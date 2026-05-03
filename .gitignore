@@ -1,0 +1,56 @@
+# Python cache and local environments
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.venv/
+venv/
+env/
+anaconda3/
+
+# Local agent/editor state
+.sisyphus/
+.opencode/
+.tmp_validation/
+tmp_*/
+.vscode/
+.idea/
+*.swp
+*.bak
+
+# User-specific runtime config and secrets
+user_config.json
+screener_configs/api_runtime_settings.json
+*.env
+.env
+
+# Local project files and databases
+*.db
+*.sqlite
+*.sqlite3
+*.json
+!AntSleap/config/*.json
+!json_projects/templates/*.json
+!json_projects/samples/*.json
+!screener_configs/*.json
+!screener_configs/*.example.json
+screener_configs/api_runtime_settings.json
+
+# Large model weights and training outputs
+*.pth
+*.pt
+AntSleap/weights/
+AntSleap/experiments/
+AntSleap/*_artifacts/
+
+# Generated run outputs
+artifacts/
+*.log
+training_report.png
+
+# Bundled local binaries
+external_tools/
+
+# OS files
+.DS_Store
+Thumbs.db

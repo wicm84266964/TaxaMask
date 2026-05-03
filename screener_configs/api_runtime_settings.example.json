@@ -1,0 +1,19 @@
+{
+  "schema_version": "taxamask-api-runtime-settings-v2",
+  "text_llm": {
+    "base_url": "",
+    "model": "gpt-5.4",
+    "api_protocol": "auto",
+    "remember_api_key": false,
+    "api_key": ""
+  },
+  "multimodal_llm": {
+    "use_same_as_text": true,
+    "base_url": "",
+    "model": "Qwen/Qwen3-VL-32B-Instruct",
+    "api_protocol": "auto",
+    "image_detail": "auto",
+    "remember_api_key": false,
+    "api_key": ""
+  }
+}

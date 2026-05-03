@@ -1,0 +1,3926 @@
+import sys
+import os
+import csv
+import json
+import re
+
+# pyright: reportMissingImports=false, reportGeneralTypeIssues=false, reportAttributeAccessIssue=false, reportArgumentType=false, reportCallIssue=false, reportOptionalMemberAccess=false, reportOptionalCall=false, reportUninitializedInstanceVariable=false, reportOperatorIssue=false
+
+# Disable Ultralytics checks BEFORE importing it
+os.environ["YOLO_VERBOSE"] = "False"
+os.environ["ULTRALYTICS_QUIET"] = "True" 
+
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
+    QListWidget, QPushButton, QLabel, QFileDialog, QTextEdit, 
+    QComboBox, QMessageBox, QSplitter, QProgressBar, QDialog, 
+    QLineEdit, QScrollArea, QRadioButton, QButtonGroup, QSlider,
+    QCheckBox, QInputDialog, QGroupBox, QListWidgetItem, QMenu,
+    QDialogButtonBox, QGridLayout, QSizePolicy, QFrame,
+    QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView,
+    QAbstractItemView, QTreeWidget, QTreeWidgetItem)
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSize
+from PySide6.QtGui import QIcon, QAction, QColor
+import numpy as np
+import torch
+
+try:
+    from AntSleap.core.project import ProjectManager
+    from AntSleap.core.database import MultiModalDB
+    from AntSleap.core.engine import AntEngine
+    from AntSleap.core.sam_helper import SAMWorker
+    from AntSleap.core.config import ConfigManager
+    from AntSleap.core.window_geometry import compute_centered_window_geometry
+    from AntSleap.ui.canvas import AnnotationCanvas
+    from AntSleap.ui.style import (
+        SCI_THEME,
+        LIGHT_THEME,
+        BUTTON_ROLE_COMMIT,
+        BUTTON_ROLE_DESTRUCTIVE,
+        BUTTON_ROLE_NEUTRAL,
+        BUTTON_ROLE_RUN,
+        BUTTON_ROLE_STOP,
+        SURFACE_ROLE_CANVAS,
+        SURFACE_ROLE_PANEL,
+        SURFACE_ROLE_RAISED,
+        SURFACE_ROLE_SUBTLE,
+        SURFACE_ROLE_TOOLBAR,
+        apply_theme_dialog_button_box_style,
+        apply_theme_button_style,
+        apply_semantic_button_style,
+        apply_surface_role,
+        get_theme_config,
+        get_theme_stylesheet,
+        normalize_theme,
+        register_windows_scholarly_ui_fonts,
+        themed_yes_no_question,
+    )
+    from AntSleap.ui.cropper import ImageCropper
+    from AntSleap.ui.pdf_processing_widget import PdfProcessingWidget
+    from AntSleap.ui.blink_lab import BlinkLabWidget
+    from AntSleap.core.dataset import TwoStageDataset
+    from AntSleap.core.training_preflight import build_training_preflight, describe_training_preflight, describe_part_coverage, format_size_pair
+    from AntSleap.core.cascade_routes import format_expert_label, get_route_persisted_expert_candidates, merge_expert_candidates
+    from AntSleap.core.project_templates import DEFAULT_PROJECT_TEMPLATE_ID, iter_project_templates
+    from AntSleap.core.external_backend import BUILTIN_BACKEND_ID, EXTERNAL_BACKEND_ID, ExternalBackendRunner, sanitize_external_backend_config
+    from AntSleap.core.part_tree import build_part_tree_groups
+except ImportError:
+    from core.project import ProjectManager
+    from core.database import MultiModalDB
+    from core.engine import AntEngine
+    from core.sam_helper import SAMWorker
+    from core.config import ConfigManager
+    from core.window_geometry import compute_centered_window_geometry
+    from ui.canvas import AnnotationCanvas
+    from ui.style import (
+        SCI_THEME,
+        LIGHT_THEME,
+        BUTTON_ROLE_COMMIT,
+        BUTTON_ROLE_DESTRUCTIVE,
+        BUTTON_ROLE_NEUTRAL,
+        BUTTON_ROLE_RUN,
+        BUTTON_ROLE_STOP,
+        SURFACE_ROLE_CANVAS,
+        SURFACE_ROLE_PANEL,
+        SURFACE_ROLE_RAISED,
+        SURFACE_ROLE_SUBTLE,
+        SURFACE_ROLE_TOOLBAR,
+        apply_theme_dialog_button_box_style,
+        apply_theme_button_style,
+        apply_semantic_button_style,
+        apply_surface_role,
+        get_theme_config,
+        get_theme_stylesheet,
+        normalize_theme,
+        register_windows_scholarly_ui_fonts,
+        themed_yes_no_question,
+    )
+    from ui.cropper import ImageCropper
+    from ui.pdf_processing_widget import PdfProcessingWidget
+    from ui.blink_lab import BlinkLabWidget
+    from core.dataset import TwoStageDataset
+    from core.training_preflight import build_training_preflight, describe_training_preflight, describe_part_coverage, format_size_pair
+    from core.cascade_routes import format_expert_label, get_route_persisted_expert_candidates, merge_expert_candidates
+    from core.project_templates import DEFAULT_PROJECT_TEMPLATE_ID, iter_project_templates
+    from core.external_backend import BUILTIN_BACKEND_ID, EXTERNAL_BACKEND_ID, ExternalBackendRunner, sanitize_external_backend_config
+    from core.part_tree import build_part_tree_groups
+
+from torch.utils.data import DataLoader
+
+class InferenceThread(QThread):
+    log_signal = Signal(str)
+    progress_signal = Signal(int)
+    result_signal = Signal(str, dict)
+    finished_signal = Signal()
+    
+    def __init__(self, engine, img_paths, taxonomy, locator_scope, inf_params, project_route_manifest=None, lang="en"):
+        super().__init__()
+        self.engine = engine
+        self.img_paths = img_paths
+        self.taxonomy = taxonomy
+        self.locator_scope = locator_scope
+        self.inf_params = inf_params
+        self.project_route_manifest = dict(project_route_manifest or {})
+        self.lang = lang
+        
+    def run(self):
+        self.log_signal.emit(tr("Starting batch inference on {0} images...", self.lang).format(len(self.img_paths)))
+        count = 0
+        for img_path in self.img_paths:
+            preds = self.engine.predict_full_pipeline(
+                img_path, 
+                current_taxonomy=self.taxonomy,
+                locator_scope=self.locator_scope,
+                conf_thresh=self.inf_params['conf'],
+                adapt_thresh=self.inf_params['adapt'],
+                box_pad=self.inf_params['pad'],
+                noise_floor=self.inf_params['noise_floor'],
+                poly_epsilon=self.inf_params['poly_epsilon'],
+                project_route_manifest=self.project_route_manifest,
+            )
+            if preds:
+                self.result_signal.emit(img_path, preds)
+                self.log_signal.emit(tr("Processed {0}", self.lang).format(os.path.basename(img_path)))
+            
+            count += 1
+            self.progress_signal.emit(int(count / len(self.img_paths) * 100))
+            
+        self.finished_signal.emit()
+
+# --- Localization ---
+TRANSLATIONS = {
+    "zh": {
+        "PROJECT IMAGES": "项目图片",
+        "+ Add Images": "+ 添加图片",
+        "Import & Crop": "导入并裁剪",
+        "Manual Draw": "手动绘制",
+        "Magic Wand (SAM)": "魔棒 (SAM)",
+        "Box Prompt (SAM)": "框选 (SAM)",
+        "Tool: Magic Wand (SAM) - Click to auto-segment.": "工具: 魔棒 - 点击自动分割",
+        "Tool: Box Prompt (SAM) - Drag to segment area.": "工具: 框选 - 拖拽选择区域",
+        "Tool: Manual Draw - Click points to outline.": "工具: 手动 - 点击绘制轮廓",
+        "Taxon": "分类单元",
+        "Structures": "结构标签",
+        "DESCRIPTION (Linked)": "描述 (关联)",
+        "AI WORKFLOW": "AI 工作流",
+        "Auto (Current)": "自动标注 (当前)",
+        "Batch (All)": "批量标注 (全部)",
+        "Train Models": "训练模型",
+        "LOGS": "日志",
+        "Export Dataset": "导出数据集",
+        "Export Multimodal Dataset": "导出多模态数据",
+        "Model Settings": "模型设置",
+        "Model Backend:": "模型后端：",
+        "Built-in Locator + SAM": "内置 Locator + SAM",
+        "External Script Backend": "外部脚本后端",
+    "External Backend": "外部后端",
+    "Backend ID:": "后端 ID：",
+    "Display Name:": "显示名称：",
+    "Python Executable:": "Python 解释器：",
+    "Prepare Dataset Command:": "数据准备命令：",
+    "Train Command:": "训练命令：",
+    "Predict Command:": "推理命令：",
+    "Model Manifest Path:": "模型 manifest 路径：",
+    "Validate External Backend": "校验外部后端",
+    "External backend note:": "外部后端说明：",
+    "Use this advanced entry when you want TaxaMask to call your own training or prediction scripts. Commands run in an isolated external_runs directory and receive a contract JSON path through {contract} or {contract_json}. When this backend is selected, built-in Locator/SAM training and prediction do not run for that task.": "当你希望 TaxaMask 调用自己的训练或推理脚本时使用这个高级入口。命令会在独立的 external_runs 目录中运行，并通过 {contract} 或 {contract_json} 接收契约 JSON 路径。选择该后端后，本次任务不会运行内置 Locator/SAM 训练或推理。",
+    "External backend configuration looks valid.": "外部后端配置看起来可用。",
+    "External backend needs at least a train command or a predict command.": "外部后端至少需要填写训练命令或推理命令。",
+    "External backend command '{0}' must include {contract} or {contract_json}.": "外部后端命令“{0}”必须包含 {contract} 或 {contract_json}。",
+    "External backend ID is required.": "外部后端 ID 不能为空。",
+        "Training": "训练",
+        "Inference": "推理",
+        "Language": "语言",
+        "Theme": "主题",
+        "Dark Mode": "深色模式",
+        "File": "文件",
+        "Settings": "设置",
+        "Epochs:": "训练轮数 (Epochs):",
+        "Batch Size:": "批次大小 (Batch Size):",
+        "Learning Rate:": "学习率 (LR):",
+        "Weight Decay (L2 Reg):": "权重衰减 (L2正则):",
+        "Train from Scratch (Reset Weights)": "从头训练 (重置权重)",
+        "Validation Report %:": "测试集展示比例 (%):",
+        "Confidence Threshold:": "置信度阈值:",
+        "Adaptive Thresh Ratio:": "自适应阈值比例:",
+        "Box Padding Ratio:": "框扩展比例:",
+        "Noise Floor:": "底噪阈值:",
+        "Polygon Simplification (px):": "多边形简化度 (px):",
+        "Cancel": "取消",
+        "Close": "关闭",
+        "Save": "保存",
+        "Export": "导出",
+        "Browse": "浏览",
+        "Select Directory": "选择目录",
+        "Export Format:": "导出格式:",
+        "Export Path:": "导出路径:",
+        "No Labels": "无标签",
+        "Annotate images first!": "请先标注图片！",
+        "Starting training on active compute device...": "开始在当前计算设备上训练...",
+        "Training Locator...": "正在训练定位器...",
+        "Training Segmentation...": "正在训练分割器...",
+        "Training Finished! Weights saved.": "训练完成！权重已保存。",
+        "Batch Inference": "批量推理",
+        "Clear AI Labels": "清除 AI 标签",
+        "Run auto-annotation on {0} images?\nThis may take a while.": "对 {0} 张图片进行自动标注？\n这可能需要一段时间。",
+        "Batch Complete": "批量完成",
+        "Batch inference finished.": "批量推理已结束。",
+        "System Initialized. Starting SAM loader in 1s...": "系统初始化。1秒后加载 SAM...",
+        "Initializing SAM (Segment Anything) on active compute device...": "正在当前计算设备上初始化 SAM...",
+        "SAM Model Loaded and Ready!": "SAM 模型加载完毕！",
+        "Warning: SAM weights not found at {model_path}": "警告：未在 {model_path} 找到 SAM 权重",
+        "Enable Morphometrics": "启用形态测量",
+        "Scale Tool": "标尺工具",
+        "Tool: Scale - Drag to define 1mm.": "工具: 标尺 - 拖动定义1mm长度。",
+        "Enter length in mm:": "输入长度 (mm):",
+        "Measurements": "测量数据",
+        "Area:": "面积:",
+        "Perimeter:": "周长:",
+        "Scale set to {:.2f} px/mm": "标尺已设定: {:.2f} px/mm",
+        "Open Project": "打开项目",
+        "New Project": "新建项目",
+        "Project Template:": "项目模板：",
+        "Generic taxonomy mask project": "通用分类掩码项目",
+        "Ant morphology (validated example)": "蚂蚁形态学（已验证示例）",
+        "Save Project": "保存项目",
+        "Head": "头部 (Head)",
+        "Mesosoma": "胸部 (Mesosoma)",
+        "Thorax": "胸部 (Thorax)", 
+        "Gaster": "腹部 (Gaster)",
+        "Mandible": "上颚 (Mandible)",
+        "Eye": "复眼 (Eye)",
+        "Unknown": "未知 (Unknown)",
+        "Labeling Workbench": "标注工作台",
+        "PDF Processing": "文献处理",
+        "Add Structure": "添加结构标签",
+        "Remove Structure": "删除结构标签",
+        "Crop this Image": "裁剪此图片",
+        "Remove Image": "移除图片",
+        "Error": "错误",
+        "Success": "成功",
+        "Open in Blink Workbench": "在 Blink 工作台中打开",
+        "Blink Workbench": "Blink 工作台",
+        "Training Report & Validation": "训练报告与验证",
+        "Summary": "摘要",
+        "No Metrics Generated": "未生成指标图",
+        "Training Metrics": "训练指标",
+        "Show Validation Set %:": "显示验证集比例：",
+        "Load Samples": "加载样本",
+        "All validation": "全部验证",
+        "Macro locator": "宏定位器",
+        "No Validation Summary": "无验证摘要",
+        "--- Initial Summary (Top 6) ---": "--- 初始摘要（前 6 张）---",
+        "--- Detailed Inspection ---": "--- 详细检查 ---",
+        "Validation Inspection": "验证检查",
+        "Open Report Folder": "打开报告文件夹",
+        "No validation details found at {0}": "未在 {0} 找到验证详情",
+        "No images found.": "未找到图片。",
+        "{0}% ({1} images)": "{0}%（{1} 张图片）",
+        "Cascade Routes": "级联路由",
+        "Appoint Expert": "指定专家",
+        "Enable Route": "启用路由",
+        "Disable Route": "停用路由",
+        "Awaiting expert": "待指定专家",
+        "Expert file missing": "专家文件缺失",
+        "Delete route {0} -> {1}?": "删除路由 {0} -> {1}？",
+        "No trained experts were found under weights/experts.": "未在 weights/experts 下找到已训练专家。",
+        "Refresh": "刷新",
+        "Info": "提示",
+        "Select export directory...": "选择导出目录...",
+        "Multimodal (Crops + JSONL)": "多模态（裁剪图 + JSONL）",
+        "COCO (Standard)": "COCO（标准）",
+        "YOLO (Segmentation)": "YOLO（分割）",
+        "Enter Blink Workbench": "进入 Blink 工作台",
+        "Image: {0}": "图片：{0}",
+        "Target Part:": "目标部位：",
+        "Entry ROI:": "进入 ROI：",
+        "Manual Box": "手工框",
+        "Auto Box": "自动框",
+        "Target Part is the child part you want to refine. Entry ROI is the parent/context region Blink will zoom into. This project remembers the parent/context ROI you chose for each target part, and later Blink entries reuse that remembered context.": "目标部位是你要精修的子部位；进入 ROI 是 Blink 将放大的父级/上下文区域。这个项目会记住你为每个目标部位选择过的父级/上下文 ROI，之后再次进入 Blink 时会复用这份项目内记忆。",
+        "B:": "亮：",
+        "C:": "对：",
+        "Locator:": "定位器：",
+        "Segmenter:": "分割器：",
+        "Del": "删除",
+        "Delete": "删除",
+        "No Locators Found": "未找到定位器",
+        "Base SAM (Original)": "基础 SAM（原始）",
+        "Delete the selected locator model file from disk.": "从磁盘删除当前选中的定位器模型文件。",
+        "Delete the selected segmenter model file from disk.": "从磁盘删除当前选中的分割器模型文件。",
+        "Delete Model": "删除模型",
+        "Delete locator model {0}?": "删除定位器模型 {0}？",
+        "Locator reset to base (untrained).": "定位器已重置为基础（未训练）状态。",
+        "Segmenter switched to: Base SAM (Original)": "分割器已切换为：基础 SAM（原始）",
+        "Segmenter switched to: Fine-tuned {0}": "分割器已切换为：微调版 {0}",
+        "Delete segmenter LoRA {0}?": "删除分割器 LoRA {0}？",
+        "New Project Directory": "新建项目目录",
+        "Project Name:": "项目名称：",
+        "Structure Name:": "结构标签名称：",
+        "Exists.": "已存在。",
+        "Delete '{0}'?": "删除“{0}”？",
+        "Clear AI": "清除 AI",
+        "Are you sure?": "确定吗？",
+        "Clear all AI labels from the current project?": "清除当前项目中的全部 AI 标签？",
+        "Select Images": "选择图片",
+        "Remove": "移除",
+        "Remove {0} images?": "移除 {0} 张图片？",
+        "Blink Workbench Entry": "Blink 工作台入口",
+        "Please select an image first.": "请先选择一张图片。",
+        "Please select a target part first.": "请先选择目标部位。",
+        "No entry ROI is available yet. Draw a manual box or generate an auto box in the workbench first.": "当前还没有可用的进入 ROI，请先在工作台中绘制手工框或生成自动框。",
+        "Failed to build a Blink session from the selected options.": "无法根据当前选择建立 Blink 会话。",
+        "Opened Blink session for {0} via {1} ({2}).": "已通过 {1}（{2}）为 {0} 打开 Blink 会话。",
+        "mm:": "毫米：",
+        "No Scale.": "未设置比例尺。",
+        "Area: {0:.4f} mm2\nPeri: {1:.4f} mm": "面积：{0:.4f} mm²\n周长：{1:.4f} mm",
+        "No Polygon.": "无多边形。",
+        "Annotate first!": "请先完成标注！",
+        "Training Split Error": "训练划分错误",
+        "Training aborted: {0}": "训练已中止：{0}",
+        "Settings updated.": "设置已更新。",
+        "Language: {0}": "语言：{0}",
+        "Running inference on: {0}...": "正在对 {0} 进行推理...",
+        "Inference complete. Detected {0} parts, saved {1} new labels.": "推理完成。检测到 {0} 个部位，保存了 {1} 个新标签。",
+        "Batch": "批量",
+        "Annotate {0} images?": "对 {0} 张图片进行标注？",
+        "Starting Batch Inference with Taxonomy ({0}): {1}": "开始批量推理，分类体系（{0}）：{1}",
+        "Batch saved {0}/{1} for {2}": "已为 {2} 保存 {0}/{1}",
+        "Exported {0} samples.": "已导出 {0} 个样本。",
+        "Global labels updated from Blink Workbench.": "全局标签已从 Blink 工作台同步更新。",
+        "Restored session: {0}": "已恢复会话：{0}",
+        "System Initialized.": "系统已初始化。",
+        "Syncing Engine Taxonomy ({0} -> {1})...": "正在同步引擎分类体系（{0} -> {1}）...",
+        "Taxonomy changed. Please retrain or select a matching model.": "分类体系已变化，请重新训练或选择匹配的模型。",
+        "Training with Taxonomy ({0}): {1}": "使用分类体系进行训练（{0}）：{1}",
+        "Training with Locator Scope ({0}): {1}": "使用定位器范围进行训练（{0}）：{1}",
+        "Starting Batch Inference with Locator Scope ({0}): {1}": "开始批量推理，定位器范围（{0}）：{1}",
+        "Syncing Locator Scope ({0} -> {1})...": "正在同步定位器范围（{0} -> {1}）...",
+        "Locator scope changed. Please retrain or select a matching model.": "定位器范围已变化，请重新训练或选择匹配的模型。",
+        "Starting batch inference on {0} images...": "开始对 {0} 张图片进行批量推理...",
+        "Processed {0}": "已处理 {0}",
+        "Training SAM... (BS=1)": "正在训练 SAM...（批次=1）",
+        "Generating Report...": "正在生成报告...",
+        "Loc Ep {0}: Train {1:.4f} | Val {2:.4f} | Err {3:.1f}px": "定位器轮次 {0}：训练 {1:.4f} | 验证 {2:.4f} | 误差 {3:.1f}px",
+        "SAM Ep {0}: Train {1:.4f} | Val {2:.4f} | IoU {3:.2%}": "SAM 轮次 {0}：训练 {1:.4f} | 验证 {2:.4f} | IoU {3:.2%}",
+        "Training Finished! All validation results saved to {0}/val_details": "训练完成！所有验证结果已保存到 {0}/val_details",
+        "Locator training size set to {0}": "定位器训练尺寸设为 {0}",
+        "Locator stage skipped: no eligible locator samples.": "定位器阶段已跳过：没有可用的定位器样本。",
+        "SAM stage skipped: no eligible SAM/parts samples.": "SAM 阶段已跳过：没有可用的 SAM/部位样本。",
+        "Training Preflight": "训练预检",
+        "Training Readiness Warning": "训练准备警告",
+        "Training Confirmation Required": "需要训练确认",
+        "Training Retry": "训练重试",
+        "Train anyway": "仍然训练",
+        "Retry with lower resolution": "用更低分辨率重试",
+        "Legacy Locator Confirmation": "旧版定位器确认",
+        "The selected locator checkpoint does not store its training resolution. It will be treated as a legacy 512px locator only if you confirm.": "当前选中的定位器检查点没有保存训练分辨率。只有在你确认后，程序才会把它当作旧版 512px 定位器使用。",
+        "Training will use only saved annotations and image files. View/manifest gating is no longer used in the main Train Models path.": "主训练路径现在只依据已保存标注和图像文件，不再依赖视图/manifest 门控。",
+        "Mixed native image resolutions detected among locator-eligible images. Training will unify them to the smallest native resolution tier among eligible images: {0}. Continue?": "检测到可用于 locator 训练的图片存在混合原生分辨率。训练会统一到这些合格图片中最小的原生分辨率层级：{0}。是否继续？",
+        "Locator stage ran out of memory at {0}. You can retry with a lower locator size: {1}": "定位器阶段在 {0} 时发生显存不足。你可以改用更低的定位器尺寸重试：{1}",
+        "No lower locator resolutions are available for retry.": "已经没有更低的 locator 分辨率可供重试。",
+        "Training preflight summary:\n{0}": "训练预检摘要：\n{0}",
+        "Proceed with training?": "是否继续训练？",
+        "Locator switched to: {0}": "定位器已切换为：{0}"
+    }
+}
+
+def tr(text, lang="en"):
+    if lang == "zh":
+        return TRANSLATIONS["zh"].get(text, text)
+    return text
+
+
+SECTION_TRANSLATIONS = {
+    "zh": {
+        "Overview": "概览",
+        "Coverage": "覆盖情况",
+        "Warnings": "警告",
+        "Ready": "就绪",
+        "Skipped": "跳过",
+        "Locator stage: {0} | SAM stage: {1}": "Locator 阶段：{0} | SAM 阶段：{1}",
+        "Locator size: {0}": "Locator 尺寸：{0}",
+        "Mixed-resolution decision: locator training will use {0}.": "混合分辨率处理：Locator 训练将统一使用 {0}。",
+        "total images: {0}": "总图片数：{0}",
+        "train images: {0}": "训练集图片数：{0}",
+        "val images: {0}": "验证集图片数：{0}",
+        "total coverage: {0}": "总覆盖：{0}",
+        "train coverage: {0}": "训练覆盖：{0}",
+        "val coverage: {0}": "验证覆盖：{0}",
+        "Locator eligible images: {0}": "可用于 Locator 训练的图片：{0}",
+        "SAM/parts eligible images: {0}": "可用于 SAM/部位训练的图片：{0}",
+        "Selected locator size: {0}": "选定的 Locator 尺寸：{0}",
+        "Eligible locator native sizes: {0}": "符合条件的 Locator 原始尺寸：{0}",
+        "Mixed native resolutions: {0}": "存在混合原生分辨率：{0}",
+        "Locator coverage": "Locator 标注覆盖情况",
+        "SAM / parts coverage": "SAM / 部位标注覆盖情况",
+        "Missing images": "缺失图片",
+        "Unreadable images": "无法读取的图片",
+        "Zero-annotation images": "零标注图片",
+        "Invalid-annotation images": "无效标注图片",
+        "Warnings:": "警告：",
+        "No warnings. The current saved annotations satisfy the training gate.": "当前没有警告，现有已保存标注已满足训练条件。",
+        "ID": "编号",
+        "Image": "图片",
+        "Source": "来源",
+        "Valid Parts": "有效部位",
+        "Max Error(px)": "最大误差（px）",
+        "Validation count: {0}": "验证样本数：{0}",
+        "Preview count: {0}": "预览样本数：{0}",
+        "Provenance counts:": "来源统计：",
+        "Metrics plot: {0}": "指标图：{0}",
+        "Validation index: {0}": "验证索引：{0}",
+        "No structured report summary found.": "未找到结构化报告摘要。",
+        "Validation samples:": "验证样本：",
+        "Project Routes": "项目路由",
+        "Project Route Management": "项目路由管理",
+        "Manage Blink-discovered or manually appointed project routes here. Deleting a route removes only this project record; reopening Blink later with the same parent/child context can register a candidate again.": "可在这里管理由 Blink 发现或手动指定的项目 route。删除 route 只会移除当前项目中的这条记录；如果之后在相同父/子部位上下文下再次打开 Blink，仍可重新登记为候选 route。",
+        "Project routes below control which parent -> child expert links are available.": "下方项目中的 route 决定哪些 parent -> child expert 链路可以实际使用。",
+        "Parent": "父部位",
+        "Child": "子部位",
+        "Cross-region structures": "跨区域结构",
+        "Ungrouped structures": "未分组结构",
+        "Main locator parts": "主定位部位",
+        "Blink child parts": "Blink 子部位",
+        "Structure group": "结构分组",
+        "Enabled": "已启用",
+        "Disabled": "已停用",
+        "Expert": "专家",
+        "Status": "状态",
+        "Yes": "是",
+        "No": "否",
+        "Not appointed": "未指定",
+        "Expert not appointed yet": "尚未指定专家",
+        "Project": "项目",
+        "Blink candidate": "Blink 候选",
+        "Blink training": "Blink 训练",
+        "Legacy global manifest": "Legacy 全局清单",
+        "Appointed": "已指定",
+        "Available": "可指定",
+        "History": "历史候选",
+        "Missing file history": "缺文件历史",
+        "Discoverable": "可发现",
+        "Select the expert to appoint for {0} -> {1}": "为 {0} -> {1} 选择要指定的专家",
+        "This route has no appointed expert yet. Appoint an expert first, then enable the route.": "这条路由还没有指定专家。请先指定专家，再启用该路由。",
+        "The appointed expert file for this route is missing. Reappoint an available expert before enabling the route.": "这条路由指定的专家文件缺失。请先重新指定一个可用专家，再启用该路由。",
+        "Route {0} -> {1} now uses expert {2}.": "路由 {0} -> {1} 现已指定专家 {2}。",
+        "Route {0} -> {1} enabled.": "路由 {0} -> {1} 已启用。",
+        "Route {0} -> {1} disabled.": "路由 {0} -> {1} 已停用。",
+        "Delete project route {0} -> {1}?\n\nThis removes the current project route record only. If you reopen Blink later with the same parent/child context, Blink can register this route again as a candidate.": "删除项目路由 {0} -> {1}？\n\n这只会移除当前项目里的这条路由记录。如果你之后在相同父/子部位上下文下再次打开 Blink，Blink 仍可把这条路由重新登记为候选。",
+        "Deleted route {0} -> {1}.": "已删除路由 {0} -> {1}。",
+        "Current Image": "当前图片",
+        "Route usage for {0}": "路由使用情况：{0}",
+        "Route usage for batch image {0}": "批量图片的路由使用情况：{0}",
+        "source={0}; attempted={1}; applied={2}": "来源={0}；尝试={1}；应用={2}",
+        "Route blocks: {0}": "路由阻断：{0}",
+        "Unknown": "未知",
+    }
+}
+
+
+def ui_text(text, lang="en"):
+    if lang == "zh":
+        return SECTION_TRANSLATIONS["zh"].get(text, text)
+    return text
+
+
+def _yes_no_text(value, lang="en"):
+    return ui_text("Yes", lang) if value else ui_text("No", lang)
+
+
+def _translate_validation_provenance(value, lang="en"):
+    mapping = {
+        "macro_locator": tr("Macro locator", lang),
+        "all": tr("All validation", lang),
+    }
+    return mapping.get(str(value or ""), str(value or ""))
+
+
+def _translate_route_registration_source(value, lang="en"):
+    mapping = {
+        "project": ui_text("Project", lang),
+        "blink_candidate": ui_text("Blink candidate", lang),
+        "blink_training": ui_text("Blink training", lang),
+        "legacy_global_manifest": ui_text("Legacy global manifest", lang),
+    }
+    text = str(value or "project")
+    return mapping.get(text, text)
+
+
+def _translate_training_warning_text(text, lang="en"):
+    warning_text = str(text or "")
+    if lang != "zh":
+        return warning_text
+
+    patterns = [
+        (
+            r"^Excluded (\d+) image\(s\) missing on disk from training\.$",
+            "训练中排除了 {0} 张磁盘缺失图片。",
+        ),
+        (
+            r"^Excluded (\d+) unreadable image\(s\) from training\.$",
+            "训练中排除了 {0} 张无法读取的图片。",
+        ),
+        (
+            r"^Excluded (\d+) image\(s\) whose saved annotations were invalid\.$",
+            "训练中排除了 {0} 张已保存标注无效的图片。",
+        ),
+        (
+            r"^Excluded (\d+) zero-annotation image\(s\) from training\.$",
+            "训练中排除了 {0} 张零标注图片。",
+        ),
+        (
+            r"^No locator-eligible images were found\. The locator stage will be skipped\.$",
+            "没有找到可用于 Locator 训练的图片，Locator 阶段将被跳过。",
+        ),
+        (
+            r"^Only 1 locator-eligible image was found; training and validation will reuse the same image\.$",
+            "只找到 1 张可用于 Locator 训练的图片，训练与验证将复用同一张图片。",
+        ),
+        (
+            r"^No SAM/parts-eligible images were found\. The SAM stage will be skipped\.$",
+            "没有找到可用于 SAM/部位训练的图片，SAM 阶段将被跳过。",
+        ),
+        (
+            r"^Only 1 SAM/parts-eligible image was found; training and validation will reuse the same image\.$",
+            "只找到 1 张可用于 SAM/部位训练的图片，训练与验证将复用同一张图片。",
+        ),
+        (
+            r"^Locator coverage is 0 for '(.+)', so that locator part will not be trained\.$",
+            "'{0}' 的 Locator 标注覆盖为 0，因此该部位不会进入 Locator 训练。",
+        ),
+        (
+            r"^SAM/parts coverage is 0 for '(.+)', so that part will not enter SAM training\.$",
+            "'{0}' 的 SAM/部位标注覆盖为 0，因此该部位不会进入 SAM 训练。",
+        ),
+    ]
+
+    for pattern, template in patterns:
+        match = re.match(pattern, warning_text)
+        if match:
+            return template.format(*match.groups())
+    return warning_text
+
+
+WORKBENCH_WINDOW_TITLE = "TaxaMask Workbench"
+DEFAULT_PROJECT_NAME = "TaxaMask_Project"
+
+
+def _blink_preferred_roi_parts(target_part, remembered_parent_part=None):
+    target = str(target_part or "").strip()
+    remembered_parent = str(remembered_parent_part or "").strip()
+    preferred_parts = []
+    if remembered_parent and remembered_parent != target:
+        preferred_parts.append(remembered_parent)
+    return preferred_parts
+
+class TrainingThread(QThread):
+    log_signal = Signal(str)
+    progress_signal = Signal(int)
+    report_signal = Signal(dict)
+    success_signal = Signal()
+    error_signal = Signal(dict)
+    finished_signal = Signal()
+    
+    def __init__(
+        self,
+        engine,
+        preflight,
+        taxonomy,
+        locator_scope,
+        epochs=5,
+        batch_size=4,
+        lang="en",
+    ):
+        super().__init__()
+        self.engine = engine
+        self.preflight = dict(preflight or {})
+        self.taxonomy = taxonomy
+        self.locator_scope = locator_scope
+        self.epochs = epochs
+        self.batch_size = batch_size
+        self.lang = lang
+        self.locator_train_data = list(self.preflight.get("locator_train_data", []))
+        self.locator_val_data = list(self.preflight.get("locator_val_data", []))
+        self.parts_train_data = list(self.preflight.get("parts_train_data", []))
+        self.parts_val_data = list(self.preflight.get("parts_val_data", []))
+        self.locator_resolution = tuple(self.preflight.get("selected_locator_size") or (512, 512))
+        self.has_locator_stage = bool(self.locator_train_data and self.locator_val_data)
+        self.has_parts_stage = bool(self.parts_train_data and self.parts_val_data)
+         
+    def run(self):
+        try:
+            self.log_signal.emit("Starting training on active compute device...")
+
+            self.engine.locator_resolution = tuple(self.locator_resolution)
+            self.log_signal.emit(
+                tr("Locator training size set to {0}", self.lang).format(format_size_pair(self.engine.locator_resolution))
+            )
+
+            self.engine.history["locator_train"] = []
+            self.engine.history["locator_val"] = []
+            self.engine.history["pixel_error"] = []
+            self.engine.history["parts_train"] = []
+            self.engine.history["parts_val"] = []
+            self.engine.history["iou"] = []
+
+            dl_loc_val = None
+
+            if self.has_locator_stage:
+                ds_loc_train = TwoStageDataset(
+                    self.locator_train_data,
+                    self.locator_scope,
+                    mode='locator',
+                    input_size=tuple(self.engine.locator_resolution),
+                )
+                ds_loc_val = TwoStageDataset(
+                    self.locator_val_data,
+                    self.locator_scope,
+                    mode='locator',
+                    input_size=tuple(self.engine.locator_resolution),
+                )
+                dl_loc_train = DataLoader(ds_loc_train, batch_size=max(1, self.batch_size*2), shuffle=True)
+                dl_loc_val = DataLoader(ds_loc_val, batch_size=max(1, self.batch_size*2), shuffle=False)
+
+                self.log_signal.emit("Training Locator...")
+                try:
+                    for epoch in range(self.epochs): 
+                        loss_t = self.engine.train_epoch(dl_loc_train, self.engine.locator, self.engine.opt_loc, None)
+                        metrics_v = self.engine.validate_epoch(dl_loc_val, self.engine.locator)
+                        self.engine.history["locator_train"].append(loss_t)
+                        self.engine.history["locator_val"].append(metrics_v['loss'])
+                        self.engine.history["pixel_error"].append(metrics_v['pixel_error'])
+                        self.log_signal.emit(
+                            tr("Loc Ep {0}: Train {1:.4f} | Val {2:.4f} | Err {3:.1f}px", self.lang).format(
+                                epoch, loss_t, metrics_v['loss'], metrics_v['pixel_error']
+                            )
+                        )
+                        self.progress_signal.emit(int((epoch+1)/(self.epochs*2) * 100))
+                except RuntimeError as exc:
+                    if "out of memory" in str(exc).lower():
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                        self.error_signal.emit(
+                            {
+                                "type": "oom",
+                                "stage": "locator",
+                                "current_resolution": tuple(self.engine.locator_resolution),
+                                "lower_options": list(self.preflight.get("lower_locator_size_options", [])),
+                                "message": str(exc),
+                            }
+                        )
+                        return
+                    raise
+            else:
+                self.log_signal.emit(tr("Locator stage skipped: no eligible locator samples.", self.lang))
+                self.progress_signal.emit(50)
+
+            if self.has_parts_stage:
+                ds_parts_train = TwoStageDataset(self.parts_train_data, self.taxonomy, mode='parts')
+                ds_parts_val = TwoStageDataset(self.parts_val_data, self.taxonomy, mode='parts')
+                dl_parts_train = DataLoader(ds_parts_train, batch_size=1, shuffle=True)
+                dl_parts_val = DataLoader(ds_parts_val, batch_size=1, shuffle=False)
+
+                self.log_signal.emit(tr("Training SAM... (BS=1)", self.lang))
+                for epoch in range(self.epochs):
+                    loss_t = self.engine.train_epoch(dl_parts_train, self.engine.parts_model, self.engine.opt_parts, self.engine.crit_parts)
+                    metrics_v = self.engine.validate_epoch(dl_parts_val, self.engine.parts_model)
+                    self.engine.history["parts_train"].append(loss_t)
+                    self.engine.history["parts_val"].append(metrics_v['loss'])
+                    self.engine.history["iou"].append(metrics_v['iou'])
+                    self.log_signal.emit(
+                        tr("SAM Ep {0}: Train {1:.4f} | Val {2:.4f} | IoU {3:.2%}", self.lang).format(
+                            epoch, loss_t, metrics_v['loss'], metrics_v['iou']
+                        )
+                    )
+                    self.progress_signal.emit(50 + int((epoch+1)/(self.epochs*2) * 100))
+            else:
+                self.log_signal.emit(tr("SAM stage skipped: no eligible SAM/parts samples.", self.lang))
+                self.progress_signal.emit(100)
+                
+            self.engine.save_weights(save_locator=self.has_locator_stage, save_segmenter=self.has_parts_stage)
+            self.log_signal.emit(tr("Generating Report...", self.lang))
+            
+            # Initial report shows only a small summary (e.g., 6 images)
+            # Detailed inspection is handled by the UI post-training.
+            report = self.engine.generate_report(dl_loc_val, num_samples=6)
+            
+            self.report_signal.emit(report)
+            self.log_signal.emit(
+                tr("Training Finished! All validation results saved to {0}/val_details", self.lang).format(report['dir'])
+            )
+            self.success_signal.emit()
+        except Exception as exc:
+            self.error_signal.emit({"type": "error", "message": str(exc)})
+        finally:
+            self.finished_signal.emit()
+
+
+class TrainingPreflightDialog(QDialog):
+    def __init__(self, preflight, parent=None, lang="en"):
+        super().__init__(parent)
+        self.lang = lang
+        self.preflight = dict(preflight or {})
+        self.current_theme = getattr(parent, "current_theme", "dark")
+        self._accepted = False
+        self._accepted_mixed_resolution = False
+        self.setWindowTitle(tr("Training Preflight", self.lang))
+        self.resize(920, 760)
+
+        layout = QVBoxLayout(self)
+
+        intro = QLabel(
+            tr(
+                "Training will use only saved annotations and image files. View/manifest gating is no longer used in the main Train Models path.",
+                self.lang,
+            )
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        self.summary_label = QLabel(self._build_overall_summary())
+        self.summary_label.setWordWrap(True)
+        self.summary_label.setObjectName("mutedLabel")
+        layout.addWidget(self.summary_label)
+
+        tabs = QTabWidget()
+        tabs.addTab(self._build_overview_tab(), ui_text("Overview", self.lang))
+        tabs.addTab(self._build_coverage_tab(), ui_text("Coverage", self.lang))
+        tabs.addTab(self._build_warnings_tab(), ui_text("Warnings", self.lang))
+        layout.addWidget(tabs)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.buttons = buttons
+        self.btn_train = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        self.btn_cancel = buttons.button(QDialogButtonBox.StandardButton.Cancel)
+        self.btn_train.setText(tr("Train anyway", self.lang))
+        self.btn_cancel.setText(tr("Cancel", self.lang))
+        self.set_theme(self.current_theme)
+        buttons.accepted.connect(self._accept_training)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def set_theme(self, theme):
+        self.current_theme = theme
+        apply_theme_dialog_button_box_style(
+            getattr(self, "buttons", None),
+            ok_role=BUTTON_ROLE_RUN,
+            cancel_role=BUTTON_ROLE_STOP,
+            theme=theme,
+        )
+
+    def _ui(self, text):
+        return ui_text(text, self.lang)
+
+    def _translate_warning(self, text):
+        return _translate_training_warning_text(text, self.lang)
+
+    def _warnings_text(self):
+        warnings = list(self.preflight.get("warnings", []))
+        excluded_sections = [
+            ("Missing images", self.preflight.get("excluded_missing_images", [])),
+            ("Unreadable images", self.preflight.get("excluded_invalid_images", [])),
+            ("Zero-annotation images", self.preflight.get("excluded_zero_annotation_images", [])),
+            ("Invalid-annotation images", self.preflight.get("excluded_invalid_annotation_images", [])),
+        ]
+        lines = []
+        if warnings:
+            lines.append(self._ui("Warnings:"))
+            lines.extend(f"- {self._translate_warning(warning)}" for warning in warnings)
+        else:
+            lines.append(self._ui("No warnings. The current saved annotations satisfy the training gate."))
+        for title, values in excluded_sections:
+            if values:
+                lines.append("")
+                lines.append(f"{self._ui(title)}:")
+                lines.extend(f"- {os.path.basename(str(value))}" for value in values)
+        return "\n".join(lines)
+
+    def _build_overall_summary(self):
+        locator_count = int(self.preflight.get("locator_image_count", 0))
+        parts_count = int(self.preflight.get("parts_image_count", 0))
+        locator_ready = self._ui("Ready") if locator_count > 0 else self._ui("Skipped")
+        sam_ready = self._ui("Ready") if parts_count > 0 else self._ui("Skipped")
+        selected_locator_size = format_size_pair(self.preflight.get("selected_locator_size"))
+        if self.preflight.get("mixed_native_resolutions"):
+            mixed_note = tr("Mixed native image resolutions detected among locator-eligible images. Training will unify them to the smallest native resolution tier among eligible images: {0}. Continue?", self.lang).format(selected_locator_size)
+        else:
+            mixed_note = self._ui("Mixed-resolution decision: locator training will use {0}.").format(selected_locator_size)
+        return (
+            f"{self._ui('Locator stage: {0} | SAM stage: {1}').format(locator_ready, sam_ready)}\n"
+            f"{self._ui('Locator size: {0}').format(selected_locator_size)}\n"
+            f"{mixed_note}"
+        )
+
+    def _make_readonly_text(self, text):
+        box = QTextEdit()
+        box.setReadOnly(True)
+        box.setPlainText(text)
+        box.setMinimumHeight(160)
+        return box
+
+    def _coverage_lines(self, title, total_count, train_count, val_count, total_text, train_text, val_text):
+        lines = [
+            self._ui(title),
+            f"  {self._ui('total images: {0}').format(total_count)}",
+            f"  {self._ui('train images: {0}').format(train_count)}",
+            f"  {self._ui('val images: {0}').format(val_count)}",
+            f"  {self._ui('total coverage: {0}').format(total_text)}",
+            f"  {self._ui('train coverage: {0}').format(train_text)}",
+            f"  {self._ui('val coverage: {0}').format(val_text)}",
+        ]
+        return "\n".join(lines)
+
+    def _build_overview_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        selected_locator_size = format_size_pair(self.preflight.get("selected_locator_size"))
+        locator_size_summary = str(self.preflight.get("locator_size_summary", "none") or "none")
+        overview_lines = [
+            self._ui("Locator eligible images: {0}").format(int(self.preflight.get('locator_image_count', 0))),
+            self._ui("SAM/parts eligible images: {0}").format(int(self.preflight.get('parts_image_count', 0))),
+            self._ui("Selected locator size: {0}").format(selected_locator_size),
+            self._ui("Eligible locator native sizes: {0}").format(locator_size_summary),
+            self._ui("Mixed native resolutions: {0}").format(_yes_no_text(self.preflight.get('mixed_native_resolutions'), self.lang)),
+        ]
+        layout.addWidget(self._make_readonly_text("\n".join(overview_lines)))
+        return tab
+
+    def _build_coverage_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        locator_text = self._coverage_lines(
+            "Locator coverage",
+            int(self.preflight.get("locator_image_count", 0)),
+            len(self.preflight.get("locator_train_data", []) or []),
+            len(self.preflight.get("locator_val_data", []) or []),
+            describe_part_coverage(self.preflight.get("locator_part_counts", {}), self.preflight.get("locator_scope", [])),
+            describe_part_coverage(self.preflight.get("locator_train_part_counts", {}), self.preflight.get("locator_scope", [])),
+            describe_part_coverage(self.preflight.get("locator_val_part_counts", {}), self.preflight.get("locator_scope", [])),
+        )
+        parts_text = self._coverage_lines(
+            "SAM / parts coverage",
+            int(self.preflight.get("parts_image_count", 0)),
+            len(self.preflight.get("parts_train_data", []) or []),
+            len(self.preflight.get("parts_val_data", []) or []),
+            describe_part_coverage(self.preflight.get("parts_part_counts", {}), self.preflight.get("taxonomy", [])),
+            describe_part_coverage(self.preflight.get("parts_train_part_counts", {}), self.preflight.get("taxonomy", [])),
+            describe_part_coverage(self.preflight.get("parts_val_part_counts", {}), self.preflight.get("taxonomy", [])),
+        )
+        layout.addWidget(self._make_readonly_text(locator_text + "\n\n" + parts_text))
+        return tab
+
+    def _build_warnings_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.addWidget(self._make_readonly_text(self._warnings_text()))
+        return tab
+
+    def _accept_training(self):
+        self._accepted = True
+        self._accepted_mixed_resolution = not bool(self.preflight.get("mixed_native_resolutions"))
+        self.accept()
+
+    def accepted_training(self):
+        return self._accepted
+
+    def accepted_mixed_resolution(self):
+        return self._accepted_mixed_resolution
+
+class TrainingReportDialog(QDialog):
+    def __init__(self, report_data, parent=None, lang="en"):
+        super().__init__(parent)
+        self.lang = lang
+        self.setWindowTitle(tr("Training Report & Validation", self.lang))
+        self.resize(1200, 800)
+        self.report_data = dict(report_data or {})
+        self.validation_rows = self._load_validation_rows()
+        self.filtered_validation_rows = list(self.validation_rows)
+        self.report_summary = self._load_report_summary()
+        
+        layout = QVBoxLayout(self)
+        
+        tabs = QTabWidget()
+
+        tab_summary = QWidget()
+        summary_layout = QVBoxLayout(tab_summary)
+        self.summary_box = QTextEdit()
+        self.summary_box.setReadOnly(True)
+        self.summary_box.setPlainText(self._build_summary_text())
+        summary_layout.addWidget(self.summary_box)
+        tabs.addTab(tab_summary, tr("Summary", self.lang))
+        
+        # Tab 1: Metrics Plot
+        tab_metrics = QWidget()
+        layout_m = QVBoxLayout(tab_metrics)
+        self.lbl_metrics = QLabel(tr("No Metrics Generated", self.lang))
+        self.lbl_metrics.setAlignment(Qt.AlignCenter)
+        if report_data.get('metrics') and os.path.exists(report_data['metrics']):
+            from PySide6.QtGui import QPixmap
+            pix = QPixmap(report_data['metrics'])
+            self.lbl_metrics.setPixmap(pix.scaled(1000, 700, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        layout_m.addWidget(self.lbl_metrics)
+        tabs.addTab(tab_metrics, tr("Training Metrics", self.lang))
+        
+        # Tab 2: Validation Samples
+        tab_val = QWidget()
+        layout_v = QVBoxLayout(tab_val)
+        
+        # Controls for deterministic browsing
+        ctrl_layout = QHBoxLayout()
+        ctrl_layout.addWidget(QLabel(tr("Show Validation Set %:", self.lang)))
+        
+        self.slider_pct = QSlider(Qt.Horizontal)
+        self.slider_pct.setRange(5, 100)
+        self.slider_pct.setValue(20)
+        self.slider_pct.setTickPosition(QSlider.TicksBelow)
+        self.slider_pct.setTickInterval(10)
+        
+        self.lbl_pct = QLabel("20%")
+        self.slider_pct.valueChanged.connect(lambda v: self.lbl_pct.setText(f"{v}%"))
+        
+        ctrl_layout.addWidget(self.slider_pct)
+        ctrl_layout.addWidget(self.lbl_pct)
+
+        self.validation_filter = QComboBox()
+        self.validation_filter.addItem(tr("All validation", self.lang), "all")
+        self.validation_filter.addItem(tr("Macro locator", self.lang), "macro_locator")
+        self.validation_filter.currentIndexChanged.connect(self.load_gallery)
+        ctrl_layout.addWidget(self.validation_filter)
+        
+        btn_load = QPushButton(tr("Load Samples", self.lang))
+        btn_load.clicked.connect(self.load_gallery)
+        ctrl_layout.addWidget(btn_load)
+        ctrl_layout.addStretch()
+        
+        layout_v.addLayout(ctrl_layout)
+        
+        # Scroll Area
+        scroll_v = QScrollArea()
+        scroll_v.setWidgetResizable(True)
+        self.content_v = QWidget()
+        self.layout_gallery = QVBoxLayout(self.content_v) # Main layout for scroll content
+        
+        # 1. Initial Summary Image
+        self.lbl_val = QLabel(tr("No Validation Summary", self.lang))
+        self.lbl_val.setAlignment(Qt.AlignCenter)
+        if report_data.get('val') and os.path.exists(report_data['val']):
+            from PySide6.QtGui import QPixmap
+            pix = QPixmap(report_data['val'])
+            self.lbl_val.setPixmap(pix)
+            self.layout_gallery.addWidget(QLabel(tr("--- Initial Summary (Top 6) ---", self.lang)))
+            self.layout_gallery.addWidget(self.lbl_val)
+        
+        self.validation_index_table = QTableWidget(0, 5)
+        self.validation_index_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.validation_index_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.validation_index_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.validation_index_table.setAlternatingRowColors(True)
+        self.validation_index_table.verticalHeader().setVisible(False)
+        self.validation_index_table.horizontalHeader().setStretchLastSection(True)
+        self.validation_index_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.validation_index_table.setHorizontalHeaderLabels([
+            ui_text("ID", self.lang),
+            ui_text("Image", self.lang),
+            ui_text("Source", self.lang),
+            ui_text("Valid Parts", self.lang),
+            ui_text("Max Error(px)", self.lang),
+        ])
+        self.validation_index_table.itemSelectionChanged.connect(self._load_selected_detail_preview)
+        layout_v.addWidget(self.validation_index_table)
+
+        # 2. Dynamic Grid Placeholder
+        self.grid_widget = QWidget()
+        self.grid_layout = None # Will be created on load
+        self.layout_gallery.addWidget(QLabel(tr("--- Detailed Inspection ---", self.lang)))
+        self.layout_gallery.addWidget(self.grid_widget)
+        self.layout_gallery.addStretch()
+        
+        scroll_v.setWidget(self.content_v)
+        layout_v.addWidget(scroll_v)
+        tabs.addTab(tab_val, tr("Validation Inspection", self.lang))
+        
+        layout.addWidget(tabs)
+        
+        # Bottom Buttons
+        btn_layout = QHBoxLayout()
+        btn_open = QPushButton(tr("Open Report Folder", self.lang))
+        btn_open.clicked.connect(self.open_folder)
+        btn_close = QPushButton(tr("Close", self.lang))
+        btn_close.clicked.connect(self.accept)
+        
+        btn_layout.addWidget(btn_open)
+        btn_layout.addStretch()
+        btn_layout.addWidget(btn_close)
+        layout.addLayout(btn_layout)
+
+        self.load_gallery()
+
+    def _ui(self, text):
+        return ui_text(text, self.lang)
+
+    def _load_report_summary(self):
+        summary_path = self.report_data.get("report_summary")
+        if summary_path and os.path.exists(summary_path):
+            try:
+                with open(summary_path, "r", encoding="utf-8") as handle:
+                    loaded = json.load(handle)
+                    if isinstance(loaded, dict):
+                        return loaded
+            except Exception:
+                pass
+        summary = self.report_data.get("validation_summary")
+        return dict(summary or {})
+
+    def _load_validation_rows(self):
+        if isinstance(self.report_data.get("validation_rows"), list):
+            return [dict(row) for row in self.report_data.get("validation_rows", []) if isinstance(row, dict)]
+        index_path = self.report_data.get("validation_index")
+        rows = []
+        if index_path and os.path.exists(index_path):
+            try:
+                with open(index_path, "r", encoding="utf-8", newline="") as handle:
+                    reader = csv.DictReader(handle)
+                    for row in reader:
+                        rows.append(dict(row))
+            except Exception:
+                pass
+        return rows
+
+    def _build_summary_text(self):
+        lines = []
+        if self.report_summary:
+            lines.append(self._ui("Validation count: {0}").format(self.report_summary.get('validation_count', 0)))
+            lines.append(self._ui("Preview count: {0}").format(self.report_summary.get('validation_preview_count', 0)))
+            provenance_counts = self.report_summary.get("validation_provenance_counts", {}) or {}
+            if provenance_counts:
+                lines.append(self._ui("Provenance counts:"))
+                for key, value in sorted(provenance_counts.items()):
+                    lines.append(f"- {_translate_validation_provenance(key, self.lang)}: {value}")
+            metrics_name = self.report_summary.get("metrics_plot")
+            if metrics_name:
+                lines.append(self._ui("Metrics plot: {0}").format(metrics_name))
+            validation_index = self.report_summary.get("validation_index_csv")
+            if validation_index:
+                lines.append(self._ui("Validation index: {0}").format(validation_index))
+        else:
+            lines.append(self._ui("No structured report summary found."))
+
+        if self.validation_rows:
+            lines.append("")
+            lines.append(self._ui("Validation samples:"))
+            for row in self.validation_rows[:10]:
+                lines.append(
+                    f"- {row.get('sample_id', '')}: {row.get('image_name', '')} | {_translate_validation_provenance(row.get('provenance', ''), self.lang)} | {row.get('error_summary', '')}"
+                )
+        return "\n".join(lines)
+
+    def _current_filtered_rows(self):
+        filter_value = self.validation_filter.currentData() if hasattr(self, "validation_filter") else "all"
+        if filter_value in (None, "all"):
+            return list(self.validation_rows)
+        return [row for row in self.validation_rows if row.get("provenance") == filter_value]
+
+    def _detail_image_path(self, row):
+        details_dir = self.report_data.get("details_dir") or os.path.join(self.report_data.get("dir", ""), "val_details")
+        detail_name = row.get("detail_image") if isinstance(row, dict) else None
+        if not detail_name:
+            return None
+        path = os.path.join(details_dir, detail_name)
+        return path if os.path.exists(path) else None
+
+    def _rebuild_gallery_grid(self, selected_rows):
+        if self.grid_layout:
+            while self.grid_layout.count():
+                item = self.grid_layout.takeAt(0)
+                widget = item.widget()
+                if widget:
+                    widget.deleteLater()
+            QWidget().setLayout(self.grid_layout)
+
+        from PySide6.QtWidgets import QGridLayout
+        from PySide6.QtGui import QPixmap
+
+        self.grid_layout = QGridLayout(self.grid_widget)
+        self.grid_layout.setSpacing(10)
+
+        row_idx = 0
+        col_idx = 0
+        max_cols = 3
+        for row in selected_rows:
+            detail_path = self._detail_image_path(row)
+            if not detail_path:
+                continue
+            label = QLabel()
+            pix = QPixmap(detail_path)
+            if pix.width() > 400:
+                pix = pix.scaledToWidth(400, Qt.SmoothTransformation)
+            label.setPixmap(pix)
+            label.setToolTip(f"{row.get('sample_id', '')} | {row.get('image_name', '')}")
+            self.grid_layout.addWidget(label, row_idx, col_idx)
+            col_idx += 1
+            if col_idx >= max_cols:
+                col_idx = 0
+                row_idx += 1
+
+    def _populate_validation_index_table(self, selected_rows):
+        self.validation_index_table.setRowCount(len(selected_rows))
+        for row_idx, row in enumerate(selected_rows):
+            values = [
+                row.get("sample_id", ""),
+                row.get("image_name", ""),
+                _translate_validation_provenance(row.get("provenance", ""), self.lang),
+                row.get("valid_parts", ""),
+                row.get("max_error_px", ""),
+            ]
+            for col_idx, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                item.setData(Qt.UserRole, dict(row))
+                self.validation_index_table.setItem(row_idx, col_idx, item)
+
+    def _load_selected_detail_preview(self):
+        current_row = self.validation_index_table.currentRow()
+        if current_row < 0:
+            return
+        item = self.validation_index_table.item(current_row, 0)
+        if not item:
+            return
+        row = item.data(Qt.UserRole)
+        if not isinstance(row, dict):
+            return
+        self._rebuild_gallery_grid([row])
+
+    def load_gallery(self):
+        val_dir = self.report_data.get("details_dir") or os.path.join(self.report_data.get('dir', ''), "val_details")
+        if not os.path.exists(val_dir):
+            QMessageBox.warning(self, tr("Error", self.lang), tr("No validation details found at {0}", self.lang).format(val_dir))
+            return
+
+        if not self.validation_rows:
+            QMessageBox.warning(self, tr("Error", self.lang), tr("No images found.", self.lang))
+            return
+
+        filtered_rows = self._current_filtered_rows()
+        if not filtered_rows:
+            self.filtered_validation_rows = []
+            self.validation_index_table.setRowCount(0)
+            self._rebuild_gallery_grid([])
+            self.lbl_pct.setText(tr("{0}% ({1} images)", self.lang).format(self.slider_pct.value(), 0))
+            return
+
+        pct = self.slider_pct.value()
+        count = max(1, int(len(filtered_rows) * (pct / 100.0)))
+        selected_rows = filtered_rows[:count]
+        self.filtered_validation_rows = list(selected_rows)
+        self._populate_validation_index_table(selected_rows)
+        self._rebuild_gallery_grid(selected_rows[: min(6, len(selected_rows))])
+        if selected_rows:
+            self.validation_index_table.setCurrentCell(0, 0)
+        self.lbl_pct.setText(tr("{0}% ({1} images)", self.lang).format(pct, count))
+        
+    def open_folder(self):
+        d = self.report_data.get('dir')
+        if d and os.path.exists(d):
+            import subprocess
+            if sys.platform == 'win32':
+                os.startfile(d)
+            elif sys.platform == 'darwin':
+                subprocess.run(['open', d])
+            else:
+                subprocess.run(['xdg-open', d])
+
+
+class RouteManagementPanel(QWidget):
+    NODE_TYPE_ROLE = Qt.UserRole
+    NODE_PAYLOAD_ROLE = Qt.UserRole + 1
+
+    def __init__(self, owner, lang="en", parent=None):
+        super().__init__(parent)
+        self.owner = owner
+        self.lang = lang
+        self.init_ui()
+        self.retranslate_ui()
+
+    def _ui(self, text):
+        return ui_text(text, self.lang)
+
+    def _tr(self, text):
+        return tr(text, self.lang)
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        self.header_label = QLabel()
+        self.header_label.setObjectName("HeaderLabel")
+        layout.addWidget(self.header_label)
+
+        self.note_label = QLabel()
+        self.note_label.setWordWrap(True)
+        self.note_label.setObjectName("mutedLabel")
+        layout.addWidget(self.note_label)
+
+        self.route_tree = QTreeWidget()
+        self.route_tree.setObjectName("projectRouteTree")
+        self.route_tree.setAlternatingRowColors(True)
+        self.route_tree.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.route_tree.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.route_tree.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.route_tree.setRootIsDecorated(True)
+        self.route_tree.setItemsExpandable(True)
+        self.route_tree.setUniformRowHeights(True)
+        self.route_tree.header().setStretchLastSection(True)
+        self.route_tree.header().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.route_tree.itemSelectionChanged.connect(self.update_action_buttons)
+        self.route_tree.setMinimumHeight(220)
+        layout.addWidget(self.route_tree)
+
+        button_row = QHBoxLayout()
+        self.btn_refresh_routes = QPushButton()
+        self.btn_refresh_routes.clicked.connect(self.refresh_route_table)
+        apply_semantic_button_style(self.btn_refresh_routes, BUTTON_ROLE_NEUTRAL)
+        button_row.addWidget(self.btn_refresh_routes)
+
+        self.btn_appoint_route_expert = QPushButton()
+        self.btn_appoint_route_expert.clicked.connect(self.appoint_selected_route_expert)
+        apply_semantic_button_style(self.btn_appoint_route_expert, BUTTON_ROLE_COMMIT)
+        button_row.addWidget(self.btn_appoint_route_expert)
+
+        self.btn_toggle_route = QPushButton()
+        self.btn_toggle_route.clicked.connect(self.toggle_selected_route_enabled)
+        apply_semantic_button_style(self.btn_toggle_route, BUTTON_ROLE_NEUTRAL)
+        button_row.addWidget(self.btn_toggle_route)
+
+        self.btn_delete_route = QPushButton()
+        self.btn_delete_route.clicked.connect(self.delete_selected_route)
+        apply_semantic_button_style(self.btn_delete_route, BUTTON_ROLE_DESTRUCTIVE)
+        button_row.addWidget(self.btn_delete_route)
+
+        layout.addLayout(button_row)
+
+    def set_language(self, lang):
+        self.lang = lang
+        self.retranslate_ui()
+        self.refresh_route_table()
+
+    def set_theme(self, theme):
+        apply_theme_button_style(self.btn_refresh_routes, BUTTON_ROLE_NEUTRAL, "", theme)
+        apply_theme_button_style(self.btn_appoint_route_expert, BUTTON_ROLE_COMMIT, "", theme)
+        apply_theme_button_style(self.btn_toggle_route, BUTTON_ROLE_NEUTRAL, "", theme)
+        apply_theme_button_style(self.btn_delete_route, BUTTON_ROLE_DESTRUCTIVE, "", theme)
+
+    def retranslate_ui(self):
+        self.header_label.setText(self._ui("Project Routes"))
+        self.note_label.setText(
+            self._ui(
+                "Manage Blink-discovered or manually appointed project routes here. Deleting a route removes only this project record; reopening Blink later with the same parent/child context can register a candidate again."
+            )
+        )
+        self.btn_refresh_routes.setText(self._tr("Refresh"))
+        self.btn_appoint_route_expert.setText(self._tr("Appoint Expert"))
+        self.btn_delete_route.setText(self._tr("Delete"))
+        self.route_tree.setHeaderLabels([
+            self._ui("Parent"),
+            self._ui("Child"),
+            self._ui("Enabled"),
+            self._ui("Expert"),
+            self._ui("Status"),
+            self._ui("Source"),
+        ])
+        self.update_action_buttons()
+
+    def _selected_node_payload(self):
+        item = self.route_tree.currentItem()
+        if item is None:
+            return None
+        payload = item.data(0, self.NODE_PAYLOAD_ROLE)
+        return dict(payload) if isinstance(payload, dict) else None
+
+    def _selected_route_entry(self):
+        payload = self._selected_node_payload() or {}
+        route = payload.get("route")
+        return dict(route) if isinstance(route, dict) else None
+
+    def _selected_expert_entry(self):
+        payload = self._selected_node_payload() or {}
+        expert = payload.get("expert")
+        return dict(expert) if isinstance(expert, dict) else None
+
+    def _make_node_payload(self, kind, *, route=None, expert=None, parent_part=None):
+        payload = {"kind": str(kind or "")}
+        if isinstance(route, dict):
+            payload["route"] = dict(route)
+        if isinstance(expert, dict):
+            payload["expert"] = dict(expert)
+        if parent_part:
+            payload["parent_part"] = str(parent_part)
+        return payload
+
+    def _available_experts_by_part(self):
+        cascade_manager = getattr(getattr(self.owner, "engine", None), "cascade_manager", None)
+        if cascade_manager is None:
+            return {}
+
+        experts_by_part = {}
+        for expert in cascade_manager.list_available_experts() or []:
+            if not isinstance(expert, dict):
+                continue
+            expert_part = str(expert.get("expert_part") or "").strip()
+            if not expert_part:
+                continue
+            experts_by_part.setdefault(expert_part, []).append(dict(expert))
+        return experts_by_part
+
+    def _route_expert_candidates(self, route_entry, available_experts_by_part):
+        route = dict(route_entry or {})
+        cascade_manager = getattr(getattr(self.owner, "engine", None), "cascade_manager", None)
+        resolve_route_expert_path = getattr(cascade_manager, "resolve_route_expert_path", None)
+        child_part = str(route.get("child") or "").strip()
+
+        appointed_label = format_expert_label(route)
+        appointed_candidate = None
+        if appointed_label != "Unappointed":
+            appointed_candidate = {
+                "expert_id": appointed_label,
+                "expert_part": route.get("expert_part") or route.get("child"),
+                "expert_filename": route.get("expert_filename"),
+                "path": resolve_route_expert_path(route) if callable(resolve_route_expert_path) else None,
+            }
+
+        candidates = []
+        persisted_candidates = get_route_persisted_expert_candidates(route)
+        runtime_candidates = available_experts_by_part.get(child_part, [])
+        merged_candidates = merge_expert_candidates(
+            persisted_candidates,
+            runtime_candidates,
+            appointed_expert=appointed_candidate,
+        )
+
+        available_by_id = {}
+        for expert in runtime_candidates:
+            expert_id = str(expert.get("expert_id") or "").strip()
+            if not expert_id:
+                continue
+            available_by_id[expert_id] = dict(expert)
+
+        persisted_ids = {
+            str(candidate.get("expert_id") or "").strip()
+            for candidate in persisted_candidates
+            if isinstance(candidate, dict)
+        }
+
+        for candidate in merged_candidates:
+            expert_id = str(candidate.get("expert_id") or "").strip()
+            if not expert_id:
+                continue
+
+            runtime_match = available_by_id.get(expert_id)
+            is_appointed = expert_id == appointed_label
+            is_persisted = expert_id in persisted_ids or is_appointed
+            merged_candidate = dict(candidate)
+            if isinstance(runtime_match, dict):
+                merged_candidate.update(runtime_match)
+
+            merged_candidate["appointed"] = is_appointed
+            merged_candidate["is_persisted"] = is_persisted
+            merged_candidate["is_discoverable"] = isinstance(runtime_match, dict)
+            path_value = merged_candidate.get("path")
+            merged_candidate["file_exists"] = bool(path_value) and os.path.exists(path_value)
+            candidates.append(merged_candidate)
+        return candidates
+
+    def _set_item_payload(self, item, payload):
+        item.setData(0, self.NODE_TYPE_ROLE, payload.get("kind"))
+        item.setData(0, self.NODE_PAYLOAD_ROLE, payload)
+
+    def _build_route_tree_item(self, parent_item, route_entry, expert_candidates):
+        route = dict(route_entry or {})
+        route_item = QTreeWidgetItem(parent_item)
+        self._set_item_payload(route_item, self._make_node_payload("route", route=route))
+        route_item.setText(1, str(route.get("child") or ""))
+        route_item.setText(2, _yes_no_text(route.get("enabled"), self.lang))
+        route_label = format_expert_label(route)
+        route_item.setText(3, route_label if route_label != "Unappointed" else self._ui("Not appointed"))
+        route_item.setText(4, self._route_runtime_status(route))
+        route_item.setText(5, _translate_route_registration_source(route.get("registration_source"), self.lang))
+
+        if not expert_candidates:
+            placeholder_item = QTreeWidgetItem(route_item)
+            self._set_item_payload(placeholder_item, self._make_node_payload("expert_placeholder", route=route))
+            placeholder_item.setText(3, self._ui("Not appointed"))
+            placeholder_item.setText(4, self._ui("Expert not appointed yet"))
+            placeholder_item.setFlags(placeholder_item.flags() & ~Qt.ItemIsSelectable)
+            return route_item
+
+        for expert in expert_candidates:
+            expert_item = QTreeWidgetItem(route_item)
+            self._set_item_payload(expert_item, self._make_node_payload("expert", route=route, expert=expert))
+            expert_label = str(expert.get("expert_id") or "").strip()
+            is_appointed = bool(expert.get("appointed"))
+            is_discoverable = bool(expert.get("is_discoverable"))
+            is_persisted = bool(expert.get("is_persisted"))
+            file_exists = bool(expert.get("file_exists"))
+            expert_item.setText(3, f"★ {expert_label}" if is_appointed else expert_label)
+            if is_appointed:
+                status_text = self._ui("Appointed")
+            elif is_persisted and not file_exists:
+                status_text = self._ui("Missing file history")
+            elif is_persisted:
+                status_text = self._ui("History")
+            elif is_discoverable:
+                status_text = self._ui("Discoverable")
+            else:
+                status_text = self._ui("Available")
+            expert_item.setText(4, status_text)
+            if is_appointed:
+                expert_font = expert_item.font(3)
+                expert_font.setBold(True)
+                expert_item.setFont(3, expert_font)
+                status_font = expert_item.font(4)
+                status_font.setBold(True)
+                expert_item.setFont(4, status_font)
+        return route_item
+
+    def _find_parent_item(self, parent_part):
+        clean_parent = str(parent_part or "").strip()
+        for index in range(self.route_tree.topLevelItemCount()):
+            item = self.route_tree.topLevelItem(index)
+            if item is None:
+                continue
+            payload = item.data(0, self.NODE_PAYLOAD_ROLE)
+            if isinstance(payload, dict) and payload.get("kind") == "parent" and payload.get("parent_part") == clean_parent:
+                return item
+        return None
+
+    def _find_route_item(self, parent_part, child_part):
+        parent_item = self._find_parent_item(parent_part)
+        clean_child = str(child_part or "").strip()
+        if parent_item is None or not clean_child:
+            return None
+        for index in range(parent_item.childCount()):
+            item = parent_item.child(index)
+            if item is None:
+                continue
+            payload = item.data(0, self.NODE_PAYLOAD_ROLE)
+            route = payload.get("route") if isinstance(payload, dict) else None
+            if isinstance(route, dict) and route.get("parent") == str(parent_part or "").strip() and route.get("child") == clean_child:
+                return item
+        return None
+
+    def _find_expert_item(self, parent_part, child_part, expert_id):
+        route_item = self._find_route_item(parent_part, child_part)
+        clean_expert_id = str(expert_id or "").strip()
+        if route_item is None or not clean_expert_id:
+            return None
+        for index in range(route_item.childCount()):
+            item = route_item.child(index)
+            if item is None:
+                continue
+            payload = item.data(0, self.NODE_PAYLOAD_ROLE)
+            expert = payload.get("expert") if isinstance(payload, dict) else None
+            if isinstance(expert, dict) and str(expert.get("expert_id") or "").strip() == clean_expert_id:
+                return item
+        return None
+
+    def _route_runtime_status(self, route_entry):
+        if not route_entry:
+            return self._ui("Unknown")
+        block_reason = self.owner.engine.cascade_manager.get_route_block_reason(route_entry)
+        if block_reason == "expert_unappointed":
+            return self._ui("Expert not appointed yet")
+        if block_reason == "expert_model_missing":
+            return self._tr("Expert file missing")
+        return self._ui("Enabled") if bool(route_entry.get("enabled", False)) else self._ui("Disabled")
+
+    def refresh_route_table(self):
+        routes = self.owner.project.iter_cascade_routes()
+        experts_by_part = self._available_experts_by_part()
+        self.route_tree.clear()
+        parent_items = {}
+
+        for route in routes:
+            parent_part = str(route.get("parent") or "")
+            parent_item = parent_items.get(parent_part)
+            if parent_item is None:
+                parent_item = QTreeWidgetItem(self.route_tree)
+                self._set_item_payload(parent_item, self._make_node_payload("parent", parent_part=parent_part))
+                parent_item.setText(0, parent_part)
+                parent_item.setExpanded(True)
+                parent_items[parent_part] = parent_item
+
+            expert_candidates = self._route_expert_candidates(route, experts_by_part)
+            route_item = self._build_route_tree_item(parent_item, route, expert_candidates)
+            route_item.setExpanded(True)
+
+        self.route_tree.expandAll()
+        self.update_action_buttons()
+
+    def update_action_buttons(self):
+        payload = self._selected_node_payload() or {}
+        route = self._selected_route_entry()
+        selected_kind = str(payload.get("kind") or "")
+        self.btn_appoint_route_expert.setEnabled(selected_kind == "expert" and bool(self._selected_expert_entry()))
+        self.btn_delete_route.setEnabled(selected_kind == "route" and bool(route))
+        self.btn_toggle_route.setEnabled(selected_kind == "route" and bool(route))
+        self.btn_toggle_route.setText(
+            self._tr("Disable Route") if route and route.get("enabled") else self._tr("Enable Route")
+        )
+
+    def appoint_selected_route_expert(self):
+        payload = self._selected_node_payload() or {}
+        if str(payload.get("kind") or "") != "expert":
+            return
+        route = self._selected_route_entry()
+        expert = self._selected_expert_entry()
+        if not route or not expert:
+            return
+        selected_label = str(expert.get("expert_id") or "").strip()
+        if not selected_label:
+            return
+
+        updated = self.owner.project.appoint_cascade_route_expert(
+            route.get("parent"),
+            route.get("child"),
+            expert_id=selected_label,
+        )
+        if updated:
+            self.refresh_route_table()
+            self.owner.log(
+                self._ui("Route {0} -> {1} now uses expert {2}.").format(
+                    route.get("parent"),
+                    route.get("child"),
+                    selected_label,
+                )
+            )
+
+    def toggle_selected_route_enabled(self):
+        payload = self._selected_node_payload() or {}
+        if str(payload.get("kind") or "") != "route":
+            return
+        route = self._selected_route_entry()
+        if not route:
+            return
+        block_reason = self.owner.engine.cascade_manager.get_route_block_reason(route)
+        if not route.get("enabled") and block_reason == "expert_unappointed":
+            QMessageBox.information(self, self._tr("Appoint Expert"), self._ui("This route has no appointed expert yet. Appoint an expert first, then enable the route."))
+            return
+        if not route.get("enabled") and block_reason == "expert_model_missing":
+            QMessageBox.information(self, self._tr("Appoint Expert"), self._ui("The appointed expert file for this route is missing. Reappoint an available expert before enabling the route."))
+            return
+
+        updated = self.owner.project.set_cascade_route_enabled(
+            route.get("parent"),
+            route.get("child"),
+            not bool(route.get("enabled")),
+        )
+        if updated:
+            self.refresh_route_table()
+            if updated.get("enabled"):
+                self.owner.log(self._ui("Route {0} -> {1} enabled.").format(updated.get("parent"), updated.get("child")))
+            else:
+                self.owner.log(self._ui("Route {0} -> {1} disabled.").format(updated.get("parent"), updated.get("child")))
+
+    def delete_selected_route(self):
+        payload = self._selected_node_payload() or {}
+        if str(payload.get("kind") or "") != "route":
+            return
+        route = self._selected_route_entry()
+        if not route:
+            return
+        reply = themed_yes_no_question(
+            self,
+            self._tr("Delete"),
+            self._ui(
+                "Delete project route {0} -> {1}?\n\nThis removes the current project route record only. If you reopen Blink later with the same parent/child context, Blink can register this route again as a candidate."
+            ).format(route.get("parent"), route.get("child")),
+            confirm_role=BUTTON_ROLE_DESTRUCTIVE,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        if self.owner.project.delete_cascade_route(route.get("parent"), route.get("child")):
+            self.refresh_route_table()
+            self.owner.log(self._ui("Deleted route {0} -> {1}.").format(route.get("parent"), route.get("child")))
+
+class ModelSettingsDialog(QDialog):
+    def __init__(self, params, lang="en", parent=None, route_panel=None):
+        super().__init__(parent)
+        self.lang = lang
+        self.route_panel = route_panel
+        self.setWindowTitle(tr("Model Settings", lang))
+        self.resize(880, 760)
+        layout = QVBoxLayout(self)
+        tabs = QTabWidget()
+
+        tab_backend = QWidget()
+        form_backend = QVBoxLayout(tab_backend)
+        form_backend.addWidget(QLabel(tr("Model Backend:", lang)))
+        self.backend_combo = QComboBox()
+        self.backend_combo.addItem(tr("Built-in Locator + SAM", lang), BUILTIN_BACKEND_ID)
+        self.backend_combo.addItem(tr("External Script Backend", lang), EXTERNAL_BACKEND_ID)
+        backend_index = self.backend_combo.findData(params.get("model_backend", BUILTIN_BACKEND_ID))
+        self.backend_combo.setCurrentIndex(backend_index if backend_index >= 0 else 0)
+        form_backend.addWidget(self.backend_combo)
+        external_note = QLabel(
+            tr("Use this advanced entry when you want TaxaMask to call your own training or prediction scripts. Commands run in an isolated external_runs directory and receive a contract JSON path through {contract} or {contract_json}. When this backend is selected, built-in Locator/SAM training and prediction do not run for that task.", lang)
+        )
+        external_note.setWordWrap(True)
+        external_note.setObjectName("mutedLabel")
+        form_backend.addWidget(external_note)
+
+        external_config = sanitize_external_backend_config(params.get("external_backend", {}))
+        form_backend.addWidget(QLabel(tr("Backend ID:", lang)))
+        self.external_backend_id = QLineEdit(external_config.get("backend_id", ""))
+        form_backend.addWidget(self.external_backend_id)
+        form_backend.addWidget(QLabel(tr("Display Name:", lang)))
+        self.external_display_name = QLineEdit(external_config.get("display_name", ""))
+        form_backend.addWidget(self.external_display_name)
+        form_backend.addWidget(QLabel(tr("Python Executable:", lang)))
+        self.external_python = QLineEdit(external_config.get("python_executable", "python"))
+        form_backend.addWidget(self.external_python)
+        form_backend.addWidget(QLabel(tr("Prepare Dataset Command:", lang)))
+        self.external_prepare_command = self._make_command_editor(
+            external_config.get("prepare_dataset_command", ""),
+            "{python} scripts/prepare_dataset.py --contract {contract_json}",
+        )
+        form_backend.addWidget(self.external_prepare_command)
+        form_backend.addWidget(QLabel(tr("Train Command:", lang)))
+        self.external_train_command = self._make_command_editor(
+            external_config.get("train_command", ""),
+            "{python} scripts/train_model.py --contract {contract_json}",
+        )
+        form_backend.addWidget(self.external_train_command)
+        form_backend.addWidget(QLabel(tr("Predict Command:", lang)))
+        self.external_predict_command = self._make_command_editor(
+            external_config.get("predict_command", ""),
+            "{python} scripts/predict_image.py --contract {contract_json}",
+        )
+        form_backend.addWidget(self.external_predict_command)
+        form_backend.addWidget(QLabel(tr("Model Manifest Path:", lang)))
+        self.external_model_manifest = QLineEdit(external_config.get("model_manifest", ""))
+        self.external_model_manifest.setPlaceholderText("{run_dir}/model/taxamask_model_manifest.json")
+        form_backend.addWidget(self.external_model_manifest)
+        self.external_validation_label = QLabel()
+        self.external_validation_label.setObjectName("mutedLabel")
+        self.external_validation_label.setWordWrap(True)
+        form_backend.addWidget(self.external_validation_label)
+        btn_validate_external = QPushButton(tr("Validate External Backend", lang))
+        apply_semantic_button_style(btn_validate_external, BUTTON_ROLE_NEUTRAL)
+        btn_validate_external.clicked.connect(self.validate_external_backend)
+        form_backend.addWidget(btn_validate_external)
+        form_backend.addStretch()
+        
+        tab_train = QWidget()
+        form_train = QVBoxLayout(tab_train)
+        form_train.addWidget(QLabel(tr("Epochs:", lang)))
+        self.spin_epochs = QLineEdit(str(params['epochs']))
+        form_train.addWidget(self.spin_epochs)
+        form_train.addWidget(QLabel(tr("Batch Size:", lang)))
+        self.spin_batch = QLineEdit(str(params['batch']))
+        form_train.addWidget(self.spin_batch)
+        form_train.addWidget(QLabel(tr("Learning Rate:", lang)))
+        self.spin_lr = QLineEdit(str(params['lr']))
+        form_train.addWidget(self.spin_lr)
+        form_train.addWidget(QLabel(tr("Weight Decay (L2 Reg):", lang)))
+        self.spin_wd = QLineEdit(str(params['wd']))
+        form_train.addWidget(self.spin_wd)
+        
+        form_train.addStretch()
+        tabs.addTab(tab_train, tr("Training", lang))
+        
+        tab_inf = QWidget()
+        form_inf = QVBoxLayout(tab_inf)
+        form_inf.addWidget(QLabel(tr("Confidence Threshold:", lang)))
+        self.spin_conf = QLineEdit(str(params['conf']))
+        form_inf.addWidget(self.spin_conf)
+        form_inf.addWidget(QLabel(tr("Adaptive Thresh Ratio:", lang)))
+        self.spin_adapt = QLineEdit(str(params['adapt']))
+        form_inf.addWidget(self.spin_adapt)
+        form_inf.addWidget(QLabel(tr("Noise Floor:", lang)))
+        self.spin_noise = QLineEdit(str(params['noise_floor']))
+        form_inf.addWidget(self.spin_noise)
+        form_inf.addWidget(QLabel(tr("Polygon Simplification (px):", lang)))
+        self.spin_poly = QLineEdit(str(params.get('poly_epsilon', 2.0)))
+        form_inf.addWidget(self.spin_poly)
+        form_inf.addWidget(QLabel(tr("Box Padding Ratio:", lang)))
+        self.spin_pad = QLineEdit(str(params['pad']))
+        form_inf.addWidget(self.spin_pad)
+        self.lbl_cascade_note = QLabel(
+            ui_text(
+                "Project routes below control which parent -> child expert links are available.",
+                lang,
+            )
+        )
+        self.lbl_cascade_note.setWordWrap(True)
+        self.lbl_cascade_note.setObjectName("mutedLabel")
+        form_inf.addWidget(self.lbl_cascade_note)
+
+        if self.route_panel is not None:
+            route_group = QGroupBox(ui_text("Project Route Management", lang))
+            apply_surface_role(route_group, SURFACE_ROLE_SUBTLE, "modelSettingsRoutePanel")
+            route_layout = QVBoxLayout(route_group)
+            route_layout.setContentsMargins(12, 12, 12, 12)
+            route_layout.setSpacing(10)
+            route_layout.addWidget(self.route_panel)
+            form_inf.addWidget(route_group, 1)
+
+        form_inf.addStretch()
+        tabs.addTab(tab_inf, tr("Inference", lang))
+        tabs.addTab(tab_backend, tr("External Backend", lang))
+        
+        layout.addWidget(tabs)
+        btn_layout = QHBoxLayout()
+        btn_save = QPushButton(tr("Save", lang))
+        apply_semantic_button_style(btn_save, BUTTON_ROLE_COMMIT)
+        btn_save.clicked.connect(self.accept_with_validation)
+        btn_cancel = QPushButton(tr("Cancel", lang))
+        apply_semantic_button_style(btn_cancel, BUTTON_ROLE_STOP)
+        btn_cancel.clicked.connect(self.reject)
+        btn_layout.addWidget(btn_save)
+        btn_layout.addWidget(btn_cancel)
+        layout.addLayout(btn_layout)
+        
+    def _make_command_editor(self, text, placeholder):
+        editor = QTextEdit()
+        editor.setAcceptRichText(False)
+        editor.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        editor.setMinimumHeight(72)
+        editor.setPlainText(str(text or ""))
+        editor.setPlaceholderText(placeholder)
+        return editor
+
+    def _command_text(self, editor):
+        return editor.toPlainText().strip()
+
+    def _external_backend_validation_errors(self):
+        if self.backend_combo.currentData() != EXTERNAL_BACKEND_ID:
+            return []
+        errors = []
+        if not self.external_backend_id.text().strip():
+            errors.append(tr("External backend ID is required.", self.lang))
+
+        commands = {
+            "prepare_dataset": self._command_text(self.external_prepare_command),
+            "train": self._command_text(self.external_train_command),
+            "predict": self._command_text(self.external_predict_command),
+        }
+        if not commands["train"] and not commands["predict"]:
+            errors.append(tr("External backend needs at least a train command or a predict command.", self.lang))
+
+        for command_name, command_text in commands.items():
+            if command_text and "{contract}" not in command_text and "{contract_json}" not in command_text:
+                errors.append(
+                    tr(
+                        "External backend command '{0}' must include {contract} or {contract_json}.",
+                        self.lang,
+                    ).format(command_name)
+                )
+        return errors
+
+    def validate_external_backend(self):
+        errors = self._external_backend_validation_errors()
+        if errors:
+            self.external_validation_label.setText("\n".join(errors))
+            QMessageBox.warning(self, tr("External Backend", self.lang), "\n".join(errors))
+            return False
+        self.external_validation_label.setText(tr("External backend configuration looks valid.", self.lang))
+        QMessageBox.information(self, tr("External Backend", self.lang), tr("External backend configuration looks valid.", self.lang))
+        return True
+
+    def accept_with_validation(self):
+        errors = self._external_backend_validation_errors()
+        if errors:
+            self.external_validation_label.setText("\n".join(errors))
+            QMessageBox.warning(self, tr("External Backend", self.lang), "\n".join(errors))
+            return
+        self.accept()
+
+    def get_values(self):
+        try:
+            return {
+                'epochs': int(self.spin_epochs.text()),
+                'batch': int(self.spin_batch.text()),
+                'lr': float(self.spin_lr.text()),
+                'wd': float(self.spin_wd.text()),
+                'conf': float(self.spin_conf.text()),
+                'adapt': float(self.spin_adapt.text()),
+                'pad': float(self.spin_pad.text()),
+                'noise_floor': float(self.spin_noise.text()),
+                'poly_epsilon': float(self.spin_poly.text()),
+                'model_backend': self.backend_combo.currentData() or BUILTIN_BACKEND_ID,
+                'external_backend': sanitize_external_backend_config(
+                    {
+                        "backend_id": self.external_backend_id.text(),
+                        "display_name": self.external_display_name.text(),
+                        "python_executable": self.external_python.text(),
+                        "prepare_dataset_command": self._command_text(self.external_prepare_command),
+                        "train_command": self._command_text(self.external_train_command),
+                        "predict_command": self._command_text(self.external_predict_command),
+                        "model_manifest": self.external_model_manifest.text(),
+                    }
+                ),
+            }
+        except: return None
+
+class ExportDialog(QDialog):
+    def __init__(self, parent=None, lang="en"):
+        super().__init__(parent)
+        self.lang = lang
+        self.setWindowTitle(tr("Export Dataset", self.lang))
+        self.resize(400, 150)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(tr("Export Format:", self.lang)))
+        self.format_combo = QComboBox()
+        self.format_combo.addItem(tr("Multimodal (Crops + JSONL)", self.lang), "multimodal")
+        self.format_combo.addItem(tr("COCO (Standard)", self.lang), "coco")
+        self.format_combo.addItem(tr("YOLO (Segmentation)", self.lang), "yolo")
+        layout.addWidget(self.format_combo)
+        self.path_edit = QLineEdit()
+        self.path_edit.setPlaceholderText(tr("Select export directory...", self.lang))
+        layout.addWidget(QLabel(tr("Export Path:", self.lang)))
+        browse_layout = QHBoxLayout()
+        browse_layout.addWidget(self.path_edit)
+        btn_browse = QPushButton(tr("Browse", self.lang))
+        apply_semantic_button_style(btn_browse, BUTTON_ROLE_NEUTRAL)
+        btn_browse.clicked.connect(self.browse)
+        browse_layout.addWidget(btn_browse)
+        layout.addLayout(browse_layout)
+        btn_layout = QHBoxLayout()
+        btn_ok = QPushButton(tr("Export", self.lang))
+        apply_semantic_button_style(btn_ok, BUTTON_ROLE_COMMIT)
+        btn_ok.clicked.connect(self.accept)
+        btn_cancel = QPushButton(tr("Cancel", self.lang))
+        apply_semantic_button_style(btn_cancel, BUTTON_ROLE_STOP)
+        btn_cancel.clicked.connect(self.reject)
+        btn_layout.addWidget(btn_ok)
+        btn_layout.addWidget(btn_cancel)
+        layout.addLayout(btn_layout)
+        
+    def browse(self):
+        d = QFileDialog.getExistingDirectory(self, tr("Select Directory", self.lang))
+        if d:
+            self.path_edit.setText(d)
+    def get_path(self): 
+        return self.path_edit.text()
+    def get_format(self): 
+        return self.format_combo.currentData() or self.format_combo.currentText()
+
+
+class BlinkEntryDialog(QDialog):
+    def __init__(self, image_path, taxonomy, selected_part, roi_candidates, parent=None, lang="en", remembered_parent_map=None):
+        super().__init__(parent)
+        self.lang = lang
+        self.current_theme = getattr(parent, "current_theme", "dark")
+        self.remembered_parent_map = dict(remembered_parent_map or {})
+        self.setWindowTitle(tr("Enter Blink Workbench", self.lang))
+        self.setModal(True)
+        self.resize(520, 220)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(tr("Image: {0}", self.lang).format(os.path.basename(image_path))))
+
+        target_row = QHBoxLayout()
+        target_row.addWidget(QLabel(tr("Target Part:", self.lang)))
+        self.target_combo = QComboBox()
+        for part in taxonomy:
+            self.target_combo.addItem(tr(part, self.lang), part)
+        selected_idx = self.target_combo.findData(selected_part)
+        if selected_idx >= 0:
+            self.target_combo.setCurrentIndex(selected_idx)
+        target_row.addWidget(self.target_combo)
+        layout.addLayout(target_row)
+
+        roi_row = QHBoxLayout()
+        roi_row.addWidget(QLabel(tr("Entry ROI:", self.lang)))
+        self.roi_combo = QComboBox()
+        for candidate in roi_candidates:
+            source_text = tr("Manual Box", self.lang) if candidate.get("source") == "manual" else tr("Auto Box", self.lang)
+            label = f"{tr(candidate.get('part', 'ROI'), self.lang)} ({source_text})"
+            self.roi_combo.addItem(label, candidate)
+        roi_row.addWidget(self.roi_combo)
+        layout.addLayout(roi_row)
+
+        self.tip_label = QLabel(
+            tr("Target Part is the child part you want to refine. Entry ROI is the parent/context region Blink will zoom into. This project remembers the parent/context ROI you chose for each target part, and later Blink entries reuse that remembered context.", self.lang)
+        )
+        self.tip_label.setWordWrap(True)
+        layout.addWidget(self.tip_label)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        self.buttons = buttons
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        self.set_theme(self.current_theme)
+        layout.addWidget(buttons)
+
+        self.target_combo.currentIndexChanged.connect(self._sync_preferred_roi)
+        self._sync_preferred_roi(self.target_combo.currentIndex())
+
+    def set_theme(self, theme):
+        self.current_theme = theme
+        apply_theme_dialog_button_box_style(
+            getattr(self, "buttons", None),
+            ok_role=BUTTON_ROLE_RUN,
+            cancel_role=BUTTON_ROLE_STOP,
+            theme=theme,
+        )
+
+    def _sync_preferred_roi(self, _index):
+        target_part = self.target_combo.currentData() or self.target_combo.currentText()
+        remembered_parent = self.remembered_parent_map.get(str(target_part or "").strip())
+        for preferred_part in _blink_preferred_roi_parts(target_part, remembered_parent):
+            for idx in range(self.roi_combo.count()):
+                candidate = self.roi_combo.itemData(idx)
+                if isinstance(candidate, dict) and candidate.get("part") == preferred_part:
+                    self.roi_combo.setCurrentIndex(idx)
+                    return
+
+        self.roi_combo.setCurrentIndex(-1)
+
+    def get_session_spec(self, image_path):
+        focus_roi = self.roi_combo.currentData()
+        if not isinstance(focus_roi, dict):
+            return None
+
+        target_part = self.target_combo.currentData() or self.target_combo.currentText().strip()
+        if not target_part:
+            return None
+
+        return {
+            "image_path": image_path,
+            "target_part": target_part,
+            "focus_roi": focus_roi,
+        }
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.startup_size = QSize(1600, 1000)
+        self.resize(self.startup_size)
+        self.config = ConfigManager()
+        self.current_lang = self.config.get("language", "en")
+        self.current_theme = normalize_theme(self.config.get("theme", "dark"))
+        if self.config.get("theme", "dark") != self.current_theme:
+            self.config.set("theme", self.current_theme)
+        self.project = ProjectManager()
+        self.project.set_known_relocated_roots(self.config.get("known_relocated_roots", []))
+        self.db = MultiModalDB()
+        
+        self.train_epochs = self.config.get("train_epochs", 5)
+        self.train_batch = self.config.get("train_batch", 4)
+        self.train_lr = self.config.get("train_lr", 1e-4)
+        self.train_wd = self.config.get("train_weight_decay", 1e-4)
+        self.runtime_device = self.config.get("runtime_device", "auto")
+        self.model_backend = self.config.get("model_backend", BUILTIN_BACKEND_ID)
+        self.external_backend_config = sanitize_external_backend_config(self.config.get("external_backend", {}))
+        self.inf_conf = self.config.get("inf_conf_thresh", 0.1)
+        self.inf_adapt = self.config.get("inf_adapt_thresh", 0.4)
+        self.inf_pad = self.config.get("inf_box_pad", 0.4)
+        self.inf_noise_floor = self.config.get("inf_noise_floor", 0.15)
+        self.inf_poly_epsilon = self.config.get("inf_poly_epsilon", 2.0)
+        self.engine = AntEngine(
+            learning_rate=self.train_lr,
+            weight_decay=self.train_wd,
+            num_classes=len(self.project.get_locator_scope()),
+            device=self.runtime_device,
+        )
+        self.current_image = None
+        self.inf_thread = None
+        self.sam_thread = None
+        self.sam_worker = None
+        self.project_autosave_delay_ms = 3000
+        self.project_save_pending = False
+        self.project_save_timer = QTimer(self)
+        self.project_save_timer.setSingleShot(True)
+        self.project_save_timer.timeout.connect(self._flush_pending_project_save)
+        self.last_confirmed_locator_timestamp = None
+        self.pending_training_preflight = None
+        self.training_retry_requested = False
+        QTimer.singleShot(1000, self.init_sam)
+
+        self.tabs = QTabWidget()
+        self.setCentralWidget(self.tabs)
+
+        self.workbench_widget = QWidget()
+        main_layout = QVBoxLayout(self.workbench_widget)
+        main_layout.setContentsMargins(12, 12, 12, 12)
+        main_layout.setSpacing(12)
+        self.create_menus()
+
+        self.btn_export = QPushButton()
+        self.btn_export.clicked.connect(self.export_dataset)
+        apply_semantic_button_style(self.btn_export, BUTTON_ROLE_COMMIT)
+        self.btn_crop = QPushButton()
+        self.btn_crop.clicked.connect(self.open_cropper)
+        apply_semantic_button_style(self.btn_crop, BUTTON_ROLE_NEUTRAL)
+        self.btn_blink_entry = QPushButton()
+        self.btn_blink_entry.clicked.connect(self.launch_blink_from_workbench)
+        apply_semantic_button_style(self.btn_blink_entry, BUTTON_ROLE_NEUTRAL)
+
+        self.workbench_top_bar = QWidget()
+        apply_surface_role(self.workbench_top_bar, SURFACE_ROLE_TOOLBAR, "workbenchTopBar")
+        top_bar_layout = QHBoxLayout(self.workbench_top_bar)
+        top_bar_layout.setContentsMargins(12, 10, 12, 10)
+        top_bar_layout.setSpacing(10)
+
+        self.toolbar_project_panel = QWidget()
+        apply_surface_role(self.toolbar_project_panel, SURFACE_ROLE_SUBTLE, "workbenchToolbarProjectPanel")
+        toolbar_project_layout = QHBoxLayout(self.toolbar_project_panel)
+        toolbar_project_layout.setContentsMargins(10, 8, 10, 8)
+        toolbar_project_layout.setSpacing(8)
+        toolbar_project_layout.addWidget(self.btn_export)
+        toolbar_project_layout.addWidget(self.btn_crop)
+
+        self.toolbar_flow_panel = QWidget()
+        apply_surface_role(self.toolbar_flow_panel, SURFACE_ROLE_SUBTLE, "workbenchToolbarFlowPanel")
+        toolbar_flow_layout = QHBoxLayout(self.toolbar_flow_panel)
+        toolbar_flow_layout.setContentsMargins(10, 8, 10, 8)
+        toolbar_flow_layout.setSpacing(8)
+        toolbar_flow_layout.addWidget(self.btn_blink_entry)
+
+        top_bar_layout.addWidget(self.toolbar_project_panel, 0)
+        top_bar_layout.addStretch(1)
+        top_bar_layout.addWidget(self.toolbar_flow_panel, 0)
+        main_layout.addWidget(self.workbench_top_bar)
+
+        self.workbench_splitter = QSplitter(Qt.Horizontal)
+        self.workbench_splitter.setChildrenCollapsible(False)
+        self.workbench_splitter.setHandleWidth(8)
+        main_layout.addWidget(self.workbench_splitter, 1)
+
+        left_panel = QWidget()
+        apply_surface_role(left_panel, SURFACE_ROLE_SUBTLE, "workbenchLibraryPanel")
+        left_panel.setMinimumWidth(220)
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(12, 12, 12, 12)
+        left_layout.setSpacing(10)
+        self.label_project_images = QLabel()
+        self.label_project_images.setObjectName("HeaderLabel")
+        left_layout.addWidget(self.label_project_images)
+        self.file_list = QListWidget()
+        self.file_list.setObjectName("imageList")
+        self.file_list.setSelectionMode(QListWidget.ExtendedSelection)
+        self.file_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.file_list.customContextMenuRequested.connect(self.show_file_list_context_menu)
+        self.file_list.currentItemChanged.connect(self.on_file_selected)
+        left_layout.addWidget(self.file_list)
+        self.btn_add = QPushButton()
+        self.btn_add.clicked.connect(self.add_images)
+        apply_semantic_button_style(self.btn_add, BUTTON_ROLE_NEUTRAL)
+        left_layout.addWidget(self.btn_add)
+        self.workbench_splitter.addWidget(left_panel)
+
+        center_panel = QWidget()
+        center_panel.setObjectName("workbenchCenterPanel")
+        center_layout = QVBoxLayout(center_panel)
+        center_layout.setContentsMargins(0, 0, 0, 0)
+        center_layout.setSpacing(12)
+
+        self.tool_strip = QWidget()
+        apply_surface_role(self.tool_strip, SURFACE_ROLE_SUBTLE, "workbenchToolStrip")
+        tool_layout = QHBoxLayout(self.tool_strip)
+        tool_layout.setContentsMargins(12, 8, 12, 8)
+        tool_layout.setSpacing(12)
+        self.tool_group = QButtonGroup(self)
+        self.radio_draw = QRadioButton()
+        self.radio_draw.setObjectName("toolChip")
+        self.radio_draw.setChecked(True)
+        self.radio_draw.toggled.connect(self.on_tool_changed)
+        self.tool_group.addButton(self.radio_draw)
+        tool_layout.addWidget(self.radio_draw)
+        self.radio_magic = QRadioButton()
+        self.radio_magic.setObjectName("toolChip")
+        self.radio_magic.toggled.connect(self.on_tool_changed)
+        self.tool_group.addButton(self.radio_magic)
+        tool_layout.addWidget(self.radio_magic)
+        self.radio_box = QRadioButton()
+        self.radio_box.setObjectName("toolChip")
+        self.radio_box.toggled.connect(self.on_tool_changed)
+        self.tool_group.addButton(self.radio_box)
+        tool_layout.addWidget(self.radio_box)
+        self.radio_scale = QRadioButton()
+        self.radio_scale.setObjectName("scaleToolRadio")
+        self.radio_scale.toggled.connect(self.on_tool_changed)
+        self.tool_group.addButton(self.radio_scale)
+        self.radio_scale.setVisible(False) 
+        tool_layout.addWidget(self.radio_scale)
+        tool_layout.addStretch(1)
+        enh_layout = QHBoxLayout()
+        self.lbl_bright = QLabel("B:")
+        self.lbl_bright.setObjectName("mutedLabel")
+        enh_layout.addWidget(self.lbl_bright)
+        self.slider_bright = QSlider(Qt.Horizontal)
+        self.slider_bright.setRange(-100, 100)
+        self.slider_bright.setValue(0)
+        self.slider_bright.setFixedWidth(120)
+        self.slider_bright.valueChanged.connect(self.on_enhancement_changed)
+        enh_layout.addWidget(self.slider_bright)
+        self.lbl_contrast = QLabel("C:")
+        self.lbl_contrast.setObjectName("mutedLabel")
+        enh_layout.addWidget(self.lbl_contrast)
+        self.slider_contrast = QSlider(Qt.Horizontal)
+        self.slider_contrast.setRange(1, 30)
+        self.slider_contrast.setValue(10)
+        self.slider_contrast.setFixedWidth(120)
+        self.slider_contrast.valueChanged.connect(self.on_enhancement_changed)
+        enh_layout.addWidget(self.slider_contrast)
+        tool_layout.addLayout(enh_layout)
+        center_layout.addWidget(self.tool_strip)
+
+        self.canvas = AnnotationCanvas()
+        self.canvas.setObjectName("annotationCanvas")
+        self.canvas.polygon_completed.connect(self.on_polygon_completed)
+        self.canvas.magic_wand_clicked.connect(self.on_magic_wand_clicked)
+        self.canvas.magic_box_completed.connect(self.on_magic_box_completed)
+        self.canvas.scale_defined.connect(self.on_scale_defined)
+        self.canvas_shell = QWidget()
+        apply_surface_role(self.canvas_shell, SURFACE_ROLE_CANVAS, "workbenchCanvasShell")
+        canvas_layout = QVBoxLayout(self.canvas_shell)
+        canvas_layout.setContentsMargins(12, 12, 12, 12)
+        canvas_layout.addWidget(self.canvas)
+        center_layout.addWidget(self.canvas_shell, 1)
+        self.workbench_splitter.addWidget(center_panel)
+
+        from PySide6.QtGui import QKeySequence, QShortcut
+        self.shortcut_undo = QShortcut(QKeySequence("Ctrl+Z"), self)
+        self.shortcut_undo.activated.connect(self.canvas.undo)
+        self.shortcut_redo = QShortcut(QKeySequence("Ctrl+Y"), self)
+        self.shortcut_redo.activated.connect(self.canvas.redo)
+        self.shortcut_save = QShortcut(QKeySequence(Qt.Key_S), self)
+        self.shortcut_save.activated.connect(lambda: self._flush_pending_project_save(force=True))
+        self.shortcut_verify = QShortcut(QKeySequence(Qt.Key_Space), self)
+        self.shortcut_verify.activated.connect(self.verify_current_image)
+
+        right_scroll = QScrollArea()
+        right_scroll.setObjectName("workbenchInspectorScroll")
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setFrameShape(QFrame.NoFrame)
+        right_panel = QWidget()
+        right_panel.setMinimumWidth(320)
+        right_panel.setObjectName("workbenchInspectorPanel")
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(12)
+
+        self.metadata_panel = QWidget()
+        apply_surface_role(self.metadata_panel, SURFACE_ROLE_PANEL, "workbenchMetadataPanel")
+        metadata_layout = QVBoxLayout(self.metadata_panel)
+        metadata_layout.setContentsMargins(12, 12, 12, 12)
+        metadata_layout.setSpacing(10)
+        self.label_taxonomy = QLabel()
+        self.label_taxonomy.setObjectName("HeaderLabel")
+        metadata_layout.addWidget(self.label_taxonomy)
+        self.genus_combo = QComboBox()
+        self.genus_combo.setEditable(True)
+        self.genus_combo.setInsertPolicy(QComboBox.InsertAlphabetically)
+        self.genus_combo.currentTextChanged.connect(self.on_genus_changed)
+        metadata_layout.addWidget(self.genus_combo)
+        self.label_structures = QLabel()
+        self.label_structures.setObjectName("HeaderLabel")
+        metadata_layout.addWidget(self.label_structures)
+        self.part_list = QTreeWidget()
+        self.part_list.setObjectName("workbenchPartTree")
+        self.part_list.setHeaderHidden(True)
+        self.part_list.setRootIsDecorated(True)
+        self.part_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.part_list.currentItemChanged.connect(self.on_part_selected)
+        self.part_list.setFixedHeight(190) 
+        metadata_layout.addWidget(self.part_list)
+        
+        tax_btn_layout = QHBoxLayout()
+        self.btn_add_part = QPushButton("+")
+        self.btn_add_part.clicked.connect(self.add_taxonomy_part)
+        apply_semantic_button_style(self.btn_add_part, BUTTON_ROLE_NEUTRAL, "font-weight: bold;")
+        self.btn_del_part = QPushButton("-")
+        self.btn_del_part.clicked.connect(self.remove_taxonomy_part)
+        apply_semantic_button_style(self.btn_del_part, BUTTON_ROLE_DESTRUCTIVE, "font-weight: bold;")
+        tax_btn_layout.addWidget(self.btn_add_part)
+        tax_btn_layout.addWidget(self.btn_del_part)
+        metadata_layout.addLayout(tax_btn_layout)
+        
+        self.check_morpho = QCheckBox() 
+        self.check_morpho.stateChanged.connect(self.toggle_morphometrics)
+        metadata_layout.addWidget(self.check_morpho)
+        self.group_morpho = QGroupBox()
+        apply_surface_role(self.group_morpho, SURFACE_ROLE_SUBTLE, "workbenchMorphometricsPanel")
+        self.group_morpho.setVisible(False)
+        morpho_layout = QVBoxLayout(self.group_morpho)
+        self.label_measurements = QLabel("N/A")
+        self.label_measurements.setObjectName("mutedLabel")
+        morpho_layout.addWidget(self.label_measurements)
+        metadata_layout.addWidget(self.group_morpho)
+        self.label_description = QLabel()
+        self.label_description.setObjectName("HeaderLabel")
+        metadata_layout.addWidget(self.label_description)
+        self.desc_box = QTextEdit()
+        self.desc_box.setReadOnly(True)
+        self.desc_box.setMaximumHeight(100)
+        self.desc_box.setObjectName("LinkedDescriptionBox")
+        metadata_layout.addWidget(self.desc_box)
+        right_layout.addWidget(self.metadata_panel)
+
+        self.ai_panel = QWidget()
+        apply_surface_role(self.ai_panel, SURFACE_ROLE_PANEL, "workbenchAIPanel")
+        ai_layout = QVBoxLayout(self.ai_panel)
+        ai_layout.setContentsMargins(12, 12, 12, 12)
+        ai_layout.setSpacing(10)
+        self.label_ai_workflow = QLabel()
+        self.label_ai_workflow.setObjectName("HeaderLabel")
+        ai_layout.addWidget(self.label_ai_workflow)
+
+        self.label_model_backend = QLabel()
+        self.label_model_backend.setObjectName("mutedLabel")
+        ai_layout.addWidget(self.label_model_backend)
+        
+        # --- Model Selection Area (Decoupled) ---
+        self.ai_model_panel = QWidget()
+        apply_surface_role(self.ai_model_panel, SURFACE_ROLE_SUBTLE, "workbenchAIModelPanel")
+        models_form = QGridLayout(self.ai_model_panel)
+        models_form.setContentsMargins(10, 10, 10, 10)
+        models_form.setHorizontalSpacing(8)
+        models_form.setVerticalSpacing(5)
+        models_form.setColumnStretch(1, 1)
+        
+        # Locator Selection
+        self.lbl_locator = QLabel("Locator:")
+        models_form.addWidget(self.lbl_locator, 0, 0)
+        self.combo_locator = QComboBox()
+        self.combo_locator.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.combo_locator.activated.connect(self.on_locator_changed)
+        self.combo_locator.currentIndexChanged.connect(self.update_model_delete_button_states)
+        models_form.addWidget(self.combo_locator, 0, 1)
+        
+        self.btn_del_locator = QPushButton("Del")
+        self.btn_del_locator.setEnabled(False)
+        self.btn_del_locator.clicked.connect(self.delete_locator_model)
+        apply_semantic_button_style(self.btn_del_locator, BUTTON_ROLE_DESTRUCTIVE)
+        models_form.addWidget(self.btn_del_locator, 0, 2)
+        
+        # Segmenter Selection
+        self.lbl_segmenter = QLabel("Segmenter:")
+        models_form.addWidget(self.lbl_segmenter, 1, 0)
+        self.combo_segmenter = QComboBox()
+        self.combo_segmenter.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.combo_segmenter.activated.connect(self.on_segmenter_changed)
+        self.combo_segmenter.currentIndexChanged.connect(self.update_model_delete_button_states)
+        models_form.addWidget(self.combo_segmenter, 1, 1)
+        
+        self.btn_del_segmenter = QPushButton("Del")
+        self.btn_del_segmenter.setEnabled(False)
+        self.btn_del_segmenter.clicked.connect(self.delete_segmenter_model)
+        apply_semantic_button_style(self.btn_del_segmenter, BUTTON_ROLE_DESTRUCTIVE)
+        models_form.addWidget(self.btn_del_segmenter, 1, 2)
+        
+        ai_layout.addWidget(self.ai_model_panel)
+
+        self.ai_action_panel = QWidget()
+        apply_surface_role(self.ai_action_panel, SURFACE_ROLE_RAISED, "workbenchAIActionPanel")
+        ai_action_layout = QVBoxLayout(self.ai_action_panel)
+        ai_action_layout.setContentsMargins(10, 10, 10, 10)
+        ai_action_layout.setSpacing(8)
+
+        btns_layout = QHBoxLayout()
+        self.btn_predict = QPushButton()
+        self.btn_predict.clicked.connect(self.run_prediction)
+        apply_semantic_button_style(self.btn_predict, BUTTON_ROLE_RUN, "padding: 5px;")
+        btns_layout.addWidget(self.btn_predict)
+        self.btn_batch = QPushButton()
+        self.btn_batch.clicked.connect(self.run_batch_inference)
+        apply_semantic_button_style(self.btn_batch, BUTTON_ROLE_RUN, "padding: 5px;")
+        btns_layout.addWidget(self.btn_batch)
+        ai_action_layout.addLayout(btns_layout)
+        self.btn_train = QPushButton()
+        self.btn_train.clicked.connect(self.run_training)
+        apply_semantic_button_style(self.btn_train, BUTTON_ROLE_RUN, "padding: 8px; margin-top: 5px;")
+        ai_action_layout.addWidget(self.btn_train)
+        self.btn_clear_ai = QPushButton()
+        self.btn_clear_ai.clicked.connect(self.clear_ai_labels)
+        apply_semantic_button_style(self.btn_clear_ai, BUTTON_ROLE_DESTRUCTIVE, "font-weight: bold; margin-top: 5px;")
+        ai_action_layout.addWidget(self.btn_clear_ai)
+        self.progress = QProgressBar()
+        ai_action_layout.addWidget(self.progress)
+        ai_layout.addWidget(self.ai_action_panel)
+        right_layout.addWidget(self.ai_panel)
+
+        self.logs_panel = QWidget()
+        apply_surface_role(self.logs_panel, SURFACE_ROLE_SUBTLE, "workbenchLogsPanel")
+        logs_layout = QVBoxLayout(self.logs_panel)
+        logs_layout.setContentsMargins(12, 12, 12, 12)
+        logs_layout.setSpacing(8)
+        self.label_logs = QLabel()
+        self.label_logs.setObjectName("HeaderLabel")
+        logs_layout.addWidget(self.label_logs)
+        self.log_console = QTextEdit()
+        self.log_console.setReadOnly(True)
+        self.log_console.setMinimumHeight(100)
+        self.log_console.setObjectName("MutedLogConsole")
+        logs_layout.addWidget(self.log_console)
+        right_layout.addWidget(self.logs_panel)
+        right_layout.addStretch()
+        right_scroll.setWidget(right_panel)
+        self.workbench_splitter.addWidget(right_scroll)
+        self.workbench_splitter.setStretchFactor(0, 1)
+        self.workbench_splitter.setStretchFactor(1, 5)
+        self.workbench_splitter.setStretchFactor(2, 2)
+        self.workbench_splitter.setSizes([240, 1080, 320])
+
+        self.pdf_widget = PdfProcessingWidget(self.current_lang)
+        self.blink_lab = BlinkLabWidget(self.engine, self.project, self.current_lang)
+        self.blink_lab.global_labels_updated.connect(self.on_global_labels_updated)
+        self.blink_lab.route_registry_refresh_requested.connect(self.refresh_route_table)
+        self.route_settings_panel = RouteManagementPanel(self, self.current_lang)
+        self.tabs.addTab(self.pdf_widget, tr("PDF Processing", self.current_lang))
+        self.tabs.addTab(self.workbench_widget, tr("Labeling Workbench", self.current_lang))
+        self.tabs.addTab(self.blink_lab, tr("Blink Workbench", self.current_lang))
+        
+        last_proj = self.config.get("last_project_path")
+        if last_proj and os.path.exists(last_proj):
+            try:
+                self.project.load_project(last_proj)
+                self.log(tr("Restored session: {0}", self.current_lang).format(last_proj))
+            except Exception:
+                self.project.create_project(DEFAULT_PROJECT_NAME, ".", template_id=DEFAULT_PROJECT_TEMPLATE_ID)
+        else:
+            self.project.create_project(DEFAULT_PROJECT_NAME, ".", template_id=DEFAULT_PROJECT_TEMPLATE_ID)
+        
+        self.refresh_file_list()
+        self.log(tr("System Initialized.", self.current_lang))
+        self.refresh_model_list()
+        self.refresh_ui()
+        self.refresh_route_table()
+        self.change_theme(self.current_theme)
+        self.apply_startup_window_geometry()
+
+    def apply_startup_window_geometry(self):
+        if QApplication.platformName() == "offscreen":
+            return
+
+        app = QApplication.instance()
+        if app is None:
+            return
+
+        screen = app.primaryScreen()
+        if screen is None:
+            return
+
+        available = screen.availableGeometry()
+        x, y, width, height = compute_centered_window_geometry(
+            (available.left(), available.top(), available.width(), available.height()),
+            (self.startup_size.width(), self.startup_size.height()),
+        )
+        self.setGeometry(x, y, width, height)
+
+    def closeEvent(self, event):
+        self._flush_pending_project_save()
+        if self.project.current_project_path:
+            self.config.set("last_project_path", self.project.current_project_path)
+        self.config.save()
+        if self.sam_thread and self.sam_thread.isRunning():
+            self.sam_thread.quit()
+            self.sam_thread.wait(1000)
+        event.accept()
+        os._exit(0)
+
+    def _schedule_project_save(self):
+        self.project_save_pending = True
+        self.project_save_timer.start(self.project_autosave_delay_ms)
+
+    def _flush_pending_project_save(self, force=False):
+        if self.project_save_timer.isActive():
+            self.project_save_timer.stop()
+
+        if not self.project.current_project_path:
+            self.project_save_pending = False
+            return False
+
+        if not force and not self.project_save_pending:
+            return False
+
+        self.project.save_project()
+        self.project_save_pending = False
+        return True
+
+    def refresh_model_list(self):
+        current_locator = self.combo_locator.currentData() if self.combo_locator.count() else None
+        current_segmenter = self.combo_segmenter.currentData() if self.combo_segmenter.count() else None
+        self.combo_locator.blockSignals(True)
+        self.combo_segmenter.blockSignals(True)
+        self.combo_locator.clear()
+        self.combo_segmenter.clear()
+        
+        if not self.engine:
+            return
+            
+        import glob
+        # 1. Populate Locators
+        loc_files = glob.glob(os.path.join(self.engine.weights_dir, "locator_*.pth"))
+        # Format: "20260105_1105"
+        loc_timestamps = sorted([os.path.basename(f).replace("locator_", "").replace(".pth", "") for f in loc_files], reverse=True)
+        
+        if loc_timestamps:
+            for ts in loc_timestamps:
+                self.combo_locator.addItem(self._build_locator_combo_label(ts), ts)
+            locator_index = self.combo_locator.findData(current_locator)
+            if locator_index < 0:
+                locator_index = 0
+            self.combo_locator.setCurrentIndex(locator_index)
+        else:
+            self.combo_locator.addItem(tr("No Locators Found", self.current_lang), "__no_locator__")
+            
+        # 2. Populate Segmenters
+        self.combo_segmenter.addItem(tr("Base SAM (Original)", self.current_lang), "BASE_SAM")
+        
+        seg_files = glob.glob(os.path.join(self.engine.weights_dir, "sam_decoder_lora_*.pth"))
+        seg_timestamps = sorted([os.path.basename(f).replace("sam_decoder_lora_", "").replace(".pth", "") for f in seg_files], reverse=True)
+        
+        if seg_timestamps:
+            for ts in seg_timestamps:
+                self.combo_segmenter.addItem(ts, ts)
+            
+        # Default to Base SAM (Index 0) for safety/compatibility, or latest if user prefers?
+        # User strategy: "配合原始的sam模型，先达到一个很好的效果". So default to Base SAM.
+        segmenter_index = self.combo_segmenter.findData(current_segmenter)
+        if segmenter_index < 0:
+            segmenter_index = 0
+        self.combo_segmenter.setCurrentIndex(segmenter_index)
+        
+        self.combo_locator.blockSignals(False)
+        self.combo_segmenter.blockSignals(False)
+        self._apply_locator_selection_to_runtime()
+        self._apply_segmenter_selection_to_runtime()
+        self.update_model_delete_button_states()
+
+    def _selected_locator_timestamp(self):
+        item_data = self.combo_locator.currentData() if self.combo_locator.count() else None
+        if item_data in (None, "", "__no_locator__"):
+            return None
+        return str(item_data)
+
+    def _selected_locator_display_text(self):
+        if not self.combo_locator.count():
+            return ""
+        return str(self.combo_locator.currentText() or "").strip()
+
+    def _build_locator_combo_label(self, timestamp):
+        ts = str(timestamp or "").strip()
+        if not ts:
+            return ts
+
+        path = self._locator_model_path(ts)
+        if not path or not os.path.exists(path):
+            return ts
+
+        try:
+            saved_state = torch.load(path, map_location="cpu")
+        except Exception:
+            return ts
+
+        checkpoint_meta = {}
+        if isinstance(saved_state, dict) and isinstance(saved_state.get("meta"), dict):
+            checkpoint_meta = saved_state.get("meta") or {}
+
+        saved_resolution = checkpoint_meta.get("locator_size")
+        legacy_resolution = checkpoint_meta.get("locator_resolution")
+        if saved_resolution is None and legacy_resolution is not None:
+            try:
+                legacy_side = max(1, int(legacy_resolution))
+            except Exception:
+                legacy_side = 512
+            saved_resolution = [legacy_side, legacy_side]
+
+        if saved_resolution is None:
+            state_label = "legacy-512"
+        else:
+            try:
+                size_pair = (max(1, int(saved_resolution[0])), max(1, int(saved_resolution[1])))
+            except Exception:
+                size_pair = (512, 512)
+            state_label = f"exact {format_size_pair(size_pair)}"
+        return f"{ts} [{state_label}]"
+
+    def _selected_segmenter_timestamp(self):
+        item_data = self.combo_segmenter.currentData() if self.combo_segmenter.count() else None
+        if item_data in (None, "", "BASE_SAM", "No Segmenters Found"):
+            return None
+        return str(item_data)
+
+    def _active_project_route_manifest(self):
+        return self.project.get_cascade_routes()
+
+    def _selected_route_entry(self):
+        panel = getattr(self, "route_settings_panel", None)
+        if panel is None:
+            return None
+        return panel._selected_route_entry()
+
+    def _route_runtime_status(self, route_entry):
+        panel = getattr(self, "route_settings_panel", None)
+        if panel is None:
+            return ui_text("Unknown", self.current_lang)
+        return panel._route_runtime_status(route_entry)
+
+    def refresh_route_table(self):
+        panel = getattr(self, "route_settings_panel", None)
+        if panel is not None:
+            panel.refresh_route_table()
+        if hasattr(self, "part_list"):
+            self._refresh_part_tree(self._current_part_name())
+
+    def update_route_action_buttons(self):
+        panel = getattr(self, "route_settings_panel", None)
+        if panel is not None:
+            panel.update_action_buttons()
+
+    def _refresh_project_bound_views(self):
+        self.refresh_file_list()
+        self.refresh_ui()
+        self.refresh_route_table()
+
+    def appoint_selected_route_expert(self):
+        panel = getattr(self, "route_settings_panel", None)
+        if panel is not None:
+            panel.appoint_selected_route_expert()
+
+    def toggle_selected_route_enabled(self):
+        panel = getattr(self, "route_settings_panel", None)
+        if panel is not None:
+            panel.toggle_selected_route_enabled()
+
+    def delete_selected_route(self):
+        panel = getattr(self, "route_settings_panel", None)
+        if panel is not None:
+            panel.delete_selected_route()
+
+    def _log_route_usage_summary(self, payload, image_path=None, prefix=None):
+        if not isinstance(payload, dict):
+            return
+        meta = payload.get("meta", {}) if isinstance(payload.get("meta"), dict) else {}
+        attempted = list(meta.get("cascade_attempted_routes", []) or [])
+        applied = list(meta.get("cascade_applied_routes", []) or [])
+        block_reasons = dict(meta.get("cascade_block_reasons", {}) or {})
+        route_source = str(meta.get("cascade_route_source", "none") or "none")
+        image_name = os.path.basename(image_path) if image_path else tr("Current Image", self.current_lang)
+        title = prefix or ui_text("Route usage for {0}", self.current_lang).format(image_name)
+        attempted_text = attempted or [ui_text("None", self.current_lang)]
+        applied_text = applied or [ui_text("None", self.current_lang)]
+        self.log(
+            f"{title}: "
+            f"{ui_text('source={0}; attempted={1}; applied={2}', self.current_lang).format(route_source, attempted_text, applied_text)}"
+        )
+        if block_reasons:
+            block_text = ", ".join(f"{part}={reason}" for part, reason in sorted(block_reasons.items()))
+            self.log(ui_text("Route blocks: {0}", self.current_lang).format(block_text))
+
+    def _locator_model_path(self, timestamp):
+        if not self.engine or not timestamp:
+            return None
+        return os.path.join(self.engine.weights_dir, f"locator_{timestamp}.pth")
+
+    def _segmenter_model_path(self, timestamp):
+        if not self.engine or not timestamp:
+            return None
+        return os.path.join(self.engine.weights_dir, f"sam_decoder_lora_{timestamp}.pth")
+
+    def _apply_locator_selection_to_runtime(self, *, log_change=False):
+        if not self.engine:
+            return
+
+        ts = self._selected_locator_timestamp()
+        if not ts:
+            self.engine.reset_locator_to_base()
+            if log_change:
+                self.log(tr("Locator reset to base (untrained).", self.current_lang))
+            return
+
+        self.engine.load_locator(ts)
+        if log_change:
+            locator_label = self._selected_locator_display_text() or ts
+            self.log(tr("Locator switched to: {0}", self.current_lang).format(locator_label))
+
+    def _locator_selection_needs_legacy_confirmation(self):
+        return bool(getattr(self.engine, "loaded_locator_requires_legacy_confirmation", False))
+
+    def _confirm_legacy_locator_selection_if_needed(self):
+        if not self.engine or not self._locator_selection_needs_legacy_confirmation():
+            return True
+
+        reply = themed_yes_no_question(
+            self,
+            tr("Legacy Locator Confirmation", self.current_lang),
+            tr(
+                "The selected locator checkpoint does not store its training resolution. It will be treated as a legacy 512px locator only if you confirm.",
+                self.current_lang,
+            ),
+            confirm_role=BUTTON_ROLE_COMMIT,
+        )
+        if reply == QMessageBox.Yes:
+            self.engine.loaded_locator_requires_legacy_confirmation = False
+            self.last_confirmed_locator_timestamp = self._selected_locator_timestamp()
+            return True
+
+        self.log("Legacy locator selection was cancelled.")
+        return False
+
+    def _show_structured_training_preflight(self, preflight):
+        dialog = TrainingPreflightDialog(preflight, self, self.current_lang)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return False
+        return bool(dialog.accepted_training())
+
+    def _is_locator_oom_error(self, exc):
+        message = str(exc or "").lower()
+        return "out of memory" in message or "cuda out of memory" in message
+
+    def _ask_locator_oom_retry_resolution(self, current_resolution, lower_options):
+        if not lower_options:
+            QMessageBox.warning(
+                self,
+                tr("Training Retry", self.current_lang),
+                tr("No lower locator resolutions are available for retry.", self.current_lang),
+            )
+            return None
+
+        options_text = ", ".join(format_size_pair(value) for value in lower_options)
+        message = tr(
+            "Locator stage ran out of memory at {0}. You can retry with a lower locator size: {1}",
+            self.current_lang,
+        ).format(format_size_pair(current_resolution), options_text)
+
+        selected_text, ok = QInputDialog.getItem(
+            self,
+            tr("Training Retry", self.current_lang),
+            message,
+            [format_size_pair(value) for value in lower_options],
+            0,
+            False,
+        )
+        if not ok or not selected_text:
+            return None
+
+        for candidate in lower_options:
+            if format_size_pair(candidate) == str(selected_text).strip():
+                return tuple(candidate)
+        return None
+
+    def _launch_training_with_preflight(self, preflight, tax, locator_scope):
+        active_preflight = dict(preflight or {})
+        self.pending_training_preflight = {
+            "preflight": active_preflight,
+            "taxonomy": list(tax or []),
+            "locator_scope": list(locator_scope or []),
+        }
+        self.training_retry_requested = False
+
+        self.engine.locator_resolution = tuple(active_preflight.get("selected_locator_size") or (512, 512))
+        self.trainer = TrainingThread(
+            self.engine,
+            active_preflight,
+            tax,
+            locator_scope,
+            self.train_epochs,
+            self.train_batch,
+            lang=self.current_lang,
+        )
+        self.trainer.log_signal.connect(self.log)
+        self.trainer.progress_signal.connect(self.progress.setValue)
+        self.trainer.report_signal.connect(self.show_training_report)
+        self.trainer.success_signal.connect(self._on_training_success)
+        self.trainer.error_signal.connect(self._on_training_error)
+        self.trainer.finished_signal.connect(self._on_training_finished)
+        self.btn_train.setEnabled(False)
+        self.trainer.start()
+
+    def _on_training_success(self):
+        self.refresh_model_list()
+
+    def _on_training_finished(self):
+        self.btn_train.setEnabled(False if self.training_retry_requested else True)
+        if not self.training_retry_requested:
+            self.refresh_model_list()
+
+    def _on_training_error(self, payload):
+        payload = dict(payload or {})
+        error_type = payload.get("type")
+        self.training_retry_requested = False
+
+        if error_type == "oom" and payload.get("stage") == "locator":
+            retry_resolution = self._ask_locator_oom_retry_resolution(
+                payload.get("current_resolution") or 512,
+                payload.get("lower_options", []),
+            )
+            if retry_resolution is not None and self.pending_training_preflight:
+                self.training_retry_requested = True
+                updated_preflight = dict(self.pending_training_preflight.get("preflight") or {})
+                updated_preflight["selected_locator_size"] = tuple(retry_resolution)
+                updated_preflight["lower_locator_size_options"] = [
+                    tuple(value)
+                    for value in updated_preflight.get("lower_locator_size_options", [])
+                    if tuple(value) != tuple(retry_resolution)
+                ]
+                self.pending_training_preflight["preflight"] = updated_preflight
+                QTimer.singleShot(
+                    0,
+                    lambda: self._launch_training_with_preflight(
+                        updated_preflight,
+                        self.pending_training_preflight.get("taxonomy", []),
+                        self.pending_training_preflight.get("locator_scope", []),
+                    ),
+                )
+                return
+
+        message = str(payload.get("message") or "Training failed.")
+        self.log(tr("Training aborted: {0}", self.current_lang).format(message))
+        QMessageBox.critical(self, tr("Error", self.current_lang), message)
+
+    def _apply_segmenter_selection_to_runtime(self, *, log_change=False):
+        if not self.engine:
+            return
+
+        ts = self._selected_segmenter_timestamp()
+        if not ts:
+            self.engine.reset_sam_to_base()
+            if self.sam_worker:
+                self.sam_worker.reload_base_model()
+            if log_change:
+                self.log(tr("Segmenter switched to: Base SAM (Original)", self.current_lang))
+            return
+
+        self.engine.load_sam_decoder(ts)
+        if self.sam_worker:
+            weights_path = self._segmenter_model_path(ts)
+            if weights_path:
+                self.sam_worker.load_decoder_weights(weights_path)
+        if log_change:
+            self.log(tr("Segmenter switched to: Fine-tuned {0}", self.current_lang).format(ts))
+
+    def update_model_delete_button_states(self, *_):
+        locator_ts = self._selected_locator_timestamp()
+        locator_path = self._locator_model_path(locator_ts)
+        self.btn_del_locator.setEnabled(bool(locator_path and os.path.exists(locator_path)))
+
+        segmenter_ts = self._selected_segmenter_timestamp()
+        segmenter_path = self._segmenter_model_path(segmenter_ts)
+        self.btn_del_segmenter.setEnabled(bool(segmenter_path and os.path.exists(segmenter_path)))
+
+    def on_locator_changed(self, index):
+        self._apply_locator_selection_to_runtime(log_change=False)
+        if self._locator_selection_needs_legacy_confirmation():
+            if not self._confirm_legacy_locator_selection_if_needed():
+                fallback_ts = self.last_confirmed_locator_timestamp
+                fallback_index = self.combo_locator.findData(fallback_ts) if fallback_ts else -1
+                if fallback_index < 0:
+                    fallback_index = 0 if self.combo_locator.count() else -1
+                if fallback_index >= 0:
+                    self.combo_locator.blockSignals(True)
+                    self.combo_locator.setCurrentIndex(fallback_index)
+                    self.combo_locator.blockSignals(False)
+                    self._apply_locator_selection_to_runtime(log_change=False)
+                    fallback_label = self._selected_locator_display_text()
+                    if fallback_label:
+                        self.log(tr("Locator switched to: {0}", self.current_lang).format(fallback_label))
+                    else:
+                        self.log(tr("Locator reset to base (untrained).", self.current_lang))
+            else:
+                self.last_confirmed_locator_timestamp = self._selected_locator_timestamp()
+                self.log(
+                    tr("Locator switched to: {0}", self.current_lang).format(
+                        self._selected_locator_display_text() or self.last_confirmed_locator_timestamp
+                    )
+                )
+        else:
+            self.last_confirmed_locator_timestamp = self._selected_locator_timestamp()
+            current_label = self._selected_locator_display_text()
+            if current_label:
+                self.log(tr("Locator switched to: {0}", self.current_lang).format(current_label))
+            else:
+                self.log(tr("Locator reset to base (untrained).", self.current_lang))
+        self.update_model_delete_button_states()
+
+    def delete_locator_model(self):
+        ts = self._selected_locator_timestamp()
+        if not ts:
+            self.update_model_delete_button_states()
+            return
+        
+        reply = themed_yes_no_question(
+            self,
+            tr("Delete Model", self.current_lang),
+            tr("Delete locator model {0}?", self.current_lang).format(ts),
+            confirm_role=BUTTON_ROLE_DESTRUCTIVE,
+        )
+        if reply == QMessageBox.Yes:
+            try:
+                p = self._locator_model_path(ts)
+                if os.path.exists(p):
+                    os.remove(p)
+                    self.log(f"Deleted locator: {ts}")
+                    self.refresh_model_list()
+                else:
+                    self.log(f"File not found: {p}")
+                    self.update_model_delete_button_states()
+            except Exception as e:
+                self.log(f"Error deleting model: {e}")
+                self.update_model_delete_button_states()
+
+    def on_segmenter_changed(self, index):
+        self._apply_segmenter_selection_to_runtime(log_change=True)
+        self.update_model_delete_button_states()
+
+    def delete_segmenter_model(self):
+        ts = self._selected_segmenter_timestamp()
+        if not ts:
+            self.update_model_delete_button_states()
+            return
+        
+        reply = themed_yes_no_question(
+            self,
+            tr("Delete Model", self.current_lang),
+            tr("Delete segmenter LoRA {0}?", self.current_lang).format(ts),
+            confirm_role=BUTTON_ROLE_DESTRUCTIVE,
+        )
+        if reply == QMessageBox.Yes:
+            try:
+                p = self._segmenter_model_path(ts)
+                if os.path.exists(p):
+                    os.remove(p)
+                    self.log(f"Deleted segmenter: {ts}")
+                    self.refresh_model_list()
+                else:
+                    self.log(f"File not found: {p}")
+                    self.update_model_delete_button_states()
+            except Exception as e:
+                self.log(f"Error deleting model: {e}")
+                self.update_model_delete_button_states()
+
+    def on_model_changed(self, index):
+        # Deprecated
+        pass
+
+    def create_menus(self):
+        menubar = self.menuBar()
+        menubar.clear()
+        file_menu = menubar.addMenu(tr("File", self.current_lang))
+        file_menu.addAction(tr("New Project", self.current_lang), self.new_project)
+        file_menu.addAction(tr("Open Project", self.current_lang), self.open_project)
+        file_menu.addAction(tr("Save Project", self.current_lang), lambda: self._flush_pending_project_save(force=True))
+        file_menu.addAction(tr("Export Dataset", self.current_lang), self.export_dataset)
+        settings_menu = menubar.addMenu(tr("Settings", self.current_lang))
+        settings_menu.addAction(tr("Model Settings", self.current_lang), self.open_settings)
+        lang_menu = settings_menu.addMenu(tr("Language", self.current_lang))
+        lang_menu.addAction("English", lambda: self.change_language("en"))
+        lang_menu.addAction("中文", lambda: self.change_language("zh"))
+        theme_menu = settings_menu.addMenu(tr("Theme", self.current_lang))
+        theme_menu.addAction(tr("Dark Mode", self.current_lang), lambda: self.change_theme("dark"))
+
+    def new_project(self):
+        d = QFileDialog.getExistingDirectory(self, tr("New Project Directory", self.current_lang))
+        if d:
+            name, ok = QInputDialog.getText(self, tr("New Project", self.current_lang), tr("Project Name:", self.current_lang))
+            if ok and name:
+                template = self._choose_project_template()
+                if template is None:
+                    return
+                self._flush_pending_project_save()
+                self.project.create_project(name, d, template_id=template["template_id"])
+                self._refresh_project_bound_views()
+                self.canvas.load_image("") 
+
+    def _choose_project_template(self):
+        templates = iter_project_templates()
+        if not templates:
+            return {"template_id": DEFAULT_PROJECT_TEMPLATE_ID}
+        labels = [tr(template["display_name"], self.current_lang) for template in templates]
+        selected, ok = QInputDialog.getItem(
+            self,
+            tr("New Project", self.current_lang),
+            tr("Project Template:", self.current_lang),
+            labels,
+            0,
+            False,
+        )
+        if not ok:
+            return None
+        try:
+            return templates[labels.index(selected)]
+        except ValueError:
+            return templates[0]
+
+    def open_project(self):
+        f, _ = QFileDialog.getOpenFileName(self, tr("Open Project", self.current_lang), "", "JSON (*.json)")
+        if f:
+            self._flush_pending_project_save()
+            self.project.load_project(f)
+            self._refresh_project_bound_views()
+            self.canvas.load_image("")
+
+    def _part_item_name(self, item):
+        if item is None:
+            return None
+        part_name = item.data(0, Qt.UserRole)
+        clean_name = str(part_name or "").strip()
+        return clean_name or None
+
+    def _current_part_name(self):
+        return self._part_item_name(self.part_list.currentItem())
+
+    def _append_part_tree_item(self, parent_item, text, part_name=None, tooltip=None):
+        item = QTreeWidgetItem(parent_item) if parent_item is not None else QTreeWidgetItem(self.part_list)
+        item.setText(0, text)
+        item.setData(0, Qt.UserRole, part_name)
+        if tooltip:
+            item.setToolTip(0, tooltip)
+        return item
+
+    def _select_part_in_tree(self, part_name):
+        clean_name = str(part_name or "").strip()
+        if not clean_name:
+            return False
+
+        def walk(item):
+            if item is None:
+                return None
+            if self._part_item_name(item) == clean_name:
+                return item
+            for index in range(item.childCount()):
+                found = walk(item.child(index))
+                if found is not None:
+                    return found
+            return None
+
+        for index in range(self.part_list.topLevelItemCount()):
+            found_item = walk(self.part_list.topLevelItem(index))
+            if found_item is not None:
+                self.part_list.setCurrentItem(found_item)
+                return True
+        return False
+
+    def _first_selectable_part_item(self):
+        def walk(item):
+            if item is None:
+                return None
+            if self._part_item_name(item):
+                return item
+            for index in range(item.childCount()):
+                found = walk(item.child(index))
+                if found is not None:
+                    return found
+            return None
+
+        for index in range(self.part_list.topLevelItemCount()):
+            found_item = walk(self.part_list.topLevelItem(index))
+            if found_item is not None:
+                return found_item
+        return None
+
+    def _refresh_part_tree(self, selected_part=None):
+        if getattr(self, "_refreshing_part_tree", False):
+            return
+        if not hasattr(self, "part_list"):
+            return
+        self._refreshing_part_tree = True
+        previous_selection = selected_part or self._current_part_name()
+        try:
+            self.part_list.blockSignals(True)
+            self.part_list.clear()
+            groups = build_part_tree_groups(
+                self.project.project_data.get("taxonomy", []),
+                self.project.get_locator_scope(),
+                self.project.iter_cascade_routes(),
+            )
+
+            for parent_group in groups.get("parents", []):
+                parent_part = parent_group.get("part")
+                if not parent_part:
+                    continue
+                parent_item = self._append_part_tree_item(
+                    None,
+                    tr(parent_part, self.current_lang),
+                    part_name=parent_part,
+                    tooltip=tr("Main locator parts", self.current_lang),
+                )
+                for child_part in parent_group.get("children", []):
+                    self._append_part_tree_item(
+                        parent_item,
+                        tr(child_part, self.current_lang),
+                        part_name=child_part,
+                        tooltip=tr("Blink child parts", self.current_lang),
+                    )
+                parent_item.setExpanded(True)
+
+            cross_region = groups.get("cross_region", [])
+            if cross_region:
+                group_item = self._append_part_tree_item(
+                    None,
+                    tr("Cross-region structures", self.current_lang),
+                    tooltip=tr("Structure group", self.current_lang),
+                )
+                for part_name in cross_region:
+                    self._append_part_tree_item(group_item, tr(part_name, self.current_lang), part_name=part_name)
+                group_item.setExpanded(True)
+
+            ungrouped = groups.get("ungrouped", [])
+            if ungrouped:
+                group_item = self._append_part_tree_item(
+                    None,
+                    tr("Ungrouped structures", self.current_lang),
+                    tooltip=tr("Structure group", self.current_lang),
+                )
+                for part_name in ungrouped:
+                    self._append_part_tree_item(group_item, tr(part_name, self.current_lang), part_name=part_name)
+                group_item.setExpanded(True)
+
+            selected = self._select_part_in_tree(previous_selection)
+            if not selected:
+                first_part_item = self._first_selectable_part_item()
+                if first_part_item is not None:
+                    self.part_list.setCurrentItem(first_part_item)
+        finally:
+            self.part_list.blockSignals(False)
+            self._refreshing_part_tree = False
+
+        current_part = self._current_part_name()
+        if current_part:
+            self.canvas.set_active_part(current_part)
+            self.update_db_description(current_part)
+        else:
+            self.canvas.set_active_part(None)
+            self.desc_box.clear()
+
+    def add_taxonomy_part(self):
+        name, ok = QInputDialog.getText(self, tr("Add Structure", self.current_lang), tr("Structure Name:", self.current_lang))
+        if ok and name:
+            if self.project.add_taxonomy_part(name.strip()):
+                self.refresh_ui()
+                self.project.save_project()
+            else:
+                QMessageBox.warning(self, tr("Error", self.current_lang), tr("Exists.", self.current_lang))
+
+    def remove_taxonomy_part(self):
+        part_name = self._current_part_name()
+        if not part_name:
+            return
+        if themed_yes_no_question(
+            self,
+            tr("Remove Structure", self.current_lang),
+            tr("Delete '{0}'?", self.current_lang).format(part_name),
+            confirm_role=BUTTON_ROLE_DESTRUCTIVE,
+        ) == QMessageBox.Yes:
+            if self.project.remove_taxonomy_part(part_name):
+                self.refresh_ui()
+                self.project.save_project()
+
+    def clear_ai_labels(self):
+        if themed_yes_no_question(
+            self,
+            tr("Clear AI Labels", self.current_lang),
+            tr("Clear all AI labels from the current project?", self.current_lang),
+            confirm_role=BUTTON_ROLE_DESTRUCTIVE,
+        ) == QMessageBox.Yes:
+            c = self.project.remove_auto_labels()
+            self.refresh_file_list()
+            if self.current_image:
+                self.canvas.set_polygons(self.project.get_labels(self.current_image))
+            self.log(f"Removed {c} AI labels.")
+
+    def on_global_labels_updated(self):
+        """Called when Blink Workbench applies changes back to the global project."""
+        if self.current_image:
+            self.canvas.set_polygons(self.project.get_labels(self.current_image))
+            self.canvas.set_boxes(
+                self.project.get_boxes(self.current_image), 
+                self.project.get_auto_boxes(self.current_image)
+            )
+        self.log(tr("Global labels updated from Blink Workbench.", self.current_lang))
+
+    def refresh_ui(self):
+        if self.engine:
+            current_locator_scope = self.project.get_locator_scope()
+            curr_scope_len = len(current_locator_scope)
+            if curr_scope_len != self.engine.current_num_classes:
+                self.log(
+                    tr("Syncing Locator Scope ({0} -> {1})...", self.current_lang).format(
+                        self.engine.current_num_classes, curr_scope_len
+                    )
+                )
+                self.engine.rebuild_locator(curr_scope_len, self.train_lr, self.train_wd)
+                # FIX: Do NOT auto-load weights here as they might mismatch dimensions.
+                self.log(tr("Locator scope changed. Please retrain or select a matching model.", self.current_lang))
+                self.refresh_model_list()
+        self.setWindowTitle(f"{WORKBENCH_WINDOW_TITLE} ({self.current_lang.upper()})")
+        self.create_menus()
+        self.btn_export.setText(tr("Export Dataset", self.current_lang))
+        self.btn_crop.setText(tr("Import & Crop", self.current_lang))
+        self.btn_add.setText(tr("+ Add Images", self.current_lang))
+        self.label_project_images.setText(tr("PROJECT IMAGES", self.current_lang))
+        self.label_taxonomy.setText(tr("Taxon", self.current_lang))
+        self.label_structures.setText(tr("Structures", self.current_lang))
+        self.label_ai_workflow.setText(tr("AI WORKFLOW", self.current_lang))
+        backend_label = tr("Built-in Locator + SAM", self.current_lang)
+        if self.model_backend == EXTERNAL_BACKEND_ID:
+            backend_label = self.external_backend_config.get("display_name") or tr("External Script Backend", self.current_lang)
+        self.label_model_backend.setText(f"{tr('Model Backend:', self.current_lang)} {backend_label}")
+        self.btn_predict.setText(tr("Auto (Current)", self.current_lang))
+        self.btn_batch.setText(tr("Batch (All)", self.current_lang))
+        self.btn_train.setText(tr("Train Models", self.current_lang))
+        self.btn_clear_ai.setText(tr("Clear AI Labels", self.current_lang))
+        self.btn_blink_entry.setText(tr("Open in Blink Workbench", self.current_lang))
+        self.label_logs.setText(tr("LOGS", self.current_lang))
+        self.radio_draw.setText(tr("Manual Draw", self.current_lang))
+        self.radio_magic.setText(tr("Magic Wand (SAM)", self.current_lang))
+        self.radio_box.setText(tr("Box Prompt (SAM)", self.current_lang))
+        self.radio_scale.setText(tr("Scale Tool", self.current_lang))
+        self.lbl_bright.setText(tr("B:", self.current_lang))
+        self.lbl_contrast.setText(tr("C:", self.current_lang))
+        self.check_morpho.setText(tr("Enable Morphometrics", self.current_lang))
+        self.group_morpho.setTitle(tr("Measurements", self.current_lang))
+        self.lbl_locator.setText(tr("Locator:", self.current_lang))
+        self.lbl_segmenter.setText(tr("Segmenter:", self.current_lang))
+        self.btn_del_locator.setText(tr("Del", self.current_lang))
+        self.btn_del_locator.setToolTip(tr("Delete the selected locator model file from disk.", self.current_lang))
+        self.btn_del_segmenter.setText(tr("Del", self.current_lang))
+        self.btn_del_segmenter.setToolTip(tr("Delete the selected segmenter model file from disk.", self.current_lang))
+        self.tabs.setTabText(0, tr("PDF Processing", self.current_lang))
+        self.tabs.setTabText(1, tr("Labeling Workbench", self.current_lang))
+        self.tabs.setTabText(2, tr("Blink Workbench", self.current_lang))
+        self.genus_combo.blockSignals(True)
+        self.genus_combo.clear()
+        if hasattr(self.project, "list_taxa"):
+            taxa = self.project.list_taxa()
+        else:
+            labels_vals = self.project.project_data["labels"].values()
+            taxa = sorted(list(set(["Unknown"] + [d.get("genus", "Unknown") for d in labels_vals])))
+        self.genus_combo.addItems(taxa)
+        get_taxon = getattr(self.project, "get_taxon", self.project.get_genus)
+        self.genus_combo.setCurrentText(get_taxon(self.current_image) if self.current_image else "Unknown")
+        self.genus_combo.blockSignals(False)
+        if self.check_morpho.isChecked() and self._current_part_name():
+            self.update_measurements(self._current_part_name())
+        self.refresh_route_table()
+
+    def open_settings(self):
+        params = {
+            'epochs': self.train_epochs, 'batch': self.train_batch, 'lr': self.train_lr, 'wd': self.train_wd,
+            'conf': self.inf_conf, 'adapt': self.inf_adapt, 'pad': self.inf_pad, 
+            'noise_floor': self.inf_noise_floor, 'poly_epsilon': self.inf_poly_epsilon,
+            'model_backend': self.model_backend,
+            'external_backend': self.external_backend_config,
+        }
+        route_panel = getattr(self, "route_settings_panel", None)
+        if route_panel is not None:
+            route_panel.setParent(None)
+        dlg = ModelSettingsDialog(params, self.current_lang, self, route_panel=route_panel)
+        if dlg.exec():
+            v = dlg.get_values()
+            if not v:
+                if route_panel is not None:
+                    route_panel.setParent(self)
+                return
+            self.train_epochs, self.train_batch = v['epochs'], v['batch']
+            self.train_lr, self.train_wd = v['lr'], v['wd']
+            self.inf_conf, self.inf_adapt = v['conf'], v['adapt']
+            self.inf_pad, self.inf_noise_floor = v['pad'], v['noise_floor']
+            self.inf_poly_epsilon = v['poly_epsilon']
+            self.model_backend = v.get("model_backend", BUILTIN_BACKEND_ID)
+            self.external_backend_config = sanitize_external_backend_config(v.get("external_backend", {}))
+            
+            self.config.set("train_epochs", self.train_epochs)
+            self.config.set("train_batch", self.train_batch)
+            self.config.set("train_lr", self.train_lr)
+            self.config.set("train_weight_decay", self.train_wd)
+            self.config.set("inf_conf_thresh", self.inf_conf)
+            self.config.set("inf_adapt_thresh", self.inf_adapt)
+            self.config.set("inf_box_pad", self.inf_pad)
+            self.config.set("inf_noise_floor", self.inf_noise_floor)
+            self.config.set("inf_poly_epsilon", self.inf_poly_epsilon)
+            self.config.set("model_backend", self.model_backend)
+            self.config.set("external_backend", self.external_backend_config)
+            
+            self.engine.update_hyperparameters(self.train_lr, self.train_wd)
+            
+            # Update SAM Worker epsilon
+            if self.sam_worker:
+                self.sam_worker.set_epsilon(self.inf_poly_epsilon)
+
+            self.log(tr("Settings updated.", self.current_lang))
+            self.refresh_ui()
+
+        if route_panel is not None:
+            route_panel.setParent(self)
+            route_panel.set_language(self.current_lang)
+            route_panel.set_theme(self.current_theme)
+
+    def change_language(self, lang):
+        self.current_lang = lang
+        self.config.set("language", lang)
+        self.pdf_widget.change_language(lang)
+        self.blink_lab.change_language(lang)
+        if hasattr(self, "route_settings_panel"):
+            self.route_settings_panel.set_language(lang)
+        self.refresh_model_list()
+        self.refresh_ui()
+        self.change_theme(self.current_theme)
+        self.log(tr("Language: {0}", self.current_lang).format(lang))
+
+    def change_theme(self, theme):
+        theme = normalize_theme(theme)
+        self.current_theme = theme
+        self.config.set("theme", theme)
+        app = QApplication.instance()
+        if isinstance(app, QApplication):
+            app.setProperty("activeTheme", theme)
+        self.setStyleSheet(get_theme_stylesheet(theme))
+
+        for widget in [self.pdf_widget, self.blink_lab, self.canvas]:
+            if hasattr(widget, "set_theme"):
+                widget.set_theme(theme)
+
+        if hasattr(self, "route_settings_panel"):
+            self.route_settings_panel.set_theme(theme)
+
+        self.update_widget_themes()
+        self.update_button_themes()
+        self.log(f"Theme: {tr('Dark Mode', self.current_lang)}")
+
+    def update_widget_themes(self):
+        c = get_theme_config(self.current_theme)
+
+        if hasattr(self, "desc_box"):
+            self.desc_box.setStyleSheet(
+                f"color: {c['text_soft']}; font-style: italic; background-color: {c['bg_input']};"
+                f"border: 1px solid {c['border']}; border-radius: 10px; padding: 8px 10px; font-size: 10pt;"
+            )
+
+        if hasattr(self, "log_console"):
+            self.log_console.setStyleSheet(
+                f"background-color: {c['bg_input']}; color: {c['text_main']};"
+                f"font-family: Consolas, 'Courier New', monospace; font-size: 9pt;"
+                f"border: 1px solid {c['border']}; border-radius: 10px; padding: 8px;"
+            )
+
+    def update_button_themes(self):
+        if hasattr(self, "btn_export"):
+            apply_theme_button_style(self.btn_export, BUTTON_ROLE_COMMIT, "", self.current_theme)
+        if hasattr(self, "btn_crop"):
+            apply_theme_button_style(self.btn_crop, BUTTON_ROLE_NEUTRAL, "", self.current_theme)
+        if hasattr(self, "btn_blink_entry"):
+            apply_theme_button_style(self.btn_blink_entry, BUTTON_ROLE_NEUTRAL, "", self.current_theme)
+        if hasattr(self, "btn_add"):
+            apply_theme_button_style(self.btn_add, BUTTON_ROLE_NEUTRAL, "", self.current_theme)
+        if hasattr(self, "btn_add_part"):
+            apply_theme_button_style(self.btn_add_part, BUTTON_ROLE_NEUTRAL, "font-weight: bold;", self.current_theme)
+        if hasattr(self, "btn_del_part"):
+            apply_theme_button_style(self.btn_del_part, BUTTON_ROLE_DESTRUCTIVE, "font-weight: bold;", self.current_theme)
+        if hasattr(self, "btn_del_locator"):
+            apply_theme_button_style(self.btn_del_locator, BUTTON_ROLE_DESTRUCTIVE, "", self.current_theme)
+        if hasattr(self, "btn_del_segmenter"):
+            apply_theme_button_style(self.btn_del_segmenter, BUTTON_ROLE_DESTRUCTIVE, "", self.current_theme)
+        if hasattr(self, "btn_predict"):
+            apply_theme_button_style(self.btn_predict, BUTTON_ROLE_RUN, "padding: 5px;", self.current_theme)
+        if hasattr(self, "btn_batch"):
+            apply_theme_button_style(self.btn_batch, BUTTON_ROLE_RUN, "padding: 5px;", self.current_theme)
+        if hasattr(self, "btn_train"):
+            apply_theme_button_style(self.btn_train, BUTTON_ROLE_RUN, "padding: 8px; margin-top: 5px;", self.current_theme)
+        if hasattr(self, "btn_clear_ai"):
+            apply_theme_button_style(self.btn_clear_ai, BUTTON_ROLE_DESTRUCTIVE, "font-weight: bold; margin-top: 5px;", self.current_theme)
+    def add_images(self):
+        fs, _ = QFileDialog.getOpenFileNames(self, tr("Select Images", self.current_lang), "", "Images (*.png *.jpg *.jpeg *.tif)")
+        if fs:
+            self._flush_pending_project_save()
+            self.project.add_images(fs)
+            self.refresh_file_list()
+
+    def open_cropper(self):
+        img = None
+        if self.file_list.currentItem():
+            fn = self.file_list.currentItem().text()
+            for p in self.project.project_data["images"]:
+                if os.path.basename(p) == fn:
+                    img = p
+                    break
+        dlg = ImageCropper(initial_image=img, parent=self, lang=self.current_lang)
+        if dlg.exec():
+            nf = dlg.get_files()
+            if nf:
+                self._flush_pending_project_save()
+                self.project.add_images(nf)
+                self.refresh_file_list()
+
+    def show_file_list_context_menu(self, pos):
+        its = self.file_list.selectedItems()
+        if not its:
+            return
+        m = QMenu(self)
+        if len(its) == 1:
+            m.addAction(tr("Crop this Image", self.current_lang), self.open_cropper)
+        m.addAction(tr("Remove Image", self.current_lang), self.remove_selected_images)
+        m.exec(self.file_list.mapToGlobal(pos))
+
+    def remove_selected_images(self):
+        its = self.file_list.selectedItems()
+        if not its:
+            return
+        if themed_yes_no_question(
+            self,
+            tr("Remove", self.current_lang),
+            tr("Remove {0} images?", self.current_lang).format(len(its)),
+            confirm_role=BUTTON_ROLE_DESTRUCTIVE,
+        ) == QMessageBox.Yes:
+            self._flush_pending_project_save()
+            name_to_path = {os.path.basename(p): p for p in self.project.project_data["images"]}
+            for it in its:
+                p = name_to_path.get(it.text())
+                if p:
+                    self.project.remove_image(p)
+            self.refresh_file_list()
+            if self.current_image not in self.project.project_data["images"]:
+                self.current_image = None
+                self.canvas.load_image("")
+
+    def refresh_file_list(self):
+        # 1. Remember the currently selected image path
+        current_selection_path = self.current_image
+
+        self.file_list.blockSignals(True) # Prevent signal spam during rebuild
+        self.file_list.clear()
+        total_count = len(self.project.project_data["images"])
+        labeled_count = 0
+        
+        # Logic: Labeled images first, then Unlabeled images.
+        # Within each group, keep original insertion order.
+        labeled_imgs = []
+        unlabeled_imgs = []
+        
+        for img in self.project.project_data["images"]:
+            if not img: continue
+            if self.project.get_labels(img):
+                labeled_imgs.append(img)
+                labeled_count += 1
+            else:
+                unlabeled_imgs.append(img)
+                
+        # Combine: Labeled -> Unlabeled
+        final_list = labeled_imgs + unlabeled_imgs
+        
+        item_to_select = None
+
+        for img in final_list:
+            base_name = os.path.basename(img)
+            item = QListWidgetItem(base_name)
+            item.setData(Qt.UserRole, img) # Store full path for safer lookup
+            
+            if img in labeled_imgs:
+                item.setForeground(QColor("#8FBC8F")) # DarkSeaGreen
+            else:
+                item.setForeground(QColor("#CCCCCC")) # Grey
+                
+            self.file_list.addItem(item)
+            
+            # Check if this is the one we were looking at
+            if current_selection_path and img == current_selection_path:
+                item_to_select = item
+        
+        self.file_list.blockSignals(False)
+        
+        # 2. Restore Selection
+        if item_to_select:
+            self.file_list.setCurrentItem(item_to_select)
+            self.file_list.scrollToItem(item_to_select) # Ensure visible
+        
+        # Update the header label on the left side
+        header_base = tr("PROJECT IMAGES", self.current_lang)
+        self.label_project_images.setText(f"{header_base} ({labeled_count}/{total_count})")
+
+    def _collect_blink_roi_candidates(self, image_path, selected_part=None, preferred_roi_parts=None):
+        manual_boxes = self.project.get_boxes(image_path)
+        auto_boxes = self.project.get_auto_boxes(image_path)
+        candidates = []
+
+        def _append(boxes, source):
+            if not isinstance(boxes, dict):
+                return
+
+            ordered_parts = list(boxes.keys())
+            preferred_parts = [part for part in list(preferred_roi_parts or []) if part in ordered_parts]
+            if preferred_parts:
+                ordered_parts = preferred_parts + [part for part in ordered_parts if part not in preferred_parts]
+
+            for part in ordered_parts:
+                box = boxes.get(part)
+                if not isinstance(box, (list, tuple)) or len(box) != 4:
+                    continue
+                try:
+                    clean_box = [float(v) for v in box]
+                except Exception:
+                    continue
+                if clean_box[2] <= clean_box[0] or clean_box[3] <= clean_box[1]:
+                    continue
+                candidates.append({
+                    "part": part,
+                    "source": source,
+                    "box": clean_box,
+                })
+
+        _append(manual_boxes, "manual")
+        _append(auto_boxes, "auto")
+        return candidates
+
+    def on_file_selected(self, curr, prev):
+        if not curr:
+            return
+        
+        # Robust Retrieval: Try getting data from UserRole first
+        p = curr.data(Qt.UserRole)
+        
+        # Fallback for old items (shouldn't happen with new refresh logic)
+        if not p:
+            fn = curr.text()
+            p = next((path for path in self.project.project_data["images"] if os.path.basename(path) == fn), None)
+            
+        if p:
+            previous_image = self.current_image
+            same_image = bool(previous_image) and os.path.normpath(previous_image) == os.path.normpath(p)
+            has_loaded_pixmap = bool(self.canvas.original_pixmap and not self.canvas.original_pixmap.isNull())
+
+            if not same_image:
+                self._flush_pending_project_save()
+
+            self.current_image = p
+            labels = self.project.get_labels(p)
+            manual_boxes = self.project.get_boxes(p)
+            auto_boxes = self.project.get_auto_boxes(p)
+            if not (same_image and has_loaded_pixmap):
+                self.canvas.load_image(p)
+                self.on_enhancement_changed()
+            self.canvas.set_polygons(labels)
+            self.canvas.set_boxes(manual_boxes, auto_boxes)
+            get_taxon = getattr(self.project, "get_taxon", self.project.get_genus)
+            self.genus_combo.setCurrentText(get_taxon(p))
+
+    def on_part_selected(self, curr, prev):
+        p = self._part_item_name(curr)
+        if not p:
+            self.canvas.set_active_part(None)
+            self.desc_box.clear()
+            return
+        self.canvas.set_active_part(p)
+        self.update_db_description(p)
+        if self.check_morpho.isChecked():
+            self.update_measurements(p)
+
+    def launch_blink_from_workbench(self):
+        if not self.current_image:
+            QMessageBox.warning(self, tr("Blink Workbench Entry", self.current_lang), tr("Please select an image first.", self.current_lang))
+            return
+
+        selected_part = self._current_part_name()
+        if not selected_part:
+            QMessageBox.warning(self, tr("Blink Workbench Entry", self.current_lang), tr("Please select a target part first.", self.current_lang))
+            return
+
+        taxonomy = list(self.project.project_data.get("taxonomy", []))
+        remembered_parent_map = self.project.get_blink_context_roi_parents()
+        remembered_parent = remembered_parent_map.get(str(selected_part or "").strip())
+        preferred_roi_parts = _blink_preferred_roi_parts(selected_part, remembered_parent)
+        roi_candidates = self._collect_blink_roi_candidates(
+            self.current_image,
+            selected_part,
+            preferred_roi_parts=preferred_roi_parts,
+        )
+        if not roi_candidates:
+            QMessageBox.information(
+                self,
+                tr("Blink Workbench Entry", self.current_lang),
+                tr("No entry ROI is available yet. Draw a manual box or generate an auto box in the workbench first.", self.current_lang),
+            )
+            return
+
+        dialog = BlinkEntryDialog(
+            self.current_image,
+            taxonomy,
+            selected_part,
+            roi_candidates,
+            self,
+            self.current_lang,
+            remembered_parent_map=remembered_parent_map,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        session = dialog.get_session_spec(self.current_image)
+        if not session:
+            QMessageBox.warning(
+                self,
+                tr("Blink Workbench Entry", self.current_lang),
+                tr("Failed to build a Blink session from the selected options.", self.current_lang),
+            )
+            return
+
+        labels = self.project.get_labels(self.current_image)
+        manual_boxes = self.project.get_boxes(self.current_image)
+        auto_boxes = self.project.get_auto_boxes(self.current_image)
+        started = self.blink_lab.start_session(session, labels, manual_boxes, auto_boxes)
+        if not started:
+            return
+        self.tabs.setCurrentWidget(self.blink_lab)
+
+        focus_roi = session.get("focus_roi", {})
+        if not isinstance(focus_roi, dict):
+            focus_roi = {}
+        remembered_target_part = session.get("target_part")
+        remembered_parent_part = str(focus_roi.get("part") or "").strip()
+        if remembered_parent_part and remembered_target_part:
+            if remembered_parent_part == remembered_target_part:
+                self.project.clear_blink_context_parent(remembered_target_part)
+            else:
+                self.project.remember_blink_context_parent(remembered_target_part, remembered_parent_part)
+                if hasattr(self.project, "register_cascade_route_candidate"):
+                    self.project.register_cascade_route_candidate(
+                        remembered_parent_part,
+                        remembered_target_part,
+                        focus_source=focus_roi.get("source"),
+                        registration_source="blink_candidate",
+                    )
+                    if hasattr(self, "refresh_route_table"):
+                        self.refresh_route_table()
+        focus_label = focus_roi.get("part", "ROI")
+        focus_source = focus_roi.get("source", "manual")
+        self.log(
+            tr("Opened Blink session for {0} via {1} ({2}).", self.current_lang).format(
+                session.get('target_part'), focus_label, focus_source
+            )
+        )
+
+    def on_genus_changed(self, txt):
+        if self.current_image:
+            set_taxon = getattr(self.project, "set_taxon", self.project.set_genus)
+            set_taxon(self.current_image, txt)
+
+    def update_db_description(self, p):
+        if p:
+            self.desc_box.setText(self.db.query_trait_description(self.genus_combo.currentText(), p))
+
+    def on_enhancement_changed(self):
+        self.canvas.set_enhancements(self.slider_bright.value(), self.slider_contrast.value() / 10.0)
+
+    def on_tool_changed(self):
+        if self.radio_magic.isChecked():
+            self.canvas.set_mode("MAGIC_WAND")
+        elif self.radio_box.isChecked():
+            self.canvas.set_mode("BOX_PROMPT")
+        elif self.radio_scale.isChecked():
+            self.canvas.set_mode("SCALE")
+        else:
+            self.canvas.set_mode("DRAW")
+
+    def on_magic_wand_clicked(self, x, y):
+        if self.current_image and self.sam_worker and self.sam_worker.model:
+            self.sam_worker.predict_point(self.current_image, x, y)
+
+    def on_magic_box_completed(self, x1, y1, x2, y2):
+        if self.current_image and self.sam_worker and self.sam_worker.model:
+            self.sam_worker.predict_box(self.current_image, x1, y1, x2, y2)
+
+    def on_sam_mask_generated(self, pts, box=None):
+        p = self._current_part_name()
+        if p:
+            self.on_polygon_completed(p, pts, box)
+            # Re-fetch from project to ensure consistency (and display updated boxes)
+            self.canvas.set_polygons(self.project.get_labels(self.current_image))
+            self.canvas.set_boxes(self.project.get_boxes(self.current_image), self.project.get_auto_boxes(self.current_image))
+
+    def on_polygon_completed(self, p, pts, box=None):
+        if self.current_image:
+            if not pts:
+                # Empty points means DELETE
+                self.project.delete_label(self.current_image, p, save=False)
+            else:
+                self.project.update_label(self.current_image, p, pts, self.desc_box.toPlainText(), box=box, save=False)
+            self._schedule_project_save()
+            
+            # Update counts on the left panel
+            self.refresh_file_list()
+            
+            if self.check_morpho.isChecked():
+                self.update_measurements(p)
+
+    def toggle_morphometrics(self, state):
+        on = self.check_morpho.isChecked()
+        self.radio_scale.setVisible(on)
+        self.group_morpho.setVisible(on)
+        p = self._current_part_name()
+        if on and p:
+            self.update_measurements(p)
+
+    def on_scale_defined(self, lpx):
+        v, ok = QInputDialog.getDouble(self, tr("Scale Tool", self.current_lang), tr("mm:", self.current_lang), 1.0, 0.001, 1000.0, 3)
+        if ok and self.current_image:
+            self.project.set_scale(self.current_image, lpx/v)
+            self.refresh_ui()
+
+    def update_measurements(self, p):
+        if not self.current_image or not p:
+            return
+        sc = self.project.get_scale(self.current_image)
+        if not sc:
+            self.label_measurements.setText(tr("No Scale.", self.current_lang))
+            return
+        pts = self.project.get_labels(self.current_image).get(p)
+        if pts and len(pts) > 2:
+            import cv2
+            pts_np = np.array(pts, dtype=np.float32)
+            a = cv2.contourArea(pts_np) / (sc*sc)
+            peri = cv2.arcLength(pts_np, True) / sc
+            self.label_measurements.setText(tr("Area: {0:.4f} mm2\nPeri: {1:.4f} mm", self.current_lang).format(a, peri))
+        else:
+            self.label_measurements.setText(tr("No Polygon.", self.current_lang))
+
+    def run_training(self):
+        self._flush_pending_project_save()
+        if self.model_backend == EXTERNAL_BACKEND_ID:
+            self.run_external_training()
+            return
+        images = list(self.project.project_data.get("images", []))
+        labels_by_image = dict(self.project.project_data.get("labels", {}))
+        if not images:
+            QMessageBox.warning(self, tr("No Labels", self.current_lang), tr("Annotate first!", self.current_lang))
+            return
+        tax = self.project.project_data["taxonomy"]
+        locator_scope = self.project.get_locator_scope()
+        preflight = build_training_preflight(images, labels_by_image, tax, locator_scope)
+
+        if not preflight.get("locator_samples") and not preflight.get("parts_samples"):
+            QMessageBox.warning(self, tr("No Labels", self.current_lang), tr("Annotate first!", self.current_lang))
+            return
+
+        if not self._confirm_legacy_locator_selection_if_needed():
+            return
+
+        self.log(tr("Training with Taxonomy ({0}): {1}", self.current_lang).format(len(tax), tax))
+        self.log(tr("Training with Locator Scope ({0}): {1}", self.current_lang).format(len(locator_scope), locator_scope))
+        self.log(describe_training_preflight(preflight))
+        
+        if len(locator_scope) != self.engine.current_num_classes:
+            self.engine.rebuild_locator(len(locator_scope), self.train_lr, self.train_wd)
+
+        if not self._show_structured_training_preflight(preflight):
+            return
+
+        self._launch_training_with_preflight(preflight, tax, locator_scope)
+
+    def _external_backend_runner(self):
+        return ExternalBackendRunner(self.project, self.external_backend_config)
+
+    def run_external_training(self):
+        self._flush_pending_project_save()
+        if not self.project.current_project_path:
+            QMessageBox.warning(self, tr("Training", self.current_lang), tr("Save Project", self.current_lang))
+            return
+        try:
+            self.btn_train.setEnabled(False)
+            self.log("External backend training started.")
+            summary = self._external_backend_runner().run_prepare_and_train()
+            self.log(f"External training complete. Contract: {summary.get('contract_json')}")
+            self.log(f"External model manifest: {summary.get('model_manifest')}")
+        except Exception as exc:
+            self.log(f"External training failed: {exc}")
+            QMessageBox.critical(self, tr("Error", self.current_lang), str(exc))
+        finally:
+            self.btn_train.setEnabled(True)
+
+    def show_training_report(self, report_data):
+        dlg = TrainingReportDialog(report_data, self, self.current_lang)
+        dlg.exec()
+
+    def _extract_prediction_payload(self, payload):
+        """兼容新旧推理输出协议，统一返回 polygons + auto_boxes。"""
+        polygons = {}
+        auto_boxes = {}
+        taxonomy_set = set(self.project.project_data.get("taxonomy", []))
+
+        if not isinstance(payload, dict):
+            return polygons, auto_boxes
+
+        # 新协议: {polygons: {...}, auto_boxes: {...}}
+        if isinstance(payload.get("polygons"), dict):
+            polygons = {
+                str(part): points
+                for part, points in payload.get("polygons", {}).items()
+                if str(part) in taxonomy_set
+            }
+            raw_auto_boxes = payload.get("auto_boxes", {}) if isinstance(payload.get("auto_boxes"), dict) else {}
+            auto_boxes = {
+                str(part): box
+                for part, box in raw_auto_boxes.items()
+                if str(part) in taxonomy_set
+            }
+            return polygons, auto_boxes
+
+        # 旧协议回退: {part: polygon, part_BOX: box_polygon}
+        for key, value in payload.items():
+            if key.endswith("_BOX") and isinstance(value, list):
+                xs = [p[0] for p in value if isinstance(p, (list, tuple)) and len(p) >= 2]
+                ys = [p[1] for p in value if isinstance(p, (list, tuple)) and len(p) >= 2]
+                if xs and ys:
+                    real_part = key.replace("_BOX", "")
+                    auto_boxes[real_part] = [float(min(xs)), float(min(ys)), float(max(xs)), float(max(ys))]
+            elif isinstance(value, list):
+                if key in taxonomy_set:
+                    polygons[key] = value
+
+        return polygons, auto_boxes
+
+    def _apply_prediction_to_project(self, image_path, payload, only_new=True):
+        polygons, auto_boxes = self._extract_prediction_payload(payload)
+        existing_parts = set(self.project.get_labels(image_path).keys())
+        saved_count = 0
+
+        for part_name, points in polygons.items():
+            if only_new and part_name in existing_parts:
+                continue
+
+            auto_box = auto_boxes.get(part_name)
+            if (not auto_box) and isinstance(points, list) and points:
+                xs = [pt[0] for pt in points if isinstance(pt, (list, tuple)) and len(pt) >= 2]
+                ys = [pt[1] for pt in points if isinstance(pt, (list, tuple)) and len(pt) >= 2]
+                if xs and ys:
+                    auto_box = [float(min(xs)), float(min(ys)), float(max(xs)), float(max(ys))]
+
+            self.project.update_label(image_path, part_name, points, "Auto-Annotated", auto_box=auto_box)
+            existing_parts.add(part_name)
+            saved_count += 1
+
+        return saved_count, len(polygons)
+
+    def run_prediction(self):
+        if not self.current_image:
+            return
+        if self.model_backend == EXTERNAL_BACKEND_ID:
+            self.run_external_prediction(self.current_image)
+            return
+        if not self._confirm_legacy_locator_selection_if_needed():
+            return
+        self.log(tr("Running inference on: {0}...", self.current_lang).format(os.path.basename(self.current_image)))
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            ps = self.engine.predict_full_pipeline(
+                self.current_image, 
+                self.project.project_data["taxonomy"], 
+                self.project.get_locator_scope(),
+                self.inf_conf, 
+                self.inf_adapt, 
+                self.inf_pad, 
+                self.inf_noise_floor,
+                self.inf_poly_epsilon,
+                self._active_project_route_manifest(),
+            )
+            count, total_detected = self._apply_prediction_to_project(self.current_image, ps, only_new=True)
+            
+            labels = self.project.get_labels(self.current_image)
+            manual_boxes = self.project.get_boxes(self.current_image)
+            auto_boxes = self.project.get_auto_boxes(self.current_image)
+            self.canvas.set_polygons(labels)
+            self.canvas.set_boxes(manual_boxes, auto_boxes)
+            self.refresh_file_list()
+            self._log_route_usage_summary(ps, self.current_image)
+            self.log(tr("Inference complete. Detected {0} parts, saved {1} new labels.", self.current_lang).format(total_detected, count))
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    def run_external_prediction(self, image_path):
+        self._flush_pending_project_save()
+        self.log(tr("Running inference on: {0}...", self.current_lang).format(os.path.basename(image_path)))
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            result = self._external_backend_runner().run_predict(
+                image_path,
+                model_manifest=self.external_backend_config.get("model_manifest", ""),
+            )
+            count, total_detected = self._apply_prediction_to_project(image_path, result.get("payload", {}), only_new=True)
+            if image_path == self.current_image:
+                self.canvas.set_polygons(self.project.get_labels(image_path))
+                self.canvas.set_boxes(self.project.get_boxes(image_path), self.project.get_auto_boxes(image_path))
+            self.refresh_file_list()
+            self.log(f"External inference complete. Contract: {result.get('contract_json')}")
+            self.log(tr("Inference complete. Detected {0} parts, saved {1} new labels.", self.current_lang).format(total_detected, count))
+        except Exception as exc:
+            self.log(f"External inference failed: {exc}")
+            QMessageBox.critical(self, tr("Error", self.current_lang), str(exc))
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    def verify_current_image(self):
+        if self.current_image:
+            self.project.verify_image_labels(self.current_image)
+
+    def run_batch_inference(self):
+        ul = [img for img in self.project.project_data["images"] if not self.project.get_labels(img)]
+        if not ul:
+            return
+        if self.model_backend == EXTERNAL_BACKEND_ID:
+            if themed_yes_no_question(
+                self,
+                tr("Batch", self.current_lang),
+                tr("Annotate {0} images?", self.current_lang).format(len(ul)),
+                confirm_role=BUTTON_ROLE_RUN,
+            ) == QMessageBox.Yes:
+                self.btn_batch.setEnabled(False)
+                self.btn_predict.setEnabled(False)
+                try:
+                    for image_path in ul:
+                        result = self._external_backend_runner().run_predict(
+                            image_path,
+                            model_manifest=self.external_backend_config.get("model_manifest", ""),
+                        )
+                        saved, total = self._apply_prediction_to_project(image_path, result.get("payload", {}), only_new=True)
+                        self.log(tr("Batch saved {0}/{1} for {2}", self.current_lang).format(saved, total, os.path.basename(image_path)))
+                    self.refresh_file_list()
+                except Exception as exc:
+                    self.log(f"External batch inference failed: {exc}")
+                    QMessageBox.critical(self, tr("Error", self.current_lang), str(exc))
+                finally:
+                    self.btn_batch.setEnabled(True)
+                    self.btn_predict.setEnabled(True)
+            return
+        if not self._confirm_legacy_locator_selection_if_needed():
+            return
+        if themed_yes_no_question(
+            self,
+            tr("Batch", self.current_lang),
+            tr("Annotate {0} images?", self.current_lang).format(len(ul)),
+            confirm_role=BUTTON_ROLE_RUN,
+        ) == QMessageBox.Yes:
+            self.btn_batch.setEnabled(False)
+            self.btn_predict.setEnabled(False)
+            
+            tax = self.project.project_data["taxonomy"]
+            locator_scope = self.project.get_locator_scope()
+            self.log(tr("Starting Batch Inference with Taxonomy ({0}): {1}", self.current_lang).format(len(tax), tax))
+            self.log(tr("Starting Batch Inference with Locator Scope ({0}): {1}", self.current_lang).format(len(locator_scope), locator_scope))
+            
+            params = {
+                'conf': self.inf_conf, 'adapt': self.inf_adapt, 
+                'pad': self.inf_pad, 'noise_floor': self.inf_noise_floor,
+                'poly_epsilon': self.inf_poly_epsilon,
+            }
+            self.inf_thread = InferenceThread(
+                self.engine,
+                ul,
+                tax,
+                locator_scope,
+                params,
+                project_route_manifest=self._active_project_route_manifest(),
+                lang=self.current_lang,
+            )
+            self.inf_thread.log_signal.connect(self.log) # Fix: Connect log signal
+            def on_batch_res(p, d):
+                saved, total = self._apply_prediction_to_project(p, d, only_new=True)
+                self._log_route_usage_summary(
+                    d,
+                    p,
+                    prefix=ui_text("Route usage for batch image {0}", self.current_lang).format(os.path.basename(p)),
+                )
+                self.log(tr("Batch saved {0}/{1} for {2}", self.current_lang).format(saved, total, os.path.basename(p)))
+            self.inf_thread.result_signal.connect(on_batch_res)
+            self.inf_thread.finished_signal.connect(lambda: [self.btn_batch.setEnabled(True), self.btn_predict.setEnabled(True)])
+            self.inf_thread.start()
+
+    def export_dataset(self):
+        dlg = ExportDialog(self, self.current_lang)
+        if dlg.exec():
+            self._flush_pending_project_save()
+            p, f = dlg.get_path(), dlg.get_format()
+            if f == "multimodal":
+                c = self.project.export_multimodal_dataset(p)
+            elif f == "coco":
+                c = self.project.export_coco(p)
+            else:
+                c = self.project.export_yolo(p)
+            QMessageBox.information(self, tr("Export", self.current_lang), tr("Exported {0} samples.", self.current_lang).format(c))
+
+    def init_sam(self):
+        mp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "weights", "sam_b.pt")
+        self.sam_thread = QThread()
+        # Pass current epsilon to worker
+        self.sam_worker = SAMWorker(model_type=mp, poly_epsilon=self.inf_poly_epsilon, device=self.runtime_device)
+        self.sam_worker.moveToThread(self.sam_thread)
+        self.sam_thread.started.connect(self.sam_worker.load_model)
+        self.sam_worker.mask_generated.connect(self.on_sam_mask_generated)
+        self.sam_thread.start()
+
+    def log(self, msg):
+        self.log_console.append(msg)
+
+if __name__ == "__main__":
+    def excepthook(t, v, tb):
+        import traceback
+        err = "".join(traceback.format_exception(t, v, tb))
+        print(f"CRITICAL ERROR:\n{err}")
+        QMessageBox.critical(None, "Error", f"{v}")
+        sys.__excepthook__(t, v, tb)
+    sys.excepthook = excepthook
+    app = QApplication(sys.argv)
+    register_windows_scholarly_ui_fonts()
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())

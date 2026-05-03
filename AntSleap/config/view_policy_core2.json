@@ -1,0 +1,49 @@
+{
+  "policy_version": "core2-v1",
+  "target_views": [
+    "lateral",
+    "dorsal"
+  ],
+  "excluded_training_views": [
+    "head_frontal"
+  ],
+  "quality_gate": {
+    "pass_rate_min": 0.95,
+    "boundary_overlap_min": 0.75,
+    "localization_error_px_max": 15.0,
+    "min_samples_per_target_view": 30
+  },
+  "routing": {
+    "core2": {
+      "min_confidence": 0.8,
+      "require_quality_pass": true,
+      "disallow_risk_tiers": [
+        "high"
+      ]
+    },
+    "frontier": {
+      "min_confidence": 0.55,
+      "max_confidence": 0.8,
+      "include_views": [
+        "head_frontal"
+      ]
+    },
+    "ambiguous": {
+      "max_confidence": 0.55,
+      "allow_conflict_signals": true,
+      "allow_unknown_view": true
+    }
+  },
+  "review_sampling": {
+    "high": 1.0,
+    "medium": 0.3,
+    "low": 0.1
+  },
+  "bridge": {
+    "mode": "candidate_only"
+  },
+  "locator_upgrade_trigger": {
+    "consecutive_fail_runs": 2,
+    "single_run_pass_rate_gap": 0.05
+  }
+}

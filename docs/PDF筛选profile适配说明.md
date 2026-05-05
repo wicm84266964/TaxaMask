@@ -23,7 +23,7 @@ PDF Processing -> Select Logic Profile -> Advanced Logic Settings
 命令行中也可以指定：
 
 ```bash
-python tools/agentic/screen_pdfs.py --input pdf_folder --output out_folder --config screener_configs/蚂蚁新种筛选_V2示例.json
+python tools/agentic/screen_pdfs.py --pdf-source-dir pdf_folder --out out_folder --config screener_configs/蚂蚁新种筛选_V2示例.json
 ```
 
 ---

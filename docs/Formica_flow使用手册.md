@@ -1154,7 +1154,7 @@ Blink 不是用来替代大部位定位器的。
 
 ![图 10-1 模型设置对话框：训练参数页与推理参数页的入口](manual_images/fig_10_1_model_settings_dialog.png)
 
-这里管理两类东西：
+这里管理三类东西：
 
 1. **训练参数**
 2. **推理参数**
@@ -1166,6 +1166,25 @@ Blink 不是用来替代大部位定位器的。
 - Batch Size
 - Learning Rate
 - Weight Decay
+- Main Locator Parts / 主定位结构
+
+#### Main Locator Parts / 主定位结构
+
+这是多类群项目里最容易影响训练结果的一项。
+
+它决定哪些结构会进入内置 Locator 的“大目标定位”训练。一般建议：
+
+- 大而稳定、容易先定位的结构放进 `Main Locator Parts`
+- 很小、需要局部放大的结构仍然保留在 `Structures`，但不一定交给主 Locator
+- 细部位可以后续用 SAM、Blink 专家或外部脚本后端继续精修
+
+举例：
+
+- 蚂蚁模板通常是 `Head / Mesosoma / Gaster`
+- 植物项目可以只把 `Leaf / Flower / Fruit` 这类主结构放进去
+- 刚毛、气孔、微小脉序细节这类目标，不建议随手塞进主 Locator，除非你的模型和训练数据本来就是为它们设计的
+
+如果你改了主定位结构，旧的 Locator 权重可能不再匹配当前项目。程序会提醒你重新训练或选择匹配的新模型。
 
 #### 推理参数常见项
 
@@ -1485,6 +1504,12 @@ PDF 侧 accepted 更多表示：
 | Stop Extraction | 合作式停止提取 | 当前提取运行 |
 | Browse Database | 浏览提取结果数据库 | 人工复核 |
 | Export Raw JSONL | 导出粗提取数据集 | 粗 JSONL 数据 |
+
+### 13.4 Model Settings
+
+| 按钮 / 控件 | 作用 | 影响层 |
+|---|---|---|
+| Main Locator Parts | 选择内置 Locator 学哪些主结构 | 主定位器训练范围 |
 | Validate External Backend | 校验外部脚本后端配置 | 检查外部后端 ID 和命令占位符 |
 
 ---
@@ -1665,7 +1690,7 @@ PDF 侧 accepted 更多表示：
 训练前更稳妥的判断是：
 
 1. 确保项目里已经有足够的已标注图片
-2. 打开 `Settings -> Model Settings` 调整训练与推理参数
+2. 打开 `Settings -> Model Settings` 调整训练与推理参数，并确认 `Main Locator Parts` 只包含这轮要让内置 Locator 学习的主结构
 3. 点击 `Train Models`
 4. 在训练预检里确认可训练图片数量、结构标签覆盖和排除原因
 5. 看训练报告和验证图

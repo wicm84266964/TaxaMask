@@ -199,6 +199,9 @@ TRANSLATIONS = {
         "Batch Size:": "批次大小 (Batch Size):",
         "Learning Rate:": "学习率 (LR):",
         "Weight Decay (L2 Reg):": "权重衰减 (L2正则):",
+        "Main Locator Parts:": "主定位结构：",
+        "Choose which structures the built-in Locator should learn as large, stable targets. Small structures can stay in Structures and be refined with SAM, Blink, or an external backend.": "选择哪些结构交给内置 Locator 作为大而稳定的目标来学习。小结构仍可保留在结构标签中，再通过 SAM、Blink 或外部后端精修。",
+        "At least one main locator part must be selected.": "至少需要选择一个主定位结构。",
         "Train from Scratch (Reset Weights)": "从头训练 (重置权重)",
         "Validation Report %:": "测试集展示比例 (%):",
         "Confidence Threshold:": "置信度阈值:",
@@ -1610,6 +1613,7 @@ class ModelSettingsDialog(QDialog):
         self.resize(880, 760)
         layout = QVBoxLayout(self)
         tabs = QTabWidget()
+        self.locator_scope_checks = []
 
         tab_backend = QWidget()
         form_backend = QVBoxLayout(tab_backend)
@@ -1683,6 +1687,43 @@ class ModelSettingsDialog(QDialog):
         form_train.addWidget(QLabel(tr("Weight Decay (L2 Reg):", lang)))
         self.spin_wd = QLineEdit(str(params['wd']))
         form_train.addWidget(self.spin_wd)
+
+        locator_group = QGroupBox(tr("Main Locator Parts:", lang))
+        apply_surface_role(locator_group, SURFACE_ROLE_SUBTLE, "modelSettingsLocatorScopePanel")
+        locator_layout = QVBoxLayout(locator_group)
+        locator_layout.setContentsMargins(12, 12, 12, 12)
+        locator_layout.setSpacing(8)
+        locator_note = QLabel(
+            tr(
+                "Choose which structures the built-in Locator should learn as large, stable targets. Small structures can stay in Structures and be refined with SAM, Blink, or an external backend.",
+                lang,
+            )
+        )
+        locator_note.setWordWrap(True)
+        locator_note.setObjectName("mutedLabel")
+        locator_layout.addWidget(locator_note)
+
+        taxonomy = [str(part) for part in params.get("taxonomy", []) if str(part).strip()]
+        locator_scope = [str(part) for part in params.get("locator_scope", []) if str(part).strip()]
+        if not taxonomy:
+            taxonomy = list(locator_scope)
+        if not locator_scope:
+            locator_scope = list(taxonomy)
+        locator_grid = QGridLayout()
+        locator_grid.setContentsMargins(0, 4, 0, 0)
+        locator_grid.setHorizontalSpacing(16)
+        locator_grid.setVerticalSpacing(6)
+        for index, part_name in enumerate(taxonomy):
+            check = QCheckBox(part_name)
+            check.setChecked(part_name in locator_scope)
+            check.setProperty("part_name", part_name)
+            self.locator_scope_checks.append(check)
+            locator_grid.addWidget(check, index // 2, index % 2)
+        locator_layout.addLayout(locator_grid)
+        self.locator_scope_validation_label = QLabel("")
+        self.locator_scope_validation_label.setObjectName("mutedLabel")
+        locator_layout.addWidget(self.locator_scope_validation_label)
+        form_train.addWidget(locator_group)
         
         form_train.addStretch()
         tabs.addTab(tab_train, tr("Training", lang))
@@ -1788,11 +1829,24 @@ class ModelSettingsDialog(QDialog):
 
     def accept_with_validation(self):
         errors = self._external_backend_validation_errors()
+        if not self._selected_locator_scope():
+            errors.append(tr("At least one main locator part must be selected.", self.lang))
         if errors:
-            self.external_validation_label.setText("\n".join(errors))
-            QMessageBox.warning(self, tr("External Backend", self.lang), "\n".join(errors))
+            message = "\n".join(errors)
+            self.external_validation_label.setText(message)
+            self.locator_scope_validation_label.setText(message)
+            QMessageBox.warning(self, tr("Model Settings", self.lang), message)
             return
         self.accept()
+
+    def _selected_locator_scope(self):
+        selected = []
+        for check in self.locator_scope_checks:
+            if check.isChecked():
+                part_name = str(check.property("part_name") or check.text()).strip()
+                if part_name:
+                    selected.append(part_name)
+        return selected
 
     def get_values(self):
         try:
@@ -1806,6 +1860,7 @@ class ModelSettingsDialog(QDialog):
                 'pad': float(self.spin_pad.text()),
                 'noise_floor': float(self.spin_noise.text()),
                 'poly_epsilon': float(self.spin_poly.text()),
+                'locator_scope': self._selected_locator_scope(),
                 'model_backend': self.backend_combo.currentData() or BUILTIN_BACKEND_ID,
                 'external_backend': sanitize_external_backend_config(
                     {
@@ -3165,6 +3220,8 @@ class MainWindow(QMainWindow):
             'noise_floor': self.inf_noise_floor, 'poly_epsilon': self.inf_poly_epsilon,
             'model_backend': self.model_backend,
             'external_backend': self.external_backend_config,
+            'taxonomy': self.project.project_data.get("taxonomy", []),
+            'locator_scope': self.project.get_locator_scope(),
         }
         route_panel = getattr(self, "route_settings_panel", None)
         if route_panel is not None:
@@ -3183,6 +3240,7 @@ class MainWindow(QMainWindow):
             self.inf_poly_epsilon = v['poly_epsilon']
             self.model_backend = v.get("model_backend", BUILTIN_BACKEND_ID)
             self.external_backend_config = sanitize_external_backend_config(v.get("external_backend", {}))
+            self.project.set_locator_scope(v.get("locator_scope", []), save=False)
             
             self.config.set("train_epochs", self.train_epochs)
             self.config.set("train_batch", self.train_batch)
@@ -3195,6 +3253,7 @@ class MainWindow(QMainWindow):
             self.config.set("inf_poly_epsilon", self.inf_poly_epsilon)
             self.config.set("model_backend", self.model_backend)
             self.config.set("external_backend", self.external_backend_config)
+            self.project.save_project()
             
             self.engine.update_hyperparameters(self.train_lr, self.train_wd)
             

@@ -374,12 +374,16 @@ class UiLocalizationTests(unittest.TestCase):
                 "pad": 0.4,
                 "noise_floor": 0.15,
                 "poly_epsilon": 2.0,
+                "taxonomy": ["Head", "Mesosoma", "Gaster"],
+                "locator_scope": ["Head", "Mesosoma", "Gaster"],
             },
             lang="zh",
         )
 
         try:
-            self.assertFalse(dialog.findChildren(main_module.QCheckBox))
+            locator_group = dialog.findChild(QWidget, "modelSettingsLocatorScopePanel")
+            self.assertIsNotNone(locator_group)
+            self.assertEqual(len(locator_group.findChildren(main_module.QCheckBox)), 3)
             self.assertNotIn("enable_cascade", dialog.get_values())
         finally:
             dialog.deleteLater()

@@ -88,6 +88,13 @@ def _token_values(inputs: dict[str, dict[str, Any]], output_dir: str) -> dict[st
     }
     for input_id, payload in inputs.items():
         values[input_id] = str(payload.get("resolved_path", "") or "")
+    db_path = values.get("db", "")
+    if db_path:
+        db_parent = os.path.dirname(os.path.abspath(db_path)) or os.getcwd()
+        db_name = os.path.splitext(os.path.basename(db_path))[0]
+        values["db_artifacts_dir"] = os.path.join(db_parent, f"{db_name}_v2_artifacts")
+    else:
+        values["db_artifacts_dir"] = ""
     return values
 
 
@@ -109,6 +116,8 @@ def _stage_plan(stage: dict[str, Any], inputs: dict[str, dict[str, Any]], values
         for input_id in required_input_ids
         if input_id not in inputs or not bool(inputs[input_id].get("exists", False))
     ]
+    required_artifacts = _render_list(stage.get("required_artifacts", []), values) if isinstance(stage.get("required_artifacts", []), list) else []
+    missing_artifacts = [path for path in required_artifacts if path and not os.path.exists(path)]
     autonomy_level = str(stage.get("autonomy_level", "") or "")
     execution_type = str(stage.get("execution_type", "") or "")
     command = stage.get("command", [])
@@ -117,6 +126,8 @@ def _stage_plan(stage: dict[str, Any], inputs: dict[str, dict[str, Any]], values
     blocked_reasons: list[str] = []
     if missing_inputs:
         blocked_reasons.append("missing_inputs:" + ",".join(missing_inputs))
+    if missing_artifacts:
+        blocked_reasons.append("missing_artifacts:" + ",".join(missing_artifacts))
     if autonomy_level in {"needs_headless_wrapper", "missing_adapter", "needs_small_cli", "ready_after_adapters"}:
         blocked_reasons.append("adapter_not_implemented:" + autonomy_level)
     if autonomy_level == "ready_model_gated" and not allow_model_inference:
@@ -134,6 +145,8 @@ def _stage_plan(stage: dict[str, Any], inputs: dict[str, dict[str, Any]], values
         "execution_type": execution_type,
         "required_inputs": required_input_ids,
         "missing_inputs": missing_inputs,
+        "required_artifacts": required_artifacts,
+        "missing_artifacts": missing_artifacts,
         "command": rendered_command,
         "outputs": rendered_outputs,
         "gates": stage.get("gates", []),
@@ -188,6 +201,8 @@ def main() -> int:
     parser.add_argument("--project", default="", help="Override input project path.")
     parser.add_argument("--db", default="", help="Override input db path.")
     parser.add_argument("--policy", default="", help="Override input policy path.")
+    parser.add_argument("--screener-config", default="", help="Override PDF screening logic profile path.")
+    parser.add_argument("--figure-profile", default="", help="Override figure extraction/review profile path.")
     parser.add_argument("--dry-run", action="store_true", help="Only write the run plan; this is the default.")
     parser.add_argument("--execute-ready", action="store_true", help="Execute currently runnable command stages in order.")
     parser.add_argument("--allow-model-inference", action="store_true", help="Allow runnable stages that initialize model weights/GPU inference.")
@@ -203,6 +218,8 @@ def main() -> int:
         "project": args.project,
         "db": args.db,
         "policy": args.policy,
+        "screener_config": args.screener_config,
+        "figure_profile": args.figure_profile,
         "output_dir": args.out,
     }
     inputs = _contract_inputs(contract, overrides)

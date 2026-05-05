@@ -1,12 +1,52 @@
 # TAXAMASK / FORMICA-FLOW SYSTEM TECHNICAL MANUAL (Deep Dive)
 
 > **Target Audience**: Expert LLM Assistants, Senior Developers
-> **Version**: v3.19 (May 3, 2026, generic workbench + external backend state)
+> **Version**: v3.20 (May 5, 2026, locator scope UI + agentic profile contract alignment)
 > **Purpose**: Up-to-date architectural, workflow, and governance context for implementation and maintenance.
 
 ---
 
-## 0) v3.19 Generic Workbench / External Backend Delta (2026-05-03)
+## 0) v3.20 Locator Scope UI / Agentic Contract Alignment (2026-05-05)
+
+### 0.0 Model Settings now exposes locator scope
+- `Settings -> Model Settings -> Training` includes `Main Locator Parts`.
+- This is the GUI editor for project `locator_scope`.
+- `locator_scope` controls which structures the built-in Locator learns as large, stable targets.
+- Full project `taxonomy` / `Structures` can still contain smaller targets for SAM, Blink experts, or an external backend.
+- Saving Model Settings writes the selected locator scope into the project JSON through `ProjectManager.set_locator_scope(...)`.
+- If the locator scope length no longer matches the loaded Locator head, `MainWindow.refresh_ui()` rebuilds the runtime Locator head and warns that the user must retrain or select a matching model.
+
+### 0.1 Agentic PDF/profile contract now mirrors PDF Processing
+- `AntSleap/config/agentic_pipeline_contract.json` now has explicit required inputs:
+  - `screener_config`
+  - `figure_profile`
+- Stage 10 passes the screener profile to `tools/agentic/screen_pdfs.py --config`.
+- Stage 20 passes the figure extraction/review profile to `tools/agentic/extract_figures.py --figure-profile`.
+- `tools/agentic/run_agentic_pipeline.py` accepts:
+  - `--screener-config`
+  - `--figure-profile`
+- The default examples remain ant-oriented so the validated ant path is still visible, but the contract is now profile-replaceable for other taxa.
+
+### 0.2 Agentic artifact gating and actual figure artifact paths
+- `tools/agentic/run_agentic_pipeline.py` now supports contract-level `required_artifacts`.
+- A stage can be blocked by missing upstream output files, not only by missing user-provided inputs.
+- This prevents later stages from becoming runnable before generated files such as `routing_decisions.json`, `pdf_candidates_raw.json`, or `project_agentic_import.json` actually exist.
+- Stage 20 figure extraction artifacts follow `EnhancedPDFExtractionSystem` behavior:
+  - output DB: `{db}`
+  - figure images: `{db_artifacts_dir}/figure_images`
+  - review batches: `{db_artifacts_dir}/review_batches`
+- `{db_artifacts_dir}` is resolved by `run_agentic_pipeline.py` as `<db parent>/<db stem>_v2_artifacts`.
+
+### 0.3 Documentation corrections
+- `docs/PDF筛选profile适配说明.md` now uses the current CLI flags:
+  - `--pdf-source-dir`
+  - `--out`
+  - `--config`
+- `docs/Formica_flow使用手册.md` now explains `Main Locator Parts` and moves `Validate External Backend` to the Model Settings button table.
+
+---
+
+## 1) v3.19 Generic Workbench / External Backend Delta (2026-05-03)
 
 ### 0.0 Product naming and compatibility boundary
 - External product/UI name is now `TaxaMask`.
@@ -85,6 +125,7 @@
   1. Training
   2. Inference
   3. External Backend
+- Training tab includes `Main Locator Parts`, the user-facing editor for project `locator_scope`.
 - External Backend tab is an advanced entry. It contains a short operator note explaining:
   - TaxaMask calls user scripts
   - commands run in isolated `external_runs`

@@ -4,6 +4,46 @@
 
 ## 📅 更新日志 (Update Log)
 
+### **[2026-05-05] 多物种适配链路收口 + 主定位结构 UI + agentic 合约对齐**
+> **本次重点：把“可配置多类群”从 PDF 处理、标注训练、Blink/外部后端说明延伸到大模型自动化合约，并修正文献处理页 API 区在窗口缩放时的布局问题。当前结论是：架构和用户入口已打通，蚂蚁仍是验证最充分示例，其他类群需要通过 profile 小批量试跑完成实证落地。**
+
+#### **1）Model Settings 新增主定位结构选择**
+- `Settings -> Model Settings -> Training` 新增 `Main Locator Parts / 主定位结构`。
+- 该控件直接编辑项目 `locator_scope`，决定内置 Locator 学哪些大而稳定的主结构。
+- 小结构仍可保留在 `Structures` 中，后续由 SAM、Blink 专家或外部脚本后端精修。
+- 保存后如果 Locator 输出头与当前 `locator_scope` 不匹配，程序会沿用既有逻辑提醒重新训练或选择匹配模型。
+
+#### **2）agentic / 大模型自动化合约对齐 PDF Processing**
+- `AntSleap/config/agentic_pipeline_contract.json` 新增 `screener_config` 和 `figure_profile` 输入。
+- 文献筛选阶段现在显式传入 `--config {screener_config}`。
+- 图文提取与多模态复核阶段现在显式传入 `--figure-profile {figure_profile}`。
+- 默认示例仍保留蚂蚁路径，便于用户参考已验证工作流；通用/植物/自定义类群可替换 profile。
+- `tools/agentic/run_agentic_pipeline.py` 新增 `--screener-config` 和 `--figure-profile` 覆盖参数。
+
+#### **3）agentic 阶段依赖和产物路径修正**
+- `run_agentic_pipeline.py` 支持 contract 中的 `required_artifacts`。
+- 后续阶段会等待 `routing_decisions.json`、`pdf_candidates_raw.json`、`project_agentic_import.json` 等上游产物真实存在后才变为 runnable。
+- 修正 figure extraction 合约输出路径：figure 图片和 review batch 实际位于 `<db parent>/<db stem>_v2_artifacts/` 下，而不是 `output_dir/figure_extraction/`。
+
+#### **4）PDF Processing 布局修复**
+- 修正文献处理页在原始窗口或全屏窗口下 API 输入框被压扁的问题。
+- 页面改为滚动承载，窗口较小时滚动而不是压缩顶部 API 区。
+- Text LLM 和 Multimodal LLM 输入框/下拉框保留可用高度。
+
+#### **5）用户手册与大模型对接文档同步**
+- `docs/Formica_flow使用手册.md` 补充 `Main Locator Parts` 的研究流程含义和使用建议。
+- `Validate External Backend` 从 PDF 处理页按钮速查移动到 Model Settings 速查。
+- `docs/PDF筛选profile适配说明.md` 修正过时 CLI 示例参数。
+- `LLM_CONTEXT_DETAILED.md` 更新到 v3.20，记录 locator scope UI、agentic profile 输入和 artifact gating。
+
+#### **6）测试与验证**
+- `tests/test_agentic_contract.py` 扩展 agentic profile 输入、figure artifact 路径和 required artifact gating 测试。
+- `tests/test_ui_polish_scope.py` 增加 API 输入框窗口缩放几何测试和主定位结构 UI 测试。
+- 验证通过：
+  - `python -m py_compile tools/agentic/run_agentic_pipeline.py AntSleap/ui/pdf_processing_widget.py AntSleap/main.py`
+  - `python -m unittest tests.test_agentic_contract`
+  - 受影响 UI 测试：主定位结构、PDF API 输入框缩放、旧 cascade 总开关移除断言。
+
 ### **[2026-05-03] 标注工作台通用物种适配 + 外部脚本后端闭环**
 > **本次重点：把标注工作台从“界面和导出仍明显偏蚂蚁历史项目”整理为 TaxaMask 的通用分类学掩码工作台，同时增加外部脚本后端，让高级用户可以把自己的训练/推理脚本接入“标注 -> 训练 -> 自动预标注 -> 复核 -> 再训练”的闭环。**
 

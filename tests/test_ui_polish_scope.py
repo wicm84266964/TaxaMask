@@ -164,6 +164,16 @@ class DummyProjectManager:
         taxonomy = list(self.project_data.get("taxonomy", []))
         return list(self.project_data.get("locator_scope", taxonomy))
 
+    def set_locator_scope(self, locator_scope, save=True):
+        taxonomy = list(self.project_data.get("taxonomy", []))
+        clean_scope = [part for part in locator_scope if part in taxonomy]
+        if not clean_scope and taxonomy:
+            clean_scope = [taxonomy[0]]
+        self.project_data["locator_scope"] = clean_scope
+        if save:
+            self.save_project()
+        return clean_scope
+
     def get_labels(self, image_path):
         return self.project_data["labels"].get(image_path, {}).get("parts", {})
 
@@ -445,6 +455,35 @@ class UiPolishScopeTests(unittest.TestCase):
         self.assertEqual(widget.btn_run_extract.parentWidget().objectName(), "pdfExtractActionPanel")
         self.assertEqual(widget.log_area.parentWidget().objectName(), "pdfFeedbackPanel")
 
+    def test_pdf_processing_api_inputs_keep_usable_height_when_resized(self):
+        with patch.object(PdfProcessingWidget, "load_api_settings", lambda self: None), \
+             patch.object(PdfProcessingWidget, "refresh_profile_list", lambda self: None), \
+             patch.object(PdfProcessingWidget, "sync_runtime_controls_from_config", lambda self: None):
+            widget = PdfProcessingWidget("zh")
+
+        try:
+            for width, height in [(1180, 760), (1920, 1080), (900, 560)]:
+                widget.resize(width, height)
+                widget.show()
+                self.app.processEvents()
+                for control in (
+                    widget.edit_api_key,
+                    widget.edit_base_url,
+                    widget.edit_model,
+                    widget.edit_mllm_api_key,
+                    widget.edit_mllm_base_url,
+                    widget.edit_mllm_model,
+                    widget.combo_api_protocol,
+                    widget.combo_mllm_api_protocol,
+                    widget.combo_mllm_image_detail,
+                ):
+                    self.assertGreaterEqual(control.height(), 24)
+                    self.assertTrue(control.isVisible())
+            self.assertLessEqual(widget.minimumHeight(), 120)
+        finally:
+            widget.close()
+            widget.deleteLater()
+
     def test_blink_lab_exposes_session_action_and_training_panels(self):
         widget = BlinkLabWidget(self.engine, self.project_manager, lang="en")
 
@@ -633,6 +672,37 @@ class UiPolishScopeTests(unittest.TestCase):
             except Exception:
                 pass
             window.deleteLater()
+
+    def test_model_settings_exposes_locator_scope_selection(self):
+        dialog = main_module.ModelSettingsDialog(
+            {
+                "epochs": 5,
+                "batch": 2,
+                "lr": 1e-4,
+                "wd": 1e-4,
+                "conf": 0.1,
+                "adapt": 0.4,
+                "pad": 0.4,
+                "noise_floor": 0.15,
+                "poly_epsilon": 2.0,
+                "taxonomy": ["Leaf", "Flower", "Fruit", "Stamen"],
+                "locator_scope": ["Leaf", "Flower"],
+            },
+            lang="en",
+        )
+        try:
+            locator_group = dialog.findChild(QWidget, "modelSettingsLocatorScopePanel")
+            self.assertIsNotNone(locator_group)
+            checks = {check.text(): check for check in locator_group.findChildren(main_module.QCheckBox)}
+            self.assertEqual(set(checks), {"Leaf", "Flower", "Fruit", "Stamen"})
+            self.assertTrue(checks["Leaf"].isChecked())
+            self.assertTrue(checks["Flower"].isChecked())
+            self.assertFalse(checks["Fruit"].isChecked())
+            checks["Flower"].setChecked(False)
+            checks["Fruit"].setChecked(True)
+            self.assertEqual(dialog.get_values()["locator_scope"], ["Leaf", "Fruit"])
+        finally:
+            dialog.deleteLater()
 
     def test_main_window_run_prediction_omits_retired_cascade_toggle_argument(self):
         image_path = Path(self.temp_dir.name) / "specimen.png"

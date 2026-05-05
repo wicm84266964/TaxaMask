@@ -1719,7 +1719,15 @@ class PdfProcessingWidget(QWidget):
         return dialog.clickedButton() == continue_button
 
     def init_ui(self):
-        layout = QVBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+        self.main_scroll = QScrollArea()
+        self.main_scroll.setWidgetResizable(True)
+        self.main_scroll.setObjectName("pdfProcessingScrollArea")
+        scroll_content = QWidget()
+        scroll_content.setObjectName("pdfProcessingScrollContent")
+        layout = QVBoxLayout(scroll_content)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(12)
         
@@ -1755,6 +1763,8 @@ class PdfProcessingWidget(QWidget):
         self.combo_api_protocol.addItem(self.tr("Auto (Recommended)"), "auto")
         self.combo_api_protocol.addItem(self.tr("Chat Completions"), "chat_completions")
         self.combo_api_protocol.addItem(self.tr("Responses API"), "responses")
+        for control in (self.edit_api_key, self.edit_base_url, self.edit_model, self.combo_api_protocol):
+            control.setMinimumHeight(30)
         
         self.lbl_api_key = QLabel()
         self.lbl_base_url = QLabel()
@@ -1797,6 +1807,14 @@ class PdfProcessingWidget(QWidget):
         self.combo_mllm_image_detail.addItem("Auto", "auto")
         self.combo_mllm_image_detail.addItem("Low", "low")
         self.combo_mllm_image_detail.addItem("High", "high")
+        for control in (
+            self.edit_mllm_api_key,
+            self.edit_mllm_base_url,
+            self.edit_mllm_model,
+            self.combo_mllm_api_protocol,
+            self.combo_mllm_image_detail,
+        ):
+            control.setMinimumHeight(30)
 
         self.lbl_mllm_api_key = QLabel()
         self.lbl_mllm_base_url = QLabel()
@@ -1832,7 +1850,7 @@ class PdfProcessingWidget(QWidget):
         api_action_layout.addStretch()
         api_action_layout.addWidget(self.btn_save_api_settings)
         api_panel_layout.addLayout(api_action_layout)
-        form_layout.addWidget(self.api_panel)
+        form_layout.addWidget(self.api_panel, 0)
 
         # Profile Selector & Advanced Logic Button
         self.profile_panel = QWidget()
@@ -1887,9 +1905,9 @@ class PdfProcessingWidget(QWidget):
         figure_profile_layout.addWidget(self.btn_adv_figure_config)
 
         profile_panel_layout.addLayout(figure_profile_layout)
-        form_layout.addWidget(self.profile_panel)
+        form_layout.addWidget(self.profile_panel, 0)
         
-        layout.addWidget(self.config_group)
+        layout.addWidget(self.config_group, 0)
         
         # --- Task Tabs ---
         self.tabs = QTabWidget()
@@ -2143,7 +2161,7 @@ class PdfProcessingWidget(QWidget):
         
         self.tabs.addTab(tab_extract, "")
         
-        layout.addWidget(self.tabs)
+        layout.addWidget(self.tabs, 1)
         
         # --- Progress Bar & Logs ---
         self.feedback_panel = QWidget()
@@ -2162,8 +2180,11 @@ class PdfProcessingWidget(QWidget):
         self.log_area = QTextEdit()
         self.log_area.setReadOnly(True)
         self.log_area.setObjectName("MutedLogConsole")
-        feedback_layout.addWidget(self.log_area)
-        layout.addWidget(self.feedback_panel)
+        self.log_area.setMinimumHeight(96)
+        feedback_layout.addWidget(self.log_area, 1)
+        layout.addWidget(self.feedback_panel, 1)
+        self.main_scroll.setWidget(scroll_content)
+        outer_layout.addWidget(self.main_scroll)
 
     def retranslate_ui(self):
         """Update all text labels based on current language"""

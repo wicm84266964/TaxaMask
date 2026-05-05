@@ -40,6 +40,18 @@
       "description": "Governance policy for routing, sampling, redline gates, and acceptance checks."
     },
     {
+      "id": "screener_config",
+      "kind": "file",
+      "default": "screener_configs/蚂蚁新种筛选_V2示例.json",
+      "description": "PDF screening logic profile. The default is the ant taxonomy example; replace it with a generic, plant, or project-specific V2 profile for other taxa."
+    },
+    {
+      "id": "figure_profile",
+      "kind": "file",
+      "default": "multimodal_configs/蚂蚁三视图提取复核_示例.json",
+      "description": "Figure extraction and multimodal review profile. The default is the ant triptych example; replace it to define evidence rules for other taxa or figure types."
+    },
+    {
       "id": "output_dir",
       "kind": "directory",
       "default": "artifacts/agentic_pipeline",
@@ -78,11 +90,14 @@
         "{pdf_source_dir}",
         "--out",
         "{output_dir}/literature_screening",
+        "--config",
+        "{screener_config}",
         "--run-index",
         "{output_dir}/literature_screening/run_index.json"
       ],
       "required_inputs": [
-        "pdf_source_dir"
+        "pdf_source_dir",
+        "screener_config"
       ],
       "outputs": [
         "{output_dir}/literature_screening/master_queue.csv",
@@ -93,11 +108,11 @@
         "LLM responses are saved as raw evidence.",
         "Uncertain or unreadable PDFs are preserved as review artifacts rather than silently dropped."
       ],
-      "agent_notes": "A headless CLI wrapper now exists. Runs still require a configured PDF source folder and real LLM settings for production use."
+      "agent_notes": "A headless CLI wrapper now exists. Headless automation should pass the same PDF screening logic profile that the Qt PDF Processing page exposes through Select Logic Profile."
     },
     {
       "id": "stage_20_figure_extraction",
-      "title": "Triptych figure extraction",
+      "title": "Figure extraction and multimodal review",
       "autonomy_level": "ready",
       "execution_type": "command",
       "command": [
@@ -107,24 +122,27 @@
         "{pdf_source_dir}",
         "--db",
         "{db}",
+        "--figure-profile",
+        "{figure_profile}",
         "--save-images",
         "--run-index",
         "{output_dir}/figure_extraction_run_index.json"
       ],
       "required_inputs": [
-        "pdf_source_dir"
+        "pdf_source_dir",
+        "figure_profile"
       ],
       "outputs": [
         "{db}",
-        "{output_dir}/figure_extraction/figure_images",
-        "{output_dir}/figure_extraction/review_batches"
+        "{db_artifacts_dir}/figure_images",
+        "{db_artifacts_dir}/review_batches"
       ],
       "gates": [
         "Real multimodal validator is configured or the run is explicitly marked as mock/default review.",
         "Each accepted figure has page, figure index, image path, caption evidence, and review status.",
-        "Figures lacking reliable triptych evidence remain candidates, not trusted training samples."
+        "Figures lacking reliable profile-defined evidence remain candidates, not trusted training samples."
       ],
-      "agent_notes": "A headless CLI wrapper now exists. Real production runs should pass a multimodal config or explicitly disable multimodal validation."
+      "agent_notes": "A headless CLI wrapper now exists. Real production runs should pass the same Figure Extraction / Review Profile used in the Qt PDF Processing page, plus a multimodal config or an explicit disable flag for multimodal validation."
     },
     {
       "id": "stage_30_candidate_bridge_and_routing",
@@ -150,6 +168,7 @@
       ],
       "outputs": [
         "{output_dir}/core2_orchestrated/run_index.json",
+        "{output_dir}/core2_orchestrated/pdf_candidates_raw.json",
         "{output_dir}/core2_orchestrated/acceptance_summary.json",
         "{output_dir}/core2_orchestrated/routing_decisions.json"
       ],
@@ -187,6 +206,10 @@
         "project",
         "db"
       ],
+      "required_artifacts": [
+        "{output_dir}/core2_orchestrated/routing_decisions.json",
+        "{output_dir}/core2_orchestrated/pdf_candidates_raw.json"
+      ],
       "outputs": [
         "{output_dir}/project_agentic_import.json",
         "{output_dir}/import_manifest.json"
@@ -218,6 +241,9 @@
       "required_inputs": [
         "project"
       ],
+      "required_artifacts": [
+        "{output_dir}/project_agentic_import.json"
+      ],
       "outputs": [
         "{output_dir}/project_auto_annotated.json",
         "{output_dir}/auto_annotation_predictions.json"
@@ -248,6 +274,9 @@
       ],
       "required_inputs": [
         "project"
+      ],
+      "required_artifacts": [
+        "{output_dir}/project_agentic_import.json"
       ],
       "outputs": [
         "{output_dir}/multimodal_dataset/multimodal_dataset.jsonl",

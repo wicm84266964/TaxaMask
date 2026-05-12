@@ -194,7 +194,7 @@ def build_plan(contract: dict[str, Any], inputs: dict[str, dict[str, Any]], outp
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Build or execute the Formica-Flow agentic pipeline plan.")
+    parser = argparse.ArgumentParser(description="Build or execute the TaxaMask agentic pipeline plan.")
     parser.add_argument("--contract", default=DEFAULT_CONTRACT, help="Agentic pipeline contract JSON path.")
     parser.add_argument("--out", default=os.path.join(REPO_ROOT, "artifacts", "agentic_pipeline"), help="Output artifact directory.")
     parser.add_argument("--pdf-source-dir", default="", help="Override input pdf_source_dir.")

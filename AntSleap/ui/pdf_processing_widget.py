@@ -2103,7 +2103,7 @@ class PdfProcessingWidget(QWidget):
         extract_input_layout.addLayout(h3)
         
         h4 = QHBoxLayout()
-        self.edit_db_path = QLineEdit("ant_literature.db")
+        self.edit_db_path = QLineEdit("taxamask_literature.db")
         self.btn_db = QPushButton()
         self.btn_db.clicked.connect(self.browse_save_db)
         apply_semantic_button_style(self.btn_db, BUTTON_ROLE_NEUTRAL)

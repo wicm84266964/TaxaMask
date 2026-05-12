@@ -113,7 +113,7 @@ class AgenticContractTests(unittest.TestCase):
         self.assertIn(str(figure_profile), stages["stage_20_figure_extraction"]["command"])
         self.assertTrue(
             any(
-                path.endswith("ant_literature_v2_artifacts/figure_images")
+                path.endswith("taxamask_literature_v2_artifacts/figure_images")
                 for path in stages["stage_20_figure_extraction"]["outputs"]
             )
         )

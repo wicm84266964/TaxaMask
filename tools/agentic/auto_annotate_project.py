@@ -181,7 +181,7 @@ def _run_engine_predictions(manager: ProjectManager, confidence: float, only_new
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Apply batch auto-annotation predictions to a Formica-Flow project JSON.")
+    parser = argparse.ArgumentParser(description="Apply batch auto-annotation predictions to a TaxaMask project JSON.")
     parser.add_argument("--project", required=True, help="Input project JSON.")
     parser.add_argument("--out", required=True, help="Output project JSON.")
     parser.add_argument("--predictions", default="", help="Prediction JSON. Omit only with --run-engine.")

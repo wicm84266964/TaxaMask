@@ -1,6 +1,6 @@
 {
-  "schema_version": "formica-agentic-pipeline-contract-v1",
-  "purpose": "Machine-readable contract for letting a code agent orchestrate Formica-Flow from literature input to multimodal dataset output.",
+  "schema_version": "taxamask-agentic-pipeline-contract-v1",
+  "purpose": "Machine-readable contract for letting a code agent orchestrate TaxaMask from literature input to multimodal dataset output.",
   "assumptions": {
     "locator_quality": "production_ready",
     "auto_annotation_quality": "production_ready",
@@ -24,13 +24,13 @@
     {
       "id": "project",
       "kind": "file",
-      "default": "artifacts/core2/test-head-v2.json",
+      "default": "json_projects/samples/taxamask_minimal_sample.json",
       "description": "Project JSON used by governance and dataset export stages."
     },
     {
       "id": "db",
       "kind": "file",
-      "default": "ant_literature.db",
+      "default": "taxamask_literature.db",
       "description": "SQLite database produced by PDF extraction."
     },
     {

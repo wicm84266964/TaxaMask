@@ -117,7 +117,7 @@ def _build_provenance(candidate: dict[str, Any], decision: dict[str, Any], db_pa
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Import routed PDF candidates into a Formica-Flow project JSON.")
+    parser = argparse.ArgumentParser(description="Import routed PDF candidates into a TaxaMask project JSON.")
     parser.add_argument("--project", required=True, help="Input project JSON.")
     parser.add_argument("--out", required=True, help="Output project JSON.")
     parser.add_argument("--routing", required=True, help="Routing decisions JSON.")

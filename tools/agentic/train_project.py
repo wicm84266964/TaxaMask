@@ -55,7 +55,7 @@ def _split_data(records: list[tuple[str, dict[str, Any]]], seed: int) -> tuple[l
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run a small headless Formica-Flow training job.")
+    parser = argparse.ArgumentParser(description="Run a small headless TaxaMask training job.")
     parser.add_argument("--project", required=True, help="Input project JSON.")
     parser.add_argument("--report", required=True, help="Output training report JSON.")
     parser.add_argument("--epochs", type=int, default=1, help="Epoch count.")

@@ -1,0 +1,38 @@
+TaxaMask Notice
+
+TaxaMask is a taxonomy-oriented mask annotation, literature figure extraction,
+and multimodal dataset production workbench.
+
+Project origin:
+
+TaxaMask was originally developed for ant taxonomy research. The internal Python
+package name `AntSleap` is retained for runtime compatibility and as a tribute
+to SLEAP, the animal pose-estimation project that inspired the original
+development direction. The external project and user-facing name is TaxaMask.
+
+Research use and citation:
+
+If TaxaMask contributes to a publication, preprint, dataset, benchmark, or
+public research output, please cite the repository release and DOI when
+available. See CITATION.cff for the current preferred citation metadata.
+
+Scope of included materials:
+
+- Source code is licensed under the TaxaMask Research Use License in LICENSE.
+- User documentation, tutorials, screenshots, profile guides, and explanatory
+  materials are provided for academic and research reuse with attribution unless
+  a file states otherwise.
+- Model weights, local user projects, API keys, databases, and generated
+  artifacts are not part of the public source release unless explicitly added in
+  a future release.
+
+TaxaMask name and attribution:
+
+The TaxaMask name should not be used to imply official endorsement of a modified
+version, hosted service, commercial product, or derivative work without written
+permission.
+
+Commercial use:
+
+Commercial use is not granted by the repository license. Please contact the
+copyright holder for separate commercial permission.

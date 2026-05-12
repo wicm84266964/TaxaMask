@@ -1,0 +1,215 @@
+{
+  "schema_version": "taxamask-figure-extraction-review-profile-v1",
+  "profile_name": "植物分类学图版提取复核_模板",
+  "profile_description": "植物分类学图版提取和复核模板。正式使用前应根据具体植物类群和文献类型小批量校验。",
+  "target_taxon": {
+    "display_name": "植物",
+    "scientific_scope": "Plantae",
+    "tested_status": "template-needs-validation"
+  },
+  "taxonomy_terms": [
+    "plantae",
+    "plant",
+    "plants",
+    "botany",
+    "botanical",
+    "flora",
+    "diagnosis",
+    "description",
+    "morphology",
+    "holotype",
+    "isotype",
+    "paratype",
+    "type specimen",
+    "specimens examined",
+    "flower",
+    "leaf",
+    "leaves",
+    "fruit",
+    "seed",
+    "inflorescence",
+    "sp. nov",
+    "new species"
+  ],
+  "rejection_terms": [
+    "comparison",
+    "compared",
+    "versus",
+    "vs.",
+    "phylogeny",
+    "map only",
+    "ecology",
+    "cultivation experiment",
+    "gene expression"
+  ],
+  "auxiliary_terms": [
+    "map",
+    "distribution",
+    "inset",
+    "scale",
+    "scale bar",
+    "plate",
+    "locality"
+  ],
+  "extraction_rules": {
+    "caption_patterns": [
+      "^Figure\\s+\\d+[A-Za-z]?[:\\.]\\s+.+",
+      "^Fig\\.\\s*\\d+[A-Za-z]?[:\\.]\\s+.+",
+      "^Plate\\s+\\d+[A-Za-z]?[:\\.]\\s+.+",
+      "^图\\s*\\d+[A-Za-z]?[:：\\.]\\s*.+"
+    ],
+    "figure_reference_patterns": [
+      "\\bfig\\.?\\s*(\\d+[A-Za-z]?)",
+      "\\bfigure\\s*(\\d+[A-Za-z]?)",
+      "\\bplate\\s*(\\d+[A-Za-z]?)",
+      "图\\s*(\\d+[A-Za-z]?)"
+    ],
+    "section_hint_map": {
+      "diagnosis": "diagnosis",
+      "description": "description",
+      "phenology": "phenology",
+      "distribution": "distribution",
+      "habitat": "habitat",
+      "ecology": "ecology",
+      "etymology": "etymology",
+      "specimens examined": "material_examined",
+      "type": "type_material",
+      "taxonomic treatment": "taxonomic_treatment",
+      "key to species": "key_to_species"
+    },
+    "core_section_hints": [
+      "diagnosis",
+      "description",
+      "type_material",
+      "material_examined",
+      "distribution",
+      "habitat",
+      "phenology",
+      "etymology",
+      "species_account"
+    ],
+    "extended_section_hints": [
+      "key_to_species",
+      "taxonomic_treatment",
+      "species_account",
+      "ecology"
+    ],
+    "evidence_text_limits": {
+      "figure_local_chars": 1200,
+      "species_core_chars": 2200,
+      "species_extended_chars": 2200
+    },
+    "species_name_patterns": [
+      "\\b([A-Z][a-z]{2,})\\s+([a-z][a-z\\-]{2,})\\b"
+    ],
+    "blocked_genus_words": [
+      "flower",
+      "leaf",
+      "leaves",
+      "fruit",
+      "seed",
+      "figure",
+      "plate",
+      "table",
+      "type",
+      "diagnosis",
+      "description",
+      "distribution",
+      "habitat",
+      "other"
+    ],
+    "blocked_species_words": [
+      "and",
+      "for",
+      "with",
+      "without",
+      "view",
+      "species",
+      "nov",
+      "n",
+      "the",
+      "this",
+      "that",
+      "locality"
+    ]
+  },
+  "review_rules": {
+    "acceptance_goal": "接受目标植物分类群的单一分类单元分类学图版，图版应主要展示植物整体、叶、花、果、种子或其他诊断结构。",
+    "accept_if": [
+      "主体是单一植物分类单元或同一物种候选",
+      "图版展示 habit、leaf、flower、fruit、seed 或显微诊断结构之一或多个",
+      "caption 或附近文本支持分类学描述、模式标本或新种处理",
+      "辅助地图、比例尺或少量 inset 不改变图版主体"
+    ],
+    "reject_if": [
+      "多物种比较图且无法锁定单一主体",
+      "仅分布图、系统树、表格、生态照片或实验图",
+      "主体不是目标植物类群",
+      "图像和文字证据明显不一致"
+    ],
+    "view_schema": {
+      "required_or_expected_views": [
+        "habit",
+        "leaf",
+        "flower",
+        "fruit_or_seed",
+        "diagnostic_detail"
+      ],
+      "acceptance_mode": "model_accept_with_parts_recorded",
+      "view_terms": {
+        "habit": [
+          "habit",
+          "habitus",
+          "whole plant",
+          "plant habit"
+        ],
+        "leaf": [
+          "leaf",
+          "leaves",
+          "lamina",
+          "petiole"
+        ],
+        "flower": [
+          "flower",
+          "floral",
+          "inflorescence",
+          "corolla",
+          "calyx"
+        ],
+        "fruit_or_seed": [
+          "fruit",
+          "seed",
+          "capsule",
+          "achene",
+          "berry"
+        ],
+        "diagnostic_detail": [
+          "detail",
+          "micromorphology",
+          "trichome",
+          "stamen",
+          "pistil",
+          "ovary"
+        ]
+      }
+    },
+    "category_values": [
+      "plant_taxonomic_plate",
+      "comparison_or_multi_species",
+      "non_target_or_other",
+      "uncertain"
+    ],
+    "decision_thresholds": {
+      "accept_threshold": 0.75
+    },
+    "prompt": {
+      "system_prompt": "你是严谨的植物分类学图版审稿助手。你将收到多个 PDF figure 候选，每个候选包含一张整图和分层文本证据。你的目标是只保留目标植物分类群的单一分类单元分类学图版。若主体不是植物分类图版、是多物种比较图、或只是地图/系统树/表格/实验图，请拒绝。请只输出 JSON，不要输出任何额外解释。",
+      "user_instructions": "请按顺序审查以下 figure 候选。你必须为每个 candidate_id 返回一条结果。accept 仅在候选符合植物分类学图版标准时为 true；detected_views 使用 profile 中定义的植物结构字段；confidence_score 使用 0-1 浮点数。"
+    },
+    "mock_fallback": {
+      "enabled": true,
+      "accept_requires_text_hits": 2,
+      "accept_requires_parts": []
+    }
+  }
+}

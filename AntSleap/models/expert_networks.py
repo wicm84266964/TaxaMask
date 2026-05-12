@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torchvision.models as models
+from torchvision.models.vision_transformer import interpolate_embeddings
 
 class MicroExpertLocator(nn.Module):
     """
@@ -13,13 +14,27 @@ class MicroExpertLocator(nn.Module):
        的注意力权重，推断出被遮挡部位的精确物理边界。
     3. 极限回归：抛弃分类头，换上专为极限界框设计的回归头。
     """
-    def __init__(self, pretrained=True):
+    def __init__(self, pretrained=True, image_size=224):
         super().__init__()
+        self.image_size = int(image_size or 224)
+        if self.image_size <= 0 or self.image_size % 16 != 0:
+            raise ValueError(f"MicroExpertLocator image_size must be a positive multiple of 16, got {image_size}")
         
         # 1. 骨干网络 (Backbone)：加载预训练的 Vision Transformer (Base 架构, 16x16 Patch)
         # ViT-B_16 has 86M parameters and is intended for CUDA-capable GPU runs.
         weights = models.ViT_B_16_Weights.DEFAULT if pretrained else None
-        self.vit = models.vit_b_16(weights=weights)
+        if pretrained and self.image_size != 224:
+            self.vit = models.vit_b_16(weights=None, image_size=self.image_size)
+            state = weights.get_state_dict(progress=True)
+            state = interpolate_embeddings(
+                image_size=self.image_size,
+                patch_size=16,
+                model_state=state,
+                reset_heads=True,
+            )
+            self.vit.load_state_dict(state, strict=False)
+        else:
+            self.vit = models.vit_b_16(weights=weights, image_size=self.image_size)
         
         # 2. 定制回归头 (Regression Head)：替换原本的 1000 类分类头
         # ViT-B_16 输出的隐层维度是 768

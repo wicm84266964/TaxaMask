@@ -49,9 +49,6 @@ class DummyPartsModel:
 
 
 class DummyCascadeManager:
-    def infer_active_expert_in_parent_box(self, image_path, parent_box, child_part_name):
-        return None
-
     def get_route_block_reason(self, route):
         if not isinstance(route, dict):
             return "route_missing"
@@ -59,7 +56,7 @@ class DummyCascadeManager:
         if not appointed.get("expert_id"):
             return "expert_unappointed"
         expert_part = appointed.get("expert_part") or route.get("expert_part") or route.get("child")
-        expert_filename = appointed.get("expert_filename") or route.get("expert_filename") or "best_expert.pth"
+        expert_filename = appointed.get("expert_filename") or route.get("expert_filename")
         if not expert_part or not expert_filename:
             return "expert_unappointed"
         return None
@@ -658,6 +655,7 @@ class UiPolishScopeTests(unittest.TestCase):
             self.assertEqual(route_panel.parentWidget().objectName(), "modelSettingsRoutePanel")
             self.assertIn("Deleting a route removes only this project record", route_panel.note_label.text())
             self.assertEqual(route_panel.route_tree.objectName(), "projectRouteTree")
+            self.assertGreaterEqual(route_panel.route_tree.minimumHeight(), 360)
             parent_item = route_panel._find_parent_item("Head")
             self.assertIsNotNone(parent_item)
             route_item = route_panel._find_route_item("Head", "Mandible")
@@ -732,20 +730,20 @@ class UiPolishScopeTests(unittest.TestCase):
                         "child": "Mandible",
                         "enabled": True,
                         "appointed_expert": {
-                            "expert_id": "Mandible/best_expert.pth",
+                            "expert_id": "Mandible/expert_v20260501_090000.pth",
                             "expert_part": "Mandible",
-                            "expert_filename": "best_expert.pth",
+                            "expert_filename": "expert_v20260501_090000.pth",
                         },
                         "expert_candidates": [
                             {
-                                "expert_id": "Mandible/best_expert.pth",
+                                "expert_id": "Mandible/expert_v20260501_090000.pth",
                                 "expert_part": "Mandible",
-                                "expert_filename": "best_expert.pth",
+                                "expert_filename": "expert_v20260501_090000.pth",
                             }
                         ],
-                        "expert_id": "Mandible/best_expert.pth",
+                        "expert_id": "Mandible/expert_v20260501_090000.pth",
                         "expert_part": "Mandible",
-                        "expert_filename": "best_expert.pth",
+                        "expert_filename": "expert_v20260501_090000.pth",
                         "registration_source": "blink_candidate",
                     }
                 ],

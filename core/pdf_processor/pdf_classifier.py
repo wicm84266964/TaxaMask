@@ -623,8 +623,8 @@ class LLMScreenPDFClassifier:
                 return []
 
             # 自动检测项目内的 Poppler
-            # __file__ = .../auto-label-trainer/core/pdf_processor/pdf_classifier.py
-            # parent(1)=pdf_processor, parent(2)=core, parent(3)=auto-label-trainer
+            # __file__ = .../TaxaMask/core/pdf_processor/pdf_classifier.py
+            # parent(1)=pdf_processor, parent(2)=core, parent(3)=TaxaMask
             project_root = Path(__file__).parent.parent.parent 
             
             # 兼容打包后的路径或开发环境路径

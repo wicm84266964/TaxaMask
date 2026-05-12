@@ -7,7 +7,7 @@ import cv2
 
 from .projection import CoordinateMapper
 from .cascade_routes import (
-    DEFAULT_EXPERT_FILENAME,
+    LEGACY_EXPERT_FILENAME,
     build_expert_id,
     format_expert_label,
     parse_expert_id,
@@ -15,6 +15,7 @@ from .cascade_routes import (
     sanitize_legacy_route_manifest,
     sanitize_project_route_manifest,
 )
+from .expert_notes import load_expert_notes
 try:
     from AntSleap.models.expert_networks import MicroExpertLocator
 except ImportError:
@@ -174,7 +175,7 @@ class CascadingManager:
             if not expert_part:
                 expert_part = str(route.get("child") or "").strip()
             if not expert_filename:
-                expert_filename = DEFAULT_EXPERT_FILENAME
+                expert_filename = LEGACY_EXPERT_FILENAME
 
         if not expert_part or not expert_filename:
             return None
@@ -200,6 +201,7 @@ class CascadingManager:
         experts = []
         if not os.path.exists(self.expert_dir):
             return experts
+        expert_notes = load_expert_notes(self.engine.weights_dir)
 
         for part_folder in sorted(os.listdir(self.expert_dir)):
             part_path = os.path.join(self.expert_dir, part_folder)
@@ -217,7 +219,7 @@ class CascadingManager:
                         "expert_filename": filename,
                         "expert_id": expert_id,
                         "path": os.path.join(part_path, filename),
-                        "is_active": filename == DEFAULT_EXPERT_FILENAME,
+                        "note": expert_notes.get(expert_id, ""),
                     }
                 )
         return experts
@@ -229,13 +231,25 @@ class CascadingManager:
             return self.loaded_experts[cache_key]
              
         if model_path is None:
-            model_path = os.path.join(self.expert_dir, part_name, DEFAULT_EXPERT_FILENAME)
+            return None
         if not os.path.exists(model_path):
             return None
              
         print(f"Loading Micro-Expert for [{part_name}] from {model_path}...")
-        expert_model = MicroExpertLocator(pretrained=False).to(self.device)
-        expert_model.load_state_dict(torch.load(model_path, map_location=self.device))
+        loaded = torch.load(model_path, map_location=self.device)
+        checkpoint_state = loaded
+        checkpoint_meta = {}
+        if isinstance(loaded, dict) and isinstance(loaded.get("state_dict"), dict):
+            checkpoint_state = loaded.get("state_dict", {})
+            checkpoint_meta = loaded.get("meta", {}) if isinstance(loaded.get("meta"), dict) else {}
+        input_size = checkpoint_meta.get("input_size") or [224, 224]
+        try:
+            input_side = int(input_size[0] if isinstance(input_size, (list, tuple)) else input_size)
+        except Exception:
+            input_side = 224
+        expert_model = MicroExpertLocator(pretrained=False, image_size=input_side).to(self.device)
+        expert_model.load_state_dict(checkpoint_state)
+        expert_model._taxamask_meta = checkpoint_meta
         expert_model.eval()
          
         self.loaded_experts[cache_key] = expert_model
@@ -251,7 +265,13 @@ class CascadingManager:
         img_np = cv2.cvtColor(img_np, cv2.COLOR_BGR2RGB)
         h, w, _ = img_np.shape
 
-        target_size = (224, 224)
+        meta = getattr(expert_model, "_taxamask_meta", {}) if expert_model is not None else {}
+        input_size = meta.get("input_size") if isinstance(meta, dict) else None
+        try:
+            input_side = int(input_size[0] if isinstance(input_size, (list, tuple)) else input_size)
+        except Exception:
+            input_side = int(getattr(expert_model, "image_size", 224) or 224)
+        target_size = (input_side, input_side)
         mapper = CoordinateMapper((w, h), parent_box, target_size=target_size)
         zoomed_img_np = mapper.crop_and_resize(img_np)
 
@@ -284,10 +304,11 @@ class CascadingManager:
             "area_ratio": float(area_ratio),
         }
 
-    def infer_active_expert_in_parent_box(self, image_path, parent_box, child_part_name):
-        expert_model = self._load_expert(child_part_name)
+    def infer_legacy_expert_in_parent_box(self, image_path, parent_box, child_part_name):
+        legacy_path = os.path.join(self.expert_dir, child_part_name, LEGACY_EXPERT_FILENAME)
+        expert_model = self._load_expert(child_part_name, model_path=legacy_path)
         if expert_model is None:
-            print(f"Active expert model for {child_part_name} not found. Skipping.")
+            print(f"Legacy expert model for {child_part_name} not found. Skipping.")
             return None
         return self._infer_with_loaded_expert(image_path, parent_box, child_part_name, expert_model)
 

@@ -11,6 +11,7 @@ anaconda3/
 # Local agent/editor state
 .sisyphus/
 .opencode/
+AGENTS.md
 .tmp_validation/
 tmp_*/
 .vscode/
@@ -34,6 +35,7 @@ screener_configs/api_runtime_settings.json
 !json_projects/samples/*.json
 !screener_configs/*.json
 !screener_configs/*.example.json
+!multimodal_configs/*.json
 screener_configs/api_runtime_settings.json
 
 # Large model weights and training outputs
@@ -47,6 +49,17 @@ AntSleap/*_artifacts/
 artifacts/
 *.log
 training_report.png
+
+# Internal planning and handoff notes
+docs/designs/
+docs/discussions/
+docs/handoffs/
+docs/concepts/
+docs/manual_images/
+docs/agentic_orchestration_assessment.md
+docs/core2_governance_runbook.md
+docs/generate_manual_screenshots.py
+docs/跨物种适配严格审查报告.md
 
 # Bundled local binaries
 external_tools/

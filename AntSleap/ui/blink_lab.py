@@ -2,18 +2,20 @@
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, 
                               QPushButton, QLabel, QSplitter, QListWidget,
-                              QGroupBox, QSlider, QProgressBar, QRadioButton, QButtonGroup, QSpinBox, QFormLayout, QTreeWidget, QTreeWidgetItem, QMessageBox, QTextEdit, QCheckBox, QDialog, QDialogButtonBox, QLineEdit)
+                              QGroupBox, QSlider, QProgressBar, QRadioButton, QButtonGroup, QSpinBox, QTreeWidget, QTreeWidgetItem, QMessageBox, QTextEdit, QCheckBox, QDialog, QDialogButtonBox, QLineEdit, QHeaderView, QSizePolicy, QScrollArea, QFrame, QComboBox, QTabWidget, QInputDialog)
 import os
 import shutil
 import sys
 from PySide6.QtCore import Qt, Signal, QPointF, QRectF, QThread
-from PySide6.QtGui import QColor, QPainter, QBrush, QPen, QPainterPath
+from PySide6.QtGui import QColor, QPainter, QBrush, QPen, QPainterPath, QPixmap
 try:
     from AntSleap.core.taxonomy_defaults import is_safe_part_name
     from AntSleap.core.cascade_routes import build_expert_id
+    from AntSleap.core.expert_notes import format_expert_display_name, load_expert_notes, set_expert_note
 except ImportError:
     from core.taxonomy_defaults import is_safe_part_name
     from core.cascade_routes import build_expert_id
+    from core.expert_notes import format_expert_display_name, load_expert_notes, set_expert_note
 from .canvas import AnnotationCanvas
 from .style import (
     BUTTON_ROLE_COMMIT,
@@ -44,7 +46,8 @@ BLINK_TRANSLATIONS = {
         "Trained Experts": "已训练专家",
         "Model File": "模型文件",
         "Size": "大小",
-        "Set Active": "设为激活",
+        "Appoint to Current Route": "指定到当前路由",
+        "Edit Note": "编辑备注",
         "Delete": "删除",
         "Refresh": "刷新",
         "Blink Control Room": "Blink 控制区",
@@ -60,7 +63,20 @@ BLINK_TRANSLATIONS = {
         "Blink training log will appear here during expert training.": "Blink 专家训练时的日志会显示在这里。",
         "Epochs:": "训练轮数 (Epochs):",
         "Batch Size:": "批次大小 (Batch Size):",
+        "Learning Rate:": "学习率 (LR):",
+        "Weight Decay:": "权重衰减：",
+        "Input Size:": "输入尺寸：",
+        "Blink Training Report": "Blink 训练报告",
+        "Summary": "摘要",
+        "Metrics": "指标",
+        "Box Validation": "框验证",
+        "No report image generated.": "没有生成报告图像。",
+        "Close": "关闭",
         "TRAIN EXPERT MODEL": "训练专家模型",
+        "STOP TRAINING": "停止训练",
+        "Training Progress": "训练进度",
+        "Training cancelled.": "训练已取消。",
+        "Stopping training after the current batch...": "将在当前批次结束后停止训练...",
         "Discard Blink Edits?": "放弃 Blink 编辑？",
         "The current Blink session has unapplied edits. Discard them and {0}?": "当前 Blink 会话有未应用的修改。要放弃这些修改并{0}吗？",
         "Focus: Full Image": "焦点：整张图像",
@@ -74,10 +90,17 @@ BLINK_TRANSLATIONS = {
         "Sync cancelled. Blink session edits were kept.": "已取消同步，Blink 会话修改已保留。",
         "Synced from Workbench": "已从工作台同步",
         "Info": "提示",
-        "This model is already set as active.": "该模型已经是激活模型。",
-        "Set this model as the active expert for {0}?\n(The current active model will be archived)": "要将该模型设为 {0} 的激活专家吗？\n（当前激活模型将被归档）",
+        "This model is already appointed to the current route.": "该模型已经是当前路由的指定专家。",
+        "Appoint this model to {0}?\n(This will only update the current route manifest; it will not copy or overwrite model files.)": "要将该模型指定到当前 Blink 路由 {0} 吗？\n这只会更新当前项目路由，不会复制或覆盖模型文件。",
         "Success": "成功",
-        "Model activated successfully.": "模型激活成功。",
+        "Route expert updated successfully.": "当前路由专家已更新。",
+        "Open a Blink session with a parent ROI before appointing a route expert.": "请先通过父级 ROI 打开 Blink 会话，再为当前路由指定专家。",
+        "Expert Note": "专家备注",
+        "Set a short note for {0}:": "为 {0} 设置一个简短备注：",
+        "Select a trained expert file first.": "请先选择一个专家模型文件。",
+        "Edit a display note only. The model file name and route binding stay unchanged.": "只编辑展示备注；模型文件名和路由绑定不会改变。",
+        "Note saved.": "备注已保存。",
+        "Note cleared.": "备注已清空。",
         "Delete Model": "删除模型",
         "Are you sure you want to delete {0}?": "确定要删除 {0} 吗？",
         "Delete Expert Bucket": "删除专家桶",
@@ -125,7 +148,7 @@ BLINK_TRANSLATIONS = {
         "Generating SAM draft for {0}...": "正在为 {0} 生成 SAM 草稿...",
         "Draft polygon generated for {0}. Refine it, then draw a loose box for shrink.": "已为 {0} 生成草稿多边形。请先精修，再绘制松框用于收缩。",
         "Expert found a box for {0}, but base SAM returned no polygon. Refine manually.": "专家已为 {0} 找到框，但基础 SAM 没有返回多边形。请手工精修。",
-        "Error: No active expert found for {0}. Train or activate an expert first.": "错误：没有找到 {0} 的激活专家。请先训练或激活专家模型。",
+        "Error: No appointed route expert found for {0}. Train one or appoint a candidate first.": "错误：没有找到 {0} 的路由指定专家。请先训练一个候选专家，或手动指定一个专家。",
         "Replace current polygon for {0}?": "要替换 {0} 的当前多边形吗？",
         "A draft polygon already exists for this target. Replacing it will discard the current local polygon.": "该目标已经有一个草稿多边形。替换后会丢弃当前本地多边形。",
         "Auto-annotate cancelled. Current polygon kept.": "已取消自动标注，当前多边形已保留。",
@@ -146,7 +169,8 @@ BLINK_TRANSLATIONS = {
         "Success! Expert saved.": "成功！专家模型已保存。",
         "Training failed. Need more data.": "训练失败，需要更多数据。",
         "Training finished. Expert was linked to route {0} -> {1} and enabled for workbench auto-annotation.": "训练完成。专家模型已绑定到路由 {0} -> {1}，并已启用，可用于标注工作台自动标注。",
-        "Training finished. Route {0} -> {1} already has an appointed expert, so the new model was saved as a candidate and was not activated automatically.": "训练完成。路由 {0} -> {1} 已有指定专家，因此新模型已作为候选保存，未自动激活。",
+        "Training finished. Route {0} -> {1} already has an appointed expert, so the new model was saved as a candidate and was not appointed automatically.": "训练完成。路由 {0} -> {1} 已有指定专家，因此新模型已作为候选保存，未自动指定。",
+        "Training finished. Expert was added as a route candidate for {0} -> {1}. Appoint it manually if the report looks better.": "训练完成。专家模型已作为路由 {0} -> {1} 的候选保存。请根据报告判断更好后再手动指定。",
         "Training finished. Expert saved, but no parent-part route was available to enable.": "训练完成。专家模型已保存，但当前没有可启用的父部位路由。",
         "Training finished. Expert saved, but route auto-link failed: {0}": "训练完成。专家模型已保存，但自动绑定路由失败：{0}",
         "Training Error: {0}": "训练错误：{0}",
@@ -163,6 +187,12 @@ def translate_blink_text(text, lang="en"):
     if lang == "zh":
         return BLINK_TRANSLATIONS["zh"].get(text, text)
     return text
+
+
+class NoWheelComboBox(QComboBox):
+    def wheelEvent(self, event):
+        event.ignore()
+
 
 class BlinkCanvas(AnnotationCanvas):
     """
@@ -232,17 +262,32 @@ class BlinkCanvas(AnnotationCanvas):
 
 class BlinkTrainingThread(QThread):
     result_signal = Signal(str)
+    report_signal = Signal(dict)
     error_signal = Signal(str)
     log_signal = Signal(str)
+    progress_signal = Signal(int)
+    cancelled_signal = Signal()
 
-    def __init__(self, project_path, part_name, parent_part, epochs, batch_size, protect_active=False):
+    def __init__(
+        self,
+        project_path,
+        part_name,
+        parent_part,
+        epochs,
+        batch_size,
+        learning_rate=1e-3,
+        weight_decay=1e-4,
+        input_size=224,
+    ):
         super().__init__()
         self.project_path = project_path
         self.part_name = part_name
         self.parent_part = parent_part
         self.epochs = epochs
         self.batch_size = batch_size
-        self.protect_active = bool(protect_active)
+        self.learning_rate = learning_rate
+        self.weight_decay = weight_decay
+        self.input_size = input_size
 
     def run(self):
         try:
@@ -255,16 +300,89 @@ class BlinkTrainingThread(QThread):
                 project_path=self.project_path,
                 part_name=self.part_name,
                 parent_part=self.parent_part,
-                protect_active=self.protect_active,
+                learning_rate=self.learning_rate,
+                weight_decay=self.weight_decay,
+                input_size=self.input_size,
             )
             save_path = trainer.train(
                 epochs=self.epochs,
                 batch_size=self.batch_size,
                 log_callback=self.log_signal.emit,
+                progress_callback=self.progress_signal.emit,
+                stop_callback=self.isInterruptionRequested,
             )
-            self.result_signal.emit(save_path or "")
+            if self.isInterruptionRequested() and not save_path:
+                self.cancelled_signal.emit()
+            else:
+                self.result_signal.emit(save_path or "")
+                report = getattr(trainer, "last_report", None)
+                if isinstance(report, dict) and report:
+                    self.report_signal.emit(report)
         except Exception as exc:
             self.error_signal.emit(str(exc))
+
+
+class BlinkExpertTrainingReportDialog(QDialog):
+    def __init__(self, report_data, lang="en", parent=None):
+        super().__init__(parent)
+        self.report_data = dict(report_data or {})
+        self.lang = lang
+        self.setWindowTitle(translate_blink_text("Blink Training Report", lang))
+        self.resize(1100, 760)
+
+        layout = QVBoxLayout(self)
+        tabs = QTabWidget()
+
+        summary = self.report_data.get("validation_summary") or {}
+        summary_text = [
+            f"Part: {summary.get('part_name', '')}",
+            f"Parent: {summary.get('parent_part') or 'N/A'}",
+            f"Input size: {summary.get('input_size', '')}",
+            f"Learning rate: {summary.get('learning_rate', '')}",
+            f"Weight decay: {summary.get('weight_decay', '')}",
+            f"Validation samples: {summary.get('validation_count', 0)}",
+            f"Model: {self.report_data.get('model_path', '')}",
+            f"Report folder: {self.report_data.get('dir', '')}",
+            "",
+            "Green box = trajectory target / golden box",
+            "Cyan box = Blink expert prediction",
+        ]
+        summary_box = QTextEdit()
+        summary_box.setReadOnly(True)
+        summary_box.setPlainText("\n".join(str(line) for line in summary_text))
+        tabs.addTab(summary_box, translate_blink_text("Summary", lang))
+
+        tabs.addTab(
+            self._image_tab(self.report_data.get("metrics")),
+            translate_blink_text("Metrics", lang),
+        )
+        tabs.addTab(
+            self._image_tab(self.report_data.get("val")),
+            translate_blink_text("Box Validation", lang),
+        )
+
+        layout.addWidget(tabs, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        close_button = buttons.button(QDialogButtonBox.StandardButton.Close)
+        if close_button:
+            close_button.setText(translate_blink_text("Close", lang))
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _image_tab(self, image_path):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        holder = QWidget()
+        layout = QVBoxLayout(holder)
+        label = QLabel(translate_blink_text("No report image generated.", self.lang))
+        label.setAlignment(Qt.AlignCenter)
+        if image_path and os.path.exists(image_path):
+            pix = QPixmap(image_path)
+            label.setPixmap(pix.scaled(1000, 680, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        layout.addWidget(label)
+        layout.addStretch()
+        scroll.setWidget(holder)
+        return scroll
 
 
 class BucketDeletePreviewDialog(QDialog):
@@ -381,12 +499,28 @@ class BlinkLabWidget(QWidget):
     global_labels_updated = Signal() # Signal to notify MainWindow to refresh
     route_registry_refresh_requested = Signal()
 
-    def __init__(self, engine, project_manager, lang="en", parent=None):
+    def __init__(
+        self,
+        engine,
+        project_manager,
+        lang="en",
+        parent=None,
+        blink_epochs=5,
+        blink_batch=2,
+        blink_lr=1e-3,
+        blink_weight_decay=1e-4,
+        blink_input_size=224,
+    ):
         super().__init__(parent)
         self.engine = engine
         self.pm = project_manager
         self.lang = lang
         self.current_theme = "dark"
+        self.default_training_epochs = self._clamp_training_value(blink_epochs, 1, 500, 5)
+        self.default_training_batch = self._clamp_training_value(blink_batch, 1, 64, 2)
+        self.default_learning_rate = self._coerce_float(blink_lr, 1e-3)
+        self.default_weight_decay = self._coerce_float(blink_weight_decay, 1e-4)
+        self.default_input_size = self._normalize_input_size(blink_input_size)
         self.training_thread = None
         self.active_session = None
         self.session_target_part = None
@@ -399,6 +533,58 @@ class BlinkLabWidget(QWidget):
         self.raw_auto_boxes = {}
         self.init_ui()
         self.retranslate_ui()
+
+    def _clamp_training_value(self, value, low, high, fallback):
+        try:
+            number = int(value)
+        except Exception:
+            number = int(fallback)
+        return max(int(low), min(int(high), number))
+
+    def _coerce_float(self, value, fallback):
+        try:
+            number = float(value)
+        except Exception:
+            number = float(fallback)
+        return number if number > 0 else float(fallback)
+
+    def _normalize_input_size(self, value):
+        try:
+            side = int(value[0] if isinstance(value, (list, tuple)) else value)
+        except Exception:
+            side = 224
+        allowed = [224, 384, 512]
+        return min(allowed, key=lambda candidate: abs(candidate - side))
+
+    def set_training_defaults(
+        self,
+        epochs=None,
+        batch_size=None,
+        learning_rate=None,
+        weight_decay=None,
+        input_size=None,
+        apply_to_controls=True,
+    ):
+        if epochs is not None:
+            self.default_training_epochs = self._clamp_training_value(epochs, 1, 500, self.default_training_epochs)
+        if batch_size is not None:
+            self.default_training_batch = self._clamp_training_value(batch_size, 1, 64, self.default_training_batch)
+        if learning_rate is not None:
+            self.default_learning_rate = self._coerce_float(learning_rate, self.default_learning_rate)
+        if weight_decay is not None:
+            self.default_weight_decay = self._coerce_float(weight_decay, self.default_weight_decay)
+        if input_size is not None:
+            self.default_input_size = self._normalize_input_size(input_size)
+        if apply_to_controls and hasattr(self, "spin_epochs") and hasattr(self, "spin_batch"):
+            self.spin_epochs.setValue(self.default_training_epochs)
+            self.spin_batch.setValue(self.default_training_batch)
+            if hasattr(self, "edit_lr"):
+                self.edit_lr.setText(f"{self.default_learning_rate:g}")
+            if hasattr(self, "edit_weight_decay"):
+                self.edit_weight_decay.setText(f"{self.default_weight_decay:g}")
+            if hasattr(self, "combo_input_size"):
+                index = self.combo_input_size.findData(self.default_input_size)
+                self.combo_input_size.setCurrentIndex(index if index >= 0 else 0)
 
     def tr(self, text):
         return translate_blink_text(text, self.lang)
@@ -416,7 +602,9 @@ class BlinkLabWidget(QWidget):
         self.rb_box.setText(self.tr("Draw Box (For Shrink)"))
         self.expert_registry.setTitle(self.tr("Trained Experts"))
         self.expert_tree.setHeaderLabels([self.tr("Model File"), self.tr("Size")])
-        self.btn_set_active.setText(self.tr("Set Active"))
+        self.btn_appoint_route_expert.setText(self.tr("Appoint to Current Route"))
+        self.btn_edit_expert_note.setText(self.tr("Edit Note"))
+        self.btn_edit_expert_note.setToolTip(self.tr("Edit a display note only. The model file name and route binding stay unchanged."))
         self.btn_delete_expert.setText(self.tr("Delete"))
         self.btn_refresh_experts.setText(self.tr("Refresh"))
         self.training_log_box.setTitle(self.tr("Training Log"))
@@ -432,7 +620,12 @@ class BlinkLabWidget(QWidget):
         self.training_settings_box.setTitle(self.tr("Training Settings"))
         self.lbl_epochs.setText(self.tr("Epochs:"))
         self.lbl_batch_size.setText(self.tr("Batch Size:"))
+        self.lbl_learning_rate.setText(self.tr("Learning Rate:"))
+        self.lbl_weight_decay.setText(self.tr("Weight Decay:"))
+        self.lbl_input_size.setText(self.tr("Input Size:"))
         self.btn_train_expert.setText(self.tr("TRAIN EXPERT MODEL"))
+        self.btn_stop_training.setText(self.tr("STOP TRAINING"))
+        self.lbl_training_progress.setText(self.tr("Training Progress"))
         if self.has_active_session():
             self.lbl_status.setText(self._session_focus_status())
         elif self.lbl_status.text() in {"Mode: STANDBY", "模式：待命", ""}:
@@ -442,8 +635,8 @@ class BlinkLabWidget(QWidget):
         self.current_theme = theme
         c = get_theme_config(theme)
         self.lbl_status.setStyleSheet(f"color: {c['success']}; font-weight: bold;")
-        self.lbl_epochs.setStyleSheet(f"color: {c['text_soft']}; font-weight: 600;")
-        self.lbl_batch_size.setStyleSheet(f"color: {c['text_soft']}; font-weight: 600;")
+        for label in [self.lbl_epochs, self.lbl_batch_size, self.lbl_learning_rate, self.lbl_weight_decay, self.lbl_input_size]:
+            label.setStyleSheet(f"color: {c['text_soft']}; font-weight: 600;")
         self.training_settings_box.setStyleSheet(
             f"QGroupBox {{ background-color: {c['bg_surface_alt']}; border: 1px solid {c['border']}; "
             f"border-radius: 10px; margin-top: 10px; padding-top: 12px; }}"
@@ -451,7 +644,8 @@ class BlinkLabWidget(QWidget):
             f"subcontrol-position: top left; left: 10px; padding: 0 4px; }}"
         )
         apply_theme_button_style(self.btn_sync, BUTTON_ROLE_NEUTRAL, "", theme)
-        apply_theme_button_style(self.btn_set_active, BUTTON_ROLE_COMMIT, "", theme)
+        apply_theme_button_style(self.btn_appoint_route_expert, BUTTON_ROLE_COMMIT, "", theme)
+        apply_theme_button_style(self.btn_edit_expert_note, BUTTON_ROLE_NEUTRAL, "", theme)
         apply_theme_button_style(self.btn_delete_expert, BUTTON_ROLE_DESTRUCTIVE, "", theme)
         apply_theme_button_style(self.btn_refresh_experts, BUTTON_ROLE_NEUTRAL, "", theme)
         apply_theme_button_style(
@@ -464,6 +658,7 @@ class BlinkLabWidget(QWidget):
         apply_theme_button_style(self.btn_auto_shrink, BUTTON_ROLE_RUN, "", theme)
         apply_theme_button_style(self.btn_apply_global, BUTTON_ROLE_COMMIT, "font-weight: bold;", theme)
         apply_theme_button_style(self.btn_train_expert, BUTTON_ROLE_RUN, "font-weight: bold;", theme)
+        apply_theme_button_style(self.btn_stop_training, BUTTON_ROLE_STOP, "font-weight: bold;", theme)
         apply_theme_button_style(self.btn_clear_training_log, BUTTON_ROLE_NEUTRAL, "", theme)
         self.training_log_console.setStyleSheet(
             f"background-color: {c['bg_input']}; color: {c['text_main']};"
@@ -480,6 +675,7 @@ class BlinkLabWidget(QWidget):
         
         # Sidebar: Parts and Experts
         self.sidebar = QGroupBox("Expert Taxonomy")
+        self.sidebar.setMinimumWidth(380)
         apply_surface_role(self.sidebar, SURFACE_ROLE_PANEL, "blinkSidebarPanel")
         s_layout = QVBoxLayout(self.sidebar)
         s_layout.setContentsMargins(12, 12, 12, 12)
@@ -533,22 +729,32 @@ class BlinkLabWidget(QWidget):
         self.expert_tree = QTreeWidget()
         self.expert_tree.setHeaderLabels(["Model File", "Size"])
         self.expert_tree.setAlternatingRowColors(True)
+        self.expert_tree.setMinimumHeight(180)
+        self.expert_tree.setTextElideMode(Qt.ElideMiddle)
+        self.expert_tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.expert_tree.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.expert_tree.setColumnWidth(0, 300)
         self.expert_tree.itemSelectionChanged.connect(self._update_delete_expert_tooltip)
         er_layout.addWidget(self.expert_tree)
         
         btn_layout_er = QHBoxLayout()
-        self.btn_set_active = QPushButton("Set Active")
-        self.btn_set_active.clicked.connect(self.set_active_expert)
+        self.btn_appoint_route_expert = QPushButton("Appoint to Current Route")
+        self.btn_appoint_route_expert.clicked.connect(self.appoint_selected_expert_to_current_route)
+        self.btn_edit_expert_note = QPushButton("Edit Note")
+        self.btn_edit_expert_note.clicked.connect(self.edit_selected_expert_note)
+        self.btn_edit_expert_note.setToolTip(self.tr("Edit a display note only. The model file name and route binding stay unchanged."))
         self.btn_delete_expert = QPushButton("Delete")
         self.btn_delete_expert.clicked.connect(self.delete_expert_model)
         self.btn_delete_expert.setToolTip(self.tr("Delete the selected expert model file from disk."))
         self.btn_refresh_experts = QPushButton("Refresh")
         self.btn_refresh_experts.clicked.connect(self.refresh_expert_registry)
-        apply_semantic_button_style(self.btn_set_active, BUTTON_ROLE_COMMIT)
+        apply_semantic_button_style(self.btn_appoint_route_expert, BUTTON_ROLE_COMMIT)
+        apply_semantic_button_style(self.btn_edit_expert_note, BUTTON_ROLE_NEUTRAL)
         apply_semantic_button_style(self.btn_delete_expert, BUTTON_ROLE_DESTRUCTIVE)
         apply_semantic_button_style(self.btn_refresh_experts, BUTTON_ROLE_NEUTRAL)
         
-        btn_layout_er.addWidget(self.btn_set_active)
+        btn_layout_er.addWidget(self.btn_appoint_route_expert)
+        btn_layout_er.addWidget(self.btn_edit_expert_note)
         btn_layout_er.addWidget(self.btn_delete_expert)
         btn_layout_er.addWidget(self.btn_refresh_experts)
         er_layout.addLayout(btn_layout_er)
@@ -618,24 +824,49 @@ class BlinkLabWidget(QWidget):
 
         self.training_settings_box = QGroupBox("Training Settings")
         apply_surface_role(self.training_settings_box, SURFACE_ROLE_SUBTLE, "blinkTrainingSettingsBox")
-        tc_layout = QFormLayout(self.training_settings_box)
+        tc_layout = QVBoxLayout(self.training_settings_box)
+        tc_layout.setContentsMargins(10, 12, 10, 10)
+        tc_layout.setSpacing(8)
         
         self.spin_epochs = QSpinBox()
         self.spin_epochs.setRange(1, 500)
-        self.spin_epochs.setValue(5)
+        self.spin_epochs.setValue(self.default_training_epochs)
         self.spin_epochs.setMinimumHeight(30)
         
         self.spin_batch = QSpinBox()
         self.spin_batch.setRange(1, 64)
-        self.spin_batch.setValue(2)
+        self.spin_batch.setValue(self.default_training_batch)
         self.spin_batch.setMinimumHeight(30)
         
         self.lbl_epochs = QLabel("Epochs:")
         self.lbl_epochs.setObjectName("BlinkFormLabel")
         self.lbl_batch_size = QLabel("Batch Size:")
         self.lbl_batch_size.setObjectName("BlinkFormLabel")
-        tc_layout.addRow(self.lbl_epochs, self.spin_epochs)
-        tc_layout.addRow(self.lbl_batch_size, self.spin_batch)
+        self.lbl_learning_rate = QLabel("Learning Rate:")
+        self.lbl_learning_rate.setObjectName("BlinkFormLabel")
+        self.lbl_weight_decay = QLabel("Weight Decay:")
+        self.lbl_weight_decay.setObjectName("BlinkFormLabel")
+        self.lbl_input_size = QLabel("Input Size:")
+        self.lbl_input_size.setObjectName("BlinkFormLabel")
+        tc_layout.addWidget(self.lbl_epochs)
+        tc_layout.addWidget(self.spin_epochs)
+        tc_layout.addWidget(self.lbl_batch_size)
+        tc_layout.addWidget(self.spin_batch)
+        self.edit_lr = QLineEdit(f"{self.default_learning_rate:g}")
+        self.edit_lr.setMinimumHeight(30)
+        self.edit_weight_decay = QLineEdit(f"{self.default_weight_decay:g}")
+        self.edit_weight_decay.setMinimumHeight(30)
+        self.combo_input_size = NoWheelComboBox()
+        for side in [224, 384, 512]:
+            self.combo_input_size.addItem(f"{side} x {side}", side)
+        input_index = self.combo_input_size.findData(self.default_input_size)
+        self.combo_input_size.setCurrentIndex(input_index if input_index >= 0 else 0)
+        tc_layout.addWidget(self.lbl_learning_rate)
+        tc_layout.addWidget(self.edit_lr)
+        tc_layout.addWidget(self.lbl_weight_decay)
+        tc_layout.addWidget(self.edit_weight_decay)
+        tc_layout.addWidget(self.lbl_input_size)
+        tc_layout.addWidget(self.combo_input_size)
         training_panel_layout.addWidget(self.training_settings_box)
         
         self.btn_train_expert = QPushButton("TRAIN EXPERT MODEL")
@@ -643,6 +874,21 @@ class BlinkLabWidget(QWidget):
         apply_semantic_button_style(self.btn_train_expert, BUTTON_ROLE_RUN, "font-weight: bold;")
         self.btn_train_expert.clicked.connect(self.train_expert_model)
         training_panel_layout.addWidget(self.btn_train_expert)
+
+        self.btn_stop_training = QPushButton("STOP TRAINING")
+        self.btn_stop_training.setFixedHeight(40)
+        self.btn_stop_training.setEnabled(False)
+        apply_semantic_button_style(self.btn_stop_training, BUTTON_ROLE_STOP, "font-weight: bold;")
+        self.btn_stop_training.clicked.connect(self.stop_expert_training)
+        training_panel_layout.addWidget(self.btn_stop_training)
+
+        self.lbl_training_progress = QLabel("Training Progress")
+        self.lbl_training_progress.setObjectName("BlinkFormLabel")
+        training_panel_layout.addWidget(self.lbl_training_progress)
+        self.prog_training = QProgressBar()
+        self.prog_training.setRange(0, 100)
+        self.prog_training.setValue(0)
+        training_panel_layout.addWidget(self.prog_training)
 
         self.training_log_box = QGroupBox("Training Log")
         apply_surface_role(self.training_log_box, SURFACE_ROLE_SUBTLE, "blinkTrainingLogBox")
@@ -653,17 +899,18 @@ class BlinkLabWidget(QWidget):
         self.training_log_console = QTextEdit()
         self.training_log_console.setReadOnly(True)
         self.training_log_console.setObjectName("blinkTrainingLogConsole")
-        self.training_log_console.setMinimumHeight(140)
+        self.training_log_console.setMinimumHeight(300)
+        self.training_log_console.setSizePolicy(self.training_log_console.sizePolicy().horizontalPolicy(), QSizePolicy.Expanding)
         self.training_log_console.setPlaceholderText("Blink training log will appear here during expert training.")
-        training_log_layout.addWidget(self.training_log_console)
+        training_log_layout.addWidget(self.training_log_console, 1)
 
         self.btn_clear_training_log = QPushButton("Clear Log")
         self.btn_clear_training_log.clicked.connect(self.training_log_console.clear)
         apply_semantic_button_style(self.btn_clear_training_log, BUTTON_ROLE_NEUTRAL)
         training_log_layout.addWidget(self.btn_clear_training_log)
-        training_panel_layout.addWidget(self.training_log_box)
-        c_layout.addWidget(self.training_panel)
-        c_layout.addStretch()
+        training_panel_layout.addWidget(self.training_log_box, 1)
+        c_layout.addWidget(self.training_panel, 1)
+        c_layout.addStretch(0)
         
         # Splitter assembly
         self.blink_splitter = QSplitter(Qt.Horizontal)
@@ -673,16 +920,26 @@ class BlinkLabWidget(QWidget):
         self.blink_splitter.addWidget(self.sidebar)
         self.blink_splitter.addWidget(self.canvas_shell)
         
+        right_scroll = QScrollArea()
+        right_scroll.setObjectName("blinkControlsScroll")
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setFrameShape(QFrame.NoFrame)
+        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        right_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        right_scroll.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Ignored)
+        right_scroll.setFixedWidth(336)
+
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.addWidget(self.controls)
-        right_panel.setFixedWidth(304)
-        self.blink_splitter.addWidget(right_panel)
+        right_panel.setMinimumWidth(320)
+        right_scroll.setWidget(right_panel)
+        self.blink_splitter.addWidget(right_scroll)
         self.blink_splitter.setStretchFactor(0, 2)
         self.blink_splitter.setStretchFactor(1, 5)
         self.blink_splitter.setStretchFactor(2, 2)
-        self.blink_splitter.setSizes([280, 936, 304])
+        self.blink_splitter.setSizes([420, 800, 336])
         
         layout.addWidget(self.blink_splitter)
         self._update_delete_expert_tooltip()
@@ -989,6 +1246,7 @@ class BlinkLabWidget(QWidget):
         if not os.path.exists(expert_dir):
             self._update_delete_expert_tooltip()
             return
+        expert_notes = load_expert_notes(self.engine.weights_dir)
             
         for part_folder in os.listdir(expert_dir):
             part_path = os.path.join(expert_dir, part_folder)
@@ -999,14 +1257,13 @@ class BlinkLabWidget(QWidget):
             
             part_item = QTreeWidgetItem(self.expert_tree)
             part_item.setText(0, part_folder)
+            part_item.setToolTip(0, part_folder)
             part_item.setExpanded(True)
             part_item.setData(0, Qt.UserRole, None)
             part_item.setData(0, Qt.UserRole + 1, {"bucket_path": part_path, "part_name": part_folder})
             
-            # Find all .pth files
             pth_files = [f for f in os.listdir(part_path) if f.endswith(".pth")]
-            # Sort so best_expert is at the top
-            pth_files.sort(key=lambda x: 0 if x == "best_expert.pth" else 1)
+            pth_files.sort(reverse=True)
             
             for pth in pth_files:
                 file_path = os.path.join(part_path, pth)
@@ -1016,14 +1273,21 @@ class BlinkLabWidget(QWidget):
                 
                 model_item = QTreeWidgetItem(part_item)
                 
-                # Mark best_expert with a green check
-                display_name = f"✅ {pth}" if pth == "best_expert.pth" else pth
+                full_expert_name = f"{part_folder}/{pth}"
+                note = expert_notes.get(full_expert_name, "")
+                display_name = format_expert_display_name(full_expert_name, note)
                 model_item.setText(0, display_name)
                 model_item.setText(1, f"{size_mb:.1f} MB")
+                tooltip_lines = [full_expert_name, file_path]
+                if note:
+                    tooltip_lines.insert(0, note)
+                model_item.setToolTip(0, "\n".join(tooltip_lines))
+                model_item.setToolTip(1, "\n".join(tooltip_lines))
                 
                 # Store full path in UserRole for easy access
                 model_item.setData(0, Qt.UserRole, file_path)
                 model_item.setData(0, Qt.UserRole + 1, None)
+                model_item.setData(0, Qt.UserRole + 2, full_expert_name)
         self._update_delete_expert_tooltip()
 
     def append_training_log(self, message):
@@ -1196,6 +1460,11 @@ class BlinkLabWidget(QWidget):
             self.lbl_status.setText(self.tr("Failed to delete expert bucket: {0}").format(exc))
             return
 
+        for deleted_path in files_to_delete:
+            expert_id = build_expert_id(part_name, os.path.basename(deleted_path))
+            if expert_id:
+                set_expert_note(self.engine.weights_dir, expert_id, "")
+
         cleanup_count = 0
         if cleanup_routes and hasattr(self.pm, "remove_current_project_expert_bucket_routes"):
             cleanup_count = int(self.pm.remove_current_project_expert_bucket_routes(part_name) or 0)
@@ -1215,47 +1484,125 @@ class BlinkLabWidget(QWidget):
             file_path = selected[0].data(0, Qt.UserRole)
         if file_path:
             self.btn_delete_expert.setToolTip(self.tr("Delete the selected expert model file from disk."))
+            self.btn_edit_expert_note.setEnabled(True)
             return
+        self.btn_edit_expert_note.setEnabled(False)
         if self._selected_expert_bucket_info():
             self.btn_delete_expert.setToolTip(self.tr("Delete the selected child-part expert bucket from disk."))
             return
         self.btn_delete_expert.setToolTip(self.tr("Select a trained expert file or a child-part bucket first."))
 
-    def set_active_expert(self):
+    def _find_expert_tree_item_by_id(self, expert_id):
+        clean_id = str(expert_id or "").strip()
+        if not clean_id:
+            return None
+        for part_index in range(self.expert_tree.topLevelItemCount()):
+            part_item = self.expert_tree.topLevelItem(part_index)
+            if part_item is None:
+                continue
+            for model_index in range(part_item.childCount()):
+                model_item = part_item.child(model_index)
+                if model_item is None:
+                    continue
+                if str(model_item.data(0, Qt.UserRole + 2) or "").strip() == clean_id:
+                    return model_item
+        return None
+
+    def _selected_expert_file_info(self):
+        selected = self.expert_tree.selectedItems()
+        if not selected:
+            return None
+        item = selected[0]
+        file_path = item.data(0, Qt.UserRole)
+        if not file_path or not self._is_safe_expert_file_path(file_path):
+            return None
+        expert_id = item.data(0, Qt.UserRole + 2)
+        if not expert_id:
+            expert_filename = os.path.basename(file_path)
+            expert_part = os.path.basename(os.path.dirname(file_path))
+            expert_id = build_expert_id(expert_part, expert_filename)
+        if not expert_id:
+            return None
+        return {"file_path": file_path, "expert_id": str(expert_id)}
+
+    def edit_selected_expert_note(self):
+        info = self._selected_expert_file_info()
+        if not info:
+            QMessageBox.information(self, self.tr("Info"), self.tr("Select a trained expert file first."))
+            return
+        expert_id = info["expert_id"]
+        current_note = load_expert_notes(self.engine.weights_dir).get(expert_id, "")
+        note, ok = QInputDialog.getText(
+            self,
+            self.tr("Expert Note"),
+            self.tr("Set a short note for {0}:").format(expert_id),
+            text=current_note,
+        )
+        if not ok:
+            return
+        saved_note = set_expert_note(self.engine.weights_dir, expert_id, note)
+        self.refresh_expert_registry()
+        refreshed_item = self._find_expert_tree_item_by_id(expert_id)
+        if refreshed_item is not None:
+            self.expert_tree.setCurrentItem(refreshed_item)
+        self.lbl_status.setText(self.tr("Note saved.") if saved_note else self.tr("Note cleared."))
+
+    def appoint_selected_expert_to_current_route(self):
         selected = self.expert_tree.selectedItems()
         if not selected: return
         item = selected[0]
         file_path = item.data(0, Qt.UserRole)
         if not file_path: return # Selected a part folder, not a file
-        
-        part_dir = os.path.dirname(file_path)
-        best_path = os.path.join(part_dir, "best_expert.pth")
-        
-        # If it's already the active one, do nothing
-        if os.path.normpath(file_path) == os.path.normpath(best_path):
-            QMessageBox.information(self, self.tr("Info"), self.tr("This model is already set as active."))
+
+        context = self._route_context_for_training(
+            (self.active_session.get("focus_roi") or {}).get("part") if self.active_session else None,
+            self.session_target_part or self.canvas.current_tool_part,
+        )
+        parent_part = context.get("parent_part")
+        child_part = context.get("child_part")
+        if not parent_part or not child_part or parent_part == child_part:
+            QMessageBox.information(self, self.tr("Info"), self.tr("Open a Blink session with a parent ROI before appointing a route expert."))
+            return
+
+        expert_filename = os.path.basename(file_path)
+        expert_part = os.path.basename(os.path.dirname(file_path))
+        expert_id = build_expert_id(expert_part, expert_filename)
+        if not expert_id:
+            QMessageBox.critical(self, self.tr("Error"), self.tr("Failed to delete file: {0}").format(file_path))
+            return
+
+        existing_route = self.pm.get_cascade_route(parent_part, child_part) if hasattr(self.pm, "get_cascade_route") else None
+        existing_expert = (existing_route or {}).get("appointed_expert") if isinstance(existing_route, dict) else {}
+        if isinstance(existing_expert, dict) and existing_expert.get("expert_id") == expert_id:
+            QMessageBox.information(self, self.tr("Info"), self.tr("This model is already appointed to the current route."))
             return
             
         reply = themed_yes_no_question(
             self,
-            self.tr("Set Active"),
-            self.tr("Set this model as the active expert for {0}?\n(The current active model will be archived)").format(os.path.basename(part_dir)),
+            self.tr("Appoint to Current Route"),
+            self.tr("Appoint this model to {0}?\n(This will only update the current route manifest; it will not copy or overwrite model files.)").format(f"{parent_part} -> {child_part}"),
             confirm_role=BUTTON_ROLE_COMMIT,
         )
         if reply == QMessageBox.Yes:
-            import shutil
-            from datetime import datetime
-            
-            # 1. Archive current best
-            if os.path.exists(best_path):
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                archive_path = os.path.join(part_dir, f"expert_v{timestamp}.pth")
-                shutil.move(best_path, archive_path)
-                
-            # 2. Copy selected to best_expert.pth
-            shutil.copy2(file_path, best_path)
+            if hasattr(self.pm, "register_cascade_route_candidate"):
+                self.pm.register_cascade_route_candidate(
+                    parent_part,
+                    child_part,
+                    expert_id=expert_id,
+                    focus_source=(self.active_session.get("focus_roi") or {}).get("source") if self.active_session else None,
+                    registration_source="blink_manual_appointment",
+                    save=True,
+                )
+            appointed = self.pm.appoint_cascade_route_expert(parent_part, child_part, expert_id=expert_id, save=True)
+            if appointed and hasattr(self.pm, "set_cascade_route_enabled"):
+                self.pm.set_cascade_route_enabled(parent_part, child_part, True, save=True)
+            cascade_manager = getattr(self.engine, "cascade_manager", None)
+            loaded_experts = getattr(cascade_manager, "loaded_experts", None)
+            if isinstance(loaded_experts, dict):
+                loaded_experts.clear()
             self.refresh_expert_registry()
-            QMessageBox.information(self, self.tr("Success"), self.tr("Model activated successfully."))
+            self.route_registry_refresh_requested.emit()
+            QMessageBox.information(self, self.tr("Success"), self.tr("Route expert updated successfully."))
 
     def delete_expert_model(self):
         selected = self.expert_tree.selectedItems()
@@ -1279,7 +1626,12 @@ class BlinkLabWidget(QWidget):
         )
         if reply == QMessageBox.Yes:
             try:
+                expert_id = item.data(0, Qt.UserRole + 2)
+                if not expert_id:
+                    expert_id = build_expert_id(os.path.basename(os.path.dirname(file_path)), os.path.basename(file_path))
                 os.remove(file_path)
+                if expert_id:
+                    set_expert_note(self.engine.weights_dir, expert_id, "")
                 self.refresh_expert_registry()
                 self.route_registry_refresh_requested.emit()
             except Exception as e:
@@ -1431,23 +1783,37 @@ class BlinkLabWidget(QWidget):
         self.repaint()
 
         try:
-            expert_result = self.engine.cascade_manager.infer_active_expert_in_parent_box(
+            parent_part = None
+            if self.active_session:
+                focus_roi = self.active_session.get("focus_roi") or {}
+                if isinstance(focus_roi, dict):
+                    raw_parent_part = focus_roi.get("part")
+                    if isinstance(raw_parent_part, str) and raw_parent_part.strip():
+                        parent_part = raw_parent_part.strip()
+            route_manifest = self.pm.get_cascade_routes() if hasattr(self.pm, "get_cascade_routes") else None
+            if not parent_part:
+                self.lbl_status.setText(self.tr("Error: No appointed route expert found for {0}. Train one or appoint a candidate first.").format(part))
+                return
+
+            expert_result = self.engine.cascade_manager.infer_child_part(
                 self.current_image_path,
                 focus_box,
                 part,
+                parent_part=parent_part,
+                route_manifest=route_manifest,
             )
             if not isinstance(expert_result, dict):
-                self.lbl_status.setText(self.tr("Error: No active expert found for {0}. Train or activate an expert first.").format(part))
+                self.lbl_status.setText(self.tr("Error: No appointed route expert found for {0}. Train one or appoint a candidate first.").format(part))
                 return
 
             raw_box = expert_result.get("box")
             if not isinstance(raw_box, (list, tuple)) or len(raw_box) != 4:
-                self.lbl_status.setText(self.tr("Error: No active expert found for {0}. Train or activate an expert first.").format(part))
+                self.lbl_status.setText(self.tr("Error: No appointed route expert found for {0}. Train one or appoint a candidate first.").format(part))
                 return
 
             local_box = self.mapper.bbox_global_to_local(raw_box)
             if not self._normalize_local_box(local_box):
-                self.lbl_status.setText(self.tr("Error: No active expert found for {0}. Train or activate an expert first.").format(part))
+                self.lbl_status.setText(self.tr("Error: No appointed route expert found for {0}. Train one or appoint a candidate first.").format(part))
                 return
 
             self._install_draft_polygon_from_local_box(
@@ -1611,6 +1977,9 @@ class BlinkLabWidget(QWidget):
 
         epochs = self.spin_epochs.value()
         batch_size = self.spin_batch.value()
+        learning_rate = self._coerce_float(self.edit_lr.text(), self.default_learning_rate)
+        weight_decay = self._coerce_float(self.edit_weight_decay.text(), self.default_weight_decay)
+        input_size = self._normalize_input_size(self.combo_input_size.currentData())
         parent_part = None
         if self.active_session:
             focus_roi = self.active_session.get("focus_roi") or {}
@@ -1625,15 +1994,34 @@ class BlinkLabWidget(QWidget):
             parent_part=parent_part,
             epochs=epochs,
             batch_size=batch_size,
-            protect_active=bool(self.training_route_context.get("had_appointed_expert")),
+            learning_rate=learning_rate,
+            weight_decay=weight_decay,
+            input_size=input_size,
         )
         self.training_thread.result_signal.connect(self._on_training_result)
+        self.training_thread.report_signal.connect(self._on_training_report)
         self.training_thread.error_signal.connect(self._on_training_error)
         self.training_thread.log_signal.connect(self.append_training_log)
+        self.training_thread.progress_signal.connect(self.prog_training.setValue)
+        self.training_thread.cancelled_signal.connect(self._on_training_cancelled)
         self.training_thread.finished.connect(self._on_training_finished)
         self.training_log_console.clear()
+        self.prog_training.setValue(0)
         self.append_training_log(self.tr("Training Expert for {0}...").format(part))
+        self.btn_stop_training.setEnabled(True)
         self.training_thread.start()
+
+    def _on_training_report(self, report_data):
+        if isinstance(report_data, dict) and report_data:
+            dlg = BlinkExpertTrainingReportDialog(report_data, self.lang, self)
+            dlg.exec()
+
+    def stop_expert_training(self):
+        if self.training_thread and self.training_thread.isRunning():
+            self.training_thread.requestInterruption()
+            self.btn_stop_training.setEnabled(False)
+            self.lbl_status.setText(self.tr("Stopping training after the current batch..."))
+            self.append_training_log(self.tr("Stopping training after the current batch..."))
 
     def _route_has_appointed_expert(self, parent_part, child_part):
         get_route = getattr(self.pm, "get_cascade_route", None)
@@ -1672,9 +2060,7 @@ class BlinkLabWidget(QWidget):
             return None
 
         register_route = getattr(self.pm, "register_cascade_route_candidate", None)
-        appoint_expert = getattr(self.pm, "appoint_cascade_route_expert", None)
-        enable_route = getattr(self.pm, "set_cascade_route_enabled", None)
-        if not (callable(register_route) and callable(appoint_expert) and callable(enable_route)):
+        if not callable(register_route):
             return None
 
         focus_source = None
@@ -1684,43 +2070,46 @@ class BlinkLabWidget(QWidget):
                 focus_source = focus_roi.get("source")
 
         if bool(context.get("had_appointed_expert")):
+            register_route(
+                parent_part,
+                child_part,
+                expert_id=expert_id,
+                focus_source=focus_source,
+                registration_source="blink_training",
+                save=True,
+            )
             self.route_registry_refresh_requested.emit()
             return {
                 "parent_part": parent_part,
                 "child_part": child_part,
                 "expert_id": expert_id,
-                "skipped_activation": True,
+                "skipped_appointment": True,
             }
 
         register_route(
             parent_part,
             child_part,
+            expert_id=expert_id,
             focus_source=focus_source,
             registration_source="blink_training",
             save=True,
         )
-
-        appointed = appoint_expert(
-            parent_part,
-            child_part,
-            expert_id=expert_id,
-            save=True,
-        )
-        if not appointed:
-            return None
-        enabled = enable_route(parent_part, child_part, True, save=True)
-        if not enabled:
-            return None
 
         self.route_registry_refresh_requested.emit()
         return {
             "parent_part": parent_part,
             "child_part": child_part,
             "expert_id": expert_id,
+            "candidate_only": True,
         }
 
     def _on_training_result(self, save_path):
         if save_path:
+            self.prog_training.setValue(100)
+            cascade_manager = getattr(self.engine, "cascade_manager", None)
+            loaded_experts = getattr(cascade_manager, "loaded_experts", None)
+            if isinstance(loaded_experts, dict):
+                loaded_experts.clear()
             self.refresh_expert_registry()
             try:
                 linked_route = self._auto_link_training_route(save_path)
@@ -1731,9 +2120,13 @@ class BlinkLabWidget(QWidget):
                 return
 
             if linked_route:
-                if linked_route.get("skipped_activation"):
+                if linked_route.get("skipped_appointment"):
                     message = self.tr(
-                        "Training finished. Route {0} -> {1} already has an appointed expert, so the new model was saved as a candidate and was not activated automatically."
+                        "Training finished. Route {0} -> {1} already has an appointed expert, so the new model was saved as a candidate and was not appointed automatically."
+                    ).format(linked_route["parent_part"], linked_route["child_part"])
+                elif linked_route.get("candidate_only"):
+                    message = self.tr(
+                        "Training finished. Expert was added as a route candidate for {0} -> {1}. Appoint it manually if the report looks better."
                     ).format(linked_route["parent_part"], linked_route["child_part"])
                 else:
                     message = self.tr(
@@ -1752,8 +2145,13 @@ class BlinkLabWidget(QWidget):
         self.lbl_status.setText(self.tr("Training Error: {0}").format(error_msg))
         print(f"Training Exception: {error_msg}")
 
+    def _on_training_cancelled(self):
+        self.lbl_status.setText(self.tr("Training cancelled."))
+        self.append_training_log(self.tr("Training cancelled."))
+
     def _on_training_finished(self):
         self.btn_train_expert.setEnabled(True)
+        self.btn_stop_training.setEnabled(False)
         if self.training_thread:
             self.training_thread.deleteLater()
             self.training_thread = None

@@ -315,7 +315,7 @@ class AntEngine:
 
         return total_error, valid_count
 
-    def validate_epoch(self, dataloader, model):
+    def validate_epoch(self, dataloader, model, stop_callback=None):
         is_sam = isinstance(model, TrainableSAM)
         if is_sam: model.sam_model.eval()
         else: model.eval()
@@ -324,6 +324,8 @@ class AntEngine:
         
         with torch.no_grad():
             for batch_data in dataloader:
+                if callable(stop_callback) and stop_callback():
+                    return None
                 if is_sam:
                     imgs, boxes, masks = batch_data
                     imgs, boxes, masks = imgs.to(self.device), boxes.to(self.device), masks.to(self.device)
@@ -546,13 +548,15 @@ class AntEngine:
             'details_dir': details_dir or os.path.join(reporter.get_experiment_dir(), "val_details"),
         }
 
-    def train_epoch(self, dataloader, model, optimizer, criterion, log_func=None):
+    def train_epoch(self, dataloader, model, optimizer, criterion, log_func=None, stop_callback=None):
         is_sam = isinstance(model, TrainableSAM)
         if is_sam: model.sam_model.train()
         else: model.train()
         total_loss = 0
         
         for i, batch_data in enumerate(dataloader):
+            if callable(stop_callback) and stop_callback():
+                return None
             optimizer.zero_grad()
             if is_sam:
                 imgs, boxes, masks = batch_data
@@ -635,9 +639,21 @@ class AntEngine:
         cascade_attempted_routes = []
         cascade_applied_routes = []
         cascade_applied_count = 0
-        runtime_route_manifest = self.cascade_manager.get_runtime_route_manifest(project_route_manifest)
+        cascade_manager = getattr(self, "cascade_manager", None)
+        get_runtime_route_manifest = getattr(cascade_manager, "get_runtime_route_manifest", None)
+        if callable(get_runtime_route_manifest):
+            runtime_route_manifest = get_runtime_route_manifest(project_route_manifest)
+        else:
+            runtime_route_manifest = project_route_manifest if isinstance(project_route_manifest, dict) else {}
         runtime_route_source = "project" if route_manifest_has_routes(project_route_manifest or {}) else "legacy_global"
-        cascade_routes_ready = self.cascade_manager.routes_ready(runtime_route_manifest)
+        routes_ready = getattr(cascade_manager, "routes_ready", None)
+        if callable(routes_ready):
+            try:
+                cascade_routes_ready = bool(routes_ready(runtime_route_manifest))
+            except TypeError:
+                cascade_routes_ready = bool(routes_ready())
+        else:
+            cascade_routes_ready = False
         if not cascade_routes_ready and runtime_route_source != "project":
             runtime_route_source = "none"
 

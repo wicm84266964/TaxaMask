@@ -120,8 +120,8 @@ def _validate_export(output_dir: str) -> dict[str, Any]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Export a Formica-Flow project as a multimodal JSONL dataset.")
-    parser.add_argument("--project", required=True, help="Input Formica-Flow project JSON.")
+    parser = argparse.ArgumentParser(description="Export a TaxaMask project as a multimodal JSONL dataset.")
+    parser.add_argument("--project", required=True, help="Input TaxaMask project JSON.")
     parser.add_argument("--out", required=True, help="Output dataset directory.")
     parser.add_argument("--crop-size", type=int, default=512, help="Local crop size in pixels.")
     parser.add_argument("--global-size", type=int, default=1024, help="Max global image size in pixels.")

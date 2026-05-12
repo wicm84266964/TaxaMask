@@ -36,7 +36,7 @@ def _count_pdfs(source_dir: str) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run Formica-Flow PDF literature screening without the Qt GUI.")
+    parser = argparse.ArgumentParser(description="Run TaxaMask PDF literature screening without the Qt GUI.")
     parser.add_argument("--pdf-source-dir", required=True, help="Directory containing PDFs.")
     parser.add_argument("--out", required=True, help="Output directory for screening artifacts.")
     parser.add_argument("--config", default="", help="Optional classifier config JSON.")

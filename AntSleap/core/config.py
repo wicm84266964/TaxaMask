@@ -15,6 +15,11 @@ DEFAULT_CONFIG = {
     "last_project_path": "",
     "train_epochs": 5,
     "train_batch": 4,
+    "blink_train_epochs": 5,
+    "blink_train_batch": 2,
+    "blink_train_lr": 1e-3,
+    "blink_train_weight_decay": 1e-4,
+    "blink_train_input_size": 224,
     "train_lr": 1e-4,
     "train_weight_decay": 1e-4, # L2 Regularization (Higher = Less Overfitting)
     "train_from_scratch": False, # If True, resets weights before training

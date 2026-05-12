@@ -4,6 +4,69 @@
 
 ## 📅 更新日志 (Update Log)
 
+### **[2026-05-12] 训练工作流与 Blink 专家路线收口**
+> **本次重点：围绕开源前的真实研究使用流程，补齐主工作台训练控制、Blink 专家训练可调参数、训练报告、专家候选与路由指定机制。`best_expert.pth` 从当前 Blink 专家工作流中退场，改为“版本化候选模型 + 项目路由指定专家”的可审计机制。**
+
+#### **1）主工作台训练控制增强**
+- 标注工作台右侧训练区新增 `Stop Training / 停止训练` 按钮。
+- Locator 和 SAM 训练循环现在会在 epoch / batch 边界响应中断请求，避免训练跑起来后只能等待自然结束。
+- 新增 `Train Locator only (skip SAM) / 仅训练定位器（跳过 SAM）` 选项。
+- 研究流程含义：当基础 SAM 已经足够好，只想继续强化主定位器时，可以跳过 SAM/parts 训练，减少时间和显存占用。
+- 训练日志面板加高，并让右侧工作台面板通过滚动和伸展策略保持可读，不再把日志挤成很小一块。
+
+#### **2）模型设置窗口适配长配置**
+- `Settings -> Model Settings` 改为更矮的初始窗口，并让 Training / Inference / External Backend 标签页内部滚动。
+- 修复 27 寸屏幕仍可能点不到底部保存按钮的问题。
+- 多个下拉框改为 `NoWheelComboBox`，避免鼠标滚轮经过模型选择、导出格式、Blink 入口 ROI 等控件时误切换选项。
+
+#### **3）Blink 专家训练参数开放**
+- Model Settings 新增 Blink 专家训练默认值：
+  - 默认 Blink epochs
+  - 默认 Blink batch size
+  - 默认 Blink learning rate
+  - 默认 Blink weight decay
+  - 默认 Blink input size
+- Blink 工作台训练区同步显示这些默认值，同时仍允许单次训练前临时调整。
+- Blink 输入尺寸开放为稳定预设值 `224 / 384 / 512`，避免任意尺寸导致 ViT patch embedding 或显存行为不可控。
+- `MicroExpertLocator` 支持按输入尺寸初始化；非 224 预训练 ViT 会对 position embedding 做插值适配。
+
+#### **4）Blink 训练过程可见、可中断、可复盘**
+- Blink 工作台新增训练进度条和 `STOP TRAINING / 停止训练` 按钮。
+- Blink 训练线程现在支持日志流、进度回调、停止回调和训练取消状态。
+- Blink 训练结束后生成报告：
+  - `training_log.csv`
+  - loss 曲线图
+  - 验证样本预测框对比图
+  - validation index
+  - summary JSON
+- 报告弹窗展示摘要、指标图和框验证图，帮助用户判断新专家是否值得指定到路由。
+
+#### **5）Blink 新训练不再写入 `best_expert.pth`**
+- Blink 专家训练现在保存为 `expert_vYYYYMMDD_HHMMSS.pth` 形式的版本化候选模型。
+- 单次训练内部仍保存本轮 loss 最好的 checkpoint，但文件名不再暗示它一定优于历史所有专家。
+- 研究流程含义：新训练结果默认只是候选，用户可以结合训练报告和实际自动标注效果决定是否指定到当前路由。
+
+#### **6）路由指定专家成为唯一当前使用入口**
+- Blink 当前路由和 Model Settings 项目路由管理共用同一套 route manifest。
+- 如果当前 `父部位 -> 子部位` 路由已有指定专家，新训练只加入候选列表，不会自动覆盖用户已经认可的专家。
+- Blink 工作台里的 `Appoint to Current Route / 指定到当前路由` 只更新项目路由，不复制、不改名、不覆盖模型文件。
+- Blink 自动草稿现在要求当前父部位 ROI 与子部位之间存在路由指定专家；找不到指定专家时会提示先训练候选或手动指定。
+- Blink 左下角专家树按版本化 `.pth` 文件展示，并通过悬浮提示显示完整 `部位/模型文件名` 和磁盘路径。
+- 已训练专家列表新增 `Edit Note / 编辑备注`，用于给候选专家添加“侧面稳定”“小样本可用”等人工记忆标签。
+- 备注保存到 `weights/experts/expert_notes.json`，只影响 Blink 专家树和项目路由树的展示，不会重命名 `.pth` 文件，也不会改变 route manifest 里的真实 `expert_id`。
+- 删除单个专家文件或整个子部位专家桶时，会同步清理对应备注，避免旧标签继续指向不存在的模型。
+
+#### **7）保留旧项目兼容，但不作为新流程默认**
+- `best_expert.pth` 只保留为旧版全局 cascade manifest 的兼容文件名。
+- 当前 GUI 训练、候选列表和自动标注都不再依赖 `best_expert.pth` 作为默认专家。
+- `LLM_CONTEXT_DETAILED.md` 已同步为“route-appointed expert / 路由指定专家”语义。
+
+#### **8）测试与修复**
+- `tests/test_blink_bridge.py` 覆盖 Blink 入口父子 ROI 记忆、候选专家、路由指定、删除专家桶、训练线程参数、手工提示框取消等路径。
+- `tests/test_locator_scope.py` 增加“新训练候选排到前面但不覆盖既有指定专家”的断言。
+- `tests/test_macro_micro_pipeline.py` 更新为版本化专家文件名和路由指定专家语义。
+- 修正旧测试替身缺少 `_current_part_name()`、旧弹窗 mock 不再匹配主题确认弹窗的问题。
+
 ### **[2026-05-05] 多物种适配链路收口 + 主定位结构 UI + agentic 合约对齐**
 > **本次重点：把“可配置多类群”从 PDF 处理、标注训练、Blink/外部后端说明延伸到大模型自动化合约，并修正文献处理页 API 区在窗口缩放时的布局问题。当前结论是：架构和用户入口已打通，蚂蚁仍是验证最充分示例，其他类群需要通过 profile 小批量试跑完成实证落地。**
 

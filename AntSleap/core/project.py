@@ -432,15 +432,24 @@ class ProjectManager:
             "routes": [self._clone_cascade_route(route) for route in clean_manifest.get("routes", [])],
         }
 
-    def merge_cascade_route_expert_candidates(self, route_entry, supplemental_candidates=None):
+    def merge_cascade_route_expert_candidates(self, route_entry, supplemental_candidates=None, prioritize_supplemental=False):
         route = dict(route_entry or {})
         appointed_expert = get_route_appointed_expert(route)
-        persisted_candidates = get_route_persisted_expert_candidates(route)
-        merged_candidates = merge_expert_candidates(
-            persisted_candidates,
-            supplemental_candidates or [],
-            appointed_expert=appointed_expert,
-        )
+        if prioritize_supplemental:
+            persisted_candidates = route.get("expert_candidates", [])
+            merged_candidates = merge_expert_candidates(
+                supplemental_candidates or [],
+                persisted_candidates,
+                appointed_expert,
+                appointed_expert=None,
+            )
+        else:
+            persisted_candidates = get_route_persisted_expert_candidates(route)
+            merged_candidates = merge_expert_candidates(
+                persisted_candidates,
+                supplemental_candidates or [],
+                appointed_expert=appointed_expert,
+            )
         route["appointed_expert"] = dict(appointed_expert)
         route["expert_candidates"] = [dict(candidate) for candidate in merged_candidates]
         route.update(appointed_expert)
@@ -496,11 +505,20 @@ class ProjectManager:
         parent_part,
         child_part,
         *,
+        expert_id=None,
+        expert_part=None,
+        expert_filename=None,
         focus_source=None,
         registration_source="blink_candidate",
         save=True,
     ):
         existing = self.get_cascade_route(parent_part, child_part) or {}
+        supplemental_candidate = sanitize_expert_reference(
+            expert_part=expert_part,
+            expert_filename=expert_filename,
+            expert_id=expert_id,
+        )
+        supplemental_candidates = [supplemental_candidate] if supplemental_candidate.get("expert_id") else []
         route_payload = {
             "parent": parent_part,
             "child": child_part,
@@ -514,7 +532,11 @@ class ProjectManager:
             "expert_part": existing.get("expert_part"),
             "expert_filename": existing.get("expert_filename"),
         }
-        route_payload = self.merge_cascade_route_expert_candidates(route_payload)
+        route_payload = self.merge_cascade_route_expert_candidates(
+            route_payload,
+            supplemental_candidates,
+            prioritize_supplemental=bool(supplemental_candidates),
+        )
         return self.set_cascade_route(route_payload, save=save)
 
     def appoint_cascade_route_expert(

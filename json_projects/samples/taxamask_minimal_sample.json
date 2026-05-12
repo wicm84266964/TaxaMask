@@ -1,0 +1,22 @@
+{
+    "name": "TaxaMask_Minimal_Sample",
+    "taxonomy": [
+        "Object",
+        "Region",
+        "Structure"
+    ],
+    "locator_scope": [
+        "Object"
+    ],
+    "taxon_label": "Taxon",
+    "template_id": "generic_taxonomy",
+    "blink_context_roi_parents": {},
+    "cascade_routes": {
+        "version": "project-v2",
+        "routes": []
+    },
+    "images": [],
+    "labels": {},
+    "scales": {},
+    "image_provenance": {}
+}

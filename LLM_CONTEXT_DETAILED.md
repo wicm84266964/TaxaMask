@@ -1,8 +1,73 @@
 # TAXAMASK / FORMICA-FLOW SYSTEM TECHNICAL MANUAL (Deep Dive)
 
 > **Target Audience**: Expert LLM Assistants, Senior Developers
-> **Version**: v3.20 (May 5, 2026, locator scope UI + agentic profile contract alignment)
+> **Version**: v3.21 (May 12, 2026, training controls + Blink route-appointed expert workflow)
 > **Purpose**: Up-to-date architectural, workflow, and governance context for implementation and maintenance.
+
+---
+
+## 0) v3.21 Training Controls / Blink Expert Route Workflow (2026-05-12)
+
+### 0.0 Main workbench training controls
+- `MainWindow` now keeps a `self.trainer` reference and exposes `Stop Training`.
+- `TrainingThread` accepts `train_segmenter`; when false, it trains the Locator stage only and skips the SAM/parts stage.
+- Locator and SAM loops now pass `stop_callback=self.isInterruptionRequested` into engine train/validate calls and return early on cancellation.
+- The workbench checkbox label is `Train Locator only (skip SAM)`.
+- The right-side training log console is taller and expands with the workbench inspector scroll area.
+
+### 0.1 Model Settings now includes Blink expert defaults
+- `Settings -> Model Settings -> Training` includes Blink expert defaults:
+  - `blink_epochs`
+  - `blink_batch`
+  - `blink_lr`
+  - `blink_weight_decay`
+  - `blink_input_size`
+- These values are saved through config keys:
+  - `blink_train_epochs`
+  - `blink_train_batch`
+  - `blink_train_lr`
+  - `blink_train_weight_decay`
+  - `blink_train_input_size`
+- The dialog tabs are scrollable so long Training / Inference / External Backend configuration remains reachable on normal screens.
+- Several GUI combo boxes now use `NoWheelComboBox` to avoid accidental wheel-triggered selection changes.
+
+### 0.2 Blink expert training is versioned and report-backed
+- `BlinkExpertTrainer` no longer writes the current run to `best_expert.pth`.
+- New runs save versioned candidates under the child-part bucket:
+  - `weights/experts/{part}/expert_vYYYYMMDD_HHMMSS.pth`
+- Within one run, the best checkpoint by loss is saved to that run's versioned candidate file.
+- Checkpoints now carry metadata such as:
+  - `input_size`
+  - `learning_rate`
+  - `weight_decay`
+  - `epochs`
+  - `batch_size`
+  - `best_loss`
+- `MicroExpertLocator` accepts `image_size`; non-224 pretrained ViT initialization interpolates position embeddings.
+- Supported Blink input-size presets are `224`, `384`, and `512`.
+- Training generates structured artifacts:
+  - `training_log.csv`
+  - `metrics_plot.png`
+  - `validation_samples.png`
+  - `validation_index.csv`
+  - `report_summary.json`
+  - `val_details/`
+- `BlinkExpertTrainingReportDialog` shows summary, metrics, and validation-box previews.
+
+### 0.3 Route appointment is the runtime authority for Blink experts
+- `best_expert.pth` remains only as `LEGACY_EXPERT_FILENAME` for legacy global cascade manifest fallback.
+- Current GUI training, expert registry, and route inference do not use `best_expert.pth` as the default selected expert.
+- `BlinkLabWidget` uses `Appoint to Current Route` rather than an active-expert file operation.
+- If the current parent -> child route already has an appointed expert, new training only registers the new file as a candidate and does not overwrite the appointed expert.
+- `AUTO-ANNOTATE DRAFT` requires a route-appointed expert for the current parent -> target route.
+- `ProjectManager.register_cascade_route_candidate(...)` is candidate-only; `ProjectManager.appoint_cascade_route_expert(...)` is the only path that changes the route-appointed expert.
+
+### 0.4 Blink expert notes are display metadata, not renames
+- `AntSleap/core/expert_notes.py` stores optional human notes in `weights/experts/expert_notes.json`.
+- Notes are keyed by stable `expert_id` values such as `Mandible/expert_v20260512_153000.pth`.
+- The Blink expert registry and `Settings -> Model Settings -> Project Route Management` display notes as `note (expert_id)`.
+- Route payloads, model loading, deletion safety, and appointment logic still use the real `expert_id`; note text must never be treated as a filename or route key.
+- Clearing a note removes its sidecar entry. Deleting an expert file or child-part expert bucket also clears matching note entries.
 
 ---
 
@@ -698,7 +763,7 @@
   - `Head -> Mandible`
   - `Head -> Eye`
 - Blink local annotation now supports two draft-first paths before manual refinement:
-  - **active expert box -> base SAM draft polygon** (`AUTO-ANNOTATE DRAFT`)
+  - **route-appointed expert box -> base SAM draft polygon** (`AUTO-ANNOTATE DRAFT`)
   - **manual prompt box -> base SAM draft polygon** (`Draw Box (For SAM Draft)`)
 - These prompt boxes are intentionally temporary and are not treated as the later loose shrink box.
 
@@ -1167,8 +1232,8 @@ Current Blink session behavior is intentionally split into different layers:
   - cycles masking/view mode only: `NORMAL` → `INSIDE` → `OUTSIDE`
   - this does not save labels and does not generate training data
 - **`AUTO-ANNOTATE DRAFT`**
-  - requires an active expert for the current target part
-  - current target-part expert predicts a local box inside the session ROI
+  - requires a route-appointed expert for the current parent -> target route
+  - the appointed target-part expert predicts a local box inside the session ROI
   - base SAM turns that box into a draft polygon
   - the draft polygon is then refined manually by the researcher
 - **`Draw Box (For SAM Draft)`**
@@ -1199,7 +1264,7 @@ The current system now makes an important distinction:
 
 - **Draft-assist prompt box**
   - used only to obtain an initial draft polygon from base SAM
-  - can come from the active expert path or the manual prompt-box path
+  - can come from the route-appointed expert path or the manual prompt-box path
   - is intentionally **not** persisted as the formal shrink box
 
 - **Trajectory data** (`trajectories[part_name]`)

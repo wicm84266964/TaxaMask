@@ -61,6 +61,7 @@ try:
     from AntSleap.core.dataset import TwoStageDataset
     from AntSleap.core.training_preflight import build_training_preflight, describe_training_preflight, describe_part_coverage, format_size_pair
     from AntSleap.core.cascade_routes import format_expert_label, get_route_persisted_expert_candidates, merge_expert_candidates
+    from AntSleap.core.expert_notes import format_expert_display_name, load_expert_notes
     from AntSleap.core.project_templates import DEFAULT_PROJECT_TEMPLATE_ID, iter_project_templates
     from AntSleap.core.external_backend import BUILTIN_BACKEND_ID, EXTERNAL_BACKEND_ID, ExternalBackendRunner, sanitize_external_backend_config
     from AntSleap.core.part_tree import build_part_tree_groups
@@ -101,6 +102,7 @@ except ImportError:
     from core.dataset import TwoStageDataset
     from core.training_preflight import build_training_preflight, describe_training_preflight, describe_part_coverage, format_size_pair
     from core.cascade_routes import format_expert_label, get_route_persisted_expert_candidates, merge_expert_candidates
+    from core.expert_notes import format_expert_display_name, load_expert_notes
     from core.project_templates import DEFAULT_PROJECT_TEMPLATE_ID, iter_project_templates
     from core.external_backend import BUILTIN_BACKEND_ID, EXTERNAL_BACKEND_ID, ExternalBackendRunner, sanitize_external_backend_config
     from core.part_tree import build_part_tree_groups
@@ -197,6 +199,13 @@ TRANSLATIONS = {
         "Settings": "设置",
         "Epochs:": "训练轮数 (Epochs):",
         "Batch Size:": "批次大小 (Batch Size):",
+        "Blink Expert Training Defaults:": "Blink 专家训练默认值：",
+        "Default Blink Epochs:": "默认 Blink 训练轮数：",
+        "Default Blink Batch Size:": "默认 Blink 批次大小：",
+        "Default Blink Learning Rate:": "默认 Blink 学习率：",
+        "Default Blink Weight Decay:": "默认 Blink 权重衰减：",
+        "Default Blink Input Size:": "默认 Blink 输入尺寸：",
+        "These defaults are shown in Blink Workbench when the app starts or settings are saved. You can still adjust them for a single expert before training.": "这些默认值会在应用启动或保存设置后显示到 Blink 工作台。训练单个专家前仍可在 Blink 工作台临时调整。",
         "Learning Rate:": "学习率 (LR):",
         "Weight Decay (L2 Reg):": "权重衰减 (L2正则):",
         "Main Locator Parts:": "主定位结构：",
@@ -369,6 +378,13 @@ TRANSLATIONS = {
         "Locator training size set to {0}": "定位器训练尺寸设为 {0}",
         "Locator stage skipped: no eligible locator samples.": "定位器阶段已跳过：没有可用的定位器样本。",
         "SAM stage skipped: no eligible SAM/parts samples.": "SAM 阶段已跳过：没有可用的 SAM/部位样本。",
+        "SAM stage skipped: locator-only training is enabled.": "SAM 阶段已跳过：已启用仅训练定位器。",
+        "Training cancelled.": "训练已取消。",
+        "Training already running...": "训练已在进行中...",
+        "Stop Training": "停止训练",
+        "Stopping training after the current epoch/batch...": "将在当前轮次/批次结束后停止训练...",
+        "Train Locator only (skip SAM)": "仅训练定位器（跳过 SAM）",
+        "Skip SAM/parts training for this run. Useful when the base SAM result is already good enough.": "本次训练跳过 SAM/部位分割训练。适合基础 SAM 效果已经足够好的情况。",
         "Training Preflight": "训练预检",
         "Training Readiness Warning": "训练准备警告",
         "Training Confirmation Required": "需要训练确认",
@@ -568,6 +584,13 @@ WORKBENCH_WINDOW_TITLE = "TaxaMask Workbench"
 DEFAULT_PROJECT_NAME = "TaxaMask_Project"
 
 
+class NoWheelComboBox(QComboBox):
+    """Combo box that ignores mouse-wheel changes to avoid accidental selection changes."""
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+
 def _blink_preferred_roi_parts(target_part, remembered_parent_part=None):
     target = str(target_part or "").strip()
     remembered_parent = str(remembered_parent_part or "").strip()
@@ -593,6 +616,7 @@ class TrainingThread(QThread):
         epochs=5,
         batch_size=4,
         lang="en",
+        train_segmenter=True,
     ):
         super().__init__()
         self.engine = engine
@@ -602,13 +626,14 @@ class TrainingThread(QThread):
         self.epochs = epochs
         self.batch_size = batch_size
         self.lang = lang
+        self.train_segmenter = bool(train_segmenter)
         self.locator_train_data = list(self.preflight.get("locator_train_data", []))
         self.locator_val_data = list(self.preflight.get("locator_val_data", []))
         self.parts_train_data = list(self.preflight.get("parts_train_data", []))
         self.parts_val_data = list(self.preflight.get("parts_val_data", []))
         self.locator_resolution = tuple(self.preflight.get("selected_locator_size") or (512, 512))
         self.has_locator_stage = bool(self.locator_train_data and self.locator_val_data)
-        self.has_parts_stage = bool(self.parts_train_data and self.parts_val_data)
+        self.has_parts_stage = bool(self.train_segmenter and self.parts_train_data and self.parts_val_data)
          
     def run(self):
         try:
@@ -647,8 +672,30 @@ class TrainingThread(QThread):
                 self.log_signal.emit("Training Locator...")
                 try:
                     for epoch in range(self.epochs): 
-                        loss_t = self.engine.train_epoch(dl_loc_train, self.engine.locator, self.engine.opt_loc, None)
-                        metrics_v = self.engine.validate_epoch(dl_loc_val, self.engine.locator)
+                        if self.isInterruptionRequested():
+                            self.log_signal.emit(tr("Training cancelled.", self.lang))
+                            return
+                        loss_t = self.engine.train_epoch(
+                            dl_loc_train,
+                            self.engine.locator,
+                            self.engine.opt_loc,
+                            None,
+                            stop_callback=self.isInterruptionRequested,
+                        )
+                        if loss_t is None:
+                            self.log_signal.emit(tr("Training cancelled.", self.lang))
+                            return
+                        if self.isInterruptionRequested():
+                            self.log_signal.emit(tr("Training cancelled.", self.lang))
+                            return
+                        metrics_v = self.engine.validate_epoch(
+                            dl_loc_val,
+                            self.engine.locator,
+                            stop_callback=self.isInterruptionRequested,
+                        )
+                        if metrics_v is None:
+                            self.log_signal.emit(tr("Training cancelled.", self.lang))
+                            return
                         self.engine.history["locator_train"].append(loss_t)
                         self.engine.history["locator_val"].append(metrics_v['loss'])
                         self.engine.history["pixel_error"].append(metrics_v['pixel_error'])
@@ -685,8 +732,30 @@ class TrainingThread(QThread):
 
                 self.log_signal.emit(tr("Training SAM... (BS=1)", self.lang))
                 for epoch in range(self.epochs):
-                    loss_t = self.engine.train_epoch(dl_parts_train, self.engine.parts_model, self.engine.opt_parts, self.engine.crit_parts)
-                    metrics_v = self.engine.validate_epoch(dl_parts_val, self.engine.parts_model)
+                    if self.isInterruptionRequested():
+                        self.log_signal.emit(tr("Training cancelled.", self.lang))
+                        return
+                    loss_t = self.engine.train_epoch(
+                        dl_parts_train,
+                        self.engine.parts_model,
+                        self.engine.opt_parts,
+                        self.engine.crit_parts,
+                        stop_callback=self.isInterruptionRequested,
+                    )
+                    if loss_t is None:
+                        self.log_signal.emit(tr("Training cancelled.", self.lang))
+                        return
+                    if self.isInterruptionRequested():
+                        self.log_signal.emit(tr("Training cancelled.", self.lang))
+                        return
+                    metrics_v = self.engine.validate_epoch(
+                        dl_parts_val,
+                        self.engine.parts_model,
+                        stop_callback=self.isInterruptionRequested,
+                    )
+                    if metrics_v is None:
+                        self.log_signal.emit(tr("Training cancelled.", self.lang))
+                        return
                     self.engine.history["parts_train"].append(loss_t)
                     self.engine.history["parts_val"].append(metrics_v['loss'])
                     self.engine.history["iou"].append(metrics_v['iou'])
@@ -697,8 +766,15 @@ class TrainingThread(QThread):
                     )
                     self.progress_signal.emit(50 + int((epoch+1)/(self.epochs*2) * 100))
             else:
-                self.log_signal.emit(tr("SAM stage skipped: no eligible SAM/parts samples.", self.lang))
+                if self.train_segmenter:
+                    self.log_signal.emit(tr("SAM stage skipped: no eligible SAM/parts samples.", self.lang))
+                else:
+                    self.log_signal.emit(tr("SAM stage skipped: locator-only training is enabled.", self.lang))
                 self.progress_signal.emit(100)
+
+            if self.isInterruptionRequested():
+                self.log_signal.emit(tr("Training cancelled.", self.lang))
+                return
                 
             self.engine.save_weights(save_locator=self.has_locator_stage, save_segmenter=self.has_parts_stage)
             self.log_signal.emit(tr("Generating Report...", self.lang))
@@ -944,7 +1020,7 @@ class TrainingReportDialog(QDialog):
         ctrl_layout.addWidget(self.slider_pct)
         ctrl_layout.addWidget(self.lbl_pct)
 
-        self.validation_filter = QComboBox()
+        self.validation_filter = NoWheelComboBox()
         self.validation_filter.addItem(tr("All validation", self.lang), "all")
         self.validation_filter.addItem(tr("Macro locator", self.lang), "macro_locator")
         self.validation_filter.currentIndexChanged.connect(self.load_gallery)
@@ -1235,8 +1311,9 @@ class RouteManagementPanel(QWidget):
         self.route_tree.header().setStretchLastSection(True)
         self.route_tree.header().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.route_tree.itemSelectionChanged.connect(self.update_action_buttons)
-        self.route_tree.setMinimumHeight(220)
-        layout.addWidget(self.route_tree)
+        self.route_tree.setMinimumHeight(380)
+        self.route_tree.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        layout.addWidget(self.route_tree, 1)
 
         button_row = QHBoxLayout()
         self.btn_refresh_routes = QPushButton()
@@ -1334,6 +1411,10 @@ class RouteManagementPanel(QWidget):
             experts_by_part.setdefault(expert_part, []).append(dict(expert))
         return experts_by_part
 
+    def _expert_notes(self):
+        weights_dir = getattr(getattr(self.owner, "engine", None), "weights_dir", "")
+        return load_expert_notes(weights_dir)
+
     def _route_expert_candidates(self, route_entry, available_experts_by_part):
         route = dict(route_entry or {})
         cascade_manager = getattr(getattr(self.owner, "engine", None), "cascade_manager", None)
@@ -1398,12 +1479,19 @@ class RouteManagementPanel(QWidget):
 
     def _build_route_tree_item(self, parent_item, route_entry, expert_candidates):
         route = dict(route_entry or {})
+        expert_notes = self._expert_notes()
         route_item = QTreeWidgetItem(parent_item)
         self._set_item_payload(route_item, self._make_node_payload("route", route=route))
         route_item.setText(1, str(route.get("child") or ""))
         route_item.setText(2, _yes_no_text(route.get("enabled"), self.lang))
         route_label = format_expert_label(route)
-        route_item.setText(3, route_label if route_label != "Unappointed" else self._ui("Not appointed"))
+        if route_label != "Unappointed":
+            route_note = expert_notes.get(route_label, "")
+            route_display = format_expert_display_name(route_label, route_note)
+            route_item.setText(3, route_display)
+            route_item.setToolTip(3, f"{route_display}\n{route_label}")
+        else:
+            route_item.setText(3, self._ui("Not appointed"))
         route_item.setText(4, self._route_runtime_status(route))
         route_item.setText(5, _translate_route_registration_source(route.get("registration_source"), self.lang))
 
@@ -1418,12 +1506,15 @@ class RouteManagementPanel(QWidget):
         for expert in expert_candidates:
             expert_item = QTreeWidgetItem(route_item)
             self._set_item_payload(expert_item, self._make_node_payload("expert", route=route, expert=expert))
-            expert_label = str(expert.get("expert_id") or "").strip()
+            expert_id = str(expert.get("expert_id") or "").strip()
             is_appointed = bool(expert.get("appointed"))
             is_discoverable = bool(expert.get("is_discoverable"))
             is_persisted = bool(expert.get("is_persisted"))
             file_exists = bool(expert.get("file_exists"))
-            expert_item.setText(3, f"★ {expert_label}" if is_appointed else expert_label)
+            expert_note = expert_notes.get(expert_id, "")
+            expert_label = format_expert_display_name(expert_id, expert_note, appointed=is_appointed)
+            expert_item.setText(3, expert_label)
+            expert_item.setToolTip(3, f"{expert_label}\n{expert_id}")
             if is_appointed:
                 status_text = self._ui("Appointed")
             elif is_persisted and not file_exists:
@@ -1610,15 +1701,16 @@ class ModelSettingsDialog(QDialog):
         self.lang = lang
         self.route_panel = route_panel
         self.setWindowTitle(tr("Model Settings", lang))
-        self.resize(880, 760)
+        self.resize(880, 680)
         layout = QVBoxLayout(self)
         tabs = QTabWidget()
+        tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
         self.locator_scope_checks = []
 
         tab_backend = QWidget()
         form_backend = QVBoxLayout(tab_backend)
         form_backend.addWidget(QLabel(tr("Model Backend:", lang)))
-        self.backend_combo = QComboBox()
+        self.backend_combo = NoWheelComboBox()
         self.backend_combo.addItem(tr("Built-in Locator + SAM", lang), BUILTIN_BACKEND_ID)
         self.backend_combo.addItem(tr("External Script Backend", lang), EXTERNAL_BACKEND_ID)
         backend_index = self.backend_combo.findData(params.get("model_backend", BUILTIN_BACKEND_ID))
@@ -1688,6 +1780,45 @@ class ModelSettingsDialog(QDialog):
         self.spin_wd = QLineEdit(str(params['wd']))
         form_train.addWidget(self.spin_wd)
 
+        blink_group = QGroupBox(tr("Blink Expert Training Defaults:", lang))
+        apply_surface_role(blink_group, SURFACE_ROLE_SUBTLE, "modelSettingsBlinkTrainingPanel")
+        blink_layout = QVBoxLayout(blink_group)
+        blink_layout.setContentsMargins(12, 12, 12, 12)
+        blink_layout.setSpacing(8)
+        blink_note = QLabel(
+            tr(
+                "These defaults are shown in Blink Workbench when the app starts or settings are saved. You can still adjust them for a single expert before training.",
+                lang,
+            )
+        )
+        blink_note.setWordWrap(True)
+        blink_note.setObjectName("mutedLabel")
+        blink_layout.addWidget(blink_note)
+        blink_layout.addWidget(QLabel(tr("Default Blink Epochs:", lang)))
+        self.spin_blink_epochs = QLineEdit(str(params.get("blink_epochs", 5)))
+        blink_layout.addWidget(self.spin_blink_epochs)
+        blink_layout.addWidget(QLabel(tr("Default Blink Batch Size:", lang)))
+        self.spin_blink_batch = QLineEdit(str(params.get("blink_batch", 2)))
+        blink_layout.addWidget(self.spin_blink_batch)
+        blink_layout.addWidget(QLabel(tr("Default Blink Learning Rate:", lang)))
+        self.spin_blink_lr = QLineEdit(str(params.get("blink_lr", 1e-3)))
+        blink_layout.addWidget(self.spin_blink_lr)
+        blink_layout.addWidget(QLabel(tr("Default Blink Weight Decay:", lang)))
+        self.spin_blink_wd = QLineEdit(str(params.get("blink_weight_decay", 1e-4)))
+        blink_layout.addWidget(self.spin_blink_wd)
+        blink_layout.addWidget(QLabel(tr("Default Blink Input Size:", lang)))
+        self.combo_blink_input_size = NoWheelComboBox()
+        for side in [224, 384, 512]:
+            self.combo_blink_input_size.addItem(f"{side} x {side}", side)
+        try:
+            input_side = int(params.get("blink_input_size", 224))
+        except Exception:
+            input_side = 224
+        input_index = self.combo_blink_input_size.findData(input_side)
+        self.combo_blink_input_size.setCurrentIndex(input_index if input_index >= 0 else 0)
+        blink_layout.addWidget(self.combo_blink_input_size)
+        form_train.addWidget(blink_group)
+
         locator_group = QGroupBox(tr("Main Locator Parts:", lang))
         apply_surface_role(locator_group, SURFACE_ROLE_SUBTLE, "modelSettingsLocatorScopePanel")
         locator_layout = QVBoxLayout(locator_group)
@@ -1726,7 +1857,7 @@ class ModelSettingsDialog(QDialog):
         form_train.addWidget(locator_group)
         
         form_train.addStretch()
-        tabs.addTab(tab_train, tr("Training", lang))
+        tabs.addTab(self._make_scroll_tab(tab_train), tr("Training", lang))
         
         tab_inf = QWidget()
         form_inf = QVBoxLayout(tab_inf)
@@ -1765,10 +1896,10 @@ class ModelSettingsDialog(QDialog):
             form_inf.addWidget(route_group, 1)
 
         form_inf.addStretch()
-        tabs.addTab(tab_inf, tr("Inference", lang))
-        tabs.addTab(tab_backend, tr("External Backend", lang))
+        tabs.addTab(self._make_scroll_tab(tab_inf), tr("Inference", lang))
+        tabs.addTab(self._make_scroll_tab(tab_backend), tr("External Backend", lang))
         
-        layout.addWidget(tabs)
+        layout.addWidget(tabs, 1)
         btn_layout = QHBoxLayout()
         btn_save = QPushButton(tr("Save", lang))
         apply_semantic_button_style(btn_save, BUTTON_ROLE_COMMIT)
@@ -1779,7 +1910,17 @@ class ModelSettingsDialog(QDialog):
         btn_layout.addWidget(btn_save)
         btn_layout.addWidget(btn_cancel)
         layout.addLayout(btn_layout)
-        
+
+    def _make_scroll_tab(self, content_widget):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
+        scroll.setWidget(content_widget)
+        return scroll
+
     def _make_command_editor(self, text, placeholder):
         editor = QTextEdit()
         editor.setAcceptRichText(False)
@@ -1853,6 +1994,11 @@ class ModelSettingsDialog(QDialog):
             return {
                 'epochs': int(self.spin_epochs.text()),
                 'batch': int(self.spin_batch.text()),
+                'blink_epochs': int(self.spin_blink_epochs.text()),
+                'blink_batch': int(self.spin_blink_batch.text()),
+                'blink_lr': float(self.spin_blink_lr.text()),
+                'blink_weight_decay': float(self.spin_blink_wd.text()),
+                'blink_input_size': int(self.combo_blink_input_size.currentData() or 224),
                 'lr': float(self.spin_lr.text()),
                 'wd': float(self.spin_wd.text()),
                 'conf': float(self.spin_conf.text()),
@@ -1884,7 +2030,7 @@ class ExportDialog(QDialog):
         self.resize(400, 150)
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(tr("Export Format:", self.lang)))
-        self.format_combo = QComboBox()
+        self.format_combo = NoWheelComboBox()
         self.format_combo.addItem(tr("Multimodal (Crops + JSONL)", self.lang), "multimodal")
         self.format_combo.addItem(tr("COCO (Standard)", self.lang), "coco")
         self.format_combo.addItem(tr("YOLO (Segmentation)", self.lang), "yolo")
@@ -1935,7 +2081,7 @@ class BlinkEntryDialog(QDialog):
 
         target_row = QHBoxLayout()
         target_row.addWidget(QLabel(tr("Target Part:", self.lang)))
-        self.target_combo = QComboBox()
+        self.target_combo = NoWheelComboBox()
         for part in taxonomy:
             self.target_combo.addItem(tr(part, self.lang), part)
         selected_idx = self.target_combo.findData(selected_part)
@@ -1946,7 +2092,7 @@ class BlinkEntryDialog(QDialog):
 
         roi_row = QHBoxLayout()
         roi_row.addWidget(QLabel(tr("Entry ROI:", self.lang)))
-        self.roi_combo = QComboBox()
+        self.roi_combo = NoWheelComboBox()
         for candidate in roi_candidates:
             source_text = tr("Manual Box", self.lang) if candidate.get("source") == "manual" else tr("Auto Box", self.lang)
             label = f"{tr(candidate.get('part', 'ROI'), self.lang)} ({source_text})"
@@ -2024,6 +2170,11 @@ class MainWindow(QMainWindow):
         
         self.train_epochs = self.config.get("train_epochs", 5)
         self.train_batch = self.config.get("train_batch", 4)
+        self.blink_train_epochs = self.config.get("blink_train_epochs", 5)
+        self.blink_train_batch = self.config.get("blink_train_batch", 2)
+        self.blink_train_lr = self.config.get("blink_train_lr", 1e-3)
+        self.blink_train_weight_decay = self.config.get("blink_train_weight_decay", 1e-4)
+        self.blink_train_input_size = self.config.get("blink_train_input_size", 224)
         self.train_lr = self.config.get("train_lr", 1e-4)
         self.train_wd = self.config.get("train_weight_decay", 1e-4)
         self.runtime_device = self.config.get("runtime_device", "auto")
@@ -2044,6 +2195,7 @@ class MainWindow(QMainWindow):
         self.inf_thread = None
         self.sam_thread = None
         self.sam_worker = None
+        self.trainer = None
         self.project_autosave_delay_ms = 3000
         self.project_save_pending = False
         self.project_save_timer = QTimer(self)
@@ -2211,6 +2363,8 @@ class MainWindow(QMainWindow):
         right_scroll.setObjectName("workbenchInspectorScroll")
         right_scroll.setWidgetResizable(True)
         right_scroll.setFrameShape(QFrame.NoFrame)
+        right_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        right_scroll.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Ignored)
         right_panel = QWidget()
         right_panel.setMinimumWidth(320)
         right_panel.setObjectName("workbenchInspectorPanel")
@@ -2226,7 +2380,7 @@ class MainWindow(QMainWindow):
         self.label_taxonomy = QLabel()
         self.label_taxonomy.setObjectName("HeaderLabel")
         metadata_layout.addWidget(self.label_taxonomy)
-        self.genus_combo = QComboBox()
+        self.genus_combo = NoWheelComboBox()
         self.genus_combo.setEditable(True)
         self.genus_combo.setInsertPolicy(QComboBox.InsertAlphabetically)
         self.genus_combo.currentTextChanged.connect(self.on_genus_changed)
@@ -2300,7 +2454,7 @@ class MainWindow(QMainWindow):
         # Locator Selection
         self.lbl_locator = QLabel("Locator:")
         models_form.addWidget(self.lbl_locator, 0, 0)
-        self.combo_locator = QComboBox()
+        self.combo_locator = NoWheelComboBox()
         self.combo_locator.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.combo_locator.activated.connect(self.on_locator_changed)
         self.combo_locator.currentIndexChanged.connect(self.update_model_delete_button_states)
@@ -2315,7 +2469,7 @@ class MainWindow(QMainWindow):
         # Segmenter Selection
         self.lbl_segmenter = QLabel("Segmenter:")
         models_form.addWidget(self.lbl_segmenter, 1, 0)
-        self.combo_segmenter = QComboBox()
+        self.combo_segmenter = NoWheelComboBox()
         self.combo_segmenter.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.combo_segmenter.activated.connect(self.on_segmenter_changed)
         self.combo_segmenter.currentIndexChanged.connect(self.update_model_delete_button_states)
@@ -2345,10 +2499,26 @@ class MainWindow(QMainWindow):
         apply_semantic_button_style(self.btn_batch, BUTTON_ROLE_RUN, "padding: 5px;")
         btns_layout.addWidget(self.btn_batch)
         ai_action_layout.addLayout(btns_layout)
+        self.chk_train_locator_only = QCheckBox()
+        self.chk_train_locator_only.setToolTip(
+            tr(
+                "Skip SAM/parts training for this run. Useful when the base SAM result is already good enough.",
+                self.current_lang,
+            )
+        )
+        ai_action_layout.addWidget(self.chk_train_locator_only)
+
+        train_buttons_layout = QHBoxLayout()
         self.btn_train = QPushButton()
         self.btn_train.clicked.connect(self.run_training)
         apply_semantic_button_style(self.btn_train, BUTTON_ROLE_RUN, "padding: 8px; margin-top: 5px;")
-        ai_action_layout.addWidget(self.btn_train)
+        train_buttons_layout.addWidget(self.btn_train, 3)
+        self.btn_stop_training = QPushButton()
+        self.btn_stop_training.setEnabled(False)
+        self.btn_stop_training.clicked.connect(self.stop_training)
+        apply_semantic_button_style(self.btn_stop_training, BUTTON_ROLE_STOP, "padding: 8px; margin-top: 5px;")
+        train_buttons_layout.addWidget(self.btn_stop_training, 2)
+        ai_action_layout.addLayout(train_buttons_layout)
         self.btn_clear_ai = QPushButton()
         self.btn_clear_ai.clicked.connect(self.clear_ai_labels)
         apply_semantic_button_style(self.btn_clear_ai, BUTTON_ROLE_DESTRUCTIVE, "font-weight: bold; margin-top: 5px;")
@@ -2368,11 +2538,12 @@ class MainWindow(QMainWindow):
         logs_layout.addWidget(self.label_logs)
         self.log_console = QTextEdit()
         self.log_console.setReadOnly(True)
-        self.log_console.setMinimumHeight(100)
+        self.log_console.setMinimumHeight(260)
+        self.log_console.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.log_console.setObjectName("MutedLogConsole")
-        logs_layout.addWidget(self.log_console)
-        right_layout.addWidget(self.logs_panel)
-        right_layout.addStretch()
+        logs_layout.addWidget(self.log_console, 1)
+        right_layout.addWidget(self.logs_panel, 1)
+        right_layout.addStretch(0)
         right_scroll.setWidget(right_panel)
         self.workbench_splitter.addWidget(right_scroll)
         self.workbench_splitter.setStretchFactor(0, 1)
@@ -2381,7 +2552,16 @@ class MainWindow(QMainWindow):
         self.workbench_splitter.setSizes([240, 1080, 320])
 
         self.pdf_widget = PdfProcessingWidget(self.current_lang)
-        self.blink_lab = BlinkLabWidget(self.engine, self.project, self.current_lang)
+        self.blink_lab = BlinkLabWidget(
+            self.engine,
+            self.project,
+            self.current_lang,
+            blink_epochs=self.blink_train_epochs,
+            blink_batch=self.blink_train_batch,
+            blink_lr=self.blink_train_lr,
+            blink_weight_decay=self.blink_train_weight_decay,
+            blink_input_size=self.blink_train_input_size,
+        )
         self.blink_lab.global_labels_updated.connect(self.on_global_labels_updated)
         self.blink_lab.route_registry_refresh_requested.connect(self.refresh_route_table)
         self.route_settings_panel = RouteManagementPanel(self, self.current_lang)
@@ -2718,12 +2898,13 @@ class MainWindow(QMainWindow):
                 return tuple(candidate)
         return None
 
-    def _launch_training_with_preflight(self, preflight, tax, locator_scope):
+    def _launch_training_with_preflight(self, preflight, tax, locator_scope, train_segmenter=True):
         active_preflight = dict(preflight or {})
         self.pending_training_preflight = {
             "preflight": active_preflight,
             "taxonomy": list(tax or []),
             "locator_scope": list(locator_scope or []),
+            "train_segmenter": bool(train_segmenter),
         }
         self.training_retry_requested = False
 
@@ -2736,6 +2917,7 @@ class MainWindow(QMainWindow):
             self.train_epochs,
             self.train_batch,
             lang=self.current_lang,
+            train_segmenter=train_segmenter,
         )
         self.trainer.log_signal.connect(self.log)
         self.trainer.progress_signal.connect(self.progress.setValue)
@@ -2744,6 +2926,8 @@ class MainWindow(QMainWindow):
         self.trainer.error_signal.connect(self._on_training_error)
         self.trainer.finished_signal.connect(self._on_training_finished)
         self.btn_train.setEnabled(False)
+        self.btn_stop_training.setEnabled(True)
+        self.progress.setValue(0)
         self.trainer.start()
 
     def _on_training_success(self):
@@ -2751,6 +2935,7 @@ class MainWindow(QMainWindow):
 
     def _on_training_finished(self):
         self.btn_train.setEnabled(False if self.training_retry_requested else True)
+        self.btn_stop_training.setEnabled(False)
         if not self.training_retry_requested:
             self.refresh_model_list()
 
@@ -2780,6 +2965,7 @@ class MainWindow(QMainWindow):
                         updated_preflight,
                         self.pending_training_preflight.get("taxonomy", []),
                         self.pending_training_preflight.get("locator_scope", []),
+                        self.pending_training_preflight.get("train_segmenter", True),
                     ),
                 )
                 return
@@ -2787,6 +2973,12 @@ class MainWindow(QMainWindow):
         message = str(payload.get("message") or "Training failed.")
         self.log(tr("Training aborted: {0}", self.current_lang).format(message))
         QMessageBox.critical(self, tr("Error", self.current_lang), message)
+
+    def stop_training(self):
+        if self.trainer and self.trainer.isRunning():
+            self.trainer.requestInterruption()
+            self.btn_stop_training.setEnabled(False)
+            self.log(tr("Stopping training after the current epoch/batch...", self.current_lang))
 
     def _apply_segmenter_selection_to_runtime(self, *, log_change=False):
         if not self.engine:
@@ -3177,7 +3369,15 @@ class MainWindow(QMainWindow):
         self.label_model_backend.setText(f"{tr('Model Backend:', self.current_lang)} {backend_label}")
         self.btn_predict.setText(tr("Auto (Current)", self.current_lang))
         self.btn_batch.setText(tr("Batch (All)", self.current_lang))
+        self.chk_train_locator_only.setText(tr("Train Locator only (skip SAM)", self.current_lang))
+        self.chk_train_locator_only.setToolTip(
+            tr(
+                "Skip SAM/parts training for this run. Useful when the base SAM result is already good enough.",
+                self.current_lang,
+            )
+        )
         self.btn_train.setText(tr("Train Models", self.current_lang))
+        self.btn_stop_training.setText(tr("Stop Training", self.current_lang))
         self.btn_clear_ai.setText(tr("Clear AI Labels", self.current_lang))
         self.btn_blink_entry.setText(tr("Open in Blink Workbench", self.current_lang))
         self.label_logs.setText(tr("LOGS", self.current_lang))
@@ -3216,6 +3416,11 @@ class MainWindow(QMainWindow):
     def open_settings(self):
         params = {
             'epochs': self.train_epochs, 'batch': self.train_batch, 'lr': self.train_lr, 'wd': self.train_wd,
+            'blink_epochs': self.blink_train_epochs,
+            'blink_batch': self.blink_train_batch,
+            'blink_lr': self.blink_train_lr,
+            'blink_weight_decay': self.blink_train_weight_decay,
+            'blink_input_size': self.blink_train_input_size,
             'conf': self.inf_conf, 'adapt': self.inf_adapt, 'pad': self.inf_pad, 
             'noise_floor': self.inf_noise_floor, 'poly_epsilon': self.inf_poly_epsilon,
             'model_backend': self.model_backend,
@@ -3234,6 +3439,10 @@ class MainWindow(QMainWindow):
                     route_panel.setParent(self)
                 return
             self.train_epochs, self.train_batch = v['epochs'], v['batch']
+            self.blink_train_epochs, self.blink_train_batch = v['blink_epochs'], v['blink_batch']
+            self.blink_train_lr = v['blink_lr']
+            self.blink_train_weight_decay = v['blink_weight_decay']
+            self.blink_train_input_size = v['blink_input_size']
             self.train_lr, self.train_wd = v['lr'], v['wd']
             self.inf_conf, self.inf_adapt = v['conf'], v['adapt']
             self.inf_pad, self.inf_noise_floor = v['pad'], v['noise_floor']
@@ -3244,6 +3453,11 @@ class MainWindow(QMainWindow):
             
             self.config.set("train_epochs", self.train_epochs)
             self.config.set("train_batch", self.train_batch)
+            self.config.set("blink_train_epochs", self.blink_train_epochs)
+            self.config.set("blink_train_batch", self.blink_train_batch)
+            self.config.set("blink_train_lr", self.blink_train_lr)
+            self.config.set("blink_train_weight_decay", self.blink_train_weight_decay)
+            self.config.set("blink_train_input_size", self.blink_train_input_size)
             self.config.set("train_lr", self.train_lr)
             self.config.set("train_weight_decay", self.train_wd)
             self.config.set("inf_conf_thresh", self.inf_conf)
@@ -3260,6 +3474,15 @@ class MainWindow(QMainWindow):
             # Update SAM Worker epsilon
             if self.sam_worker:
                 self.sam_worker.set_epsilon(self.inf_poly_epsilon)
+
+            if hasattr(self, "blink_lab"):
+                self.blink_lab.set_training_defaults(
+                    self.blink_train_epochs,
+                    self.blink_train_batch,
+                    self.blink_train_lr,
+                    self.blink_train_weight_decay,
+                    self.blink_train_input_size,
+                )
 
             self.log(tr("Settings updated.", self.current_lang))
             self.refresh_ui()
@@ -3340,6 +3563,8 @@ class MainWindow(QMainWindow):
             apply_theme_button_style(self.btn_batch, BUTTON_ROLE_RUN, "padding: 5px;", self.current_theme)
         if hasattr(self, "btn_train"):
             apply_theme_button_style(self.btn_train, BUTTON_ROLE_RUN, "padding: 8px; margin-top: 5px;", self.current_theme)
+        if hasattr(self, "btn_stop_training"):
+            apply_theme_button_style(self.btn_stop_training, BUTTON_ROLE_STOP, "padding: 8px; margin-top: 5px;", self.current_theme)
         if hasattr(self, "btn_clear_ai"):
             apply_theme_button_style(self.btn_clear_ai, BUTTON_ROLE_DESTRUCTIVE, "font-weight: bold; margin-top: 5px;", self.current_theme)
     def add_images(self):
@@ -3696,6 +3921,9 @@ class MainWindow(QMainWindow):
 
     def run_training(self):
         self._flush_pending_project_save()
+        if self.trainer and self.trainer.isRunning():
+            self.log(tr("Training already running...", self.current_lang))
+            return
         if self.model_backend == EXTERNAL_BACKEND_ID:
             self.run_external_training()
             return
@@ -3718,6 +3946,14 @@ class MainWindow(QMainWindow):
         self.log(tr("Training with Taxonomy ({0}): {1}", self.current_lang).format(len(tax), tax))
         self.log(tr("Training with Locator Scope ({0}): {1}", self.current_lang).format(len(locator_scope), locator_scope))
         self.log(describe_training_preflight(preflight))
+        train_segmenter = not self.chk_train_locator_only.isChecked()
+        if not train_segmenter and not preflight.get("locator_samples"):
+            QMessageBox.warning(
+                self,
+                tr("Training", self.current_lang),
+                tr("Locator stage skipped: no eligible locator samples.", self.current_lang),
+            )
+            return
         
         if len(locator_scope) != self.engine.current_num_classes:
             self.engine.rebuild_locator(len(locator_scope), self.train_lr, self.train_wd)
@@ -3725,7 +3961,7 @@ class MainWindow(QMainWindow):
         if not self._show_structured_training_preflight(preflight):
             return
 
-        self._launch_training_with_preflight(preflight, tax, locator_scope)
+        self._launch_training_with_preflight(preflight, tax, locator_scope, train_segmenter=train_segmenter)
 
     def _external_backend_runner(self):
         return ExternalBackendRunner(self.project, self.external_backend_config)
@@ -3737,6 +3973,7 @@ class MainWindow(QMainWindow):
             return
         try:
             self.btn_train.setEnabled(False)
+            self.btn_stop_training.setEnabled(False)
             self.log("External backend training started.")
             summary = self._external_backend_runner().run_prepare_and_train()
             self.log(f"External training complete. Contract: {summary.get('contract_json')}")
@@ -3746,6 +3983,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, tr("Error", self.current_lang), str(exc))
         finally:
             self.btn_train.setEnabled(True)
+            self.btn_stop_training.setEnabled(False)
 
     def show_training_report(self, report_data):
         dlg = TrainingReportDialog(report_data, self, self.current_lang)

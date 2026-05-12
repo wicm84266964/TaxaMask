@@ -1,7 +1,7 @@
 import os
 
 
-DEFAULT_EXPERT_FILENAME = "best_expert.pth"
+LEGACY_EXPERT_FILENAME = "best_expert.pth"
 PROJECT_ROUTE_MANIFEST_VERSION = "project-v2"
 
 
@@ -73,7 +73,7 @@ def sanitize_expert_reference(
     if not clean_part and legacy_name:
         clean_part = legacy_name
 
-    chosen_default_filename = _clean_expert_filename(default_filename) or DEFAULT_EXPERT_FILENAME
+    chosen_default_filename = _clean_expert_filename(default_filename)
     if clean_part and not clean_filename:
         clean_filename = chosen_default_filename
 
@@ -168,9 +168,10 @@ def get_route_persisted_expert_candidates(route_entry, default_filename=None):
     if not isinstance(route_entry, dict):
         return []
 
+    appointed_expert = get_route_appointed_expert(route_entry, default_filename=default_filename)
     return merge_expert_candidates(
         route_entry.get("expert_candidates", []),
-        appointed_expert=get_route_appointed_expert(route_entry, default_filename=default_filename),
+        appointed_expert,
         default_filename=default_filename,
     )
 
@@ -281,7 +282,7 @@ def sanitize_legacy_route_manifest(raw_manifest):
                 expert_filename=item.get("expert_filename"),
                 expert_id=item.get("expert_id"),
                 legacy_expert_name=item.get("expert_name") or child,
-                default_filename=DEFAULT_EXPERT_FILENAME,
+                default_filename=LEGACY_EXPERT_FILENAME,
             )
         )
         clean_routes.append(clean_route)

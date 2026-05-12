@@ -110,10 +110,10 @@ def migrate_project(old_json_path: str, new_json_path: str) -> None:
     print(f"New project saved to: {new_json_path}")
 
 if __name__ == "__main__":
-    # Source: The fixed (but still glitchy) project
-    src = os.path.join(RECOVERED_DIR, "test-head_fixed.json")
-    # Dest: A fresh start
-    dst = os.path.join(RECOVERED_DIR, "test-head_clean.json")
+    # Source: a repaired local project file.
+    src = os.path.join(RECOVERED_DIR, "project_fixed.json")
+    # Dest: a cleaned project file.
+    dst = os.path.join(RECOVERED_DIR, "project_clean.json")
     
     if os.path.exists(src):
         migrate_project(src, dst)

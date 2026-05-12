@@ -21,6 +21,7 @@ from AntSleap.main import ExportDialog, BlinkEntryDialog, ModelSettingsDialog, R
 from AntSleap.ui.blink_lab import BlinkLabWidget
 from AntSleap.ui.cropper import ImageCropper
 from AntSleap.ui.pdf_processing_widget import PdfProcessingWidget
+from AntSleap.core.expert_notes import set_expert_note
 
 
 class DummyPartsModel:
@@ -99,6 +100,12 @@ class DummyProjectManager:
 
     def iter_cascade_routes(self):
         return [dict(route) for route in self.project_data.get("cascade_routes", {}).get("routes", [])]
+
+    def get_cascade_route(self, parent_part, child_part):
+        for route in self.project_data.get("cascade_routes", {}).get("routes", []):
+            if route.get("parent") == parent_part and route.get("child") == child_part:
+                return dict(route)
+        return None
 
     def save_project(self):
         self.save_calls += 1
@@ -309,9 +316,9 @@ class UiLocalizationTests(unittest.TestCase):
                         "expert_filename": "mandible_v2.pth",
                     },
                     {
-                        "expert_id": "Mandible/best_expert.pth",
+                        "expert_id": "Mandible/expert_v20260501_090000.pth",
                         "expert_part": "Mandible",
-                        "expert_filename": "best_expert.pth",
+                        "expert_filename": "expert_v20260501_090000.pth",
                     },
                 ],
                 "expert_id": "Mandible/mandible_v2.pth",
@@ -334,7 +341,7 @@ class UiLocalizationTests(unittest.TestCase):
 
         route_item = panel._find_route_item("Head", "Mandible")
         appointed_item = panel._find_expert_item("Head", "Mandible", "Mandible/mandible_v2.pth")
-        history_item = panel._find_expert_item("Head", "Mandible", "Mandible/best_expert.pth")
+        history_item = panel._find_expert_item("Head", "Mandible", "Mandible/expert_v20260501_090000.pth")
 
         self.assertIsNotNone(route_item)
         self.assertEqual(route_item.childCount(), 2)
@@ -418,17 +425,15 @@ class UiLocalizationTests(unittest.TestCase):
         available_experts = [
             {
                 "expert_part": "Mandible",
-                "expert_filename": "best_expert.pth",
-                "expert_id": "Mandible/best_expert.pth",
-                "path": str(Path(self.temp_dir.name) / "weights" / "experts" / "Mandible" / "best_expert.pth"),
-                "is_active": True,
+                "expert_filename": "expert_v20260501_090000.pth",
+                "expert_id": "Mandible/expert_v20260501_090000.pth",
+                "path": str(Path(self.temp_dir.name) / "weights" / "experts" / "Mandible" / "expert_v20260501_090000.pth"),
             },
             {
                 "expert_part": "Mandible",
                 "expert_filename": "mandible_v2.pth",
                 "expert_id": "Mandible/mandible_v2.pth",
                 "path": str(Path(self.temp_dir.name) / "weights" / "experts" / "Mandible" / "mandible_v2.pth"),
-                "is_active": False,
             },
         ]
         engine = DummyEngine(str(Path(self.temp_dir.name) / "weights"), available_experts=available_experts)
@@ -441,13 +446,13 @@ class UiLocalizationTests(unittest.TestCase):
                 "log": lambda _self, _message: None,
             },
         )()
-        self.pm.appoint_cascade_route_expert("Head", "Mandible", expert_id="Mandible/best_expert.pth", save=False)
+        self.pm.appoint_cascade_route_expert("Head", "Mandible", expert_id="Mandible/expert_v20260501_090000.pth", save=False)
         panel = RouteManagementPanel(owner, lang="en")
         panel.refresh_route_table()
 
         parent_item = panel._find_parent_item("Head")
         route_item = panel._find_route_item("Head", "Mandible")
-        appointed_expert_item = panel._find_expert_item("Head", "Mandible", "Mandible/best_expert.pth")
+        appointed_expert_item = panel._find_expert_item("Head", "Mandible", "Mandible/expert_v20260501_090000.pth")
         available_expert_item = panel._find_expert_item("Head", "Mandible", "Mandible/mandible_v2.pth")
 
         self.assertIsNotNone(parent_item)
@@ -455,7 +460,7 @@ class UiLocalizationTests(unittest.TestCase):
         self.assertIsNotNone(appointed_expert_item)
         self.assertIsNotNone(available_expert_item)
         self.assertEqual(route_item.childCount(), 2)
-        self.assertEqual(appointed_expert_item.text(3), "★ Mandible/best_expert.pth")
+        self.assertEqual(appointed_expert_item.text(3), "★ Mandible/expert_v20260501_090000.pth")
         self.assertEqual(appointed_expert_item.text(4), "Appointed")
         self.assertEqual(available_expert_item.text(4), "Discoverable")
 
@@ -477,9 +482,48 @@ class UiLocalizationTests(unittest.TestCase):
         self.assertFalse(panel.btn_toggle_route.isEnabled())
         self.assertFalse(panel.btn_delete_route.isEnabled())
 
+    def test_route_tree_displays_expert_notes_without_changing_route_payloads(self):
+        available_experts = [
+            {
+                "expert_part": "Mandible",
+                "expert_filename": "expert_v20260501_090000.pth",
+                "expert_id": "Mandible/expert_v20260501_090000.pth",
+                "path": str(Path(self.temp_dir.name) / "weights" / "experts" / "Mandible" / "expert_v20260501_090000.pth"),
+            },
+            {
+                "expert_part": "Mandible",
+                "expert_filename": "expert_v20260503_120000.pth",
+                "expert_id": "Mandible/expert_v20260503_120000.pth",
+                "path": str(Path(self.temp_dir.name) / "weights" / "experts" / "Mandible" / "expert_v20260503_120000.pth"),
+            },
+        ]
+        engine = DummyEngine(str(Path(self.temp_dir.name) / "weights"), available_experts=available_experts)
+        set_expert_note(engine.weights_dir, "Mandible/expert_v20260501_090000.pth", "side view stable")
+        owner = type(
+            "Owner",
+            (),
+            {
+                "project": self.pm,
+                "engine": engine,
+                "log": lambda _self, _message: None,
+            },
+        )()
+        self.pm.appoint_cascade_route_expert("Head", "Mandible", expert_id="Mandible/expert_v20260501_090000.pth", save=False)
+        panel = RouteManagementPanel(owner, lang="en")
+        panel.refresh_route_table()
+
+        route_item = panel._find_route_item("Head", "Mandible")
+        appointed_expert_item = panel._find_expert_item("Head", "Mandible", "Mandible/expert_v20260501_090000.pth")
+        available_expert_item = panel._find_expert_item("Head", "Mandible", "Mandible/expert_v20260503_120000.pth")
+
+        self.assertEqual(route_item.text(3), "side view stable (Mandible/expert_v20260501_090000.pth)")
+        self.assertEqual(appointed_expert_item.text(3), "★ side view stable (Mandible/expert_v20260501_090000.pth)")
+        self.assertEqual(available_expert_item.text(3), "Mandible/expert_v20260503_120000.pth")
+
+        panel.route_tree.setCurrentItem(available_expert_item)
         panel.appoint_selected_route_expert()
-        route = self.pm.iter_cascade_routes()[0]
-        self.assertEqual(route.get("expert_id"), "Mandible/mandible_v2.pth")
+        route = self.pm.get_cascade_route("Head", "Mandible")
+        self.assertEqual(route.get("expert_id"), "Mandible/expert_v20260503_120000.pth")
 
     def test_training_dialogs_use_chinese_runtime_copy(self):
         preflight = {

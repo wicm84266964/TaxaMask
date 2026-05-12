@@ -39,7 +39,7 @@ def _pdf_files(source_dir: str) -> list[str]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run Formica-Flow triptych figure extraction without the Qt GUI.")
+    parser = argparse.ArgumentParser(description="Run TaxaMask figure extraction without the Qt GUI.")
     parser.add_argument("--pdf-source-dir", required=True, help="Directory containing PDFs.")
     parser.add_argument("--db", required=True, help="Output SQLite DB path.")
     parser.add_argument("--multimodal-config", default="", help="Optional multimodal validator config JSON.")

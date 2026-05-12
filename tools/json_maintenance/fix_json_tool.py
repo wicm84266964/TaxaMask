@@ -58,8 +58,7 @@ def fix_json(file_path):
 
 if __name__ == "__main__":
     files = [
-        os.path.join(ROOT_DIR, "test-head.json"),
-        os.path.join(ROOT_DIR, "Formica_Seg.json"),
+        os.path.join(ROOT_DIR, "TaxaMask_Project.json"),
     ]
     for f in files:
         if os.path.exists(f):

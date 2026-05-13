@@ -24,7 +24,7 @@ from .projection import CoordinateMapper
 from .taxonomy_defaults import DEFAULT_LOCATOR_SCOPE, DEFAULT_PROJECT_TAXONOMY, sanitize_locator_scope, sanitize_taxonomy
 from .training_preflight import format_size_pair
 from .cascade_routes import route_manifest_has_routes
-from .runtime_device import resolve_torch_device
+from .runtime_device import normalize_device_preference, resolve_torch_device
 
 class DiceLoss(nn.Module):
     def __init__(self, smooth=1):
@@ -94,6 +94,7 @@ class FocalMSELoss(nn.Module):
 
 class AntEngine:
     def __init__(self, learning_rate=1e-4, weight_decay=1e-4, num_classes=None, device="auto"):
+        self.device_preference = normalize_device_preference(device)
         self.device = resolve_torch_device(device)
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self.weights_dir = os.path.join(base_dir, "weights")
@@ -132,6 +133,29 @@ class AntEngine:
         
         self.history = {"locator": [], "parts": []}
         self.load_weights()
+
+    def set_device_preference(self, device_preference):
+        clean_preference = normalize_device_preference(device_preference)
+        new_device = resolve_torch_device(clean_preference)
+        if clean_preference == self.device_preference and new_device == self.device:
+            return False
+
+        self.device_preference = clean_preference
+        self.device = new_device
+        self.locator.to(self.device)
+        self.parts_model.to(self.device)
+        self.parts_model.device = self.device
+        self.base_sam_predictor = None
+
+        self.opt_loc = optim.Adam(self.locator.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
+        trainable_params = [p for p in self.parts_model.parameters() if p.requires_grad]
+        self.opt_parts = optim.Adam(trainable_params, lr=self.learning_rate, weight_decay=self.weight_decay)
+        if getattr(self, "cascade_manager", None) is not None:
+            self.cascade_manager.device = self.device
+            self.cascade_manager.loaded_experts.clear()
+        if self.device.type != "cuda" and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return True
 
     def rebuild_locator(self, num_classes, learning_rate=1e-4, weight_decay=1e-4):
         if num_classes == self.current_num_classes: return

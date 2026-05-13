@@ -65,13 +65,7 @@ The internal package is still named `AntSleap` for runtime stability and histori
 TaxaMask is currently prepared as a source-based research application.
 
 1. Create and activate a Python environment.
-2. Install the base dependencies:
-
-```bash
-pip install -r requirements.txt
-```
-
-3. Install a PyTorch variant for your machine:
+2. Install a PyTorch variant for your machine first:
 
 ```bash
 pip install -r requirements-torch-cpu.txt
@@ -83,6 +77,12 @@ or, for CUDA 12.1:
 pip install -r requirements-torch-cu121.txt
 ```
 
+3. Install the base dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
 4. Download the SAM base checkpoint if you want SAM-assisted annotation, and place it under:
 
 ```text
@@ -90,6 +90,8 @@ AntSleap/weights/sam_b.pt
 ```
 
 Model weights are not included in the repository.
+
+Windows is the primary validated desktop environment at this stage. Linux and macOS should be treated as experimental until real-machine validation covers Qt startup, PyTorch, Poppler/PDF tooling, and file-open behavior. macOS can use CPU mode for small tests; Apple Silicon MPS acceleration is not yet exposed as a runtime device option.
 
 ## Run the GUI
 

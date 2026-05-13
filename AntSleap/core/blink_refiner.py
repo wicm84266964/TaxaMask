@@ -1,6 +1,7 @@
 import numpy as np
 import cv2
 from .projection import CoordinateMapper
+from .runtime_device import normalize_device_preference, resolve_torch_device
 
 class BlinkRefiner:
     """
@@ -9,9 +10,10 @@ class BlinkRefiner:
     从初始松散框生成向物理极限逼近的渐进式收缩轨迹。
     这是生成 Blink 算法训练数据集的核心。
     """
-    def __init__(self, sam_model, device='cuda'):
+    def __init__(self, sam_model, device='auto'):
         self.sam = sam_model
-        self.device = device
+        self.device_preference = normalize_device_preference(device)
+        self.device = resolve_torch_device(self.device_preference)
 
     def _resolve_image_size(self, image_input):
         """统一解析输入图像尺寸，返回 (width, height)。"""

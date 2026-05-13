@@ -683,12 +683,21 @@ class UiPolishScopeTests(unittest.TestCase):
                 "pad": 0.4,
                 "noise_floor": 0.15,
                 "poly_epsilon": 2.0,
+                "runtime_device": "cpu",
                 "taxonomy": ["Leaf", "Flower", "Fruit", "Stamen"],
                 "locator_scope": ["Leaf", "Flower"],
             },
             lang="en",
         )
         try:
+            runtime_group = dialog.findChild(QWidget, "modelSettingsRuntimeDevicePanel")
+            self.assertIsNotNone(runtime_group)
+            device_combo = runtime_group.findChild(main_module.QComboBox)
+            self.assertIsNotNone(device_combo)
+            self.assertEqual(device_combo.currentData(), "cpu")
+            device_combo.setCurrentIndex(device_combo.findData("cuda"))
+            self.assertEqual(dialog.get_values()["runtime_device"], "cuda")
+
             locator_group = dialog.findChild(QWidget, "modelSettingsLocatorScopePanel")
             self.assertIsNotNone(locator_group)
             checks = {check.text(): check for check in locator_group.findChildren(main_module.QCheckBox)}

@@ -58,14 +58,23 @@ class _FakeWHCriterion:
 class _FakeLocatorModel:
     def __init__(self):
         self.loaded_state = None
+        self.last_device = None
+        self.param = torch.nn.Parameter(torch.zeros(1))
 
     def state_dict(self):
         return {"outc.conv.weight": torch.zeros((1, 1, 1, 1), dtype=torch.float32)}
+
+    def parameters(self):
+        return [self.param]
 
     def load_state_dict(self, state, strict=False):
         self.loaded_state = dict(state)
 
     def eval(self):
+        return self
+
+    def to(self, device):
+        self.last_device = torch.device(device)
         return self
 
     def __call__(self, _tensor):
@@ -94,6 +103,23 @@ class _FakePartsModel:
     def __init__(self):
         self.sam_model = self._FakeSAMModel()
         self.ultralytics_sam = self._FakePredictor()
+        self.device = None
+        self.last_device = None
+        self.param = torch.nn.Parameter(torch.zeros(1))
+
+    def parameters(self):
+        return [self.param]
+
+    def to(self, device):
+        self.device = torch.device(device)
+        self.last_device = torch.device(device)
+        return self
+
+
+class _FakeCascadeManagerWithCache:
+    def __init__(self):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.loaded_experts = {"cached": object()}
 
 
 class _DeterministicLocatorModel(torch.nn.Module):
@@ -111,6 +137,31 @@ class _DeterministicLocatorModel(torch.nn.Module):
 
 
 class LocatorResolutionMetadataTests(unittest.TestCase):
+    def test_runtime_device_switch_moves_builtin_models_and_clears_cascade_cache(self):
+        engine = AntEngine.__new__(AntEngine)
+        engine.device_preference = "auto"
+        engine.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        engine.learning_rate = 1e-4
+        engine.weight_decay = 1e-4
+        engine.locator = _FakeLocatorModel()
+        engine.parts_model = _FakePartsModel()
+        engine.opt_loc = torch.optim.SGD([torch.nn.Parameter(torch.zeros(1))], lr=0.1)
+        engine.opt_parts = torch.optim.SGD([torch.nn.Parameter(torch.zeros(1))], lr=0.1)
+        engine.base_sam_predictor = object()
+        engine.cascade_manager = _FakeCascadeManagerWithCache()
+
+        changed = engine.set_device_preference("cpu")
+
+        self.assertTrue(changed)
+        self.assertEqual(engine.device_preference, "cpu")
+        self.assertEqual(engine.device.type, "cpu")
+        self.assertEqual(engine.locator.last_device.type, "cpu")
+        self.assertEqual(engine.parts_model.last_device.type, "cpu")
+        self.assertEqual(engine.parts_model.device.type, "cpu")
+        self.assertIsNone(engine.base_sam_predictor)
+        self.assertEqual(engine.cascade_manager.device.type, "cpu")
+        self.assertEqual(engine.cascade_manager.loaded_experts, {})
+
     def test_save_locator_persists_resolution_metadata(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             engine = AntEngine.__new__(AntEngine)

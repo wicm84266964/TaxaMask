@@ -65,6 +65,7 @@ try:
     from AntSleap.core.project_templates import DEFAULT_PROJECT_TEMPLATE_ID, iter_project_templates
     from AntSleap.core.external_backend import BUILTIN_BACKEND_ID, EXTERNAL_BACKEND_ID, ExternalBackendRunner, sanitize_external_backend_config
     from AntSleap.core.part_tree import build_part_tree_groups
+    from AntSleap.core.runtime_device import normalize_device_preference, resolve_torch_device
 except ImportError:
     from core.project import ProjectManager
     from core.database import MultiModalDB
@@ -106,6 +107,7 @@ except ImportError:
     from core.project_templates import DEFAULT_PROJECT_TEMPLATE_ID, iter_project_templates
     from core.external_backend import BUILTIN_BACKEND_ID, EXTERNAL_BACKEND_ID, ExternalBackendRunner, sanitize_external_backend_config
     from core.part_tree import build_part_tree_groups
+    from core.runtime_device import normalize_device_preference, resolve_torch_device
 
 from torch.utils.data import DataLoader
 
@@ -175,6 +177,12 @@ TRANSLATIONS = {
         "Model Backend:": "模型后端：",
         "Built-in Locator + SAM": "内置 Locator + SAM",
         "External Script Backend": "外部脚本后端",
+        "Runtime Device:": "运行设备：",
+        "Auto (CUDA if available)": "自动（有 CUDA 则使用）",
+        "CPU only": "仅 CPU",
+        "CUDA GPU": "CUDA 显卡",
+        "Controls built-in Locator/SAM/Blink training and inference. External backends use their own command environment. CPU can run small tests, but CUDA is recommended for real training.": "控制内置 Locator/SAM/Blink 的训练和推理。外部后端使用自己的命令环境。CPU 可用于小规模测试，正式训练建议使用 CUDA。",
+        "Runtime device resolved to: {0}": "运行设备已解析为：{0}",
     "External Backend": "外部后端",
     "Backend ID:": "后端 ID：",
     "Display Name:": "显示名称：",
@@ -1780,6 +1788,30 @@ class ModelSettingsDialog(QDialog):
         self.spin_wd = QLineEdit(str(params['wd']))
         form_train.addWidget(self.spin_wd)
 
+        device_group = QGroupBox(tr("Runtime Device:", lang))
+        apply_surface_role(device_group, SURFACE_ROLE_SUBTLE, "modelSettingsRuntimeDevicePanel")
+        device_layout = QVBoxLayout(device_group)
+        device_layout.setContentsMargins(12, 12, 12, 12)
+        device_layout.setSpacing(8)
+        device_note = QLabel(
+            tr(
+                "Controls built-in Locator/SAM/Blink training and inference. External backends use their own command environment. CPU can run small tests, but CUDA is recommended for real training.",
+                lang,
+            )
+        )
+        device_note.setWordWrap(True)
+        device_note.setObjectName("mutedLabel")
+        device_layout.addWidget(device_note)
+        self.combo_runtime_device = NoWheelComboBox()
+        self.combo_runtime_device.addItem(tr("Auto (CUDA if available)", lang), "auto")
+        self.combo_runtime_device.addItem(tr("CPU only", lang), "cpu")
+        self.combo_runtime_device.addItem(tr("CUDA GPU", lang), "cuda")
+        runtime_device = normalize_device_preference(params.get("runtime_device", "auto"))
+        runtime_index = self.combo_runtime_device.findData(runtime_device)
+        self.combo_runtime_device.setCurrentIndex(runtime_index if runtime_index >= 0 else 0)
+        device_layout.addWidget(self.combo_runtime_device)
+        form_train.addWidget(device_group)
+
         blink_group = QGroupBox(tr("Blink Expert Training Defaults:", lang))
         apply_surface_role(blink_group, SURFACE_ROLE_SUBTLE, "modelSettingsBlinkTrainingPanel")
         blink_layout = QVBoxLayout(blink_group)
@@ -2007,6 +2039,7 @@ class ModelSettingsDialog(QDialog):
                 'noise_floor': float(self.spin_noise.text()),
                 'poly_epsilon': float(self.spin_poly.text()),
                 'locator_scope': self._selected_locator_scope(),
+                'runtime_device': self.combo_runtime_device.currentData() or "auto",
                 'model_backend': self.backend_combo.currentData() or BUILTIN_BACKEND_ID,
                 'external_backend': sanitize_external_backend_config(
                     {
@@ -2177,7 +2210,7 @@ class MainWindow(QMainWindow):
         self.blink_train_input_size = self.config.get("blink_train_input_size", 224)
         self.train_lr = self.config.get("train_lr", 1e-4)
         self.train_wd = self.config.get("train_weight_decay", 1e-4)
-        self.runtime_device = self.config.get("runtime_device", "auto")
+        self.runtime_device = normalize_device_preference(self.config.get("runtime_device", "auto"))
         self.model_backend = self.config.get("model_backend", BUILTIN_BACKEND_ID)
         self.external_backend_config = sanitize_external_backend_config(self.config.get("external_backend", {}))
         self.inf_conf = self.config.get("inf_conf_thresh", 0.1)
@@ -2561,6 +2594,7 @@ class MainWindow(QMainWindow):
             blink_lr=self.blink_train_lr,
             blink_weight_decay=self.blink_train_weight_decay,
             blink_input_size=self.blink_train_input_size,
+            runtime_device=self.runtime_device,
         )
         self.blink_lab.global_labels_updated.connect(self.on_global_labels_updated)
         self.blink_lab.route_registry_refresh_requested.connect(self.refresh_route_table)
@@ -3425,6 +3459,7 @@ class MainWindow(QMainWindow):
             'noise_floor': self.inf_noise_floor, 'poly_epsilon': self.inf_poly_epsilon,
             'model_backend': self.model_backend,
             'external_backend': self.external_backend_config,
+            'runtime_device': self.runtime_device,
             'taxonomy': self.project.project_data.get("taxonomy", []),
             'locator_scope': self.project.get_locator_scope(),
         }
@@ -3447,6 +3482,8 @@ class MainWindow(QMainWindow):
             self.inf_conf, self.inf_adapt = v['conf'], v['adapt']
             self.inf_pad, self.inf_noise_floor = v['pad'], v['noise_floor']
             self.inf_poly_epsilon = v['poly_epsilon']
+            old_runtime_device = self.runtime_device
+            self.runtime_device = normalize_device_preference(v.get("runtime_device", "auto"))
             self.model_backend = v.get("model_backend", BUILTIN_BACKEND_ID)
             self.external_backend_config = sanitize_external_backend_config(v.get("external_backend", {}))
             self.project.set_locator_scope(v.get("locator_scope", []), save=False)
@@ -3465,15 +3502,26 @@ class MainWindow(QMainWindow):
             self.config.set("inf_box_pad", self.inf_pad)
             self.config.set("inf_noise_floor", self.inf_noise_floor)
             self.config.set("inf_poly_epsilon", self.inf_poly_epsilon)
+            self.config.set("runtime_device", self.runtime_device)
             self.config.set("model_backend", self.model_backend)
             self.config.set("external_backend", self.external_backend_config)
             self.project.save_project()
             
             self.engine.update_hyperparameters(self.train_lr, self.train_wd)
+            if self.engine.set_device_preference(self.runtime_device):
+                self.log(tr("Runtime device resolved to: {0}", self.current_lang).format(str(self.engine.device)))
             
             # Update SAM Worker epsilon
             if self.sam_worker:
                 self.sam_worker.set_epsilon(self.inf_poly_epsilon)
+                if old_runtime_device != self.runtime_device:
+                    self.sam_worker.device_preference = self.runtime_device
+                    self.sam_worker.reload_base_model()
+                    selected_segmenter = self._selected_segmenter_timestamp()
+                    if selected_segmenter:
+                        weights_path = self._segmenter_model_path(selected_segmenter)
+                        if weights_path:
+                            self.sam_worker.load_decoder_weights(weights_path)
 
             if hasattr(self, "blink_lab"):
                 self.blink_lab.set_training_defaults(
@@ -3482,6 +3530,7 @@ class MainWindow(QMainWindow):
                     self.blink_train_lr,
                     self.blink_train_weight_decay,
                     self.blink_train_input_size,
+                    self.runtime_device,
                 )
 
             self.log(tr("Settings updated.", self.current_lang))
@@ -4196,6 +4245,9 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, tr("Export", self.current_lang), tr("Exported {0} samples.", self.current_lang).format(c))
 
     def init_sam(self):
+        if self.sam_thread and self.sam_thread.isRunning():
+            self.sam_thread.quit()
+            self.sam_thread.wait(1000)
         mp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "weights", "sam_b.pt")
         self.sam_thread = QThread()
         # Pass current epsilon to worker

@@ -16,6 +16,12 @@
 - The right-side training log console is taller and expands with the workbench inspector scroll area.
 
 ### 0.1 Model Settings now includes Blink expert defaults
+- `Settings -> Model Settings -> Training` includes `Runtime Device` with `auto|cpu|cuda`.
+- The runtime device preference is saved as config key `runtime_device`.
+- `AntEngine.set_device_preference(...)` moves built-in Locator/SAM runtime modules to the resolved device, rebuilds optimizers, clears the base SAM predictor cache, and clears loaded cascade experts.
+- `BlinkLabWidget` receives the same runtime device preference and passes it into both Blink auto-shrink trajectory generation (`BlinkRefiner`) and expert training (`BlinkTrainingThread -> BlinkExpertTrainer`).
+- CPU mode is intended for installation validation, annotation-centric workflows, and small smoke tests. CUDA remains the practical recommendation for real Locator/SAM/Blink training.
+- Platform status: Windows is the only fully exercised desktop environment in this workspace so far. Linux/macOS should be documented as experimental until real-machine validation covers Qt startup, PyTorch runtime, Poppler/PDF tooling, and file-open behavior. macOS does not currently expose an MPS runtime option.
 - `Settings -> Model Settings -> Training` includes Blink expert defaults:
   - `blink_epochs`
   - `blink_batch`
@@ -1071,9 +1077,10 @@ python AntSleap/main.py
 
 ## 8) Dependency Notes
 
-- PDF extraction requires Poppler binaries under `external_tools/poppler/`.
+- PDF extraction requires Poppler binaries. The bundled/local Windows path convention is `external_tools/poppler/`; Linux and macOS users may prefer system package managers and should verify the Poppler executables are discoverable.
 - Segmentation relies on SAM base weights (`sam_b.pt`) under `AntSleap/weights/`.
-- Conda environment recommendation for runtime: `antsleap`.
+- Conda environment recommendation for the current Windows validation workspace: `antsleap`.
+- Install a platform-appropriate PyTorch build before the rest of the dependencies when possible; CUDA and CPU wheels are split into `requirements-torch-cu121.txt` and `requirements-torch-cpu.txt`.
 
 ---
 

@@ -18,6 +18,10 @@
 - `Settings -> Model Settings` 改为更矮的初始窗口，并让 Training / Inference / External Backend 标签页内部滚动。
 - 修复 27 寸屏幕仍可能点不到底部保存按钮的问题。
 - 多个下拉框改为 `NoWheelComboBox`，避免鼠标滚轮经过模型选择、导出格式、Blink 入口 ROI 等控件时误切换选项。
+- Training 标签页新增 `Runtime Device / 运行设备`，可选择 `Auto / CPU only / CUDA GPU`。
+- 该选项现在统一影响内置 Locator、SAM、Blink 专家训练与推理；CPU 路径用于无显卡机器的小规模验证和标注整理，正式训练仍建议 CUDA。
+- 严格复核时补齐 Blink 自动收缩轨迹生成的设备链路，旧的 `BlinkRefiner` 默认 `cuda` 已改为跟随当前运行设备设置。
+- 复核并记录当前跨平台状态：Windows 是当前验证最充分的平台；Linux / macOS 具备一定代码基础，但在开源说明中应先标为实验性支持，后续需要实机验证 Qt、PyTorch、Poppler 和文件打开行为。
 
 #### **3）Blink 专家训练参数开放**
 - Model Settings 新增 Blink 专家训练默认值：

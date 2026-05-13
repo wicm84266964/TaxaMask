@@ -658,8 +658,11 @@ class BlinkBridgeTests(unittest.TestCase):
         module = types.ModuleType("core.blink_refiner")
 
         class FakeBlinkRefiner:
-            def __init__(self, sam_model=None):
+            last_device = None
+
+            def __init__(self, sam_model=None, device="auto"):
                 self.sam_model = sam_model
+                FakeBlinkRefiner.last_device = device
 
             def generate_shrink_trajectory(self, image_input, initial_box, golden_poly):
                 return [
@@ -695,6 +698,7 @@ class BlinkBridgeTests(unittest.TestCase):
             self.assertEqual(len(saved_frames), 2)
             self.assertIsInstance(parent_context, dict)
             self.assertEqual(parent_context.get("parent_part"), "Head")
+            self.assertEqual(FakeBlinkRefiner.last_device, "auto")
         finally:
             if previous_module is not None:
                 sys.modules["core.blink_refiner"] = previous_module
@@ -929,6 +933,7 @@ class BlinkBridgeTests(unittest.TestCase):
             learning_rate=0.002,
             weight_decay=0.0003,
             input_size=384,
+            device="cpu",
         )
         with patch("AntSleap.core.blink_trainer.BlinkExpertTrainer", FakeTrainer):
             thread.start()
@@ -937,11 +942,12 @@ class BlinkBridgeTests(unittest.TestCase):
 
         self.assertEqual(
             set(trainer_kwargs),
-            {"project_path", "part_name", "parent_part", "learning_rate", "weight_decay", "input_size"},
+            {"project_path", "part_name", "parent_part", "learning_rate", "weight_decay", "input_size", "device"},
         )
         self.assertEqual(trainer_kwargs.get("learning_rate"), 0.002)
         self.assertEqual(trainer_kwargs.get("weight_decay"), 0.0003)
         self.assertEqual(trainer_kwargs.get("input_size"), 384)
+        self.assertEqual(trainer_kwargs.get("device"), "cpu")
 
     def test_training_success_registers_candidate_without_enabling_current_route(self):
         widget = BlinkLabWidget(self.engine, self.pm)

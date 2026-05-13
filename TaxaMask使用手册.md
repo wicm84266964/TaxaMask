@@ -90,6 +90,18 @@ TaxaMask 是一个**综合科研工作台**，里面有两条大主线：
 
 ## 3. 首次启动、语言与界面总结构
 
+### 3.0 当前平台支持状态
+
+当前版本主要在 Windows 环境下开发和验证。程序代码已经尽量使用可跨平台的 Python 路径处理方式，也提供了 `CPU only` 运行设备选项，因此 Linux 和 macOS 可以作为后续适配目标；但在正式开源说明中，应把 Linux / macOS 视为**尚未完整实机验收的实验性支持**。
+
+这对使用者的实际含义是：
+
+- Windows：当前最推荐、验证最充分的运行环境。
+- Linux：理论上适合服务器或工作站部署，尤其是 NVIDIA CUDA 环境，但仍需要按实际机器验证 GUI、PyTorch、Poppler 和显卡驱动。
+- macOS：可以尝试 CPU 路径做项目管理、标注整理和小规模测试；当前版本还没有把 Apple Silicon 的 MPS 加速作为正式支持设备。
+
+如果你只是整理项目、人工标注、检查导出或做很小的数据测试，`CPU only` 可以降低硬件门槛。如果你要训练 Locator、SAM 或 Blink 专家，特别是大量 4K 图像或 `384 / 512` Blink 输入尺寸，仍建议使用 CUDA 版 PyTorch 和 NVIDIA 显卡。
+
 ### 3.1 启动后你会看到什么
 
 主界面由三个主要标签页组成：
@@ -1157,12 +1169,25 @@ Blink 的阅读逻辑是：先通过较大的 ROI 进入局部区域，再在局
 
 #### 训练参数常见项
 
+- Runtime Device
 - Epochs
 - Batch Size
 - Learning Rate
 - Weight Decay
 - Main Locator Parts / 主定位结构
 - Blink Expert Training Defaults / Blink 专家训练默认值
+
+#### Runtime Device / 运行设备
+
+这里控制内置 `Locator / SAM / Blink` 的训练和推理使用什么计算设备：
+
+- `Auto (CUDA if available)`：默认推荐。有 NVIDIA CUDA 环境时用显卡，否则退到 CPU。
+- `CPU only`：强制使用 CPU，适合无显卡机器上的安装验证、小规模流程测试或只做标注整理。
+- `CUDA GPU`：要求使用 CUDA；如果当前 PyTorch 环境识别不到 CUDA，程序会退到 CPU，但正式训练前应先检查安装环境。
+
+CPU 路径的意义是让项目不把用户群体限制死，但不要把它理解成正式训练推荐配置。Locator、SAM 和 Blink 专家都可以在 CPU 路径上尝试运行，小数据测试可以接受；正式训练，尤其是 Blink 的 `384 / 512` 输入尺寸和 SAM 训练，仍建议使用 CUDA 版 PyTorch 和 NVIDIA 显卡。
+
+外部脚本后端不受这个选项直接控制。外部后端使用你在命令里指定的 Python 环境、脚本和依赖。
 
 #### Main Locator Parts / 主定位结构
 

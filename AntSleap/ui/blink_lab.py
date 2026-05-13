@@ -278,6 +278,7 @@ class BlinkTrainingThread(QThread):
         learning_rate=1e-3,
         weight_decay=1e-4,
         input_size=224,
+        device="auto",
     ):
         super().__init__()
         self.project_path = project_path
@@ -288,6 +289,7 @@ class BlinkTrainingThread(QThread):
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
         self.input_size = input_size
+        self.device = device
 
     def run(self):
         try:
@@ -303,6 +305,7 @@ class BlinkTrainingThread(QThread):
                 learning_rate=self.learning_rate,
                 weight_decay=self.weight_decay,
                 input_size=self.input_size,
+                device=self.device,
             )
             save_path = trainer.train(
                 epochs=self.epochs,
@@ -510,6 +513,7 @@ class BlinkLabWidget(QWidget):
         blink_lr=1e-3,
         blink_weight_decay=1e-4,
         blink_input_size=224,
+        runtime_device="auto",
     ):
         super().__init__(parent)
         self.engine = engine
@@ -521,6 +525,7 @@ class BlinkLabWidget(QWidget):
         self.default_learning_rate = self._coerce_float(blink_lr, 1e-3)
         self.default_weight_decay = self._coerce_float(blink_weight_decay, 1e-4)
         self.default_input_size = self._normalize_input_size(blink_input_size)
+        self.runtime_device = str(runtime_device or "auto")
         self.training_thread = None
         self.active_session = None
         self.session_target_part = None
@@ -563,6 +568,7 @@ class BlinkLabWidget(QWidget):
         learning_rate=None,
         weight_decay=None,
         input_size=None,
+        runtime_device=None,
         apply_to_controls=True,
     ):
         if epochs is not None:
@@ -575,6 +581,8 @@ class BlinkLabWidget(QWidget):
             self.default_weight_decay = self._coerce_float(weight_decay, self.default_weight_decay)
         if input_size is not None:
             self.default_input_size = self._normalize_input_size(input_size)
+        if runtime_device is not None:
+            self.runtime_device = str(runtime_device or "auto")
         if apply_to_controls and hasattr(self, "spin_epochs") and hasattr(self, "spin_batch"):
             self.spin_epochs.setValue(self.default_training_epochs)
             self.spin_batch.setValue(self.default_training_batch)
@@ -1906,7 +1914,7 @@ class BlinkLabWidget(QWidget):
             except ImportError:
                 from core.blink_refiner import BlinkRefiner
         sam_model = self.engine.parts_model.ultralytics_sam
-        refiner = BlinkRefiner(sam_model=sam_model)
+        refiner = BlinkRefiner(sam_model=sam_model, device=self.runtime_device)
         
         # 执行靶向轨迹生成
         trajectory = refiner.generate_shrink_trajectory(
@@ -1997,6 +2005,7 @@ class BlinkLabWidget(QWidget):
             learning_rate=learning_rate,
             weight_decay=weight_decay,
             input_size=input_size,
+            device=self.runtime_device,
         )
         self.training_thread.result_signal.connect(self._on_training_result)
         self.training_thread.report_signal.connect(self._on_training_report)

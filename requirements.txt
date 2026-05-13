@@ -24,9 +24,10 @@ pdfplumber>=0.10.3
 PyMuPDF>=1.23.0
 
 # --- AI & Machine Learning ---
+# Install torch/torchvision from requirements-torch-cpu.txt or
+# requirements-torch-cu121.txt before this file so the hardware-specific
+# PyTorch build is not replaced by a generic wheel.
 ultralytics>=8.2.0
-torch>=2.0.0
-torchvision>=0.15.0
 easyocr>=1.7.1
 
 # --- LLM & API ---

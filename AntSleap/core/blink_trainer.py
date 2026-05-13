@@ -21,6 +21,10 @@ except ImportError:
 from .blink_dataset import BlinkTrajectoryDataset
 from .taxonomy_defaults import is_safe_part_name
 from torchvision.ops import generalized_box_iou_loss, box_convert
+try:
+    from AntSleap.core.runtime_device import resolve_torch_device
+except ImportError:
+    from .runtime_device import resolve_torch_device
 
 try:
     import matplotlib.pyplot as plt
@@ -41,13 +45,13 @@ class BlinkExpertTrainer:
         project_path,
         part_name,
         parent_part=None,
-        device='cuda',
+        device='auto',
         save_dir=None,
         learning_rate=1e-3,
         weight_decay=1e-4,
         input_size=224,
     ):
-        self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
+        self.device = resolve_torch_device(device)
         self.part_name = str(part_name).strip()
         if not is_safe_part_name(self.part_name):
             raise ValueError(f"Unsafe Blink expert part name: {self.part_name}")

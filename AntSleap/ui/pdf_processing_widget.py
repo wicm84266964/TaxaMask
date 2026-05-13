@@ -39,7 +39,7 @@ def _load_pdf_processor_dependencies():
         return getattr(module, "LLMScreenPDFClassifier"), getattr(
             module,
             "EnhancedPDFExtractionSystem",
-        )
+        ), getattr(module, "discover_poppler", None)
     except ModuleNotFoundError as exc:
         if exc.name != "core.pdf_processor":
             raise
@@ -63,7 +63,7 @@ def _load_pdf_processor_dependencies():
     return getattr(module, "LLMScreenPDFClassifier"), getattr(
         module,
         "EnhancedPDFExtractionSystem",
-    )
+    ), getattr(module, "discover_poppler", None)
 
 
 def _load_figure_profile_dependencies():
@@ -87,7 +87,7 @@ def _load_figure_profile_dependencies():
     )
 
 
-LLMScreenPDFClassifier, EnhancedPDFExtractionSystem = _load_pdf_processor_dependencies()
+LLMScreenPDFClassifier, EnhancedPDFExtractionSystem, discover_poppler = _load_pdf_processor_dependencies()
 load_figure_profile, normalize_figure_profile, profile_display_name = _load_figure_profile_dependencies()
 
 
@@ -149,6 +149,10 @@ TRANSLATIONS = {
         "Output DB:": "输出数据库:",
         "Select DB File": "选择数据库文件",
         "Enable Multimodal Validation (Uses API - Slower but more accurate)": "启用多模态验证 (使用 API - 较慢但更准确)",
+        "Poppler: checking...": "Poppler：正在检测...",
+        "Poppler: found ({0}) - PDF OCR/image fallback is available.": "Poppler：已找到（{0}）- PDF OCR/图像回退可用。",
+        "Poppler: not found - PyMuPDF extraction can still run, but pdf2image/OCR fallback may be unavailable.": "Poppler：未找到 - PyMuPDF 提取仍可运行，但 pdf2image/OCR 回退可能不可用。",
+        "Poppler status: {0}": "Poppler 状态：{0}",
         "Start Extraction Pipeline": "开始提取流程",
         "Stop Extraction": "停止提取",
         "3. Data Utilities": "3. 数据工具",
@@ -1118,6 +1122,7 @@ class PdfProcessingWidget(QWidget):
         self.refresh_figure_profile_list()
         self.sync_runtime_controls_from_config()
         self.retranslate_ui()
+        self.refresh_poppler_status()
 
     def _normalize_mode(self, mode_value, default_mode="v2"):
         return "v2"
@@ -2115,6 +2120,11 @@ class PdfProcessingWidget(QWidget):
         
         self.check_mllm = QCheckBox()
         extract_input_layout.addWidget(self.check_mllm)
+
+        self.lbl_poppler_status = QLabel()
+        self.lbl_poppler_status.setObjectName("pdfPopplerStatus")
+        self.lbl_poppler_status.setWordWrap(True)
+        extract_input_layout.addWidget(self.lbl_poppler_status)
         l_ext.addWidget(self.extract_input_panel)
         
         # Buttons Layout
@@ -2261,6 +2271,7 @@ class PdfProcessingWidget(QWidget):
         self.lbl_ext_db.setText(self.tr("Output DB:"))
         self.btn_db.setText(self.tr("Select DB File"))
         self.check_mllm.setText(self.tr("Enable Multimodal Validation (Uses API - Slower but more accurate)"))
+        self.refresh_poppler_status()
         self.btn_run_extract.setText(self.tr("Start Extraction Pipeline"))
         self.btn_stop_extract.setText(self.tr("Stop Extraction"))
         
@@ -2370,6 +2381,37 @@ class PdfProcessingWidget(QWidget):
         self.log_area.append(msg)
         self.log_area.verticalScrollBar().setValue(self.log_area.verticalScrollBar().maximum())
 
+    def _current_poppler_status(self):
+        if discover_poppler is None:
+            return None
+        try:
+            return discover_poppler()
+        except Exception:
+            return None
+
+    def refresh_poppler_status(self):
+        status = self._current_poppler_status()
+        if status is not None and getattr(status, "found", False):
+            source = getattr(status, "source", "") or getattr(status, "bin_path", "") or "detected"
+            text = self.tr("Poppler: found ({0}) - PDF OCR/image fallback is available.").format(source)
+        elif status is not None:
+            text = self.tr("Poppler: not found - PyMuPDF extraction can still run, but pdf2image/OCR fallback may be unavailable.")
+        else:
+            text = self.tr("Poppler: checking...")
+        if hasattr(self, "lbl_poppler_status"):
+            self.lbl_poppler_status.setText(text)
+        return status
+
+    def log_poppler_status(self):
+        status = self.refresh_poppler_status()
+        if status is not None and getattr(status, "message", ""):
+            detail = status.message
+        elif status is not None:
+            detail = getattr(status, "source", "unknown")
+        else:
+            detail = self.tr("Poppler: checking...")
+        self.log(self.tr("Poppler status: {0}").format(detail))
+
     def update_progress(self, current, total):
         if total <= 0:
             total = 1
@@ -2390,6 +2432,7 @@ class PdfProcessingWidget(QWidget):
              
         self.toggle_buttons(True)
         self.progress_bar.setValue(0)
+        self.log_poppler_status()
 
         mode = self.combo_mode.currentData() or "v2"
         selected_profile_mode = self._normalize_mode(self.screener_config.get("processing_mode"), "v2")
@@ -2564,6 +2607,7 @@ class PdfProcessingWidget(QWidget):
 
         self.toggle_buttons(True)
         self.progress_bar.setValue(0)
+        self.log_poppler_status()
         
         self.worker = PDFWorker("extract", lang=self.current_lang, pdf_dir=src, db_path=db, 
                                 use_mllm=use_mllm,

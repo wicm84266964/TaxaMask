@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from AntSleap.core.config import ConfigManager, DEFAULT_CONFIG
+from AntSleap.core.platform_paths import user_config_path
 
 
 class ConfigCleanupTests(unittest.TestCase):
@@ -46,6 +47,64 @@ class ConfigCleanupTests(unittest.TestCase):
                 self.assertNotIn("train_core2_manifest_path", saved_payload)
                 self.assertNotIn("train_allow_random_fallback", saved_payload)
                 self.assertNotIn("inf_enable_cascade_experts", saved_payload)
+
+    def test_config_manager_migrates_legacy_root_config_without_deleting_it(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            legacy_path = tmp_path / "repo" / "user_config.json"
+            config_path = tmp_path / "config" / "TaxaMask" / "user_config.json"
+            legacy_path.parent.mkdir(parents=True)
+            legacy_path.write_text(
+                json.dumps({"language": "zh", "runtime_device": "cpu"}),
+                encoding="utf-8",
+            )
+
+            manager = ConfigManager(config_path=config_path, legacy_config_path=legacy_path)
+
+            self.assertEqual(manager.get("language"), "zh")
+            self.assertEqual(manager.get("runtime_device"), "cpu")
+            self.assertTrue(config_path.exists())
+            self.assertTrue(legacy_path.exists())
+
+            manager.set("language", "en")
+            manager.save()
+
+            migrated_payload = json.loads(config_path.read_text(encoding="utf-8"))
+            legacy_payload = json.loads(legacy_path.read_text(encoding="utf-8"))
+            self.assertEqual(migrated_payload["language"], "en")
+            self.assertEqual(legacy_payload["language"], "zh")
+
+    def test_platform_config_path_rules_are_stable(self):
+        win_path = user_config_path(
+            platform="win32",
+            env={"APPDATA": r"C:\Users\alice\AppData\Roaming"},
+            home=r"C:\Users\alice",
+        )
+        self.assertTrue(str(win_path).replace("\\", "/").endswith("AppData/Roaming/TaxaMask/user_config.json"))
+
+        linux_path = user_config_path(
+            platform="linux",
+            env={},
+            home="/home/alice",
+        )
+        self.assertEqual(str(linux_path).replace("\\", "/"), "/home/alice/.config/taxamask/user_config.json")
+
+        xdg_path = user_config_path(
+            platform="linux",
+            env={"XDG_CONFIG_HOME": "/tmp/xdg"},
+            home="/home/alice",
+        )
+        self.assertEqual(str(xdg_path).replace("\\", "/"), "/tmp/xdg/taxamask/user_config.json")
+
+        mac_path = user_config_path(
+            platform="darwin",
+            env={},
+            home="/Users/alice",
+        )
+        self.assertEqual(
+            str(mac_path).replace("\\", "/"),
+            "/Users/alice/Library/Application Support/TaxaMask/user_config.json",
+        )
 
 
 if __name__ == "__main__":

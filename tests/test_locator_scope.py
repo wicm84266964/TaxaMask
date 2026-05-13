@@ -179,6 +179,42 @@ class LocatorScopeTests(unittest.TestCase):
             ["Mandible/mandible_v2.pth", "Mandible/expert_v20260501_090000.pth"],
         )
 
+    def test_remove_route_expert_candidate_keeps_appointed_expert(self):
+        pm = ProjectManager()
+        pm.add_taxonomy_part("Mandible")
+        pm.register_cascade_route_candidate("Head", "Mandible", save=False)
+        pm.appoint_cascade_route_expert("Head", "Mandible", expert_id="Mandible/appointed.pth", save=False)
+        pm.register_cascade_route_candidate(
+            "Head",
+            "Mandible",
+            expert_id="Mandible/deleted_history.pth",
+            save=False,
+        )
+
+        self.assertFalse(
+            pm.remove_cascade_route_expert_candidate(
+                "Head",
+                "Mandible",
+                "Mandible/appointed.pth",
+                save=False,
+            )
+        )
+        self.assertTrue(
+            pm.remove_cascade_route_expert_candidate(
+                "Head",
+                "Mandible",
+                "Mandible/deleted_history.pth",
+                save=False,
+            )
+        )
+
+        route = pm.get_cascade_route("Head", "Mandible")
+        self.assertEqual(route.get("appointed_expert", {}).get("expert_id"), "Mandible/appointed.pth")
+        self.assertEqual(
+            [candidate.get("expert_id") for candidate in route.get("expert_candidates", [])],
+            ["Mandible/appointed.pth"],
+        )
+
     def test_new_training_candidate_is_first_without_overwriting_appointed_expert(self):
         pm = ProjectManager()
         pm.add_taxonomy_part("Mandible")

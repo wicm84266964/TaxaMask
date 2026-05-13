@@ -43,6 +43,19 @@ TaxaMask is multi-taxon configurable, but not all taxa are equally validated.
 
 This distinction matters for research trustworthiness: the software exposes adaptation interfaces, but each new taxon still needs profile-level and model-level validation.
 
+## Platform Support
+
+TaxaMask is currently prepared as a source-based research application.
+
+- Windows 10/11 is the primary validated desktop environment.
+- Linux is the main cross-platform target for lab workstations, servers, CUDA training, and batch processing.
+- macOS is planned as a CPU-only source-based trial path for lightweight annotation, project review, teaching, and small validation runs.
+- Apple Silicon MPS acceleration is not part of the first compatibility target because SAM, torchvision, Ultralytics, and related model paths need real-machine testing before they can be trusted.
+
+Users may install a PyTorch build that fits their own hardware before installing the base dependencies. Advanced users can experiment with their own compatible PyTorch/SAM stack, but the current validated training path remains Windows/Linux with CPU or NVIDIA CUDA.
+
+For detailed per-platform notes, see [Platform setup](docs/platform_setup.md).
+
 ## Repository Layout
 
 ```text
@@ -62,20 +75,20 @@ The internal package is still named `AntSleap` for runtime stability and histori
 
 ## Installation
 
-TaxaMask is currently prepared as a source-based research application.
-
 1. Create and activate a Python environment.
-2. Install a PyTorch variant for your machine first:
+2. Install a PyTorch variant for your machine first. For CPU-only testing:
 
 ```bash
 pip install -r requirements-torch-cpu.txt
 ```
 
-or, for CUDA 12.1:
+For NVIDIA CUDA 12.1 environments, such as a matching Windows or Linux workstation:
 
 ```bash
 pip install -r requirements-torch-cu121.txt
 ```
+
+Linux CUDA users should choose the PyTorch command that matches their installed driver and CUDA runtime when the CUDA 12.1 example is not appropriate. macOS users should not install the CUDA requirements file.
 
 3. Install the base dependencies:
 
@@ -91,7 +104,7 @@ AntSleap/weights/sam_b.pt
 
 Model weights are not included in the repository.
 
-Windows is the primary validated desktop environment at this stage. Linux and macOS should be treated as experimental until real-machine validation covers Qt startup, PyTorch, Poppler/PDF tooling, and file-open behavior. macOS can use CPU mode for small tests; Apple Silicon MPS acceleration is not yet exposed as a runtime device option.
+Linux and macOS users may also need system packages for Qt/PySide6 display support and Poppler-based PDF tooling. These requirements differ by distribution and package manager; see [Platform setup](docs/platform_setup.md).
 
 ## Run the GUI
 

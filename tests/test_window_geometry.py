@@ -3,11 +3,10 @@ import unittest
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-ANTSLEAP_ROOT = PROJECT_ROOT / "AntSleap"
-if str(ANTSLEAP_ROOT) not in sys.path:
-    sys.path.insert(0, str(ANTSLEAP_ROOT))
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-from core.window_geometry import compute_centered_window_geometry
+from AntSleap.core.window_geometry import compute_centered_window_geometry
 
 
 class WindowGeometryTests(unittest.TestCase):

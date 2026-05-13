@@ -92,15 +92,15 @@ TaxaMask 是一个**综合科研工作台**，里面有两条大主线：
 
 ### 3.0 当前平台支持状态
 
-当前版本主要在 Windows 环境下开发和验证。程序代码已经尽量使用可跨平台的 Python 路径处理方式，也提供了 `CPU only` 运行设备选项，因此 Linux 和 macOS 可以作为后续适配目标；但在正式开源说明中，应把 Linux / macOS 视为**尚未完整实机验收的实验性支持**。
+当前版本的跨平台策略已经收口为：**Windows 继续作为最稳的桌面入口，Linux 是下一阶段重点跨平台训练/服务器入口，macOS 只做 CPU-only 源码级轻量试用**。
 
 这对使用者的实际含义是：
 
 - Windows：当前最推荐、验证最充分的运行环境。
-- Linux：理论上适合服务器或工作站部署，尤其是 NVIDIA CUDA 环境，但仍需要按实际机器验证 GUI、PyTorch、Poppler 和显卡驱动。
-- macOS：可以尝试 CPU 路径做项目管理、标注整理和小规模测试；当前版本还没有把 Apple Silicon 的 MPS 加速作为正式支持设备。
+- Linux：本轮非 Windows 的重点目标，适合实验室服务器或工作站部署，尤其是 NVIDIA CUDA 环境；仍需要按实际机器验证 GUI、PyTorch、Poppler 和显卡驱动。
+- macOS：可以尝试 CPU 路径做项目管理、标注整理、教学演示和小规模测试；Apple Silicon 的 MPS 加速不进入第一轮支持目标。
 
-如果你只是整理项目、人工标注、检查导出或做很小的数据测试，`CPU only` 可以降低硬件门槛。如果你要训练 Locator、SAM 或 Blink 专家，特别是大量 4K 图像或 `384 / 512` Blink 输入尺寸，仍建议使用 CUDA 版 PyTorch 和 NVIDIA 显卡。
+如果你只是整理项目、人工标注、检查导出或做很小的数据测试，`CPU only` 可以降低硬件门槛。如果你要训练 Locator、SAM 或 Blink 专家，特别是大量 4K 图像或 `384 / 512` Blink 输入尺寸，仍建议使用 CUDA 版 PyTorch 和 NVIDIA 显卡。macOS 用户可以自行尝试适合本机的 PyTorch / SAM 组合，但这属于高级实验路径，不等同于 TaxaMask 已经正式支持 MPS。
 
 ### 3.1 启动后你会看到什么
 
@@ -224,7 +224,25 @@ TaxaMask 是一个**综合科研工作台**，里面有两条大主线：
 
 ### 4.4 图片搬盘后的路径兜底
 
-当前版本的路径恢复不再写死某个作者本机目录，而是通过本地配置里的 `known_relocated_roots` 做映射。
+当前版本的路径恢复不再写死某个作者本机目录。推荐先使用主菜单里的：
+
+```text
+File -> Check / Relocate Project Images
+```
+
+它会先统计当前项目里多少图片路径可访问、多少路径缺失。若有缺失，你可以选择新的图片库根目录，程序会显示一份重定位预览；只有你确认后，才会把缺失图片路径改写到项目里并保存。
+
+这个工具只会修复当前缺失的图片路径，并且只接受在新根目录下能唯一匹配文件名的图片。若同名图片出现多份，它会留在未解决列表，避免把某只标本的标注错误连到另一张图上。
+
+高级兜底仍然可以通过本地配置里的 `known_relocated_roots` 做映射。
+
+本地配置现在保存在系统用户配置目录，而不是仓库根目录：
+
+- Windows：`%APPDATA%/TaxaMask/user_config.json`
+- Linux：`~/.config/taxamask/user_config.json`
+- macOS：`~/Library/Application Support/TaxaMask/user_config.json`
+
+如果旧版本在仓库根目录留下了 `user_config.json`，程序首次运行时会复制一份到新的系统配置目录，但不会删除旧文件。
 
 它适合这种情况：
 
@@ -1482,11 +1500,13 @@ PDF 侧 accepted 更多表示：
 
 程序能做的是：
 
+- 通过 `File -> Check / Relocate Project Images` 统计缺失图片并预览可修复路径
 - 按你在本地配置里写好的 `known_relocated_roots` 映射，尝试把旧路径片段解析到新图片库根目录
 
 程序不能做的是：
 
 - 自动修复语法损坏的项目 JSON
+- 在同名图片有多份时替你猜哪一张才是正确标本图
 
 ### 12.5 最常见误区 5：以为 PDF 侧已经有完整候选审批工作台
 
@@ -1509,7 +1529,7 @@ PDF 侧 accepted 更多表示：
 2. 任何重要标注阶段结束后都主动保存项目
 3. Blink 中做完真正要保留的结果后，记得点 `APPLY TO GLOBAL`
 4. 要训练 Blink 专家时，优先关注 trajectory 数量，而不是只看 polygon 数量
-5. 搬盘后先确认 `known_relocated_roots` 映射和图片路径，再判断是不是 JSON 文件本身损坏
+5. 搬盘后先用 `Check / Relocate Project Images` 检查图片路径，再判断是不是 JSON 文件本身损坏
 
 ---
 
@@ -1940,12 +1960,13 @@ PDF 侧 accepted 更多表示：
 推荐步骤：
 
 1. 先确认是不是图片路径问题，而不是 JSON 语法问题
-2. 如果只是图片库整体搬到了新位置，先在本地配置里写好 `known_relocated_roots` 映射，再尝试打开项目
-3. 打开后立刻重新保存项目
+2. 如果只是图片库整体搬到了新位置，打开项目后运行 `File -> Check / Relocate Project Images`
+3. 选择新的图片库根目录，核对预览里的旧路径和新路径
+4. 确认无误后应用重定位并保存项目
 
 **为什么要立刻保存一次**
 
-因为这样能尽快把当前可用路径状态稳定下来，减少后面继续靠兜底逻辑的次数。
+因为这样能尽快把当前可用路径状态稳定下来，减少后面继续靠兜底逻辑或手工配置的次数。
 
 #### 场景 3：报 JSONDecodeError
 

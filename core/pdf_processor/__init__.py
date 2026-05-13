@@ -9,6 +9,12 @@ except ModuleNotFoundError:
     EnhancedPDFExtractionSystem = None
 
 try:
+    from .poppler_discovery import discover_poppler, poppler_path_for_pdf2image
+except ModuleNotFoundError:
+    discover_poppler = None
+    poppler_path_for_pdf2image = None
+
+try:
     from .multimodal_validator import MultimodalValidator, ValidationResult
 except ModuleNotFoundError:
     MultimodalValidator = None

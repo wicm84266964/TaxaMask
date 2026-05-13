@@ -1,7 +1,12 @@
 import json
 import os
+import shutil
+from copy import deepcopy
 
-CONFIG_FILE = "user_config.json"
+from .platform_paths import legacy_repo_config_path, user_config_path
+
+CONFIG_FILE = str(user_config_path())
+LEGACY_CONFIG_FILE = str(legacy_repo_config_path())
 
 OBSOLETE_CONFIG_KEYS = (
     "train_split_manifest_path",
@@ -46,28 +51,43 @@ DEFAULT_CONFIG = {
 }
 
 class ConfigManager:
-    def __init__(self):
-        self.config = DEFAULT_CONFIG.copy()
+    def __init__(self, config_path=None, legacy_config_path=None):
+        self.config_path = os.path.abspath(config_path or CONFIG_FILE)
+        self.legacy_config_path = os.path.abspath(legacy_config_path or LEGACY_CONFIG_FILE)
+        self.config = deepcopy(DEFAULT_CONFIG)
         self.load()
 
     def _drop_obsolete_keys(self):
         for key in OBSOLETE_CONFIG_KEYS:
             self.config.pop(key, None)
 
+    def _migrate_legacy_config(self):
+        if os.path.exists(self.config_path):
+            return
+        if not self.legacy_config_path or not os.path.exists(self.legacy_config_path):
+            return
+        if os.path.abspath(self.config_path) == os.path.abspath(self.legacy_config_path):
+            return
+        os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
+        shutil.copy2(self.legacy_config_path, self.config_path)
+
     def load(self):
-        if os.path.exists(CONFIG_FILE):
+        self._migrate_legacy_config()
+        if os.path.exists(self.config_path):
             try:
-                with open(CONFIG_FILE, 'r') as f:
+                with open(self.config_path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
+                if isinstance(data, dict):
                     self.config.update(data)
-            except:
+            except Exception:
                 pass
         self._drop_obsolete_keys()
 
     def save(self):
         self._drop_obsolete_keys()
-        with open(CONFIG_FILE, 'w') as f:
-            json.dump(self.config, f, indent=4)
+        os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
+        with open(self.config_path, 'w', encoding='utf-8') as f:
+            json.dump(self.config, f, indent=4, ensure_ascii=False)
 
     def get(self, key, default=None):
         return self.config.get(key, default)

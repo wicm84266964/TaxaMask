@@ -21,7 +21,7 @@
 - `AntEngine.set_device_preference(...)` moves built-in Locator/SAM runtime modules to the resolved device, rebuilds optimizers, clears the base SAM predictor cache, and clears loaded cascade experts.
 - `BlinkLabWidget` receives the same runtime device preference and passes it into both Blink auto-shrink trajectory generation (`BlinkRefiner`) and expert training (`BlinkTrainingThread -> BlinkExpertTrainer`).
 - CPU mode is intended for installation validation, annotation-centric workflows, and small smoke tests. CUDA remains the practical recommendation for real Locator/SAM/Blink training.
-- Platform status: Windows is the only fully exercised desktop environment in this workspace so far. Linux/macOS should be documented as experimental until real-machine validation covers Qt startup, PyTorch runtime, Poppler/PDF tooling, and file-open behavior. macOS does not currently expose an MPS runtime option.
+- Platform status: Windows is the primary validated desktop environment. Linux is the main cross-platform target for lab workstations, servers, CUDA training, batch processing, and headless tools. macOS is only a CPU-only source trial path for lightweight annotation, project review, teaching, and small smoke tests. Apple Silicon MPS is not part of the first compatibility target and should not be exposed as a runtime device until real Mac hardware validates SAM, torchvision, Ultralytics, and related model paths.
 - `Settings -> Model Settings -> Training` includes Blink expert defaults:
   - `blink_epochs`
   - `blink_batch`
@@ -123,7 +123,7 @@
 - External product/UI name is now `TaxaMask`.
 - Main window title is `TaxaMask Workbench`.
 - Internal package/directory name remains `AntSleap`; do not rename imports or package paths casually.
-- Root maintained docs currently are `CHANGELOG_zh.md` and `LLM_CONTEXT_DETAILED.md`.
+- Root documentation roles: `README.md` is the public GitHub landing page and installation entrypoint; `CHANGELOG_zh.md` is the Chinese historical changelog; `LLM_CONTEXT_DETAILED.md` is the current-state handoff/context document.
 
 ### 0.1 Project templates
 - New file: `AntSleap/core/project_templates.py`.
@@ -166,6 +166,14 @@
   - `marker`
   - `relocated_root`
 - `MainWindow` passes config `known_relocated_roots` into the project manager at startup.
+- `ProjectManager.get_image_path_health()`, `preview_image_path_remap(...)`, and `apply_image_path_remap(...)` now support explicit missing-image checks and conservative project path remapping.
+- GUI entry: `File -> Check / Relocate Project Images`.
+- Remapping updates only currently missing image paths and only accepts unique filename matches under the selected new root. Duplicate filenames remain unresolved to avoid linking labels to the wrong specimen image.
+- Runtime config storage now uses platform user config locations via `AntSleap/core/platform_paths.py`:
+  - Windows: `%APPDATA%/TaxaMask/user_config.json`
+  - Linux: `~/.config/taxamask/user_config.json` or `$XDG_CONFIG_HOME/taxamask/user_config.json`
+  - macOS: `~/Library/Application Support/TaxaMask/user_config.json`
+- A repository-root `user_config.json` remains a migration source only. First run copies it to the platform config path and leaves the old file untouched.
 
 ### 0.5 External script backend
 - New file: `AntSleap/core/external_backend.py`.
@@ -399,6 +407,8 @@
   - `Missing file history`
   - `Discoverable`
   - `Available`
+- `Missing file history` expert nodes can now be deleted from the route tree when they are persisted history entries, no longer exist on disk, and are not the current appointed expert.
+- This cleanup removes only the current project's `expert_candidates` history entry. It does not delete model files and does not alter the current appointed expert.
 - Operational consequence:
   - the current project's stored expert history is treated as the primary route record
   - discoverable experts remain visible and appointable, but they are now a supplement rather than the main source of truth
@@ -1077,10 +1087,14 @@ python AntSleap/main.py
 
 ## 8) Dependency Notes
 
-- PDF extraction requires Poppler binaries. The bundled/local Windows path convention is `external_tools/poppler/`; Linux and macOS users may prefer system package managers and should verify the Poppler executables are discoverable.
+- PDF extraction requires Poppler binaries for some `pdf2image` fallback paths. The bundled/local Windows path convention is `external_tools/poppler/`; Linux users usually install `poppler-utils`; macOS CPU-only trial users usually install Poppler through Homebrew.
+- Poppler discovery is centralized in `core/pdf_processor/poppler_discovery.py`, exposed through `core.pdf_processor`, logged by PDF OCR fallback code, and displayed in the PDF Processing UI so missing Poppler is presented as a setup issue rather than an API/model failure.
 - Segmentation relies on SAM base weights (`sam_b.pt`) under `AntSleap/weights/`.
-- Conda environment recommendation for the current Windows validation workspace: `antsleap`.
-- Install a platform-appropriate PyTorch build before the rest of the dependencies when possible; CUDA and CPU wheels are split into `requirements-torch-cu121.txt` and `requirements-torch-cpu.txt`.
+- Local validation note: `antsleap` is the maintainer's current Windows test conda environment name, not a public requirement or recommended environment name.
+- Install a platform-appropriate PyTorch build before the rest of the dependencies when possible; CUDA and CPU wheels are split into `requirements-torch-cu121.txt` and `requirements-torch-cpu.txt`. macOS users should not install the CUDA requirements file; MPS remains an advanced user experiment outside the first supported runtime policy.
+- Runtime device policy remains `auto / cpu / cuda`. `auto` selects CUDA when PyTorch reports CUDA availability; otherwise it uses CPU. The GUI does not expose MPS.
+- `AntSleap/core/runtime_device.py` remains importable in lightweight environments without PyTorch and resolves to CPU in that case.
+- Cross-platform validation guidance lives in `docs/platform_setup.md`, including Windows/Linux/macOS smoke expectations, project relocation workflow, Poppler notes, and the MPS non-goal.
 
 ---
 

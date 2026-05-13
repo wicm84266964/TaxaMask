@@ -145,6 +145,62 @@ class GenericExportSchemaTests(unittest.TestCase):
             resolved = manager._resolve_known_relocated_output(str(Path(old_marker) / "images" / "specimen.png"))
             self.assertEqual(Path(resolved), relocated_image)
 
+    def test_project_image_health_and_remap_preview_are_explicit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_dir = Path(tmp)
+            old_root = work_dir / "old_root"
+            new_root = work_dir / "new_root"
+            old_image = old_root / "images" / "specimen.png"
+            new_image = new_root / "images" / "specimen.png"
+            new_image.parent.mkdir(parents=True)
+            Image.new("RGB", (12, 12), color=(120, 80, 80)).save(new_image)
+
+            manager = ProjectManager()
+            manager.current_project_path = str(work_dir / "project.json")
+            manager.project_data["images"] = [str(old_image)]
+            manager.project_data["labels"] = {
+                str(old_image): {
+                    "parts": {"Head": [[1, 1], [5, 1], [5, 5]]},
+                    "status": "labeled",
+                    "genus": "Unknown",
+                }
+            }
+            manager.project_data["scales"] = {str(old_image): 12.5}
+            manager.project_data["image_provenance"] = {str(old_image): {"source": "manual"}}
+
+            health = manager.get_image_path_health()
+            self.assertEqual(health["missing_count"], 1)
+            self.assertEqual(health["existing_count"], 0)
+
+            preview = manager.preview_image_path_remap(str(new_root))
+            self.assertEqual(len(preview["matches"]), 1)
+            self.assertEqual(Path(preview["matches"][0]["new_path"]), new_image)
+            self.assertEqual(preview["unresolved"], [])
+
+            changed = manager.apply_image_path_remap(preview["matches"], save=False)
+            self.assertEqual(changed, 1)
+            self.assertEqual(manager.project_data["images"], [str(new_image)])
+            self.assertIn(str(new_image), manager.project_data["labels"])
+            self.assertIn(str(new_image), manager.project_data["scales"])
+            self.assertIn(str(new_image), manager.project_data["image_provenance"])
+
+    def test_project_image_remap_leaves_duplicate_names_unresolved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_dir = Path(tmp)
+            new_root = work_dir / "new_root"
+            for folder in ("a", "b"):
+                image_path = new_root / folder / "specimen.png"
+                image_path.parent.mkdir(parents=True)
+                Image.new("RGB", (12, 12), color=(100, 100, 100)).save(image_path)
+
+            manager = ProjectManager()
+            missing = work_dir / "old_root" / "specimen.png"
+            manager.project_data["images"] = [str(missing)]
+
+            preview = manager.preview_image_path_remap(str(new_root))
+            self.assertEqual(preview["matches"], [])
+            self.assertEqual(preview["unresolved"], [str(missing)])
+
     def test_external_backend_runner_contract_and_prediction_import(self):
         with tempfile.TemporaryDirectory() as tmp:
             work_dir = Path(tmp)

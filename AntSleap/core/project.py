@@ -173,6 +173,102 @@ class ProjectManager:
                 return relocated_path
         return None
 
+    def get_image_path_health(self):
+        images = list(self.project_data.get("images", []))
+        existing = []
+        missing = []
+        for image_path in images:
+            normalized = os.path.normpath(str(image_path))
+            if os.path.exists(normalized):
+                existing.append(normalized)
+            else:
+                missing.append(normalized)
+        return {
+            "total": len(images),
+            "existing": existing,
+            "missing": missing,
+            "existing_count": len(existing),
+            "missing_count": len(missing),
+        }
+
+    def preview_image_path_remap(self, new_root):
+        root = os.path.normpath(str(new_root or "").strip())
+        health = self.get_image_path_health()
+        matches = []
+        unresolved = []
+        if not root or not os.path.isdir(root):
+            return {
+                "new_root": root,
+                "missing": health["missing"],
+                "matches": matches,
+                "unresolved": list(health["missing"]),
+            }
+
+        by_name = {}
+        duplicate_names = set()
+        for dirpath, _, filenames in os.walk(root):
+            for filename in filenames:
+                key = filename.lower()
+                candidate = os.path.normpath(os.path.join(dirpath, filename))
+                if key in by_name:
+                    duplicate_names.add(key)
+                    continue
+                by_name[key] = candidate
+
+        for old_path in health["missing"]:
+            filename = os.path.basename(old_path).lower()
+            new_path = by_name.get(filename)
+            if new_path and filename not in duplicate_names:
+                matches.append({"old_path": old_path, "new_path": new_path})
+            else:
+                unresolved.append(old_path)
+
+        return {
+            "new_root": root,
+            "missing": health["missing"],
+            "matches": matches,
+            "unresolved": unresolved,
+        }
+
+    def apply_image_path_remap(self, remap_matches, save=True):
+        path_map = {}
+        for item in remap_matches or []:
+            if not isinstance(item, dict):
+                continue
+            old_path = os.path.normpath(str(item.get("old_path", "") or ""))
+            new_path = os.path.normpath(str(item.get("new_path", "") or ""))
+            if old_path and new_path and os.path.exists(new_path):
+                path_map[old_path] = new_path
+
+        if not path_map:
+            return 0
+
+        remapped_images = []
+        changed = 0
+        for image_path in self.project_data.get("images", []):
+            normalized = os.path.normpath(str(image_path))
+            replacement = path_map.get(normalized)
+            if replacement:
+                remapped_images.append(replacement)
+                changed += 1
+            else:
+                remapped_images.append(image_path)
+        self.project_data["images"] = remapped_images
+
+        for key in ("labels", "scales", "image_provenance"):
+            source = self.project_data.get(key, {})
+            if not isinstance(source, dict):
+                continue
+            remapped = {}
+            for image_path, value in source.items():
+                normalized = os.path.normpath(str(image_path))
+                remapped[path_map.get(normalized, image_path)] = value
+            self.project_data[key] = remapped
+
+        if changed and save:
+            self.save_project()
+        return changed
+
     def create_project(self, name, save_dir, template_id=None):
         self.clear()
         template = get_project_template(template_id or PROJECT_TEMPLATE_ANT)
@@ -605,6 +701,38 @@ class ProjectManager:
         if save:
             self.save_project()
         return True
+
+    def remove_cascade_route_expert_candidate(self, parent_part, child_part, expert_id, save=True):
+        clean_parent = str(parent_part or "").strip()
+        clean_child = str(child_part or "").strip()
+        clean_expert_id = str(expert_id or "").strip()
+        if not clean_parent or not clean_child or not clean_expert_id:
+            return False
+
+        route = self.get_cascade_route(clean_parent, clean_child)
+        if not route:
+            return False
+
+        appointed_id = str(get_route_appointed_expert(route).get("expert_id") or "").strip()
+        if appointed_id == clean_expert_id:
+            return False
+
+        candidates = [
+            dict(candidate)
+            for candidate in route.get("expert_candidates", [])
+            if isinstance(candidate, dict)
+        ]
+        kept_candidates = [
+            candidate
+            for candidate in candidates
+            if str(candidate.get("expert_id") or "").strip() != clean_expert_id
+        ]
+        if len(kept_candidates) == len(candidates):
+            return False
+
+        route_payload = dict(route)
+        route_payload["expert_candidates"] = kept_candidates
+        return bool(self.set_cascade_route(route_payload, save=save))
 
     def get_current_project_expert_bucket_impacts(self, child_part):
         clean_child = str(child_part or "").strip()

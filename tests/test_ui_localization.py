@@ -175,6 +175,29 @@ class DummyProjectManager:
         self.project_data["cascade_routes"]["routes"] = routes
         return removed
 
+    def remove_cascade_route_expert_candidate(self, parent_part, child_part, expert_id, save=True):
+        removed = False
+        routes = []
+        for route in self.project_data.get("cascade_routes", {}).get("routes", []):
+            candidate = dict(route)
+            if candidate.get("parent") == parent_part and candidate.get("child") == child_part:
+                appointed_id = str((candidate.get("appointed_expert") or {}).get("expert_id") or "")
+                if appointed_id == expert_id:
+                    routes.append(candidate)
+                    continue
+                before = list(candidate.get("expert_candidates", []))
+                candidate["expert_candidates"] = [
+                    dict(item)
+                    for item in before
+                    if isinstance(item, dict) and item.get("expert_id") != expert_id
+                ]
+                removed = len(candidate["expert_candidates"]) != len(before)
+            routes.append(candidate)
+        self.project_data["cascade_routes"]["routes"] = routes
+        if removed and save:
+            self.save_project()
+        return removed
+
 
 class UiLocalizationTests(unittest.TestCase):
     @classmethod
@@ -368,6 +391,76 @@ class UiLocalizationTests(unittest.TestCase):
         route_group = dialog.findChild(QWidget, "modelSettingsRoutePanel")
         self.assertIsNotNone(route_group)
         self.assertIn("route 决定哪些 parent -> child expert 链路可以实际使用", dialog.lbl_cascade_note.text())
+
+    def test_missing_expert_history_can_be_removed_from_route_tree(self):
+        self.pm.project_data["cascade_routes"]["version"] = "project-v2"
+        self.pm.project_data["cascade_routes"]["routes"] = [
+            {
+                "parent": "Head",
+                "child": "Mandible",
+                "enabled": False,
+                "appointed_expert": {
+                    "expert_id": "Mandible/appointed.pth",
+                    "expert_part": "Mandible",
+                    "expert_filename": "appointed.pth",
+                },
+                "expert_candidates": [
+                    {
+                        "expert_id": "Mandible/appointed.pth",
+                        "expert_part": "Mandible",
+                        "expert_filename": "appointed.pth",
+                    },
+                    {
+                        "expert_id": "Mandible/deleted_history.pth",
+                        "expert_part": "Mandible",
+                        "expert_filename": "deleted_history.pth",
+                    },
+                ],
+                "expert_id": "Mandible/appointed.pth",
+                "expert_part": "Mandible",
+                "expert_filename": "appointed.pth",
+                "registration_source": "project",
+            }
+        ]
+        owner = type(
+            "Owner",
+            (),
+            {
+                "project": self.pm,
+                "engine": self.engine,
+                "log": lambda _self, _message: None,
+            },
+        )()
+        panel = RouteManagementPanel(owner, lang="en")
+        panel.refresh_route_table()
+
+        history_item = panel._find_expert_item("Head", "Mandible", "Mandible/deleted_history.pth")
+        appointed_item = panel._find_expert_item("Head", "Mandible", "Mandible/appointed.pth")
+        self.assertIsNotNone(history_item)
+        self.assertIsNotNone(appointed_item)
+
+        panel.route_tree.setCurrentItem(history_item)
+        panel.update_action_buttons()
+        self.assertTrue(panel.btn_delete_route.isEnabled())
+
+        with patch.object(
+            main_module,
+            "themed_yes_no_question",
+            return_value=QMessageBox.StandardButton.Yes,
+        ) as question_mock:
+            panel.delete_selected_route()
+
+        self.assertIn("only cleans the current project route history", question_mock.call_args.args[2])
+        route = self.pm.get_cascade_route("Head", "Mandible")
+        self.assertEqual(
+            [candidate.get("expert_id") for candidate in route.get("expert_candidates", [])],
+            ["Mandible/appointed.pth"],
+        )
+        self.assertIsNone(panel._find_expert_item("Head", "Mandible", "Mandible/deleted_history.pth"))
+
+        panel.route_tree.setCurrentItem(panel._find_expert_item("Head", "Mandible", "Mandible/appointed.pth"))
+        panel.update_action_buttons()
+        self.assertFalse(panel.btn_delete_route.isEnabled())
 
     def test_model_settings_dialog_no_longer_exposes_cascade_master_toggle(self):
         dialog = ModelSettingsDialog(

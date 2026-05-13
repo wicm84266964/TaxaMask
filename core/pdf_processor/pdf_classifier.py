@@ -17,6 +17,11 @@ import shutil
 import requests
 
 try:
+    from .poppler_discovery import discover_poppler, poppler_path_for_pdf2image
+except ImportError:
+    from poppler_discovery import discover_poppler, poppler_path_for_pdf2image
+
+try:
     import torch
 except ModuleNotFoundError:
     torch = None
@@ -112,17 +117,8 @@ def _infer_pdf_issue_from_exception_text(exc: Exception | str) -> Dict[str, str]
 
 
 def _resolve_local_poppler_path() -> Path | None:
-    project_root = Path(__file__).parent.parent.parent
-    possible_paths = [
-        project_root / "external_tools" / "poppler" / "Library" / "bin",
-        project_root / "external_tools" / "poppler" / "bin",
-        Path("external_tools") / "poppler" / "Library" / "bin",
-        Path("external_tools") / "poppler" / "bin",
-    ]
-    for candidate in possible_paths:
-        if candidate.exists():
-            return candidate
-    return None
+    poppler_path = poppler_path_for_pdf2image()
+    return Path(poppler_path) if poppler_path else None
 
 
 def _ocr_pdf_page_direct(pdf_path: Path) -> List[str]:
@@ -622,25 +618,12 @@ class LLMScreenPDFClassifier:
             if self.reader is None:
                 return []
 
-            # 自动检测项目内的 Poppler
-            # __file__ = .../TaxaMask/core/pdf_processor/pdf_classifier.py
-            # parent(1)=pdf_processor, parent(2)=core, parent(3)=TaxaMask
-            project_root = Path(__file__).parent.parent.parent 
-            
-            # 兼容打包后的路径或开发环境路径
-            possible_paths = [
-                project_root / "external_tools" / "poppler" / "Library" / "bin",
-                project_root / "external_tools" / "poppler" / "bin",
-                Path("external_tools") / "poppler" / "Library" / "bin",
-                Path("external_tools") / "poppler" / "bin"
-            ]
-            
-            poppler_path = None
-            for p in possible_paths:
-                if p.exists():
-                    poppler_path = p
-                    self.logger.info(f"Using local Poppler: {poppler_path}")
-                    break
+            poppler_status = discover_poppler()
+            poppler_path = poppler_status.bin_path if poppler_status.found and poppler_status.source != "PATH" else None
+            if poppler_status.found:
+                self.logger.info(poppler_status.message)
+            else:
+                self.logger.warning(poppler_status.message)
             
             # 1. PDF 转图片 (只转第一页，dpi=300 保证学术文献清晰度)
             # fmt='jpeg' 速度比 png 快一点点

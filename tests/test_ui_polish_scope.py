@@ -448,6 +448,7 @@ class UiPolishScopeTests(unittest.TestCase):
         self.assertIsNotNone(widget.findChild(QWidget, "pdfExtractActionPanel"))
         self.assertIsNotNone(widget.findChild(QWidget, "pdfUtilityPanel"))
         self.assertIsNotNone(widget.findChild(QWidget, "pdfFeedbackPanel"))
+        self.assertIsNotNone(widget.findChild(QWidget, "pdfPopplerStatus"))
         self.assertEqual(widget.btn_run_classify.parentWidget().objectName(), "pdfClassifyActionPanel")
         self.assertEqual(widget.btn_run_extract.parentWidget().objectName(), "pdfExtractActionPanel")
         self.assertEqual(widget.log_area.parentWidget().objectName(), "pdfFeedbackPanel")

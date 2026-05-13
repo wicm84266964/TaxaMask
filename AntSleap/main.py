@@ -65,6 +65,7 @@ try:
     from AntSleap.core.project_templates import DEFAULT_PROJECT_TEMPLATE_ID, iter_project_templates
     from AntSleap.core.external_backend import BUILTIN_BACKEND_ID, EXTERNAL_BACKEND_ID, ExternalBackendRunner, sanitize_external_backend_config
     from AntSleap.core.part_tree import build_part_tree_groups
+    from AntSleap.core.platform_open import open_path
     from AntSleap.core.runtime_device import normalize_device_preference, resolve_torch_device
 except ImportError:
     from core.project import ProjectManager
@@ -107,6 +108,7 @@ except ImportError:
     from core.project_templates import DEFAULT_PROJECT_TEMPLATE_ID, iter_project_templates
     from core.external_backend import BUILTIN_BACKEND_ID, EXTERNAL_BACKEND_ID, ExternalBackendRunner, sanitize_external_backend_config
     from core.part_tree import build_part_tree_groups
+    from core.platform_open import open_path
     from core.runtime_device import normalize_device_preference, resolve_torch_device
 
 from torch.utils.data import DataLoader
@@ -263,6 +265,15 @@ TRANSLATIONS = {
         "Generic taxonomy mask project": "通用分类掩码项目",
         "Ant morphology (validated example)": "蚂蚁形态学（已验证示例）",
         "Save Project": "保存项目",
+        "Check / Relocate Project Images": "检查/重定位项目图片",
+        "Project Image Health": "项目图片健康检查",
+        "Project has {0}/{1} image paths available. Missing: {2}.": "项目共有 {1} 条图片路径，当前可访问 {0} 条，缺失 {2} 条。",
+        "All project image paths are available.": "当前项目图片路径全部可访问。",
+        "Select New Image Root": "选择新的图片根目录",
+        "Relocation Preview": "重定位预览",
+        "Matched {0} missing image path(s). Still unresolved: {1}.\n\nPreview:\n{2}\n\nApply this remap and save the project?": "已匹配 {0} 条缺失图片路径，仍未解决 {1} 条。\n\n预览：\n{2}\n\n是否应用这次重定位并保存项目？",
+        "No missing image paths could be matched under the selected folder.": "在所选文件夹下没有匹配到缺失图片路径。",
+        "Remapped {0} project image path(s).": "已重定位 {0} 条项目图片路径。",
         "Head": "头部 (Head)",
         "Mesosoma": "胸部 (Mesosoma)",
         "Thorax": "胸部 (Thorax)", 
@@ -494,6 +505,8 @@ SECTION_TRANSLATIONS = {
         "Route {0} -> {1} disabled.": "路由 {0} -> {1} 已停用。",
         "Delete project route {0} -> {1}?\n\nThis removes the current project route record only. If you reopen Blink later with the same parent/child context, Blink can register this route again as a candidate.": "删除项目路由 {0} -> {1}？\n\n这只会移除当前项目里的这条路由记录。如果你之后在相同父/子部位上下文下再次打开 Blink，Blink 仍可把这条路由重新登记为候选。",
         "Deleted route {0} -> {1}.": "已删除路由 {0} -> {1}。",
+        "Remove missing expert history {0} from route {1} -> {2}?\n\nThis only cleans the current project route history. It does not delete any model file.": "从路由 {1} -> {2} 中移除缺文件专家历史 {0}？\n\n这只会清理当前项目里的路由历史，不会删除任何模型文件。",
+        "Removed missing expert history {0} from route {1} -> {2}.": "已从路由 {1} -> {2} 移除缺文件专家历史 {0}。",
         "Current Image": "当前图片",
         "Route usage for {0}": "路由使用情况：{0}",
         "Route usage for batch image {0}": "批量图片的路由使用情况：{0}",
@@ -1266,14 +1279,8 @@ class TrainingReportDialog(QDialog):
         
     def open_folder(self):
         d = self.report_data.get('dir')
-        if d and os.path.exists(d):
-            import subprocess
-            if sys.platform == 'win32':
-                os.startfile(d)
-            elif sys.platform == 'darwin':
-                subprocess.run(['open', d])
-            else:
-                subprocess.run(['xdg-open', d])
+        if d:
+            open_path(d)
 
 
 class RouteManagementPanel(QWidget):
@@ -1620,9 +1627,19 @@ class RouteManagementPanel(QWidget):
     def update_action_buttons(self):
         payload = self._selected_node_payload() or {}
         route = self._selected_route_entry()
+        expert = self._selected_expert_entry()
         selected_kind = str(payload.get("kind") or "")
+        can_delete_missing_history = (
+            selected_kind == "expert"
+            and bool(route)
+            and bool(expert)
+            and bool(expert.get("is_persisted"))
+            and not bool(expert.get("file_exists"))
+            and not bool(expert.get("appointed"))
+            and hasattr(self.owner.project, "remove_cascade_route_expert_candidate")
+        )
         self.btn_appoint_route_expert.setEnabled(selected_kind == "expert" and bool(self._selected_expert_entry()))
-        self.btn_delete_route.setEnabled(selected_kind == "route" and bool(route))
+        self.btn_delete_route.setEnabled((selected_kind == "route" and bool(route)) or can_delete_missing_history)
         self.btn_toggle_route.setEnabled(selected_kind == "route" and bool(route))
         self.btn_toggle_route.setText(
             self._tr("Disable Route") if route and route.get("enabled") else self._tr("Enable Route")
@@ -1684,6 +1701,9 @@ class RouteManagementPanel(QWidget):
 
     def delete_selected_route(self):
         payload = self._selected_node_payload() or {}
+        if str(payload.get("kind") or "") == "expert":
+            self.remove_selected_missing_expert_history()
+            return
         if str(payload.get("kind") or "") != "route":
             return
         route = self._selected_route_entry()
@@ -1702,6 +1722,39 @@ class RouteManagementPanel(QWidget):
         if self.owner.project.delete_cascade_route(route.get("parent"), route.get("child")):
             self.refresh_route_table()
             self.owner.log(self._ui("Deleted route {0} -> {1}.").format(route.get("parent"), route.get("child")))
+
+    def remove_selected_missing_expert_history(self):
+        route = self._selected_route_entry()
+        expert = self._selected_expert_entry()
+        if not route or not expert:
+            return
+        if not bool(expert.get("is_persisted")) or bool(expert.get("file_exists")) or bool(expert.get("appointed")):
+            return
+        remove_candidate = getattr(self.owner.project, "remove_cascade_route_expert_candidate", None)
+        if not callable(remove_candidate):
+            return
+        expert_id = str(expert.get("expert_id") or "").strip()
+        if not expert_id:
+            return
+        reply = themed_yes_no_question(
+            self,
+            self._tr("Delete"),
+            self._ui(
+                "Remove missing expert history {0} from route {1} -> {2}?\n\nThis only cleans the current project route history. It does not delete any model file."
+            ).format(expert_id, route.get("parent"), route.get("child")),
+            confirm_role=BUTTON_ROLE_DESTRUCTIVE,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        if remove_candidate(route.get("parent"), route.get("child"), expert_id):
+            self.refresh_route_table()
+            self.owner.log(
+                self._ui("Removed missing expert history {0} from route {1} -> {2}.").format(
+                    expert_id,
+                    route.get("parent"),
+                    route.get("child"),
+                )
+            )
 
 class ModelSettingsDialog(QDialog):
     def __init__(self, params, lang="en", parent=None, route_panel=None):
@@ -3145,6 +3198,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction(tr("New Project", self.current_lang), self.new_project)
         file_menu.addAction(tr("Open Project", self.current_lang), self.open_project)
         file_menu.addAction(tr("Save Project", self.current_lang), lambda: self._flush_pending_project_save(force=True))
+        file_menu.addAction(tr("Check / Relocate Project Images", self.current_lang), self.check_relocate_project_images)
         file_menu.addAction(tr("Export Dataset", self.current_lang), self.export_dataset)
         settings_menu = menubar.addMenu(tr("Settings", self.current_lang))
         settings_menu.addAction(tr("Model Settings", self.current_lang), self.open_settings)
@@ -3194,6 +3248,72 @@ class MainWindow(QMainWindow):
             self.project.load_project(f)
             self._refresh_project_bound_views()
             self.canvas.load_image("")
+
+    def _format_relocation_preview(self, matches, limit=8):
+        lines = []
+        for item in list(matches or [])[:limit]:
+            old_name = os.path.basename(str(item.get("old_path", "")))
+            new_path = str(item.get("new_path", ""))
+            lines.append(f"{old_name} -> {new_path}")
+        remaining = max(0, len(matches or []) - limit)
+        if remaining:
+            lines.append(f"... +{remaining}")
+        return "\n".join(lines) if lines else "-"
+
+    def check_relocate_project_images(self):
+        health = self.project.get_image_path_health()
+        message = tr("Project has {0}/{1} image paths available. Missing: {2}.", self.current_lang).format(
+            health["existing_count"],
+            health["total"],
+            health["missing_count"],
+        )
+        if health["missing_count"] <= 0:
+            QMessageBox.information(
+                self,
+                tr("Project Image Health", self.current_lang),
+                tr("All project image paths are available.", self.current_lang),
+            )
+            self.log(message)
+            return
+
+        self.log(message)
+        new_root = QFileDialog.getExistingDirectory(self, tr("Select New Image Root", self.current_lang))
+        if not new_root:
+            return
+
+        preview = self.project.preview_image_path_remap(new_root)
+        matches = preview.get("matches", [])
+        if not matches:
+            QMessageBox.information(
+                self,
+                tr("Relocation Preview", self.current_lang),
+                tr("No missing image paths could be matched under the selected folder.", self.current_lang),
+            )
+            return
+
+        preview_text = self._format_relocation_preview(matches)
+        reply = themed_yes_no_question(
+            self,
+            tr("Relocation Preview", self.current_lang),
+            tr("Matched {0} missing image path(s). Still unresolved: {1}.\n\nPreview:\n{2}\n\nApply this remap and save the project?", self.current_lang).format(
+                len(matches),
+                len(preview.get("unresolved", [])),
+                preview_text,
+            ),
+            confirm_role=BUTTON_ROLE_COMMIT,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        self._flush_pending_project_save()
+        changed = self.project.apply_image_path_remap(matches, save=True)
+        self.refresh_file_list()
+        if self.current_image and not os.path.exists(self.current_image):
+            self.current_image = None
+            self.canvas.load_image("")
+        result = tr("Remapped {0} project image path(s).", self.current_lang).format(changed)
+        self.log(result)
+        QMessageBox.information(self, tr("Project Image Health", self.current_lang), result)
 
     def _part_item_name(self, item):
         if item is None:

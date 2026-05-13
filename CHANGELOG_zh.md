@@ -4,6 +4,77 @@
 
 ## 📅 更新日志 (Update Log)
 
+### **[2026-05-13] Windows/Linux/macOS 源码适配落地 + 路由缺文件历史清理**
+> **本次重点：按 Windows 和 Linux 为主、macOS 仅 CPU-only 源码试用的策略，完成跨平台路径、配置、Poppler 检测、GUI smoke 与项目搬盘恢复工具；同时修复项目路由树里 Blink 专家“缺文件历史”无法清理的问题。README 已明确回到 GitHub 首页展示/安装文档定位，历史记录继续集中在本 changelog。**
+
+#### **1）README 与公开平台定位收口**
+- `README.md` 保持为 TaxaMask 的公开 GitHub 首页展示与安装入口，不再作为开发日志使用。
+- 公开产品名统一为 `TaxaMask`；内部 Python 包名 `AntSleap` 暂时保留，用于稳定现有导入路径和历史兼容。
+- 平台说明改为：
+  - Windows 10/11：当前验证最充分的桌面入口。
+  - Linux：本轮主要跨平台目标，适合实验室工作站、服务器、CUDA 训练和批处理。
+  - macOS：仅作为 CPU-only 源码轻量试用路径，用于项目检查、标注整理、教学和小规模 smoke test。
+- Apple Silicon MPS 不进入第一轮支持目标；高级用户可自行尝试适配 PyTorch/SAM 组合，但 TaxaMask 不把 MPS 暴露为受支持运行设备。
+
+#### **2）跨平台配置与文件打开**
+- 新增 `AntSleap/core/platform_paths.py`，运行时配置迁移到系统用户配置目录：
+  - Windows：`%APPDATA%/TaxaMask/user_config.json`
+  - Linux：`~/.config/taxamask/user_config.json` 或 `$XDG_CONFIG_HOME/taxamask/user_config.json`
+  - macOS：`~/Library/Application Support/TaxaMask/user_config.json`
+- 仓库根目录旧 `user_config.json` 只作为首次迁移来源；程序复制后保留旧文件，不自动删除。
+- 新增 `AntSleap/core/platform_open.py`，报告文件夹打开逻辑改为 Windows/macOS/Linux 分支封装，避免训练报告 UI 写死 Windows 行为。
+
+#### **3）运行设备策略固定为 CUDA 优先，否则 CPU**
+- `AntSleap/core/runtime_device.py` 明确只支持 `auto / cpu / cuda`。
+- `auto` 在 PyTorch 报告 CUDA 可用时选择 CUDA，否则选择 CPU。
+- 没安装 PyTorch 的轻量环境也能导入该模块，并安全解析为 CPU，便于文档、路径和 GUI smoke 测试。
+- Model Settings 中不暴露 MPS 选项，避免研究者误以为 Mac GPU 训练链路已经验证。
+
+#### **4）PDF / Poppler 检测可见化**
+- 新增 `core/pdf_processor/poppler_discovery.py`，统一发现：
+  - 用户配置路径
+  - 仓库 `external_tools/poppler`
+  - 系统 `PATH`
+- PDF OCR / `pdf2image` fallback 使用统一发现逻辑。
+- PDF Processing 页面新增 Poppler 状态提示；缺 Poppler 时明确说明 PyMuPDF 提取仍可运行，但 OCR/image fallback 可能不可用。
+- 研究流程含义：PDF 失败时能更快区分“系统依赖缺失”和“API/模型问题”，减少误判。
+
+#### **5）项目搬盘后的图片路径健康检查与重定位**
+- `ProjectManager` 新增图片路径健康检查、重定位预览和确认后 remap：
+  - `get_image_path_health()`
+  - `preview_image_path_remap(...)`
+  - `apply_image_path_remap(...)`
+- 主菜单新增 `File -> Check / Relocate Project Images`。
+- 该工具只处理当前项目中缺失的图片路径，并且只接受新根目录下唯一文件名匹配；同名图片多份时保持未解决，避免把标注错连到另一张标本图。
+- 中文手册同步为优先使用 GUI 检查/重定位；`known_relocated_roots` 保留为高级兜底配置。
+
+#### **6）Blink 路由缺文件历史可清理**
+- 路由树中第三层专家节点仍保留不同状态：
+  - `Appointed`
+  - `History`
+  - `Missing file history`
+  - `Discoverable`
+  - `Available`
+- 新增 `ProjectManager.remove_cascade_route_expert_candidate(...)`。
+- 当选中的是 `Missing file history` 且不是当前 appointed 专家时，路由管理面板的 `Delete` 可以清理这条失效历史。
+- 该操作只清理当前项目 route 的 `expert_candidates` 历史记录，不删除任何磁盘模型文件，也不改变当前指定专家。
+- 研究流程含义：如果 Blink 里已经删掉某个专家模型，Model Settings 路由树里残留的缺文件历史可以直接清掉，不必再绕回 Blink 专家列表。
+
+#### **7）跨平台 smoke 与验证矩阵**
+- 新增 `.github/workflows/cross-platform-smoke.yml`，覆盖 Windows / Linux / macOS 的轻量 CI。
+- 新增 `docs/platform_setup.md`，记录安装顺序、Poppler、Linux GUI、运行设备策略、项目搬盘和验收矩阵。
+- 新增或扩展测试：
+  - `tests/test_config_cleanup.py`
+  - `tests/test_platform_open.py`
+  - `tests/test_poppler_discovery.py`
+  - `tests/test_runtime_device.py`
+  - `tests/test_gui_smoke.py`
+  - `tests/test_generic_export_schema.py`
+  - `tests/test_locator_scope.py`
+  - `tests/test_ui_localization.py`
+  - `tests/test_window_geometry.py`
+- 本地验证包括基础环境轻量测试、`antsleap` 维护者测试环境 GUI smoke、Poppler / runtime device / project remap / route missing history 定向测试。
+
 ### **[2026-05-12] 训练工作流与 Blink 专家路线收口**
 > **本次重点：围绕开源前的真实研究使用流程，补齐主工作台训练控制、Blink 专家训练可调参数、训练报告、专家候选与路由指定机制。`best_expert.pth` 从当前 Blink 专家工作流中退场，改为“版本化候选模型 + 项目路由指定专家”的可审计机制。**
 

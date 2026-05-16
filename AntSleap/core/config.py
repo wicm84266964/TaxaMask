@@ -18,6 +18,8 @@ OBSOLETE_CONFIG_KEYS = (
 DEFAULT_CONFIG = {
     "language": "en",
     "last_project_path": "",
+    "startup_behavior": "start_center", # start_center | continue_last
+    "project_autosave_interval_sec": 3,
     "train_epochs": 5,
     "train_batch": 4,
     "blink_train_epochs": 5,
@@ -40,6 +42,16 @@ DEFAULT_CONFIG = {
         "train_command": "",
         "predict_command": "",
         "model_manifest": "",
+    },
+    "tif_backend": {
+        "backend_id": "custom_tif_backend",
+        "display_name": "TIF Volume Backend",
+        "python_executable": "python",
+        "prepare_dataset_command": "",
+        "train_command": "",
+        "predict_command": "",
+        "model_manifest": "",
+        "export_formats": "ome_tiff,nrrd,mha,nifti",
     },
     
     # Inference Hyperparameters

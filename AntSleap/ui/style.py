@@ -407,7 +407,8 @@ QWidget {
 }
 
 QWidget#workbenchCenterPanel,
-QWidget#CenterPanel {
+QWidget#CenterPanel,
+QWidget#startCenterPage {
     background-color: %SURFACE%;
     border: 1px solid %BORDER%;
     border-radius: 14px;
@@ -464,6 +465,18 @@ QLabel#HeaderLabel {
     border-bottom: 1px solid %BORDER%;
     padding-bottom: 6px;
     margin-bottom: 8px;
+}
+
+QLabel#startCenterTitle {
+    color: %TEXT%;
+    font-size: 18pt;
+    font-weight: 800;
+}
+
+QLabel#startWorkflowTitle {
+    color: %TEXT%;
+    font-size: 15pt;
+    font-weight: 800;
 }
 
 QLabel#SectionNote,

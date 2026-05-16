@@ -10,13 +10,18 @@ import re
 os.environ["YOLO_VERBOSE"] = "False"
 os.environ["ULTRALYTICS_QUIET"] = "True" 
 
+PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(PACKAGE_DIR)
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QListWidget, QPushButton, QLabel, QFileDialog, QTextEdit, 
     QComboBox, QMessageBox, QSplitter, QProgressBar, QDialog, 
     QLineEdit, QScrollArea, QRadioButton, QButtonGroup, QSlider,
     QCheckBox, QInputDialog, QGroupBox, QListWidgetItem, QMenu,
-    QDialogButtonBox, QGridLayout, QSizePolicy, QFrame,
+    QDialogButtonBox, QGridLayout, QSizePolicy, QFrame, QFormLayout,
     QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView,
     QAbstractItemView, QTreeWidget, QTreeWidgetItem)
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSize
@@ -58,12 +63,20 @@ try:
     from AntSleap.ui.cropper import ImageCropper
     from AntSleap.ui.pdf_processing_widget import PdfProcessingWidget
     from AntSleap.ui.blink_lab import BlinkLabWidget
+    from AntSleap.ui.tif_workbench import TifWorkbenchWidget
     from AntSleap.core.dataset import TwoStageDataset
     from AntSleap.core.training_preflight import build_training_preflight, describe_training_preflight, describe_part_coverage, format_size_pair
     from AntSleap.core.cascade_routes import format_expert_label, get_route_persisted_expert_candidates, merge_expert_candidates
     from AntSleap.core.expert_notes import format_expert_display_name, load_expert_notes
     from AntSleap.core.project_templates import DEFAULT_PROJECT_TEMPLATE_ID, iter_project_templates
     from AntSleap.core.external_backend import BUILTIN_BACKEND_ID, EXTERNAL_BACKEND_ID, ExternalBackendRunner, sanitize_external_backend_config
+    from AntSleap.core.tif_backend import DEFAULT_TIF_BACKEND_CONFIG, sanitize_tif_backend_config
+    from AntSleap.core.tif_export import SUPPORTED_TIF_EXPORT_FORMATS
+    from AntSleap.core.tif_project import TIF_PROJECT_SCHEMA_VERSION, TIF_PROJECT_TYPE, TifProjectManager
+    from AntSleap.core.stl_project import STL_PROJECT_SCHEMA_VERSION, STL_PROJECT_TYPE, StlRenderedProjectManager
+    from AntSleap.core.stl_review_bridge import import_stl_rendered_views_into_2d_project, register_stl_rendered_views_for_2d_review
+    from AntSleap.core.tif_stack_import import import_tif_stack
+    from AntSleap.core.amira_import import import_amira_directory
     from AntSleap.core.part_tree import build_part_tree_groups
     from AntSleap.core.platform_open import open_path
     from AntSleap.core.runtime_device import normalize_device_preference, resolve_torch_device
@@ -101,12 +114,20 @@ except ImportError:
     from ui.cropper import ImageCropper
     from ui.pdf_processing_widget import PdfProcessingWidget
     from ui.blink_lab import BlinkLabWidget
+    from ui.tif_workbench import TifWorkbenchWidget
     from core.dataset import TwoStageDataset
     from core.training_preflight import build_training_preflight, describe_training_preflight, describe_part_coverage, format_size_pair
     from core.cascade_routes import format_expert_label, get_route_persisted_expert_candidates, merge_expert_candidates
     from core.expert_notes import format_expert_display_name, load_expert_notes
     from core.project_templates import DEFAULT_PROJECT_TEMPLATE_ID, iter_project_templates
     from core.external_backend import BUILTIN_BACKEND_ID, EXTERNAL_BACKEND_ID, ExternalBackendRunner, sanitize_external_backend_config
+    from core.tif_backend import DEFAULT_TIF_BACKEND_CONFIG, sanitize_tif_backend_config
+    from core.tif_export import SUPPORTED_TIF_EXPORT_FORMATS
+    from core.tif_project import TIF_PROJECT_SCHEMA_VERSION, TIF_PROJECT_TYPE, TifProjectManager
+    from core.stl_project import STL_PROJECT_SCHEMA_VERSION, STL_PROJECT_TYPE, StlRenderedProjectManager
+    from core.stl_review_bridge import import_stl_rendered_views_into_2d_project, register_stl_rendered_views_for_2d_review
+    from core.tif_stack_import import import_tif_stack
+    from core.amira_import import import_amira_directory
     from core.part_tree import build_part_tree_groups
     from core.platform_open import open_path
     from core.runtime_device import normalize_device_preference, resolve_torch_device
@@ -176,6 +197,64 @@ TRANSLATIONS = {
         "Export Dataset": "导出数据集",
         "Export Multimodal Dataset": "导出多模态数据",
         "Model Settings": "模型设置",
+        "2D/STL Model Settings": "2D/STL 模型设置",
+        "TIF Volume Model Settings": "TIF 体数据模型设置",
+        "General Settings": "通用设置",
+        "General Application Settings": "软件通用设置",
+        "Application Preferences": "软件使用偏好",
+        "General settings control the whole application: language, theme, startup behavior, autosave, and the default compute device. Workflow-specific training parameters stay in their own model settings.": "通用设置只控制整个软件的使用习惯：语言、主题、启动方式、自动保存和默认计算设备。具体工作流的训练参数放在各自的模型设置里。",
+        "Language:": "语言：",
+        "Theme:": "主题：",
+        "Startup Behavior:": "启动方式：",
+        "Show Start Center": "显示启动中心",
+        "Continue last project automatically": "自动继续上次项目",
+        "Project Autosave Interval (seconds):": "项目自动保存间隔（秒）：",
+        "Default Runtime Device:": "默认计算设备：",
+        "Runtime device here is the default for built-in 2D/STL models and other internal Torch tasks. TIF external backends use the Python executable and commands configured in TIF settings.": "这里的计算设备是内置 2D/STL 模型和其他内部 Torch 任务的默认值。TIF 外部后端使用 TIF 设置中的 Python 解释器和命令。",
+        "Only the audited dark theme is currently enabled.": "当前只启用已经检查过的深色主题。",
+        "Autosave interval must be a positive number.": "自动保存间隔必须是正数。",
+        "General settings updated.": "通用设置已更新。",
+        "2D/STL Morphology Model Settings": "2D/STL 形态学模型设置",
+        "2D/STL morphology settings control rendered STL views and ordinary morphology images. TIF volume training is configured separately.": "2D/STL 形态学设置控制 STL 渲染视角图和普通形态图片。TIF 体数据训练在单独的 TIF 设置中配置。",
+        "TIF Volume Training Settings": "TIF 体数据训练设置",
+        "TIF Backend Defaults": "TIF 后端默认配置",
+        "Controls the default external backend used by TIF Volume Workbench. The workbench can still edit the same defaults while you are inside a project.": "这里控制 TIF 体数据工作台默认使用的外部后端。在进入具体项目后，工作台内也可以编辑同一套默认配置。",
+        "TIF training uses manual_truth label volumes only. Prediction results are imported as model_draft, so they must be reviewed before becoming manual truth.": "TIF 训练只使用 manual_truth 人工真值标注体。模型预测结果导入为 model_draft 草稿层，必须人工复核后才可成为人工真值。",
+        "Training Data Safety": "训练数据安全规则",
+        "Training source: manual_truth only.": "训练来源：仅 manual_truth 人工真值。",
+        "Prediction import: model_draft layer.": "预测导入：进入 model_draft 草稿层。",
+        "Manual truth is never overwritten automatically.": "人工真值不会被自动覆盖。",
+        "Export Formats:": "导出格式：",
+        "Supported export formats: {0}": "支持的导出格式：{0}",
+        "Validate TIF Backend": "校验 TIF 后端",
+        "TIF backend configuration looks valid.": "TIF 后端配置看起来可用。",
+        "TIF backend ID is required.": "TIF 后端 ID 不能为空。",
+        "TIF backend export formats are required.": "TIF 后端导出格式不能为空。",
+        "Unsupported TIF export formats: {0}": "不支持的 TIF 导出格式：{0}",
+        "TIF backend command '{0}' must include {contract} or {contract_json}.": "TIF 后端命令“{0}”必须包含 {contract} 或 {contract_json}。",
+        "TIF backend settings updated.": "TIF 后端设置已更新。",
+        "Invalid Settings": "设置无效",
+        "Workflow": "工作流",
+        "Start Center": "启动中心",
+        "TaxaMask Workflow Selection": "TaxaMask 工作流选择",
+        "Choose the data type you want to work with today.": "选择今天要处理的数据类型。",
+        "2D / STL morphology annotation": "2D / STL 形态学标注",
+        "Annotate rendered STL views or ordinary 2D morphology images, then train Locator/SAM/Blink models.": "标注 STL 渲染视角图或普通 2D 形态图像，并训练 Locator/SAM/Blink 模型。",
+        "TIF volume annotation": "TIF 体数据标注",
+        "Annotate continuous slice volumes with material IDs, export train-ready volumes, and call TIF segmentation backends.": "用 material ID 标注连续切片体数据，导出可训练体数据，并调用 TIF 分割后端。",
+        "Continue last project": "继续上次项目",
+        "No recent project": "暂无最近项目",
+        "Enter 2D/STL workflow": "进入 2D/STL 工作流",
+        "Enter TIF workflow": "进入 TIF 工作流",
+        "Open any project": "打开任意项目",
+        "Create 2D/STL project": "新建 2D/STL 项目",
+        "Create TIF project": "新建 TIF 项目",
+        "Open 2D/STL Project": "打开 2D/STL 项目",
+        "Open TIF Project": "打开 TIF 项目",
+        "2D/STL Morphology Workflow": "2D/STL 形态学工作流",
+        "TIF Volume Workflow": "TIF 体数据工作流",
+        "Opened 2D/STL workflow.": "已进入 2D/STL 工作流。",
+        "Opened TIF volume workflow.": "已进入 TIF 体数据工作流。",
         "Model Backend:": "模型后端：",
         "Built-in Locator + SAM": "内置 Locator + SAM",
         "External Script Backend": "外部脚本后端",
@@ -261,10 +340,23 @@ TRANSLATIONS = {
         "Scale set to {:.2f} px/mm": "标尺已设定: {:.2f} px/mm",
         "Open Project": "打开项目",
         "New Project": "新建项目",
+        "New TIF Volume Project": "新建 TIF 体数据项目",
+        "New TIF Project Directory": "新建 TIF 项目目录",
+        "Open STL Rendered-View Project": "打开 STL 渲染视图项目",
         "Project Template:": "项目模板：",
         "Generic taxonomy mask project": "通用分类掩码项目",
         "Ant morphology (validated example)": "蚂蚁形态学（已验证示例）",
         "Save Project": "保存项目",
+        "Import TIF Stack": "导入 TIF stack",
+        "Import AMIRA Directory": "导入 AMIRA 目录",
+        "Import STL Rendered Views to Labeling Workbench": "导入 STL 渲染视角图到标注工作台",
+        "Specimen ID:": "Specimen 编号：",
+        "Please create or open a TIF volume project first.": "请先新建或打开一个 TIF 体数据项目。",
+        "Created TIF volume project: {0}": "已创建 TIF 体数据项目：{0}",
+        "Imported TIF stack for specimen {0}. Report: {1}": "已为 specimen {0} 导入 TIF stack。报告：{1}",
+        "Imported AMIRA directory for specimen {0}. Report: {1}": "已为 specimen {0} 导入 AMIRA 目录。报告：{1}",
+        "Imported STL rendered views into the Labeling Workbench from {0}. Registered views: {1}, specimens: {2}, unparsed files: {3}.": "已从 {0} 将 STL 渲染视角图导入标注工作台。登记视角图：{1}，Specimen 数：{2}，未解析文件：{3}。",
+        "Registered STL rendered-view project into the Labeling Workbench. Views: {0}, missing files: {1}.": "已将 STL 渲染视图项目登记进标注工作台。视角图：{0}，缺失文件：{1}。",
         "Check / Relocate Project Images": "检查/重定位项目图片",
         "Project Image Health": "项目图片健康检查",
         "Project has {0}/{1} image paths available. Missing: {2}.": "项目共有 {1} 条图片路径，当前可访问 {0} 条，缺失 {2} 条。",
@@ -283,6 +375,11 @@ TRANSLATIONS = {
         "Unknown": "未知 (Unknown)",
         "Labeling Workbench": "标注工作台",
         "PDF Processing": "文献处理",
+        "PDF Evidence Tools": "PDF 文献证据工具",
+        "Open PDF Evidence Tools": "打开 PDF 文献证据工具",
+        "TIF Volume Workbench": "TIF 体数据工作台",
+        "Opened TIF volume project: {0}": "已打开 TIF 体数据项目：{0}",
+        "Opened STL rendered-view project and registered it into the Labeling Workbench: {0}": "已打开 STL 渲染视图项目，并登记进标注工作台：{0}",
         "Add Structure": "添加结构标签",
         "Remove Structure": "删除结构标签",
         "Crop this Image": "裁剪此图片",
@@ -1761,12 +1858,22 @@ class ModelSettingsDialog(QDialog):
         super().__init__(parent)
         self.lang = lang
         self.route_panel = route_panel
-        self.setWindowTitle(tr("Model Settings", lang))
+        self.setWindowTitle(tr("2D/STL Morphology Model Settings", lang))
         self.resize(880, 680)
         layout = QVBoxLayout(self)
         tabs = QTabWidget()
         tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
         self.locator_scope_checks = []
+
+        workflow_note = QLabel(
+            tr(
+                "2D/STL morphology settings control rendered STL views and ordinary morphology images. TIF volume training is configured separately.",
+                lang,
+            )
+        )
+        workflow_note.setWordWrap(True)
+        workflow_note.setObjectName("mutedLabel")
+        layout.addWidget(workflow_note)
 
         tab_backend = QWidget()
         form_backend = QVBoxLayout(tab_backend)
@@ -2108,6 +2215,312 @@ class ModelSettingsDialog(QDialog):
             }
         except: return None
 
+
+class GeneralSettingsDialog(QDialog):
+    def __init__(self, params, lang="en", parent=None):
+        super().__init__(parent)
+        self.lang = lang
+        self.setWindowTitle(tr("General Application Settings", lang))
+        self.resize(620, 460)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(14)
+
+        note = QLabel(
+            tr(
+                "General settings control the whole application: language, theme, startup behavior, autosave, and the default compute device. Workflow-specific training parameters stay in their own model settings.",
+                lang,
+            )
+        )
+        note.setWordWrap(True)
+        note.setObjectName("mutedLabel")
+        layout.addWidget(note)
+
+        group = QGroupBox(tr("Application Preferences", lang))
+        apply_surface_role(group, SURFACE_ROLE_SUBTLE, "generalSettingsPreferencesPanel")
+        form = QFormLayout(group)
+        form.setContentsMargins(12, 12, 12, 12)
+        form.setSpacing(10)
+
+        self.language_combo = NoWheelComboBox()
+        self.language_combo.addItem("English", "en")
+        self.language_combo.addItem("中文", "zh")
+        language_index = self.language_combo.findData(params.get("language", "en"))
+        self.language_combo.setCurrentIndex(language_index if language_index >= 0 else 0)
+        form.addRow(QLabel(tr("Language:", lang)), self.language_combo)
+
+        self.theme_combo = NoWheelComboBox()
+        self.theme_combo.addItem(tr("Dark Mode", lang), "dark")
+        theme_index = self.theme_combo.findData(normalize_theme(params.get("theme", "dark")))
+        self.theme_combo.setCurrentIndex(theme_index if theme_index >= 0 else 0)
+        form.addRow(QLabel(tr("Theme:", lang)), self.theme_combo)
+
+        theme_note = QLabel(tr("Only the audited dark theme is currently enabled.", lang))
+        theme_note.setWordWrap(True)
+        theme_note.setObjectName("mutedLabel")
+        form.addRow(QLabel(""), theme_note)
+
+        self.startup_combo = NoWheelComboBox()
+        self.startup_combo.addItem(tr("Show Start Center", lang), "start_center")
+        self.startup_combo.addItem(tr("Continue last project automatically", lang), "continue_last")
+        startup_index = self.startup_combo.findData(params.get("startup_behavior", "start_center"))
+        self.startup_combo.setCurrentIndex(startup_index if startup_index >= 0 else 0)
+        form.addRow(QLabel(tr("Startup Behavior:", lang)), self.startup_combo)
+
+        self.autosave_seconds = QLineEdit(str(params.get("project_autosave_interval_sec", 3)))
+        form.addRow(QLabel(tr("Project Autosave Interval (seconds):", lang)), self.autosave_seconds)
+
+        self.runtime_combo = NoWheelComboBox()
+        self.runtime_combo.addItem(tr("Auto (CUDA if available)", lang), "auto")
+        self.runtime_combo.addItem(tr("CPU only", lang), "cpu")
+        self.runtime_combo.addItem(tr("CUDA GPU", lang), "cuda")
+        runtime_index = self.runtime_combo.findData(normalize_device_preference(params.get("runtime_device", "auto")))
+        self.runtime_combo.setCurrentIndex(runtime_index if runtime_index >= 0 else 0)
+        form.addRow(QLabel(tr("Default Runtime Device:", lang)), self.runtime_combo)
+
+        runtime_note = QLabel(
+            tr(
+                "Runtime device here is the default for built-in 2D/STL models and other internal Torch tasks. TIF external backends use the Python executable and commands configured in TIF settings.",
+                lang,
+            )
+        )
+        runtime_note.setWordWrap(True)
+        runtime_note.setObjectName("mutedLabel")
+        form.addRow(QLabel(""), runtime_note)
+
+        layout.addWidget(group)
+        layout.addStretch(1)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        btn_save = QPushButton(tr("Save", lang))
+        apply_semantic_button_style(btn_save, BUTTON_ROLE_COMMIT)
+        btn_save.clicked.connect(self.accept_with_validation)
+        btn_cancel = QPushButton(tr("Cancel", lang))
+        apply_semantic_button_style(btn_cancel, BUTTON_ROLE_STOP)
+        btn_cancel.clicked.connect(self.reject)
+        buttons.addWidget(btn_save)
+        buttons.addWidget(btn_cancel)
+        layout.addLayout(buttons)
+
+    def accept_with_validation(self):
+        try:
+            autosave = int(float(self.autosave_seconds.text()))
+        except Exception:
+            autosave = 0
+        if autosave <= 0:
+            QMessageBox.warning(self, tr("Invalid Settings", self.lang), tr("Autosave interval must be a positive number.", self.lang))
+            return
+        self.accept()
+
+    def get_values(self):
+        try:
+            return {
+                "language": self.language_combo.currentData() or "en",
+                "theme": normalize_theme(self.theme_combo.currentData() or "dark"),
+                "startup_behavior": self.startup_combo.currentData() or "start_center",
+                "project_autosave_interval_sec": int(float(self.autosave_seconds.text())),
+                "runtime_device": normalize_device_preference(self.runtime_combo.currentData() or "auto"),
+            }
+        except Exception:
+            return None
+
+
+class TifModelSettingsDialog(QDialog):
+    def __init__(self, config, lang="en", parent=None):
+        super().__init__(parent)
+        self.lang = lang
+        self.setWindowTitle(tr("TIF Volume Training Settings", lang))
+        self.resize(820, 680)
+
+        self.backend_config = sanitize_tif_backend_config(config or {})
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(14)
+
+        note = QLabel(
+            tr(
+                "Controls the default external backend used by TIF Volume Workbench. The workbench can still edit the same defaults while you are inside a project.",
+                lang,
+            )
+        )
+        note.setWordWrap(True)
+        note.setObjectName("mutedLabel")
+        layout.addWidget(note)
+
+        safety = QGroupBox(tr("Training Data Safety", lang))
+        apply_surface_role(safety, SURFACE_ROLE_SUBTLE, "tifModelSettingsSafetyPanel")
+        safety_layout = QVBoxLayout(safety)
+        safety_layout.setContentsMargins(12, 12, 12, 12)
+        safety_layout.setSpacing(6)
+        for text in (
+            "TIF training uses manual_truth label volumes only. Prediction results are imported as model_draft, so they must be reviewed before becoming manual truth.",
+            "Training source: manual_truth only.",
+            "Prediction import: model_draft layer.",
+            "Manual truth is never overwritten automatically.",
+        ):
+            label = QLabel(tr(text, lang))
+            label.setWordWrap(True)
+            label.setObjectName("mutedLabel")
+            safety_layout.addWidget(label)
+        layout.addWidget(safety)
+
+        group = QGroupBox(tr("TIF Backend Defaults", lang))
+        apply_surface_role(group, SURFACE_ROLE_SUBTLE, "tifModelSettingsBackendPanel")
+        form = QFormLayout(group)
+        form.setContentsMargins(12, 12, 12, 12)
+        form.setSpacing(10)
+
+        self.backend_id_edit = QLineEdit(self.backend_config.get("backend_id", ""))
+        form.addRow(QLabel(tr("Backend ID:", lang)), self.backend_id_edit)
+
+        self.display_name_edit = QLineEdit(self.backend_config.get("display_name", ""))
+        form.addRow(QLabel(tr("Display Name:", lang)), self.display_name_edit)
+
+        self.python_edit = QLineEdit(self.backend_config.get("python_executable", "python"))
+        form.addRow(QLabel(tr("Python Executable:", lang)), self.python_edit)
+
+        self.export_formats_edit = QLineEdit(self.backend_config.get("export_formats", "ome_tiff,nrrd,mha,nifti"))
+        form.addRow(QLabel(tr("Export Formats:", lang)), self.export_formats_edit)
+
+        supported = QLabel(tr("Supported export formats: {0}", lang).format(", ".join(sorted(SUPPORTED_TIF_EXPORT_FORMATS))))
+        supported.setWordWrap(True)
+        supported.setObjectName("mutedLabel")
+        form.addRow(QLabel(""), supported)
+
+        self.prepare_command_edit = self._make_command_editor(
+            self.backend_config.get("prepare_dataset_command", ""),
+            "{python} prepare_tif_dataset.py --contract {contract_json}",
+        )
+        form.addRow(QLabel(tr("Prepare Dataset Command:", lang)), self.prepare_command_edit)
+
+        self.train_command_edit = self._make_command_editor(
+            self.backend_config.get("train_command", ""),
+            "{python} train_tif_model.py --contract {contract_json}",
+        )
+        form.addRow(QLabel(tr("Train Command:", lang)), self.train_command_edit)
+
+        self.predict_command_edit = self._make_command_editor(
+            self.backend_config.get("predict_command", ""),
+            "{python} predict_tif_volume.py --contract {contract_json}",
+        )
+        form.addRow(QLabel(tr("Predict Command:", lang)), self.predict_command_edit)
+
+        self.model_manifest_edit = QLineEdit(self.backend_config.get("model_manifest", ""))
+        self.model_manifest_edit.setPlaceholderText("{run_dir}/outputs/model_manifest.json")
+        form.addRow(QLabel(tr("Model Manifest Path:", lang)), self.model_manifest_edit)
+
+        self.validation_label = QLabel("")
+        self.validation_label.setObjectName("mutedLabel")
+        self.validation_label.setWordWrap(True)
+        form.addRow(QLabel(""), self.validation_label)
+
+        btn_validate = QPushButton(tr("Validate TIF Backend", lang))
+        apply_semantic_button_style(btn_validate, BUTTON_ROLE_NEUTRAL)
+        btn_validate.clicked.connect(self.validate_backend)
+        form.addRow(QLabel(""), btn_validate)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setWidget(group)
+        layout.addWidget(scroll, 1)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        btn_save = QPushButton(tr("Save", lang))
+        apply_semantic_button_style(btn_save, BUTTON_ROLE_COMMIT)
+        btn_save.clicked.connect(self.accept_with_validation)
+        btn_cancel = QPushButton(tr("Cancel", lang))
+        apply_semantic_button_style(btn_cancel, BUTTON_ROLE_STOP)
+        btn_cancel.clicked.connect(self.reject)
+        buttons.addWidget(btn_save)
+        buttons.addWidget(btn_cancel)
+        layout.addLayout(buttons)
+
+    def _make_command_editor(self, text, placeholder):
+        editor = QTextEdit()
+        editor.setAcceptRichText(False)
+        editor.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        editor.setMinimumHeight(70)
+        editor.setPlainText(str(text or ""))
+        editor.setPlaceholderText(placeholder)
+        return editor
+
+    def _command_text(self, editor):
+        return editor.toPlainText().strip()
+
+    def _export_formats(self):
+        return [
+            item.strip()
+            for item in self.export_formats_edit.text().split(",")
+            if item.strip()
+        ]
+
+    def _validation_errors(self):
+        errors = []
+        if not self.backend_id_edit.text().strip():
+            errors.append(tr("TIF backend ID is required.", self.lang))
+        export_formats = self._export_formats()
+        if not export_formats:
+            errors.append(tr("TIF backend export formats are required.", self.lang))
+        unknown_formats = sorted(set(export_formats) - SUPPORTED_TIF_EXPORT_FORMATS)
+        if unknown_formats:
+            errors.append(tr("Unsupported TIF export formats: {0}", self.lang).format(", ".join(unknown_formats)))
+
+        commands = {
+            "prepare_dataset": self._command_text(self.prepare_command_edit),
+            "train": self._command_text(self.train_command_edit),
+            "predict": self._command_text(self.predict_command_edit),
+        }
+        for command_name, command_text in commands.items():
+            if command_text and "{contract}" not in command_text and "{contract_json}" not in command_text:
+                errors.append(
+                    tr("TIF backend command '{0}' must include {contract} or {contract_json}.", self.lang).format(command_name)
+                )
+        return errors
+
+    def validate_backend(self):
+        errors = self._validation_errors()
+        if errors:
+            message = "\n".join(errors)
+            self.validation_label.setText(message)
+            QMessageBox.warning(self, tr("TIF Volume Model Settings", self.lang), message)
+            return False
+        self.validation_label.setText(tr("TIF backend configuration looks valid.", self.lang))
+        QMessageBox.information(
+            self,
+            tr("TIF Volume Model Settings", self.lang),
+            tr("TIF backend configuration looks valid.", self.lang),
+        )
+        return True
+
+    def accept_with_validation(self):
+        errors = self._validation_errors()
+        if errors:
+            message = "\n".join(errors)
+            self.validation_label.setText(message)
+            QMessageBox.warning(self, tr("Invalid Settings", self.lang), message)
+            return
+        self.accept()
+
+    def get_values(self):
+        return sanitize_tif_backend_config(
+            {
+                "backend_id": self.backend_id_edit.text(),
+                "display_name": self.display_name_edit.text(),
+                "python_executable": self.python_edit.text(),
+                "export_formats": ",".join(self._export_formats()),
+                "prepare_dataset_command": self._command_text(self.prepare_command_edit),
+                "train_command": self._command_text(self.train_command_edit),
+                "predict_command": self._command_text(self.predict_command_edit),
+                "model_manifest": self.model_manifest_edit.text(),
+            }
+        )
+
+
 class ExportDialog(QDialog):
     def __init__(self, parent=None, lang="en"):
         super().__init__(parent)
@@ -2243,7 +2656,7 @@ class BlinkEntryDialog(QDialog):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.startup_size = QSize(1600, 1000)
+        self.startup_size = QSize(1480, 920)
         self.resize(self.startup_size)
         self.config = ConfigManager()
         self.current_lang = self.config.get("language", "en")
@@ -2252,6 +2665,9 @@ class MainWindow(QMainWindow):
             self.config.set("theme", self.current_theme)
         self.project = ProjectManager()
         self.project.set_known_relocated_roots(self.config.get("known_relocated_roots", []))
+        self.tif_project = TifProjectManager()
+        self.stl_project = StlRenderedProjectManager()
+        self.active_project_kind = "image"
         self.db = MultiModalDB()
         
         self.train_epochs = self.config.get("train_epochs", 5)
@@ -2282,7 +2698,11 @@ class MainWindow(QMainWindow):
         self.sam_thread = None
         self.sam_worker = None
         self.trainer = None
-        self.project_autosave_delay_ms = 3000
+        try:
+            autosave_seconds = int(float(self.config.get("project_autosave_interval_sec", 3)))
+        except Exception:
+            autosave_seconds = 3
+        self.project_autosave_delay_ms = max(1, autosave_seconds) * 1000
         self.project_save_pending = False
         self.project_save_timer = QTimer(self)
         self.project_save_timer.setSingleShot(True)
@@ -2294,6 +2714,7 @@ class MainWindow(QMainWindow):
 
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
+        self.start_center_widget = self._build_start_center()
 
         self.workbench_widget = QWidget()
         main_layout = QVBoxLayout(self.workbench_widget)
@@ -2638,6 +3059,7 @@ class MainWindow(QMainWindow):
         self.workbench_splitter.setSizes([240, 1080, 320])
 
         self.pdf_widget = PdfProcessingWidget(self.current_lang)
+        self.tif_workbench = TifWorkbenchWidget(self.tif_project, self.current_lang, config_manager=self.config)
         self.blink_lab = BlinkLabWidget(
             self.engine,
             self.project,
@@ -2652,21 +3074,15 @@ class MainWindow(QMainWindow):
         self.blink_lab.global_labels_updated.connect(self.on_global_labels_updated)
         self.blink_lab.route_registry_refresh_requested.connect(self.refresh_route_table)
         self.route_settings_panel = RouteManagementPanel(self, self.current_lang)
-        self.tabs.addTab(self.pdf_widget, tr("PDF Processing", self.current_lang))
-        self.tabs.addTab(self.workbench_widget, tr("Labeling Workbench", self.current_lang))
-        self.tabs.addTab(self.blink_lab, tr("Blink Workbench", self.current_lang))
-        
-        last_proj = self.config.get("last_project_path")
-        if last_proj and os.path.exists(last_proj):
-            try:
-                self.project.load_project(last_proj)
-                self.log(tr("Restored session: {0}", self.current_lang).format(last_proj))
-            except Exception:
-                self.project.create_project(DEFAULT_PROJECT_NAME, ".", template_id=DEFAULT_PROJECT_TEMPLATE_ID)
+
+        self.project.create_project(DEFAULT_PROJECT_NAME, ".", template_id=DEFAULT_PROJECT_TEMPLATE_ID)
+        self.active_project_kind = "start"
+        if self.config.get("startup_behavior", "start_center") == "continue_last" and self.config.get("last_project_path", ""):
+            self.open_last_project()
+            if self.active_project_kind == "start":
+                self._show_start_center()
         else:
-            self.project.create_project(DEFAULT_PROJECT_NAME, ".", template_id=DEFAULT_PROJECT_TEMPLATE_ID)
-        
-        self.refresh_file_list()
+            self._show_start_center()
         self.log(tr("System Initialized.", self.current_lang))
         self.refresh_model_list()
         self.refresh_ui()
@@ -2693,10 +3109,161 @@ class MainWindow(QMainWindow):
         )
         self.setGeometry(x, y, width, height)
 
+    def _build_start_center(self):
+        page = QWidget()
+        page.setObjectName("startCenterPage")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(32, 28, 32, 28)
+        layout.setSpacing(18)
+
+        header = QWidget()
+        apply_surface_role(header, SURFACE_ROLE_PANEL, "startCenterHeader")
+        header_layout = QVBoxLayout(header)
+        header_layout.setContentsMargins(22, 18, 22, 18)
+        header_layout.setSpacing(8)
+        self.start_title = QLabel()
+        self.start_title.setObjectName("startCenterTitle")
+        self.start_subtitle = QLabel()
+        self.start_subtitle.setObjectName("mutedLabel")
+        self.start_subtitle.setWordWrap(True)
+        header_layout.addWidget(self.start_title)
+        header_layout.addWidget(self.start_subtitle)
+        layout.addWidget(header)
+
+        card_row = QHBoxLayout()
+        card_row.setSpacing(16)
+        self.start_image_card = self._build_workflow_card(
+            "start2DWorkflowCard",
+            "2D / STL morphology annotation",
+            "Annotate rendered STL views or ordinary 2D morphology images, then train Locator/SAM/Blink models.",
+            "Enter 2D/STL workflow",
+            self.enter_image_workflow,
+            "Create 2D/STL project",
+            self.new_project,
+        )
+        self.start_tif_card = self._build_workflow_card(
+            "startTifWorkflowCard",
+            "TIF volume annotation",
+            "Annotate continuous slice volumes with material IDs, export train-ready volumes, and call TIF segmentation backends.",
+            "Enter TIF workflow",
+            self.enter_tif_workflow,
+            "Create TIF project",
+            self.new_tif_project,
+        )
+        card_row.addWidget(self.start_image_card, 1)
+        card_row.addWidget(self.start_tif_card, 1)
+        layout.addLayout(card_row, 1)
+
+        footer = QWidget()
+        apply_surface_role(footer, SURFACE_ROLE_SUBTLE, "startCenterFooter")
+        footer_layout = QHBoxLayout(footer)
+        footer_layout.setContentsMargins(16, 12, 16, 12)
+        footer_layout.setSpacing(10)
+        self.start_recent_label = QLabel()
+        self.start_recent_label.setObjectName("mutedLabel")
+        self.btn_continue_last = QPushButton()
+        self.btn_continue_last.clicked.connect(self.open_last_project)
+        apply_semantic_button_style(self.btn_continue_last, BUTTON_ROLE_COMMIT)
+        self.btn_open_any = QPushButton()
+        self.btn_open_any.clicked.connect(self.open_project)
+        apply_semantic_button_style(self.btn_open_any, BUTTON_ROLE_NEUTRAL)
+        self.btn_general_settings = QPushButton()
+        self.btn_general_settings.clicked.connect(self.open_general_settings)
+        apply_semantic_button_style(self.btn_general_settings, BUTTON_ROLE_NEUTRAL)
+        footer_layout.addWidget(self.start_recent_label, 1)
+        footer_layout.addWidget(self.btn_continue_last)
+        footer_layout.addWidget(self.btn_open_any)
+        footer_layout.addWidget(self.btn_general_settings)
+        layout.addWidget(footer)
+        return page
+
+    def _build_workflow_card(self, object_name, title_key, description_key, enter_key, enter_callback, create_key, create_callback):
+        card = QFrame()
+        card.setObjectName(object_name)
+        card.setFrameShape(QFrame.NoFrame)
+        card.setProperty("surfaceRole", SURFACE_ROLE_PANEL)
+        card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        card.setMinimumHeight(260)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(12)
+        title = QLabel()
+        title.setObjectName("startWorkflowTitle")
+        title.setProperty("textKey", title_key)
+        description = QLabel()
+        description.setObjectName("mutedLabel")
+        description.setWordWrap(True)
+        description.setProperty("textKey", description_key)
+        enter_button = QPushButton()
+        enter_button.setProperty("textKey", enter_key)
+        enter_button.clicked.connect(enter_callback)
+        apply_semantic_button_style(enter_button, BUTTON_ROLE_RUN, "padding: 10px; font-weight: bold;")
+        create_button = QPushButton()
+        create_button.setProperty("textKey", create_key)
+        create_button.clicked.connect(create_callback)
+        apply_semantic_button_style(create_button, BUTTON_ROLE_NEUTRAL)
+        layout.addWidget(title)
+        layout.addWidget(description)
+        layout.addStretch(1)
+        layout.addWidget(enter_button)
+        layout.addWidget(create_button)
+        return card
+
+    def _show_start_center(self):
+        self.active_project_kind = "start"
+        self._apply_project_mode_tabs()
+        self._update_start_center_texts()
+
+    def _update_start_center_texts(self):
+        if not hasattr(self, "start_center_widget"):
+            return
+        self.start_title.setText(tr("TaxaMask Workflow Selection", self.current_lang))
+        self.start_subtitle.setText(tr("Choose the data type you want to work with today.", self.current_lang))
+        last_project = self.config.get("last_project_path", "")
+        if last_project and os.path.exists(last_project):
+            self.start_recent_label.setText(f"{tr('Continue last project', self.current_lang)}: {last_project}")
+            self.btn_continue_last.setEnabled(True)
+        else:
+            self.start_recent_label.setText(tr("No recent project", self.current_lang))
+            self.btn_continue_last.setEnabled(False)
+        self.btn_continue_last.setText(tr("Continue last project", self.current_lang))
+        self.btn_open_any.setText(tr("Open any project", self.current_lang))
+        self.btn_general_settings.setText(tr("General Settings", self.current_lang))
+        if hasattr(self, "create_menus"):
+            self.create_menus()
+        for label in self.start_center_widget.findChildren(QLabel):
+            key = label.property("textKey")
+            if key:
+                label.setText(tr(str(key), self.current_lang))
+        for button in self.start_center_widget.findChildren(QPushButton):
+            key = button.property("textKey")
+            if key:
+                button.setText(tr(str(key), self.current_lang))
+
+    def enter_image_workflow(self):
+        self.active_project_kind = "image"
+        self._refresh_project_bound_views()
+        self.tabs.setCurrentWidget(self.workbench_widget)
+        self.log(tr("Opened 2D/STL workflow.", self.current_lang))
+
+    def enter_tif_workflow(self):
+        self.active_project_kind = "tif"
+        self._refresh_project_bound_views()
+        self.tabs.setCurrentWidget(self.tif_workbench)
+        self.log(tr("Opened TIF volume workflow.", self.current_lang))
+
+    def open_last_project(self):
+        last_project = self.config.get("last_project_path", "")
+        if not last_project or not os.path.exists(last_project):
+            return
+        self.open_project_path(last_project)
+
     def closeEvent(self, event):
         self._flush_pending_project_save()
-        if self.project.current_project_path:
+        if getattr(self, "active_project_kind", "image") == "image" and self.project.current_project_path:
             self.config.set("last_project_path", self.project.current_project_path)
+        if getattr(self, "active_project_kind", "image") == "tif" and self.tif_project.current_project_path:
+            self.config.set("last_project_path", self.tif_project.current_project_path)
         self.config.save()
         if self.sam_thread and self.sam_thread.isRunning():
             self.sam_thread.quit()
@@ -2855,9 +3422,82 @@ class MainWindow(QMainWindow):
             panel.update_action_buttons()
 
     def _refresh_project_bound_views(self):
+        self._apply_project_mode_tabs()
+        if getattr(self, "active_project_kind", "image") == "start":
+            self._update_start_center_texts()
+            if hasattr(self, "tabs"):
+                self.tabs.setCurrentWidget(self.start_center_widget)
+            return
+        if getattr(self, "active_project_kind", "image") == "tif":
+            if hasattr(self, "tif_workbench"):
+                self.tif_workbench.refresh_project()
+            if hasattr(self, "tabs"):
+                self.tabs.setCurrentWidget(self.tif_workbench)
+            return
         self.refresh_file_list()
         self.refresh_ui()
         self.refresh_route_table()
+
+    def _ensure_tab_visible(self, widget, title):
+        if not hasattr(self, "tabs") or widget is None:
+            return
+        if self.tabs.indexOf(widget) < 0:
+            self.tabs.addTab(widget, title)
+
+    def _remove_tab_if_present(self, widget):
+        if not hasattr(self, "tabs") or widget is None:
+            return
+        index = self.tabs.indexOf(widget)
+        if index >= 0:
+            self.tabs.removeTab(index)
+
+    def _apply_project_mode_tabs(self):
+        if not hasattr(self, "tabs"):
+            return
+        if getattr(self, "active_project_kind", "image") == "start":
+            for widget in (self.workbench_widget, self.blink_lab, self.tif_workbench, self.pdf_widget):
+                self._remove_tab_if_present(widget)
+            self._ensure_tab_visible(self.start_center_widget, tr("Start Center", self.current_lang))
+            self.tabs.setCurrentWidget(self.start_center_widget)
+            return
+        if getattr(self, "active_project_kind", "image") == "tif":
+            self._remove_tab_if_present(self.start_center_widget)
+            self._remove_tab_if_present(self.workbench_widget)
+            self._remove_tab_if_present(self.blink_lab)
+            self._remove_tab_if_present(self.pdf_widget)
+            self._ensure_tab_visible(self.tif_workbench, tr("TIF Volume Workbench", self.current_lang))
+            self.tabs.setCurrentWidget(self.tif_workbench)
+            return
+        self._remove_tab_if_present(self.start_center_widget)
+        self._remove_tab_if_present(self.tif_workbench)
+        self._ensure_tab_visible(self.workbench_widget, tr("Labeling Workbench", self.current_lang))
+        self._ensure_tab_visible(self.blink_lab, tr("Blink Workbench", self.current_lang))
+        if self.tabs.currentWidget() is None or self.tabs.currentWidget() is self.tif_workbench:
+            self.tabs.setCurrentWidget(self.workbench_widget)
+
+    def _is_tif_project_file(self, path):
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except Exception:
+            return False
+        return (
+            isinstance(payload, dict)
+            and payload.get("schema_version") == TIF_PROJECT_SCHEMA_VERSION
+            and payload.get("project_type") == TIF_PROJECT_TYPE
+        )
+
+    def _is_stl_project_file(self, path):
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except Exception:
+            return False
+        return (
+            isinstance(payload, dict)
+            and payload.get("schema_version") == STL_PROJECT_SCHEMA_VERSION
+            and payload.get("project_type") == STL_PROJECT_TYPE
+        )
 
     def appoint_selected_route_expert(self):
         panel = getattr(self, "route_settings_panel", None)
@@ -3195,18 +3835,25 @@ class MainWindow(QMainWindow):
         menubar = self.menuBar()
         menubar.clear()
         file_menu = menubar.addMenu(tr("File", self.current_lang))
+        file_menu.addAction(tr("Start Center", self.current_lang), self._show_start_center)
         file_menu.addAction(tr("New Project", self.current_lang), self.new_project)
+        file_menu.addAction(tr("New TIF Volume Project", self.current_lang), self.new_tif_project)
         file_menu.addAction(tr("Open Project", self.current_lang), self.open_project)
         file_menu.addAction(tr("Save Project", self.current_lang), lambda: self._flush_pending_project_save(force=True))
+        file_menu.addAction(tr("Import STL Rendered Views to Labeling Workbench", self.current_lang), self.import_stl_rendered_views_action)
+        file_menu.addAction(tr("Open PDF Evidence Tools", self.current_lang), self.open_pdf_evidence_tools)
         file_menu.addAction(tr("Check / Relocate Project Images", self.current_lang), self.check_relocate_project_images)
         file_menu.addAction(tr("Export Dataset", self.current_lang), self.export_dataset)
+        workflow_menu = menubar.addMenu(tr("Workflow", self.current_lang))
+        workflow_menu.addAction(tr("2D/STL Morphology Workflow", self.current_lang), self.enter_image_workflow)
+        workflow_menu.addAction(tr("TIF Volume Workflow", self.current_lang), self.enter_tif_workflow)
+        workflow_menu.addAction(tr("Create 2D/STL project", self.current_lang), self.new_project)
+        workflow_menu.addAction(tr("Create TIF project", self.current_lang), self.new_tif_project)
+        workflow_menu.addAction(tr("Import STL Rendered Views to Labeling Workbench", self.current_lang), self.import_stl_rendered_views_action)
         settings_menu = menubar.addMenu(tr("Settings", self.current_lang))
-        settings_menu.addAction(tr("Model Settings", self.current_lang), self.open_settings)
-        lang_menu = settings_menu.addMenu(tr("Language", self.current_lang))
-        lang_menu.addAction("English", lambda: self.change_language("en"))
-        lang_menu.addAction("中文", lambda: self.change_language("zh"))
-        theme_menu = settings_menu.addMenu(tr("Theme", self.current_lang))
-        theme_menu.addAction(tr("Dark Mode", self.current_lang), lambda: self.change_theme("dark"))
+        settings_menu.addAction(tr("General Settings", self.current_lang), self.open_general_settings)
+        settings_menu.addAction(tr("2D/STL Model Settings", self.current_lang), self.open_stl_model_settings)
+        settings_menu.addAction(tr("TIF Volume Model Settings", self.current_lang), self.open_tif_model_settings)
 
     def new_project(self):
         d = QFileDialog.getExistingDirectory(self, tr("New Project Directory", self.current_lang))
@@ -3218,8 +3865,115 @@ class MainWindow(QMainWindow):
                     return
                 self._flush_pending_project_save()
                 self.project.create_project(name, d, template_id=template["template_id"])
+                self.active_project_kind = "image"
                 self._refresh_project_bound_views()
                 self.canvas.load_image("") 
+
+    def new_tif_project(self):
+        d = QFileDialog.getExistingDirectory(self, tr("New TIF Project Directory", self.current_lang))
+        if not d:
+            return
+        name, ok = QInputDialog.getText(self, tr("New TIF Volume Project", self.current_lang), tr("Project Name:", self.current_lang))
+        if not ok or not name:
+            return
+        self._flush_pending_project_save()
+        self.tif_project.create_project(name, d)
+        self.active_project_kind = "tif"
+        self.config.set("last_project_path", self.tif_project.current_project_path)
+        self._refresh_project_bound_views()
+        self.log(tr("Created TIF volume project: {0}", self.current_lang).format(self.tif_project.current_project_path))
+
+    def _ensure_tif_project_open(self):
+        if getattr(self, "active_project_kind", "image") != "tif" or not self.tif_project.current_project_path:
+            QMessageBox.warning(
+                self,
+                tr("TIF Volume Workbench", self.current_lang),
+                tr("Please create or open a TIF volume project first.", self.current_lang),
+            )
+            return False
+        return True
+
+    def import_tif_stack_action(self):
+        if not self._ensure_tif_project_open():
+            return
+        tif_path, _ = QFileDialog.getOpenFileName(
+            self,
+            tr("Import TIF Stack", self.current_lang),
+            "",
+            "TIF/TIFF (*.tif *.tiff)",
+        )
+        if not tif_path:
+            return
+        default_id = os.path.splitext(os.path.basename(tif_path))[0]
+        specimen_id, ok = QInputDialog.getText(
+            self,
+            tr("Import TIF Stack", self.current_lang),
+            tr("Specimen ID:", self.current_lang),
+            text=default_id,
+        )
+        if not ok or not specimen_id:
+            return
+        try:
+            result = import_tif_stack(self.tif_project, tif_path, specimen_id)
+        except Exception as exc:
+            QMessageBox.critical(self, tr("Import TIF Stack", self.current_lang), str(exc))
+            return
+        self.tif_workbench.refresh_project()
+        self.tabs.setCurrentWidget(self.tif_workbench)
+        report_path = result.get("report_path", "")
+        self.log(tr("Imported TIF stack for specimen {0}. Report: {1}", self.current_lang).format(specimen_id, report_path))
+
+    def import_amira_directory_action(self):
+        if not self._ensure_tif_project_open():
+            return
+        source_dir = QFileDialog.getExistingDirectory(self, tr("Import AMIRA Directory", self.current_lang))
+        if not source_dir:
+            return
+        default_id = os.path.basename(os.path.normpath(source_dir))
+        specimen_id, ok = QInputDialog.getText(
+            self,
+            tr("Import AMIRA Directory", self.current_lang),
+            tr("Specimen ID:", self.current_lang),
+            text=default_id,
+        )
+        if not ok or not specimen_id:
+            return
+        try:
+            result = import_amira_directory(self.tif_project, source_dir, specimen_id)
+        except Exception as exc:
+            QMessageBox.critical(self, tr("Import AMIRA Directory", self.current_lang), str(exc))
+            return
+        self.tif_workbench.refresh_project()
+        self.tabs.setCurrentWidget(self.tif_workbench)
+        report_path = result.get("report_path", "")
+        self.log(tr("Imported AMIRA directory for specimen {0}. Report: {1}", self.current_lang).format(specimen_id, report_path))
+
+    def import_stl_rendered_views_action(self):
+        source_dir = QFileDialog.getExistingDirectory(self, tr("Import STL Rendered Views to Labeling Workbench", self.current_lang))
+        if not source_dir:
+            return
+        try:
+            result = import_stl_rendered_views_into_2d_project(self.project, source_dir)
+        except Exception as exc:
+            QMessageBox.critical(self, tr("Import STL Rendered Views to Labeling Workbench", self.current_lang), str(exc))
+            return
+        self.active_project_kind = "image"
+        self._refresh_project_bound_views()
+        self.tabs.setCurrentWidget(self.workbench_widget)
+        self.log(
+            tr("Imported STL rendered views into the Labeling Workbench from {0}. Registered views: {1}, specimens: {2}, unparsed files: {3}.", self.current_lang).format(
+                source_dir,
+                result.get("registered_count", 0),
+                result.get("specimen_count", 0),
+                result.get("unparsed_count", 0),
+            )
+        )
+
+    def open_pdf_evidence_tools(self):
+        index = self.tabs.indexOf(self.pdf_widget)
+        if index < 0:
+            index = self.tabs.addTab(self.pdf_widget, tr("PDF Evidence Tools", self.current_lang))
+        self.tabs.setCurrentIndex(index)
 
     def _choose_project_template(self):
         templates = iter_project_templates()
@@ -3244,10 +3998,34 @@ class MainWindow(QMainWindow):
     def open_project(self):
         f, _ = QFileDialog.getOpenFileName(self, tr("Open Project", self.current_lang), "", "JSON (*.json)")
         if f:
-            self._flush_pending_project_save()
+            self.open_project_path(f)
+
+    def open_project_path(self, path):
+        f = os.path.abspath(str(path))
+        self._flush_pending_project_save()
+        if self._is_tif_project_file(f):
+            self.tif_project.load_project(f)
+            self.active_project_kind = "tif"
+            self.config.set("last_project_path", f)
+            self.log(tr("Opened TIF volume project: {0}", self.current_lang).format(f))
+        elif self._is_stl_project_file(f):
+            self.stl_project.load_project(f)
+            result = register_stl_rendered_views_for_2d_review(self.stl_project, self.project)
+            self.active_project_kind = "image"
+            self.config.set("last_project_path", f)
+            self.log(tr("Opened STL rendered-view project and registered it into the Labeling Workbench: {0}", self.current_lang).format(f))
+            self.log(
+                tr("Registered STL rendered-view project into the Labeling Workbench. Views: {0}, missing files: {1}.", self.current_lang).format(
+                    result.get("registered_count", 0),
+                    result.get("missing_count", 0),
+                )
+            )
+        else:
             self.project.load_project(f)
-            self._refresh_project_bound_views()
-            self.canvas.load_image("")
+            self.active_project_kind = "image"
+            self.config.set("last_project_path", f)
+        self._refresh_project_bound_views()
+        self.canvas.load_image("")
 
     def _format_relocation_preview(self, matches, limit=8):
         lines = []
@@ -3549,9 +4327,19 @@ class MainWindow(QMainWindow):
         self.btn_del_locator.setToolTip(tr("Delete the selected locator model file from disk.", self.current_lang))
         self.btn_del_segmenter.setText(tr("Del", self.current_lang))
         self.btn_del_segmenter.setToolTip(tr("Delete the selected segmenter model file from disk.", self.current_lang))
-        self.tabs.setTabText(0, tr("PDF Processing", self.current_lang))
-        self.tabs.setTabText(1, tr("Labeling Workbench", self.current_lang))
-        self.tabs.setTabText(2, tr("Blink Workbench", self.current_lang))
+        for index in range(self.tabs.count()):
+            widget = self.tabs.widget(index)
+            if widget is self.workbench_widget:
+                self.tabs.setTabText(index, tr("Labeling Workbench", self.current_lang))
+            elif widget is self.blink_lab:
+                self.tabs.setTabText(index, tr("Blink Workbench", self.current_lang))
+            elif widget is self.tif_workbench:
+                self.tabs.setTabText(index, tr("TIF Volume Workbench", self.current_lang))
+            elif widget is self.pdf_widget:
+                self.tabs.setTabText(index, tr("PDF Evidence Tools", self.current_lang))
+            elif widget is self.start_center_widget:
+                self.tabs.setTabText(index, tr("Start Center", self.current_lang))
+        self._update_start_center_texts()
         self.genus_combo.blockSignals(True)
         self.genus_combo.clear()
         if hasattr(self.project, "list_taxa"):
@@ -3567,7 +4355,65 @@ class MainWindow(QMainWindow):
             self.update_measurements(self._current_part_name())
         self.refresh_route_table()
 
-    def open_settings(self):
+    def open_general_settings(self):
+        params = {
+            "language": self.current_lang,
+            "theme": self.current_theme,
+            "startup_behavior": self.config.get("startup_behavior", "start_center"),
+            "project_autosave_interval_sec": max(1, int(self.project_autosave_delay_ms / 1000)),
+            "runtime_device": self.runtime_device,
+        }
+        dlg = GeneralSettingsDialog(params, self.current_lang, self)
+        if not dlg.exec():
+            return
+        values = dlg.get_values()
+        if not values:
+            return
+
+        old_lang = self.current_lang
+        old_theme = self.current_theme
+        old_runtime_device = self.runtime_device
+        self.project_autosave_delay_ms = max(1, int(values["project_autosave_interval_sec"])) * 1000
+        self.config.set("startup_behavior", values["startup_behavior"])
+        self.config.set("project_autosave_interval_sec", int(values["project_autosave_interval_sec"]))
+
+        new_runtime_device = normalize_device_preference(values.get("runtime_device", "auto"))
+        self.runtime_device = new_runtime_device
+        self.config.set("runtime_device", self.runtime_device)
+        if old_runtime_device != self.runtime_device:
+            if self.engine.set_device_preference(self.runtime_device):
+                self.log(tr("Runtime device resolved to: {0}", self.current_lang).format(str(self.engine.device)))
+            if self.sam_worker:
+                self.sam_worker.device_preference = self.runtime_device
+                self.sam_worker.reload_base_model()
+                selected_segmenter = self._selected_segmenter_timestamp()
+                if selected_segmenter:
+                    weights_path = self._segmenter_model_path(selected_segmenter)
+                    if weights_path:
+                        self.sam_worker.load_decoder_weights(weights_path)
+            if hasattr(self, "blink_lab"):
+                self.blink_lab.set_training_defaults(
+                    self.blink_train_epochs,
+                    self.blink_train_batch,
+                    self.blink_train_lr,
+                    self.blink_train_weight_decay,
+                    self.blink_train_input_size,
+                    self.runtime_device,
+                )
+
+        if values["language"] != old_lang:
+            self.change_language(values["language"])
+        else:
+            self.config.set("language", self.current_lang)
+        if values["theme"] != old_theme:
+            self.change_theme(values["theme"])
+        else:
+            self.config.set("theme", self.current_theme)
+        self.config.save()
+        self.log(tr("General settings updated.", self.current_lang))
+        self.refresh_ui()
+
+    def open_stl_model_settings(self):
         params = {
             'epochs': self.train_epochs, 'batch': self.train_batch, 'lr': self.train_lr, 'wd': self.train_wd,
             'blink_epochs': self.blink_train_epochs,
@@ -3661,10 +4507,26 @@ class MainWindow(QMainWindow):
             route_panel.set_language(self.current_lang)
             route_panel.set_theme(self.current_theme)
 
+    def open_settings(self):
+        self.open_stl_model_settings()
+
+    def open_tif_model_settings(self):
+        current_config = self.config.get("tif_backend", DEFAULT_TIF_BACKEND_CONFIG)
+        dlg = TifModelSettingsDialog(current_config, self.current_lang, self)
+        if not dlg.exec():
+            return
+        backend_config = dlg.get_values()
+        self.config.set("tif_backend", dict(backend_config))
+        self.config.save()
+        if hasattr(self, "tif_workbench"):
+            self.tif_workbench.set_config_manager(self.config)
+        self.log(tr("TIF backend settings updated.", self.current_lang))
+
     def change_language(self, lang):
         self.current_lang = lang
         self.config.set("language", lang)
         self.pdf_widget.change_language(lang)
+        self.tif_workbench.change_language(lang)
         self.blink_lab.change_language(lang)
         if hasattr(self, "route_settings_panel"):
             self.route_settings_panel.set_language(lang)

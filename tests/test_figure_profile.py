@@ -3,13 +3,24 @@ import sys
 import types
 import unittest
 from pathlib import Path
-
-from core.pdf_processor.figure_profile import load_figure_profile, normalize_figure_profile, profile_display_name
-from core.pdf_processor.multimodal_validator import MultimodalValidator
-
+import importlib
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 PROFILE_DIR = REPO_ROOT / "multimodal_configs"
+PDF_PROCESSOR_DIR = REPO_ROOT / "core" / "pdf_processor"
+PDF_PROCESSOR_PACKAGE_DIR = REPO_ROOT / "core"
+if str(PDF_PROCESSOR_PACKAGE_DIR) not in sys.path:
+    sys.path.insert(0, str(PDF_PROCESSOR_PACKAGE_DIR))
+
+figure_profile_module = importlib.import_module("pdf_processor.figure_profile")
+validator_module = importlib.import_module("pdf_processor.multimodal_validator")
+load_figure_profile = figure_profile_module.load_figure_profile
+normalize_figure_profile = figure_profile_module.normalize_figure_profile
+profile_display_name = figure_profile_module.profile_display_name
+MultimodalValidator = validator_module.MultimodalValidator
 
 
 class FigureProfileTests(unittest.TestCase):
@@ -72,7 +83,7 @@ class MultimodalValidatorProfileTests(unittest.TestCase):
 class PDFExtractorProfileTests(unittest.TestCase):
     def test_extractor_acceptance_mode_follows_profile(self):
         sys.modules.setdefault("fitz", types.SimpleNamespace(Rect=object, Document=object, Page=object))
-        from core.pdf_processor.pdf_extractor import EnhancedPDFExtractionSystem
+        EnhancedPDFExtractionSystem = importlib.import_module("pdf_processor.pdf_extractor").EnhancedPDFExtractionSystem
 
         plant = load_figure_profile(PROFILE_DIR / "植物分类学图版提取复核_模板.json")
         extractor = EnhancedPDFExtractionSystem(
@@ -96,4 +107,3 @@ class PDFExtractorProfileTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

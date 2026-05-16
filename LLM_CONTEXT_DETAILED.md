@@ -8,6 +8,222 @@
 
 ## 0) v3.21 Training Controls / Blink Expert Route Workflow (2026-05-12)
 
+## 0) v3.23 Ant 3D Workbench Completion Pass (2026-05-16)
+
+### 0.0 OME-NGFF sidecar is now a real minimal store
+- `AntSleap/core/tif_volume_io.py` still writes `array.npy` for fast internal recovery, but `.ome.zarr/` directories now also contain:
+  - `.zgroup`
+  - `.zattrs`
+  - `0/.zarray`
+  - raw uncompressed Zarr v2 chunks
+- Metadata records `ome_ngff_complete: true`, `ome_ngff_version: "0.4"`, axes, shape, dtype, spacing, chunk shape, role, and array path.
+- This is intentionally a minimal OME-NGFF-compatible store, not a dependency on `zarr` or `ome_zarr`; the current `antsleap` environment still lacks those packages.
+- Internal reads continue to use `array.npy`, so old TIF/AMIRA UI behavior remains stable.
+
+### 0.1 TIF training exchange exports
+- New module: `AntSleap/core/tif_export.py`.
+- Supports project-safe export of train-ready TIF specimens without modifying `manual_truth`.
+- Generic exchange formats now include:
+  - OME-TIFF
+  - plain multi-page TIFF
+  - NRRD
+  - MHA
+  - NIfTI `.nii`
+- Export writes `tif_training_export_manifest.json` with specimen ID, modality, shape, source project, label role, exported paths, and material map snapshot path.
+- No external `nibabel`, `SimpleITK`, or `pynrrd` dependency is required; NRRD/MHA/NIfTI are written directly for handoff and should still be verified in the target backend environment before large training runs.
+
+### 0.2 nnU-Net / MONAI layout adapters
+- `export_nnunet_dataset(...)` writes:
+  - `imagesTr/*_0000.nii`
+  - `labelsTr/*.nii`
+  - `dataset.json`
+  - `nnunet_manifest.json`
+- `export_monai_dataset(...)` writes:
+  - NIfTI / NRRD / MHA copies
+  - `monai_datalist.json`
+  - `monai_manifest.json`
+- Material IDs are preserved in label volumes. Backend-specific class remapping must be explicit and audited.
+- `TifBackendRunner.run_action("prepare_dataset")` now creates a training export dataset before running the external prepare command and injects `dataset_manifest` / `dataset_formats` into the contract.
+
+### 0.3 Material map editing is available in the TIF workbench
+- `AntSleap/ui/tif_workbench.py` now provides add/edit/delete controls for TIF material maps.
+- Users can edit ID, name, display name, display color, and trainable state.
+- Material ID `0` is protected as background.
+- Deletion is blocked if the material ID is still present in loaded label volumes, preventing orphaned labels that would make research annotations ambiguous.
+
+### 0.4 STL rendered views are now routed into the existing 2D review path
+- New project schema: `ant3d_stl_rendered_project_v1`.
+- New project type: `stl_rendered_views`.
+- New manager: `AntSleap/core/stl_project.py`.
+- Main window default tabs are:
+  - `Labeling Workbench`
+  - `Blink Workbench`
+  - `TIF Volume Workbench`
+- PDF remains on-demand through `File -> Open PDF Evidence Tools`.
+- File menu includes `Import STL Rendered Views to Labeling Workbench`.
+- Direct directory import groups rendered-view files by specimen ID and fixed view token, then registers those images in the existing 2D `Labeling Workbench`.
+- Opening a JSON with `schema_version: ant3d_stl_rendered_project_v1` and `project_type: stl_rendered_views` is treated as a legacy/lightweight registry import: its views are registered into the Labeling Workbench rather than opened as a separate main workbench.
+- STL rendered-view imports record source path/provenance and keep STL surface labels separate from TIF material IDs.
+
+### 0.5 STL rendered views can be registered for 2D review
+- New bridge module: `AntSleap/core/stl_review_bridge.py`.
+- `import_stl_rendered_views_into_2d_project(...)` imports a directory of rendered views directly into the existing 2D `Labeling Workbench`.
+- `register_stl_rendered_views_for_2d_review(...)` remains available for older `StlRenderedProjectManager` registries.
+- The 2D project receives image provenance:
+  - source type `stl_rendered_view`
+  - optional STL project path
+  - specimen ID
+  - metadata reference
+  - fixed view name
+  - original source path
+- This reuses the existing Labeling Workbench / Blink / Locator/SAM path for surface-view annotation and training while preserving provenance, matching the intended STL-derived 2D review workflow.
+- These 2D surface labels remain separate from TIF volume `manual_truth`.
+
+### 0.6 PDF evidence and cross-project linkage helpers
+- New lightweight PDF evidence index module: `AntSleap/core/pdf_evidence.py`.
+- Schema: `ant3d_pdf_evidence_index_v1`.
+- Stores source PDF, page, caption, candidate path, specimen ID, metadata_ref, notes, and provenance.
+- It is intentionally evidence/provenance only; it does not write into TIF `manual_truth`.
+- New specimen linkage module: `AntSleap/core/specimen_linkage.py`.
+- Schema: `ant3d_specimen_linkage_v1`.
+- It links independent TIF/STL projects by normalized `metadata_ref` or `specimen_id`, producing JSON/CSV reports without creating a monolithic workspace.
+
+### 0.7 Current validation status
+- Full validation on 2026-05-16:
+  - `C:\Users\admin\anaconda3\envs\antsleap\python.exe -m unittest discover tests`
+  - 193 tests passed.
+- Compile validation:
+  - `C:\Users\admin\anaconda3\envs\antsleap\python.exe -m compileall -q AntSleap tests`
+- Real AMIRA sample path still resolves:
+  - `D:\confirm-project\LBJ-workspace\new-project\AMIRA-data`
+  - raw TIF, `.hx`, `.resampled`, `.labels`, `.MaterialStatistics`, and `.surf` are detected.
+
+---
+
+## 0) v3.22 Ant 3D Workbench TIF Volume Foundation (2026-05-16)
+
+### 0.0 Independent TIF project type now exists
+- New TIF project schema: `ant3d_tif_project_v1`.
+- New project type: `tif_volume`.
+- `AntSleap/core/tif_project.py` provides `TifProjectManager`, separate from the existing 2D/STL `ProjectManager`.
+- TIF project JSON stays lightweight and stores specimen records, paths, material maps, review/train-ready state, model records, run records, and provenance.
+- Large image/label data is stored in sidecar directories, not embedded in JSON.
+- Current sidecar schema is `ant3d_volume_sidecar_v1`; v3.23 upgrades it from `.npy + metadata.json` only to a minimal OME-NGFF/Zarr v2 sidecar while retaining the `.npy` recovery copy.
+
+### 0.1 TIF label layers and train-ready safety
+- TIF label roles are separated:
+  - `manual_truth`: human-confirmed training truth
+  - `working_edit`: current editable correction layer
+  - `model_draft`: model-generated prediction drafts
+- Train-ready checks require:
+  - specimen marked train-ready
+  - working image sidecar exists
+  - `manual_truth` sidecar exists
+  - material map exists
+  - image/label shape match
+  - at least one trainable material
+- Brush edits and model predictions do not automatically become training truth.
+- `working_edit` must be explicitly promoted before it becomes `manual_truth`.
+
+### 0.2 Plain TIF stack import
+- New module: `AntSleap/core/tif_stack_import.py`.
+- Imports a single `.tif` / `.tiff` stack as a TIF specimen.
+- Creates:
+  - `working/image.ome.zarr/` lightweight sidecar
+  - empty `labels/working_edit.ome.zarr/`
+  - `material_map.json`
+  - `working/import_report.json`
+- Plain TIF import does not create `manual_truth` and does not mark the specimen train-ready.
+
+### 0.3 AMIRA read-only import
+- New module: `AntSleap/core/amira_import.py`.
+- First target is the observed AMIRA sample structure:
+  - raw `.tif`
+  - `.hx`
+  - `.resampled`
+  - `.labels`
+  - `.MaterialStatistics`
+  - `.surf`
+- `.hx` parsing confirms that `.labels` connects to `.resampled`.
+- `.resampled + .labels` is treated as the aligned working pair.
+- raw TIF is retained as source/provenance, not used as the label overlay base when shapes differ.
+- `.labels` HxByteRLE decoding follows the validated AmiraMesh rule:
+  - control byte `>127`: literal run of `control & 0x7F`
+  - control byte `<=127`: repeat next value `control` times
+- The real sample validates as:
+  - labels/resampled shape Z/Y/X: `[231, 1218, 1225]`
+  - resampled spacing Z/Y/X approximately `[0.99992835521698, 0.600000023841858, 0.600000023841858]`
+  - decoded label voxels: `344663550`
+  - material statistics count: `19`
+- Import writes `manual_truth` and copies it to `working_edit`.
+- AMIRA original files are not modified or written back.
+
+### 0.4 TIF Volume Workbench UI
+- New UI module: `AntSleap/ui/tif_workbench.py`.
+- Main window now owns a separate `self.tif_project` and a `TIF Volume Workbench` tab.
+- The primary tab layout is now Labeling Workbench / TIF Volume Workbench / Blink Workbench.
+- PDF tools are no longer shown as a default primary tab; they can be opened on demand from `File -> Open PDF Evidence Tools`.
+- Opening a JSON with `schema_version: ant3d_tif_project_v1` and `project_type: tif_volume` loads it into the TIF workbench.
+- Old 2D/STL TaxaMask JSON projects still load through the existing `ProjectManager`.
+- File menu now includes:
+  - `New TIF Volume Project`
+  - `Import TIF Stack`
+  - `Import AMIRA Directory`
+  - `Open PDF Evidence Tools`
+- TIF workbench supports:
+  - specimen list
+  - slice slider
+  - image display
+  - label overlay
+  - material map table
+  - brightness/contrast/overlay opacity controls
+  - brush painting into `working_edit`
+  - Ctrl-erase
+  - slice-level undo/redo
+  - saving `working_edit`
+  - explicit promotion of `working_edit` to `manual_truth`
+- The UI uses memory-mapped sidecar reads for viewing and releases references when closing/switching projects.
+
+### 0.5 Independent TIF backend contract
+- New module: `AntSleap/core/tif_backend.py`.
+- Contract schema: `ant3d_tif_backend_contract_v1`.
+- Result schema: `ant3d_tif_backend_result_v1`.
+- Model manifest schema: `ant3d_tif_model_manifest_v1`.
+- Supported actions:
+  - `prepare_dataset`
+  - `train`
+  - `predict`
+- TIF backend contract is separate from the existing 2D polygon/box external backend contract.
+- Training/prepare contracts select only train-ready specimens and use `manual_truth` as label input.
+- Prediction imports only artifacts with role `model_draft`.
+- Prediction shape must match the specimen working volume shape before import.
+- Imported predictions are copied into `labels/model_draft/` and do not overwrite `manual_truth`.
+
+### 0.6 STL rendered-view grouping foundation
+- New module: `AntSleap/core/stl_rendered_views.py`.
+- Provides filename parsing and specimen grouping for STL-derived rendered 2D views.
+- It expects rendered view filenames to end with a known fixed view token such as `dorsal`, `lateral`, `front`, `ventral`, etc.
+- The output registry schema is `ant3d_stl_rendered_view_registry_v1`.
+- This is a lightweight foundation only; existing Labeling Workbench, Blink, Locator/SAM, and training logic remain unchanged.
+
+### 0.7 PDF evidence boundary
+- `docs/ant3d_workbench/PDF文献证据层边界_zh.md` records the new boundary:
+  - PDF remains useful as literature evidence, provenance, and headless/agentic workflow.
+  - PDF is no longer positioned as the main Ant 3D Workbench visual annotation entry.
+  - Existing PDF code and tools remain intact.
+  - PDF candidates must not automatically become TIF `manual_truth`.
+
+### 0.8 Validation status
+- Focused validation on 2026-05-16:
+  - `python -m unittest tests.test_generic_taxonomy_workflow tests.test_generic_export_schema tests.test_locator_scope tests.test_runtime_device tests.test_part_tree tests.test_window_geometry tests.test_tif_project tests.test_tif_stack_import tests.test_amira_import tests.test_tif_workbench tests.test_tif_backend tests.test_gui_smoke tests.test_stl_rendered_views`
+  - 66 tests passed.
+- Compile validation:
+  - `python -m compileall AntSleap/core AntSleap/ui AntSleap/main.py tests`
+- Environment note:
+  - Validation used `C:\Users\admin\anaconda3\envs\antsleap\python.exe`.
+  - The environment currently has `numpy`, `tifffile`, `PySide6`, and `PIL`.
+  - It does not currently have `pytest`, `zarr`, or `ome_zarr`, so tests were run with `unittest`, and the first volume sidecar is the lightweight recoverable format described above.
+
 ### 0.0 Main workbench training controls
 - `MainWindow` now keeps a `self.trainer` reference and exposes `Stop Training`.
 - `TrainingThread` accepts `train_segmenter`; when false, it trains the Locator stage only and skips the SAM/parts stage.

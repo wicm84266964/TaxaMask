@@ -1,9 +1,18 @@
 import tempfile
 import unittest
+import sys
+import importlib
 from pathlib import Path
 from unittest.mock import patch
 
-from core.pdf_processor.poppler_discovery import discover_poppler
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+PDF_PROCESSOR_PACKAGE_DIR = REPO_ROOT / "core"
+if str(PDF_PROCESSOR_PACKAGE_DIR) not in sys.path:
+    sys.path.insert(0, str(PDF_PROCESSOR_PACKAGE_DIR))
+
+discover_poppler = importlib.import_module("pdf_processor.poppler_discovery").discover_poppler
 
 
 class PopplerDiscoveryTests(unittest.TestCase):

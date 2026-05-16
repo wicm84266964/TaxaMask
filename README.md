@@ -11,7 +11,8 @@ It was originally built for ant taxonomy research, with an ant morphology workfl
 TaxaMask connects two parts of a taxonomy data workflow:
 
 - Literature processing: screen taxonomy PDFs, extract candidate figures, assemble caption and nearby text evidence, and optionally run multimodal review.
-- Annotation and model loop: manage project images, draw masks, use SAM-assisted annotation, train locator/SAM/Blink components, reuse trained experts for pre-annotation, and export datasets.
+- Annotation and model loop: manage project images and STL-derived rendered views, draw masks, use SAM-assisted annotation, train locator/SAM/Blink components, reuse trained experts for pre-annotation, and export datasets.
+- Ant 3D workbench: keep STL-derived 2D review and TIF volume segmentation as separate workflows, import AMIRA/TIF volume data, preserve material maps and manual truth layers, and export volume labels for external 3D segmentation backends.
 
 The intended research loop is:
 
@@ -25,11 +26,12 @@ PDF literature -> candidate figures -> project images -> mask annotation
 - PDF screening with editable V2 logic profiles.
 - Figure extraction and multimodal review profiles for different taxa or plate styles.
 - Taxa-aware project templates, including a validated ant morphology example and a generic taxonomy mask template.
-- Labeling Workbench for biological structure masks.
+- Labeling Workbench for biological structure masks, including specimen-grouped STL-rendered surface views imported as derived 2D review images.
+- TIF Volume Workbench for stack viewing, overlay review, material-map editing, working edits, and explicit promotion to manual training truth.
 - Blink Workbench for parent-structure to child-structure refinement and local expert training.
 - Configurable main locator structures for non-ant projects.
 - Built-in training/inference path plus an external backend contract for advanced users who want to connect custom models.
-- Export paths for multimodal JSONL, COCO, and YOLO-style datasets.
+- Export paths for multimodal JSONL, COCO, YOLO-style datasets, and TIF volume exchange formats including OME-TIFF, NRRD, MHA, NIfTI, nnU-Net-style layout, and MONAI-style datalists.
 - Headless agentic tools for PDF screening, figure extraction, candidate import, auto-annotation, and dataset export.
 
 ## Current Validation Scope

@@ -505,8 +505,8 @@ class UiLocalizationTests(unittest.TestCase):
         panel.route_tree.setCurrentItem(route_item)
 
         with patch.object(
-            main_module.QMessageBox,
-            "question",
+            main_module,
+            "themed_yes_no_question",
             return_value=QMessageBox.StandardButton.No,
         ) as question_mock:
             panel.delete_selected_route()
@@ -712,8 +712,8 @@ class UiLocalizationTests(unittest.TestCase):
 
         window = DummyWindow()
         with patch.object(
-            main_module.QMessageBox,
-            "question",
+            main_module,
+            "themed_yes_no_question",
             return_value=QMessageBox.StandardButton.No,
         ) as question_mock:
             main_module.MainWindow.clear_ai_labels(window)

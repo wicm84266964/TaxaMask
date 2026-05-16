@@ -350,9 +350,9 @@ class UiPolishScopeTests(unittest.TestCase):
 
     def test_scientific_theme_strengthens_generic_checked_indicators_without_touching_chip_radios(self):
         self.assertIn("QRadioButton::indicator:checked", SCI_THEME)
-        self.assertIn("border: 4px solid %TEXT_MAIN%".replace("%TEXT_MAIN%", "#E8EEF7"), SCI_THEME)
+        self.assertIn("border: 2px solid #38BDF8", SCI_THEME)
         self.assertIn("QCheckBox::indicator:checked", SCI_THEME)
-        self.assertIn("border: 3px solid #E8EEF7", SCI_THEME)
+        self.assertIn("background-color: #38BDF8", SCI_THEME)
         self.assertIn("QRadioButton#toolChip::indicator", SCI_THEME)
         self.assertIn("QRadioButton#scaleToolRadio::indicator", SCI_THEME)
 
@@ -398,8 +398,8 @@ class UiPolishScopeTests(unittest.TestCase):
             self.assertIn("min-width: 104px", ok_button.styleSheet())
             self.assertIn("min-height: 36px", ok_button.styleSheet())
             self.assertIn("font-weight: 700", ok_button.styleSheet())
-            self.assertIn("background-color: #0284C7", ok_button.styleSheet())
-            self.assertIn("background-color: #F8FBFE", cancel_button.styleSheet())
+            self.assertIn("background-color: #5B7486", ok_button.styleSheet())
+            self.assertIn("background-color: #1E2126", cancel_button.styleSheet())
 
         preflight_dialog.close()
         entry_dialog.close()
@@ -517,6 +517,7 @@ class UiPolishScopeTests(unittest.TestCase):
         window = self.make_main_window()
 
         try:
+            window.enter_image_workflow()
             self.assertEqual(window.windowTitle(), "TaxaMask Workbench (EN)")
             self.assertEqual(window.tabs.styleSheet().strip(), "")
             self.assertIsNotNone(window.findChild(QWidget, "workbenchTopBar"))
@@ -883,8 +884,8 @@ class UiPolishScopeTests(unittest.TestCase):
             self.assertTrue(window.btn_del_locator.isEnabled())
 
             with patch.object(
-                main_module.QMessageBox,
-                "question",
+                main_module,
+                "themed_yes_no_question",
                 return_value=main_module.QMessageBox.Yes,
             ):
                 window.delete_locator_model()
@@ -910,8 +911,8 @@ class UiPolishScopeTests(unittest.TestCase):
             window.combo_segmenter.setCurrentIndex(segmenter_index)
 
             with patch.object(
-                main_module.QMessageBox,
-                "question",
+                main_module,
+                "themed_yes_no_question",
                 return_value=main_module.QMessageBox.Yes,
             ):
                 window.delete_segmenter_model()

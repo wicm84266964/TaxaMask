@@ -6,7 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QTimer, QUrl
+from PySide6.QtCore import QTimer, QUrl, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -91,6 +91,8 @@ else:
 class TaxaMaskAgentPanel(QWidget):
     """Embed the real Ant-Code Dashboard inside TaxaMask."""
 
+    status_changed = Signal(str)
+
     def __init__(self, lang="en", parent=None, workspace_dir=None, ant_code_executable=None, ant_code_root=None):
         super().__init__(parent)
         self.lang = lang
@@ -104,6 +106,7 @@ class TaxaMaskAgentPanel(QWidget):
         self._health_checks_remaining = 0
         self._pending_context_prompt = ""
         self._project_display = self.workspace_dir
+        self._status_text = ""
         self._load_retries = 0
         self._preflight_checks_remaining = 0
         self._preflight_error = ""
@@ -716,7 +719,12 @@ class TaxaMaskAgentPanel(QWidget):
         super().closeEvent(event)
 
     def _update_status_label(self, status):
+        self._status_text = str(status or "")
         self.status_label.setText(f"{at('Status', self.lang)}: {status}")
+        self.status_changed.emit(self._status_text)
+
+    def status_text(self):
+        return self._status_text
 
     def _update_fallback(self):
         lines = [

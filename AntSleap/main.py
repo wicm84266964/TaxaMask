@@ -243,8 +243,26 @@ TRANSLATIONS = {
         "TaxaMask Agent Center": "TaxaMask Agent 中心",
         "Choose the data type you want to work with today.": "选择今天要处理的数据类型。",
         "Ask Ant-Code to configure workflows, inspect errors, prepare PDF evidence, or plan training. Use the right rail when you want to enter a workbench directly.": "让 Ant-Code 帮你配置工作流、检查报错、准备 PDF 证据或规划训练。需要直接进入工作台时，使用右侧入口。",
+        "Project Console": "项目控制台",
+        "Current workflow": "当前工作流",
+        "Current project": "当前项目",
+        "2D/STL images": "2D/STL 图片",
+        "TIF specimens": "TIF specimen",
+        "PDF evidence": "PDF 证据",
+        "Ant-Code ready": "Ant-Code 已就绪",
+        "Ant-Code stopped": "Ant-Code 未启动",
+        "Repository only; no research project selected": "仅仓库上下文；尚未选择研究项目",
+        "Recent project: {0}": "最近项目：{0}",
+        "2D project: {0}": "2D 项目：{0}",
+        "STL rendered-view project: {0}": "STL 渲染视角图项目：{0}",
+        "TIF project: {0}": "TIF 项目：{0}",
+        "{0} image(s), {1} labeled, {2} STL rendered 2D view(s)": "{0} 张图片，{1} 张已有人工标注，{2} 张 STL 渲染 2D 视角图",
+        "{0} specimen(s), {1} train-ready, {2} with manual_truth": "{0} 个 specimen，{1} 个可训练，{2} 个已有 manual_truth",
+        "PDF evidence skill ready; {0} review candidate(s)": "PDF evidence skill 已配置；{0} 个候选图待复核",
+        "PDF evidence skill missing": "PDF evidence skill 未找到",
+        "STL source stays as exported high-resolution 2D views; TaxaMask does not label 3D meshes.": "STL 来源保持为外部导出的高分辨率 2D 视角图；TaxaMask 不做 3D mesh 标注。",
         "2D / STL morphology annotation": "2D / STL 形态学标注",
-        "Annotate rendered STL views or ordinary 2D morphology images, then train Locator/SAM/Blink models.": "标注 STL 渲染视角图或普通 2D 形态图像，并训练 Locator/SAM/Blink 模型。",
+        "Annotate high-resolution 2D views rendered from STL, or ordinary 2D morphology images, then train Locator/SAM/Blink models.": "标注从 STL 导出的高分辨率 2D 视角图，或普通 2D 形态图像，并训练 Locator/SAM/Blink 模型。",
         "TIF volume annotation": "TIF 体数据标注",
         "Annotate continuous slice volumes with material IDs, export train-ready volumes, and call TIF segmentation backends.": "用 material ID 标注连续切片体数据，导出可训练体数据，并调用 TIF 分割后端。",
         "Continue last project": "继续上次项目",
@@ -3166,7 +3184,11 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(self.start_subtitle)
         agent_layout.addWidget(header)
 
+        self.start_console_panel = self._build_project_console()
+        agent_layout.addWidget(self.start_console_panel)
+
         self.agent_panel = TaxaMaskAgentPanel(self.current_lang)
+        self.agent_panel.status_changed.connect(lambda _status: self._refresh_project_console())
         agent_layout.addWidget(self.agent_panel, 1)
         outer_layout.addWidget(agent_area, 1)
 
@@ -3180,7 +3202,7 @@ class MainWindow(QMainWindow):
         self.start_image_card = self._build_workflow_card(
             "start2DWorkflowCard",
             "2D / STL morphology annotation",
-            "Annotate rendered STL views or ordinary 2D morphology images, then train Locator/SAM/Blink models.",
+            "Annotate high-resolution 2D views rendered from STL, or ordinary 2D morphology images, then train Locator/SAM/Blink models.",
             "Enter 2D/STL workflow",
             self.enter_image_workflow,
             "Create 2D/STL project",
@@ -3223,6 +3245,61 @@ class MainWindow(QMainWindow):
         rail_layout.addStretch(1)
         outer_layout.addWidget(workflow_rail, 0)
         return page
+
+    def _build_project_console(self):
+        panel = QWidget()
+        apply_surface_role(panel, SURFACE_ROLE_SUBTLE, "startProjectConsole")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(8)
+
+        self.start_console_title = QLabel()
+        self.start_console_title.setObjectName("HeaderLabel")
+        layout.addWidget(self.start_console_title)
+
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(7)
+
+        self.start_console_workflow_label, self.start_console_workflow_value = self._build_project_console_row(
+            grid, 0, "startConsoleWorkflowValue"
+        )
+        self.start_console_project_label, self.start_console_project_value = self._build_project_console_row(
+            grid, 1, "startConsoleProjectValue"
+        )
+        self.start_console_images_label, self.start_console_images_value = self._build_project_console_row(
+            grid, 2, "startConsoleImagesValue"
+        )
+        self.start_console_tif_label, self.start_console_tif_value = self._build_project_console_row(
+            grid, 3, "startConsoleTifValue"
+        )
+        self.start_console_pdf_label, self.start_console_pdf_value = self._build_project_console_row(
+            grid, 4, "startConsolePdfValue"
+        )
+        self.start_console_agent_label, self.start_console_agent_value = self._build_project_console_row(
+            grid, 5, "startConsoleAgentValue"
+        )
+        grid.setColumnStretch(1, 1)
+        layout.addLayout(grid)
+
+        self.start_console_stl_note = QLabel()
+        self.start_console_stl_note.setObjectName("mutedLabel")
+        self.start_console_stl_note.setWordWrap(True)
+        layout.addWidget(self.start_console_stl_note)
+        return panel
+
+    def _build_project_console_row(self, grid, row, value_object_name):
+        label = QLabel()
+        label.setObjectName("mutedLabel")
+        label.setMinimumWidth(120)
+        value = QLabel()
+        value.setObjectName(value_object_name)
+        value.setProperty("consoleValue", True)
+        value.setWordWrap(True)
+        grid.addWidget(label, row, 0)
+        grid.addWidget(value, row, 1)
+        return label, value
 
     def _build_workflow_card(self, object_name, title_key, description_key, enter_key, enter_callback, create_key, create_callback):
         card = QFrame()
@@ -3282,6 +3359,7 @@ class MainWindow(QMainWindow):
         self.btn_continue_last.setText(tr("Continue last project", self.current_lang))
         self.btn_open_any.setText(tr("Open any project", self.current_lang))
         self.btn_general_settings.setText(tr("General Settings", self.current_lang))
+        self._refresh_project_console()
         if hasattr(self, "create_menus"):
             self.create_menus()
         for label in self.start_center_widget.findChildren(QLabel):
@@ -3300,6 +3378,106 @@ class MainWindow(QMainWindow):
                 project=self._agent_current_project_label(),
                 state=tr("Idle", self.current_lang),
             )
+            self._refresh_project_console()
+
+    def _refresh_project_console(self):
+        if not hasattr(self, "start_console_title"):
+            return
+        self.start_console_title.setText(tr("Project Console", self.current_lang))
+        self.start_console_workflow_label.setText(tr("Current workflow", self.current_lang))
+        self.start_console_project_label.setText(tr("Current project", self.current_lang))
+        self.start_console_images_label.setText(tr("2D/STL images", self.current_lang))
+        self.start_console_tif_label.setText(tr("TIF specimens", self.current_lang))
+        self.start_console_pdf_label.setText(tr("PDF evidence", self.current_lang))
+        self.start_console_agent_label.setText("Ant-Code")
+
+        self.start_console_workflow_value.setText(self._agent_current_workflow_label())
+        self.start_console_project_value.setText(self._start_console_project_summary())
+        self.start_console_images_value.setText(self._start_console_image_summary())
+        self.start_console_tif_value.setText(self._start_console_tif_summary())
+        self.start_console_pdf_value.setText(self._start_console_pdf_summary())
+        self.start_console_agent_value.setText(self._start_console_agent_status())
+        self.start_console_stl_note.setText(
+            tr(
+                "STL source stays as exported high-resolution 2D views; TaxaMask does not label 3D meshes.",
+                self.current_lang,
+            )
+        )
+
+    def _start_console_project_summary(self):
+        kind = getattr(self, "active_project_kind", "start")
+        source_kind = getattr(self, "active_project_source_kind", kind)
+        if kind == "tif":
+            path = getattr(self.tif_project, "current_project_path", "") or ""
+            return tr("TIF project: {0}", self.current_lang).format(path) if path else tr("No active project", self.current_lang)
+        if kind == "image":
+            path = self._active_recent_project_path() or getattr(self.project, "current_project_path", "") or ""
+            if source_kind == "stl":
+                return tr("STL rendered-view project: {0}", self.current_lang).format(path) if path else tr("No active project", self.current_lang)
+            return tr("2D project: {0}", self.current_lang).format(path) if path else tr("No active project", self.current_lang)
+
+        last_project = self.config.get("last_project_path", "") or ""
+        if last_project:
+            return tr("Recent project: {0}", self.current_lang).format(last_project)
+        return tr("Repository only; no research project selected", self.current_lang)
+
+    def _start_console_image_summary(self):
+        images = list((self.project.project_data or {}).get("images", []))
+        labels = (self.project.project_data or {}).get("labels", {})
+        labeled_count = 0
+        stl_count = 0
+        for image_path in images:
+            entry = labels.get(image_path, {}) if isinstance(labels, dict) else {}
+            if isinstance(entry, dict) and entry.get("parts"):
+                labeled_count += 1
+            provenance = self.project.get_image_provenance(image_path)
+            if provenance.get("source_type") == "stl_rendered_view":
+                stl_count += 1
+        return tr("{0} image(s), {1} labeled, {2} STL rendered 2D view(s)", self.current_lang).format(
+            len(images),
+            labeled_count,
+            stl_count,
+        )
+
+    def _start_console_tif_summary(self):
+        specimens = list((self.tif_project.project_data or {}).get("specimens", []))
+        manual_truth_count = 0
+        for specimen in specimens:
+            manual = ((specimen.get("labels") or {}) if isinstance(specimen, dict) else {}).get("manual_truth") or {}
+            if manual.get("path"):
+                manual_truth_count += 1
+        try:
+            train_ready_count = len(self.tif_project.list_train_ready_specimens())
+        except Exception:
+            train_ready_count = sum(
+                1
+                for specimen in specimens
+                if isinstance(specimen, dict) and (specimen.get("train_ready") or specimen.get("review_status") == "train_ready")
+            )
+        return tr("{0} specimen(s), {1} train-ready, {2} with manual_truth", self.current_lang).format(
+            len(specimens),
+            train_ready_count,
+            manual_truth_count,
+        )
+
+    def _start_console_pdf_summary(self):
+        skill_path = os.path.join(REPO_ROOT, ".lab-agent", "skills", "taxamask-pdf-evidence", "SKILL.md")
+        if not os.path.exists(skill_path):
+            return tr("PDF evidence skill missing", self.current_lang)
+        candidates = 0
+        for image_path in (self.project.project_data or {}).get("images", []):
+            provenance = self.project.get_image_provenance(image_path)
+            if provenance.get("source_type") == "pdf_candidate":
+                entry = (self.project.project_data or {}).get("labels", {}).get(image_path, {})
+                if not isinstance(entry, dict) or entry.get("status") != "labeled":
+                    candidates += 1
+        return tr("PDF evidence skill ready; {0} review candidate(s)", self.current_lang).format(candidates)
+
+    def _start_console_agent_status(self):
+        panel = getattr(self, "agent_panel", None)
+        if panel is None or not panel.is_running():
+            return tr("Ant-Code stopped", self.current_lang)
+        return tr("Ant-Code ready", self.current_lang)
 
     def _agent_current_workflow_label(self):
         kind = getattr(self, "active_project_kind", "start")

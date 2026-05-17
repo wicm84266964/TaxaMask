@@ -7,6 +7,7 @@ context: instruction
 paths:
   - ANTCODE.md
   - .lab-agent/memory.md
+  - .lab-agent/skills/taxamask-pdf-evidence/SKILL.md
   - TaxaMask使用手册.md
   - LLM_CONTEXT_DETAILED.md
   - docs/ant3d_workbench/
@@ -25,6 +26,7 @@ Use this skill as the compact operating map for TaxaMask. It is not merely an op
    - current architecture handoff: `LLM_CONTEXT_DETAILED.md`
    - Agent integration: `docs/ant3d_workbench/TaxaMask_AntCode项目记忆与对接手册_zh.md`
    - Agent/PDF skill design: `docs/ant3d_workbench/TaxaMask_Agent侧栏与PDF_Skill设计_zh.md`
+   - PDF evidence operations: `.lab-agent/skills/taxamask-pdf-evidence/SKILL.md`
    - TIF implementation contracts: `docs/ant3d_workbench/TIF项目结构实施设计_zh.md` and `docs/ant3d_workbench/TIF后端契约_v1_实施设计_zh.md`
 
 ## Current Product Shape
@@ -42,7 +44,7 @@ Choose the route before editing or advising:
 
 - `2D/STL morphology`: ordinary morphology images plus STL-rendered 2D views. Uses Labeling Workbench, Blink, Locator/SAM, route-appointed experts, and the 2D external backend.
 - `TIF volume`: continuous TIF/AMIRA-style volumes. Uses TIF Volume Workbench, material IDs, `working_edit`, `manual_truth`, `model_draft`, TIF export, and the TIF backend contract.
-- `PDF evidence`: screens PDFs and extracts figure/caption evidence. Results are candidate/evidence artifacts and must not automatically become training truth.
+- `PDF evidence`: screens PDFs and extracts figure/caption evidence. Load `.lab-agent/skills/taxamask-pdf-evidence/SKILL.md` for PDF runs, candidate import, evidence indexes, or PDF failure triage. Results are candidate/evidence artifacts and must not automatically become training truth.
 - `Agent Center`: natural-language configuration, error triage, PDF workflow orchestration, training-readiness checks, and project documentation support.
 
 ## Safety Boundaries

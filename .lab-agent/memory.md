@@ -8,6 +8,7 @@ Primary rule source:
 - `ANTCODE.md` is the highest-priority always-on project rule for the embedded TaxaMask Agent. It mirrors the core TaxaMask workflow protocol into the initial prompt.
 - Use this `.lab-agent/memory.md` as short operational memory after `ANTCODE.md`.
 - Use `.lab-agent/skills/taxamask-workflows/SKILL.md` as the always-relevant compact workflow card for Agent Center, 2D/STL, TIF, PDF evidence, settings, and training-readiness tasks.
+- Use `.lab-agent/skills/taxamask-pdf-evidence/SKILL.md` for PDF literature screening, figure/caption extraction, PDF evidence indexes, PDF-derived candidates, candidate import, and PDF failure triage.
 - For deeper architecture details, read `docs/ant3d_workbench/TaxaMask_AntCode项目记忆与对接手册_zh.md` before broad refactors.
 
 Core product stance:
@@ -44,6 +45,7 @@ Main code map:
 - `AntSleap/core/tif_backend.py`: external TIF backend contract runner.
 - `AntSleap/core/external_backend.py`: 2D/STL external backend contract runner.
 - `AntSleap/ui/pdf_processing_widget.py` and `AntSleap/core/pdf_evidence.py`: PDF evidence tools and indexes.
+- `tools/agentic/screen_pdfs.py`, `tools/agentic/extract_figures.py`, and `tools/agentic/import_candidates_to_project.py`: headless PDF evidence and candidate workflows used by Agent tasks.
 
 Project types:
 - 2D/STL morphology uses the existing Labeling Workbench plus Blink. STL data means rendered 2D views from STL/mesh assets, not direct 3D mesh painting.
@@ -65,6 +67,7 @@ Research safety defaults:
 - Do not write back to original AMIRA source files in first-stage workflows.
 - Keep TIF project JSON lightweight; large volumes and labels belong in sidecar files/directories.
 - Preserve provenance for PDF, STL rendered views, TIF imports, backend exports, and model predictions.
+- PDF outputs are candidate/evidence artifacts. Import PDF-derived images only as reviewable 2D candidates such as `needs_review`; never automatically promote them to training truth or TIF `manual_truth`.
 - Avoid root-level temporary files. Use `.tmp_validation/` for disposable validation and clean it before finishing.
 - Do not include local databases, model weights, user configs, generated artifacts, sessions, or API keys in Git.
 

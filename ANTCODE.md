@@ -41,7 +41,8 @@ Treat this TaxaMask protocol as always active, not as an optional skill:
    - TIF uses independent TIF projects, material-ID labels, `working_edit`, `manual_truth`, `model_draft`, sidecars, and the TIF backend contract.
    - PDF is evidence/provenance and Agent/headless workflow. PDF candidates are not training truth.
 3. For common TaxaMask tasks, consult `.lab-agent/skills/taxamask-workflows/SKILL.md` as the compact workflow card before loading the full manual.
-4. Use `TaxaMask使用手册.md` for user-facing operation detail and `LLM_CONTEXT_DETAILED.md` for current architecture handoff.
+4. For PDF literature screening, figure/caption extraction, PDF evidence indexes, PDF-derived candidate images, or PDF processing failures, load `.lab-agent/skills/taxamask-pdf-evidence/SKILL.md` before planning commands or imports.
+5. Use `TaxaMask使用手册.md` for user-facing operation detail and `LLM_CONTEXT_DETAILED.md` for current architecture handoff.
 
 ## Current Program State
 
@@ -58,6 +59,7 @@ Treat this TaxaMask protocol as always active, not as an optional skill:
   - TIF workflow does not load Locator/SAM
   - entering/opening/importing 2D/STL workflow preloads Locator/SAM
   - returning to Agent Center keeps already loaded 2D/STL models alive
+- PDF evidence is a first-class Agent skill route through `.lab-agent/skills/taxamask-pdf-evidence/SKILL.md`. PDF outputs are literature evidence and candidate images; they must remain reviewable and must not become 2D/STL training truth or TIF `manual_truth` automatically.
 
 ## Data Safety Rules
 

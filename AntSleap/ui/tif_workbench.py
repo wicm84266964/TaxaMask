@@ -1,7 +1,7 @@
 import os
 
 import numpy as np
-from PySide6.QtCore import QRectF, Qt, Signal
+from PySide6.QtCore import QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -89,6 +89,13 @@ TIF_TRANSLATIONS = {
         "Undo": "撤销",
         "Redo": "重做",
         "Save working edit": "保存当前编辑层",
+        "Auto-save edit": "自动保存编辑层",
+        "Working edit saved.": "当前编辑层已保存。",
+        "Auto-saved working edit.": "已自动保存当前编辑层。",
+        "Unsaved working edit": "未保存的当前编辑层",
+        "Save changes to the current working_edit before continuing?": "继续前是否保存当前 working_edit 的修改？",
+        "Auto-save is on. Brush changes are saved shortly after editing.": "自动保存已开启。修改后会短延迟保存。",
+        "Auto-save is off. Remember to save the current edit layer.": "自动保存已关闭。请记得手动保存当前编辑层。",
         "Accept as manual truth": "确认为人工真值",
         "Copy model draft to working edit": "复制模型草稿到当前编辑层",
         "Material map": "材料表",
@@ -456,6 +463,9 @@ class TifWorkbenchWidget(QWidget):
         self.material_colors = {}
         self.current_material_id = 0
         self.edit_volume = None
+        self.working_edit_dirty = False
+        self._loading_specimen = False
+        self._saving_working_edit = False
         self.undo_stack = []
         self.redo_stack = []
 
@@ -523,7 +533,11 @@ class TifWorkbenchWidget(QWidget):
         self.btn_redo = QPushButton("Redo")
         self.btn_redo.clicked.connect(self.redo)
         self.btn_save_edit = QPushButton("Save working edit")
-        self.btn_save_edit.clicked.connect(self.save_working_edit)
+        self.btn_save_edit.clicked.connect(lambda: self.save_working_edit())
+        self.auto_save_check = QCheckBox("Auto-save edit")
+        self.auto_save_check.setObjectName("tifAutoSaveEditCheck")
+        self.auto_save_check.setChecked(True)
+        self.auto_save_check.toggled.connect(self._on_auto_save_toggled)
         self.btn_promote = QPushButton("Accept as manual truth")
         self.btn_promote.clicked.connect(self.promote_working_edit)
         self.btn_copy_draft = QPushButton("Copy model draft to working edit")
@@ -579,6 +593,10 @@ class TifWorkbenchWidget(QWidget):
         self.shortcut_undo.activated.connect(self.undo)
         self.shortcut_redo = QShortcut(QKeySequence("Ctrl+Y"), self)
         self.shortcut_redo.activated.connect(self.redo)
+        self.auto_save_timer = QTimer(self)
+        self.auto_save_timer.setSingleShot(True)
+        self.auto_save_timer.setInterval(1200)
+        self.auto_save_timer.timeout.connect(lambda: self.save_working_edit(show_message=True, reason="auto_save"))
 
         self._apply_button_roles()
         self._build_layout()
@@ -661,6 +679,7 @@ class TifWorkbenchWidget(QWidget):
         self.btn_undo.setText(tt("Undo", self.lang))
         self.btn_redo.setText(tt("Redo", self.lang))
         self.btn_save_edit.setText(tt("Save working edit", self.lang))
+        self.auto_save_check.setText(tt("Auto-save edit", self.lang))
         self.btn_promote.setText(tt("Accept as manual truth", self.lang))
         self.btn_copy_draft.setText(tt("Copy model draft to working edit", self.lang))
         self.btn_add_material.setText(tt("Add material", self.lang))
@@ -766,6 +785,38 @@ class TifWorkbenchWidget(QWidget):
     def _update_label_role_help(self):
         if hasattr(self, "label_role_help_label"):
             self.label_role_help_label.setText(self._label_role_help_text())
+
+    def _on_auto_save_toggled(self, checked):
+        message = tt("Auto-save is on. Brush changes are saved shortly after editing.", self.lang) if checked else tt("Auto-save is off. Remember to save the current edit layer.", self.lang)
+        self.training_status_label.setText(message)
+        self.log(message)
+        if checked and self.working_edit_dirty:
+            self.auto_save_timer.start()
+        elif not checked:
+            self.auto_save_timer.stop()
+
+    def _mark_working_edit_dirty(self):
+        self.working_edit_dirty = True
+        if self.auto_save_check.isChecked():
+            self.auto_save_timer.start()
+
+    def _confirm_discard_or_save_working_edit(self):
+        self.auto_save_timer.stop()
+        if not self.working_edit_dirty:
+            return True
+        reply = QMessageBox.question(
+            self,
+            tt("Unsaved working edit", self.lang),
+            tt("Save changes to the current working_edit before continuing?", self.lang),
+            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+            QMessageBox.Save,
+        )
+        if reply == QMessageBox.Cancel:
+            return False
+        if reply == QMessageBox.Save:
+            return self.save_working_edit(show_message=True)
+        self.working_edit_dirty = False
+        return True
 
     def save_backend_settings(self):
         self.backend_config = self._backend_config_from_ui()
@@ -1103,6 +1154,7 @@ class TifWorkbenchWidget(QWidget):
         button_row.addWidget(self.btn_undo)
         button_row.addWidget(self.btn_redo)
         annotation_layout.addLayout(button_row)
+        annotation_layout.addWidget(self.auto_save_check)
         annotation_layout.addWidget(self.btn_save_edit)
         annotation_layout.addWidget(self.btn_promote)
         annotation_layout.addWidget(self.btn_copy_draft)
@@ -1353,7 +1405,9 @@ class TifWorkbenchWidget(QWidget):
         )
 
     def set_project_manager(self, project_manager):
-        self.close_project()
+        if not self._confirm_discard_or_save_working_edit():
+            return
+        self.close_project(prompt_unsaved=False)
         self.project = project_manager
         self.refresh_project()
 
@@ -1363,20 +1417,27 @@ class TifWorkbenchWidget(QWidget):
         self.backend_config = sanitize_tif_backend_config(config)
         self._load_backend_config_into_ui()
 
-    def close_project(self):
+    def close_project(self, prompt_unsaved=True):
+        if prompt_unsaved and not self._confirm_discard_or_save_working_edit():
+            return False
         self.image_volume = None
         self.label_volume = None
         self.material_map = {}
         self.material_colors = {}
         self.current_specimen_id = ""
         self.edit_volume = None
+        self.auto_save_timer.stop()
+        self.working_edit_dirty = False
         self.undo_stack = []
         self.redo_stack = []
         self.canvas.clear()
         self.canvas.setText(tt("No TIF volume loaded", self.lang))
+        return True
 
     def closeEvent(self, event):
-        self.close_project()
+        if not self.close_project(prompt_unsaved=True):
+            event.ignore()
+            return
         super().closeEvent(event)
 
     def refresh_project(self):
@@ -1409,45 +1470,64 @@ class TifWorkbenchWidget(QWidget):
     def _on_specimen_selected(self, current, previous=None):
         if current is None:
             return
+        if self._loading_specimen:
+            return
+        if previous is not None and self.working_edit_dirty:
+            if not self._confirm_discard_or_save_working_edit():
+                self._loading_specimen = True
+                try:
+                    self.specimen_list.setCurrentItem(previous)
+                finally:
+                    self._loading_specimen = False
+                return
         specimen_id = current.data(Qt.UserRole)
         self.load_specimen(specimen_id)
 
     def load_specimen(self, specimen_id):
+        if specimen_id != self.current_specimen_id and self.working_edit_dirty:
+            if not self._confirm_discard_or_save_working_edit():
+                return
         specimen = self.project.get_specimen(specimen_id, default=None)
         if specimen is None:
             return
-        self.current_specimen_id = specimen_id
-        self.image_volume = None
-        self.label_volume = None
-        self.edit_volume = None
-        self.material_map = {}
-        self.material_colors = {}
-        self.undo_stack = []
-        self.redo_stack = []
+        self._loading_specimen = True
+        try:
+            self.auto_save_timer.stop()
+            self.current_specimen_id = specimen_id
+            self.image_volume = None
+            self.label_volume = None
+            self.edit_volume = None
+            self.working_edit_dirty = False
+            self.material_map = {}
+            self.material_colors = {}
+            self.undo_stack = []
+            self.redo_stack = []
 
-        image_path = self.project.to_absolute((specimen.get("working_volume") or {}).get("path", ""))
-        if image_path and volume_sidecar_exists(image_path):
-            self.image_volume = load_volume_sidecar(image_path, mmap_mode="r")
-            z_count = int(self.image_volume.shape[0])
-            self.slice_slider.setRange(0, max(0, z_count - 1))
-            self.slice_slider.setValue(min(self.slice_slider.value(), max(0, z_count - 1)))
-            self._reset_canvas_view_on_next_render = True
-        else:
-            self.slice_slider.setRange(0, 0)
-            self.canvas.reset_view()
+            image_path = self.project.to_absolute((specimen.get("working_volume") or {}).get("path", ""))
+            if image_path and volume_sidecar_exists(image_path):
+                self.image_volume = load_volume_sidecar(image_path, mmap_mode="r")
+                z_count = int(self.image_volume.shape[0])
+                self.slice_slider.setRange(0, max(0, z_count - 1))
+                self.slice_slider.setValue(min(self.slice_slider.value(), max(0, z_count - 1)))
+                self._reset_canvas_view_on_next_render = True
+            else:
+                self.slice_slider.setRange(0, 0)
+                self.canvas.reset_view()
 
-        material_path = self.project.to_absolute(specimen.get("material_map", ""))
-        if material_path and os.path.exists(material_path):
-            self.material_map = read_material_map(material_path)
-            self.material_colors = {
-                int(item["id"]): QColor(str(item.get("color", "#000000")))
-                for item in self.material_map.get("materials", [])
-            }
-        self._populate_material_table()
-        self._reload_label_volume()
-        self._load_edit_volume()
-        self._update_status_labels(specimen)
-        self.render_current_slice()
+            material_path = self.project.to_absolute(specimen.get("material_map", ""))
+            if material_path and os.path.exists(material_path):
+                self.material_map = read_material_map(material_path)
+                self.material_colors = {
+                    int(item["id"]): QColor(str(item.get("color", "#000000")))
+                    for item in self.material_map.get("materials", [])
+                }
+            self._populate_material_table()
+            self._reload_label_volume()
+            self._load_edit_volume()
+            self._update_status_labels(specimen)
+            self.render_current_slice()
+        finally:
+            self._loading_specimen = False
 
     def _populate_material_table(self):
         materials = self.material_map.get("materials", []) if isinstance(self.material_map, dict) else []
@@ -1678,6 +1758,7 @@ class TifWorkbenchWidget(QWidget):
         yy, xx = np.ogrid[:height, :width]
         mask = (xx - px) ** 2 + (yy - py) ** 2 <= radius ** 2
         self.edit_volume[z_index][mask] = 0 if erase else int(self.current_material_id)
+        self._mark_working_edit_dirty()
         self.render_current_slice()
 
     def _widget_to_image_pixel(self, x, y, image_width, image_height):
@@ -1703,6 +1784,7 @@ class TifWorkbenchWidget(QWidget):
         self.redo_stack.append((z_index, self.edit_volume[z_index].copy()))
         self.edit_volume[z_index] = old_slice
         self.slice_slider.setValue(z_index)
+        self._mark_working_edit_dirty()
         self.render_current_slice()
 
     def redo(self):
@@ -1712,29 +1794,51 @@ class TifWorkbenchWidget(QWidget):
         self.undo_stack.append((z_index, self.edit_volume[z_index].copy()))
         self.edit_volume[z_index] = redo_slice
         self.slice_slider.setValue(z_index)
+        self._mark_working_edit_dirty()
         self.render_current_slice()
 
-    def save_working_edit(self):
+    def save_working_edit(self, show_message=True, reason="manual"):
+        if self._saving_working_edit:
+            return True
         specimen = self.project.get_specimen(self.current_specimen_id, default=None)
         if specimen is None or self.edit_volume is None:
-            return
+            return False
         edit_path = self.project.to_absolute(((specimen.get("labels") or {}).get("working_edit") or {}).get("path", ""))
         if not edit_path:
-            return
-        self.label_volume = None
-        metadata = save_volume_array(edit_path, self.edit_volume)
-        specimen["labels"]["working_edit"]["dtype"] = metadata["dtype"]
-        specimen["labels"]["working_edit"]["status"] = "in_progress"
-        specimen["review_status"] = "in_progress"
-        specimen["train_ready"] = False
-        self.project.save_project()
-        self._reload_label_volume()
-        self._update_status_labels(specimen)
+            return False
+        self._saving_working_edit = True
+        self.auto_save_timer.stop()
+        try:
+            self.label_volume = None
+            metadata = save_volume_array(edit_path, self.edit_volume)
+            specimen["labels"]["working_edit"]["dtype"] = metadata["dtype"]
+            specimen["labels"]["working_edit"]["status"] = "in_progress"
+            specimen["review_status"] = "in_progress"
+            specimen["train_ready"] = False
+            self.project.save_project()
+            self.working_edit_dirty = False
+            if self.label_role_combo.currentData() == "working_edit":
+                self.label_volume = np.asarray(self.edit_volume)
+            else:
+                self._reload_label_volume()
+            self._update_status_labels(specimen)
+        except Exception as exc:
+            self.working_edit_dirty = True
+            QMessageBox.warning(self, tt("Unsaved working edit", self.lang), str(exc))
+            return False
+        finally:
+            self._saving_working_edit = False
+        if show_message:
+            message = tt("Auto-saved working edit.", self.lang) if reason == "auto_save" else tt("Working edit saved.", self.lang)
+            self.training_status_label.setText(message)
+            self.log(message)
+        return True
 
     def promote_working_edit(self):
         if not self.current_specimen_id:
             return
-        self.save_working_edit()
+        if not self.save_working_edit(show_message=False):
+            return
         reply = QMessageBox.question(
             self,
             tt("Accept working edit", self.lang),

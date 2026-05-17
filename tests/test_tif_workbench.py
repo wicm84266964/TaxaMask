@@ -17,7 +17,7 @@ has_pyside6 = False
 
 try:
     from PySide6.QtCore import QPointF, Qt
-    from PySide6.QtWidgets import QApplication, QLabel, QTextEdit
+    from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QTextEdit
 except ModuleNotFoundError as exc:
     if exc.name and exc.name.startswith("PySide6"):
         QApplication = None
@@ -233,6 +233,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertFalse(manager.evaluate_train_ready("01-0101-10")["train_ready"])
                 widget.undo()
                 widget.redo()
+                widget.save_working_edit()
             finally:
                 widget.close_project()
                 widget.deleteLater()
@@ -288,6 +289,8 @@ class TifWorkbenchTests(unittest.TestCase):
             self.assertEqual(widget.btn_train_backend.text(), "Train backend")
             self.assertEqual(widget.btn_import_prediction.text(), "Import prediction")
             self.assertEqual(widget.btn_import_external_prediction_tif.text(), "Import external label TIF to draft")
+            self.assertEqual(widget.auto_save_check.text(), "Auto-save edit")
+            self.assertTrue(widget.auto_save_check.isChecked())
             self.assertEqual(widget.btn_start_center.text(), "Start Center")
             self.assertEqual(widget.btn_ask_agent.text(), "Ask Agent")
             self.assertIsNotNone(widget.findChild(type(widget.btn_export_training), "tifExportTrainingButton"))
@@ -299,6 +302,7 @@ class TifWorkbenchTests(unittest.TestCase):
             self.assertIsNotNone(widget.findChild(type(widget.btn_train_backend), "tifTrainBackendButton"))
             self.assertIsNotNone(widget.findChild(type(widget.btn_import_prediction), "tifImportPredictionButton"))
             self.assertIsNotNone(widget.findChild(type(widget.btn_import_external_prediction_tif), "tifImportExternalPredictionTifButton"))
+            self.assertIsNotNone(widget.findChild(type(widget.auto_save_check), "tifAutoSaveEditCheck"))
             self.assertEqual(widget.backend_id_edit.objectName(), "tifBackendIdEdit")
             self.assertEqual(widget.backend_formats_edit.text(), "ome_tiff,nrrd,mha,nifti")
             self.assertEqual(widget.training_status_label.objectName(), "tifTrainingStatusText")
@@ -413,6 +417,7 @@ class TifWorkbenchTests(unittest.TestCase):
             self.assertEqual(widget.btn_train_backend.text(), "训练后端")
             self.assertEqual(widget.btn_import_prediction.text(), "运行预测并导入草稿")
             self.assertEqual(widget.btn_import_external_prediction_tif.text(), "导入外部标签 TIF 到草稿")
+            self.assertEqual(widget.auto_save_check.text(), "自动保存编辑层")
             self.assertEqual(widget.btn_start_center.text(), "启动中心")
             self.assertEqual(widget.btn_ask_agent.text(), "询问 Agent")
             section_titles = {
@@ -468,6 +473,53 @@ class TifWorkbenchTests(unittest.TestCase):
                 np.testing.assert_array_equal(widget.edit_volume, edit_before)
                 self.assertIn("Cannot paint on this label layer", widget.training_status_label.text())
             finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_auto_save_writes_working_edit_after_brush_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            widget = self._make_volume_widget(root, z_count=2)
+            try:
+                edit_index = widget.label_role_combo.findData("working_edit")
+                widget.label_role_combo.setCurrentIndex(edit_index)
+                widget.current_material_id = 2
+                widget.brush_size_slider.setValue(1)
+                widget.paint_at_widget_position(widget.canvas.width() / 2, widget.canvas.height() / 2)
+
+                self.assertTrue(widget.working_edit_dirty)
+                self.assertTrue(widget.auto_save_timer.isActive())
+                widget.auto_save_timer.stop()
+                self.assertTrue(widget.save_working_edit(show_message=True, reason="auto_save"))
+
+                specimen = widget.project.get_specimen("01-0101-21")
+                edit_path = root / "viewer" / specimen["labels"]["working_edit"]["path"] / "array.npy"
+                saved = np.load(edit_path)
+                self.assertGreater(int(saved.sum()), 0)
+                self.assertFalse(widget.working_edit_dirty)
+                self.assertIn("Auto-saved working edit.", widget.training_status_label.text())
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_unsaved_working_edit_prompt_can_cancel_close_and_save(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=2)
+            try:
+                widget.auto_save_check.setChecked(False)
+                widget.working_edit_dirty = True
+                module_path = "AntSleap.ui.tif_workbench.QMessageBox"
+                with patch(f"{module_path}.question", return_value=QMessageBox.Cancel):
+                    self.assertFalse(widget.close_project(prompt_unsaved=True))
+                    self.assertTrue(widget.working_edit_dirty)
+                    self.assertEqual(widget.current_specimen_id, "01-0101-21")
+
+                with patch(f"{module_path}.question", return_value=QMessageBox.Save):
+                    with patch.object(widget, "save_working_edit", return_value=True) as save_mock:
+                        self.assertTrue(widget._confirm_discard_or_save_working_edit())
+                        save_mock.assert_called_once()
+            finally:
+                widget.working_edit_dirty = False
                 widget.close_project()
                 widget.deleteLater()
 

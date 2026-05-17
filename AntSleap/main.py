@@ -3189,6 +3189,16 @@ class MainWindow(QMainWindow):
         agent_layout.addWidget(self.agent_panel, 1)
         outer_layout.addWidget(agent_area, 1)
 
+        workflow_rail_scroll = QScrollArea()
+        workflow_rail_scroll.setObjectName("startWorkflowRailScroll")
+        workflow_rail_scroll.setWidgetResizable(True)
+        workflow_rail_scroll.setFrameShape(QFrame.NoFrame)
+        workflow_rail_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        workflow_rail_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        workflow_rail_scroll.setMinimumWidth(360)
+        workflow_rail_scroll.setMaximumWidth(410)
+        workflow_rail_scroll.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+
         workflow_rail = QWidget()
         workflow_rail.setObjectName("startWorkflowRail")
         workflow_rail.setMinimumWidth(340)
@@ -3242,7 +3252,8 @@ class MainWindow(QMainWindow):
         footer_layout.addWidget(self.btn_general_settings)
         rail_layout.addWidget(footer)
         rail_layout.addStretch(1)
-        outer_layout.addWidget(workflow_rail, 0)
+        workflow_rail_scroll.setWidget(workflow_rail)
+        outer_layout.addWidget(workflow_rail_scroll, 0)
         return page
 
     def _build_project_console(self):

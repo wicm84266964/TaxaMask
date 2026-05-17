@@ -1,7 +1,7 @@
 import os
 
 import numpy as np
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -180,7 +180,7 @@ class MaterialEditorDialog(QDialog):
         self.lang = lang
         self.setWindowTitle(tt("Material", self.lang))
         material = dict(material or {})
-        self.id_spin = QSpinBox()
+        self.id_spin = WheelSafeSpinBox()
         self.id_spin.setRange(0, 65535)
         self.id_spin.setValue(int(material.get("id", next_id)))
         self.id_spin.setEnabled(not material)
@@ -227,20 +227,75 @@ class MaterialEditorDialog(QDialog):
         }
 
 
+class WheelSafeComboBox(QComboBox):
+    def wheelEvent(self, event):
+        event.ignore()
+
+
+class WheelSafeSlider(QSlider):
+    def wheelEvent(self, event):
+        event.ignore()
+
+
+class WheelSafeSpinBox(QSpinBox):
+    def wheelEvent(self, event):
+        event.ignore()
+
+
 class TifSliceCanvas(QLabel):
+    ZOOM_STEPS = (1.0, 1.25, 1.5, 2.0, 3.0, 4.0)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("tifSliceCanvas")
         self.setAlignment(Qt.AlignCenter)
         self.setMinimumSize(360, 280)
+        self.setFocusPolicy(Qt.StrongFocus)
         self.setFrameShape(QFrame.NoFrame)
         self.setText("No TIF volume loaded")
         self._pixmap = None
+        self._draw_rect = QRectF()
+        self._zoom_index = 0
+        self._pan_x = 0.0
+        self._pan_y = 0.0
+        self._panning = False
+        self._last_pan_pos = None
         self.workbench = None
 
-    def set_slice_pixmap(self, pixmap):
+    def set_slice_pixmap(self, pixmap, reset_view=False):
         self._pixmap = pixmap
+        if reset_view:
+            self.reset_view(refresh=False)
         self._refresh_scaled_pixmap()
+
+    def reset_view(self, refresh=True):
+        self._zoom_index = 0
+        self._pan_x = 0.0
+        self._pan_y = 0.0
+        self._panning = False
+        self._last_pan_pos = None
+        if refresh:
+            self._refresh_scaled_pixmap()
+
+    def zoom_factor(self):
+        return float(self.ZOOM_STEPS[max(0, min(self._zoom_index, len(self.ZOOM_STEPS) - 1))])
+
+    def zoom_in(self):
+        if self._pixmap is None or self._pixmap.isNull():
+            return
+        if self._zoom_index < len(self.ZOOM_STEPS) - 1:
+            self._zoom_index += 1
+            self._refresh_scaled_pixmap()
+
+    def zoom_out(self):
+        if self._pixmap is None or self._pixmap.isNull():
+            return
+        if self._zoom_index > 0:
+            self._zoom_index -= 1
+            if self._zoom_index == 0:
+                self._pan_x = 0.0
+                self._pan_y = 0.0
+            self._refresh_scaled_pixmap()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -249,17 +304,132 @@ class TifSliceCanvas(QLabel):
     def _refresh_scaled_pixmap(self):
         if self._pixmap is None or self._pixmap.isNull():
             return
-        self.setPixmap(self._pixmap.scaled(self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        view_w = max(1, int(self.width()))
+        view_h = max(1, int(self.height()))
+        base = self._pixmap.scaled(view_w, view_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        zoom = self.zoom_factor()
+        target_w = max(1, int(round(base.width() * zoom)))
+        target_h = max(1, int(round(base.height() * zoom)))
+        zoomed = self._pixmap.scaled(target_w, target_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        target_w = max(1, int(zoomed.width()))
+        target_h = max(1, int(zoomed.height()))
+        max_pan_x = max(0.0, (target_w - view_w) / 2.0)
+        max_pan_y = max(0.0, (target_h - view_h) / 2.0)
+        self._pan_x = max(-max_pan_x, min(max_pan_x, self._pan_x)) if max_pan_x else 0.0
+        self._pan_y = max(-max_pan_y, min(max_pan_y, self._pan_y)) if max_pan_y else 0.0
+        x = (view_w - target_w) / 2.0 + self._pan_x
+        y = (view_h - target_h) / 2.0 + self._pan_y
+        self._draw_rect = QRectF(x, y, target_w, target_h)
+
+        composed = QPixmap(view_w, view_h)
+        composed.fill(QColor("#07090A"))
+        painter = QPainter(composed)
+        painter.drawPixmap(int(round(x)), int(round(y)), zoomed)
+        self._draw_status_overlay(painter)
+        painter.end()
+        self.setPixmap(composed)
+
+    def _draw_status_overlay(self, painter):
+        if self.workbench is None:
+            return
+        text = self.workbench.canvas_status_text(self.zoom_factor())
+        if not text:
+            return
+        painter.save()
+        font = painter.font()
+        font.setPointSize(9)
+        painter.setFont(font)
+        metrics = painter.fontMetrics()
+        text_w = metrics.horizontalAdvance(text)
+        rect = QRectF(10, 10, text_w + 16, metrics.height() + 8)
+        painter.fillRect(rect, QColor(7, 9, 10, 190))
+        painter.setPen(QColor("#DCE4E8"))
+        painter.drawText(rect.adjusted(8, 4, -8, -4), Qt.AlignLeft | Qt.AlignVCenter, text)
+        painter.restore()
+
+    def widget_to_image_pixel(self, x, y):
+        if self._pixmap is None or self._pixmap.isNull() or self._draw_rect.isNull():
+            return None
+        if not self._draw_rect.contains(float(x), float(y)):
+            return None
+        rel_x = (float(x) - self._draw_rect.x()) / max(1.0, self._draw_rect.width())
+        rel_y = (float(y) - self._draw_rect.y()) / max(1.0, self._draw_rect.height())
+        px = int(rel_x * self._pixmap.width())
+        py = int(rel_y * self._pixmap.height())
+        return (
+            max(0, min(int(self._pixmap.width()) - 1, px)),
+            max(0, min(int(self._pixmap.height()) - 1, py)),
+        )
+
+    def wheelEvent(self, event):
+        if self.workbench is None:
+            event.ignore()
+            return
+        delta = event.angleDelta().y()
+        if delta == 0:
+            event.ignore()
+            return
+        self.setFocus(Qt.MouseFocusReason)
+        self.workbench.move_slice(-1 if delta > 0 else 1)
+        event.accept()
+
+    def keyPressEvent(self, event):
+        key = event.key()
+        if key == Qt.Key_Left:
+            if self.workbench is not None:
+                self.workbench.move_slice(-1)
+            event.accept()
+            return
+        if key == Qt.Key_Right:
+            if self.workbench is not None:
+                self.workbench.move_slice(1)
+            event.accept()
+            return
+        if key == Qt.Key_Up:
+            self.zoom_in()
+            event.accept()
+            return
+        if key == Qt.Key_Down:
+            self.zoom_out()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def mousePressEvent(self, event):
+        self.setFocus(Qt.MouseFocusReason)
+        if event.button() == Qt.RightButton and self.zoom_factor() > 1.0:
+            self._panning = True
+            self._last_pan_pos = event.position()
+            event.accept()
+            return
         if self.workbench is not None and event.button() == Qt.LeftButton:
             self.workbench.paint_at_widget_position(event.position().x(), event.position().y(), erase=bool(event.modifiers() & Qt.ControlModifier))
+            event.accept()
+            return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        if self._panning and event.buttons() & Qt.RightButton and self._last_pan_pos is not None:
+            current = event.position()
+            self._pan_x += current.x() - self._last_pan_pos.x()
+            self._pan_y += current.y() - self._last_pan_pos.y()
+            self._last_pan_pos = current
+            self._refresh_scaled_pixmap()
+            event.accept()
+            return
         if self.workbench is not None and event.buttons() & Qt.LeftButton:
             self.workbench.paint_at_widget_position(event.position().x(), event.position().y(), erase=bool(event.modifiers() & Qt.ControlModifier))
+            event.accept()
+            return
         super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.RightButton and self._panning:
+            self._panning = False
+            self._last_pan_pos = None
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
 
 class TifWorkbenchWidget(QWidget):
@@ -290,25 +460,26 @@ class TifWorkbenchWidget(QWidget):
 
         self.canvas = TifSliceCanvas()
         self.canvas.workbench = self
-        self.slice_slider = QSlider(Qt.Horizontal)
+        self._reset_canvas_view_on_next_render = False
+        self.slice_slider = WheelSafeSlider(Qt.Horizontal)
         self.slice_slider.setRange(0, 0)
-        self.slice_slider.valueChanged.connect(self.render_current_slice)
+        self.slice_slider.valueChanged.connect(self.on_slice_slider_changed)
         self.slice_prefix_label = QLabel("Slice")
         self.slice_label = QLabel("0 / 0")
 
-        self.label_role_combo = QComboBox()
+        self.label_role_combo = WheelSafeComboBox()
         self._populate_label_role_combo()
         self.label_role_combo.currentIndexChanged.connect(self._reload_label_volume)
 
-        self.opacity_slider = QSlider(Qt.Horizontal)
+        self.opacity_slider = WheelSafeSlider(Qt.Horizontal)
         self.opacity_slider.setRange(0, 100)
         self.opacity_slider.setValue(45)
         self.opacity_slider.valueChanged.connect(self.render_current_slice)
-        self.brightness_slider = QSlider(Qt.Horizontal)
+        self.brightness_slider = WheelSafeSlider(Qt.Horizontal)
         self.brightness_slider.setRange(-100, 100)
         self.brightness_slider.setValue(0)
         self.brightness_slider.valueChanged.connect(self.render_current_slice)
-        self.contrast_slider = QSlider(Qt.Horizontal)
+        self.contrast_slider = WheelSafeSlider(Qt.Horizontal)
         self.contrast_slider.setRange(1, 30)
         self.contrast_slider.setValue(10)
         self.contrast_slider.valueChanged.connect(self.render_current_slice)
@@ -336,7 +507,7 @@ class TifWorkbenchWidget(QWidget):
         self.btn_delete_material = QPushButton("Delete material")
         self.btn_delete_material.clicked.connect(self.delete_selected_material)
 
-        self.brush_size_slider = QSlider(Qt.Horizontal)
+        self.brush_size_slider = WheelSafeSlider(Qt.Horizontal)
         self.brush_size_slider.setRange(1, 80)
         self.brush_size_slider.setValue(8)
         self.btn_undo = QPushButton("Undo")
@@ -553,6 +724,27 @@ class TifWorkbenchWidget(QWidget):
         if not hasattr(self, "log_console"):
             return
         self.log_console.append(f"[{_now_log_time()}] {message}")
+
+    def canvas_status_text(self, zoom_factor):
+        if self.image_volume is None:
+            return ""
+        z_index = int(self.slice_slider.value()) + 1
+        z_total = int(self.image_volume.shape[0])
+        return f"Z {z_index}/{z_total} · {int(round(float(zoom_factor) * 100))}%"
+
+    def move_slice(self, delta):
+        if self.image_volume is None:
+            return
+        current = int(self.slice_slider.value())
+        target = max(self.slice_slider.minimum(), min(self.slice_slider.maximum(), current + int(delta)))
+        if target == current:
+            return
+        self._reset_canvas_view_on_next_render = True
+        self.slice_slider.setValue(target)
+
+    def on_slice_slider_changed(self):
+        self._reset_canvas_view_on_next_render = True
+        self.render_current_slice()
 
     def save_backend_settings(self):
         self.backend_config = self._backend_config_from_ui()
@@ -1210,8 +1402,10 @@ class TifWorkbenchWidget(QWidget):
             z_count = int(self.image_volume.shape[0])
             self.slice_slider.setRange(0, max(0, z_count - 1))
             self.slice_slider.setValue(min(self.slice_slider.value(), max(0, z_count - 1)))
+            self._reset_canvas_view_on_next_render = True
         else:
             self.slice_slider.setRange(0, 0)
+            self.canvas.reset_view()
 
         material_path = self.project.to_absolute(specimen.get("material_map", ""))
         if material_path and os.path.exists(material_path):
@@ -1427,7 +1621,9 @@ class TifWorkbenchWidget(QWidget):
         if self.label_role_combo.currentData() == "working_edit" and self.edit_volume is not None and self.edit_volume.shape == self.image_volume.shape:
             label_slice = np.asarray(self.edit_volume[z_index])
         pixmap = self._render_slice_pixmap(image_slice, label_slice)
-        self.canvas.set_slice_pixmap(pixmap)
+        reset_view = bool(getattr(self, "_reset_canvas_view_on_next_render", False))
+        self._reset_canvas_view_on_next_render = False
+        self.canvas.set_slice_pixmap(pixmap, reset_view=reset_view)
 
     def paint_at_widget_position(self, x, y, erase=False):
         if self.image_volume is None or self.edit_volume is None:
@@ -1450,19 +1646,10 @@ class TifWorkbenchWidget(QWidget):
         self.render_current_slice()
 
     def _widget_to_image_pixel(self, x, y, image_width, image_height):
-        pixmap = self.canvas.pixmap()
-        if pixmap is None or pixmap.isNull():
+        pixel = self.canvas.widget_to_image_pixel(x, y)
+        if pixel is None:
             return None
-        scaled_w = pixmap.width()
-        scaled_h = pixmap.height()
-        offset_x = (self.canvas.width() - scaled_w) / 2.0
-        offset_y = (self.canvas.height() - scaled_h) / 2.0
-        local_x = x - offset_x
-        local_y = y - offset_y
-        if local_x < 0 or local_y < 0 or local_x >= scaled_w or local_y >= scaled_h:
-            return None
-        px = int(local_x / max(scaled_w, 1) * image_width)
-        py = int(local_y / max(scaled_h, 1) * image_height)
+        px, py = pixel
         return max(0, min(image_width - 1, px)), max(0, min(image_height - 1, py))
 
     def _push_undo(self):

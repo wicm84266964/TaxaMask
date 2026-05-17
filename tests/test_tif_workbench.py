@@ -16,6 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
 has_pyside6 = False
 
 try:
+    from PySide6.QtCore import QPointF, Qt
     from PySide6.QtWidgets import QApplication, QLabel, QTextEdit
 except ModuleNotFoundError as exc:
     if exc.name and exc.name.startswith("PySide6"):
@@ -29,6 +30,64 @@ else:
     from AntSleap.ui.tif_workbench import TifWorkbenchWidget
 
     has_pyside6 = True
+
+
+class FakeWheelEvent:
+    def __init__(self, delta_y=120):
+        self._delta_y = int(delta_y)
+        self.accepted = False
+        self.ignored = False
+
+    def angleDelta(self):
+        class Delta:
+            def __init__(self, value):
+                self._value = value
+
+            def y(self):
+                return self._value
+
+        return Delta(self._delta_y)
+
+    def accept(self):
+        self.accepted = True
+
+    def ignore(self):
+        self.ignored = True
+
+
+class FakeKeyEvent:
+    def __init__(self, key):
+        self._key = key
+        self.accepted = False
+
+    def key(self):
+        return self._key
+
+    def accept(self):
+        self.accepted = True
+
+
+class FakeMouseEvent:
+    def __init__(self, button, buttons, x, y):
+        self._button = button
+        self._buttons = buttons
+        self._position = QPointF(float(x), float(y))
+        self.accepted = False
+
+    def button(self):
+        return self._button
+
+    def buttons(self):
+        return self._buttons
+
+    def position(self):
+        return self._position
+
+    def modifiers(self):
+        return Qt.NoModifier
+
+    def accept(self):
+        self.accepted = True
 
 
 class patch_message_boxes:
@@ -56,6 +115,34 @@ class TifWorkbenchTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+
+    def _make_volume_widget(self, root, z_count=4):
+        manager = TifProjectManager()
+        manager.create_project("viewer", root / "viewer")
+        manager.create_specimen_scaffold(
+            "01-0101-21",
+            modality="confocal",
+            material_map={
+                "materials": [
+                    {"id": 0, "name": "background", "display_name": "Background", "trainable": False},
+                    {"id": 2, "name": "LO_L", "display_name": "LO_L", "color": "#ff0000", "trainable": True},
+                ]
+            },
+        )
+        image = np.arange(z_count * 8 * 8, dtype=np.uint8).reshape((z_count, 8, 8))
+        edit = np.zeros((z_count, 8, 8), dtype=np.uint16)
+        image_rel = "specimens/01-0101-21/working/image.ome.zarr"
+        edit_rel = "specimens/01-0101-21/labels/working_edit.ome.zarr"
+        image_meta = write_volume_sidecar(root / "viewer" / image_rel, image, role="working_image")
+        edit_meta = write_volume_sidecar(root / "viewer" / edit_rel, edit, role="working_edit")
+        manager.register_working_volume("01-0101-21", image_rel, image_meta["shape_zyx"], image_meta["dtype"], save=False)
+        manager.register_label_volume("01-0101-21", "working_edit", edit_rel, edit_meta["shape_zyx"], edit_meta["dtype"], save=False)
+        manager.save_project()
+        widget = TifWorkbenchWidget(manager, "en")
+        widget.resize(900, 620)
+        widget.canvas.resize(480, 360)
+        widget.render_current_slice()
+        return widget
 
     def test_tif_workbench_loads_specimen_and_renders_overlay(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -226,6 +313,91 @@ class TifWorkbenchTests(unittest.TestCase):
         finally:
             widget.close_project()
             widget.deleteLater()
+
+    def test_right_panel_controls_ignore_mouse_wheel_changes(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+        try:
+            controls = [
+                widget.label_role_combo,
+                widget.opacity_slider,
+                widget.brightness_slider,
+                widget.contrast_slider,
+                widget.brush_size_slider,
+                widget.slice_slider,
+            ]
+            before = [
+                control.currentIndex() if hasattr(control, "currentIndex") else control.value()
+                for control in controls
+            ]
+            for control in controls:
+                event = FakeWheelEvent(120)
+                control.wheelEvent(event)
+                self.assertTrue(event.ignored)
+            after = [
+                control.currentIndex() if hasattr(control, "currentIndex") else control.value()
+                for control in controls
+            ]
+            self.assertEqual(before, after)
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+
+    def test_canvas_wheel_and_arrow_keys_page_slices(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=4)
+            try:
+                self.assertEqual(widget.slice_slider.value(), 0)
+
+                wheel_down = FakeWheelEvent(-120)
+                widget.canvas.wheelEvent(wheel_down)
+                self.assertTrue(wheel_down.accepted)
+                self.assertEqual(widget.slice_slider.value(), 1)
+
+                right = FakeKeyEvent(Qt.Key_Right)
+                widget.canvas.keyPressEvent(right)
+                self.assertTrue(right.accepted)
+                self.assertEqual(widget.slice_slider.value(), 2)
+
+                left = FakeKeyEvent(Qt.Key_Left)
+                widget.canvas.keyPressEvent(left)
+                self.assertTrue(left.accepted)
+                self.assertEqual(widget.slice_slider.value(), 1)
+
+                wheel_up = FakeWheelEvent(120)
+                widget.canvas.wheelEvent(wheel_up)
+                self.assertEqual(widget.slice_slider.value(), 0)
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_canvas_zoom_pan_and_slice_change_reset_view(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=3)
+            try:
+                up = FakeKeyEvent(Qt.Key_Up)
+                widget.canvas.keyPressEvent(up)
+                self.assertTrue(up.accepted)
+                self.assertGreater(widget.canvas.zoom_factor(), 1.0)
+
+                press = FakeMouseEvent(Qt.RightButton, Qt.RightButton, 220, 170)
+                move = FakeMouseEvent(Qt.RightButton, Qt.RightButton, 260, 190)
+                release = FakeMouseEvent(Qt.RightButton, Qt.NoButton, 260, 190)
+                widget.canvas.mousePressEvent(press)
+                widget.canvas.mouseMoveEvent(move)
+                widget.canvas.mouseReleaseEvent(release)
+                self.assertTrue(press.accepted)
+                self.assertTrue(move.accepted)
+                self.assertTrue(release.accepted)
+                self.assertNotEqual((widget.canvas._pan_x, widget.canvas._pan_y), (0.0, 0.0))
+
+                widget.move_slice(1)
+                self.assertEqual(widget.slice_slider.value(), 1)
+                self.assertEqual(widget.canvas.zoom_factor(), 1.0)
+                self.assertEqual((widget.canvas._pan_x, widget.canvas._pan_y), (0.0, 0.0))
+            finally:
+                widget.close_project()
+                widget.deleteLater()
 
     def test_tif_workbench_chinese_labels_cover_import_and_backend_controls(self):
         manager = TifProjectManager()

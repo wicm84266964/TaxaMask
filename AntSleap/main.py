@@ -279,6 +279,7 @@ TRANSLATIONS = {
         "Opened 2D/STL workflow.": "已进入 2D/STL 工作流。",
         "Opened TIF volume workflow.": "已进入 TIF 体数据工作流。",
         "Ask Agent": "询问 Agent",
+        "Ask Agent about these settings. Current values are summarized without sending full command text.": "询问 Agent 这些设置。只发送当前值摘要，不发送完整命令文本。",
         "Local task cards": "本地任务卡",
         "No active project": "未打开项目",
         "Model Backend:": "模型后端：",
@@ -733,6 +734,29 @@ class NoWheelComboBox(QComboBox):
 
     def wheelEvent(self, event):
         event.ignore()
+
+
+def _agent_yes_no(value):
+    return "yes" if value else "no"
+
+
+def _agent_command_has_contract(command_text):
+    command = str(command_text or "")
+    return "{contract}" in command or "{contract_json}" in command
+
+
+def _agent_error_summary(errors, limit=4):
+    items = [str(error).strip() for error in (errors or []) if str(error).strip()]
+    if not items:
+        return "none"
+    shown = items[:limit]
+    if len(items) > limit:
+        shown.append(f"+{len(items) - limit} more")
+    return " | ".join(shown)
+
+
+def _format_backend_contract_error(template, command_name):
+    return str(template or "").replace("{0}", str(command_name))
 
 
 def _blink_preferred_roi_parts(target_part, remembered_parent_part=None):
@@ -1884,6 +1908,8 @@ class RouteManagementPanel(QWidget):
             )
 
 class ModelSettingsDialog(QDialog):
+    agent_requested = Signal(dict)
+
     def __init__(self, params, lang="en", parent=None, route_panel=None):
         super().__init__(parent)
         self.lang = lang
@@ -2123,12 +2149,19 @@ class ModelSettingsDialog(QDialog):
         
         layout.addWidget(tabs, 1)
         btn_layout = QHBoxLayout()
+        btn_ask_agent = QPushButton(tr("Ask Agent", lang))
+        btn_ask_agent.setObjectName("modelSettingsAskAgentButton")
+        btn_ask_agent.setToolTip(tr("Ask Agent about these settings. Current values are summarized without sending full command text.", lang))
+        apply_semantic_button_style(btn_ask_agent, BUTTON_ROLE_NEUTRAL)
+        btn_ask_agent.clicked.connect(self.request_agent_help)
         btn_save = QPushButton(tr("Save", lang))
         apply_semantic_button_style(btn_save, BUTTON_ROLE_COMMIT)
         btn_save.clicked.connect(self.accept_with_validation)
         btn_cancel = QPushButton(tr("Cancel", lang))
         apply_semantic_button_style(btn_cancel, BUTTON_ROLE_STOP)
         btn_cancel.clicked.connect(self.reject)
+        btn_layout.addWidget(btn_ask_agent)
+        btn_layout.addStretch(1)
         btn_layout.addWidget(btn_save)
         btn_layout.addWidget(btn_cancel)
         layout.addLayout(btn_layout)
@@ -2173,10 +2206,13 @@ class ModelSettingsDialog(QDialog):
         for command_name, command_text in commands.items():
             if command_text and "{contract}" not in command_text and "{contract_json}" not in command_text:
                 errors.append(
-                    tr(
-                        "External backend command '{0}' must include {contract} or {contract_json}.",
-                        self.lang,
-                    ).format(command_name)
+                    _format_backend_contract_error(
+                        tr(
+                            "External backend command '{0}' must include {contract} or {contract_json}.",
+                            self.lang,
+                        ),
+                        command_name,
+                    )
                 )
         return errors
 
@@ -2210,6 +2246,35 @@ class ModelSettingsDialog(QDialog):
                 if part_name:
                     selected.append(part_name)
         return selected
+
+    def request_agent_help(self):
+        self.agent_requested.emit(self.get_agent_context())
+        self.reject()
+
+    def get_agent_context(self):
+        prepare_command = self._command_text(self.external_prepare_command)
+        train_command = self._command_text(self.external_train_command)
+        predict_command = self._command_text(self.external_predict_command)
+        return {
+            "source_workbench": "stl_model_settings",
+            "project_type": "settings",
+            "settings_scope": "2d_stl_model",
+            "settings_question_focus": "2D/STL morphology model defaults, runtime device, locator scope, and external script backend wiring.",
+            "model_backend": self.backend_combo.currentData() or BUILTIN_BACKEND_ID,
+            "runtime_device": self.combo_runtime_device.currentData() or "auto",
+            "external_backend_id": self.external_backend_id.text().strip(),
+            "external_display_name": self.external_display_name.text().strip(),
+            "external_python": self.external_python.text().strip(),
+            "prepare_command_present": _agent_yes_no(bool(prepare_command)),
+            "train_command_present": _agent_yes_no(bool(train_command)),
+            "predict_command_present": _agent_yes_no(bool(predict_command)),
+            "prepare_command_has_contract": _agent_yes_no(_agent_command_has_contract(prepare_command)),
+            "train_command_has_contract": _agent_yes_no(_agent_command_has_contract(train_command)),
+            "predict_command_has_contract": _agent_yes_no(_agent_command_has_contract(predict_command)),
+            "model_manifest_present": _agent_yes_no(bool(self.external_model_manifest.text().strip())),
+            "locator_scope_count": str(len(self._selected_locator_scope())),
+            "validation_errors": _agent_error_summary(self._external_backend_validation_errors()),
+        }
 
     def get_values(self):
         try:
@@ -2247,6 +2312,8 @@ class ModelSettingsDialog(QDialog):
 
 
 class GeneralSettingsDialog(QDialog):
+    agent_requested = Signal(dict)
+
     def __init__(self, params, lang="en", parent=None):
         super().__init__(parent)
         self.lang = lang
@@ -2323,13 +2390,19 @@ class GeneralSettingsDialog(QDialog):
         layout.addStretch(1)
 
         buttons = QHBoxLayout()
-        buttons.addStretch(1)
+        btn_ask_agent = QPushButton(tr("Ask Agent", lang))
+        btn_ask_agent.setObjectName("generalSettingsAskAgentButton")
+        btn_ask_agent.setToolTip(tr("Ask Agent about these settings. Current values are summarized without sending full command text.", lang))
+        apply_semantic_button_style(btn_ask_agent, BUTTON_ROLE_NEUTRAL)
+        btn_ask_agent.clicked.connect(self.request_agent_help)
         btn_save = QPushButton(tr("Save", lang))
         apply_semantic_button_style(btn_save, BUTTON_ROLE_COMMIT)
         btn_save.clicked.connect(self.accept_with_validation)
         btn_cancel = QPushButton(tr("Cancel", lang))
         apply_semantic_button_style(btn_cancel, BUTTON_ROLE_STOP)
         btn_cancel.clicked.connect(self.reject)
+        buttons.addWidget(btn_ask_agent)
+        buttons.addStretch(1)
         buttons.addWidget(btn_save)
         buttons.addWidget(btn_cancel)
         layout.addLayout(buttons)
@@ -2356,8 +2429,28 @@ class GeneralSettingsDialog(QDialog):
         except Exception:
             return None
 
+    def request_agent_help(self):
+        self.agent_requested.emit(self.get_agent_context())
+        self.reject()
+
+    def get_agent_context(self):
+        return {
+            "source_workbench": "general_settings",
+            "project_type": "settings",
+            "settings_scope": "general",
+            "settings_question_focus": "Application language, startup behavior, autosave timing, and default runtime device.",
+            "language": self.language_combo.currentData() or "en",
+            "theme": normalize_theme(self.theme_combo.currentData() or "dark"),
+            "startup_behavior": self.startup_combo.currentData() or "start_center",
+            "project_autosave_interval_sec": self.autosave_seconds.text().strip(),
+            "runtime_device": normalize_device_preference(self.runtime_combo.currentData() or "auto"),
+            "validation_errors": _agent_error_summary([]),
+        }
+
 
 class TifModelSettingsDialog(QDialog):
+    agent_requested = Signal(dict)
+
     def __init__(self, config, lang="en", parent=None):
         super().__init__(parent)
         self.lang = lang
@@ -2459,13 +2552,19 @@ class TifModelSettingsDialog(QDialog):
         layout.addWidget(scroll, 1)
 
         buttons = QHBoxLayout()
-        buttons.addStretch(1)
+        btn_ask_agent = QPushButton(tr("Ask Agent", lang))
+        btn_ask_agent.setObjectName("tifModelSettingsAskAgentButton")
+        btn_ask_agent.setToolTip(tr("Ask Agent about these settings. Current values are summarized without sending full command text.", lang))
+        apply_semantic_button_style(btn_ask_agent, BUTTON_ROLE_NEUTRAL)
+        btn_ask_agent.clicked.connect(self.request_agent_help)
         btn_save = QPushButton(tr("Save", lang))
         apply_semantic_button_style(btn_save, BUTTON_ROLE_COMMIT)
         btn_save.clicked.connect(self.accept_with_validation)
         btn_cancel = QPushButton(tr("Cancel", lang))
         apply_semantic_button_style(btn_cancel, BUTTON_ROLE_STOP)
         btn_cancel.clicked.connect(self.reject)
+        buttons.addWidget(btn_ask_agent)
+        buttons.addStretch(1)
         buttons.addWidget(btn_save)
         buttons.addWidget(btn_cancel)
         layout.addLayout(buttons)
@@ -2508,7 +2607,10 @@ class TifModelSettingsDialog(QDialog):
         for command_name, command_text in commands.items():
             if command_text and "{contract}" not in command_text and "{contract_json}" not in command_text:
                 errors.append(
-                    tr("TIF backend command '{0}' must include {contract} or {contract_json}.", self.lang).format(command_name)
+                    _format_backend_contract_error(
+                        tr("TIF backend command '{0}' must include {contract} or {contract_json}.", self.lang),
+                        command_name,
+                    )
                 )
         return errors
 
@@ -2549,6 +2651,33 @@ class TifModelSettingsDialog(QDialog):
                 "model_manifest": self.model_manifest_edit.text(),
             }
         )
+
+    def request_agent_help(self):
+        self.agent_requested.emit(self.get_agent_context())
+        self.reject()
+
+    def get_agent_context(self):
+        prepare_command = self._command_text(self.prepare_command_edit)
+        train_command = self._command_text(self.train_command_edit)
+        predict_command = self._command_text(self.predict_command_edit)
+        return {
+            "source_workbench": "tif_model_settings",
+            "project_type": "settings",
+            "settings_scope": "tif_volume_backend",
+            "settings_question_focus": "TIF volume external backend defaults for dataset export, nnU-Net style training, and prediction import.",
+            "backend_id": self.backend_id_edit.text().strip(),
+            "display_name": self.display_name_edit.text().strip(),
+            "python_executable": self.python_edit.text().strip(),
+            "export_formats": ",".join(self._export_formats()),
+            "prepare_command_present": _agent_yes_no(bool(prepare_command)),
+            "train_command_present": _agent_yes_no(bool(train_command)),
+            "predict_command_present": _agent_yes_no(bool(predict_command)),
+            "prepare_command_has_contract": _agent_yes_no(_agent_command_has_contract(prepare_command)),
+            "train_command_has_contract": _agent_yes_no(_agent_command_has_contract(train_command)),
+            "predict_command_has_contract": _agent_yes_no(_agent_command_has_contract(predict_command)),
+            "model_manifest_present": _agent_yes_no(bool(self.model_manifest_edit.text().strip())),
+            "validation_errors": _agent_error_summary(self._validation_errors()),
+        }
 
 
 class ExportDialog(QDialog):
@@ -3547,6 +3676,30 @@ class MainWindow(QMainWindow):
             "active_label_role",
             "selected_part",
             "selected_material_id",
+            "settings_scope",
+            "settings_question_focus",
+            "language",
+            "theme",
+            "startup_behavior",
+            "project_autosave_interval_sec",
+            "runtime_device",
+            "model_backend",
+            "backend_id",
+            "display_name",
+            "python_executable",
+            "export_formats",
+            "external_backend_id",
+            "external_display_name",
+            "external_python",
+            "prepare_command_present",
+            "train_command_present",
+            "predict_command_present",
+            "prepare_command_has_contract",
+            "train_command_has_contract",
+            "predict_command_has_contract",
+            "model_manifest_present",
+            "locator_scope_count",
+            "validation_errors",
             "recent_log_excerpt",
         )
         compact = {}
@@ -4821,6 +4974,7 @@ class MainWindow(QMainWindow):
             "runtime_device": self.runtime_device,
         }
         dlg = GeneralSettingsDialog(params, self.current_lang, self)
+        dlg.agent_requested.connect(self.open_agent_from_context)
         if not dlg.exec():
             return
         values = dlg.get_values()
@@ -4890,6 +5044,7 @@ class MainWindow(QMainWindow):
         if route_panel is not None:
             route_panel.setParent(None)
         dlg = ModelSettingsDialog(params, self.current_lang, self, route_panel=route_panel)
+        dlg.agent_requested.connect(self.open_agent_from_context)
         if dlg.exec():
             v = dlg.get_values()
             if not v:
@@ -4970,6 +5125,7 @@ class MainWindow(QMainWindow):
     def open_tif_model_settings(self):
         current_config = self.config.get("tif_backend", DEFAULT_TIF_BACKEND_CONFIG)
         dlg = TifModelSettingsDialog(current_config, self.current_lang, self)
+        dlg.agent_requested.connect(self.open_agent_from_context)
         if not dlg.exec():
             return
         backend_config = dlg.get_values()

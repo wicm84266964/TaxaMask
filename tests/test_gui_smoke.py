@@ -487,6 +487,7 @@ class GuiSmokeTests(unittest.TestCase):
             )
             try:
                 self.assertEqual(dialog.windowTitle(), "2D/STL 形态学模型设置")
+                self.assertIsNotNone(dialog.findChild(main_module.QPushButton, "modelSettingsAskAgentButton"))
                 self.assertEqual(dialog.get_values()["runtime_device"], "cpu")
                 runtime_group = dialog.findChild(main_module.QWidget, "modelSettingsRuntimeDevicePanel")
                 self.assertIsNotNone(runtime_group)
@@ -521,6 +522,11 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(values["startup_behavior"], "continue_last")
             self.assertEqual(values["project_autosave_interval_sec"], 5)
             self.assertEqual(values["runtime_device"], "cpu")
+            self.assertIsNotNone(dialog.findChild(main_module.QPushButton, "generalSettingsAskAgentButton"))
+            context = dialog.get_agent_context()
+            self.assertEqual(context["source_workbench"], "general_settings")
+            self.assertEqual(context["settings_scope"], "general")
+            self.assertEqual(context["runtime_device"], "cpu")
             self.assertIsNone(dialog.findChild(main_module.QWidget, "modelSettingsLocatorScopePanel"))
         finally:
             dialog.deleteLater()
@@ -543,6 +549,7 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(dialog.windowTitle(), "TIF 体数据训练设置")
             safety_panel = dialog.findChild(main_module.QWidget, "tifModelSettingsSafetyPanel")
             self.assertIsNotNone(safety_panel)
+            self.assertIsNotNone(dialog.findChild(main_module.QPushButton, "tifModelSettingsAskAgentButton"))
             self.assertEqual(dialog._validation_errors(), [])
             values = dialog.get_values()
             self.assertEqual(values["backend_id"], "tif_unet")
@@ -553,6 +560,80 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertIn("不支持的 TIF 导出格式", "\n".join(dialog._validation_errors()))
         finally:
             dialog.deleteLater()
+
+    def test_settings_ask_agent_context_is_compact_and_command_safe(self):
+        window = self._make_window()
+        try:
+            model_dialog = main_module.ModelSettingsDialog(
+                {
+                    "epochs": 1,
+                    "batch": 1,
+                    "lr": 1e-4,
+                    "wd": 1e-4,
+                    "conf": 0.1,
+                    "adapt": 0.4,
+                    "pad": 0.4,
+                    "noise_floor": 0.15,
+                    "poly_epsilon": 2.0,
+                    "runtime_device": "cpu",
+                    "model_backend": main_module.EXTERNAL_BACKEND_ID,
+                    "external_backend": {
+                        "backend_id": "custom_backend",
+                        "display_name": "Custom Backend",
+                        "python_executable": "python",
+                        "prepare_dataset_command": "python prepare.py --contract {contract_json} --very-long-private-flag secret",
+                        "train_command": "python train.py --missing-contract",
+                        "predict_command": "",
+                        "model_manifest": "{run_dir}/manifest.json",
+                    },
+                    "taxonomy": ["Head"],
+                    "locator_scope": ["Head"],
+                },
+                lang="en",
+                parent=window,
+            )
+            try:
+                context = model_dialog.get_agent_context()
+                self.assertEqual(context["settings_scope"], "2d_stl_model")
+                self.assertEqual(context["prepare_command_present"], "yes")
+                self.assertEqual(context["prepare_command_has_contract"], "yes")
+                self.assertEqual(context["train_command_present"], "yes")
+                self.assertEqual(context["train_command_has_contract"], "no")
+                self.assertNotIn("very-long-private-flag", str(context))
+
+                compact = window._compact_agent_context(context)
+                self.assertEqual(compact["source_workbench"], "stl_model_settings")
+                self.assertEqual(compact["external_backend_id"], "custom_backend")
+                self.assertIn("validation_errors", compact)
+                self.assertLess(len(str(compact)), 2000)
+            finally:
+                model_dialog.deleteLater()
+
+            tif_dialog = main_module.TifModelSettingsDialog(
+                {
+                    "backend_id": "nnunet",
+                    "display_name": "nnU-Net",
+                    "python_executable": "python",
+                    "export_formats": "nrrd,mha",
+                    "prepare_dataset_command": "python prepare.py --contract {contract_json} --large-config secret",
+                    "train_command": "",
+                    "predict_command": "python predict.py --contract {contract}",
+                    "model_manifest": "",
+                },
+                lang="en",
+                parent=window,
+            )
+            try:
+                context = tif_dialog.get_agent_context()
+                self.assertEqual(context["settings_scope"], "tif_volume_backend")
+                self.assertEqual(context["backend_id"], "nnunet")
+                self.assertEqual(context["predict_command_has_contract"], "yes")
+                self.assertNotIn("large-config", str(context))
+                self.assertNotIn("predict.py", str(context))
+            finally:
+                tif_dialog.deleteLater()
+        finally:
+            window.deleteLater()
 
     def test_tif_model_settings_save_syncs_workbench_defaults(self):
         window = self._make_window()

@@ -273,6 +273,8 @@ def copy_volume_sidecar(source_sidecar_path, target_sidecar_path, role=None):
     target = os.path.abspath(str(target_sidecar_path))
     if not volume_sidecar_exists(source):
         raise FileNotFoundError(source)
+    if os.path.normcase(source) == os.path.normcase(target):
+        raise ValueError(f"source_target_sidecar_same:{source}")
     if os.path.exists(target):
         shutil.rmtree(target)
     shutil.copytree(source, target)

@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 from datetime import datetime
 
 from .tif_materials import has_trainable_material, read_material_map, write_material_map
@@ -19,7 +20,10 @@ def _now_iso():
 def _safe_path_fragment(value):
     text = str(value or "").strip()
     clean = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in text)
-    return clean.strip("_") or "specimen"
+    clean = clean.strip("_")
+    if not clean or clean in {".", ".."} or not clean.strip("."):
+        return "specimen"
+    return clean
 
 
 def _default_project_data(name="Untitled TIF Project", project_id=None):
@@ -105,21 +109,26 @@ class TifProjectManager:
         return os.path.join("specimens", _safe_path_fragment(specimen_id))
 
     def create_specimen_scaffold(self, specimen_id, material_map=None, modality="unknown", metadata_ref="", display_name=""):
-        specimen_root = self.to_absolute(self.specimen_dir(specimen_id))
-        for rel in ("source/raw", "source/amira_original", "working", "labels/model_draft", "exports", "logs"):
-            os.makedirs(os.path.join(specimen_root, rel), exist_ok=True)
-        material_map_rel = os.path.join(self.specimen_dir(specimen_id), "material_map.json").replace("\\", "/")
-        write_material_map(self.to_absolute(material_map_rel), material_map or {}, source=(material_map or {}).get("source", "manual") if isinstance(material_map, dict) else "manual")
-        specimen = self.add_specimen(
-            specimen_id,
-            display_name=display_name or specimen_id,
-            metadata_ref=metadata_ref,
-            modality=modality,
-            material_map=material_map_rel,
-            save=False,
-        )
-        self.save_project()
-        return specimen
+        clean_id = self._validate_new_specimen_id(specimen_id, require_storage_available=True)
+        specimen_root = self.to_absolute(self.specimen_dir(clean_id))
+        try:
+            for rel in ("source/raw", "source/amira_original", "working", "labels/model_draft", "exports", "logs"):
+                os.makedirs(os.path.join(specimen_root, rel), exist_ok=True)
+            material_map_rel = os.path.join(self.specimen_dir(clean_id), "material_map.json").replace("\\", "/")
+            write_material_map(self.to_absolute(material_map_rel), material_map or {}, source=(material_map or {}).get("source", "manual") if isinstance(material_map, dict) else "manual")
+            specimen = self.add_specimen(
+                clean_id,
+                display_name=display_name or clean_id,
+                metadata_ref=metadata_ref,
+                modality=modality,
+                material_map=material_map_rel,
+                save=False,
+            )
+            self.save_project()
+            return specimen
+        except Exception:
+            self.discard_specimen_scaffold(clean_id, save=False)
+            raise
 
     def add_specimen(
         self,
@@ -136,11 +145,7 @@ class TifProjectManager:
         provenance=None,
         save=True,
     ):
-        clean_id = str(specimen_id or "").strip()
-        if not clean_id:
-            raise ValueError("specimen_id_required")
-        if self.get_specimen(clean_id, default=None) is not None:
-            raise ValueError(f"duplicate_specimen_id:{clean_id}")
+        clean_id = self._validate_new_specimen_id(specimen_id)
         if review_status not in TIF_REVIEW_STATUSES:
             review_status = "not_started"
 
@@ -178,6 +183,8 @@ class TifProjectManager:
             specimen["train_ready"] = bool(train_ready)
         elif status == "train_ready":
             specimen["train_ready"] = True
+        else:
+            specimen["train_ready"] = False
         if save:
             self.save_project()
         return specimen
@@ -232,7 +239,11 @@ class TifProjectManager:
         target_path = labels.get("working_edit", {}).get("path")
         if not target_path:
             target_path = os.path.join(self.specimen_dir(specimen_id), "labels", "working_edit.ome.zarr").replace("\\", "/")
-        metadata = copy_volume_sidecar(self.to_absolute(source_path), self.to_absolute(target_path), role="working_edit")
+        source_abs = self.to_absolute(source_path)
+        target_abs = self.to_absolute(target_path)
+        if os.path.normcase(os.path.abspath(source_abs)) == os.path.normcase(os.path.abspath(target_abs)):
+            raise ValueError(f"source_target_label_same:{source_role}")
+        metadata = copy_volume_sidecar(source_abs, target_abs, role="working_edit")
         specimen["labels"]["working_edit"] = self._volume_payload(
             target_path,
             metadata["shape_zyx"],
@@ -258,7 +269,11 @@ class TifProjectManager:
         target_path = (specimen.get("labels") or {}).get("manual_truth", {}).get("path")
         if not target_path:
             target_path = os.path.join(self.specimen_dir(specimen_id), "labels", "manual_truth.ome.zarr").replace("\\", "/")
-        metadata = copy_volume_sidecar(self.to_absolute(source_path), self.to_absolute(target_path), role="manual_truth")
+        source_abs = self.to_absolute(source_path)
+        target_abs = self.to_absolute(target_path)
+        if os.path.normcase(os.path.abspath(source_abs)) == os.path.normcase(os.path.abspath(target_abs)):
+            raise ValueError("working_edit_manual_truth_same_path")
+        metadata = copy_volume_sidecar(source_abs, target_abs, role="manual_truth")
         specimen["labels"]["manual_truth"] = self._volume_payload(
             target_path,
             metadata["shape_zyx"],
@@ -333,6 +348,59 @@ class TifProjectManager:
         if specimen is None:
             raise KeyError(f"unknown_specimen_id:{specimen_id}")
         return specimen
+
+    def discard_specimen_scaffold(self, specimen_id, save=True):
+        clean_id = str(specimen_id or "").strip()
+        specimens = self.project_data.setdefault("specimens", [])
+        before = len(specimens)
+        self.project_data["specimens"] = [item for item in specimens if item.get("specimen_id") != clean_id]
+        removed_specimen = len(self.project_data["specimens"]) != before
+
+        specimen_root = os.path.abspath(self.to_absolute(self.specimen_dir(clean_id)))
+        specimens_root = os.path.abspath(os.path.join(self.project_dir, "specimens"))
+        removed_storage = False
+        try:
+            is_safe_storage = (
+                os.path.commonpath([specimens_root, specimen_root]) == specimens_root
+                and os.path.normcase(specimen_root) != os.path.normcase(specimens_root)
+            )
+        except ValueError:
+            is_safe_storage = False
+        if is_safe_storage and os.path.exists(specimen_root):
+            shutil.rmtree(specimen_root)
+            removed_storage = True
+
+        if save and (removed_specimen or removed_storage):
+            self.save_project()
+        return {"removed_specimen": removed_specimen, "removed_storage": removed_storage}
+
+    def _validate_new_specimen_id(self, specimen_id, require_storage_available=False):
+        clean_id = str(specimen_id or "").strip()
+        if not clean_id:
+            raise ValueError("specimen_id_required")
+        if self.get_specimen(clean_id, default=None) is not None:
+            raise ValueError(f"duplicate_specimen_id:{clean_id}")
+
+        new_dir = os.path.normcase(os.path.normpath(self.specimen_dir(clean_id)))
+        for specimen in self.project_data.get("specimens", []):
+            existing_id = str(specimen.get("specimen_id", "") or "").strip()
+            if not existing_id:
+                continue
+            existing_dir = os.path.normcase(os.path.normpath(self.specimen_dir(existing_id)))
+            if existing_dir == new_dir:
+                raise ValueError(f"specimen_storage_path_collision:{clean_id}:{existing_id}:{new_dir}")
+
+        if require_storage_available:
+            specimen_root = self.to_absolute(self.specimen_dir(clean_id))
+            if os.path.exists(specimen_root):
+                if not os.path.isdir(specimen_root):
+                    raise FileExistsError(f"specimen_storage_path_exists:{self.specimen_dir(clean_id)}")
+                with os.scandir(specimen_root) as entries:
+                    has_existing_content = any(entries)
+                if has_existing_content:
+                    raise FileExistsError(f"specimen_storage_dir_not_empty:{self.specimen_dir(clean_id)}")
+                raise FileExistsError(f"specimen_storage_path_exists:{self.specimen_dir(clean_id)}")
+        return clean_id
 
     def _normalize_volume_record(self, record):
         if not isinstance(record, dict):

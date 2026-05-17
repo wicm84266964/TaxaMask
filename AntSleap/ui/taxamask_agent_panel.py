@@ -444,11 +444,8 @@ class TaxaMaskAgentPanel(QWidget):
                 command,
                 cwd=self.workspace_dir,
                 env=env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 creationflags=self._creation_flags(),
             )
         except Exception as exc:

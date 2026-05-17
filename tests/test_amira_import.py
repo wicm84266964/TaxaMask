@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import tifffile
@@ -37,6 +38,9 @@ def write_amira_file(path, array_zyx, *, materials_header="", encoding="", dtype
     if encoding == "HxByteRLE":
         data_bytes = encode_hxbyterle_repeat_only(data)
         data_decl = f"Lattice {{ {dtype_name} Data }} @1(HxByteRLE,{len(data_bytes)})"
+    elif encoding:
+        data_bytes = data.astype(np.uint8).tobytes()
+        data_decl = f"Lattice {{ {dtype_name} Data }} @1({encoding},{len(data_bytes)})"
     else:
         data_bytes = data.astype(np.uint8).tobytes()
         data_decl = f"Lattice {{ {dtype_name} Data }} @1"
@@ -218,6 +222,53 @@ Materials {
             self.assertEqual(header["lattice_xyz"], [4, 3, 2])
             self.assertEqual(header["shape_zyx"], [2, 3, 4])
             np.testing.assert_array_equal(loaded, array)
+
+    def test_failed_amira_decode_does_not_leave_half_registered_specimen(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "amira_broken"
+            source.mkdir()
+            resampled = np.zeros((2, 3, 4), dtype=np.uint8)
+            labels = np.zeros((2, 3, 4), dtype=np.uint8)
+            write_amira_file(source / "sample.resampled", resampled, encoding="")
+            write_amira_file(source / "sample.labels", labels, encoding="UnsupportedEncoding")
+            (source / "sample.hx").write_text(
+                '"sample.labels" ImageData connect "sample.resampled"',
+                encoding="latin1",
+            )
+
+            manager = TifProjectManager()
+            manager.create_project("amira_broken_project", root / "project")
+
+            with self.assertRaisesRegex(ValueError, "unsupported_amira_encoding"):
+                import_amira_directory(manager, source, "01-0101-broken")
+
+            self.assertIsNone(manager.get_specimen("01-0101-broken", default=None))
+            self.assertEqual(manager.project_data["specimens"], [])
+
+    def test_failed_amira_sidecar_write_rolls_back_registered_specimen_and_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "amira_write_fail"
+            source.mkdir()
+            resampled = np.zeros((2, 3, 4), dtype=np.uint8)
+            labels = np.zeros((2, 3, 4), dtype=np.uint8)
+            write_amira_file(source / "sample.resampled", resampled, encoding="")
+            write_amira_file(source / "sample.labels", labels, encoding="")
+            (source / "sample.hx").write_text(
+                '"sample.labels" ImageData connect "sample.resampled"',
+                encoding="latin1",
+            )
+
+            manager = TifProjectManager()
+            manager.create_project("amira_write_fail_project", root / "project")
+
+            with patch("AntSleap.core.amira_import.write_volume_sidecar", side_effect=RuntimeError("disk write failed")):
+                with self.assertRaisesRegex(RuntimeError, "disk write failed"):
+                    import_amira_directory(manager, source, "01-0101-writefail")
+
+            self.assertIsNone(manager.get_specimen("01-0101-writefail", default=None))
+            self.assertFalse((Path(manager.project_dir) / "specimens" / "01-0101-writefail").exists())
 
 
 if __name__ == "__main__":

@@ -48,6 +48,62 @@ class DummyPartsModel:
     ultralytics_sam = None
 
 
+class DummySignal:
+    def __init__(self):
+        self.callbacks = []
+
+    def connect(self, callback):
+        self.callbacks.append(callback)
+        return None
+
+    def emit(self, *args, **kwargs):
+        for callback in list(self.callbacks):
+            callback(*args, **kwargs)
+
+
+class DummyThread:
+    def __init__(self):
+        self.started = DummySignal()
+        self._running = False
+
+    def start(self):
+        self._running = True
+        self.started.emit()
+
+    def isRunning(self):
+        return self._running
+
+    def quit(self):
+        self._running = False
+
+    def wait(self, _timeout=None):
+        return True
+
+
+class DummySamWorker:
+    def __init__(self, *args, **kwargs):
+        self.model = None
+        self.mask_generated = DummySignal()
+        self.model_loaded = DummySignal()
+        self.model_load_error = DummySignal()
+
+    def moveToThread(self, thread):
+        self.thread = thread
+
+    def load_model(self):
+        self.model = object()
+        self.model_loaded.emit()
+
+    def reload_base_model(self):
+        self.load_model()
+
+    def load_decoder_weights(self, weights_path):
+        self.decoder_weights = weights_path
+
+    def set_epsilon(self, epsilon):
+        self.poly_epsilon = epsilon
+
+
 class DummyCascadeManager:
     def get_route_block_reason(self, route):
         if not isinstance(route, dict):
@@ -419,8 +475,16 @@ class UiPolishScopeTests(unittest.TestCase):
         (self.weights_dir / "experts").mkdir(parents=True, exist_ok=True)
         self.engine = DummyEngine(str(self.weights_dir))
         self.project_manager = DummyProjectManager(self.temp_dir.name)
+        self._runtime_patchers = [
+            patch.object(main_module, "SAMWorker", DummySamWorker),
+            patch.object(main_module, "QThread", DummyThread),
+        ]
+        for patcher in self._runtime_patchers:
+            patcher.start()
 
     def tearDown(self):
+        for patcher in reversed(getattr(self, "_runtime_patchers", [])):
+            patcher.stop()
         self.temp_dir.cleanup()
 
     def make_main_window(self):
@@ -434,6 +498,8 @@ class UiPolishScopeTests(unittest.TestCase):
              patch.object(main_module, "ProjectManager", project_factory), \
              patch.object(main_module, "MultiModalDB", DummyDatabase), \
              patch.object(main_module, "AntEngine", engine_factory), \
+             patch.object(main_module, "SAMWorker", DummySamWorker), \
+             patch.object(main_module, "QThread", DummyThread), \
              patch.object(PdfProcessingWidget, "load_api_settings", lambda self: None), \
              patch.object(PdfProcessingWidget, "refresh_profile_list", lambda self: None), \
              patch.object(PdfProcessingWidget, "sync_runtime_controls_from_config", lambda self: None), \

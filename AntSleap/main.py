@@ -2680,6 +2680,8 @@ class MainWindow(QMainWindow):
         self.tif_project = TifProjectManager()
         self.stl_project = StlRenderedProjectManager()
         self.active_project_kind = "image"
+        self.active_project_source_kind = "image"
+        self.active_project_entry_path = ""
         self.db = MultiModalDB()
         
         self.train_epochs = self.config.get("train_epochs", 5)
@@ -3103,6 +3105,7 @@ class MainWindow(QMainWindow):
         self.route_settings_panel = RouteManagementPanel(self, self.current_lang)
 
         self.project.create_project(DEFAULT_PROJECT_NAME, ".", template_id=DEFAULT_PROJECT_TEMPLATE_ID)
+        self.active_project_entry_path = self.project.current_project_path or ""
         self.active_project_kind = "start"
         if self.config.get("startup_behavior", "start_center") == "continue_last" and self.config.get("last_project_path", ""):
             self.open_last_project()
@@ -3310,7 +3313,7 @@ class MainWindow(QMainWindow):
         if getattr(self, "active_project_kind", "start") == "tif":
             path = getattr(self.tif_project, "current_project_path", "") or ""
         elif getattr(self, "active_project_kind", "start") == "image":
-            path = getattr(self.project, "current_project_path", "") or ""
+            path = self._active_recent_project_path() or getattr(self.project, "current_project_path", "") or ""
         else:
             path = self.config.get("last_project_path", "") or ""
         return path if path else tr("No active project", self.current_lang)
@@ -3324,7 +3327,9 @@ class MainWindow(QMainWindow):
         return {
             "source_workbench": "labeling",
             "project_type": "2d_stl",
-            "project_path": getattr(self.project, "current_project_path", "") or "",
+            "project_source_kind": getattr(self, "active_project_source_kind", "image"),
+            "project_path": self._active_recent_project_path() or getattr(self.project, "current_project_path", "") or "",
+            "review_project_path": getattr(self.project, "current_project_path", "") or "",
             "active_image_path": self.current_image or "",
             "selected_part": self._current_part_name() or "",
             "recent_log_excerpt": self._recent_text_excerpt(getattr(self, "log_console", None)),
@@ -3335,7 +3340,9 @@ class MainWindow(QMainWindow):
         return {
             "source_workbench": "blink",
             "project_type": "2d_stl",
-            "project_path": getattr(self.project, "current_project_path", "") or "",
+            "project_source_kind": getattr(self, "active_project_source_kind", "image"),
+            "project_path": self._active_recent_project_path() or getattr(self.project, "current_project_path", "") or "",
+            "review_project_path": getattr(self.project, "current_project_path", "") or "",
             "active_image_path": getattr(self.blink_lab, "current_image_path", None) or self.current_image or "",
             "selected_part": getattr(self.blink_lab, "session_target_part", None) or "",
             "active_label_role": "blink_session" if active_session else "",
@@ -3403,17 +3410,43 @@ class MainWindow(QMainWindow):
         self.open_project_path(last_project)
 
     def closeEvent(self, event):
+        self._shutdown_background_workers()
         self._flush_pending_project_save()
-        if getattr(self, "active_project_kind", "image") == "image" and self.project.current_project_path:
-            self.config.set("last_project_path", self.project.current_project_path)
-        if getattr(self, "active_project_kind", "image") == "tif" and self.tif_project.current_project_path:
-            self.config.set("last_project_path", self.tif_project.current_project_path)
+        recent_project_path = self._active_recent_project_path()
+        if recent_project_path:
+            self.config.set("last_project_path", recent_project_path)
         self.config.save()
+        event.accept()
+        os._exit(0)
+
+    def _active_recent_project_path(self):
+        active_kind = getattr(self, "active_project_kind", "start")
+        source_kind = getattr(self, "active_project_source_kind", active_kind)
+        if active_kind == "tif":
+            return getattr(self.tif_project, "current_project_path", None) or ""
+        if active_kind == "image":
+            if source_kind == "stl":
+                return getattr(self.stl_project, "current_project_path", None) or getattr(self, "active_project_entry_path", "")
+            return getattr(self.project, "current_project_path", None) or getattr(self, "active_project_entry_path", "")
+        return ""
+
+    def _shutdown_background_workers(self):
+        agent_panel = getattr(self, "agent_panel", None)
+        if agent_panel is not None and hasattr(agent_panel, "stop_dashboard"):
+            try:
+                agent_panel.stop_dashboard()
+            except Exception:
+                pass
         if self.sam_thread and self.sam_thread.isRunning():
             self.sam_thread.quit()
             self.sam_thread.wait(1000)
-        event.accept()
-        os._exit(0)
+        thread = getattr(self, "parts_model_preload_thread", None)
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=1.0)
+
+    def destroy(self, destroyWindow=True, destroySubWindows=True):
+        self._shutdown_background_workers()
+        return super().destroy(destroyWindow, destroySubWindows)
 
     def _schedule_project_save(self):
         self.project_save_pending = True
@@ -4018,6 +4051,9 @@ class MainWindow(QMainWindow):
                 self._flush_pending_project_save()
                 self.project.create_project(name, d, template_id=template["template_id"])
                 self.active_project_kind = "image"
+                self.active_project_source_kind = "image"
+                self.active_project_entry_path = self.project.current_project_path or ""
+                self.config.set("last_project_path", self.active_project_entry_path)
                 self._refresh_project_bound_views()
                 self.ensure_2d_stl_models_preloaded()
                 self.canvas.load_image("") 
@@ -4032,6 +4068,8 @@ class MainWindow(QMainWindow):
         self._flush_pending_project_save()
         self.tif_project.create_project(name, d)
         self.active_project_kind = "tif"
+        self.active_project_source_kind = "tif"
+        self.active_project_entry_path = self.tif_project.current_project_path or ""
         self.config.set("last_project_path", self.tif_project.current_project_path)
         self._refresh_project_bound_views()
         self.log(tr("Created TIF volume project: {0}", self.current_lang).format(self.tif_project.current_project_path))
@@ -4111,6 +4149,9 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, tr("Import STL Rendered Views to Labeling Workbench", self.current_lang), str(exc))
             return
         self.active_project_kind = "image"
+        self.active_project_source_kind = "image"
+        self.active_project_entry_path = self.project.current_project_path or ""
+        self.config.set("last_project_path", self.active_project_entry_path)
         self._refresh_project_bound_views()
         self.tabs.setCurrentWidget(self.workbench_widget)
         self.ensure_2d_stl_models_preloaded()
@@ -4160,12 +4201,16 @@ class MainWindow(QMainWindow):
         if self._is_tif_project_file(f):
             self.tif_project.load_project(f)
             self.active_project_kind = "tif"
+            self.active_project_source_kind = "tif"
+            self.active_project_entry_path = f
             self.config.set("last_project_path", f)
             self.log(tr("Opened TIF volume project: {0}", self.current_lang).format(f))
         elif self._is_stl_project_file(f):
             self.stl_project.load_project(f)
             result = register_stl_rendered_views_for_2d_review(self.stl_project, self.project)
             self.active_project_kind = "image"
+            self.active_project_source_kind = "stl"
+            self.active_project_entry_path = f
             self.config.set("last_project_path", f)
             self.log(tr("Opened STL rendered-view project and registered it into the Labeling Workbench: {0}", self.current_lang).format(f))
             self.log(
@@ -4177,6 +4222,8 @@ class MainWindow(QMainWindow):
         else:
             self.project.load_project(f)
             self.active_project_kind = "image"
+            self.active_project_source_kind = "image"
+            self.active_project_entry_path = f
             self.config.set("last_project_path", f)
         self._refresh_project_bound_views()
         if getattr(self, "active_project_kind", "image") == "image":

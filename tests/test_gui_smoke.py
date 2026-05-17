@@ -195,8 +195,16 @@ class GuiSmokeTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.project_dir = Path(self.temp_dir.name)
+        self._runtime_patchers = [
+            patch.object(main_module, "SAMWorker", SmokeSamWorker),
+            patch.object(main_module, "QThread", SmokeThread),
+        ]
+        for patcher in self._runtime_patchers:
+            patcher.start()
 
     def tearDown(self):
+        for patcher in reversed(getattr(self, "_runtime_patchers", [])):
+            patcher.stop()
         self.temp_dir.cleanup()
 
     def _make_window(self):
@@ -608,6 +616,12 @@ class GuiSmokeTests(unittest.TestCase):
             provenance = window.project.get_image_provenance(image_path)
             self.assertEqual(provenance["source_type"], "stl_rendered_view")
             self.assertEqual(window.project.project_data["labels"][image_path]["review_mode"], "stl_rendered_view")
+            self.assertEqual(window._active_recent_project_path(), os.path.abspath(stl_path))
+            self.assertEqual(window.config.values["last_project_path"], os.path.abspath(stl_path))
+            context = window._collect_image_workbench_agent_context()
+            self.assertEqual(context["project_source_kind"], "stl")
+            self.assertEqual(context["project_path"], os.path.abspath(stl_path))
+            self.assertEqual(context["review_project_path"], window.project.current_project_path)
             self.assertEqual(preload_events, ["preload"])
             self.assertIsNone(window.sam_worker)
             self.assertIsNone(window.sam_thread)

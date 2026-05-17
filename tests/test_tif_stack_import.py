@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import tifffile
@@ -66,6 +67,37 @@ class TifStackImportTests(unittest.TestCase):
 
             self.assertEqual(specimen["working_volume"]["shape_zyx"], [1, 6, 7])
             self.assertFalse(manager.evaluate_train_ready("01-0101-06")["train_ready"])
+
+    def test_failed_tif_read_does_not_leave_half_registered_specimen(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tif_path = root / "broken_stack.tif"
+            tif_path.write_bytes(b"not a tif")
+
+            manager = TifProjectManager()
+            manager.create_project("broken_tif", root / "broken_tif_project")
+
+            with self.assertRaises(Exception):
+                import_tif_stack(manager, tif_path, "01-0101-broken")
+
+            self.assertIsNone(manager.get_specimen("01-0101-broken", default=None))
+            self.assertEqual(manager.project_data["specimens"], [])
+
+    def test_failed_tif_sidecar_write_rolls_back_registered_specimen_and_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tif_path = root / "stack.tif"
+            tifffile.imwrite(tif_path, np.ones((2, 3, 4), dtype=np.uint8), photometric="minisblack")
+
+            manager = TifProjectManager()
+            manager.create_project("rollback_tif", root / "rollback_project")
+
+            with patch("AntSleap.core.tif_stack_import.write_volume_sidecar", side_effect=RuntimeError("disk write failed")):
+                with self.assertRaisesRegex(RuntimeError, "disk write failed"):
+                    import_tif_stack(manager, tif_path, "01-0101-rollback")
+
+            self.assertIsNone(manager.get_specimen("01-0101-rollback", default=None))
+            self.assertFalse((Path(manager.project_dir) / "specimens" / "01-0101-rollback").exists())
 
 
 if __name__ == "__main__":

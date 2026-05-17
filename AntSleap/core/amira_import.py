@@ -438,130 +438,135 @@ def import_amira_directory(
         "materials": material_stats or _fallback_materials(labels_header.get("materials", [])),
     }
 
+    image_volume, image_header = read_amira_volume(files["resampled"])
+    label_volume, label_header = read_amira_volume(files["labels"])
+
     project_manager.create_specimen_scaffold(
         specimen_id,
         material_map=material_map,
         modality=modality,
         metadata_ref=metadata_ref,
     )
-    specimen_root_rel = project_manager.specimen_dir(specimen_id)
+    try:
+        specimen_root_rel = project_manager.specimen_dir(specimen_id)
 
-    source_records = _register_or_copy_sources(project_manager, specimen_root_rel, files, copy_source=copy_source)
-    image_volume, image_header = read_amira_volume(files["resampled"])
-    label_volume, label_header = read_amira_volume(files["labels"])
+        source_records = _register_or_copy_sources(project_manager, specimen_root_rel, files, copy_source=copy_source)
 
-    image_rel = os.path.join(specimen_root_rel, "working", "image.ome.zarr").replace("\\", "/")
-    manual_rel = os.path.join(specimen_root_rel, "labels", "manual_truth.ome.zarr").replace("\\", "/")
-    edit_rel = os.path.join(specimen_root_rel, "labels", "working_edit.ome.zarr").replace("\\", "/")
-    material_map_rel = os.path.join(specimen_root_rel, "material_map.json").replace("\\", "/")
+        image_rel = os.path.join(specimen_root_rel, "working", "image.ome.zarr").replace("\\", "/")
+        manual_rel = os.path.join(specimen_root_rel, "labels", "manual_truth.ome.zarr").replace("\\", "/")
+        edit_rel = os.path.join(specimen_root_rel, "labels", "working_edit.ome.zarr").replace("\\", "/")
+        material_map_rel = os.path.join(specimen_root_rel, "material_map.json").replace("\\", "/")
 
-    image_meta = write_volume_sidecar(
-        project_manager.to_absolute(image_rel),
-        image_volume,
-        role="working_image",
-        spacing_zyx=image_header["spacing_zyx"],
-        spacing_unit=image_header["spacing_unit"],
-        orientation=image_header["orientation"],
-        source_format="amira_resampled",
-        extra_metadata={
-            "import_adapter": AMIRA_IMPORT_ADAPTER_VERSION,
-            "note": "Lightweight recoverable sidecar; not complete OME-NGFF metadata.",
-        },
-    )
-    label_meta = write_volume_sidecar(
-        project_manager.to_absolute(manual_rel),
-        label_volume,
-        role="manual_truth",
-        spacing_zyx=image_header["spacing_zyx"],
-        spacing_unit=image_header["spacing_unit"],
-        orientation=image_header["orientation"],
-        source_format="amira_labels",
-        extra_metadata={
-            "import_adapter": AMIRA_IMPORT_ADAPTER_VERSION,
-            "encoding": label_header["encoding"],
-        },
-    )
-    edit_meta = copy_volume_sidecar(project_manager.to_absolute(manual_rel), project_manager.to_absolute(edit_rel), role="working_edit")
-    material_map_payload = write_material_map(project_manager.to_absolute(material_map_rel), material_map, source=AMIRA_IMPORT_ADAPTER_VERSION)
+        image_meta = write_volume_sidecar(
+            project_manager.to_absolute(image_rel),
+            image_volume,
+            role="working_image",
+            spacing_zyx=image_header["spacing_zyx"],
+            spacing_unit=image_header["spacing_unit"],
+            orientation=image_header["orientation"],
+            source_format="amira_resampled",
+            extra_metadata={
+                "import_adapter": AMIRA_IMPORT_ADAPTER_VERSION,
+                "note": "Lightweight recoverable sidecar; not complete OME-NGFF metadata.",
+            },
+        )
+        label_meta = write_volume_sidecar(
+            project_manager.to_absolute(manual_rel),
+            label_volume,
+            role="manual_truth",
+            spacing_zyx=image_header["spacing_zyx"],
+            spacing_unit=image_header["spacing_unit"],
+            orientation=image_header["orientation"],
+            source_format="amira_labels",
+            extra_metadata={
+                "import_adapter": AMIRA_IMPORT_ADAPTER_VERSION,
+                "encoding": label_header["encoding"],
+            },
+        )
+        edit_meta = copy_volume_sidecar(project_manager.to_absolute(manual_rel), project_manager.to_absolute(edit_rel), role="working_edit")
+        material_map_payload = write_material_map(project_manager.to_absolute(material_map_rel), material_map, source=AMIRA_IMPORT_ADAPTER_VERSION)
 
-    project_manager.register_working_volume(
-        specimen_id,
-        image_rel,
-        image_meta["shape_zyx"],
-        image_meta["dtype"],
-        spacing_zyx=image_meta["spacing_zyx"],
-        spacing_unit=image_meta["spacing_unit"],
-        orientation=image_meta["orientation"],
-        fmt=image_meta["format"],
-        save=False,
-    )
-    project_manager.register_label_volume(
-        specimen_id,
-        "manual_truth",
-        manual_rel,
-        label_meta["shape_zyx"],
-        label_meta["dtype"],
-        status="reviewed",
-        spacing_zyx=label_meta["spacing_zyx"],
-        spacing_unit=label_meta["spacing_unit"],
-        orientation=label_meta["orientation"],
-        fmt=label_meta["format"],
-        save=False,
-    )
-    project_manager.register_label_volume(
-        specimen_id,
-        "working_edit",
-        edit_rel,
-        edit_meta["shape_zyx"],
-        edit_meta["dtype"],
-        status="copied_from_manual_truth",
-        spacing_zyx=edit_meta["spacing_zyx"],
-        spacing_unit=edit_meta["spacing_unit"],
-        orientation=edit_meta["orientation"],
-        fmt=edit_meta["format"],
-        save=False,
-    )
+        project_manager.register_working_volume(
+            specimen_id,
+            image_rel,
+            image_meta["shape_zyx"],
+            image_meta["dtype"],
+            spacing_zyx=image_meta["spacing_zyx"],
+            spacing_unit=image_meta["spacing_unit"],
+            orientation=image_meta["orientation"],
+            fmt=image_meta["format"],
+            save=False,
+        )
+        project_manager.register_label_volume(
+            specimen_id,
+            "manual_truth",
+            manual_rel,
+            label_meta["shape_zyx"],
+            label_meta["dtype"],
+            status="reviewed",
+            spacing_zyx=label_meta["spacing_zyx"],
+            spacing_unit=label_meta["spacing_unit"],
+            orientation=label_meta["orientation"],
+            fmt=label_meta["format"],
+            save=False,
+        )
+        project_manager.register_label_volume(
+            specimen_id,
+            "working_edit",
+            edit_rel,
+            edit_meta["shape_zyx"],
+            edit_meta["dtype"],
+            status="copied_from_manual_truth",
+            spacing_zyx=edit_meta["spacing_zyx"],
+            spacing_unit=edit_meta["spacing_unit"],
+            orientation=edit_meta["orientation"],
+            fmt=edit_meta["format"],
+            save=False,
+        )
 
-    specimen = project_manager.get_specimen(specimen_id)
-    specimen["source"].update(source_records)
-    specimen["material_map"] = material_map_rel
-    specimen["review_status"] = "train_ready"
-    specimen["train_ready"] = True
-    specimen["provenance"] = {
-        "import_method": AMIRA_IMPORT_ADAPTER_VERSION,
-        "source_dataset": os.path.abspath(str(source_dir)),
-        "notes": "AMIRA labels aligned to resampled volume.",
-    }
+        specimen = project_manager.get_specimen(specimen_id)
+        specimen["source"].update(source_records)
+        specimen["material_map"] = material_map_rel
+        specimen["review_status"] = "train_ready"
+        specimen["train_ready"] = True
+        specimen["provenance"] = {
+            "import_method": AMIRA_IMPORT_ADAPTER_VERSION,
+            "source_dataset": os.path.abspath(str(source_dir)),
+            "notes": "AMIRA labels aligned to resampled volume.",
+        }
 
-    report = {
-        "schema_version": AMIRA_IMPORT_REPORT_SCHEMA_VERSION,
-        "imported_at": _now_iso(),
-        "adapter_version": AMIRA_IMPORT_ADAPTER_VERSION,
-        "source_dir": os.path.abspath(str(source_dir)),
-        "files": {key: _basename_or_empty(value) for key, value in files.items() if key != "hx_connections"},
-        "shapes": {
-            "raw_tif_zyx": raw_tif_shape,
-            "resampled_zyx": image_meta["shape_zyx"],
-            "labels_zyx": label_meta["shape_zyx"],
-        },
-        "alignment": {
-            "working_image": "resampled",
-            "labels_aligned_to": "resampled",
-            "raw_tif_used_as": "source_provenance",
-            "hx_image_connection": files.get("hx_connections", {}).get("image_connections", []),
-        },
-        "materials": {
-            "count": len(material_map_payload.get("materials", [])),
-            "source": "MaterialStatistics" if material_stats else "labels_header",
-        },
-        "warnings": warnings,
-        "errors": [],
-    }
-    report_rel = os.path.join(specimen_root_rel, "working", "import_report.json").replace("\\", "/")
-    with open(project_manager.to_absolute(report_rel), "w", encoding="utf-8") as handle:
-        json.dump(report, handle, ensure_ascii=False, indent=2)
-    specimen["working_volume"]["import_report"] = report_rel
-    project_manager.save_project()
+        report = {
+            "schema_version": AMIRA_IMPORT_REPORT_SCHEMA_VERSION,
+            "imported_at": _now_iso(),
+            "adapter_version": AMIRA_IMPORT_ADAPTER_VERSION,
+            "source_dir": os.path.abspath(str(source_dir)),
+            "files": {key: _basename_or_empty(value) for key, value in files.items() if key != "hx_connections"},
+            "shapes": {
+                "raw_tif_zyx": raw_tif_shape,
+                "resampled_zyx": image_meta["shape_zyx"],
+                "labels_zyx": label_meta["shape_zyx"],
+            },
+            "alignment": {
+                "working_image": "resampled",
+                "labels_aligned_to": "resampled",
+                "raw_tif_used_as": "source_provenance",
+                "hx_image_connection": files.get("hx_connections", {}).get("image_connections", []),
+            },
+            "materials": {
+                "count": len(material_map_payload.get("materials", [])),
+                "source": "MaterialStatistics" if material_stats else "labels_header",
+            },
+            "warnings": warnings,
+            "errors": [],
+        }
+        report_rel = os.path.join(specimen_root_rel, "working", "import_report.json").replace("\\", "/")
+        with open(project_manager.to_absolute(report_rel), "w", encoding="utf-8") as handle:
+            json.dump(report, handle, ensure_ascii=False, indent=2)
+        specimen["working_volume"]["import_report"] = report_rel
+        project_manager.save_project()
+    except Exception:
+        project_manager.discard_specimen_scaffold(specimen_id, save=True)
+        raise
 
     return {
         "specimen": specimen,

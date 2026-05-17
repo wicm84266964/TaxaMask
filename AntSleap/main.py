@@ -3184,9 +3184,6 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(self.start_subtitle)
         agent_layout.addWidget(header)
 
-        self.start_console_panel = self._build_project_console()
-        agent_layout.addWidget(self.start_console_panel)
-
         self.agent_panel = TaxaMaskAgentPanel(self.current_lang)
         self.agent_panel.status_changed.connect(lambda _status: self._refresh_project_console())
         agent_layout.addWidget(self.agent_panel, 1)
@@ -3199,6 +3196,8 @@ class MainWindow(QMainWindow):
         rail_layout = QVBoxLayout(workflow_rail)
         rail_layout.setContentsMargins(0, 0, 0, 0)
         rail_layout.setSpacing(14)
+        self.start_console_panel = self._build_project_console()
+        rail_layout.addWidget(self.start_console_panel)
         self.start_image_card = self._build_workflow_card(
             "start2DWorkflowCard",
             "2D / STL morphology annotation",
@@ -3249,9 +3248,10 @@ class MainWindow(QMainWindow):
     def _build_project_console(self):
         panel = QWidget()
         apply_surface_role(panel, SURFACE_ROLE_SUBTLE, "startProjectConsole")
+        panel.setMaximumHeight(230)
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(16, 12, 16, 12)
-        layout.setSpacing(8)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(5)
 
         self.start_console_title = QLabel()
         self.start_console_title.setObjectName("HeaderLabel")
@@ -3259,8 +3259,8 @@ class MainWindow(QMainWindow):
 
         grid = QGridLayout()
         grid.setContentsMargins(0, 0, 0, 0)
-        grid.setHorizontalSpacing(10)
-        grid.setVerticalSpacing(7)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(4)
 
         self.start_console_workflow_label, self.start_console_workflow_value = self._build_project_console_row(
             grid, 0, "startConsoleWorkflowValue"
@@ -3292,7 +3292,7 @@ class MainWindow(QMainWindow):
     def _build_project_console_row(self, grid, row, value_object_name):
         label = QLabel()
         label.setObjectName("mutedLabel")
-        label.setMinimumWidth(120)
+        label.setMinimumWidth(92)
         value = QLabel()
         value.setObjectName(value_object_name)
         value.setProperty("consoleValue", True)
@@ -3397,6 +3397,7 @@ class MainWindow(QMainWindow):
         self.start_console_tif_value.setText(self._start_console_tif_summary())
         self.start_console_pdf_value.setText(self._start_console_pdf_summary())
         self.start_console_agent_value.setText(self._start_console_agent_status())
+        self.start_console_project_value.setToolTip(self._agent_current_project_label())
         self.start_console_stl_note.setText(
             tr(
                 "STL source stays as exported high-resolution 2D views; TaxaMask does not label 3D meshes.",
@@ -3409,17 +3410,25 @@ class MainWindow(QMainWindow):
         source_kind = getattr(self, "active_project_source_kind", kind)
         if kind == "tif":
             path = getattr(self.tif_project, "current_project_path", "") or ""
-            return tr("TIF project: {0}", self.current_lang).format(path) if path else tr("No active project", self.current_lang)
+            return tr("TIF project: {0}", self.current_lang).format(self._compact_project_path(path)) if path else tr("No active project", self.current_lang)
         if kind == "image":
             path = self._active_recent_project_path() or getattr(self.project, "current_project_path", "") or ""
             if source_kind == "stl":
-                return tr("STL rendered-view project: {0}", self.current_lang).format(path) if path else tr("No active project", self.current_lang)
-            return tr("2D project: {0}", self.current_lang).format(path) if path else tr("No active project", self.current_lang)
+                return tr("STL rendered-view project: {0}", self.current_lang).format(self._compact_project_path(path)) if path else tr("No active project", self.current_lang)
+            return tr("2D project: {0}", self.current_lang).format(self._compact_project_path(path)) if path else tr("No active project", self.current_lang)
 
         last_project = self.config.get("last_project_path", "") or ""
         if last_project:
-            return tr("Recent project: {0}", self.current_lang).format(last_project)
+            return tr("Recent project: {0}", self.current_lang).format(self._compact_project_path(last_project))
         return tr("Repository only; no research project selected", self.current_lang)
+
+    def _compact_project_path(self, path):
+        text = str(path or "").strip()
+        if not text:
+            return ""
+        name = os.path.basename(os.path.normpath(text))
+        parent = os.path.basename(os.path.dirname(os.path.normpath(text)))
+        return f"{parent}/{name}" if parent else name
 
     def _start_console_image_summary(self):
         images = list((self.project.project_data or {}).get("images", []))

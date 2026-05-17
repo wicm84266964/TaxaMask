@@ -198,7 +198,11 @@ class TifWorkbenchTests(unittest.TestCase):
             self.assertEqual(widget.btn_prepare_dataset.text(), "Prepare dataset")
             self.assertEqual(widget.btn_train_backend.text(), "Train backend")
             self.assertEqual(widget.btn_import_prediction.text(), "Import prediction")
+            self.assertEqual(widget.btn_start_center.text(), "Start Center")
+            self.assertEqual(widget.btn_ask_agent.text(), "Ask Agent")
             self.assertIsNotNone(widget.findChild(type(widget.btn_export_training), "tifExportTrainingButton"))
+            self.assertIsNotNone(widget.findChild(type(widget.btn_start_center), "tifStartCenterButton"))
+            self.assertIsNotNone(widget.findChild(type(widget.btn_ask_agent), "tifAskAgentButton"))
             self.assertIsNotNone(widget.findChild(type(widget.btn_import_tif), "tifImportStackButton"))
             self.assertIsNotNone(widget.findChild(type(widget.btn_import_amira), "tifImportAmiraButton"))
             self.assertIsNotNone(widget.findChild(type(widget.btn_prepare_dataset), "tifPrepareDatasetButton"))
@@ -216,6 +220,7 @@ class TifWorkbenchTests(unittest.TestCase):
             self.assertEqual(widget.specimen_list.objectName(), "tifSpecimenList")
             self.assertEqual(widget.material_table.objectName(), "tifMaterialTable")
             self.assertIsNotNone(widget.findChild(QTextEdit, "tifLogConsole"))
+            self.assertIsNotNone(widget.findChild(type(widget.btn_ask_agent), "tifAskAgentButton"))
         finally:
             widget.close_project()
             widget.deleteLater()
@@ -231,6 +236,8 @@ class TifWorkbenchTests(unittest.TestCase):
             self.assertEqual(widget.btn_prepare_dataset.text(), "准备训练数据")
             self.assertEqual(widget.btn_train_backend.text(), "训练后端")
             self.assertEqual(widget.btn_import_prediction.text(), "运行预测并导入草稿")
+            self.assertEqual(widget.btn_start_center.text(), "启动中心")
+            self.assertEqual(widget.btn_ask_agent.text(), "询问 Agent")
             section_titles = {
                 label.text()
                 for label in widget.findChildren(QLabel)

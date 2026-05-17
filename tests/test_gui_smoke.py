@@ -70,6 +70,56 @@ class SmokePartsModel:
     ultralytics_sam = None
 
 
+class SmokeSignal:
+    def __init__(self):
+        self.callbacks = []
+
+    def connect(self, callback):
+        self.callbacks.append(callback)
+        return None
+
+    def emit(self, *args, **kwargs):
+        for callback in list(self.callbacks):
+            callback(*args, **kwargs)
+
+
+class SmokeThread:
+    def __init__(self):
+        self.started = SmokeSignal()
+        self._running = False
+
+    def start(self):
+        self._running = True
+        self.started.emit()
+
+    def isRunning(self):
+        return self._running
+
+    def quit(self):
+        self._running = False
+
+    def wait(self, _timeout=None):
+        return True
+
+
+class SmokeSamWorker:
+    created = 0
+
+    def __init__(self, *args, **kwargs):
+        type(self).created += 1
+        self.model = None
+        self.mask_generated = SmokeSignal()
+        self.model_loaded = SmokeSignal()
+        self.model_load_error = SmokeSignal()
+
+    def moveToThread(self, thread):
+        self.thread = thread
+
+    def load_model(self):
+        self.model = object()
+        self.model_loaded.emit()
+
+
 class SmokeCascadeManager:
     def list_available_experts(self):
         return []
@@ -81,7 +131,8 @@ class SmokeCascadeManager:
 class SmokeEngine:
     def __init__(self, *args, **kwargs):
         self.weights_dir = tempfile.mkdtemp()
-        self.parts_model = SmokePartsModel()
+        self.locator = None
+        self.parts_model = None
         self.cascade_manager = SmokeCascadeManager()
         self.current_num_classes = int(kwargs.get("num_classes", 3) or 3)
         self.locator_resolution = (512, 512)
@@ -89,6 +140,8 @@ class SmokeEngine:
         self.loaded_locator_is_legacy_512 = False
         self.loaded_locator_timestamp = None
         self.device_preference = kwargs.get("device", "cpu")
+        self.ensure_locator_loaded_calls = 0
+        self.ensure_parts_model_loaded_calls = 0
 
     def set_device_preference(self, preference):
         self.device_preference = preference
@@ -100,13 +153,28 @@ class SmokeEngine:
     def update_hyperparameters(self, learning_rate, weight_decay):
         return None
 
+    def ensure_locator_loaded(self):
+        self.ensure_locator_loaded_calls += 1
+        if self.locator is None:
+            self.locator = object()
+        return self.locator
+
+    def ensure_parts_model_loaded(self):
+        self.ensure_parts_model_loaded_calls += 1
+        if self.parts_model is None:
+            self.parts_model = SmokePartsModel()
+        return self.parts_model
+
     def load_locator(self, timestamp):
+        self.ensure_locator_loaded()
+        self.loaded_locator_timestamp = timestamp
         return None
 
     def load_sam_decoder(self, timestamp):
         return None
 
     def reset_locator_to_base(self):
+        self.ensure_locator_loaded()
         return None
 
     def reset_sam_to_base(self):
@@ -135,6 +203,8 @@ class GuiSmokeTests(unittest.TestCase):
         with patch.object(main_module, "ConfigManager", SmokeConfigManager), \
              patch.object(main_module, "AntEngine", SmokeEngine), \
              patch.object(main_module, "MultiModalDB", SmokeDatabase), \
+             patch.object(main_module, "SAMWorker", SmokeSamWorker), \
+             patch.object(main_module, "QThread", SmokeThread), \
              patch.object(PdfProcessingWidget, "load_api_settings", lambda self: None), \
              patch.object(PdfProcessingWidget, "refresh_profile_list", lambda self: None), \
              patch.object(PdfProcessingWidget, "sync_runtime_controls_from_config", lambda self: None), \
@@ -142,6 +212,7 @@ class GuiSmokeTests(unittest.TestCase):
             return main_module.MainWindow()
 
     def test_main_window_constructs_offscreen_without_loading_sam(self):
+        SmokeSamWorker.created = 0
         window = self._make_window()
         try:
             self.assertEqual(window.windowTitle(), "TaxaMask Workbench (EN)")
@@ -151,9 +222,20 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(window.tabs.count(), 1)
             self.assertEqual(window.tabs.currentWidget(), window.start_center_widget)
             self.assertEqual(window.tabs.tabText(0), "Start Center")
-            self.assertEqual(window.start_title.text(), "TaxaMask Workflow Selection")
+            self.assertIsNone(window.sam_worker)
+            self.assertIsNone(window.sam_thread)
+            self.assertIsNone(window.engine.locator)
+            self.assertIsNone(window.engine.parts_model)
+            self.assertIsNone(window.parts_model_preload_thread)
+            self.assertEqual(window.engine.ensure_locator_loaded_calls, 0)
+            self.assertEqual(window.engine.ensure_parts_model_loaded_calls, 0)
+            self.assertEqual(SmokeSamWorker.created, 0)
+            self.assertEqual(window.start_title.text(), "TaxaMask Agent Center")
             self.assertIsNotNone(window.findChild(main_module.QWidget, "start2DWorkflowCard"))
             self.assertIsNotNone(window.findChild(main_module.QWidget, "startTifWorkflowCard"))
+            self.assertIsNotNone(window.findChild(main_module.QWidget, "taxamaskAgentPanel"))
+            self.assertEqual(window.agent_panel.btn_start.text(), "Start Ant-Code")
+            self.assertIn("Workspace permission", window.agent_panel.fallback.toPlainText())
             menu_texts = [
                 action.text()
                 for menu_action in window.menuBar().actions()
@@ -182,22 +264,126 @@ class GuiSmokeTests(unittest.TestCase):
     def test_start_center_workflow_buttons_switch_visible_tabs(self):
         window = self._make_window()
         try:
+            preload_events = []
+            window.ensure_sam_preloaded = lambda: preload_events.append("preload")
+
             window.enter_image_workflow()
             self.assertEqual(window.active_project_kind, "image")
             self.assertEqual(window.tabs.count(), 2)
             self.assertEqual(window.tabs.tabText(0), "Labeling Workbench")
             self.assertEqual(window.tabs.tabText(1), "Blink Workbench")
             self.assertIsNotNone(window.findChild(main_module.QWidget, "workbenchCanvasShell"))
+            self.assertEqual(window.btn_agent_from_workbench.text(), "Ask Agent")
+            self.assertEqual(preload_events, ["preload"])
+            self.assertIsNone(window.sam_worker)
+            self.assertIsNone(window.sam_thread)
 
             window._show_start_center()
             self.assertEqual(window.tabs.count(), 1)
             self.assertEqual(window.tabs.currentWidget(), window.start_center_widget)
+            self.assertEqual(preload_events, ["preload"])
+            self.assertIsNone(window.sam_worker)
+            self.assertIsNone(window.sam_thread)
 
             window.enter_tif_workflow()
             self.assertEqual(window.active_project_kind, "tif")
             self.assertEqual(window.tabs.count(), 1)
             self.assertEqual(window.tabs.currentWidget(), window.tif_workbench)
             self.assertEqual(window.tabs.tabText(0), "TIF Volume Workbench")
+            self.assertEqual(window.tif_workbench.btn_ask_agent.text(), "Ask Agent")
+            self.assertEqual(preload_events, ["preload"])
+            self.assertIsNone(window.sam_worker)
+            self.assertIsNone(window.sam_thread)
+        finally:
+            window.deleteLater()
+
+    def test_enter_image_workflow_preloads_models_once_and_keeps_them_after_start_center(self):
+        SmokeSamWorker.created = 0
+        window = self._make_window()
+        try:
+            with patch.object(main_module, "SAMWorker", SmokeSamWorker), \
+                 patch.object(main_module, "QThread", SmokeThread):
+                self.assertTrue(main_module.MainWindow.ensure_2d_stl_models_preloaded(window))
+                self.assertFalse(main_module.MainWindow.ensure_2d_stl_models_preloaded(window))
+            self.assertEqual(SmokeSamWorker.created, 1)
+            window.parts_model_preload_thread.join(timeout=1)
+            self.assertIsNotNone(window.sam_worker)
+            self.assertIsNotNone(window.sam_thread)
+            self.assertIsNotNone(window.sam_worker.model)
+            self.assertIsNotNone(window.engine.locator)
+            self.assertIsNotNone(window.engine.parts_model)
+            self.assertEqual(window.engine.ensure_locator_loaded_calls, 1)
+            self.assertEqual(window.engine.ensure_parts_model_loaded_calls, 1)
+            window._show_start_center()
+            self.assertIsNotNone(window.sam_worker)
+            self.assertIsNotNone(window.sam_thread)
+            self.assertTrue(window.sam_thread.isRunning())
+            self.assertIsNotNone(window.engine.locator)
+            self.assertIsNotNone(window.engine.parts_model)
+        finally:
+            window.deleteLater()
+
+    def test_agent_panel_embeds_ant_code_dashboard_controls(self):
+        window = self._make_window()
+        try:
+            self.assertEqual(window.agent_panel.workspace_dir, str(PROJECT_ROOT))
+            self.assertTrue(window.agent_panel.ant_code_root.endswith("lab-agent"))
+            self.assertIsNotNone(window.agent_panel.ant_code_executable)
+            self.assertTrue(window.agent_panel.ant_code_executable.endswith(("ant-code.exe", "ant-code.cmd", "ant-code")))
+            self.assertIsNotNone(window.agent_panel.findChild(main_module.QWidget, "taxamaskAgentStack"))
+            self.assertIn("Ant-Code embedded", window.agent_panel.fallback.toPlainText())
+            self.assertIn("Ant-Code executable", window.agent_panel.fallback.toPlainText())
+            self.assertFalse(window.agent_panel.is_running())
+        finally:
+            window.deleteLater()
+
+    def test_agent_panel_preflights_before_loading_webview(self):
+        window = self._make_window()
+        try:
+            panel = window.agent_panel
+            events = []
+            panel.dashboard_url = "http://127.0.0.1:7410"
+            panel.process = type("Process", (), {"poll": lambda self: None})()
+            panel._preflight_dashboard = lambda report_error=False: events.append(("preflight", report_error)) or True
+            panel._load_dashboard = lambda: events.append(("load", None))
+
+            with patch("AntSleap.ui.taxamask_agent_panel.QTimer.singleShot", lambda _ms, callback: callback()):
+                panel.start_dashboard()
+
+            self.assertEqual(events, [("preflight", False), ("load", None)])
+            self.assertEqual(panel._preflight_checks_remaining, 6)
+        finally:
+            window.deleteLater()
+
+    def test_workbench_agent_entry_returns_to_start_center_with_context(self):
+        window = self._make_window()
+        try:
+            window.project.current_project_path = str(self.project_dir / "image_project.json")
+            window.current_image = str(self.project_dir / "head.png")
+            window.log("sample recent error")
+            window.enter_image_workflow()
+            window.return_to_start_center_with_context()
+
+            self.assertEqual(window.active_project_kind, "start")
+            self.assertEqual(window.tabs.currentWidget(), window.start_center_widget)
+            self.assertEqual(window.agent_panel._context["source_workbench"], "labeling")
+            self.assertIn("head.png", window.agent_panel._context["active_image_path"])
+        finally:
+            window.deleteLater()
+
+    def test_tif_start_center_entry_carries_tif_context(self):
+        window = self._make_window()
+        try:
+            window.tif_project.current_project_path = str(self.project_dir / "tif_project.json")
+            window.enter_tif_workflow()
+            window.tif_workbench.current_specimen_id = "ANT_001"
+            window.tif_workbench.log("missing manual_truth")
+            window.return_to_start_center_with_context()
+
+            self.assertEqual(window.active_project_kind, "start")
+            self.assertEqual(window.tabs.currentWidget(), window.start_center_widget)
+            self.assertEqual(window.agent_panel._context["source_workbench"], "tif_volume")
+            self.assertEqual(window.agent_panel._context["active_specimen_id"], "ANT_001")
         finally:
             window.deleteLater()
 
@@ -208,7 +394,7 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(window.current_lang, "zh")
             self.assertIn("TaxaMask Workbench", window.windowTitle())
             self.assertEqual(window.tif_workbench.btn_import_tif.text(), "导入 TIF stack")
-            self.assertEqual(window.start_title.text(), "TaxaMask 工作流选择")
+            self.assertEqual(window.start_title.text(), "TaxaMask Agent 中心")
 
             dialog = main_module.ModelSettingsDialog(
                 {
@@ -325,6 +511,8 @@ class GuiSmokeTests(unittest.TestCase):
     def test_project_create_and_open_lightweight_path(self):
         window = self._make_window()
         try:
+            preload_events = []
+            window.ensure_sam_preloaded = lambda: preload_events.append("preload")
             window.project.create_project("smoke_project", str(self.project_dir), template_id=PROJECT_TEMPLATE_GENERIC)
             created_path = self.project_dir / "smoke_project.json"
             self.assertTrue(created_path.exists())
@@ -334,12 +522,17 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(window.project.get_locator_scope(), ["Object"])
             self.assertEqual(window.active_project_kind, "image")
             self.assertEqual(window.tabs.currentWidget(), window.workbench_widget)
+            self.assertEqual(preload_events, ["preload"])
+            self.assertIsNone(window.sam_worker)
+            self.assertIsNone(window.sam_thread)
         finally:
             window.deleteLater()
 
     def test_tif_project_open_path_switches_to_tif_workbench(self):
         window = self._make_window()
         try:
+            preload_events = []
+            window.ensure_sam_preloaded = lambda: preload_events.append("preload")
             tif_project = TifProjectManager()
             tif_path = tif_project.create_project("tif_smoke", self.project_dir / "tif_smoke")
 
@@ -352,6 +545,27 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(window.tabs.currentWidget(), window.tif_workbench)
             self.assertEqual(window.tabs.tabText(0), "TIF Volume Workbench")
             self.assertEqual(window.tif_project.project_data["project_type"], "tif_volume")
+            self.assertEqual(preload_events, [])
+            self.assertIsNone(window.sam_worker)
+            self.assertIsNone(window.sam_thread)
+        finally:
+            window.deleteLater()
+
+    def test_tif_project_open_path_does_not_preload_sam(self):
+        window = self._make_window()
+        try:
+            preload_events = []
+            window.ensure_sam_preloaded = lambda: preload_events.append("preload")
+            tif_project = TifProjectManager()
+            tif_path = tif_project.create_project("tif_open_smoke", self.project_dir / "tif_open_smoke")
+
+            window.open_project_path(tif_path)
+
+            self.assertEqual(window.active_project_kind, "tif")
+            self.assertEqual(window.tabs.currentWidget(), window.tif_workbench)
+            self.assertEqual(preload_events, [])
+            self.assertIsNone(window.sam_worker)
+            self.assertIsNone(window.sam_thread)
         finally:
             window.deleteLater()
 
@@ -370,6 +584,8 @@ class GuiSmokeTests(unittest.TestCase):
     def test_stl_project_open_path_registers_views_into_labeling_workbench(self):
         window = self._make_window()
         try:
+            preload_events = []
+            window.ensure_sam_preloaded = lambda: preload_events.append("preload")
             source = self.project_dir / "stl_source"
             source.mkdir()
             Image.new("RGB", (32, 24), "red").save(source / "01_0101_02_dorsal.png")
@@ -392,6 +608,9 @@ class GuiSmokeTests(unittest.TestCase):
             provenance = window.project.get_image_provenance(image_path)
             self.assertEqual(provenance["source_type"], "stl_rendered_view")
             self.assertEqual(window.project.project_data["labels"][image_path]["review_mode"], "stl_rendered_view")
+            self.assertEqual(preload_events, ["preload"])
+            self.assertIsNone(window.sam_worker)
+            self.assertIsNone(window.sam_thread)
         finally:
             window.deleteLater()
 

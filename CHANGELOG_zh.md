@@ -4,6 +4,48 @@
 
 ## 📅 更新日志 (Update Log)
 
+### **[2026-05-17] Agent Center 启动页 + TIF/STL 分流 + 模型惰性加载 + 文档/skill 收口**
+> **本次重点：把 TaxaMask 的真实入口从旧的工作台优先路线收口为 Agent Center 优先路线；2D/STL 与 TIF 明确分成两个工作流；PDF 下沉为 evidence/Agent 任务；Locator/SAM 改为进入 2D/STL 时才预加载；同时同步使用手册、README、LLM 对接文件和项目本地 skill。**
+
+#### **1）启动中心成为 TaxaMask Agent Center**
+- 启动页主区域现在承载内嵌 Ant-Code Dashboard，作为自然语言配置、排错、PDF 任务规划和训练准备检查入口。
+- 右侧栏上下排列两个主要工作流入口：
+  - `2D/STL Morphology`
+  - `TIF Volume`
+- 工作台界面只保留轻量 `Start Center / Ask Agent` 入口，避免聊天窗口挤占标注画布、Blink 工作区或 TIF slice viewer。
+- 从工作台回到 Agent Center 时会携带当前项目、工作台、active image/specimen、材料层或部位、最近日志等上下文，减少用户重复描述现场。
+
+#### **2）Ant-Code 集成边界固定为分发版嵌入**
+- TaxaMask 调用 `lab-agent` 的分发版 `ant-code.exe`，而不是把 `lab-agent` 源码复制进项目或实现弱化聊天助手。
+- 默认工作区是当前 TaxaMask 仓库。
+- TaxaMask 嵌入视图只显示 Ant-Code 的中间对话/任务区域，隐藏 Ant-Code 原生左右栏，避免启动页拥挤。
+- `.lab-agent/memory.md` 作为短项目记忆保留；`.lab-agent/sessions/`、任务缓存和运行痕迹继续忽略，不进入版本历史。
+
+#### **3）2D/STL 与 TIF 工作流边界重新明确**
+- 2D/STL 工作流继续使用现有 Labeling Workbench、Blink、Locator/SAM、route-appointed experts 和 2D external backend。
+- STL 当前指“已经从 STL/mesh 渲染出的固定视角 2D 图”，导入后注册到 Labeling Workbench；不是直接 3D mesh 涂色工作台。
+- TIF 工作流使用独立 TIF 项目、AMIRA-style material ID、slice viewer、material map、`working_edit`、`manual_truth`、`model_draft` 和 TIF backend contract。
+- TIF 后端配置独立于 2D/STL 模型设置，可对接 nnU-Net、MONAI 或自定义体分割脚本，但不写死为某一个模型家族。
+
+#### **4）PDF 下沉为 evidence / Agent skill 路线**
+- PDF Processing 不再作为主界面第一视觉入口。
+- PDF 处理保留为 `File -> Open PDF Evidence Tools` 和后续 Agent skill/headless workflow。
+- PDF 输出只作为 literature evidence、candidate 和 provenance；不会自动成为 TIF `manual_truth` 或 2D/STL 正式训练真值。
+
+#### **5）Locator / SAM 改为按工作流惰性加载**
+- 程序启动到 Agent Center 时不再默认加载 Locator 或 SAM。
+- 进入 TIF 工作流时也不加载 Locator/SAM。
+- 进入、打开或导入 2D/STL 工作流时才预加载 Locator 和 SAM。
+- 一旦加载后，切回 Agent Center 不卸载，方便在 2D/STL 和 Agent 间来回排错或配置。
+- 研究流程含义：只处理 PDF、TIF 或配置排错时不再一启动就占用显存和等待 SAM 初始化。
+
+#### **6）文档与项目 skill 同步**
+- `README.md` 同步为当前公开入口：Agent Center、2D/STL、TIF、PDF evidence 和惰性模型加载。
+- `TaxaMask使用手册.md` 大幅更新：新增当前版本先读、Agent Center 使用方式、TIF 专章、设置分流、TIF 导出和 TIF 常见误区。
+- `LLM_CONTEXT_DETAILED.md` 同步到 v3.24，记录当前 Agent/TIF/STL/PDF/模型加载边界。
+- 新增 `ANTCODE.md`，作为 TaxaMask 内嵌 Agent 的最高优先级常驻项目规则；同时新增 `.lab-agent/skills/taxamask-workflows/SKILL.md`，作为始终相关的短上下文工作流 card。完整手册仍是权威长文档，skill/card 只提供入口索引、常见流程和安全边界。
+- 已验证 Ant-Code 项目记忆 loader 在当前仓库中选择 `ANTCODE.md` 作为 active rule，并把同级 `AGENTS.md` 放入 skipped rules；因此 `ANTCODE.md` 已镜像关键协作、Git、文档和研究数据安全规则。
+
 ### **[2026-05-13] Windows/Linux/macOS 源码适配落地 + 路由缺文件历史清理**
 > **本次重点：按 Windows 和 Linux 为主、macOS 仅 CPU-only 源码试用的策略，完成跨平台路径、配置、Poppler 检测、GUI smoke 与项目搬盘恢复工具；同时修复项目路由树里 Blink 专家“缺文件历史”无法清理的问题。README 已明确回到 GitHub 首页展示/安装文档定位，历史记录继续集中在本 changelog。**
 

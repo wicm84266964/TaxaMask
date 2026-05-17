@@ -40,6 +40,22 @@ from AntSleap.core.engine import AntEngine
 from AntSleap.core.dataset import TwoStageDataset
 
 
+class _LazyTrainableSAM(torch.nn.Module):
+    constructed = 0
+
+    def __init__(self, model_path=None, device="cpu"):
+        super().__init__()
+        type(self).constructed += 1
+        self.device = torch.device(device if str(device) != "auto" else "cpu")
+        self.trainable = torch.nn.Parameter(torch.zeros(1))
+        self.sam_model = types.SimpleNamespace(
+            mask_decoder=types.SimpleNamespace(state_dict=lambda: {"decoder": torch.zeros(1)})
+        )
+
+    def parameters(self, recurse=True):
+        return [self.trainable]
+
+
 class _FakeMaskedCriterion:
     def __call__(self, pred, gt, reduction='mean'):
         loss = (pred - gt) ** 2
@@ -137,6 +153,27 @@ class _DeterministicLocatorModel(torch.nn.Module):
 
 
 class LocatorResolutionMetadataTests(unittest.TestCase):
+    def test_engine_initialization_defers_trainable_sam_until_needed(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            _LazyTrainableSAM.constructed = 0
+
+            def fake_dirname(path):
+                return str(Path(tmp_dir) / "pkg") if str(path).endswith("engine.py") else str(Path(path).parent)
+
+            with patch("AntSleap.core.engine.TrainableSAM", _LazyTrainableSAM), \
+                 patch("AntSleap.core.engine.os.path.dirname", side_effect=fake_dirname):
+                engine = AntEngine(device="cpu")
+
+                self.assertIsNone(engine.parts_model)
+                self.assertIsNone(engine.opt_parts)
+                self.assertEqual(_LazyTrainableSAM.constructed, 0)
+
+                parts_model = engine.ensure_parts_model_loaded()
+
+                self.assertIs(parts_model, engine.parts_model)
+                self.assertIsNotNone(engine.opt_parts)
+                self.assertEqual(_LazyTrainableSAM.constructed, 1)
+
     def test_runtime_device_switch_moves_builtin_models_and_clears_cascade_cache(self):
         engine = AntEngine.__new__(AntEngine)
         engine.device_preference = "auto"

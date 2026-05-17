@@ -1,0 +1,739 @@
+import os
+import json
+import shutil
+import socket
+import subprocess
+import sys
+from pathlib import Path
+
+from PySide6.QtCore import QTimer, QUrl
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSizePolicy,
+    QStackedWidget,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
+
+try:
+    from PySide6.QtWebEngineWidgets import QWebEngineView
+except Exception:  # pragma: no cover - depends on local Qt installation
+    QWebEngineView = None
+
+try:
+    from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineScript
+except Exception:  # pragma: no cover - depends on local Qt installation
+    QWebEnginePage = None
+    QWebEngineProfile = None
+    QWebEngineScript = None
+
+from .style import BUTTON_ROLE_NEUTRAL, BUTTON_ROLE_RUN, apply_semantic_button_style
+
+
+AGENT_TRANSLATIONS = {
+    "zh": {
+        "TaxaMask Agent": "TaxaMask Agent",
+        "Ant-Code embedded": "Ant-Code 内嵌",
+        "Start Ant-Code": "启动 Ant-Code",
+        "Open in browser": "浏览器打开",
+        "Stop": "停止",
+        "Starting Ant-Code Dashboard...": "正在启动 Ant-Code Dashboard...",
+        "Ant-Code Dashboard is ready.": "Ant-Code Dashboard 已就绪。",
+        "Ant-Code Dashboard is not running.": "Ant-Code Dashboard 尚未启动。",
+        "Qt WebEngine is unavailable in this environment. Start Ant-Code and open it in a browser.": "当前环境缺少 Qt WebEngine。可以启动 Ant-Code 后在浏览器中打开。",
+        "Ant-Code process exited.": "Ant-Code 进程已退出。",
+        "Unable to start Ant-Code: {0}": "无法启动 Ant-Code：{0}",
+        "Workspace permission is the default for this embedded TaxaMask agent.": "TaxaMask 内嵌 Agent 默认使用工作区权限。",
+        "Ant-Code executable": "Ant-Code 可执行文件",
+        "not found": "未找到",
+        "Project": "项目",
+        "Status": "状态",
+    }
+}
+
+
+def at(text, lang="en"):
+    if lang == "zh":
+        return AGENT_TRANSLATIONS["zh"].get(text, text)
+    return text
+
+
+def find_free_port(start=7410, host="127.0.0.1"):
+    for port in range(int(start), 65535):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.1)
+            try:
+                sock.bind((host, port))
+            except OSError:
+                continue
+            return port
+    raise RuntimeError("No available local port for Ant-Code Dashboard")
+
+
+if QWebEnginePage is not None:
+    class TaxaMaskAgentWebPage(QWebEnginePage):
+        def __init__(self, panel, parent=None):
+            super().__init__(parent)
+            self._panel = panel
+
+        def javaScriptConsoleMessage(self, level, message, lineNumber, sourceID):
+            try:
+                self._panel._on_web_console_message(level, message, lineNumber, sourceID)
+            except Exception:
+                return
+else:
+    TaxaMaskAgentWebPage = None
+
+
+class TaxaMaskAgentPanel(QWidget):
+    """Embed the real Ant-Code Dashboard inside TaxaMask."""
+
+    def __init__(self, lang="en", parent=None, workspace_dir=None, ant_code_executable=None, ant_code_root=None):
+        super().__init__(parent)
+        self.lang = lang
+        self.workspace_dir = os.path.abspath(str(workspace_dir or Path(__file__).resolve().parents[2]))
+        self.ant_code_root = os.path.abspath(str(ant_code_root or os.environ.get("TAXAMASK_ANT_CODE_ROOT") or self._default_ant_code_root()))
+        self.ant_code_executable = self._resolve_ant_code_executable(ant_code_executable)
+        self.process = None
+        self.dashboard_url = ""
+        self.port = None
+        self._context = {}
+        self._health_checks_remaining = 0
+        self._pending_context_prompt = ""
+        self._project_display = self.workspace_dir
+        self._load_retries = 0
+        self._preflight_checks_remaining = 0
+        self._preflight_error = ""
+        self._last_console_error = ""
+        self.setObjectName("taxamaskAgentPanel")
+        self.setMinimumWidth(640)
+        self.setMaximumWidth(16777215)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._build_ui()
+        self._apply_style()
+        self.set_language(lang)
+
+    def _default_ant_code_root(self):
+        repo_root = Path(__file__).resolve().parents[2]
+        candidate = repo_root.parent / "lab-agent"
+        return candidate
+
+    def _resolve_ant_code_executable(self, explicit=None):
+        for candidate in self._ant_code_executable_candidates(explicit):
+            if not candidate:
+                continue
+            path = Path(candidate).expanduser()
+            if path.exists():
+                return str(path.resolve())
+        for command in ("ant-code.exe", "ant-code.cmd", "ant-code"):
+            found = shutil.which(command)
+            if found:
+                return found
+        return None
+
+    def _ant_code_executable_candidates(self, explicit=None):
+        if explicit:
+            yield explicit
+        env_path = os.environ.get("TAXAMASK_ANT_CODE_EXE")
+        if env_path:
+            yield env_path
+        root = Path(self.ant_code_root)
+        exe_name = "ant-code.exe" if sys.platform == "win32" else "ant-code"
+        yield root / "dist" / "ant-code-windows-x64" / exe_name
+        yield root / "dist" / "ant-code-win32-x64" / exe_name
+        dist = root / "dist"
+        if dist.exists():
+            for candidate in dist.glob(f"ant-code-*/*{exe_name}"):
+                yield candidate
+
+    def _require_ant_code_executable(self):
+        if self.ant_code_executable and Path(self.ant_code_executable).exists():
+            return self.ant_code_executable
+        raise FileNotFoundError(
+            "Ant-Code executable not found. Set TAXAMASK_ANT_CODE_EXE to the distributed ant-code executable."
+        )
+
+    def _dashboard_command(self):
+        return [
+            self._require_ant_code_executable(),
+            "dashboard",
+            "--project",
+            self.workspace_dir,
+            "--port",
+            str(self.port),
+            "--no-open",
+        ]
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(8)
+
+        controls = QHBoxLayout()
+        controls.setSpacing(8)
+        self.status_label = QLabel()
+        self.status_label.setObjectName("taxamaskAgentInlineStatus")
+        self.status_label.setWordWrap(False)
+
+        self.btn_start = QPushButton()
+        self.btn_start.setObjectName("taxamaskStartAntCodeButton")
+        self.btn_start.clicked.connect(self.start_dashboard)
+        self.btn_open_browser = QPushButton()
+        self.btn_open_browser.setObjectName("taxamaskOpenAntCodeBrowserButton")
+        self.btn_open_browser.clicked.connect(self.open_dashboard_in_browser)
+        self.btn_stop = QPushButton()
+        self.btn_stop.setObjectName("taxamaskStopAntCodeButton")
+        self.btn_stop.clicked.connect(self.stop_dashboard)
+        apply_semantic_button_style(self.btn_start, BUTTON_ROLE_RUN)
+        apply_semantic_button_style(self.btn_open_browser, BUTTON_ROLE_NEUTRAL)
+        apply_semantic_button_style(self.btn_stop, BUTTON_ROLE_NEUTRAL)
+        controls.addWidget(self.status_label, 1)
+        controls.addWidget(self.btn_start)
+        controls.addWidget(self.btn_open_browser)
+        controls.addWidget(self.btn_stop)
+        self.btn_open_browser.hide()
+        root.addLayout(controls)
+
+        self.stack = QStackedWidget()
+        self.stack.setObjectName("taxamaskAgentStack")
+        self.fallback = QTextEdit()
+        self.fallback.setObjectName("taxamaskAgentFallback")
+        self.fallback.setReadOnly(True)
+        self.fallback.setMinimumHeight(360)
+        self.stack.addWidget(self.fallback)
+        self.web_view = QWebEngineView() if QWebEngineView is not None else None
+        if self.web_view is not None:
+            self.web_view.setObjectName("taxamaskAntCodeWebView")
+            if TaxaMaskAgentWebPage is not None:
+                self.web_view.setPage(TaxaMaskAgentWebPage(self, self.web_view))
+            self._configure_web_profile()
+            self._install_web_bootstrap_script()
+            self.web_view.loadFinished.connect(self._on_web_load_finished)
+            self.stack.addWidget(self.web_view)
+        root.addWidget(self.stack, 1)
+
+        self.health_timer = QTimer(self)
+        self.health_timer.setInterval(500)
+        self.health_timer.timeout.connect(self._poll_dashboard_ready)
+
+    def _configure_web_profile(self):
+        if self.web_view is None or QWebEngineProfile is None:
+            return
+        try:
+            profile = self.web_view.page().profile()
+            cache_type_enum = getattr(QWebEngineProfile, "HttpCacheType", QWebEngineProfile)
+            no_cache = getattr(cache_type_enum, "NoCache")
+            profile.setHttpCacheType(no_cache)
+            profile.clearHttpCache()
+        except Exception:
+            return
+
+    def _install_web_bootstrap_script(self):
+        if self.web_view is None or QWebEngineScript is None:
+            return
+        try:
+            script = QWebEngineScript()
+            script.setName("taxamask-agent-embed-bootstrap")
+            script.setSourceCode(self._web_bootstrap_source())
+            injection_enum = getattr(QWebEngineScript, "InjectionPoint", QWebEngineScript)
+            script.setInjectionPoint(getattr(injection_enum, "DocumentCreation"))
+            world_enum = getattr(QWebEngineScript, "ScriptWorldId", QWebEngineScript)
+            if hasattr(world_enum, "MainWorld"):
+                script.setWorldId(getattr(world_enum, "MainWorld"))
+            script.setRunsOnSubFrames(False)
+            self.web_view.page().scripts().insert(script)
+        except Exception:
+            return
+
+    def _web_bootstrap_source(self):
+        return r"""
+(() => {
+  if (window.__taxamaskAgentBootstrapInstalled) return;
+  window.__taxamaskAgentBootstrapInstalled = true;
+  const reloadKey = "__taxamaskAgentJsonReloaded";
+  const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
+  const guardedApiPath = (input) => {
+    try {
+      const raw = typeof input === "string" ? input : input && input.url;
+      if (!raw) return "";
+      const url = new URL(raw, window.location.href);
+      if (url.origin !== window.location.origin) return "";
+      if (url.pathname === "/api/events" || url.pathname === "/api/files/raw") return "";
+      return url.pathname.startsWith("/api/") ? url.pathname : "";
+    } catch (_error) {
+      return "";
+    }
+  };
+  const installStyle = () => {
+    if (!document.head || document.querySelector("#taxamask-agent-embed-style")) return;
+    const style = document.createElement("style");
+    style.id = "taxamask-agent-embed-style";
+    style.textContent = `
+      html,
+      body {
+        background: #15191d !important;
+        overflow: hidden !important;
+      }
+      .app-shell {
+        display: grid !important;
+        grid-template-columns: minmax(0, 1fr) !important;
+        gap: 0 !important;
+        height: 100vh !important;
+        max-height: 100vh !important;
+        padding: 0 !important;
+      }
+      .sidebar,
+      .preview {
+        display: none !important;
+      }
+      .workspace {
+        border-radius: 0 !important;
+        grid-column: 1 / -1 !important;
+        min-width: 0 !important;
+        width: 100% !important;
+      }
+      .workspace-header {
+        border-radius: 0 !important;
+        padding: 10px 16px !important;
+      }
+      .transcript {
+        padding-left: 18px !important;
+        padding-right: 18px !important;
+      }
+      .message,
+      .activity-card,
+      .workflow-panel,
+      .composer,
+      .composer-footer,
+      .approval-panel,
+      .question-panel,
+      .trust-panel,
+      .context-panel,
+      .queue-panel,
+      .live-status,
+      .shutdown-panel,
+      .workflow-strip {
+        max-width: 960px !important;
+      }
+      .mode-row,
+      #mode-description,
+      #shutdown-button,
+      #header-shutdown-button {
+        display: none !important;
+      }
+    `;
+    document.head.appendChild(style);
+  };
+  installStyle();
+  document.addEventListener("DOMContentLoaded", installStyle, { once: true });
+
+  const nativeFetch = window.fetch ? window.fetch.bind(window) : null;
+  if (nativeFetch) {
+    window.fetch = async (input, init) => {
+      const path = guardedApiPath(input);
+      if (!path) return nativeFetch(input, init);
+      let lastResponse = null;
+      let lastError = null;
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        try {
+          const response = await nativeFetch(input, init);
+          lastResponse = response;
+          const text = await response.clone().text();
+          const trimmed = text.trim();
+          if (trimmed.length > 0) {
+            JSON.parse(trimmed);
+            return response;
+          }
+          lastError = new Error(`${path} returned an empty JSON response`);
+        } catch (error) {
+          lastError = error;
+        }
+        if (attempt < 3) await sleep(160 * (attempt + 1));
+      }
+      const detail = lastError && lastError.message ? lastError.message : `${path} failed before returning JSON`;
+      return new Response(JSON.stringify({ ok: false, error: detail }), {
+        status: lastResponse ? lastResponse.status || 502 : 502,
+        headers: { "content-type": "application/json; charset=utf-8" }
+      });
+    };
+  }
+
+  window.addEventListener("unhandledrejection", (event) => {
+    const message = event.reason && (event.reason.message || String(event.reason));
+    if (!/Unexpected end of JSON input|empty JSON response/i.test(message || "")) return;
+    try {
+      if (window.sessionStorage.getItem(reloadKey)) return;
+      window.sessionStorage.setItem(reloadKey, "1");
+      event.preventDefault();
+      window.setTimeout(() => window.location.reload(), 350);
+    } catch (_error) {
+      return;
+    }
+  });
+})();
+"""
+
+    def _apply_style(self):
+        self.setStyleSheet(
+            """
+            QWidget#taxamaskAgentPanel {
+                background: #1A1F24;
+                border: 1px solid #364149;
+                border-radius: 16px;
+            }
+            QLabel#taxamaskAgentInlineStatus {
+                color: #C6D0D5;
+                font-size: 9pt;
+                padding-left: 2px;
+            }
+            QTextEdit#taxamaskAgentFallback {
+                background: #11161A;
+                border: 1px solid #303A42;
+                border-radius: 12px;
+                color: #DCE4E8;
+                padding: 10px;
+            }
+            QStackedWidget#taxamaskAgentStack {
+                background: transparent;
+                border: none;
+            }
+            """
+        )
+
+    def set_language(self, lang):
+        self.lang = lang
+        self.btn_start.setText(at("Start Ant-Code", lang))
+        self.btn_open_browser.setText(at("Open in browser", lang))
+        self.btn_stop.setText(at("Stop", lang))
+        self._update_status_label(at("Ant-Code Dashboard is not running.", lang))
+        self._update_fallback()
+
+    def update_runtime_status(self, model_status=None, workflow=None, project=None, state=None):
+        if project:
+            self._project_display = project
+        if state and not self.is_running():
+            self._update_status_label(str(state))
+
+    def set_context(self, context=None, announce=False):
+        self._context = dict(context or {})
+        if not announce or not self.is_running():
+            return
+        prompt = self._context_prompt(self._context)
+        if prompt:
+            self._send_context_prompt(prompt)
+
+    def is_running(self):
+        return self.process is not None and self.process.poll() is None
+
+    def start_dashboard(self):
+        if self.is_running():
+            self._prepare_dashboard_load(reset=True)
+            return
+        try:
+            self.port = find_free_port(7410)
+            self.dashboard_url = f"http://127.0.0.1:{self.port}"
+            self._load_retries = 0
+            self._preflight_checks_remaining = 0
+            self._preflight_error = ""
+            env = os.environ.copy()
+            command = self._dashboard_command()
+            self.process = subprocess.Popen(
+                command,
+                cwd=self.workspace_dir,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=self._creation_flags(),
+            )
+        except Exception as exc:
+            self.process = None
+            self.dashboard_url = ""
+            self._update_status_label(at("Unable to start Ant-Code: {0}", self.lang).format(str(exc)))
+            self._update_fallback()
+            return
+        self._health_checks_remaining = 80
+        self._update_status_label(at("Starting Ant-Code Dashboard...", self.lang))
+        self._update_fallback()
+        self.health_timer.start()
+
+    def _creation_flags(self):
+        if sys.platform != "win32":
+            return 0
+        return getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+    def _poll_dashboard_ready(self):
+        if not self.is_running():
+            self.health_timer.stop()
+            self._update_status_label(at("Ant-Code process exited.", self.lang))
+            self._update_fallback()
+            return
+        if self._health_checks_remaining <= 0:
+            self.health_timer.stop()
+            self._update_status_label(at("Unable to start Ant-Code: {0}", self.lang).format("timeout"))
+            self._update_fallback()
+            return
+        self._health_checks_remaining -= 1
+        try:
+            import urllib.request
+
+            with urllib.request.urlopen(f"{self.dashboard_url}/api/status", timeout=0.5) as response:
+                if response.status == 200:
+                    self.health_timer.stop()
+                    self._on_dashboard_ready()
+        except Exception:
+            return
+
+    def _on_dashboard_ready(self):
+        self._update_status_label(at("Ant-Code Dashboard is ready.", self.lang))
+        self._prepare_dashboard_load(reset=True)
+
+    def _prepare_dashboard_load(self, reset=False):
+        if reset:
+            self._preflight_checks_remaining = 6
+            self._load_retries = 0
+        if not self.dashboard_url:
+            return
+        if not self.is_running():
+            self._update_status_label(at("Ant-Code process exited.", self.lang))
+            self._update_fallback()
+            return
+        if self._preflight_dashboard(report_error=False):
+            QTimer.singleShot(250, self._load_dashboard)
+            return
+        self._update_fallback()
+        if self._preflight_checks_remaining > 0:
+            self._preflight_checks_remaining -= 1
+            self._update_status_label(at("Starting Ant-Code Dashboard...", self.lang))
+            QTimer.singleShot(350, self._prepare_dashboard_load)
+            return
+        self._update_status_label(at("Unable to start Ant-Code: {0}", self.lang).format(self._preflight_error))
+
+    def _load_dashboard(self):
+        if not self.dashboard_url:
+            return
+        if self.web_view is None:
+            self.stack.setCurrentWidget(self.fallback)
+            self._update_fallback()
+            return
+        self.stack.setCurrentWidget(self.web_view)
+        cache_key = f"taxamask_embed=1&reload={self._load_retries}"
+        self.web_view.load(QUrl(f"{self.dashboard_url}/?{cache_key}"))
+
+    def _on_web_load_finished(self, ok):
+        if not ok or self.web_view is None:
+            return
+        self.web_view.page().runJavaScript(
+            """
+            (() => {
+              const applyTaxaMaskDefaults = () => {
+                const workspaceButton = document.querySelector('#permission-mode button[data-mode="workspace"]');
+                if (workspaceButton && !workspaceButton.classList.contains('active')) {
+                  workspaceButton.click();
+                }
+                const brand = document.querySelector('.brand-name');
+                if (brand) brand.textContent = 'TaxaMask Agent';
+                const subtitle = document.querySelector('.brand-subtitle');
+                if (subtitle) subtitle.textContent = 'Ant-Code';
+              };
+              applyTaxaMaskDefaults();
+              const timer = window.setInterval(applyTaxaMaskDefaults, 300);
+              window.setTimeout(() => window.clearInterval(timer), 5000);
+              fetch('/api/trust', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: '{}'
+              }).catch(() => {});
+            })();
+            """
+        )
+        self._ensure_trusted()
+        QTimer.singleShot(1200, self._verify_embedded_page_ready)
+        if self._pending_context_prompt:
+            prompt = self._pending_context_prompt
+            self._pending_context_prompt = ""
+            QTimer.singleShot(350, lambda: self._send_context_prompt(prompt))
+
+    def _verify_embedded_page_ready(self):
+        if self.web_view is None or not self.dashboard_url:
+            return
+        self.web_view.page().runJavaScript(
+            """
+            (() => {
+              const project = document.querySelector('#project-path')?.textContent?.trim() || '';
+              const send = document.querySelector('#send-button');
+              const transcript = document.querySelector('#transcript');
+              return Boolean(send && transcript && project && project !== '加载中');
+            })();
+            """,
+            self._handle_embedded_page_ready,
+        )
+
+    def _handle_embedded_page_ready(self, ready):
+        if ready:
+            if self.web_view is not None:
+                self.web_view.page().runJavaScript(
+                    "try { sessionStorage.removeItem('__taxamaskAgentJsonReloaded'); } catch (error) {}"
+                )
+            return
+        if not self.is_running() or self.web_view is None:
+            return
+        if self._load_retries >= 1:
+            self._update_status_label(at("Unable to start Ant-Code: {0}", self.lang).format("embedded page init failed"))
+            return
+        self._load_retries += 1
+        self._update_status_label(at("Starting Ant-Code Dashboard...", self.lang))
+        QTimer.singleShot(350, self._load_dashboard)
+
+    def _ensure_trusted(self):
+        if not self.dashboard_url:
+            return False
+        try:
+            import urllib.request
+
+            request = urllib.request.Request(f"{self.dashboard_url}/api/trust", data=b"{}", method="POST")
+            request.add_header("content-type", "application/json")
+            urllib.request.urlopen(request, timeout=1.0).read()
+            return True
+        except Exception:
+            return False
+
+    def _preflight_dashboard(self, report_error=True):
+        try:
+            self._fetch_dashboard_json("/api/status")
+            if not self._ensure_trusted():
+                raise RuntimeError("workspace trust request failed")
+            self._fetch_dashboard_json("/api/sessions")
+            self._preflight_error = ""
+            return True
+        except Exception as exc:
+            self._preflight_error = str(exc)
+            if report_error:
+                self._update_status_label(at("Unable to start Ant-Code: {0}", self.lang).format(self._preflight_error))
+            return False
+
+    def _fetch_dashboard_json(self, path, timeout=2.0):
+        if not self.dashboard_url:
+            raise RuntimeError("Ant-Code Dashboard URL is empty")
+        import urllib.request
+
+        url = f"{self.dashboard_url}{path}"
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            body = response.read().decode("utf-8", errors="replace")
+            if response.status < 200 or response.status >= 300:
+                raise RuntimeError(f"{path} returned HTTP {response.status}")
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError as exc:
+            preview = body[max(0, exc.pos - 60): exc.pos + 60].replace("\n", "\\n")
+            raise RuntimeError(
+                f"{path} returned invalid JSON at line {exc.lineno} column {exc.colno}: {preview}"
+            ) from exc
+        if isinstance(data, dict) and data.get("ok") is False:
+            raise RuntimeError(str(data.get("error") or f"{path} failed"))
+        return data
+
+    def _on_web_console_message(self, level, message, line_number, source_id):
+        text = str(message or "")
+        if not text:
+            return
+        if "Unexpected end of JSON input" not in text and "empty JSON response" not in text:
+            return
+        self._last_console_error = f"{text} ({source_id}:{line_number})"
+        self._update_status_label(at("Unable to start Ant-Code: {0}", self.lang).format(self._last_console_error))
+
+    def _send_context_prompt(self, prompt):
+        if not self.is_running() or self.web_view is None:
+            self._pending_context_prompt = prompt
+            return
+        escaped = prompt.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
+        self.web_view.page().runJavaScript(
+            f"""
+            (() => {{
+              const input = document.querySelector('#prompt-input');
+              if (!input) return false;
+              input.value = `{escaped}`;
+              input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+              input.focus();
+              return true;
+            }})();
+            """
+        )
+
+    def _context_prompt(self, context):
+        if not context:
+            return ""
+        lines = [
+            "这是从 TaxaMask 工作台带回来的现场上下文，请先理解现场，不要立即执行高风险动作。",
+        ]
+        mapping = [
+            ("source_workbench", "来源工作台"),
+            ("project_type", "项目类型"),
+            ("project_path", "项目路径"),
+            ("active_specimen_id", "当前 specimen"),
+            ("active_image_path", "当前图像"),
+            ("active_label_role", "当前标签层"),
+            ("selected_part", "当前部位"),
+            ("selected_material_id", "当前 material"),
+            ("recent_log_excerpt", "最近日志"),
+        ]
+        for key, label in mapping:
+            value = context.get(key)
+            if value:
+                lines.append(f"{label}: {value}")
+        return "\n".join(lines)
+
+    def open_dashboard_in_browser(self):
+        if not self.is_running():
+            self.start_dashboard()
+        if not self.dashboard_url:
+            return
+        try:
+            import webbrowser
+
+            webbrowser.open(self.dashboard_url)
+        except Exception:
+            return
+
+    def stop_dashboard(self):
+        self.health_timer.stop()
+        if self.process is not None and self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=2)
+            except Exception:
+                self.process.kill()
+        self.process = None
+        self.dashboard_url = ""
+        self._update_status_label(at("Ant-Code Dashboard is not running.", self.lang))
+        self.stack.setCurrentWidget(self.fallback)
+        self._update_fallback()
+
+    def closeEvent(self, event):
+        self.stop_dashboard()
+        super().closeEvent(event)
+
+    def _update_status_label(self, status):
+        self.status_label.setText(f"{at('Status', self.lang)}: {status}")
+
+    def _update_fallback(self):
+        lines = [
+            at("Ant-Code embedded", self.lang),
+            "",
+            f"{at('Project', self.lang)}: {self._project_display or self.workspace_dir}",
+            f"{at('Ant-Code executable', self.lang)}: {self.ant_code_executable or at('not found', self.lang)}",
+            "",
+            at("Workspace permission is the default for this embedded TaxaMask agent.", self.lang),
+        ]
+        if QWebEngineView is None:
+            lines.extend(["", at("Qt WebEngine is unavailable in this environment. Start Ant-Code and open it in a browser.", self.lang)])
+        if self.dashboard_url:
+            lines.extend(["", self.dashboard_url])
+        if self._preflight_error:
+            lines.extend(["", f"Preflight error: {self._preflight_error}"])
+        self.fallback.setPlainText("\n".join(lines))

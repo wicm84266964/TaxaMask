@@ -3,6 +3,7 @@ import os
 import csv
 import json
 import re
+import threading
 
 # pyright: reportMissingImports=false, reportGeneralTypeIssues=false, reportAttributeAccessIssue=false, reportArgumentType=false, reportCallIssue=false, reportOptionalMemberAccess=false, reportOptionalCall=false, reportUninitializedInstanceVariable=false, reportOperatorIssue=false
 
@@ -64,6 +65,7 @@ try:
     from AntSleap.ui.pdf_processing_widget import PdfProcessingWidget
     from AntSleap.ui.blink_lab import BlinkLabWidget
     from AntSleap.ui.tif_workbench import TifWorkbenchWidget
+    from AntSleap.ui.taxamask_agent_panel import TaxaMaskAgentPanel
     from AntSleap.core.dataset import TwoStageDataset
     from AntSleap.core.training_preflight import build_training_preflight, describe_training_preflight, describe_part_coverage, format_size_pair
     from AntSleap.core.cascade_routes import format_expert_label, get_route_persisted_expert_candidates, merge_expert_candidates
@@ -115,6 +117,7 @@ except ImportError:
     from ui.pdf_processing_widget import PdfProcessingWidget
     from ui.blink_lab import BlinkLabWidget
     from ui.tif_workbench import TifWorkbenchWidget
+    from ui.taxamask_agent_panel import TaxaMaskAgentPanel
     from core.dataset import TwoStageDataset
     from core.training_preflight import build_training_preflight, describe_training_preflight, describe_part_coverage, format_size_pair
     from core.cascade_routes import format_expert_label, get_route_persisted_expert_candidates, merge_expert_candidates
@@ -237,7 +240,9 @@ TRANSLATIONS = {
         "Workflow": "工作流",
         "Start Center": "启动中心",
         "TaxaMask Workflow Selection": "TaxaMask 工作流选择",
+        "TaxaMask Agent Center": "TaxaMask Agent 中心",
         "Choose the data type you want to work with today.": "选择今天要处理的数据类型。",
+        "Ask Ant-Code to configure workflows, inspect errors, prepare PDF evidence, or plan training. Use the right rail when you want to enter a workbench directly.": "让 Ant-Code 帮你配置工作流、检查报错、准备 PDF 证据或规划训练。需要直接进入工作台时，使用右侧入口。",
         "2D / STL morphology annotation": "2D / STL 形态学标注",
         "Annotate rendered STL views or ordinary 2D morphology images, then train Locator/SAM/Blink models.": "标注 STL 渲染视角图或普通 2D 形态图像，并训练 Locator/SAM/Blink 模型。",
         "TIF volume annotation": "TIF 体数据标注",
@@ -255,6 +260,9 @@ TRANSLATIONS = {
         "TIF Volume Workflow": "TIF 体数据工作流",
         "Opened 2D/STL workflow.": "已进入 2D/STL 工作流。",
         "Opened TIF volume workflow.": "已进入 TIF 体数据工作流。",
+        "Ask Agent": "询问 Agent",
+        "Local task cards": "本地任务卡",
+        "No active project": "未打开项目",
         "Model Backend:": "模型后端：",
         "Built-in Locator + SAM": "内置 Locator + SAM",
         "External Script Backend": "外部脚本后端",
@@ -772,6 +780,8 @@ class TrainingThread(QThread):
             dl_loc_val = None
 
             if self.has_locator_stage:
+                locator = self.engine.ensure_locator_loaded()
+                opt_loc = self.engine.opt_loc
                 ds_loc_train = TwoStageDataset(
                     self.locator_train_data,
                     self.locator_scope,
@@ -795,8 +805,8 @@ class TrainingThread(QThread):
                             return
                         loss_t = self.engine.train_epoch(
                             dl_loc_train,
-                            self.engine.locator,
-                            self.engine.opt_loc,
+                            locator,
+                            opt_loc,
                             None,
                             stop_callback=self.isInterruptionRequested,
                         )
@@ -808,7 +818,7 @@ class TrainingThread(QThread):
                             return
                         metrics_v = self.engine.validate_epoch(
                             dl_loc_val,
-                            self.engine.locator,
+                            locator,
                             stop_callback=self.isInterruptionRequested,
                         )
                         if metrics_v is None:
@@ -847,6 +857,8 @@ class TrainingThread(QThread):
                 ds_parts_val = TwoStageDataset(self.parts_val_data, self.taxonomy, mode='parts')
                 dl_parts_train = DataLoader(ds_parts_train, batch_size=1, shuffle=True)
                 dl_parts_val = DataLoader(ds_parts_val, batch_size=1, shuffle=False)
+                parts_model = self.engine.ensure_parts_model_loaded()
+                opt_parts = self.engine.opt_parts
 
                 self.log_signal.emit(tr("Training SAM... (BS=1)", self.lang))
                 for epoch in range(self.epochs):
@@ -855,8 +867,8 @@ class TrainingThread(QThread):
                         return
                     loss_t = self.engine.train_epoch(
                         dl_parts_train,
-                        self.engine.parts_model,
-                        self.engine.opt_parts,
+                        parts_model,
+                        opt_parts,
                         self.engine.crit_parts,
                         stop_callback=self.isInterruptionRequested,
                     )
@@ -868,7 +880,7 @@ class TrainingThread(QThread):
                         return
                     metrics_v = self.engine.validate_epoch(
                         dl_parts_val,
-                        self.engine.parts_model,
+                        parts_model,
                         stop_callback=self.isInterruptionRequested,
                     )
                     if metrics_v is None:
@@ -2698,6 +2710,8 @@ class MainWindow(QMainWindow):
         self.sam_thread = None
         self.sam_worker = None
         self.trainer = None
+        self.locator_preload_thread = None
+        self.parts_model_preload_thread = None
         try:
             autosave_seconds = int(float(self.config.get("project_autosave_interval_sec", 3)))
         except Exception:
@@ -2710,7 +2724,6 @@ class MainWindow(QMainWindow):
         self.last_confirmed_locator_timestamp = None
         self.pending_training_preflight = None
         self.training_retry_requested = False
-        QTimer.singleShot(1000, self.init_sam)
 
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
@@ -2731,6 +2744,14 @@ class MainWindow(QMainWindow):
         self.btn_blink_entry = QPushButton()
         self.btn_blink_entry.clicked.connect(self.launch_blink_from_workbench)
         apply_semantic_button_style(self.btn_blink_entry, BUTTON_ROLE_NEUTRAL)
+        self.btn_start_center_from_workbench = QPushButton()
+        self.btn_start_center_from_workbench.setObjectName("workbenchStartCenterButton")
+        self.btn_start_center_from_workbench.clicked.connect(self.return_to_start_center_with_context)
+        apply_semantic_button_style(self.btn_start_center_from_workbench, BUTTON_ROLE_NEUTRAL)
+        self.btn_agent_from_workbench = QPushButton()
+        self.btn_agent_from_workbench.setObjectName("workbenchAskAgentButton")
+        self.btn_agent_from_workbench.clicked.connect(lambda: self.open_agent_from_context(self._collect_image_workbench_agent_context()))
+        apply_semantic_button_style(self.btn_agent_from_workbench, BUTTON_ROLE_NEUTRAL)
 
         self.workbench_top_bar = QWidget()
         apply_surface_role(self.workbench_top_bar, SURFACE_ROLE_TOOLBAR, "workbenchTopBar")
@@ -2752,6 +2773,8 @@ class MainWindow(QMainWindow):
         toolbar_flow_layout.setContentsMargins(10, 8, 10, 8)
         toolbar_flow_layout.setSpacing(8)
         toolbar_flow_layout.addWidget(self.btn_blink_entry)
+        toolbar_flow_layout.addWidget(self.btn_start_center_from_workbench)
+        toolbar_flow_layout.addWidget(self.btn_agent_from_workbench)
 
         top_bar_layout.addWidget(self.toolbar_project_panel, 0)
         top_bar_layout.addStretch(1)
@@ -3060,6 +3083,8 @@ class MainWindow(QMainWindow):
 
         self.pdf_widget = PdfProcessingWidget(self.current_lang)
         self.tif_workbench = TifWorkbenchWidget(self.tif_project, self.current_lang, config_manager=self.config)
+        self.tif_workbench.start_center_requested.connect(self.return_to_start_center_with_context)
+        self.tif_workbench.agent_requested.connect(self.open_agent_from_context)
         self.blink_lab = BlinkLabWidget(
             self.engine,
             self.project,
@@ -3071,6 +3096,8 @@ class MainWindow(QMainWindow):
             blink_input_size=self.blink_train_input_size,
             runtime_device=self.runtime_device,
         )
+        self.blink_lab.start_center_requested.connect(self.return_to_start_center_with_context)
+        self.blink_lab.agent_requested.connect(self.open_agent_from_context)
         self.blink_lab.global_labels_updated.connect(self.on_global_labels_updated)
         self.blink_lab.route_registry_refresh_requested.connect(self.refresh_route_table)
         self.route_settings_panel = RouteManagementPanel(self, self.current_lang)
@@ -3112,15 +3139,21 @@ class MainWindow(QMainWindow):
     def _build_start_center(self):
         page = QWidget()
         page.setObjectName("startCenterPage")
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(32, 28, 32, 28)
-        layout.setSpacing(18)
+        outer_layout = QHBoxLayout(page)
+        outer_layout.setContentsMargins(24, 22, 24, 22)
+        outer_layout.setSpacing(18)
+
+        agent_area = QWidget()
+        agent_area.setObjectName("startCenterAgentMain")
+        agent_layout = QVBoxLayout(agent_area)
+        agent_layout.setContentsMargins(0, 0, 0, 0)
+        agent_layout.setSpacing(14)
 
         header = QWidget()
         apply_surface_role(header, SURFACE_ROLE_PANEL, "startCenterHeader")
         header_layout = QVBoxLayout(header)
-        header_layout.setContentsMargins(22, 18, 22, 18)
-        header_layout.setSpacing(8)
+        header_layout.setContentsMargins(20, 14, 20, 14)
+        header_layout.setSpacing(6)
         self.start_title = QLabel()
         self.start_title.setObjectName("startCenterTitle")
         self.start_subtitle = QLabel()
@@ -3128,10 +3161,19 @@ class MainWindow(QMainWindow):
         self.start_subtitle.setWordWrap(True)
         header_layout.addWidget(self.start_title)
         header_layout.addWidget(self.start_subtitle)
-        layout.addWidget(header)
+        agent_layout.addWidget(header)
 
-        card_row = QHBoxLayout()
-        card_row.setSpacing(16)
+        self.agent_panel = TaxaMaskAgentPanel(self.current_lang)
+        agent_layout.addWidget(self.agent_panel, 1)
+        outer_layout.addWidget(agent_area, 1)
+
+        workflow_rail = QWidget()
+        workflow_rail.setObjectName("startWorkflowRail")
+        workflow_rail.setMinimumWidth(340)
+        workflow_rail.setMaximumWidth(390)
+        rail_layout = QVBoxLayout(workflow_rail)
+        rail_layout.setContentsMargins(0, 0, 0, 0)
+        rail_layout.setSpacing(14)
         self.start_image_card = self._build_workflow_card(
             "start2DWorkflowCard",
             "2D / STL morphology annotation",
@@ -3150,17 +3192,17 @@ class MainWindow(QMainWindow):
             "Create TIF project",
             self.new_tif_project,
         )
-        card_row.addWidget(self.start_image_card, 1)
-        card_row.addWidget(self.start_tif_card, 1)
-        layout.addLayout(card_row, 1)
+        rail_layout.addWidget(self.start_image_card)
+        rail_layout.addWidget(self.start_tif_card)
 
         footer = QWidget()
         apply_surface_role(footer, SURFACE_ROLE_SUBTLE, "startCenterFooter")
-        footer_layout = QHBoxLayout(footer)
+        footer_layout = QVBoxLayout(footer)
         footer_layout.setContentsMargins(16, 12, 16, 12)
-        footer_layout.setSpacing(10)
+        footer_layout.setSpacing(8)
         self.start_recent_label = QLabel()
         self.start_recent_label.setObjectName("mutedLabel")
+        self.start_recent_label.setWordWrap(True)
         self.btn_continue_last = QPushButton()
         self.btn_continue_last.clicked.connect(self.open_last_project)
         apply_semantic_button_style(self.btn_continue_last, BUTTON_ROLE_COMMIT)
@@ -3170,11 +3212,13 @@ class MainWindow(QMainWindow):
         self.btn_general_settings = QPushButton()
         self.btn_general_settings.clicked.connect(self.open_general_settings)
         apply_semantic_button_style(self.btn_general_settings, BUTTON_ROLE_NEUTRAL)
-        footer_layout.addWidget(self.start_recent_label, 1)
+        footer_layout.addWidget(self.start_recent_label)
         footer_layout.addWidget(self.btn_continue_last)
         footer_layout.addWidget(self.btn_open_any)
         footer_layout.addWidget(self.btn_general_settings)
-        layout.addWidget(footer)
+        rail_layout.addWidget(footer)
+        rail_layout.addStretch(1)
+        outer_layout.addWidget(workflow_rail, 0)
         return page
 
     def _build_workflow_card(self, object_name, title_key, description_key, enter_key, enter_callback, create_key, create_callback):
@@ -3183,13 +3227,14 @@ class MainWindow(QMainWindow):
         card.setFrameShape(QFrame.NoFrame)
         card.setProperty("surfaceRole", SURFACE_ROLE_PANEL)
         card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        card.setMinimumHeight(260)
+        card.setMinimumHeight(230)
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(22, 20, 22, 20)
-        layout.setSpacing(12)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(10)
         title = QLabel()
         title.setObjectName("startWorkflowTitle")
         title.setProperty("textKey", title_key)
+        title.setWordWrap(True)
         description = QLabel()
         description.setObjectName("mutedLabel")
         description.setWordWrap(True)
@@ -3217,8 +3262,13 @@ class MainWindow(QMainWindow):
     def _update_start_center_texts(self):
         if not hasattr(self, "start_center_widget"):
             return
-        self.start_title.setText(tr("TaxaMask Workflow Selection", self.current_lang))
-        self.start_subtitle.setText(tr("Choose the data type you want to work with today.", self.current_lang))
+        self.start_title.setText(tr("TaxaMask Agent Center", self.current_lang))
+        self.start_subtitle.setText(
+            tr(
+                "Ask Ant-Code to configure workflows, inspect errors, prepare PDF evidence, or plan training. Use the right rail when you want to enter a workbench directly.",
+                self.current_lang,
+            )
+        )
         last_project = self.config.get("last_project_path", "")
         if last_project and os.path.exists(last_project):
             self.start_recent_label.setText(f"{tr('Continue last project', self.current_lang)}: {last_project}")
@@ -3239,11 +3289,105 @@ class MainWindow(QMainWindow):
             key = button.property("textKey")
             if key:
                 button.setText(tr(str(key), self.current_lang))
+        if hasattr(self, "agent_panel"):
+            self.agent_panel.set_language(self.current_lang)
+            self.agent_panel.update_runtime_status(
+                model_status=tr("Local task cards", self.current_lang),
+                workflow=self._agent_current_workflow_label(),
+                project=self._agent_current_project_label(),
+                state=tr("Idle", self.current_lang),
+            )
+
+    def _agent_current_workflow_label(self):
+        kind = getattr(self, "active_project_kind", "start")
+        if kind == "tif":
+            return tr("TIF Volume Workflow", self.current_lang)
+        if kind == "image":
+            return tr("2D/STL Morphology Workflow", self.current_lang)
+        return tr("Start Center", self.current_lang)
+
+    def _agent_current_project_label(self):
+        if getattr(self, "active_project_kind", "start") == "tif":
+            path = getattr(self.tif_project, "current_project_path", "") or ""
+        elif getattr(self, "active_project_kind", "start") == "image":
+            path = getattr(self.project, "current_project_path", "") or ""
+        else:
+            path = self.config.get("last_project_path", "") or ""
+        return path if path else tr("No active project", self.current_lang)
+
+    def _recent_text_excerpt(self, widget, line_limit=6):
+        if widget is None or not hasattr(widget, "toPlainText"):
+            return ""
+        return "\n".join(widget.toPlainText().splitlines()[-line_limit:])
+
+    def _collect_image_workbench_agent_context(self):
+        return {
+            "source_workbench": "labeling",
+            "project_type": "2d_stl",
+            "project_path": getattr(self.project, "current_project_path", "") or "",
+            "active_image_path": self.current_image or "",
+            "selected_part": self._current_part_name() or "",
+            "recent_log_excerpt": self._recent_text_excerpt(getattr(self, "log_console", None)),
+        }
+
+    def _collect_blink_agent_context(self):
+        active_session = getattr(self.blink_lab, "active_session", None) or {}
+        return {
+            "source_workbench": "blink",
+            "project_type": "2d_stl",
+            "project_path": getattr(self.project, "current_project_path", "") or "",
+            "active_image_path": getattr(self.blink_lab, "current_image_path", None) or self.current_image or "",
+            "selected_part": getattr(self.blink_lab, "session_target_part", None) or "",
+            "active_label_role": "blink_session" if active_session else "",
+            "recent_log_excerpt": self._recent_text_excerpt(getattr(self.blink_lab, "training_log_console", None)),
+        }
+
+    def open_agent_from_context(self, context=None):
+        payload = dict(context or {})
+        if not payload and hasattr(self, "tabs") and self.tabs.currentWidget() is self.blink_lab:
+            payload = self._collect_blink_agent_context()
+        if not payload and hasattr(self, "tabs") and self.tabs.currentWidget() is self.tif_workbench:
+            payload = self.tif_workbench.get_agent_context()
+        if not payload:
+            payload = self._collect_image_workbench_agent_context()
+        self.active_project_kind = "start"
+        self._apply_project_mode_tabs()
+        self._update_start_center_texts()
+        if hasattr(self, "agent_panel"):
+            self.agent_panel.set_context(payload, announce=True)
+            self.agent_panel.update_runtime_status(
+                model_status=tr("Local task cards", self.current_lang),
+                workflow=str(payload.get("source_workbench") or self._agent_current_workflow_label()),
+                project=str(payload.get("project_path") or self._agent_current_project_label()),
+                state=tr("Idle", self.current_lang),
+            )
+
+    def return_to_start_center_with_context(self):
+        if hasattr(self, "tabs") and self.tabs.currentWidget() is self.tif_workbench:
+            self.open_agent_from_context(self.tif_workbench.get_agent_context())
+            return
+        if hasattr(self, "tabs") and self.tabs.currentWidget() is self.blink_lab:
+            self.open_agent_from_context(self._collect_blink_agent_context())
+            return
+        self.open_agent_from_context(self._collect_image_workbench_agent_context())
+
+    def _open_workflow_from_agent(self, workflow):
+        if workflow == "tif":
+            self.enter_tif_workflow()
+            return
+        self.enter_image_workflow()
+
+    def _open_model_settings_from_agent(self, workflow):
+        if workflow == "tif":
+            self.open_tif_model_settings()
+            return
+        self.open_stl_model_settings()
 
     def enter_image_workflow(self):
         self.active_project_kind = "image"
         self._refresh_project_bound_views()
         self.tabs.setCurrentWidget(self.workbench_widget)
+        self.ensure_2d_stl_models_preloaded()
         self.log(tr("Opened 2D/STL workflow.", self.current_lang))
 
     def enter_tif_workflow(self):
@@ -3336,8 +3480,9 @@ class MainWindow(QMainWindow):
         
         self.combo_locator.blockSignals(False)
         self.combo_segmenter.blockSignals(False)
-        self._apply_locator_selection_to_runtime()
-        self._apply_segmenter_selection_to_runtime()
+        if getattr(self, "active_project_kind", "start") == "image":
+            self._apply_locator_selection_to_runtime()
+            self._apply_segmenter_selection_to_runtime()
         self.update_model_delete_button_states()
 
     def _selected_locator_timestamp(self):
@@ -3550,7 +3695,10 @@ class MainWindow(QMainWindow):
 
         ts = self._selected_locator_timestamp()
         if not ts:
-            self.engine.reset_locator_to_base()
+            if self.engine.locator is None:
+                self.engine.ensure_locator_loaded()
+            else:
+                self.engine.reset_locator_to_base()
             if log_change:
                 self.log(tr("Locator reset to base (untrained).", self.current_lang))
             return
@@ -3713,7 +3861,8 @@ class MainWindow(QMainWindow):
 
         ts = self._selected_segmenter_timestamp()
         if not ts:
-            self.engine.reset_sam_to_base()
+            if self.engine.parts_model is not None:
+                self.engine.reset_sam_to_base()
             if self.sam_worker:
                 self.sam_worker.reload_base_model()
             if log_change:
@@ -3738,6 +3887,9 @@ class MainWindow(QMainWindow):
         self.btn_del_segmenter.setEnabled(bool(segmenter_path and os.path.exists(segmenter_path)))
 
     def on_locator_changed(self, index):
+        if getattr(self, "active_project_kind", "start") != "image" or getattr(self.engine, "locator", None) is None:
+            self.update_model_delete_button_states()
+            return
         self._apply_locator_selection_to_runtime(log_change=False)
         if self._locator_selection_needs_legacy_confirmation():
             if not self._confirm_legacy_locator_selection_if_needed():
@@ -3867,6 +4019,7 @@ class MainWindow(QMainWindow):
                 self.project.create_project(name, d, template_id=template["template_id"])
                 self.active_project_kind = "image"
                 self._refresh_project_bound_views()
+                self.ensure_2d_stl_models_preloaded()
                 self.canvas.load_image("") 
 
     def new_tif_project(self):
@@ -3960,6 +4113,7 @@ class MainWindow(QMainWindow):
         self.active_project_kind = "image"
         self._refresh_project_bound_views()
         self.tabs.setCurrentWidget(self.workbench_widget)
+        self.ensure_2d_stl_models_preloaded()
         self.log(
             tr("Imported STL rendered views into the Labeling Workbench from {0}. Registered views: {1}, specimens: {2}, unparsed files: {3}.", self.current_lang).format(
                 source_dir,
@@ -4025,6 +4179,8 @@ class MainWindow(QMainWindow):
             self.active_project_kind = "image"
             self.config.set("last_project_path", f)
         self._refresh_project_bound_views()
+        if getattr(self, "active_project_kind", "image") == "image":
+            self.ensure_2d_stl_models_preloaded()
         self.canvas.load_image("")
 
     def _format_relocation_preview(self, matches, limit=8):
@@ -4276,13 +4432,19 @@ class MainWindow(QMainWindow):
         if self.engine:
             current_locator_scope = self.project.get_locator_scope()
             curr_scope_len = len(current_locator_scope)
-            if curr_scope_len != self.engine.current_num_classes:
+        if curr_scope_len != self.engine.current_num_classes:
                 self.log(
                     tr("Syncing Locator Scope ({0} -> {1})...", self.current_lang).format(
                         self.engine.current_num_classes, curr_scope_len
                     )
                 )
-                self.engine.rebuild_locator(curr_scope_len, self.train_lr, self.train_wd)
+                if self.engine.locator is not None:
+                    self.engine.rebuild_locator(curr_scope_len, self.train_lr, self.train_wd)
+                else:
+                    self.engine.current_num_classes = curr_scope_len
+                    self.engine.loaded_locator_timestamp = None
+                    self.engine.loaded_locator_requires_legacy_confirmation = False
+                    self.engine.loaded_locator_is_legacy_512 = False
                 # FIX: Do NOT auto-load weights here as they might mismatch dimensions.
                 self.log(tr("Locator scope changed. Please retrain or select a matching model.", self.current_lang))
                 self.refresh_model_list()
@@ -4312,6 +4474,8 @@ class MainWindow(QMainWindow):
         self.btn_stop_training.setText(tr("Stop Training", self.current_lang))
         self.btn_clear_ai.setText(tr("Clear AI Labels", self.current_lang))
         self.btn_blink_entry.setText(tr("Open in Blink Workbench", self.current_lang))
+        self.btn_start_center_from_workbench.setText(tr("Start Center", self.current_lang))
+        self.btn_agent_from_workbench.setText(tr("Ask Agent", self.current_lang))
         self.label_logs.setText(tr("LOGS", self.current_lang))
         self.radio_draw.setText(tr("Manual Draw", self.current_lang))
         self.radio_magic.setText(tr("Magic Wand (SAM)", self.current_lang))
@@ -4578,6 +4742,10 @@ class MainWindow(QMainWindow):
             apply_theme_button_style(self.btn_crop, BUTTON_ROLE_NEUTRAL, "", self.current_theme)
         if hasattr(self, "btn_blink_entry"):
             apply_theme_button_style(self.btn_blink_entry, BUTTON_ROLE_NEUTRAL, "", self.current_theme)
+        if hasattr(self, "btn_start_center_from_workbench"):
+            apply_theme_button_style(self.btn_start_center_from_workbench, BUTTON_ROLE_NEUTRAL, "", self.current_theme)
+        if hasattr(self, "btn_agent_from_workbench"):
+            apply_theme_button_style(self.btn_agent_from_workbench, BUTTON_ROLE_NEUTRAL, "", self.current_theme)
         if hasattr(self, "btn_add"):
             apply_theme_button_style(self.btn_add, BUTTON_ROLE_NEUTRAL, "", self.current_theme)
         if hasattr(self, "btn_add_part"):
@@ -4971,9 +5139,6 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, tr("No Labels", self.current_lang), tr("Annotate first!", self.current_lang))
             return
 
-        if not self._confirm_legacy_locator_selection_if_needed():
-            return
-
         self.log(tr("Training with Taxonomy ({0}): {1}", self.current_lang).format(len(tax), tax))
         self.log(tr("Training with Locator Scope ({0}): {1}", self.current_lang).format(len(locator_scope), locator_scope))
         self.log(describe_training_preflight(preflight))
@@ -4991,6 +5156,13 @@ class MainWindow(QMainWindow):
 
         if not self._show_structured_training_preflight(preflight):
             return
+
+        if preflight.get("locator_samples"):
+            self.ensure_locator_preloaded()
+        if not self._confirm_legacy_locator_selection_if_needed():
+            return
+        if train_segmenter and preflight.get("parts_samples"):
+            self.ensure_sam_preloaded()
 
         self._launch_training_with_preflight(preflight, tax, locator_scope, train_segmenter=train_segmenter)
 
@@ -5086,8 +5258,10 @@ class MainWindow(QMainWindow):
         if self.model_backend == EXTERNAL_BACKEND_ID:
             self.run_external_prediction(self.current_image)
             return
+        self.ensure_locator_preloaded()
         if not self._confirm_legacy_locator_selection_if_needed():
             return
+        self.ensure_sam_preloaded()
         self.log(tr("Running inference on: {0}...", self.current_lang).format(os.path.basename(self.current_image)))
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
@@ -5170,8 +5344,10 @@ class MainWindow(QMainWindow):
                     self.btn_batch.setEnabled(True)
                     self.btn_predict.setEnabled(True)
             return
+        self.ensure_locator_preloaded()
         if not self._confirm_legacy_locator_selection_if_needed():
             return
+        self.ensure_sam_preloaded()
         if themed_yes_no_question(
             self,
             tr("Batch", self.current_lang),
@@ -5228,16 +5404,80 @@ class MainWindow(QMainWindow):
 
     def init_sam(self):
         if self.sam_thread and self.sam_thread.isRunning():
-            self.sam_thread.quit()
-            self.sam_thread.wait(1000)
+            return
+        if self.sam_worker and getattr(self.sam_worker, "model", None) is not None:
+            return
         mp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "weights", "sam_b.pt")
+        self.log(tr("Initializing SAM (Segment Anything) on active compute device...", self.current_lang))
         self.sam_thread = QThread()
         # Pass current epsilon to worker
         self.sam_worker = SAMWorker(model_type=mp, poly_epsilon=self.inf_poly_epsilon, device=self.runtime_device)
         self.sam_worker.moveToThread(self.sam_thread)
         self.sam_thread.started.connect(self.sam_worker.load_model)
         self.sam_worker.mask_generated.connect(self.on_sam_mask_generated)
+        self.sam_worker.model_loaded.connect(lambda: self.log(tr("SAM Model Loaded and Ready!", self.current_lang)))
+        self.sam_worker.model_load_error.connect(lambda message: self.log(str(message)))
         self.sam_thread.start()
+
+    def ensure_sam_preloaded(self):
+        started = False
+        if self.sam_thread and self.sam_thread.isRunning():
+            pass
+        elif self.sam_worker and getattr(self.sam_worker, "model", None) is not None:
+            pass
+        else:
+            self.init_sam()
+            started = True
+
+        if self._preload_engine_parts_model_async():
+            started = True
+        return started
+
+    def ensure_2d_stl_models_preloaded(self):
+        locator_started = self.ensure_locator_preloaded()
+        sam_started = self.ensure_sam_preloaded()
+        return bool(locator_started or sam_started)
+
+    def ensure_locator_preloaded(self):
+        if not self.engine or not hasattr(self.engine, "ensure_locator_loaded"):
+            return False
+        if getattr(self.engine, "locator", None) is not None:
+            return False
+        locator_scope_len = len(self.project.get_locator_scope())
+        if locator_scope_len != self.engine.current_num_classes:
+            self.engine.current_num_classes = locator_scope_len
+            self.engine.loaded_locator_timestamp = None
+            self.engine.loaded_locator_requires_legacy_confirmation = False
+            self.engine.loaded_locator_is_legacy_512 = False
+        ts = self._selected_locator_timestamp()
+        if ts:
+            self.engine.load_locator(ts)
+        else:
+            self.engine.ensure_locator_loaded()
+        return True
+
+    def _preload_engine_parts_model_async(self):
+        if not self.engine or not hasattr(self.engine, "ensure_parts_model_loaded"):
+            return False
+        if getattr(self.engine, "parts_model", None) is not None:
+            return False
+        existing_thread = getattr(self, "parts_model_preload_thread", None)
+        if existing_thread is not None and existing_thread.is_alive():
+            return False
+
+        def worker():
+            try:
+                self.engine.ensure_parts_model_loaded()
+            except Exception as exc:
+                print(f"Error preloading Trainable SAM: {exc}")
+
+        self.parts_model_preload_thread = threading.Thread(
+            target=worker,
+            name="TaxaMaskTrainableSAMPreload",
+            daemon=True,
+        )
+        self.parts_model_preload_thread.start()
+        return True
 
     def log(self, msg):
         self.log_console.append(msg)

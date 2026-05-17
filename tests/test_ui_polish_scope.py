@@ -68,6 +68,7 @@ class DummyCascadeManager:
 class DummyEngine:
     def __init__(self, weights_dir):
         self.weights_dir = weights_dir
+        self.locator = None
         self.parts_model = DummyPartsModel()
         self.cascade_manager = DummyCascadeManager()
         self.current_num_classes = 3
@@ -81,11 +82,18 @@ class DummyEngine:
         self.reset_locator_calls = 0
         self.predict_calls = []
 
+    def ensure_locator_loaded(self):
+        if self.locator is None:
+            self.locator = object()
+        return self.locator
+
     def load_locator(self, timestamp):
+        self.ensure_locator_loaded()
         self.load_locator_calls.append(timestamp)
         return None
 
     def reset_locator_to_base(self):
+        self.ensure_locator_loaded()
         self.reset_locator_calls += 1
         return None
 
@@ -523,6 +531,8 @@ class UiPolishScopeTests(unittest.TestCase):
             self.assertIsNotNone(window.findChild(QWidget, "workbenchTopBar"))
             self.assertIsNotNone(window.findChild(QWidget, "workbenchToolbarProjectPanel"))
             self.assertIsNotNone(window.findChild(QWidget, "workbenchToolbarFlowPanel"))
+            self.assertIsNotNone(window.findChild(QWidget, "workbenchAskAgentButton"))
+            self.assertIsNotNone(window.findChild(QWidget, "taxamaskAgentPanel"))
             self.assertIsNotNone(window.findChild(QWidget, "workbenchLibraryPanel"))
             self.assertIsNotNone(window.findChild(QWidget, "workbenchCanvasShell"))
             self.assertIsNotNone(window.findChild(QWidget, "workbenchMetadataPanel"))
@@ -531,6 +541,7 @@ class UiPolishScopeTests(unittest.TestCase):
             self.assertIsNotNone(window.findChild(QWidget, "workbenchLogsPanel"))
             self.assertEqual(window.btn_export.parentWidget().objectName(), "workbenchToolbarProjectPanel")
             self.assertEqual(window.btn_blink_entry.parentWidget().objectName(), "workbenchToolbarFlowPanel")
+            self.assertEqual(window.btn_agent_from_workbench.parentWidget().objectName(), "workbenchToolbarFlowPanel")
             self.assertEqual(window.canvas.parentWidget().objectName(), "workbenchCanvasShell")
             self.assertEqual(window.btn_predict.parentWidget().objectName(), "workbenchAIActionPanel")
             self.assertEqual(window.log_console.parentWidget().objectName(), "workbenchLogsPanel")
@@ -541,6 +552,18 @@ class UiPolishScopeTests(unittest.TestCase):
             self.assertEqual(window.workbench_splitter.handleWidth(), 8)
         finally:
             window.deleteLater()
+
+    def test_blink_workbench_uses_lightweight_agent_entry_only(self):
+        widget = BlinkLabWidget(self.engine, self.project_manager, lang="en")
+        try:
+            self.assertIsNotNone(widget.findChild(QWidget, "blinkStartCenterButton"))
+            self.assertIsNotNone(widget.findChild(QWidget, "blinkAskAgentButton"))
+            self.assertIsNone(widget.findChild(QWidget, "taxamaskAgentPanel"))
+            context = widget.get_agent_context()
+            self.assertEqual(context["source_workbench"], "blink")
+            self.assertEqual(context["project_type"], "2d_stl")
+        finally:
+            widget.deleteLater()
 
     def test_part_tree_nests_blink_children_and_preserves_child_selection(self):
         window = self.make_main_window()
@@ -797,10 +820,13 @@ class UiPolishScopeTests(unittest.TestCase):
             self.assertEqual(window.combo_locator.currentData(), locator_timestamp)
             self.assertEqual(window.combo_locator.currentText(), f"{locator_timestamp} [exact 640x384]")
             self.assertTrue(window.btn_del_locator.isEnabled())
-            self.assertEqual(self.engine.load_locator_calls[-1], locator_timestamp)
+            self.assertEqual(self.engine.load_locator_calls, [])
             self.assertEqual(window.combo_segmenter.currentData(), "BASE_SAM")
             self.assertFalse(window.btn_del_segmenter.isEnabled())
-            self.assertGreaterEqual(self.engine.reset_sam_calls, 1)
+            self.assertEqual(self.engine.reset_sam_calls, 0)
+
+            window.enter_image_workflow()
+            self.assertEqual(self.engine.load_locator_calls[-1], locator_timestamp)
 
             segmenter_index = window.combo_segmenter.findData(segmenter_timestamp)
             self.assertGreaterEqual(segmenter_index, 0)
@@ -840,6 +866,7 @@ class UiPolishScopeTests(unittest.TestCase):
             self.assertEqual(window.combo_locator.itemText(exact_index), f"{exact_timestamp} [exact 768x512]")
             self.assertEqual(window.combo_locator.itemText(legacy_index), f"{legacy_timestamp} [legacy-512]")
 
+            window.enter_image_workflow()
             window.combo_locator.setCurrentIndex(legacy_index)
             window.on_locator_changed(legacy_index)
 
@@ -894,7 +921,7 @@ class UiPolishScopeTests(unittest.TestCase):
             self.assertTrue(wrong_legacy_path.exists())
             self.assertEqual(window.combo_locator.currentData(), "__no_locator__")
             self.assertFalse(window.btn_del_locator.isEnabled())
-            self.assertGreaterEqual(self.engine.reset_locator_calls, 1)
+            self.assertEqual(self.engine.reset_locator_calls, 0)
         finally:
             window.deleteLater()
 
@@ -905,6 +932,7 @@ class UiPolishScopeTests(unittest.TestCase):
 
         window = self.make_main_window()
         try:
+            window.enter_image_workflow()
             baseline_reset_calls = self.engine.reset_sam_calls
             segmenter_index = window.combo_segmenter.findData(segmenter_timestamp)
             self.assertGreaterEqual(segmenter_index, 0)

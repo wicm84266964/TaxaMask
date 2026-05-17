@@ -1,7 +1,7 @@
 import os
 
 import numpy as np
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -91,6 +91,8 @@ TIF_TRANSLATIONS = {
         "Data import": "数据导入",
         "Import TIF stack": "导入 TIF stack",
         "Import AMIRA directory": "导入 AMIRA 目录",
+        "Start Center": "启动中心",
+        "Ask Agent": "询问 Agent",
         "Training handoff": "训练交接",
         "Export train-ready volumes": "导出可训练体数据",
         "Backend parameters": "后端参数",
@@ -253,6 +255,9 @@ class TifSliceCanvas(QLabel):
 
 
 class TifWorkbenchWidget(QWidget):
+    start_center_requested = Signal()
+    agent_requested = Signal(dict)
+
     def __init__(self, project_manager=None, lang="zh", parent=None, config_manager=None):
         super().__init__(parent)
         self.setObjectName("tifWorkbenchRoot")
@@ -366,6 +371,12 @@ class TifWorkbenchWidget(QWidget):
         self.btn_import_prediction = QPushButton("Import prediction")
         self.btn_import_prediction.setObjectName("tifImportPredictionButton")
         self.btn_import_prediction.clicked.connect(lambda: self.run_backend_action("predict"))
+        self.btn_start_center = QPushButton("Start Center")
+        self.btn_start_center.setObjectName("tifStartCenterButton")
+        self.btn_start_center.clicked.connect(self.start_center_requested.emit)
+        self.btn_ask_agent = QPushButton("Ask Agent")
+        self.btn_ask_agent.setObjectName("tifAskAgentButton")
+        self.btn_ask_agent.clicked.connect(lambda: self.agent_requested.emit(self.get_agent_context()))
         self.training_status_label = QLabel("")
         self.training_status_label.setObjectName("tifTrainingStatusText")
         self.training_status_label.setWordWrap(True)
@@ -404,6 +415,8 @@ class TifWorkbenchWidget(QWidget):
             self.btn_promote,
         ]
         secondary_buttons = [
+            self.btn_start_center,
+            self.btn_ask_agent,
             self.btn_undo,
             self.btn_redo,
             self.btn_save_edit,
@@ -474,9 +487,29 @@ class TifWorkbenchWidget(QWidget):
         self.btn_prepare_dataset.setText(tt("Prepare dataset", self.lang))
         self.btn_train_backend.setText(tt("Train backend", self.lang))
         self.btn_import_prediction.setText(tt("Import prediction", self.lang))
+        self.btn_start_center.setText(tt("Start Center", self.lang))
+        self.btn_ask_agent.setText(tt("Ask Agent", self.lang))
         self.material_table.setHorizontalHeaderLabels(
             [tt("ID", self.lang), tt("Name", self.lang), tt("Train", self.lang), tt("Color", self.lang)]
         )
+
+    def get_agent_context(self):
+        selected_material = self._selected_material()
+        material_id = ""
+        if isinstance(selected_material, dict):
+            material_id = selected_material.get("id", "")
+        recent_log = ""
+        if hasattr(self, "log_console"):
+            recent_log = "\n".join(self.log_console.toPlainText().splitlines()[-6:])
+        return {
+            "source_workbench": "tif_volume",
+            "project_type": "tif_volume",
+            "project_path": getattr(self.project, "current_project_path", "") or "",
+            "active_specimen_id": self.current_specimen_id,
+            "active_label_role": self.label_role_combo.currentData() or "",
+            "selected_material_id": material_id,
+            "recent_log_excerpt": recent_log,
+        }
 
     def _backend_config_from_ui(self):
         return sanitize_tif_backend_config(
@@ -692,6 +725,18 @@ class TifWorkbenchWidget(QWidget):
         root.setContentsMargins(10, 10, 10, 10)
         root.setSpacing(10)
 
+        top_bar = QFrame()
+        top_bar.setObjectName("tifWorkbenchTopBar")
+        top_layout = QHBoxLayout(top_bar)
+        top_layout.setContentsMargins(12, 8, 12, 8)
+        top_layout.setSpacing(8)
+        self.tif_top_context_label = QLabel("TIF Volume Workbench")
+        self.tif_top_context_label.setObjectName("tifTopContextLabel")
+        top_layout.addWidget(self.tif_top_context_label, 1)
+        top_layout.addWidget(self.btn_start_center)
+        top_layout.addWidget(self.btn_ask_agent)
+        root.addWidget(top_bar)
+
         splitter = QSplitter(Qt.Horizontal)
         splitter.setObjectName("tifWorkbenchSplitter")
         root.addWidget(splitter, 1)
@@ -834,10 +879,16 @@ class TifWorkbenchWidget(QWidget):
             }
             QFrame#tifSpecimenPanel,
             QFrame#tifVolumePanel,
-            QFrame#tifControlPanel {
+            QFrame#tifControlPanel,
+            QFrame#tifWorkbenchTopBar {
                 background: #1B2024;
                 border: 1px solid #2F3A40;
                 border-radius: 12px;
+            }
+            QLabel#tifTopContextLabel {
+                color: #DCE4E8;
+                font-weight: 700;
+                border: none;
             }
             QFrame#tifImportSection,
             QFrame#tifAnnotationSection,

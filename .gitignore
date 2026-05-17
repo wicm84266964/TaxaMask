@@ -11,7 +11,14 @@ anaconda3/
 # Local agent/editor state
 .sisyphus/
 .opencode/
+.lab-agent/*
+!.lab-agent/
+!.lab-agent/memory.md
+!.lab-agent/skills/
+!.lab-agent/skills/**/
+!.lab-agent/skills/**/SKILL.md
 AGENTS.md
+!ANTCODE.md
 .tmp_validation/
 tmp_*/
 .vscode/

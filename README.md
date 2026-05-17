@@ -8,8 +8,9 @@ It was originally built for ant taxonomy research, with an ant morphology workfl
 
 ## What TaxaMask Does
 
-TaxaMask connects two parts of a taxonomy data workflow:
+TaxaMask connects four parts of a taxonomy data workflow:
 
+- Agent-assisted operation: use the embedded Ant-Code Agent Center to configure workflows, inspect errors, prepare PDF evidence runs, and plan training without asking domain researchers to write Python commands.
 - Literature processing: screen taxonomy PDFs, extract candidate figures, assemble caption and nearby text evidence, and optionally run multimodal review.
 - Annotation and model loop: manage project images and STL-derived rendered views, draw masks, use SAM-assisted annotation, train locator/SAM/Blink components, reuse trained experts for pre-annotation, and export datasets.
 - Ant 3D workbench: keep STL-derived 2D review and TIF volume segmentation as separate workflows, import AMIRA/TIF volume data, preserve material maps and manual truth layers, and export volume labels for external 3D segmentation backends.
@@ -17,14 +18,15 @@ TaxaMask connects two parts of a taxonomy data workflow:
 The intended research loop is:
 
 ```text
-PDF literature -> candidate figures -> project images -> mask annotation
--> model training -> automatic pre-annotation -> human review -> dataset export
+Agent Center -> choose PDF / 2D-STL / TIF workflow
+-> evidence or annotation -> model training / prediction -> human review -> dataset export
 ```
 
 ## Main Features
 
 - PDF screening with editable V2 logic profiles.
 - Figure extraction and multimodal review profiles for different taxa or plate styles.
+- Embedded TaxaMask Agent Center powered by a local Ant-Code dashboard, with workflow shortcuts for 2D/STL morphology and TIF volume projects.
 - Taxa-aware project templates, including a validated ant morphology example and a generic taxonomy mask template.
 - Labeling Workbench for biological structure masks, including specimen-grouped STL-rendered surface views imported as derived 2D review images.
 - TIF Volume Workbench for stack viewing, overlay review, material-map editing, working edits, and explicit promotion to manual training truth.
@@ -33,6 +35,16 @@ PDF literature -> candidate figures -> project images -> mask annotation
 - Built-in training/inference path plus an external backend contract for advanced users who want to connect custom models.
 - Export paths for multimodal JSONL, COCO, YOLO-style datasets, and TIF volume exchange formats including OME-TIFF, NRRD, MHA, NIfTI, nnU-Net-style layout, and MONAI-style datalists.
 - Headless agentic tools for PDF screening, figure extraction, candidate import, auto-annotation, and dataset export.
+
+## Current Workbench Entry Points
+
+The GUI starts at the TaxaMask Agent Center by default. The center area embeds the Ant-Code dashboard for natural-language task assistance, while the right rail exposes direct workflow cards:
+
+- `2D/STL Morphology`: ordinary 2D morphology images and STL-derived rendered 2D views. This route uses the Labeling Workbench, Blink, built-in Locator/SAM, route-appointed experts, and the 2D external backend contract.
+- `TIF Volume`: continuous TIF/AMIRA-style volumes. This route uses independent TIF projects, material-ID label fields, `manual_truth` / `working_edit` / `model_draft` layers, TIF exports, and the TIF backend contract.
+- `PDF Evidence`: available through Agent/headless tools and `File -> Open PDF Evidence Tools`. PDF outputs are evidence/provenance artifacts, not automatic training truth.
+
+Locator and SAM are lazy-loaded. Starting the app or entering the TIF workflow does not load them; entering the 2D/STL workflow preloads them, and returning to the Agent Center keeps already loaded models alive.
 
 ## Current Validation Scope
 
@@ -122,16 +134,13 @@ TaxaMask Workbench
 
 ## Typical Workflow
 
-1. Configure text and multimodal API settings if you plan to use LLM-assisted PDF processing.
-2. Choose a PDF screening profile in `PDF Processing -> Select Logic Profile`.
-3. Choose a figure extraction/review profile for image and caption evidence handling.
-4. Run a small PDF batch and inspect accepted/review/rejected results.
-5. Create or open a TaxaMask project.
-6. Import candidate images into the project.
-7. Annotate main structures in the Labeling Workbench.
-8. Use Blink for child structures that need local parent-context refinement.
-9. Train or connect a backend model.
-10. Run pre-annotation, review predictions, and export a dataset.
+1. Start in the Agent Center and choose whether the task is PDF evidence, 2D/STL morphology, or TIF volume annotation.
+2. For PDF evidence, configure API/profile settings and run a small batch before scaling.
+3. For 2D/STL morphology, create/open a 2D project, import ordinary images or STL-rendered views, then annotate in the Labeling Workbench.
+4. Use Blink for child structures that need local parent-context refinement.
+5. For TIF volume work, create/open a TIF project, import TIF stacks or AMIRA directories, review material maps, and promote reviewed edits to `manual_truth`.
+6. Train or connect the workflow-specific backend.
+7. Run pre-annotation/prediction, review results, and export a dataset or training handoff.
 
 See [TaxaMask使用手册.md](TaxaMask使用手册.md) for the detailed Chinese manual.
 

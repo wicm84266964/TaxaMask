@@ -39,6 +39,8 @@ BLINK_TRANSLATIONS = {
     "zh": {
         "Expert Taxonomy": "专家分类",
         "Sync from Workbench": "从工作台同步",
+        "Start Center": "启动中心",
+        "Ask Agent": "询问 Agent",
         "Drawing Tools": "绘制工具",
         "Draw Polygon": "绘制多边形",
         "Draw Box (For SAM Draft)": "绘制框（SAM 草稿）",
@@ -501,6 +503,8 @@ class BucketDeleteTypeConfirmDialog(QDialog):
 class BlinkLabWidget(QWidget):
     global_labels_updated = Signal() # Signal to notify MainWindow to refresh
     route_registry_refresh_requested = Signal()
+    start_center_requested = Signal()
+    agent_requested = Signal(dict)
 
     def __init__(
         self,
@@ -604,6 +608,8 @@ class BlinkLabWidget(QWidget):
     def retranslate_ui(self):
         self.sidebar.setTitle(self.tr("Expert Taxonomy"))
         self.btn_sync.setText(self.tr("Sync from Workbench"))
+        self.btn_start_center.setText(self.tr("Start Center"))
+        self.btn_ask_agent.setText(self.tr("Ask Agent"))
         self.tool_group_box.setTitle(self.tr("Drawing Tools"))
         self.rb_draw.setText(self.tr("Draw Polygon"))
         self.rb_box_prompt.setText(self.tr("Draw Box (For SAM Draft)"))
@@ -652,6 +658,8 @@ class BlinkLabWidget(QWidget):
             f"subcontrol-position: top left; left: 10px; padding: 0 4px; }}"
         )
         apply_theme_button_style(self.btn_sync, BUTTON_ROLE_NEUTRAL, "", theme)
+        apply_theme_button_style(self.btn_start_center, BUTTON_ROLE_NEUTRAL, "", theme)
+        apply_theme_button_style(self.btn_ask_agent, BUTTON_ROLE_NEUTRAL, "", theme)
         apply_theme_button_style(self.btn_appoint_route_expert, BUTTON_ROLE_COMMIT, "", theme)
         apply_theme_button_style(self.btn_edit_expert_note, BUTTON_ROLE_NEUTRAL, "", theme)
         apply_theme_button_style(self.btn_delete_expert, BUTTON_ROLE_DESTRUCTIVE, "", theme)
@@ -688,6 +696,19 @@ class BlinkLabWidget(QWidget):
         s_layout = QVBoxLayout(self.sidebar)
         s_layout.setContentsMargins(12, 12, 12, 12)
         s_layout.setSpacing(10)
+        shortcut_row = QHBoxLayout()
+        shortcut_row.setSpacing(8)
+        self.btn_start_center = QPushButton("Start Center")
+        self.btn_start_center.setObjectName("blinkStartCenterButton")
+        self.btn_start_center.clicked.connect(self.start_center_requested.emit)
+        self.btn_ask_agent = QPushButton("Ask Agent")
+        self.btn_ask_agent.setObjectName("blinkAskAgentButton")
+        self.btn_ask_agent.clicked.connect(lambda: self.agent_requested.emit(self.get_agent_context()))
+        apply_semantic_button_style(self.btn_start_center, BUTTON_ROLE_NEUTRAL)
+        apply_semantic_button_style(self.btn_ask_agent, BUTTON_ROLE_NEUTRAL)
+        shortcut_row.addWidget(self.btn_start_center)
+        shortcut_row.addWidget(self.btn_ask_agent)
+        s_layout.addLayout(shortcut_row)
         self.part_list = QListWidget()
         self.part_list.itemClicked.connect(self.on_part_selected)
         s_layout.addWidget(self.part_list)
@@ -951,6 +972,21 @@ class BlinkLabWidget(QWidget):
         
         layout.addWidget(self.blink_splitter)
         self._update_delete_expert_tooltip()
+
+    def get_agent_context(self):
+        active_session = self.active_session if isinstance(self.active_session, dict) else {}
+        recent_log = ""
+        if hasattr(self, "training_log_console"):
+            recent_log = "\n".join(self.training_log_console.toPlainText().splitlines()[-6:])
+        return {
+            "source_workbench": "blink",
+            "project_type": "2d_stl",
+            "project_path": getattr(self.pm, "current_project_path", "") or "",
+            "active_image_path": self.current_image_path or active_session.get("image_path", "") or "",
+            "active_label_role": "blink_session" if active_session else "",
+            "selected_part": self.session_target_part or active_session.get("target_part", "") or "",
+            "recent_log_excerpt": recent_log,
+        }
 
     def load_image(self, path):
         if path:
@@ -1913,7 +1949,11 @@ class BlinkLabWidget(QWidget):
                 from AntSleap.core.blink_refiner import BlinkRefiner
             except ImportError:
                 from core.blink_refiner import BlinkRefiner
-        sam_model = self.engine.parts_model.ultralytics_sam
+        if hasattr(self.engine, "ensure_parts_model_loaded"):
+            parts_model = self.engine.ensure_parts_model_loaded()
+        else:
+            parts_model = self.engine.parts_model
+        sam_model = parts_model.ultralytics_sam
         refiner = BlinkRefiner(sam_model=sam_model, device=self.runtime_device)
         
         # 执行靶向轨迹生成

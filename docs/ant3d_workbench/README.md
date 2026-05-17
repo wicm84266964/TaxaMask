@@ -15,7 +15,18 @@ These notes are intentionally separate from the root README, changelog, and LLM 
 
 ## Current Design Status
 
-The first requirements-alignment pass is complete enough to move into implementation design.
+The first requirements-alignment pass has moved into an initial implementation landing. This folder still remains the design and implementation-planning space, while the root `README.md`, `TaxaMask使用手册.md`, `CHANGELOG_zh.md`, and `LLM_CONTEXT_DETAILED.md` now describe the current user-facing and handoff state.
+
+Current landed state as of 2026-05-17:
+
+- The visible product name remains `TaxaMask`; `AntSleap` remains the internal Python package name.
+- Startup now opens the TaxaMask Agent Center, with embedded Ant-Code in the main area and stacked 2D/STL + TIF workflow cards on the right.
+- 2D/STL and TIF are separate workflows and project systems.
+- STL currently means rendered 2D views imported into the existing Labeling Workbench, not direct 3D mesh painting.
+- TIF uses independent material-ID volume labels, sidecars, train-ready checks, and a separate TIF backend contract.
+- PDF is evidence/provenance and Agent/headless workflow, not the primary visual workbench.
+- Locator/SAM no longer load at startup or when entering TIF; they preload when entering 2D/STL and remain alive when returning to the Agent Center.
+- `ANTCODE.md` provides the highest-priority always-on TaxaMask Agent protocol. `.lab-agent/memory.md` and `.lab-agent/skills/taxamask-workflows/SKILL.md` provide short memory and an expandable workflow card so routine tasks do not require loading this entire design folder.
 
 Primary Chinese design documents:
 
@@ -23,6 +34,8 @@ Primary Chinese design documents:
 - `TIF项目结构实施设计_zh.md`: first implementation design for the independent TIF project schema, sidecar layout, specimen records, material map, review status, and train-ready checks.
 - `AMIRA导入适配实施设计_zh.md`: first implementation design for read-only AMIRA import based on the provided `.hx + .resampled + .labels + raw .tif` sample structure.
 - `TIF后端契约_v1_实施设计_zh.md`: first implementation design for the independent TIF external backend contract covering `prepare_dataset`, `train`, `predict`, model manifests, prediction outputs, and safety rules.
+- `TaxaMask_Agent侧栏与PDF_Skill设计_zh.md`: startup-center Ant-Code Agent design, using the main start-center area for the embedded Ant-Code Dashboard and a right rail for 2D/STL and TIF workflow shortcuts.
+- `TaxaMask_AntCode项目记忆与对接手册_zh.md`: detailed operating handbook for the embedded Ant-Code agent, paired with `.lab-agent/memory.md` so common TaxaMask tasks do not require rediscovering the codebase from scratch.
 
 ## Product Direction
 
@@ -244,7 +257,7 @@ Recommended direction:
 - move PDF screening/extraction into an optional agent skill or headless workflow;
 - keep PDF results as literature evidence and provenance artifacts;
 - keep only a lightweight GUI entry for reviewing imported evidence, source PDFs, captions, page numbers, and candidate provenance when needed.
-- In the first rearchitecture implementation, remove PDF Processing from the primary interface by commenting/hiding the GUI entry rather than deleting the underlying code. A dedicated skill migration can be designed later for the user's existing agent.
+- In the current implementation landing, PDF Processing is no longer part of the primary mode tabs. It remains available on demand through evidence/headless/Agent routes, with `File -> Open PDF Evidence Tools` as the GUI fallback.
 
 ## Early Architecture Sketch
 
@@ -302,13 +315,13 @@ Ant 3D Workbench
 
 ## Initial Execution Checklist
 
-- [ ] Define the first Ant 3D Workbench project/specimen registry schema.
-- [ ] Decide the top-level GUI mode structure: STL Surface, TIF Volume, Derived 2D Review, Evidence.
-- [ ] Move PDF Processing out of the primary tab layout in design, while preserving headless tools.
-- [ ] Design STL asset registration and basic mesh-viewer requirements.
-- [ ] Design TIF stack registration and AMIRA-style label-field storage.
-- [ ] Design material mapping schema for volume labels.
-- [ ] Design independent TIF external-backend/export/import contracts for multiple model families.
+- [x] Define the first independent TIF project/specimen schema.
+- [x] Decide the current top-level GUI structure: Agent Center start page, 2D/STL workflow, TIF Volume workflow, PDF evidence on demand.
+- [x] Move PDF Processing out of the primary tab layout while preserving headless/evidence tools.
+- [x] Register STL-derived rendered views into the existing 2D Labeling Workbench as the first STL route.
+- [x] Implement TIF stack registration and AMIRA-style label-field storage.
+- [x] Implement material mapping schema for volume labels.
+- [x] Implement independent TIF external-backend/export/import contracts for multiple model families.
 - [ ] Design STL-to-volume pseudo-label bridge and QC report.
-- [ ] Design migration path for existing TaxaMask projects.
-- [ ] Update public naming and README only after the architecture direction stabilizes.
+- [x] Preserve existing TaxaMask 2D projects and route STL rendered-view registries into the Labeling Workbench.
+- [x] Update public README, user manual, changelog, LLM context, and embedded Agent rules after the test branch result was accepted.

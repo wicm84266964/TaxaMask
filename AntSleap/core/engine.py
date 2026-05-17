@@ -5,6 +5,7 @@ import torch.optim as optim
 import torch.nn as nn
 from torch.utils.data import DataLoader
 import os
+import threading
 import numpy as np
 import cv2 
 from PIL import Image
@@ -111,8 +112,9 @@ class AntEngine:
         self.loaded_locator_is_legacy_512 = False
 
         # 1. Locator (Now with WH Regression)
-        self.locator = TraitRegressor(in_channels=3, out_channels=num_classes).to(self.device) 
-        self.opt_loc = optim.Adam(self.locator.parameters(), lr=learning_rate, weight_decay=weight_decay)
+        self.locator = None
+        self.opt_loc = None
+        self._locator_lock = threading.Lock()
         
         # Loss Functions
         self.crit_heatmap = FocalMSELoss() # New Focal-like MSE
@@ -122,9 +124,9 @@ class AntEngine:
         base_sam_path = os.path.join(self.weights_dir, "sam_b.pt")
         self.base_sam_path = base_sam_path
         self.base_sam_predictor = None
-        self.parts_model = TrainableSAM(model_path=base_sam_path, device=self.device)
-        trainable_params = [p for p in self.parts_model.parameters() if p.requires_grad]
-        self.opt_parts = optim.Adam(trainable_params, lr=learning_rate, weight_decay=weight_decay)
+        self.parts_model = None
+        self.opt_parts = None
+        self._parts_model_lock = threading.Lock()
         
         self.crit_dice = DiceLoss()
         self.crit_parts = self.crit_dice 
@@ -134,6 +136,29 @@ class AntEngine:
         self.history = {"locator": [], "parts": []}
         self.load_weights()
 
+    def ensure_locator_loaded(self):
+        if not hasattr(self, "_locator_lock"):
+            self._locator_lock = threading.Lock()
+        with self._locator_lock:
+            if self.locator is None:
+                self.locator = TraitRegressor(in_channels=3, out_channels=self.current_num_classes).to(self.device)
+                self.opt_loc = optim.Adam(self.locator.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
+        if self.locator is None:
+            raise RuntimeError("Locator model failed to load.")
+        return self.locator
+
+    def ensure_parts_model_loaded(self):
+        if not hasattr(self, "_parts_model_lock"):
+            self._parts_model_lock = threading.Lock()
+        with self._parts_model_lock:
+            if self.parts_model is None:
+                self.parts_model = TrainableSAM(model_path=self.base_sam_path, device=self.device)
+                trainable_params = [p for p in self.parts_model.parameters() if p.requires_grad]
+                self.opt_parts = optim.Adam(trainable_params, lr=self.learning_rate, weight_decay=self.weight_decay)
+        if self.parts_model is None:
+            raise RuntimeError("SAM parts model failed to load.")
+        return self.parts_model
+
     def set_device_preference(self, device_preference):
         clean_preference = normalize_device_preference(device_preference)
         new_device = resolve_torch_device(clean_preference)
@@ -142,14 +167,22 @@ class AntEngine:
 
         self.device_preference = clean_preference
         self.device = new_device
-        self.locator.to(self.device)
-        self.parts_model.to(self.device)
-        self.parts_model.device = self.device
+        if self.locator is not None:
+            self.locator.to(self.device)
+        if self.parts_model is not None:
+            self.parts_model.to(self.device)
+            self.parts_model.device = self.device
         self.base_sam_predictor = None
 
-        self.opt_loc = optim.Adam(self.locator.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
-        trainable_params = [p for p in self.parts_model.parameters() if p.requires_grad]
-        self.opt_parts = optim.Adam(trainable_params, lr=self.learning_rate, weight_decay=self.weight_decay)
+        if self.locator is not None:
+            self.opt_loc = optim.Adam(self.locator.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
+        else:
+            self.opt_loc = None
+        if self.parts_model is not None:
+            trainable_params = [p for p in self.parts_model.parameters() if p.requires_grad]
+            self.opt_parts = optim.Adam(trainable_params, lr=self.learning_rate, weight_decay=self.weight_decay)
+        else:
+            self.opt_parts = None
         if getattr(self, "cascade_manager", None) is not None:
             self.cascade_manager.device = self.device
             self.cascade_manager.loaded_experts.clear()
@@ -161,8 +194,11 @@ class AntEngine:
         if num_classes == self.current_num_classes: return
         print(f"Rebuilding Locator for {num_classes} classes...")
         self.current_num_classes = num_classes
-        self.locator = TraitRegressor(in_channels=3, out_channels=num_classes).to(self.device)
-        self.opt_loc = optim.Adam(self.locator.parameters(), lr=learning_rate, weight_decay=weight_decay)
+        if self.locator is not None:
+            self.locator = TraitRegressor(in_channels=3, out_channels=num_classes).to(self.device)
+            self.opt_loc = optim.Adam(self.locator.parameters(), lr=learning_rate, weight_decay=weight_decay)
+        else:
+            self.opt_loc = None
         self.loaded_locator_timestamp = None
         self.loaded_locator_requires_legacy_confirmation = False
         self.loaded_locator_is_legacy_512 = False
@@ -179,12 +215,14 @@ class AntEngine:
     def update_hyperparameters(self, learning_rate, weight_decay):
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
-        for param_group in self.opt_loc.param_groups:
-            param_group['lr'] = learning_rate
-            param_group['weight_decay'] = weight_decay
-        for param_group in self.opt_parts.param_groups:
-            param_group['lr'] = learning_rate
-            param_group['weight_decay'] = weight_decay
+        if self.opt_loc is not None:
+            for param_group in self.opt_loc.param_groups:
+                param_group['lr'] = learning_rate
+                param_group['weight_decay'] = weight_decay
+        if self.opt_parts is not None:
+            for param_group in self.opt_parts.param_groups:
+                param_group['lr'] = learning_rate
+                param_group['weight_decay'] = weight_decay
 
     def _resolve_taxonomy_scopes(self, current_taxonomy=None, locator_scope=None):
         full_taxonomy = sanitize_taxonomy(current_taxonomy or locator_scope, fallback=DEFAULT_PROJECT_TAXONOMY)
@@ -246,8 +284,9 @@ class AntEngine:
         return clamped_poly if len(clamped_poly) > 2 else None
 
     def _run_sam_polygon(self, img_crop, prompt_box, left, top, poly_epsilon, image_size):
+        parts_model = self.ensure_parts_model_loaded()
         return self._polygon_from_predictor(
-            self.parts_model.ultralytics_sam,
+            parts_model.ultralytics_sam,
             img_crop,
             prompt_box,
             left,
@@ -392,9 +431,11 @@ class AntEngine:
         return {'loss': avg_loss, 'iou' if is_sam else 'pixel_error': avg_metric}
 
     def load_weights(self, timestamp=None):
-        """Legacy method: Loads both if available."""
-        self.load_locator(timestamp)
-        self.load_sam_decoder(timestamp)
+        """Legacy method: loads models only when a specific timestamp is requested."""
+        if timestamp:
+            self.load_locator(timestamp)
+        if timestamp:
+            self.load_sam_decoder(timestamp)
 
     def load_locator(self, timestamp):
         suffix = f"_{timestamp}" if timestamp else ""
@@ -419,7 +460,8 @@ class AntEngine:
                           print(f"Locator architecture mismatch for {timestamp}. Skipping.")
                           return
 
-                self.locator.load_state_dict(checkpoint_state, strict=False)
+                locator = self.ensure_locator_loaded()
+                locator.load_state_dict(checkpoint_state, strict=False)
                 saved_resolution = checkpoint_meta.get("locator_size")
                 legacy_resolution = checkpoint_meta.get("locator_resolution")
                 if saved_resolution is None and legacy_resolution is not None:
@@ -453,7 +495,8 @@ class AntEngine:
         
         if os.path.exists(sam_path):
             try:
-                self.parts_model.sam_model.mask_decoder.load_state_dict(torch.load(sam_path, map_location=self.device))
+                parts_model = self.ensure_parts_model_loaded()
+                parts_model.sam_model.mask_decoder.load_state_dict(torch.load(sam_path, map_location=self.device))
                 print(f"Loaded Segmenter (Fine-tuned): {os.path.basename(sam_path)}")
             except Exception as e:
                 print(f"ERROR loading SAM Decoder {sam_path}: {e}")
@@ -474,8 +517,7 @@ class AntEngine:
             # But we want to avoid reloading the heavy Image Encoder if possible.
             # Ideally, we should have saved the "initial_state" of the decoder.
             # For now, let's just re-create the wrapper. It's fast enough (~1-2s).
-            base_sam_path = os.path.join(self.weights_dir, "sam_b.pt")
-            self.parts_model = TrainableSAM(model_path=base_sam_path, device=self.device)
+            self.parts_model = TrainableSAM(model_path=self.base_sam_path, device=self.device)
             
             # We also need to re-create the optimizer because parameters changed objects
             trainable_params = [p for p in self.parts_model.parameters() if p.requires_grad]
@@ -487,16 +529,16 @@ class AntEngine:
     def reset_to_base_model(self):
         """Resets everything (Locator + SAM)"""
         print("Resetting EVERYTHING to Base...")
-        self.locator = TraitRegressor(in_channels=3, out_channels=self.current_num_classes).to(self.device)
-        self.opt_loc = optim.Adam(self.locator.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
+        self.reset_locator_to_base()
         self.reset_sam_to_base()
 
     def save_weights(self, save_locator=True, save_segmenter=True):
         import datetime
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M")
         if save_locator:
+            locator = self.ensure_locator_loaded()
             locator_payload = {
-                "state_dict": self.locator.state_dict(),
+                "state_dict": locator.state_dict(),
                     "meta": {
                     "locator_size": [int(self.locator_resolution[0]), int(self.locator_resolution[1])],
                     "locator_resolution": int(self.locator_resolution[0]),
@@ -508,7 +550,8 @@ class AntEngine:
             self.loaded_locator_requires_legacy_confirmation = False
             self.loaded_locator_is_legacy_512 = False
         if save_segmenter:
-            torch.save(self.parts_model.sam_model.mask_decoder.state_dict(), os.path.join(self.weights_dir, f"sam_decoder_lora_{ts}.pth"))
+            parts_model = self.ensure_parts_model_loaded()
+            torch.save(parts_model.sam_model.mask_decoder.state_dict(), os.path.join(self.weights_dir, f"sam_decoder_lora_{ts}.pth"))
         return ts
 
     def generate_report(self, val_dataloader=None, num_samples=4):
@@ -622,8 +665,10 @@ class AntEngine:
         poly_epsilon=2.0,
         project_route_manifest=None,
     ):
-        self.locator.eval()
-        self.parts_model.sam_model.eval()
+        locator = self.ensure_locator_loaded()
+        locator.eval()
+        parts_model = self.ensure_parts_model_loaded()
+        parts_model.sam_model.eval()
 
         try:
             img_pil = Image.open(image_path).convert('RGB')
@@ -651,7 +696,7 @@ class AntEngine:
         t_loc = torch.from_numpy(np.array(img_loc)).permute(2, 0, 1).float().unsqueeze(0).to(self.device) / 255.0
 
         with torch.no_grad():
-            hm_all, wh_all = self.locator(t_loc)
+            hm_all, wh_all = locator(t_loc)
             hm_all = hm_all.cpu().numpy()[0]
             wh_all = wh_all.cpu().numpy()[0]
 

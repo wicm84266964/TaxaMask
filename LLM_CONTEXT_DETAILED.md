@@ -1,12 +1,117 @@
 # TAXAMASK / FORMICA-FLOW SYSTEM TECHNICAL MANUAL (Deep Dive)
 
 > **Target Audience**: Expert LLM Assistants, Senior Developers
-> **Version**: v3.21 (May 12, 2026, training controls + Blink route-appointed expert workflow)
+> **Version**: v3.24 (May 17, 2026, Agent Center + workflow split + lazy 2D/STL model loading)
 > **Purpose**: Up-to-date architectural, workflow, and governance context for implementation and maintenance.
 
 ---
 
-## 0) v3.21 Training Controls / Blink Expert Route Workflow (2026-05-12)
+## 0) v3.24 Agent Center / Workflow Split / Lazy Model Loading (2026-05-17)
+
+### 0.0 Visible product and package names
+- Visible product name remains `TaxaMask`.
+- Internal Python package remains `AntSleap` for historical compatibility and stable imports.
+- Do not rename the package or public project without explicit user instruction.
+
+### 0.1 Start Center is now the Agent Center
+- The startup/default entry is `TaxaMask Agent Center`.
+- `AntSleap/main.py::_build_start_center()` builds a left/main Agent area plus a right workflow rail.
+- The Agent area embeds `TaxaMaskAgentPanel` from `AntSleap/ui/taxamask_agent_panel.py`.
+- The right rail contains stacked workflow cards:
+  - `2D/STL Morphology`
+  - `TIF Volume`
+  - continue/open/general settings controls.
+- Tab visibility is mode-aware:
+  - startup/start mode shows only `Start Center`
+  - TIF mode removes Labeling/Blink/PDF tabs and shows `TIF Volume Workbench`
+  - 2D/STL mode removes Start/TIF and shows `Labeling Workbench` plus `Blink Workbench`
+  - PDF tools remain on-demand through `File -> Open PDF Evidence Tools`
+- Workbenches expose lightweight `Start Center` and `Ask Agent` entry buttons; they do not embed full chat panes.
+- `return_to_start_center_with_context()` and related context helpers pass current project/workbench context back to the Agent Center.
+
+### 0.2 Ant-Code integration boundary
+- TaxaMask embeds the distributed Ant-Code executable, not the `lab-agent` source tree.
+- Default executable search includes:
+  - `TAXAMASK_ANT_CODE_EXE`
+  - `C:\saveproject\LBJ-workspace\lab-agent\dist\ant-code-windows-x64\ant-code.exe`
+  - `PATH` candidates such as `ant-code.exe`, `ant-code.cmd`, or `ant-code`.
+- Launch form:
+  - `ant-code.exe dashboard --project <TaxaMask repo root> --port <free local port> --no-open`
+- Embedded mode hides Ant-Code's native left/right sidebars and keeps only the middle conversation/task area inside the TaxaMask start page.
+- The embedded Agent should treat the TaxaMask repo as trusted by default for ordinary in-repo tasks, while still requiring explicit user intent for destructive data operations, files outside the repo, GPU-heavy runs, or modifying `lab-agent`.
+- `ANTCODE.md` is the highest-priority always-on project rule for the embedded TaxaMask Agent; when both `ANTCODE.md` and `AGENTS.md` exist, the embedded Ant-Code loader selects `ANTCODE.md` as the active rule and skips `AGENTS.md`.
+- `.lab-agent/memory.md` is the short project memory loaded after the project rule.
+- `.lab-agent/skills/taxamask-workflows/SKILL.md` is the always-relevant compact workflow card for Agent/Codex use. The skill body is still an expandable resource, so the durable highest-priority TaxaMask rules must also remain in `ANTCODE.md`.
+- `.lab-agent/sessions/`, task caches, transcripts, and runtime state must stay ignored.
+
+### 0.3 Workflow split
+- `2D/STL Morphology` is the route for ordinary 2D morphology images and STL-derived rendered 2D views.
+  - It uses the existing Labeling Workbench, Blink Workbench, built-in Locator/SAM, route-appointed Blink experts, and `external_backend`.
+  - STL currently means rendered 2D views from STL/mesh assets, registered into the Labeling Workbench; it is not a direct mesh-painting or separate STL renderer workbench.
+- `TIF Volume` is the route for continuous slice stacks and AMIRA-style label fields.
+  - It uses independent TIF projects, material maps, `manual_truth`, `working_edit`, `model_draft`, TIF sidecars, and `tif_backend`.
+  - TIF label categories/material IDs are independent from 2D/STL structure labels.
+  - TIF training does not use the 2D/STL Locator/SAM/Blink training stack.
+- `PDF Evidence` is evidence/provenance and agent/headless workflow.
+  - PDF candidates must not automatically become TIF `manual_truth` or 2D/STL formal labels.
+  - The PDF GUI is still available on demand through `File -> Open PDF Evidence Tools`.
+
+### 0.4 Settings split
+- `General Settings` controls app-wide user preferences:
+  - language
+  - theme
+  - startup behavior
+  - autosave
+  - default runtime device for internal Torch tasks
+- `2D/STL Model Settings` controls:
+  - built-in Locator/SAM/Blink training and inference
+  - main locator parts
+  - Blink expert defaults
+  - 2D/STL external backend contract
+- `TIF Volume Model Settings` controls:
+  - TIF backend ID
+  - Python executable
+  - prepare/train/predict commands
+  - export formats
+  - validation for `ant3d_tif_backend_contract_v1`
+- TIF backends may target nnU-Net, MONAI, or custom scripts; the app must not hardwire one model family.
+
+### 0.5 Locator and SAM lazy/preload behavior
+- `AntEngine.__init__` now starts with:
+  - `self.locator = None`
+  - `self.opt_loc = None`
+  - `self.parts_model = None`
+  - `self.opt_parts = None`
+- `AntEngine.ensure_locator_loaded()` and `AntEngine.ensure_parts_model_loaded()` are the on-demand creation points.
+- `MainWindow` no longer starts SAM with a startup `QTimer`.
+- Startup Agent Center does not load Locator or SAM.
+- TIF workflow does not load Locator or SAM.
+- Entering/opening/importing 2D/STL workflow calls `ensure_2d_stl_models_preloaded()`, which preloads Locator plus SAM/TrainableSAM.
+- Returning to the start center keeps already loaded models alive.
+- Application close should stop the SAM worker thread cleanly.
+- `refresh_model_list()` scans available files but does not apply/load Locator/SAM while active mode is `start` or `tif`.
+- Legacy locator confirmation still happens when a locator is loaded for real 2D/STL training/prediction use.
+
+### 0.6 User-facing documentation state
+- `README.md` is the public GitHub landing/install entrypoint and now describes Agent Center, workflow split, PDF evidence, and lazy 2D/STL model loading.
+- `TaxaMask使用手册.md` is the full Chinese operation manual and now includes:
+  - current-version first-read section
+  - Agent Center usage
+  - 2D/STL vs TIF split
+  - TIF volume workbench chapter
+  - TIF backend and train-ready rules
+  - TIF export formats and manifest meaning
+  - updated common mistakes and button tables
+- `CHANGELOG_zh.md` has a 2026-05-17 entry for the Agent/TIF/STL/lazy-loading/documentation pass.
+- For routine tasks, agents should rely on always-loaded `ANTCODE.md`, then `.lab-agent/memory.md`, then read `.lab-agent/skills/taxamask-workflows/SKILL.md` before loading the entire manual.
+
+### 0.7 Focused validation status
+- Recent validation before this documentation pass:
+  - `py_compile` passed for `AntSleap/main.py`, `AntSleap/core/engine.py`, `AntSleap/ui/blink_lab.py`, and related tests.
+  - `tests.test_locator_resolution_metadata tests.test_macro_micro_pipeline tests.test_reporting_routes tests.test_tif_workbench`: 22 tests OK.
+  - `tests.test_gui_smoke tests.test_ui_polish_scope`: assertions OK, with a Windows/PySide teardown exit code observed after completion.
+  - Engine probe confirmed Locator/SAM runtime members start as `None`.
+- No GPU-heavy training/inference validation was run because the user indicated the GPU was not available.
 
 ## 0) v3.23 Ant 3D Workbench Completion Pass (2026-05-16)
 
@@ -55,7 +160,7 @@
 - New project schema: `ant3d_stl_rendered_project_v1`.
 - New project type: `stl_rendered_views`.
 - New manager: `AntSleap/core/stl_project.py`.
-- Main window default tabs are:
+- Historical v3.23 default-tab note before the Agent Center landing:
   - `Labeling Workbench`
   - `Blink Workbench`
   - `TIF Volume Workbench`
@@ -161,7 +266,7 @@
 ### 0.4 TIF Volume Workbench UI
 - New UI module: `AntSleap/ui/tif_workbench.py`.
 - Main window now owns a separate `self.tif_project` and a `TIF Volume Workbench` tab.
-- The primary tab layout is now Labeling Workbench / TIF Volume Workbench / Blink Workbench.
+- Historical v3.22 tab layout was Labeling Workbench / TIF Volume Workbench / Blink Workbench. v3.24 supersedes this with mode-aware tabs: Start Center only at startup, TIF-only in TIF mode, and Labeling + Blink in 2D/STL mode.
 - PDF tools are no longer shown as a default primary tab; they can be opened on demand from `File -> Open PDF Evidence Tools`.
 - Opening a JSON with `schema_version: ant3d_tif_project_v1` and `project_type: tif_volume` loads it into the TIF workbench.
 - Old 2D/STL TaxaMask JSON projects still load through the existing `ProjectManager`.

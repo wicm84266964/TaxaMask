@@ -438,7 +438,7 @@ class TaxaMaskAgentPanel(QWidget):
 
     def set_context(self, context=None, announce=False):
         self._context = dict(context or {})
-        if not announce or not self.is_running():
+        if not announce:
             return
         prompt = self._context_prompt(self._context)
         if prompt:
@@ -823,6 +823,30 @@ class TaxaMaskAgentPanel(QWidget):
             ("active_label_role", "当前标签层"),
             ("selected_part", "当前部位"),
             ("selected_material_id", "当前 material"),
+            ("settings_scope", "设置范围"),
+            ("settings_question_focus", "需要协助的问题"),
+            ("language", "语言"),
+            ("theme", "主题"),
+            ("startup_behavior", "启动方式"),
+            ("project_autosave_interval_sec", "项目自动保存间隔秒数"),
+            ("runtime_device", "运行设备"),
+            ("model_backend", "2D/STL 模型后端"),
+            ("backend_id", "TIF 后端 ID"),
+            ("display_name", "后端显示名称"),
+            ("python_executable", "Python 解释器"),
+            ("export_formats", "导出格式"),
+            ("external_backend_id", "外部后端 ID"),
+            ("external_display_name", "外部后端显示名称"),
+            ("external_python", "外部后端 Python"),
+            ("prepare_command_present", "数据准备命令已填写"),
+            ("train_command_present", "训练命令已填写"),
+            ("predict_command_present", "预测命令已填写"),
+            ("prepare_command_has_contract", "数据准备命令包含 contract"),
+            ("train_command_has_contract", "训练命令包含 contract"),
+            ("predict_command_has_contract", "预测命令包含 contract"),
+            ("model_manifest_present", "模型 manifest 已填写"),
+            ("locator_scope_count", "Locator 主部位数量"),
+            ("validation_errors", "当前校验提示"),
             ("recent_log_excerpt", "最近日志"),
         ]
         for key, label in mapping:

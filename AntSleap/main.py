@@ -3773,6 +3773,8 @@ class MainWindow(QMainWindow):
                 project=str(payload.get("project_path") or self._agent_current_project_label()),
                 state=tr("Idle", self.current_lang),
             )
+            if not self.agent_panel.is_running():
+                self.agent_panel.start_dashboard()
 
     def return_to_start_center_with_context(self):
         self._show_start_center()

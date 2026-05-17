@@ -458,6 +458,38 @@ class GuiSmokeTests(unittest.TestCase):
         finally:
             window.deleteLater()
 
+    def test_ask_agent_auto_starts_ant_code_and_queues_context(self):
+        window = self._make_window()
+        try:
+            events = []
+            window.agent_panel.is_running = lambda: False
+            window.agent_panel.start_dashboard = lambda: events.append("start")
+
+            window.open_agent_from_context({"source_workbench": "general_settings", "project_type": "settings"})
+
+            self.assertEqual(events, ["start"])
+            self.assertIn("来源工作台: general_settings", window.agent_panel._pending_context_prompt)
+        finally:
+            window.deleteLater()
+
+    def test_ask_agent_reuses_running_ant_code(self):
+        window = self._make_window()
+        try:
+            events = []
+            prompts = []
+            window.agent_panel.is_running = lambda: True
+            window.agent_panel.start_dashboard = lambda: events.append("start")
+            window.agent_panel._send_context_prompt = lambda prompt: prompts.append(prompt)
+
+            window.open_agent_from_context({"source_workbench": "general_settings", "project_type": "settings"})
+
+            self.assertEqual(events, [])
+            self.assertEqual(window.agent_panel._pending_context_prompt, "")
+            self.assertEqual(len(prompts), 1)
+            self.assertIn("项目类型: settings", prompts[0])
+        finally:
+            window.deleteLater()
+
     def test_language_switch_and_model_settings_are_lightweight(self):
         window = self._make_window()
         try:

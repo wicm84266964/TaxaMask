@@ -219,6 +219,8 @@ class TifWorkbenchTests(unittest.TestCase):
             widget = TifWorkbenchWidget(manager)
             try:
                 widget.slice_slider.setValue(0)
+                edit_index = widget.label_role_combo.findData("working_edit")
+                widget.label_role_combo.setCurrentIndex(edit_index)
                 widget.current_material_id = 5
                 widget.brush_size_slider.setValue(2)
                 widget.paint_at_widget_position(widget.canvas.width() / 2, widget.canvas.height() / 2)
@@ -422,9 +424,52 @@ class TifWorkbenchTests(unittest.TestCase):
             self.assertIn("模型配置", section_titles)
             self.assertIn("工作台日志", section_titles)
             self.assertEqual(widget.label_role_combo.itemText(widget.label_role_combo.findData("manual_truth")), "人工真值")
+            self.assertIn("只读基准层", widget.label_role_help_label.text())
         finally:
             widget.close_project()
             widget.deleteLater()
+
+    def test_label_role_help_explains_editable_and_read_only_layers(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "zh")
+        try:
+            manual_index = widget.label_role_combo.findData("manual_truth")
+            edit_index = widget.label_role_combo.findData("working_edit")
+            draft_index = widget.label_role_combo.findData("model_draft")
+
+            widget.label_role_combo.setCurrentIndex(manual_index)
+            self.assertIn("只读基准层", widget.label_role_help_label.text())
+
+            widget.label_role_combo.setCurrentIndex(edit_index)
+            self.assertIn("可写的工作副本", widget.label_role_help_label.text())
+
+            widget.label_role_combo.setCurrentIndex(draft_index)
+            self.assertIn("只读的预测候选", widget.label_role_help_label.text())
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+
+    def test_painting_is_blocked_on_read_only_label_layers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=2)
+            try:
+                edit_before = widget.edit_volume.copy()
+                draft_index = widget.label_role_combo.findData("model_draft")
+                widget.label_role_combo.setCurrentIndex(draft_index)
+                widget.paint_at_widget_position(widget.canvas.width() / 2, widget.canvas.height() / 2)
+
+                np.testing.assert_array_equal(widget.edit_volume, edit_before)
+                self.assertIn("Cannot paint on model draft", widget.training_status_label.text())
+
+                manual_index = widget.label_role_combo.findData("manual_truth")
+                widget.label_role_combo.setCurrentIndex(manual_index)
+                widget.paint_at_widget_position(widget.canvas.width() / 2, widget.canvas.height() / 2)
+
+                np.testing.assert_array_equal(widget.edit_volume, edit_before)
+                self.assertIn("Cannot paint on this label layer", widget.training_status_label.text())
+            finally:
+                widget.close_project()
+                widget.deleteLater()
 
     def test_backend_settings_save_into_config_manager(self):
         class Config:

@@ -74,6 +74,11 @@ TIF_TRANSLATIONS = {
         "Workbench log": "工作台日志",
         "Slice": "切片",
         "Label layer": "标签层",
+        "Manual truth is a read-only reference. Switch to Current edit before changing labels.": "人工真值是只读基准层。要修改标注，请先切换到“当前编辑”。",
+        "Current edit is the editable working copy. Brush changes are saved here first.": "当前编辑是可写的工作副本。画笔修改会先保存到这一层。",
+        "Model draft is a read-only prediction candidate. Copy it to Current edit before manual correction.": "模型草稿是只读的预测候选。需要人工修正时，请先复制到“当前编辑”。",
+        "Cannot paint on this label layer. Switch to Current edit first.": "当前标签层不能直接绘制。请先切换到“当前编辑”。",
+        "Cannot paint on model draft. Copy model draft to Current edit first.": "不能直接在模型草稿上绘制。请先复制模型草稿到“当前编辑”。",
         "manual_truth": "人工真值",
         "working_edit": "当前编辑",
         "model_draft": "模型草稿",
@@ -470,6 +475,9 @@ class TifWorkbenchWidget(QWidget):
         self.label_role_combo = WheelSafeComboBox()
         self._populate_label_role_combo()
         self.label_role_combo.currentIndexChanged.connect(self._reload_label_volume)
+        self.label_role_help_label = QLabel("")
+        self.label_role_help_label.setObjectName("tifLayerHelpText")
+        self.label_role_help_label.setWordWrap(True)
 
         self.opacity_slider = WheelSafeSlider(Qt.Horizontal)
         self.opacity_slider.setRange(0, 100)
@@ -643,6 +651,7 @@ class TifWorkbenchWidget(QWidget):
                 self.canvas.setText(tt("No specimens in this TIF project", self.lang))
         self.slice_prefix_label.setText(tt("Slice", self.lang))
         self.label_layer_label.setText(tt("Label layer", self.lang))
+        self._update_label_role_help()
         self.overlay_label.setText(tt("Overlay", self.lang))
         self.brightness_label.setText(tt("Brightness", self.lang))
         self.contrast_label.setText(tt("Contrast", self.lang))
@@ -745,6 +754,18 @@ class TifWorkbenchWidget(QWidget):
     def on_slice_slider_changed(self):
         self._reset_canvas_view_on_next_render = True
         self.render_current_slice()
+
+    def _label_role_help_text(self, role=None):
+        role = role or self.label_role_combo.currentData()
+        if role == "working_edit":
+            return tt("Current edit is the editable working copy. Brush changes are saved here first.", self.lang)
+        if role == "model_draft":
+            return tt("Model draft is a read-only prediction candidate. Copy it to Current edit before manual correction.", self.lang)
+        return tt("Manual truth is a read-only reference. Switch to Current edit before changing labels.", self.lang)
+
+    def _update_label_role_help(self):
+        if hasattr(self, "label_role_help_label"):
+            self.label_role_help_label.setText(self._label_role_help_text())
 
     def save_backend_settings(self):
         self.backend_config = self._backend_config_from_ui()
@@ -1077,6 +1098,7 @@ class TifWorkbenchWidget(QWidget):
         controls.addWidget(self.brush_size_label, 4, 0)
         controls.addWidget(self.brush_size_slider, 4, 1)
         annotation_layout.addLayout(controls)
+        annotation_layout.addWidget(self.label_role_help_label)
         button_row = QHBoxLayout()
         button_row.addWidget(self.btn_undo)
         button_row.addWidget(self.btn_redo)
@@ -1305,6 +1327,13 @@ class TifWorkbenchWidget(QWidget):
                 border: 1px solid #2A353B;
                 border-radius: 10px;
                 padding: 6px;
+            }
+            QLabel#tifLayerHelpText {
+                color: #B8C4CA;
+                background: #12191D;
+                border: 1px solid #2C3840;
+                border-radius: 8px;
+                padding: 6px 8px;
             }
             QLabel#tifStatusText,
             QLabel#tifMetadataText,
@@ -1565,6 +1594,7 @@ class TifWorkbenchWidget(QWidget):
     def _reload_label_volume(self):
         specimen = self.project.get_specimen(self.current_specimen_id, default=None)
         self.label_volume = None
+        self._update_label_role_help()
         if specimen is None:
             return
         role = self.label_role_combo.currentData()
@@ -1628,6 +1658,15 @@ class TifWorkbenchWidget(QWidget):
     def paint_at_widget_position(self, x, y, erase=False):
         if self.image_volume is None or self.edit_volume is None:
             return
+        role = self.label_role_combo.currentData()
+        if role != "working_edit":
+            if role == "model_draft":
+                message = tt("Cannot paint on model draft. Copy model draft to Current edit first.", self.lang)
+            else:
+                message = tt("Cannot paint on this label layer. Switch to Current edit first.", self.lang)
+            self.training_status_label.setText(message)
+            self.log(message)
+            return
         z_index = int(self.slice_slider.value())
         height, width = self.image_volume.shape[1], self.image_volume.shape[2]
         pixel = self._widget_to_image_pixel(x, y, width, height)
@@ -1639,10 +1678,6 @@ class TifWorkbenchWidget(QWidget):
         yy, xx = np.ogrid[:height, :width]
         mask = (xx - px) ** 2 + (yy - py) ** 2 <= radius ** 2
         self.edit_volume[z_index][mask] = 0 if erase else int(self.current_material_id)
-        if self.label_role_combo.currentData() != "working_edit":
-            index = self.label_role_combo.findData("working_edit")
-            if index >= 0:
-                self.label_role_combo.setCurrentIndex(index)
         self.render_current_slice()
 
     def _widget_to_image_pixel(self, x, y, image_width, image_height):

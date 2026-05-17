@@ -4,6 +4,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from PySide6.QtCore import QTimer, QUrl, Signal
@@ -75,8 +76,11 @@ def find_free_port(start=7410, host="127.0.0.1"):
 
 if QWebEnginePage is not None:
     class TaxaMaskAgentWebPage(QWebEnginePage):
-        def __init__(self, panel, parent=None):
-            super().__init__(parent)
+        def __init__(self, panel, profile=None, parent=None):
+            if profile is not None:
+                super().__init__(profile, parent)
+            else:
+                super().__init__(parent)
             self._panel = panel
 
         def javaScriptConsoleMessage(self, level, message, lineNumber, sourceID):
@@ -111,6 +115,10 @@ class TaxaMaskAgentPanel(QWidget):
         self._preflight_checks_remaining = 0
         self._preflight_error = ""
         self._last_console_error = ""
+        self._web_profile = None
+        self._web_profile_storage_dir = ""
+        self._json_health_error = ""
+        self._json_health_warning = ""
         self.setObjectName("taxamaskAgentPanel")
         self.setMinimumWidth(640)
         self.setMaximumWidth(16777215)
@@ -211,7 +219,7 @@ class TaxaMaskAgentPanel(QWidget):
         if self.web_view is not None:
             self.web_view.setObjectName("taxamaskAntCodeWebView")
             if TaxaMaskAgentWebPage is not None:
-                self.web_view.setPage(TaxaMaskAgentWebPage(self, self.web_view))
+                self.web_view.setPage(TaxaMaskAgentWebPage(self, parent=self.web_view))
             self._configure_web_profile()
             self._install_web_bootstrap_script()
             self.web_view.loadFinished.connect(self._on_web_load_finished)
@@ -226,7 +234,15 @@ class TaxaMaskAgentPanel(QWidget):
         if self.web_view is None or QWebEngineProfile is None:
             return
         try:
-            profile = self.web_view.page().profile()
+            profile = QWebEngineProfile(self.web_view)
+            self._web_profile = profile
+            self._web_profile_storage_dir = tempfile.mkdtemp(prefix="taxamask_antcode_web_")
+            if hasattr(profile, "setPersistentStoragePath"):
+                profile.setPersistentStoragePath(self._web_profile_storage_dir)
+            if hasattr(profile, "setCachePath"):
+                profile.setCachePath(self._web_profile_storage_dir)
+            if TaxaMaskAgentWebPage is not None:
+                self.web_view.setPage(TaxaMaskAgentWebPage(self, profile=profile, parent=self.web_view))
             cache_type_enum = getattr(QWebEngineProfile, "HttpCacheType", QWebEngineProfile)
             no_cache = getattr(cache_type_enum, "NoCache")
             profile.setHttpCacheType(no_cache)
@@ -441,6 +457,10 @@ class TaxaMaskAgentPanel(QWidget):
             self._load_retries = 0
             self._preflight_checks_remaining = 0
             self._preflight_error = ""
+            self._json_health_warning = self._dashboard_workspace_json_warning()
+            self._json_health_error = self._dashboard_json_health_error()
+            if self._json_health_error:
+                raise RuntimeError(self._json_health_error)
             env = os.environ.copy()
             command = self._dashboard_command()
             self.process = subprocess.Popen(
@@ -454,7 +474,8 @@ class TaxaMaskAgentPanel(QWidget):
         except Exception as exc:
             self.process = None
             self.dashboard_url = ""
-            self._update_status_label(at("Unable to start Ant-Code: {0}", self.lang).format(str(exc)))
+            self._preflight_error = str(exc)
+            self._update_status_label(at("Unable to start Ant-Code: {0}", self.lang).format(self._preflight_error))
             self._update_fallback()
             return
         self._health_checks_remaining = 80
@@ -605,6 +626,10 @@ class TaxaMaskAgentPanel(QWidget):
 
     def _preflight_dashboard(self, report_error=True):
         try:
+            self._json_health_warning = self._dashboard_workspace_json_warning()
+            self._json_health_error = self._dashboard_json_health_error()
+            if self._json_health_error:
+                raise RuntimeError(self._json_health_error)
             self._fetch_dashboard_json("/api/status")
             if not self._ensure_trusted():
                 raise RuntimeError("workspace trust request failed")
@@ -642,10 +667,128 @@ class TaxaMaskAgentPanel(QWidget):
         text = str(message or "")
         if not text:
             return
-        if "Unexpected end of JSON input" not in text and "empty JSON response" not in text:
+        if not self._is_json_console_error(text):
             return
         self._last_console_error = f"{text} ({source_id}:{line_number})"
         self._update_status_label(at("Unable to start Ant-Code: {0}", self.lang).format(self._last_console_error))
+
+    def _is_json_console_error(self, text):
+        lowered = str(text or "").lower()
+        patterns = (
+            "unexpected end of json input",
+            "empty json response",
+            "expected double-quoted property name",
+            "json.parse",
+            "json 解析失败",
+        )
+        return any(pattern in lowered for pattern in patterns)
+
+    def _dashboard_json_health_error(self):
+        issue = self._find_invalid_dashboard_json(self._dashboard_context_json_paths())
+        if not issue:
+            return ""
+        return self._format_json_health_issue(self._json_issue_prefix("active_project"), issue)
+
+    def _dashboard_workspace_json_warning(self):
+        issue = self._find_invalid_dashboard_json(self._dashboard_workspace_json_paths())
+        if not issue:
+            return ""
+        return self._format_json_health_issue(self._json_issue_prefix("workspace"), issue)
+
+    def _json_issue_prefix(self, kind):
+        if self.lang == "zh":
+            if kind == "active_project":
+                return "当前项目 JSON 检查失败，已阻止 Ant-Code 启动"
+            return "工作区中存在无效 JSON 文件"
+        if kind == "active_project":
+            return "Active project JSON check failed before Ant-Code launch"
+        return "Workspace contains an invalid JSON file"
+
+    def _format_json_health_issue(self, prefix, issue):
+        rel_path = self._display_json_health_path(issue["path"])
+        if self.lang == "zh":
+            return (
+                f"{prefix}: {rel_path}，第 {issue['line']} 行第 {issue['column']} 列。"
+                f"解析器提示：{issue['message']}。"
+                f"附近内容：{issue['preview']}"
+            )
+        return (
+            f"{prefix}: "
+            f"{rel_path} at line {issue['line']} column {issue['column']}. "
+            f"Parser said: {issue['message']}. "
+            f"Near: {issue['preview']}"
+        )
+
+    def _find_invalid_dashboard_json(self, paths):
+        for path in paths:
+            if not path.exists() or not path.is_file():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8-sig")
+                json.loads(text)
+            except json.JSONDecodeError as exc:
+                return {
+                    "path": path,
+                    "line": exc.lineno,
+                    "column": exc.colno,
+                    "message": exc.msg,
+                    "preview": self._json_error_preview(text, exc.pos),
+                }
+            except UnicodeDecodeError as exc:
+                return {
+                    "path": path,
+                    "line": 1,
+                    "column": 1,
+                    "message": f"cannot decode as UTF-8 JSON ({exc})",
+                    "preview": "",
+                }
+            except OSError:
+                continue
+        return None
+
+    def _dashboard_context_json_paths(self):
+        seen = set()
+        yield from self._normalized_json_paths((self._project_display,), seen)
+        for key in ("project_path", "review_project_path", "tif_project_path", "stl_project_path"):
+            yield from self._normalized_json_paths((self._context.get(key),), seen)
+
+    def _dashboard_workspace_json_paths(self):
+        seen = set()
+        root = Path(self.workspace_dir)
+        for candidate in sorted(root.glob("*.json")):
+            yield from self._normalized_json_paths((candidate,), seen)
+
+    def _normalized_json_paths(self, values, seen):
+        for value in values:
+            text = str(value or "").strip()
+            if not text:
+                continue
+            path = Path(text)
+            if not path.is_absolute():
+                path = Path(self.workspace_dir) / path
+            try:
+                path = path.resolve()
+            except OSError:
+                path = path.absolute()
+            if path.suffix.lower() != ".json":
+                continue
+            key = str(path).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            yield path
+
+    def _display_json_health_path(self, path):
+        try:
+            return str(path.relative_to(Path(self.workspace_dir)))
+        except ValueError:
+            return str(path)
+
+    def _json_error_preview(self, text, pos):
+        start = max(0, int(pos) - 80)
+        end = min(len(text), int(pos) + 80)
+        preview = text[start:end].replace("\r", "\\r").replace("\n", "\\n")
+        return preview[:180]
 
     def _send_context_prompt(self, prompt):
         if not self.is_running() or self.web_view is None:
@@ -716,7 +859,18 @@ class TaxaMaskAgentPanel(QWidget):
 
     def closeEvent(self, event):
         self.stop_dashboard()
+        self._cleanup_web_profile_storage()
         super().closeEvent(event)
+
+    def _cleanup_web_profile_storage(self):
+        path = self._web_profile_storage_dir
+        self._web_profile_storage_dir = ""
+        if not path:
+            return
+        try:
+            shutil.rmtree(path, ignore_errors=True)
+        except Exception:
+            return
 
     def _update_status_label(self, status):
         self._status_text = str(status or "")
@@ -741,4 +895,6 @@ class TaxaMaskAgentPanel(QWidget):
             lines.extend(["", self.dashboard_url])
         if self._preflight_error:
             lines.extend(["", f"Preflight error: {self._preflight_error}"])
+        if self._json_health_warning:
+            lines.extend(["", f"JSON warning: {self._json_health_warning}"])
         self.fallback.setPlainText("\n".join(lines))

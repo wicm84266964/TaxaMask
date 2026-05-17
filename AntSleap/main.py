@@ -3516,10 +3516,63 @@ class MainWindow(QMainWindow):
             path = self.config.get("last_project_path", "") or ""
         return path if path else tr("No active project", self.current_lang)
 
-    def _recent_text_excerpt(self, widget, line_limit=6):
+    AGENT_CONTEXT_TEXT_LIMIT = 320
+    AGENT_CONTEXT_LOG_LINES = 6
+    AGENT_CONTEXT_LOG_LINE_LIMIT = 160
+    AGENT_CONTEXT_TOTAL_LIMIT = 1800
+
+    def _recent_text_excerpt(self, widget, line_limit=AGENT_CONTEXT_LOG_LINES):
         if widget is None or not hasattr(widget, "toPlainText"):
             return ""
-        return "\n".join(widget.toPlainText().splitlines()[-line_limit:])
+        lines = []
+        for line in widget.toPlainText().splitlines()[-line_limit:]:
+            lines.append(self._agent_context_text(line, self.AGENT_CONTEXT_LOG_LINE_LIMIT))
+        return "\n".join(lines)
+
+    def _agent_context_text(self, value, limit=AGENT_CONTEXT_TEXT_LIMIT):
+        text = str(value or "").replace("\r", " ").strip()
+        if len(text) <= limit:
+            return text
+        return f"{text[:limit]}... [truncated]"
+
+    def _compact_agent_context(self, context):
+        allowed_keys = (
+            "source_workbench",
+            "project_type",
+            "project_source_kind",
+            "project_path",
+            "review_project_path",
+            "active_specimen_id",
+            "active_image_path",
+            "active_label_role",
+            "selected_part",
+            "selected_material_id",
+            "recent_log_excerpt",
+        )
+        compact = {}
+        for key in allowed_keys:
+            value = (context or {}).get(key)
+            if not value:
+                continue
+            limit = self.AGENT_CONTEXT_TEXT_LIMIT
+            if key == "recent_log_excerpt":
+                limit = self.AGENT_CONTEXT_LOG_LINES * self.AGENT_CONTEXT_LOG_LINE_LIMIT
+            compact[key] = self._agent_context_text(value, limit)
+        compact["context_policy"] = (
+            "Only compact field indexes are provided. Do not assume full project data is loaded; "
+            "read specific files only when needed."
+        )
+        text_budget = 0
+        limited = {}
+        for key, value in compact.items():
+            text = str(value)
+            next_budget = text_budget + len(key) + len(text)
+            if next_budget > self.AGENT_CONTEXT_TOTAL_LIMIT and key != "context_policy":
+                limited[key] = self._agent_context_text(text, max(80, self.AGENT_CONTEXT_TOTAL_LIMIT - text_budget - len(key)))
+                break
+            limited[key] = value
+            text_budget = next_budget
+        return limited
 
     def _collect_image_workbench_agent_context(self):
         return {
@@ -3555,6 +3608,7 @@ class MainWindow(QMainWindow):
             payload = self.tif_workbench.get_agent_context()
         if not payload:
             payload = self._collect_image_workbench_agent_context()
+        payload = self._compact_agent_context(payload)
         self.active_project_kind = "start"
         self._apply_project_mode_tabs()
         self._update_start_center_texts()
@@ -3568,13 +3622,7 @@ class MainWindow(QMainWindow):
             )
 
     def return_to_start_center_with_context(self):
-        if hasattr(self, "tabs") and self.tabs.currentWidget() is self.tif_workbench:
-            self.open_agent_from_context(self.tif_workbench.get_agent_context())
-            return
-        if hasattr(self, "tabs") and self.tabs.currentWidget() is self.blink_lab:
-            self.open_agent_from_context(self._collect_blink_agent_context())
-            return
-        self.open_agent_from_context(self._collect_image_workbench_agent_context())
+        self._show_start_center()
 
     def _open_workflow_from_agent(self, workflow):
         if workflow == "tif":

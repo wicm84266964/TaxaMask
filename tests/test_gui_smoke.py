@@ -372,26 +372,63 @@ class GuiSmokeTests(unittest.TestCase):
         finally:
             window.deleteLater()
 
-    def test_workbench_agent_entry_returns_to_start_center_with_context(self):
+    def test_agent_panel_blocks_invalid_active_project_json(self):
+        window = self._make_window()
+        try:
+            bad_project = self.project_dir / "active_project.json"
+            bad_project.write_text('{"name": "broken", bad: true}', encoding="utf-8")
+            panel = window.agent_panel
+            panel._project_display = str(bad_project)
+
+            error = panel._dashboard_json_health_error()
+
+            self.assertIn("Active project JSON check failed", error)
+            self.assertIn("active_project.json", error)
+            self.assertIn("line 1", error)
+        finally:
+            window.deleteLater()
+
+    def test_agent_panel_warns_but_does_not_block_unselected_workspace_json(self):
+        window = self._make_window()
+        try:
+            valid_project = self.project_dir / "current_project.json"
+            valid_project.write_text('{"name": "valid"}', encoding="utf-8")
+            backup = self.project_dir / "old_backup.json"
+            backup.write_text('{"name": "backup", bad: true}', encoding="utf-8")
+            panel = window.agent_panel
+            panel.workspace_dir = str(self.project_dir)
+            panel._project_display = str(valid_project)
+            panel._context = {}
+
+            self.assertEqual(panel._dashboard_json_health_error(), "")
+            warning = panel._dashboard_workspace_json_warning()
+
+            self.assertIn("Workspace contains an invalid JSON file", warning)
+            self.assertIn("old_backup.json", warning)
+        finally:
+            window.deleteLater()
+
+    def test_start_center_entry_is_navigation_only(self):
         window = self._make_window()
         try:
             window.project.current_project_path = str(self.project_dir / "image_project.json")
             window.current_image = str(self.project_dir / "head.png")
             window.log("sample recent error")
+            window.agent_panel._context = {"source_workbench": "previous"}
             window.enter_image_workflow()
             window.return_to_start_center_with_context()
 
             self.assertEqual(window.active_project_kind, "start")
             self.assertEqual(window.tabs.currentWidget(), window.start_center_widget)
-            self.assertEqual(window.agent_panel._context["source_workbench"], "labeling")
-            self.assertIn("head.png", window.agent_panel._context["active_image_path"])
+            self.assertEqual(window.agent_panel._context, {"source_workbench": "previous"})
         finally:
             window.deleteLater()
 
-    def test_tif_start_center_entry_carries_tif_context(self):
+    def test_tif_start_center_entry_is_navigation_only(self):
         window = self._make_window()
         try:
             window.tif_project.current_project_path = str(self.project_dir / "tif_project.json")
+            window.agent_panel._context = {"source_workbench": "previous"}
             window.enter_tif_workflow()
             window.tif_workbench.current_specimen_id = "ANT_001"
             window.tif_workbench.log("missing manual_truth")
@@ -399,8 +436,25 @@ class GuiSmokeTests(unittest.TestCase):
 
             self.assertEqual(window.active_project_kind, "start")
             self.assertEqual(window.tabs.currentWidget(), window.start_center_widget)
-            self.assertEqual(window.agent_panel._context["source_workbench"], "tif_volume")
-            self.assertEqual(window.agent_panel._context["active_specimen_id"], "ANT_001")
+            self.assertEqual(window.agent_panel._context, {"source_workbench": "previous"})
+        finally:
+            window.deleteLater()
+
+    def test_ask_agent_carries_compact_context_only(self):
+        window = self._make_window()
+        try:
+            window.project.current_project_path = str(self.project_dir / "image_project.json")
+            window.current_image = str(self.project_dir / "head.png")
+            window.log("x" * 1200)
+            window.enter_image_workflow()
+            window.open_agent_from_context(window._collect_image_workbench_agent_context())
+
+            context = window.agent_panel._context
+            self.assertEqual(context["source_workbench"], "labeling")
+            self.assertIn("head.png", context["active_image_path"])
+            self.assertIn("context_policy", context)
+            self.assertIn("[truncated]", context["recent_log_excerpt"])
+            self.assertLess(len(str(context)), 2000)
         finally:
             window.deleteLater()
 

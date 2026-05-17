@@ -37,6 +37,7 @@ screener_configs/api_runtime_settings.json
 *.sqlite
 *.sqlite3
 *.json
+AntSleap/specimens/
 !AntSleap/config/*.json
 !json_projects/templates/*.json
 !json_projects/samples/*.json

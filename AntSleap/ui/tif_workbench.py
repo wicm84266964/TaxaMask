@@ -38,6 +38,7 @@ try:
     from AntSleap.core.tif_backend import DEFAULT_TIF_BACKEND_CONFIG, TifBackendRunner, sanitize_tif_backend_config
     from AntSleap.core.tif_export import export_tif_training_dataset
     from AntSleap.core.tif_materials import next_material_id, read_material_map, remove_material, upsert_material, write_material_map
+    from AntSleap.core.tif_prediction_import import default_prediction_id_for_tif, import_external_prediction_tif
     from AntSleap.core.tif_project import TifProjectManager
     from AntSleap.core.tif_stack_import import import_tif_stack
     from AntSleap.core.tif_volume_io import load_volume_sidecar, save_volume_array, volume_sidecar_exists
@@ -48,6 +49,7 @@ except ModuleNotFoundError as exc:
     from core.tif_backend import DEFAULT_TIF_BACKEND_CONFIG, TifBackendRunner, sanitize_tif_backend_config
     from core.tif_export import export_tif_training_dataset
     from core.tif_materials import next_material_id, read_material_map, remove_material, upsert_material, write_material_map
+    from core.tif_prediction_import import default_prediction_id_for_tif, import_external_prediction_tif
     from core.tif_project import TifProjectManager
     from core.tif_stack_import import import_tif_stack
     from core.tif_volume_io import load_volume_sidecar, save_volume_array, volume_sidecar_exists
@@ -109,6 +111,12 @@ TIF_TRANSLATIONS = {
         "Prepare dataset": "准备训练数据",
         "Train backend": "训练后端",
         "Import prediction": "运行预测并导入草稿",
+        "Import external label TIF to draft": "导入外部标签 TIF 到草稿",
+        "Import External Label TIF": "导入外部标签 TIF",
+        "Prediction ID:": "预测编号：",
+        "Source model:": "来源模型：",
+        "Imported external label TIF as model draft for specimen {0}. Report: {1}": "已为 specimen {0} 将外部标签 TIF 导入模型草稿。报告：{1}",
+        "Please select a specimen with a working volume first.": "请先选择一个已有 working volume 的 specimen。",
         "Specimen status": "Specimen 状态",
         "Volume metadata": "体数据元数据",
         "No specimens in this TIF project": "当前 TIF 项目还没有 specimen",
@@ -371,6 +379,9 @@ class TifWorkbenchWidget(QWidget):
         self.btn_import_prediction = QPushButton("Import prediction")
         self.btn_import_prediction.setObjectName("tifImportPredictionButton")
         self.btn_import_prediction.clicked.connect(lambda: self.run_backend_action("predict"))
+        self.btn_import_external_prediction_tif = QPushButton("Import external label TIF to draft")
+        self.btn_import_external_prediction_tif.setObjectName("tifImportExternalPredictionTifButton")
+        self.btn_import_external_prediction_tif.clicked.connect(self.import_external_prediction_tif_dialog)
         self.btn_start_center = QPushButton("Start Center")
         self.btn_start_center.setObjectName("tifStartCenterButton")
         self.btn_start_center.clicked.connect(self.start_center_requested.emit)
@@ -412,6 +423,7 @@ class TifWorkbenchWidget(QWidget):
             self.btn_prepare_dataset,
             self.btn_train_backend,
             self.btn_import_prediction,
+            self.btn_import_external_prediction_tif,
             self.btn_promote,
         ]
         secondary_buttons = [
@@ -487,6 +499,7 @@ class TifWorkbenchWidget(QWidget):
         self.btn_prepare_dataset.setText(tt("Prepare dataset", self.lang))
         self.btn_train_backend.setText(tt("Train backend", self.lang))
         self.btn_import_prediction.setText(tt("Import prediction", self.lang))
+        self.btn_import_external_prediction_tif.setText(tt("Import external label TIF to draft", self.lang))
         self.btn_start_center.setText(tt("Start Center", self.lang))
         self.btn_ask_agent.setText(tt("Ask Agent", self.lang))
         self.material_table.setHorizontalHeaderLabels(
@@ -623,6 +636,72 @@ class TifWorkbenchWidget(QWidget):
         self._select_specimen_after_import(specimen_id)
         report_path = result.get("report_path", "")
         message = tt("Imported AMIRA directory for specimen {0}. Report: {1}", self.lang).format(specimen_id, report_path)
+        self.training_status_label.setText(message)
+        self.log(message)
+
+    def import_external_prediction_tif_dialog(self):
+        if not self._ensure_tif_project_open():
+            return
+        if not self.current_specimen_id:
+            QMessageBox.warning(
+                self,
+                tt("Import External Label TIF", self.lang),
+                tt("Please select a specimen with a working volume first.", self.lang),
+            )
+            return
+        specimen_id = self.current_specimen_id
+        specimen = self.project.get_specimen(specimen_id, default=None)
+        working = (specimen or {}).get("working_volume") or {}
+        if not working.get("path") or not volume_sidecar_exists(self.project.to_absolute(working.get("path", ""))):
+            QMessageBox.warning(
+                self,
+                tt("Import External Label TIF", self.lang),
+                tt("Please select a specimen with a working volume first.", self.lang),
+            )
+            return
+        tif_path, _ = QFileDialog.getOpenFileName(
+            self,
+            tt("Import External Label TIF", self.lang),
+            "",
+            "TIF/TIFF (*.tif *.tiff)",
+        )
+        if not tif_path:
+            return
+        prediction_id, ok = QInputDialog.getText(
+            self,
+            tt("Import External Label TIF", self.lang),
+            tt("Prediction ID:", self.lang),
+            text=default_prediction_id_for_tif(tif_path),
+        )
+        if not ok or not prediction_id:
+            return
+        source_model, ok = QInputDialog.getText(
+            self,
+            tt("Import External Label TIF", self.lang),
+            tt("Source model:", self.lang),
+            text="nnUNet",
+        )
+        if not ok:
+            return
+        try:
+            result = import_external_prediction_tif(
+                self.project,
+                specimen_id,
+                tif_path,
+                prediction_id=prediction_id,
+                source_model=source_model or "external_tif",
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, tt("Import External Label TIF", self.lang), str(exc))
+            return
+        self.refresh_project()
+        self._select_specimen_after_import(specimen_id)
+        index = self.label_role_combo.findData("model_draft")
+        if index >= 0:
+            self.label_role_combo.setCurrentIndex(index)
+        self.load_specimen(specimen_id)
+        report_path = result.get("report_path", "")
+        message = tt("Imported external label TIF as model draft for specimen {0}. Report: {1}", self.lang).format(specimen_id, report_path)
         self.training_status_label.setText(message)
         self.log(message)
 
@@ -831,6 +910,7 @@ class TifWorkbenchWidget(QWidget):
         backend_button_row.addWidget(self.btn_train_backend)
         backend_button_row.addWidget(self.btn_import_prediction)
         training_layout.addLayout(backend_button_row)
+        training_layout.addWidget(self.btn_import_external_prediction_tif)
         training_layout.addWidget(self.training_status_label)
         inspector_layout.addWidget(training_section)
 

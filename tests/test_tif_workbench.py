@@ -198,6 +198,7 @@ class TifWorkbenchTests(unittest.TestCase):
             self.assertEqual(widget.btn_prepare_dataset.text(), "Prepare dataset")
             self.assertEqual(widget.btn_train_backend.text(), "Train backend")
             self.assertEqual(widget.btn_import_prediction.text(), "Import prediction")
+            self.assertEqual(widget.btn_import_external_prediction_tif.text(), "Import external label TIF to draft")
             self.assertEqual(widget.btn_start_center.text(), "Start Center")
             self.assertEqual(widget.btn_ask_agent.text(), "Ask Agent")
             self.assertIsNotNone(widget.findChild(type(widget.btn_export_training), "tifExportTrainingButton"))
@@ -208,6 +209,7 @@ class TifWorkbenchTests(unittest.TestCase):
             self.assertIsNotNone(widget.findChild(type(widget.btn_prepare_dataset), "tifPrepareDatasetButton"))
             self.assertIsNotNone(widget.findChild(type(widget.btn_train_backend), "tifTrainBackendButton"))
             self.assertIsNotNone(widget.findChild(type(widget.btn_import_prediction), "tifImportPredictionButton"))
+            self.assertIsNotNone(widget.findChild(type(widget.btn_import_external_prediction_tif), "tifImportExternalPredictionTifButton"))
             self.assertEqual(widget.backend_id_edit.objectName(), "tifBackendIdEdit")
             self.assertEqual(widget.backend_formats_edit.text(), "ome_tiff,nrrd,mha,nifti")
             self.assertEqual(widget.training_status_label.objectName(), "tifTrainingStatusText")
@@ -236,6 +238,7 @@ class TifWorkbenchTests(unittest.TestCase):
             self.assertEqual(widget.btn_prepare_dataset.text(), "准备训练数据")
             self.assertEqual(widget.btn_train_backend.text(), "训练后端")
             self.assertEqual(widget.btn_import_prediction.text(), "运行预测并导入草稿")
+            self.assertEqual(widget.btn_import_external_prediction_tif.text(), "导入外部标签 TIF 到草稿")
             self.assertEqual(widget.btn_start_center.text(), "启动中心")
             self.assertEqual(widget.btn_ask_agent.text(), "询问 Agent")
             section_titles = {

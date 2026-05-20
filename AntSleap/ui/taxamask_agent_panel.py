@@ -411,6 +411,38 @@ class TaxaMaskAgentPanel(QWidget):
       .workflow-strip {
         max-width: 880px !important;
       }
+      .workflow-strip {
+        box-sizing: border-box !important;
+        width: 100% !important;
+      }
+      .workflow-strip-toggle,
+      .workflow-strip-meter,
+      .workflow-strip-detail,
+      .workflow-panel,
+      .activity-card,
+      .approval-panel,
+      .question-panel,
+      .trust-panel,
+      .context-panel,
+      .queue-panel,
+      .live-status {
+        box-sizing: border-box !important;
+        max-width: none !important;
+        width: 100% !important;
+      }
+      .workflow-strip-toggle {
+        grid-template-columns: auto auto minmax(0, 1fr) auto !important;
+      }
+      .workflow-strip-chevron {
+        display: none !important;
+      }
+      .workflow-strip-detail .workflow-list {
+        grid-template-columns: minmax(0, 1fr) !important;
+      }
+      .workflow-panel {
+        margin-left: 0 !important;
+        margin-right: 0 !important;
+      }
       .empty-state {
         border: 1px solid #303A42 !important;
         border-radius: 8px !important;

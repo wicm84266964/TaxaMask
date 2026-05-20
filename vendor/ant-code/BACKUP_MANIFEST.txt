@@ -1,0 +1,150 @@
+Ant Code lab-agent rollback backup
+createdAt=2026-05-02T07:22:47.0494558+08:00
+source=C:\saveproject\LBJ-workspace\lab-agent
+backup=C:\saveproject\ant-code项目备份\lab-agent-右栏瘦身验收通过-opencode布局重构前-源码目录-20260502-072246
+zip=C:\saveproject\ant-code项目备份\lab-agent-右栏瘦身验收通过-opencode布局重构前-源码目录-20260502-072246.zip
+version=ant-code 1.1.0
+validation=npm run check passed before backup: 322 tests / 0 fail
+excludedDirs=.git,node_modules,.lab-agent,dist,coverage
+purpose=right-sidebar cleanup accepted; rollback point before opencode-like layout refactor
+
+git status --short at backup time:
+ M README.md
+ M config/lab-agent.high-sensitivity-template.json
+ M config/lab-agent.lab-template.json
+ M docs/architecture/mvp-architecture.md
+ M docs/audit/clean-room-release-attestation.md
+ M docs/audit/dependency-license-summary.generated.md
+ M docs/audit/dependency-sbom.generated.json
+ M docs/audit/endpoint-manifest.generated.json
+ M docs/audit/mvp-release-audit.generated.md
+ M docs/audit/release-candidate-summary.generated.md
+ M docs/deployment/local-installation.md
+ M docs/deployment/pre-launch-security-config.md
+ M docs/deployment/rc-acceptance-summary.md
+ M docs/deployment/release-candidate-package.md
+ M docs/provenance/modules/agents.md
+ M docs/provenance/modules/cli.md
+ M docs/provenance/modules/commands.md
+ M docs/provenance/modules/context.md
+ M docs/provenance/modules/core.md
+ M docs/provenance/modules/mcp.md
+ M docs/provenance/modules/model-gateway.md
+ M docs/provenance/modules/permissions.md
+ M docs/provenance/modules/tools.md
+ M docs/provenance/modules/ui.md
+ M docs/security/data-boundary.md
+ M docs/specs/mvp-product-spec.md
+ M package.json
+ M scripts/generate-audit-report.js
+ M scripts/generate-license-summary.js
+ M scripts/generate-rc-summary.js
+ M scripts/verify-dependency-policy.js
+ M scripts/verify-readiness-docs.js
+ M scripts/verify-release-seal.js
+ M src/agents/profiles.js
+ M src/agents/runner.js
+ M src/cli/args.js
+ M src/cli/index.js
+ M src/cli/interactive.js
+ M src/cli/tui.js
+ M src/commands/registry.js
+ M src/commands/runtime.js
+ M src/config/load-config.js
+ M src/context/builder.js
+ M src/core/context-window.js
+ M src/core/repo-map.js
+ M src/core/session.js
+ M src/diagnostics/doctor.js
+ M src/mcp/runtime.js
+ M src/model-gateway/client.js
+ M src/model-gateway/openai-chat.js
+ M src/model-gateway/streaming.js
+ M src/permissions/policy-engine.js
+ M src/storage/session-store.js
+ M src/tools/definitions.js
+ M src/tools/env-scrubber.js
+ M src/tools/runtime.js
+ M src/tools/workflow-tools.js
+ M src/ui/output.js
+ M tests/fixtures/mcp-echo-server.js
+ M tests/integration/print-mode-gateway.test.js
+ M tests/unit/agents.test.js
+ M tests/unit/commands.test.js
+ M tests/unit/config.test.js
+ M tests/unit/context-window.test.js
+ M tests/unit/context.test.js
+ M tests/unit/gateway-protocol.test.js
+ M tests/unit/mcp.test.js
+ M tests/unit/permissions.test.js
+ M tests/unit/session.test.js
+ M tests/unit/storage.test.js
+ M tests/unit/tools.test.js
+?? LLM_ONBOARDING.md
+?? PROJECT_CHANGELOG.zh-CN.md
+?? config/skills/
+?? docs/architecture/opentui-poc-2026-04-30.md
+?? docs/deployment/v1.0-acceptance.md
+?? docs/deployment/v1.1-experience-acceptance.md
+?? docs/deployment/v1.2-tui-acceptance.md
+?? docs/deployment/v1.3-agent-extension-acceptance.md
+?? docs/deployment/v1.4-orchestration-acceptance.md
+?? docs/handoff/
+?? docs/plans/
+?? docs/provenance/modules/capabilities.md
+?? docs/provenance/modules/net.md
+?? docs/provenance/modules/skills.md
+?? docs/specs/experience-parity-v1.1.md
+?? docs/specs/tui-experience-parity-design.md
+?? docs/specs/tui-v1.2-interaction-polish-outline.md
+?? lab-agent.config.json
+?? npm-shrinkwrap.json
+?? package-lock.json
+?? src/agents/budget.js
+?? src/agents/context-pack.js
+?? src/agents/continuation.js
+?? src/agents/contracts.js
+?? src/agents/internal.js
+?? src/agents/orchestrator.js
+?? src/agents/review-policy.js
+?? src/agents/router.js
+?? src/agents/task-store.js
+?? src/agents/worktree.js
+?? src/capabilities/
+?? src/cli/print-output.js
+?? src/cli/tui/
+?? src/core/event-reducer.js
+?? src/core/events.js
+?? src/core/inflight-compaction.js
+?? src/core/tool-rounds.js
+?? src/core/workspace-diagnostics.js
+?? src/mcp/recommended.js
+?? src/model-gateway/models.js
+?? src/net/
+?? src/permissions/workspace-trust.js
+?? src/skills/
+?? src/tools/document-tools.js
+?? src/tools/web-tools.js
+?? test.txt
+?? test_file.txt
+?? tests/fixtures/events/
+?? tests/helpers/
+?? tests/integration/ant-event-output.test.js
+?? tests/unit/agent-budget-contract.test.js
+?? tests/unit/agent-profiles-config.test.js
+?? tests/unit/agent-router.test.js
+?? tests/unit/agent-task-store.test.js
+?? tests/unit/event-reducer.test.js
+?? tests/unit/events.test.js
+?? tests/unit/terminal-snapshot.test.js
+?? tests/unit/tui-command-panels.test.js
+?? tests/unit/tui-format.test.js
+?? tests/unit/tui-frame.test.js
+?? tests/unit/tui-input-editor.test.js
+?? tests/unit/tui-inspector.test.js
+?? tests/unit/tui-interaction.test.js
+?? tests/unit/tui-palettes.test.js
+?? tests/unit/tui-scroll-region.test.js
+?? tests/unit/tui-theme.test.js
+?? tests/unit/tui-workflows.test.js
+?? tests/unit/workspace-trust.test.js

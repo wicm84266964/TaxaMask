@@ -1,0 +1,741 @@
+{
+  "generatedAt": "not-recorded-deterministic-artifact",
+  "policy": {
+    "runtimeModelTraffic": "LAB_MODEL_GATEWAY_URL",
+    "networkDefault": "lab-only",
+    "mcpDefault": "explicit local stdio only",
+    "directProviderKeysInClient": "forbidden"
+  },
+  "declaredRuntimeEndpoints": [
+    {
+      "name": "Lab model gateway",
+      "configuredBy": "LAB_MODEL_GATEWAY_URL",
+      "allowedByDefault": true,
+      "notes": "All model traffic must pass through this lab-approved endpoint."
+    },
+    {
+      "name": "Lab model gateway health",
+      "configuredBy": "LAB_MODEL_GATEWAY_HEALTH_URL",
+      "allowedByDefault": true,
+      "notes": "Optional health endpoint used only by explicit gateway diagnostics and compatibility checks."
+    },
+    {
+      "name": "Lab model gateway protocol",
+      "configuredBy": "LAB_MODEL_GATEWAY_PROTOCOL",
+      "allowedByDefault": true,
+      "notes": "Protocol selector only; defaults to the lab-owned protocol and can enable OpenAI Chat compatible adapters."
+    },
+    {
+      "name": "Lab model gateway adapter auth",
+      "configuredBy": "LAB_MODEL_GATEWAY_API_KEY",
+      "allowedByDefault": true,
+      "notes": "Optional bearer token for gateway access control; provider keys remain forbidden in the local client."
+    },
+    {
+      "name": "Approved host allowlist",
+      "configuredBy": "LAB_AGENT_ALLOWED_HOSTS",
+      "allowedByDefault": false,
+      "notes": "Only used by explicit policy modes."
+    }
+  ],
+  "staticUrlLiterals": [
+    {
+      "url": "https://api.github.com/",
+      "host": "api.github.com",
+      "file": "scripts/github-mcp-server.js",
+      "line": 4,
+      "scope": "runtime-or-script",
+      "allowedByDefault": false,
+      "notes": "review required"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/",
+      "host": "raw.githubusercontent.com",
+      "file": "scripts/github-mcp-server.js",
+      "line": 5,
+      "scope": "runtime-or-script",
+      "allowedByDefault": false,
+      "notes": "review required"
+    },
+    {
+      "url": "http://${host}:${actualPort}/v1/chat",
+      "host": "dynamic-template",
+      "file": "scripts/mock-gateway.js",
+      "line": 16,
+      "scope": "development",
+      "allowedByDefault": false,
+      "notes": "dynamic template URL; review source context"
+    },
+    {
+      "url": "http://${host}:${actualPort}/health",
+      "host": "dynamic-template",
+      "file": "scripts/mock-gateway.js",
+      "line": 17,
+      "scope": "development",
+      "allowedByDefault": false,
+      "notes": "dynamic template URL; review source context"
+    },
+    {
+      "url": "http://127.0.0.1:${address.port}",
+      "host": "loopback-template",
+      "file": "scripts/verify-gateway-compat.js",
+      "line": 194,
+      "scope": "development",
+      "allowedByDefault": true,
+      "notes": "loopback development/test endpoint"
+    },
+    {
+      "url": "https://r.jina.ai/http://r.jina.ai/http://",
+      "host": "r.jina.ai",
+      "file": "src/agents/profiles.js",
+      "line": 237,
+      "scope": "runtime-or-script",
+      "allowedByDefault": false,
+      "notes": "review required"
+    },
+    {
+      "url": "https://r.jina.ai/http://r.jina.ai/http://",
+      "host": "r.jina.ai",
+      "file": "src/agents/profiles.js",
+      "line": 80,
+      "scope": "runtime-or-script",
+      "allowedByDefault": false,
+      "notes": "review required"
+    },
+    {
+      "url": "http://localhost:8080/",
+      "host": "localhost",
+      "file": "src/mcp/recommended.js",
+      "line": 37,
+      "scope": "runtime-or-script",
+      "allowedByDefault": false,
+      "notes": "loopback development/test endpoint"
+    },
+    {
+      "url": "https://duckduckgo.com/",
+      "host": "duckduckgo.com",
+      "file": "src/mcp/runtime.js",
+      "line": 316,
+      "scope": "runtime-or-script",
+      "allowedByDefault": false,
+      "notes": "review required"
+    },
+    {
+      "url": "http://localhost:8080/",
+      "host": "localhost",
+      "file": "src/mcp/runtime.js",
+      "line": 319,
+      "scope": "runtime-or-script",
+      "allowedByDefault": false,
+      "notes": "loopback development/test endpoint"
+    },
+    {
+      "url": "https://api.github.com/",
+      "host": "api.github.com",
+      "file": "src/mcp/runtime.js",
+      "line": 322,
+      "scope": "runtime-or-script",
+      "allowedByDefault": false,
+      "notes": "review required"
+    },
+    {
+      "url": "http://${text}",
+      "host": "dynamic-template",
+      "file": "src/net/proxy.js",
+      "line": 160,
+      "scope": "dynamic",
+      "allowedByDefault": false,
+      "notes": "dynamic template URL; review source context"
+    },
+    {
+      "url": "http://example.invalid/",
+      "host": "example.invalid",
+      "file": "src/net/proxy.js",
+      "line": 56,
+      "scope": "runtime-or-script",
+      "allowedByDefault": false,
+      "notes": "review required"
+    },
+    {
+      "url": "https://example.invalid/",
+      "host": "example.invalid",
+      "file": "src/net/proxy.js",
+      "line": 57,
+      "scope": "runtime-or-script",
+      "allowedByDefault": false,
+      "notes": "review required"
+    },
+    {
+      "url": "http://${text}",
+      "host": "dynamic-template",
+      "file": "src/tools/runtime.js",
+      "line": 1325,
+      "scope": "dynamic",
+      "allowedByDefault": false,
+      "notes": "dynamic template URL; review source context"
+    },
+    {
+      "url": "https://${text}",
+      "host": "dynamic-template",
+      "file": "src/tools/runtime.js",
+      "line": 1328,
+      "scope": "dynamic",
+      "allowedByDefault": false,
+      "notes": "dynamic template URL; review source context"
+    },
+    {
+      "url": "https://duckduckgo.com/",
+      "host": "duckduckgo.com",
+      "file": "src/tools/web-tools.js",
+      "line": 130,
+      "scope": "runtime-or-script",
+      "allowedByDefault": false,
+      "notes": "review required"
+    },
+    {
+      "url": "https://duckduckgo.com/",
+      "host": "duckduckgo.com",
+      "file": "src/tools/web-tools.js",
+      "line": 61,
+      "scope": "runtime-or-script",
+      "allowedByDefault": false,
+      "notes": "review required"
+    },
+    {
+      "url": "https://example.invalid/",
+      "host": "example.invalid",
+      "file": "src/tools/web-tools.js",
+      "line": 652,
+      "scope": "runtime-or-script",
+      "allowedByDefault": false,
+      "notes": "review required"
+    },
+    {
+      "url": "https://duckduckgo.com/html/",
+      "host": "duckduckgo.com",
+      "file": "src/tools/web-tools.js",
+      "line": 94,
+      "scope": "runtime-or-script",
+      "allowedByDefault": false,
+      "notes": "review required"
+    },
+    {
+      "url": "http://127.0.0.1:${address.port}",
+      "host": "loopback-template",
+      "file": "tests/integration/ant-event-output.test.js",
+      "line": 144,
+      "scope": "test",
+      "allowedByDefault": true,
+      "notes": "loopback development/test endpoint"
+    },
+    {
+      "url": "https://example.com/docs",
+      "host": "example.com",
+      "file": "tests/integration/print-mode-gateway.test.js",
+      "line": 360,
+      "scope": "test",
+      "allowedByDefault": false,
+      "notes": "review required"
+    },
+    {
+      "url": "http://127.0.0.1:${address.port}",
+      "host": "loopback-template",
+      "file": "tests/integration/print-mode-gateway.test.js",
+      "line": 482,
+      "scope": "test",
+      "allowedByDefault": true,
+      "notes": "loopback development/test endpoint"
+    },
+    {
+      "url": "http://127.0.0.1:${address.port}",
+      "host": "loopback-template",
+      "file": "tests/unit/agents.test.js",
+      "line": 1335,
+      "scope": "test",
+      "allowedByDefault": true,
+      "notes": "loopback development/test endpoint"
+    },
+    {
+      "url": "http://127.0.0.1:9/",
+      "host": "127.0.0.1",
+      "file": "tests/unit/agents.test.js",
+      "line": 185,
+      "scope": "test",
+      "allowedByDefault": true,
+      "notes": "loopback development/test endpoint"
+    },
+    {
+      "url": "http://127.0.0.1:9/",
+      "host": "127.0.0.1",
+      "file": "tests/unit/agents.test.js",
+      "line": 186,
+      "scope": "test",
+      "allowedByDefault": true,
+      "notes": "loopback development/test endpoint"
+    },
+    {
+      "url": "https://github.com/example/project",
+      "host": "github.com",
+      "file": "tests/unit/agents.test.js",
+      "line": 222,
+      "scope": "test",
+      "allowedByDefault": false,
+      "notes": "review required"
+    },
+    {
+      "url": "https://blocked.example/project",
+      "host": "blocked.example",
+      "file": "tests/unit/agents.test.js",
+      "line": 270,
+      "scope": "test",
+      "allowedByDefault": true,
+      "notes": "documentation or test example endpoint"
+    },
+    {
+      "url": "https://github.com/example/project",
+      "host": "github.com",
+      "file": "tests/unit/agents.test.js",
+      "line": 325,
+      "scope": "test",
+      "allowedByDefault": false,
+      "notes": "review required"
+    },
+    {
+      "url": "https://github.com/evropi/U-Net/tree/main",
+      "host": "github.com",
+      "file": "tests/unit/agents.test.js",
+      "line": 381,
+      "scope": "test",
+      "allowedByDefault": false,
+      "notes": "review required"
+    },
+    {
+      "url": "https://github.com/evropi/U-Net/blob/main/unet/unet.py",
+      "host": "github.com",
+      "file": "tests/unit/agents.test.js",
+      "line": 383,
+      "scope": "test",
+      "allowedByDefault": false,
+      "notes": "review required"
+    },
+    {
+      "url": "https://github.com/evropi/U-Net/blob/main/unet/layers.py",
+      "host": "github.com",
+      "file": "tests/unit/agents.test.js",
+      "line": 385,
+      "scope": "test",
+      "allowedByDefault": false,
+      "notes": "review required"
+    },
+    {
+      "url": "https://github.com/evropi/U-Net/blob/main/unet/image_util.py",
+      "host": "github.com",
+      "file": "tests/unit/agents.test.js",
+      "line": 387,
+      "scope": "test",
+      "allowedByDefault": false,
+      "notes": "review required"
+    },
+    {
+      "url": "http://127.0.0.1:8787/v1/chat",
+      "host": "127.0.0.1",
+      "file": "tests/unit/commands.test.js",
+      "line": 805,
+      "scope": "test",
+      "allowedByDefault": true,
+      "notes": "loopback development/test endpoint"
+    },
+    {
+      "url": "http://127.0.0.1:8787/health",
+      "host": "127.0.0.1",
+      "file": "tests/unit/commands.test.js",
+      "line": 806,
+      "scope": "test",
+      "allowedByDefault": true,
+      "notes": "loopback development/test endpoint"
+    },
+    {
+      "url": "http://127.0.0.1:8080/v1/chat/completions",
+      "host": "127.0.0.1",
+      "file": "tests/unit/commands.test.js",
+      "line": 821,
+      "scope": "test",
+      "allowedByDefault": true,
+      "notes": "loopback development/test endpoint"
+    },
+    {
+      "url": "http://127.0.0.1:8080/v1/chat/completions",
+      "host": "127.0.0.1",
+      "file": "tests/unit/commands.test.js",
+      "line": 962,
+      "scope": "test",
+      "allowedByDefault": true,
+      "notes": "loopback development/test endpoint"
+    },
+    {
+      "url": "http://127.0.0.1:8080/v1/chat/completions",
+      "host": "127.0.0.1",
+      "file": "tests/unit/commands.test.js",
+      "line": 981,
+      "scope": "test",
+      "allowedByDefault": true,
+      "notes": "loopback development/test endpoint"
+    },
+    {
+      "url": "https://gateway.lab.example/v1/chat",
+      "host": "gateway.lab.example",
+      "file": "tests/unit/config.test.js",
+      "line": 12,
+      "scope": "test",
+      "allowedByDefault": true,
+      "notes": "documentation or test example endpoint"
+    },
+    {
+      "url": "https://gateway.lab.example/health",
+      "host": "gateway.lab.example",
+      "file": "tests/unit/config.test.js",
+      "line": 13,
+      "scope": "test",
+      "allowedByDefault": true,
+      "notes": "documentation or test example endpoint"
+    },
+    {
+      "url": "https://gateway.lab.example/v1/chat",
+      "host": "gateway.lab.example",
+      "file": "tests/unit/config.test.js",
+      "line": 21,
+      "scope": "test",
+      "allowedByDefault": true,
+      "notes": "documentation or test example endpoint"
+    },
+    {
+      "url": "https://gateway.lab.example/health",
+      "host": "gateway.lab.example",
+      "file": "tests/unit/config.test.js",
+      "line": 22,
+      "scope": "test",
+      "allowedByDefault": true,
+      "notes": "documentation or test example endpoint"
+    },
+    {
+      "url": "https://gateway.lab.example/v1/chat/completions",
+      "host": "gateway.lab.example",
+      "file": "tests/unit/config.test.js",
+      "line": 229,
+      "scope": "test",
+      "allowedByDefault": true,
+      "notes": "documentation or test example endpoint"
+    },
+    {
+      "url": "https://gateway.lab.example/v1/chat/completions",
+      "host": "gateway.lab.example",
+      "file": "tests/unit/config.test.js",
+      "line": 299,
+      "scope": "test",
+      "allowedByDefault": true,
+      "notes": "documentation or test example endpoint"
+    },
+    {
+      "url": "https://example.com/a",
+      "host": "example.com",
+      "file": "tests/unit/context-window.test.js",
+      "line": 357,
+      "scope": "test",
+      "allowedByDefault": false,
+      "notes": "review required"
+    },
+    {
+      "url": "https://example.com/b",
+      "host": "example.com",
+      "file": "tests/unit/context-window.test.js",
+      "line": 375,
+      "scope": "test",
+      "allowedByDefault": false,
+      "notes": "review required"
+    },
+    {
+      "url": "https://github.com/example/project",
+      "host": "github.com",
+      "file": "tests/unit/delegation-guard.test.js",
+      "line": 17,
+      "scope": "test",
+      "allowedByDefault": false,
+      "notes": "review required"
+    },
+    {
+      "url": "https://gateway.lab.example/v1/chat",
+      "host": "gateway.lab.example",
+      "file": "tests/unit/doctor.test.js",
+      "line": 66,
+      "scope": "test",
+      "allowedByDefault": true,
+      "notes": "documentation or test example endpoint"
+    },
+    {
+      "url": "https://gateway.lab.example/health",
+      "host": "gateway.lab.example",
+      "file": "tests/unit/doctor.test.js",
+      "line": 67,
+      "scope": "test",
+      "allowedByDefault": true,
+      "notes": "documentation or test example endpoint"
+    },
+    {
+      "url": "http://127.0.0.1/v1/chat",
+      "host": "127.0.0.1",
+      "file": "tests/unit/gateway-health.test.js",
+      "line": 202,
+      "scope": "test",
+      "allowedByDefault": true,
+      "notes": "loopback development/test endpoint"
+    },
+    {
+      "url": "http://127.0.0.1/v1/chat",
+      "host": "127.0.0.1",
+      "file": "tests/unit/gateway-health.test.js",
+      "line": 248,
+      "scope": "test",
+      "allowedByDefault": true,
+      "notes": "loopback development/test endpoint"
+    },
+    {
+      "url": "http://127.0.0.1/v1/chat",
+      "host": "127.0.0.1",
+      "file": "tests/unit/gateway-health.test.js",
+      "line": 300,
+      "scope": "test",
+      "allowedByDefault": true,
+      "notes": "loopback development/test endpoint"
+    },
+    {
+      "url": "http://127.0.0.1/v1/chat",
+      "host": "127.0.0.1",
+      "file": "tests/unit/gateway-health.test.js",
+      "line": 359,
+      "scope": "test",
+      "allowedByDefault": true,
+      "notes": "loopback development/test endpoint"
+    },
+    {
+      "url": "http://127.0.0.1/v1/chat",
+      "host": "127.0.0.1",
+      "file": "tests/unit/gateway-health.test.js",
+      "line": 396,
+      "scope": "test",
+      "allowedByDefault": true,
+      "notes": "loopback development/test endpoint"
+    },
+    {
+      "url": "https://gateway.lab.example/v1/chat",
+      "host": "gateway.lab.example",
+      "file": "tests/unit/gateway-health.test.js",
+      "line": 41,
+      "scope": "test",
+      "allowedByDefault": true,
+      "notes": "documentation or test example endpoint"
+    },
+    {
+      "url": "https://gateway.lab.example/health",
+      "host": "gateway.lab.example",
+      "file": "tests/unit/gateway-health.test.js",
+      "line": 42,
+      "scope": "test",
+      "allowedByDefault": true,
+      "notes": "documentation or test example endpoint"
+    },
+    {
+      "url": "http://127.0.0.1:${address.port}",
+      "host": "loopback-template",
+      "file": "tests/unit/gateway-health.test.js",
+      "line": 481,
+      "scope": "test",
+      "allowedByDefault": true,
+      "notes": "loopback development/test endpoint"
+    },
+    {
+      "url": "https://example.com/docs",
+      "host": "example.com",
+      "file": "tests/unit/mcp.test.js",
+      "line": 252,
+      "scope": "test",
+      "allowedByDefault": false,
+      "notes": "review required"
+    },
+    {
+      "url": "https://gateway.lab.example/",
+      "host": "gateway.lab.example",
+      "file": "tests/unit/permissions.test.js",
+      "line": 302,
+      "scope": "test",
+      "allowedByDefault": true,
+      "notes": "documentation or test example endpoint"
+    },
+    {
+      "url": "https://gateway.lab.example/",
+      "host": "gateway.lab.example",
+      "file": "tests/unit/permissions.test.js",
+      "line": 322,
+      "scope": "test",
+      "allowedByDefault": true,
+      "notes": "documentation or test example endpoint"
+    },
+    {
+      "url": "https://example.com/",
+      "host": "example.com",
+      "file": "tests/unit/permissions.test.js",
+      "line": 429,
+      "scope": "test",
+      "allowedByDefault": false,
+      "notes": "review required"
+    },
+    {
+      "url": "https://example.com/",
+      "host": "example.com",
+      "file": "tests/unit/review-policy.test.js",
+      "line": 115,
+      "scope": "test",
+      "allowedByDefault": false,
+      "notes": "review required"
+    },
+    {
+      "url": "http://127.0.0.1:${address.port}",
+      "host": "loopback-template",
+      "file": "tests/unit/session.test.js",
+      "line": 2580,
+      "scope": "test",
+      "allowedByDefault": true,
+      "notes": "loopback development/test endpoint"
+    },
+    {
+      "url": "http://127.0.0.1/v1/chat",
+      "host": "127.0.0.1",
+      "file": "tests/unit/session.test.js",
+      "line": 915,
+      "scope": "test",
+      "allowedByDefault": true,
+      "notes": "loopback development/test endpoint"
+    },
+    {
+      "url": "http://127.0.0.1:${address.port}/",
+      "host": "loopback-template",
+      "file": "tests/unit/tools.test.js",
+      "line": 1110,
+      "scope": "test",
+      "allowedByDefault": true,
+      "notes": "loopback development/test endpoint"
+    },
+    {
+      "url": "http://127.0.0.1:${address.port}/",
+      "host": "loopback-template",
+      "file": "tests/unit/tools.test.js",
+      "line": 1136,
+      "scope": "test",
+      "allowedByDefault": true,
+      "notes": "loopback development/test endpoint"
+    },
+    {
+      "url": "https://example.com/large",
+      "host": "example.com",
+      "file": "tests/unit/tools.test.js",
+      "line": 1226,
+      "scope": "test",
+      "allowedByDefault": false,
+      "notes": "review required"
+    },
+    {
+      "url": "https://example.com/docs",
+      "host": "example.com",
+      "file": "tests/unit/tools.test.js",
+      "line": 1260,
+      "scope": "test",
+      "allowedByDefault": false,
+      "notes": "review required"
+    },
+    {
+      "url": "http://127.0.0.1:${address.port}",
+      "host": "loopback-template",
+      "file": "tests/unit/tools.test.js",
+      "line": 1619,
+      "scope": "test",
+      "allowedByDefault": true,
+      "notes": "loopback development/test endpoint"
+    },
+    {
+      "url": "https://example.com/docs",
+      "host": "example.com",
+      "file": "tests/unit/tools.test.js",
+      "line": 661,
+      "scope": "test",
+      "allowedByDefault": false,
+      "notes": "review required"
+    },
+    {
+      "url": "http://localhost:8080/v1/chat/completions",
+      "host": "localhost",
+      "file": "tests/unit/tui-format.test.js",
+      "line": 39,
+      "scope": "test",
+      "allowedByDefault": true,
+      "notes": "loopback development/test endpoint"
+    },
+    {
+      "url": "http://localhost:8080/",
+      "host": "localhost",
+      "file": "tests/unit/tui-frame.test.js",
+      "line": 254,
+      "scope": "test",
+      "allowedByDefault": true,
+      "notes": "loopback development/test endpoint"
+    },
+    {
+      "url": "http://localhost:8080/",
+      "host": "localhost",
+      "file": "tests/unit/tui-frame.test.js",
+      "line": 33,
+      "scope": "test",
+      "allowedByDefault": true,
+      "notes": "loopback development/test endpoint"
+    }
+  ],
+  "environmentVariables": [
+    "LAB_AGENT_AGENT_MAX_ROUNDS",
+    "LAB_AGENT_ALLOWED_HOSTS",
+    "LAB_AGENT_CONFIG",
+    "LAB_AGENT_CONTEXT_KEEP_RECENT_MESSAGES",
+    "LAB_AGENT_CONTEXT_MAX_BYTES",
+    "LAB_AGENT_CONTEXT_MAX_MESSAGES",
+    "LAB_AGENT_CONTEXT_MAX_TOKENS",
+    "LAB_AGENT_CONTEXT_PRESERVE_RECENT_TOKENS",
+    "LAB_AGENT_CONTEXT_RESUME_MAX_BYTES",
+    "LAB_AGENT_CONTEXT_RESUME_MAX_MESSAGES",
+    "LAB_AGENT_CONTEXT_RESUME_MAX_TOKENS",
+    "LAB_AGENT_CONTEXT_SUMMARY_BYTES",
+    "LAB_AGENT_CONTEXT_TAIL_TURNS",
+    "LAB_AGENT_HOME",
+    "LAB_AGENT_MAX_TOOL_ROUNDS",
+    "LAB_AGENT_MOCK_GATEWAY_PORT",
+    "LAB_AGENT_MOCK_GATEWAY_STREAM",
+    "LAB_AGENT_MODEL",
+    "LAB_AGENT_MODELS",
+    "LAB_AGENT_NETWORK_MODE",
+    "LAB_AGENT_NO_COLOR",
+    "LAB_AGENT_PACKAGE_ROOT",
+    "LAB_AGENT_SEARXNG_URL",
+    "LAB_AGENT_SENSITIVITY",
+    "LAB_AGENT_SKILL_PATHS",
+    "LAB_AGENT_TRANSCRIPT_ENABLED",
+    "LAB_AGENT_TRANSCRIPT_ENCRYPTION",
+    "LAB_AGENT_TRANSCRIPT_KEY",
+    "LAB_AGENT_TRANSCRIPT_RETENTION_DAYS",
+    "LAB_AGENT_TUI_DEBUG_INPUT",
+    "LAB_AGENT_TUI_IDLE_SILENT_MS",
+    "LAB_AGENT_TUI_THEME",
+    "LAB_MODEL_GATEWAY_API_KEY",
+    "LAB_MODEL_GATEWAY_HEALTH_URL",
+    "LAB_MODEL_GATEWAY_MAX_RETRIES",
+    "LAB_MODEL_GATEWAY_PROTOCOL",
+    "LAB_MODEL_GATEWAY_URL",
+    "LAB_SECRET_TOKEN",
+    "LAB_TOKEN"
+  ]
+}

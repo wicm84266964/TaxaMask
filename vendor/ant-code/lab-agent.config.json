@@ -1,0 +1,278 @@
+{
+  "modelAlias": "mimo-v2.5-pro",
+  "models": [
+    {
+      "id": "mimo-v2.5-pro",
+      "label": "Mimo v2.5 Pro",
+      "description": "Xiaomi Mimo v2.5 Pro OpenAI-compatible model for Ant Code main-agent work.",
+      "thinking": false,
+      "reasoningContentMode": "visible-when-no-content",
+      "contextTokens": 400000
+    },
+    {
+      "id": "mimo-v2.5",
+      "label": "Mimo v2.5",
+      "description": "Xiaomi Mimo v2.5 OpenAI-compatible model for Ant Code subagents and routing.",
+      "thinking": false,
+      "reasoningContentMode": "visible-when-no-content",
+      "contextTokens": 400000
+    }
+  ],
+  "allowedHosts": [
+    "token-plan-cn.xiaomimimo.com",
+    "duckduckgo.com",
+    "html.duckduckgo.com",
+    "github.com",
+    "raw.githubusercontent.com",
+    "api.github.com",
+    "r.jina.ai"
+  ],
+  "networkMode": "approved-web",
+  "lab": {
+    "gatewayUrl": "https://token-plan-cn.xiaomimimo.com/v1/chat/completions",
+    "gatewayProtocol": "openai-chat"
+  },
+  "context": {
+    "maxMessages": 100000,
+      "maxBytes": 2000000,
+      "maxTokens": 400000,
+      "keepRecentMessages": 8,
+      "tailTurns": 2,
+      "preserveRecentTokens": 8000,
+      "summaryBytes": 8192,
+      "promptCompactRatio": 0.64,
+      "resumeMaxMessages": 100000,
+      "resumeMaxTokens": 400000,
+      "resumeMaxBytes": 2000000,
+      "inFlightCompactRatio": null,
+      "inFlightKeepRecentTools": null
+    },
+  "limits": {
+    "maxToolRounds": null
+  },
+  "agents": {
+    "maxRounds": null,
+    "orchestration": {
+      "maxParallelReadonlyAgentRuns": 2
+    },
+    "delegationGuard": {
+      "enabled": true,
+      "mode": "remind",
+      "softThreshold": 3,
+      "strongThreshold": 5
+    },
+    "backgroundWakeup": {
+      "enabled": true,
+      "defaultForModelAgentRun": false,
+      "maxConcurrentBackground": 3,
+      "defaultWaitFor": "all",
+      "autoQueueParentPrompt": true,
+      "maxWakeSummaryBytes": 12000
+    },
+    "reviewGate": {
+      "enabled": true,
+      "mode": "remind",
+      "todoThreshold": 4,
+      "requireForWrites": false,
+      "requireForHighRisk": false
+    },
+    "modelTiers": {
+      "cheap": "mimo-v2.5",
+      "default": "mimo-v2.5",
+      "strong": "mimo-v2.5"
+    },
+    "budgets": {
+      "defaults": {
+        "maxDurationMs": 1800000,
+        "maxOutputBytes": 320000
+      },
+      "readonly-researcher": {
+        "maxDurationMs": 1200000,
+        "maxOutputBytes": 320000
+      },
+      "web-researcher": {
+        "maxDurationMs": 1200000,
+        "maxOutputBytes": 256000,
+        "maxPermissionDenials": 6,
+        "maxConsecutiveFailures": 6
+      },
+      "explorer.deep": {
+        "maxDurationMs": 1800000,
+        "maxOutputBytes": 360000
+      },
+      "junior.deep": {
+        "maxDurationMs": 2700000
+      },
+      "code-worker.deep": {
+        "maxDurationMs": 2700000
+      }
+    },
+    "profiles": []
+  },
+  "mcp": {
+    "servers": [
+      {
+        "name": "github",
+        "description": "内置 GitHub 只读 MCP；使用本机 GITHUB_PERSONAL_ACCESS_TOKEN，适合稳定读取公开/授权仓库文件、issue 和 PR。",
+        "enabled": true,
+        "transport": "stdio",
+        "command": "node",
+        "args": ["package:scripts/github-mcp-server.js"],
+        "requestTimeoutMs": 30000,
+        "env": {
+          "GITHUB_READ_ONLY": "1"
+        },
+        "envAllowlist": ["GITHUB_PERSONAL_ACCESS_TOKEN"],
+        "toolRisks": {
+          "get_file_contents": "read",
+          "search_repositories": "read",
+          "list_branches": "read",
+          "list_releases": "read",
+          "get_latest_release": "read",
+          "list_issues": "read",
+          "get_issue": "read",
+          "list_pull_requests": "read",
+          "get_pull_request": "read",
+          "get_pull_request_files": "read"
+        },
+        "recommended": true,
+        "category": "web"
+      },
+      {
+        "name": "fetch",
+        "description": "免 key 网页抓取 MCP；默认启用，调用时仍受网络权限策略控制。",
+        "enabled": true,
+        "transport": "stdio",
+        "command": "uvx",
+        "args": ["mcp-server-fetch"],
+        "toolRisks": {
+          "fetch": "network"
+        },
+        "recommended": true,
+        "category": "web"
+      },
+      {
+        "name": "duckduckgo-search",
+        "description": "免 key DuckDuckGo 搜索 MCP；默认启用，公开搜索可能被限流。",
+        "enabled": true,
+        "transport": "stdio",
+        "command": "uvx",
+        "args": ["duckduckgo-mcp-server"],
+        "toolRisks": {
+          "search": "network",
+          "news_search": "network"
+        },
+        "recommended": true,
+        "category": "web"
+      },
+      {
+        "name": "searxng",
+        "description": "连接实验室自建 SearXNG 的搜索 MCP；启用前设置 SEARXNG_URL。",
+        "enabled": false,
+        "transport": "stdio",
+        "command": "npx",
+        "args": ["-y", "mcp-searxng"],
+        "env": {
+          "SEARXNG_URL": "http://localhost:8080"
+        },
+        "toolRisks": {
+          "search": "network"
+        },
+        "recommended": true,
+        "category": "web"
+      },
+      {
+        "name": "filesystem",
+        "description": "标准文件系统 MCP；与内置文件工具重叠，主要用于兼容 MCP 生态，写入仍需权限确认。",
+        "enabled": true,
+        "transport": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
+        "toolRisks": {
+          "read_file": "read",
+          "list_directory": "read",
+          "search_files": "read",
+          "write_file": "write",
+          "edit_file": "write"
+        },
+        "recommended": true,
+        "category": "filesystem"
+      },
+      {
+        "name": "memory",
+        "description": "本地知识图谱/记忆 MCP；默认启用，写入长期记忆仍需权限确认。",
+        "enabled": true,
+        "transport": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-memory"],
+        "toolRisks": {
+          "read_graph": "memory",
+          "search_nodes": "memory",
+          "create_entities": "memory",
+          "create_relations": "memory",
+          "add_observations": "memory"
+        },
+        "recommended": true,
+        "category": "memory"
+      },
+      {
+        "name": "playwright",
+        "description": "浏览器自动化 MCP；默认启用，页面导航、点击、输入仍受权限策略控制。",
+        "enabled": true,
+        "transport": "stdio",
+        "command": "npx",
+        "args": ["-y", "@playwright/mcp@latest"],
+        "toolRisks": {
+          "browser_navigate": "browser",
+          "browser_click": "browser",
+          "browser_type": "browser",
+          "browser_snapshot": "read",
+          "browser_take_screenshot": "read",
+          "browser_close": "browser"
+        },
+        "recommended": true,
+        "category": "browser"
+      },
+      {
+        "name": "sequential-thinking",
+        "description": "结构化思考 MCP；用于复杂任务拆解，不能替代 todo/plan 和真实验证。",
+        "enabled": true,
+        "transport": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"],
+        "toolRisks": {
+          "sequentialthinking": "read"
+        },
+        "recommended": true,
+        "category": "planning"
+      },
+      {
+        "name": "sqlite",
+        "description": "本地 SQLite MCP；用于后续数据分析场景，启用前请配置具体数据库路径。",
+        "enabled": false,
+        "transport": "stdio",
+        "command": "uvx",
+        "args": ["mcp-server-sqlite", "--db-path", ".lab-agent/data.sqlite"],
+        "toolRisks": {
+          "read_query": "read",
+          "write_query": "write",
+          "list_tables": "read",
+          "describe_table": "read"
+        },
+        "recommended": true,
+        "category": "data"
+      }
+    ]
+  },
+  "skills": {
+    "enabled": true,
+    "paths": [
+      "config/skills",
+      "C:\\saveproject\\LBJ-workspace\\skill\\ant-render-exporter\\skills",
+      "C:\\saveproject\\LBJ-workspace\\skill\\antscan-data-crawl\\skills",
+      "C:\\saveproject\\LBJ-workspace\\skill\\paper_distill_skill_bundle_v6_zh\\skills",
+      "C:\\saveproject\\LBJ-workspace\\skill\\taxonomy-ai-intel\\skills",
+      "C:\\saveproject\\LBJ-workspace\\skill\\unsloth-studio-finetune-portable"
+    ]
+  }
+}

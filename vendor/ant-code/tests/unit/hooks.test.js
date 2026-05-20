@@ -220,6 +220,96 @@ test("tool runtime emits hook audit for tool use, file changes, todo updates, an
   assert.ok(audit.some((record) => record.event === "permission.denied" && record.name === "permission-denied-audit"));
 });
 
+test("TaxaMask source guard blocks source writes but allows docs", async () => {
+  clearHookAudit();
+  const cwd = await makeTempWorkspace();
+  const config = taxamaskHookConfig();
+  const runtime = createToolRuntime({
+    cwd,
+    config,
+    policy: {
+      networkMode: "offline",
+      approvals: { workspaceWrites: true, workspaceCommands: true }
+    }
+  });
+
+  const blockedWrite = await runtime.execute("write_file", {
+    path: "AntSleap/main.py",
+    content: "print('blocked')\n"
+  });
+  await fs.mkdir(path.join(cwd, "docs"));
+  const allowedDoc = await runtime.execute("write_file", {
+    path: "docs/notes.md",
+    content: "allowed\n"
+  });
+  const blockedShell = await runtime.execute("powershell", {
+    command: "Set-Content -Path .\\AntSleap\\main.py -Value 'blocked'"
+  });
+
+  assert.equal(blockedWrite.ok, false);
+  assert.equal(blockedWrite.blocked, true);
+  assert.equal(blockedWrite.error.code, "TAXAMASK_SOURCE_READONLY");
+  assert.equal(allowedDoc.ok, true);
+  assert.equal(blockedShell.ok, false);
+  assert.equal(blockedShell.blocked, true);
+  assert.equal(blockedShell.error.code, "TAXAMASK_SOURCE_READONLY");
+});
+
+test("TaxaMask source guard blocks filesystem MCP source writes", async () => {
+  clearHookAudit();
+  const cwd = await makeTempWorkspace();
+  const result = await runHooks({
+    config: taxamaskHookConfig(),
+    cwd,
+    event: "tool.before",
+    payload: {
+      toolName: "mcp_call",
+      input: {
+        server: "filesystem",
+        tool: "write_file",
+        arguments: {
+          path: "AntSleap/ui/taxamask_agent_panel.py",
+          content: "blocked"
+        }
+      },
+      targetPaths: []
+    }
+  });
+
+  assert.equal(result.blocked, true);
+  assert.equal(result.blockingError.code, "TAXAMASK_SOURCE_READONLY");
+});
+
+test("TaxaMask source guard blocks runtime mcp_call before MCP execution", async () => {
+  const cwd = await makeTempWorkspace();
+  const runtime = createToolRuntime({
+    cwd,
+    config: taxamaskHookConfig(),
+    policy: {
+      networkMode: "offline",
+      approvals: { workspaceWrites: true, workspaceCommands: true }
+    },
+    mcpRuntime: {
+      callTool: async () => {
+        throw new Error("MCP call should have been blocked before execution");
+      }
+    }
+  });
+
+  const result = await runtime.execute("mcp_call", {
+    server: "filesystem",
+    tool: "write_file",
+    arguments: {
+      path: "AntSleap/main.py",
+      content: "blocked"
+    }
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.blocked, true);
+  assert.equal(result.error.code, "TAXAMASK_SOURCE_READONLY");
+});
+
 test("compact with model emits compact hook audit", async () => {
   clearHookAudit();
   const session = {
@@ -360,4 +450,22 @@ async function waitFor(predicate, timeoutMs = 3000) {
     throw lastError;
   }
   throw new Error(`condition was not met within ${timeoutMs}ms`);
+}
+
+function taxamaskHookConfig() {
+  return {
+    hooks: {
+      events: {
+        "tool.before": [
+          {
+            name: "taxamask-source-readonly",
+            type: "builtin",
+            builtin: "denyTaxaMaskSourceWrites",
+            blocking: true,
+            when: { tools: ["write_file", "edit_file", "powershell", "bash", "mcp_call"] }
+          }
+        ]
+      }
+    }
+  };
 }

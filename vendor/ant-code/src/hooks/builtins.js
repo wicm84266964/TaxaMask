@@ -1,5 +1,6 @@
 import path from "node:path";
 import { collectHookTargetPaths, summarizeHookPayload } from "./events.js";
+import { taxamaskSourceWriteDecision } from "../permissions/taxamask-source-guard.js";
 
 const SENSITIVE_BASENAME_PATTERNS = Object.freeze([
   /^\.env(?:\.|$)/i,
@@ -23,6 +24,7 @@ export const BUILTIN_HOOKS = Object.freeze({
   recordTodoUpdated,
   recordSubagentLifecycle,
   auditDelegationGuard,
+  denyTaxaMaskSourceWrites,
   compactAudit,
   auditSession,
   auditUserPrompt
@@ -95,6 +97,24 @@ function auditDelegationGuard(context) {
   return {
     ok: true,
     message: summarizeHookPayload(context.payload)
+  };
+}
+
+function denyTaxaMaskSourceWrites(context) {
+  const decision = taxamaskSourceWriteDecision(context.payload, { cwd: context.cwd });
+  if (!decision.blocked) {
+    return { ok: true, message: "TaxaMask source guard: no source write detected" };
+  }
+  return {
+    ok: false,
+    blocked: true,
+    message: decision.message,
+    error: {
+      code: "TAXAMASK_SOURCE_READONLY",
+      message: decision.message,
+      target: decision.target,
+      reason: decision.reason
+    }
   };
 }
 

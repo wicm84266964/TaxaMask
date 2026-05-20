@@ -102,6 +102,9 @@ class TaxaMaskAgentPanel(QWidget):
         self.lang = lang
         self.workspace_dir = os.path.abspath(str(workspace_dir or Path(__file__).resolve().parents[2]))
         self.ant_code_root = os.path.abspath(str(ant_code_root or os.environ.get("TAXAMASK_ANT_CODE_ROOT") or self._default_ant_code_root()))
+        self.ant_code_config_path = os.path.abspath(str(os.environ.get("TAXAMASK_ANT_CODE_CONFIG") or self._default_ant_code_config_path()))
+        self.node_executable = self._resolve_node_executable()
+        self.ant_code_dashboard_entry = self._resolve_ant_code_dashboard_entry()
         self.ant_code_executable = self._resolve_ant_code_executable(ant_code_executable)
         self.process = None
         self.dashboard_url = ""
@@ -129,8 +132,31 @@ class TaxaMaskAgentPanel(QWidget):
 
     def _default_ant_code_root(self):
         repo_root = Path(__file__).resolve().parents[2]
+        candidate = repo_root / "vendor" / "ant-code"
+        if candidate.exists():
+            return candidate
         candidate = repo_root.parent / "lab-agent"
         return candidate
+
+    def _default_ant_code_config_path(self):
+        repo_root = Path(__file__).resolve().parents[2]
+        return repo_root / "AntSleap" / "config" / "taxamask_ant_code.config.json"
+
+    def _resolve_node_executable(self):
+        env_path = os.environ.get("TAXAMASK_NODE_EXE")
+        if env_path and Path(env_path).expanduser().exists():
+            return str(Path(env_path).expanduser().resolve())
+        for command in ("node.exe", "node"):
+            found = shutil.which(command)
+            if found:
+                return found
+        return None
+
+    def _resolve_ant_code_dashboard_entry(self):
+        candidate = Path(self.ant_code_root) / "src" / "cli" / "dashboard.js"
+        if candidate.exists():
+            return str(candidate.resolve())
+        return None
 
     def _resolve_ant_code_executable(self, explicit=None):
         for candidate in self._ant_code_executable_candidates(explicit):
@@ -167,7 +193,25 @@ class TaxaMaskAgentPanel(QWidget):
             "Ant-Code executable not found. Set TAXAMASK_ANT_CODE_EXE to the distributed ant-code executable."
         )
 
+    def _can_use_source_dashboard(self):
+        return bool(
+            self.node_executable
+            and Path(self.node_executable).exists()
+            and self.ant_code_dashboard_entry
+            and Path(self.ant_code_dashboard_entry).exists()
+        )
+
     def _dashboard_command(self):
+        if self._can_use_source_dashboard():
+            return [
+                self.node_executable,
+                self.ant_code_dashboard_entry,
+                "--project",
+                self.workspace_dir,
+                "--port",
+                str(self.port),
+                "--no-open",
+            ]
         return [
             self._require_ant_code_executable(),
             "dashboard",
@@ -177,6 +221,16 @@ class TaxaMaskAgentPanel(QWidget):
             str(self.port),
             "--no-open",
         ]
+
+    def _dashboard_environment(self):
+        env = os.environ.copy()
+        ant_root = Path(self.ant_code_root)
+        if ant_root.exists():
+            env["LAB_AGENT_PACKAGE_ROOT"] = str(ant_root)
+        config_path = Path(self.ant_code_config_path)
+        if config_path.exists():
+            env["LAB_AGENT_CONFIG"] = str(config_path)
+        return env
 
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -309,18 +363,38 @@ class TaxaMaskAgentPanel(QWidget):
         display: none !important;
       }
       .workspace {
+        background: #12181d !important;
+        border: 0 !important;
         border-radius: 0 !important;
         grid-column: 1 / -1 !important;
         min-width: 0 !important;
         width: 100% !important;
       }
       .workspace-header {
+        min-height: 38px !important;
+        background: #1A1F24 !important;
+        border-bottom: 1px solid #303A42 !important;
         border-radius: 0 !important;
-        padding: 10px 16px !important;
+        padding: 8px 14px !important;
+      }
+      .workspace-local {
+        color: #D7E0E5 !important;
+        font-size: 12px !important;
+        letter-spacing: 0 !important;
+      }
+      .local-dot {
+        background: #57C98B !important;
+        box-shadow: 0 0 0 3px rgba(87, 201, 139, 0.14) !important;
+      }
+      .status-pill {
+        min-height: 24px !important;
+        border-color: #3A4650 !important;
+        background: #11161A !important;
+        color: #DCE4E8 !important;
       }
       .transcript {
-        padding-left: 18px !important;
-        padding-right: 18px !important;
+        background: #12181d !important;
+        padding: 14px 16px !important;
       }
       .message,
       .activity-card,
@@ -335,7 +409,43 @@ class TaxaMaskAgentPanel(QWidget):
       .live-status,
       .shutdown-panel,
       .workflow-strip {
-        max-width: 960px !important;
+        max-width: 880px !important;
+      }
+      .empty-state {
+        border: 1px solid #303A42 !important;
+        border-radius: 8px !important;
+        background: #171D22 !important;
+        padding: 18px !important;
+      }
+      .empty-kicker {
+        color: #8AA4B1 !important;
+        letter-spacing: 0 !important;
+      }
+      .empty-title {
+        color: #E2EAEE !important;
+        font-size: 18px !important;
+        letter-spacing: 0 !important;
+      }
+      .empty-copy {
+        color: #AEBBC2 !important;
+        font-size: 12px !important;
+      }
+      .composer-shell {
+        border-top: 1px solid #303A42 !important;
+        background: #171D22 !important;
+        padding: 10px 14px 12px !important;
+      }
+      .composer {
+        border: 1px solid #3A4650 !important;
+        background: #0F1418 !important;
+        border-radius: 8px !important;
+      }
+      #prompt-input {
+        min-height: 74px !important;
+        color: #E2EAEE !important;
+      }
+      #send-button {
+        border-radius: 7px !important;
       }
       .mode-row,
       #mode-description,
@@ -461,7 +571,7 @@ class TaxaMaskAgentPanel(QWidget):
             self._json_health_error = self._dashboard_json_health_error()
             if self._json_health_error:
                 raise RuntimeError(self._json_health_error)
-            env = os.environ.copy()
+            env = self._dashboard_environment()
             command = self._dashboard_command()
             self.process = subprocess.Popen(
                 command,
@@ -557,10 +667,20 @@ class TaxaMaskAgentPanel(QWidget):
                 if (workspaceButton && !workspaceButton.classList.contains('active')) {
                   workspaceButton.click();
                 }
+                const localLabel = document.querySelector('.workspace-local span:last-child');
+                if (localLabel) localLabel.textContent = 'TaxaMask Agent · 源码只读保护已启用';
                 const brand = document.querySelector('.brand-name');
                 if (brand) brand.textContent = 'TaxaMask Agent';
                 const subtitle = document.querySelector('.brand-subtitle');
-                if (subtitle) subtitle.textContent = 'Ant-Code';
+                if (subtitle) subtitle.textContent = 'Ant-Code native';
+                const emptyKicker = document.querySelector('.empty-kicker');
+                if (emptyKicker) emptyKicker.textContent = 'TaxaMask Agent';
+                const emptyTitle = document.querySelector('.empty-title');
+                if (emptyTitle) emptyTitle.textContent = '我会在当前 TaxaMask 仓库中协助排查';
+                const emptyCopy = document.querySelector('.empty-copy');
+                if (emptyCopy) emptyCopy.textContent = '可以读源码、改配置和项目文件；源码写入会被 TaxaMask hook 阻止。';
+                const prompt = document.querySelector('#prompt-input');
+                if (prompt) prompt.placeholder = '把遇到的问题、配置目标或标注流程疑问发给 TaxaMask Agent';
               };
               applyTaxaMaskDefaults();
               const timer = window.setInterval(applyTaxaMaskDefaults, 300);
@@ -909,9 +1029,12 @@ class TaxaMaskAgentPanel(QWidget):
             at("Ant-Code embedded", self.lang),
             "",
             f"{at('Project', self.lang)}: {self._project_display or self.workspace_dir}",
-            f"{at('Ant-Code executable', self.lang)}: {self.ant_code_executable or at('not found', self.lang)}",
+            f"Ant-Code root: {self.ant_code_root}",
+            f"Ant-Code dashboard: {self.ant_code_dashboard_entry or self.ant_code_executable or at('not found', self.lang)}",
+            f"Ant-Code config: {self.ant_code_config_path}",
             "",
             at("Workspace permission is the default for this embedded TaxaMask agent.", self.lang),
+            "TaxaMask source guard: enabled",
         ]
         if QWebEngineView is None:
             lines.extend(["", at("Qt WebEngine is unavailable in this environment. Start Ant-Code and open it in a browser.", self.lang)])

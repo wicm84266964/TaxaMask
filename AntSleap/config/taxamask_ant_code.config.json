@@ -1,0 +1,25 @@
+{
+  "appName": "taxamask-agent",
+  "hooks": {
+    "events": {
+      "tool.before": [
+        {
+          "name": "taxamask-source-readonly",
+          "type": "builtin",
+          "builtin": "denyTaxaMaskSourceWrites",
+          "blocking": true,
+          "managed": true,
+          "when": {
+            "tools": [
+              "write_file",
+              "edit_file",
+              "powershell",
+              "bash",
+              "mcp_call"
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

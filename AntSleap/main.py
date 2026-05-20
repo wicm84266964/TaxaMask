@@ -261,6 +261,10 @@ TRANSLATIONS = {
         "PDF evidence skill ready; {0} review candidate(s)": "PDF evidence skill 已配置；{0} 个候选图待复核",
         "PDF evidence skill missing": "PDF evidence skill 未找到",
         "STL source stays as exported high-resolution 2D views; TaxaMask does not label 3D meshes.": "STL 来源保持为外部导出的高分辨率 2D 视角图；TaxaMask 不做 3D mesh 标注。",
+        "Start Ant-Code": "启动 Ant-Code",
+        "Open in browser": "浏览器打开",
+        "Stop Ant-Code": "停止 Ant-Code",
+        "Agent status: {0}": "Agent 状态：{0}",
         "2D / STL morphology annotation": "2D / STL 形态学标注",
         "Annotate high-resolution 2D views rendered from STL, or ordinary 2D morphology images, then train Locator/SAM/Blink models.": "标注从 STL 导出的高分辨率 2D 视角图，或普通 2D 形态图像，并训练 Locator/SAM/Blink 模型。",
         "TIF volume annotation": "TIF 体数据标注",
@@ -3299,22 +3303,61 @@ class MainWindow(QMainWindow):
         agent_layout.setContentsMargins(0, 0, 0, 0)
         agent_layout.setSpacing(14)
 
+        self.agent_panel = TaxaMaskAgentPanel(self.current_lang)
+        self.agent_panel.status_changed.connect(self._handle_agent_dashboard_status_changed)
+
         header = QWidget()
         apply_surface_role(header, SURFACE_ROLE_PANEL, "startCenterHeader")
-        header_layout = QVBoxLayout(header)
+        header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(20, 14, 20, 14)
-        header_layout.setSpacing(6)
+        header_layout.setSpacing(14)
+
+        header_text = QWidget()
+        header_text_layout = QVBoxLayout(header_text)
+        header_text_layout.setContentsMargins(0, 0, 0, 0)
+        header_text_layout.setSpacing(6)
         self.start_title = QLabel()
         self.start_title.setObjectName("startCenterTitle")
         self.start_subtitle = QLabel()
         self.start_subtitle.setObjectName("mutedLabel")
         self.start_subtitle.setWordWrap(True)
-        header_layout.addWidget(self.start_title)
-        header_layout.addWidget(self.start_subtitle)
+        header_text_layout.addWidget(self.start_title)
+        header_text_layout.addWidget(self.start_subtitle)
+        header_layout.addWidget(header_text, 1)
+
+        header_controls = QWidget()
+        header_controls.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        header_controls_layout = QVBoxLayout(header_controls)
+        header_controls_layout.setContentsMargins(0, 0, 0, 0)
+        header_controls_layout.setSpacing(6)
+        self.start_agent_status_label = QLabel()
+        self.start_agent_status_label.setObjectName("mutedLabel")
+        self.start_agent_status_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.start_agent_status_label.setWordWrap(False)
+        header_controls_layout.addWidget(self.start_agent_status_label)
+        header_button_layout = QHBoxLayout()
+        header_button_layout.setContentsMargins(0, 0, 0, 0)
+        header_button_layout.setSpacing(8)
+        self.btn_start_ant_code = QPushButton()
+        self.btn_start_ant_code.setObjectName("startCenterStartAntCodeButton")
+        self.btn_start_ant_code.clicked.connect(self.agent_panel.start_dashboard)
+        self.btn_open_ant_code_browser = QPushButton()
+        self.btn_open_ant_code_browser.setObjectName("startCenterOpenAntCodeBrowserButton")
+        self.btn_open_ant_code_browser.clicked.connect(self.agent_panel.open_dashboard_in_browser)
+        self.btn_stop_ant_code = QPushButton()
+        self.btn_stop_ant_code.setObjectName("startCenterStopAntCodeButton")
+        self.btn_stop_ant_code.clicked.connect(self.agent_panel.stop_dashboard)
+        button_extras = "padding: 5px 10px;"
+        apply_semantic_button_style(self.btn_start_ant_code, BUTTON_ROLE_RUN, button_extras)
+        apply_semantic_button_style(self.btn_open_ant_code_browser, BUTTON_ROLE_NEUTRAL, button_extras)
+        apply_semantic_button_style(self.btn_stop_ant_code, BUTTON_ROLE_STOP, button_extras)
+        header_button_layout.addWidget(self.btn_start_ant_code)
+        header_button_layout.addWidget(self.btn_open_ant_code_browser)
+        header_button_layout.addWidget(self.btn_stop_ant_code)
+        header_controls_layout.addLayout(header_button_layout)
+        header_layout.addWidget(header_controls, 0, Qt.AlignTop | Qt.AlignRight)
         agent_layout.addWidget(header)
 
-        self.agent_panel = TaxaMaskAgentPanel(self.current_lang)
-        self.agent_panel.status_changed.connect(lambda _status: self._refresh_project_console())
         agent_layout.addWidget(self.agent_panel, 1)
         outer_layout.addWidget(agent_area, 1)
 
@@ -3499,6 +3542,10 @@ class MainWindow(QMainWindow):
         self.btn_continue_last.setText(tr("Continue last project", self.current_lang))
         self.btn_open_any.setText(tr("Open any project", self.current_lang))
         self.btn_general_settings.setText(tr("General Settings", self.current_lang))
+        if hasattr(self, "btn_start_ant_code"):
+            self.btn_start_ant_code.setText(tr("Start Ant-Code", self.current_lang))
+            self.btn_open_ant_code_browser.setText(tr("Open in browser", self.current_lang))
+            self.btn_stop_ant_code.setText(tr("Stop Ant-Code", self.current_lang))
         self._refresh_project_console()
         if hasattr(self, "create_menus"):
             self.create_menus()
@@ -3518,7 +3565,24 @@ class MainWindow(QMainWindow):
                 project=self._agent_current_project_label(),
                 state=tr("Idle", self.current_lang),
             )
+            self._update_start_agent_status(self.agent_panel.status_text())
             self._refresh_project_console()
+
+    def _handle_agent_dashboard_status_changed(self, status):
+        self._update_start_agent_status(status)
+        self._refresh_project_console()
+
+    def _update_start_agent_status(self, status=None):
+        if not hasattr(self, "start_agent_status_label"):
+            return
+        panel = getattr(self, "agent_panel", None)
+        text = str(status or (panel.status_text() if panel is not None else "") or "").strip()
+        if not text:
+            text = self._start_console_agent_status()
+        max_len = 72
+        display = text if len(text) <= max_len else f"{text[: max_len - 1]}..."
+        self.start_agent_status_label.setText(tr("Agent status: {0}", self.current_lang).format(display))
+        self.start_agent_status_label.setToolTip(text)
 
     def _refresh_project_console(self):
         if not hasattr(self, "start_console_title"):
@@ -5197,6 +5261,11 @@ class MainWindow(QMainWindow):
             apply_theme_button_style(self.btn_start_center_from_workbench, BUTTON_ROLE_NEUTRAL, "", self.current_theme)
         if hasattr(self, "btn_agent_from_workbench"):
             apply_theme_button_style(self.btn_agent_from_workbench, BUTTON_ROLE_NEUTRAL, "", self.current_theme)
+        if hasattr(self, "btn_start_ant_code"):
+            compact_agent_button = "padding: 5px 10px;"
+            apply_theme_button_style(self.btn_start_ant_code, BUTTON_ROLE_RUN, compact_agent_button, self.current_theme)
+            apply_theme_button_style(self.btn_open_ant_code_browser, BUTTON_ROLE_NEUTRAL, compact_agent_button, self.current_theme)
+            apply_theme_button_style(self.btn_stop_ant_code, BUTTON_ROLE_STOP, compact_agent_button, self.current_theme)
         if hasattr(self, "btn_add"):
             apply_theme_button_style(self.btn_add, BUTTON_ROLE_NEUTRAL, "", self.current_theme)
         if hasattr(self, "btn_add_part"):

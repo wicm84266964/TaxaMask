@@ -251,7 +251,10 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertIn("STL", window.start_console_stl_note.text())
             self.assertIn("2D views", window.start_console_stl_note.text())
             self.assertNotIn("3D mesh annotation", window.start_console_stl_note.text())
-            self.assertEqual(window.agent_panel.btn_start.text(), "Start Ant-Code")
+            self.assertEqual(window.btn_start_ant_code.text(), "Start Ant-Code")
+            self.assertEqual(window.btn_stop_ant_code.text(), "Stop Ant-Code")
+            self.assertIsNone(window.agent_panel.findChild(main_module.QWidget, "taxamaskAgentInlineStatus"))
+            self.assertIsNone(window.agent_panel.findChild(main_module.QWidget, "taxamaskStartAntCodeButton"))
             self.assertIn("Workspace permission", window.agent_panel.fallback.toPlainText())
             menu_texts = [
                 action.text()
@@ -506,6 +509,7 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertIn("TaxaMask Workbench", window.windowTitle())
             self.assertEqual(window.tif_workbench.btn_import_tif.text(), "导入 TIF stack")
             self.assertEqual(window.start_title.text(), "TaxaMask Agent 中心")
+            self.assertEqual(window.btn_start_ant_code.text(), "启动 Ant-Code")
 
             dialog = main_module.ModelSettingsDialog(
                 {

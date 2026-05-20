@@ -9,9 +9,6 @@ from pathlib import Path
 
 from PySide6.QtCore import QTimer, QUrl, Signal
 from PySide6.QtWidgets import (
-    QHBoxLayout,
-    QLabel,
-    QPushButton,
     QSizePolicy,
     QStackedWidget,
     QTextEdit,
@@ -30,8 +27,6 @@ except Exception:  # pragma: no cover - depends on local Qt installation
     QWebEnginePage = None
     QWebEngineProfile = None
     QWebEngineScript = None
-
-from .style import BUTTON_ROLE_NEUTRAL, BUTTON_ROLE_RUN, apply_semantic_button_style
 
 
 AGENT_TRANSLATIONS = {
@@ -236,31 +231,6 @@ class TaxaMaskAgentPanel(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 10, 10, 10)
         root.setSpacing(8)
-
-        controls = QHBoxLayout()
-        controls.setSpacing(8)
-        self.status_label = QLabel()
-        self.status_label.setObjectName("taxamaskAgentInlineStatus")
-        self.status_label.setWordWrap(False)
-
-        self.btn_start = QPushButton()
-        self.btn_start.setObjectName("taxamaskStartAntCodeButton")
-        self.btn_start.clicked.connect(self.start_dashboard)
-        self.btn_open_browser = QPushButton()
-        self.btn_open_browser.setObjectName("taxamaskOpenAntCodeBrowserButton")
-        self.btn_open_browser.clicked.connect(self.open_dashboard_in_browser)
-        self.btn_stop = QPushButton()
-        self.btn_stop.setObjectName("taxamaskStopAntCodeButton")
-        self.btn_stop.clicked.connect(self.stop_dashboard)
-        apply_semantic_button_style(self.btn_start, BUTTON_ROLE_RUN)
-        apply_semantic_button_style(self.btn_open_browser, BUTTON_ROLE_NEUTRAL)
-        apply_semantic_button_style(self.btn_stop, BUTTON_ROLE_NEUTRAL)
-        controls.addWidget(self.status_label, 1)
-        controls.addWidget(self.btn_start)
-        controls.addWidget(self.btn_open_browser)
-        controls.addWidget(self.btn_stop)
-        self.btn_open_browser.hide()
-        root.addLayout(controls)
 
         self.stack = QStackedWidget()
         self.stack.setObjectName("taxamaskAgentStack")
@@ -555,11 +525,6 @@ class TaxaMaskAgentPanel(QWidget):
                 border: 1px solid #364149;
                 border-radius: 16px;
             }
-            QLabel#taxamaskAgentInlineStatus {
-                color: #C6D0D5;
-                font-size: 9pt;
-                padding-left: 2px;
-            }
             QTextEdit#taxamaskAgentFallback {
                 background: #11161A;
                 border: 1px solid #303A42;
@@ -576,17 +541,16 @@ class TaxaMaskAgentPanel(QWidget):
 
     def set_language(self, lang):
         self.lang = lang
-        self.btn_start.setText(at("Start Ant-Code", lang))
-        self.btn_open_browser.setText(at("Open in browser", lang))
-        self.btn_stop.setText(at("Stop", lang))
-        self._update_status_label(at("Ant-Code Dashboard is not running.", lang))
+        if self.is_running():
+            status = at("Ant-Code Dashboard is ready.", lang)
+        else:
+            status = at("Ant-Code Dashboard is not running.", lang)
+        self._update_status_label(status)
         self._update_fallback()
 
     def update_runtime_status(self, model_status=None, workflow=None, project=None, state=None):
         if project:
             self._project_display = project
-        if state and not self.is_running():
-            self._update_status_label(str(state))
 
     def set_context(self, context=None, announce=False):
         self._context = dict(context or {})
@@ -1060,7 +1024,6 @@ class TaxaMaskAgentPanel(QWidget):
 
     def _update_status_label(self, status):
         self._status_text = str(status or "")
-        self.status_label.setText(f"{at('Status', self.lang)}: {status}")
         self.status_changed.emit(self._status_text)
 
     def status_text(self):

@@ -407,13 +407,13 @@ class TaxaMaskAgentPanel(QWidget):
       .context-panel,
       .queue-panel,
       .live-status,
-      .shutdown-panel,
-      .workflow-strip {
-        max-width: 880px !important;
+      .shutdown-panel {
+        box-sizing: border-box !important;
+        max-width: none !important;
+        width: 100% !important;
       }
       .workflow-strip {
-        box-sizing: border-box !important;
-        width: 100% !important;
+        display: none !important;
       }
       .workflow-strip-toggle,
       .workflow-strip-meter,
@@ -442,6 +442,16 @@ class TaxaMaskAgentPanel(QWidget):
       .workflow-panel {
         margin-left: 0 !important;
         margin-right: 0 !important;
+      }
+      .message {
+        margin-left: 0 !important;
+        margin-right: 0 !important;
+      }
+      .message.user {
+        margin-left: auto !important;
+        margin-right: 0 !important;
+        max-width: min(900px, calc(100% - 48px)) !important;
+        width: fit-content !important;
       }
       .empty-state {
         border: 1px solid #303A42 !important;

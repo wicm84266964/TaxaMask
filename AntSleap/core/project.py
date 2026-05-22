@@ -25,6 +25,12 @@ from .cascade_routes import (
 
 DEFAULT_CATEGORY_SUPERCATEGORY = "biological_structure"
 MULTIMODAL_SAMPLE_SCHEMA_VERSION = "taxamask-multimodal-sample-v1"
+DEFAULT_PARENT_BOX_ASPECT_RATIOS = {
+    "Head": 1.0,
+    "Mesosoma": 4.0 / 3.0,
+    "Gaster": 4.0 / 3.0,
+    "Whole body": 16.0 / 9.0,
+}
 
 
 class ProjectManager:
@@ -41,6 +47,7 @@ class ProjectManager:
             "scales": {}, # Map: image_path -> float (pixels_per_mm)
             "image_provenance": {},
             "blink_context_roi_parents": {},
+            "parent_box_aspect_ratios": dict(DEFAULT_PARENT_BOX_ASPECT_RATIOS),
             "cascade_routes": {
                 "version": PROJECT_ROUTE_MANIFEST_VERSION,
                 "routes": [],
@@ -91,6 +98,28 @@ class ProjectManager:
                 continue
             clean_map[clean_target] = clean_parent
 
+        return clean_map
+
+    def _sanitize_parent_box_aspect_ratios(self, ratio_map):
+        taxonomy = set(self.project_data.get("taxonomy", []))
+        clean_map = {}
+        if isinstance(ratio_map, dict):
+            for part_name, ratio in ratio_map.items():
+                clean_part = str(part_name or "").strip()
+                if not clean_part:
+                    continue
+                if taxonomy and clean_part not in taxonomy and clean_part not in DEFAULT_PARENT_BOX_ASPECT_RATIOS:
+                    continue
+                try:
+                    clean_ratio = float(ratio)
+                except Exception:
+                    continue
+                if clean_ratio > 0:
+                    clean_map[clean_part] = clean_ratio
+
+        for part_name, ratio in DEFAULT_PARENT_BOX_ASPECT_RATIOS.items():
+            if not taxonomy or part_name in taxonomy:
+                clean_map.setdefault(part_name, float(ratio))
         return clean_map
 
     def _category_supercategory(self):
@@ -341,6 +370,7 @@ class ProjectManager:
             "scales": {},
             "image_provenance": {},
             "blink_context_roi_parents": {},
+            "parent_box_aspect_ratios": dict(DEFAULT_PARENT_BOX_ASPECT_RATIOS),
             "cascade_routes": {
                 "version": PROJECT_ROUTE_MANIFEST_VERSION,
                 "routes": [],
@@ -381,6 +411,9 @@ class ProjectManager:
 
         self.project_data["blink_context_roi_parents"] = self._sanitize_blink_context_roi_parents(
             loaded_data.get("blink_context_roi_parents", {})
+        )
+        self.project_data["parent_box_aspect_ratios"] = self._sanitize_parent_box_aspect_ratios(
+            loaded_data.get("parent_box_aspect_ratios", DEFAULT_PARENT_BOX_ASPECT_RATIOS)
         )
         self.project_data["cascade_routes"] = self._sanitize_cascade_routes(
             loaded_data.get("cascade_routes", {})
@@ -425,6 +458,7 @@ class ProjectManager:
                 "category_supercategory": self._category_supercategory(),
                 "taxon_label": self.project_data.get("taxon_label", "Taxon"),
                 "blink_context_roi_parents": self.get_blink_context_roi_parents(),
+                "parent_box_aspect_ratios": self.get_parent_box_aspect_ratios(),
                 "cascade_routes": self.get_cascade_routes(),
                 "images": [],
                 "labels": {},
@@ -827,6 +861,52 @@ class ProjectManager:
             self.save_project()
         return True
 
+    def get_parent_box_aspect_ratios(self):
+        clean_map = self._sanitize_parent_box_aspect_ratios(
+            self.project_data.get("parent_box_aspect_ratios", DEFAULT_PARENT_BOX_ASPECT_RATIOS)
+        )
+        self.project_data["parent_box_aspect_ratios"] = clean_map
+        return dict(clean_map)
+
+    def set_parent_box_aspect_ratio(self, part_name, aspect_ratio, save=True):
+        clean_part = str(part_name or "").strip()
+        if not clean_part or clean_part not in self.project_data.get("taxonomy", []):
+            return False
+        try:
+            clean_ratio = float(aspect_ratio)
+        except Exception:
+            return False
+        if clean_ratio <= 0:
+            return False
+
+        ratios = self.get_parent_box_aspect_ratios()
+        ratios[clean_part] = clean_ratio
+        self.project_data["parent_box_aspect_ratios"] = self._sanitize_parent_box_aspect_ratios(ratios)
+        if save:
+            self.save_project()
+        return True
+
+    def get_shrink_loose_boxes(self, image_path):
+        return self.project_data["labels"].get(image_path, {}).get("shrink_loose_boxes", {})
+
+    def update_shrink_loose_box(self, image_path, part_name, box, save=True):
+        clean_part = str(part_name or "").strip()
+        clean_box = None
+        if isinstance(box, (list, tuple)) and len(box) == 4:
+            try:
+                clean_box = [float(value) for value in box]
+            except Exception:
+                clean_box = None
+        if not clean_part or not clean_box or clean_box[2] <= clean_box[0] or clean_box[3] <= clean_box[1]:
+            return False
+        if image_path not in self.project_data["labels"]:
+            self.project_data["labels"][image_path] = self._default_label_entry()
+        entry = self.project_data["labels"][image_path]
+        entry.setdefault("shrink_loose_boxes", {})[clean_part] = clean_box
+        if save:
+            self.save_project()
+        return True
+
     def update_label(self, image_path, part_name, points, description_text=None, box=None, auto_box=None, save=True):
         """
         Updates polygon points AND potentially the associated text description.
@@ -1003,6 +1083,10 @@ class ProjectManager:
             # Remove Blink Trajectory
             if "trajectories" in entry and part_name in entry["trajectories"]:
                 del entry["trajectories"][part_name]
+
+            # Remove Blink loose shrink box
+            if "shrink_loose_boxes" in entry and part_name in entry["shrink_loose_boxes"]:
+                del entry["shrink_loose_boxes"][part_name]
             
             if save:
                 self.save_project()

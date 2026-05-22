@@ -12,7 +12,7 @@ TaxaMask connects four parts of a taxonomy data workflow:
 
 - Agent-assisted operation: use the embedded Ant-Code Agent Center to configure workflows, inspect errors, prepare PDF evidence runs, and plan training without asking domain researchers to write Python commands.
 - Literature processing: screen taxonomy PDFs, extract candidate figures, assemble caption and nearby text evidence, and optionally run multimodal review.
-- Annotation and model loop: manage project images and STL-derived rendered views, draw masks, use SAM-assisted annotation, train locator/SAM/Blink components, reuse trained experts for pre-annotation, and export datasets.
+- Annotation and model loop: manage project images and STL-derived rendered views, draw masks, use SAM-assisted annotation, use parent-child Blink refinement inside the main Labeling Workbench, train locator/SAM/Blink components, reuse trained experts for pre-annotation, and export datasets.
 - Ant 3D workbench: keep STL-derived 2D review and TIF volume segmentation as separate workflows, import AMIRA/TIF volume data, preserve material maps and manual truth layers, and export volume labels for external 3D segmentation backends.
 
 The intended research loop is:
@@ -28,9 +28,9 @@ Agent Center -> choose PDF / 2D-STL / TIF workflow
 - Figure extraction and multimodal review profiles for different taxa or plate styles.
 - Embedded TaxaMask Agent Center powered by a local Ant-Code dashboard, with workflow shortcuts for 2D/STL morphology and TIF volume projects.
 - Taxa-aware project templates, including a validated ant morphology example and a generic taxonomy mask template.
-- Labeling Workbench for biological structure masks, including specimen-grouped STL-rendered surface views imported as derived 2D review images.
+- Labeling Workbench for biological structure masks, including specimen-grouped STL-rendered surface views imported as derived 2D review images, plus integrated parent-child Blink refinement for small structures.
 - TIF Volume Workbench for stack viewing, overlay review, material-map editing, working edits, and explicit promotion to manual training truth.
-- Blink Workbench for parent-structure to child-structure refinement and local expert training.
+- Route-appointed Blink experts for parent-structure to child-structure pre-annotation, shrink-trajectory generation, and local expert training from the main 2D/STL labeling surface.
 - Configurable main locator structures for non-ant projects.
 - Built-in training/inference path plus an external backend contract for advanced users who want to connect custom models.
 - Export paths for multimodal JSONL, COCO, YOLO-style datasets, and TIF volume exchange formats including OME-TIFF, NRRD, MHA, NIfTI, nnU-Net-style layout, and MONAI-style datalists.
@@ -40,7 +40,7 @@ Agent Center -> choose PDF / 2D-STL / TIF workflow
 
 The GUI starts at the TaxaMask Agent Center by default. The center area embeds the Ant-Code dashboard for natural-language task assistance, while the right rail exposes direct workflow cards:
 
-- `2D/STL Morphology`: ordinary 2D morphology images and STL-derived rendered 2D views. This route uses the Labeling Workbench, Blink, built-in Locator/SAM, route-appointed experts, and the 2D external backend contract.
+- `2D/STL Morphology`: ordinary 2D morphology images and STL-derived rendered 2D views. This route uses the Labeling Workbench with an integrated parent-child Blink refinement panel, built-in Locator/SAM, route-appointed experts, and the 2D external backend contract.
 - `TIF Volume`: continuous TIF/AMIRA-style volumes. This route uses independent TIF projects, material-ID label fields, `manual_truth` / `working_edit` / `model_draft` layers, TIF exports, and the TIF backend contract.
 - `PDF Evidence`: available through Agent/headless tools and `File -> Open PDF Evidence Tools`. PDF outputs are evidence/provenance artifacts, not automatic training truth.
 
@@ -137,7 +137,7 @@ TaxaMask Workbench
 1. Start in the Agent Center and choose whether the task is PDF evidence, 2D/STL morphology, or TIF volume annotation.
 2. For PDF evidence, configure API/profile settings and run a small batch before scaling.
 3. For 2D/STL morphology, create/open a 2D project, import ordinary images or STL-rendered views, then annotate in the Labeling Workbench.
-4. Use Blink for child structures that need local parent-context refinement.
+4. For child structures, use the Labeling Workbench's `Parent-child refinement / Blink` panel to pick the parent context, configure the route expert, auto-annotate, generate shrink trajectories, and train the current child expert.
 5. For TIF volume work, create/open a TIF project, import TIF stacks or AMIRA directories, review material maps, and promote reviewed edits to `manual_truth`.
 6. Train or connect the workflow-specific backend.
 7. Run pre-annotation/prediction, review results, and export a dataset or training handoff.

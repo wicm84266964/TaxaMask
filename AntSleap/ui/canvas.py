@@ -11,6 +11,7 @@ class AnnotationCanvas(QWidget):
     polygon_completed = Signal(str, list) 
     magic_wand_clicked = Signal(float, float) 
     magic_box_completed = Signal(float, float, float, float)
+    annotation_box_completed = Signal(float, float, float, float)
     scale_defined = Signal(float)
 
     def __init__(self):
@@ -51,6 +52,7 @@ class AnnotationCanvas(QWidget):
         self.is_box_prompting = False
         self.box_start = QPointF(0, 0)
         self.box_rect = QRectF()
+        self.annotation_box_aspect_ratio = None
 
         # Scale Tool State
         self.is_scaling = False
@@ -162,10 +164,39 @@ class AnnotationCanvas(QWidget):
     
     def set_mode(self, mode):
         self.mode = mode
-        if mode in ["MAGIC_WAND", "BOX_PROMPT", "SCALE"]:
+        if mode in ["MAGIC_WAND", "BOX_PROMPT", "ANNOTATION_BOX", "SCALE"]:
             self.setCursor(Qt.CrossCursor)
         else:
             self.setCursor(Qt.ArrowCursor)
+
+    def set_annotation_box_aspect_ratio(self, aspect_ratio=None):
+        try:
+            ratio = float(aspect_ratio)
+        except Exception:
+            ratio = None
+        self.annotation_box_aspect_ratio = ratio if ratio and ratio > 0 else None
+
+    def _box_rect_for_current_mode(self, start_pos, current_pos):
+        rect = QRectF(start_pos, current_pos).normalized()
+        if self.mode != "ANNOTATION_BOX" or not self.annotation_box_aspect_ratio:
+            return rect
+
+        dx = current_pos.x() - start_pos.x()
+        dy = current_pos.y() - start_pos.y()
+        if dx == 0 or dy == 0:
+            return rect
+
+        width = abs(dx)
+        height = abs(dy)
+        ratio = self.annotation_box_aspect_ratio
+        if width / max(height, 1e-6) > ratio:
+            width = height * ratio
+        else:
+            height = width / ratio
+
+        end_x = start_pos.x() + (width if dx >= 0 else -width)
+        end_y = start_pos.y() + (height if dy >= 0 else -height)
+        return QRectF(start_pos, QPointF(end_x, end_y)).normalized()
 
     def image_to_screen(self, img_x, img_y):
         return QPointF(img_x * self.scale + self.offset.x(), img_y * self.scale + self.offset.y())
@@ -388,7 +419,7 @@ class AnnotationCanvas(QWidget):
                     self.update()
                     return
 
-            if self.mode == "BOX_PROMPT":
+            if self.mode in ["BOX_PROMPT", "ANNOTATION_BOX"]:
                 self.is_box_prompting = True
                 self.box_start = event.position()
                 self.box_rect = QRectF(self.box_start, self.box_start)
@@ -439,7 +470,7 @@ class AnnotationCanvas(QWidget):
 
         if self.is_box_prompting:
             curr_pos = event.position()
-            self.box_rect = QRectF(self.box_start, curr_pos).normalized()
+            self.box_rect = self._box_rect_for_current_mode(self.box_start, curr_pos)
             self.update()
             return
 
@@ -469,7 +500,7 @@ class AnnotationCanvas(QWidget):
                 self.update()
             
             # Cursor Logic
-            if hit or edge_hit or self.mode in ["MAGIC_WAND", "BOX_PROMPT", "SCALE"]:
+            if hit or edge_hit or self.mode in ["MAGIC_WAND", "BOX_PROMPT", "ANNOTATION_BOX", "SCALE"]:
                 self.setCursor(Qt.CrossCursor)
             else:
                 self.setCursor(Qt.ArrowCursor)
@@ -521,7 +552,10 @@ class AnnotationCanvas(QWidget):
                 
                 if abs(x2-x1) > 2 and abs(y2-y1) > 2:
                     self.save_state()
-                    self.magic_box_completed.emit(min(x1,x2), min(y1,y2), max(x1,x2), max(y1,y2))
+                    if self.mode == "ANNOTATION_BOX":
+                        self.annotation_box_completed.emit(min(x1,x2), min(y1,y2), max(x1,x2), max(y1,y2))
+                    else:
+                        self.magic_box_completed.emit(min(x1,x2), min(y1,y2), max(x1,x2), max(y1,y2))
                 return
 
             if self.is_scaling:

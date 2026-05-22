@@ -54,7 +54,7 @@ BLINK_TRANSLATIONS = {
         "Refresh": "刷新",
         "Blink Control Room": "Blink 控制区",
         "Mode: STANDBY": "模式：待命",
-        "BLINK SWITCH\n(Space)": "BLINK 开关\n（空格）",
+        "BLINK SWITCH": "BLINK 开关",
         "Shrink Logic:": "收缩逻辑：",
         "AUTO-ANNOTATE DRAFT": "自动标注草稿",
         "EXECUTE AUTO-SHRINK": "执行自动收缩",
@@ -626,7 +626,7 @@ class BlinkLabWidget(QWidget):
         if not self.training_log_console.toPlainText().strip():
             self.training_log_console.setPlaceholderText(self.tr("Blink training log will appear here during expert training."))
         self.controls.setTitle(self.tr("Blink Control Room"))
-        self.btn_blink.setText(self.tr("BLINK SWITCH\n(Space)"))
+        self.btn_blink.setText(self.tr("BLINK SWITCH"))
         self.lbl_shrink_logic.setText(self.tr("Shrink Logic:"))
         self.btn_auto_annotate.setText(self.tr("AUTO-ANNOTATE DRAFT"))
         self.btn_auto_shrink.setText(self.tr("EXECUTE AUTO-SHRINK"))
@@ -807,7 +807,7 @@ class BlinkLabWidget(QWidget):
         self.lbl_status.setWordWrap(True)
         session_layout.addWidget(self.lbl_status)
         
-        self.btn_blink = QPushButton("BLINK SWITCH\\n(Space)")
+        self.btn_blink = QPushButton("BLINK SWITCH")
         self.btn_blink.setFixedHeight(78)
         apply_semantic_button_style(self.btn_blink, BUTTON_ROLE_NEUTRAL, "font-size: 14px; font-weight: bold; border-radius: 10px;")
         self.btn_blink.clicked.connect(self.cycle_blink)
@@ -2206,6 +2206,4 @@ class BlinkLabWidget(QWidget):
             self.training_thread = None
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Space:
-            self.cycle_blink()
         super().keyPressEvent(event)

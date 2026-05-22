@@ -4,6 +4,7 @@ import csv
 import json
 import re
 import threading
+import cv2
 
 # pyright: reportMissingImports=false, reportGeneralTypeIssues=false, reportAttributeAccessIssue=false, reportArgumentType=false, reportCallIssue=false, reportOptionalMemberAccess=false, reportOptionalCall=false, reportUninitializedInstanceVariable=false, reportOperatorIssue=false
 
@@ -68,7 +69,7 @@ try:
     from AntSleap.ui.taxamask_agent_panel import TaxaMaskAgentPanel
     from AntSleap.core.dataset import TwoStageDataset
     from AntSleap.core.training_preflight import build_training_preflight, describe_training_preflight, describe_part_coverage, format_size_pair
-    from AntSleap.core.cascade_routes import format_expert_label, get_route_persisted_expert_candidates, merge_expert_candidates
+    from AntSleap.core.cascade_routes import format_expert_label, get_route_appointed_expert, get_route_persisted_expert_candidates, merge_expert_candidates
     from AntSleap.core.expert_notes import format_expert_display_name, load_expert_notes
     from AntSleap.core.project_templates import DEFAULT_PROJECT_TEMPLATE_ID, iter_project_templates
     from AntSleap.core.external_backend import BUILTIN_BACKEND_ID, EXTERNAL_BACKEND_ID, ExternalBackendRunner, sanitize_external_backend_config
@@ -120,7 +121,7 @@ except ImportError:
     from ui.taxamask_agent_panel import TaxaMaskAgentPanel
     from core.dataset import TwoStageDataset
     from core.training_preflight import build_training_preflight, describe_training_preflight, describe_part_coverage, format_size_pair
-    from core.cascade_routes import format_expert_label, get_route_persisted_expert_candidates, merge_expert_candidates
+    from core.cascade_routes import format_expert_label, get_route_appointed_expert, get_route_persisted_expert_candidates, merge_expert_candidates
     from core.expert_notes import format_expert_display_name, load_expert_notes
     from core.project_templates import DEFAULT_PROJECT_TEMPLATE_ID, iter_project_templates
     from core.external_backend import BUILTIN_BACKEND_ID, EXTERNAL_BACKEND_ID, ExternalBackendRunner, sanitize_external_backend_config
@@ -325,6 +326,8 @@ TRANSLATIONS = {
         "Default Blink Weight Decay:": "默认 Blink 权重衰减：",
         "Default Blink Input Size:": "默认 Blink 输入尺寸：",
         "These defaults are shown in Blink Workbench when the app starts or settings are saved. You can still adjust them for a single expert before training.": "这些默认值会在应用启动或保存设置后显示到 Blink 工作台。训练单个专家前仍可在 Blink 工作台临时调整。",
+        "Parent Box Aspect Ratios:": "父级框长宽比：",
+        "Used when the main labeling workbench draws parent context boxes. Child boxes and loose shrink boxes stay free-ratio.": "主标注工作台绘制父级上下文框时使用；子部位框和收缩松框保持自由比例。",
         "Learning Rate:": "学习率 (LR):",
         "Weight Decay (L2 Reg):": "权重衰减 (L2正则):",
         "Main Locator Parts:": "主定位结构：",
@@ -418,6 +421,60 @@ TRANSLATIONS = {
         "Success": "成功",
         "Open in Blink Workbench": "在 Blink 工作台中打开",
         "Blink Workbench": "Blink 工作台",
+        "Workbench Blink refinement": "工作台 Blink 精修",
+        "Parent-child refinement / Blink": "父子精修 / Blink",
+        "Configure Route Expert": "配置路由专家",
+        "Annotation Box": "标注框",
+        "Annotation box": "正式标注框",
+        "Loose shrink box": "收缩松框",
+        "Auto-annotate child": "自动标注子部位",
+        "Run auto-shrink": "执行自动收缩",
+        "Train current child expert": "训练当前子部位专家",
+        "Parent context": "父级上下文",
+        "Child structure": "子部位",
+        "parent box exists": "父级框已存在",
+        "parent box missing": "父级框未框选",
+        "Current structure: {0} ({1}); {2}.": "当前部位：{0}（{1}）；{2}。",
+        "Current structure: {0} ({1}); route {2}.": "当前部位：{0}（{1}）；路由 {2}。",
+        "Select a structure to see Blink parent-child status.": "选择部位后显示 Blink 父子状态。",
+        "Current route: {0}": "当前路由：{0}",
+        "Not available": "不可用",
+        "Parent box: {0}": "父级框：{0}",
+        "available ({0})": "已存在（{0}）",
+        "missing": "缺失",
+        "Route expert: {0}": "路由专家：{0}",
+        "Parent context:": "父级上下文：",
+        "Choose parent context": "选择父级上下文",
+        "Parent context unavailable": "父级上下文不可用",
+        "Manual parent context set: {0} -> {1}.": "已手动设置父级上下文：{0} -> {1}。",
+        "Route not configured": "路由未配置",
+        "Lock parent box ratio": "锁定父级框比例",
+        "Open route expert settings for {0}.": "打开 {0} 的路由专家设置。",
+        "Select a child structure first.": "请先选择子部位。",
+        "Select a child structure for Blink refinement.": "请选择子部位进行 Blink 精修。",
+        "Select a child structure with a parent context first.": "请先选择带父级上下文的子部位。",
+        "Choose or remember a parent structure for this child first.": "请先为这个子部位指定或记忆父级结构。",
+        "Draw a parent box before Blink refinement.": "请先绘制父级框，再进行 Blink 精修。",
+        "Configure a route expert before automatic child annotation.": "请先配置路由专家，再自动标注子部位。",
+        "Enable the current route before automatic child annotation.": "请先启用当前路由，再自动标注子部位。",
+        "Training uses saved shrink trajectories for this parent-child route.": "训练会使用这条父子路由下已保存的收缩轨迹。",
+        "Configure the current route before continuing.": "请先配置当前路由再继续。",
+        "Saved loose shrink box for {0}.": "已为 {0} 保存收缩松框。",
+        "Saved annotation box for {0}.": "已为 {0} 保存标注框。",
+        "Running child auto-annotation for {0} via {1}.": "正在通过 {1} 自动标注子部位 {0}。",
+        "No usable route expert result was returned for this child structure.": "当前子部位没有返回可用的路由专家结果。",
+        "The route expert did not return a valid child box.": "路由专家没有返回有效的子部位框。",
+        "Could not read the current image.": "无法读取当前图片。",
+        "Generated child draft polygon for {0}.": "已为 {0} 生成子部位草稿多边形。",
+        "Route expert produced a child box for {0}; refine polygon manually.": "路由专家已为 {0} 生成子部位框；请手动精修多边形。",
+        "Child auto-annotation failed: {0}": "子部位自动标注失败：{0}",
+        "Draw or confirm the child polygon before auto-shrink.": "请先绘制或确认子部位多边形，再执行自动收缩。",
+        "Switch the box role to loose shrink box and draw one around the child first.": "请先切换到收缩松框，并围绕子部位画一个松框。",
+        "Auto-shrink did not generate a trajectory.": "自动收缩没有生成轨迹。",
+        "Saved {0} shrink trajectory frames for {1}.": "已为 {1} 保存 {0} 帧收缩轨迹。",
+        "Auto-shrink failed: {0}": "自动收缩失败：{0}",
+        "Blink expert training is already running.": "Blink 专家训练已经在运行。",
+        "Started Blink expert training for {0} -> {1}.": "已开始训练 Blink 专家：{0} -> {1}。",
         "Training Report & Validation": "训练报告与验证",
         "Summary": "摘要",
         "No Metrics Generated": "未生成指标图",
@@ -667,6 +724,7 @@ def _translate_route_registration_source(value, lang="en"):
         "project": ui_text("Project", lang),
         "blink_candidate": ui_text("Blink candidate", lang),
         "blink_training": ui_text("Blink training", lang),
+        "workbench_blink_refine": tr("Workbench Blink refinement", lang),
         "legacy_global_manifest": ui_text("Legacy global manifest", lang),
     }
     text = str(value or "project")
@@ -769,6 +827,18 @@ def _blink_preferred_roi_parts(target_part, remembered_parent_part=None):
     if remembered_parent and remembered_parent != target:
         preferred_parts.append(remembered_parent)
     return preferred_parts
+
+
+def _clean_box(box):
+    if not isinstance(box, (list, tuple)) or len(box) != 4:
+        return None
+    try:
+        clean = [float(value) for value in box]
+    except Exception:
+        return None
+    if clean[2] <= clean[0] or clean[3] <= clean[1]:
+        return None
+    return clean
 
 class TrainingThread(QThread):
     log_signal = Signal(str)
@@ -1920,8 +1990,8 @@ class ModelSettingsDialog(QDialog):
         self.setWindowTitle(tr("2D/STL Morphology Model Settings", lang))
         self.resize(880, 680)
         layout = QVBoxLayout(self)
-        tabs = QTabWidget()
-        tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
+        self.tabs = QTabWidget()
+        self.tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
         self.locator_scope_checks = []
 
         workflow_note = QLabel(
@@ -2070,6 +2140,37 @@ class ModelSettingsDialog(QDialog):
         blink_layout.addWidget(self.combo_blink_input_size)
         form_train.addWidget(blink_group)
 
+        parent_ratio_group = QGroupBox(tr("Parent Box Aspect Ratios:", lang))
+        apply_surface_role(parent_ratio_group, SURFACE_ROLE_SUBTLE, "modelSettingsParentBoxRatioPanel")
+        ratio_layout = QGridLayout(parent_ratio_group)
+        ratio_layout.setContentsMargins(12, 12, 12, 12)
+        ratio_layout.setHorizontalSpacing(10)
+        ratio_layout.setVerticalSpacing(8)
+        ratio_note = QLabel(
+            tr(
+                "Used when the main labeling workbench draws parent context boxes. Child boxes and loose shrink boxes stay free-ratio.",
+                lang,
+            )
+        )
+        ratio_note.setWordWrap(True)
+        ratio_note.setObjectName("mutedLabel")
+        ratio_layout.addWidget(ratio_note, 0, 0, 1, 2)
+        self.parent_box_ratio_inputs = {}
+        ratio_map = params.get("parent_box_aspect_ratios", {}) if isinstance(params.get("parent_box_aspect_ratios", {}), dict) else {}
+        default_ratio_parts = ["Head", "Mesosoma", "Gaster", "Whole body"]
+        ratio_parts = []
+        for part_name in list(params.get("locator_scope", [])) + default_ratio_parts:
+            clean_part = str(part_name or "").strip()
+            if clean_part and clean_part not in ratio_parts:
+                ratio_parts.append(clean_part)
+        for index, part_name in enumerate(ratio_parts, start=1):
+            ratio_layout.addWidget(QLabel(part_name), index, 0)
+            edit = QLineEdit(str(ratio_map.get(part_name, "")))
+            edit.setPlaceholderText("1.0")
+            self.parent_box_ratio_inputs[part_name] = edit
+            ratio_layout.addWidget(edit, index, 1)
+        form_train.addWidget(parent_ratio_group)
+
         locator_group = QGroupBox(tr("Main Locator Parts:", lang))
         apply_surface_role(locator_group, SURFACE_ROLE_SUBTLE, "modelSettingsLocatorScopePanel")
         locator_layout = QVBoxLayout(locator_group)
@@ -2108,7 +2209,7 @@ class ModelSettingsDialog(QDialog):
         form_train.addWidget(locator_group)
         
         form_train.addStretch()
-        tabs.addTab(self._make_scroll_tab(tab_train), tr("Training", lang))
+        self.tabs.addTab(self._make_scroll_tab(tab_train), tr("Training", lang))
         
         tab_inf = QWidget()
         form_inf = QVBoxLayout(tab_inf)
@@ -2147,10 +2248,10 @@ class ModelSettingsDialog(QDialog):
             form_inf.addWidget(route_group, 1)
 
         form_inf.addStretch()
-        tabs.addTab(self._make_scroll_tab(tab_inf), tr("Inference", lang))
-        tabs.addTab(self._make_scroll_tab(tab_backend), tr("External Backend", lang))
+        self.tabs.addTab(self._make_scroll_tab(tab_inf), tr("Inference", lang))
+        self.tabs.addTab(self._make_scroll_tab(tab_backend), tr("External Backend", lang))
         
-        layout.addWidget(tabs, 1)
+        layout.addWidget(self.tabs, 1)
         btn_layout = QHBoxLayout()
         btn_ask_agent = QPushButton(tr("Ask Agent", lang))
         btn_ask_agent.setObjectName("modelSettingsAskAgentButton")
@@ -2250,6 +2351,20 @@ class ModelSettingsDialog(QDialog):
                     selected.append(part_name)
         return selected
 
+    def _parent_box_aspect_ratio_values(self):
+        ratios = {}
+        for part_name, editor in getattr(self, "parent_box_ratio_inputs", {}).items():
+            text = editor.text().strip()
+            if not text:
+                continue
+            try:
+                ratio = float(text)
+            except Exception:
+                continue
+            if ratio > 0:
+                ratios[part_name] = ratio
+        return ratios
+
     def request_agent_help(self):
         self.agent_requested.emit(self.get_agent_context())
         self.reject()
@@ -2276,6 +2391,7 @@ class ModelSettingsDialog(QDialog):
             "predict_command_has_contract": _agent_yes_no(_agent_command_has_contract(predict_command)),
             "model_manifest_present": _agent_yes_no(bool(self.external_model_manifest.text().strip())),
             "locator_scope_count": str(len(self._selected_locator_scope())),
+            "parent_box_ratio_count": str(len(self._parent_box_aspect_ratio_values())),
             "validation_errors": _agent_error_summary(self._external_backend_validation_errors()),
         }
 
@@ -2297,6 +2413,7 @@ class ModelSettingsDialog(QDialog):
                 'noise_floor': float(self.spin_noise.text()),
                 'poly_epsilon': float(self.spin_poly.text()),
                 'locator_scope': self._selected_locator_scope(),
+                'parent_box_aspect_ratios': self._parent_box_aspect_ratio_values(),
                 'runtime_device': self.combo_runtime_device.currentData() or "auto",
                 'model_backend': self.backend_combo.currentData() or BUILTIN_BACKEND_ID,
                 'external_backend': sanitize_external_backend_config(
@@ -2876,6 +2993,13 @@ class MainWindow(QMainWindow):
         self.last_confirmed_locator_timestamp = None
         self.pending_training_preflight = None
         self.training_retry_requested = False
+        self.current_blink_context = {}
+        self.blink_box_role = "annotation"
+        self.parent_box_aspect_ratios = (
+            self.project.get_parent_box_aspect_ratios()
+            if hasattr(self.project, "get_parent_box_aspect_ratios")
+            else {}
+        )
 
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
@@ -2988,6 +3112,11 @@ class MainWindow(QMainWindow):
         self.radio_box.toggled.connect(self.on_tool_changed)
         self.tool_group.addButton(self.radio_box)
         tool_layout.addWidget(self.radio_box)
+        self.radio_annotation_box = QRadioButton()
+        self.radio_annotation_box.setObjectName("toolChip")
+        self.radio_annotation_box.toggled.connect(self.on_tool_changed)
+        self.tool_group.addButton(self.radio_annotation_box)
+        tool_layout.addWidget(self.radio_annotation_box)
         self.radio_scale = QRadioButton()
         self.radio_scale.setObjectName("scaleToolRadio")
         self.radio_scale.toggled.connect(self.on_tool_changed)
@@ -3022,6 +3151,7 @@ class MainWindow(QMainWindow):
         self.canvas.polygon_completed.connect(self.on_polygon_completed)
         self.canvas.magic_wand_clicked.connect(self.on_magic_wand_clicked)
         self.canvas.magic_box_completed.connect(self.on_magic_box_completed)
+        self.canvas.annotation_box_completed.connect(self.on_annotation_box_completed)
         self.canvas.scale_defined.connect(self.on_scale_defined)
         self.canvas_shell = QWidget()
         apply_surface_role(self.canvas_shell, SURFACE_ROLE_CANVAS, "workbenchCanvasShell")
@@ -3078,6 +3208,10 @@ class MainWindow(QMainWindow):
         self.part_list.currentItemChanged.connect(self.on_part_selected)
         self.part_list.setFixedHeight(190) 
         metadata_layout.addWidget(self.part_list)
+        self.blink_context_status_label = QLabel()
+        self.blink_context_status_label.setObjectName("mutedLabel")
+        self.blink_context_status_label.setWordWrap(True)
+        metadata_layout.addWidget(self.blink_context_status_label)
         
         tax_btn_layout = QHBoxLayout()
         self.btn_add_part = QPushButton("+")
@@ -3208,6 +3342,66 @@ class MainWindow(QMainWindow):
         self.progress = QProgressBar()
         ai_action_layout.addWidget(self.progress)
         ai_layout.addWidget(self.ai_action_panel)
+
+        self.blink_refine_panel = QWidget()
+        apply_surface_role(self.blink_refine_panel, SURFACE_ROLE_RAISED, "workbenchBlinkRefinePanel")
+        blink_refine_layout = QVBoxLayout(self.blink_refine_panel)
+        blink_refine_layout.setContentsMargins(10, 10, 10, 10)
+        blink_refine_layout.setSpacing(8)
+        self.label_blink_refine = QLabel()
+        self.label_blink_refine.setObjectName("HeaderLabel")
+        blink_refine_layout.addWidget(self.label_blink_refine)
+        self.label_blink_route = QLabel()
+        self.label_blink_route.setObjectName("mutedLabel")
+        self.label_blink_route.setWordWrap(True)
+        blink_refine_layout.addWidget(self.label_blink_route)
+        self.label_blink_parent_context = QLabel()
+        self.label_blink_parent_context.setObjectName("mutedLabel")
+        blink_refine_layout.addWidget(self.label_blink_parent_context)
+        self.combo_blink_parent_context = NoWheelComboBox()
+        self.combo_blink_parent_context.activated.connect(self.on_blink_parent_context_changed)
+        blink_refine_layout.addWidget(self.combo_blink_parent_context)
+        self.label_blink_parent_box = QLabel()
+        self.label_blink_parent_box.setObjectName("mutedLabel")
+        self.label_blink_parent_box.setWordWrap(True)
+        blink_refine_layout.addWidget(self.label_blink_parent_box)
+        self.label_blink_expert = QLabel()
+        self.label_blink_expert.setObjectName("mutedLabel")
+        self.label_blink_expert.setWordWrap(True)
+        blink_refine_layout.addWidget(self.label_blink_expert)
+        self.check_lock_parent_box_ratio = QCheckBox()
+        self.check_lock_parent_box_ratio.setChecked(True)
+        self.check_lock_parent_box_ratio.stateChanged.connect(self._refresh_annotation_box_constraints)
+        blink_refine_layout.addWidget(self.check_lock_parent_box_ratio)
+        self.btn_configure_route_expert = QPushButton()
+        self.btn_configure_route_expert.clicked.connect(self.open_current_route_expert_settings)
+        apply_semantic_button_style(self.btn_configure_route_expert, BUTTON_ROLE_NEUTRAL)
+        blink_refine_layout.addWidget(self.btn_configure_route_expert)
+        self.blink_box_role_group = QButtonGroup(self)
+        box_role_layout = QHBoxLayout()
+        self.radio_blink_box_annotation = QRadioButton()
+        self.radio_blink_box_annotation.setChecked(True)
+        self.radio_blink_box_annotation.toggled.connect(self.on_blink_box_role_changed)
+        self.blink_box_role_group.addButton(self.radio_blink_box_annotation)
+        box_role_layout.addWidget(self.radio_blink_box_annotation)
+        self.radio_blink_box_shrink = QRadioButton()
+        self.radio_blink_box_shrink.toggled.connect(self.on_blink_box_role_changed)
+        self.blink_box_role_group.addButton(self.radio_blink_box_shrink)
+        box_role_layout.addWidget(self.radio_blink_box_shrink)
+        blink_refine_layout.addLayout(box_role_layout)
+        self.btn_blink_auto_annotate = QPushButton()
+        self.btn_blink_auto_annotate.clicked.connect(self.run_blink_child_auto_annotate)
+        apply_semantic_button_style(self.btn_blink_auto_annotate, BUTTON_ROLE_RUN, "padding: 6px;")
+        blink_refine_layout.addWidget(self.btn_blink_auto_annotate)
+        self.btn_blink_auto_shrink = QPushButton()
+        self.btn_blink_auto_shrink.clicked.connect(self.run_blink_auto_shrink)
+        apply_semantic_button_style(self.btn_blink_auto_shrink, BUTTON_ROLE_RUN, "padding: 6px;")
+        blink_refine_layout.addWidget(self.btn_blink_auto_shrink)
+        self.btn_blink_train_expert = QPushButton()
+        self.btn_blink_train_expert.clicked.connect(self.train_current_blink_expert)
+        apply_semantic_button_style(self.btn_blink_train_expert, BUTTON_ROLE_RUN, "padding: 6px;")
+        blink_refine_layout.addWidget(self.btn_blink_train_expert)
+        ai_layout.addWidget(self.blink_refine_panel)
         right_layout.addWidget(self.ai_panel)
 
         self.logs_panel = QWidget()
@@ -4051,6 +4245,8 @@ class MainWindow(QMainWindow):
             panel.refresh_route_table()
         if hasattr(self, "part_list"):
             self._refresh_part_tree(self._current_part_name())
+        if hasattr(self, "blink_refine_panel"):
+            self._refresh_blink_refine_state()
 
     def update_route_action_buttons(self):
         panel = getattr(self, "route_settings_panel", None)
@@ -4106,8 +4302,8 @@ class MainWindow(QMainWindow):
             return
         self._remove_tab_if_present(self.start_center_widget)
         self._remove_tab_if_present(self.tif_workbench)
+        self._remove_tab_if_present(self.blink_lab)
         self._ensure_tab_visible(self.workbench_widget, tr("Labeling Workbench", self.current_lang))
-        self._ensure_tab_visible(self.blink_lab, tr("Blink Workbench", self.current_lang))
         if self.tabs.currentWidget() is None or self.tabs.currentWidget() is self.tif_workbench:
             self.tabs.setCurrentWidget(self.workbench_widget)
 
@@ -4764,6 +4960,297 @@ class MainWindow(QMainWindow):
     def _current_part_name(self):
         return self._part_item_name(self.part_list.currentItem())
 
+    def _workbench_parent_parts(self):
+        project = getattr(self, "project", None)
+        taxonomy = list(getattr(project, "project_data", {}).get("taxonomy", [])) if project is not None else []
+        taxonomy_set = {str(part).strip() for part in taxonomy if str(part).strip()}
+        get_scope = getattr(project, "get_locator_scope", None)
+        try:
+            scope = get_scope() if callable(get_scope) else []
+        except Exception:
+            scope = []
+        parents = []
+        for part in scope or []:
+            clean = str(part or "").strip()
+            if clean and clean in taxonomy_set and clean not in parents:
+                parents.append(clean)
+        return parents
+
+    def _is_parent_part(self, part_name):
+        clean_part = str(part_name or "").strip()
+        return bool(clean_part) and clean_part in set(self._workbench_parent_parts())
+
+    def _part_tree_parent_for(self, part_name):
+        clean_part = str(part_name or "").strip()
+        if not clean_part or not hasattr(self, "part_list"):
+            return None
+
+        def walk(item):
+            if item is None:
+                return None
+            if self._part_item_name(item) == clean_part:
+                parent_item = item.parent()
+                parent_part = self._part_item_name(parent_item)
+                return parent_part if parent_part and parent_part != clean_part else None
+            for index in range(item.childCount()):
+                found = walk(item.child(index))
+                if found:
+                    return found
+            return None
+
+        for index in range(self.part_list.topLevelItemCount()):
+            found_parent = walk(self.part_list.topLevelItem(index))
+            if found_parent:
+                return found_parent
+        return None
+
+    def _route_parents_for_child(self, child_part):
+        clean_child = str(child_part or "").strip()
+        if not clean_child:
+            return []
+        routes = []
+        try:
+            routes = self.project.iter_cascade_routes()
+        except Exception:
+            routes = []
+        parents = []
+        for route in routes or []:
+            if not isinstance(route, dict):
+                continue
+            parent = str(route.get("parent") or "").strip()
+            child = str(route.get("child") or "").strip()
+            if parent and child == clean_child and parent != clean_child and parent not in parents:
+                parents.append(parent)
+        return parents
+
+    def _first_parent_with_box(self, image_path, parent_parts):
+        manual = self.project.get_boxes(image_path) if image_path else {}
+        auto = self.project.get_auto_boxes(image_path) if image_path else {}
+        for source_name, boxes in (("manual", manual), ("auto", auto)):
+            if not isinstance(boxes, dict):
+                continue
+            for parent_part in parent_parts or []:
+                if _clean_box(boxes.get(parent_part)):
+                    return parent_part
+        return None
+
+    def _resolve_child_parent(self, child_part):
+        clean_child = str(child_part or "").strip()
+        if not clean_child:
+            return None, "none"
+        taxonomy = set(str(part).strip() for part in self.project.project_data.get("taxonomy", []) if str(part).strip())
+        parent_candidates = self._workbench_parent_parts()
+
+        remembered_parent = None
+        get_parent = getattr(self.project, "get_blink_context_parent", None)
+        if callable(get_parent):
+            try:
+                remembered_parent = get_parent(clean_child)
+            except Exception:
+                remembered_parent = None
+        remembered_parent = str(remembered_parent or "").strip()
+        if remembered_parent and remembered_parent in taxonomy and remembered_parent != clean_child:
+            return remembered_parent, "remembered"
+
+        tree_parent = self._part_tree_parent_for(clean_child)
+        if tree_parent and tree_parent != clean_child:
+            return tree_parent, "part_tree"
+
+        route_parents = self._route_parents_for_child(clean_child)
+        if len(route_parents) == 1:
+            return route_parents[0], "route"
+
+        boxed_parent = self._first_parent_with_box(self.current_image, parent_candidates)
+        if boxed_parent:
+            return boxed_parent, "available_box"
+
+        if len(parent_candidates) == 1 and parent_candidates[0] != clean_child:
+            return parent_candidates[0], "locator_scope"
+        return None, "none"
+
+    def _parent_context_box(self, parent_part):
+        if not self.current_image or not parent_part:
+            return None, "none"
+        manual = self.project.get_boxes(self.current_image)
+        box = _clean_box(manual.get(parent_part) if isinstance(manual, dict) else None)
+        if box:
+            return box, "manual"
+        auto = self.project.get_auto_boxes(self.current_image)
+        box = _clean_box(auto.get(parent_part) if isinstance(auto, dict) else None)
+        if box:
+            return box, "auto"
+        return None, "none"
+
+    def _route_entry_for_context(self, parent_part, child_part):
+        get_route = getattr(self.project, "get_cascade_route", None)
+        if callable(get_route):
+            try:
+                route = get_route(parent_part, child_part)
+            except Exception:
+                route = None
+            if isinstance(route, dict):
+                return dict(route)
+        for route in self.project.iter_cascade_routes():
+            if not isinstance(route, dict):
+                continue
+            if route.get("parent") == parent_part and route.get("child") == child_part:
+                return dict(route)
+        return None
+
+    def _route_expert_status(self, route_entry):
+        if not isinstance(route_entry, dict):
+            return "missing", tr("Route not configured", self.current_lang), False
+        appointed = get_route_appointed_expert(route_entry)
+        has_appointed = bool(appointed.get("expert_id"))
+        block_reason = None
+        cascade_manager = getattr(getattr(self, "engine", None), "cascade_manager", None)
+        get_block = getattr(cascade_manager, "get_route_block_reason", None)
+        if callable(get_block):
+            try:
+                block_reason = get_block(route_entry)
+            except Exception:
+                block_reason = None
+        if block_reason == "expert_unappointed":
+            return "unappointed", ui_text("Expert not appointed yet", self.current_lang), False
+        if block_reason == "expert_model_missing":
+            return "missing_file", tr("Expert file missing", self.current_lang), has_appointed
+        if not has_appointed:
+            return "unappointed", ui_text("Expert not appointed yet", self.current_lang), False
+        if not bool(route_entry.get("enabled", False)):
+            return "disabled", ui_text("Disabled", self.current_lang), has_appointed
+        if has_appointed:
+            return "ready", ui_text("Enabled", self.current_lang), True
+        return "unappointed", ui_text("Expert not appointed yet", self.current_lang), False
+
+    def _current_blink_context(self):
+        selected_part = self._current_part_name()
+        context = {
+            "selected_part": selected_part,
+            "role": "none",
+            "parent_part": None,
+            "child_part": None,
+            "parent_source": "none",
+            "route_label": "",
+            "parent_box": None,
+            "parent_box_source": "none",
+            "has_parent_box": False,
+            "route_entry": None,
+            "route_status": "none",
+            "route_status_text": ui_text("Unknown", self.current_lang),
+            "has_appointed_expert": False,
+            "can_refine": False,
+            "disabled_reason": tr("Select a child structure first.", self.current_lang),
+        }
+        if not selected_part:
+            return context
+
+        if self._is_parent_part(selected_part):
+            box, source = self._parent_context_box(selected_part)
+            context.update(
+                {
+                    "role": "parent",
+                    "parent_part": selected_part,
+                    "parent_box": box,
+                    "parent_box_source": source,
+                    "has_parent_box": bool(box),
+                    "disabled_reason": tr("Select a child structure for Blink refinement.", self.current_lang),
+                }
+            )
+            return context
+
+        parent_part, parent_source = self._resolve_child_parent(selected_part)
+        context.update(
+            {
+                "role": "child",
+                "child_part": selected_part,
+                "parent_part": parent_part,
+                "parent_source": parent_source,
+            }
+        )
+        if parent_part:
+            context["route_label"] = f"{parent_part} -> {selected_part}"
+            parent_box, parent_box_source = self._parent_context_box(parent_part)
+            route_entry = self._route_entry_for_context(parent_part, selected_part)
+            route_status, route_status_text, has_appointed = self._route_expert_status(route_entry)
+            context.update(
+                {
+                    "parent_box": parent_box,
+                    "parent_box_source": parent_box_source,
+                    "has_parent_box": bool(parent_box),
+                    "route_entry": route_entry,
+                    "route_status": route_status,
+                    "route_status_text": route_status_text,
+                    "has_appointed_expert": has_appointed,
+                }
+            )
+        if not parent_part:
+            context["disabled_reason"] = tr("Choose or remember a parent structure for this child first.", self.current_lang)
+        elif not context["has_parent_box"]:
+            context["disabled_reason"] = tr("Draw a parent box before Blink refinement.", self.current_lang)
+        elif context["route_status"] in {"missing", "unappointed", "missing_file"}:
+            context["disabled_reason"] = tr("Configure a route expert before automatic child annotation.", self.current_lang)
+        elif context["route_status"] == "disabled":
+            context["disabled_reason"] = tr("Enable the current route before automatic child annotation.", self.current_lang)
+        else:
+            context["can_refine"] = True
+            context["disabled_reason"] = ""
+        return context
+
+    def _parent_box_aspect_ratio(self, parent_part):
+        ratios = getattr(self, "parent_box_aspect_ratios", None)
+        if not isinstance(ratios, dict):
+            ratios = self.project.get_parent_box_aspect_ratios() if hasattr(self.project, "get_parent_box_aspect_ratios") else {}
+            self.parent_box_aspect_ratios = dict(ratios)
+        try:
+            ratio = float(ratios.get(parent_part))
+        except Exception:
+            ratio = None
+        return ratio if ratio and ratio > 0 else None
+
+    def _parent_context_options(self, child_part):
+        clean_child = str(child_part or "").strip()
+        if not clean_child:
+            return []
+        taxonomy = {
+            str(part).strip()
+            for part in self.project.project_data.get("taxonomy", [])
+            if str(part).strip()
+        }
+        options = []
+        for parent_part in (
+            list(self._workbench_parent_parts())
+            + list(self._route_parents_for_child(clean_child))
+            + [self._part_tree_parent_for(clean_child)]
+        ):
+            clean_parent = str(parent_part or "").strip()
+            if (
+                clean_parent
+                and clean_parent != clean_child
+                and clean_parent in taxonomy
+                and clean_parent not in options
+            ):
+                options.append(clean_parent)
+        return options
+
+    def _refresh_annotation_box_constraints(self):
+        if not hasattr(self, "canvas"):
+            return
+        context = dict(getattr(self, "current_blink_context", {}) or self._current_blink_context())
+        ratio = None
+        lock_parent_ratio = True
+        if hasattr(self, "check_lock_parent_box_ratio"):
+            lock_parent_ratio = self.check_lock_parent_box_ratio.isChecked()
+        if lock_parent_ratio and context.get("role") == "parent":
+            ratio = self._parent_box_aspect_ratio(context.get("parent_part"))
+        self.canvas.set_annotation_box_aspect_ratio(ratio)
+
+    def _refresh_blink_refine_state(self):
+        context = self._current_blink_context()
+        self.current_blink_context = dict(context)
+        self._refresh_annotation_box_constraints()
+        self._update_blink_refine_panel(context)
+        return context
+
     def _append_part_tree_item(self, parent_item, text, part_name=None, tooltip=None):
         item = QTreeWidgetItem(parent_item) if parent_item is not None else QTreeWidgetItem(self.part_list)
         item.setText(0, text)
@@ -4886,6 +5373,8 @@ class MainWindow(QMainWindow):
         else:
             self.canvas.set_active_part(None)
             self.desc_box.clear()
+        if hasattr(self, "blink_refine_panel"):
+            self._refresh_blink_refine_state()
 
     def add_taxonomy_part(self):
         name, ok = QInputDialog.getText(self, tr("Add Structure", self.current_lang), tr("Structure Name:", self.current_lang))
@@ -4979,12 +5468,23 @@ class MainWindow(QMainWindow):
         self.btn_stop_training.setText(tr("Stop Training", self.current_lang))
         self.btn_clear_ai.setText(tr("Clear AI Labels", self.current_lang))
         self.btn_blink_entry.setText(tr("Open in Blink Workbench", self.current_lang))
+        self.btn_blink_entry.setVisible(False)
         self.btn_start_center_from_workbench.setText(tr("Start Center", self.current_lang))
         self.btn_agent_from_workbench.setText(tr("Ask Agent", self.current_lang))
+        self.label_blink_refine.setText(tr("Parent-child refinement / Blink", self.current_lang))
+        self.btn_configure_route_expert.setText(tr("Configure Route Expert", self.current_lang))
+        self.radio_blink_box_annotation.setText(tr("Annotation box", self.current_lang))
+        self.radio_blink_box_shrink.setText(tr("Loose shrink box", self.current_lang))
+        self.btn_blink_auto_annotate.setText(tr("Auto-annotate child", self.current_lang))
+        self.btn_blink_auto_shrink.setText(tr("Run auto-shrink", self.current_lang))
+        self.btn_blink_train_expert.setText(tr("Train current child expert", self.current_lang))
+        if hasattr(self, "label_blink_parent_context"):
+            self.label_blink_parent_context.setText(tr("Parent context:", self.current_lang))
         self.label_logs.setText(tr("LOGS", self.current_lang))
         self.radio_draw.setText(tr("Manual Draw", self.current_lang))
         self.radio_magic.setText(tr("Magic Wand (SAM)", self.current_lang))
         self.radio_box.setText(tr("Box Prompt (SAM)", self.current_lang))
+        self.radio_annotation_box.setText(tr("Annotation Box", self.current_lang))
         self.radio_scale.setText(tr("Scale Tool", self.current_lang))
         self.lbl_bright.setText(tr("B:", self.current_lang))
         self.lbl_contrast.setText(tr("C:", self.current_lang))
@@ -5023,6 +5523,95 @@ class MainWindow(QMainWindow):
         if self.check_morpho.isChecked() and self._current_part_name():
             self.update_measurements(self._current_part_name())
         self.refresh_route_table()
+        self._refresh_blink_refine_state()
+
+    def _update_blink_refine_panel(self, context=None):
+        if not hasattr(self, "blink_refine_panel"):
+            return
+        context = dict(context or getattr(self, "current_blink_context", {}) or {})
+        role = context.get("role") or "none"
+        selected_part = context.get("selected_part") or ""
+        parent_part = context.get("parent_part") or ""
+        child_part = context.get("child_part") or ""
+
+        if role == "parent":
+            role_text = tr("Parent context", self.current_lang)
+            box_status = tr("parent box exists", self.current_lang) if context.get("has_parent_box") else tr("parent box missing", self.current_lang)
+            summary = tr("Current structure: {0} ({1}); {2}.", self.current_lang).format(selected_part, role_text, box_status)
+        elif role == "child":
+            role_text = tr("Child structure", self.current_lang)
+            route_text = context.get("route_label") or tr("Parent not selected", self.current_lang)
+            summary = tr("Current structure: {0} ({1}); route {2}.", self.current_lang).format(selected_part, role_text, route_text)
+        else:
+            summary = tr("Select a structure to see Blink parent-child status.", self.current_lang)
+
+        self.blink_context_status_label.setText(summary)
+        self.label_blink_route.setText(
+            tr("Current route: {0}", self.current_lang).format(context.get("route_label") or tr("Not available", self.current_lang))
+        )
+        self.label_blink_parent_context.setText(tr("Parent context:", self.current_lang))
+        self._update_blink_parent_context_combo(context)
+        parent_box_text = tr("Parent box: {0}", self.current_lang).format(
+            tr("available ({0})", self.current_lang).format(context.get("parent_box_source"))
+            if context.get("has_parent_box")
+            else tr("missing", self.current_lang)
+        )
+        if parent_part and role == "child":
+            parent_box_text = f"{parent_part} · {parent_box_text}"
+        self.label_blink_parent_box.setText(parent_box_text)
+        self.label_blink_expert.setText(
+            tr("Route expert: {0}", self.current_lang).format(context.get("route_status_text") or ui_text("Unknown", self.current_lang))
+        )
+        self.check_lock_parent_box_ratio.setText(tr("Lock parent box ratio", self.current_lang))
+
+        can_open_route = bool(parent_part and child_part)
+        self.btn_configure_route_expert.setEnabled(can_open_route)
+        self.btn_configure_route_expert.setToolTip(
+            tr("Open route expert settings for {0}.", self.current_lang).format(context.get("route_label"))
+            if can_open_route
+            else tr("Select a child structure with a parent context first.", self.current_lang)
+        )
+
+        can_refine = bool(context.get("can_refine"))
+        disabled_reason = str(context.get("disabled_reason") or "")
+        self.btn_blink_auto_annotate.setEnabled(can_refine)
+        self.btn_blink_auto_annotate.setToolTip(disabled_reason)
+        self.btn_blink_auto_shrink.setEnabled(bool(role == "child" and parent_part and context.get("has_parent_box")))
+        self.btn_blink_auto_shrink.setToolTip(disabled_reason if not self.btn_blink_auto_shrink.isEnabled() else "")
+        self.btn_blink_train_expert.setEnabled(bool(role == "child" and parent_part))
+        self.btn_blink_train_expert.setToolTip(
+            tr("Training uses saved shrink trajectories for this parent-child route.", self.current_lang)
+            if self.btn_blink_train_expert.isEnabled()
+            else tr("Select a child structure with a parent context first.", self.current_lang)
+        )
+
+    def _update_blink_parent_context_combo(self, context):
+        if not hasattr(self, "combo_blink_parent_context"):
+            return
+        context = dict(context or {})
+        combo = self.combo_blink_parent_context
+        self._updating_blink_parent_context = True
+        try:
+            combo.blockSignals(True)
+            combo.clear()
+            role = context.get("role")
+            child_part = context.get("child_part")
+            parent_part = context.get("parent_part")
+            options = self._parent_context_options(child_part) if role == "child" else []
+            combo.addItem(tr("Choose parent context", self.current_lang), "")
+            for option in options:
+                combo.addItem(option, option)
+            index = combo.findData(parent_part)
+            combo.setCurrentIndex(index if index >= 0 else 0)
+            combo.setEnabled(role == "child" and bool(options))
+            combo.setToolTip(
+                tr("Choose parent context", self.current_lang)
+                if combo.isEnabled()
+                else tr("Parent context unavailable", self.current_lang)
+            )
+        finally:
+            combo.blockSignals(False)
+            self._updating_blink_parent_context = False
 
     def open_general_settings(self):
         params = {
@@ -5083,7 +5672,7 @@ class MainWindow(QMainWindow):
         self.log(tr("General settings updated.", self.current_lang))
         self.refresh_ui()
 
-    def open_stl_model_settings(self):
+    def open_stl_model_settings(self, target_route=None):
         params = {
             'epochs': self.train_epochs, 'batch': self.train_batch, 'lr': self.train_lr, 'wd': self.train_wd,
             'blink_epochs': self.blink_train_epochs,
@@ -5098,11 +5687,21 @@ class MainWindow(QMainWindow):
             'runtime_device': self.runtime_device,
             'taxonomy': self.project.project_data.get("taxonomy", []),
             'locator_scope': self.project.get_locator_scope(),
+            'parent_box_aspect_ratios': self.project.get_parent_box_aspect_ratios() if hasattr(self.project, "get_parent_box_aspect_ratios") else {},
         }
         route_panel = getattr(self, "route_settings_panel", None)
         if route_panel is not None:
             route_panel.setParent(None)
         dlg = ModelSettingsDialog(params, self.current_lang, self, route_panel=route_panel)
+        if target_route and route_panel is not None:
+            if hasattr(dlg, "tabs"):
+                dlg.tabs.setCurrentIndex(1)
+            parent_part, child_part = target_route
+            route_panel.refresh_route_table()
+            route_item = route_panel._find_route_item(parent_part, child_part)
+            if route_item is not None:
+                route_panel.route_tree.setCurrentItem(route_item)
+                route_panel.route_tree.scrollToItem(route_item)
         dlg.agent_requested.connect(self.open_agent_from_context)
         if dlg.exec():
             v = dlg.get_values()
@@ -5124,6 +5723,12 @@ class MainWindow(QMainWindow):
             self.model_backend = v.get("model_backend", BUILTIN_BACKEND_ID)
             self.external_backend_config = sanitize_external_backend_config(v.get("external_backend", {}))
             self.project.set_locator_scope(v.get("locator_scope", []), save=False)
+            self.project.project_data["parent_box_aspect_ratios"] = v.get("parent_box_aspect_ratios", {})
+            self.parent_box_aspect_ratios = (
+                self.project.get_parent_box_aspect_ratios()
+                if hasattr(self.project, "get_parent_box_aspect_ratios")
+                else dict(v.get("parent_box_aspect_ratios", {}))
+            )
             
             self.config.set("train_epochs", self.train_epochs)
             self.config.set("train_batch", self.train_batch)
@@ -5177,6 +5782,7 @@ class MainWindow(QMainWindow):
             route_panel.setParent(self)
             route_panel.set_language(self.current_lang)
             route_panel.set_theme(self.current_theme)
+        self.refresh_route_table()
 
     def open_settings(self):
         self.open_stl_model_settings()
@@ -5278,6 +5884,15 @@ class MainWindow(QMainWindow):
             apply_theme_button_style(self.btn_stop_training, BUTTON_ROLE_STOP, "padding: 8px; margin-top: 5px;", self.current_theme)
         if hasattr(self, "btn_clear_ai"):
             apply_theme_button_style(self.btn_clear_ai, BUTTON_ROLE_DESTRUCTIVE, "font-weight: bold; margin-top: 5px;", self.current_theme)
+
+        if hasattr(self, "btn_configure_route_expert"):
+            apply_theme_button_style(self.btn_configure_route_expert, BUTTON_ROLE_NEUTRAL, "", self.current_theme)
+        if hasattr(self, "btn_blink_auto_annotate"):
+            apply_theme_button_style(self.btn_blink_auto_annotate, BUTTON_ROLE_RUN, "padding: 6px;", self.current_theme)
+        if hasattr(self, "btn_blink_auto_shrink"):
+            apply_theme_button_style(self.btn_blink_auto_shrink, BUTTON_ROLE_RUN, "padding: 6px;", self.current_theme)
+        if hasattr(self, "btn_blink_train_expert"):
+            apply_theme_button_style(self.btn_blink_train_expert, BUTTON_ROLE_RUN, "padding: 6px;", self.current_theme)
     def add_images(self):
         fs, _ = QFileDialog.getOpenFileNames(self, tr("Select Images", self.current_lang), "", "Images (*.png *.jpg *.jpeg *.tif)")
         if fs:
@@ -5451,6 +6066,7 @@ class MainWindow(QMainWindow):
             self.canvas.set_boxes(manual_boxes, auto_boxes)
             get_taxon = getattr(self.project, "get_taxon", self.project.get_genus)
             self.genus_combo.setCurrentText(get_taxon(p))
+            self._refresh_blink_refine_state()
 
     def on_part_selected(self, curr, prev):
         p = self._part_item_name(curr)
@@ -5462,6 +6078,7 @@ class MainWindow(QMainWindow):
         self.update_db_description(p)
         if self.check_morpho.isChecked():
             self.update_measurements(p)
+        self._refresh_blink_refine_state()
 
     def launch_blink_from_workbench(self):
         if not self.current_image:
@@ -5563,10 +6180,41 @@ class MainWindow(QMainWindow):
             self.canvas.set_mode("MAGIC_WAND")
         elif self.radio_box.isChecked():
             self.canvas.set_mode("BOX_PROMPT")
+        elif self.radio_annotation_box.isChecked():
+            self.canvas.set_mode("ANNOTATION_BOX")
+            self._refresh_annotation_box_constraints()
         elif self.radio_scale.isChecked():
             self.canvas.set_mode("SCALE")
         else:
             self.canvas.set_mode("DRAW")
+
+    def on_blink_box_role_changed(self):
+        self.blink_box_role = "shrink" if self.radio_blink_box_shrink.isChecked() else "annotation"
+        self._refresh_blink_refine_state()
+
+    def on_blink_parent_context_changed(self, _index=None):
+        if getattr(self, "_updating_blink_parent_context", False):
+            return
+        child_part = self._current_part_name()
+        parent_part = self.combo_blink_parent_context.currentData() if hasattr(self, "combo_blink_parent_context") else None
+        child_part = str(child_part or "").strip()
+        parent_part = str(parent_part or "").strip()
+        if not child_part or not parent_part or child_part == parent_part:
+            return
+        if self._is_parent_part(child_part):
+            return
+        if hasattr(self.project, "remember_blink_context_parent"):
+            self.project.remember_blink_context_parent(child_part, parent_part, save=False)
+        if hasattr(self.project, "register_cascade_route_candidate"):
+            self.project.register_cascade_route_candidate(
+                parent_part,
+                child_part,
+                registration_source="workbench_blink_refine",
+                save=False,
+            )
+        self._schedule_project_save()
+        self.refresh_route_table()
+        self.log(tr("Manual parent context set: {0} -> {1}.", self.current_lang).format(parent_part, child_part))
 
     def on_magic_wand_clicked(self, x, y):
         if self.current_image and self.sam_worker and self.sam_worker.model:
@@ -5575,6 +6223,200 @@ class MainWindow(QMainWindow):
     def on_magic_box_completed(self, x1, y1, x2, y2):
         if self.current_image and self.sam_worker and self.sam_worker.model:
             self.sam_worker.predict_box(self.current_image, x1, y1, x2, y2)
+
+    def on_annotation_box_completed(self, x1, y1, x2, y2):
+        part = self._current_part_name()
+        clean_box = _clean_box([x1, y1, x2, y2])
+        if not self.current_image or not part or not clean_box:
+            return
+
+        context = self._current_blink_context()
+        if context.get("role") == "child" and self.blink_box_role == "shrink":
+            update_loose_box = getattr(self.project, "update_shrink_loose_box", None)
+            if callable(update_loose_box):
+                update_loose_box(self.current_image, part, clean_box, save=False)
+            self.log(tr("Saved loose shrink box for {0}.", self.current_lang).format(part))
+        else:
+            existing_points = self.project.get_labels(self.current_image).get(part, [])
+            self.project.update_label(
+                self.current_image,
+                part,
+                existing_points,
+                self.desc_box.toPlainText(),
+                box=clean_box,
+                save=False,
+            )
+            self.canvas.set_boxes(self.project.get_boxes(self.current_image), self.project.get_auto_boxes(self.current_image))
+            if context.get("role") == "child" and context.get("parent_part"):
+                self.project.remember_blink_context_parent(part, context.get("parent_part"), save=False)
+            self.log(tr("Saved annotation box for {0}.", self.current_lang).format(part))
+        self._schedule_project_save()
+        self._refresh_blink_refine_state()
+
+    def _warn_blink_context(self, message):
+        QMessageBox.information(self, tr("Parent-child refinement / Blink", self.current_lang), message)
+
+    def _active_child_blink_context(self, require_ready=False):
+        context = self._refresh_blink_refine_state()
+        if context.get("role") != "child" or not context.get("child_part") or not context.get("parent_part"):
+            self._warn_blink_context(tr("Select a child structure with a parent context first.", self.current_lang))
+            return None
+        if not context.get("has_parent_box"):
+            self._warn_blink_context(tr("Draw a parent box before Blink refinement.", self.current_lang))
+            return None
+        if require_ready and not context.get("can_refine"):
+            self._warn_blink_context(context.get("disabled_reason") or tr("Configure the current route before continuing.", self.current_lang))
+            return None
+        return context
+
+    def run_blink_child_auto_annotate(self):
+        context = self._active_child_blink_context(require_ready=True)
+        if not context or not self.current_image:
+            return
+        child_part = context.get("child_part")
+        parent_part = context.get("parent_part")
+        parent_box = context.get("parent_box")
+        self.log(tr("Running child auto-annotation for {0} via {1}.", self.current_lang).format(child_part, parent_part))
+        try:
+            expert_result = self.engine.cascade_manager.infer_child_part(
+                self.current_image,
+                parent_box,
+                child_part,
+                parent_part=parent_part,
+                route_manifest=self.project.get_cascade_routes(),
+            )
+            if not isinstance(expert_result, dict):
+                self._warn_blink_context(tr("No usable route expert result was returned for this child structure.", self.current_lang))
+                return
+            raw_box = _clean_box(expert_result.get("box"))
+            if not raw_box:
+                self._warn_blink_context(tr("The route expert did not return a valid child box.", self.current_lang))
+                return
+            image_bgr = cv2.imread(self.current_image)
+            if image_bgr is None:
+                raise RuntimeError(tr("Could not read the current image.", self.current_lang))
+            image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+            polygon = self.engine.predict_base_sam_polygon(image_rgb, raw_box, poly_epsilon=self.inf_poly_epsilon)
+            if polygon and len(polygon) >= 3:
+                self.project.update_label(self.current_image, child_part, polygon, self.desc_box.toPlainText(), box=raw_box, save=False)
+                self.canvas.set_polygons(self.project.get_labels(self.current_image))
+                self.canvas.set_boxes(self.project.get_boxes(self.current_image), self.project.get_auto_boxes(self.current_image))
+                self.log(tr("Generated child draft polygon for {0}.", self.current_lang).format(child_part))
+            else:
+                existing_points = self.project.get_labels(self.current_image).get(child_part, [])
+                self.project.update_label(self.current_image, child_part, existing_points, self.desc_box.toPlainText(), box=raw_box, save=False)
+                self.canvas.set_boxes(self.project.get_boxes(self.current_image), self.project.get_auto_boxes(self.current_image))
+                self.log(tr("Route expert produced a child box for {0}; refine polygon manually.", self.current_lang).format(child_part))
+            self.project.remember_blink_context_parent(child_part, parent_part, save=False)
+            self._schedule_project_save()
+            self._refresh_blink_refine_state()
+        except Exception as exc:
+            self._warn_blink_context(tr("Child auto-annotation failed: {0}", self.current_lang).format(str(exc)))
+
+    def run_blink_auto_shrink(self):
+        context = self._active_child_blink_context(require_ready=False)
+        if not context or not self.current_image:
+            return
+        child_part = context.get("child_part")
+        polygon = self.project.get_labels(self.current_image).get(child_part, [])
+        if not polygon or len(polygon) < 3:
+            self._warn_blink_context(tr("Draw or confirm the child polygon before auto-shrink.", self.current_lang))
+            return
+        loose_boxes = self.project.get_shrink_loose_boxes(self.current_image) if hasattr(self.project, "get_shrink_loose_boxes") else {}
+        loose_box = _clean_box(loose_boxes.get(child_part) if isinstance(loose_boxes, dict) else None)
+        if not loose_box:
+            self._warn_blink_context(tr("Switch the box role to loose shrink box and draw one around the child first.", self.current_lang))
+            return
+        try:
+            if "core.blink_refiner" in sys.modules:
+                from core.blink_refiner import BlinkRefiner
+            else:
+                try:
+                    from AntSleap.core.blink_refiner import BlinkRefiner
+                except ImportError:
+                    from core.blink_refiner import BlinkRefiner
+            parts_model = self.engine.ensure_parts_model_loaded() if hasattr(self.engine, "ensure_parts_model_loaded") else self.engine.parts_model
+            sam_model = getattr(parts_model, "ultralytics_sam", None)
+            image_bgr = cv2.imread(self.current_image)
+            if image_bgr is None:
+                raise RuntimeError(tr("Could not read the current image.", self.current_lang))
+            image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+            refiner = BlinkRefiner(sam_model=sam_model, device=self.runtime_device)
+            trajectory = refiner.generate_shrink_trajectory(image_rgb, loose_box, polygon)
+            if not trajectory:
+                self._warn_blink_context(tr("Auto-shrink did not generate a trajectory.", self.current_lang))
+                return
+            self.project.update_trajectory(
+                self.current_image,
+                child_part,
+                trajectory,
+                parent_context={
+                    "parent_part": context.get("parent_part"),
+                    "parent_box": context.get("parent_box"),
+                    "source": context.get("parent_box_source") or "workbench",
+                },
+            )
+            best_box = _clean_box(trajectory[-1].get("box") if isinstance(trajectory[-1], dict) else None)
+            if best_box:
+                self.project.update_label(
+                    self.current_image,
+                    child_part,
+                    polygon,
+                    self.desc_box.toPlainText(),
+                    box=best_box,
+                    save=False,
+                )
+                self.canvas.set_boxes(self.project.get_boxes(self.current_image), self.project.get_auto_boxes(self.current_image))
+            self.project.remember_blink_context_parent(child_part, context.get("parent_part"), save=False)
+            self._schedule_project_save()
+            self._refresh_blink_refine_state()
+            self.log(tr("Saved {0} shrink trajectory frames for {1}.", self.current_lang).format(len(trajectory), child_part))
+        except Exception as exc:
+            self._warn_blink_context(tr("Auto-shrink failed: {0}", self.current_lang).format(str(exc)))
+
+    def train_current_blink_expert(self):
+        context = self._active_child_blink_context(require_ready=False)
+        if not context:
+            return
+        if getattr(self.blink_lab, "training_thread", None) is not None and self.blink_lab.training_thread.isRunning():
+            self._warn_blink_context(tr("Blink expert training is already running.", self.current_lang))
+            return
+        child_part = context.get("child_part")
+        parent_part = context.get("parent_part")
+        self.blink_lab.canvas.current_tool_part = child_part
+        self.blink_lab.session_target_part = child_part
+        self.blink_lab.current_image_path = self.current_image
+        self.blink_lab.active_session = {
+            "image_path": self.current_image,
+            "target_part": child_part,
+            "focus_roi": {
+                "part": parent_part,
+                "source": context.get("parent_box_source") or "workbench",
+                "box": context.get("parent_box"),
+            },
+        }
+        self.blink_lab.training_route_context = self.blink_lab._route_context_for_training(parent_part, child_part)
+        self.blink_lab.train_expert_model()
+        self.log(tr("Started Blink expert training for {0} -> {1}.", self.current_lang).format(parent_part, child_part))
+
+    def open_current_route_expert_settings(self):
+        context = self._refresh_blink_refine_state()
+        parent_part = context.get("parent_part")
+        child_part = context.get("child_part")
+        if not parent_part or not child_part:
+            self._warn_blink_context(tr("Select a child structure with a parent context first.", self.current_lang))
+            return
+        if hasattr(self.project, "register_cascade_route_candidate"):
+            self.project.register_cascade_route_candidate(
+                parent_part,
+                child_part,
+                focus_source=context.get("parent_box_source"),
+                registration_source="workbench_blink_refine",
+                save=False,
+            )
+            self.project.remember_blink_context_parent(child_part, parent_part, save=False)
+            self._schedule_project_save()
+        self.open_stl_model_settings(target_route=(parent_part, child_part))
 
     def on_sam_mask_generated(self, pts, box=None):
         p = self._current_part_name()
@@ -5598,6 +6440,7 @@ class MainWindow(QMainWindow):
             
             if self.check_morpho.isChecked():
                 self.update_measurements(p)
+            self._refresh_blink_refine_state()
 
     def toggle_morphometrics(self, state):
         on = self.check_morpho.isChecked()

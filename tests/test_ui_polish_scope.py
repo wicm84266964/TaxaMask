@@ -105,6 +105,10 @@ class DummySamWorker:
 
 
 class DummyCascadeManager:
+    def __init__(self):
+        self.infer_calls = []
+        self.infer_result = {"box": [18.0, 18.0, 42.0, 42.0], "confidence": 0.9}
+
     def get_route_block_reason(self, route):
         if not isinstance(route, dict):
             return "route_missing"
@@ -119,6 +123,18 @@ class DummyCascadeManager:
 
     def list_available_experts(self):
         return []
+
+    def infer_child_part(self, image_path, parent_box, child_part_name, parent_part="macro_locator", route_manifest=None):
+        self.infer_calls.append(
+            {
+                "image_path": image_path,
+                "parent_box": list(parent_box),
+                "child_part_name": child_part_name,
+                "parent_part": parent_part,
+                "route_manifest": route_manifest,
+            }
+        )
+        return dict(self.infer_result)
 
 
 class DummyEngine:
@@ -181,6 +197,17 @@ class DummyEngine:
             },
         }
 
+    def predict_base_sam_polygon(self, image_input, prompt_box, poly_epsilon=2.0):
+        x1, y1, x2, y2 = [float(value) for value in prompt_box]
+        return [[x1, y1], [x2, y1], [x2, y2], [x1, y2]]
+
+    def ensure_parts_model_loaded(self):
+        return self.parts_model
+
+    def set_device_preference(self, preference):
+        self.device_preference = preference
+        return False
+
 
 class DummyProjectManager:
     def __init__(self, project_root):
@@ -190,6 +217,8 @@ class DummyProjectManager:
             "taxonomy": ["Head", "Mesosoma", "Gaster"],
             "images": [],
             "labels": {},
+            "blink_context_roi_parents": {},
+            "parent_box_aspect_ratios": {"Head": 1.0, "Mesosoma": 4 / 3, "Gaster": 4 / 3},
             "cascade_routes": {"version": "project-v2", "routes": []},
         }
 
@@ -244,6 +273,69 @@ class DummyProjectManager:
     def get_auto_boxes(self, image_path):
         return self.project_data["labels"].get(image_path, {}).get("auto_boxes", {})
 
+    def get_blink_context_parent(self, target_part):
+        return self.project_data.get("blink_context_roi_parents", {}).get(target_part)
+
+    def get_blink_context_roi_parents(self):
+        return dict(self.project_data.get("blink_context_roi_parents", {}))
+
+    def remember_blink_context_parent(self, target_part, parent_part, save=True):
+        self.project_data.setdefault("blink_context_roi_parents", {})[target_part] = parent_part
+        if save:
+            self.save_project()
+        return True
+
+    def clear_blink_context_parent(self, target_part, save=True):
+        removed = target_part in self.project_data.get("blink_context_roi_parents", {})
+        self.project_data.get("blink_context_roi_parents", {}).pop(target_part, None)
+        if removed and save:
+            self.save_project()
+        return removed
+
+    def get_parent_box_aspect_ratios(self):
+        return dict(self.project_data.get("parent_box_aspect_ratios", {}))
+
+    def get_cascade_route(self, parent_part, child_part):
+        for route in self.project_data.get("cascade_routes", {}).get("routes", []):
+            if route.get("parent") == parent_part and route.get("child") == child_part:
+                return dict(route)
+        return None
+
+    def register_cascade_route_candidate(self, parent_part, child_part, **kwargs):
+        existing = self.get_cascade_route(parent_part, child_part) or {}
+        route = {
+            "parent": parent_part,
+            "child": child_part,
+            "enabled": bool(existing.get("enabled", False)),
+            "appointed_expert": dict(existing.get("appointed_expert") or {}),
+            "expert_candidates": [dict(candidate) for candidate in existing.get("expert_candidates", []) if isinstance(candidate, dict)],
+            "expert_id": existing.get("expert_id"),
+            "expert_part": existing.get("expert_part"),
+            "expert_filename": existing.get("expert_filename"),
+            "registration_source": kwargs.get("registration_source", existing.get("registration_source", "blink_candidate")),
+            "focus_source": kwargs.get("focus_source", existing.get("focus_source")),
+        }
+        routes = [
+            dict(item)
+            for item in self.project_data.setdefault("cascade_routes", {"version": "project-v2", "routes": []}).get("routes", [])
+            if not (item.get("parent") == parent_part and item.get("child") == child_part)
+        ]
+        routes.append(route)
+        self.project_data["cascade_routes"]["routes"] = routes
+        if kwargs.get("save", True):
+            self.save_project()
+        return route
+
+    def get_shrink_loose_boxes(self, image_path):
+        return self.project_data["labels"].get(image_path, {}).get("shrink_loose_boxes", {})
+
+    def update_shrink_loose_box(self, image_path, part_name, box, save=True):
+        entry = self._ensure_label_entry(image_path)
+        entry.setdefault("shrink_loose_boxes", {})[part_name] = [float(value) for value in box]
+        if save:
+            self.save_project()
+        return True
+
     def get_genus(self, image_path):
         return self.project_data["labels"].get(image_path, {}).get("genus", "Unknown")
 
@@ -283,7 +375,11 @@ class DummyProjectManager:
             self.save_project()
         return None
 
-    def update_trajectory(self, *args, **kwargs):
+    def update_trajectory(self, image_path, part_name, trajectory, parent_context=None):
+        entry = self._ensure_label_entry(image_path)
+        entry.setdefault("trajectories", {})[part_name] = {"frames": list(trajectory or [])}
+        if parent_context:
+            entry["trajectories"][part_name]["parent_context"] = dict(parent_context)
         return None
 
     def iter_cascade_routes(self):
@@ -607,9 +703,12 @@ class UiPolishScopeTests(unittest.TestCase):
             self.assertIsNotNone(window.findChild(QWidget, "workbenchLogsPanel"))
             self.assertEqual(window.btn_export.parentWidget().objectName(), "workbenchToolbarProjectPanel")
             self.assertEqual(window.btn_blink_entry.parentWidget().objectName(), "workbenchToolbarFlowPanel")
+            self.assertFalse(window.btn_blink_entry.isVisible())
             self.assertEqual(window.btn_agent_from_workbench.parentWidget().objectName(), "workbenchToolbarFlowPanel")
             self.assertEqual(window.canvas.parentWidget().objectName(), "workbenchCanvasShell")
             self.assertEqual(window.btn_predict.parentWidget().objectName(), "workbenchAIActionPanel")
+            self.assertEqual(window.btn_blink_auto_annotate.parentWidget().objectName(), "workbenchBlinkRefinePanel")
+            self.assertEqual(window.combo_blink_parent_context.parentWidget().objectName(), "workbenchBlinkRefinePanel")
             self.assertEqual(window.log_console.parentWidget().objectName(), "workbenchLogsPanel")
             self.assertEqual(window.desc_box.parentWidget().objectName(), "workbenchMetadataPanel")
             self.assertIsInstance(window.part_list, QTreeWidget)
@@ -665,6 +764,370 @@ class UiPolishScopeTests(unittest.TestCase):
             self.app.processEvents()
             self.assertIsNone(window._current_part_name())
             self.assertIsNone(window.canvas.current_tool_part)
+        finally:
+            window.deleteLater()
+
+    def test_workbench_blink_context_resolves_parent_route_and_status(self):
+        window = self.make_main_window()
+        try:
+            self.project_manager.project_data["taxonomy"] = ["Head", "Mesosoma", "Gaster", "Mandible"]
+            self.project_manager.project_data["locator_scope"] = ["Head", "Mesosoma", "Gaster"]
+            image_path = str(Path(self.temp_dir.name) / "specimen.png")
+            self.project_manager.project_data["images"] = [image_path]
+            self.project_manager.project_data["labels"] = {
+                image_path: {
+                    "parts": {},
+                    "boxes": {"Head": [10, 10, 80, 70]},
+                    "auto_boxes": {},
+                    "descriptions": {},
+                    "status": "unlabeled",
+                    "genus": "Unknown",
+                }
+            }
+            self.project_manager.project_data["blink_context_roi_parents"] = {"Mandible": "Head"}
+            self.project_manager.project_data["cascade_routes"] = {
+                "version": "project-v2",
+                "routes": [
+                    {
+                        "parent": "Head",
+                        "child": "Mandible",
+                        "enabled": True,
+                        "appointed_expert": {
+                            "expert_id": "Mandible/expert_v20260501_090000.pth",
+                            "expert_part": "Mandible",
+                            "expert_filename": "expert_v20260501_090000.pth",
+                        },
+                        "expert_id": "Mandible/expert_v20260501_090000.pth",
+                        "expert_part": "Mandible",
+                        "expert_filename": "expert_v20260501_090000.pth",
+                    }
+                ],
+            }
+
+            window.refresh_route_table()
+            window.current_image = image_path
+            window._select_part_in_tree("Mandible")
+            context = window._refresh_blink_refine_state()
+
+            self.assertEqual(context["role"], "child")
+            self.assertEqual(context["parent_part"], "Head")
+            self.assertEqual(context["parent_source"], "remembered")
+            self.assertEqual(context["parent_box_source"], "manual")
+            self.assertEqual(context["route_label"], "Head -> Mandible")
+            self.assertTrue(context["can_refine"])
+            self.assertIn("Head -> Mandible", window.label_blink_route.text())
+            self.assertTrue(window.btn_blink_auto_annotate.isEnabled())
+        finally:
+            window.deleteLater()
+
+    def test_workbench_parent_context_combo_can_remember_manual_parent(self):
+        window = self.make_main_window()
+        try:
+            image_path = str(Path(self.temp_dir.name) / "specimen.png")
+            self.project_manager.project_data["taxonomy"] = ["Head", "Mesosoma", "Mandible"]
+            self.project_manager.project_data["locator_scope"] = ["Head", "Mesosoma"]
+            self.project_manager.project_data["images"] = [image_path]
+            self.project_manager.project_data["labels"] = {
+                image_path: {
+                    "parts": {},
+                    "boxes": {"Mesosoma": [10, 10, 90, 60]},
+                    "auto_boxes": {},
+                    "descriptions": {},
+                    "status": "unlabeled",
+                    "genus": "Unknown",
+                }
+            }
+
+            window.refresh_route_table()
+            window.current_image = image_path
+            window._select_part_in_tree("Mandible")
+            index = window.combo_blink_parent_context.findData("Mesosoma")
+            self.assertGreaterEqual(index, 0)
+            window.combo_blink_parent_context.setCurrentIndex(index)
+            window.on_blink_parent_context_changed()
+
+            self.assertEqual(self.project_manager.get_blink_context_parent("Mandible"), "Mesosoma")
+            route = self.project_manager.get_cascade_route("Mesosoma", "Mandible")
+            self.assertIsNotNone(route)
+            self.assertEqual(route.get("registration_source"), "workbench_blink_refine")
+            context = window._refresh_blink_refine_state()
+            self.assertEqual(context["parent_part"], "Mesosoma")
+            self.assertEqual(context["parent_source"], "remembered")
+        finally:
+            window.deleteLater()
+
+    def test_annotation_box_roles_keep_child_box_and_shrink_loose_box_separate(self):
+        window = self.make_main_window()
+        try:
+            image_path = str(Path(self.temp_dir.name) / "specimen.png")
+            self.project_manager.project_data["taxonomy"] = ["Head", "Mandible"]
+            self.project_manager.project_data["locator_scope"] = ["Head"]
+            self.project_manager.project_data["images"] = [image_path]
+            self.project_manager.project_data["labels"] = {
+                image_path: {
+                    "parts": {},
+                    "boxes": {"Head": [10, 10, 80, 70]},
+                    "auto_boxes": {},
+                    "descriptions": {},
+                    "status": "unlabeled",
+                    "genus": "Unknown",
+                }
+            }
+            self.project_manager.project_data["blink_context_roi_parents"] = {"Mandible": "Head"}
+            window.refresh_route_table()
+            window.current_image = image_path
+            window._select_part_in_tree("Mandible")
+
+            window.radio_blink_box_annotation.setChecked(True)
+            window.on_annotation_box_completed(20, 20, 40, 40)
+            self.assertEqual(self.project_manager.get_boxes(image_path)["Mandible"], [20.0, 20.0, 40.0, 40.0])
+
+            window.radio_blink_box_shrink.setChecked(True)
+            window.on_annotation_box_completed(15, 15, 45, 45)
+            self.assertEqual(self.project_manager.get_boxes(image_path)["Mandible"], [20.0, 20.0, 40.0, 40.0])
+            self.assertEqual(self.project_manager.get_shrink_loose_boxes(image_path)["Mandible"], [15.0, 15.0, 45.0, 45.0])
+        finally:
+            window.deleteLater()
+
+    def test_parent_annotation_box_uses_configured_aspect_ratio(self):
+        window = self.make_main_window()
+        try:
+            self.project_manager.project_data["taxonomy"] = ["Head", "Mandible"]
+            self.project_manager.project_data["locator_scope"] = ["Head"]
+            self.project_manager.project_data["parent_box_aspect_ratios"] = {"Head": 1.0}
+            window.refresh_route_table()
+            window._select_part_in_tree("Head")
+            window.radio_annotation_box.setChecked(True)
+            window.on_tool_changed()
+
+            self.assertEqual(window.canvas.mode, "ANNOTATION_BOX")
+            self.assertEqual(window.canvas.annotation_box_aspect_ratio, 1.0)
+            window.check_lock_parent_box_ratio.setChecked(False)
+            self.assertIsNone(window.canvas.annotation_box_aspect_ratio)
+        finally:
+            window.deleteLater()
+
+    def test_workbench_child_auto_annotate_uses_route_expert_and_sam_polygon(self):
+        image_path = Path(self.temp_dir.name) / "specimen.png"
+        image = QImage(96, 72, QImage.Format_RGB32)
+        image.fill(0xFFCCCCCC)
+        self.assertTrue(image.save(str(image_path)))
+
+        window = self.make_main_window()
+        try:
+            image_key = str(image_path)
+            self.project_manager.project_data["taxonomy"] = ["Head", "Mandible"]
+            self.project_manager.project_data["locator_scope"] = ["Head"]
+            self.project_manager.project_data["images"] = [image_key]
+            self.project_manager.project_data["labels"] = {
+                image_key: {
+                    "parts": {},
+                    "boxes": {"Head": [5, 5, 80, 60]},
+                    "auto_boxes": {},
+                    "descriptions": {},
+                    "status": "unlabeled",
+                    "genus": "Unknown",
+                }
+            }
+            self.project_manager.project_data["blink_context_roi_parents"] = {"Mandible": "Head"}
+            self.project_manager.project_data["cascade_routes"] = {
+                "version": "project-v2",
+                "routes": [
+                    {
+                        "parent": "Head",
+                        "child": "Mandible",
+                        "enabled": True,
+                        "appointed_expert": {
+                            "expert_id": "Mandible/expert_v20260501_090000.pth",
+                            "expert_part": "Mandible",
+                            "expert_filename": "expert_v20260501_090000.pth",
+                        },
+                        "expert_id": "Mandible/expert_v20260501_090000.pth",
+                        "expert_part": "Mandible",
+                        "expert_filename": "expert_v20260501_090000.pth",
+                    }
+                ],
+            }
+            window.refresh_route_table()
+            window.current_image = image_key
+            window._select_part_in_tree("Mandible")
+
+            window.run_blink_child_auto_annotate()
+
+            self.assertEqual(len(self.engine.cascade_manager.infer_calls), 1)
+            call = self.engine.cascade_manager.infer_calls[0]
+            self.assertEqual(call["parent_part"], "Head")
+            self.assertEqual(call["child_part_name"], "Mandible")
+            self.assertEqual(call["parent_box"], [5.0, 5.0, 80.0, 60.0])
+            self.assertEqual(call["route_manifest"]["routes"][0]["child"], "Mandible")
+            self.assertEqual(
+                self.project_manager.get_boxes(image_key)["Mandible"],
+                [18.0, 18.0, 42.0, 42.0],
+            )
+            self.assertEqual(len(self.project_manager.get_labels(image_key)["Mandible"]), 4)
+            self.assertEqual(self.project_manager.get_blink_context_parent("Mandible"), "Head")
+        finally:
+            window.deleteLater()
+
+    def test_workbench_child_auto_annotate_requires_ready_route_and_parent_box(self):
+        window = self.make_main_window()
+        try:
+            image_path = str(Path(self.temp_dir.name) / "specimen.png")
+            self.project_manager.project_data["taxonomy"] = ["Head", "Mandible"]
+            self.project_manager.project_data["locator_scope"] = ["Head"]
+            self.project_manager.project_data["images"] = [image_path]
+            self.project_manager.project_data["labels"] = {
+                image_path: {
+                    "parts": {},
+                    "boxes": {},
+                    "auto_boxes": {},
+                    "descriptions": {},
+                    "status": "unlabeled",
+                    "genus": "Unknown",
+                }
+            }
+            self.project_manager.project_data["blink_context_roi_parents"] = {"Mandible": "Head"}
+            window.refresh_route_table()
+            window.current_image = image_path
+            window._select_part_in_tree("Mandible")
+            context = window._refresh_blink_refine_state()
+            self.assertFalse(context["can_refine"])
+            self.assertIn("Draw a parent box", context["disabled_reason"])
+            self.assertFalse(window.btn_blink_auto_annotate.isEnabled())
+
+            with patch.object(main_module.QMessageBox, "information") as info:
+                window.run_blink_child_auto_annotate()
+            info.assert_called()
+            self.assertEqual(self.engine.cascade_manager.infer_calls, [])
+
+            self.project_manager.project_data["labels"][image_path]["boxes"]["Head"] = [5, 5, 80, 60]
+            window._refresh_blink_refine_state()
+            self.assertFalse(window.btn_blink_auto_annotate.isEnabled())
+            self.assertIn("Configure a route expert", window.btn_blink_auto_annotate.toolTip())
+        finally:
+            window.deleteLater()
+
+    def test_workbench_auto_shrink_saves_parent_context_trajectory(self):
+        module = type(sys)("core.blink_refiner")
+
+        class FakeRefiner:
+            def __init__(self, sam_model=None, device="auto"):
+                self.sam_model = sam_model
+                self.device = device
+
+            def generate_shrink_trajectory(self, image_input, initial_box, golden_poly):
+                return [
+                    {"step": 0, "alpha": 0.0, "box": list(initial_box), "is_golden": False},
+                    {"step": 1, "alpha": 1.0, "box": [22.0, 22.0, 38.0, 38.0], "is_golden": True},
+                ]
+
+        module.BlinkRefiner = FakeRefiner
+        previous_module = sys.modules.get("core.blink_refiner")
+        sys.modules["core.blink_refiner"] = module
+
+        image_path = Path(self.temp_dir.name) / "specimen.png"
+        image = QImage(96, 72, QImage.Format_RGB32)
+        image.fill(0xFFCCCCCC)
+        self.assertTrue(image.save(str(image_path)))
+        window = self.make_main_window()
+        try:
+            image_key = str(image_path)
+            self.project_manager.project_data["taxonomy"] = ["Head", "Mandible"]
+            self.project_manager.project_data["locator_scope"] = ["Head"]
+            self.project_manager.project_data["images"] = [image_key]
+            self.project_manager.project_data["labels"] = {
+                image_key: {
+                    "parts": {"Mandible": [[24, 24], [38, 24], [38, 38], [24, 38]]},
+                    "boxes": {"Head": [5, 5, 80, 60], "Mandible": [24, 24, 38, 38]},
+                    "auto_boxes": {},
+                    "descriptions": {},
+                    "shrink_loose_boxes": {"Mandible": [18, 18, 44, 44]},
+                    "status": "labeled",
+                    "genus": "Unknown",
+                }
+            }
+            self.project_manager.project_data["blink_context_roi_parents"] = {"Mandible": "Head"}
+            window.refresh_route_table()
+            window.current_image = image_key
+            window._select_part_in_tree("Mandible")
+
+            window.run_blink_auto_shrink()
+
+            trajectory = self.project_manager.project_data["labels"][image_key]["trajectories"]["Mandible"]
+            self.assertEqual(len(trajectory["frames"]), 2)
+            self.assertEqual(trajectory["parent_context"]["parent_part"], "Head")
+            self.assertEqual(trajectory["parent_context"]["parent_box"], [5.0, 5.0, 80.0, 60.0])
+            self.assertEqual(self.project_manager.get_boxes(image_key)["Mandible"], [22.0, 22.0, 38.0, 38.0])
+        finally:
+            window.deleteLater()
+            if previous_module is not None:
+                sys.modules["core.blink_refiner"] = previous_module
+            else:
+                sys.modules.pop("core.blink_refiner", None)
+
+    def test_workbench_auto_shrink_requires_polygon_and_loose_box(self):
+        window = self.make_main_window()
+        try:
+            image_path = str(Path(self.temp_dir.name) / "specimen.png")
+            self.project_manager.project_data["taxonomy"] = ["Head", "Mandible"]
+            self.project_manager.project_data["locator_scope"] = ["Head"]
+            self.project_manager.project_data["images"] = [image_path]
+            self.project_manager.project_data["labels"] = {
+                image_path: {
+                    "parts": {},
+                    "boxes": {"Head": [5, 5, 80, 60]},
+                    "auto_boxes": {},
+                    "descriptions": {},
+                    "status": "unlabeled",
+                    "genus": "Unknown",
+                }
+            }
+            self.project_manager.project_data["blink_context_roi_parents"] = {"Mandible": "Head"}
+            window.refresh_route_table()
+            window.current_image = image_path
+            window._select_part_in_tree("Mandible")
+            with patch.object(main_module.QMessageBox, "information") as info:
+                window.run_blink_auto_shrink()
+            self.assertIn("Draw or confirm the child polygon", info.call_args.args[2])
+
+            self.project_manager.project_data["labels"][image_path]["parts"]["Mandible"] = [[20, 20], [40, 20], [40, 40]]
+            with patch.object(main_module.QMessageBox, "information") as info:
+                window.run_blink_auto_shrink()
+            self.assertIn("loose shrink box", info.call_args.args[2])
+        finally:
+            window.deleteLater()
+
+    def test_workbench_train_current_blink_expert_uses_current_parent_child_context(self):
+        window = self.make_main_window()
+        try:
+            image_path = str(Path(self.temp_dir.name) / "specimen.png")
+            self.project_manager.project_data["taxonomy"] = ["Head", "Mandible"]
+            self.project_manager.project_data["locator_scope"] = ["Head"]
+            self.project_manager.project_data["images"] = [image_path]
+            self.project_manager.project_data["labels"] = {
+                image_path: {
+                    "parts": {"Mandible": [[24, 24], [38, 24], [38, 38], [24, 38]]},
+                    "boxes": {"Head": [5, 5, 80, 60]},
+                    "auto_boxes": {},
+                    "descriptions": {},
+                    "status": "labeled",
+                    "genus": "Unknown",
+                }
+            }
+            self.project_manager.project_data["blink_context_roi_parents"] = {"Mandible": "Head"}
+            window.refresh_route_table()
+            window.current_image = image_path
+            window._select_part_in_tree("Mandible")
+
+            with patch.object(window.blink_lab, "train_expert_model") as train:
+                window.train_current_blink_expert()
+
+            train.assert_called_once()
+            self.assertEqual(window.blink_lab.session_target_part, "Mandible")
+            self.assertEqual(window.blink_lab.current_image_path, image_path)
+            self.assertEqual(window.blink_lab.active_session["focus_roi"]["part"], "Head")
+            self.assertEqual(window.blink_lab.training_route_context["parent_part"], "Head")
+            self.assertEqual(window.blink_lab.training_route_context["child_part"], "Mandible")
         finally:
             window.deleteLater()
 
@@ -777,6 +1240,7 @@ class UiPolishScopeTests(unittest.TestCase):
                 "runtime_device": "cpu",
                 "taxonomy": ["Leaf", "Flower", "Fruit", "Stamen"],
                 "locator_scope": ["Leaf", "Flower"],
+                "parent_box_aspect_ratios": {"Leaf": 1.2, "Flower": 1.5},
             },
             lang="en",
         )
@@ -799,6 +1263,12 @@ class UiPolishScopeTests(unittest.TestCase):
             checks["Flower"].setChecked(False)
             checks["Fruit"].setChecked(True)
             self.assertEqual(dialog.get_values()["locator_scope"], ["Leaf", "Fruit"])
+            ratio_group = dialog.findChild(QWidget, "modelSettingsParentBoxRatioPanel")
+            self.assertIsNotNone(ratio_group)
+            ratio_edits = dialog.parent_box_ratio_inputs
+            self.assertEqual(ratio_edits["Leaf"].text(), "1.2")
+            ratio_edits["Leaf"].setText("1.4")
+            self.assertEqual(dialog.get_values()["parent_box_aspect_ratios"]["Leaf"], 1.4)
         finally:
             dialog.deleteLater()
 

@@ -42,7 +42,7 @@ Use this skill as the compact operating map for TaxaMask. It is not merely an op
 
 Choose the route before editing or advising:
 
-- `2D/STL morphology`: ordinary morphology images plus STL-rendered 2D views. Uses Labeling Workbench, Blink, Locator/SAM, route-appointed experts, and the 2D external backend.
+- `2D/STL morphology`: ordinary morphology images plus STL-rendered 2D views. Uses the Labeling Workbench as the daily surface, with the integrated `Parent-child refinement / Blink` panel for child structures, Locator/SAM, route-appointed experts, and the 2D external backend. The standalone Blink widget is compatibility/development fallback, not the normal operator route.
 - `TIF volume`: continuous TIF/AMIRA-style volumes. Uses TIF Volume Workbench, material IDs, `working_edit`, `manual_truth`, `model_draft`, TIF export, and the TIF backend contract.
 - `PDF evidence`: screens PDFs and extracts figure/caption evidence. Load `.lab-agent/skills/taxamask-pdf-evidence/SKILL.md` for PDF runs, candidate import, evidence indexes, or PDF failure triage. Results are candidate/evidence artifacts and must not automatically become training truth.
 - `Agent Center`: natural-language configuration, error triage, PDF workflow orchestration, training-readiness checks, and project documentation support.
@@ -60,7 +60,7 @@ Choose the route before editing or advising:
 ## Settings Map
 
 - General Settings: language, theme, startup behavior, autosave, and default internal runtime device.
-- 2D/STL Model Settings: built-in Locator/SAM/Blink training and inference, locator scope, Blink defaults, and the 2D external backend.
+- 2D/STL Model Settings: built-in Locator/SAM/Blink training and inference, locator scope, parent-context box aspect ratios, Blink defaults, route expert management, and the 2D external backend.
 - TIF Volume Model Settings: TIF backend defaults, Python executable, prepare/train/predict commands, export formats, and validation.
 - TIF backend commands must include `{contract}` or `{contract_json}`.
 

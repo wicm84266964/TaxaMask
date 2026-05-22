@@ -1,10 +1,86 @@
 # TAXAMASK / FORMICA-FLOW SYSTEM TECHNICAL MANUAL (Deep Dive)
 
 > **Target Audience**: Expert LLM Assistants, Senior Developers
-> **Version**: v3.24 (May 17, 2026, Agent Center + workflow split + lazy 2D/STL model loading)
+> **Version**: v3.25 (May 22, 2026, Agent Center + workflow split + main-workbench Blink merge)
 > **Purpose**: Up-to-date architectural, workflow, and governance context for implementation and maintenance.
 
 ---
+
+## 0) v3.25 Main Labeling Workbench Blink Merge (2026-05-22)
+
+### 0.0 2D/STL daily tab layout
+- `2D/STL Morphology` daily operation now shows the main `Labeling Workbench` only.
+- The old standalone `BlinkLabWidget` and `launch_blink_from_workbench(...)` remain in code as compatibility/development fallback, but the `Open in Blink Workbench` toolbar button is hidden and 2D/STL mode removes the Blink tab.
+- The standalone fallback no longer advertises or handles Space as the Blink switch shortcut, preventing conflict with main-workbench Space verification.
+- Startup and TIF tab rules from v3.24 still apply:
+  - startup/start mode shows only `Start Center`
+  - TIF mode shows only `TIF Volume Workbench`
+  - PDF tools remain on-demand through `File -> Open PDF Evidence Tools`
+
+### 0.1 Integrated parent-child refinement panel
+- `AntSleap/main.py` now adds `workbenchBlinkRefinePanel` under the main workbench AI panel.
+- The panel displays:
+  - selected structure role
+  - current parent -> child route
+  - parent context selector
+  - parent box state
+  - route expert state
+  - `Configure Route Expert`
+  - box role switch: annotation box vs loose shrink box
+  - `Auto-annotate child`
+  - `Run auto-shrink`
+  - `Train current child expert`
+- Parent parts come from project `locator_scope`; non-locator-scope structures are treated as child candidates.
+- Child parent resolution priority is: project memory (`blink_context_roi_parents`), part-tree parent, unique route parent, available parent box, then single locator-scope parent.
+- Users can manually choose a parent context from the panel; this writes `child -> parent` memory and registers a candidate route with source `workbench_blink_refine`.
+
+### 0.2 Box semantics after the merge
+- `AnnotationCanvas` now has an `ANNOTATION_BOX` mode and emits `annotation_box_completed`.
+- `Box Prompt (SAM)` remains a temporary SAM prompt and does not persist a formal box role.
+- Selecting a parent part and drawing an annotation box writes the existing manual box for that parent. It is also the parent context ROI for child refinement.
+- Selecting a child part and drawing an annotation box writes the existing manual box for that child.
+- Selecting a child part and using `Loose shrink box` writes `shrink_loose_boxes[child]`; it does not overwrite the child manual box.
+- `ProjectManager.delete_label(...)` now also removes a part's loose shrink box.
+
+### 0.3 Parent box aspect ratios
+- `ProjectManager` stores `parent_box_aspect_ratios` with defaults:
+  - `Head`: `1.0`
+  - `Mesosoma`: `4/3`
+  - `Gaster`: `4/3`
+  - `Whole body`: `16/9`
+- `2D/STL Model Settings -> Training` exposes the ratio map.
+- Main workbench `Lock parent box ratio` applies the configured ratio only when the selected structure is a parent part.
+- Child annotation boxes and loose shrink boxes remain free-ratio.
+
+### 0.4 Main workbench Blink actions
+- `run_blink_child_auto_annotate()` uses the current child context, parent box, and project route manifest, calls `engine.cascade_manager.infer_child_part(...)`, then uses base SAM to create a draft polygon in global image coordinates.
+- Automatic child annotation requires a ready route: parent box present, route exists, route enabled, and route-appointed expert available.
+- `run_blink_auto_shrink()` uses current child polygon plus `shrink_loose_boxes[child]`, generates a shrink trajectory through `BlinkRefiner`, and saves it with `parent_context`.
+- `train_current_blink_expert()` reuses `BlinkLabWidget.train_expert_model()` internally after constructing an active session and `training_route_context` from the current workbench parent-child state. This preserves existing training thread/report/candidate registration behavior.
+- `open_current_route_expert_settings()` registers the current route candidate if needed and opens `2D/STL Model Settings` focused on that `parent -> child` route.
+
+### 0.5 Research workflow meaning
+- Researchers no longer need to jump into a second visual workbench for common small-part work.
+- Parent context, child annotation, loose shrink boxes, route expert configuration, trajectory creation, and current-child expert training are visible at the same point in the labeling workflow.
+- Formal labels remain in global image coordinates, reducing the risk of confusing local ROI edits with project truth.
+- Standalone Blink session semantics (`APPLY TO GLOBAL`, `BLINK SWITCH`, local dirty session) are now fallback/legacy behavior, not the normal daily route.
+
+### 0.6 Focused validation status
+- Validation used `C:\Users\admin\anaconda3\envs\antsleap\python.exe`.
+- Focused tests updated/added for:
+  - GUI smoke tab counts after hiding standalone Blink
+  - workbench parent-child context resolution
+  - manual parent context selection
+  - annotation box vs loose shrink box separation
+  - parent aspect-ratio constraints
+  - child auto-annotation success and blocked states
+  - auto-shrink trajectory parent context
+  - current child expert training entry context
+- Full final run for this change should include:
+  - `py_compile AntSleap/main.py AntSleap/ui/canvas.py AntSleap/core/project.py AntSleap/ui/blink_lab.py`
+  - `tests.test_gui_smoke`
+  - `tests.test_ui_polish_scope`
+  - `tests.test_blink_bridge tests.test_part_tree tests.test_locator_scope`
 
 ## 0) v3.24 Agent Center / Workflow Split / Lazy Model Loading (2026-05-17)
 
@@ -21,11 +97,12 @@
   - `2D/STL Morphology`
   - `TIF Volume`
   - continue/open/general settings controls.
-- Tab visibility is mode-aware:
+- Historical v3.24 tab visibility was mode-aware:
   - startup/start mode shows only `Start Center`
   - TIF mode removes Labeling/Blink/PDF tabs and shows `TIF Volume Workbench`
-  - 2D/STL mode removes Start/TIF and shows `Labeling Workbench` plus `Blink Workbench`
+  - 2D/STL mode removed Start/TIF and showed `Labeling Workbench` plus `Blink Workbench`
   - PDF tools remain on-demand through `File -> Open PDF Evidence Tools`
+- v3.25 supersedes the 2D/STL part: standalone Blink is hidden from the daily 2D/STL tab set and its high-frequency actions live inside `Labeling Workbench`.
 - Workbenches expose lightweight `Start Center` and `Ask Agent` entry buttons; they do not embed full chat panes.
 - `return_to_start_center_with_context()` and related context helpers pass current project/workbench context back to the Agent Center.
 
@@ -46,7 +123,7 @@
 
 ### 0.3 Workflow split
 - `2D/STL Morphology` is the route for ordinary 2D morphology images and STL-derived rendered 2D views.
-  - It uses the existing Labeling Workbench, Blink Workbench, built-in Locator/SAM, route-appointed Blink experts, and `external_backend`.
+  - It uses the existing Labeling Workbench with integrated parent-child Blink refinement, built-in Locator/SAM, route-appointed Blink experts, and `external_backend`.
   - STL currently means rendered 2D views from STL/mesh assets, registered into the Labeling Workbench; it is not a direct mesh-painting or separate STL renderer workbench.
 - `TIF Volume` is the route for continuous slice stacks and AMIRA-style label fields.
   - It uses independent TIF projects, material maps, `manual_truth`, `working_edit`, `model_draft`, TIF sidecars, and `tif_backend`.
@@ -164,6 +241,7 @@
   - `Labeling Workbench`
   - `Blink Workbench`
   - `TIF Volume Workbench`
+- v3.25 keeps this as history only; current 2D/STL daily work uses Labeling Workbench with integrated Blink refinement.
 - PDF remains on-demand through `File -> Open PDF Evidence Tools`.
 - File menu includes `Import STL Rendered Views to Labeling Workbench`.
 - Direct directory import groups rendered-view files by specimen ID and fixed view token, then registers those images in the existing 2D `Labeling Workbench`.
@@ -181,7 +259,7 @@
   - metadata reference
   - fixed view name
   - original source path
-- This reuses the existing Labeling Workbench / Blink / Locator/SAM path for surface-view annotation and training while preserving provenance, matching the intended STL-derived 2D review workflow.
+- This reuses the existing Labeling Workbench / integrated Blink refinement / Locator/SAM path for surface-view annotation and training while preserving provenance, matching the intended STL-derived 2D review workflow.
 - These 2D surface labels remain separate from TIF volume `manual_truth`.
 
 ### 0.6 PDF evidence and cross-project linkage helpers
@@ -266,7 +344,7 @@
 ### 0.4 TIF Volume Workbench UI
 - New UI module: `AntSleap/ui/tif_workbench.py`.
 - Main window now owns a separate `self.tif_project` and a `TIF Volume Workbench` tab.
-- Historical v3.22 tab layout was Labeling Workbench / TIF Volume Workbench / Blink Workbench. v3.24 supersedes this with mode-aware tabs: Start Center only at startup, TIF-only in TIF mode, and Labeling + Blink in 2D/STL mode.
+- Historical v3.22 tab layout was Labeling Workbench / TIF Volume Workbench / Blink Workbench. v3.24 introduced mode-aware tabs; v3.25 supersedes the 2D/STL layout so Start Center appears only at startup, TIF mode shows only TIF, and 2D/STL daily work shows Labeling Workbench with integrated Blink refinement.
 - PDF tools are no longer shown as a default primary tab; they can be opened on demand from `File -> Open PDF Evidence Tools`.
 - Opening a JSON with `schema_version: ant3d_tif_project_v1` and `project_type: tif_volume` loads it into the TIF workbench.
 - Old 2D/STL TaxaMask JSON projects still load through the existing `ProjectManager`.
@@ -900,15 +978,16 @@
   - if it is the same image and the canvas already holds a valid pixmap, update overlays/metadata without reloading the image
   - still reload/refit normally when the operator actually switches to a different image
 
-### 0.1 2026-04-10 Blink is now explicit-entry / explicit-sync driven, not auto-pushed from main-workbench edits
+### 0.1 2026-04-10 Blink was changed to explicit-entry / explicit-sync driven, not auto-pushed from main-workbench edits
 - The main workbench no longer auto-calls `blink_lab.refresh_from_workbench(...)` after:
   - `on_polygon_completed(...)`
   - current-image prediction application
   - current-image batch result arrival
-- Current accepted Blink interaction model:
+- Historical accepted standalone Blink interaction model:
   - entering Blink from `Open in Blink Workbench` passes current labels/manual boxes/auto boxes explicitly into `start_session(...)`
   - later Blink refresh is operator-triggered via `Sync from Workbench`
   - formal return from Blink to the main project remains `APPLY TO GLOBAL`
+- v3.25 keeps this only for the standalone compatibility fallback. Normal 2D/STL small-part refinement now stays in the main Labeling Workbench.
 
 ### 0.2 2026-04-10 point-edit persistence now uses delayed autosave instead of immediate whole-project JSON rewrite
 - `ProjectManager.update_label(...)` and `delete_label(...)` now accept `save=False`, allowing memory-first state updates for high-frequency polygon edits.
@@ -945,7 +1024,7 @@
   - reapplies theme-aware styles to major toolbar/workbench action buttons
   - propagates theme changes into child workbenches
 - The stable branch now explicitly re-themes:
-  - top workbench actions (`Export Dataset`, `Import & Crop`, `Open in Blink Workbench`)
+  - top workbench actions (`Export Dataset`, `Import & Crop`, and the historical `Open in Blink Workbench` compatibility button)
   - left-side `+ Add Images`
   - workbench AI action buttons
   - `PdfProcessingWidget`
@@ -1535,31 +1614,28 @@ UI-side export utilities and the governance bridge now consume these figure-leve
   - `val_details/` detail overlays
 - The validation table is deterministic and browseable by row, rather than being only a static stitched preview.
 
-#### 9.2.4 Workbench → Blink explicit entry flow (current)
+#### 9.2.4 Main workbench parent-child refinement flow (current)
 Current operator path:
-1. select an image in the workbench
-2. select the target part in the taxonomy list
-3. click **`Open in Blink Workbench`**
-4. in the Blink entry dialog, choose:
-   - **Target Part** = the part to refine in this session
-   - **Entry ROI** = the existing manual box or auto box used to enter the local view
-5. the dialog now explicitly explains that:
-   - **Target Part** is the child part to refine
-   - **Entry ROI** is the parent/context region Blink will zoom into
-   - current guidance explicitly mentions `Eye -> Head`
-6. if the project already remembers a parent/context ROI for this target part, the dialog reuses that remembered context by default
-7. if the project does not remember one yet, Blink does not silently guess; the operator must choose explicitly
-8. Blink receives a concrete session payload instead of trying to infer user intent from the current image alone
-9. if a parent part and child target part are now known for the session, the project can register that parent -> child relation as a candidate project route
+1. select an image in the Labeling Workbench
+2. select a parent part such as `Head`
+3. draw the parent annotation box, using the configured parent aspect ratio unless temporarily unlocked
+4. select a child part such as `Mandible`
+5. confirm or choose the parent context in `Parent-child refinement / Blink`
+6. configure the route expert through `Configure Route Expert` if the route is missing, disabled, or unappointed
+7. use `Auto-annotate child` for route-appointed expert + base SAM draft polygon
+8. refine the child polygon in the main canvas
+9. switch to `Loose shrink box`, draw the loose box, and run `Run auto-shrink`
+10. train through `Train current child expert` once enough trajectory-backed examples exist
 
 Practical meaning for research workflow:
-- large-part localization and small-part refinement are now connected explicitly
-- the operator can enter through a biologically useful parent region (for example, a head box) without hardcoding a complete taxonomy graph first
-- once that choice is made, the same project can remember it instead of forcing the operator to restate the same parent relation every session
-- the same session path can also seed a project route candidate for later single-image or batch inference use
+- large-part localization and small-part refinement are connected without leaving the main image canvas
+- the operator can choose or correct the biologically useful parent region from the right-side panel
+- once a parent choice is made, the project remembers it through `blink_context_roi_parents`
+- route candidate creation and settings focus are available from the main workbench
+- formal child labels remain in global image coordinates, so there is no normal daily `Apply to Global` step
 
-#### 9.2.5 Blink local session semantics (`AntSleap/ui/blink_lab.py`)
-Current Blink session behavior is intentionally split into different layers:
+#### 9.2.5 Standalone Blink local session semantics (`AntSleap/ui/blink_lab.py`, compatibility fallback)
+Standalone Blink session behavior is still intentionally split into different layers, but it is no longer the normal daily 2D/STL route:
 
 **A. What the local view is for**
 - Blink opens in a local ROI-focused view
@@ -1609,19 +1685,30 @@ The current system now makes an important distinction:
   - can come from the route-appointed expert path or the manual prompt-box path
   - is intentionally **not** persisted as the formal shrink box
 
+- **Annotation box**
+  - main-workbench `ANNOTATION_BOX` writes formal manual boxes for the selected part
+  - when the selected part is a parent, this same manual box is also the parent-context ROI for child refinement
+  - parent annotation boxes can be aspect-ratio constrained
+
+- **Loose shrink box**
+  - main-workbench child loose boxes are stored separately as `shrink_loose_boxes[child]`
+  - they are consumed by `run_blink_auto_shrink()`
+  - they must not overwrite formal child annotation boxes
+
 - **Trajectory data** (`trajectories[part_name]`)
-  - produced by `EXECUTE AUTO-SHRINK`
+  - produced by `Run auto-shrink` in the main workbench or `EXECUTE AUTO-SHRINK` in the standalone fallback
   - used by `BlinkTrajectoryDataset` and `BlinkExpertTrainer`
   - saved immediately when auto-shrink succeeds
   - now also stores `parent_context` (`parent_part`, `parent_box`, `source`) for macro→micro training semantics
 
 - **Formal annotation data** (`parts`, `boxes`, `auto_boxes`)
-  - updated by `APPLY TO GLOBAL`
+  - updated directly by the main Labeling Workbench in normal v3.25 use
+  - still updated by `APPLY TO GLOBAL` only in the standalone Blink compatibility fallback
   - this is what the main workbench treats as the accepted project result
 
 This distinction matters operationally:
 - a sample can already contribute to Blink training after auto-shrink
-- but the refined polygon/box is not considered formally adopted until apply-to-global happens
+- but auto-shrink itself is not a polygon correction action; the formal polygon/annotation box is whatever the main workbench project labels currently contain
 
 #### 9.2.7 Dirty-session protection (current)
 Current same-image/runtime safety rules:
@@ -1923,16 +2010,18 @@ This is intentional in current phase and documented as a known gap for future UI
 
 ---
 
-### 9.9 Current BLINK/Cascade Runtime Notes (No Longer Historical-Only)
+### 9.9 Current BLINK/Cascade Runtime Notes
 
-BLINK is now an active current UI/runtime path, not just continuity context:
-- coordinate mapping still provides global/local consistency between workbench and Blink views
+BLINK remains an active runtime path, but v3.25 moves the daily operator surface into the main Labeling Workbench:
+- main-workbench parent-child refinement uses global image coordinates directly
+- standalone Blink coordinate mapping still provides global/local consistency for compatibility sessions
 - trajectory-based supervision remains the data backbone for Blink micro-expert training
-- session semantics are now explicit enough to support practical coarse→fine annotation work inside the current product
+- standalone session semantics remain explicit enough for fallback/debug coarse→fine annotation work
 
 Current boundary:
-- explicit workbench→Blink entry and local refinement are production-relevant current behavior
-- cascade gating and broader expert routing remain more experimental than the entry/writeback/session model itself
+- main-workbench parent-child refinement is the production-relevant daily behavior
+- explicit workbench→standalone-Blink entry and local refinement are compatibility/development fallback behavior
+- cascade gating and broader expert routing remain more experimental than the main-workbench annotation/trajectory model itself
 
 ---
 
@@ -1946,10 +2035,11 @@ Before modifying governance behavior:
 
 Before modifying workbench/Blink behavior:
 5. Re-check the difference between:
-   - `EXECUTE AUTO-SHRINK` = save trajectory training material
-   - `APPLY TO GLOBAL` = write refined annotation back to formal project state
-6. Preserve target-part-only writeback unless the user explicitly asks to broaden local-session commit scope.
-7. Preserve dirty-session protection unless the user explicitly accepts silent-overwrite risk.
+   - main-workbench `Run auto-shrink` = save trajectory training material
+   - main-workbench polygon/annotation box = formal project label state
+   - standalone fallback `APPLY TO GLOBAL` = write local-session refined annotation back to formal project state
+6. Preserve target-part-only writeback in the standalone fallback unless the user explicitly asks to broaden local-session commit scope.
+7. Preserve dirty-session protection in the standalone fallback unless the user explicitly accepts silent-overwrite risk.
 8. Do not claim that GUI project loading can auto-repair malformed JSON unless such a repair path is actually implemented.
 
 Cross-doc requirement:

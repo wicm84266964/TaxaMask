@@ -289,9 +289,8 @@ class GuiSmokeTests(unittest.TestCase):
 
             window.enter_image_workflow()
             self.assertEqual(window.active_project_kind, "image")
-            self.assertEqual(window.tabs.count(), 2)
+            self.assertEqual(window.tabs.count(), 1)
             self.assertEqual(window.tabs.tabText(0), "Labeling Workbench")
-            self.assertEqual(window.tabs.tabText(1), "Blink Workbench")
             self.assertIsNotNone(window.findChild(main_module.QWidget, "workbenchCanvasShell"))
             self.assertEqual(window.btn_agent_from_workbench.text(), "Ask Agent")
             self.assertEqual(preload_events, ["preload"])
@@ -769,11 +768,11 @@ class GuiSmokeTests(unittest.TestCase):
         window = self._make_window()
         try:
             window.enter_image_workflow()
-            self.assertEqual(window.tabs.count(), 2)
+            self.assertEqual(window.tabs.count(), 1)
             window.open_pdf_evidence_tools()
             self.assertEqual(window.tabs.currentWidget(), window.pdf_widget)
             self.assertEqual(window.tabs.tabText(window.tabs.currentIndex()), "PDF Evidence Tools")
-            self.assertEqual(window.tabs.count(), 3)
+            self.assertEqual(window.tabs.count(), 2)
         finally:
             window.deleteLater()
 
@@ -798,7 +797,7 @@ class GuiSmokeTests(unittest.TestCase):
 
             self.assertEqual(window.active_project_kind, "image")
             self.assertEqual(window.tabs.currentWidget(), window.workbench_widget)
-            self.assertEqual(window.tabs.count(), 2)
+            self.assertEqual(window.tabs.count(), 1)
             self.assertEqual(len(window.project.project_data["images"]), 1)
             image_path = window.project.project_data["images"][0]
             provenance = window.project.get_image_provenance(image_path)

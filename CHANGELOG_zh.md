@@ -4,6 +4,39 @@
 
 ## 📅 更新日志 (Update Log)
 
+### **[2026-05-22] 主标注工作台吸收 Blink 父子精修**
+> **本次重点：把 2D/STL 日常小部位精修从独立 Blink Workbench 合并回主 Labeling Workbench。研究者在同一张大图里完成父级框、子部位标注、收缩松框、自动标注、trajectory 积累和当前子部位专家训练；独立 Blink widget 保留为兼容回退。**
+
+#### **1）2D/STL 日常入口收口到主标注工作台**
+- 2D/STL 模式现在日常只显示 `Labeling Workbench`。
+- 顶部旧 `Open in Blink Workbench` 入口已隐藏，独立 Blink tab 不再作为普通标注流程入口。
+- 旧 `BlinkLabWidget`、旧启动函数和训练线程保留，作为兼容与开发回退，避免一次性删除后端训练链路。
+
+#### **2）右侧新增父子精修 / Blink 区**
+- 主工作台右侧新增 `Parent-child refinement / Blink` 小区。
+- 该区域显示当前部位角色、当前 `parent -> child` 路由、父级上下文、父级框状态和路由专家状态。
+- 新增父级上下文下拉框，用户可手动把子部位绑定到正确父部位；选择会写入项目记忆 `blink_context_roi_parents`。
+- `Configure Route Expert` 可直接打开设置里的项目路由专家配置，并定位当前父子 route。
+
+#### **3）框角色拆清楚**
+- 新增主画布 `Annotation Box` 模式。
+- 父部位的 annotation box 继续写入原有 manual box，同时作为子部位精修的父级上下文框。
+- 子部位 annotation box 写入子部位正式框，不继承父部位固定比例。
+- 收缩松框写入新增 `shrink_loose_boxes` 字段，不覆盖子部位正式框。
+- `Box Prompt (SAM)` 仍然只是 SAM 临时提示，不写入正式框角色。
+
+#### **4）父级框支持固定长宽比**
+- 项目新增 `parent_box_aspect_ratios`，默认包括 `Head=1.0`、`Mesosoma=4/3`、`Gaster=4/3`、`Whole body=16/9`。
+- `2D/STL Model Settings` 中可编辑父级框比例。
+- 主工作台可通过 `Lock parent box ratio` 临时解除比例锁定。
+
+#### **5）自动标注、自动收缩、专家训练都使用当前父子上下文**
+- `Auto-annotate child` 使用当前父级框和项目 route manifest 调用 route-appointed expert，再由基础 SAM 生成子部位草稿 polygon。
+- `Run auto-shrink` 使用当前子部位 polygon 和 `shrink_loose_boxes` 生成 trajectory，并保存 `parent_context`。
+- `Train current child expert` 复用现有 Blink 训练线程和 route candidate 注册逻辑，但入口来自主标注工作台当前父子上下文。
+- 兼容 Blink 回退界面不再展示或响应空格键 Blink 切换提示，避免和主工作台的空格验证快捷键混淆。
+- 研究流程含义：用户不再需要理解局部会话、坐标映射和 `Apply to Global` 才能完成常见小部位标注。
+
 ### **[2026-05-17] Agent Center 启动页 + TIF/STL 分流 + 模型惰性加载 + 文档/skill 收口**
 > **本次重点：把 TaxaMask 的真实入口从旧的工作台优先路线收口为 Agent Center 优先路线；2D/STL 与 TIF 明确分成两个工作流；PDF 下沉为 evidence/Agent 任务；Locator/SAM 改为进入 2D/STL 时才预加载；同时同步使用手册、README、LLM 对接文件和项目本地 skill。**
 

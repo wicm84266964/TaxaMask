@@ -463,8 +463,11 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(context["source_workbench"], "labeling")
             self.assertIn("head.png", context["active_image_path"])
             self.assertIn("context_policy", context)
+            self.assertEqual(context["diagnostic_route"], "labeling_workbench_context")
+            self.assertIn("LLM_CONTEXT_DETAILED.md", context["llm_context_refs"])
+            self.assertIn("MainWindow._collect_image_workbench_agent_context", context["source_code_refs"])
             self.assertIn("[truncated]", context["recent_log_excerpt"])
-            self.assertLess(len(str(context)), 2000)
+            self.assertLess(len(str(context)), 5000)
         finally:
             window.deleteLater()
 
@@ -479,6 +482,8 @@ class GuiSmokeTests(unittest.TestCase):
 
             self.assertEqual(events, ["start"])
             self.assertIn("来源工作台: general_settings", window.agent_panel._pending_context_prompt)
+            self.assertIn("诊断路线: general_settings_runtime", window.agent_panel._pending_context_prompt)
+            self.assertIn("建议阅读的大模型对接位置:", window.agent_panel._pending_context_prompt)
         finally:
             window.deleteLater()
 
@@ -497,6 +502,7 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(window.agent_panel._pending_context_prompt, "")
             self.assertEqual(len(prompts), 1)
             self.assertIn("项目类型: settings", prompts[0])
+            self.assertIn("上下文策略:", prompts[0])
         finally:
             window.deleteLater()
 
@@ -648,7 +654,10 @@ class GuiSmokeTests(unittest.TestCase):
                 self.assertEqual(compact["source_workbench"], "stl_model_settings")
                 self.assertEqual(compact["external_backend_id"], "custom_backend")
                 self.assertIn("validation_errors", compact)
-                self.assertLess(len(str(compact)), 2000)
+                self.assertIn("contract_placeholder_missing", compact["diagnostic_route"])
+                self.assertIn("docs/contracts/external_backend_contract_v1.md", compact["source_code_refs"])
+                self.assertIn("contract_placeholder=missing", compact["health_check_summary"])
+                self.assertLess(len(str(compact)), 5000)
             finally:
                 model_dialog.deleteLater()
 
@@ -673,6 +682,10 @@ class GuiSmokeTests(unittest.TestCase):
                 self.assertEqual(context["predict_command_has_contract"], "yes")
                 self.assertNotIn("large-config", str(context))
                 self.assertNotIn("predict.py", str(context))
+                compact = window._compact_agent_context(context)
+                self.assertEqual(compact["diagnostic_route"], "tif_volume_backend_settings")
+                self.assertIn("TIF后端契约", compact["source_code_refs"])
+                self.assertIn("model_draft", compact["safety_notes"])
             finally:
                 tif_dialog.deleteLater()
         finally:

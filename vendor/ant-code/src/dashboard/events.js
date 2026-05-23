@@ -184,6 +184,13 @@ function statusLabel(status) {
 }
 
 function permissionSummary(request) {
+  const taxamaskScope = request.decision?.taxamask?.scope;
+  if (taxamaskScope === "taxamask.adapter") {
+    return "外部模型后端适配 · 修改自定义模型对接脚本或配置前需要确认";
+  }
+  if (taxamaskScope === "taxamask.source_development") {
+    return "TaxaMask 源码开发模式 · 修改程序源码前需要强确认";
+  }
   const toolName = request.toolName ?? "unknown";
   const reason = request.decision?.reason ?? "需要确认后继续";
   return `${toolLabel(toolName)} · ${reason}`;

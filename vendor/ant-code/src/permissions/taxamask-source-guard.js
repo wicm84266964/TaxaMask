@@ -1,5 +1,9 @@
 import path from "node:path";
 
+export const TAXAMASK_AUTH_NONE = "none";
+export const TAXAMASK_AUTH_ADAPTER = "taxamask.adapter";
+export const TAXAMASK_AUTH_SOURCE = "taxamask.source_development";
+
 const SOURCE_ROOTS = Object.freeze([
   "AntSleap",
   "core",
@@ -22,6 +26,30 @@ const SOURCE_EXTENSIONS = Object.freeze([
   ".cjs",
   ".sh",
   ".ps1",
+  ".bat",
+  ".cmd"
+]);
+
+const DEFAULT_ADAPTER_ROOTS = Object.freeze([
+  "external_backends",
+  "external_backend_adapters",
+  "model_backends",
+  ".tmp_validation/external_backends"
+]);
+
+const DEFAULT_ADAPTER_EXTENSIONS = Object.freeze([
+  ".py",
+  ".js",
+  ".mjs",
+  ".cjs",
+  ".json",
+  ".yaml",
+  ".yml",
+  ".toml",
+  ".md",
+  ".txt",
+  ".ps1",
+  ".sh",
   ".bat",
   ".cmd"
 ]);
@@ -53,36 +81,171 @@ export function isTaxaMaskSourcePath(cwd, candidate) {
   return SOURCE_ROOTS.some((root) => relative === root || relative.startsWith(`${root}/`));
 }
 
+export function isTaxaMaskAdapterPath(cwd, candidate, policy = {}) {
+  const relative = toRelativePath(cwd, candidate);
+  if (!relative) {
+    return false;
+  }
+  const extension = path.extname(relative).toLowerCase();
+  const extensions = normalizeList(policy.adapterExtensions, DEFAULT_ADAPTER_EXTENSIONS);
+  if (!extensions.includes(extension)) {
+    return false;
+  }
+  const roots = normalizeList(policy.adapterRoots, DEFAULT_ADAPTER_ROOTS);
+  return roots.some((root) => relative === root || relative.startsWith(`${root}/`));
+}
+
 export function taxamaskSourceWriteDecision(payload = {}, options = {}) {
   const toolName = String(payload.toolName ?? "");
   const input = payload.input ?? {};
   const cwd = options.cwd ?? payload.cwd ?? process.cwd();
+  const policy = options.policy ?? {};
   const directTargets = collectDirectTargets(payload, input);
+  const sourceAuth = normalizeTaxaMaskAuth(
+    options.authorization
+      ?? payload.taxamaskPermissionScope
+      ?? payload.taxamaskAuthorization
+  );
   const sourceTarget = directTargets.find((candidate) => isTaxaMaskSourcePath(cwd, candidate));
+  const adapterTarget = directTargets.find((candidate) => isTaxaMaskAdapterPath(cwd, candidate, policy));
 
   if (SOURCE_WRITE_TOOLS.has(toolName) && sourceTarget) {
-    return blockDecision(sourceTarget, `${toolName} cannot modify TaxaMask source files`);
+    if (sourceAuth === TAXAMASK_AUTH_SOURCE) {
+      return allowDecision(TAXAMASK_AUTH_SOURCE, sourceTarget);
+    }
+    return approvalDecision(
+      TAXAMASK_AUTH_SOURCE,
+      sourceTarget,
+      `${toolName} needs TaxaMask source development permission`,
+      "TaxaMask source development",
+      sourceApprovalMessage(sourceTarget)
+    );
   }
 
   if ((toolName === "powershell" || toolName === "bash") && sourceTarget) {
     const command = String(input.command ?? "");
     if (looksLikeSourceMutatingShell(command)) {
-      return blockDecision(sourceTarget, "shell command appears to modify TaxaMask source files");
+      if (sourceAuth === TAXAMASK_AUTH_SOURCE) {
+        return allowDecision(TAXAMASK_AUTH_SOURCE, sourceTarget);
+      }
+      return approvalDecision(
+        TAXAMASK_AUTH_SOURCE,
+        sourceTarget,
+        "shell command needs TaxaMask source development permission",
+        "TaxaMask source development",
+        sourceApprovalMessage(sourceTarget)
+      );
     }
   }
 
   if (toolName === "powershell" || toolName === "bash") {
     const command = String(input.command ?? "");
     if (looksLikeBroadSourceMutation(command)) {
-      return blockDecision("TaxaMask source tree", "broad shell mutation could modify TaxaMask source files");
+      if (adapterTarget && !sourceTarget) {
+        if (sourceAuth === TAXAMASK_AUTH_ADAPTER || sourceAuth === TAXAMASK_AUTH_SOURCE) {
+          return allowDecision(sourceAuth, adapterTarget);
+        }
+        return approvalDecision(
+          TAXAMASK_AUTH_ADAPTER,
+          adapterTarget,
+          "broad shell mutation needs TaxaMask model-adapter permission",
+          "TaxaMask model adapter",
+          adapterApprovalMessage(adapterTarget)
+        );
+      }
+      if (sourceAuth === TAXAMASK_AUTH_SOURCE) {
+        return allowDecision(TAXAMASK_AUTH_SOURCE, "TaxaMask source tree");
+      }
+      return approvalDecision(
+        TAXAMASK_AUTH_SOURCE,
+        "TaxaMask source tree",
+        "broad shell mutation needs TaxaMask source development permission",
+        "TaxaMask source development",
+        sourceApprovalMessage("TaxaMask source tree")
+      );
     }
   }
 
   if (toolName === "mcp_call" && isFilesystemWriteMcpCall(input) && sourceTarget) {
-    return blockDecision(sourceTarget, "filesystem MCP call cannot modify TaxaMask source files");
+    if (sourceAuth === TAXAMASK_AUTH_SOURCE) {
+      return allowDecision(TAXAMASK_AUTH_SOURCE, sourceTarget);
+    }
+    return approvalDecision(
+      TAXAMASK_AUTH_SOURCE,
+      sourceTarget,
+      "filesystem MCP call needs TaxaMask source development permission",
+      "TaxaMask source development",
+      sourceApprovalMessage(sourceTarget)
+    );
+  }
+
+  if (SOURCE_WRITE_TOOLS.has(toolName) && adapterTarget) {
+    if (sourceAuth === TAXAMASK_AUTH_ADAPTER || sourceAuth === TAXAMASK_AUTH_SOURCE) {
+      return allowDecision(sourceAuth, adapterTarget);
+    }
+    return approvalDecision(
+      TAXAMASK_AUTH_ADAPTER,
+      adapterTarget,
+      `${toolName} needs TaxaMask model-adapter permission`,
+      "TaxaMask model adapter",
+      adapterApprovalMessage(adapterTarget)
+    );
+  }
+
+  if ((toolName === "powershell" || toolName === "bash") && adapterTarget) {
+    const command = String(input.command ?? "");
+    if (looksLikeSourceMutatingShell(command)) {
+      if (sourceAuth === TAXAMASK_AUTH_ADAPTER || sourceAuth === TAXAMASK_AUTH_SOURCE) {
+        return allowDecision(sourceAuth, adapterTarget);
+      }
+      return approvalDecision(
+        TAXAMASK_AUTH_ADAPTER,
+        adapterTarget,
+        "shell command needs TaxaMask model-adapter permission",
+        "TaxaMask model adapter",
+        adapterApprovalMessage(adapterTarget)
+      );
+    }
+  }
+
+  if (toolName === "mcp_call" && isFilesystemWriteMcpCall(input) && adapterTarget) {
+    if (sourceAuth === TAXAMASK_AUTH_ADAPTER || sourceAuth === TAXAMASK_AUTH_SOURCE) {
+      return allowDecision(sourceAuth, adapterTarget);
+    }
+    return approvalDecision(
+      TAXAMASK_AUTH_ADAPTER,
+      adapterTarget,
+      "filesystem MCP call needs TaxaMask model-adapter permission",
+      "TaxaMask model adapter",
+      adapterApprovalMessage(adapterTarget)
+    );
   }
 
   return { blocked: false };
+}
+
+export function normalizeTaxaMaskAuth(value) {
+  const text = String(value ?? "").trim().toLowerCase();
+  if ([
+    "source",
+    "source_development",
+    "taxamask.source",
+    "taxamask.source_development",
+    "taxamask-source-development"
+  ].includes(text)) {
+    return TAXAMASK_AUTH_SOURCE;
+  }
+  if ([
+    "adapter",
+    "model_adapter",
+    "external_backend_adapter",
+    "taxamask.adapter",
+    "taxamask.model_adapter",
+    "taxamask-model-adapter"
+  ].includes(text)) {
+    return TAXAMASK_AUTH_ADAPTER;
+  }
+  return TAXAMASK_AUTH_NONE;
 }
 
 export function looksLikeSourceMutatingShell(command) {
@@ -167,6 +330,43 @@ function blockDecision(target, reason) {
   };
 }
 
+function allowDecision(scope, target) {
+  return {
+    blocked: false,
+    allowed: true,
+    scope,
+    target
+  };
+}
+
+function approvalDecision(scope, target, reason, title, message) {
+  return {
+    blocked: true,
+    requiresApproval: true,
+    scope,
+    target,
+    reason,
+    title,
+    message
+  };
+}
+
+function sourceApprovalMessage(target) {
+  return [
+    "TaxaMask source development permission is required.",
+    `Target: ${safeLabel(target)}`,
+    "This can change the TaxaMask program itself, including 2D/STL, TIF, Agent Center, imports, or training behavior."
+  ].join(" ");
+}
+
+function adapterApprovalMessage(target) {
+  return [
+    "TaxaMask model-adapter permission is required.",
+    `Target: ${safeLabel(target)}`,
+    "This can change an external backend adapter used for training or prediction, but it does not unlock TaxaMask source files."
+  ].join(" ");
+}
+
 function toRelativePath(cwd, candidate) {
   const text = String(candidate ?? "").trim();
   if (!text) {
@@ -181,6 +381,13 @@ function toRelativePath(cwd, candidate) {
 
 function toPosix(value) {
   return String(value ?? "").split(path.sep).join("/");
+}
+
+function normalizeList(value, fallback) {
+  const source = Array.isArray(value) && value.length > 0 ? value : fallback;
+  return Array.from(new Set(source
+    .map((item) => String(item ?? "").trim().replace(/\\/g, "/").replace(/^\.\/+/, "").replace(/\/+$/, ""))
+    .filter(Boolean)));
 }
 
 function safeLabel(candidate) {

@@ -1499,10 +1499,17 @@ function normalizeComparableText(text) {
 
 function showApproval(approval) {
   state.pendingApproval = approval;
+  const display = approval.display && typeof approval.display === "object" ? approval.display : {};
+  const title = display.title || `需要权限确认 · ${approval.toolName}`;
+  const explanation = display.explanation || "";
+  const severityClass = display.severity ? ` ${display.severity}` : "";
+  const allowSessionLabel = display.allowSessionLabel || "本会话允许";
   els.approvalPanel.classList.remove("hidden");
+  els.approvalPanel.className = `approval-panel${severityClass}`;
   els.approvalPanel.innerHTML = `
-    <div class="approval-title">需要权限确认 · ${escapeHtml(approval.toolName)}</div>
+    <div class="approval-title">${escapeHtml(title)}</div>
     <div class="approval-preview">${escapeHtml([
+      explanation,
       approval.reason,
       approval.sensitive ? "敏感信息强确认：批准后相关内容可能进入模型上下文。" : "",
       approval.outsideWorkspace ? "目标位于工作区外，需要明确确认。" : "",
@@ -1510,7 +1517,7 @@ function showApproval(approval) {
     ].filter(Boolean).join("\n"))}</div>
     <div class="approval-actions">
       <button type="button" data-action="allow-once">允许一次</button>
-      <button type="button" data-action="allow-session">本会话允许</button>
+      <button type="button" data-action="allow-session">${escapeHtml(allowSessionLabel)}</button>
       <button type="button" data-action="deny" class="danger">拒绝</button>
       <button type="button" data-action="cancel">取消</button>
     </div>
@@ -1528,7 +1535,7 @@ async function resolveApproval(action) {
 
 function hideApproval() {
   state.pendingApproval = null;
-  els.approvalPanel.classList.add("hidden");
+  els.approvalPanel.className = "approval-panel hidden";
   els.approvalPanel.innerHTML = "";
 }
 

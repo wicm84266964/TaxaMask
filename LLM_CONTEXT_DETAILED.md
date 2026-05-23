@@ -1,14 +1,66 @@
 # TAXAMASK / FORMICA-FLOW SYSTEM TECHNICAL MANUAL (Deep Dive)
 
 > **Target Audience**: Expert LLM Assistants, Senior Developers
-> **Version**: v3.25 (May 22, 2026, Agent Center + workflow split + main-workbench Blink merge)
+> **Version**: v3.25 (May 22, 2026, Agent Center + Ask Agent routing + main-workbench Blink merge)
 > **Purpose**: Up-to-date architectural, workflow, and governance context for implementation and maintenance.
 
 ---
 
 ## 0) v3.25 Main Labeling Workbench Blink Merge (2026-05-22)
 
-### 0.0 2D/STL daily tab layout
+### 0.0 Ask Agent context routing table
+- `AntSleap/core/agent_context_routes.py` is the compact routing table for fixed `Ask Agent` entry points.
+- `MainWindow._compact_agent_context(...)` now calls `enrich_agent_context(...)` before applying its whitelist and total prompt budget.
+- `TaxaMaskAgentPanel._context_prompt(...)` displays routing fields in the short prompt sent to the embedded Ant-Code dashboard.
+- The prompt remains an index card rather than a document dump:
+  - current page/workbench identity
+  - compact field summary
+  - `diagnostic_route`
+  - `diagnostic_focus`
+  - lightweight health checks
+  - `llm_context_refs`
+  - `source_code_refs`
+  - `artifact_hints`
+  - `safety_notes`
+  - `suggested_agent_action`
+- Current route keys include:
+  - `general_settings`
+  - `stl_model_settings`
+  - `tif_model_settings`
+  - `labeling`
+  - `blink`
+  - `tif_volume`
+  - `pdf_evidence`
+- Contract-placeholder detection is route-aware. If a present prepare/train/predict command lacks `{contract}` or `{contract_json}`, the route is annotated with `contract_placeholder_missing`.
+- The operational purpose is to let the embedded Agent quickly jump to the relevant section of this handoff file, source file, contract document, or run artifact without copying large manuals, commands, project JSON, API settings, or volume sidecars into chat.
+- Important files:
+  - `AntSleap/core/agent_context_routes.py`
+  - `AntSleap/main.py::MainWindow._compact_agent_context`
+  - `AntSleap/ui/taxamask_agent_panel.py::TaxaMaskAgentPanel._context_prompt`
+  - `tests/test_agent_context_routes.py`
+
+### 0.1 TaxaMask Agent write-permission tiers
+- The embedded Ant-Code hook now separates TaxaMask model adaptation from TaxaMask source development.
+- Enforcement path:
+  - `AntSleap/config/taxamask_ant_code.config.json` enables builtin `denyTaxaMaskSourceWrites` on `tool.before`.
+  - `vendor/ant-code/src/permissions/taxamask-source-guard.js` classifies guarded writes.
+  - `vendor/ant-code/src/tools/runtime.js` converts TaxaMask hook blocks into Dashboard approvals, then retries the same `tool.before` hook with `taxamaskPermissionScope` after approval.
+  - `vendor/ant-code/src/dashboard/permissions.js`, `sessions.js`, `events.js`, and `public/app.js` render adapter/source-specific confirmation text.
+- Permission tiers:
+  - Level 1: read, diagnose, inspect settings/docs/contracts/logs. No TaxaMask-specific dialog.
+  - Level 2: external model-adapter edits under `external_backends/`, `external_backend_adapters/`, `model_backends/`, or `.tmp_validation/external_backends/`. Approval scope: `taxamask.adapter`.
+  - Level 3: TaxaMask source development under `AntSleap/`, `core/`, `tools/`, `tests/`, or `vendor/ant-code/src|tests|scripts`. Approval scope: `taxamask.source_development`.
+- Prompt/process layer:
+  - `ANTCODE.md`, `.lab-agent/skills/taxamask-workflows/SKILL.md`, and `vendor/ant-code/src/context/builder.js` tell agents to explain target, reason, and risk before editing model adapters or source.
+  - The hook remains the enforcement layer; the model must not claim source permission is granted until a tool approval succeeds.
+- Backend boundary:
+  - 2D/STL custom models use `ExternalBackendRunner` and `taxamask_external_backend_contract_v1`.
+  - TIF custom models use `TifBackendRunner` and `ant3d_tif_backend_contract_v1`.
+  - Default adaptation path is external backend script/config first; source development is only for missing TaxaMask program capability.
+- Validation:
+  - `node --test tests\unit\hooks.test.js` from `vendor/ant-code`.
+
+### 0.2 2D/STL daily tab layout
 - `2D/STL Morphology` daily operation now shows the main `Labeling Workbench` only.
 - The old standalone `BlinkLabWidget` and `launch_blink_from_workbench(...)` remain in code as compatibility/development fallback, but the `Open in Blink Workbench` toolbar button is hidden and 2D/STL mode removes the Blink tab.
 - The standalone fallback no longer advertises or handles Space as the Blink switch shortcut, preventing conflict with main-workbench Space verification.
@@ -17,7 +69,7 @@
   - TIF mode shows only `TIF Volume Workbench`
   - PDF tools remain on-demand through `File -> Open PDF Evidence Tools`
 
-### 0.1 Integrated parent-child refinement panel
+### 0.3 Integrated parent-child refinement panel
 - `AntSleap/main.py` now adds `workbenchBlinkRefinePanel` under the main workbench AI panel.
 - The panel displays:
   - selected structure role
@@ -26,23 +78,26 @@
   - parent box state
   - route expert state
   - `Configure Route Expert`
-  - box role switch: annotation box vs loose shrink box
   - `Auto-annotate child`
   - `Run auto-shrink`
   - `Train current child expert`
+- Box identity now lives on the main canvas toolbar, not in the right panel:
+  - `Box Prompt (SAM)` = temporary SAM prompt
+  - `Annotation Box` = formal parent/child annotation box
+  - `Loose Shrink Box` = child-only auto-shrink start box
 - Parent parts come from project `locator_scope`; non-locator-scope structures are treated as child candidates.
 - Child parent resolution priority is: project memory (`blink_context_roi_parents`), part-tree parent, unique route parent, available parent box, then single locator-scope parent.
 - Users can manually choose a parent context from the panel; this writes `child -> parent` memory and registers a candidate route with source `workbench_blink_refine`.
 
-### 0.2 Box semantics after the merge
+### 0.4 Box semantics after the merge
 - `AnnotationCanvas` now has an `ANNOTATION_BOX` mode and emits `annotation_box_completed`.
 - `Box Prompt (SAM)` remains a temporary SAM prompt and does not persist a formal box role.
 - Selecting a parent part and drawing an annotation box writes the existing manual box for that parent. It is also the parent context ROI for child refinement.
 - Selecting a child part and drawing an annotation box writes the existing manual box for that child.
-- Selecting a child part and using `Loose shrink box` writes `shrink_loose_boxes[child]`; it does not overwrite the child manual box.
+- Selecting a child part and using the top-toolbar `Loose Shrink Box` writes `shrink_loose_boxes[child]`; it does not overwrite the child manual box.
 - `ProjectManager.delete_label(...)` now also removes a part's loose shrink box.
 
-### 0.3 Parent box aspect ratios
+### 0.5 Parent box aspect ratios
 - `ProjectManager` stores `parent_box_aspect_ratios` with defaults:
   - `Head`: `1.0`
   - `Mesosoma`: `4/3`
@@ -52,20 +107,20 @@
 - Main workbench `Lock parent box ratio` applies the configured ratio only when the selected structure is a parent part.
 - Child annotation boxes and loose shrink boxes remain free-ratio.
 
-### 0.4 Main workbench Blink actions
+### 0.6 Main workbench Blink actions
 - `run_blink_child_auto_annotate()` uses the current child context, parent box, and project route manifest, calls `engine.cascade_manager.infer_child_part(...)`, then uses base SAM to create a draft polygon in global image coordinates.
 - Automatic child annotation requires a ready route: parent box present, route exists, route enabled, and route-appointed expert available.
 - `run_blink_auto_shrink()` uses current child polygon plus `shrink_loose_boxes[child]`, generates a shrink trajectory through `BlinkRefiner`, and saves it with `parent_context`.
 - `train_current_blink_expert()` reuses `BlinkLabWidget.train_expert_model()` internally after constructing an active session and `training_route_context` from the current workbench parent-child state. This preserves existing training thread/report/candidate registration behavior.
 - `open_current_route_expert_settings()` registers the current route candidate if needed and opens `2D/STL Model Settings` focused on that `parent -> child` route.
 
-### 0.5 Research workflow meaning
+### 0.6 Research workflow meaning
 - Researchers no longer need to jump into a second visual workbench for common small-part work.
 - Parent context, child annotation, loose shrink boxes, route expert configuration, trajectory creation, and current-child expert training are visible at the same point in the labeling workflow.
 - Formal labels remain in global image coordinates, reducing the risk of confusing local ROI edits with project truth.
 - Standalone Blink session semantics (`APPLY TO GLOBAL`, `BLINK SWITCH`, local dirty session) are now fallback/legacy behavior, not the normal daily route.
 
-### 0.6 Focused validation status
+### 0.7 Focused validation status
 - Validation used `C:\Users\admin\anaconda3\envs\antsleap\python.exe`.
 - Focused tests updated/added for:
   - GUI smoke tab counts after hiding standalone Blink
@@ -1246,9 +1301,12 @@ Formica-Flow-Latest-confirm/
 │   ├── ui/
 │   │   ├── pdf_processing_widget.py
 │   │   ├── blink_lab.py
+│   │   ├── taxamask_agent_panel.py
+│   │   ├── tif_workbench.py
 │   │   ├── style.py
 │   │   └── cropper.py
 │   ├── core/
+│   │   ├── agent_context_routes.py
 │   │   ├── config.py
 │   │   ├── cascade_routes.py
 │   │   ├── taxonomy_defaults.py

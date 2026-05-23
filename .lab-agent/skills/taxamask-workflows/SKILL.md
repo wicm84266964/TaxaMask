@@ -64,6 +64,14 @@ Choose the route before editing or advising:
 - TIF Volume Model Settings: TIF backend defaults, Python executable, prepare/train/predict commands, export formats, and validation.
 - TIF backend commands must include `{contract}` or `{contract_json}`.
 
+## Custom Model Adaptation Permission Levels
+
+- Level 1: read, diagnose, explain settings, inspect logs, inspect contracts, and point to relevant docs/source. No extra permission is needed.
+- Level 2: edit an external model-adapter script or config under `external_backends/`, `external_backend_adapters/`, `model_backends/`, or `.tmp_validation/external_backends/`. Before editing, tell the user the file, the reason, and the risk that the selected custom model may fail or emit an incompatible result. The TaxaMask hook asks for model-adapter approval at tool execution time.
+- Level 3: edit TaxaMask source under `AntSleap/`, `core/`, `tools/`, `tests/`, or `vendor/ant-code/src|tests|scripts`. Escalate here only when the existing external backend contract or settings cannot support the required model behavior. Before editing, tell the user what program area changes, why adapter/config is insufficient, and the risk to 2D/STL, TIF, Agent Center, import, training, or review. The TaxaMask hook asks for source-development approval at tool execution time.
+
+Keep 2D/STL and TIF custom model routes separate. 2D/STL uses `ExternalBackendRunner` and `taxamask_external_backend_contract_v1`; TIF uses `TifBackendRunner` and `ant3d_tif_backend_contract_v1`.
+
 ## Model Loading Rule
 
 Locator and SAM are lazy-loaded:

@@ -7,6 +7,20 @@
 ### **[2026-05-22] 主标注工作台吸收 Blink 父子精修**
 > **本次重点：把 2D/STL 日常小部位精修从独立 Blink Workbench 合并回主 Labeling Workbench。研究者在同一张大图里完成父级框、子部位标注、收缩松框、自动标注、trajectory 积累和当前子部位专家训练；独立 Blink widget 保留为兼容回退。**
 
+#### **0）Ask Agent 上下文路由表**
+- 新增 `AntSleap/core/agent_context_routes.py`，把固定 `Ask Agent` 入口映射到对应的大模型对接文件章节、源码/契约文件、产物检查提示、诊断重点和安全边界。
+- `MainWindow._compact_agent_context()` 现在会先调用路由表增强上下文，再按白名单和总长度限制压缩，避免把长文档、完整命令、项目大 JSON 或敏感配置整段塞进对话框。
+- `TaxaMaskAgentPanel._context_prompt()` 新增显示 `diagnostic_route`、`diagnostic_focus`、`llm_context_refs`、`source_code_refs`、`artifact_hints`、`safety_notes` 和 `suggested_agent_action`。
+- 如果设置页里存在“命令已填写但缺少 `{contract}` / `{contract_json}`”这类常见问题，诊断路线会自动标记为 contract 占位符缺失，Agent 可以直接优先检查外部后端命令模板。
+- 研究流程含义：`Ask Agent` 现在传的是“短索引卡片”，告诉 Agent 该读哪几段文档、哪几个源码/契约和哪些运行产物；它不再只是粗略字段摘要，也不会把大量内容复制进聊天框。
+
+#### **0.1）TaxaMask Agent 分级写入授权**
+- `denyTaxaMaskSourceWrites` 从单纯源码只读拦截升级为 TaxaMask 分级门禁：普通读取/诊断不弹窗，外部模型后端适配走轻确认，TaxaMask 源码开发走强确认。
+- 新增 `taxamask.adapter` 与 `taxamask.source_development` 两类专用审批。hook 命中受保护写入时先触发 Dashboard 审批；用户批准后，同一次工具调用会带着 TaxaMask 专用授权标记重新通过 hook。
+- `external_backends/`、`external_backend_adapters/`、`model_backends/` 和 `.tmp_validation/external_backends/` 被视为外部模型适配区；`AntSleap/`、`core/`、`tools/`、`tests/` 与 `vendor/ant-code/src|tests|scripts` 仍属于源码开发强确认区。
+- `ANTCODE.md`、TaxaMask workflow skill 和 Ant-Code 初始上下文同步补充提示词规则：智能体应优先尝试外部后端契约/配置适配；只有契约或设置面不足时，才说明原因并申请源码开发。
+- 研究流程含义：对接新 TIF 或 2D/STL 自定义模型时，用户会明确知道“这是改外部后端适配”还是“这是改 TaxaMask 程序本身”，并在真正写入前确认风险。
+
 #### **1）2D/STL 日常入口收口到主标注工作台**
 - 2D/STL 模式现在日常只显示 `Labeling Workbench`。
 - 顶部旧 `Open in Blink Workbench` 入口已隐藏，独立 Blink tab 不再作为普通标注流程入口。

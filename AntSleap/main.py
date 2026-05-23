@@ -83,6 +83,7 @@ try:
     from AntSleap.core.part_tree import build_part_tree_groups
     from AntSleap.core.platform_open import open_path
     from AntSleap.core.runtime_device import normalize_device_preference, resolve_torch_device
+    from AntSleap.core.agent_context_routes import enrich_agent_context
 except ImportError:
     from core.project import ProjectManager
     from core.database import MultiModalDB
@@ -135,6 +136,7 @@ except ImportError:
     from core.part_tree import build_part_tree_groups
     from core.platform_open import open_path
     from core.runtime_device import normalize_device_preference, resolve_torch_device
+    from core.agent_context_routes import enrich_agent_context
 
 from torch.utils.data import DataLoader
 
@@ -427,6 +429,7 @@ TRANSLATIONS = {
         "Annotation Box": "标注框",
         "Annotation box": "正式标注框",
         "Loose shrink box": "收缩松框",
+        "Loose Shrink Box": "收缩松框",
         "Auto-annotate child": "自动标注子部位",
         "Run auto-shrink": "执行自动收缩",
         "Train current child expert": "训练当前子部位专家",
@@ -460,6 +463,7 @@ TRANSLATIONS = {
         "Training uses saved shrink trajectories for this parent-child route.": "训练会使用这条父子路由下已保存的收缩轨迹。",
         "Configure the current route before continuing.": "请先配置当前路由再继续。",
         "Saved loose shrink box for {0}.": "已为 {0} 保存收缩松框。",
+        "Loose shrink boxes are only used for child structures. Select a child structure first.": "收缩松框只用于子部位。请先选择一个子部位。",
         "Saved annotation box for {0}.": "已为 {0} 保存标注框。",
         "Running child auto-annotation for {0} via {1}.": "正在通过 {1} 自动标注子部位 {0}。",
         "No usable route expert result was returned for this child structure.": "当前子部位没有返回可用的路由专家结果。",
@@ -469,7 +473,7 @@ TRANSLATIONS = {
         "Route expert produced a child box for {0}; refine polygon manually.": "路由专家已为 {0} 生成子部位框；请手动精修多边形。",
         "Child auto-annotation failed: {0}": "子部位自动标注失败：{0}",
         "Draw or confirm the child polygon before auto-shrink.": "请先绘制或确认子部位多边形，再执行自动收缩。",
-        "Switch the box role to loose shrink box and draw one around the child first.": "请先切换到收缩松框，并围绕子部位画一个松框。",
+        "Select Loose Shrink Box on the canvas toolbar and draw one around the child first.": "请先在画布上方选择收缩松框，并围绕子部位画一个松框。",
         "Auto-shrink did not generate a trajectory.": "自动收缩没有生成轨迹。",
         "Saved {0} shrink trajectory frames for {1}.": "已为 {1} 保存 {0} 帧收缩轨迹。",
         "Auto-shrink failed: {0}": "自动收缩失败：{0}",
@@ -2994,7 +2998,6 @@ class MainWindow(QMainWindow):
         self.pending_training_preflight = None
         self.training_retry_requested = False
         self.current_blink_context = {}
-        self.blink_box_role = "annotation"
         self.parent_box_aspect_ratios = (
             self.project.get_parent_box_aspect_ratios()
             if hasattr(self.project, "get_parent_box_aspect_ratios")
@@ -3117,6 +3120,11 @@ class MainWindow(QMainWindow):
         self.radio_annotation_box.toggled.connect(self.on_tool_changed)
         self.tool_group.addButton(self.radio_annotation_box)
         tool_layout.addWidget(self.radio_annotation_box)
+        self.radio_loose_shrink_box = QRadioButton()
+        self.radio_loose_shrink_box.setObjectName("toolChip")
+        self.radio_loose_shrink_box.toggled.connect(self.on_tool_changed)
+        self.tool_group.addButton(self.radio_loose_shrink_box)
+        tool_layout.addWidget(self.radio_loose_shrink_box)
         self.radio_scale = QRadioButton()
         self.radio_scale.setObjectName("scaleToolRadio")
         self.radio_scale.toggled.connect(self.on_tool_changed)
@@ -3377,18 +3385,6 @@ class MainWindow(QMainWindow):
         self.btn_configure_route_expert.clicked.connect(self.open_current_route_expert_settings)
         apply_semantic_button_style(self.btn_configure_route_expert, BUTTON_ROLE_NEUTRAL)
         blink_refine_layout.addWidget(self.btn_configure_route_expert)
-        self.blink_box_role_group = QButtonGroup(self)
-        box_role_layout = QHBoxLayout()
-        self.radio_blink_box_annotation = QRadioButton()
-        self.radio_blink_box_annotation.setChecked(True)
-        self.radio_blink_box_annotation.toggled.connect(self.on_blink_box_role_changed)
-        self.blink_box_role_group.addButton(self.radio_blink_box_annotation)
-        box_role_layout.addWidget(self.radio_blink_box_annotation)
-        self.radio_blink_box_shrink = QRadioButton()
-        self.radio_blink_box_shrink.toggled.connect(self.on_blink_box_role_changed)
-        self.blink_box_role_group.addButton(self.radio_blink_box_shrink)
-        box_role_layout.addWidget(self.radio_blink_box_shrink)
-        blink_refine_layout.addLayout(box_role_layout)
         self.btn_blink_auto_annotate = QPushButton()
         self.btn_blink_auto_annotate.clicked.connect(self.run_blink_child_auto_annotate)
         apply_semantic_button_style(self.btn_blink_auto_annotate, BUTTON_ROLE_RUN, "padding: 6px;")
@@ -3899,7 +3895,7 @@ class MainWindow(QMainWindow):
     AGENT_CONTEXT_TEXT_LIMIT = 320
     AGENT_CONTEXT_LOG_LINES = 6
     AGENT_CONTEXT_LOG_LINE_LIMIT = 160
-    AGENT_CONTEXT_TOTAL_LIMIT = 1800
+    AGENT_CONTEXT_TOTAL_LIMIT = 3600
 
     def _recent_text_excerpt(self, widget, line_limit=AGENT_CONTEXT_LOG_LINES):
         if widget is None or not hasattr(widget, "toPlainText"):
@@ -3916,6 +3912,7 @@ class MainWindow(QMainWindow):
         return f"{text[:limit]}... [truncated]"
 
     def _compact_agent_context(self, context):
+        context = enrich_agent_context(context)
         allowed_keys = (
             "source_workbench",
             "project_type",
@@ -3950,7 +3947,17 @@ class MainWindow(QMainWindow):
             "predict_command_has_contract",
             "model_manifest_present",
             "locator_scope_count",
+            "parent_box_ratio_count",
             "validation_errors",
+            "diagnostic_route",
+            "diagnostic_focus",
+            "health_check_summary",
+            "llm_context_refs",
+            "source_code_refs",
+            "artifact_hints",
+            "safety_notes",
+            "suggested_agent_action",
+            "agent_route_source",
             "recent_log_excerpt",
         )
         compact = {}
@@ -3962,16 +3969,16 @@ class MainWindow(QMainWindow):
             if key == "recent_log_excerpt":
                 limit = self.AGENT_CONTEXT_LOG_LINES * self.AGENT_CONTEXT_LOG_LINE_LIMIT
             compact[key] = self._agent_context_text(value, limit)
-        compact["context_policy"] = (
-            "Only compact field indexes are provided. Do not assume full project data is loaded; "
-            "read specific files only when needed."
+        context_policy = (
+            "Only compact field indexes, route hints, and short log excerpts are provided. "
+            "Do not assume full project data is loaded; read the referenced docs/source/artifacts only when needed."
         )
-        text_budget = 0
-        limited = {}
+        text_budget = len("context_policy") + len(context_policy)
+        limited = {"context_policy": context_policy}
         for key, value in compact.items():
             text = str(value)
             next_budget = text_budget + len(key) + len(text)
-            if next_budget > self.AGENT_CONTEXT_TOTAL_LIMIT and key != "context_policy":
+            if next_budget > self.AGENT_CONTEXT_TOTAL_LIMIT:
                 limited[key] = self._agent_context_text(text, max(80, self.AGENT_CONTEXT_TOTAL_LIMIT - text_budget - len(key)))
                 break
             limited[key] = value
@@ -5240,9 +5247,16 @@ class MainWindow(QMainWindow):
         lock_parent_ratio = True
         if hasattr(self, "check_lock_parent_box_ratio"):
             lock_parent_ratio = self.check_lock_parent_box_ratio.isChecked()
-        if lock_parent_ratio and context.get("role") == "parent":
+        if self._active_box_tool_role() == "annotation" and lock_parent_ratio and context.get("role") == "parent":
             ratio = self._parent_box_aspect_ratio(context.get("parent_part"))
         self.canvas.set_annotation_box_aspect_ratio(ratio)
+
+    def _active_box_tool_role(self):
+        if hasattr(self, "radio_loose_shrink_box") and self.radio_loose_shrink_box.isChecked():
+            return "shrink"
+        if hasattr(self, "radio_annotation_box") and self.radio_annotation_box.isChecked():
+            return "annotation"
+        return "other"
 
     def _refresh_blink_refine_state(self):
         context = self._current_blink_context()
@@ -5473,8 +5487,6 @@ class MainWindow(QMainWindow):
         self.btn_agent_from_workbench.setText(tr("Ask Agent", self.current_lang))
         self.label_blink_refine.setText(tr("Parent-child refinement / Blink", self.current_lang))
         self.btn_configure_route_expert.setText(tr("Configure Route Expert", self.current_lang))
-        self.radio_blink_box_annotation.setText(tr("Annotation box", self.current_lang))
-        self.radio_blink_box_shrink.setText(tr("Loose shrink box", self.current_lang))
         self.btn_blink_auto_annotate.setText(tr("Auto-annotate child", self.current_lang))
         self.btn_blink_auto_shrink.setText(tr("Run auto-shrink", self.current_lang))
         self.btn_blink_train_expert.setText(tr("Train current child expert", self.current_lang))
@@ -5485,6 +5497,7 @@ class MainWindow(QMainWindow):
         self.radio_magic.setText(tr("Magic Wand (SAM)", self.current_lang))
         self.radio_box.setText(tr("Box Prompt (SAM)", self.current_lang))
         self.radio_annotation_box.setText(tr("Annotation Box", self.current_lang))
+        self.radio_loose_shrink_box.setText(tr("Loose Shrink Box", self.current_lang))
         self.radio_scale.setText(tr("Scale Tool", self.current_lang))
         self.lbl_bright.setText(tr("B:", self.current_lang))
         self.lbl_contrast.setText(tr("C:", self.current_lang))
@@ -5598,16 +5611,28 @@ class MainWindow(QMainWindow):
             child_part = context.get("child_part")
             parent_part = context.get("parent_part")
             options = self._parent_context_options(child_part) if role == "child" else []
-            combo.addItem(tr("Choose parent context", self.current_lang), "")
+            prompt_text = tr("Choose parent context", self.current_lang)
+            unavailable_text = tr("Parent context unavailable", self.current_lang)
+            if hasattr(combo, "setPlaceholderText"):
+                combo.setPlaceholderText(prompt_text if role == "child" else unavailable_text)
             for option in options:
                 combo.addItem(option, option)
             index = combo.findData(parent_part)
-            combo.setCurrentIndex(index if index >= 0 else 0)
+            if index >= 0:
+                combo.setCurrentIndex(index)
+            elif options:
+                combo.setCurrentIndex(-1)
+            else:
+                combo.addItem(unavailable_text, "")
+                item = combo.model().item(0) if combo.model() is not None else None
+                if item is not None:
+                    item.setEnabled(False)
+                combo.setCurrentIndex(0)
             combo.setEnabled(role == "child" and bool(options))
             combo.setToolTip(
-                tr("Choose parent context", self.current_lang)
+                prompt_text
                 if combo.isEnabled()
-                else tr("Parent context unavailable", self.current_lang)
+                else unavailable_text
             )
         finally:
             combo.blockSignals(False)
@@ -6180,17 +6205,13 @@ class MainWindow(QMainWindow):
             self.canvas.set_mode("MAGIC_WAND")
         elif self.radio_box.isChecked():
             self.canvas.set_mode("BOX_PROMPT")
-        elif self.radio_annotation_box.isChecked():
+        elif self.radio_annotation_box.isChecked() or self.radio_loose_shrink_box.isChecked():
             self.canvas.set_mode("ANNOTATION_BOX")
             self._refresh_annotation_box_constraints()
         elif self.radio_scale.isChecked():
             self.canvas.set_mode("SCALE")
         else:
             self.canvas.set_mode("DRAW")
-
-    def on_blink_box_role_changed(self):
-        self.blink_box_role = "shrink" if self.radio_blink_box_shrink.isChecked() else "annotation"
-        self._refresh_blink_refine_state()
 
     def on_blink_parent_context_changed(self, _index=None):
         if getattr(self, "_updating_blink_parent_context", False):
@@ -6231,7 +6252,12 @@ class MainWindow(QMainWindow):
             return
 
         context = self._current_blink_context()
-        if context.get("role") == "child" and self.blink_box_role == "shrink":
+        if self._active_box_tool_role() == "shrink":
+            if context.get("role") != "child":
+                self._warn_blink_context(
+                    tr("Loose shrink boxes are only used for child structures. Select a child structure first.", self.current_lang)
+                )
+                return
             update_loose_box = getattr(self.project, "update_shrink_loose_box", None)
             if callable(update_loose_box):
                 update_loose_box(self.current_image, part, clean_box, save=False)
@@ -6325,7 +6351,7 @@ class MainWindow(QMainWindow):
         loose_boxes = self.project.get_shrink_loose_boxes(self.current_image) if hasattr(self.project, "get_shrink_loose_boxes") else {}
         loose_box = _clean_box(loose_boxes.get(child_part) if isinstance(loose_boxes, dict) else None)
         if not loose_box:
-            self._warn_blink_context(tr("Switch the box role to loose shrink box and draw one around the child first.", self.current_lang))
+            self._warn_blink_context(tr("Select Loose Shrink Box on the canvas toolbar and draw one around the child first.", self.current_lang))
             return
         try:
             if "core.blink_refiner" in sys.modules:

@@ -6,7 +6,7 @@ import { createSessionStore } from "../storage/session-store.js";
 import { loadConfig } from "../config/load-config.js";
 import { cloneWorkflowState } from "../tools/workflow-tools.js";
 import { mapSessionEventToDashboard, permissionRequestToActivity } from "./events.js";
-import { applyPermissionMode, approvalKeyFor, buildApprovalPreview, normalizePermissionMode, permissionModeSummary } from "./permissions.js";
+import { applyPermissionMode, approvalDisplayMeta, approvalKeyFor, buildApprovalPreview, normalizePermissionMode, permissionModeSummary } from "./permissions.js";
 import { collectSessionFiles } from "./files.js";
 import { getAntCodeVersion } from "../version.js";
 
@@ -913,6 +913,7 @@ function askApproval(state, request) {
     sensitive: request.decision?.sensitive === true,
     outsideWorkspace: request.decision?.outsideWorkspace === true,
     preview: buildApprovalPreview(request),
+    display: approvalDisplayMeta(request),
     input: sanitizeApprovalInput(request.input ?? {}),
     decision: request.decision ?? {},
     approvalKey,

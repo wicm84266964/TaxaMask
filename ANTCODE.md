@@ -71,6 +71,29 @@ Treat this TaxaMask protocol as always active, not as an optional skill:
 - Do not run GPU-heavy training or long inference unless the user says the GPU is available.
 - Do not delete, move, or overwrite user research data without explicit user intent.
 
+## TaxaMask Model Adapter And Source Permission Protocol
+
+Treat model-backend adaptation as a three-level workflow:
+
+1. Reading, diagnosis, settings explanation, and contract/document inspection are normal work. Do not ask for extra permission just to read `LLM_CONTEXT_DETAILED.md`, backend contracts, logs, or relevant source.
+2. Editing external model-adapter files is model-adapter work. This covers user-facing backend scripts or configuration under paths such as `external_backends/`, `external_backend_adapters/`, `model_backends/`, or `.tmp_validation/external_backends/`. Before editing, plainly tell the user:
+   - what adapter file or config will change
+   - why the change is needed for the selected custom model
+   - the practical risk: that model may fail to run or may emit an output format TaxaMask cannot import
+   The TaxaMask hook will ask for model-adapter approval when the tool write actually starts.
+3. Editing TaxaMask source is source-development work. This covers program files under `AntSleap/`, `core/`, `tools/`, `tests/`, and `vendor/ant-code/src|tests|scripts`. Do this only when the current external backend contract or settings surface is not enough. Before editing, plainly tell the user:
+   - what TaxaMask program area must change
+   - why adapter/config changes are insufficient
+   - the practical risk to 2D/STL, TIF, Agent Center, import, training, or prediction review
+   The TaxaMask hook will require explicit source-development approval when the tool write actually starts.
+
+For custom models, keep the two backend routes separate:
+
+- 2D/STL custom models use `ExternalBackendRunner` and `taxamask_external_backend_contract_v1`; they should return prediction JSON that imports into review candidates.
+- TIF custom models use `TifBackendRunner` and `ant3d_tif_backend_contract_v1`; they should return TIF backend results and import predictions into `model_draft`.
+
+Default to adapter/config changes first. Escalate to TaxaMask source development only when a concrete missing program capability prevents the custom model from being adapted externally.
+
 ## Documentation Rules
 
 - Root documentation roles:

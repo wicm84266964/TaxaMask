@@ -152,3 +152,25 @@ test("dashboard app labels approximate change stats when present", async () => {
   assert.match(source, /approximate: false/);
   assert.match(source, /stats\.approximate \? "近似" : null/);
 });
+
+test("dashboard message previews stay inside the transcript column", async () => {
+  const source = await fs.readFile(path.resolve("src/dashboard/public/styles.css"), "utf8");
+  const requiredRules = [
+    [".message", /max-width:\s*860px;[\s\S]*?min-width:\s*0;[\s\S]*?width:\s*100%;/],
+    [".message-body", /max-width:\s*100%;[\s\S]*?min-width:\s*0;[\s\S]*?overflow-wrap:\s*anywhere;/],
+    [".md-code-frame", /max-width:\s*100%;[\s\S]*?min-width:\s*0;[\s\S]*?overflow:\s*hidden;/],
+    [".md-code", /max-width:\s*100%;[\s\S]*?min-width:\s*0;[\s\S]*?overflow:\s*auto;/],
+    [".md-code code", /max-width:\s*none;[\s\S]*?min-width:\s*100%;[\s\S]*?white-space:\s*pre;[\s\S]*?width:\s*max-content;/],
+    [".md-draft-plain", /max-width:\s*100%;[\s\S]*?min-width:\s*0;[\s\S]*?overflow:\s*hidden;/],
+    [".md-draft-plain pre", /max-width:\s*100%;[\s\S]*?min-width:\s*0;[\s\S]*?overflow-x:\s*auto;/],
+    [".md-data-frame", /\.md-math-block,[\s\S]*?\.md-mermaid-frame,[\s\S]*?\.md-data-frame\s*\{[\s\S]*?max-width:\s*100%;[\s\S]*?min-width:\s*0;[\s\S]*?overflow:\s*hidden;/],
+    [".md-data-output", /\.md-math-output,[\s\S]*?\.md-mermaid-output,[\s\S]*?\.md-data-output\s*\{[\s\S]*?max-width:\s*100%;[\s\S]*?min-width:\s*0;[\s\S]*?overflow:\s*auto;/],
+    [".md-raw-source", /max-width:\s*100%;[\s\S]*?min-width:\s*0;[\s\S]*?overflow:\s*auto;/],
+    [".md-table-wrap", /max-width:\s*100%;[\s\S]*?min-width:\s*0;[\s\S]*?overflow:\s*auto;/],
+    [".draft-summary-item", /max-width:\s*100%;[\s\S]*?min-width:\s*0;[\s\S]*?overflow:\s*hidden;/]
+  ];
+
+  for (const [selector, pattern] of requiredRules) {
+    assert.match(source, pattern, `${selector} should contain long preview content`);
+  }
+});

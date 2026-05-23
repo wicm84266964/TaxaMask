@@ -101,9 +101,38 @@ function auditDelegationGuard(context) {
 }
 
 function denyTaxaMaskSourceWrites(context) {
-  const decision = taxamaskSourceWriteDecision(context.payload, { cwd: context.cwd });
+  const decision = taxamaskSourceWriteDecision(context.payload, {
+    cwd: context.cwd,
+    policy: context.config?.taxamaskPermissions ?? context.config?.taxamask?.permissions ?? {}
+  });
   if (!decision.blocked) {
-    return { ok: true, message: "TaxaMask source guard: no source write detected" };
+    return {
+      ok: true,
+      message: decision.allowed
+        ? `TaxaMask source guard: approved ${decision.scope} write to ${safePathLabel(decision.target)}`
+        : "TaxaMask source guard: no guarded write detected"
+    };
+  }
+  if (decision.requiresApproval) {
+    return {
+      ok: false,
+      blocked: true,
+      requiresApproval: true,
+      message: decision.message,
+      error: {
+        code: decision.scope === "taxamask.adapter"
+          ? "TAXAMASK_MODEL_ADAPTER_PERMISSION_REQUIRED"
+          : "TAXAMASK_SOURCE_DEVELOPMENT_PERMISSION_REQUIRED",
+        message: decision.message,
+        target: decision.target,
+        reason: decision.reason,
+        taxamask: {
+          scope: decision.scope,
+          title: decision.title,
+          requiresApproval: true
+        }
+      }
+    };
   }
   return {
     ok: false,

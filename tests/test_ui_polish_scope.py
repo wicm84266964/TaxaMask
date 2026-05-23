@@ -709,6 +709,8 @@ class UiPolishScopeTests(unittest.TestCase):
             self.assertEqual(window.btn_predict.parentWidget().objectName(), "workbenchAIActionPanel")
             self.assertEqual(window.btn_blink_auto_annotate.parentWidget().objectName(), "workbenchBlinkRefinePanel")
             self.assertEqual(window.combo_blink_parent_context.parentWidget().objectName(), "workbenchBlinkRefinePanel")
+            self.assertEqual(window.radio_loose_shrink_box.parentWidget().objectName(), "workbenchToolStrip")
+            self.assertFalse(hasattr(window, "radio_blink_box_shrink"))
             self.assertEqual(window.log_console.parentWidget().objectName(), "workbenchLogsPanel")
             self.assertEqual(window.desc_box.parentWidget().objectName(), "workbenchMetadataPanel")
             self.assertIsInstance(window.part_list, QTreeWidget)
@@ -856,6 +858,52 @@ class UiPolishScopeTests(unittest.TestCase):
         finally:
             window.deleteLater()
 
+    def test_workbench_parent_context_combo_lists_only_real_parent_options(self):
+        window = self.make_main_window()
+        try:
+            image_path = str(Path(self.temp_dir.name) / "specimen.png")
+            self.project_manager.project_data["taxonomy"] = ["Head", "Mesosoma", "Mandible"]
+            self.project_manager.project_data["locator_scope"] = ["Head", "Mesosoma"]
+            self.project_manager.project_data["images"] = [image_path]
+            self.project_manager.project_data["labels"] = {
+                image_path: {
+                    "parts": {},
+                    "boxes": {"Head": [10, 10, 80, 70], "Mesosoma": [90, 10, 150, 70]},
+                    "auto_boxes": {},
+                    "descriptions": {},
+                    "status": "unlabeled",
+                    "genus": "Unknown",
+                }
+            }
+
+            window.refresh_route_table()
+            window.current_image = image_path
+            window._select_part_in_tree("Mandible")
+
+            combo_items = [window.combo_blink_parent_context.itemText(index) for index in range(window.combo_blink_parent_context.count())]
+            combo_data = [window.combo_blink_parent_context.itemData(index) for index in range(window.combo_blink_parent_context.count())]
+            self.assertIn("Head", combo_data)
+            self.assertIn("Mesosoma", combo_data)
+            self.assertNotIn("Choose parent context", combo_items)
+            self.assertGreaterEqual(window.combo_blink_parent_context.currentIndex(), 0)
+        finally:
+            window.deleteLater()
+
+    def test_workbench_parent_context_combo_uses_disabled_unavailable_message_without_options(self):
+        window = self.make_main_window()
+        try:
+            self.project_manager.project_data["taxonomy"] = ["Mandible"]
+            self.project_manager.project_data["locator_scope"] = []
+            window.refresh_route_table()
+            window._select_part_in_tree("Mandible")
+
+            self.assertFalse(window.combo_blink_parent_context.isEnabled())
+            self.assertEqual(window.combo_blink_parent_context.count(), 1)
+            self.assertEqual(window.combo_blink_parent_context.itemData(0), "")
+            self.assertIn("unavailable", window.combo_blink_parent_context.itemText(0).lower())
+        finally:
+            window.deleteLater()
+
     def test_annotation_box_roles_keep_child_box_and_shrink_loose_box_separate(self):
         window = self.make_main_window()
         try:
@@ -878,11 +926,13 @@ class UiPolishScopeTests(unittest.TestCase):
             window.current_image = image_path
             window._select_part_in_tree("Mandible")
 
-            window.radio_blink_box_annotation.setChecked(True)
+            window.radio_annotation_box.setChecked(True)
+            window.on_tool_changed()
             window.on_annotation_box_completed(20, 20, 40, 40)
             self.assertEqual(self.project_manager.get_boxes(image_path)["Mandible"], [20.0, 20.0, 40.0, 40.0])
 
-            window.radio_blink_box_shrink.setChecked(True)
+            window.radio_loose_shrink_box.setChecked(True)
+            window.on_tool_changed()
             window.on_annotation_box_completed(15, 15, 45, 45)
             self.assertEqual(self.project_manager.get_boxes(image_path)["Mandible"], [20.0, 20.0, 40.0, 40.0])
             self.assertEqual(self.project_manager.get_shrink_loose_boxes(image_path)["Mandible"], [15.0, 15.0, 45.0, 45.0])
@@ -904,6 +954,38 @@ class UiPolishScopeTests(unittest.TestCase):
             self.assertEqual(window.canvas.annotation_box_aspect_ratio, 1.0)
             window.check_lock_parent_box_ratio.setChecked(False)
             self.assertIsNone(window.canvas.annotation_box_aspect_ratio)
+        finally:
+            window.deleteLater()
+
+    def test_loose_shrink_box_tool_is_child_only(self):
+        window = self.make_main_window()
+        try:
+            image_path = str(Path(self.temp_dir.name) / "specimen.png")
+            self.project_manager.project_data["taxonomy"] = ["Head", "Mandible"]
+            self.project_manager.project_data["locator_scope"] = ["Head"]
+            self.project_manager.project_data["images"] = [image_path]
+            self.project_manager.project_data["labels"] = {
+                image_path: {
+                    "parts": {},
+                    "boxes": {},
+                    "auto_boxes": {},
+                    "descriptions": {},
+                    "status": "unlabeled",
+                    "genus": "Unknown",
+                }
+            }
+            window.refresh_route_table()
+            window.current_image = image_path
+            window._select_part_in_tree("Head")
+
+            window.radio_loose_shrink_box.setChecked(True)
+            window.on_tool_changed()
+            with patch.object(main_module.QMessageBox, "information") as info:
+                window.on_annotation_box_completed(10, 10, 40, 40)
+
+            self.assertIn("child structures", info.call_args.args[2])
+            self.assertNotIn("Head", self.project_manager.get_boxes(image_path))
+            self.assertEqual(self.project_manager.get_shrink_loose_boxes(image_path), {})
         finally:
             window.deleteLater()
 
@@ -1093,7 +1175,8 @@ class UiPolishScopeTests(unittest.TestCase):
             self.project_manager.project_data["labels"][image_path]["parts"]["Mandible"] = [[20, 20], [40, 20], [40, 40]]
             with patch.object(main_module.QMessageBox, "information") as info:
                 window.run_blink_auto_shrink()
-            self.assertIn("loose shrink box", info.call_args.args[2])
+            self.assertIn("Loose Shrink Box", info.call_args.args[2])
+            self.assertIn("canvas toolbar", info.call_args.args[2])
         finally:
             window.deleteLater()
 

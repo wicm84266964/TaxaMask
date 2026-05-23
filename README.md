@@ -10,7 +10,7 @@ It was originally built for ant taxonomy research, with an ant morphology workfl
 
 TaxaMask connects four parts of a taxonomy data workflow:
 
-- Agent-assisted operation: use the embedded Ant-Code Agent Center to configure workflows, inspect errors, prepare PDF evidence runs, and plan training without asking domain researchers to write Python commands.
+- Agent-assisted operation: use the embedded Ant-Code Agent Center to configure workflows, inspect errors, prepare PDF evidence runs, adapt custom model backends, and plan training without asking domain researchers to write Python commands. Fixed `Ask Agent` entry points pass compact routing cards that point the Agent to relevant docs, source files, contracts, logs, and safety boundaries instead of dumping large project data into chat; external backend edits and TaxaMask source edits use separate confirmation levels.
 - Literature processing: screen taxonomy PDFs, extract candidate figures, assemble caption and nearby text evidence, and optionally run multimodal review.
 - Annotation and model loop: manage project images and STL-derived rendered views, draw masks, use SAM-assisted annotation, use parent-child Blink refinement inside the main Labeling Workbench, train locator/SAM/Blink components, reuse trained experts for pre-annotation, and export datasets.
 - Ant 3D workbench: keep STL-derived 2D review and TIF volume segmentation as separate workflows, import AMIRA/TIF volume data, preserve material maps and manual truth layers, and export volume labels for external 3D segmentation backends.
@@ -33,6 +33,7 @@ Agent Center -> choose PDF / 2D-STL / TIF workflow
 - Route-appointed Blink experts for parent-structure to child-structure pre-annotation, shrink-trajectory generation, and local expert training from the main 2D/STL labeling surface.
 - Configurable main locator structures for non-ant projects.
 - Built-in training/inference path plus an external backend contract for advanced users who want to connect custom models.
+- Guarded custom-model adaptation: external backend scripts/configs can be approved separately from TaxaMask source development, so users know when they are changing a model adapter versus changing the program itself.
 - Export paths for multimodal JSONL, COCO, YOLO-style datasets, and TIF volume exchange formats including OME-TIFF, NRRD, MHA, NIfTI, nnU-Net-style layout, and MONAI-style datalists.
 - Headless agentic tools for PDF screening, figure extraction, candidate import, auto-annotation, and dataset export.
 

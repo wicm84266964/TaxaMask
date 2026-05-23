@@ -68,12 +68,33 @@ export function createToolRuntime(options) {
 
       const beforeHook = await emitToolHook(options, "tool.before", name, input, definition);
       if (beforeHook.blocked) {
-        return {
-          ok: false,
-          blocked: true,
-          error: beforeHook.blockingError ?? { code: "HOOK_BLOCKED", message: "Tool blocked by hook" },
-          hook: summarizeHookBlock(beforeHook)
-        };
+        const taxamaskPermissionScope = await resolveTaxaMaskHookApproval(options, name, input, definition, beforeHook);
+        if (taxamaskPermissionScope) {
+          const approvedBeforeHook = await emitToolHook(options, "tool.before", name, input, definition, null, {
+            taxamaskPermissionScope
+          });
+          if (!approvedBeforeHook.blocked) {
+            input = { ...input, taxamaskPermissionScope };
+          } else {
+            return {
+              ok: false,
+              blocked: true,
+              error: approvedBeforeHook.blockingError ?? { code: "HOOK_BLOCKED", message: "Tool blocked by hook" },
+              hook: summarizeHookBlock(approvedBeforeHook)
+            };
+          }
+        } else {
+          const decision = taxamaskApprovalDecision(beforeHook);
+          if (decision) {
+            await emitPermissionDeniedHook(options, name, input, definition, decision);
+          }
+          return {
+            ok: false,
+            blocked: true,
+            error: beforeHook.blockingError ?? { code: "HOOK_BLOCKED", message: "Tool blocked by hook" },
+            hook: summarizeHookBlock(beforeHook)
+          };
+        }
       }
       if (options.signal?.aborted) {
         return finishTool(options, name, input, definition, interruptedToolExecution(name, input, definition));
@@ -557,7 +578,7 @@ function interruptedToolExecution(name, input, _definition = {}, result = null) 
   };
 }
 
-async function emitToolHook(options, event, name, input, definition, execution = null) {
+async function emitToolHook(options, event, name, input, definition, execution = null, extraPayload = {}) {
   return runHooks({
     config: options.config,
     cwd: options.cwd,
@@ -574,7 +595,8 @@ async function emitToolHook(options, event, name, input, definition, execution =
       blocked: execution?.blocked,
       decision: execution?.decision,
       error: execution?.error,
-      result: summarizeToolResultForHook(execution?.result)
+      result: summarizeToolResultForHook(execution?.result),
+      ...extraPayload
     }
   });
 }
@@ -595,6 +617,43 @@ async function emitPermissionDeniedHook(options, name, input, definition, decisi
       decision
     }
   });
+}
+
+async function resolveTaxaMaskHookApproval(options, name, input, definition, hookResult) {
+  const decision = taxamaskApprovalDecision(hookResult);
+  if (!decision || typeof options.approve !== "function") {
+    return null;
+  }
+  const approved = await options.approve({
+    toolName: name,
+    input,
+    definition,
+    decision
+  });
+  if (!approved) {
+    await emitPermissionDeniedHook(options, name, input, definition, decision);
+    return null;
+  }
+  return decision.taxamask.scope;
+}
+
+function taxamaskApprovalDecision(hookResult) {
+  const error = hookResult?.blockingError ?? hookResult?.results?.find((result) => result.blocked)?.error ?? {};
+  const taxamask = error?.taxamask ?? {};
+  const scope = typeof taxamask.scope === "string" ? taxamask.scope : "";
+  if (!taxamask.requiresApproval || !scope) {
+    return null;
+  }
+  return {
+    decision: "ask",
+    reason: error.reason ?? error.message ?? "TaxaMask guarded action requires confirmation",
+    targetPath: error.target,
+    taxamask: {
+      scope,
+      title: taxamask.title ?? "TaxaMask permission",
+      source: "hook"
+    }
+  };
 }
 
 async function emitFileChangedHook(options, name, input, result) {

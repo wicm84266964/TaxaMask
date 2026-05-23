@@ -653,6 +653,8 @@ button {
   border-radius: 8px;
   margin: 0 auto 12px;
   max-width: 860px;
+  min-width: 0;
+  width: 100%;
 }
 
 .message {
@@ -703,16 +705,24 @@ button {
   font-size: 12px;
   font-weight: 700;
   margin-bottom: 8px;
+  max-width: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .message-body {
   line-height: 1.62;
+  max-width: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
   white-space: pre-wrap;
   word-break: break-word;
 }
 
 .message-body.markdown-body,
 .markdown-body {
+  max-width: 100%;
+  min-width: 0;
   white-space: normal;
 }
 
@@ -806,7 +816,9 @@ button {
   border-radius: 8px;
   color: var(--text-soft);
   margin: 12px 0;
-  overflow: auto;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .md-code-bar {
@@ -814,14 +826,20 @@ button {
   border-bottom: 1px solid rgba(255, 255, 255, 0.055);
   color: var(--text-muted);
   display: flex;
+  gap: 8px;
   justify-content: space-between;
+  min-width: 0;
   min-height: 34px;
   padding: 6px 8px 6px 12px;
 }
 
 .md-code-bar span {
   font-size: 11px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   text-transform: uppercase;
+  white-space: nowrap;
 }
 
 .md-copy-code {
@@ -830,6 +848,7 @@ button {
   border-radius: 6px;
   color: var(--text-soft);
   cursor: pointer;
+  flex: 0 0 auto;
   font-size: 11px;
   padding: 4px 8px;
 }
@@ -841,6 +860,8 @@ button {
 
 .md-code {
   margin: 0;
+  max-width: 100%;
+  min-width: 0;
   overflow: auto;
   padding: 12px;
 }
@@ -850,8 +871,11 @@ button {
   border: 0;
   color: inherit;
   display: block;
+  max-width: none;
+  min-width: 100%;
   padding: 0;
   white-space: pre;
+  width: max-content;
 }
 
 .md-draft-plain {
@@ -860,7 +884,9 @@ button {
   border-radius: 8px;
   color: var(--text-soft);
   margin: 10px 0;
-  overflow: auto;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .md-draft-plain-label {
@@ -873,6 +899,9 @@ button {
 
 .md-draft-plain pre {
   margin: 0;
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
   padding: 10px;
 }
 
@@ -881,8 +910,11 @@ button {
   border: 0;
   color: inherit;
   display: block;
+  max-width: none;
+  min-width: 100%;
   padding: 0;
   white-space: pre;
+  width: max-content;
 }
 
 .md-draft-media {
@@ -988,6 +1020,8 @@ button {
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 8px;
   margin: 12px 0;
+  max-width: 100%;
+  min-width: 0;
   overflow: auto;
 }
 
@@ -1085,6 +1119,8 @@ button {
   border: 1px solid rgba(255, 255, 255, 0.075);
   border-radius: 8px;
   margin: 12px 0;
+  max-width: 100%;
+  min-width: 0;
   overflow: hidden;
 }
 
@@ -1097,15 +1133,26 @@ button {
   display: flex;
   font-size: 11px;
   font-weight: 760;
+  gap: 8px;
   justify-content: space-between;
+  min-width: 0;
   min-height: 32px;
   padding: 6px 10px;
+}
+
+.md-rich-bar > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .md-math-output,
 .md-mermaid-output,
 .md-data-output {
   color: var(--text-soft);
+  max-width: 100%;
+  min-width: 0;
   overflow: auto;
   padding: 12px;
 }
@@ -1121,6 +1168,7 @@ button {
   border-radius: 6px;
   color: var(--text-soft);
   cursor: pointer;
+  flex: 0 0 auto;
   font-size: 11px;
   padding: 4px 8px;
 }
@@ -1133,6 +1181,8 @@ button {
 
 .md-raw-source {
   margin: 0;
+  max-width: 100%;
+  min-width: 0;
   overflow: auto;
   padding: 12px;
 }
@@ -1141,8 +1191,11 @@ button {
   background: transparent;
   border: 0;
   display: block;
+  max-width: none;
+  min-width: 100%;
   padding: 0;
   white-space: pre;
+  width: max-content;
 }
 
 .md-mermaid-output svg {
@@ -1180,12 +1233,15 @@ button {
   gap: 8px;
   grid-template-columns: minmax(90px, 0.38fr) minmax(0, 1fr);
   margin: 4px 0;
+  min-width: 0;
 }
 
 .data-key {
   color: var(--accent-2);
   font-family: "Cascadia Code", Consolas, monospace;
   font-size: 12px;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .data-value {
@@ -1218,6 +1274,8 @@ button {
   border: 1px solid rgba(255, 255, 255, 0.07);
   border-radius: 8px;
   max-height: 440px;
+  max-width: 100%;
+  min-width: 0;
   overflow: auto;
 }
 
@@ -1394,7 +1452,9 @@ button {
   color: var(--text-muted);
   margin: 0 auto 12px;
   max-width: 860px;
+  min-width: 0;
   padding: 0;
+  width: 100%;
 }
 
 .draft-summary {
@@ -1404,7 +1464,9 @@ button {
   color: var(--text-muted);
   margin: 0 auto 12px;
   max-width: 860px;
+  min-width: 0;
   padding: 0;
+  width: 100%;
 }
 
 .draft-summary summary {
@@ -1413,9 +1475,10 @@ button {
   display: grid;
   font-size: 12px;
   gap: 9px;
-  grid-template-columns: auto auto 1fr;
+  grid-template-columns: auto minmax(0, auto) minmax(0, 1fr);
   list-style: none;
   min-height: 34px;
+  min-width: 0;
   padding: 7px 12px;
 }
 
@@ -1426,6 +1489,10 @@ button {
 .draft-summary summary span:nth-child(2) {
   color: var(--text-soft);
   font-weight: 700;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .draft-summary .status-dot {
@@ -1442,6 +1509,7 @@ button {
   border-top: 1px solid rgba(255, 255, 255, 0.05);
   display: grid;
   gap: 10px;
+  min-width: 0;
   padding: 10px 12px 12px;
 }
 
@@ -1449,6 +1517,9 @@ button {
   background: rgba(24, 24, 24, 0.42);
   border: 1px solid rgba(255, 255, 255, 0.045);
   border-radius: 8px;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
   padding: 10px;
 }
 
@@ -2009,6 +2080,14 @@ button {
   font-size: 14px;
   font-weight: 800;
   margin-bottom: 6px;
+}
+
+.approval-panel.source .approval-title {
+  color: var(--danger);
+}
+
+.approval-panel.adapter .approval-title {
+  color: var(--accent);
 }
 
 .approval-preview {

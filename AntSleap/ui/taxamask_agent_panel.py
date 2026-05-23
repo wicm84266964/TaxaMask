@@ -684,7 +684,7 @@ class TaxaMaskAgentPanel(QWidget):
                 const emptyTitle = document.querySelector('.empty-title');
                 if (emptyTitle) emptyTitle.textContent = '我会在当前 TaxaMask 仓库中协助排查';
                 const emptyCopy = document.querySelector('.empty-copy');
-                if (emptyCopy) emptyCopy.textContent = '可以读源码、改配置和项目文件；源码写入会被 TaxaMask hook 阻止。';
+                if (emptyCopy) emptyCopy.textContent = '可以读源码和排查配置；外部模型适配和 TaxaMask 源码开发会分别请求确认。';
                 const prompt = document.querySelector('#prompt-input');
                 if (prompt) prompt.placeholder = '把遇到的问题、配置目标或标注流程疑问发给 TaxaMask Agent';
               };
@@ -972,7 +972,18 @@ class TaxaMaskAgentPanel(QWidget):
             ("predict_command_has_contract", "预测命令包含 contract"),
             ("model_manifest_present", "模型 manifest 已填写"),
             ("locator_scope_count", "Locator 主部位数量"),
+            ("parent_box_ratio_count", "父级框比例数量"),
             ("validation_errors", "当前校验提示"),
+            ("diagnostic_route", "诊断路线"),
+            ("diagnostic_focus", "排查重点"),
+            ("health_check_summary", "轻量健康检查"),
+            ("llm_context_refs", "建议阅读的大模型对接位置"),
+            ("source_code_refs", "相关源码/契约位置"),
+            ("artifact_hints", "建议检查的产物"),
+            ("safety_notes", "安全边界"),
+            ("suggested_agent_action", "建议下一步"),
+            ("agent_route_source", "路由表来源"),
+            ("context_policy", "上下文策略"),
             ("recent_log_excerpt", "最近日志"),
         ]
         for key, label in mapping:

@@ -31,6 +31,7 @@ export async function runHooks(options = {}) {
         hook,
         payload,
         cwd,
+        config,
         env: options.env,
         hooksTrusted: options.hooksTrusted === true,
         onRecord: options.onRecord
@@ -113,6 +114,7 @@ async function runOneHook(options) {
         hook,
         payload,
         cwd: options.cwd,
+        config: options.config,
         env: options.env
       });
     }

@@ -248,11 +248,79 @@ test("TaxaMask source guard blocks source writes but allows docs", async () => {
 
   assert.equal(blockedWrite.ok, false);
   assert.equal(blockedWrite.blocked, true);
-  assert.equal(blockedWrite.error.code, "TAXAMASK_SOURCE_READONLY");
+  assert.equal(blockedWrite.error.code, "TAXAMASK_SOURCE_DEVELOPMENT_PERMISSION_REQUIRED");
   assert.equal(allowedDoc.ok, true);
   assert.equal(blockedShell.ok, false);
   assert.equal(blockedShell.blocked, true);
-  assert.equal(blockedShell.error.code, "TAXAMASK_SOURCE_READONLY");
+  assert.equal(blockedShell.error.code, "TAXAMASK_SOURCE_DEVELOPMENT_PERMISSION_REQUIRED");
+});
+
+test("TaxaMask source guard asks once then allows approved source development", async () => {
+  clearHookAudit();
+  const cwd = await makeTempWorkspace();
+  await fs.mkdir(path.join(cwd, "AntSleap"), { recursive: true });
+  const approvals = [];
+  const runtime = createToolRuntime({
+    cwd,
+    config: taxamaskHookConfig(),
+    policy: {
+      networkMode: "offline",
+      approvals: { workspaceWrites: true, workspaceCommands: true }
+    },
+    approve: async (request) => {
+      approvals.push(request);
+      return request.decision?.taxamask?.scope === "taxamask.source_development";
+    }
+  });
+
+  const result = await runtime.execute("write_file", {
+    path: "AntSleap/main.py",
+    content: "print('approved')\n"
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal((await fs.readFile(path.join(cwd, "AntSleap", "main.py"), "utf8")).trim(), "print('approved')");
+  assert.equal(approvals.length, 1);
+  assert.equal(approvals[0].decision.taxamask.scope, "taxamask.source_development");
+});
+
+test("TaxaMask source guard asks for external adapter edits without source permission", async () => {
+  clearHookAudit();
+  const cwd = await makeTempWorkspace();
+  await fs.mkdir(path.join(cwd, "external_backends"), { recursive: true });
+  const approvals = [];
+  const runtime = createToolRuntime({
+    cwd,
+    config: taxamaskHookConfig(),
+    policy: {
+      networkMode: "offline",
+      approvals: { workspaceWrites: true, workspaceCommands: true }
+    },
+    approve: async (request) => {
+      approvals.push(request);
+      return request.decision?.taxamask?.scope === "taxamask.adapter";
+    }
+  });
+
+  const result = await runtime.execute("write_file", {
+    path: "external_backends/custom_tif_backend.py",
+    content: "print('adapter')\n"
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(approvals.length, 1);
+  assert.equal(approvals[0].decision.taxamask.scope, "taxamask.adapter");
+
+  approvals.length = 0;
+  const blockedSource = await runtime.execute("write_file", {
+    path: "AntSleap/main.py",
+    content: "print('still blocked')\n"
+  });
+  assert.equal(blockedSource.ok, false);
+  assert.equal(blockedSource.blocked, true);
+  assert.equal(blockedSource.error.code, "TAXAMASK_SOURCE_DEVELOPMENT_PERMISSION_REQUIRED");
+  assert.equal(approvals.length, 1);
+  assert.equal(approvals[0].decision.taxamask.scope, "taxamask.source_development");
 });
 
 test("TaxaMask source guard blocks filesystem MCP source writes", async () => {
@@ -277,7 +345,7 @@ test("TaxaMask source guard blocks filesystem MCP source writes", async () => {
   });
 
   assert.equal(result.blocked, true);
-  assert.equal(result.blockingError.code, "TAXAMASK_SOURCE_READONLY");
+  assert.equal(result.blockingError.code, "TAXAMASK_SOURCE_DEVELOPMENT_PERMISSION_REQUIRED");
 });
 
 test("TaxaMask source guard blocks runtime mcp_call before MCP execution", async () => {
@@ -307,7 +375,7 @@ test("TaxaMask source guard blocks runtime mcp_call before MCP execution", async
 
   assert.equal(result.ok, false);
   assert.equal(result.blocked, true);
-  assert.equal(result.error.code, "TAXAMASK_SOURCE_READONLY");
+  assert.equal(result.error.code, "TAXAMASK_SOURCE_DEVELOPMENT_PERMISSION_REQUIRED");
 });
 
 test("compact with model emits compact hook audit", async () => {
@@ -454,6 +522,9 @@ async function waitFor(predicate, timeoutMs = 3000) {
 
 function taxamaskHookConfig() {
   return {
+    taxamaskPermissions: {
+      adapterRoots: ["external_backends", ".tmp_validation/external_backends"]
+    },
     hooks: {
       events: {
         "tool.before": [

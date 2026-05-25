@@ -94,13 +94,13 @@ class TaxaMaskAgentPanel(QWidget):
 
     def __init__(self, lang="en", parent=None, workspace_dir=None, ant_code_executable=None, ant_code_root=None):
         super().__init__(parent)
+        _ = ant_code_executable
         self.lang = lang
         self.workspace_dir = os.path.abspath(str(workspace_dir or Path(__file__).resolve().parents[2]))
         self.ant_code_root = os.path.abspath(str(ant_code_root or os.environ.get("TAXAMASK_ANT_CODE_ROOT") or self._default_ant_code_root()))
         self.ant_code_config_path = os.path.abspath(str(os.environ.get("TAXAMASK_ANT_CODE_CONFIG") or self._default_ant_code_config_path()))
         self.node_executable = self._resolve_node_executable()
         self.ant_code_dashboard_entry = self._resolve_ant_code_dashboard_entry()
-        self.ant_code_executable = self._resolve_ant_code_executable(ant_code_executable)
         self.process = None
         self.dashboard_url = ""
         self.port = None
@@ -153,41 +153,6 @@ class TaxaMaskAgentPanel(QWidget):
             return str(candidate.resolve())
         return None
 
-    def _resolve_ant_code_executable(self, explicit=None):
-        for candidate in self._ant_code_executable_candidates(explicit):
-            if not candidate:
-                continue
-            path = Path(candidate).expanduser()
-            if path.exists():
-                return str(path.resolve())
-        for command in ("ant-code.exe", "ant-code.cmd", "ant-code"):
-            found = shutil.which(command)
-            if found:
-                return found
-        return None
-
-    def _ant_code_executable_candidates(self, explicit=None):
-        if explicit:
-            yield explicit
-        env_path = os.environ.get("TAXAMASK_ANT_CODE_EXE")
-        if env_path:
-            yield env_path
-        root = Path(self.ant_code_root)
-        exe_name = "ant-code.exe" if sys.platform == "win32" else "ant-code"
-        yield root / "dist" / "ant-code-windows-x64" / exe_name
-        yield root / "dist" / "ant-code-win32-x64" / exe_name
-        dist = root / "dist"
-        if dist.exists():
-            for candidate in dist.glob(f"ant-code-*/*{exe_name}"):
-                yield candidate
-
-    def _require_ant_code_executable(self):
-        if self.ant_code_executable and Path(self.ant_code_executable).exists():
-            return self.ant_code_executable
-        raise FileNotFoundError(
-            "Ant-Code executable not found. Set TAXAMASK_ANT_CODE_EXE to the distributed ant-code executable."
-        )
-
     def _can_use_source_dashboard(self):
         return bool(
             self.node_executable
@@ -197,19 +162,14 @@ class TaxaMaskAgentPanel(QWidget):
         )
 
     def _dashboard_command(self):
-        if self._can_use_source_dashboard():
-            return [
-                self.node_executable,
-                self.ant_code_dashboard_entry,
-                "--project",
-                self.workspace_dir,
-                "--port",
-                str(self.port),
-                "--no-open",
-            ]
+        if not self._can_use_source_dashboard():
+            raise FileNotFoundError(
+                "Ant-Code source dashboard is unavailable. Ensure Node.js is installed and "
+                "vendor/ant-code/src/cli/dashboard.js exists."
+            )
         return [
-            self._require_ant_code_executable(),
-            "dashboard",
+            self.node_executable,
+            self.ant_code_dashboard_entry,
             "--project",
             self.workspace_dir,
             "--port",
@@ -1172,7 +1132,7 @@ class TaxaMaskAgentPanel(QWidget):
             "",
             f"{at('Project', self.lang)}: {self._project_display or self.workspace_dir}",
             f"Ant-Code root: {self.ant_code_root}",
-            f"Ant-Code dashboard: {self.ant_code_dashboard_entry or self.ant_code_executable or at('not found', self.lang)}",
+            f"Ant-Code dashboard: {self.ant_code_dashboard_entry or at('not found', self.lang)}",
             f"Ant-Code config: {self.ant_code_config_path}",
             "",
             at("Workspace permission is the default for this embedded TaxaMask agent.", self.lang),

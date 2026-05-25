@@ -18,12 +18,12 @@ Core product stance:
 - The first stable domain remains ant taxonomy and morphology. Do not overclaim broad multi-taxon support unless the user asks.
 
 Ant-Code embedding boundary:
-- TaxaMask embeds the distributed Ant-Code executable, not the `lab-agent` source tree.
-- Default executable path is usually `C:\saveproject\LBJ-workspace\lab-agent\dist\ant-code-windows-x64\ant-code.exe`.
-- TaxaMask starts it through `AntSleap/ui/taxamask_agent_panel.py` using:
-  `ant-code.exe dashboard --project <TaxaMask repo root> --port <free local port> --no-open`.
+- TaxaMask embeds the vendored Ant-Code source under `vendor/ant-code`; it no longer starts the distributed `ant-code.exe` package from `lab-agent/dist`.
+- TaxaMask starts it through `AntSleap/ui/taxamask_agent_panel.py` using Node.js:
+  `node vendor/ant-code/src/cli/dashboard.js --project <TaxaMask repo root> --port <free local port> --no-open`.
+- The old distributed executable is not a launch fallback. Process cleanup still recognizes old `ant-code.exe dashboard` commands only to remove historical orphan dashboard processes for this TaxaMask project.
 - The embedded view defaults to workspace trust for this TaxaMask repository. Most local TaxaMask edits should not require repeated confirmation, but destructive actions, deleting data, changing external tools, or touching files outside this repo still need explicit user intent.
-- Do not modify `C:\saveproject\LBJ-workspace\lab-agent` source unless the user explicitly asks to work on Ant-Code itself. Normal TaxaMask integration work belongs in this repo.
+- Normal embedded Agent integration work belongs in this repo, especially `vendor/ant-code` and `AntSleap/ui/taxamask_agent_panel.py`. Do not modify the external `C:\saveproject\LBJ-workspace\lab-agent` tree unless the user explicitly asks to work on that separate copy.
 
 UI structure to remember:
 - Start center is now the Agent center. The embedded Ant-Code middle workspace is the main area.

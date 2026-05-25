@@ -162,15 +162,13 @@
 - `return_to_start_center_with_context()` and related context helpers pass current project/workbench context back to the Agent Center.
 
 ### 0.2 Ant-Code integration boundary
-- TaxaMask embeds the distributed Ant-Code executable, not the `lab-agent` source tree.
-- Default executable search includes:
-  - `TAXAMASK_ANT_CODE_EXE`
-  - `C:\saveproject\LBJ-workspace\lab-agent\dist\ant-code-windows-x64\ant-code.exe`
-  - `PATH` candidates such as `ant-code.exe`, `ant-code.cmd`, or `ant-code`.
+- TaxaMask embeds the vendored Ant-Code source under `vendor/ant-code`; it no longer starts the distributed `ant-code.exe` package from `lab-agent/dist`.
 - Launch form:
-  - `ant-code.exe dashboard --project <TaxaMask repo root> --port <free local port> --no-open`
+  - `node vendor/ant-code/src/cli/dashboard.js --project <TaxaMask repo root> --port <free local port> --no-open`
+- `TAXAMASK_ANT_CODE_ROOT` may point to another Ant-Code source tree for explicit development/testing, but `TAXAMASK_ANT_CODE_EXE`, `dist\ant-code-windows-x64`, and PATH `ant-code.exe` fallbacks are no longer used by TaxaMask startup.
+- Process cleanup still recognizes old `ant-code.exe dashboard` commands only to remove historical orphan dashboard processes for this TaxaMask project.
 - Embedded mode hides Ant-Code's native left/right sidebars and keeps only the middle conversation/task area inside the TaxaMask start page.
-- The embedded Agent should treat the TaxaMask repo as trusted by default for ordinary in-repo tasks, while still requiring explicit user intent for destructive data operations, files outside the repo, GPU-heavy runs, or modifying `lab-agent`.
+- The embedded Agent should treat the TaxaMask repo as trusted by default for ordinary in-repo tasks, while still requiring explicit user intent for destructive data operations, files outside the repo, GPU-heavy runs, or modifying external Ant-Code copies.
 - `ANTCODE.md` is the highest-priority always-on project rule for the embedded TaxaMask Agent; when both `ANTCODE.md` and `AGENTS.md` exist, the embedded Ant-Code loader selects `ANTCODE.md` as the active rule and skips `AGENTS.md`.
 - `.lab-agent/memory.md` is the short project memory loaded after the project rule.
 - `.lab-agent/skills/taxamask-workflows/SKILL.md` is the always-relevant compact workflow card for Agent/Codex use. The skill body is still an expandable resource, so the durable highest-priority TaxaMask rules must also remain in `ANTCODE.md`.

@@ -364,6 +364,21 @@ class GuiSmokeTests(unittest.TestCase):
         finally:
             window.deleteLater()
 
+    def test_agent_panel_uses_source_dashboard_not_distributed_exe(self):
+        panel = main_module.TaxaMaskAgentPanel(
+            "en",
+            workspace_dir=str(PROJECT_ROOT),
+            ant_code_executable=r"C:\legacy\ant-code.exe",
+        )
+        try:
+            command = panel._dashboard_command()
+            self.assertEqual(command[0], panel.node_executable)
+            self.assertEqual(command[1], panel.ant_code_dashboard_entry)
+            self.assertNotIn(r"C:\legacy\ant-code.exe", command)
+            self.assertNotIn("dashboard", command[:2])
+        finally:
+            panel.deleteLater()
+
     def test_agent_panel_preflights_before_loading_webview(self):
         window = self._make_window()
         try:

@@ -609,6 +609,10 @@ class UiPolishScopeTests(unittest.TestCase):
             widget = PdfProcessingWidget("en")
 
         self.assertIsNotNone(widget.findChild(QWidget, "pdfSettingsPanel"))
+        self.assertIsNotNone(widget.findChild(QWidget, "pdfWorkbenchHeader"))
+        self.assertIsNotNone(widget.findChild(QWidget, "pdfStartCenterButton"))
+        self.assertIsNotNone(widget.findChild(QWidget, "pdfAskAgentButton"))
+        self.assertIsNotNone(widget.findChild(QWidget, "pdfToggleAdvancedButton"))
         self.assertIsNotNone(widget.findChild(QWidget, "pdfApiPanel"))
         self.assertIsNotNone(widget.findChild(QWidget, "pdfProfilePanel"))
         self.assertIsNotNone(widget.findChild(QWidget, "pdfClassifyInputPanel"))
@@ -622,6 +626,11 @@ class UiPolishScopeTests(unittest.TestCase):
         self.assertEqual(widget.btn_run_classify.parentWidget().objectName(), "pdfClassifyActionPanel")
         self.assertEqual(widget.btn_run_extract.parentWidget().objectName(), "pdfExtractActionPanel")
         self.assertEqual(widget.log_area.parentWidget().objectName(), "pdfFeedbackPanel")
+        scroll_layout = widget.main_scroll.widget().layout()
+        self.assertLess(scroll_layout.indexOf(widget.workbench_header), scroll_layout.indexOf(widget.tabs))
+        self.assertTrue(widget.config_group.isHidden())
+        widget.toggle_advanced_config(True)
+        self.assertFalse(widget.config_group.isHidden())
 
     def test_pdf_processing_api_inputs_keep_usable_height_when_resized(self):
         with patch.object(PdfProcessingWidget, "load_api_settings", lambda self: None), \
@@ -630,6 +639,7 @@ class UiPolishScopeTests(unittest.TestCase):
             widget = PdfProcessingWidget("zh")
 
         try:
+            widget.toggle_advanced_config(True)
             for width, height in [(1180, 760), (1920, 1080), (900, 560)]:
                 widget.resize(width, height)
                 widget.show()

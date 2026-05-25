@@ -560,6 +560,9 @@ class TaxaMaskAgentPanel(QWidget):
         if prompt:
             self._send_context_prompt(prompt)
 
+    def set_prompt_text(self, prompt):
+        self._send_context_prompt(str(prompt or ""))
+
     def is_running(self):
         return self.process is not None and self.process.poll() is None
 
@@ -931,8 +934,13 @@ class TaxaMaskAgentPanel(QWidget):
               input.focus();
               return true;
             }})();
-            """
+            """,
+            lambda ok: self._queue_prompt_if_not_inserted(prompt, ok),
         )
+
+    def _queue_prompt_if_not_inserted(self, prompt, ok):
+        if not ok:
+            self._pending_context_prompt = prompt
 
     def _context_prompt(self, context):
         if not context:
@@ -949,6 +957,23 @@ class TaxaMaskAgentPanel(QWidget):
             ("active_label_role", "当前标签层"),
             ("selected_part", "当前部位"),
             ("selected_material_id", "当前 material"),
+            ("screener_profile", "PDF 筛选方案"),
+            ("figure_profile", "PDF 图文提取方案"),
+            ("screening_mode", "PDF 筛选模式"),
+            ("text_llm_key_configured", "文本 LLM key 已配置"),
+            ("text_llm_base_url_configured", "文本 LLM Base URL 已配置"),
+            ("text_llm_model", "文本 LLM 模型"),
+            ("text_llm_api_protocol", "文本 LLM API 协议"),
+            ("multimodal_llm_uses_text_provider", "多模态复用文本模型提供方"),
+            ("multimodal_llm_key_configured", "多模态 LLM key 已配置"),
+            ("multimodal_llm_base_url_configured", "多模态 LLM Base URL 已配置"),
+            ("multimodal_llm_model", "多模态 LLM 模型"),
+            ("multimodal_llm_api_protocol", "多模态 LLM API 协议"),
+            ("pdf_source_dir", "PDF 源目录"),
+            ("screening_output_dir", "PDF 筛选输出目录"),
+            ("extract_input_dir", "PDF 提取输入目录"),
+            ("extract_db_path", "PDF 提取数据库"),
+            ("multimodal_enabled", "多模态复核已启用"),
             ("settings_scope", "设置范围"),
             ("settings_question_focus", "需要协助的问题"),
             ("language", "语言"),
@@ -1006,17 +1031,118 @@ class TaxaMaskAgentPanel(QWidget):
 
     def stop_dashboard(self):
         self.health_timer.stop()
-        if self.process is not None and self.process.poll() is None:
-            self.process.terminate()
+        if self.process is not None:
             try:
-                self.process.wait(timeout=2)
+                if self.process.poll() is None:
+                    self._terminate_process_tree(self.process.pid)
+                    try:
+                        self.process.wait(timeout=2)
+                    except Exception:
+                        try:
+                            self.process.kill()
+                        except Exception:
+                            pass
             except Exception:
-                self.process.kill()
+                pass
         self.process = None
+        self._cleanup_owned_dashboard_processes()
         self.dashboard_url = ""
         self._update_status_label(at("Ant-Code Dashboard is not running.", self.lang))
         self.stack.setCurrentWidget(self.fallback)
         self._update_fallback()
+
+    def _terminate_process_tree(self, pid):
+        if not pid:
+            return
+        if sys.platform == "win32":
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(int(pid)), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                    creationflags=self._creation_flags(),
+                )
+                return
+            except Exception:
+                return
+        try:
+            self.process.terminate()
+        except Exception:
+            return
+
+    def _cleanup_owned_dashboard_processes(self):
+        if sys.platform != "win32":
+            return
+        for pid in self._owned_dashboard_process_ids():
+            self._terminate_process_tree(pid)
+
+    def _owned_dashboard_process_ids(self):
+        try:
+            result = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    "Get-CimInstance Win32_Process | "
+                    "Select-Object ProcessId,Name,CommandLine | ConvertTo-Json -Compress",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=6,
+                check=False,
+                creationflags=self._creation_flags(),
+            )
+        except Exception:
+            return []
+        if result.returncode != 0 or not str(result.stdout or "").strip():
+            return []
+        try:
+            processes = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return []
+        if isinstance(processes, dict):
+            processes = [processes]
+        owned = []
+        current_pid = os.getpid()
+        for process in processes or []:
+            try:
+                pid = int(process.get("ProcessId"))
+            except (TypeError, ValueError):
+                continue
+            if pid == current_pid:
+                continue
+            if self._is_owned_dashboard_process(process.get("CommandLine"), process.get("Name")):
+                owned.append(pid)
+        return owned
+
+    def _is_owned_dashboard_process(self, command_line, process_name=""):
+        command = self._normalize_process_command(command_line)
+        if not command:
+            return False
+        if self._normalize_process_command(self.workspace_dir) not in command:
+            return False
+        name = Path(str(process_name or "")).name.lower()
+        source_entry = self._normalize_process_command(self.ant_code_dashboard_entry or "")
+        source_dashboard = (
+            "src\\cli\\dashboard.js" in command
+            and (not source_entry or source_entry in command)
+            and name in {"node", "node.exe"}
+        )
+        executable_dashboard = (
+            " dashboard " in f" {command} "
+            and ("ant-code.exe" in command or "ant-code.cmd" in command or "\\ant-code " in command)
+            and (name.startswith("ant-code") or name == "cmd.exe")
+        )
+        return source_dashboard or executable_dashboard
+
+    def _normalize_process_command(self, value):
+        return str(value or "").replace("/", "\\").replace('"', "").lower()
 
     def closeEvent(self, event):
         self.stop_dashboard()

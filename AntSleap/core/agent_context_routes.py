@@ -142,7 +142,7 @@ AGENT_CONTEXT_ROUTES = {
     },
     "pdf_evidence": {
         "diagnostic_route": "pdf_evidence_context",
-        "diagnostic_focus": "PDF screening, figure/caption evidence, candidate provenance, and multimodal review status.",
+        "diagnostic_focus": "PDF evidence guided workflow. Handle one stage per reply: first check key/model readiness, then screening criteria, then figure-review criteria, then run/results.",
         "llm_context_refs": (
             "LLM_CONTEXT_DETAILED.md -> 9.1 Module A - PDF Screening & Extraction",
             "LLM_CONTEXT_DETAILED.md -> 4 Candidate Flow",
@@ -160,7 +160,7 @@ AGENT_CONTEXT_ROUTES = {
         + (
             "PDF evidence and extracted figures are candidates/provenance only; never promote them into training truth automatically.",
         ),
-        "suggested_agent_action": "Load the PDF evidence skill before planning screening, extraction, candidate import, or provenance debugging.",
+        "suggested_agent_action": "Load the PDF evidence skill and stay on the current stage. Use concise requirement-confirmation questions, ask at most three items, do not dump the full workflow, and only move to the next stage after the current one is resolved.",
     },
 }
 

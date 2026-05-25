@@ -131,6 +131,13 @@ TRANSLATIONS = {
         "API settings saved.": "API设置已保存。",
         "Failed to save API settings: {}": "保存API设置失败: {}",
         "Failed to load API settings: {}": "加载API设置失败: {}",
+        "PDF Evidence Tools": "PDF 文献证据工具",
+        "Agent first: configure keys/models, then adapt PDF screening and figure-review rules to the target taxon.": "先让 Agent 引导配置 key/模型，再按目标类群适配 PDF 筛选和图文复核规则。",
+        "Start Center": "启动中心",
+        "Ask Agent": "询问 Agent",
+        "Ask Agent to check key/model readiness, then adapt target taxon, screening profile, figure-review profile, provenance, and safe candidate review before running.": "运行前让 Agent 先检查 key/模型是否就绪，再适配目标类群、筛选方案、图文复核方案、证据来源和候选复核边界。",
+        "Show Advanced Config": "显示高级配置",
+        "Hide Advanced Config": "隐藏高级配置",
         "Screening Mode:": "筛选模式:",
         "V2 (CSV Full LLM)": "V2（CSV全量LLM）",
         "Default V2 Profile": "默认V2方案",
@@ -1096,6 +1103,9 @@ class PDFWorker(QThread):
         self._is_running = False
 
 class PdfProcessingWidget(QWidget):
+    start_center_requested = Signal()
+    agent_requested = Signal(dict)
+
     def __init__(self, current_lang="en", parent=None):
         super().__init__(parent)
         self.current_lang = current_lang
@@ -1114,6 +1124,7 @@ class PdfProcessingWidget(QWidget):
         self.figure_profile = normalize_figure_profile(None)
         self.current_figure_profile_name = profile_display_name(self.figure_profile)
         self.current_figure_profile_path = ""
+        self.advanced_config_visible = False
         
         self.init_ui()
         self.load_api_settings()
@@ -1739,6 +1750,7 @@ class PdfProcessingWidget(QWidget):
         # --- Config Section ---
         self.config_group = QGroupBox()
         apply_surface_role(self.config_group, SURFACE_ROLE_PANEL, "pdfSettingsPanel")
+        self.config_group.setVisible(self.advanced_config_visible)
         form_layout = QVBoxLayout(self.config_group)
         form_layout.setContentsMargins(12, 12, 12, 12)
         form_layout.setSpacing(10)
@@ -1913,6 +1925,41 @@ class PdfProcessingWidget(QWidget):
         form_layout.addWidget(self.profile_panel, 0)
         
         layout.addWidget(self.config_group, 0)
+
+        self.workbench_header = QWidget()
+        apply_surface_role(self.workbench_header, SURFACE_ROLE_SUBTLE, "pdfWorkbenchHeader")
+        header_layout = QHBoxLayout(self.workbench_header)
+        header_layout.setContentsMargins(12, 10, 12, 10)
+        header_layout.setSpacing(10)
+        header_text_layout = QVBoxLayout()
+        header_text_layout.setContentsMargins(0, 0, 0, 0)
+        header_text_layout.setSpacing(2)
+        self.lbl_workbench_title = QLabel()
+        self.lbl_workbench_title.setObjectName("pdfWorkbenchTitle")
+        self.lbl_workbench_hint = QLabel()
+        self.lbl_workbench_hint.setObjectName("pdfWorkbenchHint")
+        self.lbl_workbench_hint.setWordWrap(True)
+        header_text_layout.addWidget(self.lbl_workbench_title)
+        header_text_layout.addWidget(self.lbl_workbench_hint)
+        header_layout.addLayout(header_text_layout, 1)
+        self.btn_start_center = QPushButton()
+        self.btn_start_center.setObjectName("pdfStartCenterButton")
+        self.btn_start_center.clicked.connect(self.start_center_requested.emit)
+        self.btn_ask_agent = QPushButton()
+        self.btn_ask_agent.setObjectName("pdfAskAgentButton")
+        self.btn_ask_agent.clicked.connect(lambda: self.agent_requested.emit(self.get_agent_context()))
+        self.btn_toggle_advanced = QPushButton()
+        self.btn_toggle_advanced.setObjectName("pdfToggleAdvancedButton")
+        self.btn_toggle_advanced.setCheckable(True)
+        self.btn_toggle_advanced.setChecked(self.advanced_config_visible)
+        self.btn_toggle_advanced.clicked.connect(self.toggle_advanced_config)
+        apply_semantic_button_style(self.btn_start_center, BUTTON_ROLE_NEUTRAL)
+        apply_semantic_button_style(self.btn_ask_agent, BUTTON_ROLE_COMMIT)
+        apply_semantic_button_style(self.btn_toggle_advanced, BUTTON_ROLE_NEUTRAL)
+        header_layout.addWidget(self.btn_start_center)
+        header_layout.addWidget(self.btn_ask_agent)
+        header_layout.addWidget(self.btn_toggle_advanced)
+        layout.addWidget(self.workbench_header, 0)
         
         # --- Task Tabs ---
         self.tabs = QTabWidget()
@@ -2229,6 +2276,18 @@ class PdfProcessingWidget(QWidget):
         self.chk_remember_api_key.setText(self.tr("Remember API Key"))
         self.chk_remember_mllm_api_key.setText(self.tr("Remember Multimodal API Key"))
         self.btn_save_api_settings.setText(self.tr("Save API Settings"))
+        self.lbl_workbench_title.setText(self.tr("PDF Evidence Tools"))
+        self.lbl_workbench_hint.setText(
+            self.tr("Agent first: configure keys/models, then adapt PDF screening and figure-review rules to the target taxon.")
+        )
+        self.btn_start_center.setText(self.tr("Start Center"))
+        self.btn_ask_agent.setText(self.tr("Ask Agent"))
+        self.btn_ask_agent.setToolTip(
+            self.tr("Ask Agent to check key/model readiness, then adapt target taxon, screening profile, figure-review profile, provenance, and safe candidate review before running.")
+        )
+        self.btn_toggle_advanced.setText(
+            self.tr("Hide Advanced Config") if self.advanced_config_visible else self.tr("Show Advanced Config")
+        )
         self.lbl_screening_mode.setText(self.tr("Screening Mode:"))
         self.combo_mode.setItemText(0, self.tr("V2 (CSV Full LLM)"))
         self.lbl_lines_per_pdf.setText(self.tr("Lines/PDF:"))
@@ -2313,6 +2372,72 @@ class PdfProcessingWidget(QWidget):
         self.refresh_figure_profile_list()
         self.retranslate_ui()
 
+    def toggle_advanced_config(self, checked=None):
+        self.advanced_config_visible = bool(checked) if checked is not None else not self.advanced_config_visible
+        if hasattr(self, "config_group"):
+            self.config_group.setVisible(self.advanced_config_visible)
+        if hasattr(self, "btn_toggle_advanced"):
+            self.btn_toggle_advanced.setChecked(self.advanced_config_visible)
+        self.retranslate_ui()
+
+    def _safe_current_data(self, combo):
+        if combo is None:
+            return ""
+        try:
+            return combo.currentData() or ""
+        except Exception:
+            return ""
+
+    def _safe_text(self, widget):
+        if widget is None or not hasattr(widget, "text"):
+            return ""
+        try:
+            return widget.text().strip()
+        except Exception:
+            return ""
+
+    def get_agent_context(self):
+        recent_log = ""
+        if hasattr(self, "log_area"):
+            recent_log = "\n".join(self.log_area.toPlainText().splitlines()[-6:])
+        current_tab = ""
+        if hasattr(self, "tabs"):
+            index = self.tabs.currentIndex()
+            if index >= 0:
+                current_tab = self.tabs.tabText(index)
+        return {
+            "source_workbench": "pdf_evidence",
+            "project_type": "pdf_evidence",
+            "settings_question_focus": "stage_1_confirm_pdf_keys_models_with_short_requirement_questions_only",
+            "active_label_role": current_tab,
+            "screener_profile": self.current_profile_name,
+            "figure_profile": self.current_figure_profile_name,
+            "screening_mode": self._safe_current_data(getattr(self, "combo_mode", None)),
+            "text_llm_key_configured": "yes" if self._safe_text(getattr(self, "edit_api_key", None)) else "no",
+            "text_llm_base_url_configured": "yes" if self._safe_text(getattr(self, "edit_base_url", None)) else "no",
+            "text_llm_model": self._safe_text(getattr(self, "edit_model", None)),
+            "text_llm_api_protocol": self._safe_current_data(getattr(self, "combo_api_protocol", None)),
+            "multimodal_llm_uses_text_provider": "yes" if getattr(self, "check_mllm_same_as_text", None) is not None and self.check_mllm_same_as_text.isChecked() else "no",
+            "multimodal_llm_key_configured": "yes" if (
+                getattr(self, "check_mllm_same_as_text", None) is not None
+                and self.check_mllm_same_as_text.isChecked()
+                and self._safe_text(getattr(self, "edit_api_key", None))
+            ) or self._safe_text(getattr(self, "edit_mllm_api_key", None)) else "no",
+            "multimodal_llm_base_url_configured": "yes" if (
+                getattr(self, "check_mllm_same_as_text", None) is not None
+                and self.check_mllm_same_as_text.isChecked()
+                and self._safe_text(getattr(self, "edit_base_url", None))
+            ) or self._safe_text(getattr(self, "edit_mllm_base_url", None)) else "no",
+            "multimodal_llm_model": self._safe_text(getattr(self, "edit_model", None)) if getattr(self, "check_mllm_same_as_text", None) is not None and self.check_mllm_same_as_text.isChecked() else self._safe_text(getattr(self, "edit_mllm_model", None)),
+            "multimodal_llm_api_protocol": self._safe_current_data(getattr(self, "combo_mllm_api_protocol", None)),
+            "pdf_source_dir": self._safe_text(getattr(self, "edit_src_folder", None)),
+            "screening_output_dir": self._safe_text(getattr(self, "edit_out_folder", None)),
+            "extract_input_dir": self._safe_text(getattr(self, "edit_ext_src", None)),
+            "extract_db_path": self._safe_text(getattr(self, "edit_db_path", None)),
+            "multimodal_enabled": "yes" if getattr(self, "check_mllm", None) is not None and self.check_mllm.isChecked() else "no",
+            "recent_log_excerpt": recent_log,
+        }
+
     def set_theme(self, theme):
         theme = normalize_theme(theme)
         from .style import (
@@ -2332,7 +2457,12 @@ class PdfProcessingWidget(QWidget):
             f"border: 1px solid {c['border']}; border-radius: 10px; padding: 8px; "
             f"selection-background-color: {c['accent_soft']}; }}"
         )
+        self.lbl_workbench_title.setStyleSheet(f"color: {c['text_main']}; font-weight: 700; font-size: 12pt;")
+        self.lbl_workbench_hint.setStyleSheet(f"color: {c['text_soft']};")
         apply_theme_button_style(self.btn_save_api_settings, BUTTON_ROLE_COMMIT, "padding: 5px;", theme)
+        apply_theme_button_style(self.btn_start_center, BUTTON_ROLE_NEUTRAL, "", theme)
+        apply_theme_button_style(self.btn_ask_agent, BUTTON_ROLE_COMMIT, "", theme)
+        apply_theme_button_style(self.btn_toggle_advanced, BUTTON_ROLE_NEUTRAL, "", theme)
         apply_theme_button_style(self.btn_delete_profile, BUTTON_ROLE_DESTRUCTIVE, "", theme)
         apply_theme_button_style(self.btn_adv_config, BUTTON_ROLE_NEUTRAL, "padding: 5px;", theme)
         apply_theme_button_style(self.btn_delete_figure_profile, BUTTON_ROLE_DESTRUCTIVE, "", theme)

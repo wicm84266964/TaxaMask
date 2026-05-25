@@ -271,6 +271,10 @@ TRANSLATIONS = {
         "Annotate high-resolution 2D views rendered from STL, or ordinary 2D morphology images, then train Locator/SAM/Blink models.": "标注从 STL 导出的高分辨率 2D 视角图，或普通 2D 形态图像，并训练 Locator/SAM/Blink 模型。",
         "TIF volume annotation": "TIF 体数据标注",
         "Annotate continuous slice volumes with material IDs, export train-ready volumes, and call TIF segmentation backends.": "用 material ID 标注连续切片体数据，导出可训练体数据，并调用 TIF 分割后端。",
+        "PDF evidence workflow": "PDF 文献证据流程",
+        "Use Agent first to confirm the target taxon, screening rules, figure extraction scope, evidence indexes, candidate review, and safe import.": "先让 Agent 确认目标类群、筛选规则、图文提取范围、证据索引、候选复核和安全导入。",
+        "Plan PDF workflow with Agent": "让 Agent 规划 PDF 流程",
+        "Open PDF tools": "打开 PDF 工具",
         "Continue last project": "继续上次项目",
         "No recent project": "暂无最近项目",
         "Enter 2D/STL workflow": "进入 2D/STL 工作流",
@@ -3424,6 +3428,8 @@ class MainWindow(QMainWindow):
         self.workbench_splitter.setSizes([240, 1080, 320])
 
         self.pdf_widget = PdfProcessingWidget(self.current_lang)
+        self.pdf_widget.start_center_requested.connect(self.return_to_start_center_with_context)
+        self.pdf_widget.agent_requested.connect(self.open_agent_from_context)
         self.tif_workbench = TifWorkbenchWidget(self.tif_project, self.current_lang, config_manager=self.config)
         self.tif_workbench.start_center_requested.connect(self.return_to_start_center_with_context)
         self.tif_workbench.agent_requested.connect(self.open_agent_from_context)
@@ -3562,6 +3568,8 @@ class MainWindow(QMainWindow):
         rail_layout = QVBoxLayout(workflow_rail)
         rail_layout.setContentsMargins(0, 0, 0, 0)
         rail_layout.setSpacing(14)
+        self.start_quick_panel = self._build_start_quick_panel()
+        rail_layout.addWidget(self.start_quick_panel)
         self.start_console_panel = self._build_project_console()
         rail_layout.addWidget(self.start_console_panel)
         self.start_image_card = self._build_workflow_card(
@@ -3582,14 +3590,29 @@ class MainWindow(QMainWindow):
             "Create TIF project",
             self.new_tif_project,
         )
+        self.start_pdf_card = self._build_workflow_card(
+            "startPdfEvidenceCard",
+            "PDF evidence workflow",
+            "Use Agent first to confirm the target taxon, screening rules, figure extraction scope, evidence indexes, candidate review, and safe import.",
+            "Plan PDF workflow with Agent",
+            self.open_agent_for_pdf_workflow,
+            "Open PDF tools",
+            self.open_pdf_evidence_tools,
+        )
         rail_layout.addWidget(self.start_image_card)
         rail_layout.addWidget(self.start_tif_card)
+        rail_layout.addWidget(self.start_pdf_card)
+        rail_layout.addStretch(1)
+        workflow_rail_scroll.setWidget(workflow_rail)
+        outer_layout.addWidget(workflow_rail_scroll, 0)
+        return page
 
-        footer = QWidget()
-        apply_surface_role(footer, SURFACE_ROLE_SUBTLE, "startCenterFooter")
-        footer_layout = QVBoxLayout(footer)
-        footer_layout.setContentsMargins(16, 12, 16, 12)
-        footer_layout.setSpacing(8)
+    def _build_start_quick_panel(self):
+        panel = QWidget()
+        apply_surface_role(panel, SURFACE_ROLE_SUBTLE, "startCenterQuickPanel")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(8)
         self.start_recent_label = QLabel()
         self.start_recent_label.setObjectName("mutedLabel")
         self.start_recent_label.setWordWrap(True)
@@ -3602,15 +3625,11 @@ class MainWindow(QMainWindow):
         self.btn_general_settings = QPushButton()
         self.btn_general_settings.clicked.connect(self.open_general_settings)
         apply_semantic_button_style(self.btn_general_settings, BUTTON_ROLE_NEUTRAL)
-        footer_layout.addWidget(self.start_recent_label)
-        footer_layout.addWidget(self.btn_continue_last)
-        footer_layout.addWidget(self.btn_open_any)
-        footer_layout.addWidget(self.btn_general_settings)
-        rail_layout.addWidget(footer)
-        rail_layout.addStretch(1)
-        workflow_rail_scroll.setWidget(workflow_rail)
-        outer_layout.addWidget(workflow_rail_scroll, 0)
-        return page
+        layout.addWidget(self.start_recent_label)
+        layout.addWidget(self.btn_continue_last)
+        layout.addWidget(self.btn_open_any)
+        layout.addWidget(self.btn_general_settings)
+        return panel
 
     def _build_project_console(self):
         panel = QWidget()
@@ -3924,6 +3943,23 @@ class MainWindow(QMainWindow):
             "active_label_role",
             "selected_part",
             "selected_material_id",
+            "screener_profile",
+            "figure_profile",
+            "screening_mode",
+            "text_llm_key_configured",
+            "text_llm_base_url_configured",
+            "text_llm_model",
+            "text_llm_api_protocol",
+            "multimodal_llm_uses_text_provider",
+            "multimodal_llm_key_configured",
+            "multimodal_llm_base_url_configured",
+            "multimodal_llm_model",
+            "multimodal_llm_api_protocol",
+            "pdf_source_dir",
+            "screening_output_dir",
+            "extract_input_dir",
+            "extract_db_path",
+            "multimodal_enabled",
             "settings_scope",
             "settings_question_focus",
             "language",
@@ -4011,8 +4047,51 @@ class MainWindow(QMainWindow):
             "recent_log_excerpt": self._recent_text_excerpt(getattr(self.blink_lab, "training_log_console", None)),
         }
 
+    def _pdf_agent_prompt(self):
+        project_hint = self._agent_current_project_label()
+        pdf_summary = self._start_console_pdf_summary()
+        return (
+            "请按 TaxaMask 的 PDF evidence workflow 作为分阶段向导接管一次 PDF 文献处理任务。"
+            "这个流程面向各种分类学研究者，不要默认用户研究蚂蚁，也不要默认当前筛选配置或图文提取配置已经合适。\n\n"
+            "请先读取并遵守这些本地规则/skill：\n"
+            "- ANTCODE.md\n"
+            "- .lab-agent/memory.md\n"
+            "- .lab-agent/skills/taxamask-pdf-evidence/SKILL.md\n\n"
+            "当前现场：\n"
+            f"- 当前项目：{project_hint}\n"
+            f"- PDF 状态：{pdf_summary}\n"
+            "- PDF 筛选依赖文本 LLM key/model；启用多模态图文复核时还需要可用的视觉模型配置。\n\n"
+            "请不要一次性输出全流程长说明。请按四个阶段推进，每轮只处理当前阶段，最多问 3 个问题：\n"
+            "1. key/model 就绪检查。\n"
+            "2. 目标类群与 PDF 筛选条件适配。\n"
+            "3. figure/caption 数据处理与图文复核条件适配。\n"
+            "4. 跑通流程、说明产物位置和复核/导入边界。\n\n"
+            "请优先使用需求确认式交互：给我简短选项或短问题让我确认，不要用长段说明替代确认。"
+            "现在先停在第 1 阶段：只确认文本 LLM key、base URL、model、API 协议是否已在本地 PDF 工具或运行环境配置好；"
+            "如果要多模态复核，再确认视觉模型配置。不要要求我在聊天里粘贴真实 key。"
+            "完成第 1 阶段后，再进入下一阶段，不要提前展开后面复杂配置。"
+        )
+
+    def open_agent_for_pdf_workflow(self):
+        prompt = self._pdf_agent_prompt()
+        self.active_project_kind = "start"
+        self._apply_project_mode_tabs()
+        self._update_start_center_texts()
+        if hasattr(self, "agent_panel"):
+            self.agent_panel.update_runtime_status(
+                model_status=tr("Local task cards", self.current_lang),
+                workflow=tr("PDF evidence workflow", self.current_lang),
+                project=self._agent_current_project_label(),
+                state=tr("Idle", self.current_lang),
+            )
+            self.agent_panel.set_prompt_text(prompt)
+            if not self.agent_panel.is_running():
+                self.agent_panel.start_dashboard()
+
     def open_agent_from_context(self, context=None):
         payload = dict(context or {})
+        if not payload and hasattr(self, "tabs") and self.tabs.currentWidget() is self.pdf_widget:
+            payload = self.pdf_widget.get_agent_context()
         if not payload and hasattr(self, "tabs") and self.tabs.currentWidget() is self.blink_lab:
             payload = self._collect_blink_agent_context()
         if not payload and hasattr(self, "tabs") and self.tabs.currentWidget() is self.tif_workbench:

@@ -382,6 +382,60 @@ class GuiSmokeTests(unittest.TestCase):
         finally:
             window.deleteLater()
 
+    def test_agent_panel_stop_dashboard_terminates_process_tree(self):
+        window = self._make_window()
+        try:
+            panel = window.agent_panel
+
+            class RunningProcess:
+                pid = 12345
+
+                def poll(self):
+                    return None
+
+                def wait(self, timeout=None):
+                    return 0
+
+            panel.process = RunningProcess()
+            panel._cleanup_owned_dashboard_processes = lambda: None
+
+            with patch("AntSleap.ui.taxamask_agent_panel.sys.platform", "win32"), \
+                 patch("AntSleap.ui.taxamask_agent_panel.subprocess.run") as run_mock:
+                panel.stop_dashboard()
+
+            run_mock.assert_called_once()
+            self.assertEqual(run_mock.call_args.args[0][:4], ["taskkill", "/PID", "12345", "/T"])
+            self.assertIn("/F", run_mock.call_args.args[0])
+            self.assertIsNone(panel.process)
+            self.assertFalse(panel.dashboard_url)
+        finally:
+            window.deleteLater()
+
+    def test_agent_panel_owned_dashboard_matching_is_project_scoped(self):
+        window = self._make_window()
+        try:
+            panel = window.agent_panel
+            project = panel.workspace_dir
+            dashboard = panel.ant_code_dashboard_entry
+            self.assertTrue(panel._is_owned_dashboard_process(
+                f'"C:\\Program Files\\nodejs\\node.exe" "{dashboard}" --project "{project}" --port 7410 --no-open',
+                "node.exe",
+            ))
+            self.assertTrue(panel._is_owned_dashboard_process(
+                f'C:\\tools\\ant-code.exe dashboard --project "{project}" --port 7411 --no-open',
+                "ant-code.exe",
+            ))
+            self.assertFalse(panel._is_owned_dashboard_process(
+                '"C:\\Program Files\\nodejs\\node.exe" C:\\other\\dashboard.js --project C:\\other --port 7410',
+                "node.exe",
+            ))
+            self.assertFalse(panel._is_owned_dashboard_process(
+                f'"C:\\Program Files\\nodejs\\node.exe" C:\\scripts\\server.js --project "{project}"',
+                "node.exe",
+            ))
+        finally:
+            window.deleteLater()
+
     def test_agent_panel_blocks_invalid_active_project_json(self):
         window = self._make_window()
         try:
@@ -786,6 +840,33 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(window.tabs.currentWidget(), window.pdf_widget)
             self.assertEqual(window.tabs.tabText(window.tabs.currentIndex()), "PDF Evidence Tools")
             self.assertEqual(window.tabs.count(), 2)
+            self.assertEqual(window.pdf_widget.btn_start_center.text(), "Start Center")
+            self.assertEqual(window.pdf_widget.btn_ask_agent.text(), "Ask Agent")
+            context = window.pdf_widget.get_agent_context()
+            self.assertEqual(
+                context["settings_question_focus"],
+                "stage_1_confirm_pdf_keys_models_with_short_requirement_questions_only",
+            )
+            self.assertEqual(context["text_llm_key_configured"], "no")
+            self.assertEqual(context["text_llm_model"], "gpt-5.4")
+            window.pdf_widget.edit_api_key.setText("secret-not-sent")
+            window.pdf_widget.edit_mllm_api_key.setText("vision-secret-not-sent")
+            context = window.pdf_widget.get_agent_context()
+            self.assertEqual(context["text_llm_key_configured"], "yes")
+            self.assertEqual(context["multimodal_llm_key_configured"], "yes")
+            self.assertNotIn("secret-not-sent", str(context))
+            self.assertNotIn("vision-secret-not-sent", str(context))
+            self.assertEqual(
+                context["settings_question_focus"],
+                "stage_1_confirm_pdf_keys_models_with_short_requirement_questions_only",
+            )
+            prompt = window._pdf_agent_prompt()
+            self.assertIn("key、base URL、model", prompt)
+            self.assertIn("四个阶段", prompt)
+            self.assertIn("每轮只处理当前阶段", prompt)
+            self.assertIn("最多问 3 个问题", prompt)
+            self.assertIn("需求确认式交互", prompt)
+            self.assertNotIn("规划时请覆盖这些点", prompt)
         finally:
             window.deleteLater()
 

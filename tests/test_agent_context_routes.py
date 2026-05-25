@@ -57,6 +57,25 @@ class AgentContextRoutesTests(unittest.TestCase):
         self.assertIn("manual_truth", context["safety_notes"])
         self.assertIn("contract_placeholder=ok_or_not_applicable", context["health_check_summary"])
 
+    def test_pdf_route_keeps_candidate_safety_visible(self):
+        context = enrich_agent_context(
+            {
+                "source_workbench": "pdf_evidence",
+                "project_type": "pdf_evidence",
+                "screener_profile": "Default_Ant_Logic",
+                "figure_profile": "Built-in Ant Triptych Figure Profile",
+            }
+        )
+
+        self.assertEqual(context["diagnostic_route"], "pdf_evidence_context")
+        self.assertIn("key/model readiness", context["diagnostic_focus"])
+        self.assertIn("one stage per reply", context["diagnostic_focus"])
+        self.assertIn("taxamask-pdf-evidence", context["llm_context_refs"])
+        self.assertIn("candidates/provenance", context["safety_notes"])
+        self.assertIn("requirement-confirmation questions", context["suggested_agent_action"])
+        self.assertIn("at most three items", context["suggested_agent_action"])
+        self.assertIn("do not dump the full workflow", context["suggested_agent_action"])
+
     def test_unknown_route_passes_through(self):
         original = {"source_workbench": "unknown", "project_type": "settings"}
         self.assertEqual(enrich_agent_context(original), original)

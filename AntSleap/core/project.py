@@ -1185,6 +1185,9 @@ class ProjectManager:
             if "auto_boxes" in entry and part_name in entry["auto_boxes"]:
                 del entry["auto_boxes"][part_name]
 
+            if "auto_box_meta" in entry and part_name in entry["auto_box_meta"]:
+                del entry["auto_box_meta"][part_name]
+
             # Remove Blink Trajectory
             if "trajectories" in entry and part_name in entry["trajectories"]:
                 del entry["trajectories"][part_name]

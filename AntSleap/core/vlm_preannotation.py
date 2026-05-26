@@ -64,6 +64,12 @@ PART_SYNONYMS = {
 }
 
 
+class VlmApiError(RuntimeError):
+    def __init__(self, message: str, raw_response: str = ""):
+        super().__init__(message)
+        self.raw_response = str(raw_response or "")
+
+
 def _normalize_name(value: Any) -> str:
     text = str(value or "").strip()
     return re.sub(r"[\s_\-]+", "", text).lower()
@@ -360,8 +366,12 @@ def call_vlm_preannotation_api(
             timeout=config["timeout"],
         )
         if response.status_code >= 400:
-            raise RuntimeError(f"HTTP {response.status_code} - responses_error - {response.text}")
-        body = response.json()
+            raise VlmApiError(f"HTTP {response.status_code} - responses_error", response.text)
+        try:
+            body = response.json()
+        except ValueError as exc:
+            preview = response.text[:500].replace("\r", " ").replace("\n", " ").strip()
+            raise VlmApiError(f"vlm_api_response_not_json: {preview or 'empty provider response'}", response.text) from exc
         text = str(body.get("output_text", "") or "").strip()
         if not text:
             chunks: list[str] = []
@@ -372,7 +382,7 @@ def call_vlm_preannotation_api(
             text = "\n".join(chunks).strip()
         finish_reason = str(body.get("status", "") or "stop").strip().lower()
         if not text:
-            raise ValueError("empty_vlm_output")
+            raise VlmApiError("empty_vlm_output", response.text)
         return text, finish_reason
 
     payload = {
@@ -411,12 +421,18 @@ def call_vlm_preannotation_api(
         timeout=config["timeout"],
     )
     if response.status_code >= 400:
-        raise RuntimeError(f"HTTP {response.status_code} - chat_completions_error - {response.text}")
-    body = response.json()
-    text = str(body.get("choices", [{}])[0].get("message", {}).get("content", "") or "").strip()
-    finish_reason = str(body.get("choices", [{}])[0].get("finish_reason", "") or "").strip().lower()
+        raise VlmApiError(f"HTTP {response.status_code} - chat_completions_error", response.text)
+    try:
+        body = response.json()
+    except ValueError as exc:
+        preview = response.text[:500].replace("\r", " ").replace("\n", " ").strip()
+        raise VlmApiError(f"vlm_api_response_not_json: {preview or 'empty provider response'}", response.text) from exc
+    choices = body.get("choices", [])
+    first_choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+    text = str(first_choice.get("message", {}).get("content", "") or "").strip()
+    finish_reason = str(first_choice.get("finish_reason", "") or "").strip().lower()
     if not text:
-        raise ValueError("empty_vlm_output")
+        raise VlmApiError("empty_vlm_output", response.text)
     return text, finish_reason
 
 
@@ -641,6 +657,9 @@ def run_vlm_preannotation(
         except Exception as exc:
             status = "failed"
             error = str(exc)
+            raw_error_response = getattr(exc, "raw_response", "")
+            if raw_error_response and not raw_text:
+                raw_text = str(raw_error_response)
             rejected.append({"part": "", "reason": error})
 
     raw_response_path = os.path.join(output_dir, f"{Path(image_path).stem}_raw_response_{run_id}.txt")

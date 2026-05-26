@@ -1,13 +1,15 @@
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from PIL import Image
 
 from AntSleap.core.project import ProjectManager
-from AntSleap.core.vlm_preannotation import parse_vlm_response
+from AntSleap.core.vlm_preannotation import parse_vlm_response, run_vlm_preannotation
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -91,6 +93,32 @@ class VlmPreannotationTests(unittest.TestCase):
         self.assertNotIn("Head", labels.get("descriptions", {}))
         self.assertEqual(labels["boxes"]["Head"], [12.0, 12.0, 52.0, 42.0])
 
+    def test_delete_label_clears_ai_box_metadata(self):
+        manager = ProjectManager()
+        image_path = "memory/specimen.png"
+        manager.project_data["labels"][image_path] = {
+            "parts": {
+                "Head": [[10, 10], [50, 10], [30, 40]],
+            },
+            "auto_boxes": {
+                "Head": [10, 10, 50, 40],
+            },
+            "auto_box_meta": {
+                "Head": {"source": "vlm_first_mile", "review_status": "draft"},
+            },
+            "descriptions": {
+                "Head": "Auto-Annotated",
+            },
+            "status": "labeled",
+        }
+
+        manager.delete_label(image_path, "Head", save=False)
+
+        labels = manager.project_data["labels"][image_path]
+        self.assertNotIn("Head", labels.get("parts", {}))
+        self.assertNotIn("Head", labels.get("auto_boxes", {}))
+        self.assertNotIn("Head", labels.get("auto_box_meta", {}))
+
     def test_parse_grid_box_to_original_pixels(self):
         raw_response = json.dumps(
             {
@@ -117,6 +145,69 @@ class VlmPreannotationTests(unittest.TestCase):
         self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates[0]["part"], "Head")
         self.assertEqual(candidates[0]["box_xyxy"], [200.0, 300.0, 500.0, 700.0])
+
+    def test_provider_non_json_response_is_saved_for_diagnosis(self):
+        class FakeResponse:
+            status_code = 200
+            text = "<html>provider gateway error</html>"
+
+            def json(self):
+                raise ValueError("not json")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            image_path = Path(tmp_dir) / "specimen.png"
+            Image.new("RGB", (120, 80), color=(140, 150, 160)).save(image_path)
+
+            with patch("AntSleap.core.vlm_preannotation.requests.post", return_value=FakeResponse()):
+                with self.assertRaises(ValueError) as ctx:
+                    run_vlm_preannotation(
+                        str(image_path),
+                        ["Head"],
+                        tmp_dir,
+                        api_config={"api_key": "test-key", "base_url": "https://example.test/v1", "model": "vlm"},
+                        run_id="badjson",
+                    )
+
+            message = str(ctx.exception)
+            self.assertIn("vlm_api_response_not_json", message)
+            raw_response_path = Path(tmp_dir) / "specimen_raw_response_badjson.txt"
+            report_path = Path(tmp_dir) / "specimen_vlm_preannotation_badjson.json"
+            self.assertEqual(raw_response_path.read_text(encoding="utf-8"), FakeResponse.text)
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(report["status"], "failed")
+            self.assertIn("vlm_api_response_not_json", report["error"])
+            self.assertEqual(report["raw_response_path"], str(raw_response_path))
+
+    def test_provider_empty_model_text_response_is_saved_for_diagnosis(self):
+        class FakeResponse:
+            status_code = 200
+            text = '{"choices":[{"message":{"content":""},"finish_reason":"stop"}]}'
+
+            def json(self):
+                return json.loads(self.text)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            image_path = Path(tmp_dir) / "specimen.png"
+            Image.new("RGB", (120, 80), color=(140, 150, 160)).save(image_path)
+
+            with patch("AntSleap.core.vlm_preannotation.requests.post", return_value=FakeResponse()):
+                with self.assertRaises(ValueError) as ctx:
+                    run_vlm_preannotation(
+                        str(image_path),
+                        ["Head"],
+                        tmp_dir,
+                        api_config={"api_key": "test-key", "base_url": "https://example.test/v1", "model": "vlm"},
+                        run_id="emptytext",
+                    )
+
+            message = str(ctx.exception)
+            self.assertIn("empty_vlm_output", message)
+            raw_response_path = Path(tmp_dir) / "specimen_raw_response_emptytext.txt"
+            report_path = Path(tmp_dir) / "specimen_vlm_preannotation_emptytext.json"
+            self.assertEqual(raw_response_path.read_text(encoding="utf-8"), FakeResponse.text)
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(report["status"], "failed")
+            self.assertEqual(report["raw_response_path"], str(raw_response_path))
 
     def test_cli_prediction_fixture_writes_auto_boxes_only(self):
         tmp = PROJECT_ROOT / "artifacts" / "test_cases" / "vlm_preannotation"

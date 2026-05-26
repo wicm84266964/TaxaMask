@@ -4,6 +4,8 @@
 
 状态：已完成第一轮代码落地，建议下一步用 10-20 张真实蚂蚁分类学图片做小样本复核。
 
+补充复核记录：2026-05-26 晚间补做严格复核，发现并修复两处边界问题：供应商返回非 JSON 或空模型文本时，程序现在会保存原始响应和单图报告，避免只留下 `Expecting value` 这类难排查报错；删除某个部位标签时，会同步清理该部位的 `auto_box_meta`，避免旧 AI 草稿来源残留在项目 JSON 中。
+
 ## 1. 本次解决的问题
 
 这次工作主要解决两个研究流程痛点。
@@ -47,8 +49,8 @@
 真实运行时会生成：
 
 - 网格图：`<project_dir>/vlm_preannotation/*_grid_*.png`
-- 原始响应：`<project_dir>/vlm_preannotation/*_raw_*.txt`
-- 单图报告：`<project_dir>/vlm_preannotation/*_report_*.json`
+- 原始响应：`<project_dir>/vlm_preannotation/*_raw_response_*.txt`
+- 单图报告：`<project_dir>/vlm_preannotation/*_vlm_preannotation_*.json`
 - 批量汇总：`<project_dir>/vlm_preannotation/vlm_preannotation_summary_*.json`
 
 这些是研究运行产物，不随源码提交。需要排查 API 或 JSON 解析问题时，优先查看 raw response 和 report。
@@ -67,6 +69,13 @@ C:\Users\admin\anaconda3\envs\antsleap\python.exe -m unittest tests.test_blink_b
 ```
 
 说明：当前默认 Python 环境缺少 `torch`，`antsleap` 环境缺少 `pytest`，所以 GUI/Blink 相关测试使用 `unittest` 在 `antsleap` 环境中验证。
+
+严格复核补丁追加验证：
+
+```text
+python -m pytest tests/test_vlm_preannotation.py -q
+python -m py_compile AntSleap/core/vlm_preannotation.py AntSleap/core/project.py
+```
 
 ## 7. 下一步小样本复核
 

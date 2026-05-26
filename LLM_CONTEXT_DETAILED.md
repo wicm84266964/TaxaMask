@@ -1,10 +1,98 @@
 # TAXAMASK / FORMICA-FLOW SYSTEM TECHNICAL MANUAL (Deep Dive)
 
 > **Target Audience**: Expert LLM Assistants, Senior Developers
-> **Version**: v3.25 (May 22, 2026, Agent Center + Ask Agent routing + main-workbench Blink merge)
+> **Version**: v3.26 (May 26, 2026, VLM first-mile preannotation + explicit Blink parent confirmation)
 > **Purpose**: Up-to-date architectural, workflow, and governance context for implementation and maintenance.
 
 ---
+
+## 0) v3.26 VLM First-Mile Preannotation + Explicit Blink Parent Confirmation (2026-05-26)
+
+### 0.0 Research workflow intent
+- This release adds a draft-only VLM preannotation path for the hardest early project stage: no trained Locator, no Blink route expert, and no first batch of SAM prompt boxes.
+- The VLM is used as a **box suggester**, not a truth source:
+  - grid-overlay image -> multimodal model -> candidate boxes
+  - candidate boxes -> base SAM -> draft polygons
+  - human review -> training-eligible labels
+- The intended ant use case is common visible morphology structures such as `Head`, `Mesosoma`, `Gaster`, `Petiole`, `Eye`, and `Mandible`.
+- Operators must select target structures explicitly in settings. Generic labels such as `Object`, `Region`, or `Structure` are valid project parts but poor VLM targets for ant anatomy prompts.
+
+### 0.1 Main GUI behavior
+- `AntSleap/main.py` adds `VLM Pre-Annotate` to the Labeling Workbench top/right tool flow near `Ask Agent`.
+- `2D/STL Model Settings -> Training` now includes `AI Multimodal Pre-Annotation`.
+- `ProjectManager` persists:
+  - `vlm_preannotation.target_parts`
+  - `vlm_preannotation.processing_scope`
+- VLM target parts are independent from main locator parts (`locator_scope`).
+- Processing scope:
+  - `current_image`
+  - `all_images`
+- `all_images` requires a second confirmation and then runs linearly, one image at a time.
+- GUI progress is step-based. Each image contributes roughly six steps: grid/API/parse/write/SAM/report or failure completion.
+- Missing VLM target parts opens a dialog with an `Open VLM settings` button.
+- Missing multimodal API settings opens a dialog with an `Open API settings` button and jumps to the PDF Evidence multimodal API area.
+- The PDF Evidence API key fields remain visible; advanced/custom details can stay collapsible, but API key entry must not be hidden from users who jump there from VLM.
+
+### 0.2 Draft data semantics
+- VLM boxes are stored as orange `aibox` entries under `auto_boxes`.
+- Source/review metadata is stored under `auto_box_meta`.
+- SAM polygons generated from VLM boxes are saved with description `Auto-Annotated`.
+- Training preflight excludes unreviewed `Auto-Annotated` drafts.
+- Space verification and `Accept current image AI drafts` both call the same review boundary through `ProjectManager.verify_image_labels(...)`.
+- Review rules:
+  - draft polygon + human confirmation -> training eligible
+  - pure `aibox` without polygon -> remains unconfirmed
+  - current-image one-click accept never applies across all imported images
+  - manual SAM re-boxing wins over AI draft and removes stale AI box metadata for that part
+- `Clear AI Labels` removes AI draft labels and their AI box metadata.
+
+### 0.3 Artifacts and failure diagnostics
+- VLM run artifacts are written beside the project file in `vlm_preannotation/`.
+- Typical artifacts:
+  - grid image
+  - raw response text
+  - per-image report JSON
+  - GUI batch summary JSON
+- `AntSleap/vlm_preannotation/` is ignored by Git because it contains generated research images, provider responses, and run reports.
+- Empty/non-JSON model responses no longer fail as a bare `Expecting value` message only; future failures include raw response and report paths when available.
+
+### 0.4 Headless and core files
+- New core module: `AntSleap/core/vlm_preannotation.py`
+  - grid overlay generation
+  - prompt construction
+  - multimodal API call
+  - JSON parsing and box normalization
+  - raw response/report output, including failure cases
+- New CLI: `tools/agentic/vlm_preannotate_project.py`
+- Existing auto-annotation/preflight tools now respect unreviewed draft safety.
+- Focused tests:
+  - `tests/test_vlm_preannotation.py`
+  - `tests/test_agentic_auto_annotate.py`
+  - `tests/test_training_preflight.py`
+  - `tests/test_ui_polish_scope.py`
+
+### 0.5 Blink parent context fix
+- The main workbench no longer guesses a child parent from:
+  - an available parent box on the current image
+  - a single item in `locator_scope`
+- Child parent resolution now only accepts explicit or already-persisted structure:
+  - project memory (`blink_context_roi_parents`)
+  - a unique saved route parent
+  - the current part-tree parent, which itself comes from saved routes
+- The parent context combo still lists real parent candidates, but it does not select one automatically for a newly created child part.
+- When the user manually selects a parent context, the program writes `child -> parent` memory and registers a candidate route.
+- This prevents new structures from visually appearing to be swallowed into a parent-child tree before the researcher confirms that relation.
+
+### 0.6 Implementation documents and validation
+- Research-facing design/implementation docs:
+  - `docs/ant3d_workbench/VLM第一公里预标注方案_zh.md`
+  - `docs/ant3d_workbench/VLM第一公里预标注实施记录_zh.md`
+- Focused validation used mixed environments because the default Python had no `torch`, while the `antsleap` environment had no `pytest`.
+- Verified:
+  - `py_compile` for VLM, project, preflight, GUI, and related agentic scripts
+  - `pytest` for VLM/preflight/agentic tests where dependencies were available
+  - `unittest` in `C:\Users\admin\anaconda3\envs\antsleap\python.exe` for GUI/Blink-related tests
+  - `AntSleap.main` import in the `antsleap` environment
 
 ## 0) v3.25 Main Labeling Workbench Blink Merge (2026-05-22)
 
@@ -86,7 +174,7 @@
   - `Annotation Box` = formal parent/child annotation box
   - `Loose Shrink Box` = child-only auto-shrink start box
 - Parent parts come from project `locator_scope`; non-locator-scope structures are treated as child candidates.
-- Child parent resolution priority is: project memory (`blink_context_roi_parents`), part-tree parent, unique route parent, available parent box, then single locator-scope parent.
+- Child parent resolution priority is now explicit-only: project memory (`blink_context_roi_parents`), unique saved route parent, then the current part-tree parent derived from saved routes. It no longer falls back to an available parent box or a single locator-scope parent, because that made newly created structures look automatically bound under a parent.
 - Users can manually choose a parent context from the panel; this writes `child -> parent` memory and registers a candidate route with source `workbench_blink_refine`.
 
 ### 0.4 Box semantics after the merge

@@ -28,7 +28,7 @@ Agent Center -> choose PDF / 2D-STL / TIF workflow
 - Figure extraction and multimodal review profiles for different taxa or plate styles.
 - Embedded TaxaMask Agent Center powered by a local Ant-Code dashboard, with workflow shortcuts for 2D/STL morphology and TIF volume projects.
 - Taxa-aware project templates, including a validated ant morphology example and a generic taxonomy mask template.
-- Labeling Workbench for biological structure masks, including specimen-grouped STL-rendered surface views imported as derived 2D review images, plus integrated parent-child Blink refinement for small structures.
+- Labeling Workbench for biological structure masks, including specimen-grouped STL-rendered surface views imported as derived 2D review images, VLM first-mile draft boxes for SAM prompts, plus integrated parent-child Blink refinement for small structures.
 - TIF Volume Workbench for stack viewing, overlay review, material-map editing, working edits, and explicit promotion to manual training truth.
 - Route-appointed Blink experts for parent-structure to child-structure pre-annotation, shrink-trajectory generation, and local expert training from the main 2D/STL labeling surface.
 - Configurable main locator structures for non-ant projects.
@@ -138,10 +138,11 @@ TaxaMask Workbench
 1. Start in the Agent Center and choose whether the task is PDF evidence, 2D/STL morphology, or TIF volume annotation.
 2. For PDF evidence, configure API/profile settings and run a small batch before scaling.
 3. For 2D/STL morphology, create/open a 2D project, import ordinary images or STL-rendered views, then annotate in the Labeling Workbench.
-4. For child structures, use the Labeling Workbench's `Parent-child refinement / Blink` panel to pick the parent context, configure the route expert, auto-annotate, generate shrink trajectories, and train the current child expert.
-5. For TIF volume work, create/open a TIF project, import TIF stacks or AMIRA directories, review material maps, and promote reviewed edits to `manual_truth`.
-6. Train or connect the workflow-specific backend.
-7. Run pre-annotation/prediction, review results, and export a dataset or training handoff.
+4. Optionally configure VLM target structures and run `VLM Pre-Annotate` to create draft AI boxes/SAM polygons for human review before training.
+5. For child structures, use the Labeling Workbench's `Parent-child refinement / Blink` panel to pick the parent context, configure the route expert, auto-annotate, generate shrink trajectories, and train the current child expert.
+6. For TIF volume work, create/open a TIF project, import TIF stacks or AMIRA directories, review material maps, and promote reviewed edits to `manual_truth`.
+7. Train or connect the workflow-specific backend.
+8. Run pre-annotation/prediction, review results, and export a dataset or training handoff.
 
 See [TaxaMask使用手册.md](TaxaMask使用手册.md) for the detailed Chinese manual.
 

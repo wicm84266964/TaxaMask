@@ -4,6 +4,19 @@
 
 ## 📅 更新日志 (Update Log)
 
+### **[2026-05-26] VLM 第一公里预标注与 Blink 父级确认修复**
+> **本次重点：把多模态大模型接入为“草稿框建议器”，帮助没有训练素材时给 SAM 提供第一批提示框；同时修复新建部位被单一父级自动吸入父子关系树的交互漏洞。**
+
+- 主标注工作台新增 `VLM Pre-Annotate` 入口，可对当前图像或二次确认后的已导入图像线性批量生成 VLM 候选框。
+- `2D/STL Model Settings -> Training` 新增 AI 多模态预标注设置；VLM 目标部位由用户从已有部位中勾选，且与主定位部位 `locator_scope` 分开。
+- 复用 PDF Evidence 的 Multimodal LLM API 配置；缺少目标部位或 API 配置时，弹窗按钮可直接跳到对应设置位置，API key 输入区保持可见。
+- VLM 候选框写入橙色 `aibox`，SAM 草稿 polygon 标记为 `Auto-Annotated`；训练预检跳过未复核草稿，空格确认或当前图像一键通过后才进入训练。
+- 当前图像一键通过只确认已有 polygon 的 AI 草稿；纯框候选不会被误认为已复核训练材料。
+- 人工重新框选并调用 SAM 时，以人工结果为准，自动移除同部位旧 AI 框元数据和旧草稿。
+- 网格图、原始响应、单图 report 和批量 summary 保存在项目同级 `vlm_preannotation/`；源码仓库忽略该运行产物目录，避免真实研究图像和 API 响应误入提交。
+- VLM 返回空响应或非 JSON 时，现在会保留 raw response/report 路径，便于排查服务商返回、模型权限或 prompt 输出问题。
+- Blink 父级解析不再使用“已有父级框”或“唯一主部位”自动猜测父级；新建部位默认留在未分组结构中，只有用户手动选择父级或已有明确 route 才形成父子关系。
+
 ### **[2026-05-22] 主标注工作台吸收 Blink 父子精修**
 > **本次重点：把 2D/STL 日常小部位精修从独立 Blink Workbench 合并回主 Labeling Workbench。研究者在同一张大图里完成父级框、子部位标注、收缩松框、自动标注、trajectory 积累和当前子部位专家训练；独立 Blink widget 保留为兼容回退。**
 

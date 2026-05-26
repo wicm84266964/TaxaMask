@@ -868,6 +868,49 @@ class UiPolishScopeTests(unittest.TestCase):
         finally:
             window.deleteLater()
 
+    def test_single_locator_parent_does_not_auto_bind_new_child_part(self):
+        window = self.make_main_window()
+        try:
+            image_path = str(Path(self.temp_dir.name) / "specimen.png")
+            self.project_manager.project_data["taxonomy"] = ["Head", "Mandible"]
+            self.project_manager.project_data["locator_scope"] = ["Head"]
+            self.project_manager.project_data["images"] = [image_path]
+            self.project_manager.project_data["labels"] = {
+                image_path: {
+                    "parts": {},
+                    "boxes": {"Head": [10, 10, 80, 70]},
+                    "auto_boxes": {},
+                    "descriptions": {},
+                    "status": "unlabeled",
+                    "genus": "Unknown",
+                }
+            }
+
+            window.refresh_route_table()
+            window.current_image = image_path
+            self.assertEqual(window.part_list.topLevelItem(0).data(0, main_module.Qt.UserRole), "Head")
+            self.assertEqual(window.part_list.topLevelItem(0).childCount(), 0)
+
+            window._select_part_in_tree("Mandible")
+            context = window._refresh_blink_refine_state()
+
+            self.assertEqual(context["role"], "child")
+            self.assertIsNone(context["parent_part"])
+            self.assertEqual(context["parent_source"], "none")
+            self.assertEqual(window.combo_blink_parent_context.findData("Head"), 0)
+            self.assertEqual(window.combo_blink_parent_context.currentIndex(), -1)
+            self.assertIsNone(self.project_manager.get_blink_context_parent("Mandible"))
+            self.assertIsNone(self.project_manager.get_cascade_route("Head", "Mandible"))
+
+            window.combo_blink_parent_context.setCurrentIndex(0)
+            window.on_blink_parent_context_changed()
+
+            self.assertEqual(self.project_manager.get_blink_context_parent("Mandible"), "Head")
+            self.assertIsNotNone(self.project_manager.get_cascade_route("Head", "Mandible"))
+            self.assertEqual(window.part_list.topLevelItem(0).child(0).data(0, main_module.Qt.UserRole), "Mandible")
+        finally:
+            window.deleteLater()
+
     def test_workbench_parent_context_combo_lists_only_real_parent_options(self):
         window = self.make_main_window()
         try:
@@ -889,13 +932,15 @@ class UiPolishScopeTests(unittest.TestCase):
             window.refresh_route_table()
             window.current_image = image_path
             window._select_part_in_tree("Mandible")
+            context = window._refresh_blink_refine_state()
 
             combo_items = [window.combo_blink_parent_context.itemText(index) for index in range(window.combo_blink_parent_context.count())]
             combo_data = [window.combo_blink_parent_context.itemData(index) for index in range(window.combo_blink_parent_context.count())]
             self.assertIn("Head", combo_data)
             self.assertIn("Mesosoma", combo_data)
             self.assertNotIn("Choose parent context", combo_items)
-            self.assertGreaterEqual(window.combo_blink_parent_context.currentIndex(), 0)
+            self.assertIsNone(context["parent_part"])
+            self.assertEqual(window.combo_blink_parent_context.currentIndex(), -1)
         finally:
             window.deleteLater()
 

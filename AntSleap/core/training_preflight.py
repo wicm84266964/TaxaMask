@@ -143,6 +143,7 @@ def build_training_preflight(images, labels_by_image, taxonomy, locator_scope):
     excluded_invalid_images = []
     excluded_zero_annotation_images = []
     excluded_invalid_annotation_images = []
+    excluded_auto_draft_images = []
 
     locator_exact_size_counts = {}
 
@@ -150,6 +151,7 @@ def build_training_preflight(images, labels_by_image, taxonomy, locator_scope):
         label_entry = labels_by_image.get(image_path, {}) if isinstance(labels_by_image, dict) else {}
         raw_parts = label_entry.get("parts", {}) if isinstance(label_entry, dict) else {}
         raw_boxes = label_entry.get("boxes", {}) if isinstance(label_entry, dict) else {}
+        raw_descriptions = label_entry.get("descriptions", {}) if isinstance(label_entry, dict) else {}
 
         if not os.path.exists(image_path):
             excluded_missing_images.append(str(image_path))
@@ -164,9 +166,13 @@ def build_training_preflight(images, labels_by_image, taxonomy, locator_scope):
 
         valid_parts = {}
         valid_boxes = {}
+        skipped_auto_draft_parts = []
         for part_name, points in (raw_parts or {}).items():
             clean_part_name = str(part_name).strip()
             if clean_part_name not in taxonomy_set:
+                continue
+            if isinstance(raw_descriptions, dict) and raw_descriptions.get(clean_part_name) == "Auto-Annotated":
+                skipped_auto_draft_parts.append(clean_part_name)
                 continue
 
             clean_points = sanitize_polygon(points)
@@ -179,7 +185,9 @@ def build_training_preflight(images, labels_by_image, taxonomy, locator_scope):
                 valid_boxes[clean_part_name] = clean_box
 
         if not valid_parts:
-            if raw_parts:
+            if skipped_auto_draft_parts and raw_parts:
+                excluded_auto_draft_images.append(str(image_path))
+            elif raw_parts:
                 excluded_invalid_annotation_images.append(str(image_path))
             else:
                 excluded_zero_annotation_images.append(str(image_path))
@@ -257,6 +265,10 @@ def build_training_preflight(images, labels_by_image, taxonomy, locator_scope):
         warnings.append(
             f"Excluded {len(excluded_invalid_annotation_images)} image(s) whose saved annotations were invalid."
         )
+    if excluded_auto_draft_images:
+        warnings.append(
+            f"Excluded {len(excluded_auto_draft_images)} image(s) with only unreviewed Auto-Annotated drafts from training."
+        )
     if excluded_zero_annotation_images:
         warnings.append(
             f"Excluded {len(excluded_zero_annotation_images)} zero-annotation image(s) from training."
@@ -328,6 +340,7 @@ def build_training_preflight(images, labels_by_image, taxonomy, locator_scope):
         "excluded_invalid_images": excluded_invalid_images,
         "excluded_zero_annotation_images": excluded_zero_annotation_images,
         "excluded_invalid_annotation_images": excluded_invalid_annotation_images,
+        "excluded_auto_draft_images": excluded_auto_draft_images,
     }
 
 

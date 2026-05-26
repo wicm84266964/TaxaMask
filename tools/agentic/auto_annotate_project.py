@@ -121,6 +121,7 @@ def _apply_payload(
     image_path: str,
     payload: Any,
     only_new: bool,
+    save_drafts_only: bool = False,
 ) -> dict[str, Any]:
     polygons, auto_boxes = _extract_prediction_payload(payload)
     taxonomy = set(manager.project_data.get("taxonomy", []))
@@ -149,14 +150,28 @@ def _apply_payload(
             xs = [point[0] for point in clean_polygon]
             ys = [point[1] for point in clean_polygon]
             clean_box = _clean_box([min(xs), min(ys), max(xs), max(ys)], image_size)
-        manager.update_label(
-            image_path,
-            clean_part,
-            clean_polygon,
-            "Auto-Annotated",
-            auto_box=clean_box,
-            save=False,
-        )
+        if save_drafts_only:
+            update_auto_box = getattr(manager, "update_auto_box", None)
+            if callable(update_auto_box) and clean_box is not None:
+                update_auto_box(image_path, clean_part, clean_box, description_text="Auto-Annotated", save=False)
+            else:
+                manager.update_label(
+                    image_path,
+                    clean_part,
+                    [],
+                    "Auto-Annotated",
+                    auto_box=clean_box,
+                    save=False,
+                )
+        else:
+            manager.update_label(
+                image_path,
+                clean_part,
+                clean_polygon,
+                "Auto-Annotated",
+                auto_box=clean_box,
+                save=False,
+            )
         existing_parts.add(clean_part)
         saved += 1
     return {"image_path": image_path, "detected_count": len(polygons), "saved_count": saved, "rejected": rejected}
@@ -187,6 +202,7 @@ def main() -> int:
     parser.add_argument("--predictions", default="", help="Prediction JSON. Omit only with --run-engine.")
     parser.add_argument("--run-engine", action="store_true", help="Run AntEngine.predict_full_pipeline for each project image.")
     parser.add_argument("--only-new", action="store_true", help="Do not overwrite already-labeled parts.")
+    parser.add_argument("--draft-boxes-only", action="store_true", help="Write only draft auto_boxes instead of training-eligible polygons.")
     parser.add_argument("--confidence", type=float, default=0.35, help="Inference confidence threshold for --run-engine.")
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto", help="Compute device preference for --run-engine.")
     parser.add_argument("--report", default="", help="Optional annotation report JSON path.")
@@ -219,7 +235,7 @@ def main() -> int:
             continue
         if image_path not in manager.project_data.get("images", []):
             manager.add_images([image_path])
-        results.append(_apply_payload(manager, image_path, record.get("payload"), bool(args.only_new)))
+        results.append(_apply_payload(manager, image_path, record.get("payload"), bool(args.only_new), save_drafts_only=bool(args.draft_boxes_only)))
 
     manager.save_project()
     report = {
@@ -227,6 +243,7 @@ def main() -> int:
         "project_input": project_path,
         "project_output": out_project,
         "prediction_source": "engine" if args.run_engine else os.path.abspath(args.predictions),
+        "draft_boxes_only": bool(args.draft_boxes_only),
         "image_count": len(results),
         "saved_label_count": sum(int(item.get("saved_count", 0) or 0) for item in results),
         "rejected_count": sum(len(item.get("rejected", []) or []) for item in results),

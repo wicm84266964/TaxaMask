@@ -181,7 +181,7 @@ TRANSLATIONS = {
         "Advanced Logic Settings": "高级逻辑设置",
         "Advanced Figure Settings": "高级图文方案设置",
         "Figure Extraction / Review Profile:": "图文提取/复核方案:",
-        "Built-in Ant Triptych Figure Profile": "内置蚂蚁三视图图文方案",
+        "Built-in Ant Taxonomy Figure Profile": "内置蚂蚁分类学图版宽松复核方案",
         "Failed to load figure profile: {0}": "加载图文方案失败: {0}",
         "Failed to save figure profile: {0}": "保存图文方案失败: {0}",
         "Invalid figure profile JSON: {0}": "图文方案 JSON 无效: {0}",
@@ -1600,7 +1600,7 @@ class PdfProcessingWidget(QWidget):
     def refresh_figure_profile_list(self):
         self.combo_figure_profiles.blockSignals(True)
         self.combo_figure_profiles.clear()
-        default_label = self.tr("Built-in Ant Triptych Figure Profile")
+        default_label = self.tr("Built-in Ant Taxonomy Figure Profile")
         self.combo_figure_profiles.addItem(default_label, "DEFAULT_FIGURE")
 
         if os.path.exists(self.figure_configs_dir):
@@ -1867,7 +1867,7 @@ class PdfProcessingWidget(QWidget):
         api_action_layout.addStretch()
         api_action_layout.addWidget(self.btn_save_api_settings)
         api_panel_layout.addLayout(api_action_layout)
-        form_layout.addWidget(self.api_panel, 0)
+        layout.addWidget(self.api_panel, 0)
 
         # Profile Selector & Advanced Logic Button
         self.profile_panel = QWidget()

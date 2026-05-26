@@ -84,6 +84,42 @@ class TrainingPreflightTests(unittest.TestCase):
     def test_format_size_pair_returns_readable_exact_size(self):
         self.assertEqual(format_size_pair((960, 640)), "960x640")
 
+    def test_preflight_skips_unreviewed_auto_annotated_drafts(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            img_draft = self._make_image(tmp_dir, "draft.png", (960, 640))
+            img_reviewed = self._make_image(tmp_dir, "reviewed.png", (960, 640))
+            labels = {
+                img_draft: {
+                    "parts": {
+                        "Head": [[10, 10], [120, 10], [60, 90]],
+                    },
+                    "boxes": {"Head": [8, 8, 124, 92]},
+                    "descriptions": {"Head": "Auto-Annotated"},
+                },
+                img_reviewed: {
+                    "parts": {
+                        "Head": [[15, 15], [110, 15], [62, 92]],
+                    },
+                    "boxes": {"Head": [12, 12, 112, 94]},
+                    "descriptions": {},
+                },
+            }
+
+            preflight = build_training_preflight(
+                [img_draft, img_reviewed],
+                labels,
+                taxonomy=["Head"],
+                locator_scope=["Head"],
+            )
+
+            self.assertEqual(preflight["locator_image_count"], 1)
+            self.assertEqual(preflight["parts_image_count"], 1)
+            self.assertEqual(preflight["excluded_auto_draft_images"], [img_draft])
+            self.assertIn(
+                "Excluded 1 image(s) with only unreviewed Auto-Annotated drafts from training.",
+                preflight["warnings"],
+            )
+
     def test_preflight_reports_train_val_coverage_separately_for_locator_and_parts(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             img_a = self._make_image(tmp_dir, "a.png", (960, 640))

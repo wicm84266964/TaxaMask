@@ -56,6 +56,7 @@ AntSleap/*_artifacts/
 
 # Generated run outputs
 artifacts/
+AntSleap/vlm_preannotation/
 *.log
 training_report.png
 

@@ -46,6 +46,10 @@ class ProjectManager:
             "taxon_label": "Genus",
             "scales": {}, # Map: image_path -> float (pixels_per_mm)
             "image_provenance": {},
+            "vlm_preannotation": {
+                "target_parts": [],
+                "processing_scope": "current_image",
+            },
             "blink_context_roi_parents": {},
             "parent_box_aspect_ratios": dict(DEFAULT_PARENT_BOX_ASPECT_RATIOS),
             "cascade_routes": {
@@ -121,6 +125,39 @@ class ProjectManager:
             if not taxonomy or part_name in taxonomy:
                 clean_map.setdefault(part_name, float(ratio))
         return clean_map
+
+    def _sanitize_vlm_preannotation_settings(self, settings):
+        taxonomy = list(self.project_data.get("taxonomy", []))
+        taxonomy_set = set(taxonomy)
+        if not isinstance(settings, dict):
+            settings = {}
+        target_parts = []
+        for part_name in settings.get("target_parts", []):
+            clean_part = str(part_name or "").strip()
+            if clean_part and clean_part in taxonomy_set and clean_part not in target_parts:
+                target_parts.append(clean_part)
+        processing_scope = str(settings.get("processing_scope", "current_image") or "current_image").strip()
+        if processing_scope not in {"current_image", "all_images"}:
+            processing_scope = "current_image"
+        return {
+            "target_parts": target_parts,
+            "processing_scope": processing_scope,
+        }
+
+    def get_vlm_preannotation_settings(self):
+        settings = self._sanitize_vlm_preannotation_settings(self.project_data.get("vlm_preannotation", {}))
+        self.project_data["vlm_preannotation"] = settings
+        return settings
+
+    def set_vlm_preannotation_settings(self, settings, save=True):
+        clean_settings = self._sanitize_vlm_preannotation_settings(settings)
+        self.project_data["vlm_preannotation"] = clean_settings
+        if save:
+            self.save_project()
+        return clean_settings
+
+    def get_vlm_preannotation_target_parts(self):
+        return list(self.get_vlm_preannotation_settings().get("target_parts", []))
 
     def _category_supercategory(self):
         value = self.project_data.get("category_supercategory", DEFAULT_CATEGORY_SUPERCATEGORY)
@@ -369,6 +406,10 @@ class ProjectManager:
             "taxon_label": "Genus",
             "scales": {},
             "image_provenance": {},
+            "vlm_preannotation": {
+                "target_parts": [],
+                "processing_scope": "current_image",
+            },
             "blink_context_roi_parents": {},
             "parent_box_aspect_ratios": dict(DEFAULT_PARENT_BOX_ASPECT_RATIOS),
             "cascade_routes": {
@@ -415,6 +456,9 @@ class ProjectManager:
         self.project_data["parent_box_aspect_ratios"] = self._sanitize_parent_box_aspect_ratios(
             loaded_data.get("parent_box_aspect_ratios", DEFAULT_PARENT_BOX_ASPECT_RATIOS)
         )
+        self.project_data["vlm_preannotation"] = self._sanitize_vlm_preannotation_settings(
+            loaded_data.get("vlm_preannotation", {})
+        )
         self.project_data["cascade_routes"] = self._sanitize_cascade_routes(
             loaded_data.get("cascade_routes", {})
         )
@@ -457,6 +501,7 @@ class ProjectManager:
                 "project_template": self.project_data.get("project_template", ""),
                 "category_supercategory": self._category_supercategory(),
                 "taxon_label": self.project_data.get("taxon_label", "Taxon"),
+                "vlm_preannotation": self.get_vlm_preannotation_settings(),
                 "blink_context_roi_parents": self.get_blink_context_roi_parents(),
                 "parent_box_aspect_ratios": self.get_parent_box_aspect_ratios(),
                 "cascade_routes": self.get_cascade_routes(),
@@ -943,6 +988,8 @@ class ProjectManager:
                     if "auto_boxes" in self.project_data["labels"][image_path]:
                         if part_name in self.project_data["labels"][image_path]["auto_boxes"]:
                             del self.project_data["labels"][image_path]["auto_boxes"][part_name]
+                    if "auto_box_meta" in self.project_data["labels"][image_path]:
+                        self.project_data["labels"][image_path]["auto_box_meta"].pop(part_name, None)
             except Exception as e:
                 print(f"Error sanitizing box: {e}")
         
@@ -956,17 +1003,75 @@ class ProjectManager:
             except Exception as e:
                 print(f"Error sanitizing auto_box: {e}")
 
+        entry = self.project_data["labels"][image_path]
         if description_text:
-            self.project_data["labels"][image_path]["descriptions"][part_name] = description_text
+            entry["descriptions"][part_name] = description_text
+        elif not auto_box and entry.get("descriptions", {}).get(part_name) == "Auto-Annotated":
+            del entry["descriptions"][part_name]
             
         if save:
             self.save_project()
+
+    def update_auto_box(self, image_path, part_name, box, description_text=None, source_meta=None, save=True):
+        clean_part = str(part_name or "").strip()
+        clean_box = None
+        if isinstance(box, (list, tuple)) and len(box) == 4:
+            try:
+                clean_box = [float(value) for value in box]
+            except Exception:
+                clean_box = None
+        if not clean_part or not clean_box or clean_box[2] <= clean_box[0] or clean_box[3] <= clean_box[1]:
+            return False
+        if image_path not in self.project_data["labels"]:
+            self.project_data["labels"][image_path] = self._default_label_entry()
+        entry = self.project_data["labels"][image_path]
+        entry.setdefault("auto_boxes", {})[clean_part] = clean_box
+        if description_text:
+            entry.setdefault("descriptions", {})[clean_part] = str(description_text)
+        if source_meta:
+            entry.setdefault("auto_box_meta", {})[clean_part] = dict(source_meta)
+        if save:
+            self.save_project()
+        return True
+
+    def set_auto_box_review_status(self, image_path, part_name, review_status, save=True):
+        clean_part = str(part_name or "").strip()
+        clean_status = str(review_status or "").strip() or "draft"
+        if not clean_part or image_path not in self.project_data["labels"]:
+            return False
+        entry = self.project_data["labels"][image_path]
+        if clean_part not in entry.get("auto_boxes", {}):
+            return False
+        meta = entry.setdefault("auto_box_meta", {}).setdefault(clean_part, {})
+        meta["review_status"] = clean_status
+        if save:
+            self.save_project()
+        return True
+
+    def remove_auto_box(self, image_path, part_name, save=True):
+        clean_part = str(part_name or "").strip()
+        if not clean_part or image_path not in self.project_data["labels"]:
+            return False
+        entry = self.project_data["labels"][image_path]
+        removed = False
+        if clean_part in entry.get("auto_boxes", {}):
+            del entry["auto_boxes"][clean_part]
+            removed = True
+        if clean_part in entry.get("auto_box_meta", {}):
+            del entry["auto_box_meta"][clean_part]
+            removed = True
+        if save and removed:
+            self.save_project()
+        return removed
     
     def get_boxes(self, image_path):
         return self.project_data["labels"].get(image_path, {}).get("boxes", {})
 
     def get_auto_boxes(self, image_path):
         return self.project_data["labels"].get(image_path, {}).get("auto_boxes", {})
+
+    def get_auto_box_meta(self, image_path):
+        return self.project_data["labels"].get(image_path, {}).get("auto_box_meta", {})
 
     def get_locator_scope(self):
         locator_scope = self.project_data.get("locator_scope", [])
@@ -1183,6 +1288,10 @@ class ProjectManager:
                 if part in labels["parts"]:
                     del labels["parts"][part]
                 del labels["descriptions"][part]
+                if "auto_boxes" in labels and part in labels["auto_boxes"]:
+                    del labels["auto_boxes"][part]
+                if "auto_box_meta" in labels and part in labels["auto_box_meta"]:
+                    del labels["auto_box_meta"][part]
                 removed_count += 1
                 
             if not labels["parts"]:
@@ -1192,15 +1301,17 @@ class ProjectManager:
         return removed_count
 
     def verify_image_labels(self, image_path):
-        """Removes 'Auto-Annotated' flag from all labels in the given image."""
+        """Removes 'Auto-Annotated' only from labels with a saved polygon."""
         if image_path not in self.project_data["labels"]: return 0
         
         labels = self.project_data["labels"][image_path]
+        parts = labels.get("parts", {}) if isinstance(labels.get("parts", {}), dict) else {}
         count = 0
         if "descriptions" in labels:
             for part in list(labels["descriptions"].keys()):
-                if labels["descriptions"][part] == "Auto-Annotated":
+                if labels["descriptions"][part] == "Auto-Annotated" and parts.get(part):
                     del labels["descriptions"][part]
+                    self.set_auto_box_review_status(image_path, part, "confirmed", save=False)
                     count += 1
         
         if count > 0:

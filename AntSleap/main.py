@@ -4,6 +4,7 @@ import csv
 import json
 import re
 import threading
+import time
 import cv2
 
 # pyright: reportMissingImports=false, reportGeneralTypeIssues=false, reportAttributeAccessIssue=false, reportArgumentType=false, reportCallIssue=false, reportOptionalMemberAccess=false, reportOptionalCall=false, reportUninitializedInstanceVariable=false, reportOperatorIssue=false
@@ -84,6 +85,11 @@ try:
     from AntSleap.core.platform_open import open_path
     from AntSleap.core.runtime_device import normalize_device_preference, resolve_torch_device
     from AntSleap.core.agent_context_routes import enrich_agent_context
+    from AntSleap.core.vlm_preannotation import (
+        VLM_PREANNOTATION_SCHEMA_VERSION,
+        load_vlm_api_config_from_runtime_settings,
+        run_vlm_preannotation,
+    )
 except ImportError:
     from core.project import ProjectManager
     from core.database import MultiModalDB
@@ -137,6 +143,11 @@ except ImportError:
     from core.platform_open import open_path
     from core.runtime_device import normalize_device_preference, resolve_torch_device
     from core.agent_context_routes import enrich_agent_context
+    from core.vlm_preannotation import (
+        VLM_PREANNOTATION_SCHEMA_VERSION,
+        load_vlm_api_config_from_runtime_settings,
+        run_vlm_preannotation,
+    )
 
 from torch.utils.data import DataLoader
 
@@ -180,6 +191,73 @@ class InferenceThread(QThread):
             
         self.finished_signal.emit()
 
+
+class VlmPreannotationThread(QThread):
+    log_signal = Signal(str)
+    image_result_signal = Signal(dict)
+    progress_signal = Signal(int, int, str)
+    error_signal = Signal(str)
+    finished_signal = Signal()
+
+    def __init__(
+        self,
+        image_path,
+        target_parts,
+        artifacts_dir,
+        api_config,
+        run_id,
+        grid_cols=12,
+        grid_rows=12,
+        min_confidence=0.25,
+    ):
+        super().__init__()
+        self.image_path = image_path
+        self.target_parts = list(target_parts or [])
+        self.artifacts_dir = artifacts_dir
+        self.api_config = dict(api_config or {})
+        self.run_id = str(run_id or time.strftime("%Y%m%d_%H%M%S"))
+        self.grid_cols = int(grid_cols)
+        self.grid_rows = int(grid_rows)
+        self.min_confidence = float(min_confidence)
+
+    def run(self):
+        def mark_step(step_name):
+            self.progress_signal.emit(1, 1, str(step_name))
+
+        try:
+            self.log_signal.emit(f"VLM first-mile preannotation started: {os.path.basename(self.image_path)}")
+            result = run_vlm_preannotation(
+                self.image_path,
+                self.target_parts,
+                self.artifacts_dir,
+                api_config=self.api_config,
+                grid_cols=self.grid_cols,
+                grid_rows=self.grid_rows,
+                min_confidence=self.min_confidence,
+                run_id=self.run_id,
+                progress_callback=mark_step,
+            )
+            self.image_result_signal.emit(result)
+        except Exception as exc:
+            message = str(exc)
+            report_match = re.search(r"report=([^;]+)$", message)
+            raw_match = re.search(r"raw_response=([^;]+);", message)
+            self.image_result_signal.emit(
+                {
+                    "schema_version": VLM_PREANNOTATION_SCHEMA_VERSION,
+                    "status": "failed",
+                    "image_path": self.image_path,
+                    "target_parts": self.target_parts,
+                    "candidates": [],
+                    "rejected": [{"part": "", "reason": message}],
+                    "error": message,
+                    "raw_response_path": raw_match.group(1).strip() if raw_match else "",
+                    "report_path": report_match.group(1).strip() if report_match else "",
+                }
+            )
+        finally:
+            self.finished_signal.emit()
+
 # --- Localization ---
 TRANSLATIONS = {
     "zh": {
@@ -198,6 +276,34 @@ TRANSLATIONS = {
         "AI WORKFLOW": "AI 工作流",
         "Auto (Current)": "自动标注 (当前)",
         "Batch (All)": "批量标注 (全部)",
+        "VLM First-Mile Boxes": "VLM 第一公里框",
+        "VLM Pre-Annotate": "VLM 预标注",
+        "Use the configured multimodal model to propose SAM prompt boxes for the current image. Results are draft AI boxes until reviewed.": "使用已配置的多模态模型为当前图片生成 SAM 提示框。结果在复核前只是 AI 草稿框。",
+        "AI Multimodal Pre-Annotation:": "AI 多模态预标注：",
+        "Choose which existing project structures will be sent to the multimodal model. This list is separate from main locator parts.": "选择哪些已有项目结构会发送给多模态大模型。这个列表与主定位结构分开。",
+        "VLM Target Parts:": "VLM 目标部位：",
+        "VLM Processing Scope:": "VLM 处理范围：",
+        "Current image only": "仅当前图像",
+        "All imported images": "已导入所有图像",
+        "Select at least one VLM target part before running pre-annotation.": "运行预标注前，请至少选择一个 VLM 目标部位。",
+        "Open VLM settings": "打开 VLM 设置",
+        "Please select an image first.": "请先选择一张图片。",
+        "VLM preannotation is already running.": "VLM 预标注正在运行。",
+        "No target structures are available for VLM preannotation.": "当前没有可供 VLM 预标注的目标结构。",
+        "Configure the Multimodal LLM API in PDF Evidence Tools first.": "请先在 PDF 证据工具中配置多模态 LLM API。",
+        "Open API settings": "打开 API 设置",
+        "VLM first-mile preannotation started for {0}.": "VLM 第一公里预标注已开始：{0}。",
+        "Run VLM preannotation on all imported images?\n\nThis will call the multimodal API, may incur provider cost, and will write draft AI boxes and SAM polygons for later review.": "对已导入的所有图像运行 VLM 预标注？\n\n这会调用多模态 API，可能产生服务商费用，并写入待复核的 AI 草稿框和 SAM 掩码。",
+        "VLM batch progress: {0}/{1} steps ({2}).": "VLM 批量进度：{0}/{1} 步（{2}）。",
+        "VLM preannotation finished. Images: {0}; saved drafts: {1}; report: {2}": "VLM 预标注完成。图像：{0}；保存草稿：{1}；报告：{2}",
+        "Accept current image AI drafts": "一键通过当前图 AI 草稿",
+        "Accepted {0} AI draft(s) on current image.": "已通过当前图像 {0} 个 AI 草稿。",
+        "No reviewable AI polygon drafts on current image.": "当前图像没有可通过的 AI 多边形草稿。",
+        "SAM draft failed for {0}: {1}": "SAM 草稿生成失败：{0}，原因：{1}",
+        "VLM first-mile preannotation returned no usable boxes.": "VLM 第一公里预标注没有返回可用框。",
+        "VLM preannotation saved {0} draft(s): {1} SAM polygon(s), {2} box-only draft(s), skipped {3}. Report: {4}": "VLM 预标注已保存 {0} 个草稿：{1} 个 SAM 多边形，{2} 个仅框草稿，跳过 {3} 个。报告：{4}",
+        "VLM first-mile preannotation failed: {0}": "VLM 第一公里预标注失败：{0}",
+        "Could not read the current image.": "无法读取当前图片。",
         "Train Models": "训练模型",
         "LOGS": "日志",
         "Export Dataset": "导出数据集",
@@ -756,6 +862,10 @@ def _translate_training_warning_text(text, lang="en"):
         (
             r"^Excluded (\d+) image\(s\) whose saved annotations were invalid\.$",
             "训练中排除了 {0} 张已保存标注无效的图片。",
+        ),
+        (
+            r"^Excluded (\d+) image\(s\) with only unreviewed Auto-Annotated drafts from training\.$",
+            "训练中排除了 {0} 张只有未复核 Auto-Annotated 草稿的图片。",
         ),
         (
             r"^Excluded (\d+) zero-annotation image\(s\) from training\.$",
@@ -2001,6 +2111,7 @@ class ModelSettingsDialog(QDialog):
         self.tabs = QTabWidget()
         self.tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
         self.locator_scope_checks = []
+        self.vlm_target_part_checks = []
 
         workflow_note = QLabel(
             tr(
@@ -2215,6 +2326,48 @@ class ModelSettingsDialog(QDialog):
         self.locator_scope_validation_label.setObjectName("mutedLabel")
         locator_layout.addWidget(self.locator_scope_validation_label)
         form_train.addWidget(locator_group)
+
+        vlm_settings = params.get("vlm_preannotation", {}) if isinstance(params.get("vlm_preannotation", {}), dict) else {}
+        vlm_group = QGroupBox(tr("AI Multimodal Pre-Annotation:", lang))
+        apply_surface_role(vlm_group, SURFACE_ROLE_SUBTLE, "modelSettingsVlmPreannotationPanel")
+        vlm_layout = QVBoxLayout(vlm_group)
+        vlm_layout.setContentsMargins(12, 12, 12, 12)
+        vlm_layout.setSpacing(8)
+        vlm_note = QLabel(
+            tr(
+                "Choose which existing project structures will be sent to the multimodal model. This list is separate from main locator parts.",
+                lang,
+            )
+        )
+        vlm_note.setWordWrap(True)
+        vlm_note.setObjectName("mutedLabel")
+        vlm_layout.addWidget(vlm_note)
+        vlm_layout.addWidget(QLabel(tr("VLM Target Parts:", lang)))
+        vlm_grid = QGridLayout()
+        vlm_grid.setContentsMargins(0, 4, 0, 0)
+        vlm_grid.setHorizontalSpacing(16)
+        vlm_grid.setVerticalSpacing(6)
+        selected_vlm_parts = {
+            str(part).strip()
+            for part in vlm_settings.get("target_parts", [])
+            if str(part).strip()
+        }
+        for index, part_name in enumerate(taxonomy):
+            check = QCheckBox(part_name)
+            check.setChecked(part_name in selected_vlm_parts)
+            check.setProperty("part_name", part_name)
+            self.vlm_target_part_checks.append(check)
+            vlm_grid.addWidget(check, index // 2, index % 2)
+        vlm_layout.addLayout(vlm_grid)
+        vlm_layout.addWidget(QLabel(tr("VLM Processing Scope:", lang)))
+        self.combo_vlm_processing_scope = NoWheelComboBox()
+        self.combo_vlm_processing_scope.addItem(tr("Current image only", lang), "current_image")
+        self.combo_vlm_processing_scope.addItem(tr("All imported images", lang), "all_images")
+        scope_value = str(vlm_settings.get("processing_scope", "current_image") or "current_image")
+        scope_index = self.combo_vlm_processing_scope.findData(scope_value)
+        self.combo_vlm_processing_scope.setCurrentIndex(scope_index if scope_index >= 0 else 0)
+        vlm_layout.addWidget(self.combo_vlm_processing_scope)
+        form_train.addWidget(vlm_group)
         
         form_train.addStretch()
         self.tabs.addTab(self._make_scroll_tab(tab_train), tr("Training", lang))
@@ -2359,6 +2512,15 @@ class ModelSettingsDialog(QDialog):
                     selected.append(part_name)
         return selected
 
+    def _selected_vlm_target_parts(self):
+        selected = []
+        for check in self.vlm_target_part_checks:
+            if check.isChecked():
+                part_name = str(check.property("part_name") or check.text()).strip()
+                if part_name:
+                    selected.append(part_name)
+        return selected
+
     def _parent_box_aspect_ratio_values(self):
         ratios = {}
         for part_name, editor in getattr(self, "parent_box_ratio_inputs", {}).items():
@@ -2421,6 +2583,10 @@ class ModelSettingsDialog(QDialog):
                 'noise_floor': float(self.spin_noise.text()),
                 'poly_epsilon': float(self.spin_poly.text()),
                 'locator_scope': self._selected_locator_scope(),
+                'vlm_preannotation': {
+                    'target_parts': self._selected_vlm_target_parts(),
+                    'processing_scope': self.combo_vlm_processing_scope.currentData() or "current_image",
+                },
                 'parent_box_aspect_ratios': self._parent_box_aspect_ratio_values(),
                 'runtime_device': self.combo_runtime_device.currentData() or "auto",
                 'model_backend': self.backend_combo.currentData() or BUILTIN_BACKEND_ID,
@@ -3002,6 +3168,7 @@ class MainWindow(QMainWindow):
         self.pending_training_preflight = None
         self.training_retry_requested = False
         self.current_blink_context = {}
+        self.vlm_preannotation_thread = None
         self.parent_box_aspect_ratios = (
             self.project.get_parent_box_aspect_ratios()
             if hasattr(self.project, "get_parent_box_aspect_ratios")
@@ -3035,6 +3202,10 @@ class MainWindow(QMainWindow):
         self.btn_agent_from_workbench.setObjectName("workbenchAskAgentButton")
         self.btn_agent_from_workbench.clicked.connect(lambda: self.open_agent_from_context(self._collect_image_workbench_agent_context()))
         apply_semantic_button_style(self.btn_agent_from_workbench, BUTTON_ROLE_NEUTRAL)
+        self.btn_vlm_preannotate = QPushButton()
+        self.btn_vlm_preannotate.setObjectName("workbenchVlmPreannotateButton")
+        self.btn_vlm_preannotate.clicked.connect(self.run_vlm_preannotation_from_settings)
+        apply_semantic_button_style(self.btn_vlm_preannotate, BUTTON_ROLE_RUN)
 
         self.workbench_top_bar = QWidget()
         apply_surface_role(self.workbench_top_bar, SURFACE_ROLE_TOOLBAR, "workbenchTopBar")
@@ -3057,6 +3228,7 @@ class MainWindow(QMainWindow):
         toolbar_flow_layout.setSpacing(8)
         toolbar_flow_layout.addWidget(self.btn_blink_entry)
         toolbar_flow_layout.addWidget(self.btn_start_center_from_workbench)
+        toolbar_flow_layout.addWidget(self.btn_vlm_preannotate)
         toolbar_flow_layout.addWidget(self.btn_agent_from_workbench)
 
         top_bar_layout.addWidget(self.toolbar_project_panel, 0)
@@ -3327,6 +3499,10 @@ class MainWindow(QMainWindow):
         apply_semantic_button_style(self.btn_batch, BUTTON_ROLE_RUN, "padding: 5px;")
         btns_layout.addWidget(self.btn_batch)
         ai_action_layout.addLayout(btns_layout)
+        self.btn_accept_current_ai_drafts = QPushButton()
+        self.btn_accept_current_ai_drafts.clicked.connect(self.accept_current_image_ai_drafts)
+        apply_semantic_button_style(self.btn_accept_current_ai_drafts, BUTTON_ROLE_COMMIT, "padding: 6px;")
+        ai_action_layout.addWidget(self.btn_accept_current_ai_drafts)
         self.chk_train_locator_only = QCheckBox()
         self.chk_train_locator_only.setToolTip(
             tr(
@@ -4910,6 +5086,48 @@ class MainWindow(QMainWindow):
             index = self.tabs.addTab(self.pdf_widget, tr("PDF Evidence Tools", self.current_lang))
         self.tabs.setCurrentIndex(index)
 
+    def open_pdf_multimodal_api_settings(self):
+        self.open_pdf_evidence_tools()
+        pdf_widget = getattr(self, "pdf_widget", None)
+        if pdf_widget is None:
+            return
+        if hasattr(pdf_widget, "tabs"):
+            try:
+                pdf_widget.tabs.setCurrentIndex(0)
+            except Exception:
+                pass
+        if hasattr(pdf_widget, "api_panel"):
+            try:
+                pdf_widget.api_panel.setVisible(True)
+            except Exception:
+                pass
+        target = getattr(pdf_widget, "mllm_group", None) or getattr(pdf_widget, "api_panel", None)
+        scroll = getattr(pdf_widget, "main_scroll", None)
+        if target is not None and scroll is not None:
+            try:
+                scroll.ensureWidgetVisible(target)
+            except Exception:
+                pass
+        use_same = True
+        same_widget = getattr(pdf_widget, "check_mllm_same_as_text", None)
+        if same_widget is not None and hasattr(same_widget, "isChecked"):
+            try:
+                use_same = bool(same_widget.isChecked())
+            except Exception:
+                use_same = True
+        editor = (
+            getattr(pdf_widget, "edit_api_key", None)
+            if use_same
+            else getattr(pdf_widget, "edit_mllm_api_key", None)
+        )
+        if editor is None:
+            editor = getattr(pdf_widget, "edit_mllm_model", None) or getattr(pdf_widget, "edit_model", None)
+        if editor is not None and hasattr(editor, "setFocus"):
+            try:
+                editor.setFocus()
+            except Exception:
+                pass
+
     def _choose_project_template(self):
         templates = iter_project_templates()
         if not templates:
@@ -5109,23 +5327,11 @@ class MainWindow(QMainWindow):
                 parents.append(parent)
         return parents
 
-    def _first_parent_with_box(self, image_path, parent_parts):
-        manual = self.project.get_boxes(image_path) if image_path else {}
-        auto = self.project.get_auto_boxes(image_path) if image_path else {}
-        for source_name, boxes in (("manual", manual), ("auto", auto)):
-            if not isinstance(boxes, dict):
-                continue
-            for parent_part in parent_parts or []:
-                if _clean_box(boxes.get(parent_part)):
-                    return parent_part
-        return None
-
     def _resolve_child_parent(self, child_part):
         clean_child = str(child_part or "").strip()
         if not clean_child:
             return None, "none"
         taxonomy = set(str(part).strip() for part in self.project.project_data.get("taxonomy", []) if str(part).strip())
-        parent_candidates = self._workbench_parent_parts()
 
         remembered_parent = None
         get_parent = getattr(self.project, "get_blink_context_parent", None)
@@ -5138,20 +5344,13 @@ class MainWindow(QMainWindow):
         if remembered_parent and remembered_parent in taxonomy and remembered_parent != clean_child:
             return remembered_parent, "remembered"
 
-        tree_parent = self._part_tree_parent_for(clean_child)
-        if tree_parent and tree_parent != clean_child:
-            return tree_parent, "part_tree"
-
         route_parents = self._route_parents_for_child(clean_child)
         if len(route_parents) == 1:
             return route_parents[0], "route"
 
-        boxed_parent = self._first_parent_with_box(self.current_image, parent_candidates)
-        if boxed_parent:
-            return boxed_parent, "available_box"
-
-        if len(parent_candidates) == 1 and parent_candidates[0] != clean_child:
-            return parent_candidates[0], "locator_scope"
+        tree_parent = self._part_tree_parent_for(clean_child)
+        if tree_parent and tree_parent != clean_child:
+            return tree_parent, "part_tree"
         return None, "none"
 
     def _parent_context_box(self, parent_part):
@@ -5550,6 +5749,16 @@ class MainWindow(QMainWindow):
         self.label_model_backend.setText(f"{tr('Model Backend:', self.current_lang)} {backend_label}")
         self.btn_predict.setText(tr("Auto (Current)", self.current_lang))
         self.btn_batch.setText(tr("Batch (All)", self.current_lang))
+        if hasattr(self, "btn_vlm_preannotate"):
+            self.btn_vlm_preannotate.setText(tr("VLM Pre-Annotate", self.current_lang))
+            self.btn_vlm_preannotate.setToolTip(
+                tr(
+                    "Use the configured multimodal model to propose SAM prompt boxes for the current image. Results are draft AI boxes until reviewed.",
+                    self.current_lang,
+                )
+            )
+        if hasattr(self, "btn_accept_current_ai_drafts"):
+            self.btn_accept_current_ai_drafts.setText(tr("Accept current image AI drafts", self.current_lang))
         self.chk_train_locator_only.setText(tr("Train Locator only (skip SAM)", self.current_lang))
         self.chk_train_locator_only.setToolTip(
             tr(
@@ -5776,7 +5985,7 @@ class MainWindow(QMainWindow):
         self.log(tr("General settings updated.", self.current_lang))
         self.refresh_ui()
 
-    def open_stl_model_settings(self, target_route=None):
+    def open_stl_model_settings(self, target_route=None, focus_vlm=False):
         params = {
             'epochs': self.train_epochs, 'batch': self.train_batch, 'lr': self.train_lr, 'wd': self.train_wd,
             'blink_epochs': self.blink_train_epochs,
@@ -5791,12 +6000,15 @@ class MainWindow(QMainWindow):
             'runtime_device': self.runtime_device,
             'taxonomy': self.project.project_data.get("taxonomy", []),
             'locator_scope': self.project.get_locator_scope(),
+            'vlm_preannotation': self.project.get_vlm_preannotation_settings() if hasattr(self.project, "get_vlm_preannotation_settings") else {},
             'parent_box_aspect_ratios': self.project.get_parent_box_aspect_ratios() if hasattr(self.project, "get_parent_box_aspect_ratios") else {},
         }
         route_panel = getattr(self, "route_settings_panel", None)
         if route_panel is not None:
             route_panel.setParent(None)
         dlg = ModelSettingsDialog(params, self.current_lang, self, route_panel=route_panel)
+        if focus_vlm and hasattr(dlg, "tabs"):
+            dlg.tabs.setCurrentIndex(0)
         if target_route and route_panel is not None:
             if hasattr(dlg, "tabs"):
                 dlg.tabs.setCurrentIndex(1)
@@ -5827,6 +6039,8 @@ class MainWindow(QMainWindow):
             self.model_backend = v.get("model_backend", BUILTIN_BACKEND_ID)
             self.external_backend_config = sanitize_external_backend_config(v.get("external_backend", {}))
             self.project.set_locator_scope(v.get("locator_scope", []), save=False)
+            if hasattr(self.project, "set_vlm_preannotation_settings"):
+                self.project.set_vlm_preannotation_settings(v.get("vlm_preannotation", {}), save=False)
             self.project.project_data["parent_box_aspect_ratios"] = v.get("parent_box_aspect_ratios", {})
             self.parent_box_aspect_ratios = (
                 self.project.get_parent_box_aspect_ratios()
@@ -5982,6 +6196,10 @@ class MainWindow(QMainWindow):
             apply_theme_button_style(self.btn_predict, BUTTON_ROLE_RUN, "padding: 5px;", self.current_theme)
         if hasattr(self, "btn_batch"):
             apply_theme_button_style(self.btn_batch, BUTTON_ROLE_RUN, "padding: 5px;", self.current_theme)
+        if hasattr(self, "btn_vlm_preannotate"):
+            apply_theme_button_style(self.btn_vlm_preannotate, BUTTON_ROLE_RUN, "padding: 6px;", self.current_theme)
+        if hasattr(self, "btn_accept_current_ai_drafts"):
+            apply_theme_button_style(self.btn_accept_current_ai_drafts, BUTTON_ROLE_COMMIT, "padding: 6px;", self.current_theme)
         if hasattr(self, "btn_train"):
             apply_theme_button_style(self.btn_train, BUTTON_ROLE_RUN, "padding: 8px; margin-top: 5px;", self.current_theme)
         if hasattr(self, "btn_stop_training"):
@@ -6711,6 +6929,369 @@ class MainWindow(QMainWindow):
             saved_count += 1
 
         return saved_count, len(polygons)
+
+    def _vlm_api_settings_path(self):
+        pdf_widget = getattr(self, "pdf_widget", None)
+        if pdf_widget is not None and getattr(pdf_widget, "api_settings_file", ""):
+            return pdf_widget.api_settings_file
+        return os.path.join(REPO_ROOT, "screener_configs", "api_runtime_settings.json")
+
+    def _vlm_api_config_from_pdf_widget(self):
+        pdf_widget = getattr(self, "pdf_widget", None)
+        if pdf_widget is None:
+            return {}
+
+        def text(widget_name):
+            widget = getattr(pdf_widget, widget_name, None)
+            if widget is None or not hasattr(widget, "text"):
+                return ""
+            try:
+                return widget.text().strip()
+            except Exception:
+                return ""
+
+        def current_data(widget_name, fallback="auto"):
+            widget = getattr(pdf_widget, widget_name, None)
+            if widget is None or not hasattr(widget, "currentData"):
+                return fallback
+            try:
+                return widget.currentData() or fallback
+            except Exception:
+                return fallback
+
+        same_widget = getattr(pdf_widget, "check_mllm_same_as_text", None)
+        use_same = bool(same_widget.isChecked()) if same_widget is not None and hasattr(same_widget, "isChecked") else True
+        if use_same:
+            return {
+                "api_key": text("edit_api_key"),
+                "base_url": text("edit_base_url"),
+                "model": text("edit_model"),
+                "api_protocol": current_data("combo_api_protocol"),
+                "image_detail": current_data("combo_mllm_image_detail"),
+            }
+        return {
+            "api_key": text("edit_mllm_api_key"),
+            "base_url": text("edit_mllm_base_url"),
+            "model": text("edit_mllm_model"),
+            "api_protocol": current_data("combo_mllm_api_protocol"),
+            "image_detail": current_data("combo_mllm_image_detail"),
+        }
+
+    def _vlm_preannotation_artifacts_dir(self):
+        project_path = getattr(self.project, "current_project_path", "") or ""
+        if project_path:
+            base_dir = os.path.join(os.path.dirname(os.path.abspath(project_path)), "vlm_preannotation")
+        else:
+            base_dir = os.path.join(REPO_ROOT, "artifacts", "vlm_preannotation")
+        os.makedirs(base_dir, exist_ok=True)
+        return base_dir
+
+    def _current_vlm_target_parts(self):
+        if hasattr(self.project, "get_vlm_preannotation_target_parts"):
+            return self.project.get_vlm_preannotation_target_parts()
+        return []
+
+    def _current_vlm_processing_scope(self):
+        if hasattr(self.project, "get_vlm_preannotation_settings"):
+            return self.project.get_vlm_preannotation_settings().get("processing_scope", "current_image")
+        return "current_image"
+
+    def _vlm_candidate_source_meta(self, candidate, result):
+        return {
+            "source": "vlm_first_mile",
+            "review_status": "draft",
+            "confidence": float(candidate.get("confidence", 0.0) or 0.0),
+            "reason": str(candidate.get("reason", "") or ""),
+            "source_model": str((getattr(self, "vlm_preannotation_api_config", {}) or {}).get("model", "") or ""),
+            "source_run_id": str(getattr(self, "vlm_preannotation_run_id", "") or ""),
+            "report_path": str(result.get("report_path", "") or ""),
+        }
+
+    def _vlm_image_paths_from_settings(self):
+        scope = self._current_vlm_processing_scope()
+        if scope == "all_images":
+            return [path for path in self.project.project_data.get("images", []) if path]
+        return [self.current_image] if self.current_image else []
+
+    def run_vlm_preannotation_from_settings(self):
+        if not self.current_image:
+            QMessageBox.warning(self, tr("VLM Pre-Annotate", self.current_lang), tr("Please select an image first.", self.current_lang))
+            return
+        if self.vlm_preannotation_thread is not None and self.vlm_preannotation_thread.isRunning():
+            QMessageBox.information(self, tr("VLM Pre-Annotate", self.current_lang), tr("VLM preannotation is already running.", self.current_lang))
+            return
+        target_parts = self._current_vlm_target_parts()
+        if not target_parts:
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Warning)
+            box.setWindowTitle(tr("VLM Pre-Annotate", self.current_lang))
+            box.setText(tr("Select at least one VLM target part before running pre-annotation.", self.current_lang))
+            open_button = box.addButton(tr("Open VLM settings", self.current_lang), QMessageBox.AcceptRole)
+            box.addButton(QMessageBox.Cancel)
+            box.exec()
+            if box.clickedButton() == open_button:
+                self.open_stl_model_settings(focus_vlm=True)
+            return
+        image_paths = self._vlm_image_paths_from_settings()
+        if not image_paths:
+            QMessageBox.warning(self, tr("VLM Pre-Annotate", self.current_lang), tr("Please select an image first.", self.current_lang))
+            return
+        if self._current_vlm_processing_scope() == "all_images":
+            if themed_yes_no_question(
+                self,
+                tr("VLM Pre-Annotate", self.current_lang),
+                tr(
+                    "Run VLM preannotation on all imported images?\n\nThis will call the multimodal API, may incur provider cost, and will write draft AI boxes and SAM polygons for later review.",
+                    self.current_lang,
+                ),
+                confirm_role=BUTTON_ROLE_RUN,
+            ) != QMessageBox.Yes:
+                return
+
+        try:
+            api_config = load_vlm_api_config_from_runtime_settings(self._vlm_api_settings_path())
+            live_config = self._vlm_api_config_from_pdf_widget()
+            for key, value in live_config.items():
+                if value:
+                    api_config[key] = value
+        except Exception as exc:
+            QMessageBox.warning(self, tr("VLM Pre-Annotate", self.current_lang), str(exc))
+            return
+        if not api_config.get("api_key") or not api_config.get("base_url") or not api_config.get("model"):
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Warning)
+            box.setWindowTitle(tr("VLM Pre-Annotate", self.current_lang))
+            box.setText(tr("Configure the Multimodal LLM API in PDF Evidence Tools first.", self.current_lang))
+            open_button = box.addButton(tr("Open API settings", self.current_lang), QMessageBox.AcceptRole)
+            box.addButton(QMessageBox.Cancel)
+            box.exec()
+            if box.clickedButton() == open_button:
+                self.open_pdf_multimodal_api_settings()
+            return
+
+        self.vlm_preannotation_api_config = dict(api_config)
+        self.btn_vlm_preannotate.setEnabled(False)
+        self.progress.setValue(0)
+        self.vlm_preannotation_saved_total = 0
+        self.vlm_preannotation_run_id = time.strftime("%Y%m%d_%H%M%S")
+        self.vlm_preannotation_records = []
+        self.vlm_preannotation_queue = list(image_paths)
+        self.vlm_preannotation_run_active = True
+        self.vlm_preannotation_total_steps = max(1, len(image_paths) * 6)
+        self.vlm_preannotation_completed_steps = 0
+        self.vlm_preannotation_target_parts = list(target_parts)
+        self.vlm_preannotation_artifacts_dir = self._vlm_preannotation_artifacts_dir()
+        self.vlm_preannotation_api_config = dict(api_config)
+        self._start_next_vlm_preannotation_image()
+
+    def _start_next_vlm_preannotation_image(self):
+        queue = list(getattr(self, "vlm_preannotation_queue", []) or [])
+        if not queue:
+            self._finish_vlm_preannotation_run()
+            return
+        image_path = queue.pop(0)
+        self.vlm_preannotation_queue = queue
+        self.vlm_preannotation_current_image_steps_completed = 0
+        self.vlm_preannotation_thread = VlmPreannotationThread(
+            image_path,
+            getattr(self, "vlm_preannotation_target_parts", []),
+            getattr(self, "vlm_preannotation_artifacts_dir", self._vlm_preannotation_artifacts_dir()),
+            getattr(self, "vlm_preannotation_api_config", {}),
+            getattr(self, "vlm_preannotation_run_id", time.strftime("%Y%m%d_%H%M%S")),
+            grid_cols=12,
+            grid_rows=12,
+            min_confidence=0.25,
+        )
+        self.vlm_preannotation_thread.log_signal.connect(self.log)
+        self.vlm_preannotation_thread.image_result_signal.connect(self._on_vlm_preannotation_image_result)
+        self.vlm_preannotation_thread.progress_signal.connect(self._on_vlm_preannotation_thread_step)
+        self.vlm_preannotation_thread.error_signal.connect(self._on_vlm_preannotation_error)
+        self.vlm_preannotation_thread.finished_signal.connect(self._on_vlm_preannotation_finished)
+        self.vlm_preannotation_thread.start()
+
+    def _apply_vlm_candidate(self, image_path, image_rgb, candidate, result):
+        part_name = str(candidate.get("part", "") or "").strip()
+        box = _clean_box(candidate.get("box_xyxy"))
+        if not part_name or not box:
+            return False, "invalid_candidate"
+
+        existing_points = self.project.get_labels(image_path).get(part_name, [])
+        if existing_points:
+            return False, "already_labeled"
+
+        polygon = None
+        try:
+            polygon = self.engine.predict_base_sam_polygon(image_rgb, box, poly_epsilon=self.inf_poly_epsilon)
+        except Exception as exc:
+            self.log(tr("SAM draft failed for {0}: {1}", self.current_lang).format(part_name, str(exc)))
+
+        if polygon and len(polygon) >= 3:
+            self.project.update_label(
+                image_path,
+                part_name,
+                polygon,
+                "Auto-Annotated",
+                auto_box=box,
+                save=False,
+            )
+            update_auto_box = getattr(self.project, "update_auto_box", None)
+            if callable(update_auto_box):
+                update_auto_box(
+                    image_path,
+                    part_name,
+                    box,
+                    source_meta=self._vlm_candidate_source_meta(candidate, result),
+                    save=False,
+                )
+            return True, "polygon"
+
+        update_auto_box = getattr(self.project, "update_auto_box", None)
+        if callable(update_auto_box):
+            update_auto_box(
+                image_path,
+                part_name,
+                box,
+                description_text="Auto-Annotated",
+                source_meta=self._vlm_candidate_source_meta(candidate, result),
+                save=False,
+            )
+        else:
+            self.project.update_label(image_path, part_name, [], "Auto-Annotated", auto_box=box, save=False)
+        return True, "box_only"
+
+    def _on_vlm_preannotation_image_result(self, result):
+        image_path = str(result.get("image_path", "") or "")
+        if not image_path or result.get("status") == "failed":
+            self.log(tr("VLM first-mile preannotation failed: {0}", self.current_lang).format(result.get("error", "")))
+            self._complete_current_vlm_image_steps("failed")
+            self.vlm_preannotation_records.append(result)
+            return
+        candidates = list(result.get("candidates", []) or []) if isinstance(result, dict) else []
+        if not candidates:
+            self.log(tr("VLM first-mile preannotation returned no usable boxes.", self.current_lang))
+            self._complete_current_vlm_image_steps("no_candidates")
+            self.vlm_preannotation_records.append(result)
+            return
+        try:
+            image_bgr = cv2.imread(image_path)
+            if image_bgr is None:
+                raise RuntimeError(tr("Could not read the current image.", self.current_lang))
+            image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+            saved = 0
+            polygon_count = 0
+            box_only_count = 0
+            skipped = 0
+            for candidate in candidates:
+                ok, mode = self._apply_vlm_candidate(image_path, image_rgb, candidate, result)
+                if ok:
+                    saved += 1
+                    if mode == "polygon":
+                        polygon_count += 1
+                    elif mode == "box_only":
+                        box_only_count += 1
+                else:
+                    skipped += 1
+            self.vlm_preannotation_saved_total = int(getattr(self, "vlm_preannotation_saved_total", 0)) + saved
+            self._schedule_project_save()
+            if image_path == self.current_image:
+                self.canvas.set_polygons(self.project.get_labels(self.current_image))
+                self.canvas.set_boxes(self.project.get_boxes(self.current_image), self.project.get_auto_boxes(self.current_image))
+            self.refresh_file_list()
+            self._refresh_blink_refine_state()
+            report_path = result.get("report_path", "")
+            result["saved_box_count"] = saved
+            result["saved_polygon_count"] = polygon_count
+            result["saved_box_only_count"] = box_only_count
+            result["skipped_count"] = skipped
+            self.vlm_preannotation_records.append(result)
+            self._advance_vlm_progress("write")
+            self._advance_vlm_progress("sam")
+            self._advance_vlm_progress("report")
+            self.log(
+                tr(
+                    "VLM preannotation saved {0} draft(s): {1} SAM polygon(s), {2} box-only draft(s), skipped {3}. Report: {4}",
+                    self.current_lang,
+                ).format(saved, polygon_count, box_only_count, skipped, report_path)
+            )
+        except Exception as exc:
+            self._complete_current_vlm_image_steps("failed")
+            failed = dict(result)
+            failed["status"] = "failed"
+            failed["error"] = str(exc)
+            self.vlm_preannotation_records.append(failed)
+            self._on_vlm_preannotation_error(str(exc))
+
+    def _advance_vlm_progress(self, step_name):
+        total = max(1, int(getattr(self, "vlm_preannotation_total_steps", 1) or 1))
+        completed = min(total, int(getattr(self, "vlm_preannotation_completed_steps", 0) or 0) + 1)
+        self.vlm_preannotation_completed_steps = completed
+        current_completed = int(getattr(self, "vlm_preannotation_current_image_steps_completed", 0) or 0)
+        self.vlm_preannotation_current_image_steps_completed = min(6, current_completed + 1)
+        self.progress.setValue(int(completed / total * 100))
+        self.log(tr("VLM batch progress: {0}/{1} steps ({2}).", self.current_lang).format(completed, total, step_name))
+
+    def _on_vlm_preannotation_thread_step(self, _completed, _total, step_name):
+        self._advance_vlm_progress(step_name)
+
+    def _complete_current_vlm_image_steps(self, step_name):
+        current_completed = int(getattr(self, "vlm_preannotation_current_image_steps_completed", 0) or 0)
+        for _ in range(max(0, 6 - current_completed)):
+            self._advance_vlm_progress(step_name)
+
+    def _finish_vlm_preannotation_run(self):
+        records = list(getattr(self, "vlm_preannotation_records", []) or [])
+        artifacts_dir = getattr(self, "vlm_preannotation_artifacts_dir", self._vlm_preannotation_artifacts_dir())
+        run_id = getattr(self, "vlm_preannotation_run_id", time.strftime("%Y%m%d_%H%M%S"))
+        report_path = os.path.join(artifacts_dir, f"vlm_preannotation_summary_{run_id}.json")
+        summary = {
+            "schema_version": "taxamask-vlm-preannotation-gui-summary-v1",
+            "run_id": run_id,
+            "artifacts_dir": artifacts_dir,
+            "target_parts": list(getattr(self, "vlm_preannotation_target_parts", []) or []),
+            "image_count": len(records),
+            "candidate_count": sum(len(item.get("candidates", []) or []) for item in records),
+            "saved_box_count": int(getattr(self, "vlm_preannotation_saved_total", 0) or 0),
+            "rejected_count": sum(len(item.get("rejected", []) or []) for item in records),
+            "records": records,
+        }
+        os.makedirs(artifacts_dir, exist_ok=True)
+        with open(report_path, "w", encoding="utf-8") as handle:
+            json.dump(summary, handle, ensure_ascii=False, indent=2)
+        self.log(
+            tr("VLM preannotation finished. Images: {0}; saved drafts: {1}; report: {2}", self.current_lang).format(
+                summary.get("image_count", 0),
+                summary.get("saved_box_count", 0),
+                report_path,
+            )
+        )
+        self.vlm_preannotation_run_active = False
+        if hasattr(self, "btn_vlm_preannotate"):
+            self.btn_vlm_preannotate.setEnabled(True)
+
+    def accept_current_image_ai_drafts(self):
+        if not self.current_image:
+            return
+        count = self.project.verify_image_labels(self.current_image)
+        if count:
+            self.canvas.set_polygons(self.project.get_labels(self.current_image))
+            self.canvas.set_boxes(self.project.get_boxes(self.current_image), self.project.get_auto_boxes(self.current_image))
+            self.refresh_file_list()
+            self._refresh_blink_refine_state()
+            self.log(tr("Accepted {0} AI draft(s) on current image.", self.current_lang).format(count))
+        else:
+            self.log(tr("No reviewable AI polygon drafts on current image.", self.current_lang))
+
+    def _on_vlm_preannotation_error(self, message):
+        self.log(tr("VLM first-mile preannotation failed: {0}", self.current_lang).format(message))
+        QMessageBox.warning(self, tr("VLM Pre-Annotate", self.current_lang), str(message))
+
+    def _on_vlm_preannotation_finished(self):
+        if not getattr(self, "vlm_preannotation_run_active", False):
+            return
+        if getattr(self, "vlm_preannotation_queue", []):
+            self._start_next_vlm_preannotation_image()
+        else:
+            self._finish_vlm_preannotation_run()
 
     def run_prediction(self):
         if not self.current_image:

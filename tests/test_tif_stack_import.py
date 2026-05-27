@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -49,6 +50,10 @@ class TifStackImportTests(unittest.TestCase):
             self.assertIn("specimen_not_marked_train_ready", readiness["reasons"])
             self.assertIn("manual_truth_missing", readiness["reasons"])
             self.assertEqual(report["alignment"]["manual_truth"], "not_created")
+            self.assertEqual(report["memory_policy"]["import_mode"], "stream_to_memmap_sidecar")
+            self.assertFalse(report["memory_policy"]["whole_volume_imread"])
+            self.assertTrue(report["memory_policy"]["source_tif_copied"])
+            self.assertTrue(report["memory_policy"]["working_edit_created_on_import"])
             self.assertTrue((Path(manager.project_dir) / specimen["source"]["raw_tif"]).exists())
             np.testing.assert_array_equal(load_volume_sidecar(image_abs), source_volume)
             self.assertEqual(read_volume_metadata(edit_abs)["shape_zyx"], [3, 4, 5])
@@ -67,6 +72,56 @@ class TifStackImportTests(unittest.TestCase):
 
             self.assertEqual(specimen["working_volume"]["shape_zyx"], [1, 6, 7])
             self.assertFalse(manager.evaluate_train_ready("01-0101-06")["train_ready"])
+
+    def test_plain_tif_stack_import_does_not_use_whole_volume_imread(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tif_path = root / "stream_stack.tif"
+            source_volume = np.arange(2 * 3 * 4, dtype=np.uint8).reshape((2, 3, 4))
+            tifffile.imwrite(tif_path, source_volume, photometric="minisblack")
+
+            manager = TifProjectManager()
+            manager.create_project("stream_tif", root / "stream_tif_project")
+            progress = []
+
+            with patch("AntSleap.core.tif_stack_import.tifffile.imread", side_effect=AssertionError("imread should not be used")):
+                result = import_tif_stack(
+                    manager,
+                    tif_path,
+                    "01-0101-stream",
+                    progress_callback=lambda current, total, message: progress.append((current, total, message)),
+                )
+
+            specimen = manager.get_specimen("01-0101-stream")
+            image_abs = manager.to_absolute(specimen["working_volume"]["path"])
+            np.testing.assert_array_equal(load_volume_sidecar(image_abs), source_volume)
+            self.assertFalse(result["report"]["memory_policy"]["whole_volume_imread"])
+            self.assertTrue(progress)
+
+    def test_plain_tif_stack_import_can_defer_source_copy_and_working_edit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tif_path = root / "preview_only.tif"
+            source_volume = np.arange(2 * 3 * 4, dtype=np.uint8).reshape((2, 3, 4))
+            tifffile.imwrite(tif_path, source_volume, photometric="minisblack")
+
+            manager = TifProjectManager()
+            manager.create_project("preview_only", root / "preview_project")
+            result = import_tif_stack(
+                manager,
+                tif_path,
+                "01-0101-preview",
+                copy_source=False,
+                create_working_edit=False,
+            )
+
+            specimen = manager.get_specimen("01-0101-preview")
+            self.assertEqual(os.path.normcase(specimen["source"]["raw_tif"]), os.path.normcase(str(tif_path.resolve())))
+            self.assertEqual(specimen["labels"]["working_edit"]["path"], "")
+            self.assertEqual(result["report"]["files"]["working_edit"], "")
+            self.assertFalse(result["report"]["memory_policy"]["source_tif_copied"])
+            self.assertFalse(result["report"]["memory_policy"]["working_edit_created_on_import"])
+            self.assertFalse((Path(manager.project_dir) / "specimens" / "01-0101-preview" / "source" / "raw" / tif_path.name).exists())
 
     def test_failed_tif_read_does_not_leave_half_registered_specimen(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -92,7 +147,7 @@ class TifStackImportTests(unittest.TestCase):
             manager = TifProjectManager()
             manager.create_project("rollback_tif", root / "rollback_project")
 
-            with patch("AntSleap.core.tif_stack_import.write_volume_sidecar", side_effect=RuntimeError("disk write failed")):
+            with patch("AntSleap.core.tif_stack_import.create_volume_sidecar_memmap", side_effect=RuntimeError("disk write failed")):
                 with self.assertRaisesRegex(RuntimeError, "disk write failed"):
                     import_tif_stack(manager, tif_path, "01-0101-rollback")
 

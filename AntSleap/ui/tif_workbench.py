@@ -1,7 +1,7 @@
 import os
 
 import numpy as np
-from PySide6.QtCore import QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QObject, QRectF, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QScrollArea,
     QSlider,
@@ -41,7 +42,7 @@ try:
     from AntSleap.core.tif_prediction_import import default_prediction_id_for_tif, import_external_prediction_tif
     from AntSleap.core.tif_project import TifProjectManager
     from AntSleap.core.tif_stack_import import import_tif_stack
-    from AntSleap.core.tif_volume_io import load_volume_sidecar, save_volume_array, volume_sidecar_exists
+    from AntSleap.core.tif_volume_io import create_empty_label_sidecar_like, flush_volume_array, load_volume_sidecar, volume_sidecar_exists
 except ModuleNotFoundError as exc:
     if exc.name != "AntSleap":
         raise
@@ -52,7 +53,7 @@ except ModuleNotFoundError as exc:
     from core.tif_prediction_import import default_prediction_id_for_tif, import_external_prediction_tif
     from core.tif_project import TifProjectManager
     from core.tif_stack_import import import_tif_stack
-    from core.tif_volume_io import load_volume_sidecar, save_volume_array, volume_sidecar_exists
+    from core.tif_volume_io import create_empty_label_sidecar_like, flush_volume_array, load_volume_sidecar, volume_sidecar_exists
 
 
 TIF_TRANSLATIONS = {
@@ -152,6 +153,13 @@ TIF_TRANSLATIONS = {
         "Import AMIRA Directory": "导入 AMIRA 目录",
         "Specimen ID:": "Specimen 编号：",
         "Imported TIF stack for specimen {0}. Report: {1}": "已为 specimen {0} 导入 TIF stack。报告：{1}",
+        "Importing TIF stack...": "正在导入 TIF stack...",
+        "Reading TIF slices": "正在读取 TIF 切片",
+        "Reading TIF volume": "正在读取 TIF 体数据",
+        "Writing TIF sidecar": "正在写入 TIF sidecar",
+        "Creating editable label layer": "正在创建可编辑标签层",
+        "Saving TIF project": "正在保存 TIF 项目",
+        "TIF import is already running.": "已有 TIF 导入正在运行。",
         "Imported AMIRA directory for specimen {0}. Report: {1}": "已为 specimen {0} 导入 AMIRA 目录。报告：{1}",
         "TIF training handoff": "TIF 训练交接",
         "Export train-ready TIF volumes": "导出可训练 TIF 体数据",
@@ -444,6 +452,33 @@ class TifSliceCanvas(QLabel):
         super().mouseReleaseEvent(event)
 
 
+class TifImportWorker(QObject):
+    progress = Signal(int, int, str)
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, project_manager, tif_path, specimen_id):
+        super().__init__()
+        self.project_manager = project_manager
+        self.tif_path = tif_path
+        self.specimen_id = specimen_id
+
+    def run(self):
+        try:
+            result = import_tif_stack(
+                self.project_manager,
+                self.tif_path,
+                self.specimen_id,
+                copy_source=False,
+                create_working_edit=False,
+                progress_callback=self.progress.emit,
+            )
+        except Exception as exc:
+            self.failed.emit(str(exc))
+            return
+        self.finished.emit(result)
+
+
 class TifWorkbenchWidget(QWidget):
     start_center_requested = Signal()
     agent_requested = Signal(dict)
@@ -464,8 +499,13 @@ class TifWorkbenchWidget(QWidget):
         self.current_material_id = 0
         self.edit_volume = None
         self.working_edit_dirty = False
+        self._dirty_edit_slices = set()
         self._loading_specimen = False
         self._saving_working_edit = False
+        self._tif_import_thread = None
+        self._tif_import_worker = None
+        self._tif_import_progress = None
+        self._tif_import_specimen_id = ""
         self.undo_stack = []
         self.redo_stack = []
 
@@ -816,6 +856,9 @@ class TifWorkbenchWidget(QWidget):
         if reply == QMessageBox.Save:
             return self.save_working_edit(show_message=True)
         self.working_edit_dirty = False
+        self._dirty_edit_slices = set()
+        if self.current_specimen_id:
+            self._load_edit_volume()
         return True
 
     def save_backend_settings(self):
@@ -844,8 +887,58 @@ class TifWorkbenchWidget(QWidget):
                 self.specimen_list.setCurrentRow(row)
                 break
 
+    def _set_tif_import_controls_enabled(self, enabled):
+        for button in (self.btn_import_tif, self.btn_import_amira):
+            button.setEnabled(bool(enabled))
+
+    def _cleanup_tif_import_thread(self):
+        self._set_tif_import_controls_enabled(True)
+        if self._tif_import_progress is not None:
+            self._tif_import_progress.close()
+            self._tif_import_progress.deleteLater()
+        self._tif_import_progress = None
+        self._tif_import_worker = None
+        self._tif_import_thread = None
+        self._tif_import_specimen_id = ""
+
+    def _on_tif_import_progress(self, current, total, message):
+        if self._tif_import_progress is None:
+            return
+        maximum = max(1, int(total or 100))
+        value = max(0, min(maximum, int(current or 0)))
+        self._tif_import_progress.setMaximum(maximum)
+        self._tif_import_progress.setValue(value)
+        self._tif_import_progress.setLabelText(tt(message, self.lang))
+
+    def _on_tif_import_finished(self, result):
+        specimen_id = self._tif_import_specimen_id
+        self.refresh_project()
+        self._select_specimen_after_import(specimen_id)
+        report_path = result.get("report_path", "") if isinstance(result, dict) else ""
+        message = tt("Imported TIF stack for specimen {0}. Report: {1}", self.lang).format(specimen_id, report_path)
+        self.training_status_label.setText(message)
+        self.log(message)
+        thread = self._tif_import_thread
+        self._cleanup_tif_import_thread()
+        if thread is not None:
+            thread.quit()
+
+    def _on_tif_import_failed(self, message):
+        thread = self._tif_import_thread
+        self._cleanup_tif_import_thread()
+        if thread is not None:
+            thread.quit()
+        QMessageBox.critical(self, tt("Import TIF Stack", self.lang), message)
+
     def import_tif_stack_dialog(self):
         if not self._ensure_tif_project_open():
+            return
+        if self._tif_import_thread is not None:
+            QMessageBox.information(
+                self,
+                tt("Import TIF Stack", self.lang),
+                tt("TIF import is already running.", self.lang),
+            )
             return
         tif_path, _ = QFileDialog.getOpenFileName(
             self,
@@ -864,17 +957,34 @@ class TifWorkbenchWidget(QWidget):
         )
         if not ok or not specimen_id:
             return
-        try:
-            result = import_tif_stack(self.project, tif_path, specimen_id)
-        except Exception as exc:
-            QMessageBox.critical(self, tt("Import TIF Stack", self.lang), str(exc))
-            return
-        self.refresh_project()
-        self._select_specimen_after_import(specimen_id)
-        report_path = result.get("report_path", "")
-        message = tt("Imported TIF stack for specimen {0}. Report: {1}", self.lang).format(specimen_id, report_path)
-        self.training_status_label.setText(message)
-        self.log(message)
+        self._set_tif_import_controls_enabled(False)
+        self._tif_import_specimen_id = specimen_id
+        self._tif_import_progress = QProgressDialog(
+            tt("Importing TIF stack...", self.lang),
+            "",
+            0,
+            100,
+            self,
+        )
+        self._tif_import_progress.setWindowTitle(tt("Import TIF Stack", self.lang))
+        self._tif_import_progress.setCancelButton(None)
+        self._tif_import_progress.setAutoClose(False)
+        self._tif_import_progress.setAutoReset(False)
+        self._tif_import_progress.setWindowModality(Qt.WindowModal)
+        self._tif_import_progress.show()
+
+        self._tif_import_thread = QThread(self)
+        self._tif_import_worker = TifImportWorker(self.project, tif_path, specimen_id)
+        self._tif_import_worker.moveToThread(self._tif_import_thread)
+        self._tif_import_thread.started.connect(self._tif_import_worker.run)
+        self._tif_import_worker.progress.connect(self._on_tif_import_progress)
+        self._tif_import_worker.finished.connect(self._on_tif_import_finished)
+        self._tif_import_worker.failed.connect(self._on_tif_import_failed)
+        self._tif_import_worker.finished.connect(self._tif_import_thread.quit)
+        self._tif_import_worker.failed.connect(self._tif_import_thread.quit)
+        self._tif_import_thread.finished.connect(self._tif_import_worker.deleteLater)
+        self._tif_import_thread.finished.connect(self._tif_import_thread.deleteLater)
+        self._tif_import_thread.start()
 
     def import_amira_directory_dialog(self):
         if not self._ensure_tif_project_open():
@@ -1426,6 +1536,7 @@ class TifWorkbenchWidget(QWidget):
         self.material_colors = {}
         self.current_specimen_id = ""
         self.edit_volume = None
+        self._dirty_edit_slices = set()
         self.auto_save_timer.stop()
         self.working_edit_dirty = False
         self.undo_stack = []
@@ -1498,6 +1609,7 @@ class TifWorkbenchWidget(QWidget):
             self.label_volume = None
             self.edit_volume = None
             self.working_edit_dirty = False
+            self._dirty_edit_slices = set()
             self.material_map = {}
             self.material_colors = {}
             self.undo_stack = []
@@ -1655,8 +1767,10 @@ class TifWorkbenchWidget(QWidget):
                         pass
         for array in arrays:
             try:
-                if np.any(np.asarray(array) == int(material_id)):
-                    return True
+                z_count = int(array.shape[0]) if getattr(array, "ndim", 0) == 3 else 0
+                for z_index in range(z_count):
+                    if np.any(np.asarray(array[z_index]) == int(material_id)):
+                        return True
             except Exception:
                 continue
         return False
@@ -1697,7 +1811,41 @@ class TifWorkbenchWidget(QWidget):
             return
         edit_path = self.project.to_absolute(((specimen.get("labels") or {}).get("working_edit") or {}).get("path", ""))
         if edit_path and volume_sidecar_exists(edit_path):
-            self.edit_volume = np.asarray(load_volume_sidecar(edit_path)).copy()
+            self.edit_volume = load_volume_sidecar(edit_path, mmap_mode="c")
+
+    def _ensure_working_edit_volume(self):
+        specimen = self.project.get_specimen(self.current_specimen_id, default=None)
+        if specimen is None:
+            return False
+        labels = specimen.setdefault("labels", {})
+        edit_record = labels.get("working_edit") or {}
+        edit_path = self.project.to_absolute(edit_record.get("path", ""))
+        if edit_path and volume_sidecar_exists(edit_path):
+            if self.edit_volume is None:
+                self.edit_volume = load_volume_sidecar(edit_path, mmap_mode="c")
+            return self.edit_volume is not None
+        image_path = self.project.to_absolute((specimen.get("working_volume") or {}).get("path", ""))
+        if not image_path or not volume_sidecar_exists(image_path):
+            return False
+        edit_rel = os.path.join(self.project.specimen_dir(self.current_specimen_id), "labels", "working_edit.ome.zarr").replace("\\", "/")
+        edit_abs = self.project.to_absolute(edit_rel)
+        metadata = create_empty_label_sidecar_like(image_path, edit_abs, role="working_edit", write_ome_zarr=False)
+        self.project.register_label_volume(
+            self.current_specimen_id,
+            "working_edit",
+            edit_rel,
+            metadata["shape_zyx"],
+            metadata["dtype"],
+            status="empty_edit",
+            spacing_zyx=metadata.get("spacing_zyx"),
+            spacing_unit=metadata.get("spacing_unit", "micrometer"),
+            orientation=metadata.get("orientation", "unknown"),
+            fmt=metadata.get("format", ""),
+            save=False,
+        )
+        self.project.save_project()
+        self.edit_volume = load_volume_sidecar(edit_abs, mmap_mode="c")
+        return self.edit_volume is not None
 
     def _update_status_labels(self, specimen):
         readiness = self.project.evaluate_train_ready(specimen.get("specimen_id"))
@@ -1736,7 +1884,9 @@ class TifWorkbenchWidget(QWidget):
         self.canvas.set_slice_pixmap(pixmap, reset_view=reset_view)
 
     def paint_at_widget_position(self, x, y, erase=False):
-        if self.image_volume is None or self.edit_volume is None:
+        if self.image_volume is None:
+            return
+        if self.edit_volume is None and not self._ensure_working_edit_volume():
             return
         role = self.label_role_combo.currentData()
         if role != "working_edit":
@@ -1758,6 +1908,7 @@ class TifWorkbenchWidget(QWidget):
         yy, xx = np.ogrid[:height, :width]
         mask = (xx - px) ** 2 + (yy - py) ** 2 <= radius ** 2
         self.edit_volume[z_index][mask] = 0 if erase else int(self.current_material_id)
+        self._dirty_edit_slices.add(z_index)
         self._mark_working_edit_dirty()
         self.render_current_slice()
 
@@ -1783,6 +1934,7 @@ class TifWorkbenchWidget(QWidget):
         z_index, old_slice = self.undo_stack.pop()
         self.redo_stack.append((z_index, self.edit_volume[z_index].copy()))
         self.edit_volume[z_index] = old_slice
+        self._dirty_edit_slices.add(z_index)
         self.slice_slider.setValue(z_index)
         self._mark_working_edit_dirty()
         self.render_current_slice()
@@ -1793,6 +1945,7 @@ class TifWorkbenchWidget(QWidget):
         z_index, redo_slice = self.redo_stack.pop()
         self.undo_stack.append((z_index, self.edit_volume[z_index].copy()))
         self.edit_volume[z_index] = redo_slice
+        self._dirty_edit_slices.add(z_index)
         self.slice_slider.setValue(z_index)
         self._mark_working_edit_dirty()
         self.render_current_slice()
@@ -1810,15 +1963,22 @@ class TifWorkbenchWidget(QWidget):
         self.auto_save_timer.stop()
         try:
             self.label_volume = None
-            metadata = save_volume_array(edit_path, self.edit_volume)
+            target = load_volume_sidecar(edit_path, mmap_mode="r+")
+            if self._dirty_edit_slices:
+                for z_index in sorted(self._dirty_edit_slices):
+                    if 0 <= int(z_index) < int(target.shape[0]):
+                        target[int(z_index)] = self.edit_volume[int(z_index)]
+            metadata = flush_volume_array(edit_path, target)
             specimen["labels"]["working_edit"]["dtype"] = metadata["dtype"]
             specimen["labels"]["working_edit"]["status"] = "in_progress"
             specimen["review_status"] = "in_progress"
             specimen["train_ready"] = False
             self.project.save_project()
             self.working_edit_dirty = False
+            self._dirty_edit_slices = set()
+            self.edit_volume = load_volume_sidecar(edit_path, mmap_mode="c")
             if self.label_role_combo.currentData() == "working_edit":
-                self.label_volume = np.asarray(self.edit_volume)
+                self.label_volume = load_volume_sidecar(edit_path, mmap_mode="r")
             else:
                 self._reload_label_volume()
             self._update_status_labels(specimen)

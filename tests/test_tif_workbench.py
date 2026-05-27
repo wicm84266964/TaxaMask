@@ -218,12 +218,14 @@ class TifWorkbenchTests(unittest.TestCase):
 
             widget = TifWorkbenchWidget(manager)
             try:
+                self.assertIsInstance(widget.edit_volume, np.memmap)
                 widget.slice_slider.setValue(0)
                 edit_index = widget.label_role_combo.findData("working_edit")
                 widget.label_role_combo.setCurrentIndex(edit_index)
                 widget.current_material_id = 5
                 widget.brush_size_slider.setValue(2)
                 widget.paint_at_widget_position(widget.canvas.width() / 2, widget.canvas.height() / 2)
+                self.assertEqual(widget._dirty_edit_slices, {0})
                 widget.save_working_edit()
 
                 saved_edit = np.load(root / "brush" / edit_rel / "array.npy")
@@ -234,6 +236,49 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.undo()
                 widget.redo()
                 widget.save_working_edit()
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_working_edit_is_created_lazily_when_painting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = TifProjectManager()
+            manager.create_project("lazy_edit", root / "lazy_edit")
+            manager.create_specimen_scaffold(
+                "01-0101-lazy",
+                material_map={
+                    "materials": [
+                        {"id": 0, "name": "background", "display_name": "Background", "trainable": False},
+                        {"id": 7, "name": "brain", "display_name": "Brain", "color": "#00ff00", "trainable": True},
+                    ]
+                },
+            )
+            image = np.zeros((2, 12, 12), dtype=np.uint8)
+            image_rel = "specimens/01-0101-lazy/working/image.ome.zarr"
+            image_meta = write_volume_sidecar(root / "lazy_edit" / image_rel, image, role="working_image")
+            manager.register_working_volume("01-0101-lazy", image_rel, image_meta["shape_zyx"], image_meta["dtype"], save=False)
+            manager.save_project()
+
+            widget = TifWorkbenchWidget(manager)
+            try:
+                self.assertIsNone(widget.edit_volume)
+                self.assertEqual(widget.project.get_specimen("01-0101-lazy")["labels"]["working_edit"]["path"], "")
+
+                edit_index = widget.label_role_combo.findData("working_edit")
+                widget.label_role_combo.setCurrentIndex(edit_index)
+                widget.current_material_id = 7
+                widget.paint_at_widget_position(widget.canvas.width() / 2, widget.canvas.height() / 2)
+
+                specimen = widget.project.get_specimen("01-0101-lazy")
+                self.assertIsInstance(widget.edit_volume, np.memmap)
+                self.assertNotEqual(specimen["labels"]["working_edit"]["path"], "")
+                self.assertTrue(widget.working_edit_dirty)
+                widget.save_working_edit()
+
+                edit_path = root / "lazy_edit" / specimen["labels"]["working_edit"]["path"] / "array.npy"
+                saved = np.load(edit_path)
+                self.assertGreater(int(saved.sum()), 0)
             finally:
                 widget.close_project()
                 widget.deleteLater()

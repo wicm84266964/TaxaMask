@@ -56,6 +56,50 @@ def _write_json(path, payload):
         json.dump(payload, handle, ensure_ascii=False, indent=2)
 
 
+def _volume_metadata_payload(
+    shape_zyx,
+    dtype,
+    role,
+    spacing_zyx=None,
+    spacing_unit="micrometer",
+    orientation="unknown",
+    source_format="",
+    extra_metadata=None,
+    storage="npy",
+    ome_ngff_complete=False,
+):
+    shape = [int(value) for value in shape_zyx]
+    if len(shape) != 3:
+        raise ValueError("shape_zyx_must_have_3_values")
+    now = _now_iso()
+    metadata = {
+        "schema_version": VOLUME_SIDECAR_SCHEMA_VERSION,
+        "format": VOLUME_SIDECAR_FORMAT,
+        "storage": str(storage or "npy"),
+        "ome_ngff_complete": bool(ome_ngff_complete),
+        "role": str(role or "unknown"),
+        "axes": "zyx",
+        "shape_zyx": shape,
+        "dtype": str(np.dtype(dtype)),
+        "spacing_zyx": _normalize_spacing(spacing_zyx),
+        "spacing_unit": str(spacing_unit or "micrometer"),
+        "orientation": str(orientation or "unknown"),
+        "source_format": str(source_format or ""),
+        "created_at": now,
+        "updated_at": now,
+    }
+    if isinstance(extra_metadata, dict):
+        for key, value in extra_metadata.items():
+            if key not in {"schema_version", "format", "storage", "shape_zyx", "dtype"}:
+                metadata[key] = value
+    return metadata
+
+
+def _write_volume_metadata(sidecar_path, metadata):
+    with open(metadata_path(sidecar_path), "w", encoding="utf-8") as handle:
+        json.dump(metadata, handle, ensure_ascii=False, indent=2)
+
+
 def _write_ome_ngff_zarr(sidecar_path, volume, role, spacing_zyx, spacing_unit, chunk_shape_zyx=None):
     """Write a minimal OME-NGFF v0.4 Zarr v2 store beside the legacy npy copy."""
     path = os.path.abspath(str(sidecar_path))
@@ -168,7 +212,6 @@ def write_volume_sidecar(
     os.makedirs(path, exist_ok=True)
     np.save(array_path(path), volume, allow_pickle=False)
 
-    now = _now_iso()
     spacing = _normalize_spacing(spacing_zyx)
     ngff_metadata = {}
     ome_ngff_complete = False
@@ -184,31 +227,59 @@ def write_volume_sidecar(
         )
         ome_ngff_complete = True
         storage = "npy+ome_zarr_v2"
-    metadata = {
-        "schema_version": VOLUME_SIDECAR_SCHEMA_VERSION,
-        "format": VOLUME_SIDECAR_FORMAT,
-        "storage": storage,
-        "ome_ngff_complete": ome_ngff_complete,
-        "role": str(role or "unknown"),
-        "axes": "zyx",
-        "shape_zyx": shape,
-        "dtype": str(volume.dtype),
-        "spacing_zyx": spacing,
-        "spacing_unit": str(spacing_unit or "micrometer"),
-        "orientation": str(orientation or "unknown"),
-        "source_format": str(source_format or ""),
-        "created_at": now,
-        "updated_at": now,
-    }
+    metadata = _volume_metadata_payload(
+        shape,
+        volume.dtype,
+        role=role,
+        spacing_zyx=spacing,
+        spacing_unit=spacing_unit,
+        orientation=orientation,
+        source_format=source_format,
+        extra_metadata=extra_metadata,
+        storage=storage,
+        ome_ngff_complete=ome_ngff_complete,
+    )
     metadata.update(ngff_metadata)
-    if isinstance(extra_metadata, dict):
-        for key, value in extra_metadata.items():
-            if key not in {"schema_version", "format", "storage", "shape_zyx", "dtype"}:
-                metadata[key] = value
-
-    with open(metadata_path(path), "w", encoding="utf-8") as handle:
-        json.dump(metadata, handle, ensure_ascii=False, indent=2)
+    _write_volume_metadata(path, metadata)
     return metadata
+
+
+def create_volume_sidecar_memmap(
+    sidecar_path,
+    shape_zyx,
+    dtype,
+    role,
+    spacing_zyx=None,
+    spacing_unit="micrometer",
+    orientation="unknown",
+    source_format="",
+    extra_metadata=None,
+    fill_value=None,
+):
+    path = os.path.abspath(str(sidecar_path))
+    shape = tuple(int(value) for value in shape_zyx)
+    if len(shape) != 3:
+        raise ValueError("shape_zyx_must_have_3_values")
+    os.makedirs(path, exist_ok=True)
+    array = np.lib.format.open_memmap(array_path(path), mode="w+", dtype=np.dtype(dtype), shape=shape)
+    if fill_value is not None:
+        for z0 in range(0, shape[0], 64):
+            array[z0 : min(z0 + 64, shape[0])] = fill_value
+        array.flush()
+    metadata = _volume_metadata_payload(
+        shape,
+        dtype,
+        role=role,
+        spacing_zyx=spacing_zyx,
+        spacing_unit=spacing_unit,
+        orientation=orientation,
+        source_format=source_format,
+        extra_metadata=extra_metadata,
+        storage="npy",
+        ome_ngff_complete=False,
+    )
+    _write_volume_metadata(path, metadata)
+    return metadata, array
 
 
 def read_volume_metadata(sidecar_path):
@@ -235,7 +306,14 @@ def save_volume_array(sidecar_path, array):
     volume = np.asarray(array)
     if [int(value) for value in volume.shape] != [int(value) for value in metadata.get("shape_zyx", [])]:
         raise ValueError(f"volume_shape_change_not_allowed:{volume.shape}:{metadata.get('shape_zyx')}")
-    np.save(array_path(sidecar_path), volume, allow_pickle=False)
+    expected_path = os.path.abspath(array_path(sidecar_path))
+    volume_path = os.path.abspath(getattr(array, "filename", "")) if hasattr(array, "filename") else ""
+    mode = str(getattr(array, "mode", ""))
+    if volume_path and os.path.normcase(volume_path) == os.path.normcase(expected_path) and mode != "c":
+        if hasattr(array, "flush"):
+            array.flush()
+    else:
+        np.save(expected_path, volume, allow_pickle=False)
     metadata["dtype"] = str(volume.dtype)
     metadata["updated_at"] = _now_iso()
     if metadata.get("ome_ngff_complete"):
@@ -253,9 +331,60 @@ def save_volume_array(sidecar_path, array):
     return metadata
 
 
-def create_empty_label_sidecar_like(image_sidecar_path, label_sidecar_path, dtype="uint16", fill_value=0, role="working_edit"):
+def flush_volume_array(sidecar_path, array, update_ome_zarr=False):
+    metadata = read_volume_metadata(sidecar_path)
+    volume = np.asarray(array)
+    if [int(value) for value in volume.shape] != [int(value) for value in metadata.get("shape_zyx", [])]:
+        raise ValueError(f"volume_shape_change_not_allowed:{volume.shape}:{metadata.get('shape_zyx')}")
+    if hasattr(array, "flush") and str(getattr(array, "mode", "")) != "c":
+        array.flush()
+    else:
+        np.save(array_path(sidecar_path), volume, allow_pickle=False)
+    metadata["dtype"] = str(volume.dtype)
+    metadata["updated_at"] = _now_iso()
+    if update_ome_zarr and metadata.get("ome_ngff_complete"):
+        ngff_metadata = _write_ome_ngff_zarr(
+            sidecar_path,
+            volume,
+            role=metadata.get("role", "unknown"),
+            spacing_zyx=metadata.get("spacing_zyx", [1.0, 1.0, 1.0]),
+            spacing_unit=metadata.get("spacing_unit", "micrometer"),
+            chunk_shape_zyx=metadata.get("zarr_chunks_zyx"),
+        )
+        metadata.update(ngff_metadata)
+    elif metadata.get("ome_ngff_complete"):
+        metadata["storage"] = "npy"
+        metadata["ome_ngff_complete"] = False
+        metadata["ome_ngff_stale_after_edit"] = True
+    _write_volume_metadata(sidecar_path, metadata)
+    return metadata
+
+
+def create_empty_label_sidecar_like(
+    image_sidecar_path,
+    label_sidecar_path,
+    dtype="uint16",
+    fill_value=0,
+    role="working_edit",
+    write_ome_zarr=True,
+):
     image_meta = read_volume_metadata(image_sidecar_path)
     shape = tuple(int(value) for value in image_meta["shape_zyx"])
+    if not write_ome_zarr:
+        metadata, array = create_volume_sidecar_memmap(
+            label_sidecar_path,
+            shape,
+            dtype,
+            role=role,
+            spacing_zyx=image_meta.get("spacing_zyx"),
+            spacing_unit=image_meta.get("spacing_unit", "micrometer"),
+            orientation=image_meta.get("orientation", "unknown"),
+            source_format="empty_label_like",
+            fill_value=fill_value,
+        )
+        if hasattr(array, "_mmap"):
+            array._mmap.close()
+        return metadata
     array = np.full(shape, fill_value, dtype=np.dtype(dtype))
     return write_volume_sidecar(
         label_sidecar_path,

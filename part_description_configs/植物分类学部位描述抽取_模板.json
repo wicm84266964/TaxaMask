@@ -1,0 +1,99 @@
+{
+  "schema_version": "taxamask-part-description-profile-v1",
+  "profile_name": "植物分类学部位描述抽取_模板",
+  "profile_description": "用于植物分类学文献的纯文本部位描述抽取模板，批量使用前应按目标类群改写。",
+  "target_taxon": {
+    "display_name": "植物",
+    "scientific_scope": "Plantae",
+    "tested_status": "template"
+  },
+  "part_schema": [
+    {
+      "key": "habit",
+      "label": "生活型/整体习性",
+      "aliases": ["habit", "herb", "shrub", "tree", "liana", "perennial", "annual"]
+    },
+    {
+      "key": "stem",
+      "label": "茎",
+      "aliases": ["stem", "stems", "branch", "branches", "twig", "rhizome"]
+    },
+    {
+      "key": "leaf",
+      "label": "叶",
+      "aliases": ["leaf", "leaves", "blade", "petiole", "stipule", "venation", "lamina"]
+    },
+    {
+      "key": "inflorescence",
+      "label": "花序",
+      "aliases": ["inflorescence", "raceme", "panicle", "cyme", "flowering branch"]
+    },
+    {
+      "key": "flower",
+      "label": "花",
+      "aliases": ["flower", "flowers", "sepal", "petal", "calyx", "corolla", "stamen", "pistil"]
+    },
+    {
+      "key": "fruit",
+      "label": "果实",
+      "aliases": ["fruit", "fruits", "capsule", "achene", "berry", "drupe"]
+    },
+    {
+      "key": "seed",
+      "label": "种子",
+      "aliases": ["seed", "seeds", "testa", "hilum"]
+    },
+    {
+      "key": "surface_indumentum",
+      "label": "表面/毛被",
+      "aliases": ["surface", "indumentum", "pubescent", "glabrous", "hair", "hairs", "trichome"]
+    },
+    {
+      "key": "color",
+      "label": "颜色",
+      "aliases": ["color", "colour", "green", "white", "yellow", "purple", "brown"]
+    },
+    {
+      "key": "measurements",
+      "label": "测量值",
+      "aliases": ["measurement", "measurements", "length", "width", "diameter"]
+    },
+    {
+      "key": "other_diagnostic_structure",
+      "label": "其他诊断结构",
+      "aliases": ["diagnostic", "character", "structure"]
+    }
+  ],
+  "block_role_values": [
+    "morphological_description",
+    "diagnosis",
+    "measurements",
+    "material_examined",
+    "type_material",
+    "distribution",
+    "biology",
+    "etymology",
+    "remarks",
+    "figure_caption",
+    "identification_key",
+    "references",
+    "title_or_metadata",
+    "unprocessed",
+    "other"
+  ],
+  "extraction_settings": {
+    "max_input_chars": 600000,
+    "max_output_tokens": 12000,
+    "timeout": 240,
+    "max_retries": 2,
+    "persist_unlabeled_blocks": true
+  },
+  "prompt": {
+    "system_prompt": "你是严谨的植物分类学文本结构化助手。只根据输入的 PDF 原文文本块工作，只输出 JSON。",
+    "user_instructions": "从全文文本块中提取“植物分类单元 -> 植物部位 -> 文中描述”。重点保留 diagnosis、description、measurements 中关于生活型、茎、叶、花序、花、果实、种子、表面毛被、颜色和测量值的原文信息。不要根据图片或常识补充原文没有写出的形态信息。材料、分布、参考文献、生态等不属于部位描述的内容不要写入 taxon_part_descriptions，但可以在 text_block_labels 中标记。每条记录必须引用真实存在的 source_block_refs。"
+  },
+  "mock_fallback": {
+    "measurement_terms": ["measurements", " length ", " width ", " diameter "],
+    "reference_terms": ["references", "literature cited"]
+  }
+}

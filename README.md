@@ -80,6 +80,7 @@ tools/agentic/              Headless workflow tools
 tools/governance/           Dataset governance and audit utilities
 screener_configs/           PDF screening profile examples and templates
 multimodal_configs/         Figure extraction and multimodal review profiles
+part_description_configs/   Pure-text taxon part-description extraction profiles
 json_projects/templates/    Clean project templates
 docs/                       Public profile guides and external contracts
 tests/                      Unit and workflow tests
@@ -152,6 +153,7 @@ For a new organism group, usually adapt these layers:
 
 - PDF screening: copy a file from `screener_configs/` and edit target taxa, keywords, and prompt logic.
 - Figure extraction and review: copy a file from `multimodal_configs/` and edit figure evidence rules, expected views, and review prompt.
+- PDF part-description extraction: copy a file from `part_description_configs/` and edit part buckets and text-structuring prompt.
 - Project template: choose the generic taxonomy template and define your own structures.
 - Main locator structures: keep large, stable structures in the main locator scope; use Blink or custom backends for small local parts.
 - Model backend: use the built-in path when it fits your structure model, or connect custom scripts through the external backend contract.
@@ -171,7 +173,7 @@ python tools/agentic/screen_pdfs.py --pdf-source-dir pdf_folder --out out_folder
 ```
 
 ```bash
-python tools/agentic/extract_figures.py --pdf-source-dir pdf_folder --db out_folder/literature.db --out out_folder --figure-profile multimodal_configs/蚂蚁三视图提取复核_示例.json
+python tools/agentic/extract_figures.py --pdf-source-dir pdf_folder --db out_folder/literature.db --figure-profile multimodal_configs/蚂蚁分类学图版宽松复核_示例.json --part-description-profile part_description_configs/蚂蚁分类学部位描述抽取_示例.json
 ```
 
 ```bash

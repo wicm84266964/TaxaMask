@@ -60,6 +60,8 @@ Treat this TaxaMask protocol as always active, not as an optional skill:
   - entering/opening/importing 2D/STL workflow preloads Locator/SAM
   - returning to Agent Center keeps already loaded 2D/STL models alive
 - PDF evidence is a first-class Agent skill route through `.lab-agent/skills/taxamask-pdf-evidence/SKILL.md`. PDF outputs are literature evidence and candidate images; they must remain reviewable and must not become 2D/STL training truth or TIF `manual_truth` automatically.
+- Current default PDF figure review uses the broad ant taxonomy profile `multimodal_configs/蚂蚁分类学图版宽松复核_示例.json`: accept single-ant-taxon morphology plates, useful views, and local diagnostic structures; reject multi-species or multi-taxon comparison figures. Other taxa should adapt copied figure profiles in the same way.
+- Current default PDF part-description extraction uses `part_description_configs/蚂蚁分类学部位描述抽取_示例.json`: structure PDF text into `taxon -> part -> description` records with file/page/block provenance. It is a Text LLM profile, not a multimodal image reviewer, and other taxa should adapt copied part-description profiles rather than editing runtime/API secrets into profiles.
 
 ## Data Safety Rules
 

@@ -17,6 +17,21 @@
 - VLM 返回空响应或非 JSON 时，现在会保留 raw response/report 路径，便于排查服务商返回、模型权限或 prompt 输出问题。
 - Blink 父级解析不再使用“已有父级框”或“唯一主部位”自动猜测父级；新建部位默认留在未分组结构中，只有用户手动选择父级或已有明确 route 才形成父子关系。
 
+### **[2026-05-26] PDF 多模态复核默认迁移为蚂蚁分类学图版宽松 Profile**
+> **本次重点：PDF figure 复核不再以“三视图齐全”为默认目标，而是保留单一蚂蚁物种/单一分类单元的分类学形态图版证据。**
+
+- 默认 Figure Extraction / Review Profile 迁移为 `multimodal_configs/蚂蚁分类学图版宽松复核_示例.json`。
+- 内置 profile 现在接受 habitus、侧面、背面、腹面、正面、头部、局部诊断结构、同物种图版组合等多视角/多结构候选；纯局部结构图只要 caption 或附近文本能对应单一蚂蚁物种/分类单元，也可进入 evidence review。
+- 多物种或多分类单元比较图默认一律拒绝；地图、系统树、表格、生态/实验图和非蚂蚁主体仍拒绝。
+- README、Agentic pipeline contract 和 PDF evidence skill 的默认示例路径同步到新 profile；旧三视图示例不再作为默认或推荐入口保留。
+- 研究流程含义：PDF 输出仍是 evidence/candidate/provenance 层，不会自动写入 TIF `manual_truth` 或训练真值；mock/default 复核结果仍进入人工 review，而不是可信 accepted。
+- 严格复核后补强 accepted 门槛：真实多模态结果即使返回 `accept=true`，只要 category 属于 comparison/multi/non/other/uncertain，也不会进入 accepted，避免模型 flags 漏打时误收多物种比较图；同时修正用户手册中残留的旧三视图默认说明。
+- 新增 PDF 纯文本部位描述结构化链路：提取器在读取全文 `document_blocks` 后，可用 Text LLM 将分类学描述整理为“物种/分类单元 -> 部位 -> 文中描述”，不输入图片，不依赖多模态模型判断小结构。
+- 新增独立 Part Description Profile：`part_description_configs/蚂蚁分类学部位描述抽取_示例.json`、`通用分类学部位描述抽取_模板.json`、`植物分类学部位描述抽取_模板.json`。它和图版复核 profile 并列，负责纯文本“部位桶 + 抽取提示词”，不保存 API key。
+- PDF Processing 高级设置区新增 `Part Description Profile` 选择、删除和 JSON 编辑入口；headless `tools/agentic/extract_figures.py` 新增 `--part-description-profile`，Agentic pipeline contract 也把它列为独立输入。
+- SQLite 新增 `pdf_text_blocks`、`taxon_part_descriptions`、`part_extraction_runs`：前者保存带文件名、文件路径、hash、页码和 block_ref 的原文文本块及 LLM 角色标记；后者保存重点部位描述和来源 block；运行表记录是否 real/mock/skipped/failed，并记录本次使用的部位描述 profile。
+- PDF Processing 导出 JSONL 现在附带 `part_descriptions` 字段；GUI 浏览 DB 时会在 figure 证据下方显示同一 PDF/物种相关的部位描述。没有 Text LLM key/model 时，图版提取照常运行，只记录部位描述结构化 skipped。
+
 ### **[2026-05-22] 主标注工作台吸收 Blink 父子精修**
 > **本次重点：把 2D/STL 日常小部位精修从独立 Blink Workbench 合并回主 Labeling Workbench。研究者在同一张大图里完成父级框、子部位标注、收缩松框、自动标注、trajectory 积累和当前子部位专家训练；独立 Blink widget 保留为兼容回退。**
 

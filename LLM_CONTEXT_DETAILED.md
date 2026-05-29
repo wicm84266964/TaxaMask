@@ -774,7 +774,7 @@
 - Figure extraction and multimodal review now share a downstream `Figure Extraction / Review Profile`.
 - New profile utilities live in `core/pdf_processor/figure_profile.py`.
 - New example/template profiles live under `multimodal_configs/`:
-  - `蚂蚁三视图提取复核_示例.json`
+  - `蚂蚁分类学图版宽松复核_示例.json`
   - `通用分类学图版提取复核_模板.json`
   - `植物分类学图版提取复核_模板.json`
 - `EnhancedPDFExtractionSystem` now accepts `figure_profile` / `figure_profile_path` and uses the profile for:
@@ -790,19 +790,26 @@
   - allowed `detected_views` / detected structure fields
   - category values
   - mock fallback terms and required parts
-- Ant triptych behavior remains the built-in default and shipped example. Generic and plant templates no longer inherit `lateral / dorsal / head_frontal` as required acceptance fields.
+- Built-in/default ant review now uses a broad ant taxonomy plate profile. It accepts single-taxon ant morphology figures such as habitus/overview, any useful view, local diagnostic structures, and same-species plate combinations; it no longer requires `lateral + dorsal + head_frontal`.
+- Multi-species or multi-taxon comparison plates are rejected by the ant default profile. Pure local structure figures can be accepted when caption/nearby text ties them to a single ant species or taxon.
+- 2026-05-26 sync: this broad ant taxonomy plate profile is now the default across the built-in profile, GUI default label, README headless example, agentic pipeline contract, and PDF evidence skill. The old ant triptych JSON example is no longer the default or recommended entrypoint.
 - `AntSleap/ui/pdf_processing_widget.py` now separates:
   - `Select Logic Profile` for PDF screening
   - `Figure Extraction / Review Profile` for figure extraction, evidence assembly, and multimodal review
+  - `Part Description Profile` for pure-text taxon/body-part description structuring
 - GUI API settings are now role-based:
   - Text LLM API for PDF screening
   - Multimodal LLM API for figure image+text review
   - Multimodal can reuse Text LLM provider or use a separate vision-capable model/provider.
 - `screener_configs/api_runtime_settings.example.json` is now `taxamask-api-runtime-settings-v2` and contains separate `text_llm` / `multimodal_llm` sections.
 - `tools/agentic/extract_figures.py` supports `--figure-profile` and the compatibility alias `--multimodal-profile`; run indexes record figure profile metadata and multimodal runtime summary.
+- `tools/agentic/extract_figures.py` also supports `--part-description-profile`; run indexes record the pure-text part-description profile used for `taxon -> part -> description` extraction.
 - New tests:
   - `tests/test_figure_profile.py`
   - `tests/test_api_runtime_settings_schema.py`
+- 2026-05-26 focused validation after the ant default migration:
+  - `python -m unittest tests.test_figure_profile tests.test_agent_context_routes tests.test_agentic_contract`
+  - `python -m py_compile core/pdf_processor/figure_profile.py core/pdf_processor/pdf_extractor.py core/pdf_processor/multimodal_validator.py AntSleap/ui/pdf_processing_widget.py`
 - Validation run on 2026-05-03:
   - `python -m unittest tests.test_figure_profile tests.test_api_runtime_settings_schema`
   - `python -m unittest tests.test_config_cleanup tests.test_agentic_contract tests.test_agentic_candidate_import tests.test_figure_profile tests.test_api_runtime_settings_schema`
@@ -1220,7 +1227,7 @@
 ### 0.3 Triptych Extractor V2.0 replaced the old image-object-centric extraction semantics
 - `core/pdf_processor/pdf_extractor.py` now builds **whole figure-region candidates** rather than treating each raw embedded image object as the accepted unit.
 - Candidate discovery is broader than before: it uses both page image rects and drawing/vector rects, then clusters nearby visual regions into figure candidates.
-- Accepted target unit is now a **whole ant triptych figure**; small maps / scale bars / insets may remain if the main subject is still the triptych figure.
+- Accepted target unit is now a **single-taxon ant taxonomy morphology figure/plate**; small maps / scale bars / insets may remain if the main subject is still the morphology figure.
 - Comparison figures and multi-species figures are explicitly kept out of accepted outputs.
 
 ### 0.4 Figure-level persistence + layered text evidence
@@ -1261,7 +1268,7 @@
   - confidence passed threshold
   - it is not `comparison_figure`
   - it is not `multiple_species`
-  - required views are present: `lateral + dorsal + head_frontal`
+  - default ant profile records detected views/structures but does not require all of them
 - Mock/default review no longer silently accepts or silently discards figures.
 - Non-real review is routed into `Review` with `mock_review_only` semantics.
 
@@ -1536,7 +1543,7 @@ They are no longer the active gating mechanism for the standard GUI training but
 ## 4) Candidate Flow (Current Practical Semantics)
 
 ### 4.1 PDF extraction persistence
-`EnhancedPDFExtractionSystem` now stores **figure-level** extraction outputs to SQLite plus run-scoped figure images / batch artifacts.
+`EnhancedPDFExtractionSystem` now stores **figure-level** extraction outputs to SQLite plus run-scoped figure images / batch artifacts. It also has an optional pure-text morphology structuring pass that writes taxon-level part descriptions without using images.
 
 Current crop semantics are intentionally split:
 - `context_bbox`: wider, internal-only, used for caption/local evidence discovery
@@ -1557,6 +1564,14 @@ Current crop semantics are intentionally split:
 There is no dedicated candidate-approval UI tab yet.
 Operators review via DB viewer/artifacts and manually import approved images for annotation.
 If extraction could not use real multimodal review, the current UI now warns before the run starts and also warns again in the main extraction log after each affected PDF.
+
+### 4.5 PDF text part-description evidence
+- The part-description pass runs after full-PDF text blocks are extracted and before final persistence.
+- It sends numbered text blocks to a Text LLM, not to the multimodal validator.
+- The model's task is only to organize text already present in the PDF as `taxon -> part -> description`; it must not infer morphology from images.
+- Source traceability is program-owned: each stored description links back to `file_name`, `file_path`, `file_hash`, `page_number`, and `block_ref`.
+- Missing Text LLM settings do not block figure extraction; the pass records `skipped` in `part_extraction_runs`.
+- These rows are evidence/provenance artifacts and must not be promoted automatically into TIF `manual_truth` or training labels.
 
 ---
 
@@ -1618,7 +1633,7 @@ python AntSleap/main.py
 
 - Candidate pool is not yet a front-end approval panel.
 - No DB-native approval/rejection column synchronized with governance routing outputs.
-- Triptych extraction is still **whole-figure first**; automatic panel splitting (`lateral` / `dorsal` / `head_frontal`) is not yet implemented.
+- PDF figure extraction is still **whole-figure first**; automatic panel splitting into individual views or structures is not yet implemented.
 - Candidate discovery is broader than legacy raw image-object extraction but remains visually rect-seeded (image/drawing region based), not caption-first.
 - Downstream consumers should rely on `review_status` + `multimodal_review_mode`, not only a boolean accepted/taxonomic flag.
 - Final ingestion into annotation project is still manual.
@@ -1687,6 +1702,9 @@ python AntSleap/main.py
   - `save_images_to_files`
   - `enable_multimodal_validation`
   - `multimodal_config`
+  - `text_part_config`
+  - `figure_profile` / `figure_profile_path`
+  - `part_description_profile` / `part_description_profile_path`
 - With `save_images_to_files=True`, extracted **figure clips** are persisted under `<db_stem>_v2_artifacts/figure_images/`.
 - The same artifact root also keeps:
   - `review_batches/` (per-batch candidate manifests)
@@ -1701,6 +1719,9 @@ Saved clip generation now uses a tighter clip path than the internal evidence wi
 - `pdf_files`
 - `figure_records`
 - `figure_evidence`
+- `pdf_text_blocks`
+- `taxon_part_descriptions`
+- `part_extraction_runs`
 - `extraction_stats`
 
 `figure_records` now holds figure-level fields such as:
@@ -1725,6 +1746,19 @@ Saved clip generation now uses a tighter clip path than the internal evidence wi
 - `figure_local`
 - `species_core`
 - `species_extended`
+
+`pdf_text_blocks` stores LLM-labeled original PDF text blocks with `file_name`, `file_path`, `file_hash`, `block_ref`, page/block indexes, original text, `llm_role`, `llm_taxon_name`, and confidence.
+
+`taxon_part_descriptions` stores the main structured output: `taxon_name`, `caste_or_stage`, `part_key`, `part_label`, `description_text`, `source_pages`, `source_block_refs`, `source_blocks`, model, confidence, and review status.
+
+`part_extraction_runs` records whether the pure-text structuring pass ran as `real`, `mock`, `skipped`, `empty`, or `failed`, plus model/protocol, raw response, and the part-description profile name/schema version.
+
+Part-description profiles live under `part_description_configs/`:
+- `蚂蚁分类学部位描述抽取_示例.json`
+- `通用分类学部位描述抽取_模板.json`
+- `植物分类学部位描述抽取_模板.json`
+
+They define pure-text part buckets, text-block role labels, extraction settings, and prompt text. They do not store API keys or multimodal settings. The default ant profile is available both as a JSON example and as an internal fallback.
 
 UI-side export utilities and the governance bridge now consume these figure-level records instead of depending on the legacy `images/text_blocks/image_text_relations` semantics.
 
@@ -2081,7 +2115,7 @@ Acceptance output contract:
       },
       "species_candidate": "Formica aurata",
       "review_status": "accepted",
-      "category": "ant_triptych",
+      "category": "ant_taxonomic_figure",
       "multimodal_review_mode": "real",
       "multimodal_model_used": "gpt-5.4"
     }

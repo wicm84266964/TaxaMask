@@ -63,7 +63,7 @@ class AgentContextRoutesTests(unittest.TestCase):
                 "source_workbench": "pdf_evidence",
                 "project_type": "pdf_evidence",
                 "screener_profile": "Default_Ant_Logic",
-                "figure_profile": "Built-in Ant Triptych Figure Profile",
+                "figure_profile": "Built-in Ant Taxonomy Figure Profile",
             }
         )
 

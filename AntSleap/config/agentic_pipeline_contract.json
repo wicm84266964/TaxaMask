@@ -48,8 +48,14 @@
     {
       "id": "figure_profile",
       "kind": "file",
-      "default": "multimodal_configs/蚂蚁三视图提取复核_示例.json",
-      "description": "Figure extraction and multimodal review profile. The default is the ant triptych example; replace it to define evidence rules for other taxa or figure types."
+      "default": "multimodal_configs/蚂蚁分类学图版宽松复核_示例.json",
+      "description": "Figure extraction and multimodal review profile. The default is the broad ant taxonomy figure example; replace it to define evidence rules for other taxa or figure types."
+    },
+    {
+      "id": "part_description_profile",
+      "kind": "file",
+      "default": "part_description_configs/蚂蚁分类学部位描述抽取_示例.json",
+      "description": "Pure-text taxon part-description extraction profile. It defines the part buckets and prompt used to structure PDF text into taxon -> part -> description records."
     },
     {
       "id": "output_dir",
@@ -124,13 +130,16 @@
         "{db}",
         "--figure-profile",
         "{figure_profile}",
+        "--part-description-profile",
+        "{part_description_profile}",
         "--save-images",
         "--run-index",
         "{output_dir}/figure_extraction_run_index.json"
       ],
       "required_inputs": [
         "pdf_source_dir",
-        "figure_profile"
+        "figure_profile",
+        "part_description_profile"
       ],
       "outputs": [
         "{db}",

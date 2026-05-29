@@ -74,10 +74,11 @@ Summarize the needed figure-review profile changes, then ask whether to create/e
 
 ## Profile Adaptation
 
-Create or select two separate profiles when a non-default workflow is needed:
+Create or select three separate profiles when a non-default workflow is needed:
 
 - Screening profile: controls which PDFs pass the literature screening stage.
 - Figure extraction/review profile: controls which extracted figure/caption candidates are accepted, rejected, or marked uncertain.
+- Part-description profile: controls how pure PDF text is structured into `taxon -> part -> description` records.
 
 Do not edit reusable templates in place. Copy a template to a new descriptive JSON file, then edit the copy. Never store API keys in profile JSON.
 
@@ -88,7 +89,12 @@ Template starting points:
 - Ant screening example: `screener_configs/蚂蚁新种筛选_V2示例.json`
 - Generic figure review: `multimodal_configs/通用分类学图版提取复核_模板.json`
 - Plant figure review: `multimodal_configs/植物分类学图版提取复核_模板.json`
-- Ant figure review example: `multimodal_configs/蚂蚁三视图提取复核_示例.json`
+- Ant figure review example: `multimodal_configs/蚂蚁分类学图版宽松复核_示例.json`
+- Generic part-description extraction: `part_description_configs/通用分类学部位描述抽取_模板.json`
+- Plant part-description extraction: `part_description_configs/植物分类学部位描述抽取_模板.json`
+- Ant part-description extraction example: `part_description_configs/蚂蚁分类学部位描述抽取_示例.json`
+
+Current ant default: the ant figure review example is intentionally broad. It accepts single ant species/taxon morphology figures such as habitus, useful body views, head or local diagnostic structures, and same-taxon plate combinations. It rejects multi-species or multi-taxon comparison figures. This is a profile adaptation pattern similar to what other taxa should do with their own copied templates, not a hard-coded algorithm fork.
 
 ### Screening Profile Checklist
 
@@ -128,6 +134,7 @@ Suggested output paths:
 
 - Screening profile: `screener_configs/<target>_pdf_screening_v2.json`
 - Figure profile: `multimodal_configs/<target>_figure_review.json`
+- Part-description profile: `part_description_configs/<target>_part_descriptions.json`
 
 Validate that the edited JSON is parseable before running. If possible, run a small sample folder first and inspect false positives/false negatives with the user. If credentials are still missing, stop here and guide key/model setup instead of pretending the run can proceed.
 
@@ -143,13 +150,22 @@ Outputs include `run_index.json`, `master_queue.csv`, `master_results.csv`, debu
 
 ### 3. Extract Figures And Captions
 
-Use when the user wants figure images, captions, surrounding evidence text, and a SQLite DB.
+Use when the user wants figure images, captions, surrounding evidence text, taxon part-description text evidence, and a SQLite DB.
 
 ```powershell
-python tools\agentic\extract_figures.py --pdf-source-dir <pdf_dir> --db <output_db> --figure-profile <figure_profile_json> --save-images
+python tools\agentic\extract_figures.py --pdf-source-dir <pdf_dir> --db <output_db> --figure-profile <figure_profile_json> --part-description-profile <part_description_profile_json> --save-images --text-api-key <configured_outside_chat> --text-base-url <base_url> --text-model <text_model>
 ```
 
-Add `--disable-multimodal-validation` only when the user accepts local/mock review. Outputs include the extraction SQLite DB, saved figure images when requested, and `figure_extraction_run_index.json`.
+Add `--disable-multimodal-validation` only when the user accepts local/mock review. Add `--disable-part-description-extraction` when the user only wants figure/caption evidence and does not want the pure-text Text LLM pass. Headless part-description extraction runs as real LLM work only when `--text-api-key`, `--text-base-url`, and `--text-model` are provided; otherwise it records `skipped` and figure extraction continues. Outputs include the extraction SQLite DB, saved figure images when requested, and `figure_extraction_run_index.json`.
+
+Current extraction DB tables include:
+- `figure_records`: figure candidates and review status.
+- `figure_evidence`: caption/local/species-core/species-extended original evidence.
+- `pdf_text_blocks`: original PDF text blocks labeled by the Text LLM, with file name, file path, file hash, page number, and block_ref.
+- `taxon_part_descriptions`: the main `taxon -> part -> description` output, with source pages/block refs and source block payloads.
+- `part_extraction_runs`: real/mock/skipped/failed status for the pure-text structuring pass, including the part-description profile used.
+
+Explain that part descriptions are structured literature evidence, not visual labels and not training truth.
 
 ### 4. Export And Import Candidates
 

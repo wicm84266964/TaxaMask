@@ -87,8 +87,34 @@ def _load_figure_profile_dependencies():
     )
 
 
+def _load_part_description_profile_dependencies():
+    try:
+        module = importlib.import_module("core.pdf_processor.part_description_profile")
+    except ModuleNotFoundError as exc:
+        if exc.name not in {"core", "core.pdf_processor", "core.pdf_processor.part_description_profile"}:
+            raise
+        repo_root = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        profile_file = os.path.join(repo_root, "core", "pdf_processor", "part_description_profile.py")
+        spec = importlib.util.spec_from_file_location("formica_flow_part_description_profile", profile_file)
+        if spec is None or spec.loader is None:
+            raise ModuleNotFoundError(f"Unable to load part_description_profile module from: {profile_file}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+    return (
+        getattr(module, "load_part_description_profile"),
+        getattr(module, "normalize_part_description_profile"),
+        getattr(module, "profile_display_name"),
+    )
+
+
 LLMScreenPDFClassifier, EnhancedPDFExtractionSystem, discover_poppler = _load_pdf_processor_dependencies()
 load_figure_profile, normalize_figure_profile, profile_display_name = _load_figure_profile_dependencies()
+(
+    load_part_description_profile,
+    normalize_part_description_profile,
+    part_description_profile_display_name,
+) = _load_part_description_profile_dependencies()
 
 
 def _resolve_active_theme(parent=None) -> str:
@@ -180,13 +206,21 @@ TRANSLATIONS = {
         "Extraction Pipeline Completed.": "提取流程已完成。",
         "Advanced Logic Settings": "高级逻辑设置",
         "Advanced Figure Settings": "高级图文方案设置",
+        "Advanced Part Description Settings": "高级部位描述方案设置",
         "Figure Extraction / Review Profile:": "图文提取/复核方案:",
+        "Part Description Profile:": "部位描述抽取方案:",
         "Built-in Ant Taxonomy Figure Profile": "内置蚂蚁分类学图版宽松复核方案",
+        "Built-in Ant Part Description Profile": "内置蚂蚁分类学部位描述抽取方案",
         "Failed to load figure profile: {0}": "加载图文方案失败: {0}",
         "Failed to save figure profile: {0}": "保存图文方案失败: {0}",
+        "Failed to load part description profile: {0}": "加载部位描述方案失败: {0}",
+        "Failed to save part description profile: {0}": "保存部位描述方案失败: {0}",
         "Invalid figure profile JSON: {0}": "图文方案 JSON 无效: {0}",
+        "Invalid part description profile JSON: {0}": "部位描述方案 JSON 无效: {0}",
         "Figure extraction/review profile updated.": "图文提取/复核方案已更新。",
+        "Part description profile updated.": "部位描述抽取方案已更新。",
         "Edit the figure extraction and multimodal review profile JSON. API keys are not stored here.": "编辑图文提取与多模态复核方案 JSON。API 密钥不会保存在这里。",
+        "Edit the pure-text part-description extraction profile JSON. API keys are not stored here.": "编辑纯文本部位描述抽取方案 JSON。API 密钥不会保存在这里。",
         "Keyword Configuration": "关键词配置",
         "Keyword lists are editable helper lexicons for V2 screening. The LLM prompt defines the final biological decision criteria.": "关键词是 V2 筛选的可编辑辅助词库；最终生物学判定标准由 LLM 提示词决定。",
         "Show Keyword Lexicons": "显示关键词词库",
@@ -272,6 +306,7 @@ TRANSLATIONS = {
         "\n--- Caption ---\n{0}\n": "\n--- 图注 ---\n{0}\n",
         "\n--- Evidence ---\n": "\n--- 证据 ---\n",
         "\n(No related evidence found in DB)": "\n（数据库中未找到相关证据）",
+        "\n--- Taxon Part Descriptions ---\n": "\n--- 物种部位描述 ---\n",
         "\n\n--- Related Text ---\n": "\n\n--- 相关文本 ---\n",
         "[{0} | {1}]: {2}\n\n": "[{0} | {1}]：{2}\n\n",
         "\n\n(No related text found in DB)": "\n\n（数据库中未找到相关文本）",
@@ -314,9 +349,13 @@ TRANSLATIONS = {
         "  > Run Status: {0}": "  > 运行状态：{0}",
         "  > Partial results were saved to disk.": "  > 部分结果已保存到磁盘。",
         "Initializing Extractor...": "正在初始化提取器...",
+        "  > Figure Profile: {0}": "  > 图文方案：{0}",
+        "  > Part Description Profile: {0}": "  > 部位描述方案：{0}",
         "No PDF files found in input directory.": "输入目录中未找到 PDF 文件。",
         "Processing {0}/{1}: {2}": "正在处理 {0}/{1}：{2}",
         "  > Figures: {0}, Accepted: {1}, Review: {2}": "  > 图像：{0}，接受：{1}，复核：{2}",
+        "  > Part descriptions: {0}, Text blocks: {1}, Status: {2}": "  > 部位描述：{0}，文本块：{1}，状态：{2}",
+        "  > Part descriptions: {0}, Text blocks: {1}, Status: {2}, Profile: {3}": "  > 部位描述：{0}，文本块：{1}，状态：{2}，方案：{3}",
         "  > Failed: {0}": "  > 失败：{0}",
         "  > WARNING: {0} figure(s) in this PDF used mock/default review because real multimodal review was turned OFF at startup. They were placed into Review instead of true acceptance.": "  > 警告：该 PDF 中有 {0} 张图片因启动时关闭了真实多模态复核而使用了 mock/default 复核，因此被放入 Review，而不是真正接受。",
         "  > WARNING: {0} figure(s) in this PDF used mock/default review because real multimodal review could not start at startup{1}. They were placed into Review instead of true acceptance.": "  > 警告：该 PDF 中有 {0} 张图片因真实多模态复核在启动时无法开始{1}，而使用了 mock/default 复核，因此被放入 Review，而不是真正接受。",
@@ -514,6 +553,37 @@ class DatabaseViewerDialog(QDialog):
                         display_text += f"[{level} | {evidence_type}{title_part} | score={score:.3f}]\n{content}\n\n"
                 else:
                     display_text += self.tr("\n(No related evidence found in DB)")
+                if figure_row:
+                    cursor.execute(
+                        """
+                        SELECT taxon_name, caste_or_stage, part_label, description_text,
+                               source_pages, source_block_refs, confidence, review_status,
+                               file_name, file_path, file_hash
+                        FROM taxon_part_descriptions
+                        WHERE pdf_file_id = (
+                            SELECT pdf_file_id FROM figure_records WHERE id = ?
+                        )
+                          AND (
+                            taxon_name = ?
+                            OR ? = ''
+                            OR taxon_name = ''
+                        )
+                        ORDER BY taxon_name ASC, part_key ASC, id ASC
+                        LIMIT 80
+                        """,
+                        (image_id, species_candidate or "", species_candidate or ""),
+                    )
+                    part_rows = cursor.fetchall()
+                    if part_rows:
+                        display_text += self.tr("\n--- Taxon Part Descriptions ---\n")
+                        for taxon_name, caste, part_label, description, source_pages, source_refs, confidence, status, part_file_name, part_file_path, part_file_hash in part_rows:
+                            display_text += (
+                                f"[{taxon_name or 'Unknown'} | {caste or 'unknown'} | {part_label} | "
+                                f"file={part_file_name or ''} | hash={part_file_hash or ''} | "
+                                f"conf={float(confidence or 0.0):.3f} | {status} | pages={source_pages} | refs={source_refs}]\n"
+                                f"{part_file_path or ''}\n"
+                                f"{description}\n\n"
+                            )
                 self.txt_context.setText(display_text)
             else:
                 query = """
@@ -838,6 +908,85 @@ class FigureProfileDialog(QDialog):
     def get_result(self):
         return self.profile, self.profile_name, self.save_action
 
+
+class PartDescriptionProfileDialog(QDialog):
+    def __init__(self, current_profile, profile_name="New_Part_Description_Profile", is_default=False, parent=None, lang="en"):
+        super().__init__(parent)
+        self.profile = deepcopy(current_profile)
+        self.profile_name = profile_name
+        self.is_default = is_default
+        self.lang = lang
+        self.current_theme = _resolve_active_theme(parent)
+        self.save_action = None
+        self.setWindowTitle(self.tr("Advanced Part Description Settings"))
+        self.resize(850, 760)
+        self.setStyleSheet(get_theme_stylesheet(self.current_theme))
+        self.init_ui()
+
+    def tr(self, text):
+        if self.lang == "zh":
+            return TRANSLATIONS["zh"].get(text, text)
+        return text
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        top_layout = QHBoxLayout()
+        top_layout.addWidget(QLabel(self.tr("Profile Name:")))
+        self.edit_profile_name = QLineEdit(self.profile_name)
+        if self.is_default:
+            self.edit_profile_name.setReadOnly(True)
+        top_layout.addWidget(self.edit_profile_name)
+        layout.addLayout(top_layout)
+
+        note = QLabel(self.tr("Edit the pure-text part-description extraction profile JSON. API keys are not stored here."))
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        self.edit_json = QTextEdit()
+        self.edit_json.setAcceptRichText(False)
+        self.edit_json.setPlainText(json.dumps(self.profile, ensure_ascii=False, indent=2))
+        layout.addWidget(self.edit_json)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        if not self.is_default:
+            btn_overwrite = QPushButton(self.tr("Overwrite Current"))
+            btn_overwrite.clicked.connect(lambda: self.save_config("overwrite"))
+            apply_theme_button_style(btn_overwrite, BUTTON_ROLE_COMMIT, "font-weight: bold; padding: 8px;", self.current_theme)
+            btn_layout.addWidget(btn_overwrite)
+        btn_save_new = QPushButton(self.tr("Save as New Profile"))
+        btn_save_new.clicked.connect(lambda: self.save_config("new"))
+        apply_theme_button_style(btn_save_new, BUTTON_ROLE_COMMIT, "font-weight: bold; padding: 8px;", self.current_theme)
+        btn_layout.addWidget(btn_save_new)
+        btn_close = QPushButton(self.tr("Close"))
+        btn_close.clicked.connect(self.reject)
+        apply_theme_button_style(btn_close, BUTTON_ROLE_NEUTRAL, theme=self.current_theme)
+        btn_layout.addWidget(btn_close)
+        layout.addLayout(btn_layout)
+
+    def save_config(self, action):
+        name = self.edit_profile_name.text().strip()
+        if not name:
+            QMessageBox.warning(self, self.tr("Error"), self.tr("Profile name cannot be empty."))
+            return
+        try:
+            payload = json.loads(self.edit_json.toPlainText())
+            if not isinstance(payload, dict):
+                raise ValueError("profile_root_not_object")
+            payload["profile_name"] = name
+            payload = normalize_part_description_profile(payload)
+        except Exception as exc:
+            QMessageBox.warning(self, self.tr("Error"), self.tr("Invalid part description profile JSON: {0}").format(exc))
+            return
+        self.profile = payload
+        self.profile_name = name
+        self.save_action = action
+        self.accept()
+
+    def get_result(self):
+        return self.profile, self.profile_name, self.save_action
+
+
 class ProcessingResultDialog(QDialog):
     def __init__(self, txt_path, csv_path, parent=None, lang="en"):
         super().__init__(parent)
@@ -1053,15 +1202,20 @@ class PDFWorker(QThread):
 
     def run_extract(self):
         figure_profile_name = self.kwargs.get('figure_profile_name', 'Unknown')
+        part_description_profile_name = self.kwargs.get('part_description_profile_name', 'Unknown')
         self.log_signal.emit(self.tr("Initializing Extractor..."))
         self.log_signal.emit(self.tr("  > Figure Profile: {0}").format(figure_profile_name))
+        self.log_signal.emit(self.tr("  > Part Description Profile: {0}").format(part_description_profile_name))
         extractor = EnhancedPDFExtractionSystem(
             output_db_path=self.kwargs['db_path'],
             save_images_to_files=True, 
             enable_multimodal_validation=self.kwargs.get('use_mllm', False),
             multimodal_config=self.kwargs.get('mllm_config'),
+            text_part_config=self.kwargs.get('text_part_config'),
             figure_profile=self.kwargs.get('figure_profile'),
-            figure_profile_path=self.kwargs.get('figure_profile_path')
+            figure_profile_path=self.kwargs.get('figure_profile_path'),
+            part_description_profile=self.kwargs.get('part_description_profile'),
+            part_description_profile_path=self.kwargs.get('part_description_profile_path')
         )
         self._log_extract_startup_warning(extractor)
         
@@ -1092,6 +1246,16 @@ class PDFWorker(QThread):
                         stats.get('review_queue_figures', 0),
                     )
                 )
+                part_status = str(stats.get('part_extraction_status', '') or '')
+                if part_status:
+                    self.log_signal.emit(
+                        self.tr("  > Part descriptions: {0}, Text blocks: {1}, Status: {2}, Profile: {3}").format(
+                            stats.get('part_description_records', 0),
+                            stats.get('part_text_blocks', 0),
+                            part_status,
+                            stats.get('part_description_profile_name', part_description_profile_name),
+                        )
+                    )
                 self._log_extract_pdf_warnings(stats)
             except Exception as e:
                 self.log_signal.emit(self.tr("  > Failed: {0}").format(e))
@@ -1118,12 +1282,18 @@ class PdfProcessingWidget(QWidget):
         self.figure_configs_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'multimodal_configs')
         if not os.path.exists(self.figure_configs_dir):
             os.makedirs(self.figure_configs_dir)
+        self.part_description_configs_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'part_description_configs')
+        if not os.path.exists(self.part_description_configs_dir):
+            os.makedirs(self.part_description_configs_dir)
              
         self.screener_config = LLMScreenPDFClassifier.DEFAULT_CONFIG.copy()
         self.current_profile_name = "Default_Ant_Logic"
         self.figure_profile = normalize_figure_profile(None)
         self.current_figure_profile_name = profile_display_name(self.figure_profile)
         self.current_figure_profile_path = ""
+        self.part_description_profile = normalize_part_description_profile(None)
+        self.current_part_description_profile_name = part_description_profile_display_name(self.part_description_profile)
+        self.current_part_description_profile_path = ""
         self.advanced_config_visible = False
         
         self.init_ui()
@@ -1131,6 +1301,7 @@ class PdfProcessingWidget(QWidget):
         self.worker = None
         self.refresh_profile_list()
         self.refresh_figure_profile_list()
+        self.refresh_part_description_profile_list()
         self.sync_runtime_controls_from_config()
         self.retranslate_ui()
         self.refresh_poppler_status()
@@ -1684,6 +1855,93 @@ class PdfProcessingWidget(QWidget):
             except Exception as exc:
                 QMessageBox.warning(self, self.tr("Error"), self.tr("Failed to delete profile: {0}").format(exc))
 
+    def refresh_part_description_profile_list(self):
+        self.combo_part_description_profiles.blockSignals(True)
+        self.combo_part_description_profiles.clear()
+        default_label = self.tr("Built-in Ant Part Description Profile")
+        self.combo_part_description_profiles.addItem(default_label, "DEFAULT_PART_DESCRIPTION")
+
+        if os.path.exists(self.part_description_configs_dir):
+            for filename in sorted(os.listdir(self.part_description_configs_dir)):
+                if not filename.endswith(".json"):
+                    continue
+                path = os.path.join(self.part_description_configs_dir, filename)
+                try:
+                    profile = load_part_description_profile(path)
+                    name = part_description_profile_display_name(profile) or filename[:-5]
+                except Exception:
+                    name = filename[:-5]
+                self.combo_part_description_profiles.addItem(name, filename)
+
+        index = self.combo_part_description_profiles.findText(self.current_part_description_profile_name)
+        if index >= 0:
+            self.combo_part_description_profiles.setCurrentIndex(index)
+        else:
+            self.combo_part_description_profiles.setCurrentIndex(0)
+            self.part_description_profile = normalize_part_description_profile(None)
+            self.current_part_description_profile_name = self.combo_part_description_profiles.currentText()
+            self.current_part_description_profile_path = ""
+        self.combo_part_description_profiles.blockSignals(False)
+
+    def on_part_description_profile_changed(self, index):
+        if index < 0:
+            return
+        name = self.combo_part_description_profiles.currentText()
+        data = self.combo_part_description_profiles.currentData()
+        if data == "DEFAULT_PART_DESCRIPTION":
+            self.part_description_profile = normalize_part_description_profile(None)
+            self.current_part_description_profile_name = name
+            self.current_part_description_profile_path = ""
+            return
+        path = os.path.join(self.part_description_configs_dir, str(data))
+        try:
+            self.part_description_profile = load_part_description_profile(path)
+            self.current_part_description_profile_name = part_description_profile_display_name(self.part_description_profile) or name
+            self.current_part_description_profile_path = path
+        except Exception as exc:
+            QMessageBox.warning(self, self.tr("Error"), self.tr("Failed to load part description profile: {0}").format(exc))
+            self.combo_part_description_profiles.setCurrentIndex(0)
+
+    def save_part_description_profile(self, name, profile):
+        filename = f"{name}.json"
+        path = os.path.join(self.part_description_configs_dir, filename)
+        profile_to_save = normalize_part_description_profile(profile)
+        profile_to_save["profile_name"] = name
+        try:
+            with open(path, 'w', encoding='utf-8') as handle:
+                json.dump(profile_to_save, handle, ensure_ascii=False, indent=2)
+            self.part_description_profile = profile_to_save
+            self.current_part_description_profile_name = name
+            self.current_part_description_profile_path = path
+            self.refresh_part_description_profile_list()
+        except Exception as exc:
+            QMessageBox.warning(self, self.tr("Error"), self.tr("Failed to save part description profile: {0}").format(exc))
+
+    def delete_current_part_description_profile(self):
+        if self.combo_part_description_profiles.currentData() == "DEFAULT_PART_DESCRIPTION":
+            return
+        name = self.combo_part_description_profiles.currentText()
+        reply = themed_yes_no_question(
+            self,
+            self.tr("Confirm Delete"),
+            self.tr("Are you sure you want to delete profile '{}'?").format(name),
+            confirm_role=BUTTON_ROLE_DESTRUCTIVE,
+        )
+        if reply == QMessageBox.Yes:
+            path = os.path.join(self.part_description_configs_dir, f"{name}.json")
+            data = self.combo_part_description_profiles.currentData()
+            if data:
+                path = os.path.join(self.part_description_configs_dir, str(data))
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+                self.part_description_profile = normalize_part_description_profile(None)
+                self.current_part_description_profile_name = ""
+                self.current_part_description_profile_path = ""
+                self.refresh_part_description_profile_list()
+            except Exception as exc:
+                QMessageBox.warning(self, self.tr("Error"), self.tr("Failed to delete profile: {0}").format(exc))
+
     def tr(self, text):
         if self.current_lang == "zh":
             return TRANSLATIONS["zh"].get(text, text)
@@ -1922,6 +2180,29 @@ class PdfProcessingWidget(QWidget):
         figure_profile_layout.addWidget(self.btn_adv_figure_config)
 
         profile_panel_layout.addLayout(figure_profile_layout)
+
+        part_description_profile_layout = QHBoxLayout()
+        self.lbl_select_part_description_profile = QLabel()
+        part_description_profile_layout.addWidget(self.lbl_select_part_description_profile)
+
+        self.combo_part_description_profiles = QComboBox()
+        self.combo_part_description_profiles.setMinimumWidth(240)
+        self.combo_part_description_profiles.currentIndexChanged.connect(self.on_part_description_profile_changed)
+        part_description_profile_layout.addWidget(self.combo_part_description_profiles)
+
+        self.btn_delete_part_description_profile = QPushButton()
+        self.btn_delete_part_description_profile.clicked.connect(self.delete_current_part_description_profile)
+        apply_semantic_button_style(self.btn_delete_part_description_profile, BUTTON_ROLE_DESTRUCTIVE)
+        part_description_profile_layout.addWidget(self.btn_delete_part_description_profile)
+
+        part_description_profile_layout.addStretch()
+
+        self.btn_adv_part_description_config = QPushButton()
+        self.btn_adv_part_description_config.clicked.connect(self.open_adv_part_description_config)
+        apply_semantic_button_style(self.btn_adv_part_description_config, BUTTON_ROLE_NEUTRAL, "padding: 5px;")
+        part_description_profile_layout.addWidget(self.btn_adv_part_description_config)
+
+        profile_panel_layout.addLayout(part_description_profile_layout)
         form_layout.addWidget(self.profile_panel, 0)
         
         layout.addWidget(self.config_group, 0)
@@ -2311,6 +2592,9 @@ class PdfProcessingWidget(QWidget):
         self.lbl_select_figure_profile.setText(self.tr("Figure Extraction / Review Profile:"))
         self.btn_delete_figure_profile.setText(self.tr("Delete Profile"))
         self.btn_adv_figure_config.setText(self.tr("Advanced Figure Settings"))
+        self.lbl_select_part_description_profile.setText(self.tr("Part Description Profile:"))
+        self.btn_delete_part_description_profile.setText(self.tr("Delete Profile"))
+        self.btn_adv_part_description_config.setText(self.tr("Advanced Part Description Settings"))
         
         self.tabs.setTabText(0, self.tr("1. PDF Screener (Classify)"))
         self.lbl_src_pdf.setText(self.tr("Input PDFs:"))
@@ -2366,10 +2650,28 @@ class PdfProcessingWidget(QWidget):
                 self.save_figure_profile(self.current_figure_profile_name, new_profile)
             QMessageBox.information(self, self.tr("Settings Saved"), self.tr("Figure extraction/review profile updated."))
 
+    def open_adv_part_description_config(self):
+        is_default = self.combo_part_description_profiles.currentData() == "DEFAULT_PART_DESCRIPTION"
+        dlg = PartDescriptionProfileDialog(
+            self.part_description_profile,
+            self.current_part_description_profile_name,
+            is_default,
+            self,
+            self.current_lang,
+        )
+        if dlg.exec():
+            new_profile, new_name, action = dlg.get_result()
+            if action == "new":
+                self.save_part_description_profile(new_name, new_profile)
+            elif action == "overwrite":
+                self.save_part_description_profile(self.current_part_description_profile_name, new_profile)
+            QMessageBox.information(self, self.tr("Settings Saved"), self.tr("Part description profile updated."))
+
     def change_language(self, lang):
         self.current_lang = lang
         self.refresh_profile_list()
         self.refresh_figure_profile_list()
+        self.refresh_part_description_profile_list()
         self.retranslate_ui()
 
     def toggle_advanced_config(self, checked=None):
@@ -2412,6 +2714,7 @@ class PdfProcessingWidget(QWidget):
             "active_label_role": current_tab,
             "screener_profile": self.current_profile_name,
             "figure_profile": self.current_figure_profile_name,
+            "part_description_profile": self.current_part_description_profile_name,
             "screening_mode": self._safe_current_data(getattr(self, "combo_mode", None)),
             "text_llm_key_configured": "yes" if self._safe_text(getattr(self, "edit_api_key", None)) else "no",
             "text_llm_base_url_configured": "yes" if self._safe_text(getattr(self, "edit_base_url", None)) else "no",
@@ -2735,6 +3038,22 @@ class PdfProcessingWidget(QWidget):
         if not self._confirm_extract_preflight(use_mllm, mllm_config):
             return
 
+        text_part_config = {
+            "enabled": True,
+            "default_provider": "text_llm",
+            "api_protocol": self.combo_api_protocol.currentData() or "auto",
+            "timeout": 240,
+            "max_output_tokens": 12000,
+            "max_input_chars": 600000,
+            "providers": {
+                "text_llm": {
+                    "api_key": self.edit_api_key.text().strip(),
+                    "base_url": self.edit_base_url.text().strip(),
+                    "model": self.edit_model.text().strip(),
+                }
+            },
+        }
+
         self.toggle_buttons(True)
         self.progress_bar.setValue(0)
         self.log_poppler_status()
@@ -2742,9 +3061,13 @@ class PdfProcessingWidget(QWidget):
         self.worker = PDFWorker("extract", lang=self.current_lang, pdf_dir=src, db_path=db, 
                                 use_mllm=use_mllm,
                                 mllm_config=mllm_config,
+                                text_part_config=text_part_config,
                                 figure_profile=deepcopy(self.figure_profile),
                                 figure_profile_path=self.current_figure_profile_path,
-                                figure_profile_name=self.current_figure_profile_name)
+                                figure_profile_name=self.current_figure_profile_name,
+                                part_description_profile=deepcopy(self.part_description_profile),
+                                part_description_profile_path=self.current_part_description_profile_path,
+                                part_description_profile_name=self.current_part_description_profile_name)
         self.worker.log_signal.connect(self.log)
         self.worker.progress_signal.connect(self.update_progress)
         self.worker.finished_signal.connect(self.on_finished)
@@ -2844,7 +3167,51 @@ class PdfProcessingWidget(QWidget):
                     evidence_text = []
                     for level, text_content in evidence_rows:
                         evidence_text.append(f"[{level}] {text_content}")
-                    rows.append((img_path, img_name, "\n".join(filter(None, [caption_text or "", *evidence_text])), species_candidate, page_number, final_confidence))
+                    cursor.execute(
+                        """
+                        SELECT taxon_name, caste_or_stage, part_key, part_label,
+                               description_text, source_pages, source_block_refs,
+                               confidence, review_status, file_name, file_path, file_hash
+                        FROM taxon_part_descriptions
+                        WHERE pdf_file_id = (
+                            SELECT pdf_file_id FROM figure_records WHERE id = ?
+                        )
+                          AND (
+                            taxon_name = ?
+                            OR ? = ''
+                            OR taxon_name = ''
+                        )
+                        ORDER BY taxon_name ASC, part_key ASC, id ASC
+                        """,
+                        (figure_id, species_candidate or "", species_candidate or ""),
+                    )
+                    part_descriptions = []
+                    for taxon_name, caste, part_key, part_label, description, source_pages, source_refs, part_confidence, review_status, file_name, file_path, file_hash in cursor.fetchall():
+                        try:
+                            pages_payload = json.loads(source_pages or "[]")
+                        except Exception:
+                            pages_payload = []
+                        try:
+                            refs_payload = json.loads(source_refs or "[]")
+                        except Exception:
+                            refs_payload = []
+                        part_descriptions.append(
+                            {
+                                "taxon_name": taxon_name,
+                                "caste_or_stage": caste,
+                                "part_key": part_key,
+                                "part_label": part_label,
+                                "description_text": description,
+                                "source_pages": pages_payload,
+                                "source_block_refs": refs_payload,
+                                "confidence": part_confidence,
+                                "review_status": review_status,
+                                "file_name": file_name,
+                                "file_path": file_path,
+                                "file_hash": file_hash,
+                            }
+                        )
+                    rows.append((img_path, img_name, "\n".join(filter(None, [caption_text or "", *evidence_text])), species_candidate, page_number, final_confidence, part_descriptions))
             else:
                 cursor.execute("""
                     SELECT i.image_file_path, i.image_file_name, t.text_content, '', 0, i.confidence_score
@@ -2853,11 +3220,11 @@ class PdfProcessingWidget(QWidget):
                     JOIN text_blocks t ON r.text_block_id = t.id
                     WHERE i.is_taxonomic = 1 AND r.confidence_level = 'high'
                 """)
-                rows = cursor.fetchall()
+                rows = [(*row, []) for row in cursor.fetchall()]
             count = 0
             
             with open(save_path, 'w', encoding='utf-8') as f:
-                for img_path, img_name, text, species_candidate, page_number, final_confidence in rows:
+                for img_path, img_name, text, species_candidate, page_number, final_confidence, part_descriptions in rows:
                     entry = {
                         "image": img_name,
                         "text": text,
@@ -2865,6 +3232,7 @@ class PdfProcessingWidget(QWidget):
                         "species_candidate": species_candidate,
                         "page_number": page_number,
                         "confidence": final_confidence,
+                        "part_descriptions": part_descriptions,
                     }
                     f.write(json.dumps(entry, ensure_ascii=False) + "\n")
                     count += 1

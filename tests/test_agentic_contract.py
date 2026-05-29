@@ -22,6 +22,16 @@ class AgenticContractTests(unittest.TestCase):
         input_ids = {item["id"] for item in payload["required_inputs"]}
         self.assertIn("screener_config", input_ids)
         self.assertIn("figure_profile", input_ids)
+        self.assertIn("part_description_profile", input_ids)
+        defaults = {item["id"]: item.get("default", "") for item in payload["required_inputs"]}
+        self.assertEqual(
+            defaults["figure_profile"],
+            "multimodal_configs/蚂蚁分类学图版宽松复核_示例.json",
+        )
+        self.assertEqual(
+            defaults["part_description_profile"],
+            "part_description_configs/蚂蚁分类学部位描述抽取_示例.json",
+        )
 
         stages = {stage["id"]: stage for stage in payload["stages"]}
         screening_command = stages["stage_10_literature_screening"]["command"]
@@ -30,6 +40,8 @@ class AgenticContractTests(unittest.TestCase):
         self.assertIn("{screener_config}", screening_command)
         self.assertIn("--figure-profile", figure_command)
         self.assertIn("{figure_profile}", figure_command)
+        self.assertIn("--part-description-profile", figure_command)
+        self.assertIn("{part_description_profile}", figure_command)
         self.assertIn("{db_artifacts_dir}/figure_images", stages["stage_20_figure_extraction"]["outputs"])
         self.assertIn("{db_artifacts_dir}/review_batches", stages["stage_20_figure_extraction"]["outputs"])
         self.assertEqual(stages["stage_20_figure_extraction"]["title"], "Figure extraction and multimodal review")
@@ -87,6 +99,7 @@ class AgenticContractTests(unittest.TestCase):
         out_dir.mkdir(parents=True, exist_ok=True)
         screener_config = PROJECT_ROOT / "screener_configs" / "通用分类学新种筛选_V2模板.json"
         figure_profile = PROJECT_ROOT / "multimodal_configs" / "通用分类学图版提取复核_模板.json"
+        part_description_profile = PROJECT_ROOT / "part_description_configs" / "通用分类学部位描述抽取_模板.json"
         result = subprocess.run(
             [
                 sys.executable,
@@ -98,6 +111,8 @@ class AgenticContractTests(unittest.TestCase):
                 str(screener_config),
                 "--figure-profile",
                 str(figure_profile),
+                "--part-description-profile",
+                str(part_description_profile),
             ],
             cwd=PROJECT_ROOT,
             capture_output=True,
@@ -108,9 +123,11 @@ class AgenticContractTests(unittest.TestCase):
         plan = json.loads(plan_path.read_text(encoding="utf-8"))
         self.assertTrue(plan["inputs"]["screener_config"]["exists"])
         self.assertTrue(plan["inputs"]["figure_profile"]["exists"])
+        self.assertTrue(plan["inputs"]["part_description_profile"]["exists"])
         stages = {stage["stage_id"]: stage for stage in plan["stages"]}
         self.assertIn(str(screener_config), stages["stage_10_literature_screening"]["command"])
         self.assertIn(str(figure_profile), stages["stage_20_figure_extraction"]["command"])
+        self.assertIn(str(part_description_profile), stages["stage_20_figure_extraction"]["command"])
         self.assertTrue(
             any(
                 path.endswith("taxamask_literature_v2_artifacts/figure_images")

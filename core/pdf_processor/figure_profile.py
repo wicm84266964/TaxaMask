@@ -13,8 +13,8 @@ PROFILE_SCHEMA_VERSION = "taxamask-figure-extraction-review-profile-v1"
 
 DEFAULT_FIGURE_PROFILE: Dict[str, Any] = {
     "schema_version": PROFILE_SCHEMA_VERSION,
-    "profile_name": "内置蚂蚁三视图提取复核",
-    "profile_description": "Built-in fallback profile matching the historical ant triptych workflow.",
+    "profile_name": "内置蚂蚁分类学图版宽松复核",
+    "profile_description": "Built-in ant taxonomy figure review profile for broad multi-view morphology evidence.",
     "target_taxon": {
         "display_name": "蚂蚁",
         "scientific_scope": "Formicidae",
@@ -32,6 +32,8 @@ DEFAULT_FIGURE_PROFILE: Dict[str, Any] = {
         "diagnosis",
         "description",
         "measurements",
+        "morphology",
+        "morphological",
         "material examined",
         "type material",
         "type locality",
@@ -41,6 +43,25 @@ DEFAULT_FIGURE_PROFILE: Dict[str, Any] = {
         "sp. nov",
         "sp. n",
         "gen. nov",
+        "habitus",
+        "whole body",
+        "lateral",
+        "dorsal",
+        "ventral",
+        "frontal",
+        "full-face",
+        "head",
+        "mandible",
+        "antenna",
+        "scape",
+        "mesosoma",
+        "petiole",
+        "postpetiole",
+        "gaster",
+        "leg",
+        "legs",
+        "pilosity",
+        "sculpture",
     ],
     "rejection_terms": [
         "comparison",
@@ -53,7 +74,6 @@ DEFAULT_FIGURE_PROFILE: Dict[str, Any] = {
         "ecology",
         "behavior",
         "nest",
-        "queen and male",
     ],
     "auxiliary_terms": ["map", "distribution", "inset", "scale", "scale bar", "plate", "locality"],
     "extraction_rules": {
@@ -154,22 +174,49 @@ DEFAULT_FIGURE_PROFILE: Dict[str, Any] = {
         ],
     },
     "review_rules": {
-        "acceptance_goal": "只接受主体为单一物种蚂蚁分类学三视图的整张 figure。",
+        "acceptance_goal": "接受主体为单一蚂蚁物种或单一分类单元的分类学形态图版，不要求三视图齐全。",
         "accept_if": [
             "主体是同一物种或同一分类单元",
-            "包含 lateral、dorsal、head_frontal 主要视图",
+            "任一可用于分类学审阅的 habitus、整体视角、局部诊断结构或同物种图版组合",
             "caption 或附近文本能支持物种候选",
+            "纯局部结构图可以接受，只要证据表明其对应单一蚂蚁物种或分类单元",
+            "地图、比例尺或少量 inset 不改变图版主体",
         ],
         "reject_if": [
-            "多物种比较图",
-            "仅分布图、系统树、生态照片或实验图",
-            "主体不是目标分类群",
+            "多物种或多分类单元比较图",
+            "仅分布图、系统树、表格、生态照片、巢穴照片或实验图",
+            "主体不是蚂蚁或目标分类群",
             "图像证据与文字证据明显冲突",
         ],
         "view_schema": {
-            "required_or_expected_views": ["lateral", "dorsal", "head_frontal"],
-            "acceptance_mode": "require_all_expected_parts",
+            "required_or_expected_views": [
+                "habitus_or_overview",
+                "lateral",
+                "dorsal",
+                "ventral",
+                "frontal",
+                "head",
+                "diagnostic_structure",
+                "mandible",
+                "antenna_or_scape",
+                "mesosoma",
+                "petiole_or_postpetiole",
+                "gaster",
+                "legs",
+                "pilosity_or_sculpture",
+                "plate_combination",
+            ],
+            "acceptance_mode": "model_accept_with_parts_recorded",
             "view_terms": {
+                "habitus_or_overview": [
+                    "habitus",
+                    "overview",
+                    "whole body",
+                    "whole ant",
+                    "body view",
+                    "general view",
+                    "plate",
+                ],
                 "lateral": [
                     "lateral",
                     "profile",
@@ -179,13 +226,33 @@ DEFAULT_FIGURE_PROFILE: Dict[str, Any] = {
                     "mesosoma in profile",
                 ],
                 "dorsal": ["dorsal", "in dorsal view", "from above", "body in dorsal view"],
-                "head_frontal": ["full-face", "frontal", "head in full-face", "head frontal", "face view"],
+                "ventral": ["ventral", "in ventral view", "bottom view"],
+                "frontal": ["frontal", "front view", "anterior view", "face view"],
+                "head": ["head", "full-face", "head in full-face", "head frontal", "cephalic"],
+                "diagnostic_structure": ["diagnostic", "detail", "structure", "morphology", "microscopy"],
+                "mandible": ["mandible", "mandibles", "mandibular", "masticatory margin"],
+                "antenna_or_scape": ["antenna", "antennae", "scape", "funiculus", "antennal"],
+                "mesosoma": ["mesosoma", "pronotum", "mesonotum", "propodeum", "alitrunk"],
+                "petiole_or_postpetiole": ["petiole", "postpetiole", "node", "petiolar", "postpetiolar"],
+                "gaster": ["gaster", "gastral", "abdomen"],
+                "legs": ["leg", "legs", "femur", "tibia", "tarsus"],
+                "pilosity_or_sculpture": [
+                    "pilosity",
+                    "setae",
+                    "pubescence",
+                    "sculpture",
+                    "sculpturing",
+                    "striation",
+                    "punctation",
+                    "reticulation",
+                ],
+                "plate_combination": ["plate", "figures", "multi-panel", "multiple panels", "diagnostic plate"],
             },
         },
         "category_values": [
-            "ant_triptych",
+            "ant_taxonomic_figure",
             "comparison_or_multi_species",
-            "non_triptych_or_other",
+            "non_taxonomic_or_other",
             "uncertain",
         ],
         "decision_thresholds": {"accept_threshold": 0.75},
@@ -193,20 +260,23 @@ DEFAULT_FIGURE_PROFILE: Dict[str, Any] = {
             "system_prompt": (
                 "你是严谨的蚂蚁分类学图像审稿助手。"
                 "你将收到多个 PDF figure 候选，每个候选包含一张整图和分层文本证据。"
-                "你的目标是只保留主体为单一物种蚂蚁三视图的整张 figure。"
-                "允许整图中附带地图、比例尺、少量 inset，但若主体不是三视图、或是多物种/比较图，必须拒绝。"
+                "你的目标是保留主体为单一蚂蚁物种或单一分类单元的分类学形态图版。"
+                "不要要求 lateral、dorsal、head_frontal 三视图齐全；任一有分类学形态价值的整体视角、局部诊断结构或同物种图版组合都可以接受。"
+                "纯局部结构图可以接受，只要 caption 或附近文本支持其对应单一蚂蚁物种或分类单元。"
+                "若是多物种或多分类单元比较图、非蚂蚁主体、仅地图/系统树/表格/生态/实验图，或图文明显冲突，必须拒绝。"
                 "请只输出 JSON，不要输出任何额外解释。"
             ),
             "user_instructions": (
                 "请按顺序审查以下 figure 候选。你必须为每个 candidate_id 返回一条结果。"
-                "accept 仅在主体是单一物种蚂蚁三视图整图时为 true；"
-                "detected_views 仅使用 profile 中定义的视图字段；confidence_score 使用 0-1 浮点数。"
+                "accept=true 表示该候选值得进入 PDF evidence review，不代表训练真值；"
+                "不要因为缺少三视图而拒绝；detected_views 仅用于记录可见视角或结构，并且只能使用 profile 中定义的字段；"
+                "多物种比较图必须拒绝；confidence_score 使用 0-1 浮点数。"
             ),
         },
         "mock_fallback": {
             "enabled": True,
             "accept_requires_text_hits": 2,
-            "accept_requires_parts": ["lateral", "dorsal", "head_frontal"],
+            "accept_requires_parts": [],
         },
     },
 }

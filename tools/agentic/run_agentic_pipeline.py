@@ -203,6 +203,7 @@ def main() -> int:
     parser.add_argument("--policy", default="", help="Override input policy path.")
     parser.add_argument("--screener-config", default="", help="Override PDF screening logic profile path.")
     parser.add_argument("--figure-profile", default="", help="Override figure extraction/review profile path.")
+    parser.add_argument("--part-description-profile", default="", help="Override pure-text part-description extraction profile path.")
     parser.add_argument("--dry-run", action="store_true", help="Only write the run plan; this is the default.")
     parser.add_argument("--execute-ready", action="store_true", help="Execute currently runnable command stages in order.")
     parser.add_argument("--allow-model-inference", action="store_true", help="Allow runnable stages that initialize model weights/GPU inference.")
@@ -220,6 +221,7 @@ def main() -> int:
         "policy": args.policy,
         "screener_config": args.screener_config,
         "figure_profile": args.figure_profile,
+        "part_description_profile": args.part_description_profile,
         "output_dir": args.out,
     }
     inputs = _contract_inputs(contract, overrides)

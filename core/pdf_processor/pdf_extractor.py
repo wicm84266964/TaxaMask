@@ -24,6 +24,12 @@ import fitz
 
 from .figure_profile import load_figure_profile, normalize_figure_profile, profile_display_name
 from .multimodal_validator import FigureReviewResult, MultimodalValidator
+from .part_description_extractor import PartExtractionResult, TextPartDescriptionExtractor
+from .part_description_profile import (
+    load_part_description_profile,
+    normalize_part_description_profile,
+    profile_display_name as part_profile_display_name,
+)
 
 
 class EnhancedPDFExtractionSystem:
@@ -67,8 +73,6 @@ class EnhancedPDFExtractionSystem:
         "sp. n",
         "gen. nov",
     ]
-    REQUIRED_TRIPTYCH_VIEWS = {"lateral", "dorsal", "head_frontal"}
-
     CORE_SECTION_HINTS = {
         "diagnosis",
         "description",
@@ -98,8 +102,11 @@ class EnhancedPDFExtractionSystem:
         per_pdf_database: bool = False,
         enable_multimodal_validation: bool = True,
         multimodal_config: Dict[str, Any] | None = None,
+        text_part_config: Dict[str, Any] | None = None,
         figure_profile: Dict[str, Any] | None = None,
         figure_profile_path: str | None = None,
+        part_description_profile: Dict[str, Any] | None = None,
+        part_description_profile_path: str | None = None,
         two_stage_validation: bool = False,
     ):
         self.logger = logging.getLogger(__name__)
@@ -110,8 +117,15 @@ class EnhancedPDFExtractionSystem:
         self.per_pdf_database = per_pdf_database
         self.enable_multimodal_validation = enable_multimodal_validation
         self.multimodal_config = multimodal_config or {}
+        self.text_part_config = text_part_config or {}
         self.figure_profile = self._load_runtime_figure_profile(figure_profile, figure_profile_path)
         self.figure_profile_name = profile_display_name(self.figure_profile) or "内置默认方案"
+        self.part_description_profile = self._load_runtime_part_description_profile(
+            part_description_profile,
+            part_description_profile_path,
+        )
+        self.part_description_profile_name = part_profile_display_name(self.part_description_profile) or "内置默认部位描述方案"
+        self.part_description_profile_path = str(part_description_profile_path or "").strip()
         self._apply_figure_profile(self.figure_profile)
         self.two_stage_validation = two_stage_validation
         profile_threshold = (
@@ -149,6 +163,18 @@ class EnhancedPDFExtractionSystem:
                 self.logger.warning(f"Figure 多模态验证器初始化失败，将退化为本地启发式复核: {exc}")
                 self.validator = None
         self.multimodal_startup_state: dict[str, object] = self._build_multimodal_startup_state()
+        self.text_part_extractor = TextPartDescriptionExtractor(
+            self.text_part_config,
+            self.figure_profile,
+            self.part_description_profile,
+            self.part_description_profile_path,
+        )
+        if self.text_part_extractor.is_configured():
+            self.logger.info(f"PDF 纯文本部位描述抽取器已配置 | profile={self.part_description_profile_name}")
+        else:
+            self.logger.info(
+                f"PDF 纯文本部位描述抽取器未配置或关闭；提取时将跳过部位描述结构化 | profile={self.part_description_profile_name}"
+            )
 
         self._init_database()
 
@@ -168,6 +194,25 @@ class EnhancedPDFExtractionSystem:
         if isinstance(config_profile, dict):
             return normalize_figure_profile(config_profile)
         return normalize_figure_profile(None)
+
+    def _load_runtime_part_description_profile(
+        self,
+        part_description_profile: Dict[str, Any] | None,
+        part_description_profile_path: str | None,
+    ) -> Dict[str, Any]:
+        if part_description_profile_path:
+            return load_part_description_profile(part_description_profile_path)
+        if part_description_profile is not None:
+            return normalize_part_description_profile(part_description_profile)
+        config_profile_path = str(
+            self.text_part_config.get("part_description_profile_path", self.text_part_config.get("profile_path", "")) or ""
+        ).strip()
+        if config_profile_path:
+            return load_part_description_profile(config_profile_path)
+        config_profile = self.text_part_config.get("part_description_profile", self.text_part_config.get("profile"))
+        if isinstance(config_profile, dict):
+            return normalize_part_description_profile(config_profile)
+        return normalize_part_description_profile(None)
 
     def _apply_figure_profile(self, profile: Dict[str, Any]) -> None:
         extraction_rules = profile.get("extraction_rules", {})
@@ -410,6 +455,80 @@ class EnhancedPDFExtractionSystem:
 
         cursor.execute(
             """
+            CREATE TABLE IF NOT EXISTS pdf_text_blocks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pdf_file_id INTEGER NOT NULL,
+                file_name TEXT,
+                file_path TEXT,
+                file_hash TEXT,
+                block_ref TEXT NOT NULL,
+                page_number INTEGER NOT NULL,
+                block_index INTEGER NOT NULL,
+                section_hint TEXT,
+                text_type TEXT,
+                text_content TEXT NOT NULL,
+                llm_role TEXT,
+                llm_taxon_name TEXT,
+                llm_confidence REAL DEFAULT 0.0,
+                model_used TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (pdf_file_id) REFERENCES pdf_files(id),
+                UNIQUE(pdf_file_id, block_ref)
+            )
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS taxon_part_descriptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pdf_file_id INTEGER NOT NULL,
+                file_name TEXT,
+                file_path TEXT,
+                file_hash TEXT,
+                taxon_name TEXT,
+                caste_or_stage TEXT,
+                part_key TEXT NOT NULL,
+                part_label TEXT NOT NULL,
+                description_text TEXT NOT NULL,
+                source_pages TEXT,
+                source_block_refs TEXT,
+                source_blocks TEXT,
+                model_used TEXT,
+                confidence REAL DEFAULT 0.0,
+                review_status TEXT DEFAULT 'auto_extracted',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (pdf_file_id) REFERENCES pdf_files(id)
+            )
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS part_extraction_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pdf_file_id INTEGER NOT NULL,
+                file_name TEXT,
+                file_path TEXT,
+                file_hash TEXT,
+                status TEXT NOT NULL,
+                reason TEXT,
+                model_used TEXT,
+                used_protocol TEXT,
+                profile_name TEXT,
+                profile_schema_version TEXT,
+                extracted_records INTEGER DEFAULT 0,
+                labeled_blocks INTEGER DEFAULT 0,
+                truncated_input BOOLEAN DEFAULT FALSE,
+                raw_response TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (pdf_file_id) REFERENCES pdf_files(id)
+            )
+            """
+        )
+
+        cursor.execute(
+            """
             CREATE TABLE IF NOT EXISTS extraction_stats (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 pdf_file_id INTEGER NOT NULL,
@@ -426,7 +545,13 @@ class EnhancedPDFExtractionSystem:
 
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_figure_records_pdf_page ON figure_records(pdf_file_id, page_number)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_figure_evidence_figure ON figure_evidence(figure_id, evidence_level)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_pdf_text_blocks_pdf_ref ON pdf_text_blocks(pdf_file_id, block_ref)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_pdf_text_blocks_role ON pdf_text_blocks(pdf_file_id, llm_role)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_taxon_part_pdf_taxon ON taxon_part_descriptions(pdf_file_id, taxon_name)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_taxon_part_key ON taxon_part_descriptions(part_key)")
         self._ensure_column_exists("figure_records", "multimodal_review_mode", "TEXT DEFAULT 'none'")
+        self._ensure_column_exists("part_extraction_runs", "profile_name", "TEXT")
+        self._ensure_column_exists("part_extraction_runs", "profile_schema_version", "TEXT")
 
         self.db_conn.commit()
         self.logger.info(f"Figure V2.0 数据库初始化完成: {self.output_db_path}")
@@ -490,6 +615,13 @@ class EnhancedPDFExtractionSystem:
             pdf_file_id = int(cursor.lastrowid or 0)
 
             document_blocks = self._extract_document_text_blocks(doc)
+            part_extraction_result = self._extract_text_part_descriptions(
+                pdf_file_id=pdf_file_id,
+                file_name=pdf_path_obj.name,
+                file_path=str(pdf_path_obj),
+                file_hash=file_hash,
+                document_blocks=document_blocks,
+            )
             figure_candidates: List[Dict[str, Any]] = []
 
             for page_offset in range(total_pages):
@@ -515,12 +647,12 @@ class EnhancedPDFExtractionSystem:
                         page_candidate_index += 1
 
             reviewed_candidates = self._review_all_candidates(figure_candidates)
-            stats = self._persist_pdf_results(pdf_file_id, reviewed_candidates)
+            stats = self._persist_pdf_results(pdf_file_id, reviewed_candidates, part_extraction_result)
             self.db_conn.commit()
             doc.close()
 
             self.logger.info(
-                f"Figure V2.0 提取完成: {pdf_path_obj.name} | 候选={stats['total_figures']} | 通过={stats['accepted_figures']} | 拒绝={stats['rejected_figures']} | 复核={stats['review_queue_figures']}"
+                f"Figure V2.0 提取完成: {pdf_path_obj.name} | 候选={stats['total_figures']} | 通过={stats['accepted_figures']} | 拒绝={stats['rejected_figures']} | 复核={stats['review_queue_figures']} | 部位描述={stats.get('part_description_records', 0)}"
             )
             return {"status": "success", "file_id": pdf_file_id, "stats": stats}
         except Exception:
@@ -536,6 +668,9 @@ class EnhancedPDFExtractionSystem:
         if not existing:
             return
         pdf_file_id = int(existing[0])
+        cursor.execute("DELETE FROM taxon_part_descriptions WHERE pdf_file_id = ?", (pdf_file_id,))
+        cursor.execute("DELETE FROM pdf_text_blocks WHERE pdf_file_id = ?", (pdf_file_id,))
+        cursor.execute("DELETE FROM part_extraction_runs WHERE pdf_file_id = ?", (pdf_file_id,))
         cursor.execute("DELETE FROM figure_evidence WHERE figure_id IN (SELECT id FROM figure_records WHERE pdf_file_id = ?)", (pdf_file_id,))
         cursor.execute("DELETE FROM figure_records WHERE pdf_file_id = ?", (pdf_file_id,))
         cursor.execute("DELETE FROM extraction_stats WHERE pdf_file_id = ?", (pdf_file_id,))
@@ -584,6 +719,37 @@ class EnhancedPDFExtractionSystem:
                     }
                 )
         return blocks
+
+    def _extract_text_part_descriptions(
+        self,
+        *,
+        pdf_file_id: int,
+        file_name: str,
+        file_path: str,
+        file_hash: str,
+        document_blocks: List[Dict[str, Any]],
+    ) -> PartExtractionResult:
+        try:
+            result = self.text_part_extractor.extract(
+                pdf_file_id=pdf_file_id,
+                file_name=file_name,
+                file_path=file_path,
+                file_hash=file_hash,
+                document_blocks=document_blocks,
+            )
+        except Exception as exc:
+            self.logger.warning(f"PDF 纯文本部位描述抽取失败: {file_name} | {exc}")
+            return PartExtractionResult(status="failed", reason=str(exc))
+
+        if result.status in {"real", "mock"}:
+            self.logger.info(
+                f"PDF 纯文本部位描述抽取完成: {file_name} | profile={result.profile_name or self.part_description_profile_name} | records={len(result.records)} | blocks={len(result.block_labels)} | mode={result.status}"
+            )
+        else:
+            self.logger.info(
+                f"PDF 纯文本部位描述抽取跳过/未产出: {file_name} | profile={result.profile_name or self.part_description_profile_name} | status={result.status} | reason={result.reason}"
+            )
+        return result
 
     def _score_taxonomic_text(self, text: str) -> float:
         lowered = text.lower()
@@ -1209,9 +1375,11 @@ class EnhancedPDFExtractionSystem:
                 candidate_review_source = "missing_result"
             is_real_multimodal = str(result.review_mode or "").strip().lower() == "real"
             required_parts_ok = self._has_required_profile_parts(result.detected_views)
+            category_ok = self._is_accept_category(result.category)
             accepted = (
                 result.accept
                 and result.confidence_score >= self.review_accept_threshold
+                and category_ok
                 and not result.comparison_figure
                 and not result.multiple_species
                 and required_parts_ok
@@ -1226,6 +1394,9 @@ class EnhancedPDFExtractionSystem:
             elif result.accept and not required_parts_ok:
                 review_status = "rejected"
                 rejection_reason = "missing_required_parts"
+            elif result.accept and not category_ok:
+                review_status = "rejected"
+                rejection_reason = result.category or "blocked_category"
             elif result.category == "uncertain":
                 review_status = "needs_review"
                 rejection_reason = "uncertain"
@@ -1262,6 +1433,14 @@ class EnhancedPDFExtractionSystem:
         if not self.required_figure_parts:
             return True
         return self.required_figure_parts.issubset({str(view or "").strip() for view in detected_views})
+
+    @staticmethod
+    def _is_accept_category(category: str) -> bool:
+        category_text = str(category or "").strip().lower()
+        if not category_text:
+            return False
+        blocked_tokens = ("comparison", "multi", "uncertain", "non_", "non-", "other")
+        return not any(token in category_text for token in blocked_tokens)
 
     def _block_references_other_figure(
         self,
@@ -1316,7 +1495,12 @@ class EnhancedPDFExtractionSystem:
     # ------------------------------------------------------------------
     # Persistence
     # ------------------------------------------------------------------
-    def _persist_pdf_results(self, pdf_file_id: int, candidates: List[Dict[str, Any]]) -> dict[str, int | str | bool]:
+    def _persist_pdf_results(
+        self,
+        pdf_file_id: int,
+        candidates: List[Dict[str, Any]],
+        part_extraction_result: PartExtractionResult | None = None,
+    ) -> dict[str, int | str | bool]:
         if self.db_conn is None:
             raise RuntimeError("数据库连接未初始化")
         cursor = self.db_conn.cursor()
@@ -1391,6 +1575,8 @@ class EnhancedPDFExtractionSystem:
             else:
                 rejected_count += 1
 
+        part_stats = self._persist_part_extraction_result(cursor, pdf_file_id, part_extraction_result)
+
         cursor.execute(
             """
             INSERT INTO extraction_stats (
@@ -1413,9 +1599,143 @@ class EnhancedPDFExtractionSystem:
             "multimodal_startup_status": str(self.multimodal_startup_state.get("status", "unknown") or "unknown"),
             "multimodal_startup_reason": str(self.multimodal_startup_state.get("reason", "") or ""),
             "real_multimodal_configured": bool(self.multimodal_startup_state.get("real_multimodal_configured", False)),
+            "part_extraction_status": str(part_stats.get("status", "")),
+            "part_extraction_reason": str(part_stats.get("reason", "")),
+            "part_description_profile_name": str(part_stats.get("profile_name", "")),
+            "part_description_records": int(part_stats.get("part_description_records", 0) or 0),
+            "part_text_blocks": int(part_stats.get("part_text_blocks", 0) or 0),
             # 兼容旧 UI 日志字段
             "total_images": len(candidates),
             "taxonomic_images": accepted_count,
+        }
+
+    def _persist_part_extraction_result(
+        self,
+        cursor: sqlite3.Cursor,
+        pdf_file_id: int,
+        result: PartExtractionResult | None,
+    ) -> dict[str, int | str | bool]:
+        if result is None:
+            result = PartExtractionResult(status="skipped", reason="not_run")
+        if not result.profile_name:
+            result.profile_name = self.part_description_profile_name
+        if not result.profile_schema_version:
+            result.profile_schema_version = str(self.part_description_profile.get("schema_version", "") or "")
+        records = list(result.records or [])
+        block_labels = list(result.block_labels or [])
+
+        run_file_name = ""
+        run_file_path = ""
+        run_file_hash = ""
+        for payload in block_labels:
+            run_file_name = str(payload.get("file_name", "") or "")
+            run_file_path = str(payload.get("file_path", "") or "")
+            run_file_hash = str(payload.get("file_hash", "") or "")
+            if run_file_name or run_file_path or run_file_hash:
+                break
+        if not run_file_name and records:
+            first_block = (records[0].get("source_blocks") or [{}])[0]
+            if isinstance(first_block, dict):
+                run_file_name = str(first_block.get("file_name", "") or "")
+                run_file_path = str(first_block.get("file_path", "") or "")
+                run_file_hash = str(first_block.get("file_hash", "") or "")
+
+        cursor.execute(
+            """
+            INSERT INTO part_extraction_runs (
+                pdf_file_id, file_name, file_path, file_hash, status, reason,
+                model_used, used_protocol, profile_name, profile_schema_version, extracted_records, labeled_blocks,
+                truncated_input, raw_response
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                pdf_file_id,
+                run_file_name,
+                run_file_path,
+                run_file_hash,
+                str(result.status or ""),
+                str(result.reason or ""),
+                str(result.model_used or ""),
+                str(result.used_protocol or ""),
+                str(result.profile_name or self.part_description_profile_name or ""),
+                str(result.profile_schema_version or self.part_description_profile.get("schema_version", "") or ""),
+                len(records),
+                len(block_labels),
+                bool(result.truncated_input),
+                str(result.raw_response or ""),
+            ),
+        )
+
+        for block in block_labels:
+            cursor.execute(
+                """
+                INSERT OR REPLACE INTO pdf_text_blocks (
+                    pdf_file_id, file_name, file_path, file_hash, block_ref,
+                    page_number, block_index, section_hint, text_type, text_content,
+                    llm_role, llm_taxon_name, llm_confidence, model_used
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    pdf_file_id,
+                    str(block.get("file_name", "") or ""),
+                    str(block.get("file_path", "") or ""),
+                    str(block.get("file_hash", "") or ""),
+                    str(block.get("block_ref", "") or ""),
+                    int(block.get("page_number", 0) or 0),
+                    int(block.get("block_index", 0) or 0),
+                    str(block.get("section_hint", "") or ""),
+                    str(block.get("text_type", "") or ""),
+                    str(block.get("text_content", "") or ""),
+                    str(block.get("llm_role", "") or ""),
+                    str(block.get("llm_taxon_name", "") or ""),
+                    float(block.get("llm_confidence", 0.0) or 0.0),
+                    str(block.get("model_used", "") or result.model_used or ""),
+                ),
+            )
+
+        for record in records:
+            source_blocks = record.get("source_blocks", [])
+            if not isinstance(source_blocks, list):
+                source_blocks = []
+            first_block = next((block for block in source_blocks if isinstance(block, dict)), {})
+            file_name = str(first_block.get("file_name", run_file_name) if isinstance(first_block, dict) else run_file_name)
+            file_path = str(first_block.get("file_path", run_file_path) if isinstance(first_block, dict) else run_file_path)
+            file_hash = str(first_block.get("file_hash", run_file_hash) if isinstance(first_block, dict) else run_file_hash)
+            cursor.execute(
+                """
+                INSERT INTO taxon_part_descriptions (
+                    pdf_file_id, file_name, file_path, file_hash, taxon_name,
+                    caste_or_stage, part_key, part_label, description_text,
+                    source_pages, source_block_refs, source_blocks, model_used,
+                    confidence, review_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    pdf_file_id,
+                    file_name,
+                    file_path,
+                    file_hash,
+                    str(record.get("taxon_name", "") or ""),
+                    str(record.get("caste_or_stage", "unknown") or "unknown"),
+                    str(record.get("part_key", "") or ""),
+                    str(record.get("part_label", "") or ""),
+                    str(record.get("description_text", "") or ""),
+                    json.dumps(record.get("source_pages", []), ensure_ascii=False),
+                    json.dumps(record.get("source_block_refs", []), ensure_ascii=False),
+                    json.dumps(source_blocks, ensure_ascii=False),
+                    str(record.get("model_used", "") or result.model_used or ""),
+                    float(record.get("confidence", 0.0) or 0.0),
+                    str(record.get("review_status", "auto_extracted") or "auto_extracted"),
+                ),
+            )
+
+        return {
+            "status": str(result.status or ""),
+            "reason": str(result.reason or ""),
+            "profile_name": str(result.profile_name or self.part_description_profile_name or ""),
+            "part_description_records": len(records),
+            "part_text_blocks": len(block_labels),
+            "part_extraction_real": result.status == "real",
         }
 
     def _insert_evidence_rows(self, cursor: sqlite3.Cursor, figure_id: int, candidate: Dict[str, Any]) -> None:

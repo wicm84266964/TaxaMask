@@ -113,7 +113,6 @@ class MultimodalValidator:
         "ecology",
         "behavior",
         "nest",
-        "queen and male",
     ]
 
     AUXILIARY_TERMS = ["map", "distribution", "inset", "scale bar", "plate", "locality"]

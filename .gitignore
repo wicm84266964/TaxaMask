@@ -44,6 +44,7 @@ AntSleap/specimens/
 !screener_configs/*.json
 !screener_configs/*.example.json
 !multimodal_configs/*.json
+!part_description_configs/*.json
 !vendor/ant-code/**/*.json
 screener_configs/api_runtime_settings.json
 

@@ -1086,13 +1086,71 @@ class TifWorkbenchWidget(QWidget):
         recent_log = ""
         if hasattr(self, "log_console"):
             recent_log = "\n".join(self.log_console.toPlainText().splitlines()[-6:])
+
+        source_shape, spacing_zyx = self._volume_source_geometry()
+        active_label_role = self.label_role_combo.currentData() or ""
+        active_label_volume = self.label_volume
+        if active_label_role == "working_edit" and self.edit_volume is not None:
+            active_label_volume = self.edit_volume
+        label_shape = tuple(int(value) for value in getattr(active_label_volume, "shape", ()) or ())
+        axis = self._current_slice_axis()
+        slice_position = ""
+        if self.image_volume is not None:
+            slice_position = f"{int(self.slice_slider.value()) + 1}/{self._slice_count_for_axis(axis)}"
+
+        readiness_text = ""
+        readiness_reasons = ""
+        if self.current_specimen_id:
+            try:
+                readiness = self.project.evaluate_train_ready(self.current_specimen_id)
+            except Exception:
+                readiness = {}
+            if readiness:
+                readiness_text = "yes" if readiness.get("train_ready") else "no"
+                readiness_reasons = ",".join(str(item) for item in readiness.get("reasons", []) if str(item))
+
+        def triplet_text(values):
+            values = tuple(values or ())
+            if len(values) != 3:
+                return ""
+            return f"{values[0]}/{values[1]}/{values[2]}"
+
+        clarity = "on" if bool(getattr(self, "_volume_clarity_mode", False)) else "off"
+        volume_status = ""
+        if self.image_volume is not None:
+            volume_status = self.volume_canvas_overlay_text()
+
         return {
             "source_workbench": "tif_volume",
             "project_type": "tif_volume",
             "project_path": getattr(self.project, "current_project_path", "") or "",
             "active_specimen_id": self.current_specimen_id,
-            "active_label_role": self.label_role_combo.currentData() or "",
+            "active_label_role": active_label_role,
             "selected_material_id": material_id,
+            "display_mode": self.display_mode,
+            "active_slice_axis": axis,
+            "active_slice_position": slice_position,
+            "active_volume_shape_zyx": triplet_text(source_shape),
+            "active_volume_spacing_zyx": triplet_text(spacing_zyx),
+            "active_label_shape_zyx": triplet_text(label_shape),
+            "train_ready_status": readiness_text,
+            "train_ready_reasons": readiness_reasons,
+            "volume_renderer": self._volume_canvas_renderer,
+            "volume_renderer_label": self._volume_renderer_label(),
+            "volume_render_mode": self._volume_render_mode,
+            "volume_density_cutoff": f"{int(self.volume_cutoff_slider.value())}%",
+            "volume_texture_target_dim": str(self._active_volume_target_dim()),
+            "volume_ray_samples": str(self._active_volume_sample_count()),
+            "volume_clarity_mode": clarity,
+            "volume_inside_depth": f"{int(self.volume_inside_slider.value())}%",
+            "volume_front_cut": f"{int(self.volume_clip_slider.value())}%",
+            "volume_zoom": f"{int(round(float(self._volume_zoom) * 100))}%",
+            "volume_pan": f"x={int(round(float(self._volume_pan_x) * 100))}%, y={int(round(float(self._volume_pan_y) * 100))}%",
+            "volume_yaw_pitch": f"yaw={float(self._volume_yaw):.1f}, pitch={float(self._volume_pitch):.1f}",
+            "volume_gpu_warning": self._volume_renderer_warning,
+            "volume_status_overlay": volume_status,
+            "tif_next_requirement": "brain_orientation_reslice: standardize ant brain/head volumes by dorsal head-top axis upward, fix anterior-posterior axis, crop brain-only volume, and export resampled image/label volumes for AI training or internal-structure analysis.",
+            "tif_requirement_doc": "docs/ant3d_workbench/TIF脑部统一朝向重切片需求_zh.md",
             "recent_log_excerpt": recent_log,
         }
 

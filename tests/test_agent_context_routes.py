@@ -57,6 +57,23 @@ class AgentContextRoutesTests(unittest.TestCase):
         self.assertIn("manual_truth", context["safety_notes"])
         self.assertIn("contract_placeholder=ok_or_not_applicable", context["health_check_summary"])
 
+    def test_tif_volume_route_includes_gpu_preview_and_reslice_hints(self):
+        context = enrich_agent_context(
+            {
+                "source_workbench": "tif_volume",
+                "project_type": "tif_volume",
+                "display_mode": "volume",
+                "tif_next_requirement": "brain_orientation_reslice",
+            }
+        )
+
+        self.assertEqual(context["diagnostic_route"], "tif_volume_workbench_context")
+        self.assertIn("GPU preview", context["diagnostic_focus"])
+        self.assertIn("brain-orientation reslicing", context["diagnostic_focus"])
+        self.assertIn("TIF脑部统一朝向重切片需求_zh.md", context["llm_context_refs"])
+        self.assertIn("tif_gpu_volume_canvas.py", context["source_code_refs"])
+        self.assertIn("nearest-neighbor", context["safety_notes"])
+
     def test_pdf_route_keeps_candidate_safety_visible(self):
         context = enrich_agent_context(
             {

@@ -52,6 +52,13 @@
 - Chinese mode uses Chinese labels for renderer status metrics; English mode keeps English labels.
 - The persistent right-side render log/status was removed from the normal layout pressure path. Volume render state is exposed as canvas overlay text and compact status text.
 - Status fields include renderer, compact GPU name, texture size, ray samples, view depth, front cut, zoom, pan, VRAM estimate, upload/draw timing, and uploaded data dtype when available.
+- `TifWorkbenchWidget.get_agent_context()` now passes compact TIF view state to Ask Agent:
+  - display mode
+  - active slice axis and position
+  - source image shape/spacing and current label shape
+  - train-ready summary
+  - GPU/CPU renderer, quality, samples, clarity, view depth, front cut, zoom, pan, yaw/pitch
+  - a pointer to the brain-orientation reslicing requirement document
 
 ### 0.4 Known limits
 - This is still a downsampled/preview renderer, not a quantitative analysis export.
@@ -60,6 +67,7 @@
 - Qt may still emit shutdown messages such as `QDxgiVSyncService not destroyed in time`; current handling reduces but does not fully eliminate those harmless teardown warnings.
 - Orthogonal/slice review remains necessary for precise label editing. The 3D preview is read-only.
 - Brain-standardization reslicing is not implemented in this milestone. It should use explicit landmarks/orientation vectors, source spacing, affine resampling, and label-nearest-neighbor handling.
+- Requirement document for the next stage: `docs/ant3d_workbench/TIF脑部统一朝向重切片需求_zh.md`.
 
 ### 0.5 Validation
 - Focused tests:

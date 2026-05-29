@@ -120,25 +120,29 @@ AGENT_CONTEXT_ROUTES = {
     },
     "tif_volume": {
         "diagnostic_route": "tif_volume_workbench_context",
-        "diagnostic_focus": "Current TIF specimen, label role, material ID, sidecar volumes, and train-ready/manual_truth safety.",
+        "diagnostic_focus": "Current TIF specimen, label role, material ID, sidecar volumes, slice/3D volume view state, GPU preview clarity, future brain-orientation reslicing, and train-ready/manual_truth safety.",
         "llm_context_refs": (
+            "LLM_CONTEXT_DETAILED.md -> 0) v3.27 TIF GPU Volume Preview + Clarity Mode",
             "LLM_CONTEXT_DETAILED.md -> 0.1 TIF label layers and train-ready safety",
             "LLM_CONTEXT_DETAILED.md -> 0.4 TIF Volume Workbench UI",
             "LLM_CONTEXT_DETAILED.md -> 0.5 Independent TIF backend contract",
+            "docs/ant3d_workbench/TIF脑部统一朝向重切片需求_zh.md",
         ),
         "source_code_refs": (
             "AntSleap/ui/tif_workbench.py -> TifWorkbenchWidget.get_agent_context",
+            "AntSleap/ui/tif_gpu_volume_canvas.py",
             "AntSleap/core/tif_project.py",
             "AntSleap/core/tif_backend.py",
         ),
         "artifact_hints": (
-            "TIF project JSON, current specimen sidecars, working_edit, manual_truth, model_draft, material map, and recent workbench log are the first inspection targets.",
+            "TIF project JSON, current specimen sidecars, working_edit, manual_truth, model_draft, material map, volume renderer state, source spacing, and recent workbench log are the first inspection targets.",
         ),
         "safety_notes": COMMON_SAFETY_NOTES
         + (
             "Do not write predictions or working_edit into manual_truth unless the researcher explicitly confirms that review is complete.",
+            "Future oblique/brain-standardized reslicing must preserve source provenance and use nearest-neighbor interpolation for label volumes.",
         ),
-        "suggested_agent_action": "Check label role and material ID before interpreting a missing overlay, training readiness issue, or prediction import problem.",
+        "suggested_agent_action": "Check display_mode, slice axis/position, volume renderer, shape/spacing, label role, and material ID before interpreting a missing overlay, GPU preview issue, training readiness issue, prediction import problem, or brain reslicing request.",
     },
     "pdf_evidence": {
         "diagnostic_route": "pdf_evidence_context",

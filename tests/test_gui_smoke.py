@@ -540,6 +540,43 @@ class GuiSmokeTests(unittest.TestCase):
         finally:
             window.deleteLater()
 
+    def test_tif_ask_agent_compact_context_keeps_volume_and_reslice_fields(self):
+        window = self._make_window()
+        try:
+            compact = window._compact_agent_context(
+                {
+                    "source_workbench": "tif_volume",
+                    "project_type": "tif_volume",
+                    "active_specimen_id": "ANT_001",
+                    "display_mode": "volume",
+                    "active_slice_axis": "y",
+                    "active_slice_position": "3/120",
+                    "active_volume_shape_zyx": "300/800/900",
+                    "active_volume_spacing_zyx": "2.0/0.5/0.5",
+                    "volume_renderer": "gpu",
+                    "volume_renderer_label": "GPU ray march [RTX 3090]",
+                    "volume_texture_target_dim": "2048",
+                    "volume_ray_samples": "2048",
+                    "volume_clarity_mode": "on",
+                    "volume_inside_depth": "65%",
+                    "volume_front_cut": "30%",
+                    "volume_yaw_pitch": "yaw=12.0, pitch=18.0",
+                    "tif_next_requirement": "brain_orientation_reslice",
+                    "tif_requirement_doc": "docs/ant3d_workbench/TIF脑部统一朝向重切片需求_zh.md",
+                }
+            )
+
+            self.assertEqual(compact["diagnostic_route"], "tif_volume_workbench_context")
+            self.assertEqual(compact["display_mode"], "volume")
+            self.assertEqual(compact["active_slice_axis"], "y")
+            self.assertEqual(compact["volume_renderer"], "gpu")
+            self.assertEqual(compact["volume_clarity_mode"], "on")
+            self.assertIn("brain_orientation_reslice", compact["tif_next_requirement"])
+            self.assertIn("TIF脑部统一朝向重切片需求_zh.md", compact["tif_requirement_doc"])
+            self.assertIn("GPU preview", compact["diagnostic_focus"])
+        finally:
+            window.deleteLater()
+
     def test_ask_agent_auto_starts_ant_code_and_queues_context(self):
         window = self._make_window()
         try:

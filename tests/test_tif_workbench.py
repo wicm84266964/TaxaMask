@@ -384,6 +384,47 @@ class TifWorkbenchTests(unittest.TestCase):
             widget.close_project()
             widget.deleteLater()
 
+    def test_ask_agent_context_includes_tif_view_and_brain_reslice_focus(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+            try:
+                specimen = widget.project.get_specimen(widget.current_specimen_id)
+                specimen["working_volume"]["spacing_zyx"] = [2.0, 0.5, 0.5]
+                widget.display_mode = "volume"
+                edit_index = widget.label_role_combo.findData("working_edit")
+                widget.label_role_combo.setCurrentIndex(edit_index)
+                y_index = widget.slice_axis_combo.findData("y")
+                widget.slice_axis_combo.setCurrentIndex(y_index)
+                widget.slice_slider.setValue(2)
+                widget.volume_quality_slider.setValue(2048)
+                widget.volume_sample_slider.setValue(2048)
+                widget.volume_cutoff_slider.setValue(22)
+                widget.volume_clarity_check.setChecked(True)
+                widget.volume_inside_slider.setValue(65)
+                widget.volume_clip_slider.setValue(30)
+
+                context = widget.get_agent_context()
+
+                self.assertEqual(context["source_workbench"], "tif_volume")
+                self.assertEqual(context["display_mode"], "volume")
+                self.assertEqual(context["active_slice_axis"], "y")
+                self.assertIn("/", context["active_slice_position"])
+                self.assertEqual(context["active_volume_shape_zyx"], "5/8/8")
+                self.assertEqual(context["active_volume_spacing_zyx"], "2.0/0.5/0.5")
+                self.assertEqual(context["active_label_shape_zyx"], "5/8/8")
+                self.assertEqual(context["volume_density_cutoff"], "22%")
+                self.assertEqual(context["volume_texture_target_dim"], "2048")
+                self.assertEqual(context["volume_ray_samples"], "2048")
+                self.assertEqual(context["volume_clarity_mode"], "on")
+                self.assertEqual(context["volume_inside_depth"], "65%")
+                self.assertEqual(context["volume_front_cut"], "30%")
+                self.assertIn("yaw=", context["volume_yaw_pitch"])
+                self.assertIn("brain_orientation_reslice", context["tif_next_requirement"])
+                self.assertIn("TIF脑部统一朝向重切片需求_zh.md", context["tif_requirement_doc"])
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
     def test_right_panel_controls_ignore_mouse_wheel_changes(self):
         manager = TifProjectManager()
         widget = TifWorkbenchWidget(manager, "en")

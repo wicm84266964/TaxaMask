@@ -1,3 +1,4 @@
+import math
 import os
 
 import numpy as np
@@ -27,6 +28,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSpinBox,
     QSplitter,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -73,7 +75,23 @@ TIF_TRANSLATIONS = {
         "Model training": "模型训练",
         "Model configuration": "模型配置",
         "Workbench log": "工作台日志",
+        "Display mode": "显示模式",
+        "Slice review": "切片复核",
+        "3D volume": "3D 体预览",
+        "Volume render": "体渲染",
+        "Density cutoff": "密度阈值",
+        "Render quality": "渲染质量",
+        "Reset 3D view": "重置 3D 视角",
+        "Drag to rotate · wheel to zoom": "拖拽旋转 · 滚轮缩放",
+        "3D preview uses a downsampled read-only volume. Use Slice review for precise label editing.": "3D 预览使用降采样只读体数据。精确标签修改请使用切片复核。",
+        "3D volume preview is read-only. Switch to Slice review for label editing.": "3D 体预览为只读观察。需要修改标签时请切回切片复核。",
         "Slice": "切片",
+        "View plane": "切片方向",
+        "Z axial": "Z 轴切片",
+        "Y coronal": "Y 方向切片",
+        "X sagittal": "X 方向切片",
+        "Side-angle slices are read-only in this version. Use Z axial view for label editing.": "当前版本中侧向切片为只读观察。需要修改标签时请切回 Z 轴切片。",
+        "Painting is available on Z slices only. Switch back to Z axial view before editing labels.": "画笔编辑目前只开放在 Z 轴切片上。修改标签前请切回 Z 轴切片。",
         "Label layer": "标签层",
         "Manual truth is a read-only reference. Switch to Current edit before changing labels.": "人工真值是只读基准层。要修改标注，请先切换到“当前编辑”。",
         "Current edit is the editable working copy. Brush changes are saved here first.": "当前编辑是可写的工作副本。画笔修改会先保存到这一层。",
@@ -452,6 +470,102 @@ class TifSliceCanvas(QLabel):
         super().mouseReleaseEvent(event)
 
 
+class TifVolumeCanvas(QLabel):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("tifVolumeCanvas")
+        self.setAlignment(Qt.AlignCenter)
+        self.setMinimumSize(360, 280)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setFrameShape(QFrame.NoFrame)
+        self.setText("No TIF volume loaded")
+        self.workbench = None
+        self._dragging = False
+        self._last_drag_pos = None
+
+    def set_volume_pixmap(self, pixmap):
+        if pixmap is None or pixmap.isNull():
+            self.clear()
+            return
+        scaled = pixmap.scaled(
+            max(1, int(self.width())),
+            max(1, int(self.height())),
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
+        )
+        composed = QPixmap(max(1, int(self.width())), max(1, int(self.height())))
+        composed.fill(QColor("#07090A"))
+        painter = QPainter(composed)
+        x = int(round((composed.width() - scaled.width()) / 2.0))
+        y = int(round((composed.height() - scaled.height()) / 2.0))
+        painter.drawPixmap(x, y, scaled)
+        self._draw_status_overlay(painter)
+        painter.end()
+        self.setPixmap(composed)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.workbench is not None:
+            self.workbench.render_volume_preview()
+
+    def _draw_status_overlay(self, painter):
+        if self.workbench is None:
+            return
+        text = self.workbench.volume_status_text()
+        if not text:
+            return
+        painter.save()
+        font = painter.font()
+        font.setPointSize(9)
+        painter.setFont(font)
+        metrics = painter.fontMetrics()
+        text_w = metrics.horizontalAdvance(text)
+        rect = QRectF(10, 10, text_w + 16, metrics.height() + 8)
+        painter.fillRect(rect, QColor(7, 9, 10, 190))
+        painter.setPen(QColor("#DCE4E8"))
+        painter.drawText(rect.adjusted(8, 4, -8, -4), Qt.AlignLeft | Qt.AlignVCenter, text)
+        painter.restore()
+
+    def mousePressEvent(self, event):
+        self.setFocus(Qt.MouseFocusReason)
+        if self.workbench is not None and event.button() == Qt.LeftButton:
+            self._dragging = True
+            self._last_drag_pos = event.position()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self.workbench is not None and self._dragging and event.buttons() & Qt.LeftButton and self._last_drag_pos is not None:
+            current = event.position()
+            dx = current.x() - self._last_drag_pos.x()
+            dy = current.y() - self._last_drag_pos.y()
+            self._last_drag_pos = current
+            self.workbench.rotate_volume_preview(dx, dy)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self._dragging:
+            self._dragging = False
+            self._last_drag_pos = None
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def wheelEvent(self, event):
+        if self.workbench is None:
+            event.ignore()
+            return
+        delta = event.angleDelta().y()
+        if delta == 0:
+            event.ignore()
+            return
+        self.workbench.zoom_volume_preview(1 if delta > 0 else -1)
+        event.accept()
+
+
 class TifImportWorker(QObject):
     progress = Signal(int, int, str)
     finished = Signal(object)
@@ -508,6 +622,14 @@ class TifWorkbenchWidget(QWidget):
         self._tif_import_specimen_id = ""
         self.undo_stack = []
         self.redo_stack = []
+        self.slice_axis = "z"
+        self._slice_positions = {"z": 0, "y": 0, "x": 0}
+        self.display_mode = "slice"
+        self._volume_preview = None
+        self._volume_preview_source_shape = ()
+        self._volume_yaw = -35.0
+        self._volume_pitch = 20.0
+        self._volume_zoom = 1.0
 
         self.specimen_list = QListWidget()
         self.specimen_list.setObjectName("tifSpecimenList")
@@ -515,12 +637,22 @@ class TifWorkbenchWidget(QWidget):
 
         self.canvas = TifSliceCanvas()
         self.canvas.workbench = self
+        self.volume_canvas = TifVolumeCanvas()
+        self.volume_canvas.workbench = self
         self._reset_canvas_view_on_next_render = False
+        self.display_mode_combo = WheelSafeComboBox()
+        self.display_mode_combo.setObjectName("tifDisplayModeCombo")
+        self._populate_display_mode_combo()
+        self.display_mode_combo.currentIndexChanged.connect(self.on_display_mode_changed)
         self.slice_slider = WheelSafeSlider(Qt.Horizontal)
         self.slice_slider.setRange(0, 0)
         self.slice_slider.valueChanged.connect(self.on_slice_slider_changed)
         self.slice_prefix_label = QLabel("Slice")
         self.slice_label = QLabel("0 / 0")
+        self.slice_axis_combo = WheelSafeComboBox()
+        self.slice_axis_combo.setObjectName("tifSliceAxisCombo")
+        self._populate_slice_axis_combo()
+        self.slice_axis_combo.currentIndexChanged.connect(self.on_slice_axis_changed)
 
         self.label_role_combo = WheelSafeComboBox()
         self._populate_label_role_combo()
@@ -541,6 +673,19 @@ class TifWorkbenchWidget(QWidget):
         self.contrast_slider.setRange(1, 30)
         self.contrast_slider.setValue(10)
         self.contrast_slider.valueChanged.connect(self.render_current_slice)
+        self.volume_cutoff_slider = WheelSafeSlider(Qt.Horizontal)
+        self.volume_cutoff_slider.setObjectName("tifVolumeCutoffSlider")
+        self.volume_cutoff_slider.setRange(0, 95)
+        self.volume_cutoff_slider.setValue(35)
+        self.volume_cutoff_slider.valueChanged.connect(self.render_volume_preview)
+        self.volume_quality_slider = WheelSafeSlider(Qt.Horizontal)
+        self.volume_quality_slider.setObjectName("tifVolumeQualitySlider")
+        self.volume_quality_slider.setRange(32, 96)
+        self.volume_quality_slider.setValue(64)
+        self.volume_quality_slider.valueChanged.connect(self._refresh_volume_preview)
+        self.btn_reset_volume_view = QPushButton("Reset 3D view")
+        self.btn_reset_volume_view.setObjectName("tifResetVolumeViewButton")
+        self.btn_reset_volume_view.clicked.connect(self.reset_volume_view)
 
         self.status_label = QLabel("")
         self.status_label.setObjectName("tifStatusText")
@@ -669,6 +814,7 @@ class TifWorkbenchWidget(QWidget):
             self.btn_undo,
             self.btn_redo,
             self.btn_save_edit,
+            self.btn_reset_volume_view,
             self.btn_copy_draft,
             self.btn_add_material,
             self.btn_edit_material,
@@ -690,6 +836,26 @@ class TifWorkbenchWidget(QWidget):
         self.label_role_combo.setCurrentIndex(index if index >= 0 else 0)
         self.label_role_combo.blockSignals(False)
 
+    def _populate_slice_axis_combo(self):
+        current = self.slice_axis_combo.currentData() if self.slice_axis_combo.count() else self.slice_axis
+        self.slice_axis_combo.blockSignals(True)
+        self.slice_axis_combo.clear()
+        for axis, label in (("z", "Z axial"), ("y", "Y coronal"), ("x", "X sagittal")):
+            self.slice_axis_combo.addItem(tt(label, self.lang), axis)
+        index = self.slice_axis_combo.findData(current)
+        self.slice_axis_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.slice_axis_combo.blockSignals(False)
+
+    def _populate_display_mode_combo(self):
+        current = self.display_mode_combo.currentData() if self.display_mode_combo.count() else self.display_mode
+        self.display_mode_combo.blockSignals(True)
+        self.display_mode_combo.clear()
+        for mode, label in (("slice", "Slice review"), ("volume", "3D volume")):
+            self.display_mode_combo.addItem(tt(label, self.lang), mode)
+        index = self.display_mode_combo.findData(current)
+        self.display_mode_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.display_mode_combo.blockSignals(False)
+
     def change_language(self, lang):
         self.lang = lang
         self._update_texts()
@@ -702,17 +868,24 @@ class TifWorkbenchWidget(QWidget):
         for title, label in getattr(self, "_section_title_labels", {}).values():
             label.setText(tt(title, self.lang))
         self._populate_label_role_combo()
+        self._populate_display_mode_combo()
         if self.image_volume is None:
             if self.specimen_list.count():
                 self.canvas.setText(tt("Working volume missing", self.lang))
             else:
                 self.canvas.setText(tt("No specimens in this TIF project", self.lang))
         self.slice_prefix_label.setText(tt("Slice", self.lang))
+        self.display_mode_label.setText(tt("Display mode", self.lang))
+        self.slice_axis_label.setText(tt("View plane", self.lang))
+        self._populate_slice_axis_combo()
         self.label_layer_label.setText(tt("Label layer", self.lang))
         self._update_label_role_help()
         self.overlay_label.setText(tt("Overlay", self.lang))
         self.brightness_label.setText(tt("Brightness", self.lang))
         self.contrast_label.setText(tt("Contrast", self.lang))
+        self.volume_cutoff_label.setText(tt("Density cutoff", self.lang))
+        self.volume_quality_label.setText(tt("Render quality", self.lang))
+        self.btn_reset_volume_view.setText(tt("Reset 3D view", self.lang))
         self.brush_size_label.setText(tt("Brush size", self.lang))
         self.btn_import_tif.setText(tt("Import TIF stack", self.lang))
         self.btn_import_amira.setText(tt("Import AMIRA directory", self.lang))
@@ -796,9 +969,10 @@ class TifWorkbenchWidget(QWidget):
     def canvas_status_text(self, zoom_factor):
         if self.image_volume is None:
             return ""
-        z_index = int(self.slice_slider.value()) + 1
-        z_total = int(self.image_volume.shape[0])
-        return f"Z {z_index}/{z_total} · {int(round(float(zoom_factor) * 100))}%"
+        axis = self._current_slice_axis()
+        index = int(self.slice_slider.value()) + 1
+        total = self._slice_count_for_axis(axis)
+        return f"{axis.upper()} {index}/{total} · {int(round(float(zoom_factor) * 100))}%"
 
     def move_slice(self, delta):
         if self.image_volume is None:
@@ -812,7 +986,41 @@ class TifWorkbenchWidget(QWidget):
 
     def on_slice_slider_changed(self):
         self._reset_canvas_view_on_next_render = True
+        self._slice_positions[self._current_slice_axis()] = int(self.slice_slider.value())
         self.render_current_slice()
+
+    def on_slice_axis_changed(self):
+        axis = self.slice_axis_combo.currentData() or "z"
+        self.slice_axis = axis if axis in {"z", "y", "x"} else "z"
+        self._configure_slice_slider_for_axis(self.slice_axis, preserve_position=True)
+        self._reset_canvas_view_on_next_render = True
+        if self.slice_axis != "z":
+            message = tt("Side-angle slices are read-only in this version. Use Z axial view for label editing.", self.lang)
+            self.training_status_label.setText(message)
+            self.log(message)
+        self.render_current_slice()
+
+    def on_display_mode_changed(self):
+        mode = self.display_mode_combo.currentData() or "slice"
+        self.display_mode = mode if mode in {"slice", "volume"} else "slice"
+        if hasattr(self, "view_stack"):
+            self.view_stack.setCurrentWidget(self.volume_canvas if self.display_mode == "volume" else self.canvas)
+        is_volume = self.display_mode == "volume"
+        for widget in (
+            self.slice_axis_label,
+            self.slice_axis_combo,
+            self.slice_prefix_label,
+            self.slice_slider,
+            self.slice_label,
+        ):
+            widget.setVisible(not is_volume)
+        if is_volume:
+            message = tt("3D preview uses a downsampled read-only volume. Use Slice review for precise label editing.", self.lang)
+            self.training_status_label.setText(message)
+            self.log(message)
+            self.render_volume_preview()
+        else:
+            self.render_current_slice()
 
     def _label_role_help_text(self, role=None):
         role = role or self.label_role_combo.currentData()
@@ -1203,12 +1411,22 @@ class TifWorkbenchWidget(QWidget):
         canvas_shell.setObjectName("tifCanvasShell")
         canvas_layout = QVBoxLayout(canvas_shell)
         canvas_layout.setContentsMargins(6, 6, 6, 6)
-        canvas_layout.addWidget(self.canvas, 1)
+        self.view_stack = QStackedWidget()
+        self.view_stack.setObjectName("tifViewStack")
+        self.view_stack.addWidget(self.canvas)
+        self.view_stack.addWidget(self.volume_canvas)
+        canvas_layout.addWidget(self.view_stack, 1)
         center_layout.addWidget(canvas_shell, 1)
         slice_bar = QFrame()
         slice_bar.setObjectName("tifSliceBar")
         slice_row = QHBoxLayout()
         slice_row.setContentsMargins(10, 6, 10, 6)
+        self.display_mode_label = QLabel("Display mode")
+        slice_row.addWidget(self.display_mode_label)
+        slice_row.addWidget(self.display_mode_combo)
+        self.slice_axis_label = QLabel("View plane")
+        slice_row.addWidget(self.slice_axis_label)
+        slice_row.addWidget(self.slice_axis_combo)
         slice_row.addWidget(self.slice_prefix_label)
         slice_row.addWidget(self.slice_slider, 1)
         slice_row.addWidget(self.slice_label)
@@ -1247,6 +1465,8 @@ class TifWorkbenchWidget(QWidget):
         self.overlay_label = QLabel("Overlay")
         self.brightness_label = QLabel("Brightness")
         self.contrast_label = QLabel("Contrast")
+        self.volume_cutoff_label = QLabel("Density cutoff")
+        self.volume_quality_label = QLabel("Render quality")
         self.brush_size_label = QLabel("Brush size")
         controls.addWidget(self.label_layer_label, 0, 0)
         controls.addWidget(self.label_role_combo, 0, 1)
@@ -1256,10 +1476,15 @@ class TifWorkbenchWidget(QWidget):
         controls.addWidget(self.brightness_slider, 2, 1)
         controls.addWidget(self.contrast_label, 3, 0)
         controls.addWidget(self.contrast_slider, 3, 1)
-        controls.addWidget(self.brush_size_label, 4, 0)
-        controls.addWidget(self.brush_size_slider, 4, 1)
+        controls.addWidget(self.volume_cutoff_label, 4, 0)
+        controls.addWidget(self.volume_cutoff_slider, 4, 1)
+        controls.addWidget(self.volume_quality_label, 5, 0)
+        controls.addWidget(self.volume_quality_slider, 5, 1)
+        controls.addWidget(self.brush_size_label, 6, 0)
+        controls.addWidget(self.brush_size_slider, 6, 1)
         annotation_layout.addLayout(controls)
         annotation_layout.addWidget(self.label_role_help_label)
+        annotation_layout.addWidget(self.btn_reset_volume_view)
         button_row = QHBoxLayout()
         button_row.addWidget(self.btn_undo)
         button_row.addWidget(self.btn_redo)
@@ -1382,6 +1607,12 @@ class TifWorkbenchWidget(QWidget):
                 border-radius: 12px;
             }
             QLabel#tifSliceCanvas {
+                background: #07090A;
+                color: #859098;
+                border: none;
+                border-radius: 10px;
+            }
+            QLabel#tifVolumeCanvas {
                 background: #07090A;
                 color: #859098;
                 border: none;
@@ -1536,14 +1767,51 @@ class TifWorkbenchWidget(QWidget):
         self.material_colors = {}
         self.current_specimen_id = ""
         self.edit_volume = None
+        self._volume_preview = None
+        self._volume_preview_source_shape = ()
         self._dirty_edit_slices = set()
         self.auto_save_timer.stop()
         self.working_edit_dirty = False
         self.undo_stack = []
         self.redo_stack = []
         self.canvas.clear()
+        self.volume_canvas.clear()
         self.canvas.setText(tt("No TIF volume loaded", self.lang))
+        self.volume_canvas.setText(tt("No TIF volume loaded", self.lang))
         return True
+
+    def _current_slice_axis(self):
+        axis = self.slice_axis_combo.currentData() if hasattr(self, "slice_axis_combo") else self.slice_axis
+        return axis if axis in {"z", "y", "x"} else "z"
+
+    def _slice_axis_dim(self, axis):
+        return {"z": 0, "y": 1, "x": 2}.get(axis, 0)
+
+    def _slice_count_for_axis(self, axis=None):
+        if self.image_volume is None:
+            return 1
+        axis = axis or self._current_slice_axis()
+        dim = self._slice_axis_dim(axis)
+        return max(1, int(self.image_volume.shape[dim]))
+
+    def _configure_slice_slider_for_axis(self, axis=None, preserve_position=True):
+        axis = axis or self._current_slice_axis()
+        count = self._slice_count_for_axis(axis)
+        position = int(self._slice_positions.get(axis, 0)) if preserve_position else 0
+        position = max(0, min(count - 1, position))
+        self.slice_slider.blockSignals(True)
+        self.slice_slider.setRange(0, count - 1)
+        self.slice_slider.setValue(position)
+        self.slice_slider.blockSignals(False)
+        self._slice_positions[axis] = position
+        self.slice_label.setText(f"{position + 1} / {count}")
+
+    def _active_slice_position(self):
+        axis = self._current_slice_axis()
+        count = self._slice_count_for_axis(axis)
+        index = max(0, min(int(self.slice_slider.value()), count - 1))
+        self._slice_positions[axis] = index
+        return axis, index
 
     def closeEvent(self, event):
         if not self.close_project(prompt_unsaved=True):
@@ -1612,15 +1880,20 @@ class TifWorkbenchWidget(QWidget):
             self._dirty_edit_slices = set()
             self.material_map = {}
             self.material_colors = {}
+            self._volume_preview = None
+            self._volume_preview_source_shape = ()
             self.undo_stack = []
             self.redo_stack = []
 
             image_path = self.project.to_absolute((specimen.get("working_volume") or {}).get("path", ""))
             if image_path and volume_sidecar_exists(image_path):
                 self.image_volume = load_volume_sidecar(image_path, mmap_mode="r")
-                z_count = int(self.image_volume.shape[0])
-                self.slice_slider.setRange(0, max(0, z_count - 1))
-                self.slice_slider.setValue(min(self.slice_slider.value(), max(0, z_count - 1)))
+                self._slice_positions = {
+                    "z": max(0, min(int(self.slice_slider.value()), int(self.image_volume.shape[0]) - 1)),
+                    "y": max(0, int(self.image_volume.shape[1]) // 2),
+                    "x": max(0, int(self.image_volume.shape[2]) // 2),
+                }
+                self._configure_slice_slider_for_axis(self._current_slice_axis(), preserve_position=True)
                 self._reset_canvas_view_on_next_render = True
             else:
                 self.slice_slider.setRange(0, 0)
@@ -1638,6 +1911,8 @@ class TifWorkbenchWidget(QWidget):
             self._load_edit_volume()
             self._update_status_labels(specimen)
             self.render_current_slice()
+            if self.display_mode == "volume":
+                self.render_volume_preview()
         finally:
             self._loading_specimen = False
 
@@ -1869,22 +2144,178 @@ class TifWorkbenchWidget(QWidget):
             else:
                 self.canvas.setText(tt("Working volume missing", self.lang))
             return
-        z_index = int(self.slice_slider.value())
-        z_index = max(0, min(z_index, int(self.image_volume.shape[0]) - 1))
-        self.slice_label.setText(f"{z_index + 1} / {int(self.image_volume.shape[0])}")
-        image_slice = np.asarray(self.image_volume[z_index])
+        axis, slice_index = self._active_slice_position()
+        total = self._slice_count_for_axis(axis)
+        self.slice_label.setText(f"{slice_index + 1} / {total}")
+        image_slice = self._extract_axis_slice(self.image_volume, axis, slice_index)
         label_slice = None
         if self.label_volume is not None and self.label_volume.shape == self.image_volume.shape:
-            label_slice = np.asarray(self.label_volume[z_index])
+            label_slice = self._extract_axis_slice(self.label_volume, axis, slice_index)
         if self.label_role_combo.currentData() == "working_edit" and self.edit_volume is not None and self.edit_volume.shape == self.image_volume.shape:
-            label_slice = np.asarray(self.edit_volume[z_index])
+            label_slice = self._extract_axis_slice(self.edit_volume, axis, slice_index)
         pixmap = self._render_slice_pixmap(image_slice, label_slice)
         reset_view = bool(getattr(self, "_reset_canvas_view_on_next_render", False))
         self._reset_canvas_view_on_next_render = False
         self.canvas.set_slice_pixmap(pixmap, reset_view=reset_view)
 
+    def _extract_axis_slice(self, volume, axis, index):
+        if volume is None:
+            return None
+        axis = axis if axis in {"z", "y", "x"} else "z"
+        if axis == "y":
+            index = max(0, min(int(index), int(volume.shape[1]) - 1))
+            return np.asarray(volume[:, index, :])
+        if axis == "x":
+            index = max(0, min(int(index), int(volume.shape[2]) - 1))
+            return np.asarray(volume[:, :, index])
+        index = max(0, min(int(index), int(volume.shape[0]) - 1))
+        return np.asarray(volume[index])
+
+    def volume_status_text(self):
+        if self.image_volume is None:
+            return ""
+        return (
+            f"{tt('3D volume', self.lang)} · "
+            f"{tt('Drag to rotate · wheel to zoom', self.lang)} · "
+            f"{int(round(self._volume_zoom * 100))}%"
+        )
+
+    def rotate_volume_preview(self, dx, dy):
+        self._volume_yaw = (self._volume_yaw + float(dx) * 0.6) % 360.0
+        self._volume_pitch = max(-85.0, min(85.0, self._volume_pitch + float(dy) * 0.45))
+        self.render_volume_preview()
+
+    def zoom_volume_preview(self, direction):
+        factor = 1.12 if int(direction) > 0 else 1.0 / 1.12
+        self._volume_zoom = max(0.6, min(2.8, self._volume_zoom * factor))
+        self.render_volume_preview()
+
+    def reset_volume_view(self):
+        self._volume_yaw = -35.0
+        self._volume_pitch = 20.0
+        self._volume_zoom = 1.0
+        self.render_volume_preview()
+
+    def _refresh_volume_preview(self):
+        self._volume_preview = None
+        self._volume_preview_source_shape = ()
+        self.render_volume_preview()
+
+    def _ensure_volume_preview(self):
+        if self.image_volume is None:
+            return None
+        shape = tuple(int(value) for value in self.image_volume.shape)
+        max_dim = max(8, int(self.volume_quality_slider.value()))
+        if self._volume_preview is not None and self._volume_preview_source_shape == (shape, max_dim):
+            return self._volume_preview
+
+        factors = [max(1, int(math.ceil(size / float(max_dim)))) for size in shape]
+        preview = np.asarray(self.image_volume[:: factors[0], :: factors[1], :: factors[2]], dtype=np.float32)
+        if preview.size == 0:
+            return None
+        finite = preview[np.isfinite(preview)]
+        if finite.size == 0:
+            preview = np.zeros(preview.shape, dtype=np.uint8)
+        else:
+            low = float(np.percentile(finite, 1))
+            high = float(np.percentile(finite, 99.5))
+            if high <= low:
+                low = float(np.min(finite))
+                high = float(np.max(finite))
+            if high <= low:
+                preview = np.zeros(preview.shape, dtype=np.uint8)
+            else:
+                preview = np.clip((preview - low) / (high - low), 0.0, 1.0)
+                preview = np.clip(preview * 255.0, 0, 255).astype(np.uint8)
+        self._volume_preview = preview
+        self._volume_preview_source_shape = (shape, max_dim)
+        return self._volume_preview
+
+    def render_volume_preview(self):
+        if not hasattr(self, "volume_canvas"):
+            return
+        if self.image_volume is None:
+            self.volume_canvas.clear()
+            self.volume_canvas.setText(tt("No TIF volume loaded", self.lang))
+            return
+        preview = self._ensure_volume_preview()
+        if preview is None:
+            self.volume_canvas.clear()
+            self.volume_canvas.setText(tt("No TIF volume loaded", self.lang))
+            return
+        pixmap = self._render_volume_preview_pixmap(preview)
+        self.volume_canvas.set_volume_pixmap(pixmap)
+
+    def _render_volume_preview_pixmap(self, preview):
+        threshold = int(round(self.volume_cutoff_slider.value() * 255.0 / 100.0))
+        points = np.argwhere(preview > threshold)
+        if points.size == 0:
+            points = np.argwhere(preview > 0)
+        if points.size == 0:
+            center_slice = np.asarray(preview[int(preview.shape[0] // 2)], dtype=np.uint8)
+            return self._render_slice_pixmap(center_slice)
+
+        values = preview[points[:, 0], points[:, 1], points[:, 2]].astype(np.float32)
+        dims = np.array([max(1, preview.shape[0] - 1), max(1, preview.shape[1] - 1), max(1, preview.shape[2] - 1)], dtype=np.float32)
+        coords = points.astype(np.float32) / dims
+        coords = coords[:, [2, 1, 0]] - 0.5
+        coords[:, 2] *= max(0.15, float(preview.shape[0]) / float(max(preview.shape[1], preview.shape[2], 1)))
+
+        yaw = math.radians(self._volume_yaw)
+        pitch = math.radians(self._volume_pitch)
+        cy, sy = math.cos(yaw), math.sin(yaw)
+        cp, sp = math.cos(pitch), math.sin(pitch)
+        rot_yaw = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]], dtype=np.float32)
+        rot_pitch = np.array([[1.0, 0.0, 0.0], [0.0, cp, -sp], [0.0, sp, cp]], dtype=np.float32)
+        rotated = coords @ (rot_yaw @ rot_pitch).T
+
+        out_size = 360
+        scale = (out_size * 0.78) * float(self._volume_zoom)
+        px = np.round(rotated[:, 0] * scale + out_size / 2.0).astype(np.int32)
+        py = np.round(-rotated[:, 1] * scale + out_size / 2.0).astype(np.int32)
+        inside = (px >= 0) & (px < out_size) & (py >= 0) & (py < out_size)
+        if not np.any(inside):
+            pixmap = QPixmap(out_size, out_size)
+            pixmap.fill(QColor("#07090A"))
+            return pixmap
+
+        px = px[inside]
+        py = py[inside]
+        depth = rotated[:, 2][inside]
+        values = values[inside]
+
+        image = np.zeros((out_size, out_size, 3), dtype=np.uint8)
+        shade = 0.65 + 0.35 * np.clip((depth - depth.min()) / max(1e-6, depth.max() - depth.min()), 0.0, 1.0)
+        intensity = np.clip(values * shade, 0, 255)
+        color = np.clip(np.stack([intensity * 0.85, intensity, intensity * 1.05], axis=1), 0, 255).astype(np.uint8)
+        flat_index = py * out_size + px
+        flat = image.reshape((-1, 3))
+        for channel in range(3):
+            np.maximum.at(flat[:, channel], flat_index, color[:, channel])
+        for off_x, off_y in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            nx = px + off_x
+            ny = py + off_y
+            neighbor = (nx >= 0) & (nx < out_size) & (ny >= 0) & (ny < out_size)
+            if np.any(neighbor):
+                nidx = ny[neighbor] * out_size + nx[neighbor]
+                ncolor = (color[neighbor].astype(np.float32) * 0.42).astype(np.uint8)
+                for channel in range(3):
+                    np.maximum.at(flat[:, channel], nidx, ncolor[:, channel])
+        qimage = QImage(np.ascontiguousarray(image).data, out_size, out_size, out_size * 3, QImage.Format_RGB888).copy()
+        return QPixmap.fromImage(qimage)
+
     def paint_at_widget_position(self, x, y, erase=False):
         if self.image_volume is None:
+            return
+        if self.display_mode == "volume":
+            message = tt("3D volume preview is read-only. Switch to Slice review for label editing.", self.lang)
+            self.training_status_label.setText(message)
+            self.log(message)
+            return
+        if self._current_slice_axis() != "z":
+            message = tt("Painting is available on Z slices only. Switch back to Z axial view before editing labels.", self.lang)
+            self.training_status_label.setText(message)
+            self.log(message)
             return
         if self.edit_volume is None and not self._ensure_working_edit_volume():
             return
@@ -1922,6 +2353,8 @@ class TifWorkbenchWidget(QWidget):
     def _push_undo(self):
         if self.edit_volume is None:
             return
+        if self._current_slice_axis() != "z":
+            return
         z_index = int(self.slice_slider.value())
         self.undo_stack.append((z_index, self.edit_volume[z_index].copy()))
         if len(self.undo_stack) > 20:
@@ -1935,7 +2368,8 @@ class TifWorkbenchWidget(QWidget):
         self.redo_stack.append((z_index, self.edit_volume[z_index].copy()))
         self.edit_volume[z_index] = old_slice
         self._dirty_edit_slices.add(z_index)
-        self.slice_slider.setValue(z_index)
+        if self._current_slice_axis() == "z":
+            self.slice_slider.setValue(z_index)
         self._mark_working_edit_dirty()
         self.render_current_slice()
 
@@ -1946,7 +2380,8 @@ class TifWorkbenchWidget(QWidget):
         self.undo_stack.append((z_index, self.edit_volume[z_index].copy()))
         self.edit_volume[z_index] = redo_slice
         self._dirty_edit_slices.add(z_index)
-        self.slice_slider.setValue(z_index)
+        if self._current_slice_axis() == "z":
+            self.slice_slider.setValue(z_index)
         self._mark_working_edit_dirty()
         self.render_current_slice()
 

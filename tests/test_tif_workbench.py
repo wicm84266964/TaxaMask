@@ -338,6 +338,8 @@ class TifWorkbenchTests(unittest.TestCase):
             self.assertTrue(widget.auto_save_check.isChecked())
             self.assertEqual(widget.btn_start_center.text(), "Start Center")
             self.assertEqual(widget.btn_ask_agent.text(), "Ask Agent")
+            self.assertEqual(widget.display_mode_combo.currentData(), "slice")
+            self.assertEqual(widget.btn_reset_volume_view.text(), "Reset 3D view")
             self.assertIsNotNone(widget.findChild(type(widget.btn_export_training), "tifExportTrainingButton"))
             self.assertIsNotNone(widget.findChild(type(widget.btn_start_center), "tifStartCenterButton"))
             self.assertIsNotNone(widget.findChild(type(widget.btn_ask_agent), "tifAskAgentButton"))
@@ -348,6 +350,11 @@ class TifWorkbenchTests(unittest.TestCase):
             self.assertIsNotNone(widget.findChild(type(widget.btn_import_prediction), "tifImportPredictionButton"))
             self.assertIsNotNone(widget.findChild(type(widget.btn_import_external_prediction_tif), "tifImportExternalPredictionTifButton"))
             self.assertIsNotNone(widget.findChild(type(widget.auto_save_check), "tifAutoSaveEditCheck"))
+            self.assertIsNotNone(widget.findChild(type(widget.display_mode_combo), "tifDisplayModeCombo"))
+            self.assertIsNotNone(widget.findChild(type(widget.volume_cutoff_slider), "tifVolumeCutoffSlider"))
+            self.assertIsNotNone(widget.findChild(type(widget.volume_quality_slider), "tifVolumeQualitySlider"))
+            self.assertIsNotNone(widget.findChild(type(widget.btn_reset_volume_view), "tifResetVolumeViewButton"))
+            self.assertIsNotNone(widget.findChild(QLabel, "tifVolumeCanvas"))
             self.assertEqual(widget.backend_id_edit.objectName(), "tifBackendIdEdit")
             self.assertEqual(widget.backend_formats_edit.text(), "ome_tiff,nrrd,mha,nifti")
             self.assertEqual(widget.training_status_label.objectName(), "tifTrainingStatusText")
@@ -370,10 +377,14 @@ class TifWorkbenchTests(unittest.TestCase):
         widget = TifWorkbenchWidget(manager, "en")
         try:
             controls = [
+                widget.display_mode_combo,
+                widget.slice_axis_combo,
                 widget.label_role_combo,
                 widget.opacity_slider,
                 widget.brightness_slider,
                 widget.contrast_slider,
+                widget.volume_cutoff_slider,
+                widget.volume_quality_slider,
                 widget.brush_size_slider,
                 widget.slice_slider,
             ]
@@ -450,6 +461,110 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.close_project()
                 widget.deleteLater()
 
+    def test_tif_workbench_can_view_z_y_x_orthogonal_slices(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=4)
+            try:
+                self.assertEqual(widget.slice_axis_combo.currentData(), "z")
+                self.assertEqual(widget.slice_slider.maximum(), 3)
+
+                y_index = widget.slice_axis_combo.findData("y")
+                widget.slice_axis_combo.setCurrentIndex(y_index)
+                self.assertEqual(widget.slice_slider.maximum(), 7)
+                self.assertIn("Y ", widget.canvas_status_text(1.0))
+                widget.slice_slider.setValue(4)
+                widget.render_current_slice()
+                self.assertEqual(widget.canvas._pixmap.width(), 8)
+                self.assertEqual(widget.canvas._pixmap.height(), 4)
+
+                x_index = widget.slice_axis_combo.findData("x")
+                widget.slice_axis_combo.setCurrentIndex(x_index)
+                self.assertEqual(widget.slice_slider.maximum(), 7)
+                widget.slice_slider.setValue(5)
+                widget.render_current_slice()
+                self.assertEqual(widget.canvas._pixmap.width(), 8)
+                self.assertEqual(widget.canvas._pixmap.height(), 4)
+
+                z_index = widget.slice_axis_combo.findData("z")
+                widget.slice_axis_combo.setCurrentIndex(z_index)
+                self.assertEqual(widget.slice_slider.maximum(), 3)
+                self.assertEqual(widget.canvas._pixmap.width(), 8)
+                self.assertEqual(widget.canvas._pixmap.height(), 8)
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_side_angle_slices_are_read_only_for_label_safety(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=3)
+            try:
+                edit_index = widget.label_role_combo.findData("working_edit")
+                widget.label_role_combo.setCurrentIndex(edit_index)
+                widget.current_material_id = 2
+                before = widget.edit_volume.copy()
+
+                y_index = widget.slice_axis_combo.findData("y")
+                widget.slice_axis_combo.setCurrentIndex(y_index)
+                widget.paint_at_widget_position(widget.canvas.width() / 2, widget.canvas.height() / 2)
+
+                np.testing.assert_array_equal(widget.edit_volume, before)
+                self.assertIn("Painting is available on Z slices only", widget.training_status_label.text())
+                self.assertFalse(widget.working_edit_dirty)
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_tif_workbench_can_render_drag_rotate_volume_preview(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+            try:
+                mode_index = widget.display_mode_combo.findData("volume")
+                widget.display_mode_combo.setCurrentIndex(mode_index)
+
+                self.assertEqual(widget.display_mode, "volume")
+                self.assertEqual(widget.view_stack.currentWidget(), widget.volume_canvas)
+                self.assertFalse(widget.slice_slider.isVisible())
+                self.assertIn("3D preview uses a downsampled", widget.training_status_label.text())
+                self.assertIsNotNone(widget._volume_preview)
+                self.assertIsNotNone(widget.volume_canvas.pixmap())
+                self.assertIn("3D volume", widget.volume_status_text())
+
+                old_yaw = widget._volume_yaw
+                widget.rotate_volume_preview(25, -10)
+                self.assertNotEqual(widget._volume_yaw, old_yaw)
+
+                old_zoom = widget._volume_zoom
+                widget.zoom_volume_preview(1)
+                self.assertGreater(widget._volume_zoom, old_zoom)
+
+                widget.reset_volume_view()
+                self.assertEqual(widget._volume_yaw, -35.0)
+                self.assertEqual(widget._volume_pitch, 20.0)
+                self.assertEqual(widget._volume_zoom, 1.0)
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_volume_preview_is_read_only_for_label_safety(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=3)
+            try:
+                edit_index = widget.label_role_combo.findData("working_edit")
+                widget.label_role_combo.setCurrentIndex(edit_index)
+                widget.current_material_id = 2
+                before = widget.edit_volume.copy()
+
+                mode_index = widget.display_mode_combo.findData("volume")
+                widget.display_mode_combo.setCurrentIndex(mode_index)
+                widget.paint_at_widget_position(widget.canvas.width() / 2, widget.canvas.height() / 2)
+
+                np.testing.assert_array_equal(widget.edit_volume, before)
+                self.assertIn("3D volume preview is read-only", widget.training_status_label.text())
+                self.assertFalse(widget.working_edit_dirty)
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
     def test_tif_workbench_chinese_labels_cover_import_and_backend_controls(self):
         manager = TifProjectManager()
         widget = TifWorkbenchWidget(manager, "en")
@@ -465,6 +580,10 @@ class TifWorkbenchTests(unittest.TestCase):
             self.assertEqual(widget.auto_save_check.text(), "自动保存编辑层")
             self.assertEqual(widget.btn_start_center.text(), "启动中心")
             self.assertEqual(widget.btn_ask_agent.text(), "询问 Agent")
+            self.assertEqual(widget.display_mode_label.text(), "显示模式")
+            self.assertEqual(widget.display_mode_combo.itemText(widget.display_mode_combo.findData("volume")), "3D 体预览")
+            self.assertEqual(widget.slice_axis_label.text(), "切片方向")
+            self.assertEqual(widget.slice_axis_combo.itemText(widget.slice_axis_combo.findData("y")), "Y 方向切片")
             section_titles = {
                 label.text()
                 for label in widget.findChildren(QLabel)

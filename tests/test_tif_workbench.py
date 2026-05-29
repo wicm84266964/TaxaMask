@@ -17,7 +17,7 @@ has_pyside6 = False
 
 try:
     from PySide6.QtCore import QPointF, Qt
-    from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QTextEdit
+    from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QTextEdit, QWidget
 except ModuleNotFoundError as exc:
     if exc.name and exc.name.startswith("PySide6"):
         QApplication = None
@@ -27,7 +27,8 @@ else:
     from AntSleap.core.tif_materials import upsert_material
     from AntSleap.core.tif_project import TifProjectManager
     from AntSleap.core.tif_volume_io import write_volume_sidecar
-    from AntSleap.ui.tif_workbench import TifWorkbenchWidget
+    from AntSleap.ui.tif_gpu_volume_canvas import gpu_volume_canvas_available, gpu_volume_unavailable_reason
+    from AntSleap.ui.tif_workbench import TifVolumeCanvas, TifWorkbenchWidget, create_tif_volume_canvas
 
     has_pyside6 = True
 
@@ -353,12 +354,23 @@ class TifWorkbenchTests(unittest.TestCase):
             self.assertIsNotNone(widget.findChild(type(widget.display_mode_combo), "tifDisplayModeCombo"))
             self.assertIsNotNone(widget.findChild(type(widget.volume_cutoff_slider), "tifVolumeCutoffSlider"))
             self.assertIsNotNone(widget.findChild(type(widget.volume_quality_slider), "tifVolumeQualitySlider"))
+            self.assertIsNotNone(widget.findChild(type(widget.volume_sample_slider), "tifVolumeSampleSlider"))
+            self.assertIsNotNone(widget.findChild(type(widget.volume_inside_slider), "tifVolumeInsideSlider"))
+            self.assertIsNotNone(widget.findChild(type(widget.volume_clip_slider), "tifVolumeClipSlider"))
             self.assertIsNotNone(widget.findChild(type(widget.btn_reset_volume_view), "tifResetVolumeViewButton"))
-            self.assertIsNotNone(widget.findChild(QLabel, "tifVolumeCanvas"))
+            self.assertIsNotNone(widget.findChild(type(widget.volume_clarity_check), "tifVolumeClarityCheck"))
+            self.assertIsNotNone(widget.findChild(QWidget, "tifVolumeCanvas"))
+            self.assertEqual(widget.volume_quality_slider.maximum(), 4096)
+            self.assertEqual(widget.volume_sample_slider.maximum(), 4096)
+            self.assertEqual(widget.volume_inside_slider.maximum(), 160)
             self.assertEqual(widget.backend_id_edit.objectName(), "tifBackendIdEdit")
             self.assertEqual(widget.backend_formats_edit.text(), "ome_tiff,nrrd,mha,nifti")
             self.assertEqual(widget.training_status_label.objectName(), "tifTrainingStatusText")
             self.assertEqual(widget.log_console.objectName(), "tifLogConsole")
+            inspector_body = widget.findChild(QWidget, "tifInspectorBody")
+            self.assertIsNotNone(inspector_body)
+            self.assertIs(inspector_body, widget.log_console.parentWidget().parentWidget())
+            self.assertIsNone(widget.findChild(QWidget, "tifStatusSection"))
             self.assertEqual(widget.btn_import_tif.property("tifRole"), "primary")
             self.assertEqual(widget.btn_train_backend.property("tifRole"), "primary")
             self.assertEqual(widget.btn_save_backend.property("tifRole"), "secondary")
@@ -385,6 +397,9 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.contrast_slider,
                 widget.volume_cutoff_slider,
                 widget.volume_quality_slider,
+                widget.volume_sample_slider,
+                widget.volume_inside_slider,
+                widget.volume_clip_slider,
                 widget.brush_size_slider,
                 widget.slice_slider,
             ]
@@ -526,24 +541,189 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertFalse(widget.slice_slider.isVisible())
                 self.assertIn("3D preview uses a downsampled", widget.training_status_label.text())
                 self.assertIsNotNone(widget._volume_preview)
-                self.assertIsNotNone(widget.volume_canvas.pixmap())
+                if isinstance(widget.volume_canvas, TifVolumeCanvas):
+                    self.assertIsNotNone(widget.volume_canvas.pixmap())
                 self.assertIn("3D volume", widget.volume_status_text())
+                self.assertIn(
+                    "GPU ray march" if widget._volume_canvas_renderer == "gpu" else "CPU fallback",
+                    widget.volume_status_text(),
+                )
+                widget._volume_canvas_renderer = "gpu"
+                widget._volume_gl_renderer_info = "NVIDIA GeForce RTX 3090/PCIe/SSE2"
+                widget.volume_quality_slider.setValue(4096)
+                widget.volume_sample_slider.setValue(4096)
+                widget.volume_clarity_check.setChecked(True)
+                widget.volume_inside_slider.setValue(65)
+                widget.volume_clip_slider.setValue(30)
+                self.assertIn("RTX 3090", widget.volume_status_text())
+                self.assertIn("Volume view | GPU ray march [", widget.volume_canvas_overlay_text())
+                self.assertIn("Still high quality", widget.volume_canvas_overlay_text())
+                self.assertIn("Texture 4096", widget.volume_canvas_overlay_text())
+                self.assertIn("Samples 4096", widget.volume_canvas_overlay_text())
+                self.assertIn("Inside 65%", widget.volume_canvas_overlay_text())
+                self.assertIn("Cut 30%", widget.volume_canvas_overlay_text())
+                self.assertIn("drag rotate / wheel zoom", widget.volume_status_text())
+                self.assertIn("Pan X 0%", widget.volume_canvas_overlay_text())
+                self.assertNotIn("render_quality", widget.volume_canvas_overlay_text())
+                widget.change_language("zh")
+                self.assertIn("体预览 | GPU 光线步进 [", widget.volume_canvas_overlay_text())
+                self.assertIn("静止高清", widget.volume_canvas_overlay_text())
+                self.assertEqual(widget.volume_clarity_check.text(), "清晰模式")
+                self.assertIn("纹理 4096", widget.volume_canvas_overlay_text())
+                self.assertIn("采样 4096", widget.volume_canvas_overlay_text())
+                self.assertIn("视点 65%", widget.volume_canvas_overlay_text())
+                self.assertIn("近端切 30%", widget.volume_canvas_overlay_text())
+                self.assertIn("左键旋转", widget.volume_status_text())
+                self.assertIn("右键平移", widget.volume_status_text())
+                self.assertIn("横移 0%", widget.volume_canvas_overlay_text())
+                self.assertIn("纵移 0%", widget.volume_canvas_overlay_text())
+                self.assertIn("静止高清", widget.volume_quality_slider.toolTip())
+                widget._update_volume_render_status_label()
+                self.assertIn("RTX 3090", widget.volume_render_status_label.text())
 
                 old_yaw = widget._volume_yaw
                 widget.rotate_volume_preview(25, -10)
                 self.assertNotEqual(widget._volume_yaw, old_yaw)
+                self.assertEqual(widget._volume_render_mode, "drag")
+                self.assertIn("拖动预览", widget.volume_canvas_overlay_text())
+                self.assertIn("纹理 640", widget.volume_canvas_overlay_text())
+                self.assertIn("采样 768", widget.volume_canvas_overlay_text())
+                widget._finish_volume_interaction()
+                self.assertEqual(widget._volume_render_mode, "still")
+
+                old_pan = (widget._volume_pan_x, widget._volume_pan_y)
+                widget.pan_volume_preview(80, -40)
+                self.assertNotEqual((widget._volume_pan_x, widget._volume_pan_y), old_pan)
+                self.assertGreater(widget._volume_pan_x, old_pan[0])
+                self.assertGreater(widget._volume_pan_y, old_pan[1])
+                self.assertEqual(widget._volume_render_mode, "drag")
+                self.assertIn("横移", widget.volume_canvas_overlay_text())
+                self.assertIn("纵移", widget.volume_canvas_overlay_text())
+                widget.volume_canvas.resize(480, 360)
+                press = FakeMouseEvent(Qt.RightButton, Qt.RightButton, 220, 170)
+                move = FakeMouseEvent(Qt.RightButton, Qt.RightButton, 260, 140)
+                release = FakeMouseEvent(Qt.RightButton, Qt.NoButton, 260, 140)
+                widget.volume_canvas.mousePressEvent(press)
+                widget.volume_canvas.mouseMoveEvent(move)
+                widget.volume_canvas.mouseReleaseEvent(release)
+                self.assertTrue(press.accepted)
+                self.assertTrue(move.accepted)
+                self.assertTrue(release.accepted)
 
                 old_zoom = widget._volume_zoom
                 widget.zoom_volume_preview(1)
                 self.assertGreater(widget._volume_zoom, old_zoom)
+                for _ in range(20):
+                    widget.zoom_volume_preview(1)
+                self.assertEqual(widget._volume_zoom, 8.0)
+                widget._finish_volume_interaction()
 
                 widget.reset_volume_view()
                 self.assertEqual(widget._volume_yaw, -35.0)
                 self.assertEqual(widget._volume_pitch, 20.0)
                 self.assertEqual(widget._volume_zoom, 1.0)
+                self.assertEqual(widget._volume_pan_x, 0.0)
+                self.assertEqual(widget._volume_pan_y, 0.0)
+                self.assertEqual(widget.volume_inside_slider.value(), 0)
+                self.assertEqual(widget.volume_clip_slider.value(), 0)
             finally:
                 widget.close_project()
                 widget.deleteLater()
+
+    def test_volume_preview_cache_keeps_drag_and_still_textures_separate(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "zh")
+        try:
+            widget._volume_canvas_renderer = "gpu"
+            widget.image_volume = np.zeros((12, 900, 900), dtype=np.uint8)
+            widget.image_volume[:, 250:650, 250:650] = 180
+            widget.volume_quality_slider.setValue(1024)
+            still = widget._ensure_volume_preview("still")
+            drag = widget._ensure_volume_preview("drag")
+            self.assertIsNotNone(still)
+            self.assertIsNotNone(drag)
+            self.assertLessEqual(max(drag.shape), 640)
+            self.assertLessEqual(max(still.shape), 1024)
+            self.assertGreaterEqual(max(still.shape), max(drag.shape))
+            self.assertEqual(len(widget._volume_preview_cache), 2)
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+
+    def test_volume_source_geometry_stays_fixed_across_preview_sizes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = TifProjectManager()
+            manager.create_project("geometry", root / "geometry")
+            manager.create_specimen_scaffold("01-0101-geo")
+            image = np.zeros((12, 900, 900), dtype=np.uint8)
+            image_rel = "specimens/01-0101-geo/working/image.ome.zarr"
+            image_meta = write_volume_sidecar(root / "geometry" / image_rel, image, role="working_image")
+            manager.register_working_volume(
+                "01-0101-geo",
+                image_rel,
+                image_meta["shape_zyx"],
+                image_meta["dtype"],
+                spacing_zyx=[2.0, 1.0, 1.0],
+                save=False,
+            )
+            manager.save_project()
+            widget = TifWorkbenchWidget(manager, "zh")
+            try:
+                widget.load_specimen("01-0101-geo")
+                widget._volume_canvas_renderer = "gpu"
+                widget.volume_quality_slider.setValue(1024)
+                still = widget._ensure_volume_preview("still")
+                drag = widget._ensure_volume_preview("drag")
+                self.assertNotEqual(still.shape, drag.shape)
+                shape, spacing = widget._volume_source_geometry()
+                self.assertEqual(shape, (12, 900, 900))
+                self.assertEqual(spacing, (2.0, 1.0, 1.0))
+            finally:
+                still = None
+                drag = None
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_volume_preview_keeps_uint8_source_without_float_copy(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "zh")
+        try:
+            source = np.arange(2 * 4 * 4, dtype=np.uint8).reshape((2, 4, 4))
+            preview = widget._normalize_volume_preview_to_uint8(source)
+            self.assertEqual(preview.dtype, np.uint8)
+            np.testing.assert_array_equal(preview, source)
+            self.assertTrue(preview.flags["C_CONTIGUOUS"])
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+
+    def test_volume_preview_normalizes_uint16_source_for_gpu_upload(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "zh")
+        try:
+            source = np.array([[[0, 32768], [49152, 65535]]], dtype=np.uint16)
+            preview = widget._normalize_volume_preview_to_uint8(source)
+            self.assertEqual(preview.dtype, np.uint8)
+            self.assertEqual(int(preview.min()), 0)
+            self.assertEqual(int(preview.max()), 255)
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+
+    def test_clarity_mode_preserves_uint16_preview_for_gpu_upload(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "zh")
+        try:
+            widget._volume_canvas_renderer = "gpu"
+            widget.image_volume = np.array([[[0, 32768], [49152, 65535]]], dtype=np.uint16)
+            widget.volume_clarity_check.setChecked(True)
+            preview = widget._ensure_volume_preview("still")
+            self.assertEqual(preview.dtype, np.uint16)
+            np.testing.assert_array_equal(preview, widget.image_volume)
+        finally:
+            widget.close_project()
+            widget.deleteLater()
 
     def test_volume_preview_is_read_only_for_label_safety(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -581,7 +761,7 @@ class TifWorkbenchTests(unittest.TestCase):
             self.assertEqual(widget.btn_start_center.text(), "启动中心")
             self.assertEqual(widget.btn_ask_agent.text(), "询问 Agent")
             self.assertEqual(widget.display_mode_label.text(), "显示模式")
-            self.assertEqual(widget.display_mode_combo.itemText(widget.display_mode_combo.findData("volume")), "3D 体预览")
+            self.assertEqual(widget.display_mode_combo.itemText(widget.display_mode_combo.findData("volume")), "三维体预览")
             self.assertEqual(widget.slice_axis_label.text(), "切片方向")
             self.assertEqual(widget.slice_axis_combo.itemText(widget.slice_axis_combo.findData("y")), "Y 方向切片")
             section_titles = {
@@ -597,6 +777,45 @@ class TifWorkbenchTests(unittest.TestCase):
         finally:
             widget.close_project()
             widget.deleteLater()
+
+    def test_tif_volume_canvas_factory_reports_gpu_or_cpu_renderer(self):
+        canvas, renderer, warning = create_tif_volume_canvas()
+        try:
+            self.assertIn(renderer, {"gpu", "cpu"})
+            self.assertEqual(canvas.objectName(), "tifVolumeCanvas")
+            if renderer == "gpu":
+                self.assertTrue(gpu_volume_canvas_available())
+                self.assertEqual(warning, "")
+            else:
+                self.assertIsInstance(canvas, TifVolumeCanvas)
+                self.assertIsInstance(warning, str)
+        finally:
+            canvas.deleteLater()
+
+    def test_gpu_volume_unavailable_reason_is_safe_to_call(self):
+        reason = gpu_volume_unavailable_reason()
+        self.assertIsInstance(reason, str)
+
+    def test_tif_workbench_releases_optional_gpu_renderer_on_close(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+
+        class FakeGpuCanvas(TifVolumeCanvas):
+            def __init__(self):
+                super().__init__()
+                self.release_calls = 0
+
+            def release_gl_resources(self):
+                self.release_calls += 1
+
+        fake_canvas = FakeGpuCanvas()
+        try:
+            widget.volume_canvas = fake_canvas
+            self.assertTrue(widget.close_project(prompt_unsaved=False))
+            self.assertEqual(fake_canvas.release_calls, 1)
+        finally:
+            widget.deleteLater()
+            fake_canvas.deleteLater()
 
     def test_label_role_help_explains_editable_and_read_only_layers(self):
         manager = TifProjectManager()

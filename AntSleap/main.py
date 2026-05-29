@@ -4345,6 +4345,12 @@ class MainWindow(QMainWindow):
         return ""
 
     def _shutdown_background_workers(self):
+        tif_workbench = getattr(self, "tif_workbench", None)
+        if tif_workbench is not None and hasattr(tif_workbench, "release_volume_renderer"):
+            try:
+                tif_workbench.release_volume_renderer()
+            except Exception:
+                pass
         agent_panel = getattr(self, "agent_panel", None)
         if agent_panel is not None and hasattr(agent_panel, "stop_dashboard"):
             try:

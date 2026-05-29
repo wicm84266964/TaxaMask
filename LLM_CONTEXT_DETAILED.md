@@ -1,10 +1,73 @@
 # TAXAMASK / FORMICA-FLOW SYSTEM TECHNICAL MANUAL (Deep Dive)
 
 > **Target Audience**: Expert LLM Assistants, Senior Developers
-> **Version**: v3.26 (May 26, 2026, VLM first-mile preannotation + explicit Blink parent confirmation)
+> **Version**: v3.27 (May 29, 2026, TIF GPU volume preview + clarity mode)
 > **Purpose**: Up-to-date architectural, workflow, and governance context for implementation and maintenance.
 
 ---
+
+## 0) v3.27 TIF GPU Volume Preview + Clarity Mode (2026-05-29)
+
+### 0.0 Research workflow intent
+- The TIF workbench now has a read-only 3D volume preview intended for inspecting internal structures before slice editing, backend training, or future brain-oriented reslicing.
+- The concrete ant use case driving this pass is micro-CT / TIF inspection of internal head and brain structures, where users need to rotate the specimen, zoom in, move the camera inward, and peel away near-side tissue without modifying labels.
+- This feature is a preview/inspection tool. It does not replace precise slice review and does not write into `manual_truth`, `working_edit`, or `model_draft`.
+- Future standardized brain reslicing should build on this orientation work but must be implemented as explicit resampling/export, not as a screen capture of the 3D renderer.
+
+### 0.1 Main implementation
+- New optional renderer module: `AntSleap/ui/tif_gpu_volume_canvas.py`.
+- The renderer uses Qt `QOpenGLWidget`, PyOpenGL, a 3D texture, and GLSL ray marching with front-to-back opacity accumulation.
+- `AntSleap/ui/tif_workbench.py` now creates the GPU canvas when available and falls back to the older CPU pixmap preview when imports or runtime rendering fail.
+- `requirements.txt` adds `PyOpenGL>=3.1.7`.
+- `AntSleap/main.py::_shutdown_background_workers()` calls `release_volume_renderer()` when the TIF workbench exists, so the OpenGL widget is explicitly released during application shutdown.
+- Helper launcher: `tools/start_antsleap_high_performance_gpu.ps1`.
+  - Sets `QT_OPENGL=desktop`.
+  - Sets NVIDIA offload environment variables where they apply.
+  - Starts the `antsleap` conda `pythonw.exe` against `AntSleap/main.py`.
+
+### 0.2 Renderer behavior and user controls
+- Display mode now includes slice review and 3D volume preview.
+- 3D interaction:
+  - left mouse drag: rotate
+  - right mouse drag: pan, using grab-the-image direction
+  - wheel: zoom, capped at 8x
+  - reset: returns to external default view and clears inside depth/front cut
+- GPU preview quality:
+  - `GPU_VOLUME_MAX_TEXTURE_DIM = 4096`
+  - `GPU_VOLUME_MAX_RAY_STEPS = 4096`
+  - drag mode temporarily caps texture size and samples for responsiveness
+  - still mode rebuilds the sharper preview after interaction settles
+- Clarity mode:
+  - keeps `uint16` source intensities for still GPU upload when possible
+  - uses crisper sampling and lower opacity blending to reduce volume fog
+  - can appear grainier but better exposes thin internal structures
+- Geometry:
+  - display scaling uses source `shape_zyx` and `spacing_zyx`, not the current downsampled preview array, preventing drag/still texture swaps from changing specimen proportions.
+- Viewing-depth controls:
+  - `Inside depth` / Chinese `视点深度`: moves the camera into the volume; it does not delete or clip data.
+  - `Front cut` / Chinese `近端剖切`: clips away the near-side ray segment from the current screen-facing side.
+  - Both GPU and CPU fallback paths follow near-to-far front clip semantics.
+
+### 0.3 UI/text and status boundaries
+- Chinese mode uses Chinese labels for renderer status metrics; English mode keeps English labels.
+- The persistent right-side render log/status was removed from the normal layout pressure path. Volume render state is exposed as canvas overlay text and compact status text.
+- Status fields include renderer, compact GPU name, texture size, ray samples, view depth, front cut, zoom, pan, VRAM estimate, upload/draw timing, and uploaded data dtype when available.
+
+### 0.4 Known limits
+- This is still a downsampled/preview renderer, not a quantitative analysis export.
+- GPU load can appear low if the volume texture is smaller than the physical GPU budget or if early ray termination exits quickly.
+- Windows hybrid graphics may still choose the integrated GPU unless the OS/NVIDIA control panel is configured for high performance; the helper script improves the environment but cannot override all driver policy.
+- Qt may still emit shutdown messages such as `QDxgiVSyncService not destroyed in time`; current handling reduces but does not fully eliminate those harmless teardown warnings.
+- Orthogonal/slice review remains necessary for precise label editing. The 3D preview is read-only.
+- Brain-standardization reslicing is not implemented in this milestone. It should use explicit landmarks/orientation vectors, source spacing, affine resampling, and label-nearest-neighbor handling.
+
+### 0.5 Validation
+- Focused tests:
+  - `tests/test_tif_gpu_volume_canvas.py`
+  - `tests/test_tif_workbench.py`
+- Last full focused validation reported for this milestone:
+  - `C:\Users\admin\anaconda3\envs\antsleap\python.exe -m unittest tests.test_tif_project tests.test_tif_stack_import tests.test_tif_export tests.test_tif_prediction_import tests.test_tif_gpu_volume_canvas tests.test_tif_workbench`
+  - Result: 55 tests, OK.
 
 ## 0) v3.26 VLM First-Mile Preannotation + Explicit Blink Parent Confirmation (2026-05-26)
 

@@ -13,7 +13,7 @@ TaxaMask connects four parts of a taxonomy data workflow:
 - Agent-assisted operation: use the embedded Ant-Code Agent Center to configure workflows, inspect errors, prepare PDF evidence runs, adapt custom model backends, and plan training without asking domain researchers to write Python commands. Fixed `Ask Agent` entry points pass compact routing cards that point the Agent to relevant docs, source files, contracts, logs, and safety boundaries instead of dumping large project data into chat; external backend edits and TaxaMask source edits use separate confirmation levels.
 - Literature processing: screen taxonomy PDFs, extract candidate figures, assemble caption and nearby text evidence, and optionally run multimodal review.
 - Annotation and model loop: manage project images and STL-derived rendered views, draw masks, use SAM-assisted annotation, use parent-child Blink refinement inside the main Labeling Workbench, train locator/SAM/Blink components, reuse trained experts for pre-annotation, and export datasets.
-- Ant 3D workbench: keep STL-derived 2D review and TIF volume segmentation as separate workflows, import AMIRA/TIF volume data, preserve material maps and manual truth layers, and export volume labels for external 3D segmentation backends.
+- Ant 3D workbench: keep STL-derived 2D review and TIF volume segmentation as separate workflows, import AMIRA/TIF volume data, inspect read-only GPU volume previews, preserve material maps and manual truth layers, and export volume labels for external 3D segmentation backends.
 
 The intended research loop is:
 
@@ -29,7 +29,7 @@ Agent Center -> choose PDF / 2D-STL / TIF workflow
 - Embedded TaxaMask Agent Center powered by a local Ant-Code dashboard, with workflow shortcuts for 2D/STL morphology and TIF volume projects.
 - Taxa-aware project templates, including a validated ant morphology example and a generic taxonomy mask template.
 - Labeling Workbench for biological structure masks, including specimen-grouped STL-rendered surface views imported as derived 2D review images, VLM first-mile draft boxes for SAM prompts, plus integrated parent-child Blink refinement for small structures.
-- TIF Volume Workbench for stack viewing, overlay review, material-map editing, working edits, and explicit promotion to manual training truth.
+- TIF Volume Workbench for stack viewing, read-only GPU 3D volume preview, overlay review, material-map editing, working edits, and explicit promotion to manual training truth.
 - Route-appointed Blink experts for parent-structure to child-structure pre-annotation, shrink-trajectory generation, and local expert training from the main 2D/STL labeling surface.
 - Configurable main locator structures for non-ant projects.
 - Built-in training/inference path plus an external backend contract for advanced users who want to connect custom models.
@@ -42,7 +42,7 @@ Agent Center -> choose PDF / 2D-STL / TIF workflow
 The GUI starts at the TaxaMask Agent Center by default. The center area embeds the Ant-Code dashboard for natural-language task assistance, while the right rail exposes direct workflow cards:
 
 - `2D/STL Morphology`: ordinary 2D morphology images and STL-derived rendered 2D views. This route uses the Labeling Workbench with an integrated parent-child Blink refinement panel, built-in Locator/SAM, route-appointed experts, and the 2D external backend contract.
-- `TIF Volume`: continuous TIF/AMIRA-style volumes. This route uses independent TIF projects, material-ID label fields, `manual_truth` / `working_edit` / `model_draft` layers, TIF exports, and the TIF backend contract.
+- `TIF Volume`: continuous TIF/AMIRA-style volumes. This route uses independent TIF projects, material-ID label fields, slice review plus read-only 3D volume preview, `manual_truth` / `working_edit` / `model_draft` layers, TIF exports, and the TIF backend contract.
 - `PDF Evidence`: available through Agent/headless tools and `File -> Open PDF Evidence Tools`. PDF outputs are evidence/provenance artifacts, not automatic training truth.
 
 Locator and SAM are lazy-loaded. Starting the app or entering the TIF workflow does not load them; entering the 2D/STL workflow preloads them, and returning to the Agent Center keeps already loaded models alive.

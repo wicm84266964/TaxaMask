@@ -4,6 +4,7 @@ import { createLabModelGateway } from "../model-gateway/client.js";
 import { resolveWorkspaceTrust, trustWorkspace as saveWorkspaceTrust } from "../permissions/workspace-trust.js";
 import { createSessionStore } from "../storage/session-store.js";
 import { loadConfig } from "../config/load-config.js";
+import { createAgentTaskGroupStore } from "../agents/task-group-store.js";
 import { cloneWorkflowState } from "../tools/workflow-tools.js";
 import { mapSessionEventToDashboard, permissionRequestToActivity } from "./events.js";
 import { applyPermissionMode, approvalDisplayMeta, approvalKeyFor, buildApprovalPreview, normalizePermissionMode, permissionModeSummary } from "./permissions.js";
@@ -730,7 +731,7 @@ function beginPrompt(state, item, env) {
   appendDashboardEvent(state, {
     type: "user_message",
     id: eventId("user"),
-    text: item.kind === "guide" ? item.guidance : item.prompt,
+    text: userMessageEventText(item),
     turnId: state.currentTurnId,
     queuedKind: item.kind,
     at: new Date().toISOString()
@@ -745,14 +746,14 @@ function runTurnInBackground(state, item, env) {
     try {
       const result = await runSessionTurn(state.session, {
         prompt: item.prompt,
-        displayPrompt: item.kind === "guide" ? item.guidance : item.prompt,
+        displayPrompt: displayPromptForQueueItem(item),
         env,
         stream: true,
         signal: controller.signal,
         hooksTrusted: state.hooksTrusted,
         approvalCallback: (request) => askApproval(state, request),
         userInputCallback: (request) => askQuestion(state, request),
-        onEvent: (event) => {
+        onEvent: async (event) => {
           for (const mapped of mapSessionEventToDashboard(event)) {
             mapped.turnId = state.currentTurnId;
             mapped.sessionStatus = sessionStatusSummary(state.session);
@@ -771,6 +772,9 @@ function runTurnInBackground(state, item, env) {
           }
           if (event.type === "workflow_updated") {
             appendWorkflowSnapshot(state, event.reason ?? "workflow_updated");
+          }
+          if (event.type === "subagent_group_wakeup") {
+            await queueBackgroundWakePrompt(state, event, env);
           }
         }
       });
@@ -1060,14 +1064,86 @@ function queueSnapshot(state) {
   return state.queuedPrompts.map(publicQueueItem);
 }
 
+function createWakeQueueItem(event, permissionMode = "plan") {
+  const prompt = String(event?.wakePrompt ?? "").trim();
+  if (!prompt) {
+    return null;
+  }
+  return {
+    ...createQueueItem(prompt, permissionMode, "wakeup"),
+    title: "子智能体完成，主控自动接续",
+    groupId: String(event.groupId ?? "").trim() || null
+  };
+}
+
+async function queueBackgroundWakePrompt(state, event, env) {
+  const item = createWakeQueueItem(event, state.currentPermissionMode);
+  if (!item) {
+    return;
+  }
+  if (state.running) {
+    state.queuedPrompts.push(item);
+    state.queuedPrompts = state.queuedPrompts.slice(0, MAX_QUEUE);
+    appendDashboardEvent(state, {
+      type: "wakeup_queued",
+      id: eventId("wakeup"),
+      groupId: item.groupId,
+      queue: queueSnapshot(state),
+      queueLength: state.queuedPrompts.length,
+      running: true,
+      at: new Date().toISOString()
+    });
+  } else {
+    appendDashboardEvent(state, {
+      type: "wakeup_queued",
+      id: eventId("wakeup"),
+      groupId: item.groupId,
+      queue: queueSnapshot(state),
+      queueLength: state.queuedPrompts.length,
+      running: false,
+      at: new Date().toISOString()
+    });
+    beginPrompt(state, item, env);
+  }
+  await markWakePromptConsumed(state, event);
+}
+
+async function markWakePromptConsumed(state, event) {
+  const groupId = String(event?.groupId ?? "").trim();
+  if (!groupId) {
+    return;
+  }
+  try {
+    await createAgentTaskGroupStore({ cwd: state.session.cwd }).updateGroup(groupId, {
+      wakePromptConsumedAt: new Date().toISOString()
+    });
+  } catch {
+    // Wakeup continuation must not fail only because the observability marker could not be written.
+  }
+}
+
 function publicQueueItem(item) {
   return {
     id: item.id,
     kind: item.kind,
-    preview: previewText(item.kind === "guide" ? item.guidance : item.prompt),
+    preview: previewText(item.title || (item.kind === "guide" ? item.guidance : item.prompt)),
     permissionMode: item.permissionMode,
     at: item.at
   };
+}
+
+function displayPromptForQueueItem(item) {
+  if (item.kind === "guide") {
+    return item.guidance;
+  }
+  if (item.kind === "wakeup") {
+    return item.title || "子智能体完成，主控自动接续";
+  }
+  return item.prompt;
+}
+
+function userMessageEventText(item) {
+  return item.kind === "wakeup" ? displayPromptForQueueItem(item) : item.kind === "guide" ? item.guidance : item.prompt;
 }
 
 function previewText(value, max = 120) {

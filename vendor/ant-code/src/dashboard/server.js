@@ -12,7 +12,7 @@ const DASHBOARD_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(DASHBOARD_DIR, "public");
 
 /**
- * @param {{ cwd: string; env?: NodeJS.ProcessEnv; packageRoot?: string; host?: string; port?: number; open?: boolean; project?: string | null }} options
+ * @param {{ cwd: string; env?: NodeJS.ProcessEnv; packageRoot?: string; host?: string; port?: number; open?: boolean; project?: string | null; parentPid?: number | null }} options
  */
 export async function startDashboard(options) {
   const host = normalizeDashboardHost(options.host ?? DEFAULT_HOST);
@@ -25,6 +25,7 @@ export async function startDashboard(options) {
     publicDir: await resolveDashboardPublicDir(options.packageRoot),
     onShutdown: () => process.exit(0)
   });
+  monitorParentProcess(options.parentPid, () => server.requestShutdown?.());
   const bound = await listenOnAvailablePort(server, { host, port });
   const url = `http://${hostForUrl(host)}:${bound.port}`;
   if (options.open !== false) {
@@ -100,6 +101,7 @@ export function createDashboardServer(options) {
     socket.on("close", () => sockets.delete(socket));
   });
 
+  server.requestShutdown = requestShutdown;
   return server;
 
   function requestShutdown() {
@@ -132,6 +134,25 @@ export function createDashboardServer(options) {
     shutdownFinished = true;
     options.onShutdown?.();
   }
+}
+
+function monitorParentProcess(parentPid, onExit) {
+  const pid = Number(parentPid);
+  if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) {
+    return;
+  }
+  const timer = setInterval(() => {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if (error?.code === "EPERM") {
+        return;
+      }
+      clearInterval(timer);
+      onExit();
+    }
+  }, 1000);
+  timer.unref?.();
 }
 
 async function routeRequest(req, res, options) {

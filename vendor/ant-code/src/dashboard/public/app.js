@@ -22,6 +22,7 @@ const state = {
   files: [],
   liveTitle: "",
   liveActivities: new Map(),
+  backgroundSubagents: new Map(),
   completedActivities: [],
   running: false,
   pendingGuide: null,
@@ -624,7 +625,7 @@ function handleDashboardEvent(event) {
     beginEventTurn(event);
     updateTurnChangeStats(null, { reset: true });
     state.lastAssistantFinalSignature = "";
-    appendMessage("user", event.queuedKind === "guide" ? "引导" : "你", event.text);
+    appendMessage("user", event.queuedKind === "guide" ? "引导" : event.queuedKind === "wakeup" ? "子智能体" : "你", event.text);
     state.running = true;
     if (event.queuedKind === "guide") {
       els.runStatus.textContent = "引导中";
@@ -659,8 +660,14 @@ function handleDashboardEvent(event) {
       setLiveTitle("正在按引导继续");
     } else if (!state.running) {
       clearPendingGuide();
-      els.runStatus.textContent = "空闲";
-      resetLiveStatus();
+      if (state.backgroundSubagents.size > 0) {
+        els.runStatus.textContent = "等待子智能体唤醒";
+        state.liveActivities.clear();
+        updateLiveStatus();
+      } else {
+        els.runStatus.textContent = "空闲";
+        resetLiveStatus();
+      }
     } else {
       els.runStatus.textContent = "运行中";
       renderQueuePanel();
@@ -682,6 +689,15 @@ function handleDashboardEvent(event) {
     state.queue = event.queue ?? [];
     syncPendingGuideFromQueue();
     els.runStatus.textContent = state.pendingGuide ? "引导中" : state.running ? "运行中" : "已排队";
+    return;
+  }
+  if (event.type === "wakeup_queued") {
+    state.queue = event.queue ?? state.queue;
+    clearBackgroundSubagentStatus(event.groupId);
+    renderQueuePanel();
+    els.runStatus.textContent = event.running ? "主控续跑已排队" : "主控接续中";
+    setLiveTitle("子智能体已唤醒主控");
+    updateSendButton();
     return;
   }
   if (event.type === "queue_item_cancelled") {
@@ -737,6 +753,10 @@ function handleDashboardEvent(event) {
   if (event.type === "activity") {
     if (event.rawType === "turn_interrupted") {
       collapseAssistantDrafts();
+    }
+    if (isBackgroundSubagentActivity(event)) {
+      handleBackgroundSubagentActivity(event);
+      return;
     }
     handleActivity(event);
     if (event.status === "waiting") els.runStatus.textContent = "等待确认";
@@ -808,11 +828,17 @@ function handleDashboardEvent(event) {
     state.lastAssistantFinalSignature = finalSignature;
     collapseAssistantDrafts(event.text);
     collapseCompletedActivities();
-    resetLiveStatus();
+    if (state.backgroundSubagents.size > 0) {
+      state.running = false;
+      state.liveActivities.clear();
+      updateLiveStatus();
+    } else {
+      resetLiveStatus();
+    }
     clearPendingGuide();
     appendMessage("assistant", "Ant Code", event.text);
     state.activeTurnId = "";
-    els.runStatus.textContent = "收尾中";
+    els.runStatus.textContent = state.backgroundSubagents.size > 0 ? "等待子智能体唤醒" : "收尾中";
     updateSendButton();
     return;
   }
@@ -823,8 +849,15 @@ function handleDashboardEvent(event) {
       els.runStatus.textContent = "引导中";
       updateLiveStatus();
     } else {
-      els.runStatus.textContent = "完成";
-      resetLiveStatus();
+      if (state.backgroundSubagents.size > 0) {
+        els.runStatus.textContent = "等待子智能体唤醒";
+        state.running = false;
+        state.liveActivities.clear();
+        updateLiveStatus();
+      } else {
+        els.runStatus.textContent = "完成";
+        resetLiveStatus();
+      }
       clearPendingGuide();
     }
     updateSendButton();
@@ -1212,6 +1245,70 @@ function handleActivity(activity) {
   }
 }
 
+function isBackgroundSubagentActivity(activity) {
+  return activity?.backgroundSubagent === true || String(activity?.rawType ?? "").startsWith("subagent_group_");
+}
+
+function handleBackgroundSubagentActivity(activity) {
+  const key = activity.coalesceKey || activity.groupId || activity.taskId || activity.id;
+  const previous = state.backgroundSubagents.get(key) ?? {};
+  const merged = {
+    ...previous,
+    ...activity,
+    groupId: activity.groupId ?? previous.groupId ?? null,
+    taskId: activity.taskId ?? previous.taskId ?? null,
+    profile: activity.profile ?? previous.profile ?? null,
+    waitFor: activity.waitFor ?? previous.waitFor ?? null,
+    wakeParent: typeof activity.wakeParent === "boolean" ? activity.wakeParent : previous.wakeParent ?? null,
+    summary: activity.summary || activity.detail || previous.summary || "",
+    wakePromptQueued: activity.wakePromptQueued === true || previous.wakePromptQueued === true,
+    status: backgroundSubagentDisplayStatus(activity, previous)
+  };
+  if (backgroundSubagentVisible(merged)) {
+    state.backgroundSubagents.set(key, merged);
+  } else {
+    state.backgroundSubagents.delete(key);
+  }
+  updateLiveStatus();
+  if (!state.running && state.backgroundSubagents.size > 0) {
+    els.runStatus.textContent = merged.status === "waiting" ? "等待子智能体唤醒" : "子智能体运行中";
+  }
+}
+
+function clearBackgroundSubagentStatus(groupId) {
+  const id = String(groupId ?? "").trim();
+  if (id) {
+    state.backgroundSubagents.delete(`subagent-group:${id}`);
+    for (const [key, item] of state.backgroundSubagents.entries()) {
+      if (item.groupId === id) {
+        state.backgroundSubagents.delete(key);
+      }
+    }
+  } else {
+    state.backgroundSubagents.clear();
+  }
+  updateLiveStatus();
+}
+
+function backgroundSubagentDisplayStatus(activity, previous) {
+  if (activity.rawType === "subagent_group_wakeup" || activity.wakePromptQueued === true) {
+    return "waiting";
+  }
+  if (activity.rawType === "subagent_group_started") {
+    return "running";
+  }
+  if (activity.completed === true) {
+    const wakeParent = typeof activity.wakeParent === "boolean" ? activity.wakeParent : previous.wakeParent;
+    const waitFor = activity.waitFor ?? previous.waitFor;
+    return wakeParent !== false && waitFor !== "none" ? "waiting" : (activity.status ?? "completed");
+  }
+  return activity.status ?? previous.status ?? "running";
+}
+
+function backgroundSubagentVisible(activity) {
+  return activity.status === "running" || activity.status === "waiting";
+}
+
 function updateLiveActivity(activity) {
   const key = activity.coalesceKey || activity.toolUseId || activity.id;
   state.liveActivities.set(key, activity);
@@ -1231,7 +1328,8 @@ function setLiveTitle(title) {
 
 function updateLiveStatus() {
   const active = Array.from(state.liveActivities.values()).filter((activity) => activity.status === "running" || activity.status === "waiting");
-  const visible = state.running || active.length > 0 || state.liveTitle;
+  const background = Array.from(state.backgroundSubagents.values()).filter(backgroundSubagentVisible);
+  const visible = state.running || active.length > 0 || background.length > 0 || state.liveTitle;
   els.liveStatus.classList.toggle("hidden", !visible);
   if (!visible) {
     els.liveTitle.textContent = "";
@@ -1240,7 +1338,9 @@ function updateLiveStatus() {
   }
   const primary = active.find((activity) => activity.toolName !== "agent_run") || active[0];
   const subtasks = active.filter((activity) => activity.toolName === "agent_run");
-  els.liveTitle.textContent = primary?.title === "开始任务" && subtasks.length > 0
+  els.liveTitle.textContent = background.length > 0 && (!primary || primary.title === "开始任务")
+    ? background.some((item) => item.status === "running") ? "子智能体后台运行中" : "等待子智能体唤醒主控"
+    : primary?.title === "开始任务" && subtasks.length > 0
     ? "子智能体运行中"
     : primary?.title || state.liveTitle || "正在处理";
   els.liveSubtasks.innerHTML = "";
@@ -1250,12 +1350,20 @@ function updateLiveStatus() {
     chip.innerHTML = `<span class="chip-pulse" aria-hidden="true"></span>${escapeHtml(task.profile ? `${task.profile} 子任务运行中` : "子智能体运行中")}`;
     els.liveSubtasks.append(chip);
   }
+  for (const item of background.slice(0, 4)) {
+    const chip = document.createElement("div");
+    chip.className = "live-chip";
+    const profile = item.profile ? `${item.profile} ` : "";
+    chip.innerHTML = `<span class="chip-pulse" aria-hidden="true"></span>${escapeHtml(item.status === "waiting" ? `${profile}等待唤醒` : `${profile}后台运行`)}`;
+    els.liveSubtasks.append(chip);
+  }
 }
 
 function resetLiveStatus() {
   state.running = false;
   state.liveTitle = "";
   state.liveActivities.clear();
+  state.backgroundSubagents.clear();
   updateLiveStatus();
   updateSendButton();
 }

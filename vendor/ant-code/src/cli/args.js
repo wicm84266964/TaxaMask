@@ -15,7 +15,8 @@ export function parseArgs(argv) {
       host: "127.0.0.1",
       port: 7410,
       open: true,
-      project: null
+      project: null,
+      parentPid: null
     },
     outputFormat: "text",
     includePartialMessages: false,
@@ -64,6 +65,11 @@ export function parseArgs(argv) {
       index += 1;
     } else if (item.startsWith("--project=")) {
       args.dashboard.project = item.slice("--project=".length) || null;
+    } else if (item === "--parent-pid") {
+      args.dashboard.parentPid = normalizePositiveInteger(argv[index + 1]);
+      index += 1;
+    } else if (item.startsWith("--parent-pid=")) {
+      args.dashboard.parentPid = normalizePositiveInteger(item.slice("--parent-pid=".length));
     } else if (item === "--output-format") {
       args.outputFormat = normalizeOutputFormat(argv[index + 1] ?? "text");
       index += 1;
@@ -105,4 +111,9 @@ function normalizePort(value, fallback) {
     return port;
   }
   return fallback;
+}
+
+function normalizePositiveInteger(value) {
+  const number = Number(value);
+  return Number.isInteger(number) && number > 0 ? number : null;
 }

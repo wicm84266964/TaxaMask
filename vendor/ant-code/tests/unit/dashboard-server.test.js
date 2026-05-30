@@ -65,6 +65,26 @@ test("dashboard shutdown route responds before invoking shutdown callback", asyn
   }
 });
 
+test("dashboard server exposes programmatic shutdown for embedded hosts", async () => {
+  let shutdownCalled = false;
+  const server = createDashboardServer({
+    cwd: process.cwd(),
+    runtime: createRuntimeStub(),
+    onShutdown: () => {
+      shutdownCalled = true;
+    }
+  });
+  await listen(server, "127.0.0.1", 0);
+
+  try {
+    server.requestShutdown();
+    await waitFor(() => shutdownCalled);
+    assert.equal(shutdownCalled, true);
+  } finally {
+    await close(server);
+  }
+});
+
 test("dashboard status route includes runtime session status", async () => {
   const server = createDashboardServer({
     cwd: process.cwd(),

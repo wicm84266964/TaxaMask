@@ -175,6 +175,8 @@ class TaxaMaskAgentPanel(QWidget):
             "--port",
             str(self.port),
             "--no-open",
+            "--parent-pid",
+            str(os.getpid()),
         ]
 
     def _dashboard_environment(self):
@@ -991,6 +993,7 @@ class TaxaMaskAgentPanel(QWidget):
 
     def stop_dashboard(self):
         self.health_timer.stop()
+        self._request_dashboard_shutdown()
         if self.process is not None:
             try:
                 if self.process.poll() is None:
@@ -1010,6 +1013,18 @@ class TaxaMaskAgentPanel(QWidget):
         self._update_status_label(at("Ant-Code Dashboard is not running.", self.lang))
         self.stack.setCurrentWidget(self.fallback)
         self._update_fallback()
+
+    def _request_dashboard_shutdown(self):
+        if not self.dashboard_url:
+            return
+        try:
+            import urllib.request
+
+            request = urllib.request.Request(f"{self.dashboard_url}/api/shutdown", data=b"{}", method="POST")
+            request.add_header("content-type", "application/json")
+            urllib.request.urlopen(request, timeout=1.0).read()
+        except Exception:
+            return
 
     def _terminate_process_tree(self, pid):
         if not pid:

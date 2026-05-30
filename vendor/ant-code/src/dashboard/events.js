@@ -89,6 +89,31 @@ export function mapSessionEventToDashboard(event) {
   if (type === "workflow_updated") {
     return [activity("workflow-updated", "任务状态已同步", `已完成 ${event.todosCompleted ?? 0} 个待办、${event.planStepsCompleted ?? 0} 个计划步骤`, "completed", "session", event, { coalesceKey: "workflow" })];
   }
+  if (type === "subagent_group_started") {
+    return [backgroundSubagentActivity(event, {
+      title: "子智能体后台运行中",
+      status: "running",
+      detail: backgroundSubagentStartedDetail(event)
+    })];
+  }
+  if (type === "subagent_group_progress") {
+    return [backgroundSubagentActivity(event, {
+      title: event.completed ? "子任务组已完成" : "子任务组仍在运行",
+      status: event.completed ? "completed" : "running",
+      detail: String(event.summary ?? ""),
+      completed: event.completed === true
+    })];
+  }
+  if (type === "subagent_group_wakeup") {
+    return [backgroundSubagentActivity(event, {
+      title: "等待子智能体唤醒主控",
+      status: "waiting",
+      detail: String(event.summary ?? ""),
+      completed: true,
+      wakePromptQueued: true,
+      wakePromptBytes: Buffer.byteLength(String(event.wakePrompt ?? ""), "utf8")
+    })];
+  }
   if (type === "assistant_final") {
     return [{
       type: "assistant_final",
@@ -132,6 +157,35 @@ function activity(id, title, detail, status, source, raw, extra = {}) {
     collapsed: status !== "running",
     ...extra
   };
+}
+
+function backgroundSubagentActivity(event, options) {
+  const groupId = typeof event.groupId === "string" && event.groupId.trim() ? event.groupId.trim() : null;
+  const taskId = typeof event.taskId === "string" && event.taskId.trim() ? event.taskId.trim() : null;
+  const profile = typeof event.profile === "string" && event.profile.trim() ? event.profile.trim() : null;
+  return activity(`subagent-group:${groupId ?? taskId ?? "unknown"}`, options.title, options.detail, options.status, "subagent", event, {
+    backgroundSubagent: true,
+    groupId,
+    taskId,
+    profile,
+    waitFor: event.waitFor ?? null,
+    wakeParent: typeof event.wakeParent === "boolean" ? event.wakeParent : null,
+    completed: options.completed === true,
+    summary: typeof event.summary === "string" ? event.summary : "",
+    wakePromptQueued: options.wakePromptQueued === true,
+    wakePromptBytes: Number.isFinite(options.wakePromptBytes) ? options.wakePromptBytes : null,
+    coalesceKey: `subagent-group:${groupId ?? taskId ?? "unknown"}`
+  });
+}
+
+function backgroundSubagentStartedDetail(event) {
+  const parts = [
+    event.profile ? `profile=${event.profile}` : null,
+    event.groupId ? `group=${event.groupId}` : null,
+    event.waitFor ? `waitFor=${event.waitFor}` : null,
+    event.wakeParent === false ? "完成后仅记录结果" : "完成后自动唤醒主控"
+  ].filter(Boolean);
+  return parts.join(" · ");
 }
 
 function roundDetail(event) {

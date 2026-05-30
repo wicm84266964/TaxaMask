@@ -139,6 +139,7 @@ function normalizeGroup(value = {}) {
     updatedAt: group.updatedAt ?? group.createdAt ?? null,
     completedAt: group.completedAt ?? null,
     wakePromptQueuedAt: group.wakePromptQueuedAt ?? null,
+    wakePromptConsumedAt: group.wakePromptConsumedAt ?? null,
     wakePrompt: typeof group.wakePrompt === "string" ? group.wakePrompt : "",
     latestProgress: String(group.latestProgress ?? ""),
     summary: String(group.summary ?? ""),

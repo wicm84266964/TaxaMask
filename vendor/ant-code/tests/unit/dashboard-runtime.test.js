@@ -4,6 +4,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { listBackgroundAgentTasks } from "../../src/agents/background-registry.js";
 import { createDashboardRuntime } from "../../src/dashboard/sessions.js";
 import { createSessionStore } from "../../src/storage/session-store.js";
 
@@ -195,6 +196,55 @@ test("dashboard runtime sends WebUI client surface in model context", async () =
 
     const metadata = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "sessions", `${started.sessionId}.json`), "utf8"));
     assert.equal(metadata.clientSurface, "dashboard");
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime resumes an idle parent when a background subagent completes", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const requests = [];
+  const server = await listen(createBackgroundAgentWakeGateway(requests, { childDelayMs: 120 }), "127.0.0.1", 0);
+  const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
+
+  try {
+    await runtime.trustWorkspace();
+    const started = await runtime.startTurn({
+      prompt: "delegate background subagent",
+      permissionMode: "workspace"
+    });
+    assert.equal(started.ok, true);
+
+    await waitForEvent(runtime, started.sessionId, () =>
+      runtime.listActiveEvents(started.sessionId)
+        .some((event) => event.type === "assistant_final" && /background dispatched/.test(event.text ?? ""))
+      && runtime.listActiveEvents(started.sessionId)
+        .some((event) => event.type === "run_state" && event.running === false)
+    );
+
+    const wakeEvents = await waitForEvent(runtime, started.sessionId, () =>
+      runtime.listActiveEvents(started.sessionId)
+        .some((event) => event.type === "wakeup_queued")
+    );
+    const wakeupQueued = wakeEvents.find((event) => event.type === "wakeup_queued");
+    assert.equal(wakeupQueued?.running, false);
+
+    const finalEvents = await waitForEvent(runtime, started.sessionId, () =>
+      runtime.listActiveEvents(started.sessionId)
+        .some((event) => event.type === "assistant_final" && /wakeup consumed/.test(event.text ?? ""))
+    );
+    assert.deepEqual(finalEvents.filter((event) => event.type === "user_message").map((event) => event.text), [
+      "delegate background subagent",
+      "子智能体完成，主控自动接续"
+    ]);
+    await waitForCondition(() => listBackgroundAgentTasks({ parentSessionId: started.sessionId }).length === 0);
+    assert.equal(listBackgroundAgentTasks({ parentSessionId: started.sessionId }).length, 0);
+
+    const group = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "task-groups", "group-dashboard-bg.json"), "utf8"));
+    assert.equal(group.status, "completed");
+    assert.match(group.summary, /完成 1/);
+    assert.equal(typeof group.wakePromptQueuedAt, "string");
+    assert.equal(typeof group.wakePromptConsumedAt, "string");
   } finally {
     await close(server);
   }
@@ -842,6 +892,17 @@ async function waitForEvent(runtime, sessionId, predicate) {
   });
 }
 
+async function waitForCondition(predicate, timeoutMs = 5000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (await predicate()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.fail("Timed out waiting for condition");
+}
+
 function transcriptText(message) {
   if (typeof message?.content === "string") {
     return message.content;
@@ -902,6 +963,62 @@ function createRecordingGateway(requests, text) {
   });
 }
 
+function createBackgroundAgentWakeGateway(requests, options = {}) {
+  let parentCalls = 0;
+  return http.createServer(async (req, res) => {
+    const body = await readGatewayJson(req);
+    requests.push(body);
+    const sessionId = String(body.metadata?.sessionId ?? body.sessionId ?? "");
+    res.writeHead(200, { "content-type": "application/json" });
+
+    if (sessionId.startsWith("agent-explorer-")) {
+      await new Promise((resolve) => setTimeout(resolve, options.childDelayMs ?? 0));
+      res.end(JSON.stringify({
+        id: "dashboard-background-child-final",
+        model: "mock-model",
+        content: [{ type: "text", text: "dashboard background child done" }],
+        toolCalls: [],
+        stopReason: "stop"
+      }));
+      return;
+    }
+
+    parentCalls += 1;
+    if (parentCalls === 1) {
+      res.end(JSON.stringify({
+        id: "dashboard-background-agent-run",
+        model: "mock-model",
+        content: [],
+        toolCalls: [
+          {
+            id: "delegate-background-explorer",
+            name: "agent_run",
+            input: {
+              profile: "explorer",
+              taskId: "task-dashboard-bg",
+              groupId: "group-dashboard-bg",
+              query: "inspect current workspace in background",
+              background: true,
+              waitForGroup: "all",
+              wakeParent: true
+            }
+          }
+        ],
+        stopReason: "tool_calls"
+      }));
+      return;
+    }
+
+    res.end(JSON.stringify({
+      id: `dashboard-background-parent-final-${parentCalls}`,
+      model: "mock-model",
+      content: [{ type: "text", text: parentCalls === 2 ? "background dispatched" : "wakeup consumed" }],
+      toolCalls: [],
+      stopReason: "stop"
+    }));
+  });
+}
+
 function createDelayedGateway(texts, delayMs) {
   let calls = 0;
   return http.createServer(async (req, res) => {
@@ -920,6 +1037,14 @@ function createDelayedGateway(texts, delayMs) {
       stopReason: "stop"
     }));
   });
+}
+
+async function readGatewayJson(req) {
+  let body = "";
+  for await (const chunk of req) {
+    body += Buffer.from(chunk).toString("utf8");
+  }
+  return JSON.parse(body || "{}");
 }
 
 function createHangingStreamGateway() {

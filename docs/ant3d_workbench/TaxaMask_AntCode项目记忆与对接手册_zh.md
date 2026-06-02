@@ -34,14 +34,14 @@ ANTCODE.md
 
 ## 2. 当前嵌入方式
 
-TaxaMask 不把 Ant-Code 源码复制进项目，也不维护弱化版聊天助手。当前实现是：
+TaxaMask 不维护弱化版聊天助手。当前实现是把仓库内 vendored Ant-Code 源码作为 TaxaMask 的嵌入式 Agent 运行时：
 
 ```text
 TaxaMask PySide 启动中心
 -> TaxaMaskAgentPanel
--> 调用 lab-agent 分发版 ant-code.exe
+-> node vendor/ant-code/src/cli/dashboard.js
 -> 启动本机 Dashboard
--> 用 QWebEngineView 只嵌入中间工作区
+-> 用 QWebEngineView 嵌入中间工作区
 ```
 
 核心文件：
@@ -54,15 +54,14 @@ AntSleap/main.py
 默认命令形式：
 
 ```text
-ant-code.exe dashboard --project <TaxaMask repo root> --port <free port> --no-open
+node vendor/ant-code/src/cli/dashboard.js --project <TaxaMask repo root> --port <free port> --no-open
 ```
 
-默认可执行文件候选：
+默认依赖：
 
 ```text
-TAXAMASK_ANT_CODE_EXE
-C:\saveproject\LBJ-workspace\lab-agent\dist\ant-code-windows-x64\ant-code.exe
-PATH 中的 ant-code.exe / ant-code.cmd / ant-code
+vendor/ant-code/src/cli/dashboard.js
+可用 Node.js
 ```
 
 TaxaMask 启动后会后台访问：
@@ -96,13 +95,13 @@ Agent 应把普通任务限制在这个目录内，例如：
 
 ### 3.2 不要默认修改 lab-agent
 
-Ant-Code 源码目录通常在：
+外部 Ant-Code 源码副本通常在：
 
 ```text
 C:\saveproject\LBJ-workspace\lab-agent
 ```
 
-TaxaMask 正常集成工作只应该调用分发版 `ant-code.exe`。除非用户明确说“修改 Ant-Code / lab-agent”，否则不要改 `lab-agent` 源码。可以只读查看 Ant-Code WebUI 的 DOM、接口、启动参数，用于理解嵌入边界。
+TaxaMask 正常集成工作属于当前仓库，尤其是 `vendor/ant-code` 和 `AntSleap/ui/taxamask_agent_panel.py`。除非用户明确说“修改外部 Ant-Code / lab-agent”，否则不要改 `C:\saveproject\LBJ-workspace\lab-agent` 源码。可以只读查看外部 Ant-Code 资料，用于理解嵌入边界。
 
 ### 3.3 权限与确认
 
@@ -193,10 +192,11 @@ Agent 收到上下文后，用户可以直接说：
 
 ```text
 Labeling Workbench
-Blink Workbench
+Parent-part annotation / Child-part annotation
 Locator/SAM
-route-appointed experts
+Blink route-appointed experts
 external_backend
+Literature Traits
 ```
 
 核心文件：
@@ -206,6 +206,7 @@ AntSleap/core/project.py
 AntSleap/main.py
 AntSleap/ui/blink_lab.py
 AntSleap/core/external_backend.py
+AntSleap/core/literature_descriptions.py
 AntSleap/core/training_preflight.py
 ```
 
@@ -213,7 +214,8 @@ AntSleap/core/training_preflight.py
 
 - 适合外部形态、分类学图像、STL 渲染视角图；
 - 标注对象通常是形态部位 mask / polygon；
-- Blink 用于小部位、局部细化、专家路线；
+- 子部位标注区和 Blink 路由专家用于小部位、局部细化、专家路线；
+- 文献性状弹窗可把 PDF 抽取的 `taxon -> part -> description` 证据对齐到当前图片和当前部位描述框；
 - 训练前要检查标注覆盖、locator scope、图像路径和部位树。
 
 ### 5.2 STL rendered views
@@ -397,6 +399,7 @@ PDF 工具不再是主视觉工作台，但能力保留。
 AntSleap/ui/pdf_processing_widget.py
 AntSleap/core/pdf_evidence.py
 AntSleap/core/governance/candidate_bridge.py
+AntSleap/core/literature_descriptions.py
 ```
 
 重要产物：
@@ -404,6 +407,8 @@ AntSleap/core/governance/candidate_bridge.py
 ```text
 PDF extraction records
 candidate figure images
+accepted_figures / needs_review_figures
+pdf_text_blocks / taxon_part_descriptions
 PDF evidence index
 CSV / JSON / JSONL reports
 provenance fields
@@ -414,7 +419,8 @@ provenance fields
 - PDF 处理适合接入 Ant-Code skill；
 - 用户可以用自然语言说“帮我处理这批 PDF，筛出目标类群图版”；
 - Agent 负责调用已有 TaxaMask 能力、生成 evidence index、解释候选和风险；
-- 产物必须保留来源 PDF、页码、图像编号、筛选理由和可复核路径。
+- 产物默认应放在 `TaxaMask_outputs/` 或用户选择的结果文件夹；
+- 产物必须保留来源 PDF、页码、图像编号、筛选理由、文献性状来源和可复核路径。
 
 ## 8. 常见 Agent 任务路线
 
@@ -433,7 +439,8 @@ recent log excerpt from Agent context
 如果是 Ant-Code 嵌入报错：
 
 ```text
-检查 ant-code.exe 是否存在
+检查 vendor/ant-code/src/cli/dashboard.js 是否存在
+检查 Node.js 是否可用
 检查 /api/status
 检查 /api/trust
 检查 /api/sessions
@@ -504,10 +511,10 @@ AntSleap/main.py::import_stl_rendered_views_action
 
 - STL 处理的是渲染好的视角图；
 - 导入后进入 Labeling Workbench；
-- Blink 可继续做小部位局部细化；
+- 子部位标注区 / Blink 路由专家可继续做小部位局部细化；
 - 不要创建单独 STL 3D 渲染工作台，除非用户重新提出该需求。
 
-### 8.5 处理 2D/STL 训练和 Blink
+### 8.5 处理 2D/STL 训练和子部位标注
 
 优先看：
 
@@ -516,6 +523,7 @@ AntSleap/core/training_preflight.py
 AntSleap/core/blink_trainer.py
 AntSleap/core/blink_dataset.py
 AntSleap/ui/blink_lab.py
+AntSleap/core/literature_descriptions.py
 AntSleap/main.py
 ```
 
@@ -523,8 +531,8 @@ AntSleap/main.py
 
 - Locator 阶段负责找到大区域；
 - SAM/parts 或专家模型负责部位掩膜；
-- Blink 是局部 ROI 的细化/专家训练流程；
-- route-appointed expert 是把某个专家模型指定给某条部位路线。
+- 子部位标注区负责基于已有父框做局部 ROI 的细化、trajectory 积累和专家训练；
+- route-appointed expert 是把某个专家模型指定给某条 `父部位 -> 子部位` 路线。
 
 ### 8.6 文档同步
 
@@ -623,7 +631,7 @@ GPU 训练或真实推理默认不要跑，除非用户明确说显卡空闲。
 - “TIF 能不能训练”：检查 specimen、manual_truth、material map、shape、review status、export manifest。
 - “模型设置太难”：优先考虑把脚本/后端细节封装成 Agent 可执行流程，而不是让分类学家手填命令。
 - “STL 入口”：通常指 STL rendered views 导入 Labeling Workbench，不是直接 3D mesh painting。
-- “Blink 那边”：通常指局部 ROI、专家路线、细部结构修正。
+- “子部位标注 / Blink 路由专家”：通常指局部 ROI、专家路线、细部结构修正。
 - “PDF 路径接入 skill”：优先把 PDF 批处理做成 Agent 可调用的 headless workflow，并保留 evidence/provenance。
 - “不要做歪”：先复述 STL/TIF/PDF/Agent 边界，再动代码。
 
@@ -632,6 +640,6 @@ GPU 训练或真实推理默认不要跑，除非用户明确说显卡空闲。
 ```text
 manual_truth 不可被模型预测静默覆盖。
 TIF/STL 标签体系不可混在一起。
-TaxaMask 集成不应默认修改 lab-agent 源码。
+TaxaMask 集成不应默认修改外部 lab-agent 源码。
 用户原始研究数据不可被自动覆盖或删除。
 ```

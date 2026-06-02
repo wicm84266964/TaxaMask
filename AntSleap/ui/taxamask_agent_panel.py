@@ -627,11 +627,8 @@ class TaxaMaskAgentPanel(QWidget):
         cache_key = f"taxamask_embed=1&reload={self._load_retries}"
         self.web_view.load(QUrl(f"{self.dashboard_url}/?{cache_key}"))
 
-    def _on_web_load_finished(self, ok):
-        if not ok or self.web_view is None:
-            return
-        self.web_view.page().runJavaScript(
-            """
+    def _web_post_load_source(self):
+        return r"""
             (() => {
               const applyTaxaMaskDefaults = () => {
                 const workspaceButton = document.querySelector('#permission-mode button[data-mode="workspace"]');
@@ -653,17 +650,70 @@ class TaxaMaskAgentPanel(QWidget):
                 const prompt = document.querySelector('#prompt-input');
                 if (prompt) prompt.placeholder = '把遇到的问题、配置目标或标注流程疑问发给 TaxaMask Agent';
               };
+              const trustPending = () => {
+                const send = document.querySelector('#send-button');
+                const trustPanel = document.querySelector('#trust-panel');
+                const sendText = send ? send.textContent.trim() : '';
+                const panelVisible = trustPanel
+                  && !trustPanel.classList.contains('hidden')
+                  && trustPanel.textContent.trim().length > 0;
+                return sendText === '待信任' || Boolean(panelVisible);
+              };
+              const postTrust = async () => {
+                try {
+                  const response = await fetch('/api/trust', {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/json' },
+                    body: '{}'
+                  });
+                  const result = await response.json();
+                  return Boolean(result && result.ok !== false && result.trust && result.trust.trusted);
+                } catch (_error) {
+                  return false;
+                }
+              };
               applyTaxaMaskDefaults();
-              const timer = window.setInterval(applyTaxaMaskDefaults, 300);
-              window.setTimeout(() => window.clearInterval(timer), 5000);
-              fetch('/api/trust', {
-                method: 'POST',
-                headers: { 'content-type': 'application/json' },
-                body: '{}'
-              }).catch(() => {});
+              const defaultsTimer = window.setInterval(applyTaxaMaskDefaults, 300);
+              window.setTimeout(() => window.clearInterval(defaultsTimer), 5000);
+
+              const trustReloadKey = '__taxamaskAgentTrustReloaded';
+              let trustAttempts = 0;
+              let backendTrusted = false;
+              const reconcileTrust = async () => {
+                trustAttempts += 1;
+                applyTaxaMaskDefaults();
+                const trustButton = document.querySelector('#trust-panel button[data-action="trust"]');
+                if (trustButton && !trustButton.disabled) {
+                  trustButton.click();
+                }
+                backendTrusted = (await postTrust()) || backendTrusted;
+                if (!trustPending()) {
+                  window.clearInterval(trustTimer);
+                  return;
+                }
+                if (backendTrusted && trustAttempts >= 10) {
+                  try {
+                    if (!window.sessionStorage.getItem(trustReloadKey)) {
+                      window.sessionStorage.setItem(trustReloadKey, '1');
+                      window.location.reload();
+                    }
+                  } catch (_error) {
+                    return;
+                  }
+                }
+                if (trustAttempts >= 20) {
+                  window.clearInterval(trustTimer);
+                }
+              };
+              const trustTimer = window.setInterval(() => { void reconcileTrust(); }, 250);
+              void reconcileTrust();
             })();
             """
-        )
+
+    def _on_web_load_finished(self, ok):
+        if not ok or self.web_view is None:
+            return
+        self.web_view.page().runJavaScript(self._web_post_load_source())
         self._ensure_trusted()
         QTimer.singleShot(1200, self._verify_embedded_page_ready)
         if self._pending_context_prompt:
@@ -680,7 +730,12 @@ class TaxaMaskAgentPanel(QWidget):
               const project = document.querySelector('#project-path')?.textContent?.trim() || '';
               const send = document.querySelector('#send-button');
               const transcript = document.querySelector('#transcript');
-              return Boolean(send && transcript && project && project !== '加载中');
+              const trustPanel = document.querySelector('#trust-panel');
+              const sendText = send ? send.textContent.trim() : '';
+              const panelVisible = trustPanel
+                && !trustPanel.classList.contains('hidden')
+                && trustPanel.textContent.trim().length > 0;
+              return Boolean(send && transcript && project && project !== '加载中' && sendText !== '待信任' && !panelVisible);
             })();
             """,
             self._handle_embedded_page_ready,
@@ -690,7 +745,7 @@ class TaxaMaskAgentPanel(QWidget):
         if ready:
             if self.web_view is not None:
                 self.web_view.page().runJavaScript(
-                    "try { sessionStorage.removeItem('__taxamaskAgentJsonReloaded'); } catch (error) {}"
+                    "try { sessionStorage.removeItem('__taxamaskAgentJsonReloaded'); sessionStorage.removeItem('__taxamaskAgentTrustReloaded'); } catch (error) {}"
                 )
             return
         if not self.is_running() or self.web_view is None:
@@ -710,8 +765,13 @@ class TaxaMaskAgentPanel(QWidget):
 
             request = urllib.request.Request(f"{self.dashboard_url}/api/trust", data=b"{}", method="POST")
             request.add_header("content-type", "application/json")
-            urllib.request.urlopen(request, timeout=1.0).read()
-            return True
+            with urllib.request.urlopen(request, timeout=2.0) as response:
+                body = response.read().decode("utf-8", errors="replace")
+                if response.status < 200 or response.status >= 300:
+                    return False
+            data = json.loads(body) if body.strip() else {}
+            trust = data.get("trust") if isinstance(data, dict) else {}
+            return bool(data.get("ok") is not False and isinstance(trust, dict) and trust.get("trusted") is True)
         except Exception:
             return False
 
@@ -1160,5 +1220,6 @@ class TaxaMaskAgentPanel(QWidget):
         if self._preflight_error:
             lines.extend(["", f"Preflight error: {self._preflight_error}"])
         if self._json_health_warning:
-            lines.extend(["", f"JSON warning: {self._json_health_warning}"])
+            warning_label = "JSON 提醒（不影响 Ant-Code 启动）" if self.lang == "zh" else "JSON warning (does not block Ant-Code launch)"
+            lines.extend(["", f"{warning_label}: {self._json_health_warning}"])
         self.fallback.setPlainText("\n".join(lines))

@@ -336,7 +336,7 @@ class LLMScreenPDFClassifier:
         "api_protocol": "auto",
         "resume_interrupted_runs": True,
         "isolate_v2_runs": True,
-        "llm_request_timeout_seconds": 240,
+        "llm_request_timeout_seconds": 180,
         "split_failed_batches": True,
         "pdf_extract_timeout_seconds": 30,
     }
@@ -381,7 +381,7 @@ class LLMScreenPDFClassifier:
         self.api_protocol = raw_protocol if raw_protocol in {"auto", "chat_completions", "responses"} else "auto"
         self.resume_interrupted_runs = bool(self.config.get("resume_interrupted_runs", True))
         self.isolate_v2_runs = bool(self.config.get("isolate_v2_runs", True))
-        self.llm_request_timeout_seconds = max(30, int(self.config.get("llm_request_timeout_seconds", 240)))
+        self.llm_request_timeout_seconds = max(30, int(self.config.get("llm_request_timeout_seconds", 180)))
         self.split_failed_batches = bool(self.config.get("split_failed_batches", True))
         self.pdf_extract_timeout_seconds = max(15, int(self.config.get("pdf_extract_timeout_seconds", 30)))
         self.v2_runs_root = self.output_root / "v2_runs"

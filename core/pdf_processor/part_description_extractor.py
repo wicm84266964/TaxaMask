@@ -35,7 +35,7 @@ class PartExtractionResult:
 class TextPartDescriptionExtractor:
     """Extract `taxon -> body part -> textual description` records from PDF text."""
 
-    DEFAULT_TIMEOUT_SECONDS = 240
+    DEFAULT_TIMEOUT_SECONDS = 180
     DEFAULT_MAX_OUTPUT_TOKENS = 12000
     DEFAULT_MAX_INPUT_CHARS = 600000
 
@@ -457,17 +457,38 @@ PDF 文件哈希：{file_hash}
 
     def _parse_json_payload(self, raw_response: str) -> Dict[str, Any]:
         text = self._strip_code_fence(raw_response)
-        try:
-            payload = json.loads(text)
-        except json.JSONDecodeError:
-            start = text.find("{")
-            end = text.rfind("}")
-            if start == -1 or end == -1 or end <= start:
-                raise
-            payload = json.loads(text[start : end + 1])
+        payload = self._first_json_value(text)
         if not isinstance(payload, dict):
             raise ValueError("part_description_response_root_not_object")
         return payload
+
+    def _first_json_value(self, text: str) -> Any:
+        decoder = json.JSONDecoder()
+        source = str(text or "").strip()
+        try:
+            return json.loads(source)
+        except json.JSONDecodeError:
+            pass
+        for index, char in enumerate(source):
+            if char not in "{[":
+                continue
+            try:
+                value, _end = decoder.raw_decode(source[index:])
+                return value
+            except json.JSONDecodeError:
+                repaired = self._repair_common_json_issues(source[index:])
+                try:
+                    value, _end = decoder.raw_decode(repaired)
+                    return value
+                except json.JSONDecodeError:
+                    continue
+        raise ValueError("part_description_json_not_found")
+
+    def _repair_common_json_issues(self, text: str) -> str:
+        repaired = str(text or "").strip()
+        repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
+        repaired = re.sub(r"}\s*(?={)", "},", repaired)
+        return repaired
 
     def _normalize_payload(
         self,
@@ -821,8 +842,11 @@ PDF 文件哈希：{file_hash}
 
     def _strip_code_fence(self, content: str) -> str:
         text = str(content or "").strip()
+        fence_match = re.search(r"```(?:json)?\s*(.*?)```", text, re.IGNORECASE | re.DOTALL)
+        if fence_match:
+            return fence_match.group(1).strip()
         if text.startswith("```"):
-            text = re.sub(r"^```(?:json)?", "", text).strip()
+            text = re.sub(r"^```(?:json)?", "", text, flags=re.IGNORECASE).strip()
             if text.endswith("```"):
                 text = text[:-3].strip()
         return text

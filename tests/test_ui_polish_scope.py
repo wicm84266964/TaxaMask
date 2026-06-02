@@ -18,13 +18,14 @@ if str(PROJECT_ROOT) not in sys.path:
 has_pyside6 = False
 
 try:
-    from PySide6.QtCore import QPointF
+    from PySide6.QtCore import QPointF, QRectF
     from PySide6.QtGui import QImage
     from PySide6.QtWidgets import QApplication, QWidget, QGridLayout, QDialogButtonBox, QTreeWidget
 except ModuleNotFoundError as exc:
     if exc.name and exc.name.startswith("PySide6"):
         QApplication = None
         QPointF = None
+        QRectF = None
         QImage = None
         QTreeWidget = None
         QWidget = object
@@ -245,6 +246,7 @@ class DummyProjectManager:
                 "boxes": {},
                 "auto_boxes": {},
                 "descriptions": {},
+                "description_sources": {},
                 "status": "unlabeled",
                 "genus": "Unknown",
             },
@@ -339,9 +341,41 @@ class DummyProjectManager:
     def get_genus(self, image_path):
         return self.project_data["labels"].get(image_path, {}).get("genus", "Unknown")
 
-    def set_genus(self, image_path, genus_name):
+    def get_taxon(self, image_path):
+        entry = self.project_data["labels"].get(image_path, {})
+        return entry.get("taxon") or entry.get("genus", "Unknown")
+
+    def set_part_description(self, image_path, part_name, description_text, source_meta=None, save=True):
         entry = self._ensure_label_entry(image_path)
-        entry["genus"] = genus_name
+        text = str(description_text or "").strip()
+        if text:
+            entry.setdefault("descriptions", {})[part_name] = text
+        else:
+            entry.setdefault("descriptions", {}).pop(part_name, None)
+        if source_meta is not None:
+            if source_meta:
+                entry.setdefault("description_sources", {})[part_name] = dict(source_meta)
+            else:
+                entry.setdefault("description_sources", {}).pop(part_name, None)
+        if save:
+            self.save_project()
+        return None
+
+    def get_part_description(self, image_path, part_name):
+        return self.project_data["labels"].get(image_path, {}).get("descriptions", {}).get(part_name, "")
+
+    def get_description_source(self, image_path, part_name):
+        return dict(self.project_data["labels"].get(image_path, {}).get("description_sources", {}).get(part_name, {}))
+
+    def set_genus(self, image_path, genus_name):
+        self.set_taxon(image_path, genus_name)
+        return None
+
+    def set_taxon(self, image_path, taxon_name):
+        entry = self._ensure_label_entry(image_path)
+        clean_taxon = str(taxon_name or "Unknown").strip() or "Unknown"
+        entry["taxon"] = clean_taxon
+        entry["genus"] = clean_taxon
         self.save_project()
         return None
 
@@ -626,8 +660,9 @@ class UiPolishScopeTests(unittest.TestCase):
         self.assertEqual(widget.btn_run_classify.parentWidget().objectName(), "pdfClassifyActionPanel")
         self.assertEqual(widget.btn_run_extract.parentWidget().objectName(), "pdfExtractActionPanel")
         self.assertEqual(widget.log_area.parentWidget().objectName(), "pdfFeedbackPanel")
-        scroll_layout = widget.main_scroll.widget().layout()
-        self.assertLess(scroll_layout.indexOf(widget.workbench_header), scroll_layout.indexOf(widget.tabs))
+        self.assertEqual(widget.workbench_header.parentWidget(), widget)
+        outer_layout = widget.layout()
+        self.assertLess(outer_layout.indexOf(widget.workbench_header), outer_layout.indexOf(widget.main_scroll))
         self.assertTrue(widget.config_group.isHidden())
         widget.toggle_advanced_config(True)
         self.assertFalse(widget.config_group.isHidden())
@@ -693,6 +728,32 @@ class UiPolishScopeTests(unittest.TestCase):
         self.assertEqual(dialog.btn_save.parentWidget().objectName(), "cropperExportPanel")
         self.assertEqual(dialog.crop_list.parentWidget().objectName(), "cropperDrawPanel")
 
+    def test_cropper_exports_traceable_crop_records(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            source = Path(tmp_dir) / "paper__accepted_000007__figure.jpg"
+            image = QImage(160, 120, QImage.Format_RGB32)
+            image.fill(0xEDEAE4)
+            self.assertTrue(image.save(str(source)))
+
+            dialog = ImageCropper(initial_image=str(source), lang="en")
+            try:
+                dialog.canvas.crops = [QRectF(10, 20, 70, 80)]
+                with patch.object(main_module.QMessageBox, "information", lambda *args, **kwargs: None):
+                    dialog.save_crops()
+
+                files = dialog.get_files()
+                records = dialog.get_crop_records()
+                self.assertEqual(len(files), 1)
+                self.assertEqual(Path(files[0]).name, "paper__accepted_000007__figure__crop_001.jpg")
+                self.assertTrue(Path(files[0]).exists())
+                self.assertEqual(records[0]["path"], files[0])
+                self.assertEqual(os.path.normcase(records[0]["source_image"]), os.path.normcase(str(source.resolve())))
+                self.assertEqual(records[0]["crop_index"], 1)
+                self.assertEqual(records[0]["crop_box"], [10, 20, 80, 100])
+                self.assertEqual(records[0]["source_size"], [160, 120])
+            finally:
+                dialog.deleteLater()
+
     def test_main_window_exposes_workbench_polish_hierarchy(self):
         window = self.make_main_window()
 
@@ -708,25 +769,104 @@ class UiPolishScopeTests(unittest.TestCase):
             self.assertIsNotNone(window.findChild(QWidget, "workbenchLibraryPanel"))
             self.assertIsNotNone(window.findChild(QWidget, "workbenchCanvasShell"))
             self.assertIsNotNone(window.findChild(QWidget, "workbenchMetadataPanel"))
+            self.assertIsNotNone(window.findChild(QWidget, "workbenchImageTaxonPanel"))
             self.assertIsNotNone(window.findChild(QWidget, "workbenchAIPanel"))
+            self.assertIsNotNone(window.findChild(QWidget, "workbenchParentAnnotationPanel"))
             self.assertIsNotNone(window.findChild(QWidget, "workbenchAIActionPanel"))
             self.assertIsNotNone(window.findChild(QWidget, "workbenchLogsPanel"))
             self.assertEqual(window.btn_export.parentWidget().objectName(), "workbenchToolbarProjectPanel")
             self.assertEqual(window.btn_blink_entry.parentWidget().objectName(), "workbenchToolbarFlowPanel")
             self.assertFalse(window.btn_blink_entry.isVisible())
             self.assertEqual(window.btn_agent_from_workbench.parentWidget().objectName(), "workbenchToolbarFlowPanel")
+            self.assertEqual(window.btn_literature_descriptions.parentWidget().objectName(), "workbenchDescriptionHeader")
+            self.assertEqual(window.label_taxonomy.parentWidget().objectName(), "workbenchImageTaxonPanel")
+            self.assertEqual(window.genus_combo.parentWidget().objectName(), "workbenchImageTaxonPanel")
+            self.assertLess(
+                window.metadata_panel.layout().indexOf(window.part_list),
+                window.metadata_panel.layout().indexOf(window.image_taxon_panel),
+            )
+            self.assertLess(
+                window.description_header_panel.layout().indexOf(window.btn_literature_descriptions),
+                window.description_header_panel.layout().indexOf(window.label_description),
+            )
             self.assertEqual(window.canvas.parentWidget().objectName(), "workbenchCanvasShell")
+            self.assertEqual(window.label_ai_workflow.text(), "Auto Annotation")
+            self.assertEqual(window.label_parent_annotation.text(), "Parent-part annotation")
+            self.assertEqual(window.label_taxonomy.text(), "Current image taxon")
+            self.assertEqual(window.lbl_bright.text(), "Brightness:")
+            self.assertEqual(window.lbl_contrast.text(), "Contrast:")
+            self.assertEqual(window.ai_model_panel.parentWidget().objectName(), "workbenchParentAnnotationPanel")
+            self.assertEqual(window.ai_action_panel.parentWidget().objectName(), "workbenchParentAnnotationPanel")
             self.assertEqual(window.btn_predict.parentWidget().objectName(), "workbenchAIActionPanel")
             self.assertEqual(window.btn_blink_auto_annotate.parentWidget().objectName(), "workbenchBlinkRefinePanel")
+            self.assertEqual(window.label_blink_refine.text(), "Child-part annotation")
+            self.assertEqual(window.btn_blink_auto_annotate.text(), "Annotate child from existing parent box")
             self.assertEqual(window.combo_blink_parent_context.parentWidget().objectName(), "workbenchBlinkRefinePanel")
             self.assertEqual(window.radio_loose_shrink_box.parentWidget().objectName(), "workbenchToolStrip")
             self.assertFalse(hasattr(window, "radio_blink_box_shrink"))
             self.assertEqual(window.log_console.parentWidget().objectName(), "workbenchLogsPanel")
             self.assertEqual(window.desc_box.parentWidget().objectName(), "workbenchMetadataPanel")
+            window.change_language("zh")
+            self.assertEqual(window.label_ai_workflow.text(), "自动标注")
+            self.assertEqual(window.label_parent_annotation.text(), "父部位标注")
+            self.assertEqual(window.label_blink_refine.text(), "子部位标注")
+            self.assertEqual(window.label_taxonomy.text(), "当前图片物种")
+            self.assertEqual(window.btn_blink_auto_annotate.text(), "用已有父框标注子部位")
+            self.assertEqual(window.lbl_bright.text(), "亮度：")
+            self.assertEqual(window.lbl_contrast.text(), "对比度：")
+            self.assertFalse(window.desc_box.isReadOnly())
             self.assertIsInstance(window.part_list, QTreeWidget)
             self.assertEqual(window.part_list.objectName(), "workbenchPartTree")
             self.assertIsNone(window.findChild(QWidget, "workbenchRoutePanel"))
             self.assertEqual(window.workbench_splitter.handleWidth(), 8)
+        finally:
+            window.deleteLater()
+
+    def test_literature_description_append_reveals_editable_target_box(self):
+        window = self.make_main_window()
+        try:
+            window.enter_image_workflow()
+            window.show()
+            self.app.processEvents()
+            image_path = str(Path(self.temp_dir.name) / "paper__accepted_000001.jpg")
+            self.project_manager.project_data["images"] = [image_path]
+            self.project_manager.project_data["labels"] = {image_path: {"parts": {}, "descriptions": {}}}
+            window.current_image = image_path
+            window.desc_box.setText("Existing manual note.")
+            window.workbench_splitter.setSizes([240, 1200, 20])
+            self.app.processEvents()
+
+            source_meta = {
+                "source": "literature",
+                "pdf_filename": "paper.pdf",
+                "taxon_name": "Aphaenogaster gamagumayaa",
+            }
+            window._apply_literature_description(
+                "Mandible",
+                "Mandible elongate, inner margin with small teeth.",
+                source_meta,
+                append=True,
+            )
+            self.app.processEvents()
+
+            text = window.desc_box.toPlainText()
+            self.assertIn("Existing manual note.", text)
+            self.assertIn("Mandible elongate", text)
+            self.assertFalse(window.desc_box.isReadOnly())
+            self.assertGreaterEqual(window.workbench_splitter.sizes()[2], 180)
+            self.assertEqual(
+                self.project_manager.get_part_description(image_path, "Mandible"),
+                text,
+            )
+            self.assertEqual(
+                self.project_manager.get_description_source(image_path, "Mandible"),
+                source_meta,
+            )
+            self.assertEqual(
+                self.project_manager.get_taxon(image_path),
+                "Aphaenogaster gamagumayaa",
+            )
+            self.assertEqual(window.genus_combo.currentText(), "Aphaenogaster gamagumayaa")
         finally:
             window.deleteLater()
 

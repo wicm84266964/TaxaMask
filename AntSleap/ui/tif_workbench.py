@@ -1434,7 +1434,7 @@ class TifWorkbenchWidget(QWidget):
     def import_amira_directory_dialog(self):
         if not self._ensure_tif_project_open():
             return
-        source_dir = QFileDialog.getExistingDirectory(self, tt("Import AMIRA Directory", self.lang))
+        source_dir = QFileDialog.getExistingDirectory(self, tt("Import AMIRA Directory", self.lang), self.project.project_dir)
         if not source_dir:
             return
         default_id = os.path.basename(os.path.normpath(source_dir))
@@ -3052,7 +3052,9 @@ class TifWorkbenchWidget(QWidget):
         if not self.project.current_project_path:
             QMessageBox.warning(self, tt("TIF training handoff", self.lang), tt("Please create or open a TIF project first.", self.lang))
             return
-        output_dir = QFileDialog.getExistingDirectory(self, tt("Export train-ready TIF volumes", self.lang))
+        default_dir = os.path.join(self.project.project_dir, "exports", "train_ready")
+        os.makedirs(default_dir, exist_ok=True)
+        output_dir = QFileDialog.getExistingDirectory(self, tt("Export train-ready TIF volumes", self.lang), default_dir)
         if not output_dir:
             return
         formats = [

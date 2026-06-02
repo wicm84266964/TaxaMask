@@ -3,6 +3,7 @@ import sys
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -44,6 +45,29 @@ class PdfPartDescriptionExtractionTests(unittest.TestCase):
         self.assertEqual(head["source_pages"], [3])
         self.assertEqual(head["source_blocks"][0]["file_name"], "paper.pdf")
         self.assertEqual(head["source_blocks"][0]["file_hash"], "abc123")
+
+    def test_text_part_parser_tolerates_extra_text_after_json(self):
+        extractor = TextPartDescriptionExtractor({"default_provider": "mock"})
+        raw = (
+            '{"taxon_part_descriptions":[],"text_block_labels":[{"block_ref":"p001_b0001",'
+            '"role":"diagnosis","taxon_name":"Formica clara","confidence":0.8}]}'
+            '\n补充说明：已按要求输出。'
+        )
+
+        payload = extractor._parse_json_payload(raw)
+
+        self.assertEqual(payload["text_block_labels"][0]["block_ref"], "p001_b0001")
+
+    def test_text_part_parser_uses_first_json_object_when_model_repeats(self):
+        extractor = TextPartDescriptionExtractor({"default_provider": "mock"})
+        raw = (
+            '{"taxon_part_descriptions":[],"text_block_labels":[]}'
+            '{"taxon_part_descriptions":[{"taxon_name":"wrong"}],"text_block_labels":[]}'
+        )
+
+        payload = extractor._parse_json_payload(raw)
+
+        self.assertEqual(payload["taxon_part_descriptions"], [])
 
     def test_pdf_extractor_persists_taxon_part_descriptions_and_text_blocks(self):
         db_path = REPO_ROOT / ".tmp_validation" / "test_pdf_part_descriptions.db"
@@ -186,6 +210,107 @@ class PdfPartDescriptionExtractionTests(unittest.TestCase):
             extractor.close()
             if db_path.exists():
                 db_path.unlink()
+
+    def test_extract_from_pdf_skips_completed_same_hash_when_resume_enabled(self):
+        db_path = REPO_ROOT / ".tmp_validation" / "test_pdf_extract_resume.db"
+        pdf_path = REPO_ROOT / ".tmp_validation" / "resume_source.pdf"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        if db_path.exists():
+            db_path.unlink()
+        pdf_path.write_bytes(b"%PDF-1.4\nresume test\n%%EOF\n")
+
+        extractor = EnhancedPDFExtractionSystem(
+            output_db_path=str(db_path),
+            save_images_to_files=False,
+            enable_multimodal_validation=False,
+            resume_completed_pdfs=True,
+        )
+        try:
+            file_hash = extractor._calculate_file_hash(pdf_path)
+            cursor = extractor.db_conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO pdf_files (file_path, file_name, file_hash, total_pages, file_size)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (str(pdf_path), pdf_path.name, file_hash, 1, pdf_path.stat().st_size),
+            )
+            pdf_file_id = int(cursor.lastrowid)
+            cursor.execute(
+                """
+                INSERT INTO part_extraction_runs
+                    (pdf_file_id, file_name, file_path, file_hash, status, reason, extracted_records, labeled_blocks)
+                VALUES (?, ?, ?, ?, 'real', '', 1, 3)
+                """,
+                (pdf_file_id, pdf_path.name, str(pdf_path), file_hash),
+            )
+            cursor.execute(
+                """
+                INSERT INTO extraction_stats
+                    (pdf_file_id, total_candidates, accepted_figures, rejected_figures, review_queue_figures, multimodal_validated_figures)
+                VALUES (?, 0, 0, 0, 0, 0)
+                """,
+                (pdf_file_id,),
+            )
+            extractor.db_conn.commit()
+
+            fitz_open = Mock()
+            with patch.object(sys.modules["core.pdf_processor.pdf_extractor"].fitz, "open", fitz_open, create=True):
+                result = extractor.extract_from_pdf(str(pdf_path))
+
+            fitz_open.assert_not_called()
+            self.assertEqual(result["status"], "skipped_existing")
+            self.assertTrue(result["stats"]["resumed_skip"])
+            self.assertEqual(result["file_id"], pdf_file_id)
+        finally:
+            extractor.close()
+            if db_path.exists():
+                db_path.unlink()
+            if pdf_path.exists():
+                pdf_path.unlink()
+
+    def test_extract_from_pdf_reruns_incomplete_existing_record(self):
+        db_path = REPO_ROOT / ".tmp_validation" / "test_pdf_extract_resume_incomplete.db"
+        pdf_path = REPO_ROOT / ".tmp_validation" / "resume_incomplete.pdf"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        if db_path.exists():
+            db_path.unlink()
+        pdf_path.write_bytes(b"%PDF-1.4\nresume incomplete\n%%EOF\n")
+
+        extractor = EnhancedPDFExtractionSystem(
+            output_db_path=str(db_path),
+            save_images_to_files=False,
+            enable_multimodal_validation=False,
+            resume_completed_pdfs=True,
+        )
+        try:
+            file_hash = extractor._calculate_file_hash(pdf_path)
+            cursor = extractor.db_conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO pdf_files (file_path, file_name, file_hash, total_pages, file_size)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (str(pdf_path), pdf_path.name, file_hash, 1, pdf_path.stat().st_size),
+            )
+            pdf_file_id = int(cursor.lastrowid)
+            cursor.execute(
+                """
+                INSERT INTO extraction_stats
+                    (pdf_file_id, total_candidates, accepted_figures, rejected_figures, review_queue_figures, multimodal_validated_figures)
+                VALUES (?, 0, 0, 0, 0, 0)
+                """,
+                (pdf_file_id,),
+            )
+            extractor.db_conn.commit()
+
+            self.assertIsNone(extractor._resume_existing_pdf_result(str(pdf_path), file_hash))
+        finally:
+            extractor.close()
+            if db_path.exists():
+                db_path.unlink()
+            if pdf_path.exists():
+                pdf_path.unlink()
 
 
 if __name__ == "__main__":

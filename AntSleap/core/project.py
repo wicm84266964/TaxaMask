@@ -196,6 +196,7 @@ class ProjectManager:
             "taxon_rank": "",
             "taxon_metadata": {},
             "descriptions": {},
+            "description_sources": {},
         }
 
     def _normalize_label_taxon_fields(self, label_data):
@@ -205,6 +206,9 @@ class ProjectManager:
         label_data.setdefault("parts", {})
         label_data.setdefault("status", "unlabeled")
         label_data.setdefault("descriptions", {})
+        label_data.setdefault("description_sources", {})
+        if not isinstance(label_data.get("description_sources"), dict):
+            label_data["description_sources"] = {}
 
         payload = self._label_taxon_payload(label_data)
         label_data["taxon"] = payload["taxon"]
@@ -337,6 +341,7 @@ class ProjectManager:
 
     def create_project(self, name, save_dir, template_id=None):
         self.clear()
+        os.makedirs(save_dir, exist_ok=True)
         template = get_project_template(template_id or PROJECT_TEMPLATE_ANT)
         self.project_data["name"] = name
         self.project_data["project_template"] = template["template_id"]
@@ -566,6 +571,58 @@ class ProjectManager:
         abs_path = self._to_absolute(image_path)
         provenance = self.project_data.get("image_provenance", {}).get(abs_path, {})
         return dict(provenance) if isinstance(provenance, dict) else {}
+
+    def set_description_source(self, image_path, part_name, source_meta, save=True):
+        abs_path = self._to_absolute(image_path)
+        clean_part = str(part_name or "").strip()
+        if not abs_path or not clean_part:
+            return
+        if abs_path not in self.project_data["labels"]:
+            self.project_data["labels"][abs_path] = self._default_label_entry()
+        entry = self._normalize_label_taxon_fields(self.project_data["labels"][abs_path])
+        entry.setdefault("description_sources", {})[clean_part] = dict(source_meta or {})
+        if save:
+            self.save_project()
+
+    def get_description_source(self, image_path, part_name):
+        abs_path = self._to_absolute(image_path)
+        clean_part = str(part_name or "").strip()
+        entry = self.project_data.get("labels", {}).get(abs_path, {})
+        sources = entry.get("description_sources", {}) if isinstance(entry, dict) else {}
+        if not isinstance(sources, dict):
+            return {}
+        source = sources.get(clean_part, {})
+        return dict(source) if isinstance(source, dict) else {}
+
+    def set_part_description(self, image_path, part_name, description_text, source_meta=None, save=True):
+        abs_path = self._to_absolute(image_path)
+        clean_part = str(part_name or "").strip()
+        if not abs_path or not clean_part:
+            return
+        if abs_path not in self.project_data["labels"]:
+            self.project_data["labels"][abs_path] = self._default_label_entry()
+        entry = self._normalize_label_taxon_fields(self.project_data["labels"][abs_path])
+        text = str(description_text or "").strip()
+        if text:
+            entry.setdefault("descriptions", {})[clean_part] = text
+        elif clean_part in entry.get("descriptions", {}):
+            del entry["descriptions"][clean_part]
+        if source_meta is not None:
+            if source_meta:
+                entry.setdefault("description_sources", {})[clean_part] = dict(source_meta)
+            elif clean_part in entry.get("description_sources", {}):
+                del entry["description_sources"][clean_part]
+        if save:
+            self.save_project()
+
+    def get_part_description(self, image_path, part_name):
+        abs_path = self._to_absolute(image_path)
+        clean_part = str(part_name or "").strip()
+        entry = self.project_data.get("labels", {}).get(abs_path, {})
+        descriptions = entry.get("descriptions", {}) if isinstance(entry, dict) else {}
+        if not isinstance(descriptions, dict):
+            return ""
+        return str(descriptions.get(clean_part, "") or "")
 
     def set_scale(self, image_path, pixels_per_mm):
         self.project_data["scales"][image_path] = pixels_per_mm
@@ -1176,6 +1233,8 @@ class ProjectManager:
             # Remove Description
             if "descriptions" in entry and part_name in entry["descriptions"]:
                 del entry["descriptions"][part_name]
+            if "description_sources" in entry and part_name in entry["description_sources"]:
+                del entry["description_sources"][part_name]
                 
             # Remove Manual Box
             if "boxes" in entry and part_name in entry["boxes"]:
@@ -1291,6 +1350,8 @@ class ProjectManager:
                 if part in labels["parts"]:
                     del labels["parts"][part]
                 del labels["descriptions"][part]
+                if "description_sources" in labels and part in labels["description_sources"]:
+                    del labels["description_sources"][part]
                 if "auto_boxes" in labels and part in labels["auto_boxes"]:
                     del labels["auto_boxes"][part]
                 if "auto_box_meta" in labels and part in labels["auto_box_meta"]:

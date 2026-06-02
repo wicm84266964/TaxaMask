@@ -57,12 +57,15 @@ AntSleap/*_artifacts/
 
 # Generated run outputs
 artifacts/
+TaxaMask_outputs/
 AntSleap/vlm_preannotation/
 *.log
 training_report.png
 
 # Internal planning and handoff notes
-docs/designs/
+docs/designs/*
+!docs/designs/
+!docs/designs/2026-06-02_模型方案管理与Blink后端切换设计稿.md
 docs/discussions/
 docs/handoffs/
 docs/concepts/

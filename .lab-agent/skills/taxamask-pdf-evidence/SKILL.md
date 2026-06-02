@@ -156,7 +156,7 @@ Use when the user wants figure images, captions, surrounding evidence text, taxo
 python tools\agentic\extract_figures.py --pdf-source-dir <pdf_dir> --db <output_db> --figure-profile <figure_profile_json> --part-description-profile <part_description_profile_json> --save-images --text-api-key <configured_outside_chat> --text-base-url <base_url> --text-model <text_model>
 ```
 
-Add `--disable-multimodal-validation` only when the user accepts local/mock review. Add `--disable-part-description-extraction` when the user only wants figure/caption evidence and does not want the pure-text Text LLM pass. Headless part-description extraction runs as real LLM work only when `--text-api-key`, `--text-base-url`, and `--text-model` are provided; otherwise it records `skipped` and figure extraction continues. Outputs include the extraction SQLite DB, saved figure images when requested, and `figure_extraction_run_index.json`.
+Add `--disable-multimodal-validation` only when the user accepts local/mock review. Add `--disable-part-description-extraction` when the user only wants figure/caption evidence and does not want the pure-text Text LLM pass. Headless part-description extraction runs as real LLM work only when `--text-api-key`, `--text-base-url`, and `--text-model` are provided; otherwise it records `skipped` and figure extraction continues. GUI extraction defaults to `TaxaMask_outputs/` unless the user chooses another result folder. Outputs include the extraction SQLite DB, saved figure images when requested, accepted/review-only figure artifact folders, and `figure_extraction_run_index.json`.
 
 Current extraction DB tables include:
 - `figure_records`: figure candidates and review status.
@@ -165,7 +165,13 @@ Current extraction DB tables include:
 - `taxon_part_descriptions`: the main `taxon -> part -> description` output, with source pages/block refs and source block payloads.
 - `part_extraction_runs`: real/mock/skipped/failed status for the pure-text structuring pass, including the part-description profile used.
 
-Explain that part descriptions are structured literature evidence, not visual labels and not training truth.
+Current extraction artifacts include:
+- `accepted_figures/`: accepted, import-ready candidate figure copies.
+- `needs_review_figures/`: reviewable figure copies that should be checked before import.
+- `figure_images/`: all raw extracted candidate figures, not all suitable for import.
+- `review_batches/` and `batch_raw_responses/`: multimodal review diagnostics.
+
+Explain that part descriptions are structured literature evidence, not visual labels and not training truth. In the Labeling Workbench, they can be searched through `Literature Traits` and applied or appended to the current part description box with provenance.
 
 ### 4. Export And Import Candidates
 
@@ -183,7 +189,8 @@ Candidate import should create reviewable 2D project entries with PDF provenance
 - Never promote PDF candidates directly into training truth.
 - Never write PDF outputs into TIF `manual_truth`.
 - Import PDF-derived images into 2D projects only as reviewable candidates, usually with status `needs_review`.
-- Preserve source PDF, page number, caption/nearby text, candidate image path, model/review mode, run index paths, profile paths, and candidate/routing status.
+- Prefer importing from `accepted_figures/` for a first pass, then inspect `needs_review_figures/` manually.
+- Preserve source PDF, page number, caption/nearby text, candidate image path, literature-description source, model/review mode, run index paths, profile paths, and candidate/routing status.
 - Warn when multimodal review used mock/default fallback; such outputs belong in review, not accepted evidence.
 - Do not store API keys in profiles or committed files.
 - Do not run large PDF batches until the user accepts the adapted screening and figure-review criteria.

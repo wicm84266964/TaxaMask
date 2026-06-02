@@ -1,8 +1,149 @@
 # TAXAMASK / FORMICA-FLOW SYSTEM TECHNICAL MANUAL (Deep Dive)
 
 > **Target Audience**: Expert LLM Assistants, Senior Developers
-> **Version**: v3.27 (May 29, 2026, TIF GPU volume preview + clarity mode)
+> **Version**: v3.28 (June 2, 2026, PDF literature evidence to labeling workbench loop)
 > **Purpose**: Up-to-date architectural, workflow, and governance context for implementation and maintenance.
+
+---
+
+## 0) v3.28 PDF Literature Evidence -> Labeling Workbench Loop (2026-06-02)
+
+### 0.0 Research workflow intent
+- This milestone makes the PDF path useful as an evidence feeder for the 2D/STL labeling workbench:
+  - screen PDFs and extract candidate taxonomy figures
+  - review figures with a multimodal LLM
+  - extract pure-text taxon/part descriptions with a text LLM
+  - copy import-ready accepted figures separately from review-only figures
+  - import/crop PDF-derived images while preserving provenance
+  - search and apply literature descriptions from the labeling workbench right-side description box
+- The PDF path remains an evidence/provenance layer. It does not automatically create trusted training labels or TIF `manual_truth`.
+- Current real-batch testing indicates the image-review side is now usable for manual candidate import, while text-LLM JSON strictness and taxon-name normalization still need the next tightening pass.
+
+### 0.1 PDF runtime defaults and LLM testing
+- Multimodal figure review defaults are now deliberately small:
+  - batch size: `2` images
+  - failed-batch fallback size: `1` image
+  - request timeout: `180s`
+- Text part-description LLM timeout is also `180s`.
+- The GUI logs runtime settings such as provider/model/protocol, `batch=2/1`, prompt char budget, max tokens, and timeout before extraction.
+- `AntSleap/ui/pdf_processing_widget.py` adds two preflight connection tests:
+  - text LLM test: sends a tiny text-only request
+  - multimodal LLM test: sends a tiny generated PNG plus text
+- The multimodal test image is generated in code, so it does not depend on a local sample image path that can be moved or deleted.
+- Important files:
+  - `AntSleap/ui/pdf_processing_widget.py::LLMConnectionTestWorker`
+  - `core/pdf_processor/multimodal_validator.py`
+  - `core/pdf_processor/part_description_extractor.py`
+
+### 0.2 PDF result folders, database selection, and resume
+- PDF extraction UI now uses a result-folder + database-filename model rather than an ambiguous “select output DB file” flow.
+- The resolved database and its `<database_stem>_v2_artifacts/` folder are placed under the chosen result folder.
+- Default local run outputs now live under `TaxaMask_outputs/`, not under the `AntSleap/` source folder.
+- `TaxaMask_outputs/` is ignored by Git because it can contain real research images, SQLite databases, raw provider responses, and run reports.
+- `EnhancedPDFExtractionSystem` supports `resume_completed_pdfs=True`:
+  - if a PDF already has a complete persisted extraction, it can be skipped on rerun
+  - when a PDF is reprocessed, existing records for that PDF are deleted before inserting new figure/text/evidence rows, preventing duplicate rows for the same PDF
+- Important files:
+  - `AntSleap/ui/pdf_processing_widget.py::_resolve_extract_db_path`
+  - `AntSleap/ui/pdf_processing_widget.py::_default_taxamask_outputs_dir`
+  - `core/pdf_processor/pdf_extractor.py::EnhancedPDFExtractionSystem`
+  - `core/pdf_processor/pdf_extractor.py::_maybe_resume_completed_pdf`
+
+### 0.3 Accepted and review-only figure artifacts
+- Figure extraction still persists all candidate rows in SQLite, but the artifact folder now also separates user-facing copies:
+  - `accepted_figures/`: accepted, import-ready figure images
+  - `needs_review_figures/`: figures that need human review before import
+  - `review_batches/`: batch images/prompts used for multimodal review
+- This avoids forcing researchers to import every extracted image and then reconcile each one against CSV/DB rows manually.
+- Current accepted images are still candidate/evidence images, not verified annotation truth.
+- Multi-species or comparison plates should generally be rejected for direct import or sent through manual cropping first.
+- Important file:
+  - `core/pdf_processor/pdf_extractor.py::_export_reviewable_figures`
+
+### 0.4 Literature description bridge
+- New module: `AntSleap/core/literature_descriptions.py`.
+- It resolves the current labeling-workbench image back to a PDF evidence context using image provenance, filename-derived figure IDs, and candidate DB paths.
+- The main workbench has a `Literature Traits` button beside the linked description header.
+- `LiteratureDescriptionDialog` offers:
+  - structured `taxon_part_descriptions` search by current image/PDF/taxon/part
+  - raw `pdf_text_blocks` fallback search
+  - raw scope: current taxon first or whole current PDF
+  - replace or append into the current part description box
+- Applying a literature description writes:
+  - `labels[image]["descriptions"][part]`
+  - `labels[image]["description_sources"][part]`
+- The source metadata includes DB/PDF/figure/page/block/taxon/part/confidence fields where available.
+- Applying a description also auto-fills current-image taxon metadata from `taxon_name`, `llm_taxon_name`, or `species_candidate`, while leaving the taxon field editable for human correction.
+- Important files:
+  - `AntSleap/main.py::LiteratureDescriptionDialog`
+  - `AntSleap/main.py::MainWindow.open_literature_description_dialog`
+  - `AntSleap/main.py::MainWindow._apply_literature_description`
+  - `AntSleap/core/project.py::set_part_description`
+  - `AntSleap/core/project.py::set_description_source`
+
+### 0.5 Crop provenance for PDF-derived plates
+- The image cropper now names derived crops with the original image stem plus `__crop_001`, `__crop_002`, etc.
+- It returns crop records with:
+  - crop path
+  - source image path
+  - crop index
+  - crop box
+  - source image size
+- This preserves the PDF-derived naming chain when a multi-view or multi-species plate must be cropped before import.
+- Important file:
+  - `AntSleap/ui/cropper.py::ImageCropper.get_crop_records`
+
+### 0.6 Workbench UI wording and metadata placement
+- The right-side workbench hierarchy now uses:
+  - `Auto Annotation`
+  - `Parent-part annotation`
+  - `Child-part annotation`
+- The former ambiguous Blink/refinement wording has been reduced for researchers:
+  - button: `Annotate child from existing parent box`
+  - Chinese: `用已有父框标注子部位`
+- `Current image taxon` remains a per-image metadata field, positioned between structure labels and linked descriptions.
+- It is not a structure label and does not alter the project taxonomy tree.
+- Brightness/contrast labels are now full words in both English and Chinese.
+- Important UI test:
+  - `tests.test_ui_polish_scope.UiPolishScopeTests.test_main_window_exposes_workbench_polish_hierarchy`
+
+### 0.7 Current evidence DB reality check
+- A real local check on a 21-PDF test database showed:
+  - multimodal image review was real mode with no blank species names on accepted figures
+  - accepted figures are mostly usable as import candidates
+  - some accepted figure `species_candidate` values are not clean single-species keys, for example author strings, species-group names, temporary `sp.` labels, context notes, or multi-species names
+  - text part descriptions persisted clean records when parsed, but provider raw responses were often not strict JSON
+  - several PDFs produced zero structured part-description records even though text blocks were labeled
+- Engineering consequence:
+  - keep accepted figures as researcher-reviewed import candidates
+  - continue to show source/provenance and literature-search fallback
+  - next PDF work should tighten JSON-only text extraction, response repair/retry, taxon-name normalization, and multi-species plate handling
+
+### 0.8 Model scheme design status
+- A design document exists for the next stage:
+  - `docs/designs/2026-06-02_模型方案管理与Blink后端切换设计稿.md`
+- Scope of that design:
+  - saved model schemes
+  - parent-part and child-part backend separation
+  - one-click model-scheme switching
+  - route experts that record backend type
+  - Blink inference/training no longer being implicitly tied only to ViT-B
+  - eventual support for heatmap-style child experts where appropriate
+- This is a design archive, not implemented behavior yet.
+- `.gitignore` intentionally allows this single design file while keeping other `docs/designs/` scratch files ignored.
+
+### 0.9 Focused validation
+- Environment used for GUI-focused checks:
+  - `C:\Users\admin\anaconda3\envs\antsleap\python.exe`
+- Focused checks run during this milestone:
+  - `python -m py_compile AntSleap\main.py tests\test_ui_polish_scope.py`
+  - `python -m unittest tests.test_ui_polish_scope.UiPolishScopeTests.test_main_window_exposes_workbench_polish_hierarchy tests.test_ui_polish_scope.UiPolishScopeTests.test_literature_description_append_reveals_editable_target_box -v`
+- Related tests added/updated:
+  - `tests/test_literature_description_bridge.py`
+  - `tests/test_pdf_part_description_extraction.py`
+  - `tests/test_figure_profile.py`
+  - `tests/test_gui_smoke.py`
+  - `tests/test_ui_polish_scope.py`
 
 ---
 
@@ -228,8 +369,8 @@
   - TIF mode shows only `TIF Volume Workbench`
   - PDF tools remain on-demand through `File -> Open PDF Evidence Tools`
 
-### 0.3 Integrated parent-child refinement panel
-- `AntSleap/main.py` now adds `workbenchBlinkRefinePanel` under the main workbench AI panel.
+### 0.3 Integrated parent-part and child-part annotation panels
+- `AntSleap/main.py` now exposes parent-part annotation and child-part annotation sections in the main workbench right rail.
 - The panel displays:
   - selected structure role
   - current parent -> child route
@@ -237,7 +378,7 @@
   - parent box state
   - route expert state
   - `Configure Route Expert`
-  - `Auto-annotate child`
+  - `Annotate child from existing parent box`
   - `Run auto-shrink`
   - `Train current child expert`
 - Box identity now lives on the main canvas toolbar, not in the right panel:
@@ -1863,15 +2004,15 @@ UI-side export utilities and the governance bridge now consume these figure-leve
   - `val_details/` detail overlays
 - The validation table is deterministic and browseable by row, rather than being only a static stitched preview.
 
-#### 9.2.4 Main workbench parent-child refinement flow (current)
+#### 9.2.4 Main workbench child-part annotation flow (current)
 Current operator path:
 1. select an image in the Labeling Workbench
 2. select a parent part such as `Head`
 3. draw the parent annotation box, using the configured parent aspect ratio unless temporarily unlocked
 4. select a child part such as `Mandible`
-5. confirm or choose the parent context in `Parent-child refinement / Blink`
+5. confirm or choose the parent context in `Child-part annotation`
 6. configure the route expert through `Configure Route Expert` if the route is missing, disabled, or unappointed
-7. use `Auto-annotate child` for route-appointed expert + base SAM draft polygon
+7. use `Annotate child from existing parent box` for route-appointed expert + base SAM draft polygon
 8. refine the child polygon in the main canvas
 9. switch to `Loose shrink box`, draw the loose box, and run `Run auto-shrink`
 10. train through `Train current child expert` once enough trajectory-backed examples exist

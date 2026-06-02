@@ -74,8 +74,8 @@ class FigureReviewResult:
 class MultimodalValidator:
     """批量多模态大模型验证器。"""
 
-    DEFAULT_BATCH_SIZE = 6
-    DEFAULT_BATCH_FALLBACK_SIZE = 3
+    DEFAULT_BATCH_SIZE = 2
+    DEFAULT_BATCH_FALLBACK_SIZE = 1
     DEFAULT_BATCH_CHAR_BUDGET = 24000
     DEFAULT_MAX_TOKENS = 4000
     DEFAULT_TIMEOUT_SECONDS = 180
@@ -158,16 +158,24 @@ class MultimodalValidator:
         if self.image_detail not in {"auto", "low", "high"}:
             self.image_detail = "auto"
 
-        self.review_batch_size = max(1, int(self.api_config.get("review_batch_size", self.DEFAULT_BATCH_SIZE)))
-        self.review_batch_fallback_size = max(
-            1,
-            int(self.api_config.get("review_batch_fallback_size", self.DEFAULT_BATCH_FALLBACK_SIZE)),
+        self.review_batch_size = min(
+            self.DEFAULT_BATCH_SIZE,
+            max(1, int(self.api_config.get("review_batch_size", self.DEFAULT_BATCH_SIZE))),
+        )
+        self.review_batch_fallback_size = min(
+            self.DEFAULT_BATCH_FALLBACK_SIZE,
+            max(
+                1,
+                int(self.api_config.get("review_batch_fallback_size", self.DEFAULT_BATCH_FALLBACK_SIZE)),
+            ),
         )
         if self.review_batch_fallback_size > self.review_batch_size:
             self.review_batch_fallback_size = self.review_batch_size
         self.batch_char_budget = max(3000, int(self.api_config.get("batch_char_budget", self.DEFAULT_BATCH_CHAR_BUDGET)))
         self.batch_max_tokens = max(500, int(self.api_config.get("batch_max_tokens", self.DEFAULT_MAX_TOKENS)))
         self.timeout_seconds = max(30, int(self.api_config.get("timeout", self.DEFAULT_TIMEOUT_SECONDS)))
+        self.last_raw_response = ""
+        self.last_raw_protocol = ""
         self.logger.info(
             f"Figure review runtime | profile={self.figure_profile_name} | provider={self.default_provider} | model={self.model} | protocol={self._resolve_api_protocol()} | batch={self.review_batch_size}/{self.review_batch_fallback_size} | chars={self.batch_char_budget} | max_tokens={self.batch_max_tokens} | timeout={self.timeout_seconds}s"
         )
@@ -218,6 +226,8 @@ class MultimodalValidator:
         if self.default_provider == "mock" or not self.api_key or not self.base_url:
             return self.review_triptych_batch_mock(candidates)
 
+        self.last_raw_response = ""
+        self.last_raw_protocol = ""
         protocol_order = [self._resolve_api_protocol()]
         if self.api_protocol == "auto":
             fallback_protocol = "responses" if protocol_order[0] == "chat_completions" else "chat_completions"
@@ -226,6 +236,8 @@ class MultimodalValidator:
         for protocol in protocol_order:
             try:
                 raw_response, finish_reason = self._call_triptych_batch_api(candidates, protocol)
+                self.last_raw_response = raw_response
+                self.last_raw_protocol = protocol
                 if finish_reason in {"length", "max_output_tokens", "incomplete"}:
                     raise ValueError("triptych_batch_truncated_by_max_tokens")
                 results = self._parse_triptych_results(raw_response, candidates, model_used=self.model)
@@ -361,7 +373,8 @@ class MultimodalValidator:
         base = (
             "请按顺序审查以下 figure 候选。"
             "你必须为每个 candidate_id 返回一条结果。\n"
-            "输出必须是 JSON 数组，每个元素必须包含：\n"
+            "输出必须是一个 JSON object，且只能输出 JSON，不要添加解释、Markdown 或第二段 JSON。\n"
+            "JSON object 的 results 字段必须是数组；数组中每个元素必须包含：\n"
             "candidate_id, accept, confidence_score, category, reasoning, species_candidate, species_confidence, detected_views, has_auxiliary_inset, comparison_figure, multiple_species\n"
             "其中：\n"
             f"- 当前目标：{self.acceptance_goal}\n"
@@ -599,20 +612,10 @@ class MultimodalValidator:
         candidates: List[Dict[str, Any]],
         model_used: str,
     ) -> List[FigureReviewResult]:
-        payload = raw_response.strip()
-        parsed: Any
-        try:
-            parsed = json.loads(payload)
-        except json.JSONDecodeError:
-            array_match = re.search(r"\[.*\]", payload, re.DOTALL)
-            if not array_match:
-                raise ValueError("triptych_batch_json_not_found")
-            parsed = json.loads(array_match.group())
-
-        if isinstance(parsed, dict) and isinstance(parsed.get("results"), list):
-            parsed = parsed.get("results")
-        if not isinstance(parsed, list):
-            raise ValueError("triptych_batch_result_not_array")
+        expected_ids = [str(candidate.get("candidate_id", "") or "") for candidate in candidates]
+        parsed = self._select_triptych_payload(raw_response, expected_ids)
+        if parsed is None:
+            raise ValueError("triptych_batch_json_not_found")
 
         parsed_map: Dict[str, Dict[str, Any]] = {}
         for item in parsed:
@@ -622,7 +625,6 @@ class MultimodalValidator:
             if candidate_id:
                 parsed_map[candidate_id] = item
 
-        expected_ids = [str(candidate.get("candidate_id", "") or "") for candidate in candidates]
         missing_ids = [candidate_id for candidate_id in expected_ids if candidate_id not in parsed_map]
         if missing_ids:
             raise ValueError(f"triptych_batch_missing_candidates:{','.join(missing_ids)}")
@@ -661,6 +663,90 @@ class MultimodalValidator:
                 )
             )
         return results
+
+    def _select_triptych_payload(self, raw_response: str, expected_ids: List[str]) -> List[Dict[str, Any]] | None:
+        last_error = ""
+        for payload in self._iter_json_values(raw_response):
+            try:
+                records = self._coerce_triptych_payload(payload, expected_ids)
+            except ValueError as exc:
+                last_error = str(exc)
+                continue
+            if records is not None:
+                return records
+        if last_error:
+            raise ValueError(last_error)
+        return None
+
+    def _coerce_triptych_payload(self, payload: Any, expected_ids: List[str]) -> List[Dict[str, Any]] | None:
+        records: Any = payload
+        if isinstance(payload, dict):
+            if isinstance(payload.get("results"), list):
+                records = payload.get("results")
+            elif isinstance(payload.get("results"), dict):
+                records = [payload.get("results")]
+            elif "candidate_id" in payload:
+                records = [payload]
+            else:
+                mapped_records = []
+                for candidate_id in expected_ids:
+                    value = payload.get(candidate_id)
+                    if isinstance(value, dict):
+                        item = dict(value)
+                        item.setdefault("candidate_id", candidate_id)
+                        mapped_records.append(item)
+                if mapped_records:
+                    records = mapped_records
+        if not isinstance(records, list):
+            raise ValueError("triptych_batch_result_not_array")
+
+        dict_records = [dict(item) for item in records if isinstance(item, dict)]
+        if len(expected_ids) == 1 and len(dict_records) == 1 and not str(dict_records[0].get("candidate_id", "") or "").strip():
+            dict_records[0]["candidate_id"] = expected_ids[0]
+        if not dict_records:
+            raise ValueError("triptych_batch_result_not_array")
+
+        seen_ids = {str(item.get("candidate_id", "") or "").strip() for item in dict_records}
+        missing_ids = [candidate_id for candidate_id in expected_ids if candidate_id and candidate_id not in seen_ids]
+        if missing_ids:
+            raise ValueError(f"triptych_batch_missing_candidates:{','.join(missing_ids)}")
+        return dict_records
+
+    def _iter_json_values(self, raw_response: str) -> List[Any]:
+        text = self._strip_code_fence(str(raw_response or ""))
+        decoder = json.JSONDecoder()
+        values: List[Any] = []
+        index = 0
+        while index < len(text):
+            char = text[index]
+            if char not in "[{":
+                index += 1
+                continue
+            try:
+                value, end = decoder.raw_decode(text[index:])
+            except json.JSONDecodeError:
+                repaired = self._repair_common_json_issues(text[index:])
+                try:
+                    value, end = decoder.raw_decode(repaired)
+                except json.JSONDecodeError:
+                    index += 1
+                    continue
+            values.append(value)
+            index += max(end, 1)
+        return values
+
+    def _strip_code_fence(self, content: str) -> str:
+        text = str(content or "").strip()
+        fence_match = re.search(r"```(?:json)?\s*(.*?)```", text, re.IGNORECASE | re.DOTALL)
+        if fence_match:
+            return fence_match.group(1).strip()
+        return text
+
+    def _repair_common_json_issues(self, text: str) -> str:
+        repaired = str(text or "").strip()
+        repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
+        repaired = re.sub(r"}\s*(?={)", "},", repaired)
+        return repaired
 
     def _mock_review_candidate(self, candidate: Dict[str, Any], error_context: str = "") -> FigureReviewResult:
         candidate_id = str(candidate.get("candidate_id", "") or "candidate")

@@ -17,14 +17,15 @@ These notes are intentionally separate from the root README, changelog, and LLM 
 
 The first requirements-alignment pass has moved into an initial implementation landing. This folder still remains the design and implementation-planning space, while the root `README.md`, `TaxaMask使用手册.md`, `CHANGELOG_zh.md`, and `LLM_CONTEXT_DETAILED.md` now describe the current user-facing and handoff state.
 
-Current landed state as of 2026-05-17:
+Current landed state as of 2026-06-02:
 
 - The visible product name remains `TaxaMask`; `AntSleap` remains the internal Python package name.
-- Startup now opens the TaxaMask Agent Center, with embedded Ant-Code in the main area and stacked 2D/STL + TIF workflow cards on the right.
+- Startup now opens the TaxaMask Agent Center, with vendored Ant-Code embedded in the main area and stacked 2D/STL + TIF workflow cards on the right.
 - 2D/STL and TIF are separate workflows and project systems.
 - STL currently means rendered 2D views imported into the existing Labeling Workbench, not direct 3D mesh painting.
 - TIF uses independent material-ID volume labels, sidecars, train-ready checks, and a separate TIF backend contract.
-- PDF is evidence/provenance and Agent/headless workflow, not the primary visual workbench.
+- 2D/STL daily annotation uses the Labeling Workbench with parent-part annotation, child-part annotation, Locator/SAM, Blink route experts, and PDF-derived literature trait lookup.
+- PDF is evidence/provenance and Agent/headless workflow, not the primary visual workbench. It now separates accepted figures from needs-review figures, structures PDF text into `taxon -> part -> description`, and defaults local run artifacts to `TaxaMask_outputs/`.
 - Locator/SAM no longer load at startup or when entering TIF; they preload when entering 2D/STL and remain alive when returning to the Agent Center.
 - `ANTCODE.md` provides the highest-priority always-on TaxaMask Agent protocol. `.lab-agent/memory.md` and `.lab-agent/skills/taxamask-workflows/SKILL.md` provide short memory and an expandable workflow card so routine tasks do not require loading this entire design folder.
 

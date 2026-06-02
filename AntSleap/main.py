@@ -90,6 +90,16 @@ try:
         load_vlm_api_config_from_runtime_settings,
         run_vlm_preannotation,
     )
+    from AntSleap.core.literature_descriptions import (
+        build_text_block_source,
+        build_description_source,
+        candidate_literature_db_paths,
+        default_literature_db_path,
+        infer_literature_db_path_from_artifact_image,
+        query_literature_part_descriptions,
+        query_literature_text_blocks,
+        resolve_literature_context,
+    )
 except ImportError:
     from core.project import ProjectManager
     from core.database import MultiModalDB
@@ -148,6 +158,16 @@ except ImportError:
         load_vlm_api_config_from_runtime_settings,
         run_vlm_preannotation,
     )
+    from core.literature_descriptions import (
+        build_text_block_source,
+        build_description_source,
+        candidate_literature_db_paths,
+        default_literature_db_path,
+        infer_literature_db_path_from_artifact_image,
+        query_literature_part_descriptions,
+        query_literature_text_blocks,
+        resolve_literature_context,
+    )
 
 from torch.utils.data import DataLoader
 
@@ -166,7 +186,7 @@ class InferenceThread(QThread):
         self.inf_params = inf_params
         self.project_route_manifest = dict(project_route_manifest or {})
         self.lang = lang
-        
+
     def run(self):
         self.log_signal.emit(tr("Starting batch inference on {0} images...", self.lang).format(len(self.img_paths)))
         count = 0
@@ -271,9 +291,45 @@ TRANSLATIONS = {
         "Tool: Box Prompt (SAM) - Drag to segment area.": "工具: 框选 - 拖拽选择区域",
         "Tool: Manual Draw - Click points to outline.": "工具: 手动 - 点击绘制轮廓",
         "Taxon": "分类单元",
+        "Current image taxon": "当前图片物种",
+        "Per-image taxon metadata used for export and literature search hints. This does not change the structure labels.": "每张图片自己的物种/分类单元元数据，用于导出和文献检索提示；不会改变结构标签。",
         "Structures": "结构标签",
         "DESCRIPTION (Linked)": "描述 (关联)",
-        "AI WORKFLOW": "AI 工作流",
+        "Literature Traits": "文献性状",
+        "Literature Trait Descriptions": "文献性状描述",
+        "Search Part:": "搜索部位：",
+        "Search": "搜索",
+        "Structured Descriptions": "结构化描述",
+        "Raw Text Blocks": "原文块搜索",
+        "Raw Search Scope:": "原文检索范围：",
+        "Current Taxon First": "当前物种优先",
+        "Whole Current PDF": "当前 PDF 全文",
+        "Use Description": "使用描述",
+        "Append Description": "追加到描述框",
+        "Close": "关闭",
+        "Caste": "品级",
+        "Part": "部位",
+        "Role": "角色",
+        "Block": "文本块",
+        "Pages": "页码",
+        "Page": "页码",
+        "Conf.": "置信度",
+        "Status": "状态",
+        "Description": "描述",
+        "Text": "文本",
+        "Current Part": "当前部位",
+        "Image": "图片",
+        "PDF": "PDF",
+        "Source PDF": "来源 PDF",
+        "pronotum / 前胸背板 / propodeum ...": "pronotum / 前胸背板 / propodeum ...",
+        "No literature description matched the current image, taxon, and part search.": "当前图片、物种和部位搜索没有匹配到文献描述。",
+        "No raw PDF text block matched the current search. Try Whole Current PDF or broader terms.": "当前搜索没有匹配到 PDF 原文块。可以切换到“当前 PDF 全文”或使用更宽泛的关键词。",
+        "No PDF literature source is linked to the current image. Import images through the PDF candidate workflow or open a project that preserves PDF image provenance.": "当前图片没有关联 PDF 文献来源。请通过 PDF 候选图片流程导入，或打开保留了 PDF 图片来源记录的项目。",
+        "PDF literature database was not found: {0}": "未找到 PDF 文献数据库：{0}",
+        "Applied literature description for {0}.": "已应用 {0} 的文献描述。",
+        "Search PDF-extracted taxon/part descriptions linked to the current image and apply one to the current part description box.": "搜索与当前图片关联的 PDF 抽取物种/部位描述，并应用到当前部位描述框。",
+        "Auto Annotation": "自动标注",
+        "Parent-part annotation": "父部位标注",
         "Auto (Current)": "自动标注 (当前)",
         "Batch (All)": "批量标注 (全部)",
         "VLM First-Mile Boxes": "VLM 第一公里框",
@@ -304,6 +360,7 @@ TRANSLATIONS = {
         "VLM preannotation saved {0} draft(s): {1} SAM polygon(s), {2} box-only draft(s), skipped {3}. Report: {4}": "VLM 预标注已保存 {0} 个草稿：{1} 个 SAM 多边形，{2} 个仅框草稿，跳过 {3} 个。报告：{4}",
         "VLM first-mile preannotation failed: {0}": "VLM 第一公里预标注失败：{0}",
         "Could not read the current image.": "无法读取当前图片。",
+        "Current Image": "当前图片",
         "Train Models": "训练模型",
         "LOGS": "日志",
         "Export Dataset": "导出数据集",
@@ -397,6 +454,7 @@ TRANSLATIONS = {
         "Ask Agent": "询问 Agent",
         "Ask Agent about these settings. Current values are summarized without sending full command text.": "询问 Agent 这些设置。只发送当前值摘要，不发送完整命令文本。",
         "Local task cards": "本地任务卡",
+        "Idle": "空闲",
         "No active project": "未打开项目",
         "Model Backend:": "模型后端：",
         "Built-in Locator + SAM": "内置 Locator + SAM",
@@ -533,18 +591,24 @@ TRANSLATIONS = {
         "Success": "成功",
         "Open in Blink Workbench": "在 Blink 工作台中打开",
         "Blink Workbench": "Blink 工作台",
-        "Workbench Blink refinement": "工作台 Blink 精修",
-        "Parent-child refinement / Blink": "父子精修 / Blink",
+        "Workbench child-part refinement": "工作台子部位精修",
+        "Child-part annotation": "子部位标注",
         "Configure Route Expert": "配置路由专家",
         "Annotation Box": "标注框",
         "Annotation box": "正式标注框",
         "Loose shrink box": "收缩松框",
         "Loose Shrink Box": "收缩松框",
-        "Auto-annotate child": "自动标注子部位",
+        "Annotate child from existing parent box": "用已有父框标注子部位",
         "Run auto-shrink": "执行自动收缩",
         "Train current child expert": "训练当前子部位专家",
         "Parent context": "父级上下文",
         "Child structure": "子部位",
+        "Main locator parts": "主定位部位",
+        "Blink child parts": "Blink 子部位",
+        "Cross-region structures": "跨区域结构",
+        "Ungrouped structures": "未分组结构",
+        "Structure group": "结构分组",
+        "Parent not selected": "未选择父级",
         "parent box exists": "父级框已存在",
         "parent box missing": "父级框未框选",
         "Current structure: {0} ({1}); {2}.": "当前部位：{0}（{1}）；{2}。",
@@ -564,10 +628,10 @@ TRANSLATIONS = {
         "Lock parent box ratio": "锁定父级框比例",
         "Open route expert settings for {0}.": "打开 {0} 的路由专家设置。",
         "Select a child structure first.": "请先选择子部位。",
-        "Select a child structure for Blink refinement.": "请选择子部位进行 Blink 精修。",
+        "Select a child structure for refinement.": "请选择子部位进行精修。",
         "Select a child structure with a parent context first.": "请先选择带父级上下文的子部位。",
         "Choose or remember a parent structure for this child first.": "请先为这个子部位指定或记忆父级结构。",
-        "Draw a parent box before Blink refinement.": "请先绘制父级框，再进行 Blink 精修。",
+        "Draw a parent box before child refinement.": "请先绘制父级框，再进行子部位精修。",
         "Configure a route expert before automatic child annotation.": "请先配置路由专家，再自动标注子部位。",
         "Enable the current route before automatic child annotation.": "请先启用当前路由，再自动标注子部位。",
         "Training uses saved shrink trajectories for this parent-child route.": "训练会使用这条父子路由下已保存的收缩轨迹。",
@@ -626,8 +690,8 @@ TRANSLATIONS = {
         "Manual Box": "手工框",
         "Auto Box": "自动框",
         "Target Part is the child part you want to refine. Entry ROI is the parent/context region Blink will zoom into. This project remembers the parent/context ROI you chose for each target part, and later Blink entries reuse that remembered context.": "目标部位是你要精修的子部位；进入 ROI 是 Blink 将放大的父级/上下文区域。这个项目会记住你为每个目标部位选择过的父级/上下文 ROI，之后再次进入 Blink 时会复用这份项目内记忆。",
-        "B:": "亮：",
-        "C:": "对：",
+        "Brightness:": "亮度：",
+        "Contrast:": "对比度：",
         "Locator:": "定位器：",
         "Segmenter:": "分割器：",
         "Del": "删除",
@@ -838,7 +902,7 @@ def _translate_route_registration_source(value, lang="en"):
         "project": ui_text("Project", lang),
         "blink_candidate": ui_text("Blink candidate", lang),
         "blink_training": ui_text("Blink training", lang),
-        "workbench_blink_refine": tr("Workbench Blink refinement", lang),
+        "workbench_blink_refine": tr("Workbench child-part refinement", lang),
         "legacy_global_manifest": ui_text("Legacy global manifest", lang),
     }
     text = str(value or "project")
@@ -906,6 +970,10 @@ def _translate_training_warning_text(text, lang="en"):
 
 WORKBENCH_WINDOW_TITLE = "TaxaMask Workbench"
 DEFAULT_PROJECT_NAME = "TaxaMask_Project"
+DEFAULT_OUTPUTS_DIR_NAME = "TaxaMask_outputs"
+DEFAULT_2D_STL_PROJECTS_DIR_NAME = "2d_stl_projects"
+DEFAULT_TIF_PROJECTS_DIR_NAME = "tif_projects"
+DEFAULT_STARTUP_PROJECT_DIR_NAME = "_startup"
 
 
 class NoWheelComboBox(QComboBox):
@@ -2327,6 +2395,27 @@ class ModelSettingsDialog(QDialog):
         locator_layout.addWidget(self.locator_scope_validation_label)
         form_train.addWidget(locator_group)
 
+        form_train.addStretch()
+        self.tabs.addTab(self._make_scroll_tab(tab_train), tr("Training", lang))
+
+        tab_inf = QWidget()
+        form_inf = QVBoxLayout(tab_inf)
+        form_inf.addWidget(QLabel(tr("Confidence Threshold:", lang)))
+        self.spin_conf = QLineEdit(str(params['conf']))
+        form_inf.addWidget(self.spin_conf)
+        form_inf.addWidget(QLabel(tr("Adaptive Thresh Ratio:", lang)))
+        self.spin_adapt = QLineEdit(str(params['adapt']))
+        form_inf.addWidget(self.spin_adapt)
+        form_inf.addWidget(QLabel(tr("Noise Floor:", lang)))
+        self.spin_noise = QLineEdit(str(params['noise_floor']))
+        form_inf.addWidget(self.spin_noise)
+        form_inf.addWidget(QLabel(tr("Polygon Simplification (px):", lang)))
+        self.spin_poly = QLineEdit(str(params.get('poly_epsilon', 2.0)))
+        form_inf.addWidget(self.spin_poly)
+        form_inf.addWidget(QLabel(tr("Box Padding Ratio:", lang)))
+        self.spin_pad = QLineEdit(str(params['pad']))
+        form_inf.addWidget(self.spin_pad)
+
         vlm_settings = params.get("vlm_preannotation", {}) if isinstance(params.get("vlm_preannotation", {}), dict) else {}
         vlm_group = QGroupBox(tr("AI Multimodal Pre-Annotation:", lang))
         apply_surface_role(vlm_group, SURFACE_ROLE_SUBTLE, "modelSettingsVlmPreannotationPanel")
@@ -2367,28 +2456,8 @@ class ModelSettingsDialog(QDialog):
         scope_index = self.combo_vlm_processing_scope.findData(scope_value)
         self.combo_vlm_processing_scope.setCurrentIndex(scope_index if scope_index >= 0 else 0)
         vlm_layout.addWidget(self.combo_vlm_processing_scope)
-        form_train.addWidget(vlm_group)
-        
-        form_train.addStretch()
-        self.tabs.addTab(self._make_scroll_tab(tab_train), tr("Training", lang))
-        
-        tab_inf = QWidget()
-        form_inf = QVBoxLayout(tab_inf)
-        form_inf.addWidget(QLabel(tr("Confidence Threshold:", lang)))
-        self.spin_conf = QLineEdit(str(params['conf']))
-        form_inf.addWidget(self.spin_conf)
-        form_inf.addWidget(QLabel(tr("Adaptive Thresh Ratio:", lang)))
-        self.spin_adapt = QLineEdit(str(params['adapt']))
-        form_inf.addWidget(self.spin_adapt)
-        form_inf.addWidget(QLabel(tr("Noise Floor:", lang)))
-        self.spin_noise = QLineEdit(str(params['noise_floor']))
-        form_inf.addWidget(self.spin_noise)
-        form_inf.addWidget(QLabel(tr("Polygon Simplification (px):", lang)))
-        self.spin_poly = QLineEdit(str(params.get('poly_epsilon', 2.0)))
-        form_inf.addWidget(self.spin_poly)
-        form_inf.addWidget(QLabel(tr("Box Padding Ratio:", lang)))
-        self.spin_pad = QLineEdit(str(params['pad']))
-        form_inf.addWidget(self.spin_pad)
+        form_inf.addWidget(vlm_group)
+
         self.lbl_cascade_note = QLabel(
             ui_text(
                 "Project routes below control which parent -> child expert links are available.",
@@ -2975,9 +3044,10 @@ class TifModelSettingsDialog(QDialog):
 
 
 class ExportDialog(QDialog):
-    def __init__(self, parent=None, lang="en"):
+    def __init__(self, parent=None, lang="en", default_dir=""):
         super().__init__(parent)
         self.lang = lang
+        self.default_dir = os.path.abspath(str(default_dir)) if default_dir else ""
         self.setWindowTitle(tr("Export Dataset", self.lang))
         self.resize(400, 150)
         layout = QVBoxLayout(self)
@@ -2989,6 +3059,8 @@ class ExportDialog(QDialog):
         layout.addWidget(self.format_combo)
         self.path_edit = QLineEdit()
         self.path_edit.setPlaceholderText(tr("Select export directory...", self.lang))
+        if self.default_dir:
+            self.path_edit.setText(self.default_dir)
         layout.addWidget(QLabel(tr("Export Path:", self.lang)))
         browse_layout = QHBoxLayout()
         browse_layout.addWidget(self.path_edit)
@@ -3009,7 +3081,10 @@ class ExportDialog(QDialog):
         layout.addLayout(btn_layout)
         
     def browse(self):
-        d = QFileDialog.getExistingDirectory(self, tr("Select Directory", self.lang))
+        start_dir = self.path_edit.text().strip() or self.default_dir
+        if start_dir and not os.path.isdir(start_dir):
+            start_dir = os.path.dirname(start_dir)
+        d = QFileDialog.getExistingDirectory(self, tr("Select Directory", self.lang), start_dir)
         if d:
             self.path_edit.setText(d)
     def get_path(self): 
@@ -3105,6 +3180,354 @@ class BlinkEntryDialog(QDialog):
             "target_part": target_part,
             "focus_roi": focus_roi,
         }
+
+
+class LiteratureDescriptionDialog(QDialog):
+    def __init__(
+        self,
+        *,
+        db_path,
+        context,
+        image_path,
+        current_part,
+        taxon_hint,
+        parent=None,
+        lang="en",
+    ):
+        super().__init__(parent)
+        self.lang = lang
+        self.current_theme = getattr(parent, "current_theme", "dark")
+        self.db_path = str(db_path or "")
+        self.context = dict(context or {})
+        self.image_path = str(image_path or "")
+        self.current_part = str(current_part or "")
+        self.taxon_hint = str(taxon_hint or "")
+        self.records = []
+        self.raw_records = []
+        self.selected_record = None
+        self.selected_raw_record = None
+        self.action_mode = "replace"
+
+        self.setWindowTitle(tr("Literature Trait Descriptions", self.lang))
+        self.setModal(True)
+        self.resize(980, 680)
+
+        layout = QVBoxLayout(self)
+        self.source_label = QLabel(self._source_summary_text())
+        self.source_label.setWordWrap(True)
+        self.source_label.setObjectName("mutedLabel")
+        layout.addWidget(self.source_label)
+
+        search_row = QHBoxLayout()
+        search_row.addWidget(QLabel(tr("Search Part:", self.lang)))
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText(tr("pronotum / 前胸背板 / propodeum ...", self.lang))
+        self.search_edit.setText(self.current_part)
+        search_row.addWidget(self.search_edit, 1)
+        self.btn_search = QPushButton(tr("Search", self.lang))
+        self.btn_search.clicked.connect(self.refresh_records)
+        search_row.addWidget(self.btn_search)
+        layout.addLayout(search_row)
+
+        raw_scope_row = QHBoxLayout()
+        raw_scope_row.addWidget(QLabel(tr("Raw Search Scope:", self.lang)))
+        self.raw_scope_combo = QComboBox()
+        self.raw_scope_combo.addItem(tr("Current Taxon First", self.lang), "taxon")
+        self.raw_scope_combo.addItem(tr("Whole Current PDF", self.lang), "pdf")
+        self.raw_scope_combo.currentIndexChanged.connect(self.refresh_raw_records)
+        raw_scope_row.addWidget(self.raw_scope_combo)
+        raw_scope_row.addStretch()
+        layout.addLayout(raw_scope_row)
+
+        self.result_tabs = QTabWidget()
+        self.table = QTableWidget(0, 7)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setHorizontalHeaderLabels(
+            [
+                tr("Taxon", self.lang),
+                tr("Caste", self.lang),
+                tr("Part", self.lang),
+                tr("Pages", self.lang),
+                tr("Conf.", self.lang),
+                tr("Status", self.lang),
+                tr("Description", self.lang),
+            ]
+        )
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(6, QHeaderView.Stretch)
+        self.table.itemSelectionChanged.connect(self._on_selection_changed)
+        self.result_tabs.addTab(self.table, tr("Structured Descriptions", self.lang))
+
+        self.raw_table = QTableWidget(0, 6)
+        self.raw_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.raw_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.raw_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.raw_table.setHorizontalHeaderLabels(
+            [
+                tr("Page", self.lang),
+                tr("Block", self.lang),
+                tr("Taxon", self.lang),
+                tr("Role", self.lang),
+                tr("Conf.", self.lang),
+                tr("Text", self.lang),
+            ]
+        )
+        raw_header = self.raw_table.horizontalHeader()
+        raw_header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        raw_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        raw_header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        raw_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        raw_header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        raw_header.setSectionResizeMode(5, QHeaderView.Stretch)
+        self.raw_table.itemSelectionChanged.connect(self._on_raw_selection_changed)
+        self.result_tabs.addTab(self.raw_table, tr("Raw Text Blocks", self.lang))
+        self.result_tabs.currentChanged.connect(self._on_result_tab_changed)
+        layout.addWidget(self.result_tabs, 1)
+
+        self.preview = QTextEdit()
+        self.preview.setReadOnly(True)
+        self.preview.setMinimumHeight(150)
+        self.preview.setObjectName("LinkedDescriptionBox")
+        layout.addWidget(self.preview)
+
+        button_row = QHBoxLayout()
+        self.btn_replace = QPushButton(tr("Use Description", self.lang))
+        self.btn_replace.clicked.connect(self.accept_replace)
+        self.btn_append = QPushButton(tr("Append Description", self.lang))
+        self.btn_append.clicked.connect(self.accept_append)
+        self.btn_close = QPushButton(tr("Close", self.lang))
+        self.btn_close.clicked.connect(self.reject)
+        button_row.addStretch()
+        button_row.addWidget(self.btn_replace)
+        button_row.addWidget(self.btn_append)
+        button_row.addWidget(self.btn_close)
+        layout.addLayout(button_row)
+
+        self.search_edit.returnPressed.connect(self.refresh_records)
+        self.set_theme(self.current_theme)
+        self.refresh_records()
+
+    def set_theme(self, theme):
+        self.current_theme = theme
+        apply_theme_button_style(getattr(self, "btn_search", None), BUTTON_ROLE_NEUTRAL, "", theme)
+        apply_theme_button_style(getattr(self, "btn_replace", None), BUTTON_ROLE_COMMIT, "", theme)
+        apply_theme_button_style(getattr(self, "btn_append", None), BUTTON_ROLE_NEUTRAL, "", theme)
+        apply_theme_button_style(getattr(self, "btn_close", None), BUTTON_ROLE_STOP, "", theme)
+
+    def refresh_records(self):
+        self.records = query_literature_part_descriptions(
+            self.db_path,
+            context=self.context,
+            current_part=self.current_part,
+            search_text=self.search_edit.text(),
+            taxon_hint=self.taxon_hint,
+        )
+        self.raw_records = query_literature_text_blocks(
+            self.db_path,
+            context=self.context,
+            current_part=self.current_part,
+            search_text=self.search_edit.text(),
+            taxon_hint=self.taxon_hint,
+            scope=self.raw_scope_combo.currentData() or "taxon",
+        )
+        self._populate_table()
+        self._populate_raw_table()
+
+    def refresh_raw_records(self):
+        self.raw_records = query_literature_text_blocks(
+            self.db_path,
+            context=self.context,
+            current_part=self.current_part,
+            search_text=self.search_edit.text(),
+            taxon_hint=self.taxon_hint,
+            scope=self.raw_scope_combo.currentData() or "taxon",
+        )
+        self._populate_raw_table()
+
+    def selected_description_text(self):
+        if self._active_result_kind() == "raw":
+            record = self.selected_raw_record or {}
+            return str(record.get("text_content", "") or "").strip()
+        record = self.selected_record or {}
+        return str(record.get("description_text", "") or "").strip()
+
+    def selected_source(self):
+        if self._active_result_kind() == "raw":
+            if not self.selected_raw_record:
+                return {}
+            return build_text_block_source(self.selected_raw_record, self.context)
+        if not self.selected_record:
+            return {}
+        return build_description_source(self.selected_record, self.context)
+
+    def accept_replace(self):
+        if not self._has_active_selection():
+            return
+        self.action_mode = "replace"
+        self.accept()
+
+    def accept_append(self):
+        if not self._has_active_selection():
+            return
+        self.action_mode = "append"
+        self.accept()
+
+    def _populate_table(self):
+        self.table.setRowCount(0)
+        self.selected_record = None
+        self.preview.clear()
+        for row_index, record in enumerate(self.records):
+            self.table.insertRow(row_index)
+            values = [
+                record.get("taxon_name", ""),
+                record.get("caste_or_stage", ""),
+                f"{record.get('part_label', '')} / {record.get('part_key', '')}",
+                ", ".join(str(page) for page in record.get("source_pages", []) or []),
+                f"{float(record.get('confidence') or 0.0):.3f}",
+                record.get("review_status", ""),
+                self._short_text(record.get("description_text", "")),
+            ]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(str(value or ""))
+                item.setData(Qt.UserRole, row_index)
+                self.table.setItem(row_index, column, item)
+        if self.records:
+            self.table.selectRow(0)
+        else:
+            self._sync_action_buttons()
+            self.preview.setPlainText(tr("No literature description matched the current image, taxon, and part search.", self.lang))
+
+    def _populate_raw_table(self):
+        self.raw_table.setRowCount(0)
+        self.selected_raw_record = None
+        for row_index, record in enumerate(self.raw_records):
+            self.raw_table.insertRow(row_index)
+            values = [
+                record.get("page_number", ""),
+                record.get("block_ref", ""),
+                record.get("llm_taxon_name", ""),
+                record.get("llm_role", "") or record.get("section_hint", "") or record.get("text_type", ""),
+                f"{float(record.get('llm_confidence') or 0.0):.3f}",
+                self._short_text(record.get("text_content", "")),
+            ]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(str(value or ""))
+                item.setData(Qt.UserRole, row_index)
+                self.raw_table.setItem(row_index, column, item)
+        if self.raw_records:
+            self.raw_table.selectRow(0)
+        else:
+            self._sync_action_buttons()
+            if self._active_result_kind() == "raw":
+                self.preview.setPlainText(tr("No raw PDF text block matched the current search. Try Whole Current PDF or broader terms.", self.lang))
+
+    def _on_selection_changed(self):
+        selected = self.table.selectedItems()
+        if not selected:
+            self.selected_record = None
+            self.preview.clear()
+            self._sync_action_buttons()
+            return
+        row_index = selected[0].data(Qt.UserRole)
+        try:
+            self.selected_record = self.records[int(row_index)]
+        except Exception:
+            self.selected_record = None
+        self._sync_preview()
+        self._sync_action_buttons()
+
+    def _on_raw_selection_changed(self):
+        selected = self.raw_table.selectedItems()
+        if not selected:
+            self.selected_raw_record = None
+            if self._active_result_kind() == "raw":
+                self.preview.clear()
+            self._sync_action_buttons()
+            return
+        row_index = selected[0].data(Qt.UserRole)
+        try:
+            self.selected_raw_record = self.raw_records[int(row_index)]
+        except Exception:
+            self.selected_raw_record = None
+        if self._active_result_kind() == "raw":
+            self._sync_preview()
+        self._sync_action_buttons()
+
+    def _sync_preview(self):
+        if self._active_result_kind() == "raw":
+            self._sync_raw_preview()
+            return
+        record = self.selected_record or {}
+        if not record:
+            self.preview.clear()
+            return
+        pages = ", ".join(str(page) for page in record.get("source_pages", []) or [])
+        refs = ", ".join(str(ref) for ref in record.get("source_block_refs", []) or [])
+        meta = (
+            f"{record.get('taxon_name', '')} | {record.get('caste_or_stage', '')} | "
+            f"{record.get('part_label', '')} / {record.get('part_key', '')}\n"
+            f"{tr('Source PDF', self.lang)}: {record.get('file_name') or self.context.get('pdf_file') or ''}\n"
+            f"{tr('Pages', self.lang)}: {pages} | refs: {refs} | "
+            f"conf={float(record.get('confidence') or 0.0):.3f} | {record.get('review_status', '')}"
+        )
+        self.preview.setPlainText(f"{meta}\n\n{record.get('description_text', '')}")
+
+    def _sync_raw_preview(self):
+        record = self.selected_raw_record or {}
+        if not record:
+            self.preview.clear()
+            return
+        meta = (
+            f"{tr('Source PDF', self.lang)}: {record.get('file_name') or self.context.get('pdf_file') or ''}\n"
+            f"{tr('Page', self.lang)}: {record.get('page_number', '')} | "
+            f"{tr('Block', self.lang)}: {record.get('block_ref', '')} | "
+            f"{tr('Role', self.lang)}: {record.get('llm_role', '') or record.get('section_hint', '') or record.get('text_type', '')} | "
+            f"conf={float(record.get('llm_confidence') or 0.0):.3f}\n"
+            f"{tr('Taxon', self.lang)}: {record.get('llm_taxon_name', '') or self.context.get('species_candidate') or ''}"
+        )
+        self.preview.setPlainText(f"{meta}\n\n{record.get('text_content', '')}")
+
+    def _sync_action_buttons(self):
+        enabled = bool(self.selected_raw_record) if self._active_result_kind() == "raw" else bool(self.selected_record)
+        self.btn_replace.setEnabled(enabled)
+        self.btn_append.setEnabled(enabled)
+
+    def _on_result_tab_changed(self, _index):
+        self._sync_preview()
+        self._sync_action_buttons()
+
+    def _has_active_selection(self):
+        return bool(self.selected_raw_record) if self._active_result_kind() == "raw" else bool(self.selected_record)
+
+    def _active_result_kind(self):
+        if getattr(self, "result_tabs", None) is not None and self.result_tabs.currentWidget() == getattr(self, "raw_table", None):
+            return "raw"
+        return "structured"
+
+    def _source_summary_text(self):
+        pieces = [
+            f"{tr('Image', self.lang)}: {os.path.basename(self.image_path)}",
+            f"{tr('PDF', self.lang)}: {self.context.get('pdf_file') or tr('Unknown', self.lang)}",
+            f"{tr('Taxon', self.lang)}: {self.context.get('species_candidate') or self.taxon_hint or tr('Unknown', self.lang)}",
+            f"{tr('Current Part', self.lang)}: {self.current_part or tr('Unknown', self.lang)}",
+        ]
+        return " | ".join(pieces)
+
+    @staticmethod
+    def _short_text(value, limit=160):
+        text = " ".join(str(value or "").split())
+        if len(text) <= limit:
+            return text
+        return text[: limit - 3] + "..."
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -3309,7 +3732,7 @@ class MainWindow(QMainWindow):
         tool_layout.addWidget(self.radio_scale)
         tool_layout.addStretch(1)
         enh_layout = QHBoxLayout()
-        self.lbl_bright = QLabel("B:")
+        self.lbl_bright = QLabel("Brightness:")
         self.lbl_bright.setObjectName("mutedLabel")
         enh_layout.addWidget(self.lbl_bright)
         self.slider_bright = QSlider(Qt.Horizontal)
@@ -3318,7 +3741,7 @@ class MainWindow(QMainWindow):
         self.slider_bright.setFixedWidth(120)
         self.slider_bright.valueChanged.connect(self.on_enhancement_changed)
         enh_layout.addWidget(self.slider_bright)
-        self.lbl_contrast = QLabel("C:")
+        self.lbl_contrast = QLabel("Contrast:")
         self.lbl_contrast.setObjectName("mutedLabel")
         enh_layout.addWidget(self.lbl_contrast)
         self.slider_contrast = QSlider(Qt.Horizontal)
@@ -3355,12 +3778,12 @@ class MainWindow(QMainWindow):
         self.shortcut_verify = QShortcut(QKeySequence(Qt.Key_Space), self)
         self.shortcut_verify.activated.connect(self.verify_current_image)
 
-        right_scroll = QScrollArea()
-        right_scroll.setObjectName("workbenchInspectorScroll")
-        right_scroll.setWidgetResizable(True)
-        right_scroll.setFrameShape(QFrame.NoFrame)
-        right_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        right_scroll.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Ignored)
+        self.workbench_inspector_scroll = QScrollArea()
+        self.workbench_inspector_scroll.setObjectName("workbenchInspectorScroll")
+        self.workbench_inspector_scroll.setWidgetResizable(True)
+        self.workbench_inspector_scroll.setFrameShape(QFrame.NoFrame)
+        self.workbench_inspector_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.workbench_inspector_scroll.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Ignored)
         right_panel = QWidget()
         right_panel.setMinimumWidth(320)
         right_panel.setObjectName("workbenchInspectorPanel")
@@ -3375,12 +3798,10 @@ class MainWindow(QMainWindow):
         metadata_layout.setSpacing(10)
         self.label_taxonomy = QLabel()
         self.label_taxonomy.setObjectName("HeaderLabel")
-        metadata_layout.addWidget(self.label_taxonomy)
         self.genus_combo = NoWheelComboBox()
         self.genus_combo.setEditable(True)
         self.genus_combo.setInsertPolicy(QComboBox.InsertAlphabetically)
         self.genus_combo.currentTextChanged.connect(self.on_genus_changed)
-        metadata_layout.addWidget(self.genus_combo)
         self.label_structures = QLabel()
         self.label_structures.setObjectName("HeaderLabel")
         metadata_layout.addWidget(self.label_structures)
@@ -3419,11 +3840,30 @@ class MainWindow(QMainWindow):
         self.label_measurements.setObjectName("mutedLabel")
         morpho_layout.addWidget(self.label_measurements)
         metadata_layout.addWidget(self.group_morpho)
+        self.image_taxon_panel = QWidget()
+        self.image_taxon_panel.setObjectName("workbenchImageTaxonPanel")
+        image_taxon_layout = QVBoxLayout(self.image_taxon_panel)
+        image_taxon_layout.setContentsMargins(0, 0, 0, 0)
+        image_taxon_layout.setSpacing(6)
+        image_taxon_layout.addWidget(self.label_taxonomy)
+        image_taxon_layout.addWidget(self.genus_combo)
+        metadata_layout.addWidget(self.image_taxon_panel)
+        self.description_header_panel = QWidget()
+        self.description_header_panel.setObjectName("workbenchDescriptionHeader")
+        description_header = QHBoxLayout(self.description_header_panel)
+        description_header.setContentsMargins(0, 0, 0, 0)
+        description_header.setSpacing(8)
+        self.btn_literature_descriptions = QPushButton()
+        self.btn_literature_descriptions.setObjectName("workbenchLiteratureDescriptionButton")
+        self.btn_literature_descriptions.clicked.connect(self.open_literature_description_dialog)
+        apply_semantic_button_style(self.btn_literature_descriptions, BUTTON_ROLE_NEUTRAL, "padding: 4px 8px;")
+        description_header.addWidget(self.btn_literature_descriptions)
         self.label_description = QLabel()
         self.label_description.setObjectName("HeaderLabel")
-        metadata_layout.addWidget(self.label_description)
+        description_header.addWidget(self.label_description)
+        description_header.addStretch()
+        metadata_layout.addWidget(self.description_header_panel)
         self.desc_box = QTextEdit()
-        self.desc_box.setReadOnly(True)
         self.desc_box.setMaximumHeight(100)
         self.desc_box.setObjectName("LinkedDescriptionBox")
         metadata_layout.addWidget(self.desc_box)
@@ -3441,12 +3881,21 @@ class MainWindow(QMainWindow):
         self.label_model_backend = QLabel()
         self.label_model_backend.setObjectName("mutedLabel")
         ai_layout.addWidget(self.label_model_backend)
-        
+
+        self.parent_annotation_panel = QWidget()
+        apply_surface_role(self.parent_annotation_panel, SURFACE_ROLE_RAISED, "workbenchParentAnnotationPanel")
+        parent_annotation_layout = QVBoxLayout(self.parent_annotation_panel)
+        parent_annotation_layout.setContentsMargins(10, 10, 10, 10)
+        parent_annotation_layout.setSpacing(8)
+        self.label_parent_annotation = QLabel()
+        self.label_parent_annotation.setObjectName("HeaderLabel")
+        parent_annotation_layout.addWidget(self.label_parent_annotation)
+
         # --- Model Selection Area (Decoupled) ---
         self.ai_model_panel = QWidget()
-        apply_surface_role(self.ai_model_panel, SURFACE_ROLE_SUBTLE, "workbenchAIModelPanel")
+        self.ai_model_panel.setObjectName("workbenchAIModelPanel")
         models_form = QGridLayout(self.ai_model_panel)
-        models_form.setContentsMargins(10, 10, 10, 10)
+        models_form.setContentsMargins(0, 0, 0, 0)
         models_form.setHorizontalSpacing(8)
         models_form.setVerticalSpacing(5)
         models_form.setColumnStretch(1, 1)
@@ -3481,12 +3930,12 @@ class MainWindow(QMainWindow):
         apply_semantic_button_style(self.btn_del_segmenter, BUTTON_ROLE_DESTRUCTIVE)
         models_form.addWidget(self.btn_del_segmenter, 1, 2)
         
-        ai_layout.addWidget(self.ai_model_panel)
+        parent_annotation_layout.addWidget(self.ai_model_panel)
 
         self.ai_action_panel = QWidget()
-        apply_surface_role(self.ai_action_panel, SURFACE_ROLE_RAISED, "workbenchAIActionPanel")
+        self.ai_action_panel.setObjectName("workbenchAIActionPanel")
         ai_action_layout = QVBoxLayout(self.ai_action_panel)
-        ai_action_layout.setContentsMargins(10, 10, 10, 10)
+        ai_action_layout.setContentsMargins(0, 0, 0, 0)
         ai_action_layout.setSpacing(8)
 
         btns_layout = QHBoxLayout()
@@ -3529,7 +3978,8 @@ class MainWindow(QMainWindow):
         ai_action_layout.addWidget(self.btn_clear_ai)
         self.progress = QProgressBar()
         ai_action_layout.addWidget(self.progress)
-        ai_layout.addWidget(self.ai_action_panel)
+        parent_annotation_layout.addWidget(self.ai_action_panel)
+        ai_layout.addWidget(self.parent_annotation_panel)
 
         self.blink_refine_panel = QWidget()
         apply_surface_role(self.blink_refine_panel, SURFACE_ROLE_RAISED, "workbenchBlinkRefinePanel")
@@ -3596,8 +4046,8 @@ class MainWindow(QMainWindow):
         logs_layout.addWidget(self.log_console, 1)
         right_layout.addWidget(self.logs_panel, 1)
         right_layout.addStretch(0)
-        right_scroll.setWidget(right_panel)
-        self.workbench_splitter.addWidget(right_scroll)
+        self.workbench_inspector_scroll.setWidget(right_panel)
+        self.workbench_splitter.addWidget(self.workbench_inspector_scroll)
         self.workbench_splitter.setStretchFactor(0, 1)
         self.workbench_splitter.setStretchFactor(1, 5)
         self.workbench_splitter.setStretchFactor(2, 2)
@@ -3626,7 +4076,7 @@ class MainWindow(QMainWindow):
         self.blink_lab.route_registry_refresh_requested.connect(self.refresh_route_table)
         self.route_settings_panel = RouteManagementPanel(self, self.current_lang)
 
-        self.project.create_project(DEFAULT_PROJECT_NAME, ".", template_id=DEFAULT_PROJECT_TEMPLATE_ID)
+        self.project.create_project(DEFAULT_PROJECT_NAME, self._default_startup_project_dir(), template_id=DEFAULT_PROJECT_TEMPLATE_ID)
         self.active_project_entry_path = self.project.current_project_path or ""
         self.active_project_kind = "start"
         if self.config.get("startup_behavior", "start_center") == "continue_last" and self.config.get("last_project_path", ""):
@@ -3786,12 +4236,14 @@ class MainWindow(QMainWindow):
     def _build_start_quick_panel(self):
         panel = QWidget()
         apply_surface_role(panel, SURFACE_ROLE_SUBTLE, "startCenterQuickPanel")
+        panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(16, 12, 16, 12)
         layout.setSpacing(8)
         self.start_recent_label = QLabel()
         self.start_recent_label.setObjectName("mutedLabel")
         self.start_recent_label.setWordWrap(True)
+        self.start_recent_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.btn_continue_last = QPushButton()
         self.btn_continue_last.clicked.connect(self.open_last_project)
         apply_semantic_button_style(self.btn_continue_last, BUTTON_ROLE_COMMIT)
@@ -3810,7 +4262,7 @@ class MainWindow(QMainWindow):
     def _build_project_console(self):
         panel = QWidget()
         apply_surface_role(panel, SURFACE_ROLE_SUBTLE, "startProjectConsole")
-        panel.setMaximumHeight(230)
+        panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(12, 8, 12, 8)
         layout.setSpacing(5)
@@ -3859,6 +4311,7 @@ class MainWindow(QMainWindow):
         value.setObjectName(value_object_name)
         value.setProperty("consoleValue", True)
         value.setWordWrap(True)
+        value.setTextInteractionFlags(Qt.TextSelectableByMouse)
         grid.addWidget(label, row, 0)
         grid.addWidget(value, row, 1)
         return label, value
@@ -3913,10 +4366,14 @@ class MainWindow(QMainWindow):
         )
         last_project = self.config.get("last_project_path", "")
         if last_project and os.path.exists(last_project):
-            self.start_recent_label.setText(f"{tr('Continue last project', self.current_lang)}: {last_project}")
+            self.start_recent_label.setText(
+                f"{tr('Continue last project', self.current_lang)}\n{self._compact_project_path(last_project)}"
+            )
+            self.start_recent_label.setToolTip(os.path.abspath(last_project))
             self.btn_continue_last.setEnabled(True)
         else:
             self.start_recent_label.setText(tr("No recent project", self.current_lang))
+            self.start_recent_label.setToolTip("")
             self.btn_continue_last.setEnabled(False)
         self.btn_continue_last.setText(tr("Continue last project", self.current_lang))
         self.btn_open_any.setText(tr("Open any project", self.current_lang))
@@ -3974,12 +4431,22 @@ class MainWindow(QMainWindow):
         self.start_console_agent_label.setText("Ant-Code")
 
         self.start_console_workflow_value.setText(self._agent_current_workflow_label())
-        self.start_console_project_value.setText(self._start_console_project_summary())
-        self.start_console_images_value.setText(self._start_console_image_summary())
-        self.start_console_tif_value.setText(self._start_console_tif_summary())
-        self.start_console_pdf_value.setText(self._start_console_pdf_summary())
-        self.start_console_agent_value.setText(self._start_console_agent_status())
-        self.start_console_project_value.setToolTip(self._agent_current_project_label())
+        project_summary, project_detail = self._start_console_project_summary()
+        image_summary, image_detail = self._start_console_image_summary()
+        tif_summary, tif_detail = self._start_console_tif_summary()
+        pdf_summary, pdf_detail = self._start_console_pdf_summary()
+        agent_summary = self._start_console_agent_status()
+        self.start_console_project_value.setText(project_summary)
+        self.start_console_images_value.setText(image_summary)
+        self.start_console_tif_value.setText(tif_summary)
+        self.start_console_pdf_value.setText(pdf_summary)
+        self.start_console_agent_value.setText(agent_summary)
+        self.start_console_workflow_value.setToolTip(self._agent_current_workflow_label())
+        self.start_console_project_value.setToolTip(project_detail)
+        self.start_console_images_value.setToolTip(image_detail)
+        self.start_console_tif_value.setToolTip(tif_detail)
+        self.start_console_pdf_value.setToolTip(pdf_detail)
+        self.start_console_agent_value.setToolTip(agent_summary)
         self.start_console_stl_note.setText(
             tr(
                 "STL source stays as exported high-resolution 2D views; TaxaMask does not label 3D meshes.",
@@ -3992,17 +4459,23 @@ class MainWindow(QMainWindow):
         source_kind = getattr(self, "active_project_source_kind", kind)
         if kind == "tif":
             path = getattr(self.tif_project, "current_project_path", "") or ""
-            return tr("TIF project: {0}", self.current_lang).format(self._compact_project_path(path)) if path else tr("No active project", self.current_lang)
+            if path:
+                return tr("TIF project: {0}", self.current_lang).format(self._compact_project_path(path)), os.path.abspath(path)
+            return tr("No active project", self.current_lang), ""
         if kind == "image":
             path = self._active_recent_project_path() or getattr(self.project, "current_project_path", "") or ""
             if source_kind == "stl":
-                return tr("STL rendered-view project: {0}", self.current_lang).format(self._compact_project_path(path)) if path else tr("No active project", self.current_lang)
-            return tr("2D project: {0}", self.current_lang).format(self._compact_project_path(path)) if path else tr("No active project", self.current_lang)
+                if path:
+                    return tr("STL rendered-view project: {0}", self.current_lang).format(self._compact_project_path(path)), os.path.abspath(path)
+                return tr("No active project", self.current_lang), ""
+            if path:
+                return tr("2D project: {0}", self.current_lang).format(self._compact_project_path(path)), os.path.abspath(path)
+            return tr("No active project", self.current_lang), ""
 
         last_project = self.config.get("last_project_path", "") or ""
         if last_project:
-            return tr("Recent project: {0}", self.current_lang).format(self._compact_project_path(last_project))
-        return tr("Repository only; no research project selected", self.current_lang)
+            return tr("Recent project: {0}", self.current_lang).format(self._compact_project_path(last_project)), os.path.abspath(last_project)
+        return tr("Repository only; no research project selected", self.current_lang), REPO_ROOT
 
     def _compact_project_path(self, path):
         text = str(path or "").strip()
@@ -4010,7 +4483,13 @@ class MainWindow(QMainWindow):
             return ""
         name = os.path.basename(os.path.normpath(text))
         parent = os.path.basename(os.path.dirname(os.path.normpath(text)))
-        return f"{parent}/{name}" if parent else name
+        display = f"{parent}/{name}" if parent else name
+        max_chars = 48
+        if len(display) <= max_chars:
+            return display
+        keep_left = 18
+        keep_right = max(12, max_chars - keep_left - 3)
+        return f"{display[:keep_left]}...{display[-keep_right:]}"
 
     def _start_console_image_summary(self):
         images = list((self.project.project_data or {}).get("images", []))
@@ -4024,11 +4503,13 @@ class MainWindow(QMainWindow):
             provenance = self.project.get_image_provenance(image_path)
             if provenance.get("source_type") == "stl_rendered_view":
                 stl_count += 1
-        return tr("{0} image(s), {1} labeled, {2} STL rendered 2D view(s)", self.current_lang).format(
+        summary = tr("{0} image(s), {1} labeled, {2} STL rendered 2D view(s)", self.current_lang).format(
             len(images),
             labeled_count,
             stl_count,
         )
+        detail = tr("2D/STL images", self.current_lang) + f": {len(images)}; labeled: {labeled_count}; STL rendered 2D views: {stl_count}"
+        return summary, detail
 
     def _start_console_tif_summary(self):
         specimens = list((self.tif_project.project_data or {}).get("specimens", []))
@@ -4045,24 +4526,34 @@ class MainWindow(QMainWindow):
                 for specimen in specimens
                 if isinstance(specimen, dict) and (specimen.get("train_ready") or specimen.get("review_status") == "train_ready")
             )
-        return tr("{0} specimen(s), {1} train-ready, {2} with manual_truth", self.current_lang).format(
+        summary = tr("{0} specimen(s), {1} train-ready, {2} with manual_truth", self.current_lang).format(
             len(specimens),
             train_ready_count,
             manual_truth_count,
         )
+        detail = tr("TIF specimens", self.current_lang) + f": {len(specimens)}; train-ready: {train_ready_count}; manual_truth: {manual_truth_count}"
+        return summary, detail
 
     def _start_console_pdf_summary(self):
         skill_path = os.path.join(REPO_ROOT, ".lab-agent", "skills", "taxamask-pdf-evidence", "SKILL.md")
         if not os.path.exists(skill_path):
-            return tr("PDF evidence skill missing", self.current_lang)
+            return tr("PDF evidence skill missing", self.current_lang), skill_path
         candidates = 0
         for image_path in (self.project.project_data or {}).get("images", []):
             provenance = self.project.get_image_provenance(image_path)
-            if provenance.get("source_type") == "pdf_candidate":
+            if self._is_pdf_candidate_provenance(provenance):
                 entry = (self.project.project_data or {}).get("labels", {}).get(image_path, {})
                 if not isinstance(entry, dict) or entry.get("status") != "labeled":
                     candidates += 1
-        return tr("PDF evidence skill ready; {0} review candidate(s)", self.current_lang).format(candidates)
+        summary = tr("PDF evidence skill ready; {0} review candidate(s)", self.current_lang).format(candidates)
+        detail = f"{summary}\n{skill_path}"
+        return summary, detail
+
+    def _is_pdf_candidate_provenance(self, provenance):
+        if not isinstance(provenance, dict):
+            return False
+        source_type = str(provenance.get("source_type", "") or "").strip()
+        return source_type in {"pdf_candidate", "pdf_candidate_crop"}
 
     def _start_console_agent_status(self):
         panel = getattr(self, "agent_panel", None)
@@ -4249,7 +4740,7 @@ class MainWindow(QMainWindow):
 
     def _pdf_agent_prompt(self):
         project_hint = self._agent_current_project_label()
-        pdf_summary = self._start_console_pdf_summary()
+        pdf_summary, _pdf_detail = self._start_console_pdf_summary()
         return (
             "请按 TaxaMask 的 PDF evidence workflow 作为分阶段向导接管一次 PDF 文献处理任务。"
             "这个流程面向各种分类学研究者，不要默认用户研究蚂蚁，也不要默认当前筛选配置或图文提取配置已经合适。\n\n"
@@ -4340,6 +4831,77 @@ class MainWindow(QMainWindow):
         self._refresh_project_bound_views()
         self.tabs.setCurrentWidget(self.tif_workbench)
         self.log(tr("Opened TIF volume workflow.", self.current_lang))
+
+    def _default_outputs_root(self):
+        return os.path.abspath(os.path.join(REPO_ROOT, DEFAULT_OUTPUTS_DIR_NAME))
+
+    def _ensure_default_output_subdir(self, *parts):
+        path = os.path.join(self._default_outputs_root(), *parts)
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def _default_2d_stl_projects_root(self):
+        return self._ensure_default_output_subdir(DEFAULT_2D_STL_PROJECTS_DIR_NAME)
+
+    def _default_tif_projects_root(self):
+        return self._ensure_default_output_subdir(DEFAULT_TIF_PROJECTS_DIR_NAME)
+
+    def _default_startup_project_dir(self):
+        return self._ensure_default_output_subdir(DEFAULT_2D_STL_PROJECTS_DIR_NAME, DEFAULT_STARTUP_PROJECT_DIR_NAME)
+
+    def _default_project_dialog_dir(self, project_kind):
+        if str(project_kind or "").lower() == "tif":
+            return self._default_tif_projects_root()
+        return self._default_2d_stl_projects_root()
+
+    def _current_2d_project_dir(self):
+        project_path = getattr(self.project, "current_project_path", "") or ""
+        if project_path:
+            return os.path.dirname(os.path.abspath(project_path))
+        return self._default_2d_stl_projects_root()
+
+    def _default_2d_export_dir(self):
+        path = os.path.join(self._current_2d_project_dir(), "exports")
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def _default_vlm_preannotation_dir(self):
+        path = os.path.join(self._current_2d_project_dir(), "vlm_preannotation")
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def _default_open_project_dir(self):
+        candidates = [
+            self.config.get("last_project_path", ""),
+            getattr(self, "active_project_entry_path", ""),
+            getattr(self.project, "current_project_path", ""),
+            getattr(self.tif_project, "current_project_path", ""),
+        ]
+        for candidate in candidates:
+            if not candidate:
+                continue
+            path = os.path.abspath(str(candidate))
+            if self._path_is_startup_project(path):
+                continue
+            folder = path if os.path.isdir(path) else os.path.dirname(path)
+            if folder and os.path.isdir(folder) and not self._path_is_inside_program_package(folder):
+                return folder
+        return self._ensure_default_output_subdir()
+
+    def _path_is_startup_project(self, path_text):
+        try:
+            startup_dir = self._default_startup_project_dir()
+            path = os.path.abspath(str(path_text))
+            folder = path if os.path.isdir(path) else os.path.dirname(path)
+            return os.path.commonpath([startup_dir, folder]) == startup_dir
+        except (TypeError, ValueError):
+            return False
+
+    def _path_is_inside_program_package(self, path_text):
+        try:
+            return os.path.commonpath([PACKAGE_DIR, os.path.abspath(str(path_text))]) == PACKAGE_DIR
+        except (TypeError, ValueError):
+            return False
 
     def open_last_project(self):
         last_project = self.config.get("last_project_path", "")
@@ -4987,7 +5549,11 @@ class MainWindow(QMainWindow):
         settings_menu.addAction(tr("TIF Volume Model Settings", self.current_lang), self.open_tif_model_settings)
 
     def new_project(self):
-        d = QFileDialog.getExistingDirectory(self, tr("New Project Directory", self.current_lang))
+        d = QFileDialog.getExistingDirectory(
+            self,
+            tr("New Project Directory", self.current_lang),
+            self._default_project_dialog_dir("image"),
+        )
         if d:
             name, ok = QInputDialog.getText(self, tr("New Project", self.current_lang), tr("Project Name:", self.current_lang))
             if ok and name:
@@ -5005,7 +5571,11 @@ class MainWindow(QMainWindow):
                 self.canvas.load_image("") 
 
     def new_tif_project(self):
-        d = QFileDialog.getExistingDirectory(self, tr("New TIF Project Directory", self.current_lang))
+        d = QFileDialog.getExistingDirectory(
+            self,
+            tr("New TIF Project Directory", self.current_lang),
+            self._default_project_dialog_dir("tif"),
+        )
         if not d:
             return
         name, ok = QInputDialog.getText(self, tr("New TIF Volume Project", self.current_lang), tr("Project Name:", self.current_lang))
@@ -5063,7 +5633,11 @@ class MainWindow(QMainWindow):
     def import_amira_directory_action(self):
         if not self._ensure_tif_project_open():
             return
-        source_dir = QFileDialog.getExistingDirectory(self, tr("Import AMIRA Directory", self.current_lang))
+        source_dir = QFileDialog.getExistingDirectory(
+            self,
+            tr("Import AMIRA Directory", self.current_lang),
+            self.tif_project.project_dir,
+        )
         if not source_dir:
             return
         default_id = os.path.basename(os.path.normpath(source_dir))
@@ -5086,7 +5660,11 @@ class MainWindow(QMainWindow):
         self.log(tr("Imported AMIRA directory for specimen {0}. Report: {1}", self.current_lang).format(specimen_id, report_path))
 
     def import_stl_rendered_views_action(self):
-        source_dir = QFileDialog.getExistingDirectory(self, tr("Import STL Rendered Views to Labeling Workbench", self.current_lang))
+        source_dir = QFileDialog.getExistingDirectory(
+            self,
+            tr("Import STL Rendered Views to Labeling Workbench", self.current_lang),
+            self._current_2d_project_dir(),
+        )
         if not source_dir:
             return
         try:
@@ -5179,7 +5757,12 @@ class MainWindow(QMainWindow):
             return templates[0]
 
     def open_project(self):
-        f, _ = QFileDialog.getOpenFileName(self, tr("Open Project", self.current_lang), "", "JSON (*.json)")
+        f, _ = QFileDialog.getOpenFileName(
+            self,
+            tr("Open Project", self.current_lang),
+            self._default_open_project_dir(),
+            "JSON (*.json)",
+        )
         if f:
             self.open_project_path(f)
 
@@ -5468,7 +6051,7 @@ class MainWindow(QMainWindow):
                     "parent_box": box,
                     "parent_box_source": source,
                     "has_parent_box": bool(box),
-                    "disabled_reason": tr("Select a child structure for Blink refinement.", self.current_lang),
+                    "disabled_reason": tr("Select a child structure for refinement.", self.current_lang),
                 }
             )
             return context
@@ -5501,7 +6084,7 @@ class MainWindow(QMainWindow):
         if not parent_part:
             context["disabled_reason"] = tr("Choose or remember a parent structure for this child first.", self.current_lang)
         elif not context["has_parent_box"]:
-            context["disabled_reason"] = tr("Draw a parent box before Blink refinement.", self.current_lang)
+            context["disabled_reason"] = tr("Draw a parent box before child refinement.", self.current_lang)
         elif context["route_status"] in {"missing", "unappointed", "missing_file"}:
             context["disabled_reason"] = tr("Configure a route expert before automatic child annotation.", self.current_lang)
         elif context["route_status"] == "disabled":
@@ -5770,9 +6353,16 @@ class MainWindow(QMainWindow):
         self.btn_crop.setText(tr("Import & Crop", self.current_lang))
         self.btn_add.setText(tr("+ Add Images", self.current_lang))
         self.label_project_images.setText(tr("PROJECT IMAGES", self.current_lang))
-        self.label_taxonomy.setText(tr("Taxon", self.current_lang))
+        self.label_taxonomy.setText(tr("Current image taxon", self.current_lang))
+        taxon_tooltip = tr(
+            "Per-image taxon metadata used for export and literature search hints. This does not change the structure labels.",
+            self.current_lang,
+        )
+        self.label_taxonomy.setToolTip(taxon_tooltip)
+        self.genus_combo.setToolTip(taxon_tooltip)
         self.label_structures.setText(tr("Structures", self.current_lang))
-        self.label_ai_workflow.setText(tr("AI WORKFLOW", self.current_lang))
+        self.label_ai_workflow.setText(tr("Auto Annotation", self.current_lang))
+        self.label_parent_annotation.setText(tr("Parent-part annotation", self.current_lang))
         backend_label = tr("Built-in Locator + SAM", self.current_lang)
         if self.model_backend == EXTERNAL_BACKEND_ID:
             backend_label = self.external_backend_config.get("display_name") or tr("External Script Backend", self.current_lang)
@@ -5801,11 +6391,19 @@ class MainWindow(QMainWindow):
         self.btn_clear_ai.setText(tr("Clear AI Labels", self.current_lang))
         self.btn_blink_entry.setText(tr("Open in Blink Workbench", self.current_lang))
         self.btn_blink_entry.setVisible(False)
+        if hasattr(self, "btn_literature_descriptions"):
+            self.btn_literature_descriptions.setText(tr("Literature Traits", self.current_lang))
+            self.btn_literature_descriptions.setToolTip(
+                tr(
+                    "Search PDF-extracted taxon/part descriptions linked to the current image and apply one to the current part description box.",
+                    self.current_lang,
+                )
+            )
         self.btn_start_center_from_workbench.setText(tr("Start Center", self.current_lang))
         self.btn_agent_from_workbench.setText(tr("Ask Agent", self.current_lang))
-        self.label_blink_refine.setText(tr("Parent-child refinement / Blink", self.current_lang))
+        self.label_blink_refine.setText(tr("Child-part annotation", self.current_lang))
         self.btn_configure_route_expert.setText(tr("Configure Route Expert", self.current_lang))
-        self.btn_blink_auto_annotate.setText(tr("Auto-annotate child", self.current_lang))
+        self.btn_blink_auto_annotate.setText(tr("Annotate child from existing parent box", self.current_lang))
         self.btn_blink_auto_shrink.setText(tr("Run auto-shrink", self.current_lang))
         self.btn_blink_train_expert.setText(tr("Train current child expert", self.current_lang))
         if hasattr(self, "label_blink_parent_context"):
@@ -5817,8 +6415,8 @@ class MainWindow(QMainWindow):
         self.radio_annotation_box.setText(tr("Annotation Box", self.current_lang))
         self.radio_loose_shrink_box.setText(tr("Loose Shrink Box", self.current_lang))
         self.radio_scale.setText(tr("Scale Tool", self.current_lang))
-        self.lbl_bright.setText(tr("B:", self.current_lang))
-        self.lbl_contrast.setText(tr("C:", self.current_lang))
+        self.lbl_bright.setText(tr("Brightness:", self.current_lang))
+        self.lbl_contrast.setText(tr("Contrast:", self.current_lang))
         self.check_morpho.setText(tr("Enable Morphometrics", self.current_lang))
         self.group_morpho.setTitle(tr("Measurements", self.current_lang))
         self.lbl_locator.setText(tr("Locator:", self.current_lang))
@@ -6208,6 +6806,8 @@ class MainWindow(QMainWindow):
             apply_theme_button_style(self.btn_start_center_from_workbench, BUTTON_ROLE_NEUTRAL, "", self.current_theme)
         if hasattr(self, "btn_agent_from_workbench"):
             apply_theme_button_style(self.btn_agent_from_workbench, BUTTON_ROLE_NEUTRAL, "", self.current_theme)
+        if hasattr(self, "btn_literature_descriptions"):
+            apply_theme_button_style(self.btn_literature_descriptions, BUTTON_ROLE_NEUTRAL, "padding: 4px 8px;", self.current_theme)
         if hasattr(self, "btn_start_ant_code"):
             compact_agent_button = "padding: 5px 10px;"
             apply_theme_button_style(self.btn_start_ant_code, BUTTON_ROLE_RUN, compact_agent_button, self.current_theme)
@@ -6266,7 +6866,39 @@ class MainWindow(QMainWindow):
             if nf:
                 self._flush_pending_project_save()
                 self.project.add_images(nf)
+                crop_records = []
+                if hasattr(dlg, "get_crop_records"):
+                    crop_records = dlg.get_crop_records()
+                self._inherit_crop_provenance(crop_records)
                 self.refresh_file_list()
+
+    def _inherit_crop_provenance(self, crop_records):
+        if not crop_records or not hasattr(self.project, "get_image_provenance"):
+            return
+        changed = False
+        for record in crop_records:
+            if not isinstance(record, dict):
+                continue
+            crop_path = record.get("path")
+            source_image = record.get("source_image")
+            if not crop_path or not source_image:
+                continue
+            parent_provenance = self.project.get_image_provenance(source_image)
+            if not parent_provenance:
+                continue
+            crop_provenance = dict(parent_provenance)
+            parent_source_type = str(parent_provenance.get("source_type", "") or "image").strip() or "image"
+            crop_provenance["source_type"] = "pdf_candidate_crop" if self._is_pdf_candidate_provenance(parent_provenance) else f"{parent_source_type}_crop"
+            crop_provenance["derived_from"] = {
+                "image_path": os.path.abspath(source_image),
+                "crop_index": int(record.get("crop_index", 0) or 0),
+                "crop_box": list(record.get("crop_box", []) or []),
+                "source_size": list(record.get("source_size", []) or []),
+            }
+            self.project.set_image_provenance(crop_path, crop_provenance, save=False)
+            changed = True
+        if changed:
+            self.project.save_project()
 
     def show_file_list_context_menu(self, pos):
         its = self.file_list.selectedItems()
@@ -6522,7 +7154,191 @@ class MainWindow(QMainWindow):
 
     def update_db_description(self, p):
         if p:
-            self.desc_box.setText(self.db.query_trait_description(self.genus_combo.currentText(), p))
+            saved_description = ""
+            if self.current_image and hasattr(self.project, "get_part_description"):
+                saved_description = self.project.get_part_description(self.current_image, p)
+            if saved_description:
+                self.desc_box.setText(saved_description)
+            else:
+                self.desc_box.setText(self.db.query_trait_description(self.genus_combo.currentText(), p))
+
+    def _current_taxon_text(self):
+        try:
+            return self.genus_combo.currentText().strip()
+        except Exception:
+            return ""
+
+    def _literature_source_taxon(self, source_meta):
+        if not isinstance(source_meta, dict):
+            return ""
+        for key in ("taxon_name", "llm_taxon_name", "species_candidate"):
+            value = str(source_meta.get(key) or "").strip()
+            if value and value.lower() not in {"unknown", "unknown taxon", "n/a", "none", "null"}:
+                return value
+        return ""
+
+    def _set_current_image_taxon_from_literature(self, source_meta):
+        taxon = self._literature_source_taxon(source_meta)
+        if not self.current_image or not taxon:
+            return False
+        set_taxon = getattr(self.project, "set_taxon", self.project.set_genus)
+        set_taxon(self.current_image, taxon)
+        if hasattr(self, "genus_combo"):
+            self.genus_combo.blockSignals(True)
+            try:
+                if self.genus_combo.findText(taxon) < 0:
+                    self.genus_combo.addItem(taxon)
+                self.genus_combo.setCurrentText(taxon)
+            finally:
+                self.genus_combo.blockSignals(False)
+        return True
+
+    def _candidate_literature_db_paths(self, provenance):
+        extra_paths = []
+        inferred_db = infer_literature_db_path_from_artifact_image(self.current_image)
+        if inferred_db:
+            extra_paths.append(inferred_db)
+        pdf_widget = getattr(self, "pdf_widget", None)
+        if pdf_widget is not None and hasattr(pdf_widget, "_resolve_extract_db_path"):
+            try:
+                extra_paths.append(pdf_widget._resolve_extract_db_path(pdf_widget.edit_db_path.text()))
+            except Exception:
+                pass
+        return candidate_literature_db_paths(
+            repo_root=REPO_ROOT,
+            provenance=provenance,
+            extra_paths=extra_paths,
+        )
+
+    def _resolve_current_literature_context(self):
+        if not self.current_image:
+            return "", {}, "no_current_image"
+        provenance = {}
+        if hasattr(self.project, "get_image_provenance"):
+            provenance = self.project.get_image_provenance(self.current_image)
+        last_reason = "literature_db_missing"
+        for db_path in self._candidate_literature_db_paths(provenance):
+            if not os.path.exists(db_path):
+                continue
+            trusted_db = self._literature_db_matches_image_source(db_path, provenance)
+            context = resolve_literature_context(
+                db_path,
+                image_path=self.current_image,
+                provenance=provenance,
+                taxon_hint=self._current_taxon_text(),
+                allow_filename_figure_id=trusted_db,
+            )
+            if context.get("available"):
+                return db_path, context, ""
+            last_reason = str(context.get("reason", "") or last_reason)
+        fallback_db = default_literature_db_path(REPO_ROOT)
+        return fallback_db, {}, last_reason
+
+    def _literature_db_matches_image_source(self, db_path, provenance):
+        db_norm = os.path.normcase(os.path.normpath(os.path.abspath(str(db_path or ""))))
+        provenance = provenance if isinstance(provenance, dict) else {}
+        source_db = str(provenance.get("source_db", "") or "").strip()
+        source_ref = provenance.get("source_ref", {})
+        if not isinstance(source_ref, dict):
+            source_ref = {}
+        for value in (source_db, source_ref.get("db_path")):
+            if not value:
+                continue
+            try:
+                candidate = os.path.normcase(os.path.normpath(os.path.abspath(os.path.expanduser(str(value)))))
+            except Exception:
+                continue
+            if candidate == db_norm:
+                return True
+        inferred_db = infer_literature_db_path_from_artifact_image(self.current_image)
+        if inferred_db:
+            inferred_norm = os.path.normcase(os.path.normpath(os.path.abspath(inferred_db)))
+            if inferred_norm == db_norm:
+                return True
+        return False
+
+    def open_literature_description_dialog(self):
+        if not self.current_image:
+            QMessageBox.warning(self, tr("Literature Trait Descriptions", self.current_lang), tr("Please select an image first.", self.current_lang))
+            return
+        current_part = self._current_part_name()
+        if not current_part:
+            QMessageBox.warning(self, tr("Literature Trait Descriptions", self.current_lang), tr("Please select a target part first.", self.current_lang))
+            return
+
+        db_path, context, reason = self._resolve_current_literature_context()
+        if not context:
+            message = tr(
+                "No PDF literature source is linked to the current image. Import images through the PDF candidate workflow or open a project that preserves PDF image provenance.",
+                self.current_lang,
+            )
+            if reason == "literature_db_missing":
+                message = tr("PDF literature database was not found: {0}", self.current_lang).format(db_path)
+            QMessageBox.information(self, tr("Literature Trait Descriptions", self.current_lang), message)
+            return
+
+        dialog = LiteratureDescriptionDialog(
+            db_path=db_path,
+            context=context,
+            image_path=self.current_image,
+            current_part=current_part,
+            taxon_hint=self._current_taxon_text(),
+            parent=self,
+            lang=self.current_lang,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        description_text = dialog.selected_description_text()
+        if not description_text:
+            return
+        source_meta = dialog.selected_source()
+        self._apply_literature_description(
+            current_part,
+            description_text,
+            source_meta,
+            append=(dialog.action_mode == "append"),
+        )
+
+    def _apply_literature_description(self, part_name, description_text, source_meta, append=False):
+        clean_part = str(part_name or "").strip()
+        clean_text = str(description_text or "").strip()
+        if not self.current_image or not clean_part or not clean_text:
+            return
+        existing = self.desc_box.toPlainText().strip()
+        missing_prefix = "No description found for "
+        if append and existing and not existing.startswith(missing_prefix) and clean_text not in existing:
+            final_text = f"{existing}\n\n{clean_text}"
+        else:
+            final_text = clean_text
+        self.desc_box.setText(final_text)
+        self._ensure_workbench_description_visible()
+        set_part_description = getattr(self.project, "set_part_description", None)
+        if callable(set_part_description):
+            set_part_description(self.current_image, clean_part, final_text, source_meta=source_meta, save=False)
+        else:
+            existing_points = self.project.get_labels(self.current_image).get(clean_part, [])
+            self.project.update_label(self.current_image, clean_part, existing_points, final_text, save=False)
+            if source_meta and hasattr(self.project, "set_description_source"):
+                self.project.set_description_source(self.current_image, clean_part, source_meta, save=False)
+        self._set_current_image_taxon_from_literature(source_meta)
+        self._schedule_project_save()
+        self.log(tr("Applied literature description for {0}.", self.current_lang).format(clean_part))
+
+    def _ensure_workbench_description_visible(self):
+        if hasattr(self, "workbench_inspector_scroll"):
+            self.workbench_inspector_scroll.setMinimumWidth(260)
+        if hasattr(self, "workbench_splitter"):
+            sizes = self.workbench_splitter.sizes()
+            if len(sizes) >= 3 and sizes[2] < 180:
+                total = max(sum(sizes), 900)
+                left = sizes[0] if sizes[0] >= 180 else 240
+                right = min(360, max(260, total // 5))
+                center = max(360, total - left - right)
+                self.workbench_splitter.setSizes([left, center, right])
+        if hasattr(self, "desc_box"):
+            if hasattr(self, "workbench_inspector_scroll"):
+                self.workbench_inspector_scroll.ensureWidgetVisible(self.desc_box)
+            self.desc_box.setFocus(Qt.OtherFocusReason)
 
     def on_enhancement_changed(self):
         self.canvas.set_enhancements(self.slider_bright.value(), self.slider_contrast.value() / 10.0)
@@ -6607,7 +7423,7 @@ class MainWindow(QMainWindow):
         self._refresh_blink_refine_state()
 
     def _warn_blink_context(self, message):
-        QMessageBox.information(self, tr("Parent-child refinement / Blink", self.current_lang), message)
+        QMessageBox.information(self, tr("Child-part annotation", self.current_lang), message)
 
     def _active_child_blink_context(self, require_ready=False):
         context = self._refresh_blink_refine_state()
@@ -6615,7 +7431,7 @@ class MainWindow(QMainWindow):
             self._warn_blink_context(tr("Select a child structure with a parent context first.", self.current_lang))
             return None
         if not context.get("has_parent_box"):
-            self._warn_blink_context(tr("Draw a parent box before Blink refinement.", self.current_lang))
+            self._warn_blink_context(tr("Draw a parent box before child refinement.", self.current_lang))
             return None
         if require_ready and not context.get("can_refine"):
             self._warn_blink_context(context.get("disabled_reason") or tr("Configure the current route before continuing.", self.current_lang))
@@ -7012,7 +7828,7 @@ class MainWindow(QMainWindow):
         if project_path:
             base_dir = os.path.join(os.path.dirname(os.path.abspath(project_path)), "vlm_preannotation")
         else:
-            base_dir = os.path.join(REPO_ROOT, "artifacts", "vlm_preannotation")
+            base_dir = self._default_vlm_preannotation_dir()
         os.makedirs(base_dir, exist_ok=True)
         return base_dir
 
@@ -7461,7 +8277,7 @@ class MainWindow(QMainWindow):
             self.inf_thread.start()
 
     def export_dataset(self):
-        dlg = ExportDialog(self, self.current_lang)
+        dlg = ExportDialog(self, self.current_lang, default_dir=self._default_2d_export_dir())
         if dlg.exec():
             self._flush_pending_project_save()
             p, f = dlg.get_path(), dlg.get_format()

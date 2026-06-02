@@ -7,11 +7,15 @@ from PySide6.QtGui import QPixmap, QImage, QIntValidator, QDoubleValidator
 import importlib
 import importlib.util
 from copy import deepcopy
+import base64
 import os
+import struct
 import sys
 import csv
 import sqlite3
 import json
+import zlib
+import requests
 
 from .style import (
     BUTTON_ROLE_COMMIT,
@@ -152,11 +156,24 @@ TRANSLATIONS = {
         "Chat Completions": "Chat Completions",
         "Responses API": "Responses API",
         "Save API Settings": "保存API设置",
+        "Test Text LLM": "测试文本模型",
+        "Test Multimodal LLM": "测试多模态模型",
         "Remember API Key": "记住API密钥",
         "Remember Multimodal API Key": "记住多模态API密钥",
         "API settings saved.": "API设置已保存。",
         "Failed to save API settings: {}": "保存API设置失败: {}",
         "Failed to load API settings: {}": "加载API设置失败: {}",
+        "Connection Test": "连接测试",
+        "Please fill API key, Base URL, and model first.": "请先填写 API 密钥、Base URL 和模型名称。",
+        "Another LLM connection test is already running.": "已有一个 LLM 连接测试正在运行。",
+        "Testing Text LLM connection...": "正在测试文本模型连接...",
+        "Testing Multimodal LLM connection...": "正在测试多模态模型连接...",
+        "Text LLM test passed: {0}": "文本模型测试通过：{0}",
+        "Multimodal LLM test passed: {0}": "多模态模型测试通过：{0}",
+        "Text LLM test failed: {0}": "文本模型测试失败：{0}",
+        "Multimodal LLM test failed: {0}": "多模态模型测试失败：{0}",
+        "Send a tiny text-only request to verify the text model settings before screening PDFs.": "发送一个极小的纯文本请求，在筛选 PDF 前验证文本模型配置。",
+        "Send a tiny generated PNG plus text to verify the vision model settings before extracting figures.": "发送一张极小的程序生成 PNG 和文本，在提取图版前验证视觉模型配置。",
         "PDF Evidence Tools": "PDF 文献证据工具",
         "Agent first: configure keys/models, then adapt PDF screening and figure-review rules to the target taxon.": "先让 Agent 引导配置 key/模型，再按目标类群适配 PDF 筛选和图文复核规则。",
         "Start Center": "启动中心",
@@ -179,8 +196,12 @@ TRANSLATIONS = {
         "Stop Classification": "停止分类",
         "2. Data Extractor (Images & Text)": "2. 数据提取 (图文提取)",
         "Input Folder:": "输入筛选后的文件夹:",
-        "Output DB:": "输出数据库:",
-        "Select DB File": "选择数据库文件",
+        "Result Folder:": "结果文件夹:",
+        "Database File:": "数据库文件:",
+        "Choose Result Folder": "选择结果文件夹",
+        "Select Result Folder": "选择结果文件夹",
+        "Choose a result folder for this extraction run. The database index and the '<database>_v2_artifacts' folder for images, review batches, and raw LLM responses will be saved there.": "选择本次提取的结果文件夹。数据库索引和用于保存图像、复核批次、LLM 原始响应的“<数据库名>_v2_artifacts”文件夹都会保存在这里。",
+        "Database filename for this extraction run. If you omit .db, it will be added automatically.": "本次提取使用的数据库文件名。如果省略 .db，程序会自动补上。",
         "Enable Multimodal Validation (Uses API - Slower but more accurate)": "启用多模态验证 (使用 API - 较慢但更准确)",
         "Poppler: checking...": "Poppler：正在检测...",
         "Poppler: found ({0}) - PDF OCR/image fallback is available.": "Poppler：已找到（{0}）- PDF OCR/图像回退可用。",
@@ -189,7 +210,8 @@ TRANSLATIONS = {
         "Start Extraction Pipeline": "开始提取流程",
         "Stop Extraction": "停止提取",
         "3. Data Utilities": "3. 数据工具",
-        "Browse Database": "浏览数据库",
+        "Open Database File": "打开数据库文件",
+        "Choose an existing .db file to browse.": "选择一个已有 .db 文件进行浏览。",
         "Export PDF Extract Dataset (JSONL)": "导出 PDF 提取数据集（JSONL）",
         "This JSONL contains raw records extracted from PDFs and has not been manually curated.\nUse it for quick model checks, not as a trusted training set.\n\nFor researcher-verified training data, export from the Labeling Workbench.": "该 JSONL 包含从 PDF 自动提取的原始记录，尚未经过人工校核。\n可用于快速检查模型能力，但不应直接视为可信训练集。\n\n如需研究者确认后的训练数据，请改用“标注工作台”导出。",
         "Processing Logs:": "处理日志:",
@@ -204,6 +226,8 @@ TRANSLATIONS = {
         "Process stopped by user.": "用户已停止任务。",
         "Classification Finished.": "分类已完成。",
         "Extraction Pipeline Completed.": "提取流程已完成。",
+        "  > Import-ready accepted figures: {0} -> {1}": "  > 可直接导入的通过图: {0} -> {1}",
+        "  > Needs-review figure copies: {0} -> {1}": "  > 待人工复核图片副本: {0} -> {1}",
         "Advanced Logic Settings": "高级逻辑设置",
         "Advanced Figure Settings": "高级图文方案设置",
         "Advanced Part Description Settings": "高级部位描述方案设置",
@@ -345,6 +369,7 @@ TRANSLATIONS = {
         "  > Target Taxonomic Group: {0}": "  > 目标分类群：{0}",
         "Starting Batch Classification...": "开始批量分类...",
         "  > Resumed interrupted V2 run.": "  > 已恢复中断的 V2 运行。",
+        "  > Existing completed PDF result found; skipped re-extraction.": "  > 检测到该 PDF 已有完整提取结果，已跳过重复提取。",
         "  > Run Output Directory: {0}": "  > 运行输出目录：{0}",
         "  > Run Status: {0}": "  > 运行状态：{0}",
         "  > Partial results were saved to disk.": "  > 部分结果已保存到磁盘。",
@@ -1215,7 +1240,8 @@ class PDFWorker(QThread):
             figure_profile=self.kwargs.get('figure_profile'),
             figure_profile_path=self.kwargs.get('figure_profile_path'),
             part_description_profile=self.kwargs.get('part_description_profile'),
-            part_description_profile_path=self.kwargs.get('part_description_profile_path')
+            part_description_profile_path=self.kwargs.get('part_description_profile_path'),
+            resume_completed_pdfs=self.kwargs.get('resume_completed_pdfs', True),
         )
         self._log_extract_startup_warning(extractor)
         
@@ -1239,6 +1265,8 @@ class PDFWorker(QThread):
             try:
                 res = extractor.extract_from_pdf(pdf_path)
                 stats = res.get('stats', {})
+                if stats.get("resumed_skip"):
+                    self.log_signal.emit(self.tr("  > Existing completed PDF result found; skipped re-extraction."))
                 self.log_signal.emit(
                     self.tr("  > Figures: {0}, Accepted: {1}, Review: {2}").format(
                         stats.get('total_figures', stats.get('total_images', 0)),
@@ -1256,6 +1284,23 @@ class PDFWorker(QThread):
                             stats.get('part_description_profile_name', part_description_profile_name),
                         )
                     )
+                accepted_dir = str(stats.get("accepted_figures_dir", "") or "")
+                accepted_exported = int(stats.get("accepted_exported_figures", 0) or 0)
+                review_exported = int(stats.get("review_exported_figures", 0) or 0)
+                if accepted_dir:
+                    self.log_signal.emit(
+                        self.tr("  > Import-ready accepted figures: {0} -> {1}").format(
+                            accepted_exported,
+                            accepted_dir,
+                        )
+                    )
+                if review_exported:
+                    self.log_signal.emit(
+                        self.tr("  > Needs-review figure copies: {0} -> {1}").format(
+                            review_exported,
+                            stats.get("needs_review_figures_dir", ""),
+                        )
+                    )
                 self._log_extract_pdf_warnings(stats)
             except Exception as e:
                 self.log_signal.emit(self.tr("  > Failed: {0}").format(e))
@@ -1266,7 +1311,278 @@ class PDFWorker(QThread):
     def stop(self):
         self._is_running = False
 
+
+class LLMConnectionTestWorker(QThread):
+    result_signal = Signal(str, bool, str)
+
+    TEST_TIMEOUT_SECONDS = 180
+    TEST_MAX_OUTPUT_TOKENS = 1024
+    TEST_IMAGE_WIDTH = 128
+    TEST_IMAGE_HEIGHT = 96
+
+    def __init__(self, role, config, parent=None):
+        super().__init__(parent)
+        self.role = str(role or "text")
+        self.config = dict(config or {})
+        self.test_image_data_url = self._build_test_image_data_url()
+
+    def run(self):
+        try:
+            protocol = self._call_with_protocol_fallback()
+            self.result_signal.emit(self.role, True, f"protocol={protocol}, model={self.config.get('model', '')}")
+        except Exception as exc:
+            self.result_signal.emit(self.role, False, str(exc))
+
+    def _call_with_protocol_fallback(self):
+        preferred = self._resolve_api_protocol()
+        protocols = [preferred]
+        if str(self.config.get("api_protocol", "auto") or "auto").strip().lower() == "auto":
+            fallback = "responses" if preferred == "chat_completions" else "chat_completions"
+            protocols.append(fallback)
+
+        last_exc = None
+        for index, protocol in enumerate(protocols):
+            try:
+                if protocol == "responses":
+                    self._call_responses()
+                else:
+                    self._call_chat_completions()
+                return protocol
+            except Exception as exc:
+                last_exc = exc
+                detail = str(exc).lower()
+                can_fallback = index < len(protocols) - 1 and any(
+                    token in detail
+                    for token in [
+                        "404",
+                        "400",
+                        "422",
+                        "unsupported",
+                        "not found",
+                        "responses",
+                        "chat/completions",
+                        "empty_chat_completions_test_output",
+                        "empty_responses_test_output",
+                        "truncated_before_final_answer",
+                    ]
+                )
+                if can_fallback:
+                    continue
+                raise
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("llm_connection_test_failed")
+
+    def _headers(self):
+        return {
+            "Authorization": f"Bearer {self.config.get('api_key', '')}",
+            "Content-Type": "application/json",
+        }
+
+    def _base_url(self):
+        base_text = str(self.config.get("base_url", "") or "").strip()
+        for suffix in ["/chat/completions", "/responses"]:
+            if base_text.lower().endswith(suffix):
+                base_text = base_text[: -len(suffix)]
+        return base_text.rstrip("/")
+
+    def _resolve_api_protocol(self):
+        protocol = str(self.config.get("api_protocol", "auto") or "auto").strip().lower()
+        if protocol in {"chat_completions", "responses"}:
+            return protocol
+        model_text = str(self.config.get("model", "") or "").strip().lower()
+        base_text = self._base_url().lower()
+        if "gpt-5" in model_text or ("gmn.chuangzuoli.com" in base_text and "gpt" in model_text):
+            return "responses"
+        return "chat_completions"
+
+    def _text_prompt(self):
+        return "Connection test. Reply exactly: OK"
+
+    @classmethod
+    def _build_test_image_data_url(cls):
+        width = cls.TEST_IMAGE_WIDTH
+        height = cls.TEST_IMAGE_HEIGHT
+        rows = []
+        for y in range(height):
+            row = bytearray()
+            for x in range(width):
+                red, green, blue = 246, 246, 240
+                if 12 <= x <= width - 13 and 12 <= y <= height - 13:
+                    red, green, blue = 236, 239, 232
+                if 22 <= x <= 72 and 24 <= y <= 72:
+                    red, green, blue = 218, 64, 48
+                if (x - 84) * (x - 84) + (y - 46) * (y - 46) <= 20 * 20:
+                    red, green, blue = 42, 112, 204
+                if 0 <= x - y // 2 <= 7 and 18 <= y <= 82:
+                    red, green, blue = 36, 36, 36
+                if x in {10, width - 11} or y in {10, height - 11}:
+                    red, green, blue = 26, 31, 35
+                row.extend((red, green, blue))
+            rows.append(b"\x00" + bytes(row))
+        raw = b"".join(rows)
+
+        def chunk(tag, data):
+            return (
+                struct.pack(">I", len(data))
+                + tag
+                + data
+                + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+            )
+
+        png = (
+            b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw, 9))
+            + chunk(b"IEND", b"")
+        )
+        return "data:image/png;base64," + base64.b64encode(png).decode("ascii")
+
+    def _vision_content_chat(self):
+        return [
+            {"type": "text", "text": "Connection test image. If you can read this image input, reply exactly: OK"},
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": self.test_image_data_url,
+                    "detail": str(self.config.get("image_detail", "auto") or "auto"),
+                },
+            },
+        ]
+
+    def _vision_content_responses(self):
+        return [
+            {"type": "input_text", "text": "Connection test image. If you can read this image input, reply exactly: OK"},
+            {"type": "input_image", "image_url": self.test_image_data_url},
+        ]
+
+    def _call_chat_completions(self):
+        if self.role == "multimodal":
+            user_content = self._vision_content_chat()
+        else:
+            user_content = self._text_prompt()
+        payload = {
+            "model": self.config.get("model", ""),
+            "messages": [
+                {"role": "system", "content": "You are a connection test. Reply with the exact text OK and nothing else."},
+                {"role": "user", "content": user_content},
+            ],
+            "max_tokens": self.TEST_MAX_OUTPUT_TOKENS,
+            "temperature": 0.0,
+        }
+        response = requests.post(
+            f"{self._base_url()}/chat/completions",
+            headers=self._headers(),
+            json=payload,
+            timeout=self.TEST_TIMEOUT_SECONDS,
+        )
+        if response.status_code >= 400:
+            raise RuntimeError(f"HTTP {response.status_code} - chat_completions_error - {response.text[:300]}")
+        body = response.json()
+        text, finish_reason = self._extract_chat_completions_text(body)
+        if not text:
+            if finish_reason == "length":
+                raise ValueError(
+                    "chat_completions_test_output_truncated_before_final_answer "
+                    f"(max_tokens={self.TEST_MAX_OUTPUT_TOKENS}, response={self._json_preview(body)})"
+                )
+            raise ValueError(
+                f"empty_chat_completions_test_output "
+                f"(finish_reason={finish_reason or 'unknown'}, response={self._json_preview(body)})"
+            )
+        return text
+
+    def _call_responses(self):
+        if self.role == "multimodal":
+            user_content = self._vision_content_responses()
+        else:
+            user_content = [{"type": "input_text", "text": self._text_prompt()}]
+        payload = {
+            "model": self.config.get("model", ""),
+            "input": [
+                {"role": "system", "content": [{"type": "input_text", "text": "You are a connection test. Reply with the exact text OK and nothing else."}]},
+                {"role": "user", "content": user_content},
+            ],
+            "max_output_tokens": self.TEST_MAX_OUTPUT_TOKENS,
+            "temperature": 0.0,
+        }
+        response = requests.post(
+            f"{self._base_url()}/responses",
+            headers=self._headers(),
+            json=payload,
+            timeout=self.TEST_TIMEOUT_SECONDS,
+        )
+        if response.status_code >= 400:
+            raise RuntimeError(f"HTTP {response.status_code} - responses_error - {response.text[:300]}")
+        body = response.json()
+        text = self._extract_responses_text(body)
+        if not text:
+            raise ValueError(f"empty_responses_test_output (response={self._json_preview(body)})")
+        return text
+
+    def _extract_chat_completions_text(self, payload):
+        if not isinstance(payload, dict):
+            return "", ""
+        choices = payload.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return "", ""
+        choice = choices[0] if isinstance(choices[0], dict) else {}
+        finish_reason = str(choice.get("finish_reason", "") or "").strip()
+        message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+        content = message.get("content", "")
+        if isinstance(content, str):
+            text = content.strip()
+            if text:
+                return text, finish_reason
+        chunks = []
+        if isinstance(content, list):
+            for item in content:
+                if isinstance(item, str):
+                    chunks.append(item)
+                elif isinstance(item, dict):
+                    text = str(item.get("text", "") or "")
+                    if text:
+                        chunks.append(text)
+        text = "\n".join(chunks).strip()
+        if text:
+            return text, finish_reason
+        reasoning_content = str(message.get("reasoning_content", "") or "").strip()
+        if reasoning_content:
+            return reasoning_content, finish_reason
+        return "", finish_reason
+
+    def _json_preview(self, payload):
+        try:
+            return json.dumps(payload, ensure_ascii=False)[:300]
+        except Exception:
+            return str(payload)[:300]
+
+    def _extract_responses_text(self, payload):
+        if isinstance(payload, dict):
+            output_text = str(payload.get("output_text", "") or "").strip()
+            if output_text:
+                return output_text
+            output_items = payload.get("output")
+        else:
+            return ""
+        chunks = []
+        if isinstance(output_items, list):
+            for item in output_items:
+                content_items = item.get("content") if isinstance(item, dict) else None
+                if not isinstance(content_items, list):
+                    continue
+                for content_item in content_items:
+                    if not isinstance(content_item, dict):
+                        continue
+                    text = str(content_item.get("text", "") or "")
+                    if text:
+                        chunks.append(text)
+        return "\n".join(chunks).strip()
+
+
 class PdfProcessingWidget(QWidget):
+    DEFAULT_EXTRACT_DB_NAME = "taxamask_literature.db"
+
     start_center_requested = Signal()
     agent_requested = Signal(dict)
 
@@ -1295,10 +1611,11 @@ class PdfProcessingWidget(QWidget):
         self.current_part_description_profile_name = part_description_profile_display_name(self.part_description_profile)
         self.current_part_description_profile_path = ""
         self.advanced_config_visible = False
+        self.worker = None
+        self.llm_test_worker = None
         
         self.init_ui()
         self.load_api_settings()
-        self.worker = None
         self.refresh_profile_list()
         self.refresh_figure_profile_list()
         self.refresh_part_description_profile_list()
@@ -1383,8 +1700,11 @@ class PdfProcessingWidget(QWidget):
             self.log(self.tr("Failed to load API settings: {}").format(exc))
 
     def save_api_settings(self):
+        if self.check_mllm_same_as_text.isChecked():
+            self._sync_mllm_controls_from_text()
         remember_key = self.chk_remember_api_key.isChecked()
         remember_mllm_key = self.chk_remember_mllm_api_key.isChecked()
+        use_same_mllm = self.check_mllm_same_as_text.isChecked()
         payload = {
             "schema_version": "taxamask-api-runtime-settings-v2",
             "text_llm": {
@@ -1395,13 +1715,13 @@ class PdfProcessingWidget(QWidget):
                 "api_key": self.edit_api_key.text().strip() if remember_key else "",
             },
             "multimodal_llm": {
-                "use_same_as_text": self.check_mllm_same_as_text.isChecked(),
-                "base_url": self.edit_mllm_base_url.text().strip(),
-                "model": self.edit_mllm_model.text().strip(),
-                "api_protocol": self.combo_mllm_api_protocol.currentData() or "auto",
+                "use_same_as_text": use_same_mllm,
+                "base_url": "" if use_same_mllm else self.edit_mllm_base_url.text().strip(),
+                "model": "" if use_same_mllm else self.edit_mllm_model.text().strip(),
+                "api_protocol": "auto" if use_same_mllm else self.combo_mllm_api_protocol.currentData() or "auto",
                 "image_detail": self.combo_mllm_image_detail.currentData() or "auto",
-                "remember_api_key": remember_mllm_key,
-                "api_key": self.edit_mllm_api_key.text().strip() if remember_mllm_key else "",
+                "remember_api_key": False if use_same_mllm else remember_mllm_key,
+                "api_key": "" if use_same_mllm or not remember_mllm_key else self.edit_mllm_api_key.text().strip(),
             },
             "base_url": self.edit_base_url.text().strip(),
             "model": self.edit_model.text().strip(),
@@ -1420,8 +1740,22 @@ class PdfProcessingWidget(QWidget):
         except Exception as exc:
             QMessageBox.warning(self, self.tr("Error"), self.tr("Failed to save API settings: {}").format(exc))
 
+    def _current_text_api_settings(self):
+        return {
+            "api_key": self.edit_api_key.text().strip(),
+            "base_url": self.edit_base_url.text().strip(),
+            "model": self.edit_model.text().strip(),
+            "api_protocol": self.combo_api_protocol.currentData() or "auto",
+        }
+
+    def _sync_mllm_controls_from_text_if_needed(self):
+        if self.check_mllm_same_as_text.isChecked():
+            self._sync_mllm_controls_from_text()
+
     def update_mllm_api_controls_enabled(self):
         use_same = self.check_mllm_same_as_text.isChecked()
+        if use_same:
+            self._sync_mllm_controls_from_text()
         for widget in [
             self.edit_mllm_api_key,
             self.edit_mllm_base_url,
@@ -1431,8 +1765,23 @@ class PdfProcessingWidget(QWidget):
         ]:
             widget.setEnabled(not use_same)
         self.combo_mllm_image_detail.setEnabled(True)
+        self._refresh_llm_test_buttons()
+
+    def _sync_mllm_controls_from_text(self):
+        if not hasattr(self, "edit_mllm_base_url"):
+            return
+        self.edit_mllm_api_key.setText(self.edit_api_key.text())
+        self.edit_mllm_base_url.setText(self.edit_base_url.text())
+        self.edit_mllm_model.setText(self.edit_model.text())
+        protocol = self.combo_api_protocol.currentData() or "auto"
+        protocol_index = self.combo_mllm_api_protocol.findData(protocol)
+        if protocol_index >= 0:
+            self.combo_mllm_api_protocol.setCurrentIndex(protocol_index)
+        self.chk_remember_mllm_api_key.setChecked(self.chk_remember_api_key.isChecked())
 
     def _current_multimodal_api_settings(self):
+        if self.check_mllm_same_as_text.isChecked():
+            self._sync_mllm_controls_from_text()
         if self.check_mllm_same_as_text.isChecked():
             return {
                 "api_key": self.edit_api_key.text().strip(),
@@ -1448,6 +1797,81 @@ class PdfProcessingWidget(QWidget):
             "api_protocol": self.combo_mllm_api_protocol.currentData() or "auto",
             "image_detail": self.combo_mllm_image_detail.currentData() or "auto",
         }
+
+    def _api_test_config_error(self, config):
+        if not config.get("api_key") or not config.get("base_url") or not config.get("model"):
+            return self.tr("Please fill API key, Base URL, and model first.")
+        return ""
+
+    def _refresh_llm_test_buttons(self):
+        llm_worker = getattr(self, "llm_test_worker", None)
+        task_worker = getattr(self, "worker", None)
+        test_running = bool(llm_worker and llm_worker.isRunning())
+        task_running = bool(task_worker and task_worker.isRunning())
+        enabled = not test_running and not task_running
+        if hasattr(self, "btn_test_text_llm"):
+            self.btn_test_text_llm.setEnabled(enabled)
+        if hasattr(self, "btn_test_mllm"):
+            self.btn_test_mllm.setEnabled(enabled)
+        if hasattr(self, "btn_run_classify") and not task_running:
+            self.btn_run_classify.setEnabled(not test_running)
+        if hasattr(self, "btn_run_extract") and not task_running:
+            self.btn_run_extract.setEnabled(not test_running)
+        if hasattr(self, "btn_restore_interrupted_run") and not task_running:
+            self.btn_restore_interrupted_run.setEnabled(not test_running)
+
+    def test_text_llm_connection(self):
+        config = self._current_text_api_settings()
+        error = self._api_test_config_error(config)
+        if error:
+            QMessageBox.warning(self, self.tr("Connection Test"), error)
+            return
+        self._start_llm_connection_test("text", config)
+
+    def test_multimodal_llm_connection(self):
+        config = self._current_multimodal_api_settings()
+        error = self._api_test_config_error(config)
+        if error:
+            QMessageBox.warning(self, self.tr("Connection Test"), error)
+            return
+        self._start_llm_connection_test("multimodal", config)
+
+    def _start_llm_connection_test(self, role, config):
+        if self.llm_test_worker and self.llm_test_worker.isRunning():
+            QMessageBox.information(self, self.tr("Connection Test"), self.tr("Another LLM connection test is already running."))
+            return
+        if role == "multimodal":
+            self.log(self.tr("Testing Multimodal LLM connection..."))
+        else:
+            self.log(self.tr("Testing Text LLM connection..."))
+        self.llm_test_worker = LLMConnectionTestWorker(role, config, self)
+        self.llm_test_worker.result_signal.connect(self._on_llm_connection_test_result)
+        self.llm_test_worker.finished.connect(self._refresh_llm_test_buttons)
+        self.btn_test_text_llm.setEnabled(False)
+        self.btn_test_mllm.setEnabled(False)
+        self.btn_run_classify.setEnabled(False)
+        self.btn_run_extract.setEnabled(False)
+        self.btn_restore_interrupted_run.setEnabled(False)
+        self.llm_test_worker.start()
+
+    def _on_llm_connection_test_result(self, role, ok, detail):
+        if role == "multimodal":
+            message = (
+                self.tr("Multimodal LLM test passed: {0}").format(detail)
+                if ok
+                else self.tr("Multimodal LLM test failed: {0}").format(detail)
+            )
+        else:
+            message = (
+                self.tr("Text LLM test passed: {0}").format(detail)
+                if ok
+                else self.tr("Text LLM test failed: {0}").format(detail)
+            )
+        self.log(message)
+        if ok:
+            QMessageBox.information(self, self.tr("Connection Test"), message)
+        else:
+            QMessageBox.warning(self, self.tr("Connection Test"), message)
 
     def _load_json_dict_file(self, path):
         if not os.path.exists(path):
@@ -1712,9 +2136,9 @@ class PdfProcessingWidget(QWidget):
         except (TypeError, ValueError):
             llm_batch_max_tokens = 12000
         try:
-            llm_timeout = max(30, int(self.screener_config.get("llm_request_timeout_seconds", 240)))
+            llm_timeout = max(30, int(self.screener_config.get("llm_request_timeout_seconds", 180)))
         except (TypeError, ValueError):
-            llm_timeout = 240
+            llm_timeout = 180
         split_failed_batches = bool(self.screener_config.get("split_failed_batches", True))
         resume_runs = bool(self.screener_config.get("resume_interrupted_runs", True))
         isolate_runs = bool(self.screener_config.get("isolate_v2_runs", True))
@@ -1996,6 +2420,42 @@ class PdfProcessingWidget(QWidget):
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
         outer_layout.setSpacing(0)
+
+        self.workbench_header = QWidget()
+        apply_surface_role(self.workbench_header, SURFACE_ROLE_SUBTLE, "pdfWorkbenchHeader")
+        header_layout = QHBoxLayout(self.workbench_header)
+        header_layout.setContentsMargins(12, 10, 12, 10)
+        header_layout.setSpacing(10)
+        header_text_layout = QVBoxLayout()
+        header_text_layout.setContentsMargins(0, 0, 0, 0)
+        header_text_layout.setSpacing(2)
+        self.lbl_workbench_title = QLabel()
+        self.lbl_workbench_title.setObjectName("pdfWorkbenchTitle")
+        self.lbl_workbench_hint = QLabel()
+        self.lbl_workbench_hint.setObjectName("pdfWorkbenchHint")
+        self.lbl_workbench_hint.setWordWrap(True)
+        header_text_layout.addWidget(self.lbl_workbench_title)
+        header_text_layout.addWidget(self.lbl_workbench_hint)
+        header_layout.addLayout(header_text_layout, 1)
+        self.btn_start_center = QPushButton()
+        self.btn_start_center.setObjectName("pdfStartCenterButton")
+        self.btn_start_center.clicked.connect(self.start_center_requested.emit)
+        self.btn_ask_agent = QPushButton()
+        self.btn_ask_agent.setObjectName("pdfAskAgentButton")
+        self.btn_ask_agent.clicked.connect(lambda: self.agent_requested.emit(self.get_agent_context()))
+        self.btn_toggle_advanced = QPushButton()
+        self.btn_toggle_advanced.setObjectName("pdfToggleAdvancedButton")
+        self.btn_toggle_advanced.setCheckable(True)
+        self.btn_toggle_advanced.setChecked(self.advanced_config_visible)
+        self.btn_toggle_advanced.clicked.connect(self.toggle_advanced_config)
+        apply_semantic_button_style(self.btn_start_center, BUTTON_ROLE_NEUTRAL)
+        apply_semantic_button_style(self.btn_ask_agent, BUTTON_ROLE_COMMIT)
+        apply_semantic_button_style(self.btn_toggle_advanced, BUTTON_ROLE_NEUTRAL)
+        header_layout.addWidget(self.btn_start_center)
+        header_layout.addWidget(self.btn_ask_agent)
+        header_layout.addWidget(self.btn_toggle_advanced)
+        outer_layout.addWidget(self.workbench_header, 0)
+
         self.main_scroll = QScrollArea()
         self.main_scroll.setWidgetResizable(True)
         self.main_scroll.setObjectName("pdfProcessingScrollArea")
@@ -2038,6 +2498,10 @@ class PdfProcessingWidget(QWidget):
         self.combo_api_protocol.addItem(self.tr("Auto (Recommended)"), "auto")
         self.combo_api_protocol.addItem(self.tr("Chat Completions"), "chat_completions")
         self.combo_api_protocol.addItem(self.tr("Responses API"), "responses")
+        self.edit_api_key.textChanged.connect(lambda _text: self._sync_mllm_controls_from_text_if_needed())
+        self.edit_base_url.textChanged.connect(lambda _text: self._sync_mllm_controls_from_text_if_needed())
+        self.edit_model.textChanged.connect(lambda _text: self._sync_mllm_controls_from_text_if_needed())
+        self.combo_api_protocol.currentIndexChanged.connect(lambda _index: self._sync_mllm_controls_from_text_if_needed())
         for control in (self.edit_api_key, self.edit_base_url, self.edit_model, self.combo_api_protocol):
             control.setMinimumHeight(30)
         
@@ -2054,6 +2518,10 @@ class PdfProcessingWidget(QWidget):
         api_grid.addWidget(self.edit_model, 1, 1)
         api_grid.addWidget(self.lbl_api_protocol, 1, 2)
         api_grid.addWidget(self.combo_api_protocol, 1, 3)
+        self.btn_test_text_llm = QPushButton()
+        self.btn_test_text_llm.clicked.connect(self.test_text_llm_connection)
+        apply_semantic_button_style(self.btn_test_text_llm, BUTTON_ROLE_NEUTRAL, "padding: 5px;")
+        api_grid.addWidget(self.btn_test_text_llm, 2, 3)
         api_grid.setColumnStretch(1, 1)
         api_grid.setColumnStretch(3, 1)
         api_panel_layout.addWidget(self.text_llm_group)
@@ -2108,6 +2576,10 @@ class PdfProcessingWidget(QWidget):
         mllm_grid.addWidget(self.combo_mllm_api_protocol, 2, 3)
         mllm_grid.addWidget(self.lbl_mllm_image_detail, 3, 0)
         mllm_grid.addWidget(self.combo_mllm_image_detail, 3, 1)
+        self.btn_test_mllm = QPushButton()
+        self.btn_test_mllm.clicked.connect(self.test_multimodal_llm_connection)
+        apply_semantic_button_style(self.btn_test_mllm, BUTTON_ROLE_NEUTRAL, "padding: 5px;")
+        mllm_grid.addWidget(self.btn_test_mllm, 3, 3)
         mllm_grid.setColumnStretch(1, 1)
         mllm_grid.setColumnStretch(3, 1)
         api_panel_layout.addWidget(self.mllm_group)
@@ -2115,6 +2587,7 @@ class PdfProcessingWidget(QWidget):
         api_action_layout = QHBoxLayout()
         self.chk_remember_api_key = QCheckBox()
         self.chk_remember_api_key.setChecked(False)
+        self.chk_remember_api_key.toggled.connect(lambda _checked: self._sync_mllm_controls_from_text_if_needed())
         self.chk_remember_mllm_api_key = QCheckBox()
         self.chk_remember_mllm_api_key.setChecked(False)
         self.btn_save_api_settings = QPushButton()
@@ -2206,41 +2679,6 @@ class PdfProcessingWidget(QWidget):
         form_layout.addWidget(self.profile_panel, 0)
         
         layout.addWidget(self.config_group, 0)
-
-        self.workbench_header = QWidget()
-        apply_surface_role(self.workbench_header, SURFACE_ROLE_SUBTLE, "pdfWorkbenchHeader")
-        header_layout = QHBoxLayout(self.workbench_header)
-        header_layout.setContentsMargins(12, 10, 12, 10)
-        header_layout.setSpacing(10)
-        header_text_layout = QVBoxLayout()
-        header_text_layout.setContentsMargins(0, 0, 0, 0)
-        header_text_layout.setSpacing(2)
-        self.lbl_workbench_title = QLabel()
-        self.lbl_workbench_title.setObjectName("pdfWorkbenchTitle")
-        self.lbl_workbench_hint = QLabel()
-        self.lbl_workbench_hint.setObjectName("pdfWorkbenchHint")
-        self.lbl_workbench_hint.setWordWrap(True)
-        header_text_layout.addWidget(self.lbl_workbench_title)
-        header_text_layout.addWidget(self.lbl_workbench_hint)
-        header_layout.addLayout(header_text_layout, 1)
-        self.btn_start_center = QPushButton()
-        self.btn_start_center.setObjectName("pdfStartCenterButton")
-        self.btn_start_center.clicked.connect(self.start_center_requested.emit)
-        self.btn_ask_agent = QPushButton()
-        self.btn_ask_agent.setObjectName("pdfAskAgentButton")
-        self.btn_ask_agent.clicked.connect(lambda: self.agent_requested.emit(self.get_agent_context()))
-        self.btn_toggle_advanced = QPushButton()
-        self.btn_toggle_advanced.setObjectName("pdfToggleAdvancedButton")
-        self.btn_toggle_advanced.setCheckable(True)
-        self.btn_toggle_advanced.setChecked(self.advanced_config_visible)
-        self.btn_toggle_advanced.clicked.connect(self.toggle_advanced_config)
-        apply_semantic_button_style(self.btn_start_center, BUTTON_ROLE_NEUTRAL)
-        apply_semantic_button_style(self.btn_ask_agent, BUTTON_ROLE_COMMIT)
-        apply_semantic_button_style(self.btn_toggle_advanced, BUTTON_ROLE_NEUTRAL)
-        header_layout.addWidget(self.btn_start_center)
-        header_layout.addWidget(self.btn_ask_agent)
-        header_layout.addWidget(self.btn_toggle_advanced)
-        layout.addWidget(self.workbench_header, 0)
         
         # --- Task Tabs ---
         self.tabs = QTabWidget()
@@ -2335,7 +2773,7 @@ class PdfProcessingWidget(QWidget):
         self.edit_llm_batch_tokens.setMaximumWidth(80)
 
         self.lbl_llm_timeout = QLabel()
-        self.edit_llm_timeout = QLineEdit("240")
+        self.edit_llm_timeout = QLineEdit("180")
         self.edit_llm_timeout.setValidator(QIntValidator(30, 7200, self))
         self.edit_llm_timeout.setMaximumWidth(80)
 
@@ -2436,15 +2874,22 @@ class PdfProcessingWidget(QWidget):
         extract_input_layout.addLayout(h3)
         
         h4 = QHBoxLayout()
-        self.edit_db_path = QLineEdit("taxamask_literature.db")
+        self.edit_db_path = QLineEdit("")
         self.btn_db = QPushButton()
-        self.btn_db.clicked.connect(self.browse_save_db)
+        self.btn_db.clicked.connect(self.browse_result_folder)
         apply_semantic_button_style(self.btn_db, BUTTON_ROLE_NEUTRAL)
         self.lbl_ext_db = QLabel()
         h4.addWidget(self.lbl_ext_db)
         h4.addWidget(self.edit_db_path)
         h4.addWidget(self.btn_db)
         extract_input_layout.addLayout(h4)
+
+        h4_db_name = QHBoxLayout()
+        self.edit_db_name = QLineEdit(self.DEFAULT_EXTRACT_DB_NAME)
+        self.lbl_ext_db_name = QLabel()
+        h4_db_name.addWidget(self.lbl_ext_db_name)
+        h4_db_name.addWidget(self.edit_db_name)
+        extract_input_layout.addLayout(h4_db_name)
         
         self.check_mllm = QCheckBox()
         extract_input_layout.addWidget(self.check_mllm)
@@ -2522,7 +2967,7 @@ class PdfProcessingWidget(QWidget):
         feedback_layout.addWidget(self.log_area, 1)
         layout.addWidget(self.feedback_panel, 1)
         self.main_scroll.setWidget(scroll_content)
-        outer_layout.addWidget(self.main_scroll)
+        outer_layout.addWidget(self.main_scroll, 1)
 
     def retranslate_ui(self):
         """Update all text labels based on current language"""
@@ -2556,6 +3001,14 @@ class PdfProcessingWidget(QWidget):
         self.edit_mllm_model.setPlaceholderText(self.tr("Vision Model Name"))
         self.chk_remember_api_key.setText(self.tr("Remember API Key"))
         self.chk_remember_mllm_api_key.setText(self.tr("Remember Multimodal API Key"))
+        self.btn_test_text_llm.setText(self.tr("Test Text LLM"))
+        self.btn_test_text_llm.setToolTip(
+            self.tr("Send a tiny text-only request to verify the text model settings before screening PDFs.")
+        )
+        self.btn_test_mllm.setText(self.tr("Test Multimodal LLM"))
+        self.btn_test_mllm.setToolTip(
+            self.tr("Send a tiny generated PNG plus text to verify the vision model settings before extracting figures.")
+        )
         self.btn_save_api_settings.setText(self.tr("Save API Settings"))
         self.lbl_workbench_title.setText(self.tr("PDF Evidence Tools"))
         self.lbl_workbench_hint.setText(
@@ -2611,15 +3064,22 @@ class PdfProcessingWidget(QWidget):
         self.lbl_ext_src.setText(self.tr("Input Folder:"))
         self.edit_ext_src.setPlaceholderText(self.tr("Folder with 'New Species' PDFs..."))
         self.btn_ext_src.setText(self.tr("Browse"))
-        self.lbl_ext_db.setText(self.tr("Output DB:"))
-        self.btn_db.setText(self.tr("Select DB File"))
+        self.lbl_ext_db.setText(self.tr("Result Folder:"))
+        self.edit_db_path.setPlaceholderText(self.tr("Choose a result folder for this extraction run. The database index and the '<database>_v2_artifacts' folder for images, review batches, and raw LLM responses will be saved there."))
+        self.edit_db_path.setToolTip(self.tr("Choose a result folder for this extraction run. The database index and the '<database>_v2_artifacts' folder for images, review batches, and raw LLM responses will be saved there."))
+        self.btn_db.setText(self.tr("Choose Result Folder"))
+        self.btn_db.setToolTip(self.tr("Choose a result folder for this extraction run. The database index and the '<database>_v2_artifacts' folder for images, review batches, and raw LLM responses will be saved there."))
+        self.lbl_ext_db_name.setText(self.tr("Database File:"))
+        self.edit_db_name.setPlaceholderText(self.DEFAULT_EXTRACT_DB_NAME)
+        self.edit_db_name.setToolTip(self.tr("Database filename for this extraction run. If you omit .db, it will be added automatically."))
         self.check_mllm.setText(self.tr("Enable Multimodal Validation (Uses API - Slower but more accurate)"))
         self.refresh_poppler_status()
         self.btn_run_extract.setText(self.tr("Start Extraction Pipeline"))
         self.btn_stop_extract.setText(self.tr("Stop Extraction"))
         
         self.util_group.setTitle(self.tr("3. Data Utilities"))
-        self.btn_browse_db.setText(self.tr("Browse Database"))
+        self.btn_browse_db.setText(self.tr("Open Database File"))
+        self.btn_browse_db.setToolTip(self.tr("Choose an existing .db file to browse."))
         self.btn_export_jsonl.setText(self.tr("Export PDF Extract Dataset (JSONL)"))
         
         self.lbl_logs.setText(self.tr("Processing Logs:"))
@@ -2699,6 +3159,7 @@ class PdfProcessingWidget(QWidget):
             return ""
 
     def get_agent_context(self):
+        multimodal_settings = self._current_multimodal_api_settings()
         recent_log = ""
         if hasattr(self, "log_area"):
             recent_log = "\n".join(self.log_area.toPlainText().splitlines()[-6:])
@@ -2721,22 +3182,16 @@ class PdfProcessingWidget(QWidget):
             "text_llm_model": self._safe_text(getattr(self, "edit_model", None)),
             "text_llm_api_protocol": self._safe_current_data(getattr(self, "combo_api_protocol", None)),
             "multimodal_llm_uses_text_provider": "yes" if getattr(self, "check_mllm_same_as_text", None) is not None and self.check_mllm_same_as_text.isChecked() else "no",
-            "multimodal_llm_key_configured": "yes" if (
-                getattr(self, "check_mllm_same_as_text", None) is not None
-                and self.check_mllm_same_as_text.isChecked()
-                and self._safe_text(getattr(self, "edit_api_key", None))
-            ) or self._safe_text(getattr(self, "edit_mllm_api_key", None)) else "no",
-            "multimodal_llm_base_url_configured": "yes" if (
-                getattr(self, "check_mllm_same_as_text", None) is not None
-                and self.check_mllm_same_as_text.isChecked()
-                and self._safe_text(getattr(self, "edit_base_url", None))
-            ) or self._safe_text(getattr(self, "edit_mllm_base_url", None)) else "no",
-            "multimodal_llm_model": self._safe_text(getattr(self, "edit_model", None)) if getattr(self, "check_mllm_same_as_text", None) is not None and self.check_mllm_same_as_text.isChecked() else self._safe_text(getattr(self, "edit_mllm_model", None)),
-            "multimodal_llm_api_protocol": self._safe_current_data(getattr(self, "combo_mllm_api_protocol", None)),
+            "multimodal_llm_key_configured": "yes" if multimodal_settings.get("api_key") else "no",
+            "multimodal_llm_base_url_configured": "yes" if multimodal_settings.get("base_url") else "no",
+            "multimodal_llm_model": multimodal_settings.get("model", ""),
+            "multimodal_llm_api_protocol": multimodal_settings.get("api_protocol", "auto"),
             "pdf_source_dir": self._safe_text(getattr(self, "edit_src_folder", None)),
             "screening_output_dir": self._safe_text(getattr(self, "edit_out_folder", None)),
             "extract_input_dir": self._safe_text(getattr(self, "edit_ext_src", None)),
-            "extract_db_path": self._safe_text(getattr(self, "edit_db_path", None)),
+            "extract_result_folder": self._safe_text(getattr(self, "edit_db_path", None)),
+            "extract_db_name": self._extract_db_name(),
+            "extract_db_path": self._resolve_extract_db_path(self._safe_text(getattr(self, "edit_db_path", None))),
             "multimodal_enabled": "yes" if getattr(self, "check_mllm", None) is not None and self.check_mllm.isChecked() else "no",
             "recent_log_excerpt": recent_log,
         }
@@ -2763,6 +3218,8 @@ class PdfProcessingWidget(QWidget):
         self.lbl_workbench_title.setStyleSheet(f"color: {c['text_main']}; font-weight: 700; font-size: 12pt;")
         self.lbl_workbench_hint.setStyleSheet(f"color: {c['text_soft']};")
         apply_theme_button_style(self.btn_save_api_settings, BUTTON_ROLE_COMMIT, "padding: 5px;", theme)
+        apply_theme_button_style(self.btn_test_text_llm, BUTTON_ROLE_NEUTRAL, "padding: 5px;", theme)
+        apply_theme_button_style(self.btn_test_mllm, BUTTON_ROLE_NEUTRAL, "padding: 5px;", theme)
         apply_theme_button_style(self.btn_start_center, BUTTON_ROLE_NEUTRAL, "", theme)
         apply_theme_button_style(self.btn_ask_agent, BUTTON_ROLE_COMMIT, "", theme)
         apply_theme_button_style(self.btn_toggle_advanced, BUTTON_ROLE_NEUTRAL, "", theme)
@@ -2806,9 +3263,74 @@ class PdfProcessingWidget(QWidget):
         d = QFileDialog.getExistingDirectory(self, self.tr("Select Directory"))
         if d: line_edit.setText(d)
 
-    def browse_save_db(self):
-        f, _ = QFileDialog.getSaveFileName(self, self.tr("Select Database File"), "", "SQLite DB (*.db)")
-        if f: self.edit_db_path.setText(f)
+    def _default_outputs_root(self) -> str:
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        return os.path.join(repo_root, "TaxaMask_outputs")
+
+    def _default_extract_result_dir(self) -> str:
+        for widget_name in ("edit_out_folder", "edit_ext_src"):
+            widget = getattr(self, widget_name, None)
+            path_text = self._safe_text(widget)
+            if path_text:
+                path_text = os.path.abspath(os.path.expanduser(path_text))
+                if os.path.isdir(path_text) and not self._path_is_inside_program_package(path_text):
+                    return path_text
+                parent = os.path.dirname(path_text)
+                if parent and os.path.isdir(parent) and not self._path_is_inside_program_package(parent):
+                    return parent
+        return os.path.join(self._default_outputs_root(), "pdf_extraction")
+
+    def _path_is_inside_program_package(self, path_text: str) -> bool:
+        try:
+            package_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+            return os.path.commonpath([package_dir, os.path.abspath(path_text)]) == package_dir
+        except ValueError:
+            return False
+
+    def _extract_db_name(self) -> str:
+        db_name = self._safe_text(getattr(self, "edit_db_name", None))
+        if not db_name:
+            db_name = self.DEFAULT_EXTRACT_DB_NAME
+        db_name = os.path.basename(os.path.expanduser(db_name.strip()))
+        if not db_name:
+            db_name = self.DEFAULT_EXTRACT_DB_NAME
+        if not db_name.lower().endswith(".db"):
+            db_name = f"{db_name}.db"
+        return db_name
+
+    def _resolve_extract_db_path(self, value: str = "") -> str:
+        raw_text = str(value or "").strip()
+        if not raw_text:
+            base_dir = self._default_extract_result_dir()
+            return os.path.abspath(os.path.join(base_dir, self._extract_db_name()))
+        expanded = os.path.abspath(os.path.expanduser(raw_text))
+        if raw_text.lower().endswith(".db"):
+            return expanded
+        if os.path.isdir(expanded) or not os.path.splitext(expanded)[1]:
+            return os.path.abspath(os.path.join(expanded, self._extract_db_name()))
+        return expanded
+
+    def _set_extract_db_path(self, db_path: str):
+        resolved = os.path.abspath(os.path.expanduser(str(db_path or "").strip()))
+        if not resolved:
+            return
+        folder = os.path.dirname(resolved)
+        filename = os.path.basename(resolved)
+        if folder:
+            self.edit_db_path.setText(folder)
+        if filename:
+            self.edit_db_name.setText(filename)
+
+    def browse_result_folder(self):
+        current_db = self._resolve_extract_db_path(self.edit_db_path.text())
+        if self._safe_text(self.edit_db_path).lower().endswith(".db"):
+            self._set_extract_db_path(current_db)
+        start_dir = os.path.dirname(current_db) or self._default_extract_result_dir()
+        if not os.path.isdir(start_dir):
+            start_dir = self._default_extract_result_dir()
+        folder = QFileDialog.getExistingDirectory(self, self.tr("Select Result Folder"), start_dir)
+        if folder:
+            self.edit_db_path.setText(folder)
 
     def log(self, msg):
         self.log_area.append(msg)
@@ -2857,6 +3379,9 @@ class PdfProcessingWidget(QWidget):
         self.progress_bar.setFormat(f"%v / %m ({int(current/total*100)}%)")
 
     def start_classify(self):
+        if self.llm_test_worker and self.llm_test_worker.isRunning():
+            QMessageBox.information(self, self.tr("Connection Test"), self.tr("Another LLM connection test is already running."))
+            return
         src = self.edit_src_folder.text()
         out = self.edit_out_folder.text()
         if not src or not out:
@@ -2907,9 +3432,9 @@ class PdfProcessingWidget(QWidget):
         except ValueError:
             llm_batch_tokens = 12000
         try:
-            llm_timeout = int(self.edit_llm_timeout.text() or "240")
+            llm_timeout = int(self.edit_llm_timeout.text() or "180")
         except ValueError:
-            llm_timeout = 240
+            llm_timeout = 180
 
         lines_per_pdf = max(1, lines_per_pdf)
         batch_size = max(1, batch_size)
@@ -2986,24 +3511,22 @@ class PdfProcessingWidget(QWidget):
         self.worker.start()
 
     def start_extract(self):
+        if self.llm_test_worker and self.llm_test_worker.isRunning():
+            QMessageBox.information(self, self.tr("Connection Test"), self.tr("Another LLM connection test is already running."))
+            return
         src = self.edit_ext_src.text()
-        db = self.edit_db_path.text()
+        db = self._resolve_extract_db_path(self.edit_db_path.text())
         if not src:
              QMessageBox.warning(self, self.tr("Error"), self.tr("Please select input folder."))
              return
+        self._set_extract_db_path(db)
              
         # Config for MLLM
         mllm_config = {}
         mllm_api = self._current_multimodal_api_settings()
         if mllm_api.get("api_key"):
-             try:
-                 batch_size = max(1, int(self.edit_batch_size.text() or "80"))
-             except ValueError:
-                 batch_size = 80
-             try:
-                 fallback_batch = max(1, int(self.edit_fallback_batch.text() or "40"))
-             except ValueError:
-                 fallback_batch = 40
+             batch_size = 2
+             fallback_batch = 1
              try:
                  batch_char_budget = max(3000, int(self.edit_batch_char_budget.text() or "24000"))
              except ValueError:
@@ -3020,8 +3543,8 @@ class PdfProcessingWidget(QWidget):
                   "default_provider": "silicon_flow",
                   "api_protocol": mllm_api.get("api_protocol") or "auto",
                   "image_detail": mllm_api.get("image_detail") or "auto",
-                  "review_batch_size": batch_size,
-                  "review_batch_fallback_size": min(batch_size, fallback_batch),
+                  "review_batch_size": min(2, batch_size),
+                  "review_batch_fallback_size": min(1, fallback_batch),
                   "batch_char_budget": batch_char_budget,
                   "batch_max_tokens": llm_batch_tokens,
                   "timeout": llm_timeout,
@@ -3042,7 +3565,7 @@ class PdfProcessingWidget(QWidget):
             "enabled": True,
             "default_provider": "text_llm",
             "api_protocol": self.combo_api_protocol.currentData() or "auto",
-            "timeout": 240,
+            "timeout": 180,
             "max_output_tokens": 12000,
             "max_input_chars": 600000,
             "providers": {
@@ -3067,7 +3590,8 @@ class PdfProcessingWidget(QWidget):
                                 figure_profile_name=self.current_figure_profile_name,
                                 part_description_profile=deepcopy(self.part_description_profile),
                                 part_description_profile_path=self.current_part_description_profile_path,
-                                part_description_profile_name=self.current_part_description_profile_name)
+                                part_description_profile_name=self.current_part_description_profile_name,
+                                resume_completed_pdfs=self.check_resume_runs.isChecked())
         self.worker.log_signal.connect(self.log)
         self.worker.progress_signal.connect(self.update_progress)
         self.worker.finished_signal.connect(self.on_finished)
@@ -3097,9 +3621,28 @@ class PdfProcessingWidget(QWidget):
         self.btn_restore_interrupted_run.setEnabled(not running)
         self.btn_stop_classify.setEnabled(running)
         self.btn_stop_extract.setEnabled(running)
+        self._refresh_llm_test_buttons()
+        if running:
+            self.btn_run_classify.setEnabled(False)
+            self.btn_run_extract.setEnabled(False)
+            self.btn_restore_interrupted_run.setEnabled(False)
+            self.btn_test_text_llm.setEnabled(False)
+            self.btn_test_mllm.setEnabled(False)
 
     def browse_database(self):
-        db_path = self.edit_db_path.text()
+        current_db = self._resolve_extract_db_path(self.edit_db_path.text())
+        start_dir = os.path.dirname(current_db) or self._default_extract_result_dir()
+        if not os.path.isdir(start_dir):
+            start_dir = self._default_extract_result_dir()
+        db_path, _ = QFileDialog.getOpenFileName(
+            self,
+            self.tr("Select Database File"),
+            start_dir,
+            "SQLite DB (*.db);;All Files (*)",
+        )
+        if not db_path:
+            return
+        self._set_extract_db_path(db_path)
         if not os.path.exists(db_path):
             QMessageBox.warning(self, self.tr("Error"), self.tr("No DB selected or file not found."))
             return
@@ -3107,7 +3650,7 @@ class PdfProcessingWidget(QWidget):
         dlg.exec()
 
     def export_jsonl(self):
-        db_path = self.edit_db_path.text()
+        db_path = self._resolve_extract_db_path(self.edit_db_path.text())
         if not os.path.exists(db_path):
             QMessageBox.warning(self, self.tr("Error"), self.tr("No DB selected or file not found."))
             return

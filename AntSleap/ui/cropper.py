@@ -155,6 +155,7 @@ class ImageCropper(QDialog):
         self.setWindowTitle(translate_cropper_text("Smart Image Cropper", self.lang))
         self.resize(1200, 800)
         self.generated_files = [] # List of abs paths
+        self.generated_crops = [] # List of crop metadata dicts
         
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -259,17 +260,29 @@ class ImageCropper(QDialog):
         
         try:
             with Image.open(self.current_image_path) as img:
+                self.generated_files = []
+                self.generated_crops = []
                 for i, rect in enumerate(self.canvas.crops):
                     # Crop logic
                     crop_box = (int(rect.left()), int(rect.top()), int(rect.right()), int(rect.bottom()))
                     cropped_img = img.crop(crop_box)
                     
                     # Save
-                    new_filename = f"{base_name}_view_{i+1}.jpg"
+                    new_filename = f"{base_name}__crop_{i+1:03d}.jpg"
                     new_path = os.path.join(save_dir, new_filename)
                     cropped_img.save(new_path, quality=95)
                     
-                    self.generated_files.append(os.path.abspath(new_path))
+                    abs_new_path = os.path.abspath(new_path)
+                    self.generated_files.append(abs_new_path)
+                    self.generated_crops.append(
+                        {
+                            "path": abs_new_path,
+                            "source_image": os.path.abspath(self.current_image_path),
+                            "crop_index": i + 1,
+                            "crop_box": list(crop_box),
+                            "source_size": [int(img.width), int(img.height)],
+                        }
+                    )
             
             QMessageBox.information(self, translate_cropper_text("Success", self.lang), translate_cropper_text("Created {0} images.", self.lang).format(len(self.generated_files)))
             self.accept() # Close dialog
@@ -279,3 +292,6 @@ class ImageCropper(QDialog):
 
     def get_files(self):
         return self.generated_files
+
+    def get_crop_records(self):
+        return [dict(item) for item in self.generated_crops]

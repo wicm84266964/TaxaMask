@@ -108,7 +108,7 @@
   "api_protocol": "auto",
   "resume_interrupted_runs": true,
   "isolate_v2_runs": true,
-  "llm_request_timeout_seconds": 240,
+  "llm_request_timeout_seconds": 180,
   "split_failed_batches": true,
   "pdf_extract_timeout_seconds": 30
 }

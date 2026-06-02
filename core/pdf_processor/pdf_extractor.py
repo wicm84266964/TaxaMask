@@ -11,9 +11,11 @@ Figure 提取器 V2.0。
 from __future__ import annotations
 
 import hashlib
+import csv
 import json
 import logging
 import re
+import shutil
 import sqlite3
 import subprocess
 import time
@@ -108,6 +110,7 @@ class EnhancedPDFExtractionSystem:
         part_description_profile: Dict[str, Any] | None = None,
         part_description_profile_path: str | None = None,
         two_stage_validation: bool = False,
+        resume_completed_pdfs: bool = True,
     ):
         self.logger = logging.getLogger(__name__)
         self.output_db_path = Path(output_db_path).resolve()
@@ -128,6 +131,7 @@ class EnhancedPDFExtractionSystem:
         self.part_description_profile_path = str(part_description_profile_path or "").strip()
         self._apply_figure_profile(self.figure_profile)
         self.two_stage_validation = two_stage_validation
+        self.resume_completed_pdfs = bool(resume_completed_pdfs)
         profile_threshold = (
             self.figure_profile.get("review_rules", {})
             .get("decision_thresholds", {})
@@ -138,6 +142,8 @@ class EnhancedPDFExtractionSystem:
 
         self.artifacts_dir = self.output_dir / f"{self.output_db_path.stem}_v2_artifacts"
         self.figures_dir = self.artifacts_dir / "figure_images"
+        self.accepted_figures_dir = self.artifacts_dir / "accepted_figures"
+        self.review_figures_dir = self.artifacts_dir / "needs_review_figures"
         self.batch_dir = self.artifacts_dir / "review_batches"
         self.batch_raw_dir = self.artifacts_dir / "batch_raw_responses"
         self.stats_dir = self.artifacts_dir / "stats"
@@ -600,6 +606,11 @@ class EnhancedPDFExtractionSystem:
         file_hash = self._calculate_file_hash(pdf_path_obj)
         file_size = pdf_path_obj.stat().st_size
 
+        if self.resume_completed_pdfs:
+            existing_result = self._resume_existing_pdf_result(str(pdf_path_obj), file_hash)
+            if existing_result is not None:
+                return existing_result
+
         self._delete_existing_pdf_records(str(pdf_path_obj))
 
         try:
@@ -646,18 +657,120 @@ class EnhancedPDFExtractionSystem:
                         figure_candidates.append(candidate)
                         page_candidate_index += 1
 
-            reviewed_candidates = self._review_all_candidates(figure_candidates)
+            reviewed_candidates = self._review_all_candidates(figure_candidates, pdf_path_obj.stem)
             stats = self._persist_pdf_results(pdf_file_id, reviewed_candidates, part_extraction_result)
+            export_stats = self._sync_import_ready_figure_exports(pdf_file_id)
+            stats.update(export_stats)
             self.db_conn.commit()
             doc.close()
 
             self.logger.info(
-                f"Figure V2.0 提取完成: {pdf_path_obj.name} | 候选={stats['total_figures']} | 通过={stats['accepted_figures']} | 拒绝={stats['rejected_figures']} | 复核={stats['review_queue_figures']} | 部位描述={stats.get('part_description_records', 0)}"
+                f"Figure V2.0 提取完成: {pdf_path_obj.name} | 候选={stats['total_figures']} | 通过={stats['accepted_figures']} | 拒绝={stats['rejected_figures']} | 复核={stats['review_queue_figures']} | 部位描述={stats.get('part_description_records', 0)} | 可导入通过图={stats.get('accepted_exported_figures', 0)}"
             )
             return {"status": "success", "file_id": pdf_file_id, "stats": stats}
         except Exception:
             self.db_conn.rollback()
             raise
+
+    def _resume_existing_pdf_result(self, pdf_path: str, file_hash: str) -> Dict[str, Any] | None:
+        if self.db_conn is None:
+            return None
+        cursor = self.db_conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, file_hash
+            FROM pdf_files
+            WHERE file_path = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (pdf_path,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return None
+        pdf_file_id = int(row[0])
+        if str(row[1] or "") != str(file_hash or ""):
+            return None
+
+        stats = self._existing_pdf_completion_stats(pdf_file_id)
+        if not stats:
+            return None
+        stats.update(self._sync_import_ready_figure_exports(pdf_file_id))
+        stats["resumed_skip"] = True
+        stats.setdefault("total_images", int(stats.get("total_figures", 0) or 0))
+        stats.setdefault("taxonomic_images", int(stats.get("accepted_figures", 0) or 0))
+        self.logger.info(
+            f"Figure V2.0 已存在完整结果，跳过重跑: {Path(pdf_path).name} | "
+            f"候选={stats.get('total_figures', 0)} | 通过={stats.get('accepted_figures', 0)} | "
+            f"部位描述={stats.get('part_description_records', 0)}"
+        )
+        return {"status": "skipped_existing", "file_id": pdf_file_id, "stats": stats}
+
+    def _existing_pdf_completion_stats(self, pdf_file_id: int) -> dict[str, int | str | bool] | None:
+        if self.db_conn is None:
+            return None
+        cursor = self.db_conn.cursor()
+        cursor.execute(
+            """
+            SELECT total_candidates, accepted_figures, rejected_figures,
+                   review_queue_figures, multimodal_validated_figures
+            FROM extraction_stats
+            WHERE pdf_file_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (pdf_file_id,),
+        )
+        stats_row = cursor.fetchone()
+        if not stats_row:
+            return None
+
+        cursor.execute("SELECT COUNT(*) FROM figure_records WHERE pdf_file_id = ?", (pdf_file_id,))
+        figure_count = int(cursor.fetchone()[0] or 0)
+        total_candidates = int(stats_row[0] or 0)
+        if figure_count != total_candidates:
+            return None
+
+        cursor.execute(
+            """
+            SELECT status, reason, profile_name, extracted_records, labeled_blocks
+            FROM part_extraction_runs
+            WHERE pdf_file_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (pdf_file_id,),
+        )
+        part_row = cursor.fetchone()
+        if not part_row:
+            return None
+        part_status = str(part_row[0] or "")
+        if part_status in {"failed", "error"}:
+            return None
+        part_records = int(part_row[3] or 0)
+        part_blocks = int(part_row[4] or 0)
+        if part_blocks <= 0:
+            return None
+
+        return {
+            "total_figures": total_candidates,
+            "accepted_figures": int(stats_row[1] or 0),
+            "rejected_figures": int(stats_row[2] or 0),
+            "review_queue_figures": int(stats_row[3] or 0),
+            "multimodal_validated_figures": int(stats_row[4] or 0),
+            "non_real_multimodal_figures": 0,
+            "startup_mock_review_figures": 0,
+            "runtime_fallback_review_figures": 0,
+            "multimodal_startup_status": str(self.multimodal_startup_state.get("status", "unknown") or "unknown"),
+            "multimodal_startup_reason": str(self.multimodal_startup_state.get("reason", "") or ""),
+            "real_multimodal_configured": bool(self.multimodal_startup_state.get("real_multimodal_configured", False)),
+            "part_extraction_status": part_status,
+            "part_extraction_reason": str(part_row[1] or ""),
+            "part_description_profile_name": str(part_row[2] or ""),
+            "part_description_records": part_records,
+            "part_text_blocks": part_blocks,
+        }
 
     def _delete_existing_pdf_records(self, pdf_path: str) -> None:
         if self.db_conn is None:
@@ -1249,15 +1362,20 @@ class EnhancedPDFExtractionSystem:
     # ------------------------------------------------------------------
     # Batch review
     # ------------------------------------------------------------------
-    def _review_all_candidates(self, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _review_all_candidates(self, candidates: List[Dict[str, Any]], batch_scope: str = "") -> List[Dict[str, Any]]:
         if not candidates:
             return []
         batches = self._chunk_candidates_for_review(candidates)
+        scope_prefix = self._safe_batch_scope(batch_scope)
         reviewed: List[Dict[str, Any]] = []
         for index, batch in enumerate(batches, start=1):
-            batch_name = f"batch_{index:04d}"
+            batch_name = f"{scope_prefix}_batch_{index:04d}" if scope_prefix else f"batch_{index:04d}"
             reviewed.extend(self._review_candidate_batch(batch, batch_name))
         return reviewed
+
+    def _safe_batch_scope(self, value: str) -> str:
+        text = re.sub(r"[^A-Za-z0-9_\-]+", "_", str(value or "")).strip("_")
+        return text[:60].strip("_")
 
     def _chunk_candidates_for_review(self, candidates: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
         if not candidates:
@@ -1327,6 +1445,9 @@ class EnhancedPDFExtractionSystem:
                 )
             except Exception as exc:
                 last_error = str(exc)
+                raw_response = str(getattr(self.validator, "last_raw_response", "") or "")
+                if raw_response:
+                    self._save_batch_raw_response(f"{batch_id}_attempt_{attempt + 1}_failed", raw_response)
                 self.logger.warning(f"Figure 批量复核失败 {batch_id} (尝试 {attempt + 1}/{max_retries}): {last_error}")
                 if attempt < max_retries - 1:
                     time.sleep(retry_delay)
@@ -1491,6 +1612,125 @@ class EnhancedPDFExtractionSystem:
         with open(raw_path, "w", encoding="utf-8") as handle:
             handle.write(str(raw_response or ""))
         return str(raw_path)
+
+    def _sync_import_ready_figure_exports(self, pdf_file_id: int) -> dict[str, int | str]:
+        if self.db_conn is None:
+            return {}
+        cursor = self.db_conn.cursor()
+        cursor.execute("SELECT file_name FROM pdf_files WHERE id = ?", (pdf_file_id,))
+        pdf_row = cursor.fetchone()
+        if not pdf_row:
+            return {}
+        pdf_stem = self._safe_batch_scope(Path(str(pdf_row[0] or "pdf")).stem) or f"pdf_{pdf_file_id}"
+        self.accepted_figures_dir.mkdir(parents=True, exist_ok=True)
+        self.review_figures_dir.mkdir(parents=True, exist_ok=True)
+        self._remove_pdf_exported_files(self.accepted_figures_dir, pdf_stem)
+        self._remove_pdf_exported_files(self.review_figures_dir, pdf_stem)
+
+        cursor.execute(
+            """
+            SELECT
+                id, page_number, image_file_path, image_file_name, species_candidate,
+                final_confidence, category, review_status, accepted
+            FROM figure_records
+            WHERE pdf_file_id = ? AND (accepted = 1 OR review_status = 'needs_review')
+            ORDER BY page_number ASC, figure_index ASC, id ASC
+            """,
+            (pdf_file_id,),
+        )
+        rows = cursor.fetchall()
+        exported_rows: List[Dict[str, Any]] = []
+        accepted_count = 0
+        review_count = 0
+        for row in rows:
+            (
+                figure_id,
+                page_number,
+                image_file_path,
+                image_file_name,
+                species_candidate,
+                final_confidence,
+                category,
+                review_status,
+                accepted,
+            ) = row
+            source_path = Path(str(image_file_path or ""))
+            if not source_path.exists():
+                continue
+            target_dir = self.accepted_figures_dir if bool(accepted) else self.review_figures_dir
+            status_prefix = "accepted" if bool(accepted) else "review"
+            target_name = self._export_figure_filename(
+                pdf_stem=pdf_stem,
+                status_prefix=status_prefix,
+                figure_id=int(figure_id),
+                source_name=str(image_file_name or source_path.name),
+            )
+            target_path = target_dir / target_name
+            shutil.copy2(source_path, target_path)
+            if bool(accepted):
+                accepted_count += 1
+            else:
+                review_count += 1
+            exported_rows.append(
+                {
+                    "pdf_file_id": pdf_file_id,
+                    "figure_id": int(figure_id),
+                    "status": status_prefix,
+                    "pdf_name": str(pdf_row[0] or ""),
+                    "page_number": int(page_number or 0),
+                    "species_candidate": str(species_candidate or ""),
+                    "final_confidence": float(final_confidence or 0.0),
+                    "category": str(category or ""),
+                    "review_status": str(review_status or ""),
+                    "source_image_path": str(source_path),
+                    "exported_image_path": str(target_path),
+                    "exported_image_name": target_name,
+                }
+            )
+
+        manifest_path = self.stats_dir / f"{pdf_stem}_import_ready_figures.csv"
+        self._write_import_ready_manifest(manifest_path, exported_rows)
+        return {
+            "accepted_exported_figures": accepted_count,
+            "review_exported_figures": review_count,
+            "accepted_figures_dir": str(self.accepted_figures_dir),
+            "needs_review_figures_dir": str(self.review_figures_dir),
+            "import_ready_manifest": str(manifest_path),
+        }
+
+    def _remove_pdf_exported_files(self, folder: Path, pdf_stem: str) -> None:
+        if not folder.exists():
+            return
+        prefix = f"{pdf_stem}__"
+        for path in folder.iterdir():
+            if path.is_file() and path.name.startswith(prefix):
+                path.unlink()
+
+    def _export_figure_filename(self, *, pdf_stem: str, status_prefix: str, figure_id: int, source_name: str) -> str:
+        suffix = Path(source_name).suffix or ".png"
+        source_stem = re.sub(r"[^A-Za-z0-9_\-]+", "_", Path(source_name).stem).strip("_")[:80] or "figure"
+        return f"{pdf_stem}__{status_prefix}_{figure_id:06d}__{source_stem}{suffix}"
+
+    def _write_import_ready_manifest(self, manifest_path: Path, rows: List[Dict[str, Any]]) -> None:
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        fieldnames = [
+            "pdf_file_id",
+            "figure_id",
+            "status",
+            "pdf_name",
+            "page_number",
+            "species_candidate",
+            "final_confidence",
+            "category",
+            "review_status",
+            "source_image_path",
+            "exported_image_path",
+            "exported_image_name",
+        ]
+        with open(manifest_path, "w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
 
     # ------------------------------------------------------------------
     # Persistence

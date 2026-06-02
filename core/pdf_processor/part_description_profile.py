@@ -83,7 +83,7 @@ DEFAULT_PART_DESCRIPTION_PROFILE: Dict[str, Any] = {
     "extraction_settings": {
         "max_input_chars": 600000,
         "max_output_tokens": 12000,
-        "timeout": 240,
+        "timeout": 180,
         "max_retries": 2,
         "persist_unlabeled_blocks": True,
     },
@@ -152,7 +152,7 @@ def normalize_part_description_profile(profile: Dict[str, Any] | None) -> Dict[s
     normalized["extraction_settings"] = {
         "max_input_chars": _positive_int(settings.get("max_input_chars"), 600000, minimum=5000),
         "max_output_tokens": _positive_int(settings.get("max_output_tokens"), 12000, minimum=500),
-        "timeout": _positive_int(settings.get("timeout"), 240, minimum=30),
+        "timeout": _positive_int(settings.get("timeout"), 180, minimum=30),
         "max_retries": _positive_int(settings.get("max_retries"), 2, minimum=1),
         "persist_unlabeled_blocks": bool(settings.get("persist_unlabeled_blocks", True)),
     }

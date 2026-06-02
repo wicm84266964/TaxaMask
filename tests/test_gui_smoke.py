@@ -1,8 +1,12 @@
 # pyright: reportMissingImports=false, reportAttributeAccessIssue=false
 
 import os
+import base64
+import io
 import sys
 import tempfile
+import sqlite3
+import csv
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -29,10 +33,11 @@ else:
     from PIL import Image
 
     import AntSleap.main as main_module
+    import AntSleap.ui.pdf_processing_widget as pdf_widget_module
     from AntSleap.core.project_templates import PROJECT_TEMPLATE_GENERIC
     from AntSleap.core.stl_project import StlRenderedProjectManager
     from AntSleap.core.tif_project import TifProjectManager
-    from AntSleap.ui.pdf_processing_widget import PdfProcessingWidget
+    from AntSleap.ui.pdf_processing_widget import PdfProcessingWidget, LLMConnectionTestWorker
 
     has_pyside6 = True
 
@@ -211,13 +216,83 @@ class GuiSmokeTests(unittest.TestCase):
         with patch.object(main_module, "ConfigManager", SmokeConfigManager), \
              patch.object(main_module, "AntEngine", SmokeEngine), \
              patch.object(main_module, "MultiModalDB", SmokeDatabase), \
+             patch.object(main_module.MainWindow, "_default_outputs_root", lambda _window: str(self.project_dir / "TaxaMask_outputs")), \
              patch.object(main_module, "SAMWorker", SmokeSamWorker), \
              patch.object(main_module, "QThread", SmokeThread), \
              patch.object(PdfProcessingWidget, "load_api_settings", lambda self: None), \
              patch.object(PdfProcessingWidget, "refresh_profile_list", lambda self: None), \
              patch.object(PdfProcessingWidget, "sync_runtime_controls_from_config", lambda self: None), \
              patch.object(main_module.QTimer, "singleShot", lambda *args, **kwargs: None):
-            return main_module.MainWindow()
+            window = main_module.MainWindow()
+            window._default_outputs_root = lambda: str(self.project_dir / "TaxaMask_outputs")
+            return window
+
+    def _create_literature_db(self, db_path, image_path, *, pdf_id=3, figure_id=7, species="Aphaenogaster gamagumayaa"):
+        conn = sqlite3.connect(db_path)
+        try:
+            c = conn.cursor()
+            c.execute("CREATE TABLE pdf_files (id INTEGER PRIMARY KEY, file_path TEXT, file_name TEXT)")
+            c.execute(
+                """
+                CREATE TABLE figure_records (
+                    id INTEGER PRIMARY KEY,
+                    pdf_file_id INTEGER,
+                    page_number INTEGER,
+                    figure_index INTEGER,
+                    image_file_path TEXT,
+                    image_file_name TEXT,
+                    species_candidate TEXT
+                )
+                """
+            )
+            c.execute(
+                """
+                CREATE TABLE taxon_part_descriptions (
+                    id INTEGER PRIMARY KEY,
+                    pdf_file_id INTEGER,
+                    file_name TEXT,
+                    file_path TEXT,
+                    file_hash TEXT,
+                    taxon_name TEXT,
+                    caste_or_stage TEXT,
+                    part_key TEXT,
+                    part_label TEXT,
+                    description_text TEXT,
+                    source_pages TEXT,
+                    source_block_refs TEXT,
+                    source_blocks TEXT,
+                    model_used TEXT,
+                    confidence REAL,
+                    review_status TEXT,
+                    created_at TEXT
+                )
+                """
+            )
+            c.execute("INSERT INTO pdf_files (id, file_path, file_name) VALUES (?, ?, 'paper.pdf')", (pdf_id, str(Path(db_path).parent / "paper.pdf")))
+            c.execute(
+                """
+                INSERT INTO figure_records
+                    (id, pdf_file_id, page_number, figure_index, image_file_path, image_file_name, species_candidate)
+                VALUES (?, ?, 2, 1, ?, ?, ?)
+                """,
+                (figure_id, pdf_id, str(image_path), Path(image_path).name, species),
+            )
+            c.execute(
+                """
+                INSERT INTO taxon_part_descriptions
+                    (id, pdf_file_id, file_name, file_path, file_hash, taxon_name, caste_or_stage,
+                     part_key, part_label, description_text, source_pages, source_block_refs,
+                     source_blocks, model_used, confidence, review_status, created_at)
+                VALUES
+                    (11, ?, 'paper.pdf', ?, 'hash', ?, 'worker',
+                     'scape', '触角/柄节', 'Scapes elongate and slim.',
+                     '[2]', '["p002_b0003"]', '[]', 'mock', 0.91, 'auto_extracted', 'now')
+                """,
+                (pdf_id, str(Path(db_path).parent / "paper.pdf"), species),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
     def test_main_window_constructs_offscreen_without_loading_sam(self):
         SmokeSamWorker.created = 0
@@ -238,6 +313,13 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(window.engine.ensure_locator_loaded_calls, 0)
             self.assertEqual(window.engine.ensure_parts_model_loaded_calls, 0)
             self.assertEqual(SmokeSamWorker.created, 0)
+            startup_path = Path(window.project.current_project_path)
+            self.assertEqual(
+                startup_path,
+                self.project_dir / "TaxaMask_outputs" / "2d_stl_projects" / "_startup" / "TaxaMask_Project.json",
+            )
+            self.assertTrue(startup_path.exists())
+            self.assertNotIn("AntSleap", startup_path.parts)
             self.assertEqual(window.start_title.text(), "TaxaMask Agent Center")
             self.assertIsNotNone(window.findChild(main_module.QWidget, "start2DWorkflowCard"))
             self.assertIsNotNone(window.findChild(main_module.QWidget, "startTifWorkflowCard"))
@@ -292,6 +374,7 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(window.tabs.count(), 1)
             self.assertEqual(window.tabs.tabText(0), "Labeling Workbench")
             self.assertIsNotNone(window.findChild(main_module.QWidget, "workbenchCanvasShell"))
+            self.assertIsNotNone(window.findChild(main_module.QWidget, "workbenchLiteratureDescriptionButton"))
             self.assertEqual(window.btn_agent_from_workbench.text(), "Ask Agent")
             self.assertEqual(preload_events, ["preload"])
             self.assertIsNone(window.sam_worker)
@@ -313,6 +396,24 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(preload_events, ["preload"])
             self.assertIsNone(window.sam_worker)
             self.assertIsNone(window.sam_thread)
+        finally:
+            window.deleteLater()
+
+    def test_start_center_recent_project_uses_short_display_and_full_tooltip(self):
+        window = self._make_window()
+        try:
+            long_dir = self.project_dir / ("very_long_taxamask_project_folder_name_" * 2)
+            long_dir.mkdir(parents=True)
+            long_project = long_dir / ("very_long_taxamask_project_file_name_" * 2 + ".json")
+            long_project.write_text("{}", encoding="utf-8")
+            window.config.set("last_project_path", str(long_project))
+
+            window._update_start_center_texts()
+
+            self.assertIn("Continue last project", window.start_recent_label.text())
+            self.assertNotIn(str(long_project), window.start_recent_label.text())
+            self.assertIn("...", window.start_recent_label.text())
+            self.assertEqual(window.start_recent_label.toolTip(), os.path.abspath(long_project))
         finally:
             window.deleteLater()
 
@@ -394,6 +495,19 @@ class GuiSmokeTests(unittest.TestCase):
 
             self.assertEqual(events, [("preflight", False), ("load", None)])
             self.assertEqual(panel._preflight_checks_remaining, 6)
+        finally:
+            window.deleteLater()
+
+    def test_agent_panel_post_load_script_reconciles_embedded_trust(self):
+        window = self._make_window()
+        try:
+            script = window.agent_panel._web_post_load_source()
+
+            self.assertIn("button[data-action=\"trust\"]", script)
+            self.assertIn("trustButton.click()", script)
+            self.assertIn("postTrust", script)
+            self.assertIn("__taxamaskAgentTrustReloaded", script)
+            self.assertIn("sendText === '待信任'", script)
         finally:
             window.deleteLater()
 
@@ -659,6 +773,51 @@ class GuiSmokeTests(unittest.TestCase):
         finally:
             window.deleteLater()
 
+    def test_vlm_preannotation_settings_live_in_inference_tab(self):
+        dialog = main_module.ModelSettingsDialog(
+            {
+                "epochs": 1,
+                "batch": 1,
+                "lr": 1e-4,
+                "wd": 1e-4,
+                "conf": 0.1,
+                "adapt": 0.4,
+                "pad": 0.4,
+                "noise_floor": 0.15,
+                "poly_epsilon": 2.0,
+                "runtime_device": "cpu",
+                "taxonomy": ["Head", "Mesosoma", "Gaster"],
+                "locator_scope": ["Head"],
+                "vlm_preannotation": {
+                    "target_parts": ["Mesosoma", "Gaster"],
+                    "processing_scope": "all_images",
+                },
+            },
+            lang="en",
+        )
+        try:
+            def has_ancestor(widget, ancestor):
+                current = widget
+                while current is not None:
+                    if current is ancestor:
+                        return True
+                    current = current.parentWidget()
+                return False
+
+            training_content = dialog.tabs.widget(0).widget()
+            inference_content = dialog.tabs.widget(1).widget()
+            vlm_panel = dialog.findChild(main_module.QWidget, "modelSettingsVlmPreannotationPanel")
+            self.assertIsNotNone(vlm_panel)
+            self.assertFalse(has_ancestor(vlm_panel, training_content))
+            self.assertTrue(has_ancestor(vlm_panel, inference_content))
+            self.assertEqual(dialog.get_values()["vlm_preannotation"]["processing_scope"], "all_images")
+            self.assertEqual(
+                dialog.get_values()["vlm_preannotation"]["target_parts"],
+                ["Mesosoma", "Gaster"],
+            )
+        finally:
+            dialog.deleteLater()
+
     def test_general_settings_are_not_2d_stl_model_settings(self):
         dialog = main_module.GeneralSettingsDialog(
             {
@@ -842,6 +1001,61 @@ class GuiSmokeTests(unittest.TestCase):
         finally:
             window.deleteLater()
 
+    def test_new_project_dialogs_default_to_output_roots(self):
+        window = self._make_window()
+        try:
+            preload_events = []
+            window.ensure_2d_stl_models_preloaded = lambda: preload_events.append("preload")
+            image_root = self.project_dir / "TaxaMask_outputs" / "2d_stl_projects"
+            tif_root = self.project_dir / "TaxaMask_outputs" / "tif_projects"
+            created_image_dir = image_root / "review_run"
+            created_tif_dir = tif_root / "volume_run"
+            calls = []
+
+            def fake_get_existing_directory(_parent, title, start_dir=""):
+                calls.append((title, Path(start_dir)))
+                if "TIF" in title:
+                    created_tif_dir.mkdir(parents=True, exist_ok=True)
+                    return str(created_tif_dir)
+                created_image_dir.mkdir(parents=True, exist_ok=True)
+                return str(created_image_dir)
+
+            with patch.object(main_module.QFileDialog, "getExistingDirectory", fake_get_existing_directory), \
+                 patch.object(main_module.QInputDialog, "getText", side_effect=[("review", True), ("volume", True)]), \
+                 patch.object(window, "_choose_project_template", return_value={"template_id": PROJECT_TEMPLATE_GENERIC}):
+                window.new_project()
+                window.new_tif_project()
+
+            self.assertEqual(calls[0][1], image_root)
+            self.assertEqual(calls[1][1], tif_root)
+            self.assertEqual(Path(window.project.current_project_path), created_image_dir / "review.json")
+            self.assertEqual(Path(window.tif_project.current_project_path), created_tif_dir / "project.json")
+            self.assertTrue((created_image_dir / "review.json").exists())
+            self.assertTrue((created_tif_dir / "project.json").exists())
+            self.assertEqual(preload_events, ["preload"])
+        finally:
+            window.deleteLater()
+
+    def test_open_and_export_defaults_stay_out_of_program_package(self):
+        window = self._make_window()
+        try:
+            ant_project_dir = Path(main_module.PACKAGE_DIR)
+            window.config.set("last_project_path", str(ant_project_dir / "TaxaMask_Project.json"))
+            self.assertEqual(Path(window._default_open_project_dir()), self.project_dir / "TaxaMask_outputs")
+
+            project_dir = self.project_dir / "TaxaMask_outputs" / "2d_stl_projects" / "review"
+            window.project.create_project("review", str(project_dir), template_id=PROJECT_TEMPLATE_GENERIC)
+            self.assertEqual(Path(window._default_2d_export_dir()), project_dir / "exports")
+            self.assertEqual(Path(window._vlm_preannotation_artifacts_dir()), project_dir / "vlm_preannotation")
+
+            dialog = main_module.ExportDialog(window, "en", default_dir=window._default_2d_export_dir())
+            try:
+                self.assertEqual(Path(dialog.path_edit.text()), project_dir / "exports")
+            finally:
+                dialog.deleteLater()
+        finally:
+            window.deleteLater()
+
     def test_tif_project_open_path_switches_to_tif_workbench(self):
         window = self._make_window()
         try:
@@ -883,6 +1097,27 @@ class GuiSmokeTests(unittest.TestCase):
         finally:
             window.deleteLater()
 
+    def test_tif_training_export_defaults_to_project_exports(self):
+        window = self._make_window()
+        try:
+            tif_project = TifProjectManager()
+            tif_path = tif_project.create_project("tif_export_defaults", self.project_dir / "tif_export_defaults")
+            window.open_project_path(tif_path)
+            expected = self.project_dir / "tif_export_defaults" / "exports" / "train_ready"
+            captured = []
+
+            def fake_get_existing_directory(_parent, _title, start_dir=""):
+                captured.append(Path(start_dir))
+                return ""
+
+            with patch.object(main_module.QFileDialog, "getExistingDirectory", fake_get_existing_directory):
+                window.tif_workbench.export_training_dataset()
+
+            self.assertEqual(captured, [expected])
+            self.assertTrue(expected.exists())
+        finally:
+            window.deleteLater()
+
     def test_pdf_evidence_tools_open_on_demand(self):
         window = self._make_window()
         try:
@@ -894,6 +1129,59 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(window.tabs.count(), 2)
             self.assertEqual(window.pdf_widget.btn_start_center.text(), "Start Center")
             self.assertEqual(window.pdf_widget.btn_ask_agent.text(), "Ask Agent")
+            self.assertIsNotNone(getattr(main_module, "LiteratureDescriptionDialog", None))
+            self.assertEqual(window.pdf_widget.lbl_ext_db.text(), "Result Folder:")
+            self.assertEqual(window.pdf_widget.btn_db.text(), "Choose Result Folder")
+            self.assertIn("_v2_artifacts", window.pdf_widget.edit_db_path.toolTip())
+            self.assertEqual(window.pdf_widget.lbl_ext_db_name.text(), "Database File:")
+            self.assertEqual(window.pdf_widget.edit_db_name.text(), "taxamask_literature.db")
+            self.assertEqual(window.pdf_widget.btn_browse_db.text(), "Open Database File")
+            result_dir = self.project_dir / "pdf_results"
+            result_dir.mkdir()
+            window.pdf_widget.edit_out_folder.setText(str(result_dir))
+            self.assertEqual(
+                Path(window.pdf_widget._resolve_extract_db_path("")),
+                result_dir / "taxamask_literature.db",
+            )
+            self.assertEqual(
+                Path(window.pdf_widget._resolve_extract_db_path(str(result_dir))),
+                result_dir / "taxamask_literature.db",
+            )
+            self.assertEqual(
+                Path(window.pdf_widget._resolve_extract_db_path(str(result_dir / "custom.db"))),
+                result_dir / "custom.db",
+            )
+            window.pdf_widget.edit_db_name.setText("named_run")
+            self.assertEqual(
+                Path(window.pdf_widget._resolve_extract_db_path(str(result_dir))),
+                result_dir / "named_run.db",
+            )
+            selected_db = result_dir / "selected_review.db"
+            selected_db.write_bytes(b"")
+            opened = []
+
+            class DummyDatabaseViewer:
+                def __init__(self, db_path, *_args, **_kwargs):
+                    opened.append(Path(db_path))
+
+                def exec(self):
+                    return None
+
+            with patch.object(pdf_widget_module.QFileDialog, "getOpenFileName", return_value=(str(selected_db), "SQLite DB (*.db)")), \
+                 patch.object(pdf_widget_module, "DatabaseViewerDialog", DummyDatabaseViewer):
+                window.pdf_widget.browse_database()
+
+            self.assertEqual(opened, [selected_db])
+            self.assertEqual(Path(window.pdf_widget.edit_db_path.text()), result_dir)
+            self.assertEqual(window.pdf_widget.edit_db_name.text(), "selected_review.db")
+            window.pdf_widget.edit_out_folder.clear()
+            window.pdf_widget.edit_ext_src.clear()
+            window.pdf_widget.edit_db_path.clear()
+            window.pdf_widget.edit_db_name.setText("taxamask_literature.db")
+            self.assertEqual(
+                Path(window.pdf_widget._resolve_extract_db_path("")),
+                PROJECT_ROOT / "TaxaMask_outputs" / "pdf_extraction" / "taxamask_literature.db",
+            )
             context = window.pdf_widget.get_agent_context()
             self.assertEqual(
                 context["settings_question_focus"],
@@ -901,6 +1189,11 @@ class GuiSmokeTests(unittest.TestCase):
             )
             self.assertEqual(context["text_llm_key_configured"], "no")
             self.assertEqual(context["text_llm_model"], "gpt-5.4")
+            self.assertEqual(context["extract_db_name"], "taxamask_literature.db")
+            self.assertEqual(
+                Path(context["extract_db_path"]),
+                PROJECT_ROOT / "TaxaMask_outputs" / "pdf_extraction" / "taxamask_literature.db",
+            )
             window.pdf_widget.edit_api_key.setText("secret-not-sent")
             window.pdf_widget.edit_mllm_api_key.setText("vision-secret-not-sent")
             context = window.pdf_widget.get_agent_context()
@@ -921,6 +1214,242 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertNotIn("规划时请覆盖这些点", prompt)
         finally:
             window.deleteLater()
+
+    def test_pdf_candidate_crop_inherits_parent_provenance(self):
+        window = self._make_window()
+        try:
+            parent_image = self.project_dir / "paper__accepted_000007__figure.jpg"
+            crop_image = self.project_dir / "paper__accepted_000007__figure__crop_001.jpg"
+            parent_image.write_bytes(b"parent")
+            crop_image.write_bytes(b"crop")
+            window.project.add_images([str(parent_image), str(crop_image)])
+            parent_provenance = {
+                "source_type": "pdf_candidate",
+                "source_db": str(self.project_dir / "literature.db"),
+                "source_ref": {"table": "figure_records", "row_id": 7},
+                "pdf_id": 3,
+                "pdf_file": "paper.pdf",
+                "species_candidate": "Aphaenogaster gamagumayaa",
+            }
+            window.project.set_image_provenance(str(parent_image), parent_provenance, save=False)
+
+            window._inherit_crop_provenance(
+                [
+                    {
+                        "path": str(crop_image),
+                        "source_image": str(parent_image),
+                        "crop_index": 1,
+                        "crop_box": [10, 20, 80, 100],
+                        "source_size": [160, 120],
+                    }
+                ]
+            )
+
+            crop_provenance = window.project.get_image_provenance(str(crop_image))
+            self.assertEqual(crop_provenance["source_type"], "pdf_candidate_crop")
+            self.assertEqual(crop_provenance["source_ref"]["row_id"], 7)
+            self.assertEqual(crop_provenance["species_candidate"], "Aphaenogaster gamagumayaa")
+            self.assertEqual(crop_provenance["derived_from"]["crop_box"], [10, 20, 80, 100])
+            self.assertTrue(window._is_pdf_candidate_provenance(crop_provenance))
+        finally:
+            window.deleteLater()
+
+    def test_literature_context_prefers_image_artifact_db_over_current_pdf_widget_db(self):
+        window = self._make_window()
+        try:
+            right_db = self.project_dir / "right_run.db"
+            wrong_db = self.project_dir / "wrong_run.db"
+            source_image = self.project_dir / "right_run_v2_artifacts" / "figure_images" / "paper_source.png"
+            exported_image = self.project_dir / "right_run_v2_artifacts" / "accepted_figures" / "paper__accepted_000007__paper_source.png"
+            source_image.parent.mkdir(parents=True)
+            exported_image.parent.mkdir(parents=True)
+            source_image.write_bytes(b"source")
+            exported_image.write_bytes(b"exported")
+
+            self._create_literature_db(right_db, source_image, pdf_id=3, figure_id=7)
+            stats_dir = self.project_dir / "right_run_v2_artifacts" / "stats"
+            stats_dir.mkdir(parents=True)
+            with open(stats_dir / "paper_import_ready_figures.csv", "w", encoding="utf-8-sig", newline="") as handle:
+                writer = csv.DictWriter(
+                    handle,
+                    fieldnames=[
+                        "pdf_file_id",
+                        "figure_id",
+                        "status",
+                        "pdf_name",
+                        "page_number",
+                        "species_candidate",
+                        "final_confidence",
+                        "category",
+                        "review_status",
+                        "source_image_path",
+                        "exported_image_path",
+                        "exported_image_name",
+                    ],
+                )
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "pdf_file_id": 3,
+                        "figure_id": 7,
+                        "status": "accepted",
+                        "pdf_name": "paper.pdf",
+                        "page_number": 2,
+                        "species_candidate": "Aphaenogaster gamagumayaa",
+                        "final_confidence": 0.91,
+                        "category": "taxonomic",
+                        "review_status": "accepted",
+                        "source_image_path": str(source_image),
+                        "exported_image_path": str(exported_image),
+                        "exported_image_name": exported_image.name,
+                    }
+                )
+
+            wrong_image = self.project_dir / "wrong_run_v2_artifacts" / "accepted_figures" / exported_image.name
+            wrong_image.parent.mkdir(parents=True)
+            wrong_image.write_bytes(b"wrong")
+            self._create_literature_db(wrong_db, wrong_image, pdf_id=9, figure_id=7, species="Wrong species")
+
+            window.project.add_images([str(exported_image)])
+            window.current_image = str(exported_image)
+            window.pdf_widget.edit_db_path.setText(str(wrong_db))
+
+            db_path, context, reason = window._resolve_current_literature_context()
+
+            self.assertEqual(Path(db_path), right_db)
+            self.assertEqual(reason, "")
+            self.assertTrue(context["available"])
+            self.assertEqual(context["pdf_file_id"], 3)
+            self.assertEqual(context["species_candidate"], "Aphaenogaster gamagumayaa")
+        finally:
+            window.deleteLater()
+
+    def test_literature_dialog_exposes_structured_and_raw_text_layers(self):
+        context = {
+            "source_db": str(self.project_dir / "literature.db"),
+            "pdf_file_id": 3,
+            "pdf_file": "paper.pdf",
+            "species_candidate": "Aphaenogaster gamagumayaa",
+        }
+        structured = [
+            {
+                "taxon_name": "Aphaenogaster gamagumayaa",
+                "caste_or_stage": "worker",
+                "part_label": "触角/柄节",
+                "part_key": "antenna_scape",
+                "source_pages": [4],
+                "source_block_refs": ["p004_b0009"],
+                "confidence": 0.91,
+                "review_status": "auto_extracted",
+                "description_text": "Scapes elongate and slim.",
+            }
+        ]
+        raw = [
+            {
+                "file_name": "paper.pdf",
+                "page_number": 4,
+                "block_ref": "p004_b0009",
+                "llm_taxon_name": "Aphaenogaster gamagumayaa",
+                "llm_role": "morphological_description",
+                "llm_confidence": 0.82,
+                "text_content": "Scape is remarkably elongate in workers.",
+            }
+        ]
+
+        with patch.object(main_module, "query_literature_part_descriptions", return_value=structured), \
+             patch.object(main_module, "query_literature_text_blocks", return_value=raw):
+            dialog = main_module.LiteratureDescriptionDialog(
+                db_path=str(self.project_dir / "literature.db"),
+                context=context,
+                image_path=str(self.project_dir / "image.jpg"),
+                current_part="scape",
+                taxon_hint="Aphaenogaster gamagumayaa",
+                parent=None,
+                lang="en",
+            )
+        try:
+            self.assertEqual(dialog.result_tabs.tabText(0), "Structured Descriptions")
+            self.assertEqual(dialog.result_tabs.tabText(1), "Raw Text Blocks")
+            self.assertEqual(dialog.raw_scope_combo.itemText(0), "Current Taxon First")
+            self.assertEqual(dialog.table.rowCount(), 1)
+            self.assertEqual(dialog.raw_table.rowCount(), 1)
+            dialog.result_tabs.setCurrentWidget(dialog.raw_table)
+            self.assertIn("remarkably elongate", dialog.selected_description_text())
+            self.assertEqual(dialog.selected_source()["source"], "pdf_text_block")
+        finally:
+            dialog.deleteLater()
+
+    def test_pdf_multimodal_same_as_text_shows_effective_text_settings(self):
+        window = self._make_window()
+        try:
+            window.open_pdf_evidence_tools()
+            widget = window.pdf_widget
+            widget.edit_api_key.setText("text-key")
+            widget.edit_base_url.setText("https://example.test/v1")
+            widget.edit_model.setText("gpt-5.4")
+            responses_index = widget.combo_api_protocol.findData("responses")
+            widget.combo_api_protocol.setCurrentIndex(responses_index)
+            widget.chk_remember_api_key.setChecked(True)
+            widget.check_mllm_same_as_text.setChecked(False)
+            widget.edit_mllm_api_key.setText("old-vision-key")
+            widget.edit_mllm_base_url.setText("https://old-vision.test/v1")
+            widget.edit_mllm_model.setText("old-vision-model")
+
+            widget.check_mllm_same_as_text.setChecked(True)
+            self.app.processEvents()
+
+            self.assertEqual(widget.edit_mllm_api_key.text(), "text-key")
+            self.assertEqual(widget.edit_mllm_base_url.text(), "https://example.test/v1")
+            self.assertEqual(widget.edit_mllm_model.text(), "gpt-5.4")
+            self.assertEqual(widget.combo_mllm_api_protocol.currentData(), "responses")
+            self.assertTrue(widget.chk_remember_mllm_api_key.isChecked())
+            config = widget._current_multimodal_api_settings()
+            self.assertEqual(config["api_key"], "text-key")
+            self.assertEqual(config["base_url"], "https://example.test/v1")
+            self.assertEqual(config["model"], "gpt-5.4")
+            context = widget.get_agent_context()
+            self.assertEqual(context["multimodal_llm_uses_text_provider"], "yes")
+            self.assertEqual(context["multimodal_llm_model"], "gpt-5.4")
+            self.assertEqual(context["multimodal_llm_api_protocol"], "responses")
+        finally:
+            window.deleteLater()
+
+    def test_multimodal_connection_test_uses_nontrivial_generated_png(self):
+        worker = LLMConnectionTestWorker(
+            "multimodal",
+            {"api_key": "k", "base_url": "https://example.test/v1", "model": "vision"},
+        )
+        prefix = "data:image/png;base64,"
+        self.assertTrue(worker.test_image_data_url.startswith(prefix))
+        png = base64.b64decode(worker.test_image_data_url[len(prefix):])
+        image = Image.open(io.BytesIO(png))
+        self.assertEqual(image.size, (128, 96))
+        self.assertGreater(len(png), 200)
+        self.assertGreaterEqual(worker.TEST_MAX_OUTPUT_TOKENS, 256)
+        self.assertNotIn("JSON", str(worker._vision_content_chat()))
+
+    def test_connection_test_accepts_reasoning_content_when_chat_content_is_empty(self):
+        worker = LLMConnectionTestWorker(
+            "multimodal",
+            {"api_key": "k", "base_url": "https://example.test/v1", "model": "vision"},
+        )
+        text, finish_reason = worker._extract_chat_completions_text(
+            {
+                "choices": [
+                    {
+                        "finish_reason": "length",
+                        "message": {
+                            "content": "",
+                            "reasoning_content": "The image shows a red square and a blue circle.",
+                        },
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(finish_reason, "length")
+        self.assertIn("red square", text)
+        self.assertGreaterEqual(worker.TEST_MAX_OUTPUT_TOKENS, 1024)
 
     def test_stl_project_open_path_registers_views_into_labeling_workbench(self):
         window = self._make_window()
@@ -955,8 +1484,8 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(context["project_source_kind"], "stl")
             self.assertEqual(context["project_path"], os.path.abspath(stl_path))
             self.assertEqual(context["review_project_path"], window.project.current_project_path)
-            self.assertIn("STL rendered-view project", window._start_console_project_summary())
-            self.assertIn("1 STL rendered 2D view", window._start_console_image_summary())
+            self.assertIn("STL rendered-view project", window._start_console_project_summary()[0])
+            self.assertIn("1 STL rendered 2D view", window._start_console_image_summary()[0])
             self.assertEqual(preload_events, ["preload"])
             self.assertIsNone(window.sam_worker)
             self.assertIsNone(window.sam_thread)

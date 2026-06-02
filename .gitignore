@@ -66,6 +66,7 @@ training_report.png
 docs/designs/*
 !docs/designs/
 !docs/designs/2026-06-02_模型方案管理与Blink后端切换设计稿.md
+!docs/designs/2026-06-02_模型方案管理与Blink后端切换执行清单.md
 docs/discussions/
 docs/handoffs/
 docs/concepts/

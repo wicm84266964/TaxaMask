@@ -130,8 +130,27 @@ export function mapSessionEventToDashboard(event) {
   if (type === "turn_interrupted") {
     return [activity("turn-interrupted", "任务已中断", event.reason ?? "用户中断", "failed", "session", event)];
   }
+  if (type === "context_compacting") {
+    return [activity("context-compacting", "正在压缩上下文", contextCompactionStartDetail(event), "running", "session", event, { coalesceKey: "context-compaction" })];
+  }
   if (type === "context_compacted") {
-    return [activity("context-compacted", "上下文已整理", `整理前 ${event.beforeMessages ?? "-"} 条，整理后 ${event.afterMessages ?? "-"} 条`, "completed", "session", event)];
+    return [
+      activity("context-compacted", "上下文已压缩", contextCompactionDetail(event), "completed", "session", event, { coalesceKey: "context-compaction" }),
+      {
+        type: "context_boundary",
+        id: event.id ?? `${Date.now()}:${Math.random().toString(16).slice(2)}:context-boundary`,
+        title: "聊天内容已压缩",
+        detail: "以下回复基于压缩后的上下文继续",
+        reason: event.reason ?? null,
+        beforeMessages: Number.isFinite(event.beforeMessages) ? event.beforeMessages : null,
+        afterMessages: Number.isFinite(event.afterMessages) ? event.afterMessages : null,
+        beforeTokens: Number.isFinite(event.beforeTokens) ? event.beforeTokens : null,
+        afterTokens: Number.isFinite(event.afterTokens) ? event.afterTokens : null,
+        summaryBytes: Number.isFinite(event.summaryBytes) ? event.summaryBytes : null,
+        strategy: event.strategy ?? null,
+        at: event.at ?? new Date().toISOString()
+      }
+    ];
   }
   return [];
 }
@@ -178,6 +197,15 @@ function backgroundSubagentActivity(event, options) {
   });
 }
 
+function roundDetail(event) {
+  const parts = [
+    Number.isFinite(event.round) ? `round ${event.round}` : null,
+    Number.isFinite(event.messageCount) ? `${event.messageCount} 条消息` : null,
+    Number.isFinite(event.toolSchemaCount) ? `${event.toolSchemaCount} 个工具定义` : null
+  ].filter(Boolean);
+  return parts.join(" · ");
+}
+
 function backgroundSubagentStartedDetail(event) {
   const parts = [
     event.profile ? `profile=${event.profile}` : null,
@@ -188,13 +216,40 @@ function backgroundSubagentStartedDetail(event) {
   return parts.join(" · ");
 }
 
-function roundDetail(event) {
+function contextCompactionStartDetail(event) {
   const parts = [
-    Number.isFinite(event.round) ? `round ${event.round}` : null,
-    Number.isFinite(event.messageCount) ? `${event.messageCount} 条消息` : null,
-    Number.isFinite(event.toolSchemaCount) ? `${event.toolSchemaCount} 个工具定义` : null
+    Number.isFinite(event.beforeTokens) ? `约 ${formatTokenCount(event.beforeTokens)} tokens` : null,
+    Number.isFinite(event.maxTokens) ? `阈值 ${formatTokenCount(event.maxTokens)}` : null,
+    Number.isFinite(event.beforeMessages) ? `${event.beforeMessages} 条消息` : null
   ].filter(Boolean);
-  return parts.join(" · ");
+  return parts.length > 0 ? parts.join(" · ") : "正在整理较早聊天内容";
+}
+
+function contextCompactionDetail(event) {
+  const messagePart = `整理前 ${event.beforeMessages ?? "-"} 条，整理后 ${event.afterMessages ?? "-"} 条`;
+  const tokenPart = Number.isFinite(event.beforeTokens) && Number.isFinite(event.afterTokens)
+    ? `tokens ${formatTokenCount(event.beforeTokens)} -> ${formatTokenCount(event.afterTokens)}`
+    : null;
+  const summaryPart = Number.isFinite(event.summaryBytes) ? `摘要 ${event.summaryBytes} 字节` : null;
+  return [messagePart, tokenPart, summaryPart].filter(Boolean).join(" · ");
+}
+
+function formatTokenCount(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return "--";
+  }
+  if (number >= 1000000) {
+    return `${trimNumber(number / 1000000)}M`;
+  }
+  if (number >= 1000) {
+    return `${trimNumber(number / 1000)}k`;
+  }
+  return String(Math.round(number));
+}
+
+function trimNumber(value) {
+  return value >= 10 ? String(Math.round(value)) : value.toFixed(1).replace(/\.0$/, "");
 }
 
 function toolCallNames(toolCalls) {
@@ -238,13 +293,6 @@ function statusLabel(status) {
 }
 
 function permissionSummary(request) {
-  const taxamaskScope = request.decision?.taxamask?.scope;
-  if (taxamaskScope === "taxamask.adapter") {
-    return "外部模型后端适配 · 修改自定义模型对接脚本或配置前需要确认";
-  }
-  if (taxamaskScope === "taxamask.source_development") {
-    return "TaxaMask 源码开发模式 · 修改程序源码前需要强确认";
-  }
   const toolName = request.toolName ?? "unknown";
   const reason = request.decision?.reason ?? "需要确认后继续";
   return `${toolLabel(toolName)} · ${reason}`;

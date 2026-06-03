@@ -5,16 +5,38 @@
       "id": "mimo-v2.5-pro",
       "label": "Mimo v2.5 Pro",
       "description": "Xiaomi Mimo v2.5 Pro OpenAI-compatible model for Ant Code main-agent work.",
-      "thinking": false,
+      "thinking": true,
+      "modalities": ["text"],
       "reasoningContentMode": "visible-when-no-content",
+      "openaiExtraBody": {
+        "thinking": {
+          "type": "enabled"
+        }
+      },
+      "agentModelTiers": {
+        "cheap": "mimo-v2.5",
+        "default": "mimo-v2.5",
+        "strong": "mimo-v2.5"
+      },
       "contextTokens": 400000
     },
     {
       "id": "mimo-v2.5",
       "label": "Mimo v2.5",
       "description": "Xiaomi Mimo v2.5 OpenAI-compatible model for Ant Code subagents and routing.",
-      "thinking": false,
+      "thinking": true,
+      "modalities": ["text", "image"],
       "reasoningContentMode": "visible-when-no-content",
+      "openaiExtraBody": {
+        "thinking": {
+          "type": "enabled"
+        }
+      },
+      "agentModelTiers": {
+        "cheap": "mimo-v2.5",
+        "default": "mimo-v2.5",
+        "strong": "mimo-v2.5"
+      },
       "contextTokens": 400000
     }
   ],
@@ -76,10 +98,16 @@
       "requireForWrites": false,
       "requireForHighRisk": false
     },
+    "vision": {
+      "enabled": true,
+      "model": "mimo-v2.5",
+      "autoUseWhenMainModelTextOnly": true
+    },
     "modelTiers": {
       "cheap": "mimo-v2.5",
       "default": "mimo-v2.5",
-      "strong": "mimo-v2.5"
+      "strong": "mimo-v2.5",
+      "vision": "mimo-v2.5"
     },
     "budgets": {
       "defaults": {

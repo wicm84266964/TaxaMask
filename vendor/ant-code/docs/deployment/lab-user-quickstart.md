@@ -47,6 +47,47 @@ ant-code gateway --live
 
 The local client should never require provider API keys. Provider credentials belong inside the lab gateway service.
 
+## Dashboard Model And Image Use
+
+Start the WebUI with:
+
+```sh
+ant-code dashboard
+```
+
+The model selector near the bottom of Dashboard shows the current model and
+text/image/thinking labels. It switches models inside the active gateway profile
+and, when more than one profile has been saved, can switch the active profile
+itself. Use its configuration entry to register same-gateway models, update the
+gateway URL or access token, and set subagent defaults. Saving a new gateway URL
+or access token snapshots the previous gateway as a profile and activates the
+new one; saving another model for the same URL without entering a new key updates
+the active profile's model list.
+
+For image or screenshot work:
+
+- Mark only real vision-capable models with `modalities: ["text", "image"]`.
+- Set `agents.vision.model` to the same-gateway vision model you want Ant Code
+  to use for visual fallback.
+- If the current main model is text-only, Ant Code will ask the vision model for
+  a visual evidence report before the main model continues.
+- If no same-gateway vision model is configured, image turns will be rejected
+  with an unsupported-vision message instead of silently continuing.
+- Multiple gateway profiles are stored for convenience, but only the active
+  profile is used at runtime; Ant Code does not mix providers or keys inside one
+  task.
+
+## Dashboard Background Subagents
+
+Dashboard shows background subagent groups in the live-status strip above the
+input area. When a model starts an `agent_run` with `background=true` and
+`wakeParent=true`, the group remains visible after the parent turn finishes. On
+completion, Dashboard consumes the generated wake prompt: if the parent is still
+busy the continuation is queued, and if the parent is idle it starts
+automatically. The corresponding `.lab-agent/task-groups/<group>.json` record
+will contain both `wakePromptQueuedAt` and `wakePromptConsumedAt` when the
+WebUI has actually picked up the completion.
+
 ## Daily Code Workflow
 
 Useful local commands:

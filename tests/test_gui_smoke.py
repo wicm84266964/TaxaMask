@@ -324,8 +324,15 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertIsNotNone(window.findChild(main_module.QWidget, "start2DWorkflowCard"))
             self.assertIsNotNone(window.findChild(main_module.QWidget, "startTifWorkflowCard"))
             self.assertIsNotNone(window.findChild(main_module.QWidget, "startProjectConsole"))
+            self.assertFalse(window.start_console_body.isVisible())
+            self.assertEqual(window.btn_start_console_toggle.text(), "+")
+            self.assertIn("Project Console", window.start_console_title.text())
+            self.assertTrue(window.start_console_summary.text())
             rail_scroll = window.findChild(main_module.QScrollArea, "startWorkflowRailScroll")
             self.assertIsNotNone(rail_scroll)
+            rail_layout = rail_scroll.widget().layout()
+            self.assertEqual(rail_layout.itemAt(0).widget(), window.start_console_panel)
+            self.assertEqual(rail_layout.itemAt(1).widget(), window.start_quick_panel)
             self.assertEqual(rail_scroll.horizontalScrollBarPolicy(), main_module.Qt.ScrollBarAlwaysOff)
             self.assertEqual(rail_scroll.verticalScrollBarPolicy(), main_module.Qt.ScrollBarAsNeeded)
             self.assertIsNotNone(window.findChild(main_module.QWidget, "taxamaskAgentPanel"))
@@ -333,6 +340,9 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertIn("STL", window.start_console_stl_note.text())
             self.assertIn("2D views", window.start_console_stl_note.text())
             self.assertNotIn("3D mesh annotation", window.start_console_stl_note.text())
+            window.btn_start_console_toggle.click()
+            self.assertTrue(window.start_console_body.isVisible())
+            self.assertEqual(window.btn_start_console_toggle.text(), "−")
             self.assertEqual(window.btn_start_ant_code.text(), "Start Ant-Code")
             self.assertEqual(window.btn_stop_ant_code.text(), "Stop Ant-Code")
             self.assertIsNone(window.agent_panel.findChild(main_module.QWidget, "taxamaskAgentInlineStatus"))
@@ -450,11 +460,18 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertTrue(window.agent_panel.ant_code_root.endswith(os.path.join("vendor", "ant-code")))
             self.assertIsNotNone(window.agent_panel.node_executable)
             self.assertIsNotNone(window.agent_panel.ant_code_dashboard_entry)
-            self.assertTrue(window.agent_panel.ant_code_dashboard_entry.endswith(os.path.join("src", "cli", "dashboard.js")))
+            self.assertIn(
+                os.path.basename(window.agent_panel.ant_code_dashboard_entry),
+                {"dashboard.js", "index.js"},
+            )
             self.assertTrue(window.agent_panel.ant_code_config_path.endswith(os.path.join("AntSleap", "config", "taxamask_ant_code.config.json")))
             command = window.agent_panel._dashboard_command()
             self.assertEqual(command[0], window.agent_panel.node_executable)
             self.assertEqual(command[1], window.agent_panel.ant_code_dashboard_entry)
+            if window.agent_panel.ant_code_dashboard_entry.endswith("index.js"):
+                self.assertEqual(command[2], "dashboard")
+            self.assertIn("--project", command)
+            self.assertIn(str(PROJECT_ROOT), command)
             env = window.agent_panel._dashboard_environment()
             self.assertEqual(env["LAB_AGENT_PACKAGE_ROOT"], window.agent_panel.ant_code_root)
             self.assertEqual(env["LAB_AGENT_CONFIG"], window.agent_panel.ant_code_config_path)
@@ -475,8 +492,9 @@ class GuiSmokeTests(unittest.TestCase):
             command = panel._dashboard_command()
             self.assertEqual(command[0], panel.node_executable)
             self.assertEqual(command[1], panel.ant_code_dashboard_entry)
+            if panel.ant_code_dashboard_entry.endswith("index.js"):
+                self.assertEqual(command[2], "dashboard")
             self.assertNotIn(r"C:\legacy\ant-code.exe", command)
-            self.assertNotIn("dashboard", command[:2])
         finally:
             panel.deleteLater()
 
@@ -508,6 +526,194 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertIn("postTrust", script)
             self.assertIn("__taxamaskAgentTrustReloaded", script)
             self.assertIn("sendText === '待信任'", script)
+        finally:
+            window.deleteLater()
+
+    def test_agent_panel_embed_style_defers_to_dashboard_composer(self):
+        window = self._make_window()
+        try:
+            script = window.agent_panel._web_bootstrap_source()
+
+            self.assertIn('classList.add("taxamask-embed")', script)
+            self.assertIn(".sidebar,", script)
+            self.assertIn(".preview", script)
+            self.assertNotIn("min-height: 74px", script)
+            self.assertNotIn("#prompt-input {", script)
+            self.assertNotIn("#send-button {", script)
+            self.assertNotIn(".composer {", script)
+        finally:
+            window.deleteLater()
+
+    def test_agent_panel_keeps_pending_prompt_until_insert_confirmed(self):
+        window = self._make_window()
+        try:
+            panel = window.agent_panel
+            starts = []
+
+            class RetryTimer:
+                def isActive(self):
+                    return False
+
+                def start(self, delay):
+                    starts.append(delay)
+
+            panel.prompt_retry_timer = RetryTimer()
+            panel._pending_context_prompt = "现场信息 A"
+
+            panel._queue_prompt_if_not_inserted("现场信息 A", False)
+
+            self.assertEqual(panel._pending_context_prompt, "现场信息 A")
+            self.assertEqual(panel._pending_prompt_attempts, 1)
+            self.assertTrue(starts)
+
+            panel._queue_prompt_if_not_inserted("现场信息 A", True)
+
+            self.assertEqual(panel._pending_context_prompt, "")
+            self.assertEqual(panel._pending_prompt_attempts, 0)
+        finally:
+            window.deleteLater()
+
+    def test_agent_panel_ignores_stale_prompt_insert_callback(self):
+        window = self._make_window()
+        try:
+            panel = window.agent_panel
+            starts = []
+
+            class RetryTimer:
+                def isActive(self):
+                    return False
+
+                def start(self, delay):
+                    starts.append(delay)
+
+            panel.prompt_retry_timer = RetryTimer()
+            panel._pending_context_prompt = "最新现场"
+
+            panel._queue_prompt_if_not_inserted("旧现场", False)
+
+            self.assertEqual(panel._pending_context_prompt, "最新现场")
+            self.assertEqual(panel._pending_prompt_attempts, 0)
+            self.assertEqual(starts, [])
+        finally:
+            window.deleteLater()
+
+    def test_agent_panel_keeps_context_after_startup_json_warning(self):
+        window = self._make_window()
+        try:
+            panel = window.agent_panel
+            starts = []
+            statuses = []
+
+            class RetryTimer:
+                def isActive(self):
+                    return False
+
+                def start(self, delay):
+                    starts.append(delay)
+
+            class RunningProcess:
+                def poll(self):
+                    return None
+
+            panel.process = RunningProcess()
+            panel.prompt_retry_timer = RetryTimer()
+            panel._pending_context_prompt = "现场信息 B"
+            panel._update_status_label = lambda text: statuses.append(text)
+
+            panel._on_web_console_message(
+                None,
+                "Expected double-quoted property name in JSON at position 1048534 (line 21346 column 4)",
+                21346,
+                "qrc://embedded",
+            )
+
+            self.assertEqual(panel._pending_context_prompt, "现场信息 B")
+            self.assertTrue(starts)
+            self.assertIn("Starting Ant-Code Dashboard", statuses[-1])
+            self.assertNotIn("Unable to start Ant-Code", statuses[-1])
+        finally:
+            window.deleteLater()
+
+    def test_agent_panel_allows_extra_embed_ready_retries_for_pending_context(self):
+        window = self._make_window()
+        try:
+            panel = window.agent_panel
+            loads = []
+            starts = []
+
+            class RetryTimer:
+                def isActive(self):
+                    return False
+
+                def start(self, delay):
+                    starts.append(delay)
+
+            class RunningProcess:
+                def poll(self):
+                    return None
+
+            panel.process = RunningProcess()
+            panel.web_view = object()
+            panel.dashboard_url = "http://127.0.0.1:7410"
+            panel.prompt_retry_timer = RetryTimer()
+            panel._pending_context_prompt = "现场信息 C"
+            panel._load_retries = 1
+            panel._load_dashboard = lambda: loads.append("load")
+
+            with patch.object(main_module.QTimer, "singleShot", lambda _ms, callback: callback()):
+                panel._handle_embedded_page_ready(False)
+
+            self.assertEqual(panel._pending_context_prompt, "现场信息 C")
+            self.assertEqual(loads, ["load"])
+            self.assertTrue(starts)
+            self.assertEqual(panel._load_retries, 2)
+        finally:
+            window.deleteLater()
+
+    def test_agent_panel_returns_to_fallback_when_embed_never_becomes_ready(self):
+        window = self._make_window()
+        try:
+            panel = window.agent_panel
+            statuses = []
+
+            class RunningProcess:
+                def poll(self):
+                    return None
+
+            panel.process = RunningProcess()
+            fake_web_view = main_module.QWidget()
+            panel.web_view = fake_web_view
+            panel.dashboard_url = "http://127.0.0.1:7410"
+            panel._load_retries = 4
+            panel._pending_context_prompt = "现场信息 D"
+            panel.stack.addWidget(fake_web_view)
+            panel.stack.setCurrentWidget(fake_web_view)
+            panel._update_status_label = lambda text: statuses.append(text)
+
+            panel._handle_embedded_page_ready(False)
+
+            self.assertEqual(panel.stack.currentWidget(), panel.fallback)
+            self.assertIn("embedded page init failed", statuses[-1])
+            self.assertIn("embedded page init failed", panel.fallback.toPlainText())
+        finally:
+            window.deleteLater()
+
+    def test_agent_panel_returns_to_fallback_when_web_load_fails(self):
+        window = self._make_window()
+        try:
+            panel = window.agent_panel
+            statuses = []
+            fake_web_view = main_module.QWidget()
+            panel.web_view = fake_web_view
+            panel.stack.addWidget(fake_web_view)
+            panel.stack.setCurrentWidget(fake_web_view)
+            panel._update_status_label = lambda text: statuses.append(text)
+
+            panel._on_web_load_finished(False)
+
+            self.assertEqual(panel.stack.currentWidget(), panel.fallback)
+            self.assertIn("embedded page load failed", statuses[-1])
+            self.assertIn("embedded page load failed", panel.fallback.toPlainText())
         finally:
             window.deleteLater()
 
@@ -547,7 +753,7 @@ class GuiSmokeTests(unittest.TestCase):
             project = panel.workspace_dir
             dashboard = panel.ant_code_dashboard_entry
             self.assertTrue(panel._is_owned_dashboard_process(
-                f'"C:\\Program Files\\nodejs\\node.exe" "{dashboard}" --project "{project}" --port 7410 --no-open',
+                f'"C:\\Program Files\\nodejs\\node.exe" "{dashboard}" dashboard --project "{project}" --port 7410 --no-open',
                 "node.exe",
             ))
             self.assertTrue(panel._is_owned_dashboard_process(
@@ -691,6 +897,25 @@ class GuiSmokeTests(unittest.TestCase):
         finally:
             window.deleteLater()
 
+    def test_tif_ask_agent_prepares_volume_view_before_agent_center(self):
+        window = self._make_window()
+        try:
+            events = []
+            window.active_project_kind = "tif"
+            window._apply_project_mode_tabs()
+            window.tabs.setCurrentWidget(window.tif_workbench)
+            window.tif_workbench.prepare_for_agent_panel = lambda: events.append("prepare")
+            window.agent_panel.is_running = lambda: False
+            window.agent_panel.start_dashboard = lambda: events.append("start")
+
+            window.open_agent_from_context({"source_workbench": "tif_volume", "project_type": "tif_volume"})
+
+            self.assertEqual(events, ["prepare", "start"])
+            self.assertEqual(window.active_project_kind, "start")
+            self.assertEqual(window.tabs.currentWidget(), window.start_center_widget)
+        finally:
+            window.deleteLater()
+
     def test_ask_agent_auto_starts_ant_code_and_queues_context(self):
         window = self._make_window()
         try:
@@ -804,11 +1029,11 @@ class GuiSmokeTests(unittest.TestCase):
                     current = current.parentWidget()
                 return False
 
-            training_content = dialog.tabs.widget(0).widget()
-            inference_content = dialog.tabs.widget(1).widget()
+            parent_content = dialog.tabs.widget(dialog.parent_tab_index).widget()
+            inference_content = dialog.tabs.widget(dialog.inference_tab_index).widget()
             vlm_panel = dialog.findChild(main_module.QWidget, "modelSettingsVlmPreannotationPanel")
             self.assertIsNotNone(vlm_panel)
-            self.assertFalse(has_ancestor(vlm_panel, training_content))
+            self.assertFalse(has_ancestor(vlm_panel, parent_content))
             self.assertTrue(has_ancestor(vlm_panel, inference_content))
             self.assertEqual(dialog.get_values()["vlm_preannotation"]["processing_scope"], "all_images")
             self.assertEqual(
@@ -907,20 +1132,64 @@ class GuiSmokeTests(unittest.TestCase):
                 parent=window,
             )
             try:
+                model_dialog.child_backend_combo.setCurrentIndex(
+                    model_dialog.child_backend_combo.findData(main_module.CHILD_BACKEND_EXTERNAL)
+                )
+                model_dialog.external_blink_backend_id.setText("child_backend")
+                model_dialog.external_blink_display_name.setText("Child Backend")
+                model_dialog.external_blink_predict_command.setPlainText("python predict_child.py --contract {contract_json}")
+                model_dialog.external_blink_train_command.setPlainText("python train_child.py --missing-contract")
+                route_owner = type(
+                    "RouteOwner",
+                    (),
+                    {
+                        "project": type(
+                            "RouteProject",
+                            (),
+                            {
+                                "iter_cascade_routes": lambda _self: [
+                                    {
+                                        "parent": "Head",
+                                        "child": "Mandible",
+                                        "expert_backend": main_module.ROUTE_BACKEND_HEATMAP_BLINK,
+                                    }
+                                ]
+                            },
+                        )()
+                    },
+                )()
+                model_dialog.route_panel = type("RoutePanel", (), {"owner": route_owner})()
                 context = model_dialog.get_agent_context()
                 self.assertEqual(context["settings_scope"], "2d_stl_model")
+                self.assertEqual(context["advanced_extension_scope"], "2d_stl_model_profile")
+                self.assertEqual(context["parent_model_source"], main_module.PARENT_BACKEND_EXTERNAL)
+                self.assertEqual(context["default_child_expert"], main_module.CHILD_BACKEND_EXTERNAL)
+                self.assertEqual(context["default_child_route_backend"], main_module.ROUTE_BACKEND_EXTERNAL_BLINK)
+                self.assertEqual(context["route_specific_backend_count"], "1")
+                self.assertIn("Head->Mandible:heatmap_blink", context["route_specific_backend_summary"])
                 self.assertEqual(context["prepare_command_present"], "yes")
                 self.assertEqual(context["prepare_command_has_contract"], "yes")
                 self.assertEqual(context["train_command_present"], "yes")
                 self.assertEqual(context["train_command_has_contract"], "no")
+                self.assertEqual(context["child_predict_command_present"], "yes")
+                self.assertEqual(context["child_predict_command_has_contract"], "yes")
+                self.assertEqual(context["child_train_command_present"], "yes")
+                self.assertEqual(context["child_train_command_has_contract"], "no")
                 self.assertNotIn("very-long-private-flag", str(context))
 
                 compact = window._compact_agent_context(context)
                 self.assertEqual(compact["source_workbench"], "stl_model_settings")
                 self.assertEqual(compact["external_backend_id"], "custom_backend")
+                self.assertEqual(compact["child_extension_id"], "child_backend")
+                self.assertEqual(compact["default_child_expert"], main_module.CHILD_BACKEND_EXTERNAL)
+                self.assertIn("Head->Mandible:heatmap_blink", compact["route_specific_backend_summary"])
                 self.assertIn("validation_errors", compact)
                 self.assertIn("contract_placeholder_missing", compact["diagnostic_route"])
                 self.assertIn("docs/contracts/external_backend_contract_v1.md", compact["source_code_refs"])
+                self.assertIn("docs/contracts/external_blink_backend_contract_v1.md", compact["source_code_refs"])
+                self.assertIn("AntSleap/core/model_profiles.py", compact["source_code_refs"])
+                self.assertIn("Advanced Extensions for 2D/STL model profiles", compact["diagnostic_focus"])
+                self.assertIn("Advanced Extensions configuration task", compact["suggested_agent_action"])
                 self.assertIn("contract_placeholder=missing", compact["health_check_summary"])
                 self.assertLess(len(str(compact)), 5000)
             finally:
@@ -1053,6 +1322,315 @@ class GuiSmokeTests(unittest.TestCase):
                 self.assertEqual(Path(dialog.path_edit.text()), project_dir / "exports")
             finally:
                 dialog.deleteLater()
+        finally:
+            window.deleteLater()
+
+    def test_vlm_preannotation_progress_ui_tracks_steps(self):
+        window = self._make_window()
+        try:
+            long_name = "specimen_" + ("verylongname_" * 8) + "001.png"
+            window.vlm_preannotation_run_active = True
+            window.vlm_preannotation_total_images = 2
+            window.vlm_preannotation_completed_images = 0
+            window.vlm_preannotation_total_steps = 12
+            window.vlm_preannotation_completed_steps = 0
+            window.vlm_preannotation_current_image = str(self.project_dir / long_name)
+            window._create_vlm_progress_dialog()
+
+            window._advance_vlm_progress("grid")
+
+            progress = window.vlm_preannotation_progress_dialog
+            self.assertIsNotNone(progress)
+            self.assertEqual(progress.windowModality(), main_module.Qt.NonModal)
+            progress_bar = window.vlm_preannotation_progress_bar
+            progress_label = window.vlm_preannotation_progress_label
+            progress_path_label = window.vlm_preannotation_progress_path_label
+            self.assertEqual(progress_bar.value(), 8)
+            self.assertIn("8%", progress_label.text())
+            self.assertIn("0/2", progress_label.text())
+            self.assertIn("grid", progress_label.text())
+            self.assertIn("...", progress_path_label.text())
+            self.assertLessEqual(len(progress_path_label.text()), 92)
+            self.assertEqual(progress_path_label.toolTip(), str(self.project_dir / long_name))
+            self.assertGreaterEqual(progress.minimumWidth(), 560)
+            self.assertLessEqual(progress.maximumWidth(), 560)
+
+            window._mark_current_vlm_image_done("done")
+
+            self.assertIn("1/2", progress_label.text())
+        finally:
+            if getattr(window, "vlm_preannotation_progress_dialog", None) is not None:
+                window.vlm_preannotation_progress_dialog.close()
+                window.vlm_preannotation_progress_dialog.deleteLater()
+                window.vlm_preannotation_progress_dialog = None
+            window.deleteLater()
+
+    def test_vlm_result_refreshes_current_canvas_with_project_relative_path(self):
+        window = self._make_window()
+        try:
+            project_dir = self.project_dir / "review_project"
+            project_dir.mkdir(parents=True, exist_ok=True)
+            image_path = project_dir / "specimen.png"
+            Image.new("RGB", (120, 80), color=(140, 150, 160)).save(image_path)
+            window.project.create_project("review", str(project_dir), template_id=PROJECT_TEMPLATE_GENERIC)
+            window.project.add_images([str(image_path)])
+
+            relative_current = os.path.relpath(str(image_path), str(project_dir))
+            window.current_image = relative_current
+            window.canvas.load_image(str(image_path))
+            window.vlm_preannotation_total_images = 1
+            window.vlm_preannotation_completed_images = 0
+            window.vlm_preannotation_total_steps = 6
+            window.vlm_preannotation_completed_steps = 3
+            window.vlm_preannotation_current_image_steps_completed = 3
+            window.vlm_preannotation_current_image = str(image_path)
+            window.vlm_preannotation_records = []
+            window.vlm_preannotation_saved_total = 0
+            refresh_calls = []
+            original_refresh = window._refresh_vlm_canvas_if_current
+            window._refresh_vlm_canvas_if_current = lambda path: (refresh_calls.append(path), original_refresh(path))
+
+            window.engine.predict_base_sam_polygon = lambda *_args, **_kwargs: None
+            window._on_vlm_preannotation_image_result(
+                {
+                    "status": "passed",
+                    "image_path": str(image_path),
+                    "candidates": [
+                        {
+                            "part": "Head",
+                            "box_xyxy": [10.0, 12.0, 50.0, 44.0],
+                            "confidence": 0.8,
+                            "reason": "visible head",
+                        },
+                        {
+                            "part": "Mesosoma",
+                            "box_xyxy": [40.0, 18.0, 90.0, 55.0],
+                            "confidence": 0.75,
+                            "reason": "visible mesosoma",
+                        }
+                    ],
+                    "report_path": str(project_dir / "vlm_report.json"),
+                }
+            )
+
+            project_image_key = window.project.project_data["images"][0]
+            self.assertEqual(window.project.get_auto_boxes(project_image_key)["Head"], [10.0, 12.0, 50.0, 44.0])
+            self.assertEqual(window.canvas.auto_boxes["Head"], [10.0, 12.0, 50.0, 44.0])
+            self.assertEqual(window.canvas.auto_boxes["Mesosoma"], [40.0, 18.0, 90.0, 55.0])
+            self.assertGreaterEqual(len(refresh_calls), 1)
+        finally:
+            window.deleteLater()
+
+    def test_vlm_result_repaints_canvas_while_progress_dialog_is_open(self):
+        window = self._make_window()
+        try:
+            project_dir = self.project_dir / "visible_refresh_project"
+            project_dir.mkdir(parents=True, exist_ok=True)
+            image_path = project_dir / "specimen.png"
+            Image.new("RGB", (120, 80), color=(36, 38, 40)).save(image_path)
+            window.project.create_project("review", str(project_dir), template_id=PROJECT_TEMPLATE_GENERIC)
+            window.project.add_images([str(image_path)])
+            image_key = window.project.project_data["images"][0]
+            window.current_image = image_key
+            window.canvas.resize(360, 240)
+            window.canvas.load_image(str(image_path))
+            window.vlm_preannotation_total_images = 1
+            window.vlm_preannotation_completed_images = 0
+            window.vlm_preannotation_total_steps = 6
+            window.vlm_preannotation_completed_steps = 3
+            window.vlm_preannotation_current_image_steps_completed = 3
+            window.vlm_preannotation_current_image = str(image_path)
+            window.vlm_preannotation_records = []
+            window.vlm_preannotation_saved_total = 0
+            window._create_vlm_progress_dialog()
+
+            window.engine.predict_base_sam_polygon = lambda *_args, **_kwargs: [
+                [20, 20],
+                [80, 20],
+                [80, 60],
+                [20, 60],
+            ]
+            window._on_vlm_preannotation_image_result(
+                {
+                    "status": "passed",
+                    "image_path": str(image_path),
+                    "candidates": [
+                        {
+                            "part": "Head",
+                            "box_xyxy": [20.0, 20.0, 80.0, 60.0],
+                            "confidence": 0.8,
+                            "reason": "visible head",
+                        }
+                    ],
+                    "report_path": str(project_dir / "vlm_report.json"),
+                }
+            )
+
+            self.assertEqual(window.canvas.auto_boxes["Head"], [20.0, 20.0, 80.0, 60.0])
+            self.assertEqual(len(window.canvas.polygons["Head"]), 4)
+            pixmap = window.canvas.grab()
+            image = pixmap.toImage()
+            colored_pixels = 0
+            for y in range(image.height()):
+                for x in range(image.width()):
+                    color = image.pixelColor(x, y)
+                    if (
+                        color.green() > 180
+                        and color.red() < 120
+                        and color.blue() < 120
+                    ) or (
+                        color.red() > 220
+                        and 110 <= color.green() <= 210
+                        and color.blue() < 80
+                    ):
+                        colored_pixels += 1
+            self.assertGreater(colored_pixels, 20)
+        finally:
+            if getattr(window, "vlm_preannotation_progress_dialog", None) is not None:
+                window.vlm_preannotation_progress_dialog.close()
+                window.vlm_preannotation_progress_dialog.deleteLater()
+                window.vlm_preannotation_progress_dialog = None
+            window.deleteLater()
+
+    def test_vlm_result_reloads_workbench_after_file_list_refresh_blocks_selection_signal(self):
+        window = self._make_window()
+        try:
+            project_dir = self.project_dir / "blocked_selection_project"
+            project_dir.mkdir(parents=True, exist_ok=True)
+            image_path = project_dir / "specimen.png"
+            Image.new("RGB", (120, 80), color=(36, 38, 40)).save(image_path)
+            window.project.create_project("review", str(project_dir), template_id=PROJECT_TEMPLATE_GENERIC)
+            window.project.add_images([str(image_path)])
+            image_key = window.project.project_data["images"][0]
+            window.current_image = image_key
+            window.canvas.resize(360, 240)
+            window.canvas.load_image(str(image_path))
+            window.vlm_preannotation_total_images = 1
+            window.vlm_preannotation_completed_images = 0
+            window.vlm_preannotation_total_steps = 6
+            window.vlm_preannotation_completed_steps = 3
+            window.vlm_preannotation_current_image_steps_completed = 3
+            window.vlm_preannotation_current_image = str(image_path)
+            window.vlm_preannotation_records = []
+            window.vlm_preannotation_saved_total = 0
+
+            original_refresh_file_list = window.refresh_file_list
+
+            def refresh_and_clear_canvas_without_selection_signal():
+                original_refresh_file_list()
+                window.canvas.set_polygons({})
+                window.canvas.set_boxes({}, {})
+
+            window.refresh_file_list = refresh_and_clear_canvas_without_selection_signal
+            window.engine.predict_base_sam_polygon = lambda *_args, **_kwargs: [
+                [20, 20],
+                [80, 20],
+                [80, 60],
+                [20, 60],
+            ]
+
+            window._on_vlm_preannotation_image_result(
+                {
+                    "status": "passed",
+                    "image_path": str(image_path),
+                    "candidates": [
+                        {
+                            "part": "Head",
+                            "box_xyxy": [20.0, 20.0, 80.0, 60.0],
+                            "confidence": 0.8,
+                            "reason": "visible head",
+                        }
+                    ],
+                    "report_path": str(project_dir / "vlm_report.json"),
+                }
+            )
+
+            self.assertEqual(window.canvas.auto_boxes["Head"], [20.0, 20.0, 80.0, 60.0])
+            self.assertEqual(len(window.canvas.polygons["Head"]), 4)
+        finally:
+            window.deleteLater()
+
+    def test_vlm_auto_box_is_painted_after_refresh(self):
+        window = self._make_window()
+        try:
+            project_dir = self.project_dir / "paint_project"
+            project_dir.mkdir(parents=True, exist_ok=True)
+            image_path = project_dir / "specimen.png"
+            Image.new("RGB", (120, 80), color=(40, 42, 44)).save(image_path)
+            window.project.create_project("review", str(project_dir), template_id=PROJECT_TEMPLATE_GENERIC)
+            window.project.add_images([str(image_path)])
+            image_key = window.project.project_data["images"][0]
+            window.current_image = image_key
+            window.canvas.resize(360, 240)
+            window.canvas.load_image(str(image_path))
+            window.project.update_auto_box(image_key, "Head", [20, 20, 80, 60], save=False)
+
+            window._refresh_vlm_canvas_if_current(image_key)
+
+            self.assertEqual(window.canvas.auto_boxes["Head"], [20.0, 20.0, 80.0, 60.0])
+            pixmap = window.canvas.grab()
+            image = pixmap.toImage()
+            orange_pixels = 0
+            for y in range(image.height()):
+                for x in range(image.width()):
+                    color = image.pixelColor(x, y)
+                    if color.red() > 220 and 110 <= color.green() <= 210 and color.blue() < 80:
+                        orange_pixels += 1
+            self.assertGreater(orange_pixels, 20)
+        finally:
+            window.deleteLater()
+
+    def test_vlm_candidate_writes_box_and_polygon_without_progress_dialog_reentry(self):
+        window = self._make_window()
+        try:
+            image_path = self.project_dir / "specimen.png"
+            Image.new("RGB", (120, 80), color=(140, 150, 160)).save(image_path)
+            window.project.add_images([str(image_path)])
+            image_key = window.project.project_data["images"][0]
+
+            def fake_sam(*_args, **_kwargs):
+                return [[10, 12], [50, 12], [50, 44], [10, 44]]
+
+            window.engine.predict_base_sam_polygon = fake_sam
+            ok, mode = window._apply_vlm_candidate(
+                image_key,
+                None,
+                {
+                    "part": "Head",
+                    "box_xyxy": [10.0, 12.0, 50.0, 44.0],
+                    "confidence": 0.8,
+                    "reason": "visible head",
+                },
+                {"report_path": str(self.project_dir / "vlm_report.json")},
+            )
+
+            self.assertTrue(ok)
+            self.assertEqual(mode, "polygon")
+            self.assertEqual(window.project.get_auto_boxes(image_key)["Head"], [10.0, 12.0, 50.0, 44.0])
+            self.assertEqual(len(window.project.get_labels(image_key)["Head"]), 4)
+        finally:
+            window.deleteLater()
+
+    def test_refresh_file_list_restores_selection_with_project_relative_path(self):
+        window = self._make_window()
+        try:
+            project_dir = self.project_dir / "relative_selection_project"
+            project_dir.mkdir(parents=True, exist_ok=True)
+            image_path = project_dir / "specimen.png"
+            Image.new("RGB", (120, 80), color=(140, 150, 160)).save(image_path)
+            window.project.create_project("review", str(project_dir), template_id=PROJECT_TEMPLATE_GENERIC)
+            window.project.add_images([str(image_path)])
+
+            window.current_image = os.path.relpath(str(image_path), str(project_dir))
+            window.refresh_file_list()
+
+            self.assertIsNotNone(window.file_list.currentItem())
+            self.assertTrue(
+                window._same_project_image_path(
+                    window.file_list.currentItem().data(main_module.Qt.UserRole),
+                    str(image_path.resolve()),
+                )
+            )
         finally:
             window.deleteLater()
 
@@ -1251,6 +1829,132 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(crop_provenance["species_candidate"], "Aphaenogaster gamagumayaa")
             self.assertEqual(crop_provenance["derived_from"]["crop_box"], [10, 20, 80, 100])
             self.assertTrue(window._is_pdf_candidate_provenance(crop_provenance))
+            self.assertEqual(
+                window.project.get_image_provenance(str(parent_image))["panel_split_review"]["status"],
+                "manual_done",
+            )
+        finally:
+            window.deleteLater()
+
+    def test_plain_image_crop_gets_traceable_provenance_for_grouping(self):
+        window = self._make_window()
+        try:
+            parent_image = self.project_dir / "plain_plate.png"
+            crop_image = self.project_dir / "plain_plate__panel_001.jpg"
+            parent_image.write_bytes(b"parent")
+            crop_image.write_bytes(b"crop")
+            window.project.add_images([str(parent_image), str(crop_image)])
+
+            window._inherit_crop_provenance(
+                [
+                    {
+                        "path": str(crop_image),
+                        "source_image": str(parent_image),
+                        "crop_index": 1,
+                        "crop_box": [0, 0, 50, 50],
+                        "source_size": [100, 100],
+                        "crop_source": "white_separator_panel_split",
+                    }
+                ]
+            )
+
+            crop_provenance = window.project.get_image_provenance(str(crop_image))
+            self.assertEqual(crop_provenance["source_type"], "image_crop")
+            self.assertEqual(crop_provenance["derived_from"]["image_path"], str(parent_image.resolve()))
+            self.assertEqual(crop_provenance["derived_from"]["crop_source"], "white_separator_panel_split")
+            self.assertTrue(window._is_split_crop_image(str(crop_image)))
+        finally:
+            window.deleteLater()
+
+    def test_legacy_panel_crop_filename_is_grouped_as_split_crop(self):
+        window = self._make_window()
+        try:
+            parent_image = self.project_dir / "legacy_plate.png"
+            crop_image = self.project_dir / "legacy_plate__panel_001.jpg"
+            unrelated_crop = self.project_dir / "orphan_plate__panel_001.jpg"
+            parent_image.write_bytes(b"parent")
+            crop_image.write_bytes(b"crop")
+            unrelated_crop.write_bytes(b"orphan")
+            window.project.add_images([str(parent_image), str(crop_image), str(unrelated_crop)])
+
+            self.assertTrue(window._is_split_crop_image(str(crop_image)))
+            self.assertFalse(window._is_split_crop_image(str(unrelated_crop)))
+
+            window.refresh_file_list()
+            list_texts = [window.file_list.item(index).text().strip() for index in range(window.file_list.count())]
+            self.assertTrue(any("Split Crops" in text for text in list_texts))
+            split_index = next(index for index, text in enumerate(list_texts) if "Split Crops" in text)
+            self.assertGreater(list_texts.index(crop_image.name), split_index)
+        finally:
+            window.deleteLater()
+
+    def test_batch_panel_split_adds_white_separator_crops_and_skips_hard_seams(self):
+        window = self._make_window()
+        try:
+            parent_image = self.project_dir / "paper__accepted_000008__figure.jpg"
+            image = Image.new("RGB", (420, 260), "white")
+            image.paste((118, 92, 70), (0, 0, 200, 260))
+            image.paste((188, 194, 184), (220, 0, 420, 260))
+            image.save(parent_image)
+
+            hard_seam_image = self.project_dir / "paper__accepted_000009__figure.jpg"
+            hard_image = Image.new("RGB", (420, 260), (118, 92, 70))
+            hard_image.paste((188, 194, 184), (210, 0, 420, 260))
+            hard_image.save(hard_seam_image)
+
+            existing_crop = self.project_dir / "paper__accepted_000008__figure__crop_999.jpg"
+            Image.new("RGB", (64, 64), (120, 120, 120)).save(existing_crop)
+            window.project.add_images([str(parent_image), str(hard_seam_image), str(existing_crop)])
+            window.project.set_image_provenance(
+                str(parent_image),
+                {
+                    "source_type": "pdf_candidate",
+                    "source_ref": {"table": "figure_records", "row_id": 8},
+                    "species_candidate": "Aphaenogaster test",
+                },
+                save=False,
+            )
+            window.project.set_image_provenance(
+                str(existing_crop),
+                {
+                    "source_type": "pdf_candidate_crop",
+                    "derived_from": {"image_path": str(parent_image), "crop_index": 999},
+                },
+                save=False,
+            )
+
+            with patch.object(main_module, "themed_yes_no_question", lambda *args, **kwargs: main_module.QMessageBox.Yes):
+                with patch.object(main_module.QMessageBox, "information", lambda *args, **kwargs: None):
+                    window.batch_split_panel_images()
+
+            images = list(window.project.project_data["images"])
+            self.assertEqual(images[0], str(parent_image.resolve()))
+            self.assertEqual(images[1], str(hard_seam_image.resolve()))
+            self.assertEqual(images[2], str(existing_crop.resolve()))
+            self.assertEqual(len(images), 4)
+            generated = images[3]
+            self.assertTrue(Path(generated).name.startswith("paper__accepted_000008__figure__panel_"))
+            provenance = window.project.get_image_provenance(generated)
+            self.assertEqual(provenance["source_type"], "pdf_candidate_crop")
+            self.assertEqual(provenance["derived_from"]["crop_source"], "white_separator_panel_split")
+            hard_review = window.project.get_image_provenance(str(hard_seam_image))["panel_split_review"]
+            self.assertEqual(hard_review["status"], "manual_required")
+            self.assertEqual(hard_review["reason"], "hard_seam_panel_split")
+
+            list_texts = [window.file_list.item(index).text().strip() for index in range(window.file_list.count())]
+            original_index = next(index for index, text in enumerate(list_texts) if "Original Images" in text)
+            split_index = next(index for index, text in enumerate(list_texts) if "Split Crops" in text)
+            manual_index = next(index for index, text in enumerate(list_texts) if "Manual Split Needed" in text)
+            self.assertLess(original_index, split_index)
+            self.assertLess(list_texts.index(parent_image.name), list_texts.index(Path(generated).name))
+            self.assertLess(split_index, manual_index)
+            self.assertGreater(list_texts.index(hard_seam_image.name), manual_index)
+
+            manual_header = window.file_list.item(manual_index)
+            window._handle_image_list_item_clicked(manual_header)
+            collapsed_texts = [window.file_list.item(index).text().strip() for index in range(window.file_list.count())]
+            self.assertTrue(any(text.startswith("▸") and "Manual Split Needed" in text for text in collapsed_texts))
+            self.assertNotIn(hard_seam_image.name, collapsed_texts)
         finally:
             window.deleteLater()
 
@@ -1324,6 +2028,126 @@ class GuiSmokeTests(unittest.TestCase):
         finally:
             window.deleteLater()
 
+    def test_manual_image_can_reference_same_taxon_literature_db(self):
+        window = self._make_window()
+        try:
+            output_db = self.project_dir / "TaxaMask_outputs" / "pdf_extraction" / "taxamask_literature.db"
+            output_db.parent.mkdir(parents=True, exist_ok=True)
+            literature_image = self.project_dir / "paper_source.jpg"
+            manual_image = self.project_dir / "manual_camera_image.jpg"
+            literature_image.write_bytes(b"literature")
+            manual_image.write_bytes(b"manual")
+            self._create_literature_db(output_db, literature_image)
+            window.pdf_widget.edit_db_path.setText(str(output_db))
+
+            window.project.project_data["images"] = [str(manual_image)]
+            window.project.project_data["labels"] = {
+                str(manual_image): {
+                    "parts": {},
+                    "descriptions": {},
+                    "taxon": "Aphaenogaster gamagumayaa",
+                    "genus": "Aphaenogaster gamagumayaa",
+                }
+            }
+            window.current_image = str(manual_image)
+            window.genus_combo.addItem("Aphaenogaster gamagumayaa")
+            window.genus_combo.setCurrentText("Aphaenogaster gamagumayaa")
+
+            db_path, context, reason = window._resolve_current_literature_context()
+
+            self.assertEqual(Path(db_path), output_db)
+            self.assertEqual(reason, "")
+            self.assertTrue(context["available"])
+            self.assertEqual(context["species_candidate"], "Aphaenogaster gamagumayaa")
+            self.assertEqual(context["link_mode"], "taxon_match_not_image_provenance")
+            self.assertIsNone(context["figure_id"])
+        finally:
+            window.deleteLater()
+
+    def test_manual_image_finds_literature_db_from_other_project_pdf_image(self):
+        window = self._make_window()
+        try:
+            literature_db = self.project_dir / "pdf_results" / "custom_literature.db"
+            literature_db.parent.mkdir(parents=True, exist_ok=True)
+            literature_image = self.project_dir / "paper_source.jpg"
+            manual_image = self.project_dir / "manual_camera_image.jpg"
+            literature_image.write_bytes(b"literature")
+            manual_image.write_bytes(b"manual")
+            self._create_literature_db(literature_db, literature_image)
+
+            window.pdf_widget.edit_db_path.clear()
+            window.pdf_widget.edit_db_name.setText("taxamask_literature.db")
+            window.project.project_data["images"] = [str(literature_image), str(manual_image)]
+            window.project.project_data["labels"] = {
+                str(literature_image): {"parts": {}, "descriptions": {}},
+                str(manual_image): {
+                    "parts": {},
+                    "descriptions": {},
+                    "taxon": "Aphaenogaster gamagumayaa",
+                    "genus": "Aphaenogaster gamagumayaa",
+                },
+            }
+            window.project.set_image_provenance(
+                str(literature_image),
+                {
+                    "source_type": "pdf_candidate",
+                    "source_db": str(literature_db),
+                    "source_ref": {"table": "figure_records", "row_id": 7},
+                    "species_candidate": "Aphaenogaster gamagumayaa",
+                },
+                save=False,
+            )
+            window.current_image = str(manual_image)
+            window.genus_combo.addItem("Aphaenogaster gamagumayaa")
+            window.genus_combo.setCurrentText("Aphaenogaster gamagumayaa")
+
+            db_path, context, reason = window._resolve_current_literature_context()
+
+            self.assertEqual(Path(db_path), literature_db)
+            self.assertEqual(reason, "")
+            self.assertTrue(context["available"])
+            self.assertEqual(context["link_mode"], "taxon_match_not_image_provenance")
+        finally:
+            window.deleteLater()
+
+    def test_manual_image_can_choose_literature_db_when_auto_paths_are_missing(self):
+        window = self._make_window()
+        try:
+            literature_db = self.project_dir / "external_pdf_results" / "chosen_literature.db"
+            literature_db.parent.mkdir(parents=True, exist_ok=True)
+            literature_image = self.project_dir / "paper_source.jpg"
+            manual_image = self.project_dir / "manual_camera_image.jpg"
+            literature_image.write_bytes(b"literature")
+            manual_image.write_bytes(b"manual")
+            self._create_literature_db(literature_db, literature_image)
+
+            window.pdf_widget.edit_db_path.clear()
+            window.pdf_widget.edit_db_name.setText("taxamask_literature.db")
+            window.project.project_data["images"] = [str(manual_image)]
+            window.project.project_data["labels"] = {
+                str(manual_image): {
+                    "parts": {},
+                    "descriptions": {},
+                    "taxon": "Aphaenogaster gamagumayaa",
+                    "genus": "Aphaenogaster gamagumayaa",
+                },
+            }
+            window.current_image = str(manual_image)
+            window.genus_combo.addItem("Aphaenogaster gamagumayaa")
+            window.genus_combo.setCurrentText("Aphaenogaster gamagumayaa")
+
+            with patch.object(main_module.QFileDialog, "getOpenFileName", return_value=(str(literature_db), "SQLite Database (*.db)")):
+                db_path, context, reason = window._choose_literature_db_for_current_taxon()
+
+            self.assertEqual(Path(db_path), literature_db)
+            self.assertEqual(reason, "")
+            self.assertTrue(context["available"])
+            self.assertEqual(context["link_mode"], "taxon_match_not_image_provenance")
+            self.assertEqual(Path(window.pdf_widget.edit_db_path.text()), literature_db.parent)
+            self.assertEqual(window.pdf_widget.edit_db_name.text(), literature_db.name)
+        finally:
+            window.deleteLater()
+
     def test_literature_dialog_exposes_structured_and_raw_text_layers(self):
         context = {
             "source_db": str(self.project_dir / "literature.db"),
@@ -1371,11 +2195,37 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(dialog.result_tabs.tabText(0), "Structured Descriptions")
             self.assertEqual(dialog.result_tabs.tabText(1), "Raw Text Blocks")
             self.assertEqual(dialog.raw_scope_combo.itemText(0), "Current Taxon First")
+            self.assertEqual(dialog.btn_replace.text(), "Replace Current Description")
+            self.assertEqual(dialog.btn_append.text(), "Append to Current Description")
             self.assertEqual(dialog.table.rowCount(), 1)
             self.assertEqual(dialog.raw_table.rowCount(), 1)
             dialog.result_tabs.setCurrentWidget(dialog.raw_table)
             self.assertIn("remarkably elongate", dialog.selected_description_text())
             self.assertEqual(dialog.selected_source()["source"], "pdf_text_block")
+        finally:
+            dialog.deleteLater()
+
+    def test_literature_dialog_chinese_action_buttons_are_explicit(self):
+        context = {
+            "source_db": str(self.project_dir / "literature.db"),
+            "pdf_file_id": 3,
+            "pdf_file": "paper.pdf",
+            "species_candidate": "Aphaenogaster gamagumayaa",
+        }
+        with patch.object(main_module, "query_literature_part_descriptions", return_value=[]), \
+             patch.object(main_module, "query_literature_text_blocks", return_value=[]):
+            dialog = main_module.LiteratureDescriptionDialog(
+                db_path=str(self.project_dir / "literature.db"),
+                context=context,
+                image_path=str(self.project_dir / "image.jpg"),
+                current_part="scape",
+                taxon_hint="Aphaenogaster gamagumayaa",
+                parent=None,
+                lang="zh",
+            )
+        try:
+            self.assertEqual(dialog.btn_replace.text(), "替换当前描述")
+            self.assertEqual(dialog.btn_append.text(), "追加到当前描述末尾")
         finally:
             dialog.deleteLater()
 

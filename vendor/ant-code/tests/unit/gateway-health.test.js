@@ -34,6 +34,41 @@ test("formats gateway errors with diagnostic hints", () => {
   assert.doesNotMatch(text, /token=secret/);
 });
 
+test("gateway 404 hint matches OpenAI-compatible chat route", () => {
+  const normalized = normalizeGatewayError(null, {
+    code: "GATEWAY_HTTP_ERROR",
+    message: "Gateway returned HTTP 404",
+    status: 404,
+    protocol: "openai-chat"
+  });
+
+  assert.ok(normalized.diagnostics.some((hint) => /\/v1\/chat\/completions/.test(hint)));
+  assert.equal(normalized.diagnostics.some((hint) => /usually \/v1\/chat\./.test(hint)), false);
+});
+
+test("gateway image-input 404 reports unsupported vision route", () => {
+  const normalized = normalizeGatewayError(null, {
+    code: "GATEWAY_HTTP_ERROR",
+    message: "Gateway returned HTTP 404",
+    status: 404,
+    protocol: "openai-chat",
+    details: {
+      body: JSON.stringify({
+        error: {
+          code: "404",
+          message: "No endpoints found that support image input"
+        }
+      })
+    }
+  });
+  const text = formatGatewayError(normalized);
+
+  assert.equal(normalized.providerMessage, "No endpoints found that support image input");
+  assert.match(text, /provider: No endpoints found that support image input/);
+  assert.ok(normalized.diagnostics.some((hint) => /rejected image input|vision-capable/i.test(hint)));
+  assert.equal(normalized.diagnostics.some((hint) => /\/v1\/chat\/completions/.test(hint)), false);
+});
+
 test("gateway health dry run validates config and network policy", async () => {
   const report = await runGatewayHealth({
     cwd: process.cwd(),

@@ -19,12 +19,20 @@ from .cascade_routes import (
     get_route_appointed_expert,
     get_route_persisted_expert_candidates,
     merge_expert_candidates,
+    sanitize_route_backend_fields,
     sanitize_expert_reference,
     sanitize_project_route_manifest,
+)
+from .model_profiles import (
+    DEFAULT_MODEL_PROFILE_ID,
+    clone_model_profiles,
+    sanitize_model_profiles,
+    set_active_model_profile as set_active_model_profile_id,
 )
 
 DEFAULT_CATEGORY_SUPERCATEGORY = "biological_structure"
 MULTIMODAL_SAMPLE_SCHEMA_VERSION = "taxamask-multimodal-sample-v1"
+MODEL_PROFILE_EXPORT_SUMMARY_SCHEMA_VERSION = "taxamask-model-profile-export-summary-v1"
 DEFAULT_PARENT_BOX_ASPECT_RATIOS = {
     "Head": 1.0,
     "Mesosoma": 4.0 / 3.0,
@@ -52,6 +60,7 @@ class ProjectManager:
             },
             "blink_context_roi_parents": {},
             "parent_box_aspect_ratios": dict(DEFAULT_PARENT_BOX_ASPECT_RATIOS),
+            "model_profiles": {},
             "cascade_routes": {
                 "version": PROJECT_ROUTE_MANIFEST_VERSION,
                 "routes": [],
@@ -84,6 +93,34 @@ class ProjectManager:
         )
         self.project_data["cascade_routes"] = clean_manifest
         return clean_manifest
+
+    def _model_profile_context(self):
+        return {
+            "taxonomy": list(self.project_data.get("taxonomy", [])),
+            "locator_scope": list(self.project_data.get("locator_scope", [])),
+            "parent_box_aspect_ratios": dict(self.project_data.get("parent_box_aspect_ratios", {})),
+            "vlm_preannotation": dict(self.project_data.get("vlm_preannotation", {})),
+        }
+
+    def _sanitize_model_profiles(self, profiles):
+        clean_profiles = sanitize_model_profiles(profiles, **self._model_profile_context())
+        self.project_data["model_profiles"] = clean_profiles
+        return clean_profiles
+
+    def _sync_active_model_profile_from_project_fields(self):
+        profiles = self._sanitize_model_profiles(self.project_data.get("model_profiles", {}))
+        active_id = profiles.get("active_profile_id", DEFAULT_MODEL_PROFILE_ID)
+        for profile in profiles.get("profiles", []):
+            if profile.get("profile_id") != active_id:
+                continue
+            parent_backend = profile.setdefault("parent_backend", {})
+            parent_backend["locator_scope"] = list(self.project_data.get("locator_scope", []))
+            parent_backend["parent_box_aspect_ratios"] = dict(self.project_data.get("parent_box_aspect_ratios", {}))
+            inference_params = profile.setdefault("inference_params", {})
+            inference_params["vlm_preannotation"] = dict(self.project_data.get("vlm_preannotation", {}))
+            break
+        self.project_data["model_profiles"] = self._sanitize_model_profiles(profiles)
+        return self.project_data["model_profiles"]
 
     def _sanitize_blink_context_roi_parents(self, parent_map):
         taxonomy = set(self.project_data.get("taxonomy", []))
@@ -152,6 +189,7 @@ class ProjectManager:
     def set_vlm_preannotation_settings(self, settings, save=True):
         clean_settings = self._sanitize_vlm_preannotation_settings(settings)
         self.project_data["vlm_preannotation"] = clean_settings
+        self._sync_active_model_profile_from_project_fields()
         if save:
             self.save_project()
         return clean_settings
@@ -353,6 +391,7 @@ class ProjectManager:
         )
         self.project_data["category_supercategory"] = template["category_supercategory"]
         self.project_data["taxon_label"] = template["taxon_label"]
+        self.ensure_default_model_profile()
         self.current_project_path = os.path.join(save_dir, f"{name}.json")
         self.save_project()
 
@@ -361,42 +400,100 @@ class ProjectManager:
         if not self.current_project_path:
             return abs_path
         try:
-            project_dir = os.path.dirname(self.current_project_path)
-            return os.path.relpath(abs_path, project_dir)
+            project_dir = os.path.dirname(os.path.abspath(self.current_project_path))
+            normalized_path = str(abs_path)
+            if normalized_path and not os.path.isabs(normalized_path):
+                normalized_path = self._to_absolute(normalized_path)
+            return os.path.relpath(normalized_path, project_dir)
         except (ValueError, TypeError):
             return abs_path
 
     def _to_absolute(self, path):
         """Convert relative path to absolute path."""
-        # Normalize slashes
-        path = path.replace("\\", "/")
-        
-        # 1. Check if it's already an absolute path that exists
-        if os.path.exists(path):
-            return os.path.normpath(path)
-            
-        # 2. Try relative to project file
-        if not self.current_project_path:
-            return path
-            
-        project_dir = os.path.dirname(self.current_project_path)
-        abs_path = os.path.normpath(os.path.join(project_dir, path))
-        
-        # 3. If joined path exists, return it
-        if os.path.exists(abs_path):
+        if path is None:
+            return ""
+
+        path = str(path).replace("\\", "/")
+        if not path:
+            return ""
+
+        if os.path.isabs(path):
+            abs_path = os.path.abspath(os.path.normpath(path))
+            if os.path.exists(abs_path):
+                return abs_path
+            relocated = self._resolve_known_relocated_output(abs_path)
+            if relocated:
+                return os.path.abspath(os.path.normpath(relocated))
             return abs_path
 
-        relocated = self._resolve_known_relocated_output(abs_path)
+        project_abs_path = ""
+        if self.current_project_path:
+            project_dir = os.path.dirname(os.path.abspath(self.current_project_path))
+            project_abs_path = os.path.abspath(os.path.normpath(os.path.join(project_dir, path)))
+            if os.path.exists(project_abs_path):
+                return project_abs_path
+            relocated = self._resolve_known_relocated_output(project_abs_path)
+            if relocated:
+                return os.path.abspath(os.path.normpath(relocated))
+
+        cwd_abs_path = os.path.abspath(os.path.normpath(path))
+        if os.path.exists(cwd_abs_path):
+            return cwd_abs_path
+
+        relocated = self._resolve_known_relocated_output(cwd_abs_path)
         if relocated:
-            return relocated
+            return os.path.abspath(os.path.normpath(relocated))
 
         relocated = self._resolve_known_relocated_output(path)
         if relocated:
-            return relocated
-             
-        # 4. Fallback: maybe it was saved as absolute but OS check failed?
-        # Just return the joined path as best guess
-        return abs_path
+            return os.path.abspath(os.path.normpath(relocated))
+
+        return project_abs_path or cwd_abs_path
+
+    def _path_identity(self, path):
+        if not path:
+            return ""
+        try:
+            absolute = self._to_absolute(path)
+        except Exception:
+            absolute = path
+        return os.path.normcase(os.path.normpath(os.path.abspath(str(absolute))))
+
+    def _registered_image_key_for_path(self, path):
+        target = self._path_identity(path)
+        if not target:
+            return ""
+        for image_path in self.project_data.get("images", []):
+            if self._path_identity(image_path) == target:
+                return image_path
+        return ""
+
+    def _merge_loaded_label_entry(self, existing, incoming):
+        merged = self._normalize_label_taxon_fields(dict(existing or {}))
+        incoming = self._normalize_label_taxon_fields(dict(incoming or {}))
+
+        for key, value in incoming.items():
+            if isinstance(value, dict):
+                target = merged.setdefault(key, {})
+                if not isinstance(target, dict):
+                    target = {}
+                for child_key, child_value in value.items():
+                    if child_key not in target or target.get(child_key) in ({}, [], "", None):
+                        target[child_key] = child_value
+                merged[key] = target
+                continue
+
+            if key == "status":
+                if value == "labeled" or not merged.get("status") or merged.get("status") == "unlabeled":
+                    merged[key] = value
+                continue
+
+            if value not in ("", None, "Unknown") and merged.get(key) in ("", None, "Unknown"):
+                merged[key] = value
+
+        if merged.get("parts"):
+            merged["status"] = "labeled"
+        return self._normalize_label_taxon_fields(merged)
 
     def clear(self):
         """Resets the project data to a clean state."""
@@ -417,6 +514,7 @@ class ProjectManager:
             },
             "blink_context_roi_parents": {},
             "parent_box_aspect_ratios": dict(DEFAULT_PARENT_BOX_ASPECT_RATIOS),
+            "model_profiles": {},
             "cascade_routes": {
                 "version": PROJECT_ROUTE_MANIFEST_VERSION,
                 "routes": [],
@@ -431,7 +529,7 @@ class ProjectManager:
         with open(path, 'r', encoding='utf-8') as f:
             loaded_data = json.load(f)
         
-        self.current_project_path = path
+        self.current_project_path = os.path.abspath(path)
         
         # FIX: Strictly use loaded taxonomy if present.
         # This prevents the system from overriding custom empty taxonomies with defaults.
@@ -467,6 +565,9 @@ class ProjectManager:
         self.project_data["cascade_routes"] = self._sanitize_cascade_routes(
             loaded_data.get("cascade_routes", {})
         )
+        self.project_data["model_profiles"] = self._sanitize_model_profiles(
+            loaded_data.get("model_profiles", {})
+        )
             
         self.project_data["name"] = loaded_data.get("name", "Untitled")
         self.project_data["project_template"] = str(loaded_data.get("project_template", "") or "")
@@ -476,29 +577,50 @@ class ProjectManager:
         )
         self.project_data["taxon_label"] = str(loaded_data.get("taxon_label", "Taxon") or "Taxon").strip() or "Taxon"
 
+        image_keys_seen = set()
+
         # Handle Images
         for img_rel in loaded_data.get("images", []):
-            self.project_data["images"].append(self._to_absolute(img_rel))
+            img_abs = self._to_absolute(img_rel)
+            identity = self._path_identity(img_abs)
+            if not identity or identity in image_keys_seen:
+                continue
+            image_keys_seen.add(identity)
+            self.project_data["images"].append(img_abs)
             
         # Handle Labels
         for img_rel, label_data in loaded_data.get("labels", {}).items():
             img_abs = self._to_absolute(img_rel)
-            self.project_data["labels"][img_abs] = self._normalize_label_taxon_fields(label_data)
+            project_key = self._registered_image_key_for_path(img_abs) or img_abs
+            existing = self.project_data["labels"].get(project_key)
+            if existing:
+                self.project_data["labels"][project_key] = self._merge_loaded_label_entry(existing, label_data)
+            else:
+                self.project_data["labels"][project_key] = self._normalize_label_taxon_fields(label_data)
             
         # Handle Scales
         for img_rel, scale_val in loaded_data.get("scales", {}).items():
             img_abs = self._to_absolute(img_rel)
-            self.project_data["scales"][img_abs] = scale_val
+            project_key = self._registered_image_key_for_path(img_abs) or img_abs
+            self.project_data["scales"][project_key] = scale_val
 
         # Handle per-image provenance for agent-imported PDF candidates.
         self.project_data["image_provenance"] = {}
         for img_rel, provenance in loaded_data.get("image_provenance", {}).items():
             img_abs = self._to_absolute(img_rel)
             if isinstance(provenance, dict):
-                self.project_data["image_provenance"][img_abs] = dict(provenance)
+                project_key = self._registered_image_key_for_path(img_abs) or img_abs
+                existing = self.project_data["image_provenance"].get(project_key, {})
+                if isinstance(existing, dict):
+                    merged = dict(existing)
+                    merged.update(provenance)
+                    self.project_data["image_provenance"][project_key] = merged
+                else:
+                    self.project_data["image_provenance"][project_key] = dict(provenance)
 
     def save_project(self):
         if self.current_project_path:
+            self._sync_active_model_profile_from_project_fields()
             data_to_save = {
                 "name": self.project_data["name"],
                 "taxonomy": self.project_data["taxonomy"],
@@ -509,6 +631,7 @@ class ProjectManager:
                 "vlm_preannotation": self.get_vlm_preannotation_settings(),
                 "blink_context_roi_parents": self.get_blink_context_roi_parents(),
                 "parent_box_aspect_ratios": self.get_parent_box_aspect_ratios(),
+                "model_profiles": self.get_model_profiles(),
                 "cascade_routes": self.get_cascade_routes(),
                 "images": [],
                 "labels": {},
@@ -638,6 +761,178 @@ class ProjectManager:
         self.project_data["blink_context_roi_parents"] = clean_map
         return dict(clean_map)
 
+    def ensure_default_model_profile(self):
+        return self._sanitize_model_profiles(self.project_data.get("model_profiles", {}))
+
+    def get_model_profiles(self):
+        self._sync_active_model_profile_from_project_fields()
+        return clone_model_profiles(self.project_data.get("model_profiles", {}))
+
+    def set_model_profiles(self, model_profiles, save=True):
+        clean_profiles = self._sanitize_model_profiles(model_profiles)
+        if save:
+            self.save_project()
+        return clone_model_profiles(clean_profiles)
+
+    def get_active_model_profile(self):
+        profiles = self.get_model_profiles()
+        active_id = profiles.get("active_profile_id")
+        for profile in profiles.get("profiles", []):
+            if profile.get("profile_id") == active_id:
+                return clone_model_profiles(profile)
+        profiles = self.ensure_default_model_profile()
+        return clone_model_profiles(profiles.get("profiles", [{}])[0])
+
+    def set_active_model_profile(self, profile_id, save=True):
+        clean_profiles = set_active_model_profile_id(
+            self.project_data.get("model_profiles", {}),
+            profile_id,
+        )
+        self.project_data["model_profiles"] = self._sanitize_model_profiles(clean_profiles)
+        active_profile = None
+        active_id = self.project_data["model_profiles"].get("active_profile_id")
+        for profile in self.project_data["model_profiles"].get("profiles", []):
+            if profile.get("profile_id") == active_id:
+                active_profile = clone_model_profiles(profile)
+                break
+        if not active_profile:
+            active_profile = clone_model_profiles(self.project_data["model_profiles"].get("profiles", [{}])[0])
+        parent_backend = active_profile.get("parent_backend", {})
+        inference_params = active_profile.get("inference_params", {})
+        self.project_data["locator_scope"] = sanitize_locator_scope(
+            parent_backend.get("locator_scope", []),
+            self.project_data.get("taxonomy", []),
+            fallback=DEFAULT_LOCATOR_SCOPE,
+        )
+        self.project_data["parent_box_aspect_ratios"] = self._sanitize_parent_box_aspect_ratios(
+            parent_backend.get("parent_box_aspect_ratios", {})
+        )
+        self.project_data["vlm_preannotation"] = self._sanitize_vlm_preannotation_settings(
+            inference_params.get("vlm_preannotation", {})
+        )
+        if save:
+            self.save_project()
+        return active_profile
+
+    def update_active_model_profile_parent_weights(self, locator_weights=None, segmenter_weights=None, save=True):
+        profiles = self._sanitize_model_profiles(self.project_data.get("model_profiles", {}))
+        active_id = profiles.get("active_profile_id", DEFAULT_MODEL_PROFILE_ID)
+        updated_profile = None
+        for profile in profiles.get("profiles", []):
+            if profile.get("profile_id") != active_id:
+                continue
+            parent_backend = profile.setdefault("parent_backend", {})
+            if locator_weights is not None:
+                parent_backend["locator_weights"] = str(locator_weights or "")
+            if segmenter_weights is not None:
+                parent_backend["segmenter_weights"] = str(segmenter_weights or "BASE_SAM") or "BASE_SAM"
+            updated_profile = clone_model_profiles(profile)
+            break
+        self.project_data["model_profiles"] = self._sanitize_model_profiles(profiles)
+        if save:
+            self.save_project()
+        return updated_profile or self.get_active_model_profile()
+
+    def _summarize_external_backend_for_audit(self, config):
+        payload = config if isinstance(config, dict) else {}
+        return {
+            "backend_id": str(payload.get("backend_id") or ""),
+            "display_name": str(payload.get("display_name") or ""),
+            "python_executable": os.path.basename(str(payload.get("python_executable") or "")),
+            "prepare_command_present": bool(str(payload.get("prepare_dataset_command") or "").strip()),
+            "train_command_present": bool(str(payload.get("train_command") or "").strip()),
+            "predict_command_present": bool(str(payload.get("predict_command") or "").strip()),
+            "model_manifest": str(payload.get("model_manifest") or ""),
+        }
+
+    def _summarize_external_blink_for_audit(self, config):
+        payload = config if isinstance(config, dict) else {}
+        return {
+            "backend_id": str(payload.get("backend_id") or ""),
+            "display_name": str(payload.get("display_name") or ""),
+            "python_executable": os.path.basename(str(payload.get("python_executable") or "")),
+            "train_command_present": bool(str(payload.get("train_command") or "").strip()),
+            "predict_command_present": bool(str(payload.get("predict_command") or "").strip()),
+            "model_manifest": str(payload.get("model_manifest") or ""),
+        }
+
+    def build_model_profile_export_summary(self, export_format=None):
+        profiles = self.get_model_profiles()
+        active_profile = self.get_active_model_profile()
+        parent_backend = active_profile.get("parent_backend", {}) if isinstance(active_profile.get("parent_backend"), dict) else {}
+        child_defaults = active_profile.get("child_backend_defaults", {}) if isinstance(active_profile.get("child_backend_defaults"), dict) else {}
+        inference_params = active_profile.get("inference_params", {}) if isinstance(active_profile.get("inference_params"), dict) else {}
+
+        route_summaries = []
+        for route in self.iter_cascade_routes():
+            appointed = route.get("appointed_expert", {}) if isinstance(route.get("appointed_expert"), dict) else {}
+            route_summaries.append(
+                {
+                    "parent": str(route.get("parent") or ""),
+                    "child": str(route.get("child") or ""),
+                    "enabled": bool(route.get("enabled", False)),
+                    "expert_backend": str(appointed.get("expert_backend") or route.get("expert_backend") or ""),
+                    "expert_id": str(appointed.get("expert_id") or route.get("expert_id") or ""),
+                    "expert_manifest": str(appointed.get("expert_manifest") or route.get("expert_manifest") or ""),
+                    "input_size": appointed.get("input_size") or route.get("input_size"),
+                    "min_conf": route.get("min_conf"),
+                }
+            )
+
+        return {
+            "schema_version": MODEL_PROFILE_EXPORT_SUMMARY_SCHEMA_VERSION,
+            "project_name": str(self.project_data.get("name") or ""),
+            "project_path": os.path.abspath(self.current_project_path) if self.current_project_path else "",
+            "export_format": str(export_format or ""),
+            "active_profile_id": str(profiles.get("active_profile_id") or active_profile.get("profile_id") or ""),
+            "active_profile": {
+                "profile_id": str(active_profile.get("profile_id") or ""),
+                "display_name": str(active_profile.get("display_name") or ""),
+                "description": str(active_profile.get("description") or ""),
+                "profile_scope": str(active_profile.get("profile_scope") or "2d_stl"),
+            },
+            "parent_backend": {
+                "backend_type": str(parent_backend.get("backend_type") or ""),
+                "locator_scope": list(parent_backend.get("locator_scope") or []),
+                "locator_weights": str(parent_backend.get("locator_weights") or ""),
+                "segmenter_weights": str(parent_backend.get("segmenter_weights") or ""),
+                "train_params": dict(parent_backend.get("train_params") or {}),
+                "parent_box_aspect_ratios": dict(parent_backend.get("parent_box_aspect_ratios") or {}),
+                "external_backend": self._summarize_external_backend_for_audit(parent_backend.get("external_backend")),
+            },
+            "child_backend_defaults": {
+                "backend_type": str(child_defaults.get("backend_type") or ""),
+                "input_size": child_defaults.get("input_size"),
+                "train_params": dict(child_defaults.get("train_params") or {}),
+                "heatmap_params": dict(child_defaults.get("heatmap_params") or {}),
+                "external_blink_backend": self._summarize_external_blink_for_audit(child_defaults.get("external_blink_backend")),
+            },
+            "inference_params": {
+                "conf": inference_params.get("conf"),
+                "adapt": inference_params.get("adapt"),
+                "pad": inference_params.get("pad"),
+                "noise_floor": inference_params.get("noise_floor"),
+                "poly_epsilon": inference_params.get("poly_epsilon"),
+                "vlm_preannotation": dict(inference_params.get("vlm_preannotation") or {}),
+            },
+            "route_count": len(route_summaries),
+            "route_experts": route_summaries,
+        }
+
+    def write_model_profile_export_summary(self, output_dir, export_format=None):
+        if not output_dir:
+            return ""
+        os.makedirs(output_dir, exist_ok=True)
+        summary_path = os.path.join(output_dir, "model_profile_summary.json")
+        with open(summary_path, "w", encoding="utf-8") as handle:
+            json.dump(
+                self.build_model_profile_export_summary(export_format=export_format),
+                handle,
+                indent=2,
+                ensure_ascii=False,
+            )
+        return summary_path
+
     def _clone_cascade_route(self, route_entry):
         route = dict(route_entry or {})
         appointed_expert = route.get("appointed_expert")
@@ -740,6 +1035,11 @@ class ProjectManager:
         expert_id=None,
         expert_part=None,
         expert_filename=None,
+        expert_backend=None,
+        expert_manifest=None,
+        input_size=None,
+        backend_params=None,
+        note=None,
         focus_source=None,
         registration_source="blink_candidate",
         save=True,
@@ -763,7 +1063,16 @@ class ProjectManager:
             "expert_id": existing.get("expert_id"),
             "expert_part": existing.get("expert_part"),
             "expert_filename": existing.get("expert_filename"),
+            "expert_backend": expert_backend if expert_backend is not None else existing.get("expert_backend"),
+            "expert_manifest": expert_manifest if expert_manifest is not None else existing.get("expert_manifest"),
+            "input_size": input_size if input_size is not None else existing.get("input_size"),
+            "backend_params": backend_params if backend_params is not None else existing.get("backend_params"),
+            "note": note if note is not None else existing.get("note"),
         }
+        route_payload.update(sanitize_route_backend_fields(route_payload))
+        if supplemental_candidate.get("expert_id"):
+            supplemental_candidate.update(sanitize_route_backend_fields(route_payload))
+            supplemental_candidates = [supplemental_candidate]
         route_payload = self.merge_cascade_route_expert_candidates(
             route_payload,
             supplemental_candidates,
@@ -779,6 +1088,11 @@ class ProjectManager:
         expert_part=None,
         expert_filename=None,
         expert_id=None,
+        expert_backend=None,
+        expert_manifest=None,
+        input_size=None,
+        backend_params=None,
+        note=None,
         save=True,
     ):
         route = self.get_cascade_route(parent_part, child_part)
@@ -794,15 +1108,27 @@ class ProjectManager:
         )
         route_payload = dict(route)
         route_payload["appointed_expert"] = dict(clean_expert)
+        route_payload["appointed_expert"].update(
+            sanitize_route_backend_fields(
+                {
+                    "expert_backend": expert_backend if expert_backend is not None else route.get("expert_backend"),
+                    "expert_manifest": expert_manifest if expert_manifest is not None else route.get("expert_manifest"),
+                    "input_size": input_size if input_size is not None else route.get("input_size"),
+                    "backend_params": backend_params if backend_params is not None else route.get("backend_params"),
+                    "note": note if note is not None else route.get("note"),
+                }
+            )
+        )
         route_payload["expert_candidates"] = [
             dict(candidate)
             for candidate in merge_expert_candidates(
                 route.get("expert_candidates", []),
-                clean_expert,
-                appointed_expert=clean_expert,
+                route_payload["appointed_expert"],
+                appointed_expert=route_payload["appointed_expert"],
             )
         ]
         route_payload.update(clean_expert)
+        route_payload.update(sanitize_route_backend_fields(route_payload["appointed_expert"]))
         return self.set_cascade_route(route_payload, save=save)
 
     def set_cascade_route_enabled(self, parent_part, child_part, enabled, save=True):
@@ -984,6 +1310,7 @@ class ProjectManager:
         ratios = self.get_parent_box_aspect_ratios()
         ratios[clean_part] = clean_ratio
         self.project_data["parent_box_aspect_ratios"] = self._sanitize_parent_box_aspect_ratios(ratios)
+        self._sync_active_model_profile_from_project_fields()
         if save:
             self.save_project()
         return True
@@ -1140,6 +1467,7 @@ class ProjectManager:
     def set_locator_scope(self, locator_scope, save=True):
         clean_scope = sanitize_locator_scope(locator_scope, self.project_data.get("taxonomy", []), fallback=DEFAULT_LOCATOR_SCOPE)
         self.project_data["locator_scope"] = clean_scope
+        self._sync_active_model_profile_from_project_fields()
         if save:
             self.save_project()
         return clean_scope
@@ -1293,6 +1621,7 @@ class ProjectManager:
         clean_name = str(part_name).strip()
         if is_safe_part_name(clean_name) and clean_name not in self.project_data["taxonomy"]:
             self.project_data["taxonomy"].append(clean_name)
+            self._sync_active_model_profile_from_project_fields()
             self.save_project() # FIX: Save immediately
             return True
         return False
@@ -1329,6 +1658,7 @@ class ProjectManager:
                     ],
                 }
             )
+            self._sync_active_model_profile_from_project_fields()
             
             self.save_project() # FIX: Save immediately
             return True

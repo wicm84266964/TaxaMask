@@ -256,7 +256,7 @@ export const BUILT_IN_TOOLS = Object.freeze([
   },
   {
     name: "agent_run",
-    description: "Run a configured one-shot local subagent with a focused task through the same lab gateway and local permission engine. Built-in profiles include explorer, readonly-researcher, planner, verifier, junior, reviewer, browser-verifier, and code-worker. For broad work, split the job into bounded slices, set difficulty/modelTier deliberately, and provide writeScope plus acceptance for junior/write tasks.",
+    description: "Run a configured one-shot local subagent with a focused task through the same lab gateway and local permission engine. Built-in profiles include explorer, readonly-researcher, planner, verifier, junior, reviewer, browser-verifier, visual-verifier, and code-worker. For broad work, split the job into bounded slices, set difficulty/modelTier deliberately, and provide writeScope plus acceptance for junior/write tasks.",
     risk: "read",
     supportsAbort: true,
     inputSchema: {
@@ -273,7 +273,7 @@ export const BUILT_IN_TOOLS = Object.freeze([
         waitForGroup: { type: "string", enum: ["all", "any", "none"] },
         wakeParent: { type: "boolean" },
         wakeReason: { type: "string" },
-        purpose: { type: "string", enum: ["explore", "research", "plan", "execute", "verify", "review", "browser"] },
+        purpose: { type: "string", enum: ["explore", "research", "plan", "execute", "verify", "review", "browser", "visual"] },
         difficulty: { type: "string", enum: ["quick", "standard", "deep"] },
         risk: { type: "string", enum: ["low", "medium", "high"] },
         modelTier: { type: "string" },

@@ -29,10 +29,24 @@ test("agent router plans parallel readonly tasks for broad codebase implementati
   const parallel = route.suggestedTasks.filter((task) => task.parallelSafe);
   assert.ok(parallel.length >= 2);
   assert.ok(parallel.some((task) => task.profile === "explorer"));
-  assert.ok(parallel.some((task) => task.profile === "planner"));
+  assert.ok(parallel.some((task) => task.profile === "planner" && task.modelTier === "strong"));
   assert.ok(route.suggestedTasks.some((task) => task.profile === "junior" && task.parallelSafe === false));
   assert.equal(route.decision.difficulty, "deep");
+  assert.equal(route.decision.modelTier, "strong");
   assert.ok(route.suggestedTasks.some((task) => task.profile === "junior" && task.budget.maxRounds === null));
+});
+
+test("agent router does not auto-suggest planner for lightweight planning prompts", () => {
+  const route = routeAgentTask({
+    cwd: process.cwd(),
+    config: { agents: { profiles: [] } },
+    prompt: "计划一下这个小改动"
+  });
+
+  assert.equal(route.primaryProfile, "planner");
+  assert.equal(route.decision.modelTier, "default");
+  assert.equal(route.decision.difficulty, "quick");
+  assert.equal(route.suggestedTasks.some((task) => task.profile === "planner"), false);
 });
 
 test("agent router recommends reviewer for high-risk review prompts", () => {
@@ -48,6 +62,21 @@ test("agent router recommends reviewer for high-risk review prompts", () => {
   assert.equal(route.decision.modelTier, "strong");
   assert.equal(route.reviewRecommended, true);
   assert.ok(route.suggestedTasks.some((task) => task.profile === "reviewer"));
+});
+
+test("agent router recommends visual verifier for screenshot-heavy frontend review", () => {
+  const route = routeAgentTask({
+    cwd: process.cwd(),
+    config: { agents: { profiles: [], vision: { enabled: true, model: "mimo-v2.5" } } },
+    prompt: "请用截图复核前端页面布局，检查移动端是否有重叠、裁切和可读性问题"
+  });
+
+  assert.equal(route.signals.visual, true);
+  assert.equal(route.decision.purpose, "visual");
+  assert.equal(route.decision.modelTier, "vision");
+  assert.equal(route.decision.requiresApproval, true);
+  assert.ok(route.suggestedTasks.some((task) => task.profile === "visual-verifier" && task.modelTier === "vision"));
+  assert.match(formatAgentRoute(route), /visual-verifier/);
 });
 
 test("task tree nests orchestrated child tasks under parent task", () => {

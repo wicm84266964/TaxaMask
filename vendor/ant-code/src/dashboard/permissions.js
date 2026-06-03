@@ -74,10 +74,6 @@ export function permissionModeDescription(mode) {
  * @param {{ toolName: string; input: Record<string, any>; decision?: Record<string, any>; definition?: Record<string, any> }} request
  */
 export function approvalKeyFor(request) {
-  const taxamaskScope = request.decision?.taxamask?.scope;
-  if (typeof taxamaskScope === "string" && taxamaskScope.trim()) {
-    return `taxamask:${taxamaskScope.trim()}`;
-  }
   const boundary = approvalBoundaryKey(request);
   if (request.toolName === "write_file" || request.toolName === "edit_file") {
     return `write:${boundary}:${request.toolName}:${request.input?.path ?? ""}`;
@@ -110,10 +106,6 @@ export function approvalKeyFor(request) {
 export function buildApprovalPreview(request = {}) {
   const toolName = request.toolName ?? "unknown";
   const input = request.input ?? {};
-  const taxamaskScope = request.decision?.taxamask?.scope;
-  if (typeof taxamaskScope === "string" && taxamaskScope.trim()) {
-    return taxamaskApprovalPreview(request);
-  }
   if (toolName === "write_file") {
     return [
       `path: ${input.path ?? "unknown"}`,
@@ -151,65 +143,12 @@ export function buildApprovalPreview(request = {}) {
   return [`输入：${truncate(JSON.stringify(input), 220)}`];
 }
 
-export function approvalDisplayMeta(request = {}) {
-  const taxamaskScope = request.decision?.taxamask?.scope;
-  if (taxamaskScope === "taxamask.adapter") {
-    return {
-      title: "外部模型后端适配确认",
-      severity: "adapter",
-      explanation: "这会修改给自定义模型使用的外部后端脚本或配置，不会放开 TaxaMask 主程序源码。",
-      allowSessionLabel: "本会话允许外部后端适配"
-    };
-  }
-  if (taxamaskScope === "taxamask.source_development") {
-    return {
-      title: "TaxaMask 源码开发模式确认",
-      severity: "source",
-      explanation: "这会允许智能体修改 TaxaMask 程序源码，可能影响 2D/STL、TIF、Agent Center、导入、训练或结果导入行为。",
-      allowSessionLabel: "本会话允许源码开发"
-    };
-  }
-  return {
-    title: "",
-    severity: "",
-    explanation: "",
-    allowSessionLabel: ""
-  };
-}
-
 function approvalBoundaryKey(request) {
   const decision = request?.decision ?? {};
   return [
     decision.sensitive === true ? "sensitive" : "normal",
     decision.outsideWorkspace === true ? "outside" : "workspace"
   ].join(":");
-}
-
-function taxamaskApprovalPreview(request = {}) {
-  const decision = request.decision ?? {};
-  const scope = decision.taxamask?.scope;
-  const target = decision.targetPath ?? decision.resolvedPath ?? "unknown";
-  const lines = [];
-  if (scope === "taxamask.adapter") {
-    lines.push(
-      "修改点：外部模型对接后端脚本或配置。",
-      "原因：让自定义模型按 TaxaMask 契约读取输入、写回预测或模型 manifest。",
-      "风险：某个自定义模型可能跑不起来，或预测结果格式不符合导入要求；TaxaMask 主程序源码仍保持受保护。"
-    );
-  } else if (scope === "taxamask.source_development") {
-    lines.push(
-      "修改点：TaxaMask 程序源码。",
-      "原因：当前外部后端契约或设置项不足以完成适配，需要改变程序本身。",
-      "风险：可能影响 2D/STL、TIF、Agent Center、导入、训练或结果导入。批准前应确认智能体已经说明要改哪里、为什么必须改、如何验证。"
-    );
-  }
-  lines.push(`目标：${target}`);
-  if (request.toolName === "powershell" || request.toolName === "bash") {
-    lines.push(`命令：${truncate(String(request.input?.command ?? ""), 220)}`);
-  } else if (request.toolName === "write_file" || request.toolName === "edit_file") {
-    lines.push(`工具：${request.toolName}`);
-  }
-  return lines;
 }
 
 function truncate(value, max) {

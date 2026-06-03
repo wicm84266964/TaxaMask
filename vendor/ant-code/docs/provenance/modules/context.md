@@ -13,6 +13,8 @@ design_notes:
   - Includes project memory with bounded workspace-relative labels instead of absolute local paths.
   - Includes local skill availability and subagent profile summaries in the system context.
   - Explains MCP, skill, and subagent boundaries so the model uses local controlled extension points before assuming cloud behavior.
+  - Adds explicit guidance for using `visual-verifier` on screenshot/image evidence, UI layout/readability issues, visual regression, OCR, and screenshot-heavy frontend review.
+  - Marks Dashboard as a rich WebUI client that can render attachments/previews while still requiring actual model/tool evidence before claiming image inspection.
   - Emits Hooks v1 compact events around model-based and fallback context compaction.
   - Avoids embedding provider-specific prompt or cloud-session details.
 prohibited_sources_checked:

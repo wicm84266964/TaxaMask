@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -9,7 +10,7 @@ from unittest.mock import patch
 from PIL import Image
 
 from AntSleap.core.project import ProjectManager
-from AntSleap.core.vlm_preannotation import parse_vlm_response, run_vlm_preannotation
+from AntSleap.core.vlm_preannotation import build_vlm_preannotation_prompt, parse_vlm_response, run_vlm_preannotation
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -145,6 +146,106 @@ class VlmPreannotationTests(unittest.TestCase):
         self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates[0]["part"], "Head")
         self.assertEqual(candidates[0]["box_xyxy"], [200.0, 300.0, 500.0, 700.0])
+
+    def test_prompt_allows_reasonable_overlap_between_adjacent_parts(self):
+        prompt = build_vlm_preannotation_prompt(["Head", "Mesosoma"], (1200, 800), 12, 8)
+
+        self.assertIn("允许合理重叠", prompt)
+        self.assertIn("不是互斥切片", prompt)
+        self.assertIn("不要为了让框不重叠", prompt)
+        self.assertIn("Head 与 Mesosoma", prompt)
+
+    def test_project_load_normalizes_relative_image_keys_to_absolute(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            image_path = root / "savedata" / "specimen.png"
+            image_path.parent.mkdir()
+            Image.new("RGB", (120, 80), color=(140, 150, 160)).save(image_path)
+            project_dir = root / "projects"
+            project_dir.mkdir()
+            project_path = project_dir / "project.json"
+            relative_image = os.path.relpath(image_path, project_dir)
+            project_path.write_text(
+                json.dumps(
+                    {
+                        "name": "demo",
+                        "taxonomy": ["Head"],
+                        "images": [relative_image],
+                        "labels": {
+                            relative_image: {
+                                "parts": {"Head": [[10, 10], [50, 10], [30, 40]]},
+                                "status": "labeled",
+                            }
+                        },
+                        "scales": {relative_image: 12.5},
+                        "image_provenance": {relative_image: {"source": "pdf"}},
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            old_cwd = os.getcwd()
+            try:
+                os.chdir(project_dir)
+                manager = ProjectManager()
+                manager.load_project(str(project_path))
+            finally:
+                os.chdir(old_cwd)
+
+            absolute_image = os.path.abspath(str(image_path))
+            self.assertEqual(manager.project_data["images"], [absolute_image])
+            self.assertIn(absolute_image, manager.project_data["labels"])
+            self.assertNotIn(relative_image, manager.project_data["labels"])
+            self.assertEqual(manager.get_labels(absolute_image)["Head"], [[10, 10], [50, 10], [30, 40]])
+            self.assertEqual(manager.get_scale(absolute_image), 12.5)
+            self.assertEqual(manager.get_image_provenance(absolute_image)["source"], "pdf")
+
+    def test_project_load_merges_absolute_shadow_vlm_key(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            image_path = root / "savedata" / "specimen.png"
+            image_path.parent.mkdir()
+            Image.new("RGB", (120, 80), color=(140, 150, 160)).save(image_path)
+            project_dir = root / "projects"
+            project_dir.mkdir()
+            project_path = project_dir / "project.json"
+            relative_image = os.path.relpath(image_path, project_dir)
+            absolute_image = os.path.abspath(str(image_path))
+            project_path.write_text(
+                json.dumps(
+                    {
+                        "name": "demo",
+                        "taxonomy": ["Head", "Mesosoma"],
+                        "images": [relative_image],
+                        "labels": {
+                            relative_image: {
+                                "parts": {"Head": [[10, 10], [50, 10], [30, 40]]},
+                                "status": "labeled",
+                            },
+                            absolute_image: {
+                                "parts": {},
+                                "auto_boxes": {"Mesosoma": [40, 20, 100, 70]},
+                                "auto_box_meta": {"Mesosoma": {"source": "vlm_first_mile"}},
+                                "descriptions": {"Mesosoma": "Auto-Annotated"},
+                                "status": "unlabeled",
+                            },
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            manager = ProjectManager()
+            manager.load_project(str(project_path))
+
+            self.assertEqual(manager.project_data["images"], [absolute_image])
+            self.assertEqual(list(manager.project_data["labels"].keys()), [absolute_image])
+            labels = manager.project_data["labels"][absolute_image]
+            self.assertIn("Head", labels["parts"])
+            self.assertEqual(labels["auto_boxes"]["Mesosoma"], [40, 20, 100, 70])
+            self.assertEqual(labels["auto_box_meta"]["Mesosoma"]["source"], "vlm_first_mile")
 
     def test_provider_non_json_response_is_saved_for_diagnosis(self):
         class FakeResponse:

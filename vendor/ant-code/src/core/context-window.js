@@ -128,7 +128,7 @@ export function compactSessionContext(session, options = {}) {
 
 /**
  * @param {{ config?: Record<string, any>; id?: string; messages?: Array<Record<string, any>>; contextWindow?: ReturnType<typeof createContextWindow> }} session
- * @param {{ force?: boolean; reason?: string; keepRecentMessages?: number; gateway?: { configured?: boolean; sendChat?: (request: Record<string, any>) => Promise<Record<string, any>> }; signal?: AbortSignal }} options
+ * @param {{ force?: boolean; reason?: string; keepRecentMessages?: number; gateway?: { configured?: boolean; sendChat?: (request: Record<string, any>) => Promise<Record<string, any>> }; signal?: AbortSignal; onBeforeCompact?: (payload: Record<string, any>) => void | Promise<void> }} options
  */
 export async function compactSessionContextWithModel(session, options = {}) {
   session.contextWindow ??= createContextWindow(session.config ?? {});
@@ -209,6 +209,10 @@ export async function compactSessionContextWithModel(session, options = {}) {
     };
     await emitCompactAfterHook(session, options, beforePayload, result);
     return result;
+  }
+
+  if (typeof options.onBeforeCompact === "function") {
+    await options.onBeforeCompact(beforePayload);
   }
 
   const gateway = options.gateway;

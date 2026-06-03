@@ -1068,6 +1068,8 @@ async function finalizeBackgroundAgentTool(options, state) {
     taskId: state.taskId,
     profile: state.profile.name,
     status: group.status,
+    waitFor: state.waitFor,
+    wakeParent: state.wakeParent,
     completed: summary.completed,
     summary: summary.summary
   });
@@ -1103,6 +1105,8 @@ async function finalizeBackgroundAgentTool(options, state) {
     taskId: state.taskId,
     profile: state.profile.name,
     status: group.status,
+    waitFor: state.waitFor,
+    wakeParent: state.wakeParent,
     wakePrompt,
     summary: group.summary
   });
@@ -1152,7 +1156,7 @@ function buildAgentRouteDecision(input, profile) {
   const risk = pickEnum(input.risk, ["low", "medium", "high"], null);
   const routeDecision = {
     profile: profile.name,
-    purpose: pickEnum(input.purpose, ["explore", "research", "plan", "execute", "verify", "review", "browser"], profile.purpose ?? null),
+    purpose: pickEnum(input.purpose, ["explore", "research", "plan", "execute", "verify", "review", "browser", "visual"], profile.purpose ?? null),
     difficulty,
     risk,
     modelTier: typeof input.modelTier === "string" && input.modelTier.trim()
@@ -1163,7 +1167,7 @@ function buildAgentRouteDecision(input, profile) {
 }
 
 function agentRunRisk(profile) {
-  if (profile.purpose === "browser" || profile.name === "browser-verifier") {
+  if (profile.purpose === "browser" || profile.purpose === "visual" || profile.name === "browser-verifier" || profile.name === "visual-verifier") {
     return "browser";
   }
   if (profile.mode === "write-capable") {

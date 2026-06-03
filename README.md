@@ -32,22 +32,26 @@ Agent Center -> choose PDF / 2D-STL / TIF workflow
 - Taxa-aware project templates, including a validated ant morphology example and a generic taxonomy mask template.
 - Labeling Workbench for biological structure masks, including specimen-grouped STL-rendered surface views imported as derived 2D review images, VLM first-mile draft boxes for SAM prompts, plus integrated parent-part and child-part annotation sections for small-structure refinement.
 - TIF Volume Workbench for stack viewing, read-only GPU 3D volume preview, overlay review, material-map editing, working edits, and explicit promotion to manual training truth.
-- Route-appointed Blink experts for parent-structure to child-structure pre-annotation, shrink-trajectory generation, and local expert training from the main 2D/STL labeling surface.
+- Project-saved 2D/STL model profiles for switching parent-part and child-part annotation schemes without rewriting scattered settings.
+- Route-appointed child-part experts for parent-structure to child-structure pre-annotation, shrink-trajectory generation, and local expert training from the main 2D/STL labeling surface. Current route backends include ViT-B Blink, heatmap Blink, and external Blink scripts.
 - Configurable main locator structures for non-ant projects.
-- Built-in training/inference path plus an external backend contract for advanced users who want to connect custom models.
+- Built-in training/inference paths plus external backend contracts for advanced users who want to connect custom parent-part or child-part models.
 - Guarded custom-model adaptation: external backend scripts/configs can be approved separately from TaxaMask source development, so users know when they are changing a model adapter versus changing the program itself.
 - Export paths for multimodal JSONL, COCO, YOLO-style datasets, and TIF volume exchange formats including OME-TIFF, NRRD, MHA, NIfTI, nnU-Net-style layout, and MONAI-style datalists.
+- 2D/STL dataset exports include a compact model-profile summary for auditing the active parent/child backend scheme used around training and prediction.
 - Headless agentic tools for PDF screening, figure extraction, candidate import, auto-annotation, and dataset export.
 
 ## Current Workbench Entry Points
 
 The GUI starts at the TaxaMask Agent Center by default. The center area embeds the Ant-Code dashboard for natural-language task assistance, while the right rail exposes direct workflow cards:
 
-- `2D/STL Morphology`: ordinary 2D morphology images and STL-derived rendered 2D views. This route uses the Labeling Workbench with parent-part annotation and child-part annotation sections, built-in Locator/SAM, route-appointed experts, and the 2D external backend contract.
+- `2D/STL Morphology`: ordinary 2D morphology images and STL-derived rendered 2D views. This route uses the Labeling Workbench with parent-part annotation and child-part annotation sections, project-saved model profiles, built-in Locator/SAM, route-appointed child experts, and 2D external backend contracts.
 - `TIF Volume`: continuous TIF/AMIRA-style volumes. This route uses independent TIF projects, material-ID label fields, slice review plus read-only 3D volume preview, `manual_truth` / `working_edit` / `model_draft` layers, TIF exports, and the TIF backend contract.
 - `PDF Evidence`: available through Agent/headless tools and `File -> Open PDF Evidence Tools`. PDF outputs are evidence/provenance artifacts, not automatic training truth.
 
 Locator and SAM are lazy-loaded. Starting the app or entering the TIF workflow does not load them; entering the 2D/STL workflow preloads them, and returning to the Agent Center keeps already loaded models alive.
+
+TIF volume support is currently an experimental side workflow. The most validated daily route is still ant 2D/STL morphology plus PDF evidence. On some Windows/Qt graphics stacks, switching between the TIF GPU volume preview and the embedded Ant-Code Agent view can trigger rendering conflicts; treat TIF projects as a separate validation path and save work before switching views.
 
 ## Current Validation Scope
 
@@ -57,6 +61,7 @@ TaxaMask is multi-taxon configurable, but not all taxa are equally validated.
 - Generic and plant profiles are provided as adaptation templates.
 - New taxa should be validated with a small PDF/image batch before large-scale runs.
 - Custom model backends should be tested with a small project before production use.
+- TIF volume projects should be treated as experimental until the local GPU/Qt rendering path and external volume backend are validated on the target machine.
 
 This distinction matters for research trustworthiness: the software exposes adaptation interfaces, but each new taxon still needs profile-level and model-level validation.
 
@@ -142,7 +147,7 @@ TaxaMask Workbench
 2. For PDF evidence, configure API/profile settings and run a small batch before scaling.
 3. For 2D/STL morphology, create/open a 2D project, import ordinary images or STL-rendered views, then annotate in the Labeling Workbench.
 4. Optionally configure VLM target structures and run `VLM Pre-Annotate` to create draft AI boxes/SAM polygons for human review before training.
-5. For child structures, use the Labeling Workbench's `Child-part annotation` section to pick the parent context, configure the route expert, annotate from an existing parent box, generate shrink trajectories, and train the current child expert.
+5. For child structures, use the Labeling Workbench's `Child-part annotation` section to pick the parent context, configure the route expert backend, annotate from an existing parent box, generate shrink trajectories, and train the current child expert.
 6. For TIF volume work, create/open a TIF project, import TIF stacks or AMIRA directories, review material maps, and promote reviewed edits to `manual_truth`.
 7. Train or connect the workflow-specific backend.
 8. Run pre-annotation/prediction, review results, and export a dataset or training handoff.
@@ -157,14 +162,16 @@ For a new organism group, usually adapt these layers:
 - Figure extraction and review: copy a file from `multimodal_configs/` and edit figure evidence rules, expected views, and review prompt.
 - PDF part-description extraction: copy a file from `part_description_configs/` and edit part buckets and text-structuring prompt.
 - Project template: choose the generic taxonomy template and define your own structures.
-- Main locator structures: keep large, stable structures in the main locator scope; use Blink or custom backends for small local parts.
-- Model backend: use the built-in path when it fits your structure model, or connect custom scripts through the external backend contract.
+- Main locator structures: keep large, stable structures in the main locator scope; use child-part route experts or custom backends for small local parts.
+- Model profiles: save separate 2D/STL schemes when you need to compare built-in Locator/SAM, external parent models, ViT-B child experts, heatmap child experts, or external child scripts.
+- Model backend: use the built-in path when it fits your structure model, or connect custom scripts through the parent-part or child-part external backend contracts.
 
 Profile guides:
 
 - [PDF screening profile guide](docs/PDF筛选profile适配说明.md)
 - [Figure extraction and multimodal profile guide](docs/图文提取与多模态profile适配说明.md)
 - [External backend contract](docs/contracts/external_backend_contract_v1.md)
+- [External Blink backend contract](docs/contracts/external_blink_backend_contract_v1.md)
 
 ## Headless Tools
 
@@ -188,6 +195,7 @@ python tools/agentic/run_agentic_pipeline.py --dry-run --out artifacts/agentic_p
 - [PDF screening profile guide](docs/PDF筛选profile适配说明.md)
 - [Figure extraction and multimodal profile guide](docs/图文提取与多模态profile适配说明.md)
 - [External backend contract](docs/contracts/external_backend_contract_v1.md)
+- [External Blink backend contract](docs/contracts/external_blink_backend_contract_v1.md)
 - [Chinese changelog](CHANGELOG_zh.md)
 
 ## Citation

@@ -31,26 +31,33 @@ AGENT_CONTEXT_ROUTES = {
         "suggested_agent_action": "Check whether the user's startup/runtime expectation matches the current settings summary.",
     },
     "stl_model_settings": {
-        "diagnostic_route": "2d_stl_model_settings",
-        "diagnostic_focus": "2D/STL model defaults, Locator scope, Blink expert defaults, and external script backend wiring.",
+        "diagnostic_route": "2d_stl_advanced_extensions",
+        "diagnostic_focus": "Advanced Extensions for 2D/STL model profiles: parent model source, default child expert, custom parent/child extension contracts, and route expert compatibility.",
         "llm_context_refs": (
             "LLM_CONTEXT_DETAILED.md -> 0.4 Settings split",
             "LLM_CONTEXT_DETAILED.md -> 0.5 External script backend",
+            "LLM_CONTEXT_DETAILED.md -> Model profile / Blink backend switching notes",
             "LLM_CONTEXT_DETAILED.md -> 9.2 Module B - Labeling Workbench & Runtime",
         ),
         "source_code_refs": (
             "AntSleap/main.py -> ModelSettingsDialog.get_agent_context",
-            "AntSleap/core/external_backend.py",
+            "AntSleap/main.py -> ModelSettingsDialog._current_profile_snapshot",
             "docs/contracts/external_backend_contract_v1.md",
+            "docs/contracts/external_blink_backend_contract_v1.md",
+            "AntSleap/core/model_profiles.py",
+            "AntSleap/core/external_backend.py",
+            "AntSleap/core/external_blink_backend.py",
+            "AntSleap/core/cascade_routes.py",
+            "AntSleap/core/blink_expert_backends.py",
         ),
         "artifact_hints": (
-            "2D/STL project JSON, external backend contract JSON, result JSON, training report, and model manifest are the main troubleshooting artifacts.",
+            "2D/STL project JSON, active model profile, external parent/child contract JSON, result JSON, training report, route manifest, and model manifest are the main troubleshooting artifacts.",
         ),
         "safety_notes": COMMON_SAFETY_NOTES
         + (
-            "Do not paste full private command text or API credentials into chat; use command presence and contract checks first.",
+            "Do not paste full private command text or API credentials into chat; use command presence, contract checks, profile fields, and route backend summaries first.",
         ),
-        "suggested_agent_action": "Prioritize validation_errors, command contract placeholders, runtime_device, Locator scope count, and manifest availability.",
+        "suggested_agent_action": "Treat this as a TaxaMask Advanced Extensions configuration task. First inspect parent_model_source, default_child_expert, validation_errors, parent/child command contract flags, manifest availability, and route_specific_backend_summary; then modify only the relevant model profile, extension contract, or routing code.",
     },
     "tif_model_settings": {
         "diagnostic_route": "tif_volume_backend_settings",
@@ -179,6 +186,9 @@ def _command_contract_missing(context):
     for prefix in ("prepare", "train", "predict"):
         if context.get(f"{prefix}_command_present") == "yes" and context.get(f"{prefix}_command_has_contract") == "no":
             return True
+    for prefix in ("parent_prepare", "parent_train", "parent_predict", "child_train", "child_predict"):
+        if context.get(f"{prefix}_command_present") == "yes" and context.get(f"{prefix}_command_has_contract") == "no":
+            return True
     return False
 
 
@@ -214,7 +224,17 @@ def enrich_agent_context(context):
     validation = _validation_present(enriched)
     contract_missing = _command_contract_missing(enriched)
     health.append(f"validation_errors={'present' if validation else 'none'}")
-    if any(str(enriched.get(f"{prefix}_command_present") or "") for prefix in ("prepare", "train", "predict")):
+    command_prefixes = (
+        "prepare",
+        "train",
+        "predict",
+        "parent_prepare",
+        "parent_train",
+        "parent_predict",
+        "child_train",
+        "child_predict",
+    )
+    if any(str(enriched.get(f"{prefix}_command_present") or "") for prefix in command_prefixes):
         health.append(f"contract_placeholder={'missing' if contract_missing else 'ok_or_not_applicable'}")
 
     if contract_missing:

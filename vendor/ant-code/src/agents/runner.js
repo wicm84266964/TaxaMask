@@ -14,11 +14,13 @@ import { createBudgetTracker, checkBudget, recordBudgetToolResult, resolveAgentB
 import { buildContextPack, formatContextPack, hasWriteScope } from "./context-pack.js";
 import { createPartialSubagentResult } from "./continuation.js";
 import { formatOutputContract, summarizeContractResult } from "./contracts.js";
+import { createPlanPackageStore, extractPlanPackage } from "./plan-package-store.js";
 import { getAgentProfile, listAgentProfileLabels } from "./profiles.js";
 import { createAgentTaskStore } from "./task-store.js";
 
 const SUMMARY_PATTERNS = Object.freeze(["src/**/*.js", "tests/**/*.js", "docs/**/*.md"]);
 const MAX_AGENT_OUTPUT_CHARS = 32_000;
+const TASK_HEARTBEAT_INTERVAL_MS = 10_000;
 
 /**
  * @param {{
@@ -157,9 +159,12 @@ export async function runSubagent(options) {
     return { ...result, taskId: task.id, childSessionId };
   }
 
-  const result = await runModelSubagent({
-    ...options,
-    config: gatewayConfig,
+  const stopHeartbeat = startTaskHeartbeat(taskStore, task.id);
+  let result;
+  try {
+    result = await runModelSubagent({
+      ...options,
+      config: gatewayConfig,
       profile,
       query,
       contextPack,
@@ -170,12 +175,29 @@ export async function runSubagent(options) {
       taskId: task.id,
       childSessionId
     });
+  } finally {
+    stopHeartbeat();
+  }
   const finalStatus = result.partial ? "partial" : result.ok ? "completed" : result.interrupted ? "interrupted" : result.blocked ? "blocked" : "failed";
   const persistedOutput = await persistResultOutput(taskStore, task.id, result);
+  const persistedPlanPackage = await persistPlannerPlanPackage({
+    cwd: options.cwd,
+    profile,
+    result,
+    task,
+    parentSessionId: options.parentSessionId ?? null,
+    parentTaskId: options.parentTaskId ?? null,
+    childSessionId,
+    routeDecision: options.routeDecision ?? null,
+    model,
+    modelTier: options.routeDecision?.modelTier ?? profile.modelTier ?? null
+  });
   await taskStore.updateTask(task.id, {
     status: finalStatus,
     finishedAt: new Date().toISOString(),
-    latestProgress: result.partial ? "子智能体阶段性暂停，可继续" : result.ok ? "子智能体已完成" : result.error?.message ?? "子智能体失败",
+    latestProgress: persistedPlanPackage?.ok
+      ? `子智能体已完成；计划包已保存到 ${persistedPlanPackage.path}`
+      : result.partial ? "子智能体阶段性暂停，可继续" : result.ok ? "子智能体已完成" : result.error?.message ?? "子智能体失败",
     toolCalls: result.tools ?? [],
     outputSummary: summarizeAgentOutput(result),
     output: persistedOutput?.preview ?? result.output ?? "",
@@ -189,6 +211,16 @@ export async function runSubagent(options) {
         outputPath: persistedOutput.path,
         outputBytes: persistedOutput.bytes,
         outputTruncated: persistedOutput.truncated
+      } : {}),
+      ...(persistedPlanPackage ? {
+        planPackage: persistedPlanPackage.ok === true,
+        ...(persistedPlanPackage.ok ? {
+          planId: persistedPlanPackage.planId,
+          planPackagePath: persistedPlanPackage.path,
+          planPackageFiles: persistedPlanPackage.files
+        } : {
+          planPackageError: persistedPlanPackage.error
+        })
       } : {})
     }
   });
@@ -198,7 +230,37 @@ export async function runSubagent(options) {
     toolCalls: Array.isArray(result.tools) ? result.tools.length : 0,
     budgetExceeded: result.budgetExceeded ?? null
   });
-  return { ...result, taskId: task.id, childSessionId };
+  return {
+    ...result,
+    taskId: task.id,
+    childSessionId,
+    ...(persistedPlanPackage ? { planPackage: persistedPlanPackage } : {})
+  };
+}
+
+function startTaskHeartbeat(taskStore, taskId) {
+  if (!taskStore || typeof taskStore.updateTask !== "function" || !taskId) {
+    return () => {};
+  }
+  let stopped = false;
+  const beat = async () => {
+    if (stopped) {
+      return;
+    }
+    try {
+      await taskStore.updateTask(taskId, {
+        heartbeatAt: new Date().toISOString()
+      });
+    } catch {
+      // Heartbeat is observability only; task execution must not fail because the marker write failed.
+    }
+  };
+  const timer = setInterval(beat, TASK_HEARTBEAT_INTERVAL_MS);
+  timer.unref?.();
+  return () => {
+    stopped = true;
+    clearInterval(timer);
+  };
 }
 
 /**
@@ -1072,4 +1134,45 @@ async function persistResultOutput(taskStore, taskId, result) {
     return null;
   }
   return taskStore.writeTaskOutput(taskId, result.outputFull);
+}
+
+async function persistPlannerPlanPackage(options) {
+  if (options.profile?.name !== "planner" || options.result?.ok !== true || options.result?.partial === true) {
+    return null;
+  }
+  const output = options.result.outputFull ?? options.result.output ?? "";
+  const planPackage = extractPlanPackage(output, {
+    parsed: options.result.contract?.parsed
+  });
+  if (!planPackage) {
+    return {
+      ok: false,
+      error: {
+        code: "PLAN_PACKAGE_NOT_FOUND",
+        message: "Planner completed without a parseable plan package."
+      }
+    };
+  }
+  try {
+    const store = createPlanPackageStore({ cwd: options.cwd });
+    return await store.writePlanPackage({
+      package: planPackage,
+      parentSessionId: options.parentSessionId,
+      parentTaskId: options.parentTaskId,
+      plannerTaskId: options.task.id,
+      childSessionId: options.childSessionId,
+      title: options.task.title,
+      routeDecision: options.routeDecision,
+      model: options.model,
+      modelTier: options.modelTier
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      error: {
+        code: "PLAN_PACKAGE_WRITE_FAILED",
+        message: error instanceof Error ? error.message : String(error)
+      }
+    };
+  }
 }

@@ -8,6 +8,9 @@ import cv2
 from .projection import CoordinateMapper
 from .cascade_routes import (
     LEGACY_EXPERT_FILENAME,
+    ROUTE_BACKEND_EXTERNAL_BLINK,
+    ROUTE_BACKEND_HEATMAP_BLINK,
+    ROUTE_BACKEND_VIT_B_BLINK,
     build_expert_id,
     format_expert_label,
     parse_expert_id,
@@ -16,6 +19,9 @@ from .cascade_routes import (
     sanitize_project_route_manifest,
 )
 from .expert_notes import load_expert_notes
+from .blink_expert_manifest import default_manifest_path_for_weights, load_blink_expert_manifest
+from .blink_expert_backends import BlinkBackendError, create_default_blink_backend_registry
+from .external_blink_backend import sanitize_external_blink_config
 try:
     from AntSleap.models.expert_networks import MicroExpertLocator
 except ImportError:
@@ -31,9 +37,11 @@ class CascadingManager:
     def __init__(self, main_engine):
         self.engine = main_engine
         self.device = main_engine.device
+        self.project_manager = None
         
         # 缓存已加载的专家模型，避免重复加载
         self.loaded_experts = {}
+        self.blink_backend_registry = create_default_blink_backend_registry()
         self.expert_dir = os.path.join(main_engine.weights_dir, "experts")
         self.route_manifest_path = os.path.join(self.expert_dir, "cascade_routes.json")
         self.legacy_route_manifest = {
@@ -42,6 +50,11 @@ class CascadingManager:
             "routes": [],
         }
         self.load_routes()
+
+    def _blink_backends(self):
+        if not hasattr(self, "blink_backend_registry") or self.blink_backend_registry is None:
+            self.blink_backend_registry = create_default_blink_backend_registry()
+        return self.blink_backend_registry
 
     def load_routes(self, route_manifest_path=None):
         """加载专家路由合同。未配置或未批准时返回默认关闭态。"""
@@ -148,7 +161,8 @@ class CascadingManager:
         parent = str(route.get("parent") or "?").strip() or "?"
         child = str(route.get("child") or "?").strip() or "?"
         expert_label = format_expert_label(route)
-        return f"{parent}->{child} [{expert_label}]"
+        backend = str(route.get("expert_backend") or ROUTE_BACKEND_VIT_B_BLINK).strip() or ROUTE_BACKEND_VIT_B_BLINK
+        return f"{parent}->{child} [{backend}:{expert_label}]"
 
     def route_has_explicit_expert(self, route):
         if not isinstance(route, dict):
@@ -185,6 +199,16 @@ class CascadingManager:
         if not isinstance(route, dict):
             return "route_missing"
         is_legacy_route = str(route.get("registration_source") or "") == "legacy_global_manifest"
+        backend = str(route.get("expert_backend") or ROUTE_BACKEND_VIT_B_BLINK).strip() or ROUTE_BACKEND_VIT_B_BLINK
+        try:
+            self._blink_backends().get(backend)
+        except BlinkBackendError:
+            return "expert_backend_unknown"
+        if backend == ROUTE_BACKEND_EXTERNAL_BLINK:
+            config = self._external_blink_route_config(route)
+            if not config.get("predict_command"):
+                return "external_blink_predict_command_missing"
+            return None
         if not is_legacy_route and not self.route_has_explicit_expert(route):
             return "expert_unappointed"
         route_path = self.resolve_route_expert_path(route)
@@ -193,6 +217,17 @@ class CascadingManager:
         if not os.path.exists(route_path):
             return "expert_model_missing"
         return None
+
+    def _external_blink_route_config(self, route):
+        route_params = route.get("backend_params") if isinstance(route, dict) else {}
+        if isinstance(route_params, dict) and route_params.get("predict_command"):
+            return sanitize_external_blink_config(route_params)
+        project_manager = getattr(self, "project_manager", None)
+        get_profile = getattr(project_manager, "get_active_model_profile", None)
+        profile = get_profile() if callable(get_profile) else {}
+        child_defaults = profile.get("child_backend_defaults", {}) if isinstance(profile, dict) and isinstance(profile.get("child_backend_defaults"), dict) else {}
+        external_blink = child_defaults.get("external_blink_backend", {}) if isinstance(child_defaults.get("external_blink_backend"), dict) else {}
+        return sanitize_external_blink_config(external_blink)
 
     def route_is_usable(self, route):
         return self.get_route_block_reason(route) is None
@@ -213,12 +248,20 @@ class CascadingManager:
                 expert_id = build_expert_id(part_folder, filename)
                 if not expert_id:
                     continue
+                weights_path = os.path.join(part_path, filename)
+                manifest_path = default_manifest_path_for_weights(weights_path)
+                manifest = load_blink_expert_manifest(manifest_path)
+                input_size = manifest.get("input_size") if isinstance(manifest, dict) else None
                 experts.append(
                     {
                         "expert_part": part_folder,
                         "expert_filename": filename,
                         "expert_id": expert_id,
-                        "path": os.path.join(part_path, filename),
+                        "expert_backend": manifest.get("expert_backend") if isinstance(manifest, dict) and manifest.get("expert_backend") else ROUTE_BACKEND_VIT_B_BLINK,
+                        "expert_manifest": manifest_path if manifest else "",
+                        "input_size": input_size,
+                        "backend_params": {},
+                        "path": weights_path,
                         "note": expert_notes.get(expert_id, ""),
                     }
                 )
@@ -349,11 +392,20 @@ class CascadingManager:
         if route is None:
             return None
 
-        expert_part = str(route.get("expert_part") or route.get("child") or child_part_name).strip()
-        expert_path = self.resolve_route_expert_path(route)
-        expert_model = self._load_expert(expert_part, model_path=expert_path)
-        if expert_model is None:
-            print(f"Expert model for {child_part_name} not found. Skipping.")
+        backend = str(route.get("expert_backend") or ROUTE_BACKEND_VIT_B_BLINK).strip() or ROUTE_BACKEND_VIT_B_BLINK
+        try:
+            return self._blink_backends().predict_child_box(
+                backend,
+                manager=self,
+                image_path=image_path,
+                parent_box=parent_box,
+                child_part_name=child_part_name,
+                parent_part=parent_part,
+                route_record=route,
+                context={
+                    "route_manifest": route_manifest,
+                },
+            )
+        except BlinkBackendError as exc:
+            print(f"Blink backend failed for {child_part_name}: {exc}")
             return None
-
-        return self._infer_with_loaded_expert(image_path, parent_box, child_part_name, expert_model)

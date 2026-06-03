@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Ant Code Dashboard</title>
     <link rel="stylesheet" href="/assets/vendor/katex.min.css" />
-    <link rel="stylesheet" href="/assets/styles.css" />
+    <link rel="stylesheet" href="/assets/styles.css?v=dashboard-agent-models" />
   </head>
   <body>
     <div class="app-shell">
@@ -88,21 +88,26 @@
               <button type="button" data-mode="workspace">工作区权限</button>
               <button type="button" data-mode="fullAccess">完全访问</button>
             </div>
+            <div class="mode-description" id="mode-description">写入和命令需确认</div>
             <div class="context-actions">
               <button type="button" id="context-clear">清空上下文</button>
               <button type="button" id="context-compact">压缩上下文</button>
             </div>
           </div>
-          <div class="mode-description" id="mode-description">写入、命令和外部能力需要确认后执行</div>
           <div class="composer">
-            <textarea id="prompt-input" rows="3" placeholder="输入任务需求，例如：整理这批实验数据并生成一份简洁报告"></textarea>
+            <div class="attachment-strip hidden" id="attachment-strip" aria-live="polite"></div>
+            <textarea id="prompt-input" rows="2" placeholder="输入任务需求，例如：整理这批实验数据并生成一份简洁报告"></textarea>
+            <input id="attachment-input" class="hidden" type="file" accept="image/*" multiple />
+            <button class="attach-button" id="attach-button" type="button" title="添加图片" aria-label="添加图片">+</button>
             <button id="send-button" type="button">发送</button>
           </div>
           <div class="composer-footer" aria-live="polite">
-            <span id="model-status">模型 --</span>
+            <div class="model-status-button" id="model-status">模型 --</div>
             <span id="context-status">上下文 -- / --</span>
             <span id="change-status" class="change-status hidden"></span>
           </div>
+          <div class="model-panel hidden" id="model-panel"></div>
+          <div class="model-config-panel hidden" id="model-config-panel" role="dialog" aria-modal="true" aria-labelledby="model-config-title"></div>
         </section>
       </main>
 
@@ -133,13 +138,14 @@
             <button class="icon-button" id="lightbox-close" type="button" title="关闭">×</button>
           </div>
         </div>
-        <div class="lightbox-canvas">
+        <div class="lightbox-canvas" id="lightbox-canvas">
           <button class="lightbox-nav lightbox-prev" id="lightbox-previous" type="button" aria-label="上一张">‹</button>
           <img id="lightbox-image" alt="" />
+          <div class="lightbox-table hidden" id="lightbox-table"></div>
           <button class="lightbox-nav lightbox-next" id="lightbox-next" type="button" aria-label="下一张">›</button>
         </div>
       </div>
     </div>
-    <script src="/assets/app.js" type="module"></script>
+    <script src="/assets/app.js?v=dashboard-agent-models" type="module"></script>
   </body>
 </html>

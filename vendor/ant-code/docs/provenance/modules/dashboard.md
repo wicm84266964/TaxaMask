@@ -16,6 +16,10 @@ design_notes:
   - Provides an explicit WebUI shutdown action that stops the local dashboard server instead of leaving a silent background process.
   - Provides a dark gray, Codex-inspired, three-panel frontend for threads, conversation/activity flow, and file previews.
   - File preview is bounded to the current workspace, limits large reads, and does not execute or edit files from the preview surface.
+  - Supports Dashboard-only image attachment UX with redacted local persistence: file picker/paste upload, local preview chips, request-scoped image transport, and metadata-only transcript/session storage.
+  - Provides local model management UI for the active gateway: current model display, text/image/thinking labels, active-profile model switching, saved gateway-profile switching, gateway URL/API key/model/context/subagent/visual-agent config save, and same-gateway agent-default sync.
+  - Surfaces background subagent group lifecycle events in the live-status strip and consumes completed wake prompts through an internal Dashboard continuation queue while hiding the wake prompt body from browser activity rows.
+  - Keeps Dashboard long-conversation controls compact: demand confirmation uses one internal scroll area, permission and queue help are inline, context clear is styled as destructive, and typed guide action appears only when it can affect the running task.
 prohibited_sources_checked:
   - old source code was not copied
   - old inline source maps were not used

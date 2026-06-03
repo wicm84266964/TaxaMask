@@ -11,9 +11,11 @@ This matrix defines what a real gateway must support before Ant Code can be broa
 | Health endpoint | Sends `GET` only when `--live` is explicit. | Expose `LAB_MODEL_GATEWAY_HEALTH_URL` with a 2xx ready status. | `node src/cli/index.js gateway --live` |
 | Protocol version | Sends `protocolVersion: "lab-agent-gateway.v1"`. | Accept or explicitly reject unsupported protocol versions with a clear HTTP error. | `npm run verify:gateway`; live compat check |
 | Request diagnostics metadata | Sends `metadata.capabilities` and `metadata.request` with booleans/counts only. | Ignore unknown metadata safely; optionally log counts for operator correlation. | Unit tests and live compat check |
+| Image request metadata | Sets `metadata.capabilities.images=true` when user messages include image blocks. | Use the flag only as diagnostics; route or reject image requests according to gateway/model capability. | Unit tests and live image smoke |
 | Boundary metadata | Sends `metadata.boundary` declaring local tool execution and gateway-only provider credentials. | Treat as non-authoritative diagnostics metadata; do not infer authorization from it. | Unit tests and live compat check |
 | Model alias | Sends a lab alias from `LAB_AGENT_MODEL` or config. | Resolve alias server-side; do not require provider model IDs in the client. | Live compat check |
 | Messages | Sends provider-independent `{ role, content }` messages. | Accept text messages without provider-specific fields. | Live compat check |
+| Image messages | May send user `content` arrays containing `{ type: "image", mimeType, data, name, size }`. | Vision-capable routes accept bounded base64 image blocks; text-only routes reject with a clear bounded error. | Live image smoke |
 | Non-streaming text | Normalizes `content` text blocks into assistant text. | Return JSON with `content: [{ "type": "text", "text": "..." }]`. | Unit tests and live compat check |
 | Tool calls | Executes supported tools locally after permission checks. | Return `toolCalls` with stable `id`, `name`, and object `input`. | Tool-call rollout phase |
 | Tool results | Sends bounded `toolResults` after local execution. | Accept follow-up requests that include tool results. | Tool-call rollout phase |
@@ -44,7 +46,8 @@ This matrix defines what a real gateway must support before Ant Code can be broa
     "capabilities": {
       "tools": true,
       "toolResults": true,
-      "streaming": false
+      "streaming": false,
+      "images": false
     },
     "boundary": {
       "toolExecution": "local-client",
@@ -69,6 +72,9 @@ Required gateway behavior:
 - Reject malformed JSON without returning stack traces.
 - Apply gateway-side quota, model allowlist, provider routing, and retention policy.
 - Never ask the local client for provider credentials.
+- Image bytes are request-scoped. Gateways should apply normal prompt retention
+  policy and should not ask the local client to persist or resend image bytes
+  outside the active model turn.
 
 ## OpenAI Chat Compatible Request Shape
 
@@ -79,7 +85,13 @@ When `LAB_MODEL_GATEWAY_PROTOCOL=openai-chat`, the client sends Chat Completions
   "model": "lab-default",
   "messages": [
     { "role": "system", "content": "local tools only" },
-    { "role": "user", "content": "hello" }
+    {
+      "role": "user",
+      "content": [
+        { "type": "text", "text": "describe this image" },
+        { "type": "image_url", "image_url": { "url": "data:image/png;base64,..." } }
+      ]
+    }
   ],
   "tools": [
     {
@@ -102,6 +114,9 @@ Compatibility notes:
 - Current Ant Code omits `tool_choice` by default, even when `tools` are present. Do not require `tool_choice: "auto"` for tool-capable requests.
 - Streaming Chat Completions requests may include `stream_options.include_usage=true`; adapters should ignore it safely if unsupported.
 - OpenAI-compatible `reasoning_content` is treated as hidden thinking/status, not visible assistant text.
+- Image attachments are encoded as Chat Completions `image_url` blocks with data
+  URLs. Adapters for text-only models should return a bounded 4xx error with a
+  message that mentions unsupported image/vision input.
 
 ## Required Non-Streaming Response Shape
 
@@ -176,6 +191,7 @@ Dashboard relies on incremental dispatch: if a gateway buffers deltas until the 
 | Network policy deny | `GATEWAY_NETWORK_BLOCKED` | Use lab-owned hosts and allowlists. |
 | Timeout or fetch failure | `GATEWAY_TIMEOUT` or `GATEWAY_FETCH_ERROR` | Keep health endpoint simple and observable. |
 | Non-2xx response | `GATEWAY_HTTP_ERROR` with bounded body | Return short JSON error bodies. |
+| Text-only model receives image | `GATEWAY_HTTP_ERROR` with image/vision diagnostics | Return a short 4xx error that clearly says image input is unsupported. |
 | Invalid JSON or stream | `GATEWAY_RESPONSE_PARSE_ERROR` | Validate gateway serializers. |
 
 ## Rollout Status Template

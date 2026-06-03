@@ -1,6 +1,6 @@
-const IMPLEMENTATION_AGENT_PATTERN = /^(?:junior|worker|executor|code-worker|junior-executor|verifier|verify|browser-verifier|browser|frontend-verifier)$/i;
+const IMPLEMENTATION_AGENT_PATTERN = /^(?:junior|worker|executor|code-worker|junior-executor|verifier|verify|browser-verifier|browser|frontend-verifier|visual-verifier|vision|vision-verifier|visual-reviewer|screenshot-reviewer)$/i;
 const REVIEW_AGENT_PATTERN = /reviewer|review/i;
-const VERIFY_AGENT_PATTERN = /verifier|verify|browser-verifier/i;
+const VERIFY_AGENT_PATTERN = /verifier|verify|browser-verifier|visual-verifier|vision-verifier/i;
 const COMPLETED_STATUS = "completed";
 
 /**

@@ -21,7 +21,9 @@ from AntSleap.main import ExportDialog, BlinkEntryDialog, ModelSettingsDialog, R
 from AntSleap.ui.blink_lab import BlinkLabWidget
 from AntSleap.ui.cropper import ImageCropper
 from AntSleap.ui.pdf_processing_widget import PdfProcessingWidget
+from AntSleap.core.cascade_routes import ROUTE_BACKEND_HEATMAP_BLINK
 from AntSleap.core.expert_notes import set_expert_note
+from AntSleap.core.model_profiles import DEFAULT_MODEL_PROFILE_ID, PARENT_BACKEND_EXTERNAL
 
 
 class DummyPartsModel:
@@ -106,6 +108,14 @@ class DummyProjectManager:
             if route.get("parent") == parent_part and route.get("child") == child_part:
                 return dict(route)
         return None
+
+    def get_active_model_profile(self):
+        return {
+            "profile_id": DEFAULT_MODEL_PROFILE_ID,
+            "display_name": "Built-in heatmap parent + default Blink",
+            "parent_backend": {"backend_type": "builtin_locator_sam"},
+            "child_backend_defaults": {"backend_type": "vit_b_blink"},
+        }
 
     def save_project(self):
         self.save_calls += 1
@@ -258,6 +268,9 @@ class UiLocalizationTests(unittest.TestCase):
         dialog = ImageCropper(lang="zh")
         self.assertEqual(dialog.windowTitle(), "智能图片裁剪器")
         self.assertEqual(dialog.btn_load.text(), "加载图片")
+        self.assertEqual(dialog.btn_auto_split.text(), "自动切分拼图")
+        self.assertEqual(dialog.btn_delete_selected.text(), "删除选中裁剪框")
+        self.assertEqual(dialog.btn_clear_crops.text(), "清空裁剪框")
         self.assertEqual(dialog.btn_save.text(), "保存并加入项目")
 
     def test_pdf_processing_widget_supports_chinese_switch(self):
@@ -317,11 +330,15 @@ class UiLocalizationTests(unittest.TestCase):
         route_item = parent_item.child(0)
         self.assertEqual(route_item.text(1), "Mandible")
         self.assertEqual(route_item.text(2), "否")
-        self.assertEqual(route_item.text(4), "尚未指定专家")
-        self.assertEqual(route_item.text(5), "Blink 候选")
+        self.assertEqual(route_item.text(3), "ViT-B Blink 专家")
+        self.assertEqual(route_item.text(5), "尚未指定专家")
+        self.assertEqual(route_item.text(6), "未指定专家")
+        self.assertEqual(route_item.text(7), "Blink 候选")
         expert_placeholder = route_item.child(0)
-        self.assertEqual(expert_placeholder.text(3), "未指定")
-        self.assertEqual(expert_placeholder.text(4), "尚未指定专家")
+        self.assertEqual(expert_placeholder.text(3), "ViT-B Blink 专家")
+        self.assertEqual(expert_placeholder.text(4), "未指定")
+        self.assertEqual(expert_placeholder.text(5), "尚未指定专家")
+        self.assertEqual(expert_placeholder.text(6), "未指定专家")
 
     def test_route_tree_prefers_persisted_candidate_history_over_runtime_discovery(self):
         self.pm.project_data["cascade_routes"]["version"] = "project-v2"
@@ -373,8 +390,9 @@ class UiLocalizationTests(unittest.TestCase):
         self.assertEqual(route_item.childCount(), 2)
         self.assertIsNotNone(appointed_item)
         self.assertIsNotNone(history_item)
-        self.assertEqual(appointed_item.text(4), "Appointed")
-        self.assertEqual(history_item.text(4), "Missing file history")
+        self.assertEqual(appointed_item.text(3), "ViT-B Blink Expert")
+        self.assertEqual(appointed_item.text(5), "Appointed")
+        self.assertEqual(history_item.text(5), "Missing file history")
 
         dialog = ModelSettingsDialog(
             {
@@ -394,6 +412,45 @@ class UiLocalizationTests(unittest.TestCase):
         route_group = dialog.findChild(QWidget, "modelSettingsRoutePanel")
         self.assertIsNotNone(route_group)
         self.assertIn("route 决定哪些 parent -> child expert 链路可以实际使用", dialog.lbl_cascade_note.text())
+
+    def test_route_tree_marks_route_specific_backend_against_active_profile(self):
+        self.pm.project_data["cascade_routes"]["version"] = "project-v2"
+        self.pm.project_data["cascade_routes"]["routes"] = [
+            {
+                "parent": "Head",
+                "child": "Mandible",
+                "enabled": True,
+                "appointed_expert": {
+                    "expert_id": "Mandible/heatmap_v1.pth",
+                    "expert_part": "Mandible",
+                    "expert_filename": "heatmap_v1.pth",
+                    "expert_backend": ROUTE_BACKEND_HEATMAP_BLINK,
+                },
+                "expert_candidates": [],
+                "expert_id": "Mandible/heatmap_v1.pth",
+                "expert_part": "Mandible",
+                "expert_filename": "heatmap_v1.pth",
+                "expert_backend": ROUTE_BACKEND_HEATMAP_BLINK,
+                "registration_source": "project",
+            }
+        ]
+        owner = type(
+            "Owner",
+            (),
+            {
+                "project": self.pm,
+                "engine": self.engine,
+                "log": lambda _self, _message: None,
+            },
+        )()
+        panel = RouteManagementPanel(owner, lang="en")
+        panel.refresh_route_table()
+
+        route_item = panel._find_route_item("Head", "Mandible")
+
+        self.assertEqual(route_item.text(3), "Heatmap Blink Expert")
+        self.assertEqual(route_item.text(6), "Route-specific backend")
+        self.assertIn("Active profile default", route_item.toolTip(6))
 
     def test_missing_expert_history_can_be_removed_from_route_tree(self):
         self.pm.project_data["cascade_routes"]["version"] = "project-v2"
@@ -491,6 +548,221 @@ class UiLocalizationTests(unittest.TestCase):
         finally:
             dialog.deleteLater()
 
+    def test_model_profile_manager_requires_confirmation_for_delete_and_activation(self):
+        dialog = ModelSettingsDialog(
+            {
+                "epochs": 5,
+                "batch": 2,
+                "lr": 1e-4,
+                "wd": 1e-4,
+                "conf": 0.1,
+                "adapt": 0.4,
+                "pad": 0.4,
+                "noise_floor": 0.15,
+                "poly_epsilon": 2.0,
+                "taxonomy": ["Head", "Mandible", "Eye"],
+                "locator_scope": ["Head"],
+            },
+            lang="en",
+        )
+        try:
+            self.assertEqual(dialog.btn_new_profile.text(), "Save Current Settings as New Profile")
+            self.assertEqual(dialog.btn_set_active_profile.text(), "Set as Active Profile")
+            self.assertIsNotNone(dialog.findChild(QWidget, "modelSettingsProfileSummary"))
+            self.assertIn("Project active profile", dialog.profile_summary_box.toPlainText())
+
+            dialog.new_model_profile()
+            new_id = dialog.combo_model_profile.currentData()
+            self.assertNotEqual(new_id, DEFAULT_MODEL_PROFILE_ID)
+            self.assertEqual(dialog.model_profiles["active_profile_id"], DEFAULT_MODEL_PROFILE_ID)
+            values = dialog.get_values()
+            self.assertEqual(values["model_profiles"]["active_profile_id"], DEFAULT_MODEL_PROFILE_ID)
+
+            with patch.object(
+                main_module,
+                "themed_yes_no_question",
+                return_value=QMessageBox.StandardButton.No,
+            ) as question_mock:
+                dialog.set_selected_profile_active()
+
+            self.assertIn("only changes the project default profile", question_mock.call_args.args[2])
+            self.assertEqual(dialog.model_profiles["active_profile_id"], DEFAULT_MODEL_PROFILE_ID)
+
+            dialog.combo_model_profile.setCurrentIndex(dialog.combo_model_profile.findData(new_id))
+            with patch.object(
+                main_module,
+                "themed_yes_no_question",
+                return_value=QMessageBox.StandardButton.Yes,
+            ) as question_mock:
+                dialog.delete_model_profile()
+
+            self.assertIn("Model weights, external scripts, and route expert bindings are not deleted", question_mock.call_args.args[2])
+            remaining_ids = [profile["profile_id"] for profile in dialog.model_profiles["profiles"]]
+            self.assertNotIn(new_id, remaining_ids)
+        finally:
+            dialog.deleteLater()
+
+    def test_model_profile_external_parent_only_affects_runtime_after_activation(self):
+        dialog = ModelSettingsDialog(
+            {
+                "epochs": 5,
+                "batch": 2,
+                "lr": 1e-4,
+                "wd": 1e-4,
+                "conf": 0.1,
+                "adapt": 0.4,
+                "pad": 0.4,
+                "noise_floor": 0.15,
+                "poly_epsilon": 2.0,
+                "taxonomy": ["Head", "Mandible", "Eye"],
+                "locator_scope": ["Head"],
+                "model_backend": main_module.BUILTIN_BACKEND_ID,
+            },
+            lang="en",
+        )
+        try:
+            dialog.new_model_profile()
+            new_id = dialog.combo_model_profile.currentData()
+            dialog.parent_backend_combo.setCurrentIndex(dialog.parent_backend_combo.findData(PARENT_BACKEND_EXTERNAL))
+            dialog.external_backend_id.setText("external_parent_test")
+            dialog.external_display_name.setText("External Parent Test")
+            dialog.external_train_command.setPlainText("{python} train.py --contract {contract_json}")
+            dialog.external_predict_command.setPlainText("{python} predict.py --contract {contract_json}")
+
+            self.assertFalse(dialog.backend_combo.isEnabled())
+            self.assertEqual(dialog.backend_combo.currentData(), main_module.EXTERNAL_BACKEND_ID)
+            self.assertIn("Compatibility display only", dialog.backend_combo.toolTip())
+            self.assertEqual(dialog.tabs.tabText(dialog.advanced_extensions_tab_index), "Advanced Extensions")
+            advanced_tab = dialog.tabs.widget(dialog.advanced_extensions_tab_index).widget()
+            parent_tab = dialog.tabs.widget(dialog.parent_tab_index).widget()
+            child_tab = dialog.tabs.widget(dialog.child_tab_index).widget()
+            self.assertIsNotNone(advanced_tab.findChild(QWidget, "modelSettingsModelSourceSwitchPanel"))
+            self.assertIsNotNone(parent_tab.findChild(QWidget, "modelSettingsParentSourceSummary"))
+            self.assertIsNotNone(child_tab.findChild(QWidget, "modelSettingsChildSourceSummary"))
+            self.assertIsNotNone(advanced_tab.findChild(QWidget, "modelSettingsParentExtensionPanel"))
+            self.assertIsNotNone(advanced_tab.findChild(QWidget, "modelSettingsExternalBlinkPanel"))
+            self.assertIsNone(child_tab.findChild(QWidget, "modelSettingsExternalBlinkPanel"))
+            self.assertEqual(dialog._external_backend_validation_errors(), [])
+
+            values_before_activation = dialog.get_values()
+            self.assertEqual(values_before_activation["model_profiles"]["active_profile_id"], DEFAULT_MODEL_PROFILE_ID)
+            self.assertEqual(values_before_activation["model_backend"], main_module.BUILTIN_BACKEND_ID)
+            self.assertNotEqual(values_before_activation["external_backend"]["backend_id"], "external_parent_test")
+
+            with patch.object(
+                main_module,
+                "themed_yes_no_question",
+                return_value=QMessageBox.StandardButton.Yes,
+            ):
+                dialog.set_selected_profile_active()
+
+            values_after_activation = dialog.get_values()
+            self.assertEqual(values_after_activation["model_profiles"]["active_profile_id"], new_id)
+            self.assertEqual(values_after_activation["model_backend"], main_module.EXTERNAL_BACKEND_ID)
+            self.assertEqual(values_after_activation["external_backend"]["backend_id"], "external_parent_test")
+        finally:
+            dialog.deleteLater()
+
+    def test_model_profile_dialog_loads_active_external_parent_config(self):
+        dialog = ModelSettingsDialog(
+            {
+                "epochs": 5,
+                "batch": 2,
+                "lr": 1e-4,
+                "wd": 1e-4,
+                "conf": 0.1,
+                "adapt": 0.4,
+                "pad": 0.4,
+                "noise_floor": 0.15,
+                "poly_epsilon": 2.0,
+                "taxonomy": ["Head", "Mandible", "Eye"],
+                "locator_scope": ["Head"],
+                "model_backend": main_module.BUILTIN_BACKEND_ID,
+                "external_backend": {
+                    "backend_id": "old_global_external",
+                    "display_name": "Old Global External",
+                    "python_executable": "python",
+                    "train_command": "{python} old_train.py --contract {contract_json}",
+                    "predict_command": "{python} old_predict.py --contract {contract_json}",
+                },
+                "model_profiles": {
+                    "active_profile_id": "saved_external_profile",
+                    "profiles": [
+                        {
+                            "profile_id": "saved_external_profile",
+                            "display_name": "Saved External Profile",
+                            "parent_backend": {
+                                "backend_type": PARENT_BACKEND_EXTERNAL,
+                                "locator_scope": ["Head"],
+                                "external_backend": {
+                                    "backend_id": "saved_profile_external",
+                                    "display_name": "Saved Profile External",
+                                    "python_executable": "python",
+                                    "train_command": "{python} saved_train.py --contract {contract_json}",
+                                    "predict_command": "{python} saved_predict.py --contract {contract_json}",
+                                    "model_manifest": "saved_manifest.json",
+                                },
+                            },
+                        }
+                    ],
+                },
+            },
+            lang="en",
+        )
+        try:
+            self.assertEqual(dialog.combo_model_profile.currentData(), "saved_external_profile")
+            self.assertEqual(dialog.parent_backend_combo.currentData(), PARENT_BACKEND_EXTERNAL)
+            self.assertEqual(dialog.backend_combo.currentData(), main_module.EXTERNAL_BACKEND_ID)
+            self.assertFalse(dialog.backend_combo.isEnabled())
+            self.assertEqual(dialog.parent_backend_combo.currentText(), "Custom Parent Extension")
+            self.assertEqual(dialog.child_backend_combo.itemText(dialog.child_backend_combo.findData(main_module.CHILD_BACKEND_EXTERNAL)), "Custom Child Extension")
+            self.assertEqual(dialog.external_backend_id.text(), "saved_profile_external")
+            self.assertEqual(dialog.external_display_name.text(), "Saved Profile External")
+            self.assertIn("saved_train.py", dialog.external_train_command.toPlainText())
+
+            values = dialog.get_values()
+            self.assertEqual(values["model_backend"], main_module.EXTERNAL_BACKEND_ID)
+            self.assertEqual(values["external_backend"]["backend_id"], "saved_profile_external")
+            self.assertNotEqual(values["external_backend"]["backend_id"], "old_global_external")
+        finally:
+            dialog.deleteLater()
+
+    def test_model_settings_legacy_external_backend_initializes_default_profile(self):
+        dialog = ModelSettingsDialog(
+            {
+                "epochs": 5,
+                "batch": 2,
+                "lr": 1e-4,
+                "wd": 1e-4,
+                "conf": 0.1,
+                "adapt": 0.4,
+                "pad": 0.4,
+                "noise_floor": 0.15,
+                "poly_epsilon": 2.0,
+                "taxonomy": ["Head", "Mandible"],
+                "locator_scope": ["Head"],
+                "model_backend": main_module.EXTERNAL_BACKEND_ID,
+                "external_backend": {
+                    "backend_id": "legacy_external",
+                    "display_name": "Legacy External",
+                    "python_executable": "python",
+                    "prepare_dataset_command": "{python} prepare.py --contract {contract_json}",
+                    "train_command": "{python} train.py --contract {contract_json}",
+                    "predict_command": "",
+                },
+            },
+            lang="en",
+        )
+        try:
+            self.assertEqual(dialog.parent_backend_combo.currentData(), PARENT_BACKEND_EXTERNAL)
+            self.assertEqual(dialog.backend_combo.currentData(), main_module.EXTERNAL_BACKEND_ID)
+            self.assertEqual(dialog.external_backend_id.text(), "legacy_external")
+            context = dialog.get_agent_context()
+            self.assertEqual(context["prepare_command_present"], "yes")
+            self.assertEqual(context["prepare_command_has_contract"], "yes")
+        finally:
+            dialog.deleteLater()
+
     def test_route_delete_confirmation_uses_clear_recovery_copy_in_chinese(self):
         logged_messages = []
         owner = type(
@@ -556,9 +828,10 @@ class UiLocalizationTests(unittest.TestCase):
         self.assertIsNotNone(appointed_expert_item)
         self.assertIsNotNone(available_expert_item)
         self.assertEqual(route_item.childCount(), 2)
-        self.assertEqual(appointed_expert_item.text(3), "★ Mandible/expert_v20260501_090000.pth")
-        self.assertEqual(appointed_expert_item.text(4), "Appointed")
-        self.assertEqual(available_expert_item.text(4), "Discoverable")
+        self.assertEqual(appointed_expert_item.text(3), "ViT-B Blink Expert")
+        self.assertEqual(appointed_expert_item.text(4), "★ Mandible/expert_v20260501_090000.pth")
+        self.assertEqual(appointed_expert_item.text(5), "Appointed")
+        self.assertEqual(available_expert_item.text(5), "Discoverable")
 
         panel.route_tree.setCurrentItem(parent_item)
         panel.update_action_buttons()
@@ -612,9 +885,10 @@ class UiLocalizationTests(unittest.TestCase):
         appointed_expert_item = panel._find_expert_item("Head", "Mandible", "Mandible/expert_v20260501_090000.pth")
         available_expert_item = panel._find_expert_item("Head", "Mandible", "Mandible/expert_v20260503_120000.pth")
 
-        self.assertEqual(route_item.text(3), "side view stable (Mandible/expert_v20260501_090000.pth)")
-        self.assertEqual(appointed_expert_item.text(3), "★ side view stable (Mandible/expert_v20260501_090000.pth)")
-        self.assertEqual(available_expert_item.text(3), "Mandible/expert_v20260503_120000.pth")
+        self.assertEqual(route_item.text(3), "ViT-B Blink Expert")
+        self.assertEqual(route_item.text(4), "side view stable (Mandible/expert_v20260501_090000.pth)")
+        self.assertEqual(appointed_expert_item.text(4), "★ side view stable (Mandible/expert_v20260501_090000.pth)")
+        self.assertEqual(available_expert_item.text(4), "Mandible/expert_v20260503_120000.pth")
 
         panel.route_tree.setCurrentItem(available_expert_item)
         panel.appoint_selected_route_expert()

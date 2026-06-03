@@ -3,6 +3,7 @@ import path from "node:path";
 
 const TASK_VERSION = 2;
 const TASK_OUTPUT_PREVIEW_CHARS = 32_000;
+const TERMINAL_TASK_STATUSES = new Set(["completed", "failed", "partial", "blocked", "cancelled", "interrupted"]);
 
 export function createAgentTaskStore(options) {
   const root = path.join(options.cwd, ".lab-agent", "tasks");
@@ -27,10 +28,15 @@ export function createAgentTaskStore(options) {
       if (!current.ok) {
         return current;
       }
+      const now = new Date().toISOString();
+      const status = patch.status ? normalizeStatus(patch.status) : current.task.status;
+      const terminal = TERMINAL_TASK_STATUSES.has(status);
       const record = normalizeTask({
         ...current.task,
         ...patch,
-        updatedAt: new Date().toISOString()
+        updatedAt: now,
+        progressAt: patch.progressAt ?? (isProgressPatch(patch) ? now : current.task.progressAt),
+        heartbeatAt: patch.heartbeatAt ?? (terminal ? now : current.task.heartbeatAt)
       });
       await writeTask(root, record);
       return { ok: true, task: record };
@@ -140,6 +146,8 @@ function normalizeTask(value = {}) {
     startedAt: task.startedAt ?? null,
     finishedAt: task.finishedAt ?? null,
     updatedAt: task.updatedAt ?? task.finishedAt ?? task.startedAt ?? task.createdAt ?? null,
+    heartbeatAt: task.heartbeatAt ?? task.startedAt ?? task.updatedAt ?? task.finishedAt ?? task.createdAt ?? null,
+    progressAt: task.progressAt ?? task.updatedAt ?? task.startedAt ?? task.finishedAt ?? task.createdAt ?? null,
     latestProgress: String(task.latestProgress ?? ""),
     toolCalls: Array.isArray(task.toolCalls) ? task.toolCalls.map(normalizeToolCall) : [],
     outputSummary: String(task.outputSummary ?? ""),
@@ -151,6 +159,18 @@ function normalizeTask(value = {}) {
     route: task.route && typeof task.route === "object" ? task.route : null,
     metadata: task.metadata && typeof task.metadata === "object" ? task.metadata : {}
   };
+}
+
+function isProgressPatch(patch = {}) {
+  if (!patch || typeof patch !== "object") {
+    return false;
+  }
+  return Object.prototype.hasOwnProperty.call(patch, "latestProgress")
+    || Object.prototype.hasOwnProperty.call(patch, "toolCalls")
+    || Object.prototype.hasOwnProperty.call(patch, "budgetProgress")
+    || Object.prototype.hasOwnProperty.call(patch, "outputSummary")
+    || Object.prototype.hasOwnProperty.call(patch, "output")
+    || Object.prototype.hasOwnProperty.call(patch, "status");
 }
 
 function normalizeToolCall(value = {}) {

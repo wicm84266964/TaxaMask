@@ -21,7 +21,8 @@ The local client sends one JSON `POST` request to `LAB_MODEL_GATEWAY_URL`.
     "capabilities": {
       "tools": true,
       "toolResults": true,
-      "streaming": false
+      "streaming": false,
+      "images": false
     },
     "boundary": {
       "toolExecution": "local-client",
@@ -47,6 +48,33 @@ Rules:
 - Requests include `x-session-affinity: <sessionId>` when a session id is available. Gateways may use it as a best-effort routing/cache affinity hint; it is not an authentication token.
 - `metadata.capabilities` and `metadata.request` contain only non-sensitive booleans/counts for compatibility diagnostics.
 - `metadata.boundary` declares that tools execute locally, provider credentials stay behind the gateway/model adapter, and remote tools are not required for MVP.
+- When a request includes image attachments, user message `content` may be an
+  array of text and image blocks. The client sets `metadata.capabilities.images`
+  to `true`; image bytes are sent only for the active model request and are not
+  written to local session metadata.
+
+Image block shape in the provider-independent protocol:
+
+```json
+{
+  "role": "user",
+  "content": [
+    { "type": "text", "text": "describe this screenshot" },
+    {
+      "type": "image",
+      "mimeType": "image/png",
+      "name": "screenshot.png",
+      "size": 12345,
+      "data": "<base64>"
+    }
+  ]
+}
+```
+
+Gateways that route to text-only models should reject image requests with a
+clear bounded error body. Ant Code surfaces this as an unsupported vision/input
+diagnostic; it does not attempt to infer provider model capabilities by probing
+provider-specific model-list endpoints.
 
 ## Non-Streaming Response
 
@@ -167,6 +195,10 @@ Current compatibility notes:
 - The client sends `tools` when local tools are available, but it does not force `tool_choice: "auto"` unless a future caller explicitly provides a tool choice. Some OpenAI-compatible adapters route more reliably when tool choice is omitted.
 - Streaming requests include `stream_options: { "include_usage": true }` when `stream=true`; adapters that ignore this field should still return valid SSE/NDJSON deltas.
 - OpenAI-compatible `reasoning_content` / provider thinking deltas are treated as hidden thinking/status unless the local TUI explicitly enables thinking visibility. They are not a substitute for visible assistant `content`.
+- Ant Code image blocks are converted to Chat Completions `image_url` content
+  blocks using `data:<mime>;base64,<data>` URLs. Adapters that do not support
+  image input should return a clear 4xx error instead of hanging or accepting the
+  request silently.
 
 ## Compatibility Check
 

@@ -1,8 +1,222 @@
 # TAXAMASK / FORMICA-FLOW SYSTEM TECHNICAL MANUAL (Deep Dive)
 
 > **Target Audience**: Expert LLM Assistants, Senior Developers
-> **Version**: v3.28 (June 2, 2026, PDF literature evidence to labeling workbench loop)
+> **Version**: v3.30 (June 3, 2026, closure notes and TIF/Ant-Code rendering boundary)
 > **Purpose**: Up-to-date architectural, workflow, and governance context for implementation and maintenance.
+
+---
+
+## 0) v3.30 Closure Notes + TIF/Ant-Code Rendering Boundary (2026-06-03)
+
+### 0.0 Current milestone status
+- The June 2-3 pass closes two production-facing tracks:
+  - PDF literature evidence -> 2D/STL labeling-workbench trait lookup and candidate import support.
+  - 2D/STL model profile management with parent/child backend routing, heatmap Blink, and external Blink contracts.
+- This pass also records a practical boundary: TIF remains an experimental side workflow. It exists because the AntScan-style TIF/volume direction was added as a research experiment, not because it is already as stable as the 2D/STL ant morphology path.
+- Agents should not treat the TIF path as the main validation route unless the user explicitly asks to work on TIF.
+
+### 0.1 TIF Ask Agent / rendering limitation
+- A runtime issue was observed after opening a TIF project, then launching Ask Agent / embedded Ant-Code:
+  - Ant-Code could report ready while the embedded view was black.
+  - Returning to the TIF workbench could also leave the TIF view black.
+  - Console/log output included:
+    - `QQuickWidget: Failed to get a QRhi from the top-level widget's window`
+    - `QQuickWidget: Attempted to render scene with no rhi`
+    - `The top-level window is not using the expected graphics API for composition, 'OpenGL' is not compatible with this QQuickWidget`
+- Interpretation:
+  - This is a Qt graphics-backend composition conflict, not simply an Agent context-routing bug.
+  - The TIF GPU volume preview uses an OpenGL path, while the embedded Ant-Code Dashboard relies on Qt WebEngine / Qt Quick composition inside the same top-level window.
+  - On the tested Windows environment, these two rendering stacks can interfere with each other.
+- Current policy:
+  - Do not force further TIF Ask Agent embedding changes in this milestone.
+  - Prefer keeping the TIF workflow focused on its own workbench and treating Ant-Code/TIF combined embedding as a known experimental limitation.
+  - If this is revisited later, prefer an isolated browser/process design or another explicit graphics-backend isolation strategy rather than another small prompt/context tweak.
+- Relevant files from the attempted containment pass:
+  - `AntSleap/ui/tif_workbench.py::TifWorkbenchWidget.prepare_for_agent_panel`
+  - `AntSleap/main.py::MainWindow.open_agent_from_context`
+  - `AntSleap/ui/taxamask_agent_panel.py::_on_web_load_finished`
+  - `AntSleap/ui/taxamask_agent_panel.py::_handle_embedded_page_ready`
+- Those containment changes are limited fallbacks and do not claim to solve the underlying QRhi/OpenGL/WebEngine conflict.
+
+### 0.2 Documentation and commit hygiene
+- `CHANGELOG_zh.md` has a 2026-06-03 closure entry. Older dated logs should remain historical.
+- `docs/designs/2026-06-02_模型方案管理与Blink后端切换执行清单.md` is now both the original execution checklist and a landed-audit record.
+- `TaxaMask使用手册.md` now describes:
+  - PDF accepted/review-only artifact separation.
+  - Literature trait search and same-taxon fallback for manual images.
+  - 2D/STL model profiles and route backend audit.
+  - TIF as a separate, experimental volume workflow.
+- Before committing, verify that `.lab-agent/config.json`, `.lab-agent/sessions/`, SQLite databases, model weights, real run outputs, images, TIF stacks, and `TaxaMask_outputs/` remain ignored.
+
+---
+
+## 0) v3.29 Model Profiles + Blink Backend Routing (2026-06-02)
+
+### 0.0 Research workflow intent
+- This milestone upgrades the 2D/STL model side from scattered runtime settings into project-saved model profiles.
+- The research-facing goal is to let operators compare and switch schemes such as:
+  - built-in parent Locator/SAM + ViT-B child Blink
+  - built-in parent Locator/SAM + heatmap child Blink
+  - external parent backend
+  - external child Blink route
+- The change is specifically meant to support ant morphology workflow validation where large parent structures can use the mature heatmap locator while child structures can be routed to different local experts.
+- Model outputs remain reviewable AI drafts. Neither parent predictions nor child route predictions become manual truth automatically.
+
+### 0.1 Model profile data structure
+- New module: `AntSleap/core/model_profiles.py`.
+- Project JSON now stores:
+  - `model_profiles.schema_version = taxamask_model_profiles_v1`
+  - `model_profiles.active_profile_id`
+  - `model_profiles.profiles[]`
+- Default profile id:
+  - `builtin_heatmap_default`
+- Each profile records:
+  - `parent_backend.backend_type`: `builtin_locator_sam` or `external_parent`
+  - parent locator scope, locator weights, segmenter weights, train params, parent box aspect ratios, and external parent backend config
+  - `child_backend_defaults.backend_type`: `vit_b_blink`, `heatmap_blink`, or `external_blink`
+  - child train defaults, heatmap Blink params, and external Blink backend config
+  - inference params and VLM preannotation target parts
+- `ProjectManager` migrates old projects by creating the default profile and synchronizing legacy locator scope / parent box ratio / VLM / Blink defaults into it.
+- Important files:
+  - `AntSleap/core/model_profiles.py`
+  - `AntSleap/core/project.py`
+  - `tests/test_model_profiles.py`
+  - `tests/test_locator_scope.py`
+
+### 0.2 2D/STL settings UI
+- `2D/STL Morphology Model Settings` now has five pages:
+  - `Profile`
+  - `Parent-part annotation`
+  - `Child-part annotation`
+  - `Inference`
+  - `Advanced Extensions`
+- The profile page supports create/copy/delete/set-active plus display name and description.
+- Parent page is now mainly an operator-facing summary plus built-in parent training params, runtime device, locator scope, and parent box aspect ratios. The active parent model source is changed in `Advanced Extensions`.
+- Child page is now mainly an operator-facing summary plus Blink/heatmap training defaults. The active default child source is changed in `Advanced Extensions`; individual appointed routes still keep route-specific backend bindings.
+- Advanced Extensions is the centralized place for high-impact model source switches:
+  - parent source: built-in Locator/SAM or custom parent extension
+  - default child expert source:
+  - `ViT-B Blink Expert`
+  - `Heatmap Blink Expert`
+  - `Custom Child Extension`
+- Inference page holds thresholds, VLM preannotation, and project route expert management.
+- Custom parent extension and custom child extension settings are both saved inside the current model profile. This avoids asking operators to configure the profile, parent backend, and child backend in three scattered places.
+- Important files:
+  - `AntSleap/main.py::ModelSettingsDialog`
+  - `tests/test_ui_polish_scope.py`
+  - `tests/test_ui_localization.py`
+
+### 0.3 Route experts are backend-explicit
+- Route records now carry backend fields:
+  - `expert_backend`
+  - `expert_manifest`
+  - `input_size`
+  - `backend_params`
+  - `note`
+- Old route records without backend are interpreted as `vit_b_blink`.
+- New expert manifest module: `AntSleap/core/blink_expert_manifest.py`.
+- ViT-B Blink and heatmap Blink training outputs write `.manifest.json` files with:
+  - schema
+  - expert backend
+  - parent/child parts
+  - input size
+  - weights filename
+  - project JSON and trajectory count
+  - output schema
+- Route UI shows backend identity so a heatmap expert is not silently loaded by the ViT-B path.
+- Important files:
+  - `AntSleap/core/cascade_routes.py`
+  - `AntSleap/core/blink_expert_manifest.py`
+  - `AntSleap/core/project.py`
+  - `tests/test_blink_expert_manifest.py`
+  - `tests/test_blink_route_backends.py`
+
+### 0.4 Blink backend registry
+- New module: `AntSleap/core/blink_expert_backends.py`.
+- Registered child-route backends:
+  - `vit_b_blink`: legacy/current ViT-B Blink expert loader path
+  - `heatmap_blink`: heatmap + WH regression child expert
+  - `external_blink`: external child-part script runner
+- `CascadingManager` dispatches by route `expert_backend`.
+- Unknown backend now returns an explicit backend error rather than falling back to ViT-B.
+- `external_blink` does not require a `.pth` expert id, but it does require a `predict_command` from route `backend_params` or the active profile's `child_backend_defaults.external_blink_backend`.
+- Important files:
+  - `AntSleap/core/blink_expert_backends.py`
+  - `AntSleap/core/cascade_manager.py`
+  - `AntSleap/core/external_blink_backend.py`
+
+### 0.5 Heatmap Blink training and inference
+- New dataset module: `AntSleap/core/blink_heatmap_dataset.py`.
+  - Reads saved child trajectories.
+  - Requires `parent_context.parent_box`.
+  - Crops parent ROI and produces child center heatmap plus normalized WH target.
+- New trainer module: `AntSleap/core/blink_heatmap_trainer.py`.
+  - Saves `.pth` plus manifest.
+  - Output schema: `heatmap_wh_box_v1`.
+  - Default input size is `512`.
+- Runtime inference maps the predicted child box back from parent ROI coordinates to global image coordinates, then the existing SAM draft path can use that box.
+- Important tests:
+  - `tests/test_blink_heatmap_dataset.py`
+  - `tests/test_blink_route_backends.py`
+  - `tests/test_macro_micro_pipeline.py`
+
+### 0.6 External Blink backend contract
+- New contract doc: `docs/contracts/external_blink_backend_contract_v1.md`.
+- New runner: `AntSleap/core/external_blink_backend.py`.
+- First implemented action: `predict_child`.
+- Contract input includes:
+  - project JSON
+  - image path
+  - parent part
+  - child part
+  - parent box in global coordinates
+  - model manifest path
+  - prediction JSON path
+- Expected output schema: `taxamask_blink_prediction_v1`.
+- The external script returns a child box in global image coordinates. TaxaMask treats it as a SAM prompt and writes reviewable AI draft output.
+- The script should not edit project JSON or write manual truth.
+- Important test:
+  - `tests/test_external_blink_backend.py`
+
+### 0.7 Runtime audit and reports
+- `AntEngine.predict_full_pipeline(..., model_profile_context=...)` now writes meta fields:
+  - `model_profile_id`
+  - `parent_backend`
+  - `cascade_route_backends`
+  - `cascade_route_manifests`
+- GUI current-image and batch prediction pass the active model profile context.
+- Inference logs include:
+  - `Model audit: profile=...; parent_backend=...; route_backends=...`
+- `AntEngine.generate_report(..., training_context=...)` writes training context into `report_summary.json`.
+- Training threads pass active profile context so later review can identify which scheme produced a report.
+- Internal parent-model training now records the saved Locator/SAM weight filenames back into the active profile's `parent_backend.locator_weights` and `parent_backend.segmenter_weights`.
+- 2D/STL GUI exports and the headless multimodal export write `model_profile_summary.json`, a compact audit file with active profile, parent/child backends, inference settings, and route expert backend/manifest summaries.
+- Labeling Workbench Ask Agent context includes active profile id/name, parent backend, child backend, and a compact route backend summary.
+- Important files:
+  - `AntSleap/core/engine.py`
+  - `AntSleap/main.py`
+  - `AntSleap/core/project.py::write_model_profile_export_summary`
+  - `tests/test_reporting_routes.py`
+  - `tests/test_agentic_multimodal_export.py`
+
+### 0.8 Focused validation
+- Environment used:
+  - `C:\Users\admin\anaconda3\envs\antsleap\python.exe`
+- Core validation reported for this milestone:
+  - `python -m unittest tests.test_model_profiles tests.test_blink_expert_manifest tests.test_blink_route_backends tests.test_blink_heatmap_dataset tests.test_external_blink_backend tests.test_locator_scope tests.test_macro_micro_pipeline tests.test_blink_bridge tests.test_reporting_routes tests.test_ui_polish_scope tests.test_ui_localization -v`
+  - Result: 133 tests, OK.
+- Compile check also covered:
+  - `AntSleap/core/model_profiles.py`
+  - `AntSleap/core/blink_expert_manifest.py`
+  - `AntSleap/core/blink_heatmap_dataset.py`
+  - `AntSleap/core/blink_heatmap_trainer.py`
+  - `AntSleap/core/external_blink_backend.py`
+  - `AntSleap/core/blink_expert_backends.py`
+  - `AntSleap/core/cascade_manager.py`
+  - `AntSleap/core/engine.py`
+  - `AntSleap/core/project.py`
+  - `AntSleap/ui/blink_lab.py`
+  - `AntSleap/main.py`
 
 ---
 
@@ -119,18 +333,19 @@
   - continue to show source/provenance and literature-search fallback
   - next PDF work should tighten JSON-only text extraction, response repair/retry, taxon-name normalization, and multi-species plate handling
 
-### 0.8 Model scheme design status
-- A design document exists for the next stage:
+### 0.8 Model scheme implementation handoff
+- The model scheme design was archived in:
   - `docs/designs/2026-06-02_模型方案管理与Blink后端切换设计稿.md`
-- Scope of that design:
-  - saved model schemes
+- The implementation checklist was archived in:
+  - `docs/designs/2026-06-02_模型方案管理与Blink后端切换执行清单.md`
+- The design has now been implemented in the v3.29 layer above:
+  - saved project model profiles
   - parent-part and child-part backend separation
-  - one-click model-scheme switching
-  - route experts that record backend type
-  - Blink inference/training no longer being implicitly tied only to ViT-B
-  - eventual support for heatmap-style child experts where appropriate
-- This is a design archive, not implemented behavior yet.
-- `.gitignore` intentionally allows this single design file while keeping other `docs/designs/` scratch files ignored.
+  - explicit route `expert_backend`
+  - ViT-B Blink, heatmap Blink, and external Blink route dispatch
+  - model-profile audit metadata in prediction and training reports
+- Keep these docs as design/execution records. Current behavior should be read from the v3.29 section and source modules, not inferred from the older pre-implementation wording.
+- `.gitignore` intentionally allows the maintained design/checklist files while keeping unrelated design scratch files ignored.
 
 ### 0.9 Focused validation
 - Environment used for GUI-focused checks:

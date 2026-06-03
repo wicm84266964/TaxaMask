@@ -29,6 +29,8 @@ design_notes:
   - Persists context metadata as counts and byte totals only; compacted summary text is not written to session metadata.
   - Normalizes legacy session events into lab-owned AntEvent schema v2 with stable sequence numbers, source, visibility, persistence, and redaction metadata.
   - Persists provider-exposed thinking with local retained assistant transcript metadata for resume/review while omitting it from printable event output and future model-context requests.
+  - Handles image attachments as request-scoped user content, persists only redacted image metadata, and prevents raw image bytes from entering session metadata.
+  - Uses a same-gateway visual verifier preflight when the selected main model is text-only but an enabled vision model is configured, then passes the resulting visual evidence report to the main model.
   - Provides a deterministic event reducer foundation for transcript, tool, error, and turn state rendering.
 prohibited_sources_checked:
   - old source code was not copied

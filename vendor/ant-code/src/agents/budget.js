@@ -24,7 +24,8 @@ const BUILTIN_BUDGETS = Object.freeze({
   "code-worker.deep": { maxDurationMs: 2_700_000 },
   "verifier.standard": { maxDurationMs: 1_800_000 },
   "reviewer.high": { maxDurationMs: 1_500_000 },
-  "browser-verifier.standard": { maxDurationMs: 1_800_000 }
+  "browser-verifier.standard": { maxDurationMs: 1_800_000 },
+  "visual-verifier.standard": { maxDurationMs: 1_800_000, maxOutputBytes: 220_000, maxToolResultBytes: 12_000 }
 });
 
 /**
@@ -81,8 +82,21 @@ export function resolveAgentModel(config, routeDecision = {}, profile = {}) {
     return profile.model.trim();
   }
   const tier = String(routeDecision.modelTier ?? profile.modelTier ?? "default");
+  if (isVisionProfile(profile) || tier === "vision") {
+    const visionModel = config.agents?.vision?.enabled === false ? "" : String(config.agents?.vision?.model ?? "").trim();
+    if (visionModel) {
+      return visionModel;
+    }
+  }
   const model = config.agents?.modelTiers?.[tier];
   return typeof model === "string" && model.trim() ? model.trim() : config.modelAlias;
+}
+
+function isVisionProfile(profile = {}) {
+  if (profile.name === "visual-verifier" || profile.purpose === "visual") {
+    return true;
+  }
+  return Array.isArray(profile.aliases) && profile.aliases.some((alias) => /^(?:vision|vision-verifier|visual-reviewer|screenshot-reviewer)$/i.test(String(alias)));
 }
 
 /**

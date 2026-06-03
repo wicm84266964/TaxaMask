@@ -333,7 +333,7 @@ class WheelSafeSpinBox(QSpinBox):
 
 
 class TifSliceCanvas(QLabel):
-    ZOOM_STEPS = (1.0, 1.25, 1.5, 2.0, 3.0, 4.0)
+    ZOOM_STEPS = (1.0, 1.25, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 16.0)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2033,6 +2033,19 @@ class TifWorkbenchWidget(QWidget):
         self.volume_canvas.setText(tt("No TIF volume loaded", self.lang))
         self._update_volume_render_status_label(tt("No TIF volume loaded", self.lang))
         return True
+
+    def prepare_for_agent_panel(self):
+        if hasattr(self, "volume_still_timer"):
+            self.volume_still_timer.stop()
+        if self.display_mode != "volume":
+            return
+        self.display_mode = "slice"
+        index = self.display_mode_combo.findData("slice") if hasattr(self, "display_mode_combo") else -1
+        if index >= 0:
+            self.display_mode_combo.blockSignals(True)
+            self.display_mode_combo.setCurrentIndex(index)
+            self.display_mode_combo.blockSignals(False)
+        self.on_display_mode_changed()
 
     def release_volume_renderer(self):
         canvas = getattr(self, "volume_canvas", None)

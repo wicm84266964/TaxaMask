@@ -12,6 +12,7 @@ import { emptyResponse, normalizeContent } from "./protocol.js";
  *   tools?: Array<Record<string, any>>;
  *   toolResults?: Array<Record<string, any>>;
  *   stream?: boolean;
+ *   extraBody?: Record<string, any> | null;
  * }} input
  */
 export function createOpenAIChatCompletionRequest(input) {
@@ -23,6 +24,9 @@ export function createOpenAIChatCompletionRequest(input) {
   };
   if (request.stream) {
     request.stream_options = { include_usage: true };
+  }
+  if (isPlainObject(input.extraBody) && Object.keys(input.extraBody).length > 0) {
+    Object.assign(request, cloneJsonObject(input.extraBody));
   }
 
   const tools = normalizeOpenAITools(input.tools ?? []);
@@ -174,7 +178,9 @@ function normalizeOpenAIMessages(messages, toolResults) {
     if (["system", "user", "developer"].includes(message.role)) {
       normalized.push({
         role: message.role === "developer" ? "system" : message.role,
-        content: textFromContent(message.content)
+        content: message.role === "user"
+          ? openAIUserContent(message.content)
+          : textFromContent(message.content)
       });
     }
   }
@@ -225,6 +231,10 @@ function assistantReasoningContent(message) {
     return limitThinkingPreview(thinking.text).text;
   }
   return "";
+}
+
+function cloneJsonObject(value) {
+  return JSON.parse(JSON.stringify(value));
 }
 
 /**
@@ -604,6 +614,50 @@ function textFromContent(content) {
     return content;
   }
   return normalizeContent(content).map((block) => block.text).join("");
+}
+
+function openAIUserContent(content) {
+  if (!Array.isArray(content)) {
+    return textFromContent(content);
+  }
+  const blocks = [];
+  for (const item of content) {
+    if (typeof item === "string") {
+      if (item) {
+        blocks.push({ type: "text", text: item });
+      }
+      continue;
+    }
+    if (!isPlainObject(item)) {
+      continue;
+    }
+    if (item.type === "text" && typeof item.text === "string") {
+      blocks.push({ type: "text", text: item.text });
+      continue;
+    }
+    if (item.type === "image") {
+      const imageUrl = imageDataUrl(item);
+      if (imageUrl) {
+        blocks.push({
+          type: "image_url",
+          image_url: { url: imageUrl }
+        });
+      }
+    }
+  }
+  if (blocks.length === 0) {
+    return "";
+  }
+  return blocks.some((block) => block.type === "image_url") ? blocks : blocks.map((block) => block.text).join("");
+}
+
+function imageDataUrl(item) {
+  const data = String(item.data ?? "").replace(/\s+/g, "");
+  const mimeType = String(item.mimeType ?? item.mime_type ?? "").trim().toLowerCase();
+  if (!data || !/^image\/[a-z0-9.+-]+$/i.test(mimeType)) {
+    return "";
+  }
+  return `data:${mimeType};base64,${data}`;
 }
 
 /**

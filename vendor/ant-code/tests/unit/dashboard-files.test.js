@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { collectSessionFiles, previewFile, resolveWorkspaceFile } from "../../src/dashboard/files.js";
+import { createDocxBuffer, createXlsxBuffer } from "../fixtures/office-fixtures.js";
 
 test("dashboard file preview blocks paths outside workspace", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-files-"));
@@ -26,7 +27,7 @@ test("dashboard previews markdown as text content", async () => {
   assert.match(result.file.content, /Report/);
 });
 
-test("dashboard previews structured data files as data content", async () => {
+test("dashboard previews structured data files and table files with suitable viewers", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-files-"));
   await fs.writeFile(path.join(cwd, "data.json"), "{\"ok\":true}", "utf8");
   await fs.writeFile(path.join(cwd, "table.csv"), "name,value\nsample,12\n", "utf8");
@@ -37,7 +38,8 @@ test("dashboard previews structured data files as data content", async () => {
   assert.equal(json.ok, true);
   assert.equal(json.file.kind, "data");
   assert.equal(csv.ok, true);
-  assert.equal(csv.file.kind, "data");
+  assert.equal(csv.file.kind, "table-preview");
+  assert.deepEqual(csv.file.table.sheets[0].rows, [["name", "value"], ["sample", "12"]]);
 });
 
 test("dashboard previews png images through raw workspace URLs", async () => {
@@ -49,6 +51,51 @@ test("dashboard previews png images through raw workspace URLs", async () => {
   assert.equal(result.ok, true);
   assert.equal(result.file.kind, "image");
   assert.equal(result.file.rawUrl, "/api/files/raw?path=chart.png");
+});
+
+test("dashboard previews docx as lightweight extracted text", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-files-"));
+  await fs.writeFile(path.join(cwd, "report.docx"), createDocxBuffer("报告标题\n正文内容"));
+
+  const result = await previewFile(cwd, "report.docx");
+
+  assert.equal(result.ok, true);
+  assert.equal(result.file.kind, "office-preview");
+  assert.equal(result.file.officeKind, "docx");
+  assert.match(result.file.content, /报告标题/);
+  assert.match(result.file.content, /正文内容/);
+  assert.equal(result.file.rawUrl, "/api/files/raw?path=report.docx");
+});
+
+test("dashboard previews xlsx as compact extracted cells", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-files-"));
+  await fs.writeFile(path.join(cwd, "scores.xlsx"), createXlsxBuffer([["姓名", "分数"], ["张三", "98"]]));
+
+  const result = await previewFile(cwd, "scores.xlsx");
+
+  assert.equal(result.ok, true);
+  assert.equal(result.file.kind, "office-preview");
+  assert.equal(result.file.officeKind, "xlsx");
+  assert.deepEqual(result.file.table.sheets[0].rows, [["姓名", "分数"], ["张三", "98"]]);
+  assert.match(result.file.content, /Sheet 1/);
+  assert.match(result.file.content, /A1: 姓名/);
+  assert.match(result.file.content, /B2: 98/);
+});
+
+test("dashboard previews csv as lightweight table data", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-files-"));
+  await fs.writeFile(path.join(cwd, "scores.csv"), "姓名,分数,备注\n张三,98,\"表现稳定\"\n李四,87,继续观察\n", "utf8");
+
+  const result = await previewFile(cwd, "scores.csv");
+
+  assert.equal(result.ok, true);
+  assert.equal(result.file.kind, "table-preview");
+  assert.equal(result.file.tableKind, "csv");
+  assert.deepEqual(result.file.table.sheets[0].rows, [
+    ["姓名", "分数", "备注"],
+    ["张三", "98", "表现稳定"],
+    ["李四", "87", "继续观察"]
+  ]);
 });
 
 test("dashboard previews nested markdown assets through workspace-relative paths", async () => {

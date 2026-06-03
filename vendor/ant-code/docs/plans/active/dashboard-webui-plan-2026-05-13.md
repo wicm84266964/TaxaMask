@@ -1,6 +1,6 @@
 # Ant Code Dashboard WebUI 计划
 
-状态：待用户审核，尚未执行
+状态：已执行；本文保留为 Dashboard 初版计划和验收记录，后续行为以 `PROJECT_CHANGELOG.zh-CN.md` 与部署/验收文档为准
 创建日期：2026-05-13
 适用仓库：`C:\saveproject\LBJ-workspace\lab-agent`
 正式产品名：Ant Code
@@ -570,6 +570,7 @@ npm run check
 - 2026-05-13：`tests/unit/dashboard-runtime.test.js` 通过，确认 Web 输入到核心 turn 执行、事件流和最终回复链路可用。
 - 2026-05-13：根据 UI 反馈修正运行态展示：重复 thinking/generating 状态通过 `coalesceKey` 合并，前端改为输入区上方固定 live status；真实流式 smoke 验证运行中聊天区 activity 卡为 0，完成后只保留折叠过程记录和最终回复。
 - 2026-05-13：根据进度可见性反馈新增 `workflow_snapshot`，Dashboard 聊天区显示 todo/plan 进度面板；真实 smoke 验证面板从 `0/3` 更新到 `3/3`，且页面只保留 1 个进度面板。
+- 2026-05-29：根据后台子智能体可观察性和唤醒测试反馈，Dashboard 接入 `subagent_group_started/progress/wakeup`，在 live status 中展示后台组状态，并在 `subagent_group_wakeup` 后通过内部 `wakeup` 队列消费 wake prompt；忙时排队，空闲时自动续跑主控，任务组记录写入 `wakePromptConsumedAt`。
 
 ### Stage 4：三层权限和网页确认弹窗
 
@@ -677,7 +678,7 @@ npm run check
 - 工作区信任 gate：未信任前不启动 turn，高敏模式保留进程级确认语义。
 - 运行中输入队列：同一会话运行中继续发送应进入队列，当前 turn 完成或中断后自动继续。
 - 当前任务中断：发送按钮运行中切换为可点击中断状态，后端通过 `AbortController` 中断当前 turn。
-- 引导对话：队列栏按钮将输入转为 guide prompt；当输入框为空但已有排队消息时，可接管队首排队消息；排队行也可提供轻量引导按钮指定某条消息。引导项优先入队并中断当前轮次，不要求用户输入 slash command；点击后必须在同一队列栏即时显示“正在登记/引导已接管/正在按引导继续”等状态，避免用户误判为卡住。
+- 引导对话：运行中且输入框有新内容时，顶部按钮将输入转为 guide prompt；排队行提供轻量“引导”按钮以指定某条未开始消息。顶部按钮不再在输入为空时接管队首排队消息，避免和队列项内的精确引导入口重复。引导项优先入队并中断当前轮次，不要求用户输入 slash command；点击后必须在同一队列栏即时显示“正在登记/引导已接管/正在按引导继续”等状态，避免用户误判为卡住。
 - 上下文清空和压缩：网页内确认后调用共享上下文 helper，空会话不凭空创建上下文操作会话。
 - 文件预览路径边界。
 - Markdown 渲染：Ant Code 回复和右侧 `.md` 文件至少支持标题、列表、代码块和 pipe table；用户输入保持偏纯文本展示。

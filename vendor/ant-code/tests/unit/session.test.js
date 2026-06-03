@@ -46,6 +46,149 @@ test("interactive session turns reuse bounded conversation context", async () =>
   }
 });
 
+test("session image attachments reach a vision-capable main model but persist as redacted metadata", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
+  await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
+    modelAlias: "vision-model",
+    models: [
+      { id: "vision-model", modalities: ["text", "image"] }
+    ]
+  }), "utf8");
+  const requests = [];
+  const server = await listen(createRecordingGateway(requests), "127.0.0.1");
+
+  try {
+    const env = {
+      ...mockGatewayEnvWithoutModel(serverUrl(server)),
+      LAB_AGENT_TRANSCRIPT_ENABLED: "true"
+    };
+    const session = await createSession({
+      cwd,
+      mode: "interactive",
+      env
+    });
+
+    await runSessionTurn(session, {
+      prompt: "what is in this image?",
+      attachments: [{
+        type: "image",
+        name: "tiny.png",
+        mimeType: "image/png",
+        size: 5,
+        data: "aGVsbG8="
+      }],
+      env
+    });
+
+    const userMessage = requests[0].messages.find((message) => message.role === "user");
+    assert.equal(userMessage.content.some((block) => block.type === "image" && block.data === "aGVsbG8="), true);
+    assert.equal(session.messages[0].content.some((block) => block.type === "image" && block.redacted === true), true);
+
+    const sessionFile = path.join(cwd, ".lab-agent", "sessions", `${session.id}.json`);
+    const metadata = JSON.parse(await fs.readFile(sessionFile, "utf8"));
+    assert.equal(JSON.stringify(metadata).includes("aGVsbG8="), false);
+    assert.equal(metadata.transcript.messages[0].content.some((block) => block.type === "image" && block.redacted === true), true);
+  } finally {
+    await close(server);
+  }
+});
+
+test("session uses same-gateway vision agent when main model is text-only", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
+  await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
+    modelAlias: "text-model",
+    models: [
+      { id: "text-model", label: "Text Model", modalities: ["text"] },
+      { id: "vision-model", label: "Vision Model", modalities: ["text", "image"] }
+    ],
+    agents: {
+      vision: {
+        enabled: true,
+        model: "vision-model",
+        autoUseWhenMainModelTextOnly: true
+      }
+    }
+  }), "utf8");
+  const requests = [];
+  const server = await listen(createRecordingGateway(requests), "127.0.0.1");
+
+  try {
+    const env = mockGatewayEnvWithoutModel(serverUrl(server));
+    const session = await createSession({
+      cwd,
+      mode: "interactive",
+      env
+    });
+
+    await runSessionTurn(session, {
+      prompt: "summarize the screenshot",
+      attachments: [{
+        type: "image",
+        name: "screen.png",
+        mimeType: "image/png",
+        size: 5,
+        data: "aGVsbG8="
+      }],
+      env
+    });
+
+    const visionRequest = requests.find((request) => request.model === "vision-model");
+    const textRequest = requests.find((request) => request.model === "text-model");
+    assert.ok(visionRequest);
+    assert.ok(textRequest);
+    assert.equal(visionRequest.messages.some((message) => message.content?.some?.((block) => block.type === "image")), true);
+    assert.match(visionRequest.messages[0].content.find((block) => block.type === "text")?.text ?? "", /visual-verifier/);
+    assert.match(visionRequest.messages[0].content.find((block) => block.type === "text")?.text ?? "", /visualEvidence/);
+    const finalUserMessage = textRequest.messages.findLast((message) => message.role === "user");
+    assert.equal(finalUserMessage.content.some((block) => block.type === "image"), false);
+    assert.match(finalUserMessage.content.map((block) => block.text ?? "").join("\n"), /visual-verifier 视觉子智能体预分析/);
+    assert.equal(session.messages[0].content.some((block) => block.type === "image" && block.redacted === true), true);
+  } finally {
+    await close(server);
+  }
+});
+
+test("session blocks image attachments when no same-gateway vision model exists", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
+  await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
+    modelAlias: "deepseek-text",
+    models: [
+      { id: "deepseek-text", label: "DeepSeek Text", modalities: ["text"] },
+      { id: "deepseek-flash", label: "DeepSeek Flash", modalities: ["text"] }
+    ]
+  }), "utf8");
+  const requests = [];
+  const server = await listen(createRecordingGateway(requests), "127.0.0.1");
+
+  try {
+    const env = mockGatewayEnvWithoutModel(serverUrl(server));
+    const session = await createSession({
+      cwd,
+      mode: "interactive",
+      env
+    });
+
+    const result = await runSessionTurn(session, {
+      prompt: "describe image",
+      attachments: [{
+        type: "image",
+        name: "screen.png",
+        mimeType: "image/png",
+        size: 5,
+        data: "aGVsbG8="
+      }],
+      env
+    });
+
+    assert.equal(requests.length, 0);
+    assert.match(result.output, /当前主模型不支持图片输入/);
+    assert.match(result.output, /不会跨网关调用其他厂商模型/);
+    assert.equal(session.messages.length, 0);
+  } finally {
+    await close(server);
+  }
+});
+
 test("session context persists bounded redacted transcript for resume", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
   await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
@@ -2591,4 +2734,10 @@ function mockGatewayEnv(url) {
     LAB_AGENT_NETWORK_MODE: "offline",
     LAB_AGENT_TRANSCRIPT_ENABLED: "false"
   };
+}
+
+function mockGatewayEnvWithoutModel(url) {
+  const env = mockGatewayEnv(url);
+  delete env.LAB_AGENT_MODEL;
+  return env;
 }

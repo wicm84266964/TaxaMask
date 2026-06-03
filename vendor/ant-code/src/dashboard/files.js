@@ -1,14 +1,21 @@
 import fs from "node:fs/promises";
 import { statSync } from "node:fs";
 import path from "node:path";
+import { parseDocumentBuffer } from "../tools/document-tools.js";
 
 const DATA_EXTENSIONS = new Set([".json", ".csv", ".tsv", ".yaml", ".yml"]);
 const TEXT_EXTENSIONS = new Set([".txt", ".log", ".json", ".csv", ".tsv", ".md", ".markdown", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".css", ".html", ".xml", ".yaml", ".yml", ".py", ".ps1", ".cmd", ".sh", ".java", ".c", ".cpp", ".h", ".hpp", ".cs", ".go", ".rs", ".php", ".rb", ".sql", ".toml", ".ini"]);
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
 const PREVIEWABLE_IMAGE_EXTENSIONS = new Set([...IMAGE_EXTENSIONS, ".svg"]);
 const OFFICE_EXTENSIONS = new Set([".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx"]);
+const PREVIEWABLE_OFFICE_EXTENSIONS = new Set([".docx", ".xlsx", ".pptx"]);
 const MAX_TEXT_BYTES = 512 * 1024;
 const MAX_RAW_BYTES = 20 * 1024 * 1024;
+const MAX_OFFICE_BYTES = 10 * 1024 * 1024;
+const MAX_OFFICE_PREVIEW_CHARS = 24 * 1024;
+const MAX_TABLE_ROWS = 500;
+const MAX_TABLE_COLUMNS = 80;
+const MAX_TABLE_TEXT_BYTES = 1024 * 1024;
 
 /**
  * @param {string} cwd
@@ -31,8 +38,14 @@ export async function previewFile(cwd, requestedPath) {
   if (ext === ".pdf") {
     return { ok: true, file: { ...base, kind: "pdf", rawUrl: rawUrl(base.relativePath) } };
   }
+  if (PREVIEWABLE_OFFICE_EXTENSIONS.has(ext)) {
+    return previewOfficeFile(resolved.path, base, stat, ext);
+  }
   if (OFFICE_EXTENSIONS.has(ext)) {
     return { ok: true, file: { ...base, kind: "office", rawUrl: rawUrl(base.relativePath), message: "第一版提供文件卡片和打开入口，在线预览后续增强。" } };
+  }
+  if ((ext === ".csv" || ext === ".tsv") && stat.size <= MAX_TABLE_TEXT_BYTES) {
+    return previewDelimitedFile(resolved.path, base, ext);
   }
   if (TEXT_EXTENSIONS.has(ext) || stat.size <= MAX_TEXT_BYTES) {
     if (stat.size > MAX_TEXT_BYTES) {
@@ -41,6 +54,164 @@ export async function previewFile(cwd, requestedPath) {
     return { ok: true, file: { ...base, kind: fileKindForTextExtension(ext), content: await fs.readFile(resolved.path, "utf8") } };
   }
   return { ok: true, file: { ...base, kind: "binary", rawUrl: rawUrl(base.relativePath), message: "二进制文件不在网页中直接预览。" } };
+}
+
+async function previewDelimitedFile(filePath, base, ext) {
+  const content = await fs.readFile(filePath, "utf8");
+  const table = parseDelimitedTable(content, ext === ".tsv" ? "\t" : ",");
+  return {
+    ok: true,
+    file: {
+      ...base,
+      kind: "table-preview",
+      tableKind: ext.slice(1),
+      content,
+      table,
+      truncated: table.truncatedRows || table.truncatedColumns
+    }
+  };
+}
+
+async function previewOfficeFile(filePath, base, stat, ext) {
+  const raw = {
+    ...base,
+    kind: "office",
+    rawUrl: rawUrl(base.relativePath)
+  };
+  if (stat.size > MAX_OFFICE_BYTES) {
+    return {
+      ok: true,
+      file: {
+        ...raw,
+        message: "文件较大，右侧栏只提供打开入口。"
+      }
+    };
+  }
+  try {
+    const parsed = parseDocumentBuffer(await fs.readFile(filePath), ext);
+    if (!parsed.supported || !String(parsed.content ?? "").trim()) {
+      return {
+        ok: true,
+        file: {
+          ...raw,
+          message: "未能抽取可预览文本，仍可打开文件查看。"
+        }
+      };
+    }
+    const content = String(parsed.content ?? "");
+    const truncated = content.length > MAX_OFFICE_PREVIEW_CHARS;
+    return {
+      ok: true,
+      file: {
+        ...raw,
+        kind: "office-preview",
+        officeKind: parsed.kind,
+        content: truncated ? content.slice(0, MAX_OFFICE_PREVIEW_CHARS) : content,
+        table: officeTablePreview(parsed),
+        truncated,
+        notes: parsed.notes ?? []
+      }
+    };
+  } catch {
+    return {
+      ok: true,
+      file: {
+        ...raw,
+        message: "文件解析失败，右侧栏保留打开入口。"
+      }
+    };
+  }
+}
+
+function officeTablePreview(parsed) {
+  if (parsed.kind !== "xlsx" || !Array.isArray(parsed.sheets)) {
+    return null;
+  }
+  const sheets = parsed.sheets.map((sheet) => ({
+    name: sheet.name,
+    source: sheet.source,
+    rows: trimTableRows(sheet.rows ?? [], MAX_TABLE_ROWS, MAX_TABLE_COLUMNS),
+    truncatedRows: Boolean(sheet.truncatedRows || (sheet.rows?.length ?? 0) > MAX_TABLE_ROWS),
+    truncatedColumns: Boolean(sheet.truncatedColumns || maxColumnCount(sheet.rows ?? []) > MAX_TABLE_COLUMNS)
+  })).filter((sheet) => sheet.rows.length > 0);
+  return {
+    kind: "xlsx",
+    sheets,
+    totalSheets: parsed.sheets.length
+  };
+}
+
+function parseDelimitedTable(content, delimiter) {
+  const rows = [];
+  let row = [];
+  let cell = "";
+  let quoted = false;
+  let truncatedRows = false;
+  let truncatedColumns = false;
+  let ignoredRows = 0;
+  const text = String(content ?? "");
+  const pushRow = (nextRow) => {
+    if (rows.length >= MAX_TABLE_ROWS) {
+      ignoredRows += 1;
+      truncatedRows = true;
+      return;
+    }
+    if (nextRow.length > MAX_TABLE_COLUMNS) {
+      truncatedColumns = true;
+    }
+    rows.push(nextRow);
+  };
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (quoted) {
+      if (char === "\"" && text[index + 1] === "\"") {
+        cell += "\"";
+        index += 1;
+      } else if (char === "\"") {
+        quoted = false;
+      } else {
+        cell += char;
+      }
+      continue;
+    }
+    if (char === "\"") {
+      quoted = true;
+    } else if (char === delimiter) {
+      row.push(cell);
+      cell = "";
+    } else if (char === "\n") {
+      row.push(cell);
+      pushRow(row);
+      row = [];
+      cell = "";
+    } else if (char !== "\r") {
+      cell += char;
+    }
+  }
+  if (cell || row.length > 0) {
+    row.push(cell);
+    pushRow(row);
+  }
+  truncatedColumns = rows.some((item) => item.length > MAX_TABLE_COLUMNS) || truncatedColumns;
+  return {
+    kind: delimiter === "\t" ? "tsv" : "csv",
+    sheets: [{
+      name: delimiter === "\t" ? "TSV" : "CSV",
+      rows: trimTableRows(rows, MAX_TABLE_ROWS, MAX_TABLE_COLUMNS),
+      truncatedRows,
+      truncatedColumns,
+      ignoredRows
+    }],
+    totalSheets: 1
+  };
+}
+
+function trimTableRows(rows, maxRows, maxColumns) {
+  return rows.slice(0, maxRows).map((row) => row.slice(0, maxColumns).map((value) => String(value ?? "")));
+}
+
+function maxColumnCount(rows) {
+  return rows.reduce((max, row) => Math.max(max, row.length), 0);
 }
 
 /**

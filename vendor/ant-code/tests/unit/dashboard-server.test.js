@@ -65,26 +65,6 @@ test("dashboard shutdown route responds before invoking shutdown callback", asyn
   }
 });
 
-test("dashboard server exposes programmatic shutdown for embedded hosts", async () => {
-  let shutdownCalled = false;
-  const server = createDashboardServer({
-    cwd: process.cwd(),
-    runtime: createRuntimeStub(),
-    onShutdown: () => {
-      shutdownCalled = true;
-    }
-  });
-  await listen(server, "127.0.0.1", 0);
-
-  try {
-    server.requestShutdown();
-    await waitFor(() => shutdownCalled);
-    assert.equal(shutdownCalled, true);
-  } finally {
-    await close(server);
-  }
-});
-
 test("dashboard status route includes runtime session status", async () => {
   const server = createDashboardServer({
     cwd: process.cwd(),
@@ -95,7 +75,11 @@ test("dashboard status route includes runtime session status", async () => {
         sessionStatus: {
           model: "mock-model",
           context: { promptTokens: 1200, maxTokens: 200000 }
-        }
+        },
+        models: [{ id: "mock-model", label: "Mock", current: true, modalities: ["text"] }],
+        agentModelTiers: { default: "mock-flash" },
+        visionAgent: { enabled: true, model: "vision-model", autoUseWhenMainModelTextOnly: true },
+        gatewayConfig: { gatewayUrl: "https://gateway.example/v1/chat/completions", apiKeyConfigured: true }
       })
     }
   });
@@ -108,6 +92,151 @@ test("dashboard status route includes runtime session status", async () => {
     assert.equal(response.body.cwd, process.cwd());
     assert.equal(response.body.sessionStatus.model, "mock-model");
     assert.equal(response.body.sessionStatus.context.maxTokens, 200000);
+    assert.deepEqual(response.body.models, [{ id: "mock-model", label: "Mock", current: true, modalities: ["text"] }]);
+    assert.deepEqual(response.body.agentModelTiers, { default: "mock-flash" });
+    assert.deepEqual(response.body.visionAgent, { enabled: true, model: "vision-model", autoUseWhenMainModelTextOnly: true });
+    assert.deepEqual(response.body.gatewayConfig, { gatewayUrl: "https://gateway.example/v1/chat/completions", apiKeyConfigured: true });
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard model route forwards model switch requests", async () => {
+  const calls = [];
+  const server = createDashboardServer({
+    cwd: process.cwd(),
+    runtime: {
+      ...createRuntimeStub(),
+      switchModel: async (body) => {
+        calls.push(body);
+        return {
+          ok: true,
+          sessionStatus: { model: body.modelId, context: { maxTokens: 128000 } },
+          models: [{ id: body.modelId, current: true, modalities: ["text", "image"] }]
+        };
+      }
+    }
+  });
+  await listen(server, "127.0.0.1", 0);
+
+  try {
+    const response = await fetchJson(server, "/api/model", {
+      method: "POST",
+      body: { modelId: "vision-model", sessionId: "s1" }
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(response.body.sessionStatus.model, "vision-model");
+    assert.deepEqual(calls, [{ modelId: "vision-model", sessionId: "s1" }]);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard model config route forwards save requests", async () => {
+  const calls = [];
+  const server = createDashboardServer({
+    cwd: process.cwd(),
+    runtime: {
+      ...createRuntimeStub(),
+      saveModelConfig: async (body) => {
+        calls.push(body);
+        return {
+          ok: true,
+          gatewayConfig: { gatewayUrl: body.gatewayUrl, apiKeyConfigured: Boolean(body.gatewayApiKey) },
+          sessionStatus: { model: body.modelId, context: { maxTokens: 128000 } },
+          models: [{ id: body.modelId, current: true, modalities: ["text", "image"] }]
+        };
+      }
+    }
+  });
+  await listen(server, "127.0.0.1", 0);
+
+  try {
+    const response = await fetchJson(server, "/api/model-config", {
+      method: "POST",
+      body: {
+        gatewayUrl: "https://gateway.example/v1/chat/completions",
+        gatewayApiKey: "secret",
+        modelId: "vision-model"
+      }
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(response.body.sessionStatus.model, "vision-model");
+    assert.equal(response.body.gatewayConfig.apiKeyConfigured, true);
+    assert.deepEqual(calls, [{
+      gatewayUrl: "https://gateway.example/v1/chat/completions",
+      gatewayApiKey: "secret",
+      modelId: "vision-model"
+    }]);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard model config route forwards delete requests", async () => {
+  const calls = [];
+  const server = createDashboardServer({
+    cwd: process.cwd(),
+    runtime: {
+      ...createRuntimeStub(),
+      deleteModelConfig: async (body) => {
+        calls.push(body);
+        return {
+          ok: true,
+          deletedModel: body.modelId,
+          sessionStatus: { model: "fallback-model", context: { maxTokens: 128000 } },
+          models: [{ id: "fallback-model", current: true, modalities: ["text"] }]
+        };
+      }
+    }
+  });
+  await listen(server, "127.0.0.1", 0);
+
+  try {
+    const response = await fetchJson(server, "/api/model-config/bad-model", {
+      method: "DELETE",
+      body: { sessionId: "s1" }
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(response.body.deletedModel, "bad-model");
+    assert.deepEqual(calls, [{ sessionId: "s1", modelId: "bad-model" }]);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard gateway profile route forwards switch requests", async () => {
+  const calls = [];
+  const server = createDashboardServer({
+    cwd: process.cwd(),
+    runtime: {
+      ...createRuntimeStub(),
+      switchGatewayProfile: async (body) => {
+        calls.push(body);
+        return {
+          ok: true,
+          gatewayConfig: { gatewayUrl: "https://mimo.example/v1/chat/completions", activeProfileId: body.profileId },
+          gatewayProfiles: [{ id: body.profileId, current: true }],
+          sessionStatus: { model: "mimo-pro", context: { maxTokens: 400000 } },
+          models: [{ id: "mimo-pro", current: true, modalities: ["text"] }]
+        };
+      }
+    }
+  });
+  await listen(server, "127.0.0.1", 0);
+
+  try {
+    const response = await fetchJson(server, "/api/gateway-profile", {
+      method: "POST",
+      body: { profileId: "gw-mimo", sessionId: "s1" }
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(response.body.gatewayConfig.activeProfileId, "gw-mimo");
+    assert.deepEqual(calls, [{ profileId: "gw-mimo", sessionId: "s1" }]);
   } finally {
     await close(server);
   }
@@ -225,6 +354,10 @@ test("dashboard turn control and context routes forward to runtime", async () =>
         calls.push(["cancel-queue", body.sessionId, body.queueItemId]);
         return { ok: true };
       },
+      cancelBackgroundSubagent: async (body) => {
+        calls.push(["cancel-background", body.sessionId, body.groupId, body.taskId]);
+        return { ok: true };
+      },
       guideTurn: (body) => {
         calls.push(["guide", body.sessionId, body.guidance, body.queueItemId]);
         return { ok: true };
@@ -258,6 +391,10 @@ test("dashboard turn control and context routes forward to runtime", async () =>
       method: "POST",
       body: { sessionId: "s1", queueItemId: "q2" }
     })).status, 200);
+    assert.equal((await fetchJson(server, "/api/background-subagents/cancel", {
+      method: "POST",
+      body: { sessionId: "s1", groupId: "g1", taskId: "t1" }
+    })).status, 200);
     assert.equal((await fetchJson(server, "/api/sessions/s1", {
       method: "DELETE"
     })).status, 200);
@@ -274,6 +411,7 @@ test("dashboard turn control and context routes forward to runtime", async () =>
       ["interrupt", "s1", "user"],
       ["guide", "s1", "focus tests", "q1"],
       ["cancel-queue", "s1", "q2"],
+      ["cancel-background", "s1", "g1", "t1"],
       ["delete", "s1"],
       ["clear", "s1"],
       ["compact", "s1"]
@@ -401,8 +539,10 @@ function createRuntimeStub() {
     startTurn: async () => ({ ok: false }),
     interruptTurn: () => ({ ok: false }),
     cancelQueuedTurn: () => ({ ok: false }),
+    cancelBackgroundSubagent: async () => ({ ok: false }),
     guideTurn: () => ({ ok: false }),
     deleteSession: async () => ({ ok: false }),
+    deleteModelConfig: async () => ({ ok: false }),
     clearContext: async () => ({ ok: false }),
     compactContext: async () => ({ ok: false }),
     sessionCwd: async () => ({ ok: false }),
@@ -415,13 +555,16 @@ function createRuntimeStub() {
 function fetchJson(server, pathName, options = {}) {
   const { port } = server.address();
   return new Promise((resolve, reject) => {
+    const payload = options.body ? JSON.stringify(options.body) : "";
     const req = http.request({
       hostname: "127.0.0.1",
       port,
       path: pathName,
       method: options.method ?? "GET",
       headers: {
-        "content-type": "application/json"
+        "content-type": "application/json",
+        ...(payload ? { "content-length": Buffer.byteLength(payload) } : {}),
+        "connection": "close"
       }
     }, (res) => {
       const chunks = [];
@@ -435,8 +578,8 @@ function fetchJson(server, pathName, options = {}) {
       });
     });
     req.on("error", reject);
-    if (options.body) {
-      req.write(JSON.stringify(options.body));
+    if (payload) {
+      req.write(payload);
     }
     req.end();
   });

@@ -497,6 +497,10 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.canvas.keyPressEvent(up)
                 self.assertTrue(up.accepted)
                 self.assertGreater(widget.canvas.zoom_factor(), 1.0)
+                for _ in range(20):
+                    widget.canvas.keyPressEvent(FakeKeyEvent(Qt.Key_Up))
+                self.assertEqual(widget.canvas.zoom_factor(), 16.0)
+                self.assertIn("1600%", widget.canvas_status_text(widget.canvas.zoom_factor()))
 
                 press = FakeMouseEvent(Qt.RightButton, Qt.RightButton, 220, 170)
                 move = FakeMouseEvent(Qt.RightButton, Qt.RightButton, 260, 190)

@@ -19,6 +19,8 @@ const NODE_EXE = process.execPath;
 const RESOURCE_PATHS = [
   "README.md",
   "README.zh-CN.md",
+  "PROJECT_CHANGELOG.zh-CN.md",
+  "lab-agent.config.json",
   "configure-gateway.ps1",
   "configure-gateway.cmd",
   "package.json",

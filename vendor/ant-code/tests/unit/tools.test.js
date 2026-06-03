@@ -777,6 +777,47 @@ test("browser verifier agent_run uses browser risk approval", async () => {
   assert.equal(approvals[0].definition.name, "agent_run");
 });
 
+test("visual verifier agent_run uses browser risk approval", async () => {
+  const cwd = await makeTempWorkspace();
+  const approvals = [];
+  const runtime = createToolRuntime({
+    cwd,
+    env: {
+      LAB_AGENT_TRANSCRIPT_ENABLED: "false"
+    },
+    config: {
+      networkMode: "lab-only",
+      allowedHosts: [],
+      lab: {
+        gatewayUrl: "",
+        gatewayProtocol: "lab-agent-gateway",
+        gatewayApiKey: null
+      },
+      agents: {
+        profiles: [],
+        vision: { enabled: true, model: "vision-model" }
+      },
+      mcp: { servers: [] }
+    },
+    approve: async (request) => {
+      approvals.push(request);
+      return false;
+    }
+  });
+
+  const result = await runtime.execute("agent_run", {
+    profile: "visual-verifier",
+    purpose: "visual",
+    query: "review screenshot layout"
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.blocked, true);
+  assert.equal(approvals.length, 1);
+  assert.equal(approvals[0].decision.reason.includes("browser automation"), true);
+  assert.equal(approvals[0].definition.name, "agent_run");
+});
+
 test("full access agent_run starts write-capable subagents without approval", async () => {
   const cwd = await makeTempWorkspace();
   const approvals = [];
@@ -859,6 +900,7 @@ test("full access agent_run starts verifier without empty command denial", async
 
 test("background agent_run returns task and group immediately", async () => {
   const cwd = await makeTempWorkspace();
+  const backgroundEvents = [];
   const runtime = createToolRuntime({
     cwd,
     env: {
@@ -883,7 +925,8 @@ test("background agent_run returns task and group immediately", async () => {
       mcp: { servers: [] }
     },
     policy: { fullAccess: true },
-    parentSessionId: "session-bg-test"
+    parentSessionId: "session-bg-test",
+    onBackgroundAgentEvent: (event) => backgroundEvents.push(event)
   });
 
   const result = await runtime.execute("agent_run", {
@@ -905,6 +948,12 @@ test("background agent_run returns task and group immediately", async () => {
   const group = JSON.parse(rawGroup);
   assert.equal(group.status, "completed");
   assert.match(group.wakePrompt, /Ant Code subagent group completed/);
+  const progress = backgroundEvents.find((event) => event.type === "subagent_group_progress");
+  const wakeup = backgroundEvents.find((event) => event.type === "subagent_group_wakeup");
+  assert.equal(progress?.waitFor, "all");
+  assert.equal(progress?.wakeParent, true);
+  assert.equal(wakeup?.waitFor, "all");
+  assert.equal(wakeup?.wakeParent, true);
 });
 
 test("blocked agent_run writes a task record for TUI detail views", async () => {

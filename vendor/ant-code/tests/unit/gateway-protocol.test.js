@@ -151,6 +151,37 @@ test("OpenAI-compatible requests preserve assistant reasoning_content for tool c
   assert.equal(request.messages[1].tool_calls[0].id, "call-1");
 });
 
+test("OpenAI-compatible requests include configured provider extra_body", () => {
+  const extraBody = { thinking: { type: "enabled" } };
+  const request = createOpenAIChatCompletionRequest({
+    model: "mimo-v2.5-pro",
+    messages: [{ role: "user", content: "use thinking" }],
+    extraBody
+  });
+
+  assert.deepEqual(request.thinking, { type: "enabled" });
+  assert.equal(request.extra_body, undefined);
+  assert.notEqual(request.thinking, extraBody.thinking);
+});
+
+test("OpenAI-compatible requests map user image blocks to image_url content", () => {
+  const request = createOpenAIChatCompletionRequest({
+    model: "mimo-v2.5-pro",
+    messages: [{
+      role: "user",
+      content: [
+        { type: "text", text: "describe this image" },
+        { type: "image", mimeType: "image/png", data: "aGVsbG8=", name: "sample.png" }
+      ]
+    }]
+  });
+
+  assert.deepEqual(request.messages[0].content, [
+    { type: "text", text: "describe this image" },
+    { type: "image_url", image_url: { url: "data:image/png;base64,aGVsbG8=" } }
+  ]);
+});
+
 test("OpenAI-compatible requests keep only the latest oversized assistant reasoning_content", () => {
   const prefix = "old-".repeat(80_000);
   const suffix = "LATEST_REASONING_TAIL";

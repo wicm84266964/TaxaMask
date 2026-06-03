@@ -30,14 +30,13 @@ test("full access CLI flag enables all local approvals", () => {
 });
 
 test("dashboard CLI args parse local web options", () => {
-  const args = parseArgs(["dashboard", "--port", "7420", "--host=localhost", "--no-open", "--project", ".", "--parent-pid", "12345"]);
+  const args = parseArgs(["dashboard", "--port", "7420", "--host=localhost", "--no-open", "--project", "."]);
 
   assert.equal(args.command, "dashboard");
   assert.equal(args.dashboard.port, 7420);
   assert.equal(args.dashboard.host, "localhost");
   assert.equal(args.dashboard.open, false);
   assert.equal(args.dashboard.project, ".");
-  assert.equal(args.dashboard.parentPid, 12345);
 });
 
 test("dashboard invalid port falls back to default", () => {

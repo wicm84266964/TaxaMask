@@ -59,6 +59,43 @@ test("subagent model tiers can all route to the same configured model", () => {
   assert.equal(config.modelAlias, "mimo-v2.5");
 });
 
+test("visual verifier resolves to the configured vision agent model", () => {
+  const config = {
+    modelAlias: "text-main",
+    agents: {
+      vision: {
+        enabled: true,
+        model: "mimo-v2.5"
+      },
+      modelTiers: {
+        default: "text-default",
+        strong: "text-strong"
+      }
+    }
+  };
+
+  assert.equal(resolveAgentModel(config, { modelTier: "vision" }, { name: "visual-verifier", purpose: "visual" }), "mimo-v2.5");
+  assert.equal(resolveAgentModel(config, {}, { name: "visual-verifier", purpose: "visual", modelTier: "vision" }), "mimo-v2.5");
+});
+
+test("visual verifier falls back to model tiers when vision agent is disabled", () => {
+  const config = {
+    modelAlias: "text-main",
+    agents: {
+      vision: {
+        enabled: false,
+        model: "mimo-v2.5"
+      },
+      modelTiers: {
+        vision: "configured-vision-tier",
+        default: "text-default"
+      }
+    }
+  };
+
+  assert.equal(resolveAgentModel(config, { modelTier: "vision" }, { name: "visual-verifier", purpose: "visual" }), "configured-vision-tier");
+});
+
 test("agent budget tracker does not stop on tool call count", () => {
   const tracker = createBudgetTracker({
     maxRounds: 10,

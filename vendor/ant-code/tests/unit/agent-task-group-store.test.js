@@ -21,18 +21,14 @@ test("task group store creates, updates, reads, and lists groups", async () => {
   const updated = await store.updateGroup("group-test", {
     taskIds: ["task-a", "task-b"],
     status: "completed",
-    wakePromptQueuedAt: "queued",
-    wakePromptConsumedAt: "consumed"
+    wakePromptQueuedAt: "now"
   });
   assert.equal(updated.ok, true);
   assert.deepEqual(updated.group.taskIds, ["task-a", "task-b"]);
-  assert.equal(updated.group.wakePromptQueuedAt, "queued");
-  assert.equal(updated.group.wakePromptConsumedAt, "consumed");
 
   const read = await store.readGroup("group-test");
   assert.equal(read.ok, true);
   assert.equal(read.group.status, "completed");
-  assert.equal(read.group.wakePromptConsumedAt, "consumed");
 
   const listed = await store.listGroups({ parentSessionId: "session-a" });
   assert.equal(listed.length, 1);

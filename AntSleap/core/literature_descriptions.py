@@ -116,6 +116,7 @@ def resolve_literature_context(
     provenance: dict[str, Any] | None = None,
     taxon_hint: str = "",
     allow_filename_figure_id: bool = True,
+    allow_taxon_match: bool = False,
 ) -> dict[str, Any]:
     context = {
         "source_db": os.path.abspath(str(db_path or "")),
@@ -127,6 +128,7 @@ def resolve_literature_context(
         "figure_index": None,
         "image_file_name": os.path.basename(str(image_path or "")),
         "species_candidate": _clean_taxon(taxon_hint),
+        "link_mode": "image_provenance",
         "available": False,
         "reason": "",
     }
@@ -153,6 +155,8 @@ def resolve_literature_context(
             if pdf_id is not None:
                 context["pdf_file_id"] = pdf_id
                 _attach_pdf_file(cursor, context)
+                context["available"] = True
+            elif allow_taxon_match and _attach_taxon_match_context(cursor, context):
                 context["available"] = True
             else:
                 context["reason"] = "figure_records_missing"
@@ -182,6 +186,10 @@ def resolve_literature_context(
             context["available"] = context["pdf_file_id"] is not None
             context["reason"] = "" if context["available"] else "figure_context_missing"
             return context
+        if row is None and allow_taxon_match and _attach_taxon_match_context(cursor, context):
+            context["available"] = True
+            context["reason"] = ""
+            return context
         if row is None:
             context["reason"] = "figure_context_missing"
             return context
@@ -196,6 +204,7 @@ def resolve_literature_context(
                 "species_candidate": _clean_taxon(row["species_candidate"]) or context["species_candidate"],
                 "pdf_file": str(row["pdf_file"] or ""),
                 "pdf_file_path": str(row["pdf_file_path"] or ""),
+                "link_mode": "image_provenance",
                 "available": True,
                 "reason": "",
             }
@@ -348,9 +357,15 @@ def query_literature_text_blocks(
 
 def build_description_source(record: dict[str, Any], context: dict[str, Any] | None = None) -> dict[str, Any]:
     context = context if isinstance(context, dict) else {}
+    link_mode = str(context.get("link_mode") or "image_provenance")
+    source_kind = "pdf_taxon_part_description"
+    if link_mode == "taxon_match_not_image_provenance":
+        source_kind = "pdf_taxon_part_description_species_match"
     return {
         "schema_version": LITERATURE_DESCRIPTION_SOURCE_SCHEMA,
-        "source": "pdf_taxon_part_description",
+        "source": source_kind,
+        "link_mode": link_mode,
+        "image_provenance_matched": link_mode != "taxon_match_not_image_provenance",
         "source_db": str(record.get("source_db") or context.get("source_db") or ""),
         "record_id": record.get("id"),
         "pdf_file_id": record.get("pdf_file_id") or context.get("pdf_file_id"),
@@ -372,9 +387,12 @@ def build_description_source(record: dict[str, Any], context: dict[str, Any] | N
 
 def build_text_block_source(record: dict[str, Any], context: dict[str, Any] | None = None) -> dict[str, Any]:
     context = context if isinstance(context, dict) else {}
+    link_mode = str(context.get("link_mode") or "image_provenance")
     return {
         "schema_version": LITERATURE_DESCRIPTION_SOURCE_SCHEMA,
         "source": "pdf_text_block",
+        "link_mode": link_mode,
+        "image_provenance_matched": link_mode != "taxon_match_not_image_provenance",
         "source_db": str(record.get("source_db") or context.get("source_db") or ""),
         "record_id": record.get("id"),
         "pdf_file_id": record.get("pdf_file_id") or context.get("pdf_file_id"),
@@ -510,6 +528,39 @@ def _attach_pdf_file(cursor: sqlite3.Cursor, context: dict[str, Any]) -> None:
         else:
             context["pdf_file"] = str(row[0] or "")
             context["pdf_file_path"] = str(row[1] or "")
+
+
+def _attach_taxon_match_context(cursor: sqlite3.Cursor, context: dict[str, Any]) -> bool:
+    species = _clean_taxon(context.get("species_candidate"))
+    if not species or species.lower() in {"unknown", "unknown taxon", "n/a", "none", "null"}:
+        context["reason"] = "taxon_hint_missing"
+        return False
+    if not _table_exists(cursor, "taxon_part_descriptions"):
+        context["reason"] = "taxon_part_descriptions_missing"
+        return False
+    cursor.execute(
+        """
+        SELECT taxon_name
+        FROM taxon_part_descriptions
+        WHERE LOWER(taxon_name) = LOWER(?)
+        LIMIT 1
+        """,
+        (species,),
+    )
+    row = cursor.fetchone()
+    if not row:
+        context["reason"] = "taxon_description_missing"
+        return False
+    if isinstance(row, sqlite3.Row):
+        context["species_candidate"] = _clean_taxon(row["taxon_name"]) or species
+    else:
+        context["species_candidate"] = _clean_taxon(row[0]) or species
+    context["link_mode"] = "taxon_match_not_image_provenance"
+    context["pdf_file_id"] = None
+    context["figure_id"] = None
+    context["pdf_file"] = ""
+    context["pdf_file_path"] = ""
+    return True
 
 
 def _record_from_row(row: sqlite3.Row, *, db_path: str, context: dict[str, Any]) -> dict[str, Any]:

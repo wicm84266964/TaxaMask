@@ -11,6 +11,11 @@ export const AGENT_CONTRACTS = Object.freeze({
     type: "plan",
     required: ["goal", "assumptions", "stages", "handoff"]
   },
+  "plan-package": {
+    type: "plan-package",
+    required: ["requirementsDoc", "taskPlanDoc", "executionChecklist", "traceabilityMap", "handoffPrompt"],
+    optional: ["confirmationRequired", "clarificationQuestions", "reviewGates"]
+  },
   patch: {
     type: "patch",
     required: ["summary", "changedFiles", "validation", "remainingRisks", "needsParentAction"]

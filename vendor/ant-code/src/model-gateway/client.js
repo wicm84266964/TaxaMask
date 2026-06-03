@@ -59,7 +59,8 @@ export function createLabModelGateway(config) {
         tools: request.tools ?? [],
         toolResults: request.toolResults ?? [],
         stream: Boolean(request.stream),
-        sessionId: request.sessionId
+        sessionId: request.sessionId,
+        extraBody: protocol === "openai-chat" ? resolveOpenAIExtraBody(config) : null
       };
       const gatewayRequest = protocol === "openai-chat"
         ? createOpenAIChatCompletionRequest(requestInput)
@@ -119,6 +120,7 @@ export function createLabModelGateway(config) {
             code: "GATEWAY_HTTP_ERROR",
             message: `Gateway returned HTTP ${response.status}`,
             status: response.status,
+            protocol,
             details: {
               body,
               attempts: attempt,
@@ -455,6 +457,10 @@ function sanitizeHeaderValue(value) {
   return text.replace(/[^\x20-\x7E]/g, "").slice(0, 200);
 }
 
+function isPlainObject(value) {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
 /**
  * @param {string} protocol
  * @param {unknown} raw
@@ -476,6 +482,18 @@ function resolveReasoningContentMode(config) {
   const current = String(config.modelAlias ?? "").trim();
   const model = listConfiguredModels(config).find((item) => item.id === current);
   return model?.reasoningContentMode ?? "hidden";
+}
+
+/**
+ * @param {import("../config/load-config.js").LabAgentConfig | undefined} config
+ */
+function resolveOpenAIExtraBody(config) {
+  if (!config) {
+    return null;
+  }
+  const current = String(config.modelAlias ?? "").trim();
+  const model = listConfiguredModels(config).find((item) => item.id === current);
+  return isPlainObject(model?.openaiExtraBody) ? model.openaiExtraBody : null;
 }
 
 /**

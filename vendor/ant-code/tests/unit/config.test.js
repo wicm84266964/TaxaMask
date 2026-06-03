@@ -287,6 +287,7 @@ test("project config sets custom model window and leaves in-flight compaction of
   assert.equal(config.agents.modelTiers.cheap, "external-v1");
   assert.equal(config.agents.modelTiers.default, "external-v1");
   assert.equal(config.agents.modelTiers.strong, "external-v1");
+  assert.equal(config.agents.modelTiers.vision, "mimo-v2.5");
   assert.equal(config.agents.maxRounds, null);
   assert.equal(config.agents.orchestration.maxParallelReadonlyAgentRuns, 2);
   assert.ok(config.allowedHosts.includes("gateway.lab.example"));
@@ -329,16 +330,34 @@ test("loads bundled config when no project or lab config is present", async () =
     ["mimo-v2.5-pro", "visible-when-no-content"],
     ["mimo-v2.5", "visible-when-no-content"]
   ]);
+  assert.deepEqual(config.models.map((model) => [model.id, model.thinking, model.openaiExtraBody?.thinking?.type]), [
+    ["mimo-v2.5-pro", true, "enabled"],
+    ["mimo-v2.5", true, "enabled"]
+  ]);
   assert.deepEqual(config.models.map((model) => [model.id, model.contextTokens]), [
     ["mimo-v2.5-pro", 400000],
     ["mimo-v2.5", 400000]
   ]);
+  assert.deepEqual(config.models.map((model) => [model.id, model.modalities]), [
+    ["mimo-v2.5-pro", ["text"]],
+    ["mimo-v2.5", ["text", "image"]]
+  ]);
+  assert.deepEqual(config.models.map((model) => [model.id, model.agentModelTiers]), [
+    ["mimo-v2.5-pro", { cheap: "mimo-v2.5", default: "mimo-v2.5", strong: "mimo-v2.5" }],
+    ["mimo-v2.5", { cheap: "mimo-v2.5", default: "mimo-v2.5", strong: "mimo-v2.5" }]
+  ]);
+  assert.equal(config.agents.modelTiers.vision, "mimo-v2.5");
   assert.equal(config.agents.budgets.defaults.maxToolCalls, undefined);
   assert.equal(config.agents.budgets.defaults.maxOutputBytes, 320000);
   assert.equal(config.agents.orchestration.maxParallelReadonlyAgentRuns, 2);
   assert.equal(config.agents.delegationGuard.enabled, true);
   assert.equal(config.agents.backgroundWakeup.enabled, true);
   assert.equal(config.agents.reviewGate.enabled, true);
+  assert.deepEqual(config.agents.vision, {
+    enabled: true,
+    model: "mimo-v2.5",
+    autoUseWhenMainModelTextOnly: true
+  });
 });
 
 test("project config overlays bundled Mimo defaults without resetting model window", async () => {
@@ -364,6 +383,46 @@ test("project config overlays bundled Mimo defaults without resetting model wind
     ["mimo-v2.5", 400000]
   ]);
   assert.equal(config.lab.gatewayApiKey, "test-key");
+});
+
+test("local project config overlays root project config", async () => {
+  const cwd = await makeTempWorkspace();
+  await writeJson(cwd, {
+    modelAlias: "shared-code",
+    models: [
+      { id: "shared-code", label: "Shared Code", modalities: ["text"], contextTokens: 200000 }
+    ],
+    allowedHosts: ["shared.gateway.example"],
+    lab: {
+      gatewayUrl: "https://shared.gateway.example/v1/chat/completions",
+      gatewayProtocol: "openai-chat"
+    }
+  });
+  await fs.mkdir(path.join(cwd, ".lab-agent"), { recursive: true });
+  await fs.writeFile(path.join(cwd, ".lab-agent", "config.json"), JSON.stringify({
+    modelAlias: "local-vision",
+    models: [
+      { id: "local-vision", label: "Local Vision", modalities: ["text", "image"], contextTokens: 128000 }
+    ],
+    allowedHosts: ["local.gateway.example"],
+    lab: {
+      gatewayUrl: "https://local.gateway.example/v1/chat/completions",
+      gatewayApiKey: "local-key"
+    }
+  }), "utf8");
+
+  const config = await loadConfig({ cwd, env: {} });
+
+  assert.equal(path.basename(config.projectConfigPath), "config.json");
+  assert.equal(config.projectConfigPaths.length, 2);
+  assert.equal(config.modelAlias, "local-vision");
+  assert.equal(config.lab.gatewayUrl, "https://local.gateway.example/v1/chat/completions");
+  assert.equal(config.lab.gatewayProtocol, "openai-chat");
+  assert.equal(config.lab.gatewayApiKey, "local-key");
+  assert.deepEqual(config.models.map((model) => [model.id, model.modalities]), [
+    ["local-vision", ["text", "image"]]
+  ]);
+  assert.ok(config.allowedHosts.includes("local.gateway.example"));
 });
 
 test("rejects invalid prompt compact ratio", async () => {

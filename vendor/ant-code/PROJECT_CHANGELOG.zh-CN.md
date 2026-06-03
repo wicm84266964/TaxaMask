@@ -10,6 +10,141 @@
 - 如果涉及外部项目，只记录产品思路或公开文档参考，不粘贴外部源码实现。
 - 如果只做很小的文案或配置修正，也要至少记录影响范围和验证方式。
 
+## 2026-05-29：Dashboard 后台子智能体状态与自动唤醒闭环
+
+本次补齐 Dashboard 对后台子智能体组的运行状态展示和自动唤醒消费链路。此前核心会话和工具运行时已经会发出 `subagent_group_started`、`subagent_group_progress`、`subagent_group_wakeup` 事件，TUI 也能在子智能体页签观察这些状态并自动续跑主控；但 Dashboard 事件映射层没有接入这些生命周期，主智能体结束本轮后页面容易显示为空闲，用户无法判断后台子智能体是否仍在运行，且子智能体完成后生成的 wake prompt 只写入任务组记录，没有被 Dashboard 父会话消费。
+
+主要变化：
+
+- Dashboard 事件映射新增后台子任务组事件：保留 group/task/profile/waitFor/wakeParent/summary 等非敏感元数据，不把唤醒提示正文透传到前端活动对象。
+- Dashboard 前端新增后台子智能体状态缓存：主轮次 `assistant_final`、`files_updated`、`run_state=false` 时只清理普通运行状态，不清理仍在运行或等待唤醒的后台子任务组。
+- 右上角 `run-status` 在主轮次结束但后台组仍活跃时显示“子智能体运行中”，后台组完成并等待唤醒时显示“等待子智能体唤醒”，避免误报空闲。
+- 输入栏上方现有 `live-status` 改为可折叠的后台子智能体摘要区：默认紧凑展示，展开后显示每个组的 profile、group、task、等待策略、唤醒策略和最新进度。
+- 后台运行时的 progress/wakeup 通知补带 `waitFor` 和 `wakeParent`，避免 Dashboard 在只收到后续事件时依赖前序 started 事件猜测唤醒策略。
+- Dashboard runtime 在收到原始 `subagent_group_wakeup` 后会创建内部 `wakeup` 队列项：父会话忙时排队，父会话空闲时立即自动续跑主控，模型上下文收到完整 wake prompt，但前端只显示“子智能体完成，主控自动接续”。
+- Dashboard 收到后端 `wakeup_queued` 事件后会清理对应后台组的 waiting 状态，状态条从“等待子智能体唤醒”切到“主控续跑已排队/主控接续中”，避免唤醒成功后灯还停在等待态。
+- 任务组记录新增 `wakePromptConsumedAt` 字段，用于区分“wake prompt 已生成”与“Dashboard 父会话已消费”，便于排查后续类似“跑完但没回主控”的问题。
+
+验证：
+
+```powershell
+node --check src\dashboard\events.js
+node --check src\dashboard\public\app.js
+node --check src\dashboard\sessions.js
+node --check src\tools\runtime.js
+node --check src\agents\task-group-store.js
+node --test tests\unit\dashboard-events.test.js tests\unit\dashboard-ui.test.js tests\unit\dashboard-runtime.test.js tests\unit\tools.test.js
+node --test tests\unit\session.test.js --test-name-pattern "background agent_run|agent_run events"
+```
+
+已知风险：
+
+- 后台状态目前随当前页面会话事件流展示；切换到历史会话时不会从磁盘任务组记录重建一整套后台明细。
+- 自动续跑依赖 Dashboard 后端进程仍在运行；只刷新浏览器可以恢复事件流，但代码更新后需要重启 Dashboard 后端进程才能加载新 runtime。
+
+## 2026-05-28：Dashboard 模型配置、视觉子智能体与紧凑交互收口
+
+在图片附件直传基础上，本次补齐 Dashboard 的模型管理和视觉任务处理设计：用户可以在 WebUI 底部看到当前模型、切换已注册模型、添加/更新同一网关下的模型配置，并声明模型是否支持图片；当主模型是文本模型但同一网关内存在已配置视觉模型时，系统会用专门的 `visual-verifier` 视觉子智能体先处理图片，再把中文视觉证据报告交给主模型继续推理。当前仍保持“单网关/当前 key 生效”的边界，不做 DeepSeek 与小米等不同网关的混用路由。补充实现后，Dashboard 会把不同 URL/key 保存为可切换的“网关档案”：模型下拉框只展示当前活跃档案内的模型，但可以在同一面板切回已保存网关，不需要每次重新输入配置。
+
+主要变化：
+
+- 模型配置新增 `models[].modalities`、`models[].agentModelTiers`、`agents.vision` 和 `agents.modelTiers.vision`，内置 MiMo 配置区分 `mimo-v2.5-pro` 文本主模型与 `mimo-v2.5` 文本+图片视觉模型。
+- Dashboard 底部模型状态支持展示文本/视觉/thinking 标签、切换当前网关内已注册模型、切换已保存网关档案、保存网关 URL/API key/模型 ID/上下文窗口/子智能体模型/视觉子智能体，并可选择保存后同步子智能体默认模型。
+- 保存新 URL 或新 API key 时会自动保存当前网关档案，再把新网关设为唯一活跃档案；同一网关且未输入新 key 时，保存模型会追加/更新该网关内模型。
+- 修复 Dashboard 进程继承 `LAB_MODEL_GATEWAY_URL` / `LAB_AGENT_MODEL` 等环境变量时，本地保存的 DeepSeek 档案会被全局小米环境覆盖的问题：首次无本地配置时仍可用环境变量初始化；一旦 `.lab-agent/config.json` 存在，Dashboard 的模型/网关读取以本地档案为准。
+- 模型下拉新增删除已注册模型：删除仅作用于当前活跃网关档案，至少保留一个模型；如果被删模型是当前主模型、子智能体 tier 或视觉子智能体，会自动回退/清理对应引用，避免错误测试模型长期残留。
+- 修复模型下拉删除按钮第一次点击后面板被外层点击监听误关闭的问题；第一次点击会留在面板内显示“再次点击确认删除”的红色提示，第二次才执行删除。
+- 核心会话处理图片输入时：主模型支持图片则直接发送图片块；主模型不支持图片但同网关视觉子智能体可用时，先调用 `visual-verifier` 生成视觉证据报告；同网关没有视觉模型时，阻止图片任务并给出明确错误。
+- 新增 `visual-verifier` 子智能体画像、视觉路由触发词、上下文触发指导和预算解析；它专门处理截图、图片、OCR、前端视觉回归、布局遮挡/裁切/对齐/可读性等需要多模态复核的任务。
+- OpenAI Chat Completions adapter 支持把 Ant Code 图片块转换为 `image_url` data URL；lab gateway protocol 在非敏感 metadata 中标记 `capabilities.images`。
+- Dashboard 需求确认框改为单一内部滚动/可拖动区域，标题说明下移到底部操作栏，默认约展示 2.5 个选项，减少长对话中遮挡草稿和中间输出。
+- Dashboard 输入区和运行栏进一步压缩：主输入框改为两行，权限说明移到同一行，运行队列说明与标题同一行，清空上下文按钮使用危险红色，右下角增删统计恢复红绿颜色。
+- 引导交互收口：队列项内保留精确“引导”按钮；顶部按钮只在“任务运行中且输入框有内容”时显示“引导对话”，不再提供重复的“引导队首”入口。
+
+验证：
+
+```powershell
+node --check src\dashboard\public\app.js
+node --check src\dashboard\sessions.js
+node --check src\config\load-config.js
+node --check src\core\session.js
+node --test tests\unit\dashboard-ui.test.js tests\unit\dashboard-runtime.test.js tests\unit\dashboard-server.test.js
+node --test tests\unit\agent-budget-contract.test.js tests\unit\agent-profiles-config.test.js tests\unit\agent-router.test.js tests\unit\config.test.js tests\unit\gateway-health.test.js tests\unit\gateway-protocol.test.js tests\unit\session.test.js
+```
+
+打包验证：
+
+```powershell
+npm run verify:readiness
+npm run build:exe
+.\dist\ant-code-windows-x64\ant-code.exe --version
+Get-FileHash -Algorithm SHA256 .\dist\ant-code-windows-x64\ant-code.exe
+```
+
+结果：Windows x64 打包目录已更新，`ant-code.exe --version` 输出 `ant-code 3.0.0`。最终 SHA256 以 `dist\ant-code-windows-x64\RELEASE-MANIFEST.md` 和本轮交付说明为准。
+
+已知风险：
+
+- 视觉兜底只在当前活跃网关已注册视觉模型时可用；当前不支持一个文本网关运行主模型、另一个视觉网关处理图片。
+- Dashboard 可保存多个网关档案，但运行时仍只有一个档案处于活跃状态；档案切换不是多 key 混合路由。
+- 模型是否真实支持视觉仍以用户配置和 provider 实际响应为准；Ant Code 只负责把附件链路、视觉模型配置和错误诊断打通。
+- Dashboard 空间压缩主要按当前三栏桌面工作流调优，极窄窗口仍走移动端换行布局，后续需要真实用户反馈继续微调。
+
+## 2026-05-25：Dashboard 图片附件链路与模型侧直传
+
+参考 OpenClaw 对 WebUI 图片上传和非视觉模型的处理思路，本次先落实 Ant Code 自身的附件层和网关传输层：Dashboard 可以选择或粘贴图片，运行时把图片作为本轮用户输入附件发送给模型网关；不在界面上维护“是否视觉模型”的显式配置，非视觉模型或不支持图片的兼容网关由 provider 自身返回不支持/报错。
+
+主要变化：
+
+- Dashboard 输入框新增图片附件按钮、粘贴图片支持和附件预览条，单轮最多 6 张图片，单张限制 8MB。
+- `/api/turns`、Dashboard runtime、核心 session turn 都支持携带 `attachments`，允许“只发图片”的回合进入模型调用。
+- OpenAI-compatible adapter 将用户图片块转换为 Chat Completions 的 `image_url` data URL 格式；lab gateway protocol 在请求 metadata 中标记本轮包含图片能力。
+- 会话 metadata、transcript、归档和事件只保存图片名称、MIME、大小与 redacted 标记，不落盘 base64 图片正文。
+
+验证：
+
+```powershell
+node --check src\dashboard\public\app.js
+node --check src\dashboard\sessions.js
+node --check src\core\session.js
+node --check src\model-gateway\openai-chat.js
+node --check src\model-gateway\protocol.js
+node --test tests\unit\gateway-protocol.test.js tests\unit\dashboard-runtime.test.js tests\unit\session.test.js tests\unit\dashboard-ui.test.js
+```
+
+结果：目标测试 `93 pass / 0 fail`。
+
+已知风险：
+
+- 目前实现的是“图片直传给模型端”，不是独立 OCR/视觉工具；文本模型是否能识图由 provider/model 决定。
+- 被中断的图片回合仍以现有中断草稿路径为主，极端情况下只保留文本草稿，不额外恢复图片正文；这是刻意避免把 base64 写入持久化历史的结果。
+
+## 2026-05-22：开启 MiMo 思考模式测试路径
+
+为验证小米 MiMo thinking 模式在多轮工具调用后是否会因 `reasoning_content` 回传不完整而返回 400，本次将当前 MiMo 主模型和子智能体模型都切换为 provider-exposed thinking，并让 OpenAI-compatible 网关请求实际携带小米思考参数。代码配置沿用 OpenAI SDK 的 `extra_body` 命名口径，实际 HTTP JSON 会将 `thinking.type = "enabled"` 合并到请求顶层。
+
+主要变化：
+
+- `mimo-v2.5-pro` 和 `mimo-v2.5` 的模型配置改为 `thinking: true`。
+- 模型配置新增 `openaiExtraBody`，由 OpenAI-compatible 请求构造合并到请求顶层，当前 MiMo 配置值为 `{ "thinking": { "type": "enabled" } }`。
+- `/model` 输出和模型选择测试同步更新为 MiMo thinking 口径。
+
+验证：
+
+```powershell
+node --check src\model-gateway\client.js
+node --check src\model-gateway\models.js
+node --check src\model-gateway\openai-chat.js
+node --check src\config\load-config.js
+node --test tests\unit\gateway-protocol.test.js tests\unit\config.test.js tests\unit\commands.test.js tests\unit\session.test.js tests\unit\agents.test.js --test-name-pattern "OpenAI-compatible requests include configured provider extra_body|loads bundled config|model command|model use command|reasoning_content|OpenAI-compatible tool continuations|streamed thinking persists"
+```
+
+结果：目标测试 `158 pass / 0 fail`；本地构造请求确认当前主模型请求体包含顶层 `thinking.type = "enabled"`。
+
+已知风险：
+
+- 当前 `reasoning_content` 回传链路能覆盖普通长度的主会话和子智能体工具续轮，但超长 reasoning 仍会按既有 OOM 防护只保留尾部预览。若 MiMo 对“完整回传”严格校验，真实超长工具会话仍可能触发 400，需要后续把“模型上下文回传原文”和“UI/日志预览截断”拆成两套存储策略。
+
 ## 2026-05-17：版本号统一为 3.0.0 并补齐版本沿革
 
 用户指出版本号长期停留在 `1.1.0`，但项目已经从早期 Claude Code 源码参考/复刻阶段，演进到自研 clean-room 架构、TUI，再到当前 Dashboard/WebUI，应按产品代际重新校准版本号。本次将当前发布线统一为 Ant Code `3.0.0`。

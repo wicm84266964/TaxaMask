@@ -18,6 +18,7 @@ if str(ANTSLEAP_ROOT) not in sys.path:
 
 from core.blink_dataset import BlinkTrajectoryDataset
 from core.engine import AntEngine
+from core.cascade_manager import CascadingManager
 
 
 class _FakeLocator:
@@ -127,6 +128,89 @@ class _FakeCascadeManager:
 
 
 class MacroMicroPipelineTests(unittest.TestCase):
+    def test_legacy_project_route_without_backend_still_uses_vit_b_expert_path(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            weights_dir = Path(tmp_dir) / "weights"
+            expert_path = weights_dir / "experts" / "Mandible" / "expert_v20260501_090000.pth"
+            expert_path.parent.mkdir(parents=True, exist_ok=True)
+            expert_path.write_bytes(b"placeholder")
+
+            engine = types.SimpleNamespace(device="cpu", weights_dir=str(weights_dir))
+            manager = CascadingManager.__new__(CascadingManager)
+            manager.engine = engine
+            manager.device = "cpu"
+            manager.loaded_experts = {}
+            manager.expert_dir = str(weights_dir / "experts")
+            manager.route_manifest_path = str(weights_dir / "experts" / "cascade_routes.json")
+            manager.legacy_route_manifest = {"version": "", "approved": False, "routes": []}
+
+            route = {
+                "parent": "Head",
+                "child": "Mandible",
+                "enabled": True,
+                "expert_id": "Mandible/expert_v20260501_090000.pth",
+                "expert_part": "Mandible",
+                "expert_filename": "expert_v20260501_090000.pth",
+                "registration_source": "blink_candidate",
+            }
+
+            self.assertEqual(Path(manager.resolve_route_expert_path(route)), expert_path)
+            self.assertIsNone(manager.get_route_block_reason(route))
+
+    def test_infer_child_part_for_legacy_route_calls_micro_expert_loader(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            weights_dir = Path(tmp_dir) / "weights"
+            expert_path = weights_dir / "experts" / "Mandible" / "expert_v20260501_090000.pth"
+            expert_path.parent.mkdir(parents=True, exist_ok=True)
+            expert_path.write_bytes(b"placeholder")
+
+            engine = types.SimpleNamespace(device="cpu", weights_dir=str(weights_dir))
+            manager = CascadingManager.__new__(CascadingManager)
+            manager.engine = engine
+            manager.device = "cpu"
+            manager.loaded_experts = {}
+            manager.expert_dir = str(weights_dir / "experts")
+            manager.route_manifest_path = str(weights_dir / "experts" / "cascade_routes.json")
+            manager.legacy_route_manifest = {"version": "", "approved": False, "routes": []}
+            loader_calls = []
+            infer_calls = []
+
+            def fake_load(part_name, model_path=None):
+                loader_calls.append((part_name, model_path))
+                return object()
+
+            def fake_infer(image_path, parent_box, child_part_name, expert_model):
+                infer_calls.append((image_path, list(parent_box), child_part_name, expert_model))
+                return {"box": [1, 2, 3, 4], "confidence": 1.0}
+
+            manager._load_expert = fake_load
+            manager._infer_with_loaded_expert = fake_infer
+
+            result = manager.infer_child_part(
+                "specimen.png",
+                [10, 20, 80, 70],
+                "Mandible",
+                parent_part="Head",
+                route_manifest={
+                    "version": "project-v2",
+                    "routes": [
+                        {
+                            "parent": "Head",
+                            "child": "Mandible",
+                            "enabled": True,
+                            "expert_id": "Mandible/expert_v20260501_090000.pth",
+                            "expert_part": "Mandible",
+                            "expert_filename": "expert_v20260501_090000.pth",
+                        }
+                    ],
+                },
+            )
+
+            self.assertEqual(result["box"], [1, 2, 3, 4])
+            self.assertEqual(loader_calls, [("Mandible", str(expert_path))])
+            self.assertEqual(infer_calls[0][1], [10, 20, 80, 70])
+            self.assertEqual(infer_calls[0][2], "Mandible")
+
     def test_predict_full_pipeline_routes_child_parts_outside_locator_scope(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             image_path = Path(tmp_dir) / "specimen.png"
@@ -142,6 +226,10 @@ class MacroMicroPipelineTests(unittest.TestCase):
                 str(image_path),
                 current_taxonomy=["Head", "Mandible"],
                 locator_scope=["Head"],
+                model_profile_context={
+                    "active_profile_id": "profile_route_test",
+                    "parent_backend": "builtin_locator_sam",
+                },
                 project_route_manifest={
                     "version": "legacy",
                     "routes": [
@@ -164,6 +252,8 @@ class MacroMicroPipelineTests(unittest.TestCase):
             self.assertIn("Mandible", preds["polygons"])
             self.assertEqual(preds["meta"]["cascade_applied_count"], 1)
             self.assertEqual(preds["meta"]["cascade_route_source"], "project")
+            self.assertEqual(preds["meta"]["model_profile_id"], "profile_route_test")
+            self.assertIn("Head->Mandible:vit_b_blink", preds["meta"]["cascade_route_backends"])
             self.assertEqual(len(engine.cascade_manager.calls), 1)
             self.assertEqual(engine.cascade_manager.calls[0]["parent_part"], "Head")
 

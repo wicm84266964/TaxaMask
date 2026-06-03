@@ -19,14 +19,16 @@ has_pyside6 = False
 
 try:
     from PySide6.QtCore import QPointF, QRectF
-    from PySide6.QtGui import QImage
+    from PySide6.QtGui import QColor, QImage, QPainter
     from PySide6.QtWidgets import QApplication, QWidget, QGridLayout, QDialogButtonBox, QTreeWidget
 except ModuleNotFoundError as exc:
     if exc.name and exc.name.startswith("PySide6"):
         QApplication = None
+        QColor = None
         QPointF = None
         QRectF = None
         QImage = None
+        QPainter = None
         QTreeWidget = None
         QWidget = object
         main_module = None
@@ -477,6 +479,16 @@ class DummyProjectManager:
             self.save_project()
         return updated
 
+    def update_active_model_profile_parent_weights(self, locator_weights=None, segmenter_weights=None, save=True):
+        self.last_profile_parent_weights = {
+            "locator_weights": locator_weights,
+            "segmenter_weights": segmenter_weights,
+            "save": save,
+        }
+        if save:
+            self.save_project()
+        return self.last_profile_parent_weights
+
     def delete_cascade_route(self, parent_part, child_part, save=True):
         original = self.project_data.setdefault("cascade_routes", {"version": "project-v2", "routes": []}).get("routes", [])
         routes = [
@@ -727,6 +739,9 @@ class UiPolishScopeTests(unittest.TestCase):
         self.assertEqual(dialog.btn_load.parentWidget().objectName(), "cropperLoadPanel")
         self.assertEqual(dialog.btn_save.parentWidget().objectName(), "cropperExportPanel")
         self.assertEqual(dialog.crop_list.parentWidget().objectName(), "cropperDrawPanel")
+        self.assertEqual(dialog.btn_auto_split.parentWidget().objectName(), "cropperDrawPanel")
+        self.assertEqual(dialog.btn_delete_selected.parentWidget().objectName(), "cropperDrawPanel")
+        self.assertEqual(dialog.btn_clear_crops.parentWidget().objectName(), "cropperDrawPanel")
 
     def test_cropper_exports_traceable_crop_records(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -751,8 +766,62 @@ class UiPolishScopeTests(unittest.TestCase):
                 self.assertEqual(records[0]["crop_index"], 1)
                 self.assertEqual(records[0]["crop_box"], [10, 20, 80, 100])
                 self.assertEqual(records[0]["source_size"], [160, 120])
+                self.assertEqual(records[0]["crop_source"], "manual")
             finally:
                 dialog.deleteLater()
+
+    def test_cropper_auto_splits_white_gutter_figure_plate(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            source = Path(tmp_dir) / "paper__accepted_000008__figure.jpg"
+            image = QImage(320, 300, QImage.Format_RGB32)
+            image.fill(0xFFFFFF)
+            painter = QPainter(image)
+            try:
+                painter.fillRect(5, 5, 310, 95, QColor(120, 130, 112))
+                painter.fillRect(5, 105, 310, 90, QColor(124, 134, 116))
+                painter.fillRect(5, 205, 110, 90, QColor(140, 120, 96))
+                painter.fillRect(125, 205, 190, 90, QColor(136, 124, 100))
+            finally:
+                painter.end()
+            self.assertTrue(image.save(str(source)))
+
+            dialog = ImageCropper(initial_image=str(source), lang="en")
+            try:
+                with patch.object(main_module.QMessageBox, "information", lambda *args, **kwargs: None):
+                    dialog.auto_split_panels()
+
+                self.assertEqual(len(dialog.canvas.crops), 4)
+                self.assertEqual(dialog.crop_list.count(), 4)
+                self.assertTrue(all(source == "white_separator_panel_split" for source in dialog.crop_sources))
+
+                with patch.object(main_module.QMessageBox, "information", lambda *args, **kwargs: None):
+                    dialog.save_crops()
+
+                records = dialog.get_crop_records()
+                self.assertEqual(len(records), 4)
+                self.assertTrue(all(item["crop_source"] == "white_separator_panel_split" for item in records))
+            finally:
+                dialog.deleteLater()
+
+    def test_cropper_can_delete_and_clear_auto_split_candidates_before_saving(self):
+        dialog = ImageCropper(lang="en")
+        try:
+            dialog.canvas.crops = [QRectF(1, 2, 30, 40), QRectF(50, 60, 70, 80)]
+            dialog.crop_sources = ["white_separator_panel_split", "hard_seam_panel_split"]
+            dialog._refresh_crop_list()
+
+            dialog.crop_list.setCurrentRow(1)
+            dialog.delete_selected_crop()
+            self.assertEqual(len(dialog.canvas.crops), 1)
+            self.assertEqual(dialog.crop_sources, ["white_separator_panel_split"])
+            self.assertEqual(dialog.crop_list.count(), 1)
+
+            dialog.clear_crops()
+            self.assertEqual(dialog.canvas.crops, [])
+            self.assertEqual(dialog.crop_sources, [])
+            self.assertEqual(dialog.crop_list.count(), 0)
+        finally:
+            dialog.deleteLater()
 
     def test_main_window_exposes_workbench_polish_hierarchy(self):
         window = self.make_main_window()
@@ -1231,6 +1300,7 @@ class UiPolishScopeTests(unittest.TestCase):
 
             window.run_blink_child_auto_annotate()
 
+            self.assertEqual(self.engine.predict_calls, [])
             self.assertEqual(len(self.engine.cascade_manager.infer_calls), 1)
             call = self.engine.cascade_manager.infer_calls[0]
             self.assertEqual(call["parent_part"], "Head")
@@ -1281,6 +1351,63 @@ class UiPolishScopeTests(unittest.TestCase):
             window._refresh_blink_refine_state()
             self.assertFalse(window.btn_blink_auto_annotate.isEnabled())
             self.assertIn("Configure a route expert", window.btn_blink_auto_annotate.toolTip())
+        finally:
+            window.deleteLater()
+
+    def test_child_auto_annotate_does_not_run_with_unappointed_route_expert(self):
+        image_path = Path(self.temp_dir.name) / "specimen.png"
+        image = QImage(96, 72, QImage.Format_RGB32)
+        image.fill(0xFFCCCCCC)
+        self.assertTrue(image.save(str(image_path)))
+
+        window = self.make_main_window()
+        try:
+            image_key = str(image_path)
+            self.project_manager.project_data["taxonomy"] = ["Head", "Mandible"]
+            self.project_manager.project_data["locator_scope"] = ["Head"]
+            self.project_manager.project_data["images"] = [image_key]
+            self.project_manager.project_data["labels"] = {
+                image_key: {
+                    "parts": {},
+                    "boxes": {"Head": [5, 5, 80, 60]},
+                    "auto_boxes": {},
+                    "descriptions": {},
+                    "status": "unlabeled",
+                    "genus": "Unknown",
+                }
+            }
+            self.project_manager.project_data["blink_context_roi_parents"] = {"Mandible": "Head"}
+            self.project_manager.project_data["cascade_routes"] = {
+                "version": "project-v2",
+                "routes": [
+                    {
+                        "parent": "Head",
+                        "child": "Mandible",
+                        "enabled": True,
+                        "appointed_expert": {},
+                        "expert_candidates": [],
+                        "expert_id": None,
+                        "expert_part": None,
+                        "expert_filename": None,
+                    }
+                ],
+            }
+            window.refresh_route_table()
+            window.current_image = image_key
+            window._select_part_in_tree("Mandible")
+            context = window._refresh_blink_refine_state()
+
+            self.assertFalse(context["can_refine"])
+            self.assertIn("Configure a route expert", context["disabled_reason"])
+            self.assertFalse(window.btn_blink_auto_annotate.isEnabled())
+
+            with patch.object(main_module.QMessageBox, "information") as info:
+                window.run_blink_child_auto_annotate()
+
+            info.assert_called()
+            self.assertEqual(self.engine.predict_calls, [])
+            self.assertEqual(self.engine.cascade_manager.infer_calls, [])
+            self.assertNotIn("Mandible", self.project_manager.get_boxes(image_key))
         finally:
             window.deleteLater()
 
@@ -1485,6 +1612,16 @@ class UiPolishScopeTests(unittest.TestCase):
             route_group = dialog.findChild(QWidget, "modelSettingsRoutePanel")
             self.assertIsNotNone(route_group)
             self.assertEqual(route_panel.parentWidget().objectName(), "modelSettingsRoutePanel")
+            self.assertEqual(dialog.tabs.tabText(dialog.advanced_extensions_tab_index), "Advanced Extensions")
+            self.assertGreater(dialog.advanced_extensions_tab_index, dialog.inference_tab_index)
+            advanced_tab = dialog.tabs.widget(dialog.advanced_extensions_tab_index).widget()
+            parent_tab = dialog.tabs.widget(dialog.parent_tab_index).widget()
+            child_tab = dialog.tabs.widget(dialog.child_tab_index).widget()
+            self.assertIsNotNone(advanced_tab.findChild(QWidget, "modelSettingsModelSourceSwitchPanel"))
+            self.assertIsNotNone(parent_tab.findChild(QWidget, "modelSettingsParentSourceSummary"))
+            self.assertIsNotNone(child_tab.findChild(QWidget, "modelSettingsChildSourceSummary"))
+            self.assertIsNotNone(advanced_tab.findChild(QWidget, "modelSettingsParentExtensionPanel"))
+            self.assertIsNotNone(advanced_tab.findChild(QWidget, "modelSettingsExternalBlinkPanel"))
             self.assertIn("Deleting a route removes only this project record", route_panel.note_label.text())
             self.assertEqual(route_panel.route_tree.objectName(), "projectRouteTree")
             self.assertGreaterEqual(route_panel.route_tree.minimumHeight(), 360)
@@ -1492,8 +1629,10 @@ class UiPolishScopeTests(unittest.TestCase):
             self.assertIsNotNone(parent_item)
             route_item = route_panel._find_route_item("Head", "Mandible")
             self.assertIsNotNone(route_item)
-            self.assertEqual(route_item.text(4), "Expert not appointed yet")
-            self.assertEqual(route_item.text(5), "Blink candidate")
+            self.assertEqual(route_item.text(3), "ViT-B Blink Expert")
+            self.assertEqual(route_item.text(5), "Expert not appointed yet")
+            self.assertEqual(route_item.text(6), "No appointed expert")
+            self.assertEqual(route_item.text(7), "Blink candidate")
             self.assertIn("Project routes below control which parent -> child expert links are available", dialog.lbl_cascade_note.text())
         finally:
             try:
@@ -1605,8 +1744,71 @@ class UiPolishScopeTests(unittest.TestCase):
             self.assertEqual(len(self.engine.predict_calls), 1)
             call = self.engine.predict_calls[0]
             args = call["args"]
-            self.assertEqual(len(args), 9)
-            self.assertEqual(args[-1]["routes"][0]["child"], "Mandible")
+            kwargs = call["kwargs"]
+            self.assertEqual(args, ())
+            self.assertEqual(kwargs["project_route_manifest"]["routes"][0]["child"], "Mandible")
+            self.assertIn("model_profile_context", kwargs)
+        finally:
+            window.deleteLater()
+
+    def test_workbench_agent_context_includes_model_profile_and_route_backend(self):
+        window = self.make_main_window()
+        try:
+            window.project.project_data["taxonomy"].append("Mandible")
+            window.project.project_data["cascade_routes"] = {
+                "version": "project-v2",
+                "routes": [
+                    {
+                        "parent": "Head",
+                        "child": "Mandible",
+                        "enabled": True,
+                        "expert_backend": "heatmap_blink",
+                        "expert_id": "Mandible/expert_v20260602_120000.pth",
+                        "expert_part": "Mandible",
+                        "expert_filename": "expert_v20260602_120000.pth",
+                        "appointed_expert": {
+                            "expert_backend": "heatmap_blink",
+                            "expert_id": "Mandible/expert_v20260602_120000.pth",
+                        },
+                        "expert_candidates": [],
+                    }
+                ],
+            }
+
+            context = window._collect_image_workbench_agent_context()
+            self.assertEqual(context["active_model_profile_id"], "builtin_heatmap_default")
+            self.assertEqual(context["parent_backend"], "builtin_locator_sam")
+            self.assertEqual(context["child_backend"], "vit_b_blink")
+            self.assertIn("Head->Mandible:heatmap_blink", context["route_backend_summary"])
+
+            compact = window._compact_agent_context(context)
+            self.assertEqual(compact["active_model_profile_id"], "builtin_heatmap_default")
+            self.assertIn("Head->Mandible:heatmap_blink", compact["route_backend_summary"])
+        finally:
+            window.deleteLater()
+
+    def test_training_success_updates_active_model_profile_parent_weights(self):
+        window = self.make_main_window()
+        try:
+            class TrainerStub:
+                training_context = {
+                    "locator_weights": "locator_20260602_1200.pth",
+                    "segmenter_weights": "sam_decoder_lora_20260602_1200.pth",
+                }
+
+            window.trainer = TrainerStub()
+            window._on_training_success()
+
+            self.assertEqual(
+                window.project.last_profile_parent_weights["locator_weights"],
+                "locator_20260602_1200.pth",
+            )
+            self.assertEqual(
+                window.project.last_profile_parent_weights["segmenter_weights"],
+                "sam_decoder_lora_20260602_1200.pth",
+            )
+            self.assertFalse(window.project.last_profile_parent_weights["save"])
+            self.assertGreaterEqual(window.project.save_calls, 1)
         finally:
             window.deleteLater()
 

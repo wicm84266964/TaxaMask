@@ -3,6 +3,7 @@ import { buildInitialContext } from "../context/builder.js";
 import { loadConfig } from "../config/load-config.js";
 import { formatGatewayError } from "../model-gateway/errors.js";
 import { createLabModelGateway } from "../model-gateway/client.js";
+import { listConfiguredModels } from "../model-gateway/models.js";
 import { runHooks } from "../hooks/runner.js";
 import { createMcpRuntime } from "../mcp/runtime.js";
 import { appendThinkingPreview, limitThinkingPreview } from "../model-gateway/thinking-budget.js";
@@ -123,7 +124,7 @@ export async function createSession(options) {
 /**
  * @typedef {{ type: string; [key: string]: any }} SessionEvent
  *
- * @param {{ prompt: string; cwd: string; env?: NodeJS.ProcessEnv; readonly?: boolean; allowWrite?: boolean; allowCommand?: boolean; fullAccess?: boolean; stream?: boolean; signal?: AbortSignal; approvalCallback?: Parameters<typeof createToolRuntime>[0]["approve"]; onEvent?: (event: SessionEvent) => void | Promise<void>; onAntEvent?: (event: Record<string, any>) => void | Promise<void> }} options
+ * @param {{ prompt: string; attachments?: Array<Record<string, any>>; cwd: string; env?: NodeJS.ProcessEnv; readonly?: boolean; allowWrite?: boolean; allowCommand?: boolean; fullAccess?: boolean; stream?: boolean; signal?: AbortSignal; approvalCallback?: Parameters<typeof createToolRuntime>[0]["approve"]; onEvent?: (event: SessionEvent) => void | Promise<void>; onAntEvent?: (event: Record<string, any>) => void | Promise<void> }} options
  */
 export async function runPrintTurn(options) {
   const session = await createSession({
@@ -138,6 +139,7 @@ export async function runPrintTurn(options) {
   });
   return runSessionTurn(session, {
     prompt: options.prompt,
+    attachments: options.attachments,
     env: options.env,
     stream: options.stream,
     signal: options.signal,
@@ -149,10 +151,11 @@ export async function runPrintTurn(options) {
 
 /**
  * @param {Awaited<ReturnType<typeof createSession>>} session
- * @param {{ prompt: string; displayPrompt?: string; env?: NodeJS.ProcessEnv; stream?: boolean; signal?: AbortSignal; approvalCallback?: Parameters<typeof createToolRuntime>[0]["approve"]; userInputCallback?: Parameters<typeof createToolRuntime>[0]["askUser"]; onEvent?: (event: SessionEvent) => void | Promise<void>; onAntEvent?: (event: Record<string, any>) => void | Promise<void> }} options
+ * @param {{ prompt: string; displayPrompt?: string; attachments?: Array<Record<string, any>>; env?: NodeJS.ProcessEnv; stream?: boolean; signal?: AbortSignal; approvalCallback?: Parameters<typeof createToolRuntime>[0]["approve"]; userInputCallback?: Parameters<typeof createToolRuntime>[0]["askUser"]; onEvent?: (event: SessionEvent) => void | Promise<void>; onAntEvent?: (event: Record<string, any>) => void | Promise<void> }} options
  */
 export async function runSessionTurn(session, options) {
   const displayPrompt = typeof options.displayPrompt === "string" ? options.displayPrompt : options.prompt;
+  const attachments = normalizeInputAttachments(options.attachments);
   const thinkingCapture = createThinkingCapture();
   const interruptedDraft = createInterruptedDraftCapture();
   const eventOptions = withAntEventOptions(session, {
@@ -170,7 +173,9 @@ export async function runSessionTurn(session, options) {
     type: "turn_start",
     sessionId: session.id,
     turnIndex: session.turnCount + 1,
-    promptBytes: Buffer.byteLength(options.prompt, "utf8")
+    promptBytes: Buffer.byteLength(options.prompt, "utf8"),
+    attachmentCount: attachments.length,
+    attachments: attachmentMetadataList(attachments)
   });
   await runHooks({
     config: session.config,
@@ -183,7 +188,9 @@ export async function runSessionTurn(session, options) {
       sessionId: session.id,
       turnIndex: session.turnCount + 1,
       promptBytes: Buffer.byteLength(options.prompt, "utf8"),
-      promptPreview: displayPrompt
+      promptPreview: displayPrompt,
+      attachmentCount: attachments.length,
+      attachments: attachmentMetadataList(attachments)
     }
   });
 
@@ -285,11 +292,31 @@ export async function runSessionTurn(session, options) {
     };
   }
 
-  const userMessage = buildUserTurnMessage(options.prompt, session.workflow);
+  const visionPreparation = await prepareVisionAttachmentsForTurn({
+    session,
+    prompt: options.prompt,
+    attachments,
+    gateway,
+    signal: options.signal,
+    eventOptions,
+    metadata
+  });
+  if (!visionPreparation.ok) {
+    finalOutput = visionPreparation.output;
+    await persistSessionMetadata(sessionStore, metadata, finalOutput, visionPreparation.status, session, options);
+    await emitEvent(eventOptions, {
+      type: "turn_complete",
+      status: visionPreparation.status,
+      outputBytes: Buffer.byteLength(finalOutput, "utf8")
+    });
+    return { session, output: finalOutput };
+  }
+
+  const userMessage = buildUserTurnMessage(options.prompt, session.workflow, visionPreparation.attachments, visionPreparation.analysisText);
   let messages = buildTurnMessages(session, userMessage);
   let toolResults = [];
-  const turnMessages = [{ role: "user", content: options.prompt }];
-  const transcriptTurnMessages = [{ role: "user", content: displayPrompt }];
+  const turnMessages = [persistableUserTurnMessage(options.prompt, attachments)];
+  const transcriptTurnMessages = [persistableUserTurnMessage(displayPrompt, attachments)];
   const maxToolRounds = resolveMainToolRounds(session.config);
   const turnChangeTracker = createTurnChangeTracker();
 
@@ -519,6 +546,7 @@ export async function runSessionTurn(session, options) {
         signal: options.signal,
         env: options.env,
         hooksTrusted: options.hooksTrusted,
+        eventOptions,
         thinking,
         turnMessages,
         transcriptMessages: transcriptTurnMessages
@@ -538,7 +566,8 @@ export async function runSessionTurn(session, options) {
           summaryBytes: compaction.summaryBytes,
           strategy: compaction.strategy,
           internalAgent: compaction.internalAgent ?? null,
-          fallbackReason: compaction.fallbackReason ?? null
+          fallbackReason: compaction.fallbackReason ?? null,
+          reason: compaction.reason ?? "automatic"
         });
       }
       await persistSessionMetadata(sessionStore, metadata, finalOutput, "completed", session, options);
@@ -652,18 +681,163 @@ function buildTurnMessages(session, userMessage) {
   ];
 }
 
-function buildUserTurnMessage(prompt, workflow) {
-  const workflowContext = formatWorkflowContext(workflow);
-  if (!workflowContext) {
-    return { role: "user", content: prompt };
+async function prepareVisionAttachmentsForTurn(options) {
+  const attachments = normalizeInputAttachments(options.attachments);
+  if (attachments.length === 0) {
+    return { ok: true, attachments, analysisText: "" };
   }
+  if (modelSupportsImages(options.session.config, options.session.model)) {
+    return { ok: true, attachments, analysisText: "" };
+  }
+
+  const visionModel = resolveVisionAgentModel(options.session.config);
+  if (!visionModel) {
+    const output = [
+      "当前主模型不支持图片输入，且当前网关配置里没有可用的视觉模型。",
+      "请切换到带“视觉”标签的模型，或在同一个网关/Key 下配置一个视觉子智能体模型后重试。",
+      "当前架构只允许一个网关/Key 生效，因此不会跨网关调用其他厂商模型做图片分析。"
+    ].join("\n");
+    await emitEvent(options.eventOptions, {
+      type: "vision_unavailable",
+      model: options.session.model,
+      attachmentCount: attachments.length,
+      outputBytes: Buffer.byteLength(output, "utf8")
+    });
+    if (options.metadata) {
+      options.metadata.gatewayErrors.push("VISION_MODEL_NOT_CONFIGURED");
+    }
+    return { ok: false, status: "vision_unavailable", output };
+  }
+
+  await emitEvent(options.eventOptions, {
+    type: "vision_analysis_start",
+    model: visionModel.id,
+    mainModel: options.session.model,
+    attachmentCount: attachments.length
+  });
+
+  const visionGateway = createLabModelGateway({
+    ...options.session.config,
+    modelAlias: visionModel.id
+  });
+  const response = await visionGateway.sendChat({
+    messages: [buildVisionAnalysisMessage(options.prompt, attachments)],
+    tools: [],
+    toolResults: [],
+    sessionId: `${options.session.id}:vision`,
+    stream: false,
+    signal: options.signal
+  });
+
+  if (!response.ok) {
+    const output = formatGatewayError(response.error ?? {
+      code: "VISION_ANALYSIS_FAILED",
+      message: "vision model request failed"
+    });
+    await emitEvent(options.eventOptions, {
+      type: "vision_analysis_error",
+      model: visionModel.id,
+      error: response.error,
+      outputBytes: Buffer.byteLength(output, "utf8")
+    });
+    if (options.metadata) {
+      options.metadata.gatewayErrors.push(response.error?.code ?? "VISION_ANALYSIS_FAILED");
+    }
+    return { ok: false, status: "vision_error", output };
+  }
+
+  const analysisText = formatAssistantOutput(response.data).trim();
+  await emitEvent(options.eventOptions, {
+    type: "vision_analysis_complete",
+    model: response.data.model ?? visionModel.id,
+    outputBytes: Buffer.byteLength(analysisText, "utf8")
+  });
+  return {
+    ok: true,
+    attachments: [],
+    analysisText: formatVisionAnalysisContext(visionModel.id, attachments, analysisText)
+  };
+}
+
+function buildVisionAnalysisMessage(prompt, attachments = []) {
   return {
     role: "user",
     content: [
-      { type: "text", text: workflowContext },
-      { type: "text", text: String(prompt ?? "") }
+      {
+        type: "text",
+        text: [
+          "你是 Ant Code visual-verifier 视觉复核子智能体。当前主模型不支持图片输入，请你先处理用户上传的图片，输出可供另一个文本模型继续工作的中文视觉证据报告。",
+          "职责：把截图/图片当作证据，识别任务类型（UI/前端截图、代码或错误截图、表格/图表、文档、前后对比等），提取可见事实、OCR 文字、界面元素、布局状态、异常现象和不确定点。",
+          "前端/UI 任务需重点复核：布局完整性、响应式视口、重叠/遮挡/裁切、对齐/间距、可读性/对比度、加载/错误/空状态、交互线索与用户验收目标是否一致。",
+          "输出结构：target、visualEvidence、findings、result、residualRisks、recommendedFollowup。发现问题时 findings 优先；没有问题时明确 pass/uncertain。",
+          "只陈述看得见或能从视觉证据直接推断的信息；不要编造未显示的 DOM、业务逻辑或屏幕外内容。",
+          String(prompt ?? "").trim() ? `用户原始需求：${String(prompt ?? "").trim()}` : ""
+        ].filter(Boolean).join("\n")
+      },
+      ...attachments.map((attachment) => ({
+        type: "image",
+        data: attachment.data,
+        mimeType: attachment.mimeType,
+        name: attachment.name,
+        size: attachment.size
+      }))
     ]
   };
+}
+
+function formatVisionAnalysisContext(modelId, attachments = [], analysisText = "") {
+  const names = attachments.map((attachment) => attachment.name).filter(Boolean).join(", ");
+  return [
+    "图片已由同一网关下的 visual-verifier 视觉子智能体预分析，当前主模型收到的是视觉证据报告。",
+    `视觉模型：${modelId}`,
+    names ? `图片：${names}` : "",
+    "视觉证据报告：",
+    analysisText || "视觉模型未返回可用视觉证据报告。"
+  ].filter(Boolean).join("\n");
+}
+
+function resolveVisionAgentModel(config) {
+  const vision = config.agents?.vision ?? {};
+  if (vision.enabled === false || vision.autoUseWhenMainModelTextOnly === false) {
+    return null;
+  }
+  const models = listConfiguredModels(config);
+  const configured = String(vision.model ?? "").trim();
+  if (configured) {
+    const model = models.find((item) => item.id === configured || item.label?.toLowerCase() === configured.toLowerCase());
+    return model && modelSupportsImages(config, model.id) ? model : null;
+  }
+  return models.find((model) => modelSupportsImages(config, model.id)) ?? null;
+}
+
+function modelSupportsImages(config, modelId) {
+  const id = String(modelId ?? "").trim();
+  if (!id) {
+    return false;
+  }
+  const model = listConfiguredModels(config).find((item) => item.id === id);
+  return Array.isArray(model?.modalities) && model.modalities.includes("image");
+}
+
+function buildUserTurnMessage(prompt, workflow, attachments = [], visionAnalysisText = "") {
+  const workflowContext = formatWorkflowContext(workflow);
+  const imageBlocks = normalizeInputAttachments(attachments).map((attachment) => ({
+    type: "image",
+    data: attachment.data,
+    mimeType: attachment.mimeType,
+    name: attachment.name,
+    size: attachment.size
+  }));
+  if (!workflowContext && imageBlocks.length === 0 && !visionAnalysisText) {
+    return { role: "user", content: prompt };
+  }
+  const content = [
+    ...(workflowContext ? [{ type: "text", text: workflowContext }] : []),
+    ...(visionAnalysisText ? [{ type: "text", text: visionAnalysisText }] : []),
+    ...(String(prompt ?? "").trim() ? [{ type: "text", text: String(prompt ?? "") }] : []),
+    ...imageBlocks
+  ];
+  return { role: "user", content };
 }
 
 function normalizeUserTurnMessage(message) {
@@ -671,6 +845,67 @@ function normalizeUserTurnMessage(message) {
     return message;
   }
   return { role: "user", content: String(message ?? "") };
+}
+
+function persistableUserTurnMessage(prompt, attachments = []) {
+  const normalized = normalizeInputAttachments(attachments);
+  if (normalized.length === 0) {
+    return { role: "user", content: prompt };
+  }
+  return {
+    role: "user",
+    content: [
+      ...(String(prompt ?? "").trim() ? [{ type: "text", text: String(prompt ?? "") }] : []),
+      ...normalized.map(imageAttachmentSummaryBlock)
+    ]
+  };
+}
+
+function normalizeInputAttachments(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map(normalizeInputAttachment)
+    .filter(Boolean)
+    .slice(0, 6);
+}
+
+function normalizeInputAttachment(item) {
+  if (!item || typeof item !== "object" || item.type !== "image") {
+    return null;
+  }
+  const data = String(item.data ?? "").replace(/\s+/g, "");
+  const mimeType = String(item.mimeType ?? item.mime_type ?? "").trim().toLowerCase();
+  if (!data || !/^image\/[a-z0-9.+-]+$/i.test(mimeType)) {
+    return null;
+  }
+  return {
+    type: "image",
+    data,
+    mimeType,
+    name: String(item.name ?? "image").trim().slice(0, 160),
+    size: nonNegativeInteger(item.size ?? item.bytes ?? item.sizeBytes, 0)
+  };
+}
+
+function imageAttachmentSummaryBlock(attachment) {
+  return {
+    type: "image",
+    name: attachment.name,
+    mimeType: attachment.mimeType,
+    size: attachment.size,
+    redacted: true
+  };
+}
+
+function attachmentMetadataList(attachments = []) {
+  return normalizeInputAttachments(attachments).map((attachment) => ({
+    type: "image",
+    name: attachment.name,
+    mimeType: attachment.mimeType,
+    size: attachment.size
+  }));
 }
 
 function messagesForModelContext(messages = []) {
@@ -925,7 +1160,17 @@ async function preparePromptBudgetForGateway(input) {
       gateway: input.gateway,
       signal: input.signal,
       env: input.env,
-      hooksTrusted: input.hooksTrusted
+      hooksTrusted: input.hooksTrusted,
+      onBeforeCompact: (payload) => emitEvent(input.eventOptions, {
+        type: "context_compacting",
+        reason: "automatic_prompt_budget",
+        beforeMessages: payload.beforeMessages,
+        beforeTokens: estimate.tokens,
+        beforeBytes: payload.beforeBytes,
+        maxTokens: payload.maxTokens,
+        maxBytes: payload.maxBytes,
+        maxMessages: payload.maxMessages
+      })
     });
     if (compaction.compacted) {
       messages = buildTurnMessages(input.session, buildUserTurnMessage(input.prompt, input.session.workflow));
@@ -1604,7 +1849,17 @@ async function appendSessionMessages(session, data, fallbackText, options = {}) 
     gateway: options.gateway,
     signal: options.signal,
     env: options.env,
-    hooksTrusted: options.hooksTrusted
+    hooksTrusted: options.hooksTrusted,
+    onBeforeCompact: (payload) => emitEvent(options.eventOptions, {
+      type: "context_compacting",
+      reason: "automatic",
+      beforeMessages: payload.beforeMessages,
+      beforeTokens: payload.beforeTokens,
+      beforeBytes: payload.beforeBytes,
+      maxTokens: payload.maxTokens,
+      maxBytes: payload.maxBytes,
+      maxMessages: payload.maxMessages
+    })
   });
 }
 
@@ -1896,6 +2151,13 @@ function persistableContent(content, options = {}) {
     }
     if (!item || typeof item !== "object") {
       return item;
+    }
+    if (item.type === "image") {
+      return imageAttachmentSummaryBlock({
+        name: String(item.name ?? "image"),
+        mimeType: String(item.mimeType ?? item.mime_type ?? "image"),
+        size: nonNegativeInteger(item.size ?? item.bytes ?? item.sizeBytes, 0)
+      });
     }
     if ("text" in item) {
       const text = redactPersistedText(String(item.text ?? ""));
@@ -2254,7 +2516,7 @@ function appendInterruptedDraftMessages(session, prompt, displayPrompt, draft, r
     assistantMessage.thinking = thinking;
   }
   if (typeof prompt === "string" && prompt.trim()) {
-    session.messages.push({ role: "user", content: prompt });
+    session.messages.push(persistableUserTurnMessage(prompt));
   }
   session.messages.push(assistantMessage);
   appendTranscriptMessages(session, [

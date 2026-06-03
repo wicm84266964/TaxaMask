@@ -12,7 +12,7 @@ const DASHBOARD_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(DASHBOARD_DIR, "public");
 
 /**
- * @param {{ cwd: string; env?: NodeJS.ProcessEnv; packageRoot?: string; host?: string; port?: number; open?: boolean; project?: string | null; parentPid?: number | null }} options
+ * @param {{ cwd: string; env?: NodeJS.ProcessEnv; packageRoot?: string; host?: string; port?: number; open?: boolean; project?: string | null }} options
  */
 export async function startDashboard(options) {
   const host = normalizeDashboardHost(options.host ?? DEFAULT_HOST);
@@ -25,7 +25,6 @@ export async function startDashboard(options) {
     publicDir: await resolveDashboardPublicDir(options.packageRoot),
     onShutdown: () => process.exit(0)
   });
-  monitorParentProcess(options.parentPid, () => server.requestShutdown?.());
   const bound = await listenOnAvailablePort(server, { host, port });
   const url = `http://${hostForUrl(host)}:${bound.port}`;
   if (options.open !== false) {
@@ -101,7 +100,6 @@ export function createDashboardServer(options) {
     socket.on("close", () => sockets.delete(socket));
   });
 
-  server.requestShutdown = requestShutdown;
   return server;
 
   function requestShutdown() {
@@ -136,25 +134,6 @@ export function createDashboardServer(options) {
   }
 }
 
-function monitorParentProcess(parentPid, onExit) {
-  const pid = Number(parentPid);
-  if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) {
-    return;
-  }
-  const timer = setInterval(() => {
-    try {
-      process.kill(pid, 0);
-    } catch (error) {
-      if (error?.code === "EPERM") {
-        return;
-      }
-      clearInterval(timer);
-      onExit();
-    }
-  }, 1000);
-  timer.unref?.();
-}
-
 async function routeRequest(req, res, options) {
   const url = new URL(req.url ?? "/", "http://127.0.0.1");
   const publicDir = options.publicDir ?? PUBLIC_DIR;
@@ -170,8 +149,34 @@ async function routeRequest(req, res, options) {
       ok: status.ok !== false,
       cwd: options.cwd,
       version: "dashboard.v1",
-      sessionStatus: status.sessionStatus ?? null
+      sessionStatus: status.sessionStatus ?? null,
+      models: status.models ?? [],
+      agentModelTiers: status.agentModelTiers ?? {},
+      visionAgent: status.visionAgent ?? null,
+      gatewayConfig: status.gatewayConfig ?? null,
+      gatewayProfiles: status.gatewayProfiles ?? []
     });
+  }
+  if (req.method === "POST" && url.pathname === "/api/model") {
+    const body = await readJson(req);
+    const result = await options.runtime.switchModel(body);
+    return sendJson(res, result.ok ? 200 : result.status ?? 400, result);
+  }
+  if (req.method === "POST" && url.pathname === "/api/gateway-profile") {
+    const body = await readJson(req);
+    const result = await options.runtime.switchGatewayProfile(body);
+    return sendJson(res, result.ok ? 200 : result.status ?? 400, result);
+  }
+  if (req.method === "POST" && url.pathname === "/api/model-config") {
+    const body = await readJson(req);
+    const result = await options.runtime.saveModelConfig(body);
+    return sendJson(res, result.ok ? 200 : result.status ?? 400, result);
+  }
+  if (req.method === "DELETE" && url.pathname.startsWith("/api/model-config/")) {
+    const modelId = decodeURIComponent(url.pathname.slice("/api/model-config/".length));
+    const body = await readJson(req);
+    const result = await options.runtime.deleteModelConfig({ ...body, modelId });
+    return sendJson(res, result.ok ? 200 : result.status ?? 400, result);
   }
   if (req.method === "GET" && url.pathname === "/api/trust") {
     const result = await options.runtime.trustStatus();
@@ -221,6 +226,11 @@ async function routeRequest(req, res, options) {
   if (req.method === "POST" && url.pathname === "/api/turns/queue/cancel") {
     const body = await readJson(req);
     const result = options.runtime.cancelQueuedTurn(body);
+    return sendJson(res, result.ok ? 200 : result.status ?? 400, result);
+  }
+  if (req.method === "POST" && url.pathname === "/api/background-subagents/cancel") {
+    const body = await readJson(req);
+    const result = await options.runtime.cancelBackgroundSubagent(body);
     return sendJson(res, result.ok ? 200 : result.status ?? 400, result);
   }
   if (req.method === "POST" && url.pathname === "/api/turns/guide") {

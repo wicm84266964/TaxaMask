@@ -83,7 +83,15 @@ token in the environment. In a project-specific `lab-agent.config.json`:
       "id": "my-coding-model",
       "label": "My Coding Model",
       "thinking": false,
+      "modalities": ["text"],
       "reasoningContentMode": "visible-when-no-content",
+      "contextTokens": 200000
+    },
+    {
+      "id": "my-vision-model",
+      "label": "My Vision Model",
+      "thinking": false,
+      "modalities": ["text", "image"],
       "contextTokens": 200000
     }
   ],
@@ -98,7 +106,13 @@ token in the environment. In a project-specific `lab-agent.config.json`:
     "modelTiers": {
       "cheap": "my-coding-model",
       "default": "my-coding-model",
-      "strong": "my-coding-model"
+      "strong": "my-coding-model",
+      "vision": "my-vision-model"
+    },
+    "vision": {
+      "enabled": true,
+      "model": "my-vision-model",
+      "autoUseWhenMainModelTextOnly": true
     }
   }
 }
@@ -135,13 +149,24 @@ configuration guide.
 To switch to another gateway later, edit only these durable config fields:
 
 - `modelAlias`: model used by the main agent.
-- `models`: model ids shown in Ant Code.
+- `models`: model ids shown in Ant Code. Use `modalities: ["text", "image"]`
+  only for models that should receive image inputs.
 - `agents.modelTiers`: model ids used by subagents; set all tiers to the same
-  id when you want main and subagents to use one model.
+  id when you want main and subagents to use one model. The optional `vision`
+  tier is used by the visual verifier profile.
+- `agents.vision`: same-gateway visual fallback for image attachments when the
+  selected main model is text-only.
 - `lab.gatewayProtocol`, `lab.gatewayUrl`, and optional
   `lab.gatewayHealthUrl`.
 - `allowedHosts`: include the gateway host when `networkMode` is `lab-only` or
   `approved-web`.
+
+Dashboard can edit the same local model configuration from the model selector
+near the composer. The selector shows text/image/thinking labels, switches among
+registered models, and can save gateway URL, access token, model id, context
+window, subagent defaults, and the visual subagent model. Ant Code still uses one
+active gateway/key at a time; it does not route text models through one provider
+and image models through another provider in the same turn.
 
 Environment variables such as `LAB_AGENT_MODEL`, `LAB_AGENT_MODELS`,
 `LAB_MODEL_GATEWAY_PROTOCOL`, `LAB_MODEL_GATEWAY_URL`,
@@ -242,7 +267,7 @@ node src/cli/index.js dashboard
 node src/cli/index.js dashboard --port 7410 --no-open
 ```
 
-`ant-code dashboard` starts a local-only WebUI on `127.0.0.1:7410` by default and opens the browser unless `--no-open` is set. The first release deliberately rejects non-loopback hosts such as `0.0.0.0`; it is not a LAN sharing mode. Dashboard reuses the same core session runtime, permission engine, and `.lab-agent/sessions` history as the TUI. Its dark gray three-panel layout shows project threads on the left, folded task activity and final replies in the center, and generated or referenced files on the right. Tool calls are folded into concise activity rows, model thinking text is not shown, and permission requests appear as a web confirmation panel above the input box with allow-once, allow-session, deny, and cancel actions. The WebUI asks for workspace trust before running turns; while a turn is running, Enter queues new text, the send button switches to a running/interruption action, and the queue panel includes an explicit "引导对话" action. Context clear and compact actions use in-page confirmations. The file preview panel supports images, text, Markdown, code, PDF, and first-release Office/binary file cards. To stop the Dashboard service, use the sidebar "关闭 Dashboard" action or press `Ctrl+C` in the terminal that launched it.
+`ant-code dashboard` starts a local-only WebUI on `127.0.0.1:7410` by default and opens the browser unless `--no-open` is set. The first release deliberately rejects non-loopback hosts such as `0.0.0.0`; it is not a LAN sharing mode. Dashboard reuses the same core session runtime, permission engine, and `.lab-agent/sessions` history as the TUI. Its dark gray three-panel layout shows project threads on the left, folded task activity and final replies in the center, and generated or referenced files on the right. Tool calls are folded into concise activity rows, model thinking text is not shown, and permission requests appear as a web confirmation panel above the input box with allow-once, allow-session, deny, and cancel actions. The WebUI asks for workspace trust before running turns; while a turn is running, Enter queues new text and the send button switches to a running/interruption action. If the input contains typed guidance during a running turn, Dashboard shows an explicit "引导对话" action for steering the current task; individual queued items also provide their own guide action. Background subagent groups are surfaced in the collapsible live-status strip; for `background=true` and `wakeParent=true`, Dashboard consumes the group wake prompt, queues it while the parent turn is busy, auto-runs it when idle, and records `wakePromptConsumedAt` in the task group file. Context clear and compact actions use in-page confirmations. The file preview panel supports images, text, Markdown, code, PDF, and first-release Office/binary file cards. To stop the Dashboard service, use the sidebar "关闭 Dashboard" action or press `Ctrl+C` in the terminal that launched it.
 
 The v1.2 interaction polish work starts with theme tokens and an input editor core. `LAB_AGENT_TUI_THEME=sky-blue` is the default sky-blue theme; `ant-code`, `terminal-default`, and `no-color` are also available. Set `NO_COLOR=1` or `LAB_AGENT_NO_COLOR=1` for no-color output. The composer now tracks an insertion cursor, renders a blinking cursor segment, handles wide CJK character widths, and supports common editing keys such as Left/Right, Home/End, Delete, Ctrl+A/E/K/U/W, and Ctrl+J for newlines.
 
@@ -260,7 +285,7 @@ Model-triggered read-only git tools include `git_status` and `git_diff`. They in
 Model-triggered `edit_file` performs an exact-replacement preflight before writing. It rejects empty old text, no-op edits, invalid replacement counts, missing old text, and unexpected replacement counts with stable error codes. Dry-run edits return a bounded diff preview and byte-count summary without modifying files.
 
 Configured MCP servers are explicit local stdio processes only. The checked-in root config and lab template recommend disabled `filesystem`, `memory`, and `playwright` MCP entries for lab approval; no marketplace discovery or automatic server enablement is performed.
-Subagents are local-only. Built-in profiles include `build`, `explorer`, `readonly-researcher`/`research`, `planner`, `verifier`, `code-worker`, and hidden internal agents. Local skill files can provide bounded instructions, and `context: fork` skills run through a hidden child subagent while still using ordinary tools and permissions. Project memory is stored at `.lab-agent/memory.md`; local session metadata is stored under `.lab-agent/sessions/` and can be cleaned by retention policy.
+Subagents are local-only. Built-in profiles include `build`, `explorer`, `readonly-researcher`/`research`, `planner`, `verifier`, `code-worker`, and hidden internal agents. The planner profile is reserved for complex-task plan packages after parent-side requirement confirmation; its generated `requirements.md`, `task-plan.md`, `execution-checklist.md`, and `manifest.json` are stored under `.lab-agent/plans/<plan-id>/` for traceability and can be opened through the normal file preview flow. Local skill files can provide bounded instructions, and `context: fork` skills run through a hidden child subagent while still using ordinary tools and permissions. Project memory is stored at `.lab-agent/memory.md`; local session metadata is stored under `.lab-agent/sessions/` and can be cleaned by retention policy.
 Print and interactive turns persist bounded session metadata only; prompts and assistant outputs are not written into metadata.
 
 Every model turn receives an Ant Code behavior protocol through the lab gateway context: inspect before editing, validate after code changes, repair failed validation before claiming completion, and finish with a concise change/validation/risk summary. Project memory is included with bounded relative-path labels.

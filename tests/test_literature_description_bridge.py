@@ -413,6 +413,50 @@ class LiteratureDescriptionBridgeTests(unittest.TestCase):
             self.assertEqual(len(rows), 1)
             self.assertIn("Scapes elongate", rows[0]["description_text"])
 
+    def test_non_pdf_image_can_reference_same_taxon_structured_descriptions(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            db_path = tmp / "literature.db"
+            literature_image = tmp / "paper__accepted_000007__figure.jpg"
+            manual_image = tmp / "manual_camera_image.jpg"
+            literature_image.write_bytes(b"literature")
+            manual_image.write_bytes(b"manual")
+            self._create_minimal_literature_db(
+                db_path,
+                literature_image,
+                figure_id=7,
+                pdf_id=3,
+                species="Aphaenogaster gamagumayaa",
+            )
+
+            strict_context = resolve_literature_context(
+                str(db_path),
+                image_path=str(manual_image),
+                provenance={},
+                taxon_hint="Aphaenogaster gamagumayaa",
+                allow_filename_figure_id=False,
+            )
+            self.assertFalse(strict_context["available"])
+
+            taxon_context = resolve_literature_context(
+                str(db_path),
+                image_path=str(manual_image),
+                provenance={},
+                taxon_hint="Aphaenogaster gamagumayaa",
+                allow_filename_figure_id=False,
+                allow_taxon_match=True,
+            )
+            self.assertTrue(taxon_context["available"])
+            self.assertEqual(taxon_context["link_mode"], "taxon_match_not_image_provenance")
+            self.assertIsNone(taxon_context["pdf_file_id"])
+
+            rows = query_literature_part_descriptions(str(db_path), context=taxon_context, current_part="scape")
+            self.assertEqual(len(rows), 1)
+            source = build_description_source(rows[0], taxon_context)
+            self.assertEqual(source["source"], "pdf_taxon_part_description_species_match")
+            self.assertEqual(source["link_mode"], "taxon_match_not_image_provenance")
+            self.assertFalse(source["image_provenance_matched"])
+
     def test_raw_pdf_text_block_search_is_available_as_fallback(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp = Path(tmp_dir)

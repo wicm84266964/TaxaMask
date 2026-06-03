@@ -479,6 +479,12 @@ QLabel#startWorkflowTitle {
     font-weight: 800;
 }
 
+QLabel#startProjectConsoleTitle {
+    color: %TEXT_SOFT%;
+    font-weight: 800;
+    padding: 0 2px;
+}
+
 QLabel#SectionNote,
 QLabel#BlinkFormLabel,
 QLabel#mutedLabel {

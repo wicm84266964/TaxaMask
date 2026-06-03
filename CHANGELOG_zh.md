@@ -4,6 +4,16 @@
 
 ## 📅 更新日志 (Update Log)
 
+### **[2026-06-03] 本轮收尾：PDF 证据闭环、2D/STL 模型方案落地与 TIF 实验边界记录**
+> **本次重点：把 6 月 2 日以来的 PDF 文献证据闭环、2D/STL 模型方案与 Blink 后端切换、Ant-Code 配置/权限/文档同步集中收尾提交；同时明确 TIF 路径仍是实验性链路，暂不继续强推内嵌 Agent 与 TIF GPU 体预览的组合。**
+
+- 完成 PDF 文献证据到 2D/STL 标注工作台的闭环留档：结果目录迁出 `AntSleap/`、提取续跑、accepted/needs-review 图像分流、文献性状弹窗、非 PDF 图片按同物种引用文献描述、裁剪 provenance 继承和描述来源审计均已写入使用手册与大模型对接文档。
+- 完成 2D/STL 模型方案管理与 Blink 后端切换第一版留档：项目级 `model_profiles`、父部位/子部位后端、route 显式后端、热力图 Blink、外部 Blink 契约、训练/推理/导出审计信息，以及“高级拓展”集中配置思路均已归档。
+- `docs/designs/2026-06-02_模型方案管理与Blink后端切换执行清单.md` 从“待执行清单”更新为“已落地审计清单”，记录阶段复核和核心测试矩阵。
+- README、`TaxaMask使用手册.md`、`LLM_CONTEXT_DETAILED.md`、`.lab-agent/memory.md` 和 TaxaMask workflow skill 同步到当前工作流边界：PDF 是 evidence/provenance；2D/STL 是当前稳定主验证路线；TIF 保留为实验性体数据路线。
+- 记录 TIF 已知限制：TIF GPU/OpenGL 体预览与 Ant-Code 内嵌 WebEngine / Qt Quick 在同一顶层窗口里可能触发 `QQuickWidget ... no QRhi` 和黑屏问题。当前不继续强行改 TIF 路径；后续若要恢复 TIF Ask Agent，应优先采用外部浏览器/独立进程或其他图形后端隔离方案。
+- 提交前安全审计确认：未跟踪文件为源码、测试、契约文档和论文规划草稿；本地 `.lab-agent/config.json`、sessions、数据库、模型权重、运行产物、图片和 TIF 数据仍由 `.gitignore` 排除，不进入版本库。
+
 ### **[2026-06-02] PDF 文献证据到标注工作台的闭环收口**
 > **本次重点：把 PDF 图版筛选、纯文本性状抽取、候选图导入、人工裁剪和 2D 标注工作台里的文献性状对齐串成可试跑闭环，同时把运行产物从主程序目录迁出，避免真实研究数据把源码目录搅乱。**
 
@@ -21,6 +31,17 @@
 - 起始界面和工作台 Agent 面板补了长路径显示与 Ant-Code 首次启动 JSON 空响应提示的兜底说明，减少“待信任/无法发送”这类状态下的信息不透明。
 - 已归档模型方案专项设计稿：`docs/designs/2026-06-02_模型方案管理与Blink后端切换设计稿.md`。它记录下一阶段要做的“父部位/子部位模型方案保存、一键切换、Blink 后端不再绑定 ViT-B、训练推理链路一致化”设计，尚未进入实现阶段。
 - 当前真实小批量数据库检查结论：多模态图像复核已经基本走通，`accepted` 图均为 real 多模态结果且物种名不为空；但文本 LLM 原始 JSON 仍有不少 provider 输出不严格，部分 PDF 未产出结构化性状，部分通过图的物种名还需要后续标准化和多物种图裁剪/复核兜底。
+
+#### **后续同日追加：2D/STL 模型方案与 Blink 后端切换落地**
+
+- `2D/STL Model Settings` 从散装参数重组为 `Profile / 父部位标注 / 子部位标注 / 推理 / 外部后端` 五个页签。当前项目可以保存多套模型方案，并用 active profile 控制父部位后端、子部位默认后端、主定位结构、父级框比例、VLM 目标部位和推理阈值。
+- 项目 JSON 新增 `model_profiles` 结构；旧项目打开时会自动补默认方案并同步旧的 locator scope、父级框比例和 Blink 默认参数，避免旧项目因为新结构无法继续训练或推理。
+- `父部位 -> 子部位` route 记录新增显式 `expert_backend`、`expert_manifest`、`input_size` 和 `backend_params`。旧 route 默认解释为 `vit_b_blink`，新 route 可以区分 `vit_b_blink`、`heatmap_blink` 和 `external_blink`。
+- ViT-B Blink 和新增热力图 Blink 训练结果都会写 `.manifest.json`，记录父/子部位、输入尺寸、输出 schema、训练项目和 trajectory 数量，防止不同类型专家被静默混用。
+- 新增热力图 Blink 子部位专家路径：从带 `parent_context.parent_box` 的 trajectory 生成父 ROI crop、中心点 heatmap 和宽高回归目标，可用于在已有父框内快速验证眼、上颚等子部位起稿流程。
+- 新增外部 Blink 后端契约 `docs/contracts/external_blink_backend_contract_v1.md` 和 runner。它只接管“已有父框内预测子部位框”的任务，输出仍作为 SAM 草稿提示和可复核 AI draft，不会直接写成人工真值。
+- 自动推理与训练报告增加模型审计信息：日志和 `report_summary.json` 会记录当前模型方案、父部位后端和 route 后端，方便以后追溯某批 AI 草稿或训练结果来自哪套方案。
+- 内置父部位训练成功后会把本次 Locator/SAM 权重文件名写回当前 active profile；2D/STL 数据集导出会生成 `model_profile_summary.json`，记录 active profile、父/子后端和 route 专家摘要，方便数据集交接和实验复现。
 
 ### **[2026-05-29] TIF GPU 体预览、清晰模式与内部观察闭环**
 > **本次重点：在 TIF 体数据工作台内加入只读 3D volume 预览，让研究者可以直接旋转、平移、缩放、进入体内并剖开近端组织观察内部结构，为后续脑部统一方向重切片打基础。**

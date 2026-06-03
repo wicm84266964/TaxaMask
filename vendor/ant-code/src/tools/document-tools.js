@@ -5,6 +5,9 @@ import { isInside } from "../permissions/policy-engine.js";
 import { normalizeToolPath } from "../permissions/path-utils.js";
 import { htmlToMarkdown } from "./web-tools.js";
 
+const MAX_WORKSHEET_ROWS = 500;
+const MAX_WORKSHEET_COLUMNS = 80;
+
 export async function documentIntakeTool(input) {
   const workspace = path.resolve(input.cwd);
   const requested = normalizeToolPath(input.path);
@@ -57,7 +60,7 @@ function canUseOutsideWorkspace(policy = {}) {
   return Boolean(policy.fullAccess || policy.approvedOutsideWorkspace);
 }
 
-function parseDocumentBuffer(buffer, ext) {
+export function parseDocumentBuffer(buffer, ext) {
   if ([".txt", ".md", ".json", ".csv", ".log", ".xml"].includes(ext)) {
     return {
       kind: ext.slice(1) || "text",
@@ -130,11 +133,21 @@ function parseOfficeZip(buffer, ext) {
   const sheets = Array.from(entries.entries())
     .filter(([name]) => /^xl\/worksheets\/sheet\d+\.xml$/i.test(name))
     .sort(([a], [b]) => numericPathCompare(a, b))
-    .map(([name, value], index) => `Sheet ${index + 1} (${name})\n${worksheetToText(value.toString("utf8"), sharedStrings)}`);
+    .map(([name, value], index) => {
+      const parsed = worksheetToRows(value.toString("utf8"), sharedStrings);
+      return {
+        name: `Sheet ${index + 1}`,
+        source: name,
+        rows: parsed.rows,
+        truncatedRows: parsed.truncatedRows,
+        truncatedColumns: parsed.truncatedColumns
+      };
+    });
   return {
     kind: "xlsx",
     supported: sheets.length > 0 || sharedStrings.length > 0,
-    content: sheets.length > 0 ? sheets.join("\n\n") : sharedStrings.join("\n"),
+    content: sheets.length > 0 ? sheets.map((sheet) => `${sheet.name} (${sheet.source})\n${worksheetRowsToText(sheet.rows)}`).join("\n\n") : sharedStrings.join("\n"),
+    sheets,
     notes: [
       `Extracted ${sheets.length} worksheet XML file(s).`,
       sharedStrings.length > 0 ? `Loaded ${sharedStrings.length} shared string(s).` : "No shared string table found."
@@ -196,9 +209,15 @@ function findEndOfCentralDirectory(buffer) {
 }
 
 function xmlToText(xml) {
-  return decodeXml(String(xml ?? ""))
-    .replace(/<[^>]+>/g, " ")
-    .replace(/\s+/g, " ")
+  return decodeXml(String(xml ?? "")
+    .replace(/<w:tab\b[^>]*\/?>/gi, "\t")
+    .replace(/<w:br\b[^>]*\/?>/gi, "\n")
+    .replace(/<\/(?:w|a):p>/gi, "\n")
+    .replace(/<[^>]+>/g, " "))
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n[ \t]+/g, "\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
 
@@ -208,20 +227,103 @@ function extractSharedStrings(xml) {
     .filter(Boolean);
 }
 
-function worksheetToText(xml, sharedStrings) {
-  const cells = [];
+function worksheetToRows(xml, sharedStrings) {
+  const rowMap = new Map();
+  let maxRow = -1;
+  let maxColumn = -1;
+  let truncatedRows = false;
+  let truncatedColumns = false;
   for (const match of String(xml ?? "").matchAll(/<c\b([^>]*)>([\s\S]*?)<\/c>/gi)) {
     const attrs = match[1];
     const body = match[2];
     const ref = attrs.match(/\br="([^"]+)"/)?.[1] ?? "?";
-    const type = attrs.match(/\bt="([^"]+)"/)?.[1] ?? "";
-    const raw = body.match(/<v[^>]*>([\s\S]*?)<\/v>/i)?.[1] ?? body.match(/<t[^>]*>([\s\S]*?)<\/t>/i)?.[1] ?? "";
-    const value = type === "s" ? sharedStrings[Number(raw)] ?? raw : decodeXml(raw);
-    if (value) {
-      cells.push(`${ref}: ${value}`);
+    const position = cellReferenceToIndexes(ref);
+    const value = cellValueToText(attrs, body, sharedStrings);
+    if (!position || !value) {
+      continue;
     }
+    if (position.row >= MAX_WORKSHEET_ROWS) {
+      truncatedRows = true;
+      continue;
+    }
+    if (position.column >= MAX_WORKSHEET_COLUMNS) {
+      truncatedColumns = true;
+      continue;
+    }
+    const row = rowMap.get(position.row) ?? [];
+    row[position.column] = value;
+    rowMap.set(position.row, row);
+    maxRow = Math.max(maxRow, position.row);
+    maxColumn = Math.max(maxColumn, position.column);
   }
+  if (maxRow < 0 || maxColumn < 0) {
+    return { rows: [], truncatedRows, truncatedColumns };
+  }
+  const rows = [];
+  for (let rowIndex = 0; rowIndex <= maxRow; rowIndex += 1) {
+    const row = rowMap.get(rowIndex) ?? [];
+    rows.push(Array.from({ length: maxColumn + 1 }, (_, columnIndex) => row[columnIndex] ?? ""));
+  }
+  return { rows, truncatedRows, truncatedColumns };
+}
+
+function worksheetRowsToText(rows) {
+  const cells = [];
+  rows.forEach((row, rowIndex) => {
+    row.forEach((value, columnIndex) => {
+      if (value) {
+        cells.push(`${columnName(columnIndex)}${rowIndex + 1}: ${value}`);
+      }
+    });
+  });
   return cells.join("\n");
+}
+
+function cellReferenceToIndexes(ref) {
+  const match = String(ref ?? "").match(/^([A-Z]+)(\d+)$/i);
+  if (!match) {
+    return null;
+  }
+  return {
+    column: columnNameToIndex(match[1]),
+    row: Math.max(0, Number(match[2]) - 1)
+  };
+}
+
+function columnNameToIndex(value) {
+  let result = 0;
+  for (const char of String(value ?? "").toUpperCase()) {
+    const code = char.charCodeAt(0);
+    if (code < 65 || code > 90) {
+      return 0;
+    }
+    result = result * 26 + code - 64;
+  }
+  return Math.max(0, result - 1);
+}
+
+function columnName(index) {
+  let value = Number(index) + 1;
+  let out = "";
+  while (value > 0) {
+    const remainder = (value - 1) % 26;
+    out = String.fromCharCode(65 + remainder) + out;
+    value = Math.floor((value - 1) / 26);
+  }
+  return out;
+}
+
+function cellValueToText(attrs, body, sharedStrings) {
+  const type = String(attrs.match(/\bt="([^"]+)"/)?.[1] ?? "");
+  const raw = body.match(/<v[^>]*>([\s\S]*?)<\/v>/i)?.[1] ?? "";
+  const inline = body.match(/<t[^>]*>([\s\S]*?)<\/t>/i)?.[1] ?? "";
+  if (type === "s") {
+    return sharedStrings[Number(raw)] ?? raw;
+  }
+  if (type === "inlineStr" || inline) {
+    return decodeXml(inline);
+  }
+  return decodeXml(raw);
 }
 
 function decodeXml(value) {

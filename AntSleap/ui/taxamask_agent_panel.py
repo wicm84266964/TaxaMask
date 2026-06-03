@@ -110,9 +110,11 @@ class TaxaMaskAgentPanel(QWidget):
         self._project_display = self.workspace_dir
         self._status_text = ""
         self._load_retries = 0
+        self._pending_prompt_attempts = 0
         self._preflight_checks_remaining = 0
         self._preflight_error = ""
         self._last_console_error = ""
+        self._embedded_page_error = ""
         self._web_profile = None
         self._web_profile_storage_dir = ""
         self._json_health_error = ""
@@ -148,9 +150,12 @@ class TaxaMaskAgentPanel(QWidget):
         return None
 
     def _resolve_ant_code_dashboard_entry(self):
-        candidate = Path(self.ant_code_root) / "src" / "cli" / "dashboard.js"
-        if candidate.exists():
-            return str(candidate.resolve())
+        for candidate in (
+            Path(self.ant_code_root) / "src" / "cli" / "dashboard.js",
+            Path(self.ant_code_root) / "src" / "cli" / "index.js",
+        ):
+            if candidate.exists():
+                return str(candidate.resolve())
         return None
 
     def _can_use_source_dashboard(self):
@@ -165,19 +170,22 @@ class TaxaMaskAgentPanel(QWidget):
         if not self._can_use_source_dashboard():
             raise FileNotFoundError(
                 "Ant-Code source dashboard is unavailable. Ensure Node.js is installed and "
-                "vendor/ant-code/src/cli/dashboard.js exists."
+                "vendor/ant-code/src/cli/index.js exists."
             )
-        return [
+        command = [
             self.node_executable,
             self.ant_code_dashboard_entry,
+        ]
+        if Path(self.ant_code_dashboard_entry).name == "index.js":
+            command.append("dashboard")
+        command.extend([
             "--project",
             self.workspace_dir,
             "--port",
             str(self.port),
             "--no-open",
-            "--parent-pid",
-            str(os.getpid()),
-        ]
+        ])
+        return command
 
     def _dashboard_environment(self):
         env = os.environ.copy()
@@ -215,6 +223,9 @@ class TaxaMaskAgentPanel(QWidget):
         self.health_timer = QTimer(self)
         self.health_timer.setInterval(500)
         self.health_timer.timeout.connect(self._poll_dashboard_ready)
+        self.prompt_retry_timer = QTimer(self)
+        self.prompt_retry_timer.setSingleShot(True)
+        self.prompt_retry_timer.timeout.connect(self._flush_pending_context_prompt)
 
     def _configure_web_profile(self):
         if self.web_view is None or QWebEngineProfile is None:
@@ -266,14 +277,16 @@ class TaxaMaskAgentPanel(QWidget):
       if (!raw) return "";
       const url = new URL(raw, window.location.href);
       if (url.origin !== window.location.origin) return "";
-      if (url.pathname === "/api/events" || url.pathname === "/api/files/raw") return "";
-      return url.pathname.startsWith("/api/") ? url.pathname : "";
+      const bootJsonPaths = new Set(["/api/status", "/api/trust", "/api/sessions"]);
+      return bootJsonPaths.has(url.pathname) ? url.pathname : "";
     } catch (_error) {
       return "";
     }
   };
   const installStyle = () => {
     if (!document.head || document.querySelector("#taxamask-agent-embed-style")) return;
+    document.documentElement.classList.add("taxamask-embed");
+    document.body?.classList.add("taxamask-embed-body");
     const style = document.createElement("style");
     style.id = "taxamask-agent-embed-style";
     style.textContent = `
@@ -295,137 +308,16 @@ class TaxaMaskAgentPanel(QWidget):
         display: none !important;
       }
       .workspace {
-        background: #12181d !important;
         border: 0 !important;
         border-radius: 0 !important;
         grid-column: 1 / -1 !important;
+        height: 100vh !important;
+        max-height: 100vh !important;
         min-width: 0 !important;
         width: 100% !important;
       }
       .workspace-header {
-        min-height: 38px !important;
-        background: #1A1F24 !important;
-        border-bottom: 1px solid #303A42 !important;
         border-radius: 0 !important;
-        padding: 8px 14px !important;
-      }
-      .workspace-local {
-        color: #D7E0E5 !important;
-        font-size: 12px !important;
-        letter-spacing: 0 !important;
-      }
-      .local-dot {
-        background: #57C98B !important;
-        box-shadow: 0 0 0 3px rgba(87, 201, 139, 0.14) !important;
-      }
-      .status-pill {
-        min-height: 24px !important;
-        border-color: #3A4650 !important;
-        background: #11161A !important;
-        color: #DCE4E8 !important;
-      }
-      .transcript {
-        background: #12181d !important;
-        padding: 14px 16px !important;
-      }
-      .message,
-      .activity-card,
-      .workflow-panel,
-      .composer,
-      .composer-footer,
-      .approval-panel,
-      .question-panel,
-      .trust-panel,
-      .context-panel,
-      .queue-panel,
-      .live-status,
-      .shutdown-panel {
-        box-sizing: border-box !important;
-        max-width: none !important;
-        width: 100% !important;
-      }
-      .workflow-strip {
-        display: none !important;
-      }
-      .workflow-strip-toggle,
-      .workflow-strip-meter,
-      .workflow-strip-detail,
-      .workflow-panel,
-      .activity-card,
-      .approval-panel,
-      .question-panel,
-      .trust-panel,
-      .context-panel,
-      .queue-panel,
-      .live-status {
-        box-sizing: border-box !important;
-        max-width: none !important;
-        width: 100% !important;
-      }
-      .workflow-strip-toggle {
-        grid-template-columns: auto auto minmax(0, 1fr) auto !important;
-      }
-      .workflow-strip-chevron {
-        display: none !important;
-      }
-      .workflow-strip-detail .workflow-list {
-        grid-template-columns: minmax(0, 1fr) !important;
-      }
-      .workflow-panel {
-        margin-left: 0 !important;
-        margin-right: 0 !important;
-      }
-      .message {
-        margin-left: 0 !important;
-        margin-right: 0 !important;
-      }
-      .message.user {
-        margin-left: auto !important;
-        margin-right: 0 !important;
-        max-width: min(900px, calc(100% - 48px)) !important;
-        width: fit-content !important;
-      }
-      .empty-state {
-        border: 1px solid #303A42 !important;
-        border-radius: 8px !important;
-        background: #171D22 !important;
-        padding: 18px !important;
-      }
-      .empty-kicker {
-        color: #8AA4B1 !important;
-        letter-spacing: 0 !important;
-      }
-      .empty-title {
-        color: #E2EAEE !important;
-        font-size: 18px !important;
-        letter-spacing: 0 !important;
-      }
-      .empty-copy {
-        color: #AEBBC2 !important;
-        font-size: 12px !important;
-      }
-      .composer-shell {
-        border-top: 1px solid #303A42 !important;
-        background: #171D22 !important;
-        padding: 10px 14px 12px !important;
-      }
-      .composer {
-        border: 1px solid #3A4650 !important;
-        background: #0F1418 !important;
-        border-radius: 8px !important;
-      }
-      #prompt-input {
-        min-height: 74px !important;
-        color: #E2EAEE !important;
-      }
-      #send-button {
-        border-radius: 7px !important;
-      }
-      .mode-row,
-      #mode-description,
-      #shutdown-button,
-      #header-shutdown-button {
-        display: none !important;
       }
     `;
     document.head.appendChild(style);
@@ -466,7 +358,7 @@ class TaxaMaskAgentPanel(QWidget):
 
   window.addEventListener("unhandledrejection", (event) => {
     const message = event.reason && (event.reason.message || String(event.reason));
-    if (!/Unexpected end of JSON input|empty JSON response/i.test(message || "")) return;
+    if (!/Unexpected end of JSON input|empty JSON response|Expected double-quoted property name/i.test(message || "")) return;
     try {
       if (window.sessionStorage.getItem(reloadKey)) return;
       window.sessionStorage.setItem(reloadKey, "1");
@@ -536,8 +428,10 @@ class TaxaMaskAgentPanel(QWidget):
             self.port = find_free_port(7410)
             self.dashboard_url = f"http://127.0.0.1:{self.port}"
             self._load_retries = 0
+            self._pending_prompt_attempts = 0
             self._preflight_checks_remaining = 0
             self._preflight_error = ""
+            self._embedded_page_error = ""
             self._json_health_warning = self._dashboard_workspace_json_warning()
             self._json_health_error = self._dashboard_json_health_error()
             if self._json_health_error:
@@ -599,6 +493,7 @@ class TaxaMaskAgentPanel(QWidget):
         if reset:
             self._preflight_checks_remaining = 6
             self._load_retries = 0
+            self._embedded_page_error = ""
         if not self.dashboard_url:
             return
         if not self.is_running():
@@ -711,15 +606,19 @@ class TaxaMaskAgentPanel(QWidget):
             """
 
     def _on_web_load_finished(self, ok):
-        if not ok or self.web_view is None:
+        if self.web_view is None:
+            return
+        if not ok:
+            self._embedded_page_error = "embedded page load failed"
+            self._update_status_label(at("Unable to start Ant-Code: {0}", self.lang).format(self._embedded_page_error))
+            self.stack.setCurrentWidget(self.fallback)
+            self._update_fallback()
             return
         self.web_view.page().runJavaScript(self._web_post_load_source())
         self._ensure_trusted()
         QTimer.singleShot(1200, self._verify_embedded_page_ready)
         if self._pending_context_prompt:
-            prompt = self._pending_context_prompt
-            self._pending_context_prompt = ""
-            QTimer.singleShot(350, lambda: self._send_context_prompt(prompt))
+            self._schedule_pending_context_prompt_flush(700)
 
     def _verify_embedded_page_ready(self):
         if self.web_view is None or not self.dashboard_url:
@@ -743,18 +642,26 @@ class TaxaMaskAgentPanel(QWidget):
 
     def _handle_embedded_page_ready(self, ready):
         if ready:
+            self._embedded_page_error = ""
             if self.web_view is not None:
                 self.web_view.page().runJavaScript(
                     "try { sessionStorage.removeItem('__taxamaskAgentJsonReloaded'); sessionStorage.removeItem('__taxamaskAgentTrustReloaded'); } catch (error) {}"
                 )
+            self._flush_pending_context_prompt()
             return
         if not self.is_running() or self.web_view is None:
             return
-        if self._load_retries >= 1:
-            self._update_status_label(at("Unable to start Ant-Code: {0}", self.lang).format("embedded page init failed"))
+        max_retries = 4 if self._pending_context_prompt else 2
+        if self._load_retries >= max_retries:
+            self._embedded_page_error = "embedded page init failed"
+            self._update_status_label(at("Unable to start Ant-Code: {0}", self.lang).format(self._embedded_page_error))
+            self.stack.setCurrentWidget(self.fallback)
+            self._update_fallback()
             return
         self._load_retries += 1
         self._update_status_label(at("Starting Ant-Code Dashboard...", self.lang))
+        if self._pending_context_prompt:
+            self._schedule_pending_context_prompt_flush(900)
         QTimer.singleShot(350, self._load_dashboard)
 
     def _ensure_trusted(self):
@@ -821,6 +728,15 @@ class TaxaMaskAgentPanel(QWidget):
         if not self._is_json_console_error(text):
             return
         self._last_console_error = f"{text} ({source_id}:{line_number})"
+        if self._is_transient_json_console_error(text):
+            self._update_status_label(at("Starting Ant-Code Dashboard...", self.lang))
+            if self._pending_context_prompt:
+                self._schedule_pending_context_prompt_flush(900)
+            return
+        if self._pending_context_prompt and self.is_running():
+            self._update_status_label(at("Starting Ant-Code Dashboard...", self.lang))
+            self._schedule_pending_context_prompt_flush(900)
+            return
         self._update_status_label(at("Unable to start Ant-Code: {0}", self.lang).format(self._last_console_error))
 
     def _is_json_console_error(self, text):
@@ -831,6 +747,15 @@ class TaxaMaskAgentPanel(QWidget):
             "expected double-quoted property name",
             "json.parse",
             "json 解析失败",
+        )
+        return any(pattern in lowered for pattern in patterns)
+
+    def _is_transient_json_console_error(self, text):
+        lowered = str(text or "").lower()
+        patterns = (
+            "unexpected end of json input",
+            "empty json response",
+            "expected double-quoted property name",
         )
         return any(pattern in lowered for pattern in patterns)
 
@@ -942,27 +867,65 @@ class TaxaMaskAgentPanel(QWidget):
         return preview[:180]
 
     def _send_context_prompt(self, prompt):
+        prompt = str(prompt or "")
+        if not prompt:
+            self._pending_context_prompt = ""
+            self._pending_prompt_attempts = 0
+            return
+        self._pending_context_prompt = prompt
         if not self.is_running() or self.web_view is None:
-            self._pending_context_prompt = prompt
             return
         escaped = prompt.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
         self.web_view.page().runJavaScript(
             f"""
             (() => {{
+              const pageReadyForTaxaMaskPrompt = () => {{
+                const project = document.querySelector('#project-path')?.textContent?.trim() || '';
+                const send = document.querySelector('#send-button');
+                const transcript = document.querySelector('#transcript');
+                const trustPanel = document.querySelector('#trust-panel');
+                const sendText = send ? send.textContent.trim() : '';
+                const panelVisible = trustPanel
+                  && !trustPanel.classList.contains('hidden')
+                  && trustPanel.textContent.trim().length > 0;
+                return Boolean(send && transcript && project && project !== '加载中' && sendText !== '待信任' && !panelVisible);
+              }};
+              if (!pageReadyForTaxaMaskPrompt()) return false;
               const input = document.querySelector('#prompt-input');
               if (!input) return false;
               input.value = `{escaped}`;
               input.dispatchEvent(new Event('input', {{ bubbles: true }}));
               input.focus();
-              return true;
+              return input.value === `{escaped}`;
             }})();
             """,
             lambda ok: self._queue_prompt_if_not_inserted(prompt, ok),
         )
 
     def _queue_prompt_if_not_inserted(self, prompt, ok):
-        if not ok:
-            self._pending_context_prompt = prompt
+        if ok:
+            if self._pending_context_prompt == prompt:
+                self._pending_context_prompt = ""
+                self._pending_prompt_attempts = 0
+            return
+        if self._pending_context_prompt != prompt:
+            return
+        self._pending_prompt_attempts += 1
+        delay = min(2500, 300 + self._pending_prompt_attempts * 250)
+        self._schedule_pending_context_prompt_flush(delay)
+
+    def _schedule_pending_context_prompt_flush(self, delay_ms=500):
+        if not self._pending_context_prompt:
+            return
+        if self.prompt_retry_timer.isActive():
+            return
+        self.prompt_retry_timer.start(max(0, int(delay_ms)))
+
+    def _flush_pending_context_prompt(self):
+        prompt = self._pending_context_prompt
+        if not prompt:
+            return
+        self._send_context_prompt(prompt)
 
     def _context_prompt(self, context):
         if not context:
@@ -1053,6 +1016,7 @@ class TaxaMaskAgentPanel(QWidget):
 
     def stop_dashboard(self):
         self.health_timer.stop()
+        self.prompt_retry_timer.stop()
         self._request_dashboard_shutdown()
         if self.process is not None:
             try:
@@ -1165,8 +1129,11 @@ class TaxaMaskAgentPanel(QWidget):
         name = Path(str(process_name or "")).name.lower()
         source_entry = self._normalize_process_command(self.ant_code_dashboard_entry or "")
         source_dashboard = (
-            "src\\cli\\dashboard.js" in command
-            and (not source_entry or source_entry in command)
+            (
+                "src\\cli\\dashboard.js" in command
+                or ("src\\cli\\index.js" in command and " dashboard " in f" {command} ")
+            )
+            and (not source_entry or source_entry in command or "src\\cli\\dashboard.js" in command)
             and name in {"node", "node.exe"}
         )
         executable_dashboard = (
@@ -1219,6 +1186,9 @@ class TaxaMaskAgentPanel(QWidget):
             lines.extend(["", self.dashboard_url])
         if self._preflight_error:
             lines.extend(["", f"Preflight error: {self._preflight_error}"])
+        if self._embedded_page_error:
+            label = "内嵌页面错误" if self.lang == "zh" else "Embedded page error"
+            lines.extend(["", f"{label}: {self._embedded_page_error}"])
         if self._json_health_warning:
             warning_label = "JSON 提醒（不影响 Ant-Code 启动）" if self.lang == "zh" else "JSON warning (does not block Ant-Code launch)"
             lines.extend(["", f"{warning_label}: {self._json_health_warning}"])

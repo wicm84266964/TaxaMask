@@ -4,7 +4,8 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { listBackgroundAgentTasks } from "../../src/agents/background-registry.js";
+import { createAgentTaskGroupStore } from "../../src/agents/task-group-store.js";
+import { createAgentTaskStore } from "../../src/agents/task-store.js";
 import { createDashboardRuntime } from "../../src/dashboard/sessions.js";
 import { createSessionStore } from "../../src/storage/session-store.js";
 
@@ -43,6 +44,7 @@ test("dashboard runtime exposes model and context status", async () => {
     assert.equal(initial.ok, true);
     assert.equal(typeof initial.sessionStatus.model, "string");
     assert.notEqual(initial.sessionStatus.model.length, 0);
+    assert.ok(initial.models.some((model) => model.id === initial.sessionStatus.model && model.current === true));
     assert.ok(initial.sessionStatus.context.maxTokens > 0);
 
     await runtime.trustWorkspace();
@@ -60,6 +62,474 @@ test("dashboard runtime exposes model and context status", async () => {
   } finally {
     await close(server);
   }
+});
+
+test("dashboard runtime can switch registered model for the current session", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
+    modelAlias: "code-model",
+    models: [
+      { id: "code-model", label: "Code Model", modalities: ["text"], contextTokens: 200000 },
+      { id: "vision-model", label: "Vision Model", modalities: ["text", "image"], contextTokens: 128000 }
+    ]
+  }), "utf8");
+  const requests = [];
+  const server = await listen(createRecordingGateway(requests, "switched answer"), "127.0.0.1", 0);
+  const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
+
+  try {
+    await runtime.trustWorkspace();
+    const initial = await runtime.status();
+    assert.deepEqual(initial.models.map((model) => [model.id, model.modalities, model.current]), [
+      ["code-model", ["text"], true],
+      ["vision-model", ["text", "image"], false]
+    ]);
+
+    const switched = await runtime.switchModel({ modelId: "vision-model" });
+    assert.equal(switched.ok, true);
+    assert.equal(switched.sessionStatus.model, "vision-model");
+    assert.equal(switched.models.find((model) => model.id === "vision-model").current, true);
+
+    const started = await runtime.startTurn({
+      prompt: "use selected model",
+      permissionMode: "plan"
+    });
+    await waitForEvent(runtime, started.sessionId, (event) => event.type === "files_updated");
+
+    assert.equal(requests[0].model, "vision-model");
+    assert.equal(started.sessionStatus.model, "vision-model");
+    assert.equal(started.sessionStatus.context.modelMaxTokens, 128000);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime can apply model agent defaults when switching", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
+    modelAlias: "code-model",
+    models: [
+      {
+        id: "code-model",
+        label: "Code Model",
+        modalities: ["text"],
+        contextTokens: 200000,
+        agentModelTiers: {
+          cheap: "code-flash",
+          default: "code-flash",
+          strong: "code-strong"
+        }
+      },
+      {
+        id: "vision-model",
+        label: "Vision Model",
+        modalities: ["text", "image"],
+        contextTokens: 128000,
+        agentModelTiers: {
+          cheap: "vision-flash",
+          default: "vision-default",
+          strong: "vision-strong"
+        }
+      }
+    ],
+    agents: {
+      modelTiers: {
+        cheap: "code-flash",
+        default: "code-flash",
+        strong: "code-strong"
+      }
+    }
+  }), "utf8");
+  const runtime = createDashboardRuntime({ cwd, env: {} });
+
+  const switched = await runtime.switchModel({ modelId: "vision-model", applyAgentDefaults: true });
+
+  assert.equal(switched.ok, true);
+  assert.equal(switched.sessionStatus.model, "vision-model");
+  assert.deepEqual(switched.agentModelTiers, {
+    cheap: "vision-flash",
+    default: "vision-default",
+    strong: "vision-strong",
+    vision: "mimo-v2.5"
+  });
+  assert.deepEqual(switched.models.find((model) => model.id === "vision-model")?.agentModelTiers, {
+    cheap: "vision-flash",
+    default: "vision-default",
+    strong: "vision-strong"
+  });
+
+  const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
+  assert.deepEqual(local.agents.modelTiers, {
+    cheap: "vision-flash",
+    default: "vision-default",
+    strong: "vision-strong",
+    vision: "mimo-v2.5"
+  });
+});
+
+test("dashboard runtime saves local model gateway config", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const runtime = createDashboardRuntime({ cwd, env: {} });
+
+  const saved = await runtime.saveModelConfig({
+    gatewayUrl: "https://local.gateway.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    gatewayApiKey: "secret-key",
+    modelId: "local-vision",
+    label: "Local Vision",
+    modalities: ["text", "image"],
+    thinking: true,
+    contextTokens: "128000",
+    agentCheapModel: "local-cheap",
+    agentDefaultModel: "local-default",
+    agentStrongModel: "local-strong",
+    visionAgentModel: "local-vision",
+    applyAgentDefaults: true,
+    switchToModel: true
+  });
+
+  assert.equal(saved.ok, true);
+  assert.equal(saved.sessionStatus.model, "local-vision");
+  assert.equal(saved.gatewayConfig.apiKeyConfigured, true);
+  assert.equal(saved.models.find((model) => model.id === "local-vision")?.current, true);
+  assert.deepEqual(saved.models.find((model) => model.id === "local-vision")?.modalities, ["text", "image"]);
+
+  const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
+  assert.equal(local.modelAlias, "local-vision");
+  assert.equal(local.lab.gatewayUrl, "https://local.gateway.example/v1/chat/completions");
+  assert.equal(local.lab.gatewayApiKey, "secret-key");
+  assert.ok(local.allowedHosts.includes("local.gateway.example"));
+  assert.deepEqual(local.models.find((model) => model.id === "local-vision").modalities, ["text", "image"]);
+  assert.deepEqual(local.models.find((model) => model.id === "local-vision").agentModelTiers, {
+    cheap: "local-cheap",
+    default: "local-default",
+    strong: "local-strong"
+  });
+  assert.deepEqual(local.agents.modelTiers, {
+    cheap: "local-cheap",
+    default: "local-default",
+    strong: "local-strong",
+    vision: "local-vision"
+  });
+  assert.deepEqual(local.agents.vision, {
+    enabled: true,
+    model: "local-vision",
+    autoUseWhenMainModelTextOnly: true
+  });
+});
+
+test("dashboard runtime refreshes idle active session after saving gateway key", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const requests = [];
+  const server = await listen(createAuthRecordingGateway(requests, "fresh answer", "new-key"), "127.0.0.1", 0);
+  const env = mockGatewayEnv(server, {
+    LAB_MODEL_GATEWAY_API_KEY: "old-key",
+    LAB_AGENT_MODEL: "mock-model"
+  });
+  const runtime = createDashboardRuntime({ cwd, env });
+
+  try {
+    await runtime.trustWorkspace();
+    const started = await runtime.startTurn({
+      prompt: "first attempt",
+      permissionMode: "plan"
+    });
+    assert.equal(started.ok, true);
+    await waitForEvent(runtime, started.sessionId, (event) => event.type === "run_state" && event.running === false);
+    assert.equal(requests.at(-1)?.authorization, "Bearer old-key");
+    assert.equal(runtime.active.get(started.sessionId).session.config.lab.gatewayApiKey, "old-key");
+
+    const saved = await runtime.saveModelConfig({
+      sessionId: started.sessionId,
+      gatewayUrl: env.LAB_MODEL_GATEWAY_URL,
+      gatewayProtocol: "lab-agent-gateway",
+      gatewayApiKey: "new-key",
+      modelId: "mock-model",
+      label: "Mock Model",
+      modalities: ["text"],
+      switchToModel: true
+    });
+    assert.equal(saved.ok, true);
+    assert.equal(saved.sessionId, started.sessionId);
+    assert.equal(runtime.active.get(started.sessionId).session.config.lab.gatewayApiKey, "new-key");
+
+    const retried = await runtime.startTurn({
+      sessionId: started.sessionId,
+      prompt: "retry same session",
+      permissionMode: "plan"
+    });
+    assert.equal(retried.ok, true);
+    const events = await waitForEvent(runtime, started.sessionId, (event) => (
+      event.type === "files_updated" && event.sequence > retried.eventCursor
+    ));
+    const final = events.find((event) => event.type === "assistant_final" && event.sequence > retried.eventCursor);
+    assert.match(final?.text ?? "", /fresh answer/);
+    assert.equal(requests.at(-1)?.authorization, "Bearer new-key");
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime switches gateway profiles without mixing previous provider models", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
+    modelAlias: "mimo-pro",
+    models: [
+      { id: "mimo-pro", label: "MiMo Pro", modalities: ["text"] },
+      { id: "mimo-vision", label: "MiMo Vision", modalities: ["text", "image"] }
+    ],
+    lab: {
+      gatewayUrl: "https://mimo.example/v1/chat/completions",
+      gatewayProtocol: "openai-chat",
+      gatewayApiKey: "mimo-key"
+    },
+    agents: {
+      modelTiers: {
+        cheap: "mimo-vision",
+        default: "mimo-vision",
+        strong: "mimo-vision",
+        vision: "mimo-vision"
+      },
+      vision: {
+        enabled: true,
+        model: "mimo-vision",
+        autoUseWhenMainModelTextOnly: true
+      }
+    }
+  }), "utf8");
+  const runtime = createDashboardRuntime({ cwd, env: {} });
+
+  const saved = await runtime.saveModelConfig({
+    gatewayUrl: "https://deepseek.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    gatewayApiKey: "deepseek-key",
+    modelId: "deepseek-chat",
+    label: "DeepSeek Chat",
+    modalities: ["text"],
+    switchToModel: true
+  });
+
+  assert.equal(saved.ok, true);
+  assert.equal(saved.sessionStatus.model, "deepseek-chat");
+  assert.deepEqual(saved.models.map((model) => model.id), ["deepseek-chat"]);
+  assert.equal(saved.gatewayProfiles.length, 2);
+  assert.equal(saved.gatewayProfiles.find((profile) => profile.gatewayUrl.includes("deepseek"))?.current, true);
+  assert.equal(saved.gatewayProfiles.find((profile) => profile.gatewayUrl.includes("mimo"))?.modelCount, 2);
+
+  const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
+  assert.deepEqual(local.models.map((model) => model.id), ["deepseek-chat"]);
+  assert.equal(local.agents.vision.enabled, false);
+  assert.equal(local.agents.vision.model, null);
+  assert.equal(local.agents.modelTiers.vision, undefined);
+
+  const mimoProfile = saved.gatewayProfiles.find((profile) => profile.gatewayUrl.includes("mimo"));
+  const switched = await runtime.switchGatewayProfile({ profileId: mimoProfile.id });
+
+  assert.equal(switched.ok, true);
+  assert.equal(switched.gatewayConfig.gatewayUrl, "https://mimo.example/v1/chat/completions");
+  assert.deepEqual(switched.models.map((model) => model.id), ["mimo-pro", "mimo-vision"]);
+  assert.equal(switched.sessionStatus.model, "mimo-pro");
+  assert.deepEqual(switched.visionAgent, {
+    enabled: true,
+    model: "mimo-vision",
+    autoUseWhenMainModelTextOnly: true
+  });
+});
+
+test("dashboard model config ignores process gateway env overrides", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: {
+      LAB_MODEL_GATEWAY_URL: "https://env-mimo.example/v1/chat/completions",
+      LAB_MODEL_GATEWAY_PROTOCOL: "openai-chat",
+      LAB_MODEL_GATEWAY_API_KEY: "env-key",
+      LAB_AGENT_MODEL: "env-mimo-model"
+    }
+  });
+
+  const initial = await runtime.status();
+  assert.equal(initial.gatewayConfig.gatewayUrl, "https://env-mimo.example/v1/chat/completions");
+  assert.equal(initial.sessionStatus.model, "env-mimo-model");
+  assert.ok(initial.models.some((model) => model.id === "env-mimo-model"));
+
+  const saved = await runtime.saveModelConfig({
+    gatewayUrl: "https://deepseek.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    gatewayApiKey: "deepseek-key",
+    modelId: "deepseek-chat",
+    label: "DeepSeek Chat",
+    modalities: ["text"],
+    switchToModel: true
+  });
+
+  assert.equal(saved.ok, true);
+  assert.equal(saved.gatewayConfig.gatewayUrl, "https://deepseek.example/v1/chat/completions");
+  assert.deepEqual(saved.models.map((model) => model.id), ["deepseek-chat"]);
+  assert.equal(saved.gatewayProfiles.find((profile) => profile.gatewayUrl.includes("deepseek"))?.current, true);
+
+  const after = await runtime.status();
+  assert.equal(after.gatewayConfig.gatewayUrl, "https://deepseek.example/v1/chat/completions");
+  assert.deepEqual(after.models.map((model) => model.id), ["deepseek-chat"]);
+});
+
+test("dashboard runtime adds models to the active gateway when key is unchanged", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const runtime = createDashboardRuntime({ cwd, env: {} });
+
+  await runtime.saveModelConfig({
+    gatewayUrl: "https://deepseek.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    gatewayApiKey: "deepseek-key",
+    modelId: "deepseek-chat",
+    label: "DeepSeek Chat",
+    modalities: ["text"],
+    switchToModel: true
+  });
+  const saved = await runtime.saveModelConfig({
+    gatewayUrl: "https://deepseek.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    modelId: "deepseek-reasoner",
+    label: "DeepSeek Reasoner",
+    modalities: ["text"],
+    switchToModel: true
+  });
+
+  assert.equal(saved.ok, true);
+  assert.deepEqual(saved.models.map((model) => model.id), ["deepseek-chat", "deepseek-reasoner"]);
+  assert.equal(saved.gatewayProfiles.find((profile) => profile.current)?.modelCount, 2);
+  assert.ok(saved.gatewayProfiles.find((profile) => profile.gatewayUrl.includes("deepseek")));
+
+  const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
+  assert.deepEqual(local.models.map((model) => model.id), ["deepseek-chat", "deepseek-reasoner"]);
+  assert.equal(local.lab.gatewayApiKey, "deepseek-key");
+});
+
+test("dashboard runtime deletes a registered model from the active gateway", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const runtime = createDashboardRuntime({ cwd, env: {} });
+
+  await runtime.saveModelConfig({
+    gatewayUrl: "https://mimo.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    gatewayApiKey: "mimo-key",
+    modelId: "mimo-pro",
+    label: "Mimo Pro",
+    modalities: ["text"],
+    switchToModel: true
+  });
+  await runtime.saveModelConfig({
+    gatewayUrl: "https://mimo.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    modelId: "mimo-vision",
+    label: "Mimo Vision",
+    modalities: ["text", "image"],
+    visionAgentModel: "mimo-vision",
+    switchToModel: true
+  });
+
+  const deleted = await runtime.deleteModelConfig({ modelId: "mimo-vision" });
+
+  assert.equal(deleted.ok, true);
+  assert.equal(deleted.deletedModel, "mimo-vision");
+  assert.deepEqual(deleted.models.map((model) => [model.id, model.current]), [["mimo-pro", true]]);
+  assert.deepEqual(deleted.visionAgent, {
+    enabled: false,
+    model: "",
+    autoUseWhenMainModelTextOnly: true
+  });
+  assert.equal(deleted.gatewayProfiles.find((profile) => profile.current)?.modelCount, 1);
+
+  const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
+  assert.equal(local.modelAlias, "mimo-pro");
+  assert.deepEqual(local.models.map((model) => model.id), ["mimo-pro"]);
+  assert.equal(local.agents.vision.enabled, false);
+  assert.equal(local.agents.vision.model, null);
+  assert.equal(local.agents.modelTiers?.vision, undefined);
+  assert.equal(local.lab.gatewayProfiles.find((profile) => profile.current || profile.id === local.lab.activeGatewayProfile)?.models.length, 1);
+});
+
+test("dashboard runtime clears the active gateway when deleting its final model", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const runtime = createDashboardRuntime({ cwd, env: {} });
+
+  await runtime.saveModelConfig({
+    gatewayUrl: "https://deepseek.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    gatewayApiKey: "deepseek-key",
+    modelId: "deepseek-chat",
+    label: "DeepSeek Chat",
+    modalities: ["text"],
+    switchToModel: true
+  });
+
+  const deleted = await runtime.deleteModelConfig({ modelId: "deepseek-chat" });
+
+  assert.equal(deleted.ok, true);
+  assert.equal(deleted.deletedModel, "deepseek-chat");
+  assert.equal(deleted.clearedGateway, true);
+  assert.equal(deleted.gatewayConfig.gatewayUrl, "https://token-plan-cn.xiaomimimo.com/v1/chat/completions");
+  assert.equal(deleted.gatewayConfig.apiKeyConfigured, false);
+  assert.deepEqual(deleted.models.map((model) => model.id), ["mimo-v2.5-pro", "mimo-v2.5"]);
+  assert.equal(deleted.sessionStatus.model, "mimo-v2.5-pro");
+
+  const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
+  assert.equal(local.modelAlias, "mimo-v2.5-pro");
+  assert.deepEqual(local.models.map((model) => model.id), ["mimo-v2.5-pro", "mimo-v2.5"]);
+  assert.equal(local.lab.gatewayUrl, "https://token-plan-cn.xiaomimimo.com/v1/chat/completions");
+  assert.equal(local.lab.gatewayApiKey, undefined);
+  assert.equal(local.lab.gatewayProfiles.some((profile) => profile.gatewayUrl.includes("deepseek")), false);
+});
+
+test("dashboard runtime replaces the edited model id instead of keeping the stale entry", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const runtime = createDashboardRuntime({ cwd, env: {} });
+
+  await runtime.saveModelConfig({
+    gatewayUrl: "https://deepseek.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    gatewayApiKey: "bad-key",
+    modelId: "deepseek-typo",
+    label: "DeepSeek Typo",
+    agentCheapModel: "deepseek-typo",
+    agentDefaultModel: "deepseek-typo",
+    agentStrongModel: "deepseek-typo",
+    switchToModel: true,
+    applyAgentDefaults: true
+  });
+  const saved = await runtime.saveModelConfig({
+    gatewayUrl: "https://deepseek.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    previousModelId: "deepseek-typo",
+    modelId: "deepseek-chat",
+    label: "DeepSeek Chat",
+    agentCheapModel: "deepseek-chat",
+    agentDefaultModel: "deepseek-chat",
+    agentStrongModel: "deepseek-chat",
+    switchToModel: true,
+    applyAgentDefaults: true
+  });
+
+  assert.equal(saved.ok, true);
+  assert.deepEqual(saved.models.map((model) => model.id), ["deepseek-chat"]);
+  assert.equal(saved.sessionStatus.model, "deepseek-chat");
+  assert.deepEqual(saved.agentModelTiers, {
+    cheap: "deepseek-chat",
+    default: "deepseek-chat",
+    strong: "deepseek-chat",
+    vision: "mimo-v2.5"
+  });
+
+  const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
+  assert.deepEqual(local.models.map((model) => model.id), ["deepseek-chat"]);
+  assert.equal(local.models.some((model) => model.id === "deepseek-typo"), false);
+  assert.equal(local.modelAlias, "deepseek-chat");
+  assert.deepEqual(local.agents.modelTiers, {
+    cheap: "deepseek-chat",
+    default: "deepseek-chat",
+    strong: "deepseek-chat",
+    vision: "mimo-v2.5"
+  });
 });
 
 test("dashboard runtime accumulates per-turn change counters", async () => {
@@ -201,50 +671,40 @@ test("dashboard runtime sends WebUI client surface in model context", async () =
   }
 });
 
-test("dashboard runtime resumes an idle parent when a background subagent completes", async () => {
+test("dashboard runtime sends image attachments while persisting only metadata", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
   const requests = [];
-  const server = await listen(createBackgroundAgentWakeGateway(requests, { childDelayMs: 120 }), "127.0.0.1", 0);
+  const server = await listen(createRecordingGateway(requests, "image answer"), "127.0.0.1", 0);
   const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
 
   try {
     await runtime.trustWorkspace();
     const started = await runtime.startTurn({
-      prompt: "delegate background subagent",
-      permissionMode: "workspace"
+      prompt: "describe attached image",
+      attachments: [{
+        type: "image",
+        name: "tiny.png",
+        mimeType: "image/png",
+        size: 5,
+        data: "aGVsbG8="
+      }],
+      permissionMode: "plan"
     });
     assert.equal(started.ok, true);
 
-    await waitForEvent(runtime, started.sessionId, () =>
-      runtime.listActiveEvents(started.sessionId)
-        .some((event) => event.type === "assistant_final" && /background dispatched/.test(event.text ?? ""))
-      && runtime.listActiveEvents(started.sessionId)
-        .some((event) => event.type === "run_state" && event.running === false)
-    );
+    const events = await waitForEvent(runtime, started.sessionId, (event) => event.type === "files_updated");
+    const userEvent = events.find((event) => event.type === "user_message");
+    assert.equal(userEvent?.attachments?.[0]?.name, "tiny.png");
+    assert.equal(userEvent?.attachments?.[0]?.data, undefined);
 
-    const wakeEvents = await waitForEvent(runtime, started.sessionId, () =>
-      runtime.listActiveEvents(started.sessionId)
-        .some((event) => event.type === "wakeup_queued")
-    );
-    const wakeupQueued = wakeEvents.find((event) => event.type === "wakeup_queued");
-    assert.equal(wakeupQueued?.running, false);
+    const userMessage = requests[0]?.messages?.find((message) => message.role === "user");
+    assert.equal(userMessage.content.some((block) => block.type === "image" && block.data === "aGVsbG8="), true);
 
-    const finalEvents = await waitForEvent(runtime, started.sessionId, () =>
-      runtime.listActiveEvents(started.sessionId)
-        .some((event) => event.type === "assistant_final" && /wakeup consumed/.test(event.text ?? ""))
-    );
-    assert.deepEqual(finalEvents.filter((event) => event.type === "user_message").map((event) => event.text), [
-      "delegate background subagent",
-      "子智能体完成，主控自动接续"
-    ]);
-    await waitForCondition(() => listBackgroundAgentTasks({ parentSessionId: started.sessionId }).length === 0);
-    assert.equal(listBackgroundAgentTasks({ parentSessionId: started.sessionId }).length, 0);
-
-    const group = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "task-groups", "group-dashboard-bg.json"), "utf8"));
-    assert.equal(group.status, "completed");
-    assert.match(group.summary, /完成 1/);
-    assert.equal(typeof group.wakePromptQueuedAt, "string");
-    assert.equal(typeof group.wakePromptConsumedAt, "string");
+    const metadata = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "sessions", `${started.sessionId}.json`), "utf8"));
+    const persisted = JSON.stringify(metadata);
+    assert.equal(persisted.includes("aGVsbG8="), false);
+    assert.equal(metadata.transcript.messages[0].content.some((block) => block.type === "image" && block.redacted === true), true);
+    assert.equal(metadata.transcript.contextMessages[0].content.some((block) => block.name === "tiny.png" && block.data === undefined), true);
   } finally {
     await close(server);
   }
@@ -712,6 +1172,148 @@ test("dashboard runtime stores guide transcript using visible guidance only", as
   }
 });
 
+test("dashboard runtime consumes background subagent wake prompts", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const requests = [];
+  const server = await listen(createBackgroundWakeGateway(requests), "127.0.0.1", 0);
+  const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
+  await runtime.trustWorkspace();
+
+  try {
+    const started = await runtime.startTurn({
+      prompt: "delegate background work",
+      permissionMode: "workspace"
+    });
+    assert.equal(started.ok, true);
+
+    const events = await waitForEvent(runtime, started.sessionId, () =>
+      runtime.listActiveEvents(started.sessionId).filter((event) => event.type === "files_updated").length >= 2
+    );
+    const parentRequests = requests.filter((item) => !String(item.sessionId ?? "").startsWith("agent-explorer-"));
+
+    assert.equal(events.some((event) => event.rawType === "subagent_group_wakeup"), true);
+    assert.equal(events.some((event) => event.type === "wakeup_queued"), true);
+    assert.equal(events.some((event) => event.type === "background_subagent_snapshot"), true);
+    assert.match(parentRequests.at(-1)?.messages?.at(-1)?.content ?? "", /Ant Code subagent group completed/);
+    assert.match(events.filter((event) => event.type === "assistant_final").map((event) => event.text).join("\n"), /parent consumed wake prompt/);
+
+    const group = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "task-groups", "group-dashboard-bg.json"), "utf8"));
+    assert.ok(group.wakePromptQueuedAt);
+    assert.ok(group.wakePromptConsumedAt);
+    const lastSnapshot = events.filter((event) => event.type === "background_subagent_snapshot").at(-1);
+    assert.deepEqual(lastSnapshot.groups, []);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime keeps still-running background siblings visible after wake prompt is consumed", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const requests = [];
+  const server = await listen(createBackgroundAnyWakeGateway(requests), "127.0.0.1", 0);
+  const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
+  await runtime.trustWorkspace();
+
+  try {
+    const started = await runtime.startTurn({
+      prompt: "delegate any background work",
+      permissionMode: "workspace"
+    });
+    assert.equal(started.ok, true);
+
+    const events = await waitForEvent(runtime, started.sessionId, () =>
+      runtime.listActiveEvents(started.sessionId).filter((event) => event.type === "files_updated").length >= 2
+    );
+
+    assert.equal(events.some((event) => event.rawType === "subagent_group_wakeup"), true);
+    const snapshots = events.filter((event) => event.type === "background_subagent_snapshot");
+    assert.ok(snapshots.length >= 2);
+    const lastSnapshot = snapshots.at(-1);
+    assert.equal(lastSnapshot.groups.length, 1);
+    assert.equal(lastSnapshot.groups[0].groupId, "group-dashboard-any");
+    assert.equal(lastSnapshot.groups[0].status, "running");
+    assert.equal(lastSnapshot.groups[0].runningCount, 1);
+    assert.equal(lastSnapshot.groups[0].wakePromptQueued, false);
+
+    const group = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "task-groups", "group-dashboard-any.json"), "utf8"));
+    assert.ok(group.wakePromptConsumedAt);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard runtime reports stale background subagents and can mark them recovered", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const server = await listen(createGateway("snapshot refresh"), "127.0.0.1", 0);
+  const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
+  await runtime.trustWorkspace();
+
+  try {
+    const started = await runtime.startTurn({
+      prompt: "seed session",
+      permissionMode: "workspace"
+    });
+    assert.equal(started.ok, true);
+    await waitForEvent(runtime, started.sessionId, (event) => event.type === "files_updated");
+
+    const taskStore = createAgentTaskStore({ cwd });
+    const groupStore = createAgentTaskGroupStore({ cwd });
+    const old = new Date(Date.now() - 20 * 60 * 1000).toISOString();
+    await taskStore.createTask({
+      id: "task-lost-bg",
+      parentSessionId: started.sessionId,
+      groupId: "group-lost-bg",
+      childSessionId: "agent-explorer-lost",
+      profile: "explorer",
+      title: "Lost background task",
+      prompt: "hang",
+      status: "running",
+      startedAt: old,
+      heartbeatAt: old,
+      progressAt: old,
+      latestProgress: "still running"
+    });
+    await groupStore.createGroup({
+      id: "group-lost-bg",
+      parentSessionId: started.sessionId,
+      status: "running",
+      waitFor: "all",
+      wakeParent: true,
+      taskIds: ["task-lost-bg"],
+      latestProgress: "后台子任务仍在运行"
+    });
+
+    await runtime.startTurn({
+      sessionId: started.sessionId,
+      prompt: "refresh background status",
+      permissionMode: "workspace"
+    });
+    const events = await waitForEvent(runtime, started.sessionId, (event) =>
+      event.type === "background_subagent_snapshot"
+      && event.groups.some((group) => group.groupId === "group-lost-bg" && group.status === "lost")
+    );
+    const staleSnapshot = events.filter((event) => event.type === "background_subagent_snapshot").at(-1);
+    assert.equal(staleSnapshot.groups[0].status, "lost");
+    assert.equal(staleSnapshot.groups[0].stale, true);
+    assert.match(staleSnapshot.groups[0].staleReason, /heartbeat/);
+
+    const cancelled = await runtime.cancelBackgroundSubagent({
+      sessionId: started.sessionId,
+      groupId: "group-lost-bg"
+    });
+    assert.equal(cancelled.ok, true);
+    assert.deepEqual(cancelled.updatedTaskIds, ["task-lost-bg"]);
+    const readTask = await taskStore.readTask("task-lost-bg");
+    assert.equal(readTask.ok, true);
+    assert.equal(readTask.task.status, "interrupted");
+    assert.ok(readTask.task.cancelRequestedAt);
+    const afterCancel = runtime.listActiveEvents(started.sessionId).filter((event) => event.type === "background_subagent_snapshot").at(-1);
+    assert.deepEqual(afterCancel.groups, []);
+  } finally {
+    await close(server);
+  }
+});
+
 test("dashboard runtime cancels queued prompts before they run", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
   const server = await listen(createDelayedGateway(["first answer", "second answer"], 80), "127.0.0.1", 0);
@@ -892,17 +1494,6 @@ async function waitForEvent(runtime, sessionId, predicate) {
   });
 }
 
-async function waitForCondition(predicate, timeoutMs = 5000) {
-  const started = Date.now();
-  while (Date.now() - started < timeoutMs) {
-    if (await predicate()) {
-      return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-  assert.fail("Timed out waiting for condition");
-}
-
 function transcriptText(message) {
   if (typeof message?.content === "string") {
     return message.content;
@@ -963,56 +1554,32 @@ function createRecordingGateway(requests, text) {
   });
 }
 
-function createBackgroundAgentWakeGateway(requests, options = {}) {
-  let parentCalls = 0;
+function createAuthRecordingGateway(requests, text, validKey) {
   return http.createServer(async (req, res) => {
-    const body = await readGatewayJson(req);
-    requests.push(body);
-    const sessionId = String(body.metadata?.sessionId ?? body.sessionId ?? "");
+    let body = "";
+    for await (const chunk of req) {
+      body += Buffer.from(chunk).toString("utf8");
+    }
+    requests.push({
+      authorization: req.headers.authorization ?? "",
+      body: JSON.parse(body)
+    });
+    if (req.headers.authorization !== `Bearer ${validKey}`) {
+      res.writeHead(401, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        error: {
+          message: "Invalid API Key",
+          type: "invalid_key",
+          code: "401"
+        }
+      }));
+      return;
+    }
     res.writeHead(200, { "content-type": "application/json" });
-
-    if (sessionId.startsWith("agent-explorer-")) {
-      await new Promise((resolve) => setTimeout(resolve, options.childDelayMs ?? 0));
-      res.end(JSON.stringify({
-        id: "dashboard-background-child-final",
-        model: "mock-model",
-        content: [{ type: "text", text: "dashboard background child done" }],
-        toolCalls: [],
-        stopReason: "stop"
-      }));
-      return;
-    }
-
-    parentCalls += 1;
-    if (parentCalls === 1) {
-      res.end(JSON.stringify({
-        id: "dashboard-background-agent-run",
-        model: "mock-model",
-        content: [],
-        toolCalls: [
-          {
-            id: "delegate-background-explorer",
-            name: "agent_run",
-            input: {
-              profile: "explorer",
-              taskId: "task-dashboard-bg",
-              groupId: "group-dashboard-bg",
-              query: "inspect current workspace in background",
-              background: true,
-              waitForGroup: "all",
-              wakeParent: true
-            }
-          }
-        ],
-        stopReason: "tool_calls"
-      }));
-      return;
-    }
-
     res.end(JSON.stringify({
-      id: `dashboard-background-parent-final-${parentCalls}`,
+      id: `auth-recording-${requests.length}`,
       model: "mock-model",
-      content: [{ type: "text", text: parentCalls === 2 ? "background dispatched" : "wakeup consumed" }],
+      content: [{ type: "text", text }],
       toolCalls: [],
       stopReason: "stop"
     }));
@@ -1039,14 +1606,6 @@ function createDelayedGateway(texts, delayMs) {
   });
 }
 
-async function readGatewayJson(req) {
-  let body = "";
-  for await (const chunk of req) {
-    body += Buffer.from(chunk).toString("utf8");
-  }
-  return JSON.parse(body || "{}");
-}
-
 function createHangingStreamGateway() {
   return http.createServer(async (req, res) => {
     for await (const _ of req) {
@@ -1055,6 +1614,139 @@ function createHangingStreamGateway() {
     res.writeHead(200, { "content-type": "text/event-stream" });
     res.write(`data: ${JSON.stringify({ type: "message_start", id: "hanging", model: "mock-model" })}\n\n`);
     res.write(`data: ${JSON.stringify({ type: "text_delta", text: "partial draft" })}\n\n`);
+  });
+}
+
+function createBackgroundWakeGateway(requests) {
+  return http.createServer(async (req, res) => {
+    let raw = "";
+    for await (const chunk of req) {
+      raw += Buffer.from(chunk).toString("utf8");
+    }
+    const body = JSON.parse(raw || "{}");
+    requests.push(body);
+    res.writeHead(200, { "content-type": "application/json" });
+
+    const sessionId = String(body.metadata?.sessionId ?? body.sessionId ?? "");
+    if (sessionId.startsWith("agent-explorer-")) {
+      res.end(JSON.stringify({
+        id: "dashboard-background-child-final",
+        model: "mock-model",
+        content: [{ type: "text", text: "dashboard background child done" }],
+        toolCalls: [],
+        stopReason: "stop"
+      }));
+      return;
+    }
+
+    const parentCalls = requests.filter((item) => !String(item.sessionId ?? "").startsWith("agent-explorer-")).length;
+    if (parentCalls === 1) {
+      res.end(JSON.stringify({
+        id: "dashboard-background-agent-run",
+        model: "mock-model",
+        content: [],
+        toolCalls: [
+          {
+            id: "delegate-dashboard-background",
+            name: "agent_run",
+            input: {
+              profile: "explorer",
+              query: "inspect current workspace in background",
+              background: true,
+              groupId: "group-dashboard-bg",
+              waitForGroup: "all",
+              wakeParent: true
+            }
+          }
+        ],
+        stopReason: "tool_calls"
+      }));
+      return;
+    }
+
+    const lastMessage = body.messages?.at(-1)?.content ?? "";
+    res.end(JSON.stringify({
+      id: "dashboard-background-parent-final",
+      model: "mock-model",
+      content: [{ type: "text", text: /Ant Code subagent group completed/.test(String(lastMessage)) ? "parent consumed wake prompt" : "parent did not receive wake prompt" }],
+      toolCalls: [],
+      stopReason: "stop"
+    }));
+  });
+}
+
+function createBackgroundAnyWakeGateway(requests) {
+  return http.createServer(async (req, res) => {
+    let raw = "";
+    for await (const chunk of req) {
+      raw += Buffer.from(chunk).toString("utf8");
+    }
+    const body = JSON.parse(raw || "{}");
+    requests.push(body);
+    res.writeHead(200, { "content-type": "application/json" });
+
+    const sessionId = String(body.metadata?.sessionId ?? body.sessionId ?? "");
+    if (sessionId.startsWith("agent-explorer-")) {
+      const slow = /slow sibling/.test(JSON.stringify(body.messages ?? []));
+      if (slow) {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+      const text = slow ? "slow sibling done later" : "fast sibling done";
+      res.end(JSON.stringify({
+        id: `dashboard-background-any-${requests.length}`,
+        model: "mock-model",
+        content: [{ type: "text", text }],
+        toolCalls: [],
+        stopReason: "stop"
+      }));
+      return;
+    }
+
+    const parentCalls = requests.filter((item) => !String(item.sessionId ?? "").startsWith("agent-explorer-")).length;
+    if (parentCalls === 1) {
+      res.end(JSON.stringify({
+        id: "dashboard-background-any-agent-run",
+        model: "mock-model",
+        content: [],
+        toolCalls: [
+          {
+            id: "delegate-dashboard-any-fast",
+            name: "agent_run",
+            input: {
+              profile: "explorer",
+              query: "fast sibling",
+              background: true,
+              groupId: "group-dashboard-any",
+              waitForGroup: "any",
+              wakeParent: true
+            }
+          },
+          {
+            id: "delegate-dashboard-any-slow",
+            name: "agent_run",
+            input: {
+              profile: "explorer",
+              query: "slow sibling",
+              background: true,
+              groupId: "group-dashboard-any",
+              waitForGroup: "any",
+              wakeParent: true
+            }
+          }
+        ],
+        stopReason: "tool_calls"
+      }));
+      return;
+    }
+
+    const lastMessage = body.messages?.at(-1)?.content ?? "";
+    res.end(JSON.stringify({
+      id: "dashboard-background-any-parent-final",
+      model: "mock-model",
+      content: [{ type: "text", text: /Ant Code subagent group completed/.test(String(lastMessage)) ? "parent consumed any wake prompt" : "parent missed any wake prompt" }],
+      toolCalls: [],
+      stopReason: "stop"
+    }));
   });
 }
 

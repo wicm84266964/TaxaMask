@@ -3,6 +3,14 @@ import os
 
 LEGACY_EXPERT_FILENAME = "best_expert.pth"
 PROJECT_ROUTE_MANIFEST_VERSION = "project-v2"
+ROUTE_BACKEND_VIT_B_BLINK = "vit_b_blink"
+ROUTE_BACKEND_HEATMAP_BLINK = "heatmap_blink"
+ROUTE_BACKEND_EXTERNAL_BLINK = "external_blink"
+ROUTE_BACKEND_TYPES = {
+    ROUTE_BACKEND_VIT_B_BLINK,
+    ROUTE_BACKEND_HEATMAP_BLINK,
+    ROUTE_BACKEND_EXTERNAL_BLINK,
+}
 
 
 def _clean_part_name(value):
@@ -29,6 +37,37 @@ def _clean_expert_filename(value):
     if not filename.lower().endswith(".pth"):
         return None
     return filename
+
+
+def _clean_backend(value, fallback=ROUTE_BACKEND_VIT_B_BLINK):
+    text = str(value or "").strip()
+    return text if text in ROUTE_BACKEND_TYPES else fallback
+
+
+def _clean_input_size(value):
+    if isinstance(value, (list, tuple)) and len(value) >= 2:
+        raw_w, raw_h = value[0], value[1]
+    else:
+        raw_w = raw_h = value
+    try:
+        width = int(raw_w)
+        height = int(raw_h)
+    except Exception:
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    return [width, height]
+
+
+def _clean_manifest_path(value):
+    text = str(value or "").strip()
+    return text or None
+
+
+def _clean_backend_params(value):
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): value[key] for key in value}
 
 
 def build_expert_id(expert_part, expert_filename):
@@ -92,6 +131,18 @@ def sanitize_expert_reference(
     }
 
 
+def sanitize_route_backend_fields(route_entry):
+    if not isinstance(route_entry, dict):
+        route_entry = {}
+    return {
+        "expert_backend": _clean_backend(route_entry.get("expert_backend")),
+        "expert_manifest": _clean_manifest_path(route_entry.get("expert_manifest")),
+        "input_size": _clean_input_size(route_entry.get("input_size")),
+        "backend_params": _clean_backend_params(route_entry.get("backend_params")),
+        "note": _clean_free_text(route_entry.get("note")),
+    }
+
+
 def sanitize_expert_candidate(candidate_entry, default_filename=None):
     if isinstance(candidate_entry, str):
         payload = {"expert_id": candidate_entry}
@@ -109,6 +160,7 @@ def sanitize_expert_candidate(candidate_entry, default_filename=None):
     )
     if not clean_candidate.get("expert_id"):
         return None
+    clean_candidate.update(sanitize_route_backend_fields(payload))
     return clean_candidate
 
 
@@ -145,6 +197,8 @@ def get_route_appointed_expert(route_entry, default_filename=None):
 
     appointed_entry = route_entry.get("appointed_expert")
     if isinstance(appointed_entry, dict):
+        nested_payload = dict(route_entry)
+        nested_payload.update(appointed_entry)
         clean_nested_reference = sanitize_expert_reference(
             expert_part=appointed_entry.get("expert_part"),
             expert_filename=appointed_entry.get("expert_filename"),
@@ -153,15 +207,18 @@ def get_route_appointed_expert(route_entry, default_filename=None):
             default_filename=default_filename,
         )
         if clean_nested_reference.get("expert_id"):
+            clean_nested_reference.update(sanitize_route_backend_fields(nested_payload))
             return clean_nested_reference
 
-    return sanitize_expert_reference(
+    clean_reference = sanitize_expert_reference(
         expert_part=route_entry.get("expert_part"),
         expert_filename=route_entry.get("expert_filename"),
         expert_id=route_entry.get("expert_id"),
         legacy_expert_name=route_entry.get("expert_name"),
         default_filename=default_filename,
     )
+    clean_reference.update(sanitize_route_backend_fields(route_entry))
+    return clean_reference
 
 
 def get_route_persisted_expert_candidates(route_entry, default_filename=None):
@@ -197,6 +254,8 @@ def sanitize_project_route_entry(route_entry, taxonomy=None):
     clean_appointed_expert = get_route_appointed_expert(route_entry)
     expert_candidates = get_route_persisted_expert_candidates(route_entry)
 
+    clean_appointed_expert.update(sanitize_route_backend_fields(route_entry))
+
     clean_entry = {
         "parent": parent,
         "child": child,
@@ -207,6 +266,7 @@ def sanitize_project_route_entry(route_entry, taxonomy=None):
         "appointed_expert": dict(clean_appointed_expert),
         "expert_candidates": [dict(candidate) for candidate in expert_candidates],
     }
+    clean_entry.update(sanitize_route_backend_fields(route_entry))
     clean_entry.update(clean_appointed_expert)
     return clean_entry
 

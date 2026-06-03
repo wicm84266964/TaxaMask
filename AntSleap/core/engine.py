@@ -554,7 +554,7 @@ class AntEngine:
             torch.save(parts_model.sam_model.mask_decoder.state_dict(), os.path.join(self.weights_dir, f"sam_decoder_lora_{ts}.pth"))
         return ts
 
-    def generate_report(self, val_dataloader=None, num_samples=4):
+    def generate_report(self, val_dataloader=None, num_samples=4, training_context=None):
         """Generates plots and CSVs for the current training session."""
         reporter = ExperimentReporter(os.path.dirname(self.weights_dir))
         
@@ -600,6 +600,8 @@ class AntEngine:
             "validation_preview_count": int(validation_preview_value),
             "validation_provenance_counts": provenance_counts,
         }
+        if isinstance(training_context, dict) and training_context:
+            report_summary_payload["training_context"] = dict(training_context)
         report_summary_path = reporter.save_report_summary(report_summary_payload)
              
         print(f"Report Generated at: {reporter.get_experiment_dir()}")
@@ -664,6 +666,7 @@ class AntEngine:
         noise_floor=0.15,
         poly_epsilon=2.0,
         project_route_manifest=None,
+        model_profile_context=None,
     ):
         locator = self.ensure_locator_loaded()
         locator.eval()
@@ -744,10 +747,14 @@ class AntEngine:
                 "cascade_routes_ready": bool(cascade_routes_ready),
                 "cascade_route_source": runtime_route_source,
                 "cascade_route_manifest_version": str(runtime_route_manifest.get("version") or ""),
+                "model_profile_id": str((model_profile_context or {}).get("active_profile_id") or ""),
+                "parent_backend": str((model_profile_context or {}).get("parent_backend") or ""),
                 "cascade_applied_count": 0,
                 "cascade_attempted_routes": cascade_attempted_routes,
                 "cascade_applied_routes": cascade_applied_routes,
                 "cascade_block_reasons": cascade_block_reasons,
+                "cascade_route_backends": [],
+                "cascade_route_manifests": [],
             },
         }
 
@@ -1033,4 +1040,18 @@ class AntEngine:
         predictions["meta"]["cascade_attempted_routes"] = unique_attempted
         predictions["meta"]["cascade_applied_routes"] = unique_applied
         predictions["meta"]["cascade_applied_count"] = cascade_applied_count
+        route_backends = []
+        route_manifests = []
+        for route in runtime_route_manifest.get("routes", []) if isinstance(runtime_route_manifest, dict) else []:
+            if not isinstance(route, dict):
+                continue
+            backend = str(route.get("expert_backend") or "vit_b_blink").strip() or "vit_b_blink"
+            label = f"{route.get('parent', '?')}->{route.get('child', '?')}:{backend}"
+            if label not in route_backends:
+                route_backends.append(label)
+            manifest_path = str(route.get("expert_manifest") or "").strip()
+            if manifest_path and manifest_path not in route_manifests:
+                route_manifests.append(manifest_path)
+        predictions["meta"]["cascade_route_backends"] = route_backends
+        predictions["meta"]["cascade_route_manifests"] = route_manifests
         return predictions

@@ -43,9 +43,20 @@ Current request behavior to account for:
 
 - Ant Code sends `x-session-affinity` when a session id is available. Treat it as a routing/cache affinity hint only, not an authentication token.
 - In OpenAI-compatible mode, Ant Code sends `tools` when local tools are available but does not force `tool_choice: "auto"` by default.
+- In OpenAI-compatible mode, Ant Code sends image attachments as
+  Chat Completions `image_url` data URL blocks when the selected model turn
+  includes image input.
+- In the provider-independent protocol, Ant Code sets
+  `metadata.capabilities.images=true` when user messages include image blocks.
 - Streaming requests may include usage options such as `stream_options.include_usage=true`; adapters should ignore unsupported compatibility fields safely.
 - In streaming mode, complete SSE events or NDJSON lines should be flushed promptly. Dashboard live draft cards depend on incremental `text_delta` delivery during the turn.
 - Provider reasoning/thinking deltas are not displayed as normal assistant text in Dashboard. Visible user-facing text should use normal assistant content/delta fields.
+- If the gateway/model route is text-only, reject image requests with a bounded
+  4xx error that clearly states image or vision input is unsupported. Ant Code
+  uses that wording for operator diagnostics.
+- Dashboard model configuration is single-gateway. A text main model and visual
+  fallback model can coexist only when both are registered under the same active
+  gateway/key.
 
 ## Compatibility Evidence
 
@@ -70,6 +81,10 @@ node scripts/verify-gateway-compat.js --live --json
 The JSON evidence is intentionally non-sensitive. It records protocol version, model alias, network mode, configured endpoint booleans, chat normalization status, and the local-tool boundary declaration.
 
 For adapters that support streaming, keep at least one evidence item showing that visible deltas arrive before final completion. A gateway that buffers all stream records until the response closes may pass basic text normalization while still making Dashboard appear stalled.
+
+For adapters that support vision, keep one evidence item showing a small image
+request succeeds through the configured model alias. For adapters that do not
+support vision, keep one evidence item showing a clear unsupported-image error.
 
 ## Gateway Responsibilities
 

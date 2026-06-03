@@ -153,24 +153,182 @@ test("dashboard app labels approximate change stats when present", async () => {
   assert.match(source, /stats\.approximate \? "近似" : null/);
 });
 
-test("dashboard message previews stay inside the transcript column", async () => {
-  const source = await fs.readFile(path.resolve("src/dashboard/public/styles.css"), "utf8");
-  const requiredRules = [
-    [".message", /max-width:\s*860px;[\s\S]*?min-width:\s*0;[\s\S]*?width:\s*100%;/],
-    [".message-body", /max-width:\s*100%;[\s\S]*?min-width:\s*0;[\s\S]*?overflow-wrap:\s*anywhere;/],
-    [".md-code-frame", /max-width:\s*100%;[\s\S]*?min-width:\s*0;[\s\S]*?overflow:\s*hidden;/],
-    [".md-code", /max-width:\s*100%;[\s\S]*?min-width:\s*0;[\s\S]*?overflow:\s*auto;/],
-    [".md-code code", /max-width:\s*none;[\s\S]*?min-width:\s*100%;[\s\S]*?white-space:\s*pre;[\s\S]*?width:\s*max-content;/],
-    [".md-draft-plain", /max-width:\s*100%;[\s\S]*?min-width:\s*0;[\s\S]*?overflow:\s*hidden;/],
-    [".md-draft-plain pre", /max-width:\s*100%;[\s\S]*?min-width:\s*0;[\s\S]*?overflow-x:\s*auto;/],
-    [".md-data-frame", /\.md-math-block,[\s\S]*?\.md-mermaid-frame,[\s\S]*?\.md-data-frame\s*\{[\s\S]*?max-width:\s*100%;[\s\S]*?min-width:\s*0;[\s\S]*?overflow:\s*hidden;/],
-    [".md-data-output", /\.md-math-output,[\s\S]*?\.md-mermaid-output,[\s\S]*?\.md-data-output\s*\{[\s\S]*?max-width:\s*100%;[\s\S]*?min-width:\s*0;[\s\S]*?overflow:\s*auto;/],
-    [".md-raw-source", /max-width:\s*100%;[\s\S]*?min-width:\s*0;[\s\S]*?overflow:\s*auto;/],
-    [".md-table-wrap", /max-width:\s*100%;[\s\S]*?min-width:\s*0;[\s\S]*?overflow:\s*auto;/],
-    [".draft-summary-item", /max-width:\s*100%;[\s\S]*?min-width:\s*0;[\s\S]*?overflow:\s*hidden;/]
-  ];
+test("dashboard message surfaces constrain long draft and final content", async () => {
+  const css = await fs.readFile(path.resolve("src/dashboard/public/styles.css"), "utf8");
 
-  for (const [selector, pattern] of requiredRules) {
-    assert.match(source, pattern, `${selector} should contain long preview content`);
-  }
+  assert.match(css, /\.transcript\s*\{[^}]*overflow-x: hidden;/s);
+  assert.match(css, /\.message,\s*\.activity-card,\s*\.context-boundary,\s*\.workflow-panel\s*\{[^}]*width: min\(100%, 860px\);/s);
+  assert.match(css, /\.message\s*\{[^}]*overflow: hidden;/s);
+  assert.match(css, /\.message-body\s*\{[^}]*overflow-wrap: anywhere;/s);
+  assert.match(css, /\.message-body\.markdown-body,\s*\.markdown-body\s*\{[^}]*overflow-wrap: anywhere;/s);
+  assert.match(css, /\.markdown-body > \*\s*\{[^}]*max-width: 100%;[^}]*min-width: 0;/s);
+  assert.match(css, /\.md-code-frame\s*\{[^}]*max-width: 100%;[^}]*min-width: 0;[^}]*overflow: auto;/s);
+  assert.match(css, /\.md-draft-plain\s*\{[^}]*max-width: 100%;[^}]*min-width: 0;[^}]*overflow: auto;/s);
+  assert.match(css, /\.md-table-wrap\s*\{[^}]*max-width: 100%;[^}]*min-width: 0;[^}]*overflow: auto;/s);
+  assert.match(css, /\.draft-summary\s*\{[^}]*width: min\(100%, 860px\);/s);
+  assert.match(css, /\.draft-summary-item\s*\{[^}]*min-width: 0;[^}]*overflow: hidden;/s);
+});
+
+test("dashboard renders context compaction as a transcript divider", async () => {
+  const app = await fs.readFile(path.resolve("src/dashboard/public/app.js"), "utf8");
+  const events = await fs.readFile(path.resolve("src/dashboard/events.js"), "utf8");
+  const css = await fs.readFile(path.resolve("src/dashboard/public/styles.css"), "utf8");
+
+  assert.match(app, /event\.type === "context_boundary"/);
+  assert.match(app, /appendContextBoundary\(event\)/);
+  assert.match(app, /role", "separator"/);
+  assert.match(app, /聊天内容已压缩，以下回复基于压缩后的上下文继续/);
+  assert.match(events, /正在压缩上下文/);
+  assert.match(css, /\.context-boundary\s*\{/);
+  assert.match(css, /\.context-boundary-line\s*\{/);
+  assert.match(css, /\.context-boundary-label\s*\{/);
+});
+
+test("dashboard keeps background subagent status visible after the main turn ends", async () => {
+  const app = await fs.readFile(path.resolve("src/dashboard/public/app.js"), "utf8");
+  const events = await fs.readFile(path.resolve("src/dashboard/events.js"), "utf8");
+  const css = await fs.readFile(path.resolve("src/dashboard/public/styles.css"), "utf8");
+
+  assert.match(events, /subagent_group_started/);
+  assert.match(events, /subagent_group_progress/);
+  assert.match(events, /subagent_group_wakeup/);
+  assert.match(events, /backgroundSubagent: true/);
+  assert.match(app, /backgroundSubagents: new Map\(\)/);
+  assert.match(app, /liveStatusExpanded: false/);
+  assert.match(app, /isBackgroundSubagentActivity\(event\)/);
+  assert.match(app, /handleBackgroundSubagentActivity\(event\)/);
+  assert.match(app, /event\.type === "wakeup_queued"/);
+  assert.match(app, /clearBackgroundSubagentStatus\(event\.groupId\)/);
+  assert.match(app, /resetLiveStatus\(\{ keepBackgroundSubagents: true \}\)/);
+  assert.match(app, /applyIdleRunStatus\("空闲"\)/);
+  assert.match(app, /applyIdleRunStatus\("完成"\)/);
+  assert.match(app, /return "子智能体运行中"/);
+  assert.match(app, /return "等待子智能体唤醒"/);
+  assert.match(app, /return "子智能体疑似失联"/);
+  assert.match(app, /return "子智能体无进展"/);
+  assert.match(app, /toggleLiveStatusDetails/);
+  assert.match(app, /live-subagent-row/);
+  assert.match(app, /cancelBackgroundSubagent/);
+  assert.match(app, /\/api\/background-subagents\/cancel/);
+  assert.match(app, /data-background-cancel="true"/);
+  assert.match(css, /\.live-status\.has-background-subagents/);
+  assert.match(css, /\.live-status\.expanded \.live-subtasks/);
+  assert.match(css, /\.live-subagent-row\s*\{/);
+  assert.match(css, /\.background-subagent-chip\.stale \.chip-pulse/);
+  assert.match(css, /\.background-subagent-chip\.lost \.chip-pulse/);
+  assert.match(css, /\.live-subagent-cancel\s*\{/);
+});
+
+test("dashboard composer controls keep confirmations compact and critical status visible", async () => {
+  const app = await fs.readFile(path.resolve("src/dashboard/public/app.js"), "utf8");
+  const html = await fs.readFile(path.resolve("src/dashboard/public/index.html"), "utf8");
+  const css = await fs.readFile(path.resolve("src/dashboard/public/styles.css"), "utf8");
+  const questionRender = app.slice(app.indexOf("function renderQuestionPanel()"), app.indexOf("function questionChoiceButton"));
+  const questionReadPane = questionRender.slice(
+    questionRender.indexOf('<div class="question-read-pane">'),
+    questionRender.indexOf('<div class="question-actions">')
+  );
+  const queueRender = app.slice(app.indexOf("function renderQueuePanel()"), app.indexOf("function renderQueueItem"));
+
+  assert.match(app, /<span class="model-status-caret" aria-hidden="true">▾<\/span>/);
+  assert.match(questionRender, /<div class="question-read-pane">[\s\S]*question-copy[\s\S]*question-input[\s\S]*<div class="question-actions">/);
+  assert.match(questionReadPane, /question-title/);
+  assert.match(questionReadPane, /question-copy/);
+  assert.match(questionReadPane, /question-input/);
+  assert.doesNotMatch(css, /\.question-layout\s*\{/);
+  assert.match(css, /\.question-read-pane\s*\{[^}]*max-height: 96px;[^}]*overflow-y: auto;/s);
+  assert.doesNotMatch(css, /\.question-copy-window\s*\{/);
+  assert.doesNotMatch(css, /\.question-scroll\s*\{/);
+  assert.match(css, /\.question-actions\s*\{[^}]*justify-content: space-between;/s);
+  assert.match(css, /\.question-prompt-summary\s*\{[^}]*text-overflow: ellipsis;[^}]*white-space: nowrap;/s);
+  assert.match(css, /\.question-input\s*\{[^}]*min-height: 58px;/s);
+  assert.match(css, /\.question-action-buttons\s*\{/);
+  assert.doesNotMatch(css, /\.question-panel\s*\{[^}]*overflow: auto;/s);
+  assert.doesNotMatch(css, /\.question-choices\s*\{[^}]*overflow-y: auto;/s);
+  assert.match(css, /\.context-actions #context-clear\s*\{[^}]*border-color: rgba\(255, 133, 133, 0\.42\);[^}]*color: var\(--danger\);/s);
+  assert.match(css, /\.model-status-caret-button\s*\{[^}]*background: rgba\(255, 255, 255, 0\.08\) !important;[^}]*border-color: rgba\(213, 215, 212, 0\.2\) !important;/s);
+  assert.match(css, /\.model-status-caret-button\[aria-expanded="true"\]\s*\{/);
+  assert.match(css, /\.composer-footer \.change-status \.change-add\s*\{[^}]*color: #8fce9c !important;/s);
+  assert.match(css, /\.composer-footer \.change-status \.change-del\s*\{[^}]*color: #ff9b9b !important;/s);
+  assert.match(html, /<div class="mode-row">[\s\S]*<div class="mode-description" id="mode-description">[\s\S]*<div class="context-actions">/);
+  assert.match(html, /<textarea id="prompt-input" rows="2"/);
+  assert.match(css, /\.mode-row\s*\{[^}]*margin: 0 auto 8px;/s);
+  assert.match(css, /\.mode-description\s*\{[^}]*flex: 1 1 220px;[^}]*text-align: right;[^}]*white-space: nowrap;/s);
+  assert.match(css, /#prompt-input\s*\{[^}]*height: 52px;[^}]*min-height: 52px;/s);
+  assert.match(css, /\.attach-button\s*\{[^}]*height: 52px;/s);
+  assert.match(css, /#send-button\s*\{[^}]*height: 52px;/s);
+  assert.match(queueRender, /<div class="queue-summary">[\s\S]*<div class="queue-title">[\s\S]*<div class="queue-copy">/);
+  assert.match(css, /\.queue-summary\s*\{[^}]*display: flex;[^}]*gap: 10px;/s);
+  assert.match(css, /\.queue-copy\s*\{[^}]*overflow: hidden;[^}]*text-overflow: ellipsis;[^}]*white-space: nowrap;/s);
+  assert.doesNotMatch(app, /引导队首/);
+  assert.match(app, /function guideButtonVisible\(\)/);
+  assert.match(app, /class="\$\{guideButtonVisible\(\) \? "" : "hidden"\}"/);
+  assert.match(app, /return "引导对话"/);
+  assert.doesNotMatch(app, /state\.queue\.find\(\(item\) => item\.kind !== "guide" && !state\.queueCancelling\.has\(item\.id\)\)/);
+  assert.match(app, /gatewayProfiles: \[\]/);
+  assert.match(app, /editingModelId: ""/);
+  assert.match(app, /normalizeGatewayProfiles\(status\.gatewayProfiles\)/);
+  assert.match(app, /data-profile-id/);
+  assert.match(app, /postJson\("\/api\/gateway-profile"/);
+  assert.match(app, /data-action="edit-current-model"/);
+  assert.match(app, /data-action="edit-model"/);
+  assert.match(app, /previousModelId: state\.editingModelId/);
+  assert.match(app, /当前网关配置已清空/);
+  assert.match(app, /会清空当前网关配置/);
+  assert.match(app, /toggle\.disabled = state\.running \|\| state\.modelSwitching;/);
+  assert.match(app, /data-action="delete-model"/);
+  assert.match(app, /deleteJson\(`\/api\/model-config\/\$\{encodeURIComponent\(modelId\)\}`/);
+  assert.match(app, /event\.stopPropagation\(\);[\s\S]*const action = event\.target\.closest\("button\[data-action\]"\);/);
+  assert.match(app, /model-delete-confirm-copy/);
+  assert.match(css, /\.model-panel-actions\s*\{/);
+  assert.match(css, /\.gateway-profile-list\s*\{/);
+  assert.match(css, /\.model-option-row\s*\{[^}]*grid-template-areas: "model edit delete";[^}]*grid-template-columns: minmax\(0, 1fr\) auto auto;/s);
+  assert.match(css, /\.model-option-row\.confirming-delete\s*\{[^}]*grid-template-areas:/s);
+  assert.match(css, /\.model-edit-button,\s*\.model-delete-button\s*\{/);
+  assert.match(css, /\.model-delete-button\s*\{[^}]*min-width: 62px;[^}]*white-space: nowrap;/s);
+  assert.match(css, /\.model-delete-button\.confirm\s*\{/);
+  assert.match(css, /\.model-delete-confirm-copy\s*\{/);
+});
+
+test("dashboard TaxaMask embed mode keeps native composer control sizing", async () => {
+  const app = await fs.readFile(path.resolve("src/dashboard/public/app.js"), "utf8");
+  const css = await fs.readFile(path.resolve("src/dashboard/public/styles.css"), "utf8");
+
+  assert.match(app, /const search = window\.location\?\.search \?\? "";/);
+  assert.match(app, /new URLSearchParams\(search\)/);
+  assert.match(app, /document\.documentElement\.classList\.add\("taxamask-embed"\)/);
+  assert.match(css, /\.taxamask-embed \.app-shell\s*\{[^}]*grid-template-columns: minmax\(0, 1fr\);/s);
+  assert.match(css, /\.taxamask-embed \.sidebar,\s*\.taxamask-embed \.preview\s*\{[^}]*display: none !important;/s);
+  assert.match(css, /\.taxamask-embed \.composer,\s*\.taxamask-embed \.composer-footer\s*\{[^}]*max-width: none;[^}]*width: 100%;/s);
+  assert.match(css, /#prompt-input\s*\{[^}]*height: 52px;[^}]*min-height: 52px;/s);
+  assert.match(css, /\.attach-button\s*\{[^}]*height: 52px;/s);
+  assert.match(css, /#send-button\s*\{[^}]*height: 52px;/s);
+  assert.doesNotMatch(css, /\.taxamask-embed[\s\S]*#prompt-input\s*\{[\s\S]*min-height: 74px/);
+});
+
+test("dashboard renders lightweight office previews in the side panel", async () => {
+  const app = await fs.readFile(path.resolve("src/dashboard/public/app.js"), "utf8");
+  const css = await fs.readFile(path.resolve("src/dashboard/public/styles.css"), "utf8");
+
+  assert.match(app, /file\.kind === "office-preview"/);
+  assert.match(app, /file\.kind === "table-preview"/);
+  assert.match(app, /function renderOfficePreview\(file\)/);
+  assert.match(app, /function renderTablePreview\(file\)/);
+  assert.match(app, /function showTableLightbox\(file\)/);
+  assert.match(app, /function renderExpandedTableHtml\(table, activeIndex = 0\)/);
+  assert.match(app, /tableLightboxSheetIndex/);
+  assert.match(app, /data-sheet-index/);
+  assert.match(app, /table-sheet-rail/);
+  assert.doesNotMatch(app, /expanded-sheet-tabs/);
+  assert.doesNotMatch(app, /table-sheet-tabs/);
+  assert.match(app, /Excel 轻量预览/);
+  assert.match(app, /data-mode.*table/s);
+  assert.match(css, /\.office-preview\s*\{[^}]*grid-template-rows: auto minmax\(0, 1fr\) auto;/s);
+  assert.match(css, /\.table-preview-button\s*\{[^}]*cursor: zoom-in;/s);
+  assert.match(css, /\.table-viewer\.has-sheets\s*\{[^}]*grid-template-columns: minmax\(88px, 128px\) minmax\(0, 1fr\);/s);
+  assert.match(css, /\.table-sheet-rail\s*\{/);
+  assert.match(css, /\.lightbox-table\s*\{[^}]*overflow: auto;/s);
+  assert.match(css, /\.expanded-table-scroll\s*\{[^}]*overflow: auto;/s);
+  assert.doesNotMatch(css, /\.expanded-sheet-tabs\s*\{/);
+  assert.doesNotMatch(css, /\.table-sheet-tabs\s*\{/);
 });

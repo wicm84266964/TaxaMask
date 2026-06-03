@@ -13,6 +13,10 @@ const ROUTE_PATTERNS = Object.freeze({
     /浏览器|页面|前端|截图|点击|输入|UI|界面|验收|localhost|网页交互/i,
     /\b(browser|playwright|screenshot|frontend|ui|localhost|click|dom)\b/i
   ],
+  visual: [
+    /视觉|看图|图片|图像|截图|界面截图|视觉复核|视觉回归|布局|重叠|遮挡|裁切|溢出|对齐|间距|可读性|响应式|移动端|桌面端/i,
+    /\b(vision|visual|image|screenshot|ocr|layout|responsive|viewport|overlap|clipping|alignment|contrast)\b/i
+  ],
   repository: [
     /仓库|代码库|调用链|架构|目录|模块|定位|调查|只读|梳理|大项目/i,
     /\b(repo|repository|codebase|inspect|explore|read[- ]?only|call graph)\b/i
@@ -39,6 +43,7 @@ const PROFILE_KIND_HINTS = Object.freeze({
   "web-researcher": "web",
   "readonly-researcher": "web",
   "browser-verifier": "browser",
+  "visual-verifier": "visual",
   explorer: "repository",
   planner: "planning",
   verifier: "verification",
@@ -106,7 +111,7 @@ export function routeAgentTask(options) {
       risk,
       modelTier,
       budget,
-      requiresApproval: risk !== "low" || purpose === "execute" || purpose === "browser",
+      requiresApproval: risk !== "low" || purpose === "execute" || purpose === "browser" || purpose === "visual",
       reason: routeReason({ primary, purpose, difficulty, risk, modelTier })
     },
     candidates: scored.slice(0, 8).map((item) => ({
@@ -181,7 +186,7 @@ function scoreProfile(profile, signals, prompt) {
     score += 2;
     reasons.push("只读任务优先");
   }
-  if (profile.mode === "execute" && (signals.browser || signals.verification)) {
+  if (profile.mode === "execute" && (signals.browser || signals.visual || signals.verification)) {
     score += 4;
     reasons.push("需要执行/验收能力");
   }
@@ -196,6 +201,14 @@ function scoreProfile(profile, signals, prompt) {
   if (profile.name === "browser-verifier" && signals.browser) {
     score += 3;
     reasons.push("专用浏览器验收 profile");
+  }
+  if (profile.name === "visual-verifier" && signals.visual) {
+    score += 8;
+    reasons.push("专用视觉复核 profile");
+  }
+  if (profile.name === "visual-verifier" && signals.browser && (signals.review || signals.verification)) {
+    score += 3;
+    reasons.push("前端复核可使用视觉模型");
   }
   if (profile.name === "reviewer" && signals.review) {
     score += 8;
@@ -221,6 +234,7 @@ function scoreProfile(profile, signals, prompt) {
 
 function fallbackProfile(profiles, signals) {
   const names = [
+    signals.visual ? "visual-verifier" : null,
     signals.browser ? "browser-verifier" : null,
     signals.web ? "web-researcher" : null,
     signals.planning ? "planner" : null,
@@ -241,14 +255,16 @@ function fallbackProfile(profiles, signals) {
 
 function buildSuggestedTasks({ prompt, signals, primary, secondary, profiles, config, taskCount }) {
   const tasks = [];
+  const routeDifficulty = inferDifficulty(prompt, signals);
+  const routeRisk = inferRisk(prompt, signals);
   const add = (profileName, title, query, parallelSafe = true, overrides = {}) => {
     const profile = profiles.find((item) => item.name === profileName || item.aliases?.includes(profileName));
     if (!profile || tasks.some((task) => task.profile === profile.name)) {
       return;
     }
     const purpose = overrides.purpose ?? profile.purpose ?? kindToPurpose(PROFILE_KIND_HINTS[profile.name]);
-    const difficulty = overrides.difficulty ?? inferDifficulty(prompt, signals);
-    const risk = overrides.risk ?? inferRisk(prompt, signals);
+    const difficulty = overrides.difficulty ?? routeDifficulty;
+    const risk = overrides.risk ?? routeRisk;
     const modelTier = overrides.modelTier ?? inferModelTier({ profiles, primary: profile, purpose, difficulty, risk, config });
     const budget = resolveAgentBudget({
       config,
@@ -279,11 +295,14 @@ function buildSuggestedTasks({ prompt, signals, primary, secondary, profiles, co
   if (signals.browser) {
     add("browser-verifier", "执行浏览器/前端验收", `围绕用户任务做浏览器或前端交互验收，记录步骤和观察：\n${prompt}`, false);
   }
+  if (signals.visual) {
+    add("visual-verifier", "执行视觉证据复核", `使用视觉模型围绕用户任务复核截图、图片、UI 布局或视觉回归证据；输出可供主智能体直接决策的视觉结论：\n${prompt}`, false, { purpose: "visual", modelTier: "vision" });
+  }
   if (signals.repository || signals.implementation || signals.verification) {
     add("explorer", "只读调查相关代码路径", `只读调查当前仓库与用户任务相关的文件、调用链和风险：\n${prompt}`);
   }
-  if (signals.planning || signals.implementation) {
-    add("planner", "拆解实施计划和验证路线", `基于只读调查结果预先拆解任务计划、风险和验收命令：\n${prompt}`);
+  if (shouldSuggestPlannerPackage({ signals, difficulty: routeDifficulty, risk: routeRisk, prompt })) {
+    add("planner", "生成复杂任务计划包", `基于父智能体已确认的需求和只读调查结果，生成 requirementsDoc、taskPlanDoc、executionChecklist、traceabilityMap 和 handoffPrompt：\n${prompt}`);
   }
   if (signals.verification) {
     add("verifier", "运行或设计验证步骤", `围绕用户任务运行或设计最小验证步骤，解释失败原因：\n${prompt}`, false, { purpose: "verify" });
@@ -294,10 +313,10 @@ function buildSuggestedTasks({ prompt, signals, primary, secondary, profiles, co
   if (signals.implementation) {
     add("junior", "执行局部代码修改", `在父会话权限允许后执行局部实现或修复，并报告改动文件。若未提供 writeScope，不要写文件并向主智能体说明需要范围：\n${prompt}`, false, { purpose: "execute" });
   }
-  if (shouldRecommendReviewer({ prompt, signals, risk: inferRisk(prompt, signals), suggestedTasks: tasks }) && tasks.length < taskCount) {
+  if (shouldRecommendReviewer({ prompt, signals, risk: routeRisk, suggestedTasks: tasks }) && tasks.length < taskCount) {
     add("reviewer", "高风险任务严格复核", `只读复核该任务的风险、遗漏和验收缺口：\n${prompt}`, true, { purpose: "review", risk: "high", modelTier: "strong" });
   }
-  if (tasks.length === 0 && primary) {
+  if (tasks.length === 0 && primary && !(primary.name === "planner" && !shouldSuggestPlannerPackage({ signals, difficulty: routeDifficulty, risk: routeRisk, prompt }))) {
     add(primary.name, "处理用户任务", prompt, primary.mode === "readonly");
   }
   for (const profile of secondary) {
@@ -310,6 +329,7 @@ function buildSuggestedTasks({ prompt, signals, primary, secondary, profiles, co
 }
 
 function inferPurpose(signals) {
+  if (signals.visual) return "visual";
   if (signals.review) return "review";
   if (signals.browser) return "browser";
   if (signals.web) return "research";
@@ -330,7 +350,7 @@ function inferDifficulty(prompt, signals) {
   if (signals.implementation && (signals.repository || signals.planning || signals.verification)) {
     return "deep";
   }
-  return signals.implementation || signals.browser || signals.web ? "standard" : "quick";
+  return signals.implementation || signals.browser || signals.visual || signals.web ? "standard" : "quick";
 }
 
 function inferRisk(prompt, signals) {
@@ -338,14 +358,25 @@ function inferRisk(prompt, signals) {
   if (/权限|密钥|token|cookie|auth|security|permission|mcp|install|global|发布|release|删除|移动|remove|delete|credential/i.test(text)) {
     return "high";
   }
-  if (signals.implementation || signals.browser || signals.verification) {
+  if (signals.implementation || signals.browser || signals.visual || signals.verification) {
     return "medium";
   }
   return "low";
 }
 
+function shouldSuggestPlannerPackage({ signals, difficulty, risk, prompt }) {
+  if (risk === "high" || difficulty === "deep") {
+    return signals.planning || signals.implementation || signals.repository || signals.review || signals.verification;
+  }
+  const text = String(prompt ?? "");
+  if (/超长|多阶段|多个阶段|执行清单|需求清单|计划包|可追溯|phase|phases|stage|stages|checklist|traceability/i.test(text)) {
+    return true;
+  }
+  return false;
+}
+
 function inferModelTier({ primary, purpose, difficulty, risk, config }) {
-  if (primary?.modelTier) {
+  if (primary?.modelTier && primary.modelTier !== "default") {
     return primary.modelTier;
   }
   if (risk === "high" && config?.agents?.routing?.strongForHighRisk !== false) {
@@ -357,12 +388,16 @@ function inferModelTier({ primary, purpose, difficulty, risk, config }) {
   if ((purpose === "explore" || purpose === "research") && config?.agents?.routing?.preferCheapForReadonly !== false) {
     return "cheap";
   }
+  if (primary?.modelTier) {
+    return primary.modelTier;
+  }
   return "default";
 }
 
 function kindToPurpose(kind) {
   if (kind === "web") return "research";
   if (kind === "browser") return "browser";
+  if (kind === "visual") return "visual";
   if (kind === "planning") return "plan";
   if (kind === "verification") return "verify";
   if (kind === "implementation") return "execute";

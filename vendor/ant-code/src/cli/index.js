@@ -81,8 +81,7 @@ async function main() {
       host: args.dashboard.host,
       port: args.dashboard.port,
       open: args.dashboard.open,
-      project: args.dashboard.project,
-      parentPid: args.dashboard.parentPid
+      project: args.dashboard.project
     });
     console.log(`Ant Code Dashboard running at ${result.url}`);
     console.log(`Project: ${result.cwd}`);

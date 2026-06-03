@@ -49,7 +49,39 @@ test("agent task store creates, updates, lists, and reads task records", async (
   assert.equal(read.task.budgetExceeded.kind, "maxRounds");
   assert.equal(read.task.toolCalls[0].name, "read_file");
   assert.equal(read.task.toolCalls[0].inputSummary, "path=src/index.js");
+  assert.ok(read.task.heartbeatAt);
+  assert.ok(read.task.progressAt);
+  assert.equal(read.task.heartbeatAt, read.task.finishedAt ?? read.task.updatedAt);
   assert.ok(await exists(path.join(cwd, ".lab-agent", "tasks", "task-test.json")));
+});
+
+test("agent task store separates heartbeat from progress timestamps", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-tasks-"));
+  const store = createAgentTaskStore({ cwd });
+
+  const created = await store.createTask({
+    id: "task-heartbeat",
+    profile: "explorer",
+    title: "Observe",
+    prompt: "watch",
+    status: "running",
+    startedAt: "2026-06-01T00:00:00.000Z",
+    heartbeatAt: "2026-06-01T00:00:00.000Z",
+    progressAt: "2026-06-01T00:00:00.000Z"
+  });
+  const heartbeat = await store.updateTask(created.id, {
+    heartbeatAt: "2026-06-01T00:01:00.000Z"
+  });
+  const progress = await store.updateTask(created.id, {
+    latestProgress: "running tool"
+  });
+
+  assert.equal(heartbeat.ok, true);
+  assert.equal(heartbeat.task.heartbeatAt, "2026-06-01T00:01:00.000Z");
+  assert.equal(heartbeat.task.progressAt, "2026-06-01T00:00:00.000Z");
+  assert.equal(progress.ok, true);
+  assert.notEqual(progress.task.progressAt, "2026-06-01T00:00:00.000Z");
+  assert.equal(progress.task.heartbeatAt, "2026-06-01T00:01:00.000Z");
 });
 
 test("agent task store writes and reads sidecar task output", async () => {

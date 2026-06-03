@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from AntSleap.core.cascade_routes import ROUTE_BACKEND_VIT_B_BLINK
 from AntSleap.core.project import ProjectManager
 
 
@@ -36,6 +37,44 @@ class LocatorScopeTests(unittest.TestCase):
 
             self.assertEqual(pm.project_data["taxonomy"], ["Head", "Mesosoma", "Gaster", "Mandible", "Eye"])
             self.assertEqual(pm.get_locator_scope(), ["Head", "Mesosoma", "Gaster", "Mandible", "Eye"])
+
+    def test_legacy_project_without_model_profiles_opens_with_existing_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            project_path = Path(tmp_dir) / "legacy_without_profiles.json"
+            project_path.write_text(
+                json.dumps(
+                    {
+                        "name": "legacy_without_profiles",
+                        "taxonomy": ["Head", "Mesosoma", "Gaster", "Mandible"],
+                        "locator_scope": ["Head", "Mesosoma", "Gaster"],
+                        "images": [],
+                        "labels": {},
+                        "scales": {},
+                        "cascade_routes": {
+                            "version": "project-v2",
+                            "routes": [
+                                {
+                                    "parent": "Head",
+                                    "child": "Mandible",
+                                    "enabled": True,
+                                    "expert_id": "Mandible/expert_v20260501_090000.pth",
+                                    "expert_part": "Mandible",
+                                    "expert_filename": "expert_v20260501_090000.pth",
+                                }
+                            ],
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            pm = ProjectManager()
+            pm.load_project(str(project_path))
+
+            self.assertEqual(pm.get_locator_scope(), ["Head", "Mesosoma", "Gaster"])
+            route = pm.get_cascade_route("Head", "Mandible")
+            self.assertEqual(route.get("expert_id"), "Mandible/expert_v20260501_090000.pth")
 
     def test_adding_small_parts_does_not_expand_locator_scope(self):
         pm = ProjectManager()
@@ -100,6 +139,7 @@ class LocatorScopeTests(unittest.TestCase):
             self.assertEqual(route.get("expert_id"), "Mandible/expert_v20260501_090000.pth")
             self.assertEqual(route.get("expert_part"), "Mandible")
             self.assertEqual(route.get("expert_filename"), "expert_v20260501_090000.pth")
+            self.assertEqual(route.get("expert_backend"), ROUTE_BACKEND_VIT_B_BLINK)
             self.assertEqual(route.get("appointed_expert", {}).get("expert_id"), "Mandible/expert_v20260501_090000.pth")
             self.assertEqual(
                 [candidate.get("expert_id") for candidate in route.get("expert_candidates", [])],
@@ -157,6 +197,49 @@ class LocatorScopeTests(unittest.TestCase):
             saved_route = saved["cascade_routes"]["routes"][0]
             self.assertEqual(saved_route["appointed_expert"]["expert_id"], "Mandible/expert_v20260501_090000.pth")
             self.assertEqual(saved_route["expert_candidates"][0]["expert_id"], "Mandible/expert_v20260501_090000.pth")
+            self.assertEqual(saved_route["expert_backend"], ROUTE_BACKEND_VIT_B_BLINK)
+
+    def test_project_route_backend_manifest_fields_round_trip(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            pm = ProjectManager()
+            pm.create_project("route_backend", tmp_dir)
+            pm.add_taxonomy_part("Mandible")
+
+            pm.register_cascade_route_candidate(
+                "Head",
+                "Mandible",
+                expert_id="Mandible/expert_v20260602_120000.pth",
+                expert_backend=ROUTE_BACKEND_VIT_B_BLINK,
+                expert_manifest="experts/Mandible/expert_v20260602_120000.manifest.json",
+                input_size=[384, 384],
+                backend_params={"temperature": 0.0},
+                note="Head route test",
+                save=False,
+            )
+            pm.appoint_cascade_route_expert(
+                "Head",
+                "Mandible",
+                expert_id="Mandible/expert_v20260602_120000.pth",
+                expert_backend=ROUTE_BACKEND_VIT_B_BLINK,
+                expert_manifest="experts/Mandible/expert_v20260602_120000.manifest.json",
+                input_size=[384, 384],
+                backend_params={"temperature": 0.0},
+                note="Head route test",
+                save=False,
+            )
+            pm.save_project()
+
+            reloaded = ProjectManager()
+            reloaded.load_project(pm.current_project_path)
+            route = reloaded.get_cascade_route("Head", "Mandible")
+
+            self.assertEqual(route.get("expert_backend"), ROUTE_BACKEND_VIT_B_BLINK)
+            self.assertEqual(route.get("expert_manifest"), "experts/Mandible/expert_v20260602_120000.manifest.json")
+            self.assertEqual(route.get("input_size"), [384, 384])
+            self.assertEqual(route.get("backend_params"), {"temperature": 0.0})
+            self.assertEqual(route.get("note"), "Head route test")
+            self.assertEqual(route.get("appointed_expert", {}).get("expert_backend"), ROUTE_BACKEND_VIT_B_BLINK)
+            self.assertEqual(route.get("expert_candidates", [])[0].get("expert_manifest"), "experts/Mandible/expert_v20260602_120000.manifest.json")
 
     def test_appointing_new_expert_preserves_previous_expert_as_history_candidate(self):
         pm = ProjectManager()

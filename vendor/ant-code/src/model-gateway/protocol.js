@@ -2,6 +2,7 @@ export const GATEWAY_PROTOCOL_VERSION = "lab-agent-gateway.v1";
 
 /**
  * @typedef {{ type: "text"; text: string }} TextBlock
+ * @typedef {{ type: "image"; data?: string; mimeType?: string; name?: string; size?: number; redacted?: boolean }} ImageBlock
  * @typedef {{ id: string; name: string; input: Record<string, any> }} GatewayToolCall
  * @typedef {{
  *   id: string | null;
@@ -26,6 +27,14 @@ export const GATEWAY_PROTOCOL_VERSION = "lab-agent-gateway.v1";
  * }} input
  */
 export function createGatewayRequest(input) {
+  const capabilities = {
+    tools: true,
+    toolResults: true,
+    streaming: Boolean(input.stream)
+  };
+  if (requestIncludesImages(input.messages)) {
+    capabilities.images = true;
+  }
   return {
     protocolVersion: GATEWAY_PROTOCOL_VERSION,
     model: input.model,
@@ -36,11 +45,7 @@ export function createGatewayRequest(input) {
     metadata: {
       client: "lab-agent",
       sessionId: input.sessionId ?? null,
-      capabilities: {
-        tools: true,
-        toolResults: true,
-        streaming: Boolean(input.stream)
-      },
+      capabilities,
       boundary: {
         toolExecution: "local-client",
         providerCredentials: "gateway-only",
@@ -53,6 +58,16 @@ export function createGatewayRequest(input) {
       }
     }
   };
+}
+
+function requestIncludesImages(messages = []) {
+  if (!Array.isArray(messages)) {
+    return false;
+  }
+  return messages.some((message) => {
+    const content = message?.content;
+    return Array.isArray(content) && content.some((item) => item && typeof item === "object" && item.type === "image");
+  });
 }
 
 /**

@@ -1580,6 +1580,7 @@ async function runAgentsCommand(options, config) {
       "- /agents run explorer <问题>",
       "- /agents run planner <任务>",
       "- /agents run verifier <验证目标>",
+      "- /agents run visual-verifier <截图或视觉复核目标>",
       "- /agents run code-worker <局部修改任务>",
       "- /agents route <任务>",
       "- /agents orchestrate <任务>",

@@ -15,6 +15,11 @@ from .style import (
     apply_surface_role,
 )
 
+try:
+    from AntSleap.core.panel_splitter import detect_panel_crops
+except ImportError:
+    from core.panel_splitter import detect_panel_crops
+
 CROPPER_TRANSLATIONS = {
     "zh": {
         "Crop {0}": "裁剪 {0}",
@@ -22,6 +27,9 @@ CROPPER_TRANSLATIONS = {
         "1. Load Image with Multiple Views": "1. 加载含多个视角的图片",
         "Load Image": "加载图片",
         "2. Draw Boxes (Crops)": "2. 绘制裁剪框",
+        "Auto Split Panels": "自动切分拼图",
+        "Delete Selected Crop": "删除选中裁剪框",
+        "Clear Crop Boxes": "清空裁剪框",
         "Undo Last Crop": "撤销上一个裁剪框",
         "3. Export": "3. 导出",
         "Save & Add to Project": "保存并加入项目",
@@ -29,6 +37,9 @@ CROPPER_TRANSLATIONS = {
         "View {0} ({1}x{2})": "视角 {0}（{1}x{2}）",
         "Empty": "空内容",
         "Please load an image and draw at least one crop box.": "请先加载图片，并至少绘制一个裁剪框。",
+        "Please load an image before auto splitting panels.": "请先加载图片，再自动切分拼图。",
+        "No panel separators were detected.": "未检测到可用的拼图分隔线。",
+        "Created {0} panel crop boxes.": "已生成 {0} 个拼图裁剪框。",
         "Success": "成功",
         "Created {0} images.": "已生成 {0} 张图片。",
         "Error": "错误",
@@ -156,6 +167,7 @@ class ImageCropper(QDialog):
         self.resize(1200, 800)
         self.generated_files = [] # List of abs paths
         self.generated_crops = [] # List of crop metadata dicts
+        self.crop_sources = []
         
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -188,6 +200,21 @@ class ImageCropper(QDialog):
         self.crop_list = QListWidget()
         self.crop_list.setObjectName("cropperCropList")
         draw_layout.addWidget(self.crop_list)
+
+        self.btn_auto_split = QPushButton(translate_cropper_text("Auto Split Panels", self.lang))
+        self.btn_auto_split.clicked.connect(self.auto_split_panels)
+        apply_semantic_button_style(self.btn_auto_split, BUTTON_ROLE_NEUTRAL)
+        draw_layout.addWidget(self.btn_auto_split)
+
+        self.btn_delete_selected = QPushButton(translate_cropper_text("Delete Selected Crop", self.lang))
+        self.btn_delete_selected.clicked.connect(self.delete_selected_crop)
+        apply_semantic_button_style(self.btn_delete_selected, BUTTON_ROLE_NEUTRAL)
+        draw_layout.addWidget(self.btn_delete_selected)
+
+        self.btn_clear_crops = QPushButton(translate_cropper_text("Clear Crop Boxes", self.lang))
+        self.btn_clear_crops.clicked.connect(self.clear_crops)
+        apply_semantic_button_style(self.btn_clear_crops, BUTTON_ROLE_NEUTRAL)
+        draw_layout.addWidget(self.btn_clear_crops)
         
         self.btn_undo = QPushButton(translate_cropper_text("Undo Last Crop", self.lang))
         self.btn_undo.clicked.connect(self.undo_crop)
@@ -237,17 +264,77 @@ class ImageCropper(QDialog):
         self.current_image_path = path
         self.canvas.load_image(path)
         self.crop_list.clear()
+        self.crop_sources = []
         self.setWindowTitle(translate_cropper_text("Cropping: {0}", self.lang).format(os.path.basename(path)))
 
     def on_crop_added(self, rect):
+        self.crop_sources.append("manual")
+        self._add_crop_list_item(rect)
+
+    def _add_crop_list_item(self, rect):
         idx = self.crop_list.count() + 1
         item = translate_cropper_text("View {0} ({1}x{2})", self.lang).format(idx, int(rect.width()), int(rect.height()))
         self.crop_list.addItem(item)
 
+    def _refresh_crop_list(self):
+        self.crop_list.clear()
+        for rect in self.canvas.crops:
+            self._add_crop_list_item(rect)
+
+    def auto_split_panels(self):
+        if not self.current_image_path:
+            QMessageBox.warning(self, translate_cropper_text("Empty", self.lang), translate_cropper_text("Please load an image before auto splitting panels.", self.lang))
+            return
+
+        try:
+            detections = detect_panel_crops(self.current_image_path)
+        except Exception as exc:
+            QMessageBox.critical(self, translate_cropper_text("Error", self.lang), translate_cropper_text("Failed to save crops:\n{0}", self.lang).format(exc))
+            return
+        if not detections:
+            QMessageBox.information(self, translate_cropper_text("Empty", self.lang), translate_cropper_text("No panel separators were detected.", self.lang))
+            return
+
+        self.canvas.crops = []
+        self.crop_sources = []
+        self.crop_list.clear()
+        for detection in detections:
+            x0, y0, x1, y1 = detection["box"]
+            rect = QRectF(float(x0), float(y0), float(x1 - x0), float(y1 - y0))
+            self.canvas.crops.append(rect)
+            self.crop_sources.append(str(detection.get("source") or "white_separator_panel_split"))
+            self._add_crop_list_item(rect)
+        self.canvas.update()
+        QMessageBox.information(
+            self,
+            translate_cropper_text("Success", self.lang),
+            translate_cropper_text("Created {0} panel crop boxes.", self.lang).format(len(detections)),
+        )
+
     def undo_crop(self):
         self.canvas.remove_last()
+        if self.crop_sources:
+            self.crop_sources.pop()
         if self.crop_list.count() > 0:
             self.crop_list.takeItem(self.crop_list.count() - 1)
+
+    def delete_selected_crop(self):
+        row = self.crop_list.currentRow()
+        if row < 0 or row >= len(self.canvas.crops):
+            return
+        self.canvas.crops.pop(row)
+        if row < len(self.crop_sources):
+            self.crop_sources.pop(row)
+        self._refresh_crop_list()
+        if self.crop_list.count() > 0:
+            self.crop_list.setCurrentRow(min(row, self.crop_list.count() - 1))
+        self.canvas.update()
+
+    def clear_crops(self):
+        self.canvas.crops = []
+        self.crop_sources = []
+        self.crop_list.clear()
+        self.canvas.update()
 
     def save_crops(self):
         if not self.current_image_path or not self.canvas.crops:
@@ -281,6 +368,7 @@ class ImageCropper(QDialog):
                             "crop_index": i + 1,
                             "crop_box": list(crop_box),
                             "source_size": [int(img.width), int(img.height)],
+                            "crop_source": self.crop_sources[i] if i < len(self.crop_sources) else "manual",
                         }
                     )
             

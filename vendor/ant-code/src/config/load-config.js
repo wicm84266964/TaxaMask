@@ -103,6 +103,11 @@ const DEFAULT_CONFIG = Object.freeze({
       requireForWrites: false,
       requireForHighRisk: false
     },
+    vision: {
+      enabled: true,
+      model: null,
+      autoUseWhenMainModelTextOnly: true
+    },
     modelTiers: {},
     budgets: {},
     routing: {
@@ -152,7 +157,8 @@ export async function loadConfig(options = {}) {
   const cwd = options.cwd ?? process.cwd();
   const env = options.env ?? process.env;
 
-  const project = await loadFirstProjectConfig(cwd);
+  const projectConfigs = await loadProjectConfigs(cwd);
+  const project = mergeProjectConfigs(projectConfigs);
   const labConfigPath = env.LAB_AGENT_CONFIG ?? null;
   const bundled = await readJsonIfExists(BUNDLED_CONFIG_PATH);
   const lab = labConfigPath ? await readJsonIfExists(labConfigPath) : null;
@@ -170,6 +176,8 @@ export async function loadConfig(options = {}) {
     gatewayProtocol: env.LAB_MODEL_GATEWAY_PROTOCOL ?? hardened.lab?.gatewayProtocol ?? "lab-agent-gateway",
     gatewayApiKey: env.LAB_MODEL_GATEWAY_API_KEY ?? hardened.lab?.gatewayApiKey ?? null,
     gatewayMaxRetries: parseOptionalInteger(env.LAB_MODEL_GATEWAY_MAX_RETRIES, hardened.lab?.gatewayMaxRetries ?? 2),
+    activeGatewayProfile: typeof hardened.lab?.activeGatewayProfile === "string" ? hardened.lab.activeGatewayProfile : "",
+    gatewayProfiles: Array.isArray(hardened.lab?.gatewayProfiles) ? hardened.lab.gatewayProfiles : [],
     configPath: labConfigPath
   };
   validateLabConfig(finalLab);
@@ -178,6 +186,7 @@ export async function loadConfig(options = {}) {
     ...hardened,
     lab: finalLab,
     projectConfigPath: project?.path ?? null,
+    projectConfigPaths: project?.paths ?? [],
     bundledConfigPath: bundled ? BUNDLED_CONFIG_PATH : null
   };
 }
@@ -211,15 +220,38 @@ function normalizeContextConfig(config, env) {
 /**
  * @param {string} cwd
  */
-async function loadFirstProjectConfig(cwd) {
+export function localProjectConfigPath(cwd) {
+  return path.join(cwd, ".lab-agent", "config.json");
+}
+
+/**
+ * @param {string} cwd
+ */
+async function loadProjectConfigs(cwd) {
+  const configs = [];
   for (const name of PROJECT_CONFIG_FILES) {
     const candidate = path.join(cwd, name);
     const data = await readJsonIfExists(candidate);
     if (data) {
-      return { path: candidate, data: data.data };
+      configs.push({ path: candidate, data: data.data });
     }
   }
-  return null;
+  return configs;
+}
+
+/**
+ * @param {Array<{ path: string; data: Record<string, any> }>} configs
+ */
+function mergeProjectConfigs(configs) {
+  if (configs.length === 0) {
+    return null;
+  }
+  const merged = configs.reduce((current, item) => mergeConfig(current, item.data ?? {}), {});
+  return {
+    path: configs[configs.length - 1].path,
+    paths: configs.map((item) => item.path),
+    data: merged
+  };
 }
 
 /**
@@ -449,6 +481,31 @@ function validateConfig(config) {
     ) {
       throw new Error(`Unsupported models entry reasoningContentMode: ${model.reasoningContentMode}`);
     }
+    if (
+      model.openaiExtraBody !== undefined
+      && model.openaiExtraBody !== null
+      && !isPlainObject(model.openaiExtraBody)
+    ) {
+      throw new Error("Unsupported models entry openaiExtraBody: expected object");
+    }
+    if (model.modalities !== undefined && model.modalities !== null && !validModelModalities(model.modalities)) {
+      throw new Error("Unsupported models entry modalities: expected array or comma-separated string containing text/image");
+    }
+    if (model.agentModelTiers !== undefined && model.agentModelTiers !== null) {
+      if (!isPlainObject(model.agentModelTiers)) {
+        throw new Error("Unsupported models entry agentModelTiers: expected object");
+      }
+      for (const [tier, tierModel] of Object.entries(model.agentModelTiers)) {
+        if (typeof tierModel !== "string" || tierModel.trim() === "") {
+          throw new Error(`Unsupported models entry agentModelTiers.${tier}: expected model id string`);
+        }
+      }
+    }
+    for (const key of ["vision", "multimodal", "supportsImages", "imageInput"]) {
+      if (model[key] !== undefined && typeof model[key] !== "boolean") {
+        throw new Error(`Unsupported models entry ${key}: expected boolean`);
+      }
+    }
   }
 
   if (config.skills !== undefined) {
@@ -488,6 +545,9 @@ function validateConfig(config) {
     }
     if (config.agents.reviewGate !== undefined) {
       validateReviewGateConfig(config.agents.reviewGate);
+    }
+    if (config.agents.vision !== undefined) {
+      validateVisionAgentConfig(config.agents.vision);
     }
     if (config.agents.modelTiers !== undefined && !isPlainObject(config.agents.modelTiers)) {
       throw new Error("Unsupported agents.modelTiers: expected an object");
@@ -538,7 +598,80 @@ function validateConfig(config) {
     }
   }
 
+  if (config.lab?.gatewayProfiles !== undefined) {
+    validateGatewayProfiles(config.lab.gatewayProfiles);
+  }
+
   validateHookConfig(config);
+}
+
+function validateGatewayProfiles(value) {
+  if (!Array.isArray(value)) {
+    throw new Error("Unsupported lab.gatewayProfiles: expected an array");
+  }
+  for (const profile of value) {
+    if (!isPlainObject(profile)) {
+      throw new Error("Unsupported lab.gatewayProfiles entry: expected object");
+    }
+    if (typeof profile.id !== "string" || profile.id.trim() === "") {
+      throw new Error("Unsupported lab.gatewayProfiles entry id: expected string");
+    }
+    if (profile.label !== undefined && typeof profile.label !== "string") {
+      throw new Error("Unsupported lab.gatewayProfiles entry label: expected string");
+    }
+    if (profile.gatewayUrl !== undefined && profile.gatewayUrl !== null && typeof profile.gatewayUrl !== "string") {
+      throw new Error("Unsupported lab.gatewayProfiles entry gatewayUrl: expected string");
+    }
+    if (profile.gatewayHealthUrl !== undefined && profile.gatewayHealthUrl !== null && typeof profile.gatewayHealthUrl !== "string") {
+      throw new Error("Unsupported lab.gatewayProfiles entry gatewayHealthUrl: expected string");
+    }
+    if (profile.gatewayProtocol !== undefined && !GATEWAY_PROTOCOLS.includes(profile.gatewayProtocol)) {
+      throw new Error(`Unsupported lab.gatewayProfiles entry gatewayProtocol: ${profile.gatewayProtocol}`);
+    }
+    if (profile.gatewayApiKey !== undefined && profile.gatewayApiKey !== null && typeof profile.gatewayApiKey !== "string") {
+      throw new Error("Unsupported lab.gatewayProfiles entry gatewayApiKey: expected string");
+    }
+    if (profile.modelAlias !== undefined && typeof profile.modelAlias !== "string") {
+      throw new Error("Unsupported lab.gatewayProfiles entry modelAlias: expected string");
+    }
+    if (profile.models !== undefined && !Array.isArray(profile.models)) {
+      throw new Error("Unsupported lab.gatewayProfiles entry models: expected array");
+    }
+    if (profile.agents !== undefined && !isPlainObject(profile.agents)) {
+      throw new Error("Unsupported lab.gatewayProfiles entry agents: expected object");
+    }
+    validateProfileModels(profile.models ?? []);
+    if (profile.agents?.vision !== undefined) {
+      validateVisionAgentConfig(profile.agents.vision);
+    }
+    if (profile.agents?.modelTiers !== undefined) {
+      if (!isPlainObject(profile.agents.modelTiers)) {
+        throw new Error("Unsupported lab.gatewayProfiles entry agents.modelTiers: expected object");
+      }
+      for (const [tier, model] of Object.entries(profile.agents.modelTiers)) {
+        if (typeof model !== "string" || model.trim() === "") {
+          throw new Error(`Unsupported lab.gatewayProfiles entry agents.modelTiers.${tier}: expected model id string`);
+        }
+      }
+    }
+  }
+}
+
+function validateProfileModels(models) {
+  for (const model of models) {
+    if (typeof model === "string") {
+      continue;
+    }
+    if (!model || typeof model !== "object" || typeof model.id !== "string" || model.id.trim() === "") {
+      throw new Error("Unsupported lab.gatewayProfiles entry models item: expected string or object with id");
+    }
+    if (model.modalities !== undefined && model.modalities !== null && !validModelModalities(model.modalities)) {
+      throw new Error("Unsupported lab.gatewayProfiles entry models item modalities: expected text/image");
+    }
+    if (model.agentModelTiers !== undefined && model.agentModelTiers !== null && !isPlainObject(model.agentModelTiers)) {
+      throw new Error("Unsupported lab.gatewayProfiles entry models item agentModelTiers: expected object");
+    }
+  }
 }
 
 function validateAgentOrchestrationConfig(value) {
@@ -623,6 +756,21 @@ function validateReviewGateConfig(value) {
   }
 }
 
+function validateVisionAgentConfig(value) {
+  if (!isPlainObject(value)) {
+    throw new Error("Unsupported agents.vision: expected an object");
+  }
+  if (value.enabled !== undefined && typeof value.enabled !== "boolean") {
+    throw new Error("Unsupported agents.vision.enabled: expected boolean");
+  }
+  if (value.autoUseWhenMainModelTextOnly !== undefined && typeof value.autoUseWhenMainModelTextOnly !== "boolean") {
+    throw new Error("Unsupported agents.vision.autoUseWhenMainModelTextOnly: expected boolean");
+  }
+  if (value.model !== undefined && value.model !== null && (typeof value.model !== "string" || value.model.trim() === "")) {
+    throw new Error("Unsupported agents.vision.model: expected model id string");
+  }
+}
+
 /**
  * @param {{ gatewayProtocol?: string; gatewayApiKey?: string | null; gatewayMaxRetries?: number }} lab
  */
@@ -704,4 +852,14 @@ function parseOptionalInteger(value, fallback) {
  */
 function isPlainObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function validModelModalities(value) {
+  const items = Array.isArray(value)
+    ? value
+    : typeof value === "string" ? value.split(/[, ]+/) : [];
+  return items.length > 0 && items.every((item) => {
+    const text = String(item ?? "").trim().toLowerCase();
+    return !text || ["text", "image", "images", "vision", "visual", "multimodal", "文本", "图片", "视觉"].includes(text);
+  });
 }

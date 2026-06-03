@@ -12,10 +12,22 @@ try:
     from AntSleap.core.taxonomy_defaults import is_safe_part_name
     from AntSleap.core.cascade_routes import build_expert_id
     from AntSleap.core.expert_notes import format_expert_display_name, load_expert_notes, set_expert_note
+    from AntSleap.core.blink_expert_manifest import (
+        BLINK_EXPERT_BACKEND_HEATMAP,
+        BLINK_EXPERT_BACKEND_VIT_B,
+        default_manifest_path_for_weights,
+        load_blink_expert_manifest,
+    )
 except ImportError:
     from core.taxonomy_defaults import is_safe_part_name
     from core.cascade_routes import build_expert_id
     from core.expert_notes import format_expert_display_name, load_expert_notes, set_expert_note
+    from core.blink_expert_manifest import (
+        BLINK_EXPERT_BACKEND_HEATMAP,
+        BLINK_EXPERT_BACKEND_VIT_B,
+        default_manifest_path_for_weights,
+        load_blink_expert_manifest,
+    )
 from .canvas import AnnotationCanvas
 from .style import (
     BUTTON_ROLE_COMMIT,
@@ -68,6 +80,9 @@ BLINK_TRANSLATIONS = {
         "Learning Rate:": "学习率 (LR):",
         "Weight Decay:": "权重衰减：",
         "Input Size:": "输入尺寸：",
+        "Trainer Backend:": "训练后端：",
+        "ViT-B Blink": "ViT-B Blink",
+        "Heatmap Blink": "热力图 Blink",
         "Blink Training Report": "Blink 训练报告",
         "Summary": "摘要",
         "Metrics": "指标",
@@ -280,6 +295,8 @@ class BlinkTrainingThread(QThread):
         learning_rate=1e-3,
         weight_decay=1e-4,
         input_size=224,
+        trainer_backend=BLINK_EXPERT_BACKEND_VIT_B,
+        heatmap_params=None,
         device="auto",
     ):
         super().__init__()
@@ -291,24 +308,45 @@ class BlinkTrainingThread(QThread):
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
         self.input_size = input_size
+        self.trainer_backend = str(trainer_backend or BLINK_EXPERT_BACKEND_VIT_B)
+        self.heatmap_params = dict(heatmap_params or {})
         self.device = device
 
     def run(self):
         try:
-            try:
-                from AntSleap.core.blink_trainer import BlinkExpertTrainer
-            except ImportError:
-                from core.blink_trainer import BlinkExpertTrainer
+            if self.trainer_backend == BLINK_EXPERT_BACKEND_HEATMAP:
+                try:
+                    from AntSleap.core.blink_heatmap_trainer import BlinkHeatmapTrainer
+                except ImportError:
+                    from core.blink_heatmap_trainer import BlinkHeatmapTrainer
 
-            trainer = BlinkExpertTrainer(
-                project_path=self.project_path,
-                part_name=self.part_name,
-                parent_part=self.parent_part,
-                learning_rate=self.learning_rate,
-                weight_decay=self.weight_decay,
-                input_size=self.input_size,
-                device=self.device,
-            )
+                trainer = BlinkHeatmapTrainer(
+                    project_path=self.project_path,
+                    part_name=self.part_name,
+                    parent_part=self.parent_part,
+                    learning_rate=self.learning_rate,
+                    weight_decay=self.weight_decay,
+                    input_size=self.heatmap_params.get("input_size", self.input_size),
+                    heatmap_sigma=self.heatmap_params.get("heatmap_sigma", 2.0),
+                    wh_loss_weight=self.heatmap_params.get("wh_loss_weight", 1.0),
+                    center_loss_weight=self.heatmap_params.get("center_loss_weight", 1.0),
+                    device=self.device,
+                )
+            else:
+                try:
+                    from AntSleap.core.blink_trainer import BlinkExpertTrainer
+                except ImportError:
+                    from core.blink_trainer import BlinkExpertTrainer
+
+                trainer = BlinkExpertTrainer(
+                    project_path=self.project_path,
+                    part_name=self.part_name,
+                    parent_part=self.parent_part,
+                    learning_rate=self.learning_rate,
+                    weight_decay=self.weight_decay,
+                    input_size=self.input_size,
+                    device=self.device,
+                )
             save_path = trainer.train(
                 epochs=self.epochs,
                 batch_size=self.batch_size,
@@ -529,6 +567,8 @@ class BlinkLabWidget(QWidget):
         self.default_learning_rate = self._coerce_float(blink_lr, 1e-3)
         self.default_weight_decay = self._coerce_float(blink_weight_decay, 1e-4)
         self.default_input_size = self._normalize_input_size(blink_input_size)
+        self.default_trainer_backend = BLINK_EXPERT_BACKEND_VIT_B
+        self.default_heatmap_params = {}
         self.runtime_device = str(runtime_device or "auto")
         self.training_thread = None
         self.active_session = None
@@ -573,6 +613,8 @@ class BlinkLabWidget(QWidget):
         weight_decay=None,
         input_size=None,
         runtime_device=None,
+        trainer_backend=None,
+        heatmap_params=None,
         apply_to_controls=True,
     ):
         if epochs is not None:
@@ -587,6 +629,10 @@ class BlinkLabWidget(QWidget):
             self.default_input_size = self._normalize_input_size(input_size)
         if runtime_device is not None:
             self.runtime_device = str(runtime_device or "auto")
+        if trainer_backend is not None:
+            self.default_trainer_backend = str(trainer_backend or BLINK_EXPERT_BACKEND_VIT_B)
+        if isinstance(heatmap_params, dict):
+            self.default_heatmap_params = dict(heatmap_params)
         if apply_to_controls and hasattr(self, "spin_epochs") and hasattr(self, "spin_batch"):
             self.spin_epochs.setValue(self.default_training_epochs)
             self.spin_batch.setValue(self.default_training_batch)
@@ -597,6 +643,9 @@ class BlinkLabWidget(QWidget):
             if hasattr(self, "combo_input_size"):
                 index = self.combo_input_size.findData(self.default_input_size)
                 self.combo_input_size.setCurrentIndex(index if index >= 0 else 0)
+            if hasattr(self, "lbl_trainer_backend"):
+                backend_label = self.tr("Heatmap Blink") if self.default_trainer_backend == BLINK_EXPERT_BACKEND_HEATMAP else self.tr("ViT-B Blink")
+                self.lbl_trainer_backend.setText(f"{self.tr('Trainer Backend:')} {backend_label}")
 
     def tr(self, text):
         return translate_blink_text(text, self.lang)
@@ -622,6 +671,9 @@ class BlinkLabWidget(QWidget):
         self.btn_delete_expert.setText(self.tr("Delete"))
         self.btn_refresh_experts.setText(self.tr("Refresh"))
         self.training_log_box.setTitle(self.tr("Training Log"))
+        if hasattr(self, "lbl_trainer_backend"):
+            backend_label = self.tr("Heatmap Blink") if self.default_trainer_backend == BLINK_EXPERT_BACKEND_HEATMAP else self.tr("ViT-B Blink")
+            self.lbl_trainer_backend.setText(f"{self.tr('Trainer Backend:')} {backend_label}")
         self.btn_clear_training_log.setText(self.tr("Clear Log"))
         if not self.training_log_console.toPlainText().strip():
             self.training_log_console.setPlaceholderText(self.tr("Blink training log will appear here during expert training."))
@@ -877,6 +929,9 @@ class BlinkLabWidget(QWidget):
         self.lbl_weight_decay.setObjectName("BlinkFormLabel")
         self.lbl_input_size = QLabel("Input Size:")
         self.lbl_input_size.setObjectName("BlinkFormLabel")
+        self.lbl_trainer_backend = QLabel("Trainer Backend:")
+        self.lbl_trainer_backend.setObjectName("BlinkFormLabel")
+        tc_layout.addWidget(self.lbl_trainer_backend)
         tc_layout.addWidget(self.lbl_epochs)
         tc_layout.addWidget(self.spin_epochs)
         tc_layout.addWidget(self.lbl_batch_size)
@@ -2045,6 +2100,8 @@ class BlinkLabWidget(QWidget):
             learning_rate=learning_rate,
             weight_decay=weight_decay,
             input_size=input_size,
+            trainer_backend=self.default_trainer_backend,
+            heatmap_params=self.default_heatmap_params,
             device=self.runtime_device,
         )
         self.training_thread.result_signal.connect(self._on_training_result)
@@ -2108,6 +2165,15 @@ class BlinkLabWidget(QWidget):
         if not expert_id:
             return None
 
+        manifest_path = default_manifest_path_for_weights(save_path)
+        manifest = load_blink_expert_manifest(manifest_path)
+        input_size = manifest.get("input_size") if isinstance(manifest, dict) else None
+        expert_backend = (
+            manifest.get("expert_backend")
+            if isinstance(manifest, dict) and manifest.get("expert_backend")
+            else self.default_trainer_backend
+        )
+
         register_route = getattr(self.pm, "register_cascade_route_candidate", None)
         if not callable(register_route):
             return None
@@ -2123,6 +2189,9 @@ class BlinkLabWidget(QWidget):
                 parent_part,
                 child_part,
                 expert_id=expert_id,
+                expert_backend=expert_backend,
+                expert_manifest=manifest_path,
+                input_size=input_size,
                 focus_source=focus_source,
                 registration_source="blink_training",
                 save=True,
@@ -2139,6 +2208,9 @@ class BlinkLabWidget(QWidget):
             parent_part,
             child_part,
             expert_id=expert_id,
+            expert_backend=expert_backend,
+            expert_manifest=manifest_path,
+            input_size=input_size,
             focus_source=focus_source,
             registration_source="blink_training",
             save=True,

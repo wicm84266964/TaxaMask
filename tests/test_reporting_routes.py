@@ -109,7 +109,14 @@ class ReportingRouteTests(unittest.TestCase):
                 "iou": [],
             }
 
-            report = engine.generate_report(dataloader, num_samples=1)
+            report = engine.generate_report(
+                dataloader,
+                num_samples=1,
+                training_context={
+                    "active_profile_id": "profile_a",
+                    "parent_backend": "builtin_locator_sam",
+                },
+            )
 
             self.assertTrue(os.path.exists(report["report_summary"]))
             self.assertTrue(os.path.exists(report["validation_index"]))
@@ -119,6 +126,9 @@ class ReportingRouteTests(unittest.TestCase):
                 rows = list(csv.DictReader(handle))
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["provenance"], "macro_locator")
+            with open(report["report_summary"], "r", encoding="utf-8") as handle:
+                summary = __import__("json").load(handle)
+            self.assertEqual(summary["training_context"]["active_profile_id"], "profile_a")
 
     def test_training_report_dialog_uses_structured_validation_index_deterministically(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

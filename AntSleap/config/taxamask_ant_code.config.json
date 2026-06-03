@@ -25,6 +25,7 @@
     ]
   },
   "hooks": {
+    "enabled": true,
     "events": {
       "tool.before": [
         {

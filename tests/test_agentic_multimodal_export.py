@@ -82,6 +82,13 @@ class AgenticMultimodalExportTests(unittest.TestCase):
         self.assertEqual(records[0]["export_run_id"], "test_run")
         self.assertEqual(records[0]["source_provenance"]["candidate_id"], "cand_1")
         self.assertIn("model_provenance", records[0])
+        summary = json.loads((out_dir / "export_summary.json").read_text(encoding="utf-8"))
+        profile_summary_path = Path(summary["model_profile_summary_path"])
+        self.assertTrue(profile_summary_path.exists())
+        profile_summary = json.loads(profile_summary_path.read_text(encoding="utf-8"))
+        self.assertEqual(profile_summary["schema_version"], "taxamask-model-profile-export-summary-v1")
+        self.assertEqual(profile_summary["active_profile"]["profile_scope"], "2d_stl")
+        self.assertEqual(profile_summary["parent_backend"]["locator_scope"], ["Head"])
 
 
 if __name__ == "__main__":

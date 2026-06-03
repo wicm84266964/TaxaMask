@@ -11,7 +11,7 @@ import cv2
 
 # Disable Ultralytics checks BEFORE importing it
 os.environ["YOLO_VERBOSE"] = "False"
-os.environ["ULTRALYTICS_QUIET"] = "True" 
+os.environ["ULTRALYTICS_QUIET"] = "True"
 
 PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(PACKAGE_DIR)
@@ -19,9 +19,9 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-    QListWidget, QPushButton, QLabel, QFileDialog, QTextEdit, 
-    QComboBox, QMessageBox, QSplitter, QProgressBar, QDialog, 
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QListWidget, QPushButton, QLabel, QFileDialog, QTextEdit,
+    QComboBox, QMessageBox, QSplitter, QProgressBar, QProgressDialog, QDialog,
     QLineEdit, QScrollArea, QRadioButton, QButtonGroup, QSlider,
     QCheckBox, QInputDialog, QGroupBox, QListWidgetItem, QMenu,
     QDialogButtonBox, QGridLayout, QSizePolicy, QFrame, QFormLayout,
@@ -31,6 +31,7 @@ from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSize
 from PySide6.QtGui import QIcon, QAction, QColor
 import numpy as np
 import torch
+from PIL import Image as PILImage
 
 try:
     from AntSleap.core.project import ProjectManager
@@ -70,8 +71,27 @@ try:
     from AntSleap.ui.taxamask_agent_panel import TaxaMaskAgentPanel
     from AntSleap.core.dataset import TwoStageDataset
     from AntSleap.core.training_preflight import build_training_preflight, describe_training_preflight, describe_part_coverage, format_size_pair
-    from AntSleap.core.cascade_routes import format_expert_label, get_route_appointed_expert, get_route_persisted_expert_candidates, merge_expert_candidates
+    from AntSleap.core.cascade_routes import (
+        ROUTE_BACKEND_EXTERNAL_BLINK,
+        ROUTE_BACKEND_HEATMAP_BLINK,
+        ROUTE_BACKEND_VIT_B_BLINK,
+        format_expert_label,
+        get_route_appointed_expert,
+        get_route_persisted_expert_candidates,
+        merge_expert_candidates,
+    )
     from AntSleap.core.expert_notes import format_expert_display_name, load_expert_notes
+    from AntSleap.core.model_profiles import (
+        CHILD_BACKEND_EXTERNAL,
+        CHILD_BACKEND_HEATMAP,
+        CHILD_BACKEND_VIT_B,
+        DEFAULT_EXTERNAL_BLINK_BACKEND,
+        DEFAULT_HEATMAP_BLINK_PARAMS,
+        DEFAULT_MODEL_PROFILE_ID,
+        PARENT_BACKEND_BUILTIN,
+        PARENT_BACKEND_EXTERNAL,
+        sanitize_model_profiles,
+    )
     from AntSleap.core.project_templates import DEFAULT_PROJECT_TEMPLATE_ID, iter_project_templates
     from AntSleap.core.external_backend import BUILTIN_BACKEND_ID, EXTERNAL_BACKEND_ID, ExternalBackendRunner, sanitize_external_backend_config
     from AntSleap.core.tif_backend import DEFAULT_TIF_BACKEND_CONFIG, sanitize_tif_backend_config
@@ -138,8 +158,27 @@ except ImportError:
     from ui.taxamask_agent_panel import TaxaMaskAgentPanel
     from core.dataset import TwoStageDataset
     from core.training_preflight import build_training_preflight, describe_training_preflight, describe_part_coverage, format_size_pair
-    from core.cascade_routes import format_expert_label, get_route_appointed_expert, get_route_persisted_expert_candidates, merge_expert_candidates
+    from core.cascade_routes import (
+        ROUTE_BACKEND_EXTERNAL_BLINK,
+        ROUTE_BACKEND_HEATMAP_BLINK,
+        ROUTE_BACKEND_VIT_B_BLINK,
+        format_expert_label,
+        get_route_appointed_expert,
+        get_route_persisted_expert_candidates,
+        merge_expert_candidates,
+    )
     from core.expert_notes import format_expert_display_name, load_expert_notes
+    from core.model_profiles import (
+        CHILD_BACKEND_EXTERNAL,
+        CHILD_BACKEND_HEATMAP,
+        CHILD_BACKEND_VIT_B,
+        DEFAULT_EXTERNAL_BLINK_BACKEND,
+        DEFAULT_HEATMAP_BLINK_PARAMS,
+        DEFAULT_MODEL_PROFILE_ID,
+        PARENT_BACKEND_BUILTIN,
+        PARENT_BACKEND_EXTERNAL,
+        sanitize_model_profiles,
+    )
     from core.project_templates import DEFAULT_PROJECT_TEMPLATE_ID, iter_project_templates
     from core.external_backend import BUILTIN_BACKEND_ID, EXTERNAL_BACKEND_ID, ExternalBackendRunner, sanitize_external_backend_config
     from core.tif_backend import DEFAULT_TIF_BACKEND_CONFIG, sanitize_tif_backend_config
@@ -171,13 +210,18 @@ except ImportError:
 
 from torch.utils.data import DataLoader
 
+try:
+    from AntSleap.core.panel_splitter import detect_panel_crops
+except ImportError:
+    from core.panel_splitter import detect_panel_crops
+
 class InferenceThread(QThread):
     log_signal = Signal(str)
     progress_signal = Signal(int)
     result_signal = Signal(str, dict)
     finished_signal = Signal()
     
-    def __init__(self, engine, img_paths, taxonomy, locator_scope, inf_params, project_route_manifest=None, lang="en"):
+    def __init__(self, engine, img_paths, taxonomy, locator_scope, inf_params, project_route_manifest=None, model_profile_context=None, lang="en"):
         super().__init__()
         self.engine = engine
         self.img_paths = img_paths
@@ -185,6 +229,7 @@ class InferenceThread(QThread):
         self.locator_scope = locator_scope
         self.inf_params = inf_params
         self.project_route_manifest = dict(project_route_manifest or {})
+        self.model_profile_context = dict(model_profile_context or {})
         self.lang = lang
 
     def run(self):
@@ -201,6 +246,7 @@ class InferenceThread(QThread):
                 noise_floor=self.inf_params['noise_floor'],
                 poly_epsilon=self.inf_params['poly_epsilon'],
                 project_route_manifest=self.project_route_manifest,
+                model_profile_context=self.model_profile_context,
             )
             if preds:
                 self.result_signal.emit(img_path, preds)
@@ -284,6 +330,7 @@ TRANSLATIONS = {
         "PROJECT IMAGES": "项目图片",
         "+ Add Images": "+ 添加图片",
         "Import & Crop": "导入并裁剪",
+        "Batch Split Plates": "批量切分拼图",
         "Manual Draw": "手动绘制",
         "Magic Wand (SAM)": "魔棒 (SAM)",
         "Box Prompt (SAM)": "框选 (SAM)",
@@ -304,8 +351,8 @@ TRANSLATIONS = {
         "Raw Search Scope:": "原文检索范围：",
         "Current Taxon First": "当前物种优先",
         "Whole Current PDF": "当前 PDF 全文",
-        "Use Description": "使用描述",
-        "Append Description": "追加到描述框",
+        "Replace Current Description": "替换当前描述",
+        "Append to Current Description": "追加到当前描述末尾",
         "Close": "关闭",
         "Caste": "品级",
         "Part": "部位",
@@ -321,6 +368,13 @@ TRANSLATIONS = {
         "Image": "图片",
         "PDF": "PDF",
         "Source PDF": "来源 PDF",
+        "Source Mode": "来源模式",
+        "Current image PDF source": "当前图片来源文献",
+        "Same-taxon literature reference": "同物种文献引用",
+        "This image is not linked to the selected PDF figure. Descriptions are matched by the current image taxon name only.": "当前图片没有关联到该 PDF 图版；这里的描述仅按当前图片物种名匹配。",
+        "No PDF literature source is linked to the current image, and the current image taxon is unknown. Set the current image taxon first, or import images through the PDF candidate workflow.": "当前图片没有关联 PDF 文献来源，且当前图片物种未知。请先设置当前图片物种，或通过 PDF 候选图片流程导入。",
+        "Choose Literature Database": "选择文献数据库",
+        "No literature database was found automatically. Choose the PDF extraction database that contains this species?": "未自动找到文献数据库。是否选择一个包含该物种的 PDF 提取数据库？",
         "pronotum / 前胸背板 / propodeum ...": "pronotum / 前胸背板 / propodeum ...",
         "No literature description matched the current image, taxon, and part search.": "当前图片、物种和部位搜索没有匹配到文献描述。",
         "No raw PDF text block matched the current search. Try Whole Current PDF or broader terms.": "当前搜索没有匹配到 PDF 原文块。可以切换到“当前 PDF 全文”或使用更宽泛的关键词。",
@@ -351,6 +405,21 @@ TRANSLATIONS = {
         "VLM first-mile preannotation started for {0}.": "VLM 第一公里预标注已开始：{0}。",
         "Run VLM preannotation on all imported images?\n\nThis will call the multimodal API, may incur provider cost, and will write draft AI boxes and SAM polygons for later review.": "对已导入的所有图像运行 VLM 预标注？\n\n这会调用多模态 API，可能产生服务商费用，并写入待复核的 AI 草稿框和 SAM 掩码。",
         "VLM batch progress: {0}/{1} steps ({2}).": "VLM 批量进度：{0}/{1} 步（{2}）。",
+        "VLM Pre-Annotation Progress": "VLM 预标注进度",
+        "VLM progress: {0}% ({1}/{2}) {3}": "VLM 进度：{0}%（{1}/{2}）{3}",
+        "VLM progress: {0}% ({1}/{2}) {3} - {4}": "VLM 进度：{0}%（{1}/{2}）{3} - {4}",
+        "VLM progress: finished ({0} draft boxes)": "VLM 进度：完成（{0} 个草稿框）",
+        "start": "开始",
+        "image": "当前图像",
+        "grid": "生成网格",
+        "vlm": "调用 VLM",
+        "parse": "解析结果",
+        "write": "写入草稿",
+        "sam": "生成 SAM 草稿",
+        "report": "写入报告",
+        "done": "完成当前图",
+        "failed": "失败",
+        "no_candidates": "无可用框",
         "VLM preannotation finished. Images: {0}; saved drafts: {1}; report: {2}": "VLM 预标注完成。图像：{0}；保存草稿：{1}；报告：{2}",
         "Accept current image AI drafts": "一键通过当前图 AI 草稿",
         "Accepted {0} AI draft(s) on current image.": "已通过当前图像 {0} 个 AI 草稿。",
@@ -410,6 +479,8 @@ TRANSLATIONS = {
         "Choose the data type you want to work with today.": "选择今天要处理的数据类型。",
         "Ask Ant-Code to configure workflows, inspect errors, prepare PDF evidence, or plan training. Use the right rail when you want to enter a workbench directly.": "让 Ant-Code 帮你配置工作流、检查报错、准备 PDF 证据或规划训练。需要直接进入工作台时，使用右侧入口。",
         "Project Console": "项目控制台",
+        "Expand Project Console": "展开项目控制台",
+        "Collapse Project Console": "折叠项目控制台",
         "Current workflow": "当前工作流",
         "Current project": "当前项目",
         "2D/STL images": "2D/STL 图片",
@@ -463,10 +534,14 @@ TRANSLATIONS = {
         "Auto (CUDA if available)": "自动（有 CUDA 则使用）",
         "CPU only": "仅 CPU",
         "CUDA GPU": "CUDA 显卡",
-        "Controls built-in Locator/SAM/Blink training and inference. External backends use their own command environment. CPU can run small tests, but CUDA is recommended for real training.": "控制内置 Locator/SAM/Blink 的训练和推理。外部后端使用自己的命令环境。CPU 可用于小规模测试，正式训练建议使用 CUDA。",
+        "Controls built-in Locator/SAM/Blink training and inference. External backends use their own command environment. CPU can run small tests, but CUDA is recommended for real training.": "控制内置 Locator/SAM/Blink 的训练和推理。自定义拓展使用自己的命令环境。CPU 可用于小规模测试，正式训练建议使用 CUDA。",
+        "Controls built-in Locator/SAM/Blink training and inference. Custom extensions use their own command environment. CPU can run small tests, but CUDA is recommended for real training.": "控制内置 Locator/SAM/Blink 的训练和推理。自定义拓展使用自己的命令环境。CPU 可用于小规模测试，正式训练建议使用 CUDA。",
         "Runtime device resolved to: {0}": "运行设备已解析为：{0}",
-    "External Backend": "外部后端",
+        "Active model profile updated with trained parent weights.": "当前模型方案已记录本次训练得到的父部位权重。",
+    "External Backend": "高级拓展",
+        "Advanced Extensions": "高级拓展",
     "Backend ID:": "后端 ID：",
+        "Extension ID:": "拓展 ID：",
     "Display Name:": "显示名称：",
     "Python Executable:": "Python 解释器：",
     "Prepare Dataset Command:": "数据准备命令：",
@@ -476,10 +551,111 @@ TRANSLATIONS = {
     "Validate External Backend": "校验外部后端",
     "External backend note:": "外部后端说明：",
     "Use this advanced entry when you want TaxaMask to call your own training or prediction scripts. Commands run in an isolated external_runs directory and receive a contract JSON path through {contract} or {contract_json}. When this backend is selected, built-in Locator/SAM training and prediction do not run for that task.": "当你希望 TaxaMask 调用自己的训练或推理脚本时使用这个高级入口。命令会在独立的 external_runs 目录中运行，并通过 {contract} 或 {contract_json} 接收契约 JSON 路径。选择该后端后，本次任务不会运行内置 Locator/SAM 训练或推理。",
-    "External backend configuration looks valid.": "外部后端配置看起来可用。",
-    "External backend needs at least a train command or a predict command.": "外部后端至少需要填写训练命令或推理命令。",
-    "External backend command '{0}' must include {contract} or {contract_json}.": "外部后端命令“{0}”必须包含 {contract} 或 {contract_json}。",
-    "External backend ID is required.": "外部后端 ID 不能为空。",
+        "Advanced extensions collect high-impact model source switches plus custom script and manifest settings for the current model profile. Parent-part and child-part pages show the active sources as read-only summaries.": "高级拓展集中保存当前模型方案里的关键模型来源切换，以及自定义脚本和 manifest 设置。父部位、子部位页面只读展示当前生效来源。",
+        "Use this advanced entry when you want TaxaMask to call your own parent-part training or prediction scripts. Commands run in an isolated external_runs directory and receive a contract JSON path through {contract} or {contract_json}. When Parent Model Source is set to Custom Parent Extension for the active model profile, built-in Locator/SAM training and prediction do not run for that task.": "当你希望 TaxaMask 调用自己的父部位训练或推理脚本时，在这里配置。命令会在独立的 external_runs 目录中运行，并通过 {contract} 或 {contract_json} 接收契约 JSON 路径。当当前模型方案的父部位模型来源设为“自定义父部位拓展”时，本次任务不会运行内置 Locator/SAM 训练或推理。",
+        "Compatibility display only. Choose Parent Model Source in Advanced Extensions to switch the active parent model source.": "这里只是旧字段兼容显示。要切换实际父部位模型来源，请在“高级拓展”页选择父部位模型来源。",
+    "External backend configuration looks valid.": "父部位拓展配置看起来可用。",
+    "External backend needs at least a train command or a predict command.": "父部位拓展至少需要填写训练命令或推理命令。",
+        "External backend command '{0}' must include {contract} or {contract_json}.": "父部位拓展命令“{0}”必须包含 {contract} 或 {contract_json}。",
+        "External backend ID is required.": "父部位拓展 ID 不能为空。",
+        "Parent extension configuration looks valid.": "父部位拓展配置看起来可用。",
+        "Parent extension needs at least a train command or a predict command.": "父部位拓展至少需要填写训练命令或推理命令。",
+        "Parent extension command '{0}' must include {contract} or {contract_json}.": "父部位拓展命令“{0}”必须包含 {contract} 或 {contract_json}。",
+        "Parent extension ID is required.": "父部位拓展 ID 不能为空。",
+        "Model Profiles": "模型方案",
+        "Profile": "方案",
+        "Current Model Profile:": "当前模型方案：",
+        "Profile ID:": "方案 ID：",
+        "Profile Display Name:": "方案显示名称：",
+        "Profile Description:": "方案说明：",
+        "Profile Summary:": "方案摘要：",
+        "New Profile": "新建方案",
+        "Save Current Settings as New Profile": "从当前设置保存为新方案",
+        "Copy Profile": "复制方案",
+        "Delete Profile": "删除方案",
+        "Set Active": "设为当前方案",
+        "Set as Active Profile": "设为当前方案",
+        "{0} (active)": "{0}（当前）",
+        "Project profile changes are saved into the current project JSON. The old global settings are still synchronized for compatibility.": "方案改动会保存到当前项目 JSON。旧的全局设置仍会同步，保证已有训练和推理入口兼容。",
+        "Project profile changes are saved into the current project JSON. Save the current controls as a profile after configuring and validating the backend you want to reuse.": "模型方案会保存到当前项目 JSON。请先配置并校验想复用的模型来源或高级拓展，再把当前控件保存为方案。",
+        "Project profile changes are saved into the current project JSON. Save the current controls as a profile after choosing the model sources and validating any advanced extensions you want to reuse.": "模型方案会保存到当前项目 JSON。请先选择模型来源，并校验想复用的高级拓展，再把当前控件保存为方案。",
+        "Parent extension settings are saved inside the current model profile when Parent Model Source is set to Custom Parent Extension.": "当父部位模型来源设为“自定义父部位拓展”时，这里的父部位拓展配置会保存到当前模型方案中。",
+        "External parent backend settings are saved inside the current model profile when Parent Backend is set to External Parent Backend.": "当父部位模型来源设为“自定义父部位拓展”时，这里的父部位拓展配置会保存到当前模型方案中。",
+        "Child extension settings are saved inside the current model profile when Default Child Backend is set to Custom Child Extension.": "当默认子部位专家设为“自定义子部位拓展”时，这里的子部位拓展配置会保存到当前模型方案中。",
+        "External Blink backend settings are saved inside the current model profile when Default Child Backend is set to External Blink Expert.": "当默认子部位专家设为“自定义子部位拓展”时，这里的子部位拓展配置会保存到当前模型方案中。",
+        "Model Source Switches": "模型来源切换",
+        "Choose the high-impact model sources for the current profile here. Existing child route experts stay route-specific; this default mainly affects new/default child expert training and unresolved route defaults.": "在这里选择当前方案的关键模型来源。已有子部位路由专家仍按各自路由保存；这个默认值主要影响新建/默认子部位专家训练，以及未明确指定时的路由默认值。",
+        "Current parent model source: {0}": "当前父部位模型来源：{0}",
+        "Current default child expert: {0}": "当前默认子部位专家：{0}",
+        "Read-only summary. Change this source in Advanced Extensions.": "只读摘要。请在“高级拓展”中切换。",
+        "Parent source changes parent-part training and Auto annotation. Custom Parent Extension calls the configured script below instead of built-in Locator/SAM.": "父部位来源会改变父部位训练和自动标注链路。选择自定义父部位拓展后，会调用下方配置的脚本，而不是内置 Locator/SAM。",
+        "Default child expert affects new/default child expert training. During inference, each appointed parent -> child route calls the backend recorded on that route.": "默认子部位专家会影响新建/默认子部位专家训练。推理时，每条已指定的父部位 -> 子部位路由会调用该路由记录的后端。",
+        "Project active profile: {0}": "项目当前方案：{0}",
+        "Parent backend: {0}": "父部位后端：{0}",
+        "Main locator parts: {0}": "主定位部位：{0}",
+        "Default child backend: {0}": "默认子部位后端：{0}",
+        "Route-specific experts differing from this default: {0}": "与此默认后端不同的路由专家：{0}",
+        "Inference: conf={0}, pad={1}, noise={2}": "推理参数：置信度={0}，扩框={1}，底噪={2}",
+        "Existing route experts are kept as route-specific bindings; switching profiles does not silently reappoint trained child experts.": "已有路由专家会保留为单独路由绑定；切换方案不会悄悄重新指定已经训练好的子部位专家。",
+        "External parent backend: {0}": "父部位拓展：{0}",
+        "External Blink backend: {0}": "子部位拓展：{0}",
+        "configured": "已配置",
+        "missing train/predict command": "缺少训练/推理命令",
+        "missing predict command": "缺少推理命令",
+        "none": "无",
+        "No model profile selected.": "未选择模型方案。",
+        "The built-in default profile cannot be deleted.": "内置默认方案不能删除。",
+        "At least one model profile must remain in the project.": "项目中至少需要保留一个模型方案。",
+        "Delete model profile {0}?\n\nThis removes only the saved profile configuration from the current project. Model weights, external scripts, and route expert bindings are not deleted.": "删除模型方案 {0}？\n\n这只会删除当前项目中保存的方案配置，不会删除模型权重、外部脚本或路由专家绑定。",
+        "Set {0} as the active model profile?": "将 {0} 设为当前模型方案？",
+        "Parent backend: {0} -> {1}": "父部位后端：{0} -> {1}",
+        "Default child backend: {0} -> {1}": "默认子部位后端：{0} -> {1}",
+        "Route-specific experts differing from the target default: {0}": "与目标默认后端不同的路由专家：{0}",
+        "Existing route experts stay appointed; this switch only changes the project default profile.": "已有路由专家会继续保持指定；本次切换只改变项目默认模型方案。",
+        "Parent-part annotation": "父部位标注",
+        "Child-part annotation": "子部位标注",
+        "Parent Backend:": "父部位模型来源：",
+        "Parent Model Source:": "父部位模型来源：",
+        "External Parent Backend": "自定义父部位拓展",
+        "Custom Parent Extension": "自定义父部位拓展",
+        "Default Child Backend:": "默认子部位专家：",
+        "Default Child Expert:": "默认子部位专家：",
+        "ViT-B Blink Expert": "ViT-B Blink 专家",
+        "Heatmap Blink Expert": "热力图 Blink 专家",
+        "External Blink Expert": "自定义子部位拓展",
+        "Custom Script Extension": "自定义脚本拓展",
+        "Custom Child Extension": "自定义子部位拓展",
+        "Heatmap Blink Parameters:": "热力图 Blink 参数：",
+        "Heatmap Input Size:": "热力图输入尺寸：",
+        "Heatmap Sigma:": "热力图 Sigma：",
+        "WH Loss Weight:": "宽高回归损失权重：",
+        "Center Loss Weight:": "中心点损失权重：",
+        "Parent-part Custom Extension": "父部位自定义拓展",
+        "Child-part Custom Extension": "子部位自定义拓展",
+        "External Blink Backend:": "子部位自定义拓展：",
+        "External Blink Backend ID:": "子部位拓展 ID：",
+        "External Blink Display Name:": "子部位拓展显示名称：",
+        "External Blink Python Executable:": "子部位拓展 Python 解释器：",
+        "External Blink Predict Command:": "子部位拓展推理命令：",
+        "External Blink Train Command:": "子部位拓展训练命令：",
+        "External Blink Model Manifest:": "子部位拓展模型 manifest：",
+        "Child Extension ID:": "子部位拓展 ID：",
+        "Child Extension Display Name:": "子部位拓展显示名称：",
+        "Child Extension Python Executable:": "子部位拓展 Python 解释器：",
+        "Child Extension Predict Command:": "子部位拓展推理命令：",
+        "Child Extension Train Command:": "子部位拓展训练命令：",
+        "Child Extension Model Manifest:": "子部位拓展模型 manifest：",
+        "Validate External Blink Backend": "校验子部位拓展",
+        "Validate Parent Extension": "校验父部位拓展",
+        "Validate Child Extension": "校验子部位拓展",
+        "External Blink backend configuration looks valid.": "子部位拓展配置看起来可用。",
+        "External Blink backend needs a predict command before it can be used for child-part annotation.": "子部位拓展需要填写推理命令，才能用于子部位标注。",
+        "External Blink backend command '{0}' must include {contract} or {contract_json}.": "子部位拓展命令“{0}”必须包含 {contract} 或 {contract_json}。",
+        "External Blink backend ID is required.": "子部位拓展 ID 不能为空。",
+        "Child extension configuration looks valid.": "子部位拓展配置看起来可用。",
+        "Child extension needs a predict command before it can be used for child-part annotation.": "子部位拓展需要填写推理命令，才能用于子部位标注。",
+        "Child extension command '{0}' must include {contract} or {contract_json}.": "子部位拓展命令“{0}”必须包含 {contract} 或 {contract_json}。",
+        "Child extension ID is required.": "子部位拓展 ID 不能为空。",
         "Training": "训练",
         "Inference": "推理",
         "Language": "语言",
@@ -501,7 +677,8 @@ TRANSLATIONS = {
         "Learning Rate:": "学习率 (LR):",
         "Weight Decay (L2 Reg):": "权重衰减 (L2正则):",
         "Main Locator Parts:": "主定位结构：",
-        "Choose which structures the built-in Locator should learn as large, stable targets. Small structures can stay in Structures and be refined with SAM, Blink, or an external backend.": "选择哪些结构交给内置 Locator 作为大而稳定的目标来学习。小结构仍可保留在结构标签中，再通过 SAM、Blink 或外部后端精修。",
+        "Choose which structures the built-in Locator should learn as large, stable targets. Small structures can stay in Structures and be refined with SAM, Blink, or an external backend.": "选择哪些结构交给内置 Locator 作为大而稳定的目标来学习。小结构仍可保留在结构标签中，再通过 SAM、Blink 或自定义拓展精修。",
+        "Choose which structures the built-in Locator should learn as large, stable targets. Small structures can stay in Structures and be refined with SAM, Blink, or a custom extension.": "选择哪些结构交给内置 Locator 作为大而稳定的目标来学习。小结构仍可保留在结构标签中，再通过 SAM、Blink 或自定义拓展精修。",
         "At least one main locator part must be selected.": "至少需要选择一个主定位结构。",
         "Train from Scratch (Reset Weights)": "从头训练 (重置权重)",
         "Validation Report %:": "测试集展示比例 (%):",
@@ -587,6 +764,13 @@ TRANSLATIONS = {
         "Remove Structure": "删除结构标签",
         "Crop this Image": "裁剪此图片",
         "Remove Image": "移除图片",
+        "Run automatic panel splitting on {0} original image(s)?\n\nDetected crops will be added after the original images. Please review the generated crops before training.": "对 {0} 张原图执行自动拼图切分？\n\n检测到的裁剪图会追加在原图后面。训练前请先复核生成的小图。",
+        "Panel splitting finished: {0} crop(s) from {1} image(s); hard-joined plates needing manual crop: {2}; no split detected/errors: {3}.": "拼图切分完成：从 {1} 张图片生成 {0} 张裁剪图；硬拼接需人工裁剪 {2} 张；未检测到或读取失败 {3} 张。",
+        "Panel splitting cancelled.": "拼图切分已取消。",
+        "No panel crops were detected.": "未检测到可切分的拼图。",
+        "Original Images": "原图",
+        "Split Crops": "切分图",
+        "Manual Split Needed": "待手动切分",
         "Error": "错误",
         "Success": "成功",
         "Open in Blink Workbench": "在 Blink 工作台中打开",
@@ -846,10 +1030,15 @@ SECTION_TRANSLATIONS = {
         "Disabled": "已停用",
         "Expert": "专家",
         "Status": "状态",
+        "Profile Fit": "方案匹配",
         "Yes": "是",
         "No": "否",
         "Not appointed": "未指定",
         "Expert not appointed yet": "尚未指定专家",
+        "No appointed expert": "未指定专家",
+        "Matches active profile": "匹配当前方案",
+        "Route-specific backend": "路由单独后端",
+        "Active profile default: {0}\nRoute expert backend: {1}": "当前方案默认：{0}\n路由专家后端：{1}",
         "Project": "项目",
         "Blink candidate": "Blink 候选",
         "Blink training": "Blink 训练",
@@ -873,6 +1062,7 @@ SECTION_TRANSLATIONS = {
         "Route usage for {0}": "路由使用情况：{0}",
         "Route usage for batch image {0}": "批量图片的路由使用情况：{0}",
         "source={0}; attempted={1}; applied={2}": "来源={0}；尝试={1}；应用={2}",
+        "Model audit: profile={0}; parent_backend={1}; route_backends={2}": "模型审计：方案={0}；父部位后端={1}；路由后端={2}",
         "Route blocks: {0}": "路由阻断：{0}",
         "Unknown": "未知",
     }
@@ -907,6 +1097,104 @@ def _translate_route_registration_source(value, lang="en"):
     }
     text = str(value or "project")
     return mapping.get(text, text)
+
+
+def _route_backend_label(value, lang="en"):
+    backend = str(value or ROUTE_BACKEND_VIT_B_BLINK).strip() or ROUTE_BACKEND_VIT_B_BLINK
+    mapping = {
+        ROUTE_BACKEND_VIT_B_BLINK: tr("ViT-B Blink Expert", lang),
+        ROUTE_BACKEND_HEATMAP_BLINK: tr("Heatmap Blink Expert", lang),
+        ROUTE_BACKEND_EXTERNAL_BLINK: tr("Custom Child Extension", lang),
+    }
+    return mapping.get(backend, backend)
+
+
+def _parent_backend_label(value, lang="en"):
+    backend = str(value or PARENT_BACKEND_BUILTIN).strip() or PARENT_BACKEND_BUILTIN
+    mapping = {
+        PARENT_BACKEND_BUILTIN: tr("Built-in Locator + SAM", lang),
+        PARENT_BACKEND_EXTERNAL: tr("Custom Parent Extension", lang),
+        EXTERNAL_BACKEND_ID: tr("Custom Parent Extension", lang),
+    }
+    return mapping.get(backend, backend)
+
+
+def _child_backend_label(value, lang="en"):
+    backend = str(value or CHILD_BACKEND_VIT_B).strip() or CHILD_BACKEND_VIT_B
+    mapping = {
+        CHILD_BACKEND_VIT_B: tr("ViT-B Blink Expert", lang),
+        CHILD_BACKEND_HEATMAP: tr("Heatmap Blink Expert", lang),
+        CHILD_BACKEND_EXTERNAL: tr("Custom Child Extension", lang),
+    }
+    return mapping.get(backend, backend)
+
+
+def _route_backend_from_child_backend(value):
+    backend = str(value or CHILD_BACKEND_VIT_B).strip() or CHILD_BACKEND_VIT_B
+    mapping = {
+        CHILD_BACKEND_VIT_B: ROUTE_BACKEND_VIT_B_BLINK,
+        CHILD_BACKEND_HEATMAP: ROUTE_BACKEND_HEATMAP_BLINK,
+        CHILD_BACKEND_EXTERNAL: ROUTE_BACKEND_EXTERNAL_BLINK,
+    }
+    return mapping.get(backend, ROUTE_BACKEND_VIT_B_BLINK)
+
+
+def _active_profile_from_manager(project_manager):
+    get_profile = getattr(project_manager, "get_active_model_profile", None)
+    if callable(get_profile):
+        try:
+            profile = get_profile()
+            return profile if isinstance(profile, dict) else {}
+        except Exception:
+            pass
+    return {
+        "profile_id": DEFAULT_MODEL_PROFILE_ID,
+        "display_name": "Built-in heatmap parent + default Blink",
+        "parent_backend": {"backend_type": PARENT_BACKEND_BUILTIN},
+        "child_backend_defaults": {"backend_type": CHILD_BACKEND_VIT_B},
+    }
+
+
+def _runtime_parent_backend(project_manager, fallback=BUILTIN_BACKEND_ID):
+    profile = _active_profile_from_manager(project_manager)
+    parent_backend = profile.get("parent_backend", {}) if isinstance(profile.get("parent_backend"), dict) else {}
+    backend_type = str(parent_backend.get("backend_type") or "").strip()
+    if backend_type == PARENT_BACKEND_EXTERNAL:
+        return EXTERNAL_BACKEND_ID
+    if backend_type == PARENT_BACKEND_BUILTIN:
+        return BUILTIN_BACKEND_ID
+    return fallback or BUILTIN_BACKEND_ID
+
+
+def _runtime_child_backend_defaults(project_manager):
+    profile = _active_profile_from_manager(project_manager)
+    child_defaults = profile.get("child_backend_defaults", {}) if isinstance(profile.get("child_backend_defaults"), dict) else {}
+    return dict(child_defaults)
+
+
+def _route_backend_from_entry(route_entry):
+    if not isinstance(route_entry, dict):
+        return ROUTE_BACKEND_VIT_B_BLINK
+    appointed = route_entry.get("appointed_expert")
+    if isinstance(appointed, dict) and appointed.get("expert_backend"):
+        return appointed.get("expert_backend")
+    return route_entry.get("expert_backend") or ROUTE_BACKEND_VIT_B_BLINK
+
+
+def _route_manifest_from_entry(route_entry):
+    if not isinstance(route_entry, dict):
+        return ""
+    appointed = route_entry.get("appointed_expert")
+    if isinstance(appointed, dict) and appointed.get("expert_manifest"):
+        return str(appointed.get("expert_manifest") or "")
+    return str(route_entry.get("expert_manifest") or "")
+
+
+def _compact_path_text(value, limit=52):
+    text = str(value or "").strip().replace("\\", "/")
+    if len(text) <= limit:
+        return text
+    return "..." + text[-max(1, limit - 3):]
 
 
 def _translate_training_warning_text(text, lang="en"):
@@ -1044,6 +1332,7 @@ class TrainingThread(QThread):
         batch_size=4,
         lang="en",
         train_segmenter=True,
+        training_context=None,
     ):
         super().__init__()
         self.engine = engine
@@ -1054,6 +1343,7 @@ class TrainingThread(QThread):
         self.batch_size = batch_size
         self.lang = lang
         self.train_segmenter = bool(train_segmenter)
+        self.training_context = dict(training_context or {})
         self.locator_train_data = list(self.preflight.get("locator_train_data", []))
         self.locator_val_data = list(self.preflight.get("locator_val_data", []))
         self.parts_train_data = list(self.preflight.get("parts_train_data", []))
@@ -1061,6 +1351,7 @@ class TrainingThread(QThread):
         self.locator_resolution = tuple(self.preflight.get("selected_locator_size") or (512, 512))
         self.has_locator_stage = bool(self.locator_train_data and self.locator_val_data)
         self.has_parts_stage = bool(self.train_segmenter and self.parts_train_data and self.parts_val_data)
+        self.saved_weights_timestamp = None
          
     def run(self):
         try:
@@ -1207,12 +1498,20 @@ class TrainingThread(QThread):
                 self.log_signal.emit(tr("Training cancelled.", self.lang))
                 return
                 
-            self.engine.save_weights(save_locator=self.has_locator_stage, save_segmenter=self.has_parts_stage)
+            self.saved_weights_timestamp = self.engine.save_weights(save_locator=self.has_locator_stage, save_segmenter=self.has_parts_stage)
+            if self.saved_weights_timestamp:
+                self.training_context["saved_weights_timestamp"] = self.saved_weights_timestamp
+                self.training_context["locator_weights"] = (
+                    f"locator_{self.saved_weights_timestamp}.pth" if self.has_locator_stage else ""
+                )
+                self.training_context["segmenter_weights"] = (
+                    f"sam_decoder_lora_{self.saved_weights_timestamp}.pth" if self.has_parts_stage else ""
+                )
             self.log_signal.emit(tr("Generating Report...", self.lang))
             
             # Initial report shows only a small summary (e.g., 6 images)
             # Detailed inspection is handled by the UI post-training.
-            report = self.engine.generate_report(dl_loc_val, num_samples=6)
+            report = self.engine.generate_report(dl_loc_val, num_samples=6, training_context=self.training_context)
             
             self.report_signal.emit(report)
             self.log_signal.emit(
@@ -1788,8 +2087,10 @@ class RouteManagementPanel(QWidget):
             self._ui("Parent"),
             self._ui("Child"),
             self._ui("Enabled"),
+            self._ui("Backend"),
             self._ui("Expert"),
             self._ui("Status"),
+            self._ui("Profile Fit"),
             self._ui("Source"),
         ])
         self.update_action_buttons()
@@ -1853,6 +2154,11 @@ class RouteManagementPanel(QWidget):
                 "expert_id": appointed_label,
                 "expert_part": route.get("expert_part") or route.get("child"),
                 "expert_filename": route.get("expert_filename"),
+                "expert_backend": _route_backend_from_entry(route),
+                "expert_manifest": _route_manifest_from_entry(route),
+                "input_size": route.get("input_size"),
+                "backend_params": route.get("backend_params") if isinstance(route.get("backend_params"), dict) else {},
+                "note": route.get("note"),
                 "path": resolve_route_expert_path(route) if callable(resolve_route_expert_path) else None,
             }
 
@@ -1902,6 +2208,30 @@ class RouteManagementPanel(QWidget):
         item.setData(0, self.NODE_TYPE_ROLE, payload.get("kind"))
         item.setData(0, self.NODE_PAYLOAD_ROLE, payload)
 
+    def _active_child_route_backend(self):
+        defaults = _runtime_child_backend_defaults(getattr(self.owner, "project", None))
+        return _route_backend_from_child_backend(defaults.get("backend_type", CHILD_BACKEND_VIT_B))
+
+    def _route_profile_fit_text(self, route_entry):
+        route = dict(route_entry or {})
+        route_label = format_expert_label(route)
+        if route_label == "Unappointed":
+            return self._ui("No appointed expert")
+        default_backend = self._active_child_route_backend()
+        route_backend = _route_backend_from_entry(route)
+        if route_backend == default_backend:
+            return self._ui("Matches active profile")
+        return self._ui("Route-specific backend")
+
+    def _route_profile_fit_tooltip(self, route_entry):
+        route = dict(route_entry or {})
+        default_backend = self._active_child_route_backend()
+        route_backend = _route_backend_from_entry(route)
+        return self._ui("Active profile default: {0}\nRoute expert backend: {1}").format(
+            _route_backend_label(default_backend, self.lang),
+            _route_backend_label(route_backend, self.lang),
+        )
+
     def _build_route_tree_item(self, parent_item, route_entry, expert_candidates):
         route = dict(route_entry or {})
         expert_notes = self._expert_notes()
@@ -1909,22 +2239,33 @@ class RouteManagementPanel(QWidget):
         self._set_item_payload(route_item, self._make_node_payload("route", route=route))
         route_item.setText(1, str(route.get("child") or ""))
         route_item.setText(2, _yes_no_text(route.get("enabled"), self.lang))
+        backend_value = _route_backend_from_entry(route)
+        route_item.setText(3, _route_backend_label(backend_value, self.lang))
+        route_item.setToolTip(3, f"{_route_backend_label(backend_value, self.lang)}\n{backend_value}")
         route_label = format_expert_label(route)
         if route_label != "Unappointed":
             route_note = expert_notes.get(route_label, "")
             route_display = format_expert_display_name(route_label, route_note)
-            route_item.setText(3, route_display)
-            route_item.setToolTip(3, f"{route_display}\n{route_label}")
+            route_item.setText(4, route_display)
+            manifest_value = _route_manifest_from_entry(route)
+            tooltip = f"{route_display}\n{route_label}"
+            if manifest_value:
+                tooltip += f"\n{manifest_value}"
+            route_item.setToolTip(4, tooltip)
         else:
-            route_item.setText(3, self._ui("Not appointed"))
-        route_item.setText(4, self._route_runtime_status(route))
-        route_item.setText(5, _translate_route_registration_source(route.get("registration_source"), self.lang))
+            route_item.setText(4, self._ui("Not appointed"))
+        route_item.setText(5, self._route_runtime_status(route))
+        route_item.setText(6, self._route_profile_fit_text(route))
+        route_item.setToolTip(6, self._route_profile_fit_tooltip(route))
+        route_item.setText(7, _translate_route_registration_source(route.get("registration_source"), self.lang))
 
         if not expert_candidates:
             placeholder_item = QTreeWidgetItem(route_item)
             self._set_item_payload(placeholder_item, self._make_node_payload("expert_placeholder", route=route))
-            placeholder_item.setText(3, self._ui("Not appointed"))
-            placeholder_item.setText(4, self._ui("Expert not appointed yet"))
+            placeholder_item.setText(3, _route_backend_label(backend_value, self.lang))
+            placeholder_item.setText(4, self._ui("Not appointed"))
+            placeholder_item.setText(5, self._ui("Expert not appointed yet"))
+            placeholder_item.setText(6, self._ui("No appointed expert"))
             placeholder_item.setFlags(placeholder_item.flags() & ~Qt.ItemIsSelectable)
             return route_item
 
@@ -1938,8 +2279,18 @@ class RouteManagementPanel(QWidget):
             file_exists = bool(expert.get("file_exists"))
             expert_note = expert_notes.get(expert_id, "")
             expert_label = format_expert_display_name(expert_id, expert_note, appointed=is_appointed)
-            expert_item.setText(3, expert_label)
-            expert_item.setToolTip(3, f"{expert_label}\n{expert_id}")
+            backend_value = expert.get("expert_backend") or route.get("expert_backend") or ROUTE_BACKEND_VIT_B_BLINK
+            manifest_value = expert.get("expert_manifest") or route.get("expert_manifest") or ""
+            expert_item.setText(3, _route_backend_label(backend_value, self.lang))
+            expert_item.setText(4, expert_label)
+            expert_item.setToolTip(
+                3,
+                f"{_route_backend_label(backend_value, self.lang)}\n{backend_value}",
+            )
+            expert_item.setToolTip(
+                4,
+                f"{expert_label}\n{expert_id}\n{manifest_value}".strip(),
+            )
             if is_appointed:
                 status_text = self._ui("Appointed")
             elif is_persisted and not file_exists:
@@ -1950,14 +2301,27 @@ class RouteManagementPanel(QWidget):
                 status_text = self._ui("Discoverable")
             else:
                 status_text = self._ui("Available")
-            expert_item.setText(4, status_text)
+            expert_item.setText(5, status_text)
+            expert_item.setText(
+                6,
+                self._ui("Matches active profile")
+                if backend_value == self._active_child_route_backend()
+                else self._ui("Route-specific backend"),
+            )
+            expert_item.setToolTip(
+                6,
+                self._ui("Active profile default: {0}\nRoute expert backend: {1}").format(
+                    _route_backend_label(self._active_child_route_backend(), self.lang),
+                    _route_backend_label(backend_value, self.lang),
+                ),
+            )
             if is_appointed:
-                expert_font = expert_item.font(3)
+                expert_font = expert_item.font(4)
                 expert_font.setBold(True)
-                expert_item.setFont(3, expert_font)
-                status_font = expert_item.font(4)
+                expert_item.setFont(4, expert_font)
+                status_font = expert_item.font(5)
                 status_font.setBold(True)
-                expert_item.setFont(4, status_font)
+                expert_item.setFont(5, status_font)
         return route_item
 
     def _find_parent_item(self, parent_part):
@@ -2071,6 +2435,11 @@ class RouteManagementPanel(QWidget):
             route.get("parent"),
             route.get("child"),
             expert_id=selected_label,
+            expert_backend=expert.get("expert_backend") or route.get("expert_backend") or ROUTE_BACKEND_VIT_B_BLINK,
+            expert_manifest=expert.get("expert_manifest") or route.get("expert_manifest"),
+            input_size=expert.get("input_size") or route.get("input_size"),
+            backend_params=expert.get("backend_params") if isinstance(expert.get("backend_params"), dict) else route.get("backend_params"),
+            note=expert.get("note") or route.get("note"),
         )
         if updated:
             self.refresh_route_table()
@@ -2180,6 +2549,32 @@ class ModelSettingsDialog(QDialog):
         self.tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
         self.locator_scope_checks = []
         self.vlm_target_part_checks = []
+        self.taxonomy = [str(part) for part in params.get("taxonomy", []) if str(part).strip()]
+        self.initial_locator_scope = [str(part) for part in params.get("locator_scope", []) if str(part).strip()]
+        if not self.taxonomy:
+            self.taxonomy = list(self.initial_locator_scope)
+        if not self.initial_locator_scope:
+            self.initial_locator_scope = list(self.taxonomy)
+        model_profile_context = {
+            "taxonomy": self.taxonomy,
+            "locator_scope": self.initial_locator_scope,
+            "parent_box_aspect_ratios": params.get("parent_box_aspect_ratios", {}),
+            "vlm_preannotation": params.get("vlm_preannotation", {}),
+        }
+        raw_model_profiles = params.get("model_profiles", {})
+        if (
+            (not isinstance(raw_model_profiles, dict) or not raw_model_profiles.get("profiles"))
+            and params.get("model_backend") == EXTERNAL_BACKEND_ID
+        ):
+            model_profile_context["parent_backend_type"] = PARENT_BACKEND_EXTERNAL
+            model_profile_context["external_parent_backend"] = params.get("external_backend", {})
+        self.model_profiles = sanitize_model_profiles(
+            params.get("model_profiles", {}),
+            **model_profile_context,
+        )
+        active_profile = self._active_profile()
+        parent_backend = active_profile.get("parent_backend", {}) if isinstance(active_profile, dict) else {}
+        child_defaults = active_profile.get("child_backend_defaults", {}) if isinstance(active_profile, dict) else {}
 
         workflow_note = QLabel(
             tr(
@@ -2191,78 +2586,240 @@ class ModelSettingsDialog(QDialog):
         workflow_note.setObjectName("mutedLabel")
         layout.addWidget(workflow_note)
 
+        tab_profile = QWidget()
+        tab_profile.setObjectName("modelSettingsProfileTab")
+        profile_layout = QVBoxLayout(tab_profile)
+        profile_group = QGroupBox(tr("Model Profiles", lang))
+        apply_surface_role(profile_group, SURFACE_ROLE_SUBTLE, "modelSettingsProfilePanel")
+        profile_form = QGridLayout(profile_group)
+        profile_form.setContentsMargins(12, 12, 12, 12)
+        profile_form.setHorizontalSpacing(10)
+        profile_form.setVerticalSpacing(8)
+        profile_note = QLabel(tr("Project profile changes are saved into the current project JSON. Save the current controls as a profile after choosing the model sources and validating any advanced extensions you want to reuse.", lang))
+        profile_note.setWordWrap(True)
+        profile_note.setObjectName("mutedLabel")
+        profile_form.addWidget(profile_note, 0, 0, 1, 3)
+        profile_form.addWidget(QLabel(tr("Current Model Profile:", lang)), 1, 0)
+        self.combo_model_profile = NoWheelComboBox()
+        self.combo_model_profile.setObjectName("modelSettingsProfileCombo")
+        profile_form.addWidget(self.combo_model_profile, 1, 1, 1, 2)
+        profile_form.addWidget(QLabel(tr("Profile ID:", lang)), 2, 0)
+        self.profile_id_edit = QLineEdit()
+        self.profile_id_edit.setReadOnly(True)
+        profile_form.addWidget(self.profile_id_edit, 2, 1, 1, 2)
+        profile_form.addWidget(QLabel(tr("Profile Display Name:", lang)), 3, 0)
+        self.profile_name_edit = QLineEdit()
+        profile_form.addWidget(self.profile_name_edit, 3, 1, 1, 2)
+        profile_form.addWidget(QLabel(tr("Profile Description:", lang)), 4, 0)
+        self.profile_description_edit = QTextEdit()
+        self.profile_description_edit.setAcceptRichText(False)
+        self.profile_description_edit.setMinimumHeight(82)
+        profile_form.addWidget(self.profile_description_edit, 4, 1, 1, 2)
+        profile_form.addWidget(QLabel(tr("Profile Summary:", lang)), 5, 0)
+        self.profile_summary_box = QTextEdit()
+        self.profile_summary_box.setObjectName("modelSettingsProfileSummary")
+        self.profile_summary_box.setReadOnly(True)
+        self.profile_summary_box.setAcceptRichText(False)
+        self.profile_summary_box.setMinimumHeight(128)
+        profile_form.addWidget(self.profile_summary_box, 5, 1, 1, 2)
+        profile_buttons = QHBoxLayout()
+        self.btn_new_profile = QPushButton(tr("Save Current Settings as New Profile", lang))
+        self.btn_copy_profile = QPushButton(tr("Copy Profile", lang))
+        self.btn_delete_profile = QPushButton(tr("Delete Profile", lang))
+        self.btn_set_active_profile = QPushButton(tr("Set as Active Profile", lang))
+        for button, role in [
+            (self.btn_new_profile, BUTTON_ROLE_NEUTRAL),
+            (self.btn_copy_profile, BUTTON_ROLE_NEUTRAL),
+            (self.btn_delete_profile, BUTTON_ROLE_DESTRUCTIVE),
+            (self.btn_set_active_profile, BUTTON_ROLE_COMMIT),
+        ]:
+            apply_semantic_button_style(button, role)
+            profile_buttons.addWidget(button)
+        profile_form.addLayout(profile_buttons, 6, 0, 1, 3)
+        profile_layout.addWidget(profile_group)
+        profile_layout.addStretch()
+        self._refresh_profile_combo()
+        self.combo_model_profile.currentIndexChanged.connect(self._load_selected_profile_fields)
+        self.profile_name_edit.textChanged.connect(self._update_current_profile_metadata)
+        self.profile_description_edit.textChanged.connect(self._update_current_profile_metadata)
+        self.btn_new_profile.clicked.connect(self.new_model_profile)
+        self.btn_copy_profile.clicked.connect(self.copy_model_profile)
+        self.btn_delete_profile.clicked.connect(self.delete_model_profile)
+        self.btn_set_active_profile.clicked.connect(self.set_selected_profile_active)
+        self.profile_tab_index = self.tabs.addTab(self._make_scroll_tab(tab_profile), tr("Profile", lang))
+
         tab_backend = QWidget()
+        tab_backend.setObjectName("modelSettingsAdvancedExtensionsTab")
         form_backend = QVBoxLayout(tab_backend)
-        form_backend.addWidget(QLabel(tr("Model Backend:", lang)))
+        advanced_note = QLabel(
+            tr(
+                "Advanced extensions collect high-impact model source switches plus custom script and manifest settings for the current model profile. Parent-part and child-part pages show the active sources as read-only summaries.",
+                lang,
+            )
+        )
+        advanced_note.setWordWrap(True)
+        advanced_note.setObjectName("mutedLabel")
+        form_backend.addWidget(advanced_note)
         self.backend_combo = NoWheelComboBox()
         self.backend_combo.addItem(tr("Built-in Locator + SAM", lang), BUILTIN_BACKEND_ID)
-        self.backend_combo.addItem(tr("External Script Backend", lang), EXTERNAL_BACKEND_ID)
-        backend_index = self.backend_combo.findData(params.get("model_backend", BUILTIN_BACKEND_ID))
+        self.backend_combo.addItem(tr("Custom Script Extension", lang), EXTERNAL_BACKEND_ID)
+        initial_backend = params.get("model_backend", BUILTIN_BACKEND_ID)
+        active_parent = active_profile.get("parent_backend", {}) if isinstance(active_profile.get("parent_backend"), dict) else {}
+        if active_parent.get("backend_type") == PARENT_BACKEND_EXTERNAL:
+            initial_backend = EXTERNAL_BACKEND_ID
+        elif active_parent.get("backend_type") == PARENT_BACKEND_BUILTIN:
+            initial_backend = BUILTIN_BACKEND_ID
+        backend_index = self.backend_combo.findData(initial_backend)
         self.backend_combo.setCurrentIndex(backend_index if backend_index >= 0 else 0)
-        form_backend.addWidget(self.backend_combo)
+        self.backend_combo.setEnabled(False)
+        self.backend_combo.setToolTip(
+            tr(
+                "Compatibility display only. Choose Parent Model Source in Advanced Extensions to switch the active parent model source.",
+                lang,
+            )
+        )
+        self.backend_combo.setVisible(False)
+
+        model_source_group = QGroupBox(tr("Model Source Switches", lang))
+        model_source_group.setObjectName("modelSettingsModelSourceSwitchPanel")
+        apply_surface_role(model_source_group, SURFACE_ROLE_SUBTLE, "modelSettingsModelSourceSwitchPanel")
+        model_source_layout = QVBoxLayout(model_source_group)
+        model_source_layout.setContentsMargins(12, 12, 12, 12)
+        model_source_layout.setSpacing(8)
+        model_source_note = QLabel(
+            tr(
+                "Choose the high-impact model sources for the current profile here. Existing child route experts stay route-specific; this default mainly affects new/default child expert training and unresolved route defaults.",
+                lang,
+            )
+        )
+        model_source_note.setWordWrap(True)
+        model_source_note.setObjectName("mutedLabel")
+        model_source_layout.addWidget(model_source_note)
+        model_source_layout.addWidget(QLabel(tr("Parent Model Source:", lang)))
+        self.parent_backend_combo = NoWheelComboBox()
+        self.parent_backend_combo.addItem(tr("Built-in Locator + SAM", lang), PARENT_BACKEND_BUILTIN)
+        self.parent_backend_combo.addItem(tr("Custom Parent Extension", lang), PARENT_BACKEND_EXTERNAL)
+        parent_backend_index = self.parent_backend_combo.findData(parent_backend.get("backend_type", PARENT_BACKEND_BUILTIN))
+        self.parent_backend_combo.setCurrentIndex(parent_backend_index if parent_backend_index >= 0 else 0)
+        self.parent_backend_combo.currentIndexChanged.connect(self._sync_legacy_backend_combo_from_parent_backend)
+        self.parent_backend_combo.currentIndexChanged.connect(lambda _index: self._refresh_model_source_summaries())
+        model_source_layout.addWidget(self.parent_backend_combo)
+        parent_source_note = QLabel(
+            tr(
+                "Parent source changes parent-part training and Auto annotation. Custom Parent Extension calls the configured script below instead of built-in Locator/SAM.",
+                lang,
+            )
+        )
+        parent_source_note.setWordWrap(True)
+        parent_source_note.setObjectName("mutedLabel")
+        model_source_layout.addWidget(parent_source_note)
+        model_source_layout.addWidget(QLabel(tr("Default Child Expert:", lang)))
+        self.child_backend_combo = NoWheelComboBox()
+        self.child_backend_combo.addItem(tr("ViT-B Blink Expert", lang), CHILD_BACKEND_VIT_B)
+        self.child_backend_combo.addItem(tr("Heatmap Blink Expert", lang), CHILD_BACKEND_HEATMAP)
+        self.child_backend_combo.addItem(tr("Custom Child Extension", lang), CHILD_BACKEND_EXTERNAL)
+        child_backend_index = self.child_backend_combo.findData(child_defaults.get("backend_type", CHILD_BACKEND_VIT_B))
+        self.child_backend_combo.setCurrentIndex(child_backend_index if child_backend_index >= 0 else 0)
+        self.child_backend_combo.currentIndexChanged.connect(lambda _index: self._refresh_model_source_summaries())
+        model_source_layout.addWidget(self.child_backend_combo)
+        child_source_note = QLabel(
+            tr(
+                "Default child expert affects new/default child expert training. During inference, each appointed parent -> child route calls the backend recorded on that route.",
+                lang,
+            )
+        )
+        child_source_note.setWordWrap(True)
+        child_source_note.setObjectName("mutedLabel")
+        model_source_layout.addWidget(child_source_note)
+        form_backend.addWidget(model_source_group)
+
+        parent_extension_group = QGroupBox(tr("Parent-part Custom Extension", lang))
+        parent_extension_group.setObjectName("modelSettingsParentExtensionPanel")
+        apply_surface_role(parent_extension_group, SURFACE_ROLE_SUBTLE, "modelSettingsParentExtensionPanel")
+        parent_extension_layout = QVBoxLayout(parent_extension_group)
+        parent_extension_layout.setContentsMargins(12, 12, 12, 12)
+        parent_extension_layout.setSpacing(8)
         external_note = QLabel(
-            tr("Use this advanced entry when you want TaxaMask to call your own training or prediction scripts. Commands run in an isolated external_runs directory and receive a contract JSON path through {contract} or {contract_json}. When this backend is selected, built-in Locator/SAM training and prediction do not run for that task.", lang)
+            tr("Use this advanced entry when you want TaxaMask to call your own parent-part training or prediction scripts. Commands run in an isolated external_runs directory and receive a contract JSON path through {contract} or {contract_json}. When Parent Model Source is set to Custom Parent Extension for the active model profile, built-in Locator/SAM training and prediction do not run for that task.", lang)
         )
         external_note.setWordWrap(True)
         external_note.setObjectName("mutedLabel")
-        form_backend.addWidget(external_note)
+        parent_extension_layout.addWidget(external_note)
+        external_profile_note = QLabel(
+            tr(
+                "Parent extension settings are saved inside the current model profile when Parent Model Source is set to Custom Parent Extension.",
+                lang,
+            )
+        )
+        external_profile_note.setWordWrap(True)
+        external_profile_note.setObjectName("mutedLabel")
+        parent_extension_layout.addWidget(external_profile_note)
 
         external_config = sanitize_external_backend_config(params.get("external_backend", {}))
-        form_backend.addWidget(QLabel(tr("Backend ID:", lang)))
+        parent_extension_layout.addWidget(QLabel(tr("Extension ID:", lang)))
         self.external_backend_id = QLineEdit(external_config.get("backend_id", ""))
-        form_backend.addWidget(self.external_backend_id)
-        form_backend.addWidget(QLabel(tr("Display Name:", lang)))
+        parent_extension_layout.addWidget(self.external_backend_id)
+        parent_extension_layout.addWidget(QLabel(tr("Display Name:", lang)))
         self.external_display_name = QLineEdit(external_config.get("display_name", ""))
-        form_backend.addWidget(self.external_display_name)
-        form_backend.addWidget(QLabel(tr("Python Executable:", lang)))
+        parent_extension_layout.addWidget(self.external_display_name)
+        parent_extension_layout.addWidget(QLabel(tr("Python Executable:", lang)))
         self.external_python = QLineEdit(external_config.get("python_executable", "python"))
-        form_backend.addWidget(self.external_python)
-        form_backend.addWidget(QLabel(tr("Prepare Dataset Command:", lang)))
+        parent_extension_layout.addWidget(self.external_python)
+        parent_extension_layout.addWidget(QLabel(tr("Prepare Dataset Command:", lang)))
         self.external_prepare_command = self._make_command_editor(
             external_config.get("prepare_dataset_command", ""),
             "{python} scripts/prepare_dataset.py --contract {contract_json}",
         )
-        form_backend.addWidget(self.external_prepare_command)
-        form_backend.addWidget(QLabel(tr("Train Command:", lang)))
+        parent_extension_layout.addWidget(self.external_prepare_command)
+        parent_extension_layout.addWidget(QLabel(tr("Train Command:", lang)))
         self.external_train_command = self._make_command_editor(
             external_config.get("train_command", ""),
             "{python} scripts/train_model.py --contract {contract_json}",
         )
-        form_backend.addWidget(self.external_train_command)
-        form_backend.addWidget(QLabel(tr("Predict Command:", lang)))
+        parent_extension_layout.addWidget(self.external_train_command)
+        parent_extension_layout.addWidget(QLabel(tr("Predict Command:", lang)))
         self.external_predict_command = self._make_command_editor(
             external_config.get("predict_command", ""),
             "{python} scripts/predict_image.py --contract {contract_json}",
         )
-        form_backend.addWidget(self.external_predict_command)
-        form_backend.addWidget(QLabel(tr("Model Manifest Path:", lang)))
+        parent_extension_layout.addWidget(self.external_predict_command)
+        parent_extension_layout.addWidget(QLabel(tr("Model Manifest Path:", lang)))
         self.external_model_manifest = QLineEdit(external_config.get("model_manifest", ""))
         self.external_model_manifest.setPlaceholderText("{run_dir}/model/taxamask_model_manifest.json")
-        form_backend.addWidget(self.external_model_manifest)
+        parent_extension_layout.addWidget(self.external_model_manifest)
         self.external_validation_label = QLabel()
         self.external_validation_label.setObjectName("mutedLabel")
         self.external_validation_label.setWordWrap(True)
-        form_backend.addWidget(self.external_validation_label)
-        btn_validate_external = QPushButton(tr("Validate External Backend", lang))
+        parent_extension_layout.addWidget(self.external_validation_label)
+        btn_validate_external = QPushButton(tr("Validate Parent Extension", lang))
         apply_semantic_button_style(btn_validate_external, BUTTON_ROLE_NEUTRAL)
         btn_validate_external.clicked.connect(self.validate_external_backend)
-        form_backend.addWidget(btn_validate_external)
-        form_backend.addStretch()
+        parent_extension_layout.addWidget(btn_validate_external)
+        form_backend.addWidget(parent_extension_group)
         
-        tab_train = QWidget()
-        form_train = QVBoxLayout(tab_train)
-        form_train.addWidget(QLabel(tr("Epochs:", lang)))
+        tab_parent = QWidget()
+        tab_parent.setObjectName("modelSettingsParentTab")
+        form_parent = QVBoxLayout(tab_parent)
+        self.parent_backend_status_label = QLabel()
+        self.parent_backend_status_label.setObjectName("modelSettingsParentSourceSummary")
+        self.parent_backend_status_label.setWordWrap(True)
+        form_parent.addWidget(self.parent_backend_status_label)
+        parent_backend_status_note = QLabel(tr("Read-only summary. Change this source in Advanced Extensions.", lang))
+        parent_backend_status_note.setWordWrap(True)
+        parent_backend_status_note.setObjectName("mutedLabel")
+        form_parent.addWidget(parent_backend_status_note)
+        form_parent.addWidget(QLabel(tr("Epochs:", lang)))
         self.spin_epochs = QLineEdit(str(params['epochs']))
-        form_train.addWidget(self.spin_epochs)
-        form_train.addWidget(QLabel(tr("Batch Size:", lang)))
+        form_parent.addWidget(self.spin_epochs)
+        form_parent.addWidget(QLabel(tr("Batch Size:", lang)))
         self.spin_batch = QLineEdit(str(params['batch']))
-        form_train.addWidget(self.spin_batch)
-        form_train.addWidget(QLabel(tr("Learning Rate:", lang)))
+        form_parent.addWidget(self.spin_batch)
+        form_parent.addWidget(QLabel(tr("Learning Rate:", lang)))
         self.spin_lr = QLineEdit(str(params['lr']))
-        form_train.addWidget(self.spin_lr)
-        form_train.addWidget(QLabel(tr("Weight Decay (L2 Reg):", lang)))
+        form_parent.addWidget(self.spin_lr)
+        form_parent.addWidget(QLabel(tr("Weight Decay (L2 Reg):", lang)))
         self.spin_wd = QLineEdit(str(params['wd']))
-        form_train.addWidget(self.spin_wd)
+        form_parent.addWidget(self.spin_wd)
 
         device_group = QGroupBox(tr("Runtime Device:", lang))
         apply_surface_role(device_group, SURFACE_ROLE_SUBTLE, "modelSettingsRuntimeDevicePanel")
@@ -2271,7 +2828,7 @@ class ModelSettingsDialog(QDialog):
         device_layout.setSpacing(8)
         device_note = QLabel(
             tr(
-                "Controls built-in Locator/SAM/Blink training and inference. External backends use their own command environment. CPU can run small tests, but CUDA is recommended for real training.",
+                "Controls built-in Locator/SAM/Blink training and inference. Custom extensions use their own command environment. CPU can run small tests, but CUDA is recommended for real training.",
                 lang,
             )
         )
@@ -2286,7 +2843,83 @@ class ModelSettingsDialog(QDialog):
         runtime_index = self.combo_runtime_device.findData(runtime_device)
         self.combo_runtime_device.setCurrentIndex(runtime_index if runtime_index >= 0 else 0)
         device_layout.addWidget(self.combo_runtime_device)
-        form_train.addWidget(device_group)
+        form_parent.addWidget(device_group)
+
+        parent_ratio_group = QGroupBox(tr("Parent Box Aspect Ratios:", lang))
+        apply_surface_role(parent_ratio_group, SURFACE_ROLE_SUBTLE, "modelSettingsParentBoxRatioPanel")
+        ratio_layout = QGridLayout(parent_ratio_group)
+        ratio_layout.setContentsMargins(12, 12, 12, 12)
+        ratio_layout.setHorizontalSpacing(10)
+        ratio_layout.setVerticalSpacing(8)
+        ratio_note = QLabel(
+            tr(
+                "Used when the main labeling workbench draws parent context boxes. Child boxes and loose shrink boxes stay free-ratio.",
+                lang,
+            )
+        )
+        ratio_note.setWordWrap(True)
+        ratio_note.setObjectName("mutedLabel")
+        ratio_layout.addWidget(ratio_note, 0, 0, 1, 2)
+        self.parent_box_ratio_inputs = {}
+        ratio_map = params.get("parent_box_aspect_ratios", {}) if isinstance(params.get("parent_box_aspect_ratios", {}), dict) else {}
+        default_ratio_parts = ["Head", "Mesosoma", "Gaster", "Whole body"]
+        ratio_parts = []
+        for part_name in list(self.initial_locator_scope) + default_ratio_parts:
+            clean_part = str(part_name or "").strip()
+            if clean_part and clean_part not in ratio_parts:
+                ratio_parts.append(clean_part)
+        for index, part_name in enumerate(ratio_parts, start=1):
+            ratio_layout.addWidget(QLabel(part_name), index, 0)
+            edit = QLineEdit(str(ratio_map.get(part_name, "")))
+            edit.setPlaceholderText("1.0")
+            self.parent_box_ratio_inputs[part_name] = edit
+            ratio_layout.addWidget(edit, index, 1)
+        form_parent.addWidget(parent_ratio_group)
+
+        locator_group = QGroupBox(tr("Main Locator Parts:", lang))
+        apply_surface_role(locator_group, SURFACE_ROLE_SUBTLE, "modelSettingsLocatorScopePanel")
+        locator_layout = QVBoxLayout(locator_group)
+        locator_layout.setContentsMargins(12, 12, 12, 12)
+        locator_layout.setSpacing(8)
+        locator_note = QLabel(
+            tr(
+                "Choose which structures the built-in Locator should learn as large, stable targets. Small structures can stay in Structures and be refined with SAM, Blink, or a custom extension.",
+                lang,
+            )
+        )
+        locator_note.setWordWrap(True)
+        locator_note.setObjectName("mutedLabel")
+        locator_layout.addWidget(locator_note)
+
+        locator_grid = QGridLayout()
+        locator_grid.setContentsMargins(0, 4, 0, 0)
+        locator_grid.setHorizontalSpacing(16)
+        locator_grid.setVerticalSpacing(6)
+        for index, part_name in enumerate(self.taxonomy):
+            check = QCheckBox(part_name)
+            check.setChecked(part_name in self.initial_locator_scope)
+            check.setProperty("part_name", part_name)
+            self.locator_scope_checks.append(check)
+            locator_grid.addWidget(check, index // 2, index % 2)
+        locator_layout.addLayout(locator_grid)
+        self.locator_scope_validation_label = QLabel("")
+        self.locator_scope_validation_label.setObjectName("mutedLabel")
+        locator_layout.addWidget(self.locator_scope_validation_label)
+        form_parent.addWidget(locator_group)
+        form_parent.addStretch()
+        self.parent_tab_index = self.tabs.addTab(self._make_scroll_tab(tab_parent), tr("Parent-part annotation", lang))
+
+        tab_child = QWidget()
+        tab_child.setObjectName("modelSettingsChildTab")
+        form_child = QVBoxLayout(tab_child)
+        self.child_backend_status_label = QLabel()
+        self.child_backend_status_label.setObjectName("modelSettingsChildSourceSummary")
+        self.child_backend_status_label.setWordWrap(True)
+        form_child.addWidget(self.child_backend_status_label)
+        child_backend_status_note = QLabel(tr("Read-only summary. Change this source in Advanced Extensions.", lang))
+        child_backend_status_note.setWordWrap(True)
+        child_backend_status_note.setObjectName("mutedLabel")
+        form_child.addWidget(child_backend_status_note)
 
         blink_group = QGroupBox(tr("Blink Expert Training Defaults:", lang))
         apply_surface_role(blink_group, SURFACE_ROLE_SUBTLE, "modelSettingsBlinkTrainingPanel")
@@ -2325,78 +2958,77 @@ class ModelSettingsDialog(QDialog):
         input_index = self.combo_blink_input_size.findData(input_side)
         self.combo_blink_input_size.setCurrentIndex(input_index if input_index >= 0 else 0)
         blink_layout.addWidget(self.combo_blink_input_size)
-        form_train.addWidget(blink_group)
+        form_child.addWidget(blink_group)
 
-        parent_ratio_group = QGroupBox(tr("Parent Box Aspect Ratios:", lang))
-        apply_surface_role(parent_ratio_group, SURFACE_ROLE_SUBTLE, "modelSettingsParentBoxRatioPanel")
-        ratio_layout = QGridLayout(parent_ratio_group)
-        ratio_layout.setContentsMargins(12, 12, 12, 12)
-        ratio_layout.setHorizontalSpacing(10)
-        ratio_layout.setVerticalSpacing(8)
-        ratio_note = QLabel(
+        heatmap_group = QGroupBox(tr("Heatmap Blink Parameters:", lang))
+        apply_surface_role(heatmap_group, SURFACE_ROLE_SUBTLE, "modelSettingsHeatmapBlinkPanel")
+        heatmap_layout = QVBoxLayout(heatmap_group)
+        heatmap_params = child_defaults.get("heatmap_params", {}) if isinstance(child_defaults.get("heatmap_params"), dict) else {}
+        self.spin_heatmap_input_size = QLineEdit(str(heatmap_params.get("input_size", DEFAULT_HEATMAP_BLINK_PARAMS["input_size"])))
+        self.spin_heatmap_sigma = QLineEdit(str(heatmap_params.get("heatmap_sigma", DEFAULT_HEATMAP_BLINK_PARAMS["heatmap_sigma"])))
+        self.spin_heatmap_wh_loss = QLineEdit(str(heatmap_params.get("wh_loss_weight", DEFAULT_HEATMAP_BLINK_PARAMS["wh_loss_weight"])))
+        self.spin_heatmap_center_loss = QLineEdit(str(heatmap_params.get("center_loss_weight", DEFAULT_HEATMAP_BLINK_PARAMS["center_loss_weight"])))
+        for label_text, editor in [
+            (tr("Heatmap Input Size:", lang), self.spin_heatmap_input_size),
+            (tr("Heatmap Sigma:", lang), self.spin_heatmap_sigma),
+            (tr("WH Loss Weight:", lang), self.spin_heatmap_wh_loss),
+            (tr("Center Loss Weight:", lang), self.spin_heatmap_center_loss),
+        ]:
+            heatmap_layout.addWidget(QLabel(label_text))
+            heatmap_layout.addWidget(editor)
+        form_child.addWidget(heatmap_group)
+
+        external_blink_group = QGroupBox(tr("Child-part Custom Extension", lang))
+        apply_surface_role(external_blink_group, SURFACE_ROLE_SUBTLE, "modelSettingsExternalBlinkPanel")
+        external_blink_layout = QVBoxLayout(external_blink_group)
+        external_blink_layout.setContentsMargins(12, 12, 12, 12)
+        external_blink_layout.setSpacing(8)
+        external_blink_note = QLabel(
             tr(
-                "Used when the main labeling workbench draws parent context boxes. Child boxes and loose shrink boxes stay free-ratio.",
+                "Child extension settings are saved inside the current model profile when Default Child Backend is set to Custom Child Extension.",
                 lang,
             )
         )
-        ratio_note.setWordWrap(True)
-        ratio_note.setObjectName("mutedLabel")
-        ratio_layout.addWidget(ratio_note, 0, 0, 1, 2)
-        self.parent_box_ratio_inputs = {}
-        ratio_map = params.get("parent_box_aspect_ratios", {}) if isinstance(params.get("parent_box_aspect_ratios", {}), dict) else {}
-        default_ratio_parts = ["Head", "Mesosoma", "Gaster", "Whole body"]
-        ratio_parts = []
-        for part_name in list(params.get("locator_scope", [])) + default_ratio_parts:
-            clean_part = str(part_name or "").strip()
-            if clean_part and clean_part not in ratio_parts:
-                ratio_parts.append(clean_part)
-        for index, part_name in enumerate(ratio_parts, start=1):
-            ratio_layout.addWidget(QLabel(part_name), index, 0)
-            edit = QLineEdit(str(ratio_map.get(part_name, "")))
-            edit.setPlaceholderText("1.0")
-            self.parent_box_ratio_inputs[part_name] = edit
-            ratio_layout.addWidget(edit, index, 1)
-        form_train.addWidget(parent_ratio_group)
-
-        locator_group = QGroupBox(tr("Main Locator Parts:", lang))
-        apply_surface_role(locator_group, SURFACE_ROLE_SUBTLE, "modelSettingsLocatorScopePanel")
-        locator_layout = QVBoxLayout(locator_group)
-        locator_layout.setContentsMargins(12, 12, 12, 12)
-        locator_layout.setSpacing(8)
-        locator_note = QLabel(
-            tr(
-                "Choose which structures the built-in Locator should learn as large, stable targets. Small structures can stay in Structures and be refined with SAM, Blink, or an external backend.",
-                lang,
-            )
+        external_blink_note.setWordWrap(True)
+        external_blink_note.setObjectName("mutedLabel")
+        external_blink_layout.addWidget(external_blink_note)
+        external_blink = dict(DEFAULT_EXTERNAL_BLINK_BACKEND)
+        if isinstance(child_defaults.get("external_blink_backend"), dict):
+            external_blink.update(child_defaults.get("external_blink_backend"))
+        self.external_blink_backend_id = QLineEdit(external_blink.get("backend_id", ""))
+        self.external_blink_display_name = QLineEdit(external_blink.get("display_name", ""))
+        self.external_blink_python = QLineEdit(external_blink.get("python_executable", "python"))
+        self.external_blink_predict_command = self._make_command_editor(
+            external_blink.get("predict_command", ""),
+            "{python} scripts/predict_child.py --contract {contract_json}",
         )
-        locator_note.setWordWrap(True)
-        locator_note.setObjectName("mutedLabel")
-        locator_layout.addWidget(locator_note)
-
-        taxonomy = [str(part) for part in params.get("taxonomy", []) if str(part).strip()]
-        locator_scope = [str(part) for part in params.get("locator_scope", []) if str(part).strip()]
-        if not taxonomy:
-            taxonomy = list(locator_scope)
-        if not locator_scope:
-            locator_scope = list(taxonomy)
-        locator_grid = QGridLayout()
-        locator_grid.setContentsMargins(0, 4, 0, 0)
-        locator_grid.setHorizontalSpacing(16)
-        locator_grid.setVerticalSpacing(6)
-        for index, part_name in enumerate(taxonomy):
-            check = QCheckBox(part_name)
-            check.setChecked(part_name in locator_scope)
-            check.setProperty("part_name", part_name)
-            self.locator_scope_checks.append(check)
-            locator_grid.addWidget(check, index // 2, index % 2)
-        locator_layout.addLayout(locator_grid)
-        self.locator_scope_validation_label = QLabel("")
-        self.locator_scope_validation_label.setObjectName("mutedLabel")
-        locator_layout.addWidget(self.locator_scope_validation_label)
-        form_train.addWidget(locator_group)
-
-        form_train.addStretch()
-        self.tabs.addTab(self._make_scroll_tab(tab_train), tr("Training", lang))
+        self.external_blink_train_command = self._make_command_editor(
+            external_blink.get("train_command", ""),
+            "{python} scripts/train_child.py --contract {contract_json}",
+        )
+        self.external_blink_model_manifest = QLineEdit(external_blink.get("model_manifest", ""))
+        for label_text, widget in [
+            (tr("Child Extension ID:", lang), self.external_blink_backend_id),
+            (tr("Child Extension Display Name:", lang), self.external_blink_display_name),
+            (tr("Child Extension Python Executable:", lang), self.external_blink_python),
+            (tr("Child Extension Predict Command:", lang), self.external_blink_predict_command),
+            (tr("Child Extension Train Command:", lang), self.external_blink_train_command),
+            (tr("Child Extension Model Manifest:", lang), self.external_blink_model_manifest),
+        ]:
+            external_blink_layout.addWidget(QLabel(label_text))
+            external_blink_layout.addWidget(widget)
+        self.external_blink_validation_label = QLabel()
+        self.external_blink_validation_label.setObjectName("mutedLabel")
+        self.external_blink_validation_label.setWordWrap(True)
+        external_blink_layout.addWidget(self.external_blink_validation_label)
+        btn_validate_external_blink = QPushButton(tr("Validate Child Extension", lang))
+        apply_semantic_button_style(btn_validate_external_blink, BUTTON_ROLE_NEUTRAL)
+        btn_validate_external_blink.clicked.connect(self.validate_external_blink_backend)
+        external_blink_layout.addWidget(btn_validate_external_blink)
+        form_backend.addWidget(external_blink_group)
+        form_backend.addStretch()
+        form_child.addStretch()
+        self.child_tab_index = self.tabs.addTab(self._make_scroll_tab(tab_child), tr("Child-part annotation", lang))
 
         tab_inf = QWidget()
         form_inf = QVBoxLayout(tab_inf)
@@ -2441,7 +3073,7 @@ class ModelSettingsDialog(QDialog):
             for part in vlm_settings.get("target_parts", [])
             if str(part).strip()
         }
-        for index, part_name in enumerate(taxonomy):
+        for index, part_name in enumerate(self.taxonomy):
             check = QCheckBox(part_name)
             check.setChecked(part_name in selected_vlm_parts)
             check.setProperty("part_name", part_name)
@@ -2478,8 +3110,9 @@ class ModelSettingsDialog(QDialog):
             form_inf.addWidget(route_group, 1)
 
         form_inf.addStretch()
-        self.tabs.addTab(self._make_scroll_tab(tab_inf), tr("Inference", lang))
-        self.tabs.addTab(self._make_scroll_tab(tab_backend), tr("External Backend", lang))
+        self.inference_tab_index = self.tabs.addTab(self._make_scroll_tab(tab_inf), tr("Inference", lang))
+        self.advanced_extensions_tab_index = self.tabs.addTab(self._make_scroll_tab(tab_backend), tr("Advanced Extensions", lang))
+        self.external_backend_tab_index = self.advanced_extensions_tab_index
         
         layout.addWidget(self.tabs, 1)
         btn_layout = QHBoxLayout()
@@ -2499,6 +3132,7 @@ class ModelSettingsDialog(QDialog):
         btn_layout.addWidget(btn_save)
         btn_layout.addWidget(btn_cancel)
         layout.addLayout(btn_layout)
+        self._load_selected_profile_fields()
 
     def _make_scroll_tab(self, content_widget):
         scroll = QScrollArea()
@@ -2522,12 +3156,649 @@ class ModelSettingsDialog(QDialog):
     def _command_text(self, editor):
         return editor.toPlainText().strip()
 
+    def _active_profile_id(self):
+        selected = ""
+        if hasattr(self, "combo_model_profile"):
+            selected = str(self.combo_model_profile.currentData() or "").strip()
+        return selected or str(self.model_profiles.get("active_profile_id") or DEFAULT_MODEL_PROFILE_ID)
+
+    def _project_active_profile_id(self):
+        return str(self.model_profiles.get("active_profile_id") or DEFAULT_MODEL_PROFILE_ID)
+
+    def _active_profile(self):
+        active_id = str(self.model_profiles.get("active_profile_id") or DEFAULT_MODEL_PROFILE_ID)
+        if hasattr(self, "combo_model_profile"):
+            combo_id = str(self.combo_model_profile.currentData() or "").strip()
+            if combo_id:
+                active_id = combo_id
+        for profile in self.model_profiles.get("profiles", []):
+            if isinstance(profile, dict) and profile.get("profile_id") == active_id:
+                return dict(profile)
+        profiles = self.model_profiles.get("profiles", [])
+        return dict(profiles[0]) if profiles and isinstance(profiles[0], dict) else {}
+
+    def _refresh_profile_combo(self, select_id=None):
+        if not hasattr(self, "combo_model_profile"):
+            return
+        target = str(select_id or self.model_profiles.get("active_profile_id") or DEFAULT_MODEL_PROFILE_ID)
+        self.combo_model_profile.blockSignals(True)
+        self.combo_model_profile.clear()
+        for profile in self.model_profiles.get("profiles", []):
+            if not isinstance(profile, dict):
+                continue
+            profile_id = str(profile.get("profile_id") or "").strip()
+            if not profile_id:
+                continue
+            label = profile.get("display_name") or profile_id
+            if profile_id == self._project_active_profile_id():
+                label = tr("{0} (active)", self.lang).format(label)
+            self.combo_model_profile.addItem(str(label), profile_id)
+        index = self.combo_model_profile.findData(target)
+        self.combo_model_profile.setCurrentIndex(index if index >= 0 else 0)
+        self.combo_model_profile.blockSignals(False)
+        self._load_selected_profile_fields()
+
+    def _load_selected_profile_fields(self):
+        profile = self._active_profile()
+        if hasattr(self, "profile_id_edit"):
+            self.profile_id_edit.blockSignals(True)
+            self.profile_id_edit.setText(str(profile.get("profile_id") or ""))
+            self.profile_id_edit.blockSignals(False)
+        if hasattr(self, "profile_name_edit"):
+            self.profile_name_edit.blockSignals(True)
+            self.profile_name_edit.setText(str(profile.get("display_name") or ""))
+            self.profile_name_edit.blockSignals(False)
+        if hasattr(self, "profile_description_edit"):
+            self.profile_description_edit.blockSignals(True)
+            self.profile_description_edit.setPlainText(str(profile.get("description") or ""))
+            self.profile_description_edit.blockSignals(False)
+        self._apply_profile_to_controls(profile)
+        self._refresh_profile_summary()
+
+    def _update_current_profile_metadata(self):
+        active_id = self._active_profile_id()
+        for profile in self.model_profiles.get("profiles", []):
+            if not isinstance(profile, dict) or profile.get("profile_id") != active_id:
+                continue
+            if hasattr(self, "profile_name_edit"):
+                profile["display_name"] = self.profile_name_edit.text().strip() or active_id
+            if hasattr(self, "profile_description_edit"):
+                profile["description"] = self.profile_description_edit.toPlainText().strip()
+            break
+        self._refresh_profile_summary()
+
+    def _profile_by_id(self, profile_id):
+        target = str(profile_id or "").strip()
+        for profile in self.model_profiles.get("profiles", []):
+            if isinstance(profile, dict) and str(profile.get("profile_id") or "").strip() == target:
+                return dict(profile)
+        return {}
+
+    def _route_entries_for_profile_summary(self):
+        panel = getattr(self, "route_panel", None)
+        project = getattr(getattr(panel, "owner", None), "project", None) if panel is not None else None
+        iter_routes = getattr(project, "iter_cascade_routes", None)
+        if callable(iter_routes):
+            try:
+                return [dict(route) for route in iter_routes() if isinstance(route, dict)]
+            except Exception:
+                return []
+        return []
+
+    def _routes_differing_from_child_default(self, profile):
+        child_defaults = profile.get("child_backend_defaults", {}) if isinstance(profile.get("child_backend_defaults"), dict) else {}
+        default_backend = _route_backend_from_child_backend(child_defaults.get("backend_type", CHILD_BACKEND_VIT_B))
+        differing = []
+        for route in self._route_entries_for_profile_summary():
+            route_backend = _route_backend_from_entry(route)
+            if route_backend != default_backend:
+                differing.append(dict(route))
+        return differing
+
+    def _profile_external_status_lines(self, profile):
+        parent_backend = profile.get("parent_backend", {}) if isinstance(profile.get("parent_backend"), dict) else {}
+        child_defaults = profile.get("child_backend_defaults", {}) if isinstance(profile.get("child_backend_defaults"), dict) else {}
+        lines = []
+        if parent_backend.get("backend_type") == PARENT_BACKEND_EXTERNAL:
+            external = parent_backend.get("external_backend", {}) if isinstance(parent_backend.get("external_backend"), dict) else {}
+            has_command = any(str(external.get(key) or "").strip() for key in ("train_command", "predict_command"))
+            lines.append(
+                tr("External parent backend: {0}", self.lang).format(
+                    tr("configured", self.lang) if has_command else tr("missing train/predict command", self.lang)
+                )
+            )
+        if child_defaults.get("backend_type") == CHILD_BACKEND_EXTERNAL:
+            external_blink = child_defaults.get("external_blink_backend", {}) if isinstance(child_defaults.get("external_blink_backend"), dict) else {}
+            has_predict = bool(str(external_blink.get("predict_command") or "").strip())
+            lines.append(
+                tr("External Blink backend: {0}", self.lang).format(
+                    tr("configured", self.lang) if has_predict else tr("missing predict command", self.lang)
+                )
+            )
+        return lines
+
+    def _build_profile_summary(self, profile):
+        if not isinstance(profile, dict):
+            return tr("No model profile selected.", self.lang)
+        parent_backend = profile.get("parent_backend", {}) if isinstance(profile.get("parent_backend"), dict) else {}
+        child_defaults = profile.get("child_backend_defaults", {}) if isinstance(profile.get("child_backend_defaults"), dict) else {}
+        inference_params = profile.get("inference_params", {}) if isinstance(profile.get("inference_params"), dict) else {}
+        locator_scope = [
+            str(part).strip()
+            for part in parent_backend.get("locator_scope", [])
+            if str(part).strip()
+        ] if isinstance(parent_backend.get("locator_scope"), list) else []
+        differing_routes = self._routes_differing_from_child_default(profile)
+        route_note = tr(
+            "Existing route experts are kept as route-specific bindings; switching profiles does not silently reappoint trained child experts.",
+            self.lang,
+        )
+        lines = [
+            tr("Project active profile: {0}", self.lang).format(
+                self._active_profile_label(self._profile_by_id(self._project_active_profile_id()))
+            ),
+            tr("Parent backend: {0}", self.lang).format(_parent_backend_label(parent_backend.get("backend_type"), self.lang)),
+            tr("Main locator parts: {0}", self.lang).format(", ".join(locator_scope) if locator_scope else tr("none", self.lang)),
+            tr("Default child backend: {0}", self.lang).format(_child_backend_label(child_defaults.get("backend_type"), self.lang)),
+            tr("Route-specific experts differing from this default: {0}", self.lang).format(len(differing_routes)),
+            tr("Inference: conf={0}, pad={1}, noise={2}", self.lang).format(
+                inference_params.get("conf", ""),
+                inference_params.get("pad", ""),
+                inference_params.get("noise_floor", ""),
+            ),
+        ]
+        lines.extend(self._profile_external_status_lines(profile))
+        lines.append(route_note)
+        return "\n".join(lines)
+
+    def _refresh_profile_summary(self):
+        if not hasattr(self, "profile_summary_box"):
+            return
+        try:
+            profile = self._current_profile_snapshot(update_metadata=False) if hasattr(self, "parent_backend_combo") else self._active_profile()
+        except Exception:
+            profile = self._active_profile()
+        self.profile_summary_box.setPlainText(self._build_profile_summary(profile))
+
+    def _active_profile_label(self, profile):
+        profile_id = str(profile.get("profile_id") or "").strip()
+        display_name = str(profile.get("display_name") or "").strip()
+        if display_name and display_name != profile_id:
+            return f"{display_name} ({profile_id})"
+        return profile_id or tr("Unknown", self.lang)
+
+    def _profile_id_seed(self, base="custom_profile"):
+        existing = {
+            str(profile.get("profile_id") or "")
+            for profile in self.model_profiles.get("profiles", [])
+            if isinstance(profile, dict)
+        }
+        safe_base = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in str(base or "custom_profile"))
+        safe_base = safe_base.strip("_") or "custom_profile"
+        if safe_base not in existing:
+            return safe_base
+        for index in range(2, 1000):
+            candidate = f"{safe_base}_{index}"
+            if candidate not in existing:
+                return candidate
+        return f"{safe_base}_{int(time.time())}"
+
+    def new_model_profile(self):
+        current = self._current_profile_snapshot()
+        new_id = self._profile_id_seed("custom_profile")
+        current["profile_id"] = new_id
+        current["display_name"] = tr("New Profile", self.lang)
+        current["description"] = ""
+        self.model_profiles.setdefault("profiles", []).append(current)
+        self._refresh_profile_combo(new_id)
+
+    def copy_model_profile(self):
+        current = self._current_profile_snapshot()
+        base_id = current.get("profile_id") or "copied_profile"
+        new_id = self._profile_id_seed(f"{base_id}_copy")
+        current["profile_id"] = new_id
+        current["display_name"] = f"{current.get('display_name') or base_id} Copy"
+        self.model_profiles.setdefault("profiles", []).append(current)
+        self._refresh_profile_combo(new_id)
+
+    def delete_model_profile(self):
+        active_id = self._active_profile_id()
+        current_profile = self._profile_by_id(active_id)
+        if active_id == DEFAULT_MODEL_PROFILE_ID:
+            QMessageBox.information(
+                self,
+                tr("Delete Profile", self.lang),
+                tr("The built-in default profile cannot be deleted.", self.lang),
+            )
+            return
+        profiles = [
+            profile
+            for profile in self.model_profiles.get("profiles", [])
+            if isinstance(profile, dict) and profile.get("profile_id") != active_id
+        ]
+        if not profiles:
+            QMessageBox.information(
+                self,
+                tr("Delete Profile", self.lang),
+                tr("At least one model profile must remain in the project.", self.lang),
+            )
+            return
+        reply = themed_yes_no_question(
+            self,
+            tr("Delete Profile", self.lang),
+            tr(
+                "Delete model profile {0}?\n\nThis removes only the saved profile configuration from the current project. Model weights, external scripts, and route expert bindings are not deleted.",
+                self.lang,
+            ).format(self._active_profile_label(current_profile)),
+            confirm_role=BUTTON_ROLE_DESTRUCTIVE,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        self.model_profiles["profiles"] = profiles
+        current_project_active = self._project_active_profile_id()
+        remaining_ids = {
+            str(profile.get("profile_id") or "")
+            for profile in profiles
+            if isinstance(profile, dict)
+        }
+        if current_project_active not in remaining_ids:
+            self.model_profiles["active_profile_id"] = profiles[0].get("profile_id", DEFAULT_MODEL_PROFILE_ID)
+        self._refresh_profile_combo(self.model_profiles["active_profile_id"])
+
+    def _profile_switch_message(self, current_profile, target_profile):
+        current_parent = current_profile.get("parent_backend", {}) if isinstance(current_profile.get("parent_backend"), dict) else {}
+        current_child = current_profile.get("child_backend_defaults", {}) if isinstance(current_profile.get("child_backend_defaults"), dict) else {}
+        target_parent = target_profile.get("parent_backend", {}) if isinstance(target_profile.get("parent_backend"), dict) else {}
+        target_child = target_profile.get("child_backend_defaults", {}) if isinstance(target_profile.get("child_backend_defaults"), dict) else {}
+        differing_routes = self._routes_differing_from_child_default(target_profile)
+        lines = [
+            tr("Set {0} as the active model profile?", self.lang).format(self._active_profile_label(target_profile)),
+            "",
+            tr("Parent backend: {0} -> {1}", self.lang).format(
+                _parent_backend_label(current_parent.get("backend_type"), self.lang),
+                _parent_backend_label(target_parent.get("backend_type"), self.lang),
+            ),
+            tr("Default child backend: {0} -> {1}", self.lang).format(
+                _child_backend_label(current_child.get("backend_type"), self.lang),
+                _child_backend_label(target_child.get("backend_type"), self.lang),
+            ),
+            tr("Route-specific experts differing from the target default: {0}", self.lang).format(len(differing_routes)),
+            tr("Existing route experts stay appointed; this switch only changes the project default profile.", self.lang),
+        ]
+        return "\n".join(lines)
+
+    def set_selected_profile_active(self):
+        selected_id = self._active_profile_id()
+        current_id = self._project_active_profile_id()
+        target_profile = self._profile_by_id(selected_id)
+        if not target_profile:
+            QMessageBox.warning(self, tr("Set as Active Profile", self.lang), tr("No model profile selected.", self.lang))
+            return
+        current_profile = self._profile_by_id(current_id) or target_profile
+        if selected_id != current_id:
+            reply = themed_yes_no_question(
+                self,
+                tr("Set as Active Profile", self.lang),
+                self._profile_switch_message(current_profile, target_profile),
+                confirm_role=BUTTON_ROLE_COMMIT,
+            )
+            if reply != QMessageBox.Yes:
+                self._refresh_profile_combo(current_id)
+                return
+        self.model_profiles["active_profile_id"] = selected_id
+        self._update_current_profile_metadata()
+        self._refresh_profile_combo(selected_id)
+
+    def _sync_legacy_backend_combo_from_parent_backend(self):
+        if not hasattr(self, "backend_combo") or not hasattr(self, "parent_backend_combo"):
+            return
+        backend_id = EXTERNAL_BACKEND_ID if self.parent_backend_combo.currentData() == PARENT_BACKEND_EXTERNAL else BUILTIN_BACKEND_ID
+        backend_index = self.backend_combo.findData(backend_id)
+        self.backend_combo.setCurrentIndex(backend_index if backend_index >= 0 else 0)
+
+    def _refresh_model_source_summaries(self):
+        if hasattr(self, "parent_backend_status_label") and hasattr(self, "parent_backend_combo"):
+            self.parent_backend_status_label.setText(
+                tr("Current parent model source: {0}", self.lang).format(
+                    _parent_backend_label(self.parent_backend_combo.currentData(), self.lang)
+                )
+            )
+        if hasattr(self, "child_backend_status_label") and hasattr(self, "child_backend_combo"):
+            self.child_backend_status_label.setText(
+                tr("Current default child expert: {0}", self.lang).format(
+                    _child_backend_label(self.child_backend_combo.currentData(), self.lang)
+                )
+            )
+        if hasattr(self, "profile_summary_box"):
+            self._refresh_profile_summary()
+
+    def _apply_profile_to_controls(self, profile):
+        if not isinstance(profile, dict):
+            return
+        parent_backend = profile.get("parent_backend", {}) if isinstance(profile.get("parent_backend"), dict) else {}
+        child_defaults = profile.get("child_backend_defaults", {}) if isinstance(profile.get("child_backend_defaults"), dict) else {}
+        inference_params = profile.get("inference_params", {}) if isinstance(profile.get("inference_params"), dict) else {}
+
+        if hasattr(self, "parent_backend_combo"):
+            index = self.parent_backend_combo.findData(parent_backend.get("backend_type", PARENT_BACKEND_BUILTIN))
+            self.parent_backend_combo.setCurrentIndex(index if index >= 0 else 0)
+        self._sync_legacy_backend_combo_from_parent_backend()
+        if hasattr(self, "child_backend_combo"):
+            index = self.child_backend_combo.findData(child_defaults.get("backend_type", CHILD_BACKEND_VIT_B))
+            self.child_backend_combo.setCurrentIndex(index if index >= 0 else 0)
+        self._refresh_model_source_summaries()
+
+        external_parent = sanitize_external_backend_config(parent_backend.get("external_backend", {}))
+        for editor_name, key in [
+            ("external_backend_id", "backend_id"),
+            ("external_display_name", "display_name"),
+            ("external_python", "python_executable"),
+            ("external_model_manifest", "model_manifest"),
+        ]:
+            if hasattr(self, editor_name):
+                getattr(self, editor_name).setText(str(external_parent.get(key, "")))
+        for editor_name, key in [
+            ("external_prepare_command", "prepare_dataset_command"),
+            ("external_train_command", "train_command"),
+            ("external_predict_command", "predict_command"),
+        ]:
+            if hasattr(self, editor_name):
+                getattr(self, editor_name).setPlainText(str(external_parent.get(key, "")))
+
+        train_params = parent_backend.get("train_params", {}) if isinstance(parent_backend.get("train_params"), dict) else {}
+        for editor_name, value in [
+            ("spin_epochs", train_params.get("epochs")),
+            ("spin_batch", train_params.get("batch")),
+            ("spin_lr", train_params.get("lr")),
+            ("spin_wd", train_params.get("weight_decay")),
+        ]:
+            if hasattr(self, editor_name) and value is not None:
+                getattr(self, editor_name).setText(str(value))
+
+        child_train = child_defaults.get("train_params", {}) if isinstance(child_defaults.get("train_params"), dict) else {}
+        for editor_name, value in [
+            ("spin_blink_epochs", child_train.get("epochs")),
+            ("spin_blink_batch", child_train.get("batch")),
+            ("spin_blink_lr", child_train.get("lr")),
+            ("spin_blink_wd", child_train.get("weight_decay")),
+        ]:
+            if hasattr(self, editor_name) and value is not None:
+                getattr(self, editor_name).setText(str(value))
+        if hasattr(self, "combo_blink_input_size"):
+            try:
+                input_size = int(child_defaults.get("input_size", 224))
+            except Exception:
+                input_size = 224
+            index = self.combo_blink_input_size.findData(input_size)
+            self.combo_blink_input_size.setCurrentIndex(index if index >= 0 else 0)
+
+        heatmap_params = child_defaults.get("heatmap_params", {}) if isinstance(child_defaults.get("heatmap_params"), dict) else {}
+        for editor_name, key in [
+            ("spin_heatmap_input_size", "input_size"),
+            ("spin_heatmap_sigma", "heatmap_sigma"),
+            ("spin_heatmap_wh_loss", "wh_loss_weight"),
+            ("spin_heatmap_center_loss", "center_loss_weight"),
+        ]:
+            if hasattr(self, editor_name):
+                getattr(self, editor_name).setText(str(heatmap_params.get(key, DEFAULT_HEATMAP_BLINK_PARAMS.get(key, ""))))
+
+        external_blink = dict(DEFAULT_EXTERNAL_BLINK_BACKEND)
+        if isinstance(child_defaults.get("external_blink_backend"), dict):
+            external_blink.update(child_defaults.get("external_blink_backend"))
+        for editor_name, key in [
+            ("external_blink_backend_id", "backend_id"),
+            ("external_blink_display_name", "display_name"),
+            ("external_blink_python", "python_executable"),
+            ("external_blink_model_manifest", "model_manifest"),
+        ]:
+            if hasattr(self, editor_name):
+                getattr(self, editor_name).setText(str(external_blink.get(key, "")))
+        if hasattr(self, "external_blink_predict_command"):
+            self.external_blink_predict_command.setPlainText(str(external_blink.get("predict_command", "")))
+        if hasattr(self, "external_blink_train_command"):
+            self.external_blink_train_command.setPlainText(str(external_blink.get("train_command", "")))
+
+        locator_scope = parent_backend.get("locator_scope", [])
+        if isinstance(locator_scope, list):
+            selected = {str(part).strip() for part in locator_scope if str(part).strip()}
+            for check in getattr(self, "locator_scope_checks", []):
+                part_name = str(check.property("part_name") or check.text()).strip()
+                check.setChecked(part_name in selected)
+
+        ratios = parent_backend.get("parent_box_aspect_ratios", {})
+        if isinstance(ratios, dict):
+            for part_name, editor in getattr(self, "parent_box_ratio_inputs", {}).items():
+                value = ratios.get(part_name, "")
+                editor.setText(str(value) if value != "" else "")
+
+        for editor_name, key in [
+            ("spin_conf", "conf"),
+            ("spin_adapt", "adapt"),
+            ("spin_pad", "pad"),
+            ("spin_noise", "noise_floor"),
+            ("spin_poly", "poly_epsilon"),
+        ]:
+            if hasattr(self, editor_name) and key in inference_params:
+                getattr(self, editor_name).setText(str(inference_params.get(key)))
+
+        vlm = inference_params.get("vlm_preannotation", {}) if isinstance(inference_params.get("vlm_preannotation"), dict) else {}
+        selected_vlm = {str(part).strip() for part in vlm.get("target_parts", []) if str(part).strip()}
+        for check in getattr(self, "vlm_target_part_checks", []):
+            part_name = str(check.property("part_name") or check.text()).strip()
+            check.setChecked(part_name in selected_vlm)
+        if hasattr(self, "combo_vlm_processing_scope"):
+            index = self.combo_vlm_processing_scope.findData(str(vlm.get("processing_scope", "current_image")))
+            self.combo_vlm_processing_scope.setCurrentIndex(index if index >= 0 else 0)
+
+    def _external_blink_config_values(self):
+        return {
+            "backend_id": self.external_blink_backend_id.text().strip() if hasattr(self, "external_blink_backend_id") else DEFAULT_EXTERNAL_BLINK_BACKEND["backend_id"],
+            "display_name": self.external_blink_display_name.text().strip() if hasattr(self, "external_blink_display_name") else DEFAULT_EXTERNAL_BLINK_BACKEND["display_name"],
+            "python_executable": self.external_blink_python.text().strip() if hasattr(self, "external_blink_python") else "python",
+            "predict_command": self._command_text(self.external_blink_predict_command) if hasattr(self, "external_blink_predict_command") else "",
+            "train_command": self._command_text(self.external_blink_train_command) if hasattr(self, "external_blink_train_command") else "",
+            "model_manifest": self.external_blink_model_manifest.text().strip() if hasattr(self, "external_blink_model_manifest") else "",
+        }
+
+    def _external_blink_validation_errors(self):
+        if not hasattr(self, "child_backend_combo") or self.child_backend_combo.currentData() != CHILD_BACKEND_EXTERNAL:
+            return []
+        config = self._external_blink_config_values()
+        errors = []
+        if not config["backend_id"]:
+            errors.append(tr("Child extension ID is required.", self.lang))
+        if not config["predict_command"]:
+            errors.append(tr("Child extension needs a predict command before it can be used for child-part annotation.", self.lang))
+        commands = {
+            "predict_child": config["predict_command"],
+            "train_child": config["train_command"],
+        }
+        for command_name, command_text in commands.items():
+            if command_text and "{contract}" not in command_text and "{contract_json}" not in command_text:
+                errors.append(
+                    _format_backend_contract_error(
+                        tr(
+                            "Child extension command '{0}' must include {contract} or {contract_json}.",
+                            self.lang,
+                        ),
+                        command_name,
+                    )
+                )
+        return errors
+
+    def validate_external_blink_backend(self):
+        errors = self._external_blink_validation_errors()
+        if errors:
+            self.external_blink_validation_label.setText("\n".join(errors))
+            QMessageBox.warning(self, tr("Advanced Extensions", self.lang), "\n".join(errors))
+            return False
+        self.external_blink_validation_label.setText(tr("Child extension configuration looks valid.", self.lang))
+        QMessageBox.information(self, tr("Advanced Extensions", self.lang), tr("Child extension configuration looks valid.", self.lang))
+        return True
+
+    def _current_profile_snapshot(self, update_metadata=True):
+        if update_metadata:
+            self._update_current_profile_metadata()
+        active_id = self._active_profile_id()
+        base_profile = self._active_profile()
+        parent_backend = dict(base_profile.get("parent_backend", {}) if isinstance(base_profile.get("parent_backend"), dict) else {})
+        child_defaults = dict(base_profile.get("child_backend_defaults", {}) if isinstance(base_profile.get("child_backend_defaults"), dict) else {})
+        inference_params = dict(base_profile.get("inference_params", {}) if isinstance(base_profile.get("inference_params"), dict) else {})
+        parent_backend.update(
+            {
+                "backend_type": self.parent_backend_combo.currentData() or PARENT_BACKEND_BUILTIN,
+                "locator_scope": self._selected_locator_scope(),
+                "train_params": {
+                    "epochs": int(self.spin_epochs.text()),
+                    "batch": int(self.spin_batch.text()),
+                    "lr": float(self.spin_lr.text()),
+                    "weight_decay": float(self.spin_wd.text()),
+                },
+                "parent_box_aspect_ratios": self._parent_box_aspect_ratio_values(),
+                "external_backend": sanitize_external_backend_config(
+                    {
+                        "backend_id": self.external_backend_id.text(),
+                        "display_name": self.external_display_name.text(),
+                        "python_executable": self.external_python.text(),
+                        "prepare_dataset_command": self._command_text(self.external_prepare_command),
+                        "train_command": self._command_text(self.external_train_command),
+                        "predict_command": self._command_text(self.external_predict_command),
+                        "model_manifest": self.external_model_manifest.text(),
+                    }
+                ),
+            }
+        )
+        child_defaults.update(
+            {
+                "backend_type": self.child_backend_combo.currentData() or CHILD_BACKEND_VIT_B,
+                "input_size": int(self.combo_blink_input_size.currentData() or 224),
+                "train_params": {
+                    "epochs": int(self.spin_blink_epochs.text()),
+                    "batch": int(self.spin_blink_batch.text()),
+                    "lr": float(self.spin_blink_lr.text()),
+                    "weight_decay": float(self.spin_blink_wd.text()),
+                },
+                "heatmap_params": {
+                    "input_size": int(float(self.spin_heatmap_input_size.text())),
+                    "heatmap_sigma": float(self.spin_heatmap_sigma.text()),
+                    "wh_loss_weight": float(self.spin_heatmap_wh_loss.text()),
+                    "center_loss_weight": float(self.spin_heatmap_center_loss.text()),
+                },
+                "external_blink_backend": self._external_blink_config_values(),
+            }
+        )
+        inference_params.update(
+            {
+                "conf": float(self.spin_conf.text()),
+                "adapt": float(self.spin_adapt.text()),
+                "pad": float(self.spin_pad.text()),
+                "noise_floor": float(self.spin_noise.text()),
+                "poly_epsilon": float(self.spin_poly.text()),
+                "vlm_preannotation": {
+                    "target_parts": self._selected_vlm_target_parts(),
+                    "processing_scope": self.combo_vlm_processing_scope.currentData() or "current_image",
+                },
+            }
+        )
+        return {
+            "profile_id": active_id,
+            "display_name": self.profile_name_edit.text().strip() or active_id,
+            "description": self.profile_description_edit.toPlainText().strip(),
+            "profile_scope": "2d_stl",
+            "parent_backend": parent_backend,
+            "child_backend_defaults": child_defaults,
+            "inference_params": inference_params,
+        }
+
+    def _updated_model_profiles(self):
+        snapshot = self._current_profile_snapshot()
+        active_id = self._project_active_profile_id()
+        profiles = []
+        replaced = False
+        for profile in self.model_profiles.get("profiles", []):
+            if not isinstance(profile, dict):
+                continue
+            if profile.get("profile_id") == snapshot.get("profile_id"):
+                profiles.append(snapshot)
+                replaced = True
+            else:
+                profiles.append(dict(profile))
+        if not replaced:
+            profiles.append(snapshot)
+        clean = sanitize_model_profiles(
+            {
+                "schema_version": self.model_profiles.get("schema_version"),
+                "active_profile_id": self._project_active_profile_id(),
+                "profiles": profiles,
+            },
+            taxonomy=self.taxonomy,
+            locator_scope=self._selected_locator_scope(),
+            parent_box_aspect_ratios=self._parent_box_aspect_ratio_values(),
+            vlm_preannotation={
+                "target_parts": self._selected_vlm_target_parts(),
+                "processing_scope": self.combo_vlm_processing_scope.currentData() or "current_image",
+            },
+        )
+        self.model_profiles = clean
+        return clean
+
+    def _profile_for_legacy_values(self, model_profiles):
+        active_id = str((model_profiles or {}).get("active_profile_id") or DEFAULT_MODEL_PROFILE_ID)
+        for profile in (model_profiles or {}).get("profiles", []):
+            if isinstance(profile, dict) and str(profile.get("profile_id") or "") == active_id:
+                return dict(profile)
+        profiles = (model_profiles or {}).get("profiles", [])
+        return dict(profiles[0]) if profiles and isinstance(profiles[0], dict) else self._current_profile_snapshot(update_metadata=False)
+
+    def _legacy_values_from_profile(self, profile):
+        parent_backend = profile.get("parent_backend", {}) if isinstance(profile.get("parent_backend"), dict) else {}
+        child_defaults = profile.get("child_backend_defaults", {}) if isinstance(profile.get("child_backend_defaults"), dict) else {}
+        parent_train = parent_backend.get("train_params", {}) if isinstance(parent_backend.get("train_params"), dict) else {}
+        child_train = child_defaults.get("train_params", {}) if isinstance(child_defaults.get("train_params"), dict) else {}
+        inference_params = profile.get("inference_params", {}) if isinstance(profile.get("inference_params"), dict) else {}
+        vlm = inference_params.get("vlm_preannotation", {}) if isinstance(inference_params.get("vlm_preannotation"), dict) else {}
+        return {
+            "epochs": int(parent_train.get("epochs", self.spin_epochs.text())),
+            "batch": int(parent_train.get("batch", self.spin_batch.text())),
+            "blink_epochs": int(child_train.get("epochs", self.spin_blink_epochs.text())),
+            "blink_batch": int(child_train.get("batch", self.spin_blink_batch.text())),
+            "blink_lr": float(child_train.get("lr", self.spin_blink_lr.text())),
+            "blink_weight_decay": float(child_train.get("weight_decay", self.spin_blink_wd.text())),
+            "blink_input_size": int(child_defaults.get("input_size", self.combo_blink_input_size.currentData() or 224)),
+            "lr": float(parent_train.get("lr", self.spin_lr.text())),
+            "wd": float(parent_train.get("weight_decay", self.spin_wd.text())),
+            "conf": float(inference_params.get("conf", self.spin_conf.text())),
+            "adapt": float(inference_params.get("adapt", self.spin_adapt.text())),
+            "pad": float(inference_params.get("pad", self.spin_pad.text())),
+            "noise_floor": float(inference_params.get("noise_floor", self.spin_noise.text())),
+            "poly_epsilon": float(inference_params.get("poly_epsilon", self.spin_poly.text())),
+            "locator_scope": list(parent_backend.get("locator_scope", self._selected_locator_scope()) or []),
+            "vlm_preannotation": {
+                "target_parts": list(vlm.get("target_parts", self._selected_vlm_target_parts()) or []),
+                "processing_scope": str(vlm.get("processing_scope", self.combo_vlm_processing_scope.currentData() or "current_image") or "current_image"),
+            },
+            "parent_box_aspect_ratios": dict(parent_backend.get("parent_box_aspect_ratios", self._parent_box_aspect_ratio_values()) or {}),
+        }
+
+    def _legacy_model_backend_from_profile(self, profile):
+        parent_backend = profile.get("parent_backend", {}) if isinstance(profile.get("parent_backend"), dict) else {}
+        return EXTERNAL_BACKEND_ID if parent_backend.get("backend_type") == PARENT_BACKEND_EXTERNAL else BUILTIN_BACKEND_ID
+
+    def _external_backend_from_profile(self, profile):
+        parent_backend = profile.get("parent_backend", {}) if isinstance(profile.get("parent_backend"), dict) else {}
+        return sanitize_external_backend_config(parent_backend.get("external_backend", {}))
+
+    def _current_parent_backend_requires_external_config(self):
+        if hasattr(self, "parent_backend_combo"):
+            return self.parent_backend_combo.currentData() == PARENT_BACKEND_EXTERNAL
+        return self.backend_combo.currentData() == EXTERNAL_BACKEND_ID
+
     def _external_backend_validation_errors(self):
-        if self.backend_combo.currentData() != EXTERNAL_BACKEND_ID:
+        if not self._current_parent_backend_requires_external_config():
             return []
         errors = []
         if not self.external_backend_id.text().strip():
-            errors.append(tr("External backend ID is required.", self.lang))
+            errors.append(tr("Parent extension ID is required.", self.lang))
 
         commands = {
             "prepare_dataset": self._command_text(self.external_prepare_command),
@@ -2535,14 +3806,14 @@ class ModelSettingsDialog(QDialog):
             "predict": self._command_text(self.external_predict_command),
         }
         if not commands["train"] and not commands["predict"]:
-            errors.append(tr("External backend needs at least a train command or a predict command.", self.lang))
+            errors.append(tr("Parent extension needs at least a train command or a predict command.", self.lang))
 
         for command_name, command_text in commands.items():
             if command_text and "{contract}" not in command_text and "{contract_json}" not in command_text:
                 errors.append(
                     _format_backend_contract_error(
                         tr(
-                            "External backend command '{0}' must include {contract} or {contract_json}.",
+                            "Parent extension command '{0}' must include {contract} or {contract_json}.",
                             self.lang,
                         ),
                         command_name,
@@ -2554,19 +3825,22 @@ class ModelSettingsDialog(QDialog):
         errors = self._external_backend_validation_errors()
         if errors:
             self.external_validation_label.setText("\n".join(errors))
-            QMessageBox.warning(self, tr("External Backend", self.lang), "\n".join(errors))
+            QMessageBox.warning(self, tr("Advanced Extensions", self.lang), "\n".join(errors))
             return False
-        self.external_validation_label.setText(tr("External backend configuration looks valid.", self.lang))
-        QMessageBox.information(self, tr("External Backend", self.lang), tr("External backend configuration looks valid.", self.lang))
+        self.external_validation_label.setText(tr("Parent extension configuration looks valid.", self.lang))
+        QMessageBox.information(self, tr("Advanced Extensions", self.lang), tr("Parent extension configuration looks valid.", self.lang))
         return True
 
     def accept_with_validation(self):
         errors = self._external_backend_validation_errors()
+        errors.extend(self._external_blink_validation_errors())
         if not self._selected_locator_scope():
             errors.append(tr("At least one main locator part must be selected.", self.lang))
         if errors:
             message = "\n".join(errors)
             self.external_validation_label.setText(message)
+            if hasattr(self, "external_blink_validation_label"):
+                self.external_blink_validation_label.setText(message)
             self.locator_scope_validation_label.setText(message)
             QMessageBox.warning(self, tr("Model Settings", self.lang), message)
             return
@@ -2612,16 +3886,51 @@ class ModelSettingsDialog(QDialog):
         prepare_command = self._command_text(self.external_prepare_command)
         train_command = self._command_text(self.external_train_command)
         predict_command = self._command_text(self.external_predict_command)
+        child_predict_command = self._command_text(self.external_blink_predict_command)
+        child_train_command = self._command_text(self.external_blink_train_command)
+        selected_profile = self._current_profile_snapshot(update_metadata=False)
+        project_active_profile = self._profile_by_id(self._project_active_profile_id()) or selected_profile
+        selected_model_backend = self._legacy_model_backend_from_profile(selected_profile)
+        active_model_backend = self._legacy_model_backend_from_profile(project_active_profile)
+        parent_backend = selected_profile.get("parent_backend", {}) if isinstance(selected_profile.get("parent_backend"), dict) else {}
+        child_defaults = selected_profile.get("child_backend_defaults", {}) if isinstance(selected_profile.get("child_backend_defaults"), dict) else {}
+        parent_backend_type = parent_backend.get("backend_type", self.parent_backend_combo.currentData() if hasattr(self, "parent_backend_combo") else PARENT_BACKEND_BUILTIN)
+        child_backend_type = child_defaults.get("backend_type", self.child_backend_combo.currentData() if hasattr(self, "child_backend_combo") else CHILD_BACKEND_VIT_B)
+        route_differences = self._routes_differing_from_child_default(selected_profile)
+        route_summary = []
+        for route in route_differences[:8]:
+            parent = str(route.get("parent") or "").strip()
+            child = str(route.get("child") or "").strip()
+            backend = _route_backend_from_entry(route)
+            if parent and child:
+                route_summary.append(f"{parent}->{child}:{backend}")
+        validation_errors = self._external_backend_validation_errors() + self._external_blink_validation_errors()
         return {
             "source_workbench": "stl_model_settings",
             "project_type": "settings",
             "settings_scope": "2d_stl_model",
-            "settings_question_focus": "2D/STL morphology model defaults, runtime device, locator scope, and external script backend wiring.",
-            "model_backend": self.backend_combo.currentData() or BUILTIN_BACKEND_ID,
+            "settings_question_focus": "Advanced Extensions configuration for 2D/STL model profiles: parent model source, child expert default, custom extension contracts, and route expert compatibility.",
+            "model_backend": active_model_backend,
+            "selected_profile_model_backend": selected_model_backend,
+            "advanced_extension_scope": "2d_stl_model_profile",
+            "parent_model_source": str(parent_backend_type or ""),
+            "parent_model_source_label": _parent_backend_label(parent_backend_type, self.lang),
+            "default_child_expert": str(child_backend_type or ""),
+            "default_child_expert_label": _child_backend_label(child_backend_type, self.lang),
+            "default_child_route_backend": _route_backend_from_child_backend(child_backend_type),
+            "route_specific_backend_count": str(len(route_differences)),
+            "route_specific_backend_summary": "; ".join(route_summary),
             "runtime_device": self.combo_runtime_device.currentData() or "auto",
             "external_backend_id": self.external_backend_id.text().strip(),
             "external_display_name": self.external_display_name.text().strip(),
             "external_python": self.external_python.text().strip(),
+            "parent_prepare_command_present": _agent_yes_no(bool(prepare_command)),
+            "parent_train_command_present": _agent_yes_no(bool(train_command)),
+            "parent_predict_command_present": _agent_yes_no(bool(predict_command)),
+            "parent_prepare_command_has_contract": _agent_yes_no(_agent_command_has_contract(prepare_command)),
+            "parent_train_command_has_contract": _agent_yes_no(_agent_command_has_contract(train_command)),
+            "parent_predict_command_has_contract": _agent_yes_no(_agent_command_has_contract(predict_command)),
+            "parent_model_manifest_present": _agent_yes_no(bool(self.external_model_manifest.text().strip())),
             "prepare_command_present": _agent_yes_no(bool(prepare_command)),
             "train_command_present": _agent_yes_no(bool(train_command)),
             "predict_command_present": _agent_yes_no(bool(predict_command)),
@@ -2629,47 +3938,49 @@ class ModelSettingsDialog(QDialog):
             "train_command_has_contract": _agent_yes_no(_agent_command_has_contract(train_command)),
             "predict_command_has_contract": _agent_yes_no(_agent_command_has_contract(predict_command)),
             "model_manifest_present": _agent_yes_no(bool(self.external_model_manifest.text().strip())),
+            "child_extension_id": self.external_blink_backend_id.text().strip(),
+            "child_extension_display_name": self.external_blink_display_name.text().strip(),
+            "child_extension_python": self.external_blink_python.text().strip(),
+            "child_predict_command_present": _agent_yes_no(bool(child_predict_command)),
+            "child_train_command_present": _agent_yes_no(bool(child_train_command)),
+            "child_predict_command_has_contract": _agent_yes_no(_agent_command_has_contract(child_predict_command)),
+            "child_train_command_has_contract": _agent_yes_no(_agent_command_has_contract(child_train_command)),
+            "child_model_manifest_present": _agent_yes_no(bool(self.external_blink_model_manifest.text().strip())),
             "locator_scope_count": str(len(self._selected_locator_scope())),
             "parent_box_ratio_count": str(len(self._parent_box_aspect_ratio_values())),
-            "validation_errors": _agent_error_summary(self._external_backend_validation_errors()),
+            "child_backend": self.child_backend_combo.currentData() if hasattr(self, "child_backend_combo") else CHILD_BACKEND_VIT_B,
+            "model_profile_id": self._project_active_profile_id(),
+            "selected_model_profile_id": self._active_profile_id(),
+            "validation_errors": _agent_error_summary(validation_errors),
         }
 
     def get_values(self):
         try:
+            model_profiles = self._updated_model_profiles()
+            active_profile = self._profile_for_legacy_values(model_profiles)
+            active_values = self._legacy_values_from_profile(active_profile)
             return {
-                'epochs': int(self.spin_epochs.text()),
-                'batch': int(self.spin_batch.text()),
-                'blink_epochs': int(self.spin_blink_epochs.text()),
-                'blink_batch': int(self.spin_blink_batch.text()),
-                'blink_lr': float(self.spin_blink_lr.text()),
-                'blink_weight_decay': float(self.spin_blink_wd.text()),
-                'blink_input_size': int(self.combo_blink_input_size.currentData() or 224),
-                'lr': float(self.spin_lr.text()),
-                'wd': float(self.spin_wd.text()),
-                'conf': float(self.spin_conf.text()),
-                'adapt': float(self.spin_adapt.text()),
-                'pad': float(self.spin_pad.text()),
-                'noise_floor': float(self.spin_noise.text()),
-                'poly_epsilon': float(self.spin_poly.text()),
-                'locator_scope': self._selected_locator_scope(),
-                'vlm_preannotation': {
-                    'target_parts': self._selected_vlm_target_parts(),
-                    'processing_scope': self.combo_vlm_processing_scope.currentData() or "current_image",
-                },
-                'parent_box_aspect_ratios': self._parent_box_aspect_ratio_values(),
+                'epochs': active_values["epochs"],
+                'batch': active_values["batch"],
+                'blink_epochs': active_values["blink_epochs"],
+                'blink_batch': active_values["blink_batch"],
+                'blink_lr': active_values["blink_lr"],
+                'blink_weight_decay': active_values["blink_weight_decay"],
+                'blink_input_size': active_values["blink_input_size"],
+                'lr': active_values["lr"],
+                'wd': active_values["wd"],
+                'conf': active_values["conf"],
+                'adapt': active_values["adapt"],
+                'pad': active_values["pad"],
+                'noise_floor': active_values["noise_floor"],
+                'poly_epsilon': active_values["poly_epsilon"],
+                'locator_scope': active_values["locator_scope"],
+                'vlm_preannotation': active_values["vlm_preannotation"],
+                'parent_box_aspect_ratios': active_values["parent_box_aspect_ratios"],
                 'runtime_device': self.combo_runtime_device.currentData() or "auto",
-                'model_backend': self.backend_combo.currentData() or BUILTIN_BACKEND_ID,
-                'external_backend': sanitize_external_backend_config(
-                    {
-                        "backend_id": self.external_backend_id.text(),
-                        "display_name": self.external_display_name.text(),
-                        "python_executable": self.external_python.text(),
-                        "prepare_dataset_command": self._command_text(self.external_prepare_command),
-                        "train_command": self._command_text(self.external_train_command),
-                        "predict_command": self._command_text(self.external_predict_command),
-                        "model_manifest": self.external_model_manifest.text(),
-                    }
-                ),
+                'model_backend': self._legacy_model_backend_from_profile(active_profile),
+                'model_profiles': model_profiles,
+                'external_backend': self._external_backend_from_profile(active_profile),
             }
         except: return None
 
@@ -3299,9 +4610,9 @@ class LiteratureDescriptionDialog(QDialog):
         layout.addWidget(self.preview)
 
         button_row = QHBoxLayout()
-        self.btn_replace = QPushButton(tr("Use Description", self.lang))
+        self.btn_replace = QPushButton(tr("Replace Current Description", self.lang))
         self.btn_replace.clicked.connect(self.accept_replace)
-        self.btn_append = QPushButton(tr("Append Description", self.lang))
+        self.btn_append = QPushButton(tr("Append to Current Description", self.lang))
         self.btn_append.clicked.connect(self.accept_append)
         self.btn_close = QPushButton(tr("Close", self.lang))
         self.btn_close.clicked.connect(self.reject)
@@ -3515,11 +4826,20 @@ class LiteratureDescriptionDialog(QDialog):
     def _source_summary_text(self):
         pieces = [
             f"{tr('Image', self.lang)}: {os.path.basename(self.image_path)}",
+            f"{tr('Source Mode', self.lang)}: {self._source_mode_label()}",
             f"{tr('PDF', self.lang)}: {self.context.get('pdf_file') or tr('Unknown', self.lang)}",
             f"{tr('Taxon', self.lang)}: {self.context.get('species_candidate') or self.taxon_hint or tr('Unknown', self.lang)}",
             f"{tr('Current Part', self.lang)}: {self.current_part or tr('Unknown', self.lang)}",
         ]
-        return " | ".join(pieces)
+        summary = " | ".join(pieces)
+        if self.context.get("link_mode") == "taxon_match_not_image_provenance":
+            summary = f"{summary}\n{tr('This image is not linked to the selected PDF figure. Descriptions are matched by the current image taxon name only.', self.lang)}"
+        return summary
+
+    def _source_mode_label(self):
+        if self.context.get("link_mode") == "taxon_match_not_image_provenance":
+            return tr("Same-taxon literature reference", self.lang)
+        return tr("Current image PDF source", self.lang)
 
     @staticmethod
     def _short_text(value, limit=160):
@@ -3592,6 +4912,12 @@ class MainWindow(QMainWindow):
         self.training_retry_requested = False
         self.current_blink_context = {}
         self.vlm_preannotation_thread = None
+        self.vlm_preannotation_progress_dialog = None
+        self.image_list_group_collapsed = {
+            "original": False,
+            "split": False,
+            "manual": False,
+        }
         self.parent_box_aspect_ratios = (
             self.project.get_parent_box_aspect_ratios()
             if hasattr(self.project, "get_parent_box_aspect_ratios")
@@ -3614,6 +4940,9 @@ class MainWindow(QMainWindow):
         self.btn_crop = QPushButton()
         self.btn_crop.clicked.connect(self.open_cropper)
         apply_semantic_button_style(self.btn_crop, BUTTON_ROLE_NEUTRAL)
+        self.btn_batch_split_panels = QPushButton()
+        self.btn_batch_split_panels.clicked.connect(self.batch_split_panel_images)
+        apply_semantic_button_style(self.btn_batch_split_panels, BUTTON_ROLE_NEUTRAL)
         self.btn_blink_entry = QPushButton()
         self.btn_blink_entry.clicked.connect(self.launch_blink_from_workbench)
         apply_semantic_button_style(self.btn_blink_entry, BUTTON_ROLE_NEUTRAL)
@@ -3643,6 +4972,7 @@ class MainWindow(QMainWindow):
         toolbar_project_layout.setSpacing(8)
         toolbar_project_layout.addWidget(self.btn_export)
         toolbar_project_layout.addWidget(self.btn_crop)
+        toolbar_project_layout.addWidget(self.btn_batch_split_panels)
 
         self.toolbar_flow_panel = QWidget()
         apply_surface_role(self.toolbar_flow_panel, SURFACE_ROLE_SUBTLE, "workbenchToolbarFlowPanel")
@@ -3678,6 +5008,7 @@ class MainWindow(QMainWindow):
         self.file_list.setSelectionMode(QListWidget.ExtendedSelection)
         self.file_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.file_list.customContextMenuRequested.connect(self.show_file_list_context_menu)
+        self.file_list.itemClicked.connect(self._handle_image_list_item_clicked)
         self.file_list.currentItemChanged.connect(self.on_file_selected)
         left_layout.addWidget(self.file_list)
         self.btn_add = QPushButton()
@@ -4194,10 +5525,10 @@ class MainWindow(QMainWindow):
         rail_layout = QVBoxLayout(workflow_rail)
         rail_layout.setContentsMargins(0, 0, 0, 0)
         rail_layout.setSpacing(14)
-        self.start_quick_panel = self._build_start_quick_panel()
-        rail_layout.addWidget(self.start_quick_panel)
         self.start_console_panel = self._build_project_console()
         rail_layout.addWidget(self.start_console_panel)
+        self.start_quick_panel = self._build_start_quick_panel()
+        rail_layout.addWidget(self.start_quick_panel)
         self.start_image_card = self._build_workflow_card(
             "start2DWorkflowCard",
             "2D / STL morphology annotation",
@@ -4265,11 +5596,37 @@ class MainWindow(QMainWindow):
         panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(12, 8, 12, 8)
-        layout.setSpacing(5)
+        layout.setSpacing(6)
 
+        header = QWidget()
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(8)
         self.start_console_title = QLabel()
-        self.start_console_title.setObjectName("HeaderLabel")
-        layout.addWidget(self.start_console_title)
+        self.start_console_title.setObjectName("startProjectConsoleTitle")
+        self.start_console_summary = QLabel()
+        self.start_console_summary.setObjectName("mutedLabel")
+        self.start_console_summary.setWordWrap(False)
+        self.start_console_summary.setMinimumWidth(0)
+        self.start_console_summary.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        title_layout = QVBoxLayout()
+        title_layout.setContentsMargins(0, 0, 0, 0)
+        title_layout.setSpacing(2)
+        title_layout.addWidget(self.start_console_title)
+        title_layout.addWidget(self.start_console_summary)
+        header_layout.addLayout(title_layout, 1)
+        self.btn_start_console_toggle = QPushButton()
+        self.btn_start_console_toggle.setObjectName("startProjectConsoleToggleButton")
+        self.btn_start_console_toggle.clicked.connect(self._toggle_start_project_console)
+        apply_semantic_button_style(self.btn_start_console_toggle, BUTTON_ROLE_NEUTRAL, "padding: 3px 8px; min-width: 34px;")
+        header_layout.addWidget(self.btn_start_console_toggle, 0, Qt.AlignTop | Qt.AlignRight)
+        layout.addWidget(header)
+
+        self.start_console_body = QWidget()
+        self.start_console_body.setObjectName("startProjectConsoleBody")
+        body_layout = QVBoxLayout(self.start_console_body)
+        body_layout.setContentsMargins(0, 2, 0, 0)
+        body_layout.setSpacing(5)
 
         grid = QGridLayout()
         grid.setContentsMargins(0, 0, 0, 0)
@@ -4295,13 +5652,33 @@ class MainWindow(QMainWindow):
             grid, 5, "startConsoleAgentValue"
         )
         grid.setColumnStretch(1, 1)
-        layout.addLayout(grid)
+        body_layout.addLayout(grid)
 
         self.start_console_stl_note = QLabel()
         self.start_console_stl_note.setObjectName("mutedLabel")
         self.start_console_stl_note.setWordWrap(True)
-        layout.addWidget(self.start_console_stl_note)
+        body_layout.addWidget(self.start_console_stl_note)
+        layout.addWidget(self.start_console_body)
+        self.start_console_expanded = False
+        self.start_console_body.setVisible(False)
         return panel
+
+    def _toggle_start_project_console(self):
+        self.start_console_expanded = not bool(getattr(self, "start_console_expanded", False))
+        self._update_start_project_console_collapsed_state()
+
+    def _update_start_project_console_collapsed_state(self):
+        if not hasattr(self, "start_console_body"):
+            return
+        expanded = bool(getattr(self, "start_console_expanded", False))
+        self.start_console_body.setVisible(expanded)
+        if hasattr(self, "btn_start_console_toggle"):
+            self.btn_start_console_toggle.setText("−" if expanded else "+")
+            self.btn_start_console_toggle.setToolTip(
+                tr("Collapse Project Console", self.current_lang)
+                if expanded
+                else tr("Expand Project Console", self.current_lang)
+            )
 
     def _build_project_console_row(self, grid, row, value_object_name):
         label = QLabel()
@@ -4436,6 +5813,9 @@ class MainWindow(QMainWindow):
         tif_summary, tif_detail = self._start_console_tif_summary()
         pdf_summary, pdf_detail = self._start_console_pdf_summary()
         agent_summary = self._start_console_agent_status()
+        summary = self._start_console_collapsed_summary(project_summary, agent_summary)
+        self.start_console_summary.setText(summary)
+        self.start_console_summary.setToolTip(f"{project_summary}\n{agent_summary}".strip())
         self.start_console_project_value.setText(project_summary)
         self.start_console_images_value.setText(image_summary)
         self.start_console_tif_value.setText(tif_summary)
@@ -4453,6 +5833,16 @@ class MainWindow(QMainWindow):
                 self.current_lang,
             )
         )
+        self._update_start_project_console_collapsed_state()
+
+    def _start_console_collapsed_summary(self, project_summary, agent_summary):
+        project_text = str(project_summary or "").replace("\n", " ").strip()
+        agent_text = str(agent_summary or "").replace("\n", " ").strip()
+        if len(project_text) > 34:
+            project_text = f"{project_text[:33]}..."
+        if len(agent_text) > 26:
+            agent_text = f"{agent_text[:25]}..."
+        return " · ".join([item for item in (project_text, agent_text) if item])
 
     def _start_console_project_summary(self):
         kind = getattr(self, "active_project_kind", "start")
@@ -4653,12 +6043,25 @@ class MainWindow(QMainWindow):
             "multimodal_enabled",
             "settings_scope",
             "settings_question_focus",
+            "advanced_extension_scope",
             "language",
             "theme",
             "startup_behavior",
             "project_autosave_interval_sec",
             "runtime_device",
             "model_backend",
+            "active_model_profile_id",
+            "active_model_profile_name",
+            "parent_backend",
+            "child_backend",
+            "route_backend_summary",
+            "parent_model_source",
+            "parent_model_source_label",
+            "default_child_expert",
+            "default_child_expert_label",
+            "default_child_route_backend",
+            "route_specific_backend_count",
+            "route_specific_backend_summary",
             "backend_id",
             "display_name",
             "python_executable",
@@ -4666,6 +6069,21 @@ class MainWindow(QMainWindow):
             "external_backend_id",
             "external_display_name",
             "external_python",
+            "parent_prepare_command_present",
+            "parent_train_command_present",
+            "parent_predict_command_present",
+            "parent_prepare_command_has_contract",
+            "parent_train_command_has_contract",
+            "parent_predict_command_has_contract",
+            "parent_model_manifest_present",
+            "child_extension_id",
+            "child_extension_display_name",
+            "child_extension_python",
+            "child_predict_command_present",
+            "child_train_command_present",
+            "child_predict_command_has_contract",
+            "child_train_command_has_contract",
+            "child_model_manifest_present",
             "prepare_command_present",
             "train_command_present",
             "predict_command_present",
@@ -4713,6 +6131,17 @@ class MainWindow(QMainWindow):
         return limited
 
     def _collect_image_workbench_agent_context(self):
+        model_context = self._active_model_profile_context()
+        route_backends = []
+        for route in self._active_project_route_manifest().get("routes", []):
+            if not isinstance(route, dict):
+                continue
+            parent = str(route.get("parent") or "")
+            child = str(route.get("child") or "")
+            backend = str(route.get("expert_backend") or "")
+            if parent and child:
+                route_backends.append(f"{parent}->{child}:{backend or 'unknown'}")
+        active_profile = _active_profile_from_manager(self.project)
         return {
             "source_workbench": "labeling",
             "project_type": "2d_stl",
@@ -4721,6 +6150,11 @@ class MainWindow(QMainWindow):
             "review_project_path": getattr(self.project, "current_project_path", "") or "",
             "active_image_path": self.current_image or "",
             "selected_part": self._current_part_name() or "",
+            "active_model_profile_id": model_context.get("active_profile_id", ""),
+            "active_model_profile_name": active_profile.get("display_name", ""),
+            "parent_backend": model_context.get("parent_backend", ""),
+            "child_backend": model_context.get("child_backend", ""),
+            "route_backend_summary": "; ".join(route_backends[:12]),
             "recent_log_excerpt": self._recent_text_excerpt(getattr(self, "log_console", None)),
         }
 
@@ -4781,6 +6215,7 @@ class MainWindow(QMainWindow):
 
     def open_agent_from_context(self, context=None):
         payload = dict(context or {})
+        source_widget = self.tabs.currentWidget() if hasattr(self, "tabs") else None
         if not payload and hasattr(self, "tabs") and self.tabs.currentWidget() is self.pdf_widget:
             payload = self.pdf_widget.get_agent_context()
         if not payload and hasattr(self, "tabs") and self.tabs.currentWidget() is self.blink_lab:
@@ -4790,6 +6225,8 @@ class MainWindow(QMainWindow):
         if not payload:
             payload = self._collect_image_workbench_agent_context()
         payload = self._compact_agent_context(payload)
+        if source_widget is getattr(self, "tif_workbench", None) and hasattr(self.tif_workbench, "prepare_for_agent_panel"):
+            self.tif_workbench.prepare_for_agent_panel()
         self.active_project_kind = "start"
         self._apply_project_mode_tabs()
         self._update_start_center_texts()
@@ -5081,6 +6518,23 @@ class MainWindow(QMainWindow):
     def _active_project_route_manifest(self):
         return self.project.get_cascade_routes()
 
+    def _active_model_profile_context(self):
+        active_profile = _active_profile_from_manager(self.project)
+        parent_backend = active_profile.get("parent_backend", {}) if isinstance(active_profile.get("parent_backend"), dict) else {}
+        child_defaults = active_profile.get("child_backend_defaults", {}) if isinstance(active_profile.get("child_backend_defaults"), dict) else {}
+        return {
+            "active_profile_id": str(active_profile.get("profile_id") or ""),
+            "parent_backend": str(parent_backend.get("backend_type") or ""),
+            "child_backend": str(child_defaults.get("backend_type") or ""),
+        }
+
+    def _active_external_backend_config(self):
+        active_profile = _active_profile_from_manager(self.project)
+        parent_backend = active_profile.get("parent_backend", {}) if isinstance(active_profile.get("parent_backend"), dict) else {}
+        if parent_backend.get("backend_type") == PARENT_BACKEND_EXTERNAL:
+            return sanitize_external_backend_config(parent_backend.get("external_backend", {}))
+        return sanitize_external_backend_config(self.external_backend_config)
+
     def _selected_route_entry(self):
         panel = getattr(self, "route_settings_panel", None)
         if panel is None:
@@ -5216,6 +6670,17 @@ class MainWindow(QMainWindow):
             f"{title}: "
             f"{ui_text('source={0}; attempted={1}; applied={2}', self.current_lang).format(route_source, attempted_text, applied_text)}"
         )
+        profile_id = str(meta.get("model_profile_id") or "")
+        parent_backend = str(meta.get("parent_backend") or "")
+        route_backends = list(meta.get("cascade_route_backends", []) or [])
+        if profile_id or parent_backend or route_backends:
+            self.log(
+                ui_text("Model audit: profile={0}; parent_backend={1}; route_backends={2}", self.current_lang).format(
+                    profile_id or "unknown",
+                    parent_backend or "unknown",
+                    route_backends or [ui_text("None", self.current_lang)],
+                )
+            )
         if block_reasons:
             block_text = ", ".join(f"{part}={reason}" for part, reason in sorted(block_reasons.items()))
             self.log(ui_text("Route blocks: {0}", self.current_lang).format(block_text))
@@ -5325,6 +6790,8 @@ class MainWindow(QMainWindow):
         self.training_retry_requested = False
 
         self.engine.locator_resolution = tuple(active_preflight.get("selected_locator_size") or (512, 512))
+        active_profile = _active_profile_from_manager(self.project)
+        parent_backend = active_profile.get("parent_backend", {}) if isinstance(active_profile.get("parent_backend"), dict) else {}
         self.trainer = TrainingThread(
             self.engine,
             active_preflight,
@@ -5334,6 +6801,13 @@ class MainWindow(QMainWindow):
             self.train_batch,
             lang=self.current_lang,
             train_segmenter=train_segmenter,
+            training_context={
+                "active_profile_id": active_profile.get("profile_id", ""),
+                "parent_backend": parent_backend.get("backend_type", PARENT_BACKEND_BUILTIN),
+                "locator_scope": list(locator_scope or []),
+                "train_segmenter": bool(train_segmenter),
+                "locator_resolution": list(self.engine.locator_resolution),
+            },
         )
         self.trainer.log_signal.connect(self.log)
         self.trainer.progress_signal.connect(self.progress.setValue)
@@ -5347,6 +6821,19 @@ class MainWindow(QMainWindow):
         self.trainer.start()
 
     def _on_training_success(self):
+        context = dict(getattr(self.trainer, "training_context", {}) or {})
+        locator_weights = context.get("locator_weights") or None
+        segmenter_weights = context.get("segmenter_weights") or None
+        if (locator_weights or segmenter_weights) and hasattr(self.project, "update_active_model_profile_parent_weights"):
+            self.project.update_active_model_profile_parent_weights(
+                locator_weights=locator_weights,
+                segmenter_weights=segmenter_weights,
+                save=False,
+            )
+            self.project.save_project()
+            self.log(
+                tr("Active model profile updated with trained parent weights.", self.current_lang)
+            )
         self.refresh_model_list()
 
     def _on_training_finished(self):
@@ -5797,6 +7284,9 @@ class MainWindow(QMainWindow):
             self.active_project_entry_path = f
             self.config.set("last_project_path", f)
         self._refresh_project_bound_views()
+        if hasattr(self.engine, "cascade_manager"):
+            self.engine.cascade_manager.project_manager = self.project
+        self._sync_blink_lab_model_profile_defaults()
         if getattr(self, "active_project_kind", "image") == "image":
             self.ensure_2d_stl_models_preloaded()
         self.canvas.load_image("")
@@ -6351,6 +7841,7 @@ class MainWindow(QMainWindow):
         self.create_menus()
         self.btn_export.setText(tr("Export Dataset", self.current_lang))
         self.btn_crop.setText(tr("Import & Crop", self.current_lang))
+        self.btn_batch_split_panels.setText(tr("Batch Split Plates", self.current_lang))
         self.btn_add.setText(tr("+ Add Images", self.current_lang))
         self.label_project_images.setText(tr("PROJECT IMAGES", self.current_lang))
         self.label_taxonomy.setText(tr("Current image taxon", self.current_lang))
@@ -6366,6 +7857,12 @@ class MainWindow(QMainWindow):
         backend_label = tr("Built-in Locator + SAM", self.current_lang)
         if self.model_backend == EXTERNAL_BACKEND_ID:
             backend_label = self.external_backend_config.get("display_name") or tr("External Script Backend", self.current_lang)
+        active_parent_backend = _runtime_parent_backend(self.project, self.model_backend)
+        if active_parent_backend == EXTERNAL_BACKEND_ID:
+            backend_config = self._active_external_backend_config()
+            backend_label = backend_config.get("display_name") or tr("External Script Backend", self.current_lang)
+        elif active_parent_backend == BUILTIN_BACKEND_ID:
+            backend_label = tr("Built-in Locator + SAM", self.current_lang)
         self.label_model_backend.setText(f"{tr('Model Backend:', self.current_lang)} {backend_label}")
         self.btn_predict.setText(tr("Auto (Current)", self.current_lang))
         self.btn_batch.setText(tr("Batch (All)", self.current_lang))
@@ -6592,14 +8089,7 @@ class MainWindow(QMainWindow):
                     if weights_path:
                         self.sam_worker.load_decoder_weights(weights_path)
             if hasattr(self, "blink_lab"):
-                self.blink_lab.set_training_defaults(
-                    self.blink_train_epochs,
-                    self.blink_train_batch,
-                    self.blink_train_lr,
-                    self.blink_train_weight_decay,
-                    self.blink_train_input_size,
-                    self.runtime_device,
-                )
+                self._sync_blink_lab_model_profile_defaults()
 
         if values["language"] != old_lang:
             self.change_language(values["language"])
@@ -6630,16 +8120,17 @@ class MainWindow(QMainWindow):
             'locator_scope': self.project.get_locator_scope(),
             'vlm_preannotation': self.project.get_vlm_preannotation_settings() if hasattr(self.project, "get_vlm_preannotation_settings") else {},
             'parent_box_aspect_ratios': self.project.get_parent_box_aspect_ratios() if hasattr(self.project, "get_parent_box_aspect_ratios") else {},
+            'model_profiles': self.project.get_model_profiles() if hasattr(self.project, "get_model_profiles") else {},
         }
         route_panel = getattr(self, "route_settings_panel", None)
         if route_panel is not None:
             route_panel.setParent(None)
         dlg = ModelSettingsDialog(params, self.current_lang, self, route_panel=route_panel)
         if focus_vlm and hasattr(dlg, "tabs"):
-            dlg.tabs.setCurrentIndex(0)
+            dlg.tabs.setCurrentIndex(getattr(dlg, "inference_tab_index", 0))
         if target_route and route_panel is not None:
             if hasattr(dlg, "tabs"):
-                dlg.tabs.setCurrentIndex(1)
+                dlg.tabs.setCurrentIndex(getattr(dlg, "inference_tab_index", 0))
             parent_part, child_part = target_route
             route_panel.refresh_route_table()
             route_item = route_panel._find_route_item(parent_part, child_part)
@@ -6670,6 +8161,14 @@ class MainWindow(QMainWindow):
             if hasattr(self.project, "set_vlm_preannotation_settings"):
                 self.project.set_vlm_preannotation_settings(v.get("vlm_preannotation", {}), save=False)
             self.project.project_data["parent_box_aspect_ratios"] = v.get("parent_box_aspect_ratios", {})
+            if hasattr(self.project, "set_model_profiles"):
+                self.project.set_model_profiles(v.get("model_profiles", {}), save=False)
+                active_profile_id = (v.get("model_profiles", {}) or {}).get("active_profile_id")
+                if active_profile_id:
+                    try:
+                        self.project.set_active_model_profile(active_profile_id, save=False)
+                    except Exception:
+                        pass
             self.parent_box_aspect_ratios = (
                 self.project.get_parent_box_aspect_ratios()
                 if hasattr(self.project, "get_parent_box_aspect_ratios")
@@ -6712,14 +8211,7 @@ class MainWindow(QMainWindow):
                             self.sam_worker.load_decoder_weights(weights_path)
 
             if hasattr(self, "blink_lab"):
-                self.blink_lab.set_training_defaults(
-                    self.blink_train_epochs,
-                    self.blink_train_batch,
-                    self.blink_train_lr,
-                    self.blink_train_weight_decay,
-                    self.blink_train_input_size,
-                    self.runtime_device,
-                )
+                self._sync_blink_lab_model_profile_defaults()
 
             self.log(tr("Settings updated.", self.current_lang))
             self.refresh_ui()
@@ -6800,6 +8292,8 @@ class MainWindow(QMainWindow):
             apply_theme_button_style(self.btn_export, BUTTON_ROLE_COMMIT, "", self.current_theme)
         if hasattr(self, "btn_crop"):
             apply_theme_button_style(self.btn_crop, BUTTON_ROLE_NEUTRAL, "", self.current_theme)
+        if hasattr(self, "btn_batch_split_panels"):
+            apply_theme_button_style(self.btn_batch_split_panels, BUTTON_ROLE_NEUTRAL, "", self.current_theme)
         if hasattr(self, "btn_blink_entry"):
             apply_theme_button_style(self.btn_blink_entry, BUTTON_ROLE_NEUTRAL, "", self.current_theme)
         if hasattr(self, "btn_start_center_from_workbench"):
@@ -6855,11 +8349,15 @@ class MainWindow(QMainWindow):
     def open_cropper(self):
         img = None
         if self.file_list.currentItem():
-            fn = self.file_list.currentItem().text()
-            for p in self.project.project_data["images"]:
-                if os.path.basename(p) == fn:
-                    img = p
-                    break
+            selected_path = self.file_list.currentItem().data(Qt.UserRole)
+            if selected_path:
+                img = selected_path
+            else:
+                fn = self.file_list.currentItem().text().strip()
+                for p in self.project.project_data["images"]:
+                    if os.path.basename(p) == fn:
+                        img = p
+                        break
         dlg = ImageCropper(initial_image=img, parent=self, lang=self.current_lang)
         if dlg.exec():
             nf = dlg.get_files()
@@ -6871,6 +8369,244 @@ class MainWindow(QMainWindow):
                     crop_records = dlg.get_crop_records()
                 self._inherit_crop_provenance(crop_records)
                 self.refresh_file_list()
+
+    def _is_split_crop_image(self, image_path):
+        if not image_path or not hasattr(self.project, "get_image_provenance"):
+            return False
+        provenance = self.project.get_image_provenance(image_path)
+        derived_from = provenance.get("derived_from") if isinstance(provenance, dict) else {}
+        if isinstance(derived_from, dict) and bool(derived_from.get("image_path")):
+            return True
+        return self._looks_like_panel_crop_path(image_path)
+
+    def _looks_like_panel_crop_path(self, image_path):
+        """Fallback for crops created before provenance was available."""
+        if not image_path:
+            return False
+        base_name = os.path.basename(str(image_path))
+        if not re.search(r"__(?:panel|crop)_\d{3}(?:_\d+)?\.(?:png|jpe?g|tif|tiff)$", base_name, re.IGNORECASE):
+            return False
+        crop_dir = os.path.normcase(os.path.abspath(os.path.dirname(str(image_path))))
+        crop_abs = os.path.normcase(os.path.abspath(str(image_path)))
+        crop_stem = os.path.splitext(base_name)[0]
+        source_stem = re.sub(r"__(?:panel|crop)_\d{3}(?:_\d+)?$", "", crop_stem, flags=re.IGNORECASE)
+        return any(
+            os.path.normcase(os.path.abspath(path)) != crop_abs
+            and os.path.normcase(os.path.abspath(os.path.dirname(path))) == crop_dir
+            and os.path.normcase(os.path.splitext(os.path.basename(path))[0]) == os.path.normcase(source_stem)
+            for path in self.project.project_data.get("images", [])
+        )
+
+    def _needs_manual_panel_split(self, image_path):
+        if not image_path or not hasattr(self.project, "get_image_provenance"):
+            return False
+        provenance = self.project.get_image_provenance(image_path)
+        review = provenance.get("panel_split_review") if isinstance(provenance, dict) else {}
+        return isinstance(review, dict) and review.get("status") == "manual_required"
+
+    def _set_panel_split_review(self, image_path, status, reason="", detections=None):
+        if not image_path or not hasattr(self.project, "get_image_provenance"):
+            return
+        provenance = self.project.get_image_provenance(image_path)
+        provenance["panel_split_review"] = {
+            "status": str(status or ""),
+            "reason": str(reason or ""),
+            "candidate_count": len(detections or []),
+        }
+        self.project.set_image_provenance(image_path, provenance, save=False)
+
+    def _short_progress_path(self, path, limit=64):
+        name = os.path.basename(str(path or ""))
+        if len(name) <= limit:
+            return name
+        root, ext = os.path.splitext(name)
+        ext = ext[:10]
+        keep = max(12, limit - len(ext) - 3)
+        head = max(6, keep // 2)
+        tail = max(6, keep - head)
+        return f"{root[:head]}...{root[-tail:]}{ext}"
+
+    def _prepare_progress_dialog(self, progress, width=460):
+        if progress is None:
+            return
+        progress.setMinimumWidth(int(width))
+        progress.setMaximumWidth(int(width))
+        progress.adjustSize()
+        try:
+            center = self.frameGeometry().center()
+            rect = progress.frameGeometry()
+            rect.moveCenter(center)
+            progress.move(rect.topLeft())
+        except Exception:
+            pass
+
+    def _candidate_panel_split_sources(self):
+        return [
+            path
+            for path in self.project.project_data.get("images", [])
+            if path and not self._is_split_crop_image(path)
+        ]
+
+    def batch_split_panel_images(self):
+        source_images = self._candidate_panel_split_sources()
+        if not source_images:
+            QMessageBox.information(self, tr("Empty", self.current_lang), tr("No panel crops were detected.", self.current_lang))
+            return
+        reply = themed_yes_no_question(
+            self,
+            tr("Batch Split Plates", self.current_lang),
+            tr(
+                "Run automatic panel splitting on {0} original image(s)?\n\nDetected crops will be added after the original images. Please review the generated crops before training.",
+                self.current_lang,
+            ).format(len(source_images)),
+            confirm_role=BUTTON_ROLE_COMMIT,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        crop_records = []
+        skipped = 0
+        manual_required = 0
+        cancelled = False
+        progress = QProgressDialog(
+            tr("Batch Split Plates", self.current_lang),
+            tr("Cancel", self.current_lang),
+            0,
+            len(source_images),
+            self,
+        )
+        progress.setWindowTitle(tr("Batch Split Plates", self.current_lang))
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setValue(0)
+        self._prepare_progress_dialog(progress)
+        app = QApplication.instance()
+        if app is not None:
+            app.processEvents()
+
+        for index, source_image in enumerate(source_images, start=1):
+            progress.setLabelText(
+                f"{tr('Batch Split Plates', self.current_lang)}: {index}/{len(source_images)}\n{self._short_progress_path(source_image)}"
+            )
+            progress.setValue(index - 1)
+            if app is not None:
+                app.processEvents()
+            if progress.wasCanceled():
+                cancelled = True
+                break
+            try:
+                detections = detect_panel_crops(source_image)
+            except Exception as exc:
+                skipped += 1
+                self._set_panel_split_review(source_image, "skipped", reason=f"error: {exc}")
+                self.log(f"Panel split skipped {os.path.basename(source_image)}: {exc}")
+                continue
+            hard_joined_detections = [
+                detection
+                for detection in detections
+                if str(detection.get("source") or "") == "hard_seam_panel_split"
+            ]
+            if hard_joined_detections and not any(
+                str(detection.get("source") or "") in {"white_separator_panel_split", "mixed_separator_panel_split"}
+                for detection in detections
+            ):
+                manual_required += 1
+                self._set_panel_split_review(
+                    source_image,
+                    "manual_required",
+                    reason="hard_seam_panel_split",
+                    detections=hard_joined_detections,
+                )
+                continue
+            detections = [
+                detection
+                for detection in detections
+                if str(detection.get("source") or "") in {"white_separator_panel_split", "mixed_separator_panel_split"}
+            ]
+            if not detections:
+                skipped += 1
+                self._set_panel_split_review(source_image, "skipped", reason="no_split_detected")
+                continue
+            crop_records.extend(self._save_detected_panel_crops(source_image, detections))
+            self._set_panel_split_review(source_image, "auto_split", reason="white_separator_panel_split", detections=detections)
+            progress.setValue(index)
+            if app is not None:
+                app.processEvents()
+
+        progress.setValue(len(source_images))
+
+        if not crop_records:
+            if hasattr(self.project, "save_project"):
+                self.project.save_project()
+            if cancelled:
+                self.refresh_file_list()
+                message = tr("Panel splitting cancelled.", self.current_lang)
+                QMessageBox.information(self, tr("Batch Split Plates", self.current_lang), message)
+                return
+            if manual_required:
+                self.refresh_file_list()
+                message = tr(
+                    "Panel splitting finished: {0} crop(s) from {1} image(s); hard-joined plates needing manual crop: {2}; no split detected/errors: {3}.",
+                    self.current_lang,
+                ).format(0, 0, manual_required, skipped)
+                QMessageBox.information(self, tr("Batch Split Plates", self.current_lang), message)
+                return
+            QMessageBox.information(self, tr("Empty", self.current_lang), tr("No panel crops were detected.", self.current_lang))
+            return
+
+        self._flush_pending_project_save()
+        self.project.add_images([record["path"] for record in crop_records])
+        self._inherit_crop_provenance(crop_records)
+        self.refresh_file_list()
+        message = tr(
+            "Panel splitting finished: {0} crop(s) from {1} image(s); hard-joined plates needing manual crop: {2}; no split detected/errors: {3}.",
+            self.current_lang,
+        ).format(
+            len(crop_records),
+            len({record.get("source_image") for record in crop_records}),
+            manual_required,
+            skipped,
+        )
+        if cancelled:
+            message = f"{message}\n{tr('Panel splitting cancelled.', self.current_lang)}"
+        self.log(message)
+        QMessageBox.information(self, tr("Success", self.current_lang), message)
+
+    def _save_detected_panel_crops(self, source_image, detections):
+        records = []
+        save_dir = os.path.dirname(source_image)
+        base_name = os.path.splitext(os.path.basename(source_image))[0]
+        with PILImage.open(source_image) as img:
+            for index, detection in enumerate(detections, start=1):
+                box = [int(value) for value in detection.get("box", [])]
+                if len(box) != 4 or box[2] <= box[0] or box[3] <= box[1]:
+                    continue
+                new_path = self._next_panel_crop_path(save_dir, base_name, index)
+                img.crop(tuple(box)).save(new_path, quality=95)
+                records.append(
+                    {
+                        "path": os.path.abspath(new_path),
+                        "source_image": os.path.abspath(source_image),
+                        "crop_index": index,
+                        "crop_box": list(box),
+                        "source_size": [int(img.width), int(img.height)],
+                        "crop_source": str(detection.get("source") or "auto_panel_split"),
+                    }
+                )
+        return records
+
+    def _next_panel_crop_path(self, save_dir, base_name, index):
+        candidate = os.path.join(save_dir, f"{base_name}__panel_{index:03d}.jpg")
+        if not os.path.exists(candidate):
+            return candidate
+        suffix = 2
+        while True:
+            candidate = os.path.join(save_dir, f"{base_name}__panel_{index:03d}_{suffix}.jpg")
+            if not os.path.exists(candidate):
+                return candidate
+            suffix += 1
 
     def _inherit_crop_provenance(self, crop_records):
         if not crop_records or not hasattr(self.project, "get_image_provenance"):
@@ -6884,8 +8620,6 @@ class MainWindow(QMainWindow):
             if not crop_path or not source_image:
                 continue
             parent_provenance = self.project.get_image_provenance(source_image)
-            if not parent_provenance:
-                continue
             crop_provenance = dict(parent_provenance)
             parent_source_type = str(parent_provenance.get("source_type", "") or "image").strip() or "image"
             crop_provenance["source_type"] = "pdf_candidate_crop" if self._is_pdf_candidate_provenance(parent_provenance) else f"{parent_source_type}_crop"
@@ -6894,14 +8628,20 @@ class MainWindow(QMainWindow):
                 "crop_index": int(record.get("crop_index", 0) or 0),
                 "crop_box": list(record.get("crop_box", []) or []),
                 "source_size": list(record.get("source_size", []) or []),
+                "crop_source": str(record.get("crop_source") or "manual"),
             }
             self.project.set_image_provenance(crop_path, crop_provenance, save=False)
+            if str(record.get("crop_source") or "") == "manual":
+                self._set_panel_split_review(source_image, "manual_done", reason="manual_crop_saved")
             changed = True
         if changed:
             self.project.save_project()
 
     def show_file_list_context_menu(self, pos):
         its = self.file_list.selectedItems()
+        if not its:
+            return
+        its = [item for item in its if item.data(Qt.UserRole)]
         if not its:
             return
         m = QMenu(self)
@@ -6921,9 +8661,8 @@ class MainWindow(QMainWindow):
             confirm_role=BUTTON_ROLE_DESTRUCTIVE,
         ) == QMessageBox.Yes:
             self._flush_pending_project_save()
-            name_to_path = {os.path.basename(p): p for p in self.project.project_data["images"]}
             for it in its:
-                p = name_to_path.get(it.text())
+                p = it.data(Qt.UserRole)
                 if p:
                     self.project.remove_image(p)
             self.refresh_file_list()
@@ -6940,50 +8679,110 @@ class MainWindow(QMainWindow):
         total_count = len(self.project.project_data["images"])
         labeled_count = 0
         
-        # Logic: Labeled images first, then Unlabeled images.
-        # Within each group, keep original insertion order.
-        labeled_imgs = []
-        unlabeled_imgs = []
-        
+        original_labeled_imgs = []
+        original_unlabeled_imgs = []
+        manual_split_imgs = []
+        crop_labeled_imgs = []
+        crop_unlabeled_imgs = []
+
         for img in self.project.project_data["images"]:
             if not img: continue
-            if self.project.get_labels(img):
-                labeled_imgs.append(img)
+            is_labeled = bool(self.project.get_labels(img) or self.project.get_auto_boxes(img))
+            is_split_crop = self._is_split_crop_image(img)
+            needs_manual_split = self._needs_manual_panel_split(img)
+            if is_labeled:
                 labeled_count += 1
+            if needs_manual_split:
+                manual_split_imgs.append(img)
+            elif is_split_crop and is_labeled:
+                crop_labeled_imgs.append(img)
+            elif is_split_crop:
+                crop_unlabeled_imgs.append(img)
+            elif is_labeled:
+                original_labeled_imgs.append(img)
             else:
-                unlabeled_imgs.append(img)
-                
-        # Combine: Labeled -> Unlabeled
-        final_list = labeled_imgs + unlabeled_imgs
-        
-        item_to_select = None
+                original_unlabeled_imgs.append(img)
 
-        for img in final_list:
+        group_definitions = [
+            ("original", tr("Original Images", self.current_lang), original_labeled_imgs + original_unlabeled_imgs, False),
+            ("split", tr("Split Crops", self.current_lang), crop_labeled_imgs + crop_unlabeled_imgs, True),
+            ("manual", tr("Manual Split Needed", self.current_lang), manual_split_imgs, False),
+        ]
+        non_empty_groups = [group for group in group_definitions if group[2]]
+        use_group_headers = not (len(non_empty_groups) == 1 and non_empty_groups[0][0] == "original")
+
+        item_to_select = None
+        first_image_item = None
+
+        def add_group_header(group_key, text, count):
+            collapsed = bool(self.image_list_group_collapsed.get(group_key, False))
+            arrow = "▸" if collapsed else "▾"
+            item = QListWidgetItem(f"{arrow} {text} ({count})")
+            item.setData(Qt.UserRole, None)
+            item.setData(Qt.UserRole + 1, group_key)
+            item.setFlags((item.flags() | Qt.ItemIsEnabled | Qt.ItemIsSelectable) & ~Qt.ItemIsEditable)
+            item.setForeground(QColor("#8EA0A8"))
+            self.file_list.addItem(item)
+            return collapsed
+
+        def add_image_item(img, is_split_crop=False):
+            nonlocal item_to_select, first_image_item
             base_name = os.path.basename(img)
-            item = QListWidgetItem(base_name)
+            display_name = f"  {base_name}" if is_split_crop else base_name
+            item = QListWidgetItem(display_name)
             item.setData(Qt.UserRole, img) # Store full path for safer lookup
-            
-            if img in labeled_imgs:
+            if is_split_crop:
+                item.setToolTip(tr("Split Crops", self.current_lang))
+
+            if self.project.get_labels(img):
                 item.setForeground(QColor("#8FBC8F")) # DarkSeaGreen
+            elif is_split_crop:
+                item.setForeground(QColor("#AAB4C2"))
             else:
                 item.setForeground(QColor("#CCCCCC")) # Grey
-                
+
             self.file_list.addItem(item)
-            
+            if first_image_item is None:
+                first_image_item = item
+
             # Check if this is the one we were looking at
-            if current_selection_path and img == current_selection_path:
+            if current_selection_path and self._same_project_image_path(img, current_selection_path):
                 item_to_select = item
+
+        for group_key, label, images, is_split_group in group_definitions:
+            if not images:
+                continue
+            if use_group_headers:
+                collapsed = add_group_header(group_key, label, len(images))
+                if collapsed:
+                    continue
+            for img in images:
+                add_image_item(img, is_split_crop=is_split_group)
         
         self.file_list.blockSignals(False)
         
         # 2. Restore Selection
-        if item_to_select:
-            self.file_list.setCurrentItem(item_to_select)
-            self.file_list.scrollToItem(item_to_select) # Ensure visible
+        target_item = item_to_select or first_image_item
+        if target_item:
+            self.file_list.setCurrentItem(target_item)
+            self.file_list.scrollToItem(target_item) # Ensure visible
         
         # Update the header label on the left side
         header_base = tr("PROJECT IMAGES", self.current_lang)
         self.label_project_images.setText(f"{header_base} ({labeled_count}/{total_count})")
+
+    def _handle_image_list_item_clicked(self, item):
+        if item is None:
+            return
+        group_key = item.data(Qt.UserRole + 1)
+        if not group_key:
+            return
+        key = str(group_key)
+        self.image_list_group_collapsed[key] = not bool(self.image_list_group_collapsed.get(key, False))
+        self.file_list.blockSignals(True)
+        self.file_list.setCurrentItem(None)
+        self.file_list.blockSignals(False)
+        self.refresh_file_list()
 
     def _collect_blink_roi_candidates(self, image_path, selected_part=None, preferred_roi_parts=None):
         manual_boxes = self.project.get_boxes(image_path)
@@ -7030,10 +8829,12 @@ class MainWindow(QMainWindow):
         if not p:
             fn = curr.text()
             p = next((path for path in self.project.project_data["images"] if os.path.basename(path) == fn), None)
+        if not p:
+            return
             
         if p:
             previous_image = self.current_image
-            same_image = bool(previous_image) and os.path.normpath(previous_image) == os.path.normpath(p)
+            same_image = bool(previous_image) and self._same_project_image_path(previous_image, p)
             has_loaded_pixmap = bool(self.canvas.original_pixmap and not self.canvas.original_pixmap.isNull())
 
             if not same_image:
@@ -7198,10 +8999,15 @@ class MainWindow(QMainWindow):
         inferred_db = infer_literature_db_path_from_artifact_image(self.current_image)
         if inferred_db:
             extra_paths.append(inferred_db)
+        for candidate in self._project_literature_db_paths():
+            if candidate:
+                extra_paths.append(candidate)
         pdf_widget = getattr(self, "pdf_widget", None)
         if pdf_widget is not None and hasattr(pdf_widget, "_resolve_extract_db_path"):
             try:
-                extra_paths.append(pdf_widget._resolve_extract_db_path(pdf_widget.edit_db_path.text()))
+                widget_path = pdf_widget._resolve_extract_db_path(pdf_widget.edit_db_path.text())
+                if widget_path:
+                    extra_paths.append(widget_path)
             except Exception:
                 pass
         return candidate_literature_db_paths(
@@ -7210,6 +9016,62 @@ class MainWindow(QMainWindow):
             extra_paths=extra_paths,
         )
 
+    def _project_literature_db_paths(self):
+        paths = []
+
+        def add_path(value):
+            text = str(value or "").strip()
+            if not text:
+                return
+            try:
+                expanded = os.path.abspath(os.path.expanduser(text))
+            except Exception:
+                return
+            norm = os.path.normcase(os.path.normpath(expanded))
+            if norm not in {os.path.normcase(os.path.normpath(path)) for path in paths}:
+                paths.append(expanded)
+
+        provenance_map = {}
+        try:
+            provenance_map = self.project.project_data.get("image_provenance", {})
+        except Exception:
+            provenance_map = {}
+        if isinstance(provenance_map, dict):
+            for provenance in provenance_map.values():
+                if not isinstance(provenance, dict):
+                    continue
+                add_path(provenance.get("source_db"))
+                source_ref = provenance.get("source_ref", {})
+                if isinstance(source_ref, dict):
+                    add_path(source_ref.get("db_path"))
+                inferred_from_parent = infer_literature_db_path_from_artifact_image(
+                    (provenance.get("derived_from") or {}).get("image_path", "")
+                    if isinstance(provenance.get("derived_from"), dict)
+                    else ""
+                )
+                add_path(inferred_from_parent)
+
+        project_path = getattr(self.project, "current_project_path", "") or ""
+        if project_path:
+            project_dir = os.path.dirname(os.path.abspath(project_path))
+            for value in (
+                os.path.join(project_dir, "taxamask_literature.db"),
+                os.path.join(project_dir, "pdf_extraction", "taxamask_literature.db"),
+                os.path.join(os.path.dirname(project_dir), "pdf_extraction", "taxamask_literature.db"),
+            ):
+                add_path(value)
+        try:
+            pdf_root = os.path.join(self._default_outputs_root(), "pdf_extraction")
+            add_path(os.path.join(pdf_root, "taxamask_literature.db"))
+            if os.path.isdir(pdf_root):
+                for dirpath, _dirnames, filenames in os.walk(pdf_root):
+                    for filename in filenames:
+                        if filename.lower().endswith(".db"):
+                            add_path(os.path.join(dirpath, filename))
+        except Exception:
+            pass
+        return paths
+
     def _resolve_current_literature_context(self):
         if not self.current_image:
             return "", {}, "no_current_image"
@@ -7217,6 +9079,7 @@ class MainWindow(QMainWindow):
         if hasattr(self.project, "get_image_provenance"):
             provenance = self.project.get_image_provenance(self.current_image)
         last_reason = "literature_db_missing"
+        taxon_hint = self._current_taxon_text()
         for db_path in self._candidate_literature_db_paths(provenance):
             if not os.path.exists(db_path):
                 continue
@@ -7225,14 +9088,81 @@ class MainWindow(QMainWindow):
                 db_path,
                 image_path=self.current_image,
                 provenance=provenance,
-                taxon_hint=self._current_taxon_text(),
+                taxon_hint=taxon_hint,
                 allow_filename_figure_id=trusted_db,
             )
             if context.get("available"):
                 return db_path, context, ""
             last_reason = str(context.get("reason", "") or last_reason)
+        if taxon_hint and taxon_hint.lower() not in {"unknown", "unknown taxon", "n/a", "none", "null"}:
+            for db_path in self._candidate_literature_db_paths(provenance):
+                if not os.path.exists(db_path):
+                    continue
+                context = resolve_literature_context(
+                    db_path,
+                    image_path=self.current_image,
+                    provenance=provenance,
+                    taxon_hint=taxon_hint,
+                    allow_filename_figure_id=False,
+                    allow_taxon_match=True,
+                )
+                if context.get("available") and context.get("link_mode") == "taxon_match_not_image_provenance":
+                    return db_path, context, ""
+                last_reason = str(context.get("reason", "") or last_reason)
         fallback_db = default_literature_db_path(REPO_ROOT)
         return fallback_db, {}, last_reason
+
+    def _resolve_literature_context_from_selected_db(self, db_path):
+        if not self.current_image or not db_path:
+            return {}, "literature_db_missing"
+        provenance = {}
+        if hasattr(self.project, "get_image_provenance"):
+            provenance = self.project.get_image_provenance(self.current_image)
+        taxon_hint = self._current_taxon_text()
+        context = resolve_literature_context(
+            db_path,
+            image_path=self.current_image,
+            provenance=provenance,
+            taxon_hint=taxon_hint,
+            allow_filename_figure_id=True,
+        )
+        if context.get("available"):
+            return context, ""
+        context = resolve_literature_context(
+            db_path,
+            image_path=self.current_image,
+            provenance=provenance,
+            taxon_hint=taxon_hint,
+            allow_filename_figure_id=False,
+            allow_taxon_match=True,
+        )
+        if context.get("available"):
+            return context, ""
+        return {}, str(context.get("reason", "") or "figure_context_missing")
+
+    def _choose_literature_db_for_current_taxon(self):
+        start_dir = os.path.join(self._default_outputs_root(), "pdf_extraction")
+        if not os.path.isdir(start_dir):
+            start_dir = self._default_outputs_root()
+        db_path, _ = QFileDialog.getOpenFileName(
+            self,
+            tr("Choose Literature Database", self.current_lang),
+            start_dir,
+            "SQLite Database (*.db);;All Files (*)",
+        )
+        db_path = str(db_path or "").strip()
+        if not db_path:
+            return "", {}, "literature_db_missing"
+        context, reason = self._resolve_literature_context_from_selected_db(db_path)
+        if context:
+            pdf_widget = getattr(self, "pdf_widget", None)
+            if pdf_widget is not None and hasattr(pdf_widget, "_set_extract_db_path"):
+                try:
+                    pdf_widget._set_extract_db_path(db_path)
+                except Exception:
+                    pass
+            return db_path, context, ""
+        return db_path, {}, reason
 
     def _literature_db_matches_image_source(self, db_path, provenance):
         db_norm = os.path.normcase(os.path.normpath(os.path.abspath(str(db_path or ""))))
@@ -7268,15 +9198,39 @@ class MainWindow(QMainWindow):
 
         db_path, context, reason = self._resolve_current_literature_context()
         if not context:
-            message = tr(
-                "No PDF literature source is linked to the current image. Import images through the PDF candidate workflow or open a project that preserves PDF image provenance.",
-                self.current_lang,
-            )
+            taxon_text = self._current_taxon_text()
+            if taxon_text and taxon_text.lower() not in {"unknown", "unknown taxon", "n/a", "none", "null"}:
+                reply = themed_yes_no_question(
+                    self,
+                    tr("Choose Literature Database", self.current_lang),
+                    tr(
+                        "No literature database was found automatically. Choose the PDF extraction database that contains this species?",
+                        self.current_lang,
+                    ),
+                    default_button=QMessageBox.Yes,
+                )
+                if reply == QMessageBox.Yes:
+                    db_path, context, reason = self._choose_literature_db_for_current_taxon()
+                    if context:
+                        return self._open_literature_description_dialog_with_context(db_path, context, current_part)
+            if not self._current_taxon_text() or self._current_taxon_text().lower() in {"unknown", "unknown taxon", "n/a", "none", "null"}:
+                message = tr(
+                    "No PDF literature source is linked to the current image, and the current image taxon is unknown. Set the current image taxon first, or import images through the PDF candidate workflow.",
+                    self.current_lang,
+                )
+            else:
+                message = tr(
+                    "No PDF literature source is linked to the current image. Import images through the PDF candidate workflow or open a project that preserves PDF image provenance.",
+                    self.current_lang,
+                )
             if reason == "literature_db_missing":
                 message = tr("PDF literature database was not found: {0}", self.current_lang).format(db_path)
             QMessageBox.information(self, tr("Literature Trait Descriptions", self.current_lang), message)
             return
 
+        self._open_literature_description_dialog_with_context(db_path, context, current_part)
+
+    def _open_literature_description_dialog_with_context(self, db_path, context, current_part):
         dialog = LiteratureDescriptionDialog(
             db_path=db_path,
             context=context,
@@ -7603,6 +9557,8 @@ class MainWindow(QMainWindow):
             else:
                 self.project.update_label(self.current_image, p, pts, self.desc_box.toPlainText(), box=box, save=False)
             self._schedule_project_save()
+            self.canvas.set_polygons(self.project.get_labels(self.current_image))
+            self.canvas.set_boxes(self.project.get_boxes(self.current_image), self.project.get_auto_boxes(self.current_image))
             
             # Update counts on the left panel
             self.refresh_file_list()
@@ -7647,7 +9603,7 @@ class MainWindow(QMainWindow):
         if self.trainer and self.trainer.isRunning():
             self.log(tr("Training already running...", self.current_lang))
             return
-        if self.model_backend == EXTERNAL_BACKEND_ID:
+        if _runtime_parent_backend(self.project, self.model_backend) == EXTERNAL_BACKEND_ID:
             self.run_external_training()
             return
         images = list(self.project.project_data.get("images", []))
@@ -7691,7 +9647,28 @@ class MainWindow(QMainWindow):
         self._launch_training_with_preflight(preflight, tax, locator_scope, train_segmenter=train_segmenter)
 
     def _external_backend_runner(self):
-        return ExternalBackendRunner(self.project, self.external_backend_config)
+        return ExternalBackendRunner(self.project, self._active_external_backend_config())
+
+    def _sync_blink_lab_model_profile_defaults(self):
+        if not hasattr(self, "blink_lab"):
+            return
+        child_defaults = _runtime_child_backend_defaults(self.project)
+        train_params = child_defaults.get("train_params", {}) if isinstance(child_defaults.get("train_params"), dict) else {}
+        heatmap_params = child_defaults.get("heatmap_params", {}) if isinstance(child_defaults.get("heatmap_params"), dict) else {}
+        backend_type = child_defaults.get("backend_type") or CHILD_BACKEND_VIT_B
+        input_size = child_defaults.get("input_size", self.blink_train_input_size)
+        if backend_type == CHILD_BACKEND_HEATMAP:
+            input_size = heatmap_params.get("input_size", input_size)
+        self.blink_lab.set_training_defaults(
+            train_params.get("epochs", self.blink_train_epochs),
+            train_params.get("batch", self.blink_train_batch),
+            train_params.get("lr", self.blink_train_lr),
+            train_params.get("weight_decay", self.blink_train_weight_decay),
+            input_size,
+            self.runtime_device,
+            trainer_backend=backend_type,
+            heatmap_params=heatmap_params,
+        )
 
     def run_external_training(self):
         self._flush_pending_project_save()
@@ -7859,6 +9836,24 @@ class MainWindow(QMainWindow):
             return [path for path in self.project.project_data.get("images", []) if path]
         return [self.current_image] if self.current_image else []
 
+    def _same_project_image_path(self, left, right):
+        if not left or not right:
+            return False
+        to_absolute = getattr(self.project, "_to_absolute", None)
+        try:
+            left_path = to_absolute(left) if callable(to_absolute) else os.path.abspath(str(left))
+            right_path = to_absolute(right) if callable(to_absolute) else os.path.abspath(str(right))
+        except Exception:
+            left_path = str(left)
+            right_path = str(right)
+        return os.path.normcase(os.path.normpath(left_path)) == os.path.normcase(os.path.normpath(right_path))
+
+    def _project_image_key_for_path(self, image_path):
+        for candidate in self.project.project_data.get("images", []):
+            if self._same_project_image_path(candidate, image_path):
+                return candidate
+        return ""
+
     def run_vlm_preannotation_from_settings(self):
         if not self.current_image:
             QMessageBox.warning(self, tr("VLM Pre-Annotate", self.current_lang), tr("Please select an image first.", self.current_lang))
@@ -7917,7 +9912,6 @@ class MainWindow(QMainWindow):
 
         self.vlm_preannotation_api_config = dict(api_config)
         self.btn_vlm_preannotate.setEnabled(False)
-        self.progress.setValue(0)
         self.vlm_preannotation_saved_total = 0
         self.vlm_preannotation_run_id = time.strftime("%Y%m%d_%H%M%S")
         self.vlm_preannotation_records = []
@@ -7925,9 +9919,14 @@ class MainWindow(QMainWindow):
         self.vlm_preannotation_run_active = True
         self.vlm_preannotation_total_steps = max(1, len(image_paths) * 6)
         self.vlm_preannotation_completed_steps = 0
+        self.vlm_preannotation_total_images = len(image_paths)
+        self.vlm_preannotation_completed_images = 0
+        self.vlm_preannotation_current_image = ""
         self.vlm_preannotation_target_parts = list(target_parts)
         self.vlm_preannotation_artifacts_dir = self._vlm_preannotation_artifacts_dir()
         self.vlm_preannotation_api_config = dict(api_config)
+        self._create_vlm_progress_dialog()
+        self._set_vlm_progress_ui(0, "start")
         self._start_next_vlm_preannotation_image()
 
     def _start_next_vlm_preannotation_image(self):
@@ -7938,6 +9937,11 @@ class MainWindow(QMainWindow):
         image_path = queue.pop(0)
         self.vlm_preannotation_queue = queue
         self.vlm_preannotation_current_image_steps_completed = 0
+        self.vlm_preannotation_current_image = image_path
+        self._set_vlm_progress_ui(
+            int(int(getattr(self, "vlm_preannotation_completed_steps", 0) or 0) / max(1, int(getattr(self, "vlm_preannotation_total_steps", 1) or 1)) * 100),
+            "image",
+        )
         self.vlm_preannotation_thread = VlmPreannotationThread(
             image_path,
             getattr(self, "vlm_preannotation_target_parts", []),
@@ -8005,20 +10009,68 @@ class MainWindow(QMainWindow):
             self.project.update_label(image_path, part_name, [], "Auto-Annotated", auto_box=box, save=False)
         return True, "box_only"
 
+    def _refresh_vlm_canvas_if_current(self, image_path):
+        if self._same_project_image_path(image_path, self.current_image):
+            self.canvas.set_polygons(self.project.get_labels(image_path))
+            self.canvas.set_boxes(self.project.get_boxes(image_path), self.project.get_auto_boxes(image_path))
+            self.canvas.update()
+            self.canvas.repaint()
+
+    def _reload_current_image_for_workbench(self):
+        if not self.current_image:
+            return False
+        current_path = self._project_image_key_for_path(self.current_image)
+        if not current_path:
+            return False
+        self.current_image = current_path
+        if hasattr(self, "canvas"):
+            has_loaded_pixmap = bool(self.canvas.original_pixmap and not self.canvas.original_pixmap.isNull())
+            if not has_loaded_pixmap:
+                self.canvas.load_image(current_path)
+                self.on_enhancement_changed()
+            self.canvas.set_polygons(self.project.get_labels(current_path))
+            self.canvas.set_boxes(self.project.get_boxes(current_path), self.project.get_auto_boxes(current_path))
+            self.canvas.update()
+            self.canvas.repaint()
+        get_taxon = getattr(self.project, "get_taxon", self.project.get_genus)
+        if hasattr(self, "genus_combo"):
+            self.genus_combo.setCurrentText(get_taxon(current_path))
+        if hasattr(self, "blink_lab"):
+            try:
+                self.blink_lab.refresh_from_workbench(
+                    current_path,
+                    self.project.get_labels(current_path),
+                    self.project.get_boxes(current_path),
+                    self.project.get_auto_boxes(current_path),
+                )
+            except Exception:
+                pass
+        return True
+
     def _on_vlm_preannotation_image_result(self, result):
         image_path = str(result.get("image_path", "") or "")
         if not image_path or result.get("status") == "failed":
             self.log(tr("VLM first-mile preannotation failed: {0}", self.current_lang).format(result.get("error", "")))
             self._complete_current_vlm_image_steps("failed")
             self.vlm_preannotation_records.append(result)
+            self._mark_current_vlm_image_done("failed")
             return
         candidates = list(result.get("candidates", []) or []) if isinstance(result, dict) else []
         if not candidates:
             self.log(tr("VLM first-mile preannotation returned no usable boxes.", self.current_lang))
             self._complete_current_vlm_image_steps("no_candidates")
             self.vlm_preannotation_records.append(result)
+            self._mark_current_vlm_image_done("no_candidates")
             return
         try:
+            project_image_path = self._project_image_key_for_path(image_path)
+            if not project_image_path:
+                raise RuntimeError(
+                    tr(
+                        "VLM result image is not registered in the current project: {0}",
+                        self.current_lang,
+                    ).format(image_path)
+                )
             image_bgr = cv2.imread(image_path)
             if image_bgr is None:
                 raise RuntimeError(tr("Could not read the current image.", self.current_lang))
@@ -8028,7 +10080,7 @@ class MainWindow(QMainWindow):
             box_only_count = 0
             skipped = 0
             for candidate in candidates:
-                ok, mode = self._apply_vlm_candidate(image_path, image_rgb, candidate, result)
+                ok, mode = self._apply_vlm_candidate(project_image_path, image_rgb, candidate, result)
                 if ok:
                     saved += 1
                     if mode == "polygon":
@@ -8039,10 +10091,9 @@ class MainWindow(QMainWindow):
                     skipped += 1
             self.vlm_preannotation_saved_total = int(getattr(self, "vlm_preannotation_saved_total", 0)) + saved
             self._schedule_project_save()
-            if image_path == self.current_image:
-                self.canvas.set_polygons(self.project.get_labels(self.current_image))
-                self.canvas.set_boxes(self.project.get_boxes(self.current_image), self.project.get_auto_boxes(self.current_image))
+            self._refresh_vlm_canvas_if_current(project_image_path)
             self.refresh_file_list()
+            self._reload_current_image_for_workbench()
             self._refresh_blink_refine_state()
             report_path = result.get("report_path", "")
             result["saved_box_count"] = saved
@@ -8053,6 +10104,7 @@ class MainWindow(QMainWindow):
             self._advance_vlm_progress("write")
             self._advance_vlm_progress("sam")
             self._advance_vlm_progress("report")
+            self._mark_current_vlm_image_done("done")
             self.log(
                 tr(
                     "VLM preannotation saved {0} draft(s): {1} SAM polygon(s), {2} box-only draft(s), skipped {3}. Report: {4}",
@@ -8065,7 +10117,81 @@ class MainWindow(QMainWindow):
             failed["status"] = "failed"
             failed["error"] = str(exc)
             self.vlm_preannotation_records.append(failed)
+            self._mark_current_vlm_image_done("failed")
             self._on_vlm_preannotation_error(str(exc))
+
+    def _mark_current_vlm_image_done(self, step_name):
+        total_images = max(1, int(getattr(self, "vlm_preannotation_total_images", 1) or 1))
+        self.vlm_preannotation_completed_images = min(
+            total_images,
+            int(getattr(self, "vlm_preannotation_completed_images", 0) or 0) + 1,
+        )
+        total_steps = max(1, int(getattr(self, "vlm_preannotation_total_steps", 1) or 1))
+        completed_steps = int(getattr(self, "vlm_preannotation_completed_steps", 0) or 0)
+        self._set_vlm_progress_ui(int(completed_steps / total_steps * 100), step_name)
+
+    def _set_vlm_progress_ui(self, percent, step_name):
+        total_images = max(1, int(getattr(self, "vlm_preannotation_total_images", 1) or 1))
+        completed_images = min(total_images, int(getattr(self, "vlm_preannotation_completed_images", 0) or 0))
+        current_image = str(getattr(self, "vlm_preannotation_current_image", "") or "")
+        step_label = tr(str(step_name or ""), self.current_lang)
+        percent = max(0, min(100, int(percent)))
+        label = tr("VLM progress: {0}% ({1}/{2}) {3}", self.current_lang).format(
+            percent,
+            completed_images,
+            total_images,
+            step_label,
+        )
+        progress = getattr(self, "vlm_preannotation_progress_dialog", None)
+        if progress is not None:
+            label_widget = getattr(self, "vlm_preannotation_progress_label", None)
+            path_widget = getattr(self, "vlm_preannotation_progress_path_label", None)
+            bar_widget = getattr(self, "vlm_preannotation_progress_bar", None)
+            if label_widget is not None:
+                label_widget.setText(label)
+            if path_widget is not None:
+                if current_image:
+                    path_widget.setText(self._short_progress_path(current_image, limit=92))
+                    path_widget.setToolTip(current_image)
+                    path_widget.show()
+                else:
+                    path_widget.setText("")
+                    path_widget.setToolTip("")
+                    path_widget.hide()
+            if bar_widget is not None:
+                bar_widget.setValue(percent)
+
+    def _create_vlm_progress_dialog(self):
+        progress = QDialog(self)
+        progress.setWindowTitle(tr("VLM Pre-Annotate", self.current_lang))
+        progress.setWindowModality(Qt.NonModal)
+        layout = QVBoxLayout(progress)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(8)
+        title_label = QLabel(tr("VLM Pre-Annotation Progress", self.current_lang))
+        title_label.setWordWrap(True)
+        label = QLabel("")
+        label.setWordWrap(True)
+        label.setMinimumHeight(36)
+        path_label = QLabel("")
+        path_label.setWordWrap(True)
+        path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        path_label.setStyleSheet("color: #9CA3AF;")
+        path_label.hide()
+        bar = QProgressBar()
+        bar.setRange(0, 100)
+        bar.setValue(0)
+        layout.addWidget(title_label)
+        layout.addWidget(label)
+        layout.addWidget(path_label)
+        layout.addWidget(bar)
+        self._prepare_progress_dialog(progress, width=560)
+        self.vlm_preannotation_progress_dialog = progress
+        self.vlm_preannotation_progress_title_label = title_label
+        self.vlm_preannotation_progress_label = label
+        self.vlm_preannotation_progress_path_label = path_label
+        self.vlm_preannotation_progress_bar = bar
+        progress.show()
 
     def _advance_vlm_progress(self, step_name):
         total = max(1, int(getattr(self, "vlm_preannotation_total_steps", 1) or 1))
@@ -8073,7 +10199,7 @@ class MainWindow(QMainWindow):
         self.vlm_preannotation_completed_steps = completed
         current_completed = int(getattr(self, "vlm_preannotation_current_image_steps_completed", 0) or 0)
         self.vlm_preannotation_current_image_steps_completed = min(6, current_completed + 1)
-        self.progress.setValue(int(completed / total * 100))
+        self._set_vlm_progress_ui(int(completed / total * 100), step_name)
         self.log(tr("VLM batch progress: {0}/{1} steps ({2}).", self.current_lang).format(completed, total, step_name))
 
     def _on_vlm_preannotation_thread_step(self, _completed, _total, step_name):
@@ -8113,6 +10239,23 @@ class MainWindow(QMainWindow):
         self.vlm_preannotation_run_active = False
         if hasattr(self, "btn_vlm_preannotate"):
             self.btn_vlm_preannotate.setEnabled(True)
+        progress = getattr(self, "vlm_preannotation_progress_dialog", None)
+        if progress is not None:
+            label_widget = getattr(self, "vlm_preannotation_progress_label", None)
+            bar_widget = getattr(self, "vlm_preannotation_progress_bar", None)
+            if label_widget is not None:
+                label_widget.setText(
+                    tr("VLM progress: finished ({0} draft boxes)", self.current_lang).format(summary.get("saved_box_count", 0))
+                )
+            if bar_widget is not None:
+                bar_widget.setValue(100)
+            progress.close()
+            progress.deleteLater()
+            self.vlm_preannotation_progress_dialog = None
+            self.vlm_preannotation_progress_title_label = None
+            self.vlm_preannotation_progress_label = None
+            self.vlm_preannotation_progress_path_label = None
+            self.vlm_preannotation_progress_bar = None
 
     def accept_current_image_ai_drafts(self):
         if not self.current_image:
@@ -8142,7 +10285,7 @@ class MainWindow(QMainWindow):
     def run_prediction(self):
         if not self.current_image:
             return
-        if self.model_backend == EXTERNAL_BACKEND_ID:
+        if _runtime_parent_backend(self.project, self.model_backend) == EXTERNAL_BACKEND_ID:
             self.run_external_prediction(self.current_image)
             return
         self.ensure_locator_preloaded()
@@ -8153,15 +10296,16 @@ class MainWindow(QMainWindow):
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             ps = self.engine.predict_full_pipeline(
-                self.current_image, 
-                self.project.project_data["taxonomy"], 
-                self.project.get_locator_scope(),
-                self.inf_conf, 
-                self.inf_adapt, 
-                self.inf_pad, 
-                self.inf_noise_floor,
-                self.inf_poly_epsilon,
-                self._active_project_route_manifest(),
+                image_path=self.current_image,
+                current_taxonomy=self.project.project_data["taxonomy"],
+                locator_scope=self.project.get_locator_scope(),
+                conf_thresh=self.inf_conf,
+                adapt_thresh=self.inf_adapt,
+                box_pad=self.inf_pad,
+                noise_floor=self.inf_noise_floor,
+                poly_epsilon=self.inf_poly_epsilon,
+                project_route_manifest=self._active_project_route_manifest(),
+                model_profile_context=self._active_model_profile_context(),
             )
             count, total_detected = self._apply_prediction_to_project(self.current_image, ps, only_new=True)
             
@@ -8183,7 +10327,7 @@ class MainWindow(QMainWindow):
         try:
             result = self._external_backend_runner().run_predict(
                 image_path,
-                model_manifest=self.external_backend_config.get("model_manifest", ""),
+                model_manifest=self._active_external_backend_config().get("model_manifest", ""),
             )
             count, total_detected = self._apply_prediction_to_project(image_path, result.get("payload", {}), only_new=True)
             if image_path == self.current_image:
@@ -8206,7 +10350,7 @@ class MainWindow(QMainWindow):
         ul = [img for img in self.project.project_data["images"] if not self.project.get_labels(img)]
         if not ul:
             return
-        if self.model_backend == EXTERNAL_BACKEND_ID:
+        if _runtime_parent_backend(self.project, self.model_backend) == EXTERNAL_BACKEND_ID:
             if themed_yes_no_question(
                 self,
                 tr("Batch", self.current_lang),
@@ -8219,7 +10363,7 @@ class MainWindow(QMainWindow):
                     for image_path in ul:
                         result = self._external_backend_runner().run_predict(
                             image_path,
-                            model_manifest=self.external_backend_config.get("model_manifest", ""),
+                            model_manifest=self._active_external_backend_config().get("model_manifest", ""),
                         )
                         saved, total = self._apply_prediction_to_project(image_path, result.get("payload", {}), only_new=True)
                         self.log(tr("Batch saved {0}/{1} for {2}", self.current_lang).format(saved, total, os.path.basename(image_path)))
@@ -8261,6 +10405,7 @@ class MainWindow(QMainWindow):
                 locator_scope,
                 params,
                 project_route_manifest=self._active_project_route_manifest(),
+                model_profile_context=self._active_model_profile_context(),
                 lang=self.current_lang,
             )
             self.inf_thread.log_signal.connect(self.log) # Fix: Connect log signal
@@ -8287,6 +10432,8 @@ class MainWindow(QMainWindow):
                 c = self.project.export_coco(p)
             else:
                 c = self.project.export_yolo(p)
+            if hasattr(self.project, "write_model_profile_export_summary"):
+                self.project.write_model_profile_export_summary(p, export_format=f)
             QMessageBox.information(self, tr("Export", self.current_lang), tr("Exported {0} samples.", self.current_lang).format(c))
 
     def init_sam(self):

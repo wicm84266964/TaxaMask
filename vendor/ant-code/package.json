@@ -9,6 +9,7 @@
     "lab-agent": "./src/cli/index.js"
   },
   "files": [
+    "lab-agent.config.json",
     "config/lab-agent.high-sensitivity-template.json",
     "config/lab-agent.lab-template.json",
     "config/skills/",

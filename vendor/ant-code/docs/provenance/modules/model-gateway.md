@@ -21,6 +21,9 @@ design_notes:
   - Supports provider-independent tool-call requests and bounded tool-result handoff.
   - Supports an OpenAI Chat Completions compatible adapter mode behind an explicit protocol selector for lab-owned local gateways.
   - The OpenAI-compatible streaming parser emits incremental text, provider-exposed thinking/reasoning, tool-call draft, stream start, and stream stop events while preserving the final normalized response shape.
+  - Maps Ant Code image content blocks to OpenAI Chat Completions `image_url` data URL blocks when the active same-gateway model turn includes image attachments.
+  - Declares image request presence through non-sensitive `metadata.capabilities.images` in the provider-independent lab gateway protocol.
+  - Normalizes common image/vision unsupported gateway failures into bounded diagnostics without probing provider model-list endpoints or storing provider credentials locally.
   - The lab-owned gateway streaming parser can also emit normalized stream callbacks so session code can produce AntEvent schema v2 output consistently across protocols.
   - Local model aliases are represented as clean-room gateway configuration data; the default lab adapter options are the three locally provided Ant Code aliases, and no provider account/model-list endpoint is called.
   - Treats `LAB_MODEL_GATEWAY_API_KEY` as an adapter access token only; provider API keys remain outside the local client boundary.

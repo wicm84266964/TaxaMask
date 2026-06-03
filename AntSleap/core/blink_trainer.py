@@ -25,6 +25,18 @@ try:
     from AntSleap.core.runtime_device import resolve_torch_device
 except ImportError:
     from .runtime_device import resolve_torch_device
+try:
+    from AntSleap.core.blink_expert_manifest import (
+        BLINK_EXPERT_BACKEND_VIT_B,
+        default_manifest_path_for_weights,
+        write_blink_expert_manifest,
+    )
+except ImportError:
+    from .blink_expert_manifest import (
+        BLINK_EXPERT_BACKEND_VIT_B,
+        default_manifest_path_for_weights,
+        write_blink_expert_manifest,
+    )
 
 try:
     import matplotlib.pyplot as plt
@@ -315,7 +327,10 @@ class BlinkExpertTrainer:
             saved_payload = torch.load(save_path, map_location=self.device)
             saved_state = saved_payload.get("state_dict", saved_payload) if isinstance(saved_payload, dict) else saved_payload
             self.model.load_state_dict(saved_state)
+        manifest_path, manifest = self.write_manifest(save_path, target_size, dataset)
         self.last_report = self.generate_report(dataset, save_path, target_size=target_size, max_samples=24)
+        self.last_report["manifest_path"] = manifest_path
+        self.last_report["manifest"] = manifest
         self._emit_training_log(
             f"=== Training Complete! Expert saved to {save_path} ===",
             log_callback=log_callback,
@@ -335,6 +350,24 @@ class BlinkExpertTrainer:
             "best_loss": float(best_loss),
             "created_at": datetime.now().isoformat(timespec="seconds"),
         }
+
+    def write_manifest(self, save_path, target_size, dataset):
+        train_params = {
+            "learning_rate": float(self.learning_rate),
+            "weight_decay": float(self.weight_decay),
+        }
+        manifest_path, manifest = write_blink_expert_manifest(
+            save_path,
+            expert_backend=BLINK_EXPERT_BACKEND_VIT_B,
+            parent_part=self.parent_part,
+            child_part=self.part_name,
+            input_size=target_size,
+            project_json=self.project_path,
+            trajectory_count=len(dataset) if dataset is not None else 0,
+            output_schema="vit_b_box_regression_v1",
+            train_params=train_params,
+        )
+        return manifest_path, manifest
 
     def _experiment_dir(self):
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(self.project_path)))

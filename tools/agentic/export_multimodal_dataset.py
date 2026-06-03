@@ -141,6 +141,12 @@ def main() -> int:
         crop_size=max(1, int(args.crop_size)),
         global_size=max(1, int(args.global_size)),
     )
+    model_profile_summary_path = ""
+    if hasattr(manager, "write_model_profile_export_summary"):
+        model_profile_summary_path = manager.write_model_profile_export_summary(
+            output_dir,
+            export_format="multimodal",
+        )
     run_id = args.run_id.strip() or os.path.basename(os.path.normpath(output_dir)) or "multimodal_export"
     model_provenance = _load_json_dict(args.model_provenance)
     _enrich_jsonl(output_dir, run_id, model_provenance)
@@ -153,6 +159,7 @@ def main() -> int:
         "global_size": max(1, int(args.global_size)),
         "run_id": run_id,
         "model_provenance_path": os.path.abspath(args.model_provenance) if args.model_provenance else "",
+        "model_profile_summary_path": os.path.abspath(model_profile_summary_path) if model_profile_summary_path else "",
         "exported_count": int(exported_count),
         "validation": validation,
     }

@@ -19,6 +19,7 @@ test("builtin agent profiles expose v2 routing metadata and specialized agents",
   const config = { agents: { profiles: [] } };
   const web = getAgentProfile("web-researcher", config, { cwd: process.cwd() });
   const browser = getAgentProfile("browser", config, { cwd: process.cwd() });
+  const visual = getAgentProfile("vision", config, { cwd: process.cwd() });
   const explorer = getAgentProfile("explorer", config, { cwd: process.cwd() });
   const visibleProfiles = listAgentProfiles(config, { cwd: process.cwd(), includeHidden: false });
 
@@ -28,6 +29,10 @@ test("builtin agent profiles expose v2 routing metadata and specialized agents",
   assert.equal(web.outputContract.type, "web-research");
   assert.equal(browser?.name, "browser-verifier");
   assert.ok(browser.mcpServers.includes("playwright"));
+  assert.equal(visual?.name, "visual-verifier");
+  assert.equal(visual.modelTier, "vision");
+  assert.equal(visual.outputContract.type, "visual-verification");
+  assert.ok(visual.mcpServers.includes("playwright"));
   assert.ok(explorer.triggerHints.includes("调查"));
   assert.equal(Number.isInteger(explorer.maxRounds), false);
   assert.equal(Number.isInteger(web.maxRounds), false);
@@ -46,15 +51,19 @@ test("builtin agent prompts include complex-task operating contracts", () => {
   const reviewer = getAgentProfile("reviewer", config, { cwd: process.cwd() });
   const web = getAgentProfile("web-researcher", config, { cwd: process.cwd() });
   const browser = getAgentProfile("browser-verifier", config, { cwd: process.cwd() });
+  const visual = getAgentProfile("visual-verifier", config, { cwd: process.cwd() });
 
   assert.match(build.system, /parent coordinator/);
   assert.match(build.system, /Default to delegation/);
   assert.match(build.system, /bulk repository reading/);
   assert.match(build.system, /control loop: intake -> visible task state -> parallel readonly discovery -> synthesis -> scoped implementation -> validation -> strict review -> final report/);
+  assert.match(build.system, /three-document planning protocol/);
+  assert.match(build.system, /\.lab-agent\/plans\/<plan-id>/);
   assert.match(build.system, /lower-cost models handle bulk context/);
   assert.match(build.system, /Never dump raw child JSON/);
   assert.match(explorer.system, /compact evidence map/);
-  assert.match(planner.system, /writeScope suggestions/);
+  assert.match(planner.system, /requirementsDoc/);
+  assert.match(planner.system, /Do not edit files, do not ask the user directly/);
   assert.match(junior.system, /checkpointed slice/);
   assert.match(reviewer.system, /findings first, ordered by severity/);
   assert.match(getAgentProfile("readonly-researcher", config, { cwd: process.cwd() }).system, /github MCP/);
@@ -64,6 +73,9 @@ test("builtin agent prompts include complex-task operating contracts", () => {
   assert.match(web.system, /api\.github\.com contents endpoints/);
   assert.match(web.system, /produce the final report from already successful evidence/);
   assert.match(browser.system, /layout integrity/);
+  assert.match(visual.system, /multimodal specialist/);
+  assert.match(visual.system, /visual regression/);
+  assert.match(visual.system, /Separate directly observed facts from inference/);
 });
 
 test("builtin output contracts align with profile return fields", () => {
@@ -71,12 +83,20 @@ test("builtin output contracts align with profile return fields", () => {
   const verifier = getAgentProfile("verifier", config, { cwd: process.cwd() });
   const codeWorker = getAgentProfile("code-worker", config, { cwd: process.cwd() });
   const planner = getAgentProfile("planner", config, { cwd: process.cwd() });
+  const visual = getAgentProfile("visual-verifier", config, { cwd: process.cwd() });
 
   assert.ok(verifier.outputContract.required.includes("recommendedNextFix"));
   assert.ok(verifier.outputContract.required.includes("residualValidationGaps"));
   assert.ok(codeWorker.outputContract.required.includes("needsParentAction"));
-  assert.ok(planner.outputContract.required.includes("writeScopeSuggestions"));
+  assert.equal(planner.outputContract.type, "plan-package");
+  assert.ok(planner.outputContract.required.includes("requirementsDoc"));
+  assert.ok(planner.outputContract.required.includes("taskPlanDoc"));
+  assert.ok(planner.outputContract.required.includes("executionChecklist"));
   assert.ok(planner.outputContract.required.includes("handoffPrompt"));
+  assert.equal(planner.tools.includes("ask_user"), false);
+  assert.equal(planner.tools.includes("plan_update"), false);
+  assert.ok(visual.outputContract.required.includes("visualEvidence"));
+  assert.ok(visual.outputContract.required.includes("recommendedFollowup"));
 });
 
 test("agent profiles load markdown frontmatter from local agent directories", async () => {

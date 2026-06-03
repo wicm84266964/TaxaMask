@@ -531,6 +531,8 @@ test("model-driven subagent records prompt token estimates for task displays", a
     const task = JSON.parse(raw);
     assert.equal(result.ok, true);
     assert.equal(typeof task.budgetProgress.promptTokens, "number");
+    assert.ok(task.heartbeatAt);
+    assert.ok(task.progressAt);
     assert.equal(typeof task.budgetProgress.promptBytes, "number");
     assert.equal(task.budgetProgress.maxTokens, 200000);
     assert.equal(task.budgetProgress.promptRound, 2);
@@ -783,6 +785,109 @@ test("model-driven subagent saves full long output to task sidecar", async () =>
     assert.match(task.output, /full task output saved to sidecar/);
     const sidecar = await fs.readFile(path.join(cwd, task.metadata.outputPath), "utf8");
     assert.equal(sidecar, longFinalText);
+  } finally {
+    await close(server);
+  }
+});
+
+test("planner subagent persists parseable plan package under .lab-agent/plans", async () => {
+  const cwd = await makeTempWorkspace();
+  const requests = [];
+  const finalText = JSON.stringify({
+    requirementsDoc: "# Requirements\n\n- Confirmed requirement",
+    taskPlanDoc: "# Task Plan\n\n- Detailed planning",
+    executionChecklist: "# Execution Checklist\n\n- Stage 1: implement\n- Stage 1 review gate",
+    traceabilityMap: { requirement1: ["stage-1"] },
+    handoffPrompt: "Run stage 1."
+  });
+  const server = await listen(createRepeatedToolGateway(requests, {
+    toolRounds: 0,
+    finalText
+  }), "127.0.0.1");
+
+  try {
+    const result = await runSubagent({
+      cwd,
+      profileName: "planner",
+      query: "generate plan package",
+      parentSessionId: "session-plan",
+      env: mockGatewayEnv(serverUrl(server))
+    });
+
+    assert.equal(result.ok, true);
+    const task = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "tasks", `${result.taskId}.json`), "utf8"));
+    assert.equal(task.metadata.planPackage, true);
+    assert.match(task.metadata.planPackagePath, /^\.lab-agent\/plans\/plan-/);
+    assert.equal(task.metadata.planPackageFiles.requirements.endsWith("/requirements.md"), true);
+    assert.match(await fs.readFile(path.join(cwd, task.metadata.planPackageFiles.requirements), "utf8"), /Confirmed requirement/);
+    assert.match(await fs.readFile(path.join(cwd, task.metadata.planPackageFiles.taskPlan), "utf8"), /Detailed planning/);
+    assert.match(await fs.readFile(path.join(cwd, task.metadata.planPackageFiles.executionChecklist), "utf8"), /Stage 1 review gate/);
+  } finally {
+    await close(server);
+  }
+});
+
+test("planner subagent persists fenced json plan package with nested markdown code fences", async () => {
+  const cwd = await makeTempWorkspace();
+  const requests = [];
+  const finalText = [
+    "Planner package follows.",
+    "```json",
+    JSON.stringify({
+      requirementsDoc: "# Requirements\n\n- Confirm plan package persistence.",
+      taskPlanDoc: "# Task Plan\n\n```js\nconsole.log(\"nested fence\");\n```\n\n- Keep runner-owned persistence.",
+      executionChecklist: "# Execution Checklist\n\n```powershell\nnode --test tests/unit/agents.test.js\n```\n\n- Strict review gate.",
+      traceabilityMap: { requirement1: ["stage-1"] },
+      handoffPrompt: "Run stage 1."
+    }, null, 2),
+    "```"
+  ].join("\n");
+  const server = await listen(createRepeatedToolGateway(requests, {
+    toolRounds: 0,
+    finalText
+  }), "127.0.0.1");
+
+  try {
+    const result = await runSubagent({
+      cwd,
+      profileName: "planner",
+      query: "generate fenced plan package",
+      env: mockGatewayEnv(serverUrl(server))
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.planPackage.ok, true);
+    const task = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "tasks", `${result.taskId}.json`), "utf8"));
+    assert.equal(task.metadata.planPackage, true);
+    assert.match(await fs.readFile(path.join(cwd, task.metadata.planPackageFiles.taskPlan), "utf8"), /nested fence/);
+    assert.match(await fs.readFile(path.join(cwd, task.metadata.planPackageFiles.executionChecklist), "utf8"), /Strict review gate/);
+  } finally {
+    await close(server);
+  }
+});
+
+test("planner subagent keeps successful task when plan package cannot be parsed", async () => {
+  const cwd = await makeTempWorkspace();
+  const requests = [];
+  const server = await listen(createRepeatedToolGateway(requests, {
+    toolRounds: 0,
+    finalText: "plain planning notes without the three required documents"
+  }), "127.0.0.1");
+
+  try {
+    const result = await runSubagent({
+      cwd,
+      profileName: "planner",
+      query: "generate incomplete plan",
+      env: mockGatewayEnv(serverUrl(server))
+    });
+
+    assert.equal(result.ok, true);
+    const task = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "tasks", `${result.taskId}.json`), "utf8"));
+    assert.equal(task.status, "completed");
+    assert.equal(task.metadata.planPackage, false);
+    assert.equal(task.metadata.planPackageError.code, "PLAN_PACKAGE_NOT_FOUND");
+    await assert.rejects(fs.readdir(path.join(cwd, ".lab-agent", "plans")), /ENOENT/);
   } finally {
     await close(server);
   }

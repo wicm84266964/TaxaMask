@@ -29,7 +29,8 @@ UI structure to remember:
 - Start center is now the Agent center. The embedded Ant-Code middle workspace is the main area.
 - The right rail contains stacked workflow cards for `2D/STL Morphology` and `TIF Volume`.
 - Labeling, Blink, and TIF workbenches should stay focused on annotation. They expose lightweight `Start Center` / `Ask Agent` entries instead of full chat panels.
-- Labeling Workbench uses `Parent-part annotation` and `Child-part annotation` sections for parent boxes, child structures, Blink route experts, and literature trait alignment.
+- Labeling Workbench uses `Parent-part annotation` and `Child-part annotation` sections for parent boxes, child structures, route-appointed child experts, and literature trait alignment.
+- 2D/STL model behavior is now organized through project-saved `model_profiles`: active profile controls parent backend, child default backend, locator scope, parent box ratios, VLM targets, and inference defaults.
 - When returning from a workbench to the Agent center, pass context such as `source_workbench`, `project_type`, `project_path`, active specimen/image/part/material, and recent logs.
 
 Main code map:
@@ -38,6 +39,12 @@ Main code map:
 - `AntSleap/ui/tif_workbench.py`: dedicated TIF volume workbench, slice UI, material controls, TIF backend buttons.
 - `AntSleap/ui/blink_lab.py`: Blink refinement workbench and route expert training UI.
 - `AntSleap/core/project.py`: legacy/current 2D morphology project manager.
+- `AntSleap/core/model_profiles.py`: 2D/STL model profile schema, defaults, sanitation, and old-project migration helpers.
+- `AntSleap/core/cascade_routes.py`: parent -> child route manifest sanitation, explicit `expert_backend`, manifest, input-size, and backend-param fields.
+- `AntSleap/core/blink_expert_manifest.py`: ViT-B/heatmap Blink expert manifest read/write helpers.
+- `AntSleap/core/blink_expert_backends.py`: child-route backend registry for `vit_b_blink`, `heatmap_blink`, and `external_blink`.
+- `AntSleap/core/blink_heatmap_dataset.py` and `AntSleap/core/blink_heatmap_trainer.py`: heatmap Blink data/training path based on parent ROI trajectories.
+- `AntSleap/core/external_blink_backend.py`: external child-part Blink contract runner.
 - `AntSleap/core/stl_project.py` and `AntSleap/core/stl_rendered_views.py`: STL rendered-view registry/project support.
 - `AntSleap/core/tif_project.py`: TIF project schema and specimen records.
 - `AntSleap/core/tif_materials.py`: AMIRA-style material map.
@@ -53,16 +60,24 @@ Main code map:
 - PDF extraction databases and artifacts default to `TaxaMask_outputs/`; accepted figure copies go to `accepted_figures/`, reviewable candidates go to `needs_review_figures/`, and raw extracted figures remain in `figure_images/`.
 
 Project types:
-- 2D/STL morphology uses the existing Labeling Workbench with parent-part annotation, child-part annotation, Locator/SAM, Blink route experts, and optional literature trait lookup. STL data means rendered 2D views from STL/mesh assets, not direct 3D mesh painting.
+- 2D/STL morphology uses the existing Labeling Workbench with parent-part annotation, child-part annotation, Locator/SAM, route-appointed child experts, model profiles, and optional literature trait lookup. STL data means rendered 2D views from STL/mesh assets, not direct 3D mesh painting.
 - STL rendered-view registry schema is `ant3d_stl_rendered_view_registry_v1`; STL rendered project schema is `ant3d_stl_rendered_project_v1` with project type `stl_rendered_views`.
 - Opening an STL rendered-view project registers views into the Labeling Workbench; it is not a separate 3D renderer workbench.
 - TIF project schema is `ant3d_tif_project_v1` with project type `tif_volume`.
 - TIF labels are AMIRA-style material ID label fields and are independent from 2D/STL morphology labels.
 - TIF layers must remain separate: `manual_truth` is human-confirmed training truth, `model_draft` is model output for review, and `working_edit` is the editable layer.
+- TIF remains an experimental side workflow. It was added for AntScan-style volume data exploration and is not the main validated path. Do not force TIF fixes unless the user explicitly asks to resume TIF work.
+- Known TIF/Agent boundary: after opening a TIF project, launching Ask Agent can black-screen the embedded Ant-Code view or the TIF view on some Windows/Qt setups. Logs may show `QQuickWidget ... no QRhi` or `OpenGL is not compatible with this QQuickWidget`. Treat this as a Qt graphics-backend conflict between the TIF OpenGL preview and embedded WebEngine/Qt Quick, not as a simple prompt/context issue. Future fixes should prefer isolated browser/process or graphics-backend isolation.
 
 Training/backend rules:
 - 2D/STL model settings and TIF volume model settings are separate.
-- 2D/STL can use built-in Locator/SAM or `external_backend`.
+- 2D/STL model settings are split into Profile, Parent-part annotation, Child-part annotation, Inference, and Advanced Extensions pages.
+- 2D/STL can use built-in Locator/SAM or an external parent backend for parent-part training/prediction.
+- Child-part route experts are backend-explicit: `vit_b_blink`, `heatmap_blink`, or `external_blink`. Missing legacy route backend means `vit_b_blink`.
+- External Blink uses `docs/contracts/external_blink_backend_contract_v1.md` and predicts a child box from an existing parent box; it is separate from the whole-image `external_backend` contract.
+- Advanced Extensions is the main place to switch high-impact parent/child model sources and configure custom parent or child scripts. Parent-part and Child-part pages should mostly display the active source plus ordinary training parameters, so operators do not need to hunt across scattered backend controls.
+- `Auto (Current)` and `Batch (All)` use the active model profile. Training and prediction reports/logs should include profile/parent backend/route backend audit metadata.
+- Parent-model training should update the active profile with saved Locator/SAM weight filenames. 2D/STL exports write `model_profile_summary.json` so downstream review can audit the active parent/child backend scheme.
 - TIF uses `tif_backend` and the `ant3d_tif_backend_contract_v1` contract. It may target nnU-Net, MONAI, or custom scripts, but should not be hardwired to one model family.
 - TIF prediction import must not overwrite `manual_truth` by default. Import predictions as `model_draft` or another reviewable candidate layer unless the user explicitly asks for a reviewed promotion path.
 - Use the user-provided conda environment for validation when needed:
@@ -82,6 +97,8 @@ Common validation commands:
   `C:\Users\admin\anaconda3\envs\antsleap\python.exe -m py_compile AntSleap\main.py AntSleap\ui\taxamask_agent_panel.py`
 - Focused UI checks:
   `C:\Users\admin\anaconda3\envs\antsleap\python.exe -m unittest tests.test_gui_smoke tests.test_tif_workbench tests.test_ui_polish_scope`
+- Model profile/Blink backend checks:
+  `C:\Users\admin\anaconda3\envs\antsleap\python.exe -m unittest tests.test_model_profiles tests.test_blink_expert_manifest tests.test_blink_route_backends tests.test_blink_heatmap_dataset tests.test_external_blink_backend tests.test_macro_micro_pipeline`
 - Broader checks should be chosen based on touched modules. Do not run GPU-heavy training/inference unless the user says the GPU is free.
 
 How to answer the user:

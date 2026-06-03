@@ -137,6 +137,11 @@ class DummyProjectManager:
         expert_id=None,
         expert_part=None,
         expert_filename=None,
+        expert_backend=None,
+        expert_manifest=None,
+        input_size=None,
+        backend_params=None,
+        note=None,
         focus_source=None,
         registration_source="blink_candidate",
         save=True,
@@ -160,6 +165,10 @@ class DummyProjectManager:
                 "expert_id": clean_expert_id,
                 "expert_part": clean_expert_part,
                 "expert_filename": clean_expert_filename,
+                "expert_backend": expert_backend or existing.get("expert_backend", "vit_b_blink"),
+                "expert_manifest": expert_manifest,
+                "input_size": input_size,
+                "backend_params": backend_params or {},
             }
             existing_candidates = [
                 candidate
@@ -175,6 +184,11 @@ class DummyProjectManager:
             "expert_id": existing.get("expert_id"),
             "expert_part": existing.get("expert_part"),
             "expert_filename": existing.get("expert_filename"),
+            "expert_backend": expert_backend if expert_backend is not None else existing.get("expert_backend", "vit_b_blink"),
+            "expert_manifest": expert_manifest if expert_manifest is not None else existing.get("expert_manifest"),
+            "input_size": input_size if input_size is not None else existing.get("input_size"),
+            "backend_params": backend_params if backend_params is not None else existing.get("backend_params", {}),
+            "note": note if note is not None else existing.get("note"),
             "appointed_expert": dict(existing.get("appointed_expert") or {}),
             "expert_candidates": existing_candidates,
             "focus_source": focus_source,
@@ -189,8 +203,30 @@ class DummyProjectManager:
         self.project_data["cascade_routes"]["routes"] = routes
         return route
 
-    def appoint_cascade_route_expert(self, parent_part, child_part, expert_id=None, expert_part=None, expert_filename=None, save=True):
-        route = self.register_cascade_route_candidate(parent_part, child_part, save=False)
+    def appoint_cascade_route_expert(
+        self,
+        parent_part,
+        child_part,
+        expert_id=None,
+        expert_part=None,
+        expert_filename=None,
+        expert_backend=None,
+        expert_manifest=None,
+        input_size=None,
+        backend_params=None,
+        note=None,
+        save=True,
+    ):
+        route = self.register_cascade_route_candidate(
+            parent_part,
+            child_part,
+            expert_backend=expert_backend,
+            expert_manifest=expert_manifest,
+            input_size=input_size,
+            backend_params=backend_params,
+            note=note,
+            save=False,
+        )
         if expert_id:
             clean_expert_id = expert_id
             clean_expert_part, clean_expert_filename = expert_id.split("/", 1)
@@ -201,10 +237,19 @@ class DummyProjectManager:
         route["expert_id"] = clean_expert_id
         route["expert_part"] = clean_expert_part
         route["expert_filename"] = clean_expert_filename
+        route["expert_backend"] = expert_backend or route.get("expert_backend", "vit_b_blink")
+        route["expert_manifest"] = expert_manifest if expert_manifest is not None else route.get("expert_manifest")
+        route["input_size"] = input_size if input_size is not None else route.get("input_size")
+        route["backend_params"] = backend_params if backend_params is not None else route.get("backend_params", {})
+        route["note"] = note if note is not None else route.get("note")
         route["appointed_expert"] = {
             "expert_id": clean_expert_id,
             "expert_part": clean_expert_part,
             "expert_filename": clean_expert_filename,
+            "expert_backend": route.get("expert_backend"),
+            "expert_manifest": route.get("expert_manifest"),
+            "input_size": route.get("input_size"),
+            "backend_params": route.get("backend_params", {}),
         }
         route["expert_candidates"] = [dict(route["appointed_expert"])]
         routes = [

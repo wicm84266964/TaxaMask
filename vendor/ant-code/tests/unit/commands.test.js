@@ -966,7 +966,7 @@ test("model command explains local gateway-owned model selection", async () => {
   assert.match(output, /Ant Code model/);
   assert.match(output, /current: claude-sonnet-4-5-20250929/);
   assert.match(output, /current context window: unknown/);
-  assert.match(output, /mimo-v2\.5 context=400k/);
+  assert.match(output, /mimo-v2\.5 thinking context=400k/);
   assert.match(output, /gateway protocol: openai-chat/);
   assert.match(output, /does not call provider account\/model-list endpoints/);
 });
@@ -985,7 +985,7 @@ test("model command reports current repo Mimo model context", async () => {
   assert.match(output, /Ant Code model/);
   assert.match(output, /current: mimo-v2\.5/);
   assert.match(output, /current context window: 400k tokens/);
-  assert.match(output, /mimo-v2\.5 context=400k/);
+  assert.match(output, /mimo-v2\.5 thinking context=400k/);
   assert.match(output, /gateway protocol: openai-chat/);
   assert.match(output, /does not call provider account\/model-list endpoints/);
 });
@@ -1004,7 +1004,7 @@ test("model use command can switch an attached TUI session callback", async () =
   });
 
   assert.equal(selected.id, "mimo-v2.5");
-  assert.equal(selected.thinking, false);
+  assert.equal(selected.thinking, true);
   assert.match(output, /Switched current TUI session model/);
 });
 

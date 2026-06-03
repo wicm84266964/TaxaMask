@@ -4,6 +4,7 @@ export const DEFAULT_MODEL_OPTIONS = Object.freeze([
     label: "Sonnet 4.5",
     description: "Balanced coding model exposed by the local lab adapter.",
     thinking: false,
+    modalities: ["text"],
     contextTokens: 200000
   },
   {
@@ -11,6 +12,7 @@ export const DEFAULT_MODEL_OPTIONS = Object.freeze([
     label: "Sonnet 4.5 Thinking",
     description: "Adapter model with provider-exposed reasoning deltas when available.",
     thinking: true,
+    modalities: ["text"],
     contextTokens: 200000
   },
   {
@@ -18,6 +20,7 @@ export const DEFAULT_MODEL_OPTIONS = Object.freeze([
     label: "Haiku 4.5",
     description: "Lower-latency local adapter model for lighter work.",
     thinking: false,
+    modalities: ["text"],
     contextTokens: 200000
   }
 ]);
@@ -26,7 +29,7 @@ export const DEFAULT_MODEL_OPTIONS = Object.freeze([
  * @param {Record<string, any>} config
  */
 export function listConfiguredModels(config) {
-  const configured = Array.isArray(config.models) && config.models.length > 0
+  const configured = Array.isArray(config.models)
     ? config.models
     : DEFAULT_MODEL_OPTIONS;
   const models = configured.map(normalizeModel).filter(Boolean);
@@ -36,7 +39,9 @@ export function listConfiguredModels(config) {
       id: current,
       label: current,
       description: "Current model alias from environment or config.",
-      thinking: /thinking|reason/i.test(current)
+      thinking: /thinking|reason/i.test(current),
+      modalities: inferModalities(current),
+      agentModelTiers: {}
     });
   }
   return dedupeModels(models);
@@ -93,8 +98,11 @@ export function parseModelList(value) {
       label: id,
       description: "Model alias supplied by LAB_AGENT_MODELS.",
       thinking: /thinking|reason/i.test(id),
+      modalities: inferModalities(id),
       contextTokens: null,
-      reasoningContentMode: null
+      reasoningContentMode: null,
+      openaiExtraBody: null,
+      agentModelTiers: {}
     }));
 }
 
@@ -108,8 +116,11 @@ function normalizeModel(item) {
       label: item,
       description: "Configured model alias.",
       thinking: /thinking|reason/i.test(item),
+      modalities: inferModalities(item),
       contextTokens: null,
-      reasoningContentMode: null
+      reasoningContentMode: null,
+      openaiExtraBody: null,
+      agentModelTiers: {}
     };
   }
   if (!item || typeof item !== "object" || !item.id) {
@@ -121,9 +132,27 @@ function normalizeModel(item) {
     label: String(item.label ?? id),
     description: String(item.description ?? "Configured model alias."),
     thinking: Boolean(item.thinking ?? /thinking|reason/i.test(id)),
+    modalities: normalizeModalities(item.modalities ?? item.capabilities ?? item.inputs, item),
     contextTokens: positiveIntegerOrNull(item.contextTokens ?? item.maxContextTokens ?? item.contextWindowTokens),
-    reasoningContentMode: normalizeReasoningContentMode(item.reasoningContentMode)
+    reasoningContentMode: normalizeReasoningContentMode(item.reasoningContentMode),
+    openaiExtraBody: isPlainObject(item.openaiExtraBody) ? cloneJsonObject(item.openaiExtraBody) : null,
+    agentModelTiers: normalizeAgentModelTiers(item.agentModelTiers ?? item.agentDefaults?.modelTiers)
   };
+}
+
+export function normalizeAgentModelTiers(value) {
+  if (!isPlainObject(value)) {
+    return {};
+  }
+  const tiers = {};
+  for (const [tier, model] of Object.entries(value)) {
+    const key = String(tier ?? "").trim();
+    const id = String(model ?? "").trim();
+    if (key && id) {
+      tiers[key] = id;
+    }
+  }
+  return tiers;
 }
 
 /**
@@ -158,6 +187,48 @@ function positiveIntegerOrNull(value) {
 
 function normalizeReasoningContentMode(value) {
   return value === "visible-when-no-content" || value === "hidden" ? value : null;
+}
+
+function normalizeModalities(value, item = {}) {
+  const set = new Set(["text"]);
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const modality = normalizeModality(entry);
+      if (modality) {
+        set.add(modality);
+      }
+    }
+  } else if (typeof value === "string") {
+    for (const entry of value.split(/[, ]+/)) {
+      const modality = normalizeModality(entry);
+      if (modality) {
+        set.add(modality);
+      }
+    }
+  }
+  if (item.vision === true || item.multimodal === true || item.supportsImages === true || item.imageInput === true) {
+    set.add("image");
+  }
+  return Array.from(set);
+}
+
+function normalizeModality(value) {
+  const text = String(value ?? "").trim().toLowerCase();
+  if (text === "text" || text === "文本") return "text";
+  if (["image", "images", "vision", "visual", "图片", "视觉", "multimodal"].includes(text)) return "image";
+  return "";
+}
+
+function inferModalities(modelId) {
+  return /vision|visual|image|omni|multimodal/i.test(String(modelId ?? "")) ? ["text", "image"] : ["text"];
+}
+
+function isPlainObject(value) {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function cloneJsonObject(value) {
+  return JSON.parse(JSON.stringify(value));
 }
 
 function formatTokenCount(value) {

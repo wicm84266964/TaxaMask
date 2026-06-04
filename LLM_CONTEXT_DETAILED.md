@@ -460,6 +460,8 @@
 
 ## 0) v3.27 TIF GPU Volume Preview + Clarity Mode (2026-05-29)
 
+> Superseded note: this section records the 2026-05-29 implementation state. As of v3.31 on 2026-06-04, the default TIF 3D preview path is offscreen GPU rendering into a normal Qt display widget, the legacy embedded `QOpenGLWidget` path is not the default, ROI high-detail still rendering exists, and zoom now reaches 16x. Prefer the v3.31 section above when diagnosing current TIF/Ant-Code rendering behavior.
+
 ### 0.0 Research workflow intent
 - The TIF workbench now has a read-only 3D volume preview intended for inspecting internal structures before slice editing, backend training, or future brain-oriented reslicing.
 - The concrete ant use case driving this pass is micro-CT / TIF inspection of internal head and brain structures, where users need to rotate the specimen, zoom in, move the camera inward, and peel away near-side tissue without modifying labels.
@@ -468,7 +470,7 @@
 
 ### 0.1 Main implementation
 - New optional renderer module: `AntSleap/ui/tif_gpu_volume_canvas.py`.
-- The renderer uses Qt `QOpenGLWidget`, PyOpenGL, a 3D texture, and GLSL ray marching with front-to-back opacity accumulation.
+- Historical 2026-05-29 state: the renderer used Qt `QOpenGLWidget`, PyOpenGL, a 3D texture, and GLSL ray marching with front-to-back opacity accumulation. Current v3.31 default uses the offscreen GPU path described above.
 - `AntSleap/ui/tif_workbench.py` now creates the GPU canvas when available and falls back to the older CPU pixmap preview when imports or runtime rendering fail.
 - `requirements.txt` adds `PyOpenGL>=3.1.7`.
 - `AntSleap/main.py::_shutdown_background_workers()` calls `release_volume_renderer()` when the TIF workbench exists, so the OpenGL widget is explicitly released during application shutdown.
@@ -482,7 +484,7 @@
 - 3D interaction:
   - left mouse drag: rotate
   - right mouse drag: pan, using grab-the-image direction
-  - wheel: zoom, capped at 8x
+  - wheel: zoom, historically capped at 8x in this pass; current v3.31 reaches 16x
   - reset: returns to external default view and clears inside depth/front cut
 - GPU preview quality:
   - `GPU_VOLUME_MAX_TEXTURE_DIM = 4096`

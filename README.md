@@ -131,9 +131,13 @@ Linux and macOS users may also need system packages for Qt/PySide6 display suppo
 
 ## Run the GUI
 
+For a configured Python environment:
+
 ```bash
 python AntSleap/main.py
 ```
+
+On the current Windows maintainer workstation, the repository also includes `启动TaxaMask.bat`, a local convenience launcher that calls the `antsleap` conda environment directly. It is not a cross-platform installer; other machines should adapt the environment path or use the Python command above.
 
 The main window title should show:
 

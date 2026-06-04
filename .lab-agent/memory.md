@@ -24,6 +24,7 @@ Ant-Code embedding boundary:
 - The old distributed executable is not a launch fallback. Process cleanup still recognizes old `ant-code.exe dashboard` commands only to remove historical orphan dashboard processes for this TaxaMask project.
 - The embedded view defaults to workspace trust for this TaxaMask repository. Most local TaxaMask edits should not require repeated confirmation, but destructive actions, deleting data, changing external tools, or touching files outside this repo still need explicit user intent.
 - Normal embedded Agent integration work belongs in this repo, especially `vendor/ant-code` and `AntSleap/ui/taxamask_agent_panel.py`. Do not modify the external `C:\saveproject\LBJ-workspace\lab-agent` tree unless the user explicitly asks to work on that separate copy.
+- Current vendored Ant-Code includes dashboard full-context resume support, larger compaction summaries, OpenAI-compatible tool-call history repair, safer trust-store writes, and token/credential redaction that preserves useful file paths.
 
 UI structure to remember:
 - Start center is now the Agent center. The embedded Ant-Code middle workspace is the main area.
@@ -31,6 +32,7 @@ UI structure to remember:
 - Labeling, Blink, and TIF workbenches should stay focused on annotation. They expose lightweight `Start Center` / `Ask Agent` entries instead of full chat panels.
 - Labeling Workbench uses `Parent-part annotation` and `Child-part annotation` sections for parent boxes, child structures, route-appointed child experts, and literature trait alignment.
 - 2D/STL model behavior is now organized through project-saved `model_profiles`: active profile controls parent backend, child default backend, locator scope, parent box ratios, VLM targets, and inference defaults.
+- VLM first-mile preannotation now sends a grid-free VLM input image and asks for current-input pixel boxes, then maps coordinates back to the original image. It writes reviewable `auto_boxes` plus optional SAM draft polygons. Project load canonicalizes image, label, scale, and provenance keys to the same absolute image identity so relative/absolute path drift does not hide VLM drafts from the active canvas. Do not reintroduce writeback paths that create unregistered image keys.
 - When returning from a workbench to the Agent center, pass context such as `source_workbench`, `project_type`, `project_path`, active specimen/image/part/material, and recent logs.
 
 Main code map:
@@ -39,6 +41,7 @@ Main code map:
 - `AntSleap/ui/tif_workbench.py`: dedicated TIF volume workbench, slice UI, material controls, TIF backend buttons.
 - `AntSleap/ui/blink_lab.py`: Blink refinement workbench and route expert training UI.
 - `AntSleap/core/project.py`: legacy/current 2D morphology project manager.
+- `AntSleap/core/vlm_preannotation.py`: VLM first-mile grid-free input image, pixel-box prompt, API call, parser, raw response/report artifacts.
 - `AntSleap/core/model_profiles.py`: 2D/STL model profile schema, defaults, sanitation, and old-project migration helpers.
 - `AntSleap/core/cascade_routes.py`: parent -> child route manifest sanitation, explicit `expert_backend`, manifest, input-size, and backend-param fields.
 - `AntSleap/core/blink_expert_manifest.py`: ViT-B/heatmap Blink expert manifest read/write helpers.
@@ -67,7 +70,7 @@ Project types:
 - TIF labels are AMIRA-style material ID label fields and are independent from 2D/STL morphology labels.
 - TIF layers must remain separate: `manual_truth` is human-confirmed training truth, `model_draft` is model output for review, and `working_edit` is the editable layer.
 - TIF remains an experimental side workflow. It was added for AntScan-style volume data exploration and is not the main validated path. Do not force TIF fixes unless the user explicitly asks to resume TIF work.
-- Known TIF/Agent boundary: after opening a TIF project, launching Ask Agent can black-screen the embedded Ant-Code view or the TIF view on some Windows/Qt setups. Logs may show `QQuickWidget ... no QRhi` or `OpenGL is not compatible with this QQuickWidget`. Treat this as a Qt graphics-backend conflict between the TIF OpenGL preview and embedded WebEngine/Qt Quick, not as a simple prompt/context issue. Future fixes should prefer isolated browser/process or graphics-backend isolation.
+- Current TIF/Agent boundary: TIF 3D preview now defaults to offscreen GPU rendering into a normal Qt widget, with WebEngine CPU compositing as a guard against the old `QQuickWidget ... no QRhi` conflict. TIF remains experimental, but do not reintroduce embedded `QOpenGLWidget` as the default preview path.
 
 Training/backend rules:
 - 2D/STL model settings and TIF volume model settings are separate.

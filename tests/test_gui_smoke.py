@@ -1337,7 +1337,7 @@ class GuiSmokeTests(unittest.TestCase):
             window.vlm_preannotation_current_image = str(self.project_dir / long_name)
             window._create_vlm_progress_dialog()
 
-            window._advance_vlm_progress("grid")
+            window._advance_vlm_progress("prepare")
 
             progress = window.vlm_preannotation_progress_dialog
             self.assertIsNotNone(progress)
@@ -1348,7 +1348,7 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(progress_bar.value(), 8)
             self.assertIn("8%", progress_label.text())
             self.assertIn("0/2", progress_label.text())
-            self.assertIn("grid", progress_label.text())
+            self.assertIn("prepare", progress_label.text())
             self.assertIn("...", progress_path_label.text())
             self.assertLessEqual(len(progress_path_label.text()), 92)
             self.assertEqual(progress_path_label.toolTip(), str(self.project_dir / long_name))

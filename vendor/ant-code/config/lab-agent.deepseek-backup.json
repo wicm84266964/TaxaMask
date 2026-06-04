@@ -39,7 +39,7 @@
       "keepRecentMessages": 8,
       "tailTurns": 2,
       "preserveRecentTokens": 8000,
-      "summaryBytes": 8192,
+      "summaryBytes": 65536,
       "resumeMaxMessages": 100000,
       "resumeMaxTokens": 500000,
       "resumeMaxBytes": 2000000,

@@ -64,6 +64,7 @@ Treat this TaxaMask protocol as always active, not as an optional skill:
 - Current default PDF part-description extraction uses `part_description_configs/蚂蚁分类学部位描述抽取_示例.json`: structure PDF text into `taxon -> part -> description` records with file/page/block provenance. It is a Text LLM profile, not a multimodal image reviewer, and other taxa should adapt copied part-description profiles rather than editing runtime/API secrets into profiles.
 - PDF extraction databases and artifacts default to `TaxaMask_outputs/`; accepted images, needs-review images, raw extracted figures, review batches, raw LLM responses, and text-description tables are separate evidence artifacts.
 - The Labeling Workbench can look up PDF-derived literature traits for the current image/taxon/part and fill or append to the part description box, but this text evidence is not an automatic training label.
+- VLM first-mile preannotation is a 2D/STL draft-generation path. Keep VLM writeback tied to registered project image keys; relative/absolute image path drift must not create hidden shadow labels that the active canvas cannot show.
 
 ## Data Safety Rules
 

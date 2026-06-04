@@ -58,7 +58,7 @@ const DEFAULT_CONFIG = Object.freeze({
     keepRecentMessages: 8,
     tailTurns: 2,
     preserveRecentTokens: 8000,
-    summaryBytes: 8192,
+    summaryBytes: 65536,
     resumeMaxMessages: 100000,
     resumeMaxTokens: DEFAULT_CONTEXT_TOKENS,
     resumeMaxBytes: DEFAULT_CONTEXT_TOKENS * 4,

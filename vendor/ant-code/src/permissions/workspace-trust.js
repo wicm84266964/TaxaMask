@@ -122,6 +122,9 @@ async function readTrustStore(env) {
     if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
       return { version: 1, records: {} };
     }
+    if (error instanceof SyntaxError) {
+      return { version: 1, records: {} };
+    }
     throw error;
   }
 }
@@ -133,7 +136,9 @@ async function readTrustStore(env) {
 async function writeTrustStore(store, env) {
   const filePath = trustStorePath(env);
   await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.writeFile(filePath, `${JSON.stringify(store, null, 2)}\n`, "utf8");
+  const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  await fs.writeFile(tempPath, `${JSON.stringify(store, null, 2)}\n`, "utf8");
+  await fs.rename(tempPath, filePath);
 }
 
 /**

@@ -14,6 +14,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 
 VLM_PREANNOTATION_SCHEMA_VERSION = "taxamask-vlm-first-mile-v1"
+VLM_PREANNOTATION_IMAGE_MODE = "pixel"
 
 COMMON_ANT_FIRST_MILE_PARTS = [
     "Whole body",
@@ -243,20 +244,57 @@ def create_grid_overlay(
     }
 
 
+def create_preannotation_image(
+    image_path: str | os.PathLike[str],
+    output_path: str | os.PathLike[str],
+    max_side: int = 1600,
+) -> dict[str, Any]:
+    image_path = str(image_path)
+    output_path = str(output_path)
+    max_side = max(256, int(max_side))
+
+    with Image.open(image_path) as image:
+        rgb = image.convert("RGB")
+    original_width, original_height = rgb.size
+    scale = min(1.0, float(max_side) / float(max(original_width, original_height)))
+    if scale < 1.0:
+        prepared = rgb.resize((max(1, int(original_width * scale)), max(1, int(original_height * scale))), Image.LANCZOS)
+    else:
+        prepared = rgb.copy()
+
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    prepared.save(output_path)
+    width, height = prepared.size
+    return {
+        "image_path": os.path.abspath(image_path),
+        "overlay_path": os.path.abspath(output_path),
+        "prepared_path": os.path.abspath(output_path),
+        "original_size": [original_width, original_height],
+        "overlay_size": [width, height],
+        "prepared_size": [width, height],
+        "image_mode": VLM_PREANNOTATION_IMAGE_MODE,
+        "grid_cols": 0,
+        "grid_rows": 0,
+        "scale": scale,
+    }
+
+
 def build_vlm_preannotation_prompt(
     target_parts: list[str] | tuple[str, ...],
     image_size: tuple[int, int],
-    grid_cols: int,
-    grid_rows: int,
+    input_size: tuple[int, int] | None = None,
+    grid_cols: int = 0,
+    grid_rows: int = 0,
 ) -> str:
-    width, height = image_size
+    input_width, input_height = input_size or image_size
     parts_text = ", ".join(target_parts)
     return (
-        "你正在帮助蚂蚁分类学图片完成第一公里预标注。图片上叠加了细网格，"
-        f"网格横向坐标为 0-{grid_cols}，纵向坐标为 0-{grid_rows}。"
-        f"原始图片像素尺寸为 width={width}, height={height}。\n\n"
-        "任务：只为你能清楚看到的目标结构画宽松提示框，供 SAM 后续分割使用。"
-        "这些框不是最终分类学标注；宁可少报，也不要凭空猜测。"
+        "你正在帮助蚂蚁分类学图片完成第一公里预标注。"
+        f"当前输入图片像素尺寸为 width={input_width}, height={input_height}。"
+        "请直接按当前输入图片像素坐标输出候选框。\n\n"
+        "任务：为目标结构画宽松提示框，供 SAM 后续分割和人工复核使用。"
+        "这些框不是最终分类学标注；如果目标结构主体可见，请尽量给出候选框，"
+        "不要因为局部遮挡、姿态变化或边界不完美就直接漏报。"
         "框应覆盖目标结构主体，允许少量边缘余量，但不要包含明显无关的大面积背景。\n\n"
         "重要标注规则：不同解剖结构的提示框不是互斥切片。"
         "相邻或连接的结构（例如 Head 与 Mesosoma）允许合理重叠；"
@@ -267,12 +305,11 @@ def build_vlm_preannotation_prompt(
         "{\n"
         f'  "schema_version": "{VLM_PREANNOTATION_SCHEMA_VERSION}",\n'
         '  "detections": [\n'
-        '    {"part": "Head", "bbox_xyxy": [x1, y1, x2, y2], '
-        '"bbox_grid_xyxy": [gx1, gy1, gx2, gy2], "confidence": 0.0, "reason": "简短理由"}\n'
+        '    {"part": "Head", "bbox_xyxy": [x1, y1, x2, y2], "confidence": 0.0, "reason": "简短理由"}\n'
         "  ]\n"
         "}\n\n"
-        "bbox_xyxy 使用原始图片像素坐标；如果你主要依据网格判断，也请填写 bbox_grid_xyxy，"
-        f"其中 gx 范围 0-{grid_cols}，gy 范围 0-{grid_rows}。"
+        "bbox_xyxy 必须使用当前输入图片像素坐标，格式为左上角 x1,y1 和右下角 x2,y2。"
+        "x 的范围是 0 到 width，y 的范围是 0 到 height。"
     )
 
 
@@ -307,11 +344,10 @@ def _json_schema() -> dict[str, Any]:
                     "properties": {
                         "part": {"type": "string"},
                         "bbox_xyxy": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4},
-                        "bbox_grid_xyxy": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4},
                         "confidence": {"type": "number"},
                         "reason": {"type": "string"},
                     },
-                    "required": ["part", "confidence"],
+                    "required": ["part", "bbox_xyxy", "confidence"],
                     "additionalProperties": True,
                 },
             },
@@ -323,7 +359,7 @@ def _json_schema() -> dict[str, Any]:
 
 def call_vlm_preannotation_api(
     api_config: dict[str, Any],
-    overlay_path: str,
+    image_input_path: str,
     prompt: str,
 ) -> tuple[str, str]:
     config = normalize_vlm_api_config(api_config)
@@ -348,7 +384,7 @@ def call_vlm_preannotation_api(
                     "role": "user",
                     "content": [
                         {"type": "input_text", "text": prompt},
-                        {"type": "input_image", "image_url": _encode_image_as_data_url(overlay_path)},
+                        {"type": "input_image", "image_url": _encode_image_as_data_url(image_input_path)},
                     ],
                 },
             ],
@@ -400,7 +436,7 @@ def call_vlm_preannotation_api(
                     {
                         "type": "image_url",
                         "image_url": {
-                            "url": _encode_image_as_data_url(overlay_path),
+                            "url": _encode_image_as_data_url(image_input_path),
                             "detail": config["image_detail"],
                         },
                     },
@@ -498,18 +534,41 @@ def _box_from_detection(
     overlay_size: tuple[int, int],
     grid_cols: int,
     grid_rows: int,
+    default_coordinate_space: str = "original",
 ) -> list[float] | None:
     width, height = image_size
     overlay_width, overlay_height = overlay_size
-    coordinate_space = str(item.get("coordinate_space", item.get("coord_frame", "")) or "").strip().lower()
+    coordinate_space = str(item.get("coordinate_space", item.get("coord_frame", "")) or default_coordinate_space).strip().lower()
 
     for key in ("bbox_norm_xyxy", "bbox_normalized", "normalized_bbox"):
         box = _as_box_list(item.get(key))
         if box:
             return _clamp_box([box[0] * width, box[1] * height, box[2] * width, box[3] * height], image_size)
 
+    box = _as_box_list(
+        item.get("bbox_xyxy")
+        or item.get("bbox_pixels")
+        or item.get("box_xyxy")
+        or item.get("box")
+        or item.get("bbox")
+    )
+    if box:
+        if coordinate_space in {"normalized", "norm", "relative"} or all(0.0 <= value <= 1.0 for value in box):
+            return _clamp_box([box[0] * width, box[1] * height, box[2] * width, box[3] * height], image_size)
+        if coordinate_space in {"overlay", "overlay_pixel", "overlay_pixels", "input", "input_pixel", "input_pixels", "input_image"}:
+            return _clamp_box(
+                [
+                    box[0] / float(overlay_width) * width,
+                    box[1] / float(overlay_height) * height,
+                    box[2] / float(overlay_width) * width,
+                    box[3] / float(overlay_height) * height,
+                ],
+                image_size,
+            )
+        return _clamp_box(box, image_size)
+
     grid_box = _as_box_list(item.get("bbox_grid_xyxy") or item.get("grid_bbox") or item.get("grid_box"))
-    if grid_box:
+    if grid_box and grid_cols > 0 and grid_rows > 0:
         return _clamp_box(
             [
                 grid_box[0] / float(grid_cols) * width,
@@ -519,29 +578,7 @@ def _box_from_detection(
             ],
             image_size,
         )
-
-    box = _as_box_list(
-        item.get("bbox_xyxy")
-        or item.get("bbox_pixels")
-        or item.get("box_xyxy")
-        or item.get("box")
-        or item.get("bbox")
-    )
-    if not box:
-        return None
-    if coordinate_space in {"normalized", "norm", "relative"} or all(0.0 <= value <= 1.0 for value in box):
-        return _clamp_box([box[0] * width, box[1] * height, box[2] * width, box[3] * height], image_size)
-    if coordinate_space in {"overlay", "overlay_pixel", "overlay_pixels"}:
-        return _clamp_box(
-            [
-                box[0] / float(overlay_width) * width,
-                box[1] / float(overlay_height) * height,
-                box[2] / float(overlay_width) * width,
-                box[3] / float(overlay_height) * height,
-            ],
-            image_size,
-        )
-    return _clamp_box(box, image_size)
+    return None
 
 
 def _candidate_items(parsed: Any) -> list[dict[str, Any]]:
@@ -564,6 +601,7 @@ def parse_vlm_response(
     grid_cols: int = 12,
     grid_rows: int = 12,
     min_confidence: float = 0.0,
+    default_coordinate_space: str = "original",
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], Any]:
     parsed = _extract_json_payload(raw_response)
     overlay_size = overlay_size or image_size
@@ -584,7 +622,14 @@ def parse_vlm_response(
         if confidence < float(min_confidence):
             rejected.append({"part": part_name, "reason": "below_confidence_threshold"})
             continue
-        box = _box_from_detection(item, image_size, overlay_size, int(grid_cols), int(grid_rows))
+        box = _box_from_detection(
+            item,
+            image_size,
+            overlay_size,
+            int(grid_cols),
+            int(grid_rows),
+            default_coordinate_space=default_coordinate_space,
+        )
         if not box:
             rejected.append({"part": part_name, "reason": "invalid_box"})
             continue
@@ -623,13 +668,13 @@ def run_vlm_preannotation(
     os.makedirs(output_dir, exist_ok=True)
     started = time.time()
     run_id = str(run_id or time.strftime("%Y%m%d_%H%M%S"))
-    overlay_path = os.path.join(output_dir, f"{Path(image_path).stem}_grid_{run_id}.png")
-    overlay_meta = create_grid_overlay(image_path, overlay_path, grid_cols=grid_cols, grid_rows=grid_rows)
+    overlay_path = os.path.join(output_dir, f"{Path(image_path).stem}_vlm_input_{run_id}.png")
+    overlay_meta = create_preannotation_image(image_path, overlay_path)
     if callable(progress_callback):
-        progress_callback("grid")
+        progress_callback("prepare")
     image_size = tuple(int(value) for value in overlay_meta["original_size"])
     overlay_size = tuple(int(value) for value in overlay_meta["overlay_size"])
-    prompt = build_vlm_preannotation_prompt(list(target_parts), image_size, int(grid_cols), int(grid_rows))
+    prompt = build_vlm_preannotation_prompt(list(target_parts), image_size, input_size=overlay_size)
 
     finish_reason = "dry_run" if dry_run else ""
     raw_text = raw_response or ""
@@ -655,6 +700,7 @@ def run_vlm_preannotation(
                 grid_cols=grid_cols,
                 grid_rows=grid_rows,
                 min_confidence=min_confidence,
+                default_coordinate_space="input",
             )
             if callable(progress_callback):
                 progress_callback("parse")

@@ -7,6 +7,18 @@ import sys
 import tempfile
 from pathlib import Path
 
+
+def _ensure_qtwebengine_cpu_compositing():
+    flag = "--disable-gpu-compositing"
+    current = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
+    flags = current.split()
+    if flag not in flags:
+        flags.append(flag)
+        os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(flags)
+
+
+_ensure_qtwebengine_cpu_compositing()
+
 from PySide6.QtCore import QTimer, QUrl, Signal
 from PySide6.QtWidgets import (
     QSizePolicy,

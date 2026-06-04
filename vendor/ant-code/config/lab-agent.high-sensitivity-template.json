@@ -47,7 +47,7 @@
     "maxBytes": 800000,
     "maxTokens": 200000,
     "keepRecentMessages": 6,
-    "summaryBytes": 4096
+    "summaryBytes": 65536
   },
   "limits": {
     "maxToolRounds": null

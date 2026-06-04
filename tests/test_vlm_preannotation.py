@@ -147,13 +147,92 @@ class VlmPreannotationTests(unittest.TestCase):
         self.assertEqual(candidates[0]["part"], "Head")
         self.assertEqual(candidates[0]["box_xyxy"], [200.0, 300.0, 500.0, 700.0])
 
+    def test_pixel_box_takes_priority_over_legacy_grid_box(self):
+        raw_response = json.dumps(
+            {
+                "detections": [
+                    {
+                        "part": "Head",
+                        "bbox_xyxy": [10, 20, 110, 160],
+                        "bbox_grid_xyxy": [2, 3, 5, 7],
+                        "confidence": 0.82,
+                        "reason": "head capsule visible",
+                    }
+                ]
+            }
+        )
+        candidates, rejected, _parsed = parse_vlm_response(
+            raw_response,
+            ["Head", "Eye"],
+            image_size=(1200, 800),
+            overlay_size=(600, 400),
+            grid_cols=12,
+            grid_rows=8,
+            min_confidence=0.25,
+        )
+        self.assertEqual(rejected, [])
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["box_xyxy"], [10.0, 20.0, 110.0, 160.0])
+
+    def test_input_pixel_box_maps_back_to_original_pixels(self):
+        raw_response = json.dumps(
+            {
+                "detections": [
+                    {
+                        "part": "Head",
+                        "bbox_xyxy": [10, 20, 110, 160],
+                        "confidence": 0.82,
+                    }
+                ]
+            }
+        )
+        candidates, rejected, _parsed = parse_vlm_response(
+            raw_response,
+            ["Head"],
+            image_size=(1200, 800),
+            overlay_size=(600, 400),
+            min_confidence=0.25,
+            default_coordinate_space="input",
+        )
+        self.assertEqual(rejected, [])
+        self.assertEqual(len(candidates), 1)
+        self.assertAlmostEqual(candidates[0]["box_xyxy"][0], 20.0)
+        self.assertAlmostEqual(candidates[0]["box_xyxy"][1], 40.0)
+        self.assertAlmostEqual(candidates[0]["box_xyxy"][2], 220.0)
+        self.assertAlmostEqual(candidates[0]["box_xyxy"][3], 320.0)
+
     def test_prompt_allows_reasonable_overlap_between_adjacent_parts(self):
-        prompt = build_vlm_preannotation_prompt(["Head", "Mesosoma"], (1200, 800), 12, 8)
+        prompt = build_vlm_preannotation_prompt(["Head", "Mesosoma"], (1200, 800), input_size=(600, 400))
 
         self.assertIn("允许合理重叠", prompt)
         self.assertIn("不是互斥切片", prompt)
         self.assertIn("不要为了让框不重叠", prompt)
         self.assertIn("Head 与 Mesosoma", prompt)
+        self.assertIn("直接按当前输入图片像素坐标", prompt)
+        self.assertIn("width=600, height=400", prompt)
+        self.assertNotIn("bbox_grid_xyxy", prompt)
+        self.assertNotIn("细网格", prompt)
+
+    def test_run_preannotation_uses_pixel_input_image_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            image_path = Path(tmp_dir) / "specimen.png"
+            Image.new("RGB", (120, 80), color=(140, 150, 160)).save(image_path)
+
+            result = run_vlm_preannotation(
+                str(image_path),
+                ["Head"],
+                tmp_dir,
+                dry_run=True,
+                run_id="pixel",
+            )
+
+            overlay = result["overlay"]
+            self.assertEqual(overlay["image_mode"], "pixel")
+            self.assertEqual(overlay["grid_cols"], 0)
+            self.assertEqual(overlay["grid_rows"], 0)
+            self.assertIn("_vlm_input_pixel.png", overlay["overlay_path"])
+            self.assertNotIn("网格", result["prompt"])
+            self.assertTrue(Path(overlay["overlay_path"]).exists())
 
     def test_project_load_normalizes_relative_image_keys_to_absolute(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

@@ -13,6 +13,18 @@ import cv2
 os.environ["YOLO_VERBOSE"] = "False"
 os.environ["ULTRALYTICS_QUIET"] = "True"
 
+
+def _ensure_qtwebengine_cpu_compositing():
+    flag = "--disable-gpu-compositing"
+    current = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
+    flags = current.split()
+    if flag not in flags:
+        flags.append(flag)
+        os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(flags)
+
+
+_ensure_qtwebengine_cpu_compositing()
+
 PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(PACKAGE_DIR)
 if REPO_ROOT not in sys.path:
@@ -411,7 +423,7 @@ TRANSLATIONS = {
         "VLM progress: finished ({0} draft boxes)": "VLM 进度：完成（{0} 个草稿框）",
         "start": "开始",
         "image": "当前图像",
-        "grid": "生成网格",
+        "prepare": "准备输入图",
         "vlm": "调用 VLM",
         "parse": "解析结果",
         "write": "写入草稿",

@@ -50,6 +50,8 @@ class TifGpuVolumeCanvasImportTests(unittest.TestCase):
         self.assertEqual(gpu_canvas._compact_renderer_text(""), "")
         self.assertIn("u_camera_distance", gpu_canvas._FRAGMENT_SHADER)
         self.assertIn("u_front_clip", gpu_canvas._FRAGMENT_SHADER)
+        self.assertIn("clip_depth", gpu_canvas._FRAGMENT_SHADER)
+        self.assertIn("dot(near_point, view_axis)", gpu_canvas._FRAGMENT_SHADER)
         self.assertIn("u_gradient_weight", gpu_canvas._FRAGMENT_SHADER)
         self.assertIn("u_texel_step", gpu_canvas._FRAGMENT_SHADER)
         self.assertIn("accum.rgb", gpu_canvas._FRAGMENT_SHADER)

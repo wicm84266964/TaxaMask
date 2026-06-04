@@ -30,8 +30,8 @@ Agent Center -> choose PDF / 2D-STL / TIF workflow
 - PDF literature trait search from the Labeling Workbench, linking PDF-derived taxon/part descriptions to the current image and part description box.
 - Embedded TaxaMask Agent Center powered by a local Ant-Code dashboard, with workflow shortcuts for 2D/STL morphology and TIF volume projects.
 - Taxa-aware project templates, including a validated ant morphology example and a generic taxonomy mask template.
-- Labeling Workbench for biological structure masks, including specimen-grouped STL-rendered surface views imported as derived 2D review images, VLM first-mile draft boxes for SAM prompts, plus integrated parent-part and child-part annotation sections for small-structure refinement.
-- TIF Volume Workbench for stack viewing, read-only GPU 3D volume preview, overlay review, material-map editing, working edits, and explicit promotion to manual training truth.
+- Labeling Workbench for biological structure masks, including specimen-grouped STL-rendered surface views imported as derived 2D review images, grid-free VLM first-mile draft boxes for SAM prompts with project-path-safe live refresh, plus integrated parent-part and child-part annotation sections for small-structure refinement.
+- TIF Volume Workbench for stack viewing, read-only offscreen-GPU 3D volume preview, overlay review, material-map editing, working edits, and explicit promotion to manual training truth.
 - Project-saved 2D/STL model profiles for switching parent-part and child-part annotation schemes without rewriting scattered settings.
 - Route-appointed child-part experts for parent-structure to child-structure pre-annotation, shrink-trajectory generation, and local expert training from the main 2D/STL labeling surface. Current route backends include ViT-B Blink, heatmap Blink, and external Blink scripts.
 - Configurable main locator structures for non-ant projects.
@@ -51,7 +51,7 @@ The GUI starts at the TaxaMask Agent Center by default. The center area embeds t
 
 Locator and SAM are lazy-loaded. Starting the app or entering the TIF workflow does not load them; entering the 2D/STL workflow preloads them, and returning to the Agent Center keeps already loaded models alive.
 
-TIF volume support is currently an experimental side workflow. The most validated daily route is still ant 2D/STL morphology plus PDF evidence. On some Windows/Qt graphics stacks, switching between the TIF GPU volume preview and the embedded Ant-Code Agent view can trigger rendering conflicts; treat TIF projects as a separate validation path and save work before switching views.
+TIF volume support is currently an experimental side workflow. The most validated daily route is still ant 2D/STL morphology plus PDF evidence. The TIF preview now defaults to offscreen GPU rendering to reduce Qt WebEngine/OpenGL composition conflicts, but TIF projects should still be treated as a separate validation path and tested on the target machine before production use.
 
 ## Current Validation Scope
 
@@ -146,7 +146,7 @@ TaxaMask Workbench
 1. Start in the Agent Center and choose whether the task is PDF evidence, 2D/STL morphology, or TIF volume annotation.
 2. For PDF evidence, configure API/profile settings and run a small batch before scaling.
 3. For 2D/STL morphology, create/open a 2D project, import ordinary images or STL-rendered views, then annotate in the Labeling Workbench.
-4. Optionally configure VLM target structures and run `VLM Pre-Annotate` to create draft AI boxes/SAM polygons for human review before training.
+4. Optionally configure VLM target structures and run `VLM Pre-Annotate` to create draft AI boxes/SAM polygons for human review before training; the progress dialog tracks batch steps and current image names.
 5. For child structures, use the Labeling Workbench's `Child-part annotation` section to pick the parent context, configure the route expert backend, annotate from an existing parent box, generate shrink trajectories, and train the current child expert.
 6. For TIF volume work, create/open a TIF project, import TIF stacks or AMIRA directories, review material maps, and promote reviewed edits to `manual_truth`.
 7. Train or connect the workflow-specific backend.

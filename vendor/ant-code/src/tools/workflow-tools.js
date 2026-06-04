@@ -577,14 +577,10 @@ function classifyValidationCommand(command) {
 function redactValidationText(value) {
   return value
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
-    .replace(/[A-Za-z]:[\\/][^\s"'<>|]+/g, "[path]")
-    .replace(/\\\\[^\s"'<>|]+/g, "[path]")
-    .replace(/\/(?:Users|home|tmp|var|private|mnt|workspace|saveproject)\/[^\s"'<>|]+/g, "[path]")
     .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, "$1[redacted]")
-    .replace(/(--?(?:api-?key|token|secret|password)(?:=|\s+))\S+/gi, "$1[redacted]")
-    .replace(/((?:api_?key|token|secret|password|path)\s*=\s*)\S+/gi, "$1[redacted]")
-    .replace(/([?&](?:api_?key|token|secret|password)=)[^&\s]+/gi, "$1[redacted]")
-    .replace(/\b[A-Za-z0-9._-]*(?:secret|token|password|credential|private)[A-Za-z0-9._-]*\b/gi, "[redacted]")
+    .replace(/(^|[\s"'`])(--?(?:api-?key|token|secret|password|credential|authorization)(?:=|\s+))\S+/gi, "$1$2[redacted]")
+    .replace(/\b([A-Za-z0-9_.-]*(?:api[-_]?key|token|secret|password|credential|authorization)[A-Za-z0-9_.-]*\s*(?:=|:|\bis\b)\s*)\S+/gi, "$1[redacted]")
+    .replace(/([?&](?:api[-_]?key|token|secret|password|credential|authorization)=)[^&\s]+/gi, "$1[redacted]")
     .replace(/\b(?:Write-Error|Write-Output|printf|echo)\b/gi, "[command]")
     .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]");
 }

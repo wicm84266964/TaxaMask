@@ -102,7 +102,7 @@ test("resume context budget follows active context budget by default", async () 
       keepRecentMessages: 8,
       tailTurns: 2,
       preserveRecentTokens: 8000,
-      summaryBytes: 8192,
+      summaryBytes: 65536,
       resumeMaxMessages: 200,
       resumeMaxTokens: 200000,
       resumeMaxBytes: 1000000
@@ -126,7 +126,7 @@ test("resume context budget env overrides remain explicit", async () => {
       keepRecentMessages: 8,
       tailTurns: 2,
       preserveRecentTokens: 8000,
-      summaryBytes: 8192
+      summaryBytes: 65536
     }
   });
 
@@ -236,7 +236,7 @@ test("project config sets custom model window and leaves in-flight compaction of
       keepRecentMessages: 8,
       tailTurns: 2,
       preserveRecentTokens: 8000,
-      summaryBytes: 8192,
+      summaryBytes: 65536,
       promptCompactRatio: 0.64,
       resumeMaxMessages: 100000,
       resumeMaxTokens: 400000,
@@ -325,6 +325,7 @@ test("loads bundled config when no project or lab config is present", async () =
   assert.match(config.bundledConfigPath, /lab-agent\.config\.json$/);
   assert.equal(config.modelAlias, "mimo-v2.5-pro");
   assert.equal(config.context.maxTokens, 400000);
+  assert.equal(config.context.summaryBytes, 65536);
   assert.equal(config.context.promptCompactRatio, 0.64);
   assert.deepEqual(config.models.map((model) => [model.id, model.reasoningContentMode]), [
     ["mimo-v2.5-pro", "visible-when-no-content"],

@@ -233,16 +233,18 @@ test("session context persists bounded redacted transcript for resume", async ()
     assert.equal(session.contextWindow.lastStrategy, "agent:compaction");
     assert.equal(session.contextWindow.lastInternalAgent, "compaction");
     assert.match(session.contextWindow.summary, /Model compacted summary/);
-    assert.doesNotMatch(session.contextWindow.summary, /super-secret|secret-project/);
+    assert.doesNotMatch(session.contextWindow.summary, /super-secret/);
 
     assert.equal(requests.length, 6);
     assert.match(requests[3].messages[0].content[0].text, /context compactor/);
+    assert.doesNotMatch(requests[3].messages[1].content, /super-secret/);
+    assert.match(requests[3].messages[1].content, /path=C:\\secret-project\\paper\.txt/);
     assert.match(requests[5].messages[0].content[0].text, /context compactor/);
     assert.deepEqual(requests[4].messages.map((message) => message.role), ["system", "system", "user", "assistant", "user", "assistant", "user"]);
     const compactedContext = requests[4].messages[1].content[0].text;
     assert.match(compactedContext, /compacted conversation context/);
     assert.match(compactedContext, /first turn/);
-    assert.doesNotMatch(compactedContext, /super-secret|secret-project/);
+    assert.doesNotMatch(compactedContext, /super-secret/);
 
     const metadataPath = path.join(cwd, ".lab-agent", "sessions", `${session.id}.json`);
     const metadataText = await fs.readFile(metadataPath, "utf8");
@@ -259,7 +261,8 @@ test("session context persists bounded redacted transcript for resume", async ()
     assert.match(metadataText, /third turn/);
     assert.match(metadataText, /fourth turn/);
     assert.match(metadataText, /assistant 5/);
-    assert.doesNotMatch(metadataText, /super-secret|secret-project|C:\\\\secret-project|compacted conversation context/);
+    assert.doesNotMatch(metadataText, /super-secret|compacted conversation context/);
+    assert.match(metadataText, /path=C:\\\\secret-project\\\\paper\.txt/);
 
     const resumed = await createSession({
       cwd,
@@ -270,6 +273,7 @@ test("session context persists bounded redacted transcript for resume", async ()
     assert.equal(resumed.messages.length, 4);
     assert.equal(resumed.transcriptMessages.length, 8);
     assert.match(resumed.transcriptMessages[0].content, /first turn/);
+    assert.match(resumed.transcriptMessages[0].content, /path=C:\\secret-project\\paper\.txt/);
   } finally {
     await close(server);
   }
@@ -318,6 +322,148 @@ test("session compacts before gateway request when full prompt payload exceeds t
     const compactEvent = events.find((event) => event.type === "context_compacted");
     assert.equal(compactEvent?.reason, "automatic_prompt_budget");
     assert.ok(compactEvent.beforeTokens > compactEvent.afterTokens);
+  } finally {
+    await close(server);
+  }
+});
+
+test("OpenAI-compatible prompt compaction drops leading orphan tool messages", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
+  await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
+    modelAlias: "mock-openai",
+    models: [{ id: "mock-openai", contextTokens: 1000 }],
+    context: {
+      maxTokens: 260,
+      keepRecentMessages: 5,
+      tailTurns: 1,
+      preserveRecentTokens: 1,
+      summaryBytes: 4096
+    }
+  }), "utf8");
+  const requests = [];
+  const server = await listen(createOpenAIDanglingToolCompactionGateway(requests), "127.0.0.1");
+
+  try {
+    const env = {
+      LAB_MODEL_GATEWAY_URL: `${serverUrl(server)}/v1/chat/completions`,
+      LAB_AGENT_MODEL: "mock-openai",
+      LAB_AGENT_NETWORK_MODE: "offline",
+      LAB_AGENT_TRANSCRIPT_ENABLED: "false",
+      LAB_MODEL_GATEWAY_PROTOCOL: "openai-chat"
+    };
+    const session = await createSession({
+      cwd,
+      mode: "interactive",
+      env
+    });
+    session.messages = [
+      { role: "user", content: `older prompt ${"alpha ".repeat(80)}` },
+      { role: "assistant", content: [{ type: "text", text: `older answer ${"beta ".repeat(80)}` }] },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "orphaned tool request" }],
+        toolCalls: [{ id: "orphan-call", name: "powershell", input: { command: "Get-Date" } }]
+      },
+      {
+        role: "tool",
+        name: "powershell",
+        toolCallId: "orphan-call",
+        content: [{ type: "text", text: "{\"ok\":true,\"result\":\"orphan output\"}" }]
+      },
+      { role: "assistant", content: [{ type: "text", text: "orphan output consumed" }] },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "kept tool request" }],
+        toolCalls: [{ id: "kept-call", name: "read_file", input: { path: "notes.txt" } }]
+      },
+      {
+        role: "tool",
+        name: "read_file",
+        toolCallId: "kept-call",
+        content: [{ type: "text", text: "{\"ok\":true,\"result\":\"kept output\"}" }]
+      },
+      { role: "assistant", content: [{ type: "text", text: "kept output consumed" }] }
+    ];
+
+    const result = await runSessionTurn(session, {
+      prompt: "continue after compacted tool context",
+      env
+    });
+
+    assert.match(result.output, /after compaction accepted/);
+    assert.equal(requests.length, 2);
+    assert.equal(requests[0].messages.some((message) => String(message.content ?? "").includes("context compactor")), true);
+    const finalRequest = requests[1];
+    assert.equal(finalRequest.messages.some((message) => message.role === "tool" && message.tool_call_id === "orphan-call"), false);
+    const keptToolIndex = finalRequest.messages.findIndex((message) => message.role === "tool" && message.tool_call_id === "kept-call");
+    assert.ok(keptToolIndex > 0);
+    assert.equal(finalRequest.messages[keptToolIndex - 1].role, "assistant");
+    assert.equal(finalRequest.messages[keptToolIndex - 1].tool_calls?.[0]?.id, "kept-call");
+  } finally {
+    await close(server);
+  }
+});
+
+test("OpenAI-compatible prompt repair drops partially returned tool blocks", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "lab-agent-test-"));
+  await fs.writeFile(path.join(cwd, "lab-agent.config.json"), JSON.stringify({
+    modelAlias: "mock-openai",
+    models: [{ id: "mock-openai", contextTokens: 1000 }],
+    context: {
+      maxTokens: 1000,
+      keepRecentMessages: 10,
+      tailTurns: 2,
+      preserveRecentTokens: 4000,
+      summaryBytes: 4096
+    }
+  }), "utf8");
+  const requests = [];
+  const server = await listen(createOpenAIDanglingToolCompactionGateway(requests), "127.0.0.1");
+
+  try {
+    const env = {
+      LAB_MODEL_GATEWAY_URL: `${serverUrl(server)}/v1/chat/completions`,
+      LAB_AGENT_MODEL: "mock-openai",
+      LAB_AGENT_NETWORK_MODE: "offline",
+      LAB_AGENT_TRANSCRIPT_ENABLED: "false",
+      LAB_MODEL_GATEWAY_PROTOCOL: "openai-chat"
+    };
+    const session = await createSession({
+      cwd,
+      mode: "interactive",
+      env
+    });
+    session.messages = [
+      { role: "user", content: "continue from partial tool history" },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "I requested two tools." }],
+        toolCalls: [
+          { id: "partial-a", name: "read_file", input: { path: "a.txt" } },
+          { id: "partial-b", name: "read_file", input: { path: "b.txt" } }
+        ]
+      },
+      {
+        role: "tool",
+        name: "read_file",
+        toolCallId: "partial-a",
+        content: [{ type: "text", text: "{\"ok\":true,\"result\":\"only one tool returned\"}" }]
+      },
+      { role: "assistant", content: [{ type: "text", text: "I can continue safely without resending the broken tool chain." }] }
+    ];
+
+    const result = await runSessionTurn(session, {
+      prompt: "continue after partial tool chain",
+      env
+    });
+
+    assert.match(result.output, /after compaction accepted/);
+    assert.equal(requests.length, 1);
+    const finalRequest = requests[0];
+    assert.equal(finalRequest.messages.some((message) => message.role === "tool" && message.tool_call_id === "partial-a"), false);
+    const partialAssistant = finalRequest.messages.find((message) => message.role === "assistant" && String(message.content ?? "").includes("I requested two tools."));
+    assert.ok(partialAssistant);
+    assert.equal(partialAssistant.tool_calls, undefined);
   } finally {
     await close(server);
   }
@@ -537,7 +683,7 @@ test("failed validation context is injected into follow-up turns with redaction"
     assert.match(context, /exit=1/);
     assert.match(context, /stderr excerpt/);
     assert.doesNotMatch(context, /super-secret/);
-    assert.doesNotMatch(context, /secret-project/);
+    assert.match(context, process.platform === "win32" ? /path=C:\\secret-project\\file\.txt/ : /path=\/home\/secret-project\/file\.txt/);
     assert.doesNotMatch(context, /Write-Error|printf/);
     assert.equal(requests[2].messages.at(-1).content[1].text, "fix the validation");
 
@@ -546,7 +692,7 @@ test("failed validation context is injected into follow-up turns with redaction"
     assert.match(metadataText, /"failed":\s*1/);
     assert.match(metadataText, /"role":\s*"tool"/);
     assert.doesNotMatch(metadataText, /super-secret/);
-    assert.doesNotMatch(metadataText, /secret-project/);
+    assert.match(metadataText, process.platform === "win32" ? /path=C:\\\\secret-project\\\\file\.txt/ : /path=\/home\/secret-project\/file\.txt/);
   } finally {
     await close(server);
   }
@@ -1535,8 +1681,8 @@ test("createSession restores bounded persisted conversation messages", async () 
   assert.equal(session.turnCount, 2);
   assert.equal(session.messages.length, 2);
   assert.equal(session.transcriptMessages.length, 2);
-  assert.equal(session.messages[0].content, "previous prompt [redacted]=[redacted]");
-  assert.equal(session.messages[1].content[0].text, "previous answer path=[redacted]");
+  assert.equal(session.messages[0].content, "previous prompt token=[redacted]");
+  assert.equal(session.messages[1].content[0].text, "previous answer path=C:\\secret\\file.txt");
   assert.equal(session.contextWindow.summary, "Compacted earlier safe context");
   assert.equal(session.contextWindow.compactionCount, 1);
   assert.equal(session.resumedFrom.messages.length, 2);
@@ -1720,7 +1866,7 @@ test("createSession restores archived context up to active context budget after 
       keepRecentMessages: 8,
       tailTurns: 2,
       preserveRecentTokens: 8000,
-      summaryBytes: 8192,
+      summaryBytes: 65536,
       resumeMaxMessages: 200,
       resumeMaxTokens: 200000,
       resumeMaxBytes: 1000000
@@ -2487,6 +2633,107 @@ function createOpenAIStreamingGateway(requests) {
     response.write('data: {"choices":[{"delta":{"content":"world"},"finish_reason":"stop"}]}\n\n');
     response.end("data: [DONE]\n\n");
   });
+}
+
+/**
+ * @param {Array<Record<string, any>>} requests
+ */
+function createOpenAIDanglingToolCompactionGateway(requests) {
+  return http.createServer(async (request, response) => {
+    if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
+      response.writeHead(404, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: { code: "NOT_FOUND" } }));
+      return;
+    }
+
+    const body = await readRequestJson(request);
+    requests.push(body);
+    if (body.messages?.some((message) => String(message.content ?? "").includes("context compactor"))) {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({
+        id: "chatcmpl-compact",
+        model: body.model,
+        choices: [
+          {
+            finish_reason: "stop",
+            message: {
+              role: "assistant",
+              content: "Compacted older tool context."
+            }
+          }
+        ]
+      }));
+      return;
+    }
+
+    const danglingTool = findDanglingOpenAIToolMessage(body.messages ?? []);
+    if (danglingTool) {
+      response.writeHead(400, { "content-type": "application/json" });
+      response.end(JSON.stringify({
+        error: {
+          message: "Messages with role 'tool' must be a response to a preceding message with 'tool_calls'",
+          type: "invalid_request_error"
+        }
+      }));
+      return;
+    }
+
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      id: "chatcmpl-after-compact",
+      model: body.model,
+      choices: [
+        {
+          finish_reason: "stop",
+          message: {
+            role: "assistant",
+            content: "after compaction accepted"
+          }
+        }
+      ]
+    }));
+  });
+}
+
+function findDanglingOpenAIToolMessage(messages = []) {
+  const pendingToolCallIds = new Set();
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index];
+    if (message?.role !== "tool" && pendingToolCallIds.size > 0) {
+      return {
+        role: "assistant",
+        missing_tool_call_ids: Array.from(pendingToolCallIds)
+      };
+    }
+    if (message?.role === "assistant") {
+      pendingToolCallIds.clear();
+      for (const call of message.tool_calls ?? []) {
+        const id = String(call?.id ?? "");
+        if (id) {
+          pendingToolCallIds.add(id);
+        }
+      }
+      continue;
+    }
+    if (message?.role === "tool") {
+      const id = String(message.tool_call_id ?? "");
+      if (!pendingToolCallIds.has(id)) {
+        return message;
+      }
+      pendingToolCallIds.delete(id);
+      continue;
+    }
+    if (message?.role) {
+      pendingToolCallIds.clear();
+    }
+  }
+  if (pendingToolCallIds.size > 0) {
+    return {
+      role: "assistant",
+      missing_tool_call_ids: Array.from(pendingToolCallIds)
+    };
+  }
+  return null;
 }
 
 /**

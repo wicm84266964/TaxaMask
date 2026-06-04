@@ -116,7 +116,7 @@ function New-AntCodeGatewayConfig(
       keepRecentMessages = 8
       tailTurns = 2
       preserveRecentTokens = 8000
-      summaryBytes = 8192
+      summaryBytes = 65536
     }
     agents = [ordered]@{
       modelTiers = [ordered]@{

@@ -1416,6 +1416,64 @@ test("dashboard runtime pages archived transcript history for display", async ()
   assert.equal(older.transcriptPage.hasMore, false);
 });
 
+test("dashboard resume sends archived full context while display stays paged", async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
+  const requests = [];
+  const server = await listen(createRecordingGateway(requests, "continued with full context"), "127.0.0.1", 0);
+  const runtime = createDashboardRuntime({ cwd, env: mockGatewayEnv(server) });
+  const store = createSessionStore({ cwd });
+  const messages = [];
+  for (let index = 1; index <= 60; index += 1) {
+    messages.push({ role: "user", content: `prompt ${index}` });
+    messages.push({ role: "assistant", content: [{ type: "text", text: `answer ${index}` }] });
+  }
+  const archive = await store.writeTranscriptChunks("dashboard-full-context-session", messages);
+  await store.writeMetadata({
+    id: "dashboard-full-context-session",
+    prompt: "archived prompt",
+    title: "archived prompt",
+    status: "completed",
+    transcript: {
+      version: 2,
+      messages: messages.slice(-50),
+      contextMessages: messages.slice(-2),
+      contextWindow: {
+        summary: "Old compact summary that should not be sent when full archive is restored",
+        compactionCount: 1,
+        compactedMessages: 118
+      },
+      archive
+    }
+  });
+
+  try {
+    const reopened = await runtime.readSession("dashboard-full-context-session");
+    assert.equal(reopened.ok, true);
+    assert.equal(reopened.session.transcript.length, 100);
+    assert.equal(reopened.session.transcriptPage.hasMore, true);
+
+    await runtime.trustWorkspace();
+    const started = await runtime.startTurn({
+      sessionId: "dashboard-full-context-session",
+      prompt: "continue with full context",
+      permissionMode: "workspace"
+    });
+    assert.equal(started.ok, true);
+    await waitForEvent(runtime, started.sessionId, (event) => event.type === "files_updated");
+
+    assert.equal(requests.length, 1);
+    const request = requests[0];
+    const userMessages = request.messages.filter((message) => message.role === "user").map(requestMessageText);
+    const assistantMessages = request.messages.filter((message) => message.role === "assistant").map(requestMessageText);
+    assert.equal(userMessages.includes("prompt 1"), true);
+    assert.equal(assistantMessages.includes("answer 60"), true);
+    assert.equal(userMessages.includes("continue with full context"), true);
+    assert.doesNotMatch(JSON.stringify(request.messages), /Old compact summary/);
+  } finally {
+    await close(server);
+  }
+});
+
 test("dashboard runtime refuses deleting running sessions", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "dashboard-runtime-"));
   const server = await listen(createHangingStreamGateway(), "127.0.0.1", 0);
@@ -1502,6 +1560,24 @@ function transcriptText(message) {
     return "";
   }
   return message.content.map((item) => item?.text ?? "").join("");
+}
+
+function requestMessageText(message) {
+  if (typeof message?.content === "string") {
+    return message.content;
+  }
+  if (!Array.isArray(message?.content)) {
+    return "";
+  }
+  return message.content.map((item) => {
+    if (typeof item === "string") {
+      return item;
+    }
+    if (item && typeof item === "object" && "text" in item) {
+      return String(item.text ?? "");
+    }
+    return "";
+  }).join("");
 }
 
 function createGateway(text, options = {}) {

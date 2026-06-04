@@ -10,10 +10,11 @@ const DEFAULT_MAX_TOKENS = 200000;
 const DEFAULT_MAX_BYTES = DEFAULT_MAX_TOKENS * 4;
 const DEFAULT_TOKEN_BYTES = 4;
 const DEFAULT_KEEP_MESSAGES = 8;
-const DEFAULT_SUMMARY_BYTES = 8 * 1024;
+const DEFAULT_SUMMARY_BYTES = 64 * 1024;
 const MESSAGE_SNIPPET_CHARS = 280;
-const MODEL_COMPACT_MAX_INPUT_CHARS = 80_000;
-const MODEL_COMPACT_MAX_MESSAGE_CHARS = 2_000;
+const MODEL_COMPACT_MAX_INPUT_CHARS = 240_000;
+const MODEL_COMPACT_MAX_MESSAGE_CHARS = 8_000;
+const MODEL_COMPACT_SPINE_CHARS = 64_000;
 const DEFAULT_TAIL_TURNS = 2;
 const DEFAULT_PRESERVE_RECENT_TOKENS = 8_000;
 
@@ -407,7 +408,7 @@ function buildModelCompactionRequest(session, plan) {
     "- Summarize large tool outputs, web fetches, file contents, logs, and repetitive progress instead of copying them verbatim.",
     "- Prefer the user's language for product-facing notes; keep technical names unchanged.",
     "- Do not invent facts. If something is uncertain, say it is uncertain.",
-    "- Do not include secrets, API keys, credentials, or private absolute paths; use [redacted] or workspace-relative paths.",
+    "- Do not include secrets, API keys, credentials, Bearer tokens, or password/token values.",
     "- Return only the compacted summary text. Do not call tools.",
     "",
     "Required summary shape:",
@@ -550,9 +551,9 @@ function summarizeConversationSpine(messages) {
     if (!text) {
       continue;
     }
-    lines.push(`- ${index + 1}. ${message.role}: ${truncate(text, 700)}`);
+    lines.push(`- ${index + 1}. ${message.role}: ${truncate(text, 2_000)}`);
   }
-  return truncateBytesFromStart(lines.join("\n"), 12_000);
+  return truncateBytesFromStart(lines.join("\n"), MODEL_COMPACT_SPINE_CHARS);
 }
 
 /**
@@ -831,14 +832,10 @@ export function estimateTokensFromBytes(bytes) {
 function redactContextText(value) {
   return value
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
-    .replace(/[A-Za-z]:[\\/][^\s"'<>|]+/g, "[path]")
-    .replace(/\\\\[^\s"'<>|]+/g, "[path]")
-    .replace(/\/(?:Users|home|tmp|var|private|mnt|workspace|saveproject)\/[^\s"'<>|]+/g, "[path]")
     .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, "$1[redacted]")
-    .replace(/(--?(?:api-?key|token|secret|password)(?:=|\s+))\S+/gi, "$1[redacted]")
-    .replace(/((?:api_?key|token|secret|password|path)\s*=\s*)\S+/gi, "$1[redacted]")
-    .replace(/([?&](?:api_?key|token|secret|password)=)[^&\s]+/gi, "$1[redacted]")
-    .replace(/\b[A-Za-z0-9._-]*(?:secret|token|password|credential|private)[A-Za-z0-9._-]*\b/gi, "[redacted]")
+    .replace(/(^|[\s"'`])(--?(?:api-?key|token|secret|password|credential|authorization)(?:=|\s+))\S+/gi, "$1$2[redacted]")
+    .replace(/\b([A-Za-z0-9_.-]*(?:api[-_]?key|token|secret|password|credential|authorization)[A-Za-z0-9_.-]*\s*(?:=|:|\bis\b)\s*)\S+/gi, "$1[redacted]")
+    .replace(/([?&](?:api[-_]?key|token|secret|password|credential|authorization)=)[^&\s]+/gi, "$1[redacted]")
     .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]");
 }
 

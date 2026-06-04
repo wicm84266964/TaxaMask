@@ -8,18 +8,33 @@ import time
 
 os.environ.setdefault("__NV_PRIME_RENDER_OFFLOAD", "1")
 os.environ.setdefault("__GLX_VENDOR_LIBRARY_NAME", "nvidia")
-os.environ.setdefault("QT_OPENGL", "desktop")
 
 import numpy as np
 
 GPU_VOLUME_MAX_TEXTURE_DIM = 4096
 GPU_VOLUME_MAX_RAY_STEPS = 4096
+GPU_VOLUME_RENDER_MODES = {
+    "composite": 0,
+    "mip": 1,
+    "minip": 2,
+    "average": 3,
+    "surface": 4,
+}
 
 try:
     from PySide6.QtCore import Qt, QTimer, Signal
+    from PySide6.QtGui import QImage, QOffscreenSurface, QOpenGLContext, QPixmap, QSurfaceFormat
+    from PySide6.QtWidgets import QFrame, QLabel
     from PySide6.QtOpenGLWidgets import QOpenGLWidget
 except Exception as exc:  # pragma: no cover - exercised only on partial Qt installs
+    QFrame = None
+    QImage = None
+    QLabel = None
     QOpenGLWidget = None
+    QOffscreenSurface = None
+    QOpenGLContext = None
+    QPixmap = None
+    QSurfaceFormat = None
     _QT_OPENGL_IMPORT_ERROR = exc
 else:
     _QT_OPENGL_IMPORT_ERROR = None
@@ -65,6 +80,7 @@ uniform float u_gradient_weight;
 uniform float u_clarity;
 uniform vec3 u_texel_step;
 uniform int u_steps;
+uniform int u_projection_mode;
 
 const int MAX_RAY_STEPS = __MAX_RAY_STEPS__;
 
@@ -112,10 +128,29 @@ void main()
 
     float ray_start = max(hit.x, 0.0);
     float ray_end = hit.y;
-    float t = mix(ray_start, ray_end, clamp(u_front_clip, 0.0, 0.92));
+    float clip = clamp(u_front_clip, 0.0, 0.92);
+    float t = ray_start;
+    if (clip > 0.0) {
+        vec3 near_point = ray_origin + ray_direction * ray_start;
+        vec3 far_point = ray_origin + ray_direction * ray_end;
+        vec3 view_axis = normalize(ray_direction);
+        float near_depth = dot(near_point, view_axis);
+        float far_depth = dot(far_point, view_axis);
+        float clip_depth = mix(near_depth, far_depth, clip);
+        float denom = dot(ray_direction, view_axis);
+        if (abs(denom) > 0.000001) {
+            t = max(ray_start, min(ray_end, (clip_depth - dot(ray_origin, view_axis)) / denom));
+        }
+    }
     vec4 accum = vec4(0.0);
     float first_depth = 0.0;
     float got_first_hit = 0.0;
+    float mip_density = 0.0;
+    float mip_depth = 0.0;
+    float min_value = 1.0;
+    float got_min = 0.0;
+    float average_density = 0.0;
+    float average_count = 0.0;
     vec3 texel_step = max(u_texel_step, vec3(0.0005));
     vec3 light_dir = normalize(vec3(0.45, 0.58, 0.68));
     vec3 view_dir = normalize(-ray_direction);
@@ -128,6 +163,28 @@ void main()
         vec3 texcoord = point / u_shape_scale + 0.5;
         float sample_value = texture3D(u_volume, texcoord).r;
         float density = clamp((sample_value - u_cutoff) / max(1.0 - u_cutoff, 0.001), 0.0, 1.0);
+        if (u_projection_mode == 1) {
+            if (density > mip_density) {
+                mip_density = density;
+                mip_depth = 1.0 - float(i) / max(float(u_steps), 1.0);
+            }
+            t += u_step_size;
+            continue;
+        }
+        if (u_projection_mode == 2) {
+            if (sample_value > 0.001) {
+                min_value = min(min_value, sample_value);
+                got_min = 1.0;
+            }
+            t += u_step_size;
+            continue;
+        }
+        if (u_projection_mode == 3) {
+            average_density += density;
+            average_count += 1.0;
+            t += u_step_size;
+            continue;
+        }
         if (density > 0.001) {
             float vx = texture3D(u_volume, texcoord + vec3(texel_step.x, 0.0, 0.0)).r -
                        texture3D(u_volume, texcoord - vec3(texel_step.x, 0.0, 0.0)).r;
@@ -151,6 +208,18 @@ void main()
             transfer_color = mix(transfer_color, high_color, dense_tissue);
 
             float surface = smoothstep(0.05, 0.35, grad_mag) * u_gradient_weight;
+            if (u_projection_mode == 4) {
+                if (density > 0.035 || surface > 0.08) {
+                    float surface_alpha = clamp(max(density, surface), 0.0, 1.0);
+                    vec3 shaded_surface = transfer_color * (0.44 + 0.50 * diffuse) + transfer_color * rim * 0.22 + vec3(spec * 0.46);
+                    accum = vec4(shaded_surface * (0.80 + 0.20 * surface_alpha), surface_alpha);
+                    first_depth = 1.0 - float(i) / max(float(u_steps), 1.0);
+                    got_first_hit = 1.0;
+                    break;
+                }
+                t += u_step_size;
+                continue;
+            }
             float normal_opacity = pow(density, 1.22) * 18.0 + surface * pow(density, 0.55) * 24.0;
             float clarity_opacity = pow(density, 1.55) * 9.0 + surface * pow(density, 0.70) * 14.0;
             float opacity_density = mix(normal_opacity, clarity_opacity, clamp(u_clarity, 0.0, 1.0));
@@ -171,6 +240,42 @@ void main()
         t += u_step_size;
     }
 
+    if (u_projection_mode == 1) {
+        if (mip_density <= 0.001) {
+            gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+            return;
+        }
+        vec3 low_color = vec3(0.12, 0.36, 0.78);
+        vec3 mid_color = vec3(0.56, 0.88, 0.96);
+        vec3 high_color = vec3(1.0, 0.78, 0.36);
+        vec3 color = mix(low_color, mid_color, smoothstep(0.02, 0.52, mip_density));
+        color = mix(color, high_color, smoothstep(0.45, 1.0, mip_density));
+        color *= 0.72 + 0.28 * mip_depth;
+        gl_FragColor = vec4(pow(clamp(color, 0.0, 1.0), vec3(0.82)), 1.0);
+        return;
+    }
+    if (u_projection_mode == 2) {
+        if (got_min < 0.5) {
+            gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+            return;
+        }
+        float inverse_value = 1.0 - clamp(min_value, 0.0, 1.0);
+        vec3 color = vec3(inverse_value * 0.72, inverse_value * 0.88, inverse_value);
+        gl_FragColor = vec4(pow(clamp(color, 0.0, 1.0), vec3(0.80)), 1.0);
+        return;
+    }
+    if (u_projection_mode == 3) {
+        float average_value = average_density / max(average_count, 1.0);
+        if (average_value <= 0.001) {
+            gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+            return;
+        }
+        vec3 color = mix(vec3(0.10, 0.30, 0.68), vec3(0.70, 0.94, 0.96), smoothstep(0.015, 0.34, average_value));
+        color = mix(color, vec3(1.0, 0.86, 0.50), smoothstep(0.30, 0.72, average_value));
+        gl_FragColor = vec4(pow(clamp(color, 0.0, 1.0), vec3(0.86)), 1.0);
+        return;
+    }
+
     if (accum.a <= 0.001) {
         gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
         return;
@@ -188,9 +293,27 @@ def gpu_volume_canvas_available():
     return QOpenGLWidget is not None and GL is not None
 
 
+def gpu_volume_offscreen_available():
+    """Return True when the offscreen GPU renderer can be constructed."""
+    return (
+        QFrame is not None
+        and QOpenGLContext is not None
+        and QOffscreenSurface is not None
+        and QLabel is not None
+        and QImage is not None
+        and QPixmap is not None
+        and QSurfaceFormat is not None
+        and GL is not None
+    )
+
+
 def gpu_volume_unavailable_reason():
+    if not gpu_volume_offscreen_available():
+        if GL is None:
+            return f"PyOpenGL is unavailable: {_PYOPENGL_IMPORT_ERROR}"
+        return f"Qt offscreen OpenGL is unavailable: {_QT_OPENGL_IMPORT_ERROR}"
     if QOpenGLWidget is None:
-        return f"Qt OpenGL widget is unavailable: {_QT_OPENGL_IMPORT_ERROR}"
+        return f"Qt embedded OpenGL widget is unavailable: {_QT_OPENGL_IMPORT_ERROR}"
     if GL is None:
         return f"PyOpenGL is unavailable: {_PYOPENGL_IMPORT_ERROR}"
     return ""
@@ -317,6 +440,597 @@ def front_clip_start_t(near_hit, far_hit, front_clip):
     ray_end = float(far_hit)
     clip = max(0.0, min(0.92, float(front_clip)))
     return ray_start + (ray_end - ray_start) * clip
+
+
+class _GpuVolumeRenderCore:
+    """Shared OpenGL state for embedded and offscreen TIF volume previews."""
+
+    def _init_render_state(self):
+        self._volume_data = None
+        self._volume_shape = ()
+        self._source_shape = ()
+        self._source_spacing = ()
+        self._upload_needed = False
+        self._initialized = False
+        self._failed = False
+        self._failure_reason = ""
+        self._program = None
+        self._quad_vbo = None
+        self._texture_id = None
+        self._cutoff = 0.35
+        self._yaw = -35.0
+        self._pitch = 20.0
+        self._zoom = 1.0
+        self._pan_x = 0.0
+        self._pan_y = 0.0
+        self._clarity_mode = False
+        self._render_quality = 384
+        self._sample_steps = 768
+        self._inside_depth = 0.0
+        self._front_clip = 0.0
+        self._projection_mode = "composite"
+        self._supersample_scale = 1.0
+        self._renderer_label = ""
+        self._renderer_details = ""
+        self._uploaded_shape = ()
+        self._uploaded_bytes = 0
+        self._last_upload_ms = 0.0
+        self._last_draw_ms = 0.0
+        self._last_steps = 0
+        self._render_mode = "still"
+        self._uploaded_dtype = ""
+
+    def _store_volume_data(self, volume, source_shape=None, spacing_zyx=None):
+        if volume is None:
+            self.clear_volume()
+            return False
+        source = np.asarray(volume)
+        if source.dtype == np.uint16:
+            array = np.ascontiguousarray(source, dtype=np.uint16)
+        else:
+            array = np.ascontiguousarray(source, dtype=np.uint8)
+        if array.ndim != 3 or min(array.shape) <= 0:
+            self.clear_volume()
+            return False
+        next_source_shape = tuple(int(value) for value in (source_shape or array.shape))
+        if len(next_source_shape) != 3 or min(next_source_shape) <= 0:
+            next_source_shape = tuple(int(value) for value in array.shape)
+        try:
+            next_spacing = tuple(float(value) for value in (spacing_zyx or ()))
+        except (TypeError, ValueError):
+            next_spacing = ()
+        if len(next_spacing) != 3 or min(next_spacing) <= 0:
+            next_spacing = ()
+        if self._volume_data is not array:
+            self._volume_data = array
+            self._volume_shape = tuple(int(value) for value in array.shape)
+            self._upload_needed = True
+        self._source_shape = next_source_shape
+        self._source_spacing = next_spacing
+        return True
+
+    def clear_volume(self):
+        self._volume_data = None
+        self._volume_shape = ()
+        self._source_shape = ()
+        self._source_spacing = ()
+        self._upload_needed = False
+        self._delete_volume_texture()
+        self._texture_id = None
+        self._uploaded_shape = ()
+        self._uploaded_bytes = 0
+        self._last_upload_ms = 0.0
+        self._last_draw_ms = 0.0
+        self._last_steps = 0
+        self._uploaded_dtype = ""
+
+    def _delete_volume_texture(self):
+        if self._initialized and self._texture_id:
+            try:
+                GL.glDeleteTextures([int(self._texture_id)])
+            except Exception:
+                pass
+
+    def has_volume(self):
+        return self._volume_data is not None and not self._failed
+
+    def set_render_state(
+        self,
+        cutoff_percent,
+        yaw,
+        pitch,
+        zoom,
+        render_quality,
+        sample_steps=512,
+        inside_depth=0.0,
+        front_clip=0.0,
+        render_mode="still",
+        pan_x=0.0,
+        pan_y=0.0,
+        clarity_mode=False,
+        projection_mode="composite",
+        supersample_scale=1.0,
+    ):
+        self._cutoff = max(0.0, min(0.98, float(cutoff_percent) / 100.0))
+        self._yaw = float(yaw)
+        self._pitch = float(pitch)
+        self._zoom = max(0.2, float(zoom))
+        self._render_quality = max(128, min(GPU_VOLUME_MAX_TEXTURE_DIM, int(render_quality)))
+        self._sample_steps = max(256, min(GPU_VOLUME_MAX_RAY_STEPS, int(sample_steps)))
+        self._inside_depth = max(0.0, min(1.6, float(inside_depth)))
+        self._front_clip = max(0.0, min(0.92, float(front_clip)))
+        self._render_mode = "drag" if str(render_mode) == "drag" else "still"
+        self._pan_x = max(-2.0, min(2.0, float(pan_x)))
+        self._pan_y = max(-2.0, min(2.0, float(pan_y)))
+        self._clarity_mode = bool(clarity_mode)
+        projection_mode = str(projection_mode or "composite").lower()
+        self._projection_mode = projection_mode if projection_mode in GPU_VOLUME_RENDER_MODES else "composite"
+        self._supersample_scale = max(1.0, min(4.0, float(supersample_scale)))
+
+    def render_stats(self):
+        return {
+            "mode": self._render_mode,
+            "shape_zyx": tuple(int(value) for value in self._uploaded_shape),
+            "bytes": int(self._uploaded_bytes),
+            "upload_ms": float(self._last_upload_ms),
+            "draw_ms": float(self._last_draw_ms),
+            "steps": int(self._last_steps),
+            "dtype": self._uploaded_dtype,
+            "clarity": bool(self._clarity_mode),
+            "projection_mode": self._projection_mode,
+            "supersample_scale": float(self._supersample_scale),
+        }
+
+    def renderer_label(self):
+        return self._renderer_label
+
+    def render_scale(self):
+        return float(self._supersample_scale)
+
+    def renderer_details(self):
+        return self._renderer_details or self._renderer_label
+
+    def _initialize_render_core(self):
+        GL.glClearColor(0.027, 0.035, 0.039, 1.0)
+        GL.glDisable(GL.GL_DEPTH_TEST)
+        self._update_renderer_label()
+        self._program = _link_program(_VERTEX_SHADER, _FRAGMENT_SHADER)
+        vertices = np.array([-1.0, -1.0, 1.0, -1.0, -1.0, 1.0, 1.0, 1.0], dtype=np.float32)
+        self._quad_vbo = GL.glGenBuffers(1)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self._quad_vbo)
+        GL.glBufferData(GL.GL_ARRAY_BUFFER, vertices.nbytes, vertices, GL.GL_STATIC_DRAW)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
+        self._initialized = True
+        self._upload_volume_if_needed()
+
+    def _update_renderer_label(self):
+        vendor = _decode_gl_string(GL.glGetString(GL.GL_VENDOR))
+        renderer = _decode_gl_string(GL.glGetString(GL.GL_RENDERER))
+        version = _decode_gl_string(GL.glGetString(GL.GL_VERSION))
+        label = _compact_renderer_text(renderer or vendor)
+        self._renderer_label = label
+        self._renderer_details = " | ".join(part for part in (vendor, renderer, version) if part)
+
+    def _upload_volume_if_needed(self):
+        if not self._upload_needed or self._volume_data is None:
+            return
+        depth, height, width = self._volume_shape
+        if not self._texture_id:
+            self._texture_id = GL.glGenTextures(1)
+        GL.glBindTexture(GL.GL_TEXTURE_3D, self._texture_id)
+        texture_filter = GL.GL_NEAREST if self._clarity_mode and self._render_mode == "still" else GL.GL_LINEAR
+        GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MIN_FILTER, texture_filter)
+        GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MAG_FILTER, texture_filter)
+        GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_S, GL.GL_CLAMP_TO_EDGE)
+        GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
+        GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_R, GL.GL_CLAMP_TO_EDGE)
+        GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
+        if np.dtype(self._volume_data.dtype) == np.uint16:
+            internal_format = GL.GL_LUMINANCE16
+            pixel_type = GL.GL_UNSIGNED_SHORT
+        else:
+            internal_format = GL.GL_LUMINANCE
+            pixel_type = GL.GL_UNSIGNED_BYTE
+        started = time.perf_counter()
+        GL.glTexImage3D(
+            GL.GL_TEXTURE_3D,
+            0,
+            internal_format,
+            int(width),
+            int(height),
+            int(depth),
+            0,
+            GL.GL_LUMINANCE,
+            pixel_type,
+            self._volume_data,
+        )
+        self._last_upload_ms = (time.perf_counter() - started) * 1000.0
+        self._uploaded_shape = (int(depth), int(height), int(width))
+        self._uploaded_bytes = int(self._volume_data.nbytes)
+        self._uploaded_dtype = str(self._volume_data.dtype)
+        GL.glBindTexture(GL.GL_TEXTURE_3D, 0)
+        self._upload_needed = False
+
+    def _draw_volume(self, viewport_width, viewport_height):
+        if not self._program or not self._quad_vbo or not self._texture_id:
+            return
+        GL.glUseProgram(self._program)
+        GL.glActiveTexture(GL.GL_TEXTURE0)
+        GL.glBindTexture(GL.GL_TEXTURE_3D, self._texture_id)
+        texture_filter = GL.GL_NEAREST if self._clarity_mode and self._render_mode == "still" else GL.GL_LINEAR
+        GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MIN_FILTER, texture_filter)
+        GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MAG_FILTER, texture_filter)
+        self._set_uniform_int("u_volume", 0)
+        self._set_uniform_float("u_cutoff", self._cutoff)
+        self._set_uniform_float("u_zoom", self._zoom)
+        self._set_uniform_vec2("u_pan", self._pan_x, self._pan_y)
+        self._set_uniform_float("u_front_clip", self._front_clip)
+        self._set_uniform_int("u_projection_mode", GPU_VOLUME_RENDER_MODES.get(self._projection_mode, 0))
+        clarity = 1.0 if self._clarity_mode and self._render_mode == "still" else 0.0
+        self._set_uniform_float("u_clarity", clarity)
+        self._set_uniform_float("u_opacity", 0.72 if clarity > 0.0 else (1.0 if self._render_mode == "still" else 0.82))
+        self._set_uniform_float("u_gradient_weight", 1.35 if clarity > 0.0 else (1.0 if self._render_mode == "still" else 0.72))
+        steps = max(256, min(GPU_VOLUME_MAX_RAY_STEPS, int(self._sample_steps)))
+        self._last_steps = int(steps)
+        self._set_uniform_int("u_steps", steps)
+        self._set_uniform_float("u_step_size", 1.58 / float(steps))
+        self._set_uniform_vec2("u_viewport", float(max(1, int(viewport_width))), float(max(1, int(viewport_height))))
+        depth, height, width = self._volume_shape
+        x_scale, y_scale, z_scale = volume_shape_scale(self._source_shape or self._volume_shape, self._source_spacing)
+        self._set_uniform_vec3("u_shape_scale", x_scale, y_scale, z_scale)
+        self._set_uniform_vec3("u_texel_step", 1.0 / max(float(width), 1.0), 1.0 / max(float(height), 1.0), 1.0 / max(float(depth), 1.0))
+        inv_rotation = _rotation_inverse_matrix(self._yaw, self._pitch)
+        camera_distance = camera_distance_for_inside_zoom((x_scale, y_scale, z_scale), inv_rotation, self._zoom, self._inside_depth)
+        self._set_uniform_float("u_camera_distance", camera_distance)
+        loc = GL.glGetUniformLocation(self._program, "u_inv_rotation")
+        if loc >= 0:
+            GL.glUniformMatrix3fv(loc, 1, GL.GL_TRUE, inv_rotation)
+
+        attr = GL.glGetAttribLocation(self._program, "a_position")
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self._quad_vbo)
+        GL.glEnableVertexAttribArray(attr)
+        GL.glVertexAttribPointer(attr, 2, GL.GL_FLOAT, False, 0, None)
+        started = time.perf_counter()
+        GL.glDrawArrays(GL.GL_TRIANGLE_STRIP, 0, 4)
+        GL.glFlush()
+        self._last_draw_ms = (time.perf_counter() - started) * 1000.0
+        GL.glDisableVertexAttribArray(attr)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
+        GL.glBindTexture(GL.GL_TEXTURE_3D, 0)
+        GL.glUseProgram(0)
+
+    def _set_uniform_float(self, name, value):
+        loc = GL.glGetUniformLocation(self._program, name)
+        if loc >= 0:
+            GL.glUniform1f(loc, float(value))
+
+    def _set_uniform_int(self, name, value):
+        loc = GL.glGetUniformLocation(self._program, name)
+        if loc >= 0:
+            GL.glUniform1i(loc, int(value))
+
+    def _set_uniform_vec2(self, name, x, y):
+        loc = GL.glGetUniformLocation(self._program, name)
+        if loc >= 0:
+            GL.glUniform2f(loc, float(x), float(y))
+
+    def _set_uniform_vec3(self, name, x, y, z):
+        loc = GL.glGetUniformLocation(self._program, name)
+        if loc >= 0:
+            GL.glUniform3f(loc, float(x), float(y), float(z))
+
+    def _release_render_core(self):
+        if not self._initialized:
+            return
+        if self._texture_id:
+            GL.glDeleteTextures([int(self._texture_id)])
+            self._texture_id = None
+        if self._quad_vbo:
+            GL.glDeleteBuffers(1, [int(self._quad_vbo)])
+            self._quad_vbo = None
+        if self._program:
+            GL.glDeleteProgram(self._program)
+            self._program = None
+        GL.glBindTexture(GL.GL_TEXTURE_3D, 0)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
+        GL.glUseProgram(0)
+        GL.glFinish()
+        self._initialized = False
+
+
+if gpu_volume_offscreen_available():
+
+    class TifGpuVolumeOffscreenRenderer(_GpuVolumeRenderCore):
+        """GPU ray marcher that renders into an FBO instead of a top-level widget."""
+
+        def __init__(self):
+            self._init_render_state()
+            self._context = None
+            self._surface = None
+            self._fbo = None
+            self._color_texture = None
+            self._fbo_size = (0, 0)
+
+        def initialize(self):
+            if self._initialized and self._context is not None:
+                return
+            fmt = QSurfaceFormat()
+            fmt.setDepthBufferSize(0)
+            fmt.setStencilBufferSize(0)
+            fmt.setSwapBehavior(QSurfaceFormat.SingleBuffer)
+            context = QOpenGLContext()
+            context.setFormat(fmt)
+            if not context.create():
+                raise RuntimeError("OpenGL offscreen context creation failed")
+            surface = QOffscreenSurface()
+            surface.setFormat(context.format())
+            surface.create()
+            if not surface.isValid():
+                raise RuntimeError("OpenGL offscreen surface creation failed")
+            if not context.makeCurrent(surface):
+                raise RuntimeError("OpenGL offscreen context makeCurrent failed")
+            self._context = context
+            self._surface = surface
+            try:
+                self._initialize_render_core()
+            except Exception:
+                context.doneCurrent()
+                raise
+            context.doneCurrent()
+
+        def set_volume_data(self, volume, source_shape=None, spacing_zyx=None):
+            return self._store_volume_data(volume, source_shape=source_shape, spacing_zyx=spacing_zyx)
+
+        def render_image(self, width, height):
+            display_width = max(1, int(width))
+            display_height = max(1, int(height))
+            scale = max(1.0, min(4.0, float(self.render_scale())))
+            width = max(1, int(round(display_width * scale)))
+            height = max(1, int(round(display_height * scale)))
+            self.initialize()
+            if self._failed or self._volume_data is None or not self._volume_shape:
+                return None
+            if not self._context.makeCurrent(self._surface):
+                raise RuntimeError("OpenGL offscreen context makeCurrent failed")
+            try:
+                self._ensure_fbo(width, height)
+                GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, self._fbo)
+                GL.glViewport(0, 0, width, height)
+                GL.glClearColor(0.027, 0.035, 0.039, 1.0)
+                GL.glClear(GL.GL_COLOR_BUFFER_BIT)
+                self._upload_volume_if_needed()
+                self._draw_volume(width, height)
+                GL.glPixelStorei(GL.GL_PACK_ALIGNMENT, 1)
+                pixels = GL.glReadPixels(0, 0, width, height, GL.GL_RGBA, GL.GL_UNSIGNED_BYTE)
+                image_data = np.frombuffer(pixels, dtype=np.uint8).reshape((height, width, 4))
+                image_data = np.ascontiguousarray(image_data[::-1])
+                return QImage(image_data.data, width, height, width * 4, QImage.Format_RGBA8888).copy()
+            finally:
+                GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, 0)
+                self._context.doneCurrent()
+
+        def _ensure_fbo(self, width, height):
+            size = (max(1, int(width)), max(1, int(height)))
+            if self._fbo and self._color_texture and self._fbo_size == size:
+                return
+            self._release_fbo()
+            self._color_texture = GL.glGenTextures(1)
+            GL.glBindTexture(GL.GL_TEXTURE_2D, self._color_texture)
+            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR)
+            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_LINEAR)
+            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_S, GL.GL_CLAMP_TO_EDGE)
+            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
+            GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_RGBA, size[0], size[1], 0, GL.GL_RGBA, GL.GL_UNSIGNED_BYTE, None)
+            self._fbo = GL.glGenFramebuffers(1)
+            GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, self._fbo)
+            GL.glFramebufferTexture2D(GL.GL_FRAMEBUFFER, GL.GL_COLOR_ATTACHMENT0, GL.GL_TEXTURE_2D, self._color_texture, 0)
+            status = GL.glCheckFramebufferStatus(GL.GL_FRAMEBUFFER)
+            GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
+            if status != GL.GL_FRAMEBUFFER_COMPLETE:
+                self._release_fbo()
+                raise RuntimeError(f"OpenGL offscreen framebuffer incomplete: {status}")
+            self._fbo_size = size
+
+        def _release_fbo(self):
+            if self._color_texture:
+                GL.glDeleteTextures([int(self._color_texture)])
+                self._color_texture = None
+            if self._fbo:
+                GL.glDeleteFramebuffers(1, [int(self._fbo)])
+                self._fbo = None
+            self._fbo_size = (0, 0)
+
+        def clear_volume(self):
+            if self._context is not None and self._surface is not None and self._context.makeCurrent(self._surface):
+                try:
+                    super().clear_volume()
+                finally:
+                    self._context.doneCurrent()
+            else:
+                self._volume_data = None
+                self._volume_shape = ()
+                self._source_shape = ()
+                self._source_spacing = ()
+                self._upload_needed = False
+                self._texture_id = None
+                self._uploaded_shape = ()
+                self._uploaded_bytes = 0
+                self._last_upload_ms = 0.0
+                self._last_draw_ms = 0.0
+                self._last_steps = 0
+                self._uploaded_dtype = ""
+
+        def release(self):
+            if self._context is not None and self._surface is not None and self._context.makeCurrent(self._surface):
+                try:
+                    self._release_fbo()
+                    self._release_render_core()
+                finally:
+                    self._context.doneCurrent()
+            self._surface = None
+            self._context = None
+
+    class TifGpuVolumeOffscreenWidget(QLabel):
+        """QLabel facade for the offscreen GPU renderer.
+
+        The top-level Qt window only sees a normal label and pixmap; OpenGL work
+        happens on a QOffscreenSurface, so QWebEngine/Agent composition stays
+        compatible with the TIF workbench.
+        """
+
+        render_failed = Signal(str)
+        render_info_changed = Signal(str)
+        render_stats_changed = Signal()
+
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            self._renderer = TifGpuVolumeOffscreenRenderer()
+            self.workbench = None
+            self._mouse_mode = ""
+            self._last_drag_pos = None
+            self._empty_text = "No TIF volume loaded"
+            self._failed = False
+            self._last_renderer_info = ""
+            self.setObjectName("tifVolumeCanvas")
+            self.setAlignment(Qt.AlignCenter)
+            self.setMinimumSize(360, 280)
+            self.setFocusPolicy(Qt.StrongFocus)
+            self.setFrameShape(QFrame.NoFrame)
+            self.setText(self._empty_text)
+
+        def setText(self, text):
+            self._empty_text = str(text or "")
+            super().setText(self._empty_text)
+
+        def initialize_renderer(self, emit_info=True):
+            self._renderer.initialize()
+            if emit_info:
+                self._emit_renderer_info()
+
+        def clear(self):
+            self.clear_volume()
+
+        def clear_volume(self):
+            self._renderer.clear_volume()
+            super().clear()
+            super().setText(self._empty_text)
+            self.render_stats_changed.emit()
+
+        def has_volume(self):
+            return self._renderer.has_volume() and not self._failed
+
+        def set_volume_data(self, volume, source_shape=None, spacing_zyx=None):
+            try:
+                self._renderer.set_volume_data(volume, source_shape=source_shape, spacing_zyx=spacing_zyx)
+                self._emit_renderer_info()
+                self._render_to_label()
+            except Exception as exc:
+                self._mark_failed(f"GPU offscreen texture upload failed: {exc}")
+
+        def set_render_state(self, *args, **kwargs):
+            try:
+                self._renderer.set_render_state(*args, **kwargs)
+                self._render_to_label()
+            except Exception as exc:
+                self._mark_failed(f"GPU offscreen render failed: {exc}")
+
+        def render_stats(self):
+            return self._renderer.render_stats()
+
+        def renderer_label(self):
+            return self._renderer.renderer_label()
+
+        def _emit_renderer_info(self):
+            details = self._renderer.renderer_details()
+            if details and details != self._last_renderer_info:
+                self._last_renderer_info = details
+                self.render_info_changed.emit(details)
+
+        def _render_to_label(self):
+            if self._failed or not self._renderer.has_volume():
+                return
+            image = self._renderer.render_image(max(1, self.width()), max(1, self.height()))
+            if image is None:
+                return
+            pixmap = QPixmap.fromImage(image)
+            if pixmap.width() != max(1, self.width()) or pixmap.height() != max(1, self.height()):
+                pixmap = pixmap.scaled(max(1, self.width()), max(1, self.height()), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.setPixmap(pixmap)
+            self.render_stats_changed.emit()
+
+        def resizeEvent(self, event):
+            super().resizeEvent(event)
+            try:
+                self._render_to_label()
+            except Exception as exc:
+                self._mark_failed(f"GPU offscreen resize render failed: {exc}")
+
+        def _mark_failed(self, reason):
+            if self._failed:
+                return
+            self._failed = True
+            self.render_failed.emit(str(reason or "GPU offscreen volume renderer failed"))
+
+        def mousePressEvent(self, event):
+            self.setFocus(Qt.MouseFocusReason)
+            if self.workbench is not None and event.button() in (Qt.LeftButton, Qt.RightButton):
+                self._mouse_mode = "rotate" if event.button() == Qt.LeftButton else "pan"
+                self._last_drag_pos = event.position()
+                event.accept()
+                return
+            super().mousePressEvent(event)
+
+        def mouseMoveEvent(self, event):
+            buttons = event.buttons()
+            active = (
+                (self._mouse_mode == "rotate" and buttons & Qt.LeftButton)
+                or (self._mouse_mode == "pan" and buttons & Qt.RightButton)
+            )
+            if self.workbench is not None and active and self._last_drag_pos is not None:
+                current = event.position()
+                dx = current.x() - self._last_drag_pos.x()
+                dy = current.y() - self._last_drag_pos.y()
+                self._last_drag_pos = current
+                if self._mouse_mode == "pan":
+                    self.workbench.pan_volume_preview(dx, dy)
+                else:
+                    self.workbench.rotate_volume_preview(dx, dy)
+                event.accept()
+                return
+            super().mouseMoveEvent(event)
+
+        def mouseReleaseEvent(self, event):
+            if event.button() in (Qt.LeftButton, Qt.RightButton) and self._mouse_mode:
+                self._mouse_mode = ""
+                self._last_drag_pos = None
+                event.accept()
+                return
+            super().mouseReleaseEvent(event)
+
+        def wheelEvent(self, event):
+            if self.workbench is None:
+                event.ignore()
+                return
+            delta = event.angleDelta().y()
+            if delta == 0:
+                event.ignore()
+                return
+            self.workbench.zoom_volume_preview(1 if delta > 0 else -1)
+            event.accept()
+
+        def release_gl_resources(self):
+            self._renderer.release()
+
+        def delete_texture(self):
+            self.release_gl_resources()
+
+        def closeEvent(self, event):
+            self.release_gl_resources()
+            super().closeEvent(event)
+
+else:
+    TifGpuVolumeOffscreenRenderer = None
+    TifGpuVolumeOffscreenWidget = None
 
 
 if gpu_volume_canvas_available():
@@ -733,9 +1447,12 @@ else:
 
 __all__ = [
     "TifGpuVolumeCanvas",
+    "TifGpuVolumeOffscreenRenderer",
+    "TifGpuVolumeOffscreenWidget",
     "GPU_VOLUME_MAX_TEXTURE_DIM",
     "GPU_VOLUME_MAX_RAY_STEPS",
     "gpu_volume_canvas_available",
+    "gpu_volume_offscreen_available",
     "gpu_volume_unavailable_reason",
     "camera_distance_for_inside_zoom",
     "front_clip_start_t",

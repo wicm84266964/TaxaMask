@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createInternalAgentRequest } from "../../src/agents/internal.js";
 import { buildCompactedContextMessage, clearSessionContext, compactSessionContext, compactSessionContextWithModel, createContextWindow, estimatePromptPayload, estimateTokensFromBytes, summarizeContextWindow } from "../../src/core/context-window.js";
 import { compactInFlightToolMessages } from "../../src/core/inflight-compaction.js";
 
@@ -40,7 +41,9 @@ test("context window compacts older messages into a bounded redacted summary", (
   assert.equal(summary.compacted, 1);
   assert.equal(summary.compactedMessages, 2);
   assert.match(message.content[0].text, /compacted conversation context/);
-  assert.doesNotMatch(message.content[0].text, /super-secret|private/);
+  assert.doesNotMatch(message.content[0].text, /super-secret/);
+  assert.match(message.content[0].text, /token=\[redacted\]/);
+  assert.match(message.content[0].text, /path=C:\\private\\file\.txt/);
 });
 
 test("model compaction summarizes older messages through the configured gateway", async () => {
@@ -99,7 +102,9 @@ test("model compaction summarizes older messages through the configured gateway"
   assert.equal(session.contextWindow.lastStrategy, "agent:compaction");
   assert.equal(session.contextWindow.lastInternalAgent, "compaction");
   assert.match(session.contextWindow.summary, /模型摘要/);
-  assert.doesNotMatch(session.contextWindow.summary, /super-secret|leaked|private/);
+  assert.doesNotMatch(session.contextWindow.summary, /super-secret|leaked/);
+  assert.match(session.contextWindow.summary, /token=\[redacted\]/);
+  assert.match(session.contextWindow.summary, /path=C:\\private\\paper\.txt/);
   assert.equal(requests.length, 1);
   assert.equal(requests[0].tools.length, 0);
   assert.match(requests[0].messages[0].content[0].text, /context compactor/);
@@ -107,6 +112,71 @@ test("model compaction summarizes older messages through the configured gateway"
   assert.match(requests[0].messages[1].content, /Conversation spine to preserve/);
   assert.match(requests[0].messages[1].content, /## Conversation spine/);
   assert.match(requests[0].messages[1].content, /Summarize large tool outputs/);
+  assert.doesNotMatch(requests[0].messages[1].content, /super-secret/);
+  assert.match(requests[0].messages[1].content, /path=C:\\private\\paper\.txt/);
+});
+
+test("internal compaction agent keeps full selected input by default", () => {
+  const sentinel = "KEEP_FULL_COMPACTION_INPUT_SENTINEL";
+  const input = `${"older context ".repeat(900)}${sentinel}`;
+
+  const result = createInternalAgentRequest({
+    profileName: "compaction",
+    task: "Create a durable compacted conversation summary.",
+    input
+  });
+
+  assert.equal(result.ok, true);
+  const userPrompt = result.request.messages[1].content;
+  assert.match(userPrompt, new RegExp(sentinel));
+  assert.doesNotMatch(userPrompt, /\[internal input truncated\]/);
+});
+
+test("model compaction preserves summaries beyond the old 8KB ceiling", async () => {
+  const longSection = "durable detail ".repeat(900);
+  const summaryText = [
+    "## Goal",
+    "Preserve a long-running task handoff.",
+    "## Conversation spine",
+    longSection,
+    "## Open questions and next steps",
+    "LONG_SUMMARY_AFTER_8KB_SENTINEL"
+  ].join("\n");
+  const session = {
+    id: "session-large-model-compact",
+    config: {},
+    contextWindow: createContextWindow(),
+    messages: [
+      { role: "user", content: "older request" },
+      { role: "assistant", content: [{ type: "text", text: "older final reply" }] },
+      { role: "user", content: "current request" }
+    ]
+  };
+  const gateway = {
+    configured: true,
+    async sendChat() {
+      return {
+        ok: true,
+        data: {
+          model: "mock-summarizer",
+          text: summaryText
+        }
+      };
+    }
+  };
+
+  const result = await compactSessionContextWithModel(session, {
+    force: true,
+    reason: "manual",
+    keepRecentMessages: 1,
+    gateway
+  });
+
+  assert.equal(result.compacted, true);
+  assert.ok(result.summaryBytes > 8192);
+  assert.match(session.contextWindow.summary, /^## Goal/);
+  assert.match(session.contextWindow.summary, /LONG_SUMMARY_AFTER_8KB_SENTINEL/);
+  assert.doesNotMatch(session.contextWindow.summary, /\[earlier compacted context omitted\]/);
 });
 
 test("model compaction falls back to local compaction when the gateway is unavailable", async () => {

@@ -10,7 +10,7 @@
 
 这次工作主要解决两个研究流程痛点。
 
-第一，项目刚开始没有 Locator / Blink 素材时，研究者需要从零手工给 SAM 画提示框。现在可以让多模态大模型先根据网格图提出候选框，再由 SAM 生成草稿 polygon，帮助完成最麻烦的“第一公里”。
+第一，项目刚开始没有 Locator / Blink 素材时，研究者需要从零手工给 SAM 画提示框。现在可以让多模态大模型先根据无网格输入图提出像素候选框，再由 SAM 生成草稿 polygon，帮助完成最麻烦的“第一公里”。
 
 第二，Blink 合并进主工作台后，父级上下文解析过于积极。新建部位在只有一个主部位时会看起来自动挂到该父部位下。现在已改为显式确认：只有用户手动选择父级，或项目已有明确 route，才会形成父子关系。
 
@@ -19,7 +19,7 @@
 1. 在 `2D/STL Model Settings -> Training` 的 `AI Multimodal Pre-Annotation` 区域勾选要交给 VLM 预标注的部位。
 2. 在 PDF Evidence Tools 中配置 Multimodal LLM API；缺少配置时，弹窗按钮会直接跳到 API 设置位置。
 3. 回到主标注工作台，选择当前图像，点击顶部右侧工具流里的 `VLM Pre-Annotate`。
-4. 程序生成网格图，调用多模态 API，解析候选框，并用候选框驱动 SAM 生成 `Auto-Annotated` 草稿。
+4. 程序生成无网格 VLM 输入图，调用多模态 API，解析候选框，并用候选框驱动 SAM 生成 `Auto-Annotated` 草稿。
 5. 复核时，如果草稿正确，可以按空格确认当前部位，或点击 `Accept current image AI drafts` 一键通过当前图像已有 polygon 草稿。
 6. 如果草稿错误，直接重新框选该部位并调用 SAM；人工结果会覆盖同部位 AI 草稿。
 
@@ -36,7 +36,7 @@
 
 ## 4. 主要源码位置
 
-- `AntSleap/core/vlm_preannotation.py`：网格图、prompt、API 调用、JSON 解析和报告留档。
+- `AntSleap/core/vlm_preannotation.py`：无网格 VLM 输入图、prompt、API 调用、JSON 解析和报告留档。
 - `AntSleap/main.py`：GUI 入口、设置读取、批量队列、进度条、SAM 草稿写回、一键通过、设置跳转和 Blink 父级修复。
 - `AntSleap/core/project.py`：VLM 设置、`auto_box_meta`、草稿确认状态和 AI 框清理。
 - `AntSleap/core/training_preflight.py`：训练预检跳过未复核 `Auto-Annotated` 草稿。
@@ -48,7 +48,7 @@
 
 真实运行时会生成：
 
-- 网格图：`<project_dir>/vlm_preannotation/*_grid_*.png`
+- VLM 输入图：`<project_dir>/vlm_preannotation/*_vlm_input_*.png`
 - 原始响应：`<project_dir>/vlm_preannotation/*_raw_response_*.txt`
 - 单图报告：`<project_dir>/vlm_preannotation/*_vlm_preannotation_*.json`
 - 批量汇总：`<project_dir>/vlm_preannotation/vlm_preannotation_summary_*.json`
@@ -88,4 +88,4 @@ python -m py_compile AntSleap/core/vlm_preannotation.py AntSleap/core/project.py
 - VLM 是否会把比例尺、文字、局部插图或其他视图错当目标结构；
 - 平均每张图节省多少手工框选时间。
 
-如果常见部位框的可用率不高，应先调整目标部位列表、prompt 和网格密度，再考虑扩大批量处理。
+如果常见部位框的可用率不高，应先调整目标部位列表、prompt 和置信度阈值，再考虑扩大批量处理。

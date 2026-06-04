@@ -878,6 +878,7 @@ async function ensureTurnState(active, options) {
     clientSurface: "dashboard",
     env: options.env,
     resume: options.sessionId || null,
+    resumeFullContext: Boolean(options.sessionId),
     readonly: false,
     allowWrite: options.mode === "workspace",
     allowCommand: options.mode === "workspace",

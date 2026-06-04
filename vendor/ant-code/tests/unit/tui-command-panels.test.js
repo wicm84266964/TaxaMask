@@ -185,7 +185,9 @@ test("/compact panel reflects real context compaction result", () => {
   assert.match(contextText, /本地压缩阈值：1k tokens/);
   assert.match(contextText, /最近方式：本地摘要/);
   assert.match(contextText, /摘要字节：/);
-  assert.doesNotMatch(session.contextWindow.summary, /secret|C:\\private/);
+  assert.doesNotMatch(session.contextWindow.summary, /token=secret/);
+  assert.match(session.contextWindow.summary, /token=\[redacted\]/);
+  assert.match(session.contextWindow.summary, /path=C:\\private\\one\.txt/);
   assertTerminalBounds(text, { columns: 100, rows: 16 });
 });
 

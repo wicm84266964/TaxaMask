@@ -49,7 +49,9 @@ try:
         GPU_VOLUME_MAX_RAY_STEPS,
         GPU_VOLUME_MAX_TEXTURE_DIM,
         TifGpuVolumeCanvas,
+        TifGpuVolumeOffscreenWidget,
         gpu_volume_canvas_available,
+        gpu_volume_offscreen_available,
         gpu_volume_unavailable_reason,
         volume_shape_scale,
     )
@@ -68,7 +70,9 @@ except ModuleNotFoundError as exc:
         GPU_VOLUME_MAX_RAY_STEPS,
         GPU_VOLUME_MAX_TEXTURE_DIM,
         TifGpuVolumeCanvas,
+        TifGpuVolumeOffscreenWidget,
         gpu_volume_canvas_available,
+        gpu_volume_offscreen_available,
         gpu_volume_unavailable_reason,
         volume_shape_scale,
     )
@@ -87,6 +91,8 @@ TIF_TRANSLATIONS = {
         "Specimens": "Specimen",
         "Volume slices": "体数据切片",
         "Volume controls": "体数据控制",
+        "Slice display": "切片显示",
+        "3D rendering": "三维体渲染",
         "Annotation tools": "标注工具",
         "Model training": "模型训练",
         "Model configuration": "模型配置",
@@ -95,9 +101,17 @@ TIF_TRANSLATIONS = {
         "Slice review": "切片复核",
         "3D volume": "三维体预览",
         "Volume render": "体渲染",
+        "Render mode": "渲染模式",
+        "Composite": "透明累积",
+        "MIP": "最大强度",
+        "MinIP": "最小强度",
+        "Average": "平均强度",
+        "Surface": "表面边界",
         "Density cutoff": "密度阈值",
         "Render quality": "渲染质量",
         "Ray samples": "光线采样",
+        "ROI high detail": "ROI 高清",
+        "ROI scale": "ROI 倍率",
         "Inside depth": "视点深度",
         "Front cut": "近端剖切",
         "Transfer function": "密度映射",
@@ -128,9 +142,14 @@ TIF_TRANSLATIONS = {
         "Sharp": "清晰",
         "Smooth": "平滑",
         "Data": "数据",
+        "Mode": "模式",
+        "ROI": "ROI",
         "Filters low-gray background and noise. Raise it for outer shape review; lower it when weak internal structures disappear.": "密度映射的起点。调高会过滤背景和噪声，适合看外轮廓；调低会保留弱信号，适合找内部淡结构。",
+        "Switches how values along the viewing ray are projected. MIP highlights bright structures, MinIP highlights dark gaps, Average shows density trend, and Surface emphasizes boundaries.": "切换视线方向上的体数据投影方式。最大强度适合看亮结构，最小强度适合看暗间隙，平均强度适合看整体密度，表面边界适合看轮廓。",
         "Controls the maximum edge length of the still GPU volume. Dragging uses a smaller temporary texture, then rebuilds this sharper texture when the view settles.": "控制静止高清时上传到 GPU 的体数据最大边长。拖动时会临时用较小纹理，停下后自动重建这个高清纹理；3090 可尝试 1024 到 2048。",
         "Controls the number of samples per screen pixel along the viewing ray. Higher values stabilize internal layers and fine lines, mainly increasing GPU compute load.": "控制每个屏幕像素沿视线取样次数。数值越高，内部层次和细线更稳定，但主要增加 GPU 计算负载；如果转动不卡，可继续调高。",
+        "When zoomed in and still, renders the 3D view at a higher offscreen pixel density before scaling it back, improving small-part inspection at the cost of more GPU readback work.": "静止且放大观察时，先用更高离屏像素密度渲染三维体，再缩回当前显示区域。它能改善小部位观察，但会增加 GPU 读回和显示成本。",
+        "Controls the offscreen supersampling factor used by ROI high detail. Higher values make still zoomed views smoother but heavier.": "控制 ROI 高清的离屏超采样倍数。数值越高，静止放大视图越平滑，但负载也更重。",
         "Sharp still rendering keeps more source intensity detail and uses crisper sampling. It may upload more data and can look grainier while revealing fine internal structures.": "静止高清时尽量保留原始灰度层次，并使用更锐利的采样。它会上传更多数据，画面可能更有颗粒感，但更容易看清细小内部结构。",
         "Moves the camera into the volume. Use it to enter the specimen and inspect internal structures; keep it at 0 for outer shape review.": "移动观察点。0 在样本外看整体，100 接近样本中心，100 以上继续进入更深内部；它不切掉体数据，只改变你站在哪里看。",
         "Cuts away the front part of the current view. Use it to remove blocking outer tissue and inspect deeper structures; keep it at 0 for the full outline.": "从当前视角靠近屏幕的一侧切掉一段体数据。它不移动观察点，只移除挡在眼前的近端外层；看完整外轮廓时保持为 0。",
@@ -325,6 +344,23 @@ class WheelSafeComboBox(QComboBox):
 class WheelSafeSlider(QSlider):
     def wheelEvent(self, event):
         event.ignore()
+
+    def _tif_shortcut_parent(self):
+        parent = self.parent()
+        while parent is not None:
+            if callable(getattr(parent, "_handle_slice_shortcut_key", None)):
+                return parent
+            parent = parent.parent()
+        return None
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down):
+            parent = self._tif_shortcut_parent()
+            handler = getattr(parent, "_handle_slice_shortcut_key", None)
+            if callable(handler) and handler(event.key()):
+                event.accept()
+                return
+        super().keyPressEvent(event)
 
 
 class WheelSafeSpinBox(QSpinBox):
@@ -558,7 +594,7 @@ class TifVolumeCanvas(QLabel):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if self.workbench is not None:
-            self.workbench.render_volume_preview()
+            self.workbench.schedule_volume_preview_render()
 
     def _draw_status_overlay(self, painter):
         if self.workbench is None:
@@ -627,10 +663,23 @@ class TifVolumeCanvas(QLabel):
 
 
 def create_tif_volume_canvas(parent=None):
-    if gpu_volume_canvas_available() and TifGpuVolumeCanvas is not None:
+    gpu_flag = os.environ.get("TAXAMASK_TIF_GPU_VOLUME_PREVIEW", "").strip().lower()
+    if gpu_flag in {"0", "false", "no", "off"}:
+        return TifVolumeCanvas(parent), "cpu", "GPU volume preview disabled by TAXAMASK_TIF_GPU_VOLUME_PREVIEW."
+    if gpu_volume_offscreen_available() and TifGpuVolumeOffscreenWidget is not None:
+        try:
+            canvas = TifGpuVolumeOffscreenWidget(parent)
+            if hasattr(canvas, "initialize_renderer"):
+                canvas.initialize_renderer(emit_info=False)
+            canvas.setProperty("tifVolumeRenderer", "gpu-offscreen")
+            return canvas, "gpu", ""
+        except Exception as exc:
+            return TifVolumeCanvas(parent), "cpu", str(exc)
+    legacy_flag = os.environ.get("TAXAMASK_TIF_EMBEDDED_QOPENGLWIDGET", "").strip().lower()
+    if legacy_flag in {"1", "true", "yes", "on"} and gpu_volume_canvas_available() and TifGpuVolumeCanvas is not None:
         try:
             canvas = TifGpuVolumeCanvas(parent)
-            canvas.setProperty("tifVolumeRenderer", "gpu")
+            canvas.setProperty("tifVolumeRenderer", "gpu-embedded")
             return canvas, "gpu", ""
         except Exception as exc:
             return TifVolumeCanvas(parent), "cpu", str(exc)
@@ -704,6 +753,8 @@ class TifWorkbenchWidget(QWidget):
         self._volume_canvas_renderer = "cpu"
         self._volume_renderer_warning = ""
         self._volume_gl_renderer_info = ""
+        self._volume_render_scheduled = False
+        self._handling_gpu_volume_failure = False
         self._volume_yaw = -35.0
         self._volume_pitch = 20.0
         self._volume_zoom = 1.0
@@ -717,14 +768,10 @@ class TifWorkbenchWidget(QWidget):
 
         self.canvas = TifSliceCanvas()
         self.canvas.workbench = self
-        self.volume_canvas, self._volume_canvas_renderer, self._volume_renderer_warning = create_tif_volume_canvas()
+        self.volume_canvas = TifVolumeCanvas()
         self.volume_canvas.workbench = self
-        if hasattr(self.volume_canvas, "render_failed"):
-            self.volume_canvas.render_failed.connect(self._on_gpu_volume_failed)
-        if hasattr(self.volume_canvas, "render_info_changed"):
-            self.volume_canvas.render_info_changed.connect(self._on_gpu_volume_info_changed)
-        if hasattr(self.volume_canvas, "render_stats_changed"):
-            self.volume_canvas.render_stats_changed.connect(self._on_gpu_volume_stats_changed)
+        self.volume_canvas.setProperty("tifVolumeRenderer", "placeholder")
+        self._volume_canvas_created = False
         if hasattr(self, "volume_render_status_label"):
             self.volume_render_status_label.setVisible(False)
         self._reset_canvas_view_on_next_render = False
@@ -766,6 +813,9 @@ class TifWorkbenchWidget(QWidget):
         self.volume_cutoff_slider.setRange(0, 95)
         self.volume_cutoff_slider.setValue(35)
         self.volume_cutoff_slider.valueChanged.connect(self.render_volume_preview)
+        self.volume_projection_combo = WheelSafeComboBox()
+        self.volume_projection_combo.setObjectName("tifVolumeProjectionCombo")
+        self.volume_projection_combo.currentIndexChanged.connect(self._on_volume_projection_changed)
         self.volume_quality_slider = WheelSafeSlider(Qt.Horizontal)
         self.volume_quality_slider.setObjectName("tifVolumeQualitySlider")
         self.volume_quality_slider.setRange(128, GPU_VOLUME_MAX_TEXTURE_DIM)
@@ -779,6 +829,15 @@ class TifWorkbenchWidget(QWidget):
         self.volume_clarity_check = QCheckBox("Clarity mode")
         self.volume_clarity_check.setObjectName("tifVolumeClarityCheck")
         self.volume_clarity_check.toggled.connect(self._on_volume_clarity_toggled)
+        self.volume_roi_detail_check = QCheckBox("ROI high detail")
+        self.volume_roi_detail_check.setObjectName("tifVolumeRoiDetailCheck")
+        self.volume_roi_detail_check.setChecked(True)
+        self.volume_roi_detail_check.toggled.connect(self.render_volume_preview)
+        self.volume_roi_scale_slider = WheelSafeSlider(Qt.Horizontal)
+        self.volume_roi_scale_slider.setObjectName("tifVolumeRoiScaleSlider")
+        self.volume_roi_scale_slider.setRange(100, 300)
+        self.volume_roi_scale_slider.setValue(200)
+        self.volume_roi_scale_slider.valueChanged.connect(self.render_volume_preview)
         self.volume_inside_slider = WheelSafeSlider(Qt.Horizontal)
         self.volume_inside_slider.setObjectName("tifVolumeInsideSlider")
         self.volume_inside_slider.setRange(0, 160)
@@ -902,6 +961,7 @@ class TifWorkbenchWidget(QWidget):
         self._apply_soft_style()
         self._load_backend_config_into_ui()
         self._update_texts()
+        self._sync_mode_sections()
         self.refresh_project()
 
     def _style_button(self, button, role="secondary", full_width=False):
@@ -970,6 +1030,22 @@ class TifWorkbenchWidget(QWidget):
         self.display_mode_combo.setCurrentIndex(index if index >= 0 else 0)
         self.display_mode_combo.blockSignals(False)
 
+    def _populate_volume_projection_combo(self):
+        current = self.volume_projection_combo.currentData() if self.volume_projection_combo.count() else "composite"
+        self.volume_projection_combo.blockSignals(True)
+        self.volume_projection_combo.clear()
+        for mode, label in (
+            ("composite", "Composite"),
+            ("mip", "MIP"),
+            ("minip", "MinIP"),
+            ("average", "Average"),
+            ("surface", "Surface"),
+        ):
+            self.volume_projection_combo.addItem(tt(label, self.lang), mode)
+        index = self.volume_projection_combo.findData(current)
+        self.volume_projection_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.volume_projection_combo.blockSignals(False)
+
     def change_language(self, lang):
         self.lang = lang
         self._update_texts()
@@ -983,6 +1059,7 @@ class TifWorkbenchWidget(QWidget):
             label.setText(tt(title, self.lang))
         self._populate_label_role_combo()
         self._populate_display_mode_combo()
+        self._populate_volume_projection_combo()
         if self.image_volume is None:
             if self.specimen_list.count():
                 self.canvas.setText(tt("Working volume missing", self.lang))
@@ -997,10 +1074,13 @@ class TifWorkbenchWidget(QWidget):
         self.overlay_label.setText(tt("Overlay", self.lang))
         self.brightness_label.setText(tt("Brightness", self.lang))
         self.contrast_label.setText(tt("Contrast", self.lang))
+        self.volume_projection_label.setText(tt("Render mode", self.lang))
         self.volume_cutoff_label.setText(tt("Density cutoff", self.lang))
         self.volume_quality_label.setText(tt("Render quality", self.lang))
         self.volume_sample_label.setText(tt("Ray samples", self.lang))
         self.volume_clarity_check.setText(tt("Clarity mode", self.lang))
+        self.volume_roi_detail_check.setText(tt("ROI high detail", self.lang))
+        self.volume_roi_scale_label.setText(tt("ROI scale", self.lang))
         self.volume_inside_label.setText(tt("Inside depth", self.lang))
         self.volume_clip_label.setText(tt("Front cut", self.lang))
         self.btn_reset_volume_view.setText(tt("Reset 3D view", self.lang))
@@ -1042,6 +1122,11 @@ class TifWorkbenchWidget(QWidget):
     def _update_volume_control_tooltips(self):
         pairs = (
             (
+                self.volume_projection_label,
+                self.volume_projection_combo,
+                "Switches how values along the viewing ray are projected. MIP highlights bright structures, MinIP highlights dark gaps, Average shows density trend, and Surface emphasizes boundaries.",
+            ),
+            (
                 self.volume_cutoff_label,
                 self.volume_cutoff_slider,
                 "Filters low-gray background and noise. Raise it for outer shape review; lower it when weak internal structures disappear.",
@@ -1060,6 +1145,16 @@ class TifWorkbenchWidget(QWidget):
                 self.volume_clarity_check,
                 self.volume_clarity_check,
                 "Sharp still rendering keeps more source intensity detail and uses crisper sampling. It may upload more data and can look grainier while revealing fine internal structures.",
+            ),
+            (
+                self.volume_roi_detail_check,
+                self.volume_roi_detail_check,
+                "When zoomed in and still, renders the 3D view at a higher offscreen pixel density before scaling it back, improving small-part inspection at the cost of more GPU readback work.",
+            ),
+            (
+                self.volume_roi_scale_label,
+                self.volume_roi_scale_slider,
+                "Controls the offscreen supersampling factor used by ROI high detail. Higher values make still zoomed views smoother but heavier.",
             ),
             (
                 self.volume_inside_label,
@@ -1138,10 +1233,13 @@ class TifWorkbenchWidget(QWidget):
             "volume_renderer": self._volume_canvas_renderer,
             "volume_renderer_label": self._volume_renderer_label(),
             "volume_render_mode": self._volume_render_mode,
+            "volume_projection_mode": self._volume_projection_mode(),
             "volume_density_cutoff": f"{int(self.volume_cutoff_slider.value())}%",
             "volume_texture_target_dim": str(self._active_volume_target_dim()),
             "volume_ray_samples": str(self._active_volume_sample_count()),
             "volume_clarity_mode": clarity,
+            "volume_roi_high_detail": "on" if self.volume_roi_detail_check.isChecked() else "off",
+            "volume_roi_scale": f"{self._active_volume_roi_scale():.1f}x",
             "volume_inside_depth": f"{int(self.volume_inside_slider.value())}%",
             "volume_front_cut": f"{int(self.volume_clip_slider.value())}%",
             "volume_zoom": f"{int(round(float(self._volume_zoom) * 100))}%",
@@ -1199,11 +1297,9 @@ class TifWorkbenchWidget(QWidget):
         target = max(self.slice_slider.minimum(), min(self.slice_slider.maximum(), current + int(delta)))
         if target == current:
             return
-        self._reset_canvas_view_on_next_render = True
         self.slice_slider.setValue(target)
 
     def on_slice_slider_changed(self):
-        self._reset_canvas_view_on_next_render = True
         self._slice_positions[self._current_slice_axis()] = int(self.slice_slider.value())
         self.render_current_slice()
 
@@ -1221,15 +1317,21 @@ class TifWorkbenchWidget(QWidget):
     def on_display_mode_changed(self):
         mode = self.display_mode_combo.currentData() or "slice"
         self.display_mode = mode if mode in {"slice", "volume"} else "slice"
+        if self.display_mode == "volume":
+            self._ensure_volume_canvas()
         if hasattr(self, "view_stack"):
             self.view_stack.setCurrentWidget(self.volume_canvas if self.display_mode == "volume" else self.canvas)
         if hasattr(self, "volume_render_status_label"):
             self.volume_render_status_label.setVisible(self.display_mode == "volume")
+        self._sync_mode_sections()
         is_volume = self.display_mode == "volume"
         volume_mode_controls = (
             self.volume_sample_label,
             self.volume_sample_slider,
             self.volume_clarity_check,
+            self.volume_roi_detail_check,
+            self.volume_roi_scale_label,
+            self.volume_roi_scale_slider,
             self.volume_inside_label,
             self.volume_inside_slider,
             self.volume_clip_label,
@@ -1244,6 +1346,9 @@ class TifWorkbenchWidget(QWidget):
             self.volume_sample_label,
             self.volume_sample_slider,
             self.volume_clarity_check,
+            self.volume_roi_detail_check,
+            self.volume_roi_scale_label,
+            self.volume_roi_scale_slider,
             self.volume_inside_label,
             self.volume_inside_slider,
             self.volume_clip_label,
@@ -1258,6 +1363,88 @@ class TifWorkbenchWidget(QWidget):
             self.render_volume_preview()
         else:
             self.render_current_slice()
+
+    def _sync_mode_sections(self):
+        is_volume = self.display_mode == "volume"
+        if hasattr(self, "slice_display_section"):
+            self.slice_display_section.setVisible(not is_volume)
+        if hasattr(self, "annotation_section"):
+            self.annotation_section.setVisible(not is_volume)
+        if hasattr(self, "volume_render_section"):
+            self.volume_render_section.setVisible(is_volume)
+
+    def _connect_volume_canvas_signals(self, canvas):
+        if hasattr(canvas, "render_failed"):
+            canvas.render_failed.connect(self._on_gpu_volume_failed)
+        if hasattr(canvas, "render_info_changed"):
+            canvas.render_info_changed.connect(self._on_gpu_volume_info_changed)
+        if hasattr(canvas, "render_stats_changed"):
+            canvas.render_stats_changed.connect(self._on_gpu_volume_stats_changed)
+
+    def _ensure_volume_canvas(self, force_gpu=False):
+        if self._volume_canvas_created and not force_gpu:
+            return
+        old_canvas = getattr(self, "volume_canvas", None)
+        if force_gpu and old_canvas is not None and hasattr(old_canvas, "release_gl_resources"):
+            try:
+                old_canvas.release_gl_resources()
+            except Exception:
+                pass
+        canvas, renderer, warning = create_tif_volume_canvas()
+        canvas.workbench = self
+        if not hasattr(canvas, "set_volume_data"):
+            canvas.setProperty("tifVolumeRenderer", "cpu")
+            renderer = "cpu"
+        self._connect_volume_canvas_signals(canvas)
+        self.volume_canvas = canvas
+        self._volume_canvas_renderer = renderer
+        self._volume_renderer_warning = warning
+        self._volume_canvas_created = True
+        if hasattr(self, "view_stack"):
+            self.view_stack.addWidget(self.volume_canvas)
+            if self.display_mode == "volume":
+                self.view_stack.setCurrentWidget(self.volume_canvas)
+            if old_canvas is not None:
+                index = self.view_stack.indexOf(old_canvas)
+                if index >= 0:
+                    self.view_stack.removeWidget(old_canvas)
+        if old_canvas is not None:
+            old_canvas.hide()
+            old_canvas.setParent(None)
+            old_canvas.deleteLater()
+        if warning:
+            self.log(tt("GPU renderer unavailable. Using CPU fallback.", self.lang) + f" {warning}")
+
+    def _reset_volume_canvas_placeholder_for_agent(self):
+        canvas = getattr(self, "volume_canvas", None)
+        if canvas is None or not getattr(self, "_volume_canvas_created", False):
+            return
+        renderer_kind = str(canvas.property("tifVolumeRenderer") or "")
+        if renderer_kind == "gpu-offscreen":
+            return
+        if hasattr(canvas, "release_gl_resources"):
+            try:
+                canvas.release_gl_resources()
+            except Exception:
+                pass
+        placeholder = TifVolumeCanvas()
+        placeholder.workbench = self
+        placeholder.setProperty("tifVolumeRenderer", "placeholder")
+        self.volume_canvas = placeholder
+        self._volume_canvas_renderer = "cpu"
+        self._volume_renderer_warning = ""
+        self._volume_gl_renderer_info = ""
+        self._volume_canvas_created = False
+        if hasattr(self, "view_stack"):
+            self.view_stack.addWidget(self.volume_canvas)
+            if self.display_mode == "volume":
+                self.view_stack.setCurrentWidget(self.volume_canvas)
+            index = self.view_stack.indexOf(canvas)
+            if index >= 0:
+                self.view_stack.removeWidget(canvas)
+        canvas.hide()
+        canvas.setParent(None)
+        canvas.deleteLater()
 
     def _label_role_help_text(self, role=None):
         role = role or self.label_role_combo.currentData()
@@ -1695,44 +1882,65 @@ class TifWorkbenchWidget(QWidget):
         import_layout.addLayout(import_button_row)
         inspector_layout.addWidget(import_section)
 
-        annotation_section, annotation_layout = self._make_section("Annotation tools", "tifAnnotationSection")
-        controls = QGridLayout()
-        controls.setHorizontalSpacing(10)
-        controls.setVerticalSpacing(8)
+        self.slice_display_section, slice_display_layout = self._make_section("Slice display", "tifSliceDisplaySection")
+        slice_controls = QGridLayout()
+        slice_controls.setHorizontalSpacing(10)
+        slice_controls.setVerticalSpacing(8)
         self.label_layer_label = QLabel("Label layer")
         self.overlay_label = QLabel("Overlay")
         self.brightness_label = QLabel("Brightness")
         self.contrast_label = QLabel("Contrast")
+        slice_controls.addWidget(self.overlay_label, 0, 0)
+        slice_controls.addWidget(self.opacity_slider, 0, 1)
+        slice_controls.addWidget(self.brightness_label, 1, 0)
+        slice_controls.addWidget(self.brightness_slider, 1, 1)
+        slice_controls.addWidget(self.contrast_label, 2, 0)
+        slice_controls.addWidget(self.contrast_slider, 2, 1)
+        slice_display_layout.addLayout(slice_controls)
+        inspector_layout.addWidget(self.slice_display_section)
+
+        self.volume_render_section, volume_render_layout = self._make_section("3D rendering", "tifVolumeRenderSection")
+        volume_controls = QGridLayout()
+        volume_controls.setHorizontalSpacing(10)
+        volume_controls.setVerticalSpacing(8)
+        self.volume_projection_label = QLabel("Render mode")
         self.volume_cutoff_label = QLabel("Density cutoff")
         self.volume_quality_label = QLabel("Render quality")
         self.volume_sample_label = QLabel("Ray samples")
+        self.volume_roi_scale_label = QLabel("ROI scale")
         self.volume_inside_label = QLabel("Inside depth")
         self.volume_clip_label = QLabel("Front cut")
+        volume_controls.addWidget(self.volume_projection_label, 0, 0)
+        volume_controls.addWidget(self.volume_projection_combo, 0, 1)
+        volume_controls.addWidget(self.volume_cutoff_label, 1, 0)
+        volume_controls.addWidget(self.volume_cutoff_slider, 1, 1)
+        volume_controls.addWidget(self.volume_quality_label, 2, 0)
+        volume_controls.addWidget(self.volume_quality_slider, 2, 1)
+        volume_controls.addWidget(self.volume_sample_label, 3, 0)
+        volume_controls.addWidget(self.volume_sample_slider, 3, 1)
+        volume_controls.addWidget(self.volume_clarity_check, 4, 0, 1, 2)
+        volume_controls.addWidget(self.volume_roi_detail_check, 5, 0, 1, 2)
+        volume_controls.addWidget(self.volume_roi_scale_label, 6, 0)
+        volume_controls.addWidget(self.volume_roi_scale_slider, 6, 1)
+        volume_controls.addWidget(self.volume_inside_label, 7, 0)
+        volume_controls.addWidget(self.volume_inside_slider, 7, 1)
+        volume_controls.addWidget(self.volume_clip_label, 8, 0)
+        volume_controls.addWidget(self.volume_clip_slider, 8, 1)
+        volume_render_layout.addLayout(volume_controls)
+        volume_render_layout.addWidget(self.btn_reset_volume_view)
+        inspector_layout.addWidget(self.volume_render_section)
+
+        self.annotation_section, annotation_layout = self._make_section("Annotation tools", "tifAnnotationSection")
+        controls = QGridLayout()
+        controls.setHorizontalSpacing(10)
+        controls.setVerticalSpacing(8)
         self.brush_size_label = QLabel("Brush size")
         controls.addWidget(self.label_layer_label, 0, 0)
         controls.addWidget(self.label_role_combo, 0, 1)
-        controls.addWidget(self.overlay_label, 1, 0)
-        controls.addWidget(self.opacity_slider, 1, 1)
-        controls.addWidget(self.brightness_label, 2, 0)
-        controls.addWidget(self.brightness_slider, 2, 1)
-        controls.addWidget(self.contrast_label, 3, 0)
-        controls.addWidget(self.contrast_slider, 3, 1)
-        controls.addWidget(self.volume_cutoff_label, 4, 0)
-        controls.addWidget(self.volume_cutoff_slider, 4, 1)
-        controls.addWidget(self.volume_quality_label, 5, 0)
-        controls.addWidget(self.volume_quality_slider, 5, 1)
-        controls.addWidget(self.volume_sample_label, 6, 0)
-        controls.addWidget(self.volume_sample_slider, 6, 1)
-        controls.addWidget(self.volume_clarity_check, 7, 0, 1, 2)
-        controls.addWidget(self.volume_inside_label, 8, 0)
-        controls.addWidget(self.volume_inside_slider, 8, 1)
-        controls.addWidget(self.volume_clip_label, 9, 0)
-        controls.addWidget(self.volume_clip_slider, 9, 1)
-        controls.addWidget(self.brush_size_label, 10, 0)
-        controls.addWidget(self.brush_size_slider, 10, 1)
+        controls.addWidget(self.brush_size_label, 1, 0)
+        controls.addWidget(self.brush_size_slider, 1, 1)
         annotation_layout.addLayout(controls)
         annotation_layout.addWidget(self.label_role_help_label)
-        annotation_layout.addWidget(self.btn_reset_volume_view)
         button_row = QHBoxLayout()
         button_row.addWidget(self.btn_undo)
         button_row.addWidget(self.btn_redo)
@@ -1741,7 +1949,7 @@ class TifWorkbenchWidget(QWidget):
         annotation_layout.addWidget(self.btn_save_edit)
         annotation_layout.addWidget(self.btn_promote)
         annotation_layout.addWidget(self.btn_copy_draft)
-        inspector_layout.addWidget(annotation_section)
+        inspector_layout.addWidget(self.annotation_section)
 
         material_section, material_layout = self._make_section("Material map", "tifMaterialSection")
         material_button_row = QHBoxLayout()
@@ -1815,6 +2023,8 @@ class TifWorkbenchWidget(QWidget):
                 border: none;
             }
             QFrame#tifImportSection,
+            QFrame#tifSliceDisplaySection,
+            QFrame#tifVolumeRenderSection,
             QFrame#tifAnnotationSection,
             QFrame#tifMaterialSection,
             QFrame#tifTrainingSection,
@@ -2009,6 +2219,28 @@ class TifWorkbenchWidget(QWidget):
         self.backend_config = sanitize_tif_backend_config(config)
         self._load_backend_config_into_ui()
 
+    def _handle_slice_shortcut_key(self, key):
+        if self.display_mode == "slice":
+            if key == Qt.Key_Left:
+                self.move_slice(-1)
+                return True
+            if key == Qt.Key_Right:
+                self.move_slice(1)
+                return True
+            if key == Qt.Key_Up:
+                self.canvas.zoom_in()
+                return True
+            if key == Qt.Key_Down:
+                self.canvas.zoom_out()
+                return True
+        return False
+
+    def keyPressEvent(self, event):
+        if self._handle_slice_shortcut_key(event.key()):
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
     def close_project(self, prompt_unsaved=True):
         if prompt_unsaved and not self._confirm_discard_or_save_working_edit():
             return False
@@ -2038,6 +2270,7 @@ class TifWorkbenchWidget(QWidget):
         if hasattr(self, "volume_still_timer"):
             self.volume_still_timer.stop()
         if self.display_mode != "volume":
+            self._reset_volume_canvas_placeholder_for_agent()
             return
         self.display_mode = "slice"
         index = self.display_mode_combo.findData("slice") if hasattr(self, "display_mode_combo") else -1
@@ -2046,6 +2279,7 @@ class TifWorkbenchWidget(QWidget):
             self.display_mode_combo.setCurrentIndex(index)
             self.display_mode_combo.blockSignals(False)
         self.on_display_mode_changed()
+        self._reset_volume_canvas_placeholder_for_agent()
 
     def release_volume_renderer(self):
         canvas = getattr(self, "volume_canvas", None)
@@ -2465,8 +2699,10 @@ class TifWorkbenchWidget(QWidget):
             f"{tt('Volume view', self.lang)} | "
             f"{self._volume_renderer_label()} | "
             f"{self._volume_mode_label()} | "
+            f"{tt('Mode', self.lang)} {self._volume_projection_label()} | "
             f"{tt('Texture', self.lang)} {self._active_volume_target_dim()} | "
             f"{tt('Samples', self.lang)} {self._active_volume_sample_count()} | "
+            f"{tt('ROI', self.lang)} {self._active_volume_roi_scale():.1f}x | "
             f"{tt('Inside', self.lang)} {int(self.volume_inside_slider.value())}% | "
             f"{tt('Cut', self.lang)} {int(self.volume_clip_slider.value())}% | "
             f"{tt('Zoom', self.lang)} {int(round(self._volume_zoom * 100))}%"
@@ -2478,10 +2714,39 @@ class TifWorkbenchWidget(QWidget):
     def _volume_mode_label(self):
         return tt("Drag preview", self.lang) if self._volume_render_mode == "drag" else tt("Still high quality", self.lang)
 
+    def _volume_projection_mode(self):
+        if hasattr(self, "volume_projection_combo"):
+            mode = self.volume_projection_combo.currentData()
+            if mode in {"composite", "mip", "minip", "average", "surface"}:
+                return mode
+        return "composite"
+
+    def _volume_projection_label(self):
+        labels = {
+            "composite": "Composite",
+            "mip": "MIP",
+            "minip": "MinIP",
+            "average": "Average",
+            "surface": "Surface",
+        }
+        return tt(labels.get(self._volume_projection_mode(), "Composite"), self.lang)
+
+    def _active_volume_roi_scale(self):
+        if self._volume_canvas_renderer != "gpu" or self._volume_render_mode != "still":
+            return 1.0
+        if not getattr(self, "volume_roi_detail_check", None) or not self.volume_roi_detail_check.isChecked():
+            return 1.0
+        if float(self._volume_zoom) <= 1.01:
+            return 1.0
+        return max(1.0, min(3.0, float(self.volume_roi_scale_slider.value()) / 100.0))
+
     def _active_volume_sample_count(self):
         samples = int(self.volume_sample_slider.value())
         if self._volume_render_mode == "drag" and self._volume_canvas_renderer == "gpu":
             return max(256, min(samples, 768))
+        roi_scale = self._active_volume_roi_scale()
+        if roi_scale > 1.0 and self._volume_canvas_renderer == "gpu":
+            return max(256, min(GPU_VOLUME_MAX_RAY_STEPS, int(round(samples * min(1.5, roi_scale)))))
         return samples
 
     def _volume_stats_text(self):
@@ -2495,6 +2760,12 @@ class TifWorkbenchWidget(QWidget):
         dtype = str(stats.get("dtype") or "")
         if dtype:
             parts.append(f"{tt('Data', self.lang)} {dtype}")
+        projection = str(stats.get("projection_mode") or "")
+        if projection:
+            parts.append(f"{tt('Mode', self.lang)} {self._volume_projection_label()}")
+        supersample = float(stats.get("supersample_scale") or 1.0)
+        if supersample > 1.01:
+            parts.append(f"{tt('ROI', self.lang)} {supersample:.1f}x")
         byte_count = int(stats.get("bytes") or 0)
         if byte_count > 0:
             parts.append(f"{tt('VRAM', self.lang)} {byte_count / (1024.0 ** 3):.2f} GB")
@@ -2545,7 +2816,10 @@ class TifWorkbenchWidget(QWidget):
         return tt("3D preview uses a downsampled read-only volume. Use Slice review for precise label editing.", self.lang)
 
     def _on_gpu_volume_info_changed(self, details):
-        self._volume_gl_renderer_info = str(details or "")
+        info = str(details or "")
+        if info == self._volume_gl_renderer_info:
+            return
+        self._volume_gl_renderer_info = info
         if self._volume_gl_renderer_info:
             self.log(f"GPU volume OpenGL renderer: {self._volume_gl_renderer_info}")
         self._update_volume_render_status_label()
@@ -2555,26 +2829,32 @@ class TifWorkbenchWidget(QWidget):
     def _on_gpu_volume_failed(self, reason):
         if self._volume_canvas_renderer != "gpu":
             return
+        if getattr(self, "_handling_gpu_volume_failure", False):
+            return
+        self._handling_gpu_volume_failure = True
         warning = str(reason or "unknown")
         old_canvas = self.volume_canvas
-        self._volume_canvas_renderer = "cpu"
-        self._volume_renderer_warning = warning
-        self.volume_canvas = TifVolumeCanvas()
-        self.volume_canvas.workbench = self
-        self.volume_canvas.setProperty("tifVolumeRenderer", "cpu")
-        self.view_stack.addWidget(self.volume_canvas)
-        index = self.view_stack.indexOf(old_canvas)
-        self.view_stack.setCurrentWidget(self.volume_canvas)
-        if index >= 0:
-            self.view_stack.removeWidget(old_canvas)
-        old_canvas.deleteLater()
-        message = tt("GPU renderer failed. Using CPU fallback: {0}", self.lang).format(warning)
-        self.training_status_label.setText(message)
-        self._update_volume_render_status_label(
-            f"{tt('Volume view', self.lang)} | {tt('CPU fallback', self.lang)} | {tt('GPU failed', self.lang)}: {warning}"
-        )
-        self.log(message)
-        self.render_volume_preview()
+        try:
+            self._volume_canvas_renderer = "cpu"
+            self._volume_renderer_warning = warning
+            self.volume_canvas = TifVolumeCanvas()
+            self.volume_canvas.workbench = self
+            self.volume_canvas.setProperty("tifVolumeRenderer", "cpu")
+            self.view_stack.addWidget(self.volume_canvas)
+            index = self.view_stack.indexOf(old_canvas)
+            self.view_stack.setCurrentWidget(self.volume_canvas)
+            if index >= 0:
+                self.view_stack.removeWidget(old_canvas)
+            old_canvas.deleteLater()
+            message = tt("GPU renderer failed. Using CPU fallback: {0}", self.lang).format(warning)
+            self.training_status_label.setText(message)
+            self._update_volume_render_status_label(
+                f"{tt('Volume view', self.lang)} | {tt('CPU fallback', self.lang)} | {tt('GPU failed', self.lang)}: {warning}"
+            )
+            self.log(message)
+        finally:
+            self._handling_gpu_volume_failure = False
+        self.schedule_volume_preview_render()
 
     def _on_gpu_volume_stats_changed(self):
         if hasattr(self.volume_canvas, "render_stats"):
@@ -2597,6 +2877,9 @@ class TifWorkbenchWidget(QWidget):
         self._clear_volume_preview_cache()
         self.render_volume_preview()
 
+    def _on_volume_projection_changed(self):
+        self.render_volume_preview()
+
     def rotate_volume_preview(self, dx, dy):
         self._start_volume_interaction()
         self._volume_yaw = (self._volume_yaw + float(dx) * 0.6) % 360.0
@@ -2615,7 +2898,7 @@ class TifWorkbenchWidget(QWidget):
     def zoom_volume_preview(self, direction):
         self._start_volume_interaction()
         factor = 1.18 if int(direction) > 0 else 1.0 / 1.18
-        self._volume_zoom = max(0.35, min(8.0, self._volume_zoom * factor))
+        self._volume_zoom = max(0.35, min(16.0, self._volume_zoom * factor))
         self.render_volume_preview()
 
     def reset_volume_view(self):
@@ -2766,6 +3049,8 @@ class TifWorkbenchWidget(QWidget):
                 self._volume_pan_x,
                 self._volume_pan_y,
                 self._volume_clarity_mode,
+                self._volume_projection_mode(),
+                self._active_volume_roi_scale(),
             )
         return True
 
@@ -2790,9 +3075,25 @@ class TifWorkbenchWidget(QWidget):
             spacing = record_spacing
         return shape, spacing
 
+    def schedule_volume_preview_render(self):
+        if getattr(self, "_volume_render_scheduled", False):
+            return
+        self._volume_render_scheduled = True
+
+        def run():
+            self._volume_render_scheduled = False
+            if self.display_mode == "volume" and not getattr(self, "_handling_gpu_volume_failure", False):
+                self.render_volume_preview()
+
+        QTimer.singleShot(0, run)
+
     def render_volume_preview(self):
         if not hasattr(self, "volume_canvas"):
             return
+        if getattr(self, "_handling_gpu_volume_failure", False):
+            return
+        if self.display_mode == "volume":
+            self._ensure_volume_canvas()
         if self.image_volume is None:
             self.volume_canvas.clear()
             self.volume_canvas.setText(tt("No TIF volume loaded", self.lang))
@@ -2813,8 +3114,17 @@ class TifWorkbenchWidget(QWidget):
 
     def _render_volume_preview_pixmap(self, preview):
         max_value = float(np.iinfo(preview.dtype).max) if np.issubdtype(preview.dtype, np.integer) else 1.0
-        threshold = int(round(self.volume_cutoff_slider.value() * max_value / 100.0))
-        points = np.argwhere(preview > threshold)
+        projection_mode = self._volume_projection_mode()
+        cutoff = float(self.volume_cutoff_slider.value()) / 100.0
+        if projection_mode == "minip":
+            threshold = int(round(cutoff * max_value))
+            points = np.argwhere((preview > 0) & (preview <= max(1, threshold)))
+        elif projection_mode == "average":
+            threshold = int(round(max(0.0, cutoff * 0.65) * max_value))
+            points = np.argwhere(preview > threshold)
+        else:
+            threshold = int(round(cutoff * max_value / (1.25 if projection_mode == "surface" else 1.0)))
+            points = np.argwhere(preview > threshold)
         if points.size == 0:
             points = np.argwhere(preview > 0)
         if points.size == 0:
@@ -2822,6 +3132,8 @@ class TifWorkbenchWidget(QWidget):
             return self._render_slice_pixmap(center_slice)
 
         values = preview[points[:, 0], points[:, 1], points[:, 2]].astype(np.float32)
+        if projection_mode == "minip":
+            values = max_value - values
         if max_value > 255.0:
             values = values * (255.0 / max_value)
         source_shape, spacing_zyx = self._volume_source_geometry()
@@ -2842,10 +3154,10 @@ class TifWorkbenchWidget(QWidget):
         rotated = coords @ (rot_yaw @ rot_pitch).T
         front_clip = max(0.0, min(0.92, float(self.volume_clip_slider.value()) / 100.0))
         if front_clip > 0.0:
-            near_depth = float(np.max(rotated[:, 2]))
-            far_depth = float(np.min(rotated[:, 2]))
+            near_depth = float(np.min(rotated[:, 2]))
+            far_depth = float(np.max(rotated[:, 2]))
             keep_depth = near_depth + (far_depth - near_depth) * front_clip
-            keep = rotated[:, 2] <= keep_depth
+            keep = rotated[:, 2] >= keep_depth
             if np.any(keep):
                 rotated = rotated[keep]
                 values = values[keep]

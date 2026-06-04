@@ -1,7 +1,5 @@
 import { getAgentProfile } from "./profiles.js";
 
-const DEFAULT_INTERNAL_OUTPUT_CHARS = 8_000;
-
 /**
  * Build a gateway request for hidden internal agents such as compaction, title,
  * and summary. These agents never receive tools; they only transform bounded
@@ -43,7 +41,7 @@ export function createInternalAgentRequest(options) {
               "Internal agent boundary:",
               profile.name === "compaction" ? "Internal role: context compactor." : null,
               "- Do not call tools.",
-              "- Do not reveal secrets, API keys, credentials, or private absolute paths.",
+              "- Do not reveal secrets, API keys, credentials, Bearer tokens, or password/token values.",
               "- Preserve concrete file names, command names, model ids, config keys, and user decisions when they matter.",
               "- Return only the requested output text.",
               ...rules.map((rule) => `- ${rule}`)
@@ -68,9 +66,12 @@ export function createInternalAgentRequest(options) {
 
 /**
  * @param {unknown} value
- * @param {number} max
+ * @param {number | null} max
  */
-export function truncateInternalInput(value, max = DEFAULT_INTERNAL_OUTPUT_CHARS) {
+export function truncateInternalInput(value, max = null) {
   const text = String(value ?? "");
+  if (!Number.isInteger(max) || max <= 0) {
+    return text;
+  }
   return text.length <= max ? text : `${text.slice(0, max)}\n...[internal input truncated]`;
 }

@@ -35,7 +35,7 @@ const DEFAULT_RESUME_CONTEXT_TOKENS = 200_000;
 const DEFAULT_RESUME_CONTEXT_BYTES = 1_000_000;
 
 /**
- * @param {{ cwd: string; mode: "interactive" | "print"; clientSurface?: "tui" | "dashboard" | "chat" | "print" | string; env?: NodeJS.ProcessEnv; readonly?: boolean; allowWrite?: boolean; allowCommand?: boolean; fullAccess?: boolean; resume?: string | null }} options
+ * @param {{ cwd: string; mode: "interactive" | "print"; clientSurface?: "tui" | "dashboard" | "chat" | "print" | string; env?: NodeJS.ProcessEnv; readonly?: boolean; allowWrite?: boolean; allowCommand?: boolean; fullAccess?: boolean; resume?: string | null; resumeFullContext?: boolean }} options
  */
 export async function createSession(options) {
   const config = await loadConfig({ cwd: options.cwd, env: options.env });
@@ -43,7 +43,13 @@ export async function createSession(options) {
   const context = await buildInitialContext({ cwd: options.cwd, config, env: options.env, clientSurface });
   const workspaceDiagnostic = await diagnoseWorkspace(options.cwd);
   const resumed = options.resume
-    ? await resolveResumeMetadata({ cwd: options.cwd, config, env: options.env, resume: options.resume })
+    ? await resolveResumeMetadata({
+      cwd: options.cwd,
+      config,
+      env: options.env,
+      resume: options.resume,
+      preferFullContext: options.resumeFullContext === true
+    })
     : null;
   const contextWindow = createContextWindow(config);
   if (resumed?.contextWindow) {
@@ -1724,7 +1730,7 @@ function recordSessionProviderUsage(session, usage, details = {}) {
 }
 
 /**
- * @param {{ cwd: string; config: Record<string, any>; env?: NodeJS.ProcessEnv; resume: string }} options
+ * @param {{ cwd: string; config: Record<string, any>; env?: NodeJS.ProcessEnv; resume: string; preferFullContext?: boolean }} options
  */
 async function resolveResumeMetadata(options) {
   const store = createSessionStore({
@@ -1740,13 +1746,18 @@ async function resolveResumeMetadata(options) {
   const restoredTranscriptMessages = restoreRecentTranscriptMessages(result.metadata.transcript?.messages);
   const transcriptArchive = normalizeTranscriptArchiveState(result.metadata.transcript?.archive);
   const persistedContextWindow = result.metadata.transcript?.contextWindow ?? null;
-  const restoredContextMessages = await restoreResumeContextMessages({
+  const restoredContext = await restoreResumeContextMessages({
     store,
     archive: transcriptArchive,
     metadataMessages: result.metadata.transcript?.contextMessages ?? result.metadata.transcript?.messages,
     context: options.config.context,
-    allowArchive: !hasPersistedCompaction(persistedContextWindow)
+    allowArchive: options.preferFullContext === true || !hasPersistedCompaction(persistedContextWindow),
+    preferArchive: options.preferFullContext === true
   });
+  const restoredContextMessages = restoredContext.messages;
+  const contextWindow = restoredContext.fromArchive && options.preferFullContext === true
+    ? clearPersistedContextSummary(persistedContextWindow)
+    : persistedContextWindow;
 
   return {
     id: result.metadata.id,
@@ -1772,7 +1783,8 @@ async function resolveResumeMetadata(options) {
     messages: restoredContextMessages,
     transcriptMessages: restoredTranscriptMessages,
     transcriptArchive,
-    contextWindow: persistedContextWindow
+    contextWindow,
+    fullContextRestored: restoredContext.fromArchive
   };
 }
 
@@ -1938,30 +1950,42 @@ function repairDanglingToolCallMessages(messages = []) {
   if (!Array.isArray(messages) || messages.length === 0) {
     return [];
   }
-  const repaired = messages.map((message) => cloneTranscriptMessage(message));
-  for (let index = 0; index < repaired.length; index += 1) {
-    const message = repaired[index];
+  const source = messages.map((message) => cloneTranscriptMessage(message));
+  const repaired = [];
+  for (let index = 0; index < source.length; index += 1) {
+    const message = source[index];
+    if (message?.role === "tool") {
+      continue;
+    }
     const calls = assistantToolCalls(message);
     if (calls.length === 0) {
+      repaired.push(message);
       continue;
     }
     const expected = new Set(calls.map((call) => String(call.id ?? "")).filter(Boolean));
     const seen = new Set();
-    for (let nextIndex = index + 1; nextIndex < repaired.length; nextIndex += 1) {
-      const next = repaired[nextIndex];
+    const toolMessages = [];
+    let nextIndex = index + 1;
+    for (; nextIndex < source.length; nextIndex += 1) {
+      const next = source[nextIndex];
       if (!next || next.role !== "tool") {
         break;
       }
       const toolCallId = String(next.toolCallId ?? next.tool_call_id ?? "");
-      if (expected.has(toolCallId)) {
+      if (expected.has(toolCallId) && !seen.has(toolCallId)) {
         seen.add(toolCallId);
+        toolMessages.push(next);
       }
     }
     if (seen.size === expected.size && expected.size > 0) {
+      repaired.push(message, ...toolMessages);
+      index = nextIndex - 1;
       continue;
     }
     delete message.toolCalls;
     delete message.tool_calls;
+    repaired.push(message);
+    index = nextIndex - 1;
   }
   return repaired;
 }
@@ -2212,10 +2236,32 @@ function restorePersistedContextMessages(messages, context = {}) {
 async function restoreResumeContextMessages(input) {
   const persisted = restorePersistedContextMessages(input.metadataMessages, input.context);
   if (input.allowArchive === false) {
-    return persisted;
+    return { messages: persisted, fromArchive: false };
   }
   const archived = await restoreArchivedContextMessages(input.store, input.archive, input.context);
-  return archived.length > persisted.length ? archived : persisted;
+  if (input.preferArchive === true && archived.length > 0) {
+    return { messages: archived, fromArchive: true };
+  }
+  return archived.length > persisted.length
+    ? { messages: archived, fromArchive: true }
+    : { messages: persisted, fromArchive: false };
+}
+
+function clearPersistedContextSummary(contextWindow) {
+  if (!contextWindow || typeof contextWindow !== "object") {
+    return contextWindow;
+  }
+  return {
+    ...contextWindow,
+    summary: "",
+    compactionCount: 0,
+    compactedMessages: 0,
+    lastCompactedAt: null,
+    lastReason: "dashboard_full_context_resume",
+    lastStrategy: null,
+    lastFallbackReason: null,
+    lastInternalAgent: null
+  };
 }
 
 function hasPersistedCompaction(contextWindow) {
@@ -2371,14 +2417,10 @@ function persistableContextWindow(contextWindow = {}) {
 function redactPersistedText(value) {
   return String(value ?? "")
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
-    .replace(/[A-Za-z]:[\\/][^\s"'<>|]+/g, "[path]")
-    .replace(/\\\\[^\s"'<>|]+/g, "[path]")
-    .replace(/\/(?:Users|home|tmp|var|private|mnt|workspace|saveproject)\/[^\s"'<>|]+/g, "[path]")
     .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, "$1[redacted]")
-    .replace(/(--?(?:api-?key|token|secret|password)(?:=|\s+))\S+/gi, "$1[redacted]")
-    .replace(/((?:api_?key|token|secret|password|path)\s*=\s*)\S+/gi, "$1[redacted]")
-    .replace(/([?&](?:api_?key|token|secret|password)=)[^&\s]+/gi, "$1[redacted]")
-    .replace(/\b[A-Za-z0-9._-]*(?:secret|token|password|credential|private)[A-Za-z0-9._-]*\b/gi, "[redacted]")
+    .replace(/(^|[\s"'`])(--?(?:api-?key|token|secret|password|credential|authorization)(?:=|\s+))\S+/gi, "$1$2[redacted]")
+    .replace(/\b([A-Za-z0-9_.-]*(?:api[-_]?key|token|secret|password|credential|authorization)[A-Za-z0-9_.-]*\s*(?:=|:|\bis\b)\s*)\S+/gi, "$1[redacted]")
+    .replace(/([?&](?:api[-_]?key|token|secret|password|credential|authorization)=)[^&\s]+/gi, "$1[redacted]")
     .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]");
 }
 

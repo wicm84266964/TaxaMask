@@ -517,7 +517,7 @@ test("model-driven subagent records prompt token estimates for task displays", a
         networkMode: "offline",
         allowedHosts: [],
         transcript: { enabled: false, retentionDays: 30, includeToolOutput: "policy", encryption: "off" },
-        context: { maxMessages: 100000, maxBytes: 800000, maxTokens: 200000, keepRecentMessages: 8, summaryBytes: 8192 },
+        context: { maxMessages: 100000, maxBytes: 800000, maxTokens: 200000, keepRecentMessages: 8, summaryBytes: 65536 },
         agents: { profiles: [] },
         lab: {
           gatewayUrl: `${serverUrl(server)}/v1/chat`,
@@ -570,7 +570,7 @@ test("model-driven subagent uses configurable agent round budget", async () => {
         networkMode: "offline",
         allowedHosts: [],
         transcript: { enabled: false, retentionDays: 30, includeToolOutput: "policy", encryption: "off" },
-        context: { maxMessages: 100000, maxBytes: 800000, maxTokens: 200000, keepRecentMessages: 8, summaryBytes: 8192 },
+        context: { maxMessages: 100000, maxBytes: 800000, maxTokens: 200000, keepRecentMessages: 8, summaryBytes: 65536 },
         agents: {
           maxRounds: 5,
           profiles: [
@@ -620,7 +620,7 @@ test("model-driven subagent default has no model-tool round limit", async () => 
         networkMode: "offline",
         allowedHosts: [],
         transcript: { enabled: false, retentionDays: 30, includeToolOutput: "policy", encryption: "off" },
-        context: { maxMessages: 100000, maxBytes: 800000, maxTokens: 200000, keepRecentMessages: 8, summaryBytes: 8192 },
+        context: { maxMessages: 100000, maxBytes: 800000, maxTokens: 200000, keepRecentMessages: 8, summaryBytes: 65536 },
         agents: {
           maxRounds: null,
           profiles: []
@@ -664,7 +664,7 @@ test("model-driven subagent output budget requests no-tool staged report before 
         networkMode: "offline",
         allowedHosts: [],
         transcript: { enabled: false, retentionDays: 30, includeToolOutput: "policy", encryption: "off" },
-        context: { maxMessages: 100000, maxBytes: 800000, maxTokens: 200000, keepRecentMessages: 8, summaryBytes: 8192 },
+        context: { maxMessages: 100000, maxBytes: 800000, maxTokens: 200000, keepRecentMessages: 8, summaryBytes: 65536 },
         agents: {
           profiles: [
             {
@@ -721,7 +721,7 @@ test("model-driven subagent skips remaining same-round tools after soft guardrai
         networkMode: "offline",
         allowedHosts: [],
         transcript: { enabled: false, retentionDays: 30, includeToolOutput: "policy", encryption: "off" },
-        context: { maxMessages: 100000, maxBytes: 800000, maxTokens: 200000, keepRecentMessages: 8, summaryBytes: 8192 },
+        context: { maxMessages: 100000, maxBytes: 800000, maxTokens: 200000, keepRecentMessages: 8, summaryBytes: 65536 },
         agents: {
           profiles: [
             {
@@ -913,7 +913,7 @@ test("model-driven subagent writes staged report at configurable round limit", a
         networkMode: "offline",
         allowedHosts: [],
         transcript: { enabled: false, retentionDays: 30, includeToolOutput: "policy", encryption: "off" },
-        context: { maxMessages: 100000, maxBytes: 800000, maxTokens: 200000, keepRecentMessages: 8, summaryBytes: 8192 },
+        context: { maxMessages: 100000, maxBytes: 800000, maxTokens: 200000, keepRecentMessages: 8, summaryBytes: 65536 },
         agents: {
           maxRounds: 2,
           profiles: [
@@ -968,7 +968,7 @@ test("configured agent round budget overrides builtin profile defaults", async (
         networkMode: "offline",
         allowedHosts: [],
         transcript: { enabled: false, retentionDays: 30, includeToolOutput: "policy", encryption: "off" },
-        context: { maxMessages: 100000, maxBytes: 800000, maxTokens: 200000, keepRecentMessages: 8, summaryBytes: 8192 },
+        context: { maxMessages: 100000, maxBytes: 800000, maxTokens: 200000, keepRecentMessages: 8, summaryBytes: 65536 },
         agents: {
           maxRounds: 3,
           profiles: []

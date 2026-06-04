@@ -1,12 +1,73 @@
 # TAXAMASK / FORMICA-FLOW SYSTEM TECHNICAL MANUAL (Deep Dive)
 
 > **Target Audience**: Expert LLM Assistants, Senior Developers
-> **Version**: v3.30 (June 3, 2026, closure notes and TIF/Ant-Code rendering boundary)
+> **Version**: v3.31 (June 4, 2026, VLM pixel preannotation + TIF offscreen GPU + Ant-Code resume stability)
 > **Purpose**: Up-to-date architectural, workflow, and governance context for implementation and maintenance.
 
 ---
 
-## 0) v3.30 Closure Notes + TIF/Ant-Code Rendering Boundary (2026-06-03)
+## 0) v3.31 VLM Pixel Preannotation + TIF Offscreen GPU + Ant-Code Resume Stability (2026-06-04)
+
+### 0.0 Current milestone status
+- The June 4 pass closes three practical stability tracks:
+  - VLM first-mile preannotation now defaults to a grid-free pixel-coordinate path for lower-cost domestic multimodal models such as MIMO.
+  - TIF 3D preview now uses offscreen GPU rendering into a normal Qt display widget, reducing the earlier Qt WebEngine / OpenGL composition conflict with embedded Ant-Code.
+  - Vendored Ant-Code now has stronger dashboard resume/context behavior, OpenAI-compatible tool-call repair, trust-store robustness, and token/credential redaction while preserving useful file paths.
+- The most validated daily route remains ant 2D/STL morphology plus PDF evidence. TIF is still experimental, but its local preview path is more usable than the June 3 boundary note.
+
+### 0.1 VLM first-mile preannotation current behavior
+- `AntSleap/core/vlm_preannotation.py` now prepares a grid-free VLM input image named `*_vlm_input_*.png`.
+- Prompt/schema ask only for `bbox_xyxy` on the current input image, plus `part`, `confidence`, and `reason`.
+- If the input image is downscaled before sending to the VLM, returned input-image coordinates are mapped back to the original image coordinates before writing `auto_boxes`.
+- Legacy `bbox_grid_xyxy` parsing remains only as compatibility for old raw responses or fixtures; pixel boxes take priority over legacy grid boxes.
+- GUI progress uses `prepare -> vlm -> parse -> write -> sam -> report`.
+- Research consequence:
+  - This path intentionally favors MIMO/domestic VLM batch use over GPT-only prompt complexity.
+  - It removes grid-line occlusion and avoids asking smaller VLMs to solve both visual localization and grid-coordinate conversion.
+  - Outputs remain draft `auto_boxes` / optional SAM polygons and must be reviewed before training.
+
+### 0.2 TIF rendering current behavior
+- `AntSleap/ui/tif_gpu_volume_canvas.py` contains the offscreen GPU renderer path:
+  - `QOffscreenSurface + QOpenGLContext + FBO + glReadPixels`
+  - display through a normal label/widget rather than embedded `QOpenGLWidget` by default
+  - legacy embedded `QOpenGLWidget` path only behind an explicit environment flag
+- `AntSleap/main.py` and `AntSleap/ui/taxamask_agent_panel.py` set Chromium CPU compositing flags as an additional WebEngine safeguard.
+- TIF 3D preview now includes:
+  - composite / MIP / MinIP / average / surface modes
+  - ROI high-detail still rendering
+  - 16x zoom cap
+  - view-facing front cut / near clipping
+- TIF slice review shortcuts are fixed:
+  - Left/Right = previous/next slice
+  - Up/Down = zoom in/out
+  - slider focus no longer hijacks Up/Down into accidental slice changes.
+
+### 0.3 Vendored Ant-Code stability updates
+- `vendor/ant-code` is the embedded Agent source used by TaxaMask.
+- Current vendor changes include:
+  - Dashboard resume requests prefer full archived context for resumed sessions.
+  - Context compaction summary budget increases from 8 KB to 64 KB.
+  - Internal compaction input is less aggressively truncated.
+  - OpenAI-compatible prompt repair drops orphan/partial tool-call blocks instead of sending invalid tool histories.
+  - Trust-store reads tolerate corrupt JSON and writes use a temp-file rename pattern.
+  - Redaction now preserves useful absolute paths but masks Bearer tokens, API keys, credentials, passwords, and authorization values.
+- These vendor changes were user-reviewed before this consolidation commit.
+
+### 0.4 Focused validation used for this milestone
+- Python / TaxaMask:
+  - `C:\Users\admin\anaconda3\envs\antsleap\python.exe -m py_compile AntSleap\core\vlm_preannotation.py tools\agentic\vlm_preannotate_project.py AntSleap\main.py tests\test_vlm_preannotation.py tests\test_gui_smoke.py`
+  - `C:\Users\admin\anaconda3\envs\antsleap\python.exe -m unittest tests.test_vlm_preannotation tests.test_gui_smoke.GuiSmokeTests.test_vlm_preannotation_progress_ui_tracks_steps tests.test_gui_smoke.GuiSmokeTests.test_vlm_result_refreshes_current_canvas_with_project_relative_path tests.test_gui_smoke.GuiSmokeTests.test_vlm_result_repaints_canvas_while_progress_dialog_is_open tests.test_gui_smoke.GuiSmokeTests.test_vlm_result_reloads_workbench_after_file_list_refresh_blocks_selection_signal`
+  - `C:\Users\admin\anaconda3\envs\antsleap\python.exe -m unittest tests.test_tif_workbench`
+- Ant-Code vendor:
+  - Run targeted Node unit tests from `vendor/ant-code` after dependency availability is confirmed.
+
+### 0.5 Commit hygiene
+- Do not commit `.lab-agent/config.json`, `.lab-agent/sessions/`, SQLite databases, model weights, real image outputs, TIF stacks, or `TaxaMask_outputs/`.
+- This milestone intentionally includes `启动TaxaMask.bat` as a user-facing local launch script.
+
+---
+
+## 0A) v3.30 Closure Notes + TIF/Ant-Code Rendering Boundary (2026-06-03)
 
 ### 0.0 Current milestone status
 - The June 2-3 pass closes two production-facing tracks:
@@ -47,6 +108,41 @@
   - 2D/STL model profiles and route backend audit.
   - TIF as a separate, experimental volume workflow.
 - Before committing, verify that `.lab-agent/config.json`, `.lab-agent/sessions/`, SQLite databases, model weights, real run outputs, images, TIF stacks, and `TaxaMask_outputs/` remain ignored.
+
+### 0.3 VLM preannotation path canonicalization and live refresh fix
+- The June 3 pass also fixes a VLM-first-mile display failure where boxes/SAM polygons were saved but did not appear on the active Labeling Workbench canvas until returning to the Agent Center and re-entering the workbench.
+- Root cause:
+  - `AntSleap/core/vlm_preannotation.py::run_vlm_preannotation(...)` returns absolute image paths.
+  - Some project JSON files stored the same image as a project-relative path.
+  - `ProjectManager._to_absolute(...)` previously accepted an existing relative path from the process current working directory before resolving it relative to the project JSON directory.
+  - This allowed `project_data["images"]` / current UI state and VLM writeback to refer to the same file through different keys.
+  - VLM candidates could be written under an absolute "shadow key", while canvas reload continued reading the relative project key.
+- Current behavior:
+  - `ProjectManager._to_absolute(...)` resolves relative paths against the current project JSON directory first, then falls back to the process cwd only when needed.
+  - Loaded `images`, `labels`, `scales`, and `image_provenance` are canonicalized to the same absolute path identity.
+  - If a legacy project already contains both a relative key and an absolute shadow key for the same image, label/provenance data is merged during project load.
+  - `MainWindow._project_image_key_for_path(...)` only returns a registered project image key. VLM writeback fails explicitly rather than silently creating a new orphan key.
+  - `MainWindow._reload_current_image_for_workbench(...)` remains the UI-side fallback after file-list refreshes that block the normal selection signal.
+- Research workflow consequence:
+  - VLM/SAM drafts should appear on the currently viewed image as soon as that image's VLM result is applied.
+  - Operators should no longer need to leave the workbench and re-enter to see saved AI drafts.
+  - Historical projects that already accumulated shadow-key VLM drafts should recover on next load instead of hiding those drafts from the visible image.
+- Progress UI:
+  - The VLM progress dialog now separates title, step status, and current image name.
+  - Long image names are shortened in the visible label with the full path kept as a tooltip, avoiding cramped Chinese/long-path text in batch preannotation.
+- Important files:
+  - `AntSleap/core/project.py::_to_absolute`
+  - `AntSleap/core/project.py::_registered_image_key_for_path`
+  - `AntSleap/core/project.py::_merge_loaded_label_entry`
+  - `AntSleap/main.py::_project_image_key_for_path`
+  - `AntSleap/main.py::_on_vlm_preannotation_image_result`
+  - `AntSleap/main.py::_create_vlm_progress_dialog`
+  - `tests/test_vlm_preannotation.py`
+  - `tests/test_gui_smoke.py`
+- Focused validation used:
+  - `C:\Users\admin\anaconda3\envs\antsleap\python.exe -m unittest tests.test_vlm_preannotation`
+  - `C:\Users\admin\anaconda3\envs\antsleap\python.exe -m unittest tests.test_gui_smoke.GuiSmokeTests.test_vlm_result_refreshes_current_canvas_with_project_relative_path tests.test_gui_smoke.GuiSmokeTests.test_vlm_result_repaints_canvas_while_progress_dialog_is_open tests.test_gui_smoke.GuiSmokeTests.test_vlm_result_reloads_workbench_after_file_list_refresh_blocks_selection_signal`
+  - `C:\Users\admin\anaconda3\envs\antsleap\python.exe -m unittest tests.test_gui_smoke.GuiSmokeTests.test_vlm_preannotation_progress_ui_tracks_steps`
 
 ---
 
@@ -438,7 +534,7 @@
 ### 0.0 Research workflow intent
 - This release adds a draft-only VLM preannotation path for the hardest early project stage: no trained Locator, no Blink route expert, and no first batch of SAM prompt boxes.
 - The VLM is used as a **box suggester**, not a truth source:
-  - grid-overlay image -> multimodal model -> candidate boxes
+  - grid-free VLM input image -> multimodal model -> candidate boxes
   - candidate boxes -> base SAM -> draft polygons
   - human review -> training-eligible labels
 - The intended ant use case is common visible morphology structures such as `Head`, `Mesosoma`, `Gaster`, `Petiole`, `Eye`, and `Mandible`.
@@ -455,7 +551,7 @@
   - `current_image`
   - `all_images`
 - `all_images` requires a second confirmation and then runs linearly, one image at a time.
-- GUI progress is step-based. Each image contributes roughly six steps: grid/API/parse/write/SAM/report or failure completion.
+- GUI progress is step-based. Each image contributes roughly six steps: prepare/API/parse/write/SAM/report or failure completion.
 - Missing VLM target parts opens a dialog with an `Open VLM settings` button.
 - Missing multimodal API settings opens a dialog with an `Open API settings` button and jumps to the PDF Evidence multimodal API area.
 - The PDF Evidence API key fields remain visible; advanced/custom details can stay collapsible, but API key entry must not be hidden from users who jump there from VLM.
@@ -476,7 +572,7 @@
 ### 0.3 Artifacts and failure diagnostics
 - VLM run artifacts are written beside the project file in `vlm_preannotation/`.
 - Typical artifacts:
-  - grid image
+  - VLM input image
   - raw response text
   - per-image report JSON
   - GUI batch summary JSON
@@ -485,7 +581,7 @@
 
 ### 0.4 Headless and core files
 - New core module: `AntSleap/core/vlm_preannotation.py`
-  - grid overlay generation
+  - grid-free VLM input image preparation
   - prompt construction
   - multimodal API call
   - JSON parsing and box normalization

@@ -1,32 +1,55 @@
 # TAXAMASK / FORMICA-FLOW SYSTEM TECHNICAL MANUAL (Deep Dive)
 
 > **Target Audience**: Expert LLM Assistants, Senior Developers
-> **Version**: v3.31 (June 4, 2026, VLM pixel preannotation + TIF offscreen GPU + Ant-Code resume stability)
+> **Version**: v3.32 (June 5, 2026, VLM adaptive light-grid preannotation + PDF review tooling + model-profile safeguards)
 > **Purpose**: Up-to-date architectural, workflow, and governance context for implementation and maintenance.
 
 ---
 
-## 0) v3.31 VLM Pixel Preannotation + TIF Offscreen GPU + Ant-Code Resume Stability (2026-06-04)
+## 0) v3.32 VLM Adaptive Light-Grid Preannotation + PDF Review Tooling + Model-Profile Safeguards (2026-06-05)
 
 ### 0.0 Current milestone status
-- The June 4 pass closes three practical stability tracks:
-  - VLM first-mile preannotation now defaults to a grid-free pixel-coordinate path for lower-cost domestic multimodal models such as MIMO.
+- The June 5 consolidation closes several practical stability tracks before experimental SAM3 / parent-backend switching work:
+  - VLM first-mile preannotation now defaults to an adaptive light-grid coordinate path for lower-cost domestic multimodal models such as MIMO, after field testing showed grid-free pixel boxes were too unstable for coarse ant body-part localization.
+  - VLM prompt content is split into a fixed schema/instruction layer plus project prompt profiles. The built-in ant taxonomy profile is read-only, while `project_custom` can be edited from the ant template for other taxa.
+  - PDF candidate database review now supports pagination, filters/search/sort, gallery mode, independent human-review status, filtered CSV/image export, and batch marking passable filtered rows as `import_ready`.
+  - PDF V2 screening defaults now read the first 50 lines rather than 30, reflecting user field checks where the old 30-line limit caused about 4% misses.
   - TIF 3D preview now uses offscreen GPU rendering into a normal Qt display widget, reducing the earlier Qt WebEngine / OpenGL composition conflict with embedded Ant-Code.
   - Vendored Ant-Code now has stronger dashboard resume/context behavior, OpenAI-compatible tool-call repair, trust-store robustness, and token/credential redaction while preserving useful file paths.
 - The most validated daily route remains ant 2D/STL morphology plus PDF evidence. TIF is still experimental, but its local preview path is more usable than the June 3 boundary note.
 
 ### 0.1 VLM first-mile preannotation current behavior
-- `AntSleap/core/vlm_preannotation.py` now prepares a grid-free VLM input image named `*_vlm_input_*.png`.
-- Prompt/schema ask only for `bbox_xyxy` on the current input image, plus `part`, `confidence`, and `reason`.
-- If the input image is downscaled before sending to the VLM, returned input-image coordinates are mapped back to the original image coordinates before writing `auto_boxes`.
-- Legacy `bbox_grid_xyxy` parsing remains only as compatibility for old raw responses or fixtures; pixel boxes take priority over legacy grid boxes.
+- `AntSleap/core/vlm_preannotation.py` now prepares an adaptive light-grid VLM input image named `*_vlm_input_grid_*.png`.
+- Prompt/schema prefer `bbox_grid_xyxy` on the actual per-image adaptive grid, plus `part`, `confidence`, and `reason`; pixel `bbox_xyxy` remains a compatibility fallback.
+- Returned grid boxes are mapped back to original image coordinates before writing `auto_boxes` and before sending the prompt box to SAM.
+- Per-image reports include `coordinate_mapping` so the raw VLM grid box, grid size, original size, and final original-image box can be audited.
 - GUI progress uses `prepare -> vlm -> parse -> write -> sam -> report`.
+- Current workbench buttons are `VLM Pre-Label` / `VLM Batch Pre-Label` in English and `VLM预标注` / `VLM批量预标` in Chinese.
+- `2D/STL Model Settings -> Inference -> AI Multimodal Pre-Annotation` holds target parts, batch scope, image group, and prompt profile controls.
+- Prompt profile persistence:
+  - project JSON: `vlm_preannotation.prompt_profile_id` and `vlm_preannotation.prompt_profile`
+  - model profiles: `inference_params.vlm_preannotation.prompt_profile_id` and `prompt_profile`
+  - runtime: `VlmPreannotationThread(..., prompt_profile=...)` passes the profile into `run_vlm_preannotation(...)`
 - Research consequence:
-  - This path intentionally favors MIMO/domestic VLM batch use over GPT-only prompt complexity.
-  - It removes grid-line occlusion and avoids asking smaller VLMs to solve both visual localization and grid-coordinate conversion.
+  - This path treats MIMO/domestic VLM output as a coarse body-part box suggestion, not a fine landmark detector.
+  - The adaptive light grid gives smaller VLMs a spatial anchor while avoiding the earlier dense-grid clutter; square images stay around 8x8, wide side-view images receive more columns and fewer rows, and tall images do the reverse.
   - Outputs remain draft `auto_boxes` / optional SAM polygons and must be reviewed before training.
 
-### 0.2 TIF rendering current behavior
+### 0.2 PDF review and screening current behavior
+- `core/pdf_processor/pdf_classifier.py` and V2 screener config templates now default `lines_per_pdf` to 50.
+- `AntSleap/ui/pdf_processing_widget.py::DatabaseViewerDialog` is no longer a 500-row-only view:
+  - default page size is 500 for responsiveness, with first/previous/next/last controls
+  - search covers figure text, PDF names, species/taxon, evidence, captions, descriptions, and review notes where available
+  - filters include model status, human status, VLM real/mock, and sorting options
+  - table and gallery views share the same filtered row set
+- Human review lives in an independent table:
+  - `figure_human_reviews(source_table, record_id, human_status, review_note, updated_at)`
+  - this never overwrites model-origin `accepted`, `review_status`, or VLM decision fields
+  - allowed workflow statuses include `human_accepted`, `human_rejected`, `import_ready`, and `needs_crop`
+- Batch marking filtered rows as import-ready intentionally skips rows already marked human-rejected or needs-crop.
+- `EnhancedPDFExtractionSystem` now reports clearer rule-layer rejection reasons such as `comparison_figure`, `multiple_species`, `below_accept_threshold`, and `model_rejected`.
+
+### 0.3 TIF rendering current behavior
 - `AntSleap/ui/tif_gpu_volume_canvas.py` contains the offscreen GPU renderer path:
   - `QOffscreenSurface + QOpenGLContext + FBO + glReadPixels`
   - display through a normal label/widget rather than embedded `QOpenGLWidget` by default
@@ -42,7 +65,13 @@
   - Up/Down = zoom in/out
   - slider focus no longer hijacks Up/Down into accidental slice changes.
 
-### 0.3 Vendored Ant-Code stability updates
+### 0.4 Model profile / Advanced Extensions current boundary
+- `Advanced Extensions / 高级拓展` is the concentrated high-impact model-source area for 2D/STL profiles.
+- Parent-part and child-part settings pages should show daily training parameters and read-only source summaries; actual source switching belongs in Advanced Extensions.
+- Current profile data already includes `parent_backend.segmenter_weights`, but base SAM runtime is still hard-coded to `sam_b.pt` in the current stable milestone.
+- Therefore SAM3 work should start from a protected branch/commit and implement segmenter-backend switching without breaking the existing SAM-B fallback.
+
+### 0.5 Vendored Ant-Code stability updates
 - `vendor/ant-code` is the embedded Agent source used by TaxaMask.
 - Current vendor changes include:
   - Dashboard resume requests prefer full archived context for resumed sessions.
@@ -53,7 +82,7 @@
   - Redaction now preserves useful absolute paths but masks Bearer tokens, API keys, credentials, passwords, and authorization values.
 - These vendor changes were user-reviewed before this consolidation commit.
 
-### 0.4 Focused validation used for this milestone
+### 0.6 Focused validation used for this milestone
 - Python / TaxaMask:
   - `C:\Users\admin\anaconda3\envs\antsleap\python.exe -m py_compile AntSleap\core\vlm_preannotation.py tools\agentic\vlm_preannotate_project.py AntSleap\main.py tests\test_vlm_preannotation.py tests\test_gui_smoke.py`
   - `C:\Users\admin\anaconda3\envs\antsleap\python.exe -m unittest tests.test_vlm_preannotation tests.test_gui_smoke.GuiSmokeTests.test_vlm_preannotation_progress_ui_tracks_steps tests.test_gui_smoke.GuiSmokeTests.test_vlm_result_refreshes_current_canvas_with_project_relative_path tests.test_gui_smoke.GuiSmokeTests.test_vlm_result_repaints_canvas_while_progress_dialog_is_open tests.test_gui_smoke.GuiSmokeTests.test_vlm_result_reloads_workbench_after_file_list_refresh_blocks_selection_signal`
@@ -61,7 +90,7 @@
 - Ant-Code vendor:
   - Run targeted Node unit tests from `vendor/ant-code` after dependency availability is confirmed.
 
-### 0.5 Commit hygiene
+### 0.7 Commit hygiene
 - Do not commit `.lab-agent/config.json`, `.lab-agent/sessions/`, SQLite databases, model weights, real image outputs, TIF stacks, or `TaxaMask_outputs/`.
 - This milestone intentionally includes `启动TaxaMask.bat` as a user-facing local launch script.
 
@@ -536,18 +565,19 @@
 ### 0.0 Research workflow intent
 - This release adds a draft-only VLM preannotation path for the hardest early project stage: no trained Locator, no Blink route expert, and no first batch of SAM prompt boxes.
 - The VLM is used as a **box suggester**, not a truth source:
-  - grid-free VLM input image -> multimodal model -> candidate boxes
+  - adaptive light-grid VLM input image -> multimodal model -> candidate boxes
   - candidate boxes -> base SAM -> draft polygons
   - human review -> training-eligible labels
 - The intended ant use case is common visible morphology structures such as `Head`, `Mesosoma`, `Gaster`, `Petiole`, `Eye`, and `Mandible`.
 - Operators must select target structures explicitly in settings. Generic labels such as `Object`, `Region`, or `Structure` are valid project parts but poor VLM targets for ant anatomy prompts.
 
 ### 0.1 Main GUI behavior
-- `AntSleap/main.py` adds `VLM Pre-Annotate` to the Labeling Workbench top/right tool flow near `Ask Agent`.
-- `2D/STL Model Settings -> Training` now includes `AI Multimodal Pre-Annotation`.
+- `AntSleap/main.py` exposes separate `VLM Pre-Label` and `VLM Batch Pre-Label` buttons in the Labeling Workbench top/right tool flow near `Ask Agent`.
+- `2D/STL Model Settings -> Inference` includes `AI Multimodal Pre-Annotation`; target parts are shared by the two buttons, while the settings page only controls the batch scope.
 - `ProjectManager` persists:
   - `vlm_preannotation.target_parts`
-  - `vlm_preannotation.processing_scope`
+  - `vlm_preannotation.processing_scope` (`all_images` or `image_group` for batch)
+  - `vlm_preannotation.image_group` (`split`, `original`, or `manual`)
 - VLM target parts are independent from main locator parts (`locator_scope`).
 - Processing scope:
   - `current_image`
@@ -583,7 +613,7 @@
 
 ### 0.4 Headless and core files
 - New core module: `AntSleap/core/vlm_preannotation.py`
-  - grid-free VLM input image preparation
+  - adaptive light-grid VLM input image preparation
   - prompt construction
   - multimodal API call
   - JSON parsing and box normalization

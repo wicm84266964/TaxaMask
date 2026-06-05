@@ -412,6 +412,92 @@ class PDFExtractorProfileTests(unittest.TestCase):
             if db_path.exists():
                 db_path.unlink()
 
+    def test_extractor_reports_actionable_rejection_reason_for_target_category(self):
+        sys.modules.setdefault("fitz", types.SimpleNamespace(Rect=object, Document=object, Page=object))
+        EnhancedPDFExtractionSystem = importlib.import_module("pdf_processor.pdf_extractor").EnhancedPDFExtractionSystem
+
+        ant = load_figure_profile(PROFILE_DIR / "蚂蚁分类学图版宽松复核_示例.json")
+        db_path = REPO_ROOT / ".tmp_validation" / "test_figure_profile_target_reject.db"
+        extractor = EnhancedPDFExtractionSystem(
+            output_db_path=str(db_path),
+            save_images_to_files=False,
+            enable_multimodal_validation=False,
+            figure_profile=ant,
+        )
+        try:
+            reviewed = extractor._apply_review_results(
+                [{"candidate_id": "c1", "species_confidence": 0.0}],
+                [
+                    FigureReviewResult(
+                        candidate_id="c1",
+                        accept=False,
+                        confidence_score=0.72,
+                        category="ant_taxonomic_figure",
+                        reasoning="target taxon but not sufficient to accept",
+                        species_candidate="Formica clara",
+                        species_confidence=0.9,
+                        detected_views=["mandible"],
+                        comparison_figure=False,
+                        multiple_species=False,
+                        model_used="mimo-v2.5",
+                        review_mode="real",
+                    )
+                ],
+                "test_protocol",
+            )
+
+            self.assertFalse(reviewed[0]["accepted"])
+            self.assertEqual(reviewed[0]["review_status"], "rejected")
+            self.assertEqual(reviewed[0]["category"], "ant_taxonomic_figure")
+            self.assertEqual(reviewed[0]["rejection_reason"], "model_rejected")
+        finally:
+            extractor.close()
+            if db_path.exists():
+                db_path.unlink()
+
+    def test_extractor_reports_low_confidence_instead_of_target_category(self):
+        sys.modules.setdefault("fitz", types.SimpleNamespace(Rect=object, Document=object, Page=object))
+        EnhancedPDFExtractionSystem = importlib.import_module("pdf_processor.pdf_extractor").EnhancedPDFExtractionSystem
+
+        ant = load_figure_profile(PROFILE_DIR / "蚂蚁分类学图版宽松复核_示例.json")
+        db_path = REPO_ROOT / ".tmp_validation" / "test_figure_profile_low_confidence.db"
+        extractor = EnhancedPDFExtractionSystem(
+            output_db_path=str(db_path),
+            save_images_to_files=False,
+            enable_multimodal_validation=False,
+            figure_profile=ant,
+        )
+        try:
+            reviewed = extractor._apply_review_results(
+                [{"candidate_id": "c1", "species_confidence": 0.0}],
+                [
+                    FigureReviewResult(
+                        candidate_id="c1",
+                        accept=True,
+                        confidence_score=0.5,
+                        category="ant_taxonomic_figure",
+                        reasoning="target taxon but low confidence",
+                        species_candidate="Formica clara",
+                        species_confidence=0.9,
+                        detected_views=["mandible"],
+                        comparison_figure=False,
+                        multiple_species=False,
+                        model_used="mimo-v2.5",
+                        review_mode="real",
+                    )
+                ],
+                "test_protocol",
+            )
+
+            self.assertFalse(reviewed[0]["accepted"])
+            self.assertEqual(reviewed[0]["review_status"], "rejected")
+            self.assertEqual(reviewed[0]["category"], "ant_taxonomic_figure")
+            self.assertEqual(reviewed[0]["rejection_reason"], "below_accept_threshold")
+        finally:
+            extractor.close()
+            if db_path.exists():
+                db_path.unlink()
+
 
 if __name__ == "__main__":
     unittest.main()

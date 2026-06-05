@@ -143,7 +143,7 @@ def _ocr_pdf_page_direct(pdf_path: Path) -> List[str]:
     return reader.readtext(img_np, detail=0, paragraph=True) or []
 
 
-def _extract_first_lines_direct(pdf_path: Path, num_lines: int = 30) -> tuple[List[str], Dict[str, str] | None, str]:
+def _extract_first_lines_direct(pdf_path: Path, num_lines: int = 50) -> tuple[List[str], Dict[str, str] | None, str]:
     _silence_noisy_pdf_loggers()
     lines: List[str] = []
     issue = _probe_pdf_file_path(pdf_path)
@@ -302,7 +302,7 @@ class LLMScreenPDFClassifier:
 
 文献标题：{filename}
 
-文献前30行内容：
+文献前50行内容：
 {text}
 
 请严格按以下格式回答：
@@ -326,7 +326,7 @@ class LLMScreenPDFClassifier:
 {records_json}
 """,
         "processing_mode": "v2",
-        "lines_per_pdf": 30,
+        "lines_per_pdf": 50,
         "csv_batch_size": 80,
         "csv_batch_fallback_size": 40,
         "batch_char_budget": 100000,
@@ -364,7 +364,7 @@ class LLMScreenPDFClassifier:
 
         self.processing_mode = "v2"
         self.config["processing_mode"] = "v2"
-        self.lines_per_pdf = max(1, int(self.config.get("lines_per_pdf", 30)))
+        self.lines_per_pdf = max(1, int(self.config.get("lines_per_pdf", 50)))
         self.csv_batch_size = max(1, int(self.config.get("csv_batch_size", 80)))
         self.csv_batch_fallback_size = max(1, int(self.config.get("csv_batch_fallback_size", 40)))
         if self.csv_batch_fallback_size > self.csv_batch_size:
@@ -572,7 +572,7 @@ class LLMScreenPDFClassifier:
         }
         return [], issue, "failed", False
 
-    def extract_first_lines(self, pdf_path: Path, num_lines: int = 30, check_stop_callback=None) -> List[str]:
+    def extract_first_lines(self, pdf_path: Path, num_lines: int = 50, check_stop_callback=None) -> List[str]:
         """提取PDF文件的前几行文本，支持带超时保护的文本层/OCR 回退"""
         self._clear_pdf_issue(pdf_path)
         self._clear_pdf_extract_source(pdf_path)

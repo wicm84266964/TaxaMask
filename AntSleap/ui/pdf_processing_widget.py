@@ -1,9 +1,10 @@
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QLineEdit, QPushButton, 
                                QFileDialog, QTextEdit, QProgressBar, QGroupBox, QCheckBox, QMessageBox, 
                                QTabWidget, QDialog, QTableWidget, QTableWidgetItem, QHeaderView, QSplitter, 
-                               QScrollArea, QComboBox, QApplication)
-from PySide6.QtCore import QThread, Signal, Qt
-from PySide6.QtGui import QPixmap, QImage, QIntValidator, QDoubleValidator
+                               QScrollArea, QComboBox, QApplication, QStackedWidget, QListWidget, QListWidgetItem,
+                               QListView, QButtonGroup, QRadioButton, QAbstractItemView)
+from PySide6.QtCore import QThread, Signal, Qt, QSize
+from PySide6.QtGui import QPixmap, QImage, QIntValidator, QDoubleValidator, QIcon
 import importlib
 import importlib.util
 from copy import deepcopy
@@ -16,6 +17,13 @@ import sqlite3
 import json
 import zlib
 import requests
+import shutil
+import time
+
+try:
+    from AntSleap.core.platform_open import open_path
+except ModuleNotFoundError:
+    from core.platform_open import open_path
 
 from .style import (
     BUTTON_ROLE_COMMIT,
@@ -212,6 +220,63 @@ TRANSLATIONS = {
         "3. Data Utilities": "3. 数据工具",
         "Open Database File": "打开数据库文件",
         "Choose an existing .db file to browse.": "选择一个已有 .db 文件进行浏览。",
+        "First": "首页",
+        "Previous": "上一页",
+        "Next": "下一页",
+        "Last": "末页",
+        "Go": "跳转",
+        "Page:": "页码:",
+        "Rows/page:": "每页行数:",
+        "Showing {0}-{1} of {2} | Page {3}/{4}": "第 {0}-{1} 行，共 {2} 行 | 第 {3}/{4} 页",
+        "No rows": "无记录",
+        "Search:": "搜索:",
+        "Status:": "状态:",
+        "Human:": "人工:",
+        "VLM:": "多模态:",
+        "Sort:": "排序:",
+        "Accepted only": "仅 accepted",
+        "Needs review": "待复核",
+        "Rejected": "已拒绝",
+        "All": "全部",
+        "Any": "任意",
+        "Unreviewed": "未人工复核",
+        "Human accepted": "人工通过",
+        "Human rejected": "人工拒绝",
+        "Import ready": "可导入",
+        "Needs crop": "需裁剪",
+        "Real": "真实",
+        "Mock/none": "Mock/无",
+        "Newest first": "最新在前",
+        "Oldest first": "最旧在前",
+        "Score high-low": "分数高到低",
+        "Score low-high": "分数低到高",
+        "PDF name": "PDF 名称",
+        "Species": "物种",
+        "Apply Filters": "应用筛选",
+        "Clear Filters": "清空筛选",
+        "Clear current filters?": "确认清空当前筛选？",
+        "This will reset search, filters, sorting, and page position. It will not delete database records or human review notes.": "这会重置搜索、筛选、排序和当前页位置。不会删除数据库记录，也不会删除人工复核备注。",
+        "Table": "表格",
+        "Gallery": "图库",
+        "Open Image": "打开图片",
+        "Open Folder": "打开文件夹",
+        "Open PDF": "打开 PDF",
+        "Save Review": "保存复核",
+        "Mark Filtered Import Ready": "当前筛选全部设为可导入/通过",
+        "Mark {0} passable rows as import_ready? {1} rows already marked rejected/needs_crop will be kept.": "确认将当前筛选中 {0} 条可通过记录设为“可导入/通过”？已有 {1} 条人工拒绝/需裁剪记录会被保留。",
+        "Marked {0} filtered rows as import_ready.": "已将 {0} 条筛选记录设为“可导入/通过”。",
+        "No passable rows match the current filters.": "当前筛选条件下没有可批量通过的记录。",
+        "Human Status:": "人工状态:",
+        "Review Note:": "复核备注:",
+        "Export Filtered CSV": "导出筛选 CSV",
+        "Copy Filtered Images": "复制筛选图片",
+        "No image path selected.": "未选中图片路径。",
+        "Path does not exist: {0}": "路径不存在：{0}",
+        "No source PDF found for this row.": "未找到当前记录的来源 PDF。",
+        "Human review saved.": "人工复核已保存。",
+        "Export finished: {0} rows -> {1}": "导出完成：{0} 行 -> {1}",
+        "Copied {0} images -> {1}": "已复制 {0} 张图片 -> {1}",
+        "No rows match the current filters.": "当前筛选条件下没有记录。",
         "Export PDF Extract Dataset (JSONL)": "导出 PDF 提取数据集（JSONL）",
         "This JSONL contains raw records extracted from PDFs and has not been manually curated.\nUse it for quick model checks, not as a trusted training set.\n\nFor researcher-verified training data, export from the Labeling Workbench.": "该 JSONL 包含从 PDF 自动提取的原始记录，尚未经过人工校核。\n可用于快速检查模型能力，但不应直接视为可信训练集。\n\n如需研究者确认后的训练数据，请改用“标注工作台”导出。",
         "Processing Logs:": "处理日志:",
@@ -396,13 +461,83 @@ def translate_pdf_text(text, lang="en"):
         return TRANSLATIONS["zh"].get(text, text)
     return text
 
+class HumanReviewSaveWorker(QThread):
+    saved = Signal(str, int, str, str)
+    failed = Signal(str)
+
+    def __init__(self, db_path, source_table, record_id, status, note, parent=None):
+        super().__init__(parent)
+        self.db_path = db_path
+        self.source_table = source_table
+        self.record_id = int(record_id)
+        self.status = status
+        self.note = note
+
+    def run(self):
+        try:
+            conn = sqlite3.connect(self.db_path)
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS figure_human_reviews (
+                        source_table TEXT NOT NULL,
+                        record_id INTEGER NOT NULL,
+                        human_status TEXT NOT NULL DEFAULT 'unreviewed',
+                        review_note TEXT DEFAULT '',
+                        updated_at TEXT NOT NULL,
+                        PRIMARY KEY (source_table, record_id)
+                    )
+                    """
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO figure_human_reviews (source_table, record_id, human_status, review_note, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(source_table, record_id) DO UPDATE SET
+                        human_status = excluded.human_status,
+                        review_note = excluded.review_note,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        self.source_table,
+                        self.record_id,
+                        self.status,
+                        self.note,
+                        time.strftime("%Y-%m-%d %H:%M:%S"),
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            self.saved.emit(self.source_table, self.record_id, self.status, self.note)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class DatabaseViewerDialog(QDialog):
+    DEFAULT_PAGE_SIZE = 500
+    MAX_PAGE_SIZE = 5000
+
     def __init__(self, db_path, parent=None, lang="en"):
         super().__init__(parent)
         self.db_path = db_path
         self.lang = lang
+        self.current_page = 1
+        self.page_size = self.DEFAULT_PAGE_SIZE
+        self.total_rows = 0
+        self.total_pages = 1
+        self._active_table = ""
+        self._current_rows = []
+        self._selected_record = None
+        self._sort_options = []
+        self._table_widths_initialized = set()
+        self._review_save_workers = []
         self.setWindowTitle(self.tr("Database Viewer"))
-        self.resize(1200, 800)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint | Qt.WindowMinimizeButtonHint)
+        self.setSizeGripEnabled(True)
+        self.setMinimumSize(1200, 760)
+        self.resize(1600, 960)
         self.init_ui()
         self.load_data()
 
@@ -411,40 +546,744 @@ class DatabaseViewerDialog(QDialog):
             return TRANSLATIONS["zh"].get(text, text)
         return text
 
+    def _clamped_int(self, value, default, minimum, maximum):
+        try:
+            number = int(str(value).strip())
+        except (TypeError, ValueError):
+            number = int(default)
+        return max(int(minimum), min(int(maximum), number))
+
+    def _ensure_human_review_table(self, cursor):
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS figure_human_reviews (
+                source_table TEXT NOT NULL,
+                record_id INTEGER NOT NULL,
+                human_status TEXT NOT NULL DEFAULT 'unreviewed',
+                review_note TEXT DEFAULT '',
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (source_table, record_id)
+            )
+            """
+        )
+
+    def _refresh_schema(self, cursor):
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        self._db_tables = {str(row[0]) for row in cursor.fetchall()}
+        self._table_columns = {}
+        for table in self._db_tables:
+            try:
+                cursor.execute(f"PRAGMA table_info({table})")
+                self._table_columns[table] = {str(row[1]) for row in cursor.fetchall()}
+            except sqlite3.Error:
+                self._table_columns[table] = set()
+
+    def _has_col(self, table, column):
+        return column in self._table_columns.get(table, set())
+
+    def _has_table(self, table):
+        return table in getattr(self, "_db_tables", set())
+
+    def _sql_col(self, table, alias, column, default="''"):
+        return f"{alias}.{column}" if self._has_col(table, column) else str(default)
+
+    def _maybe_join_pdf_files(self, source_table, alias):
+        if self._has_table("pdf_files") and self._has_col(source_table, "pdf_file_id"):
+            return f"LEFT JOIN pdf_files p ON p.id = {alias}.pdf_file_id"
+        return ""
+
+    def _pdf_name_expr(self):
+        return "COALESCE(p.file_name, '')" if self._has_table("pdf_files") else "''"
+
+    def _pdf_path_expr(self):
+        return "COALESCE(p.file_path, '')" if self._has_table("pdf_files") else "''"
+
+    def _filter_state(self):
+        return {
+            "search": self.search_edit.text().strip(),
+            "status": self.status_combo.currentData() or "",
+            "human": self.human_filter_combo.currentData() or "",
+            "vlm": self.vlm_filter_combo.currentData() or "",
+            "sort": self.sort_combo.currentData() or "newest",
+        }
+
+    def _has_active_filters(self):
+        return (
+            bool(self.search_edit.text().strip())
+            or self.status_combo.currentIndex() > 0
+            or self.human_filter_combo.currentIndex() > 0
+            or self.vlm_filter_combo.currentIndex() > 0
+            or self.sort_combo.currentIndex() > 0
+            or self.current_page > 1
+        )
+
+    def _selected_human_status(self):
+        button = self.human_status_group.checkedButton()
+        if button is None:
+            return "unreviewed"
+        return str(button.property("value") or "unreviewed")
+
+    def _set_human_status_choice(self, status):
+        normalized = str(status or "unreviewed")
+        button = self.human_status_buttons.get(normalized) or self.human_status_buttons.get("unreviewed")
+        if button is not None:
+            button.setChecked(True)
+
+    def _apply_table_default_widths(self):
+        table_key = self._active_table or "unknown"
+        if table_key in self._table_widths_initialized:
+            return
+        if self._active_table == "figure_records":
+            widths = [70, 180, 420, 90, 90, 80, 180, 180, 130, 260]
+        else:
+            widths = [70, 180, 420, 90, 110, 180, 130, 260]
+        for column, width in enumerate(widths):
+            if column < self.table.columnCount():
+                self.table.setColumnWidth(column, width)
+        self._table_widths_initialized.add(table_key)
+
+    def _build_v2_query_parts(self, *, count_only=False, include_limit=True):
+        filters = self._filter_state()
+        score_expr = self._sql_col("figure_records", "f", "final_confidence", "0")
+        accepted_expr = self._sql_col("figure_records", "f", "accepted", "0")
+        page_expr = self._sql_col("figure_records", "f", "page_number", "0")
+        species_expr = self._sql_col("figure_records", "f", "species_candidate", "''")
+        review_expr = self._sql_col("figure_records", "f", "review_status", "''")
+        mode_expr = self._sql_col("figure_records", "f", "multimodal_review_mode", "''")
+        validated_expr = self._sql_col("figure_records", "f", "multimodal_validated", "0")
+        caption_expr = self._sql_col("figure_records", "f", "caption_text", "''")
+        rejection_expr = self._sql_col("figure_records", "f", "rejection_reason", "''")
+        pdf_name_expr = self._pdf_name_expr()
+        pdf_path_expr = self._pdf_path_expr()
+        select = "COUNT(*)" if count_only else (
+            f"f.id, f.image_file_name, f.image_file_path, {score_expr}, {accepted_expr}, "
+            f"{page_expr}, {species_expr}, COALESCE({review_expr}, ''), "
+            f"COALESCE({mode_expr}, ''), COALESCE({validated_expr}, 0), "
+            f"{pdf_name_expr}, {pdf_path_expr}, "
+            "COALESCE(h.human_status, 'unreviewed'), COALESCE(h.review_note, '')"
+        )
+        sql = [
+            f"SELECT {select}",
+            "FROM figure_records f",
+            "LEFT JOIN figure_human_reviews h ON h.source_table = 'figure_records' AND h.record_id = f.id",
+        ]
+        pdf_join = self._maybe_join_pdf_files("figure_records", "f")
+        if pdf_join:
+            sql.append(pdf_join)
+        where = []
+        params = []
+        status = filters["status"]
+        if status == "accepted":
+            where.append(f"({accepted_expr} = 1 OR {review_expr} = 'accepted')")
+        elif status == "needs_review":
+            where.append(f"{review_expr} = 'needs_review'")
+        elif status == "rejected":
+            where.append(f"({accepted_expr} = 0 AND {review_expr} = 'rejected')")
+        human = filters["human"]
+        if human == "__unreviewed__":
+            where.append("(h.human_status IS NULL OR h.human_status = 'unreviewed')")
+        elif human:
+            where.append("h.human_status = ?")
+            params.append(human)
+        vlm = filters["vlm"]
+        if vlm == "real":
+            where.append(f"(COALESCE({validated_expr}, 0) = 1 OR {mode_expr} = 'real')")
+        elif vlm == "mock_none":
+            where.append(f"(COALESCE({validated_expr}, 0) = 0 AND COALESCE({mode_expr}, '') != 'real')")
+        search = filters["search"]
+        if search:
+            like = f"%{search}%"
+            search_parts = [
+                "f.image_file_name LIKE ?",
+                "f.image_file_path LIKE ?",
+                f"COALESCE({species_expr}, '') LIKE ?",
+                f"COALESCE({caption_expr}, '') LIKE ?",
+                f"COALESCE({rejection_expr}, '') LIKE ?",
+                f"{pdf_name_expr} LIKE ?",
+                "COALESCE(h.review_note, '') LIKE ?",
+            ]
+            params.extend([like] * len(search_parts))
+            if self._has_table("figure_evidence"):
+                search_parts.append(
+                    """
+                    EXISTS (
+                        SELECT 1 FROM figure_evidence e
+                        WHERE e.figure_id = f.id AND (
+                            COALESCE(e.text_content, '') LIKE ? OR COALESCE(e.section_title, '') LIKE ?
+                        )
+                    )
+                    """
+                )
+                params.extend([like, like])
+            if (
+                self._has_table("taxon_part_descriptions")
+                and self._has_col("figure_records", "pdf_file_id")
+                and self._has_col("taxon_part_descriptions", "pdf_file_id")
+            ):
+                desc_search_cols = []
+                for col in ("taxon_name", "part_label", "description_text"):
+                    if self._has_col("taxon_part_descriptions", col):
+                        desc_search_cols.append(f"COALESCE(d.{col}, '') LIKE ?")
+                if desc_search_cols:
+                    search_parts.append(
+                        f"""
+                        EXISTS (
+                            SELECT 1 FROM taxon_part_descriptions d
+                            WHERE d.pdf_file_id = f.pdf_file_id AND (
+                                {" OR ".join(desc_search_cols)}
+                            )
+                        )
+                        """
+                    )
+                    params.extend([like] * len(desc_search_cols))
+            where.append("(" + " OR ".join(search_parts) + ")")
+        if where:
+            sql.append("WHERE " + " AND ".join(where))
+        if not count_only:
+            sort = filters["sort"]
+            order_by = {
+                "oldest": "f.id ASC",
+                "score_desc": f"COALESCE({score_expr}, 0) DESC, f.id DESC",
+                "score_asc": f"COALESCE({score_expr}, 0) ASC, f.id DESC",
+                "pdf_name": f"{pdf_name_expr} ASC, {page_expr} ASC, f.id ASC",
+                "species": f"{species_expr} ASC, {pdf_name_expr} ASC, f.id ASC",
+            }.get(sort, "f.id DESC")
+            sql.append(f"ORDER BY {order_by}")
+            if include_limit:
+                sql.append("LIMIT ? OFFSET ?")
+        return "\n".join(sql), params
+
+    def _build_legacy_query_parts(self, *, count_only=False, include_limit=True):
+        filters = self._filter_state()
+        score_expr = self._sql_col("images", "i", "confidence_score", "0")
+        taxonomic_expr = self._sql_col("images", "i", "is_taxonomic", "0")
+        pdf_name_expr = self._pdf_name_expr()
+        pdf_path_expr = self._pdf_path_expr()
+        select = "COUNT(*)" if count_only else (
+            f"i.id, i.image_file_name, i.image_file_path, {score_expr}, {taxonomic_expr}, "
+            f"{pdf_name_expr}, {pdf_path_expr}, "
+            "COALESCE(h.human_status, 'unreviewed'), COALESCE(h.review_note, '')"
+        )
+        sql = [
+            f"SELECT {select}",
+            "FROM images i",
+            "LEFT JOIN figure_human_reviews h ON h.source_table = 'images' AND h.record_id = i.id",
+        ]
+        pdf_join = self._maybe_join_pdf_files("images", "i")
+        if pdf_join:
+            sql.append(pdf_join)
+        where = []
+        params = []
+        status = filters["status"]
+        if status == "accepted":
+            where.append(f"{taxonomic_expr} = 1")
+        elif status in {"needs_review", "rejected"}:
+            where.append(f"{taxonomic_expr} = 0")
+        human = filters["human"]
+        if human == "__unreviewed__":
+            where.append("(h.human_status IS NULL OR h.human_status = 'unreviewed')")
+        elif human:
+            where.append("h.human_status = ?")
+            params.append(human)
+        search = filters["search"]
+        if search:
+            like = f"%{search}%"
+            search_parts = [
+                "i.image_file_name LIKE ?",
+                "i.image_file_path LIKE ?",
+                f"{pdf_name_expr} LIKE ?",
+                "COALESCE(h.review_note, '') LIKE ?",
+            ]
+            params.extend([like] * len(search_parts))
+            if self._has_table("image_text_relations") and self._has_table("text_blocks"):
+                search_parts.append(
+                    """
+                    EXISTS (
+                        SELECT 1 FROM image_text_relations r
+                        JOIN text_blocks t ON r.text_block_id = t.id
+                        WHERE r.image_id = i.id AND COALESCE(t.text_content, '') LIKE ?
+                    )
+                    """
+                )
+                params.append(like)
+            where.append("(" + " OR ".join(search_parts) + ")")
+        if where:
+            sql.append("WHERE " + " AND ".join(where))
+        if not count_only:
+            sort = filters["sort"]
+            order_by = {
+                "oldest": "i.id ASC",
+                "score_desc": f"COALESCE({score_expr}, 0) DESC, i.id DESC",
+                "score_asc": f"COALESCE({score_expr}, 0) ASC, i.id DESC",
+                "pdf_name": f"{pdf_name_expr} ASC, i.id ASC",
+            }.get(sort, "i.id DESC")
+            sql.append(f"ORDER BY {order_by}")
+            if include_limit:
+                sql.append("LIMIT ? OFFSET ?")
+        return "\n".join(sql), params
+
     def init_ui(self):
         layout = QVBoxLayout(self)
-        
+
+        filters = QGridLayout()
+        self.search_label = QLabel(self.tr("Search:"))
+        self.search_edit = QLineEdit()
+        self.search_edit.returnPressed.connect(self.apply_filters)
+        self.status_label = QLabel(self.tr("Status:"))
+        self.status_combo = QComboBox()
+        self.status_combo.addItem(self.tr("All"), "")
+        self.status_combo.addItem(self.tr("Accepted only"), "accepted")
+        self.status_combo.addItem(self.tr("Needs review"), "needs_review")
+        self.status_combo.addItem(self.tr("Rejected"), "rejected")
+        self.human_filter_label = QLabel(self.tr("Human:"))
+        self.human_filter_combo = QComboBox()
+        for label, value in [
+            (self.tr("Any"), ""),
+            (self.tr("Unreviewed"), "__unreviewed__"),
+            (self.tr("Human accepted"), "human_accepted"),
+            (self.tr("Human rejected"), "human_rejected"),
+            (self.tr("Import ready"), "import_ready"),
+            (self.tr("Needs crop"), "needs_crop"),
+        ]:
+            self.human_filter_combo.addItem(label, value)
+        self.vlm_filter_label = QLabel(self.tr("VLM:"))
+        self.vlm_filter_combo = QComboBox()
+        self.vlm_filter_combo.addItem(self.tr("Any"), "")
+        self.vlm_filter_combo.addItem(self.tr("Real"), "real")
+        self.vlm_filter_combo.addItem(self.tr("Mock/none"), "mock_none")
+        self.sort_label = QLabel(self.tr("Sort:"))
+        self.sort_combo = QComboBox()
+        self.sort_combo.addItem(self.tr("Newest first"), "newest")
+        self.sort_combo.addItem(self.tr("Oldest first"), "oldest")
+        self.sort_combo.addItem(self.tr("Score high-low"), "score_desc")
+        self.sort_combo.addItem(self.tr("Score low-high"), "score_asc")
+        self.sort_combo.addItem(self.tr("PDF name"), "pdf_name")
+        self.sort_combo.addItem(self.tr("Species"), "species")
+        self.btn_apply_filters = QPushButton(self.tr("Apply Filters"))
+        self.btn_clear_filters = QPushButton(self.tr("Clear Filters"))
+        self.btn_apply_filters.clicked.connect(self.apply_filters)
+        self.btn_clear_filters.clicked.connect(self.clear_filters)
+        apply_semantic_button_style(self.btn_apply_filters, BUTTON_ROLE_RUN)
+        apply_semantic_button_style(self.btn_clear_filters, BUTTON_ROLE_DESTRUCTIVE)
+        filters.addWidget(self.search_label, 0, 0)
+        filters.addWidget(self.search_edit, 0, 1, 1, 3)
+        filters.addWidget(self.status_label, 0, 4)
+        filters.addWidget(self.status_combo, 0, 5)
+        filters.addWidget(self.human_filter_label, 0, 6)
+        filters.addWidget(self.human_filter_combo, 0, 7)
+        filters.addWidget(self.vlm_filter_label, 1, 0)
+        filters.addWidget(self.vlm_filter_combo, 1, 1)
+        filters.addWidget(self.sort_label, 1, 2)
+        filters.addWidget(self.sort_combo, 1, 3)
+        filters.addWidget(self.btn_apply_filters, 1, 4, 1, 2)
+        filters.addWidget(self.btn_clear_filters, 1, 6, 1, 2)
+        layout.addLayout(filters)
+
+        pager = QHBoxLayout()
+        self.btn_first = QPushButton(self.tr("First"))
+        self.btn_prev = QPushButton(self.tr("Previous"))
+        self.page_label = QLabel(self.tr("Page:"))
+        self.page_edit = QLineEdit("1")
+        self.page_edit.setFixedWidth(70)
+        self.page_edit.setValidator(QIntValidator(1, 9999999, self))
+        self.btn_go = QPushButton(self.tr("Go"))
+        self.btn_next = QPushButton(self.tr("Next"))
+        self.btn_last = QPushButton(self.tr("Last"))
+        self.page_size_label = QLabel(self.tr("Rows/page:"))
+        self.page_size_edit = QLineEdit(str(self.page_size))
+        self.page_size_edit.setFixedWidth(80)
+        self.page_size_edit.setValidator(QIntValidator(1, self.MAX_PAGE_SIZE, self))
+        self.page_status = QLabel("")
+        self.page_status.setMinimumWidth(260)
+        self.btn_first.clicked.connect(lambda: self.goto_page(1))
+        self.btn_prev.clicked.connect(lambda: self.goto_page(self.current_page - 1))
+        self.btn_next.clicked.connect(lambda: self.goto_page(self.current_page + 1))
+        self.btn_last.clicked.connect(lambda: self.goto_page(self.total_pages))
+        self.btn_go.clicked.connect(self.apply_page_controls)
+        self.page_edit.returnPressed.connect(self.apply_page_controls)
+        self.page_size_edit.returnPressed.connect(self.apply_page_controls)
+        for button in (self.btn_first, self.btn_prev, self.btn_go, self.btn_next, self.btn_last):
+            apply_semantic_button_style(button, BUTTON_ROLE_NEUTRAL)
+        pager.addWidget(self.btn_first)
+        pager.addWidget(self.btn_prev)
+        pager.addWidget(self.page_label)
+        pager.addWidget(self.page_edit)
+        pager.addWidget(self.btn_go)
+        pager.addWidget(self.btn_next)
+        pager.addWidget(self.btn_last)
+        pager.addSpacing(12)
+        pager.addWidget(self.page_size_label)
+        pager.addWidget(self.page_size_edit)
+        pager.addSpacing(12)
+        pager.addWidget(self.page_status, 1)
+        layout.addLayout(pager)
+
         splitter = QSplitter(Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
         
-        # Left: Table
+        # Left: Table/Gallery
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        view_bar = QHBoxLayout()
+        self.btn_table_view = QPushButton(self.tr("Table"))
+        self.btn_gallery_view = QPushButton(self.tr("Gallery"))
+        self.btn_table_view.clicked.connect(lambda: self.view_stack.setCurrentWidget(self.table))
+        self.btn_gallery_view.clicked.connect(lambda: self.view_stack.setCurrentWidget(self.gallery))
+        apply_semantic_button_style(self.btn_table_view, BUTTON_ROLE_NEUTRAL)
+        apply_semantic_button_style(self.btn_gallery_view, BUTTON_ROLE_NEUTRAL)
+        view_bar.addWidget(self.btn_table_view)
+        view_bar.addWidget(self.btn_gallery_view)
+        view_bar.addStretch(1)
+        left_layout.addLayout(view_bar)
+        self.view_stack = QStackedWidget()
         self.table = QTableWidget()
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.table.setWordWrap(False)
+        table_header = self.table.horizontalHeader()
+        table_header.setSectionResizeMode(QHeaderView.Interactive)
+        table_header.setStretchLastSection(False)
         self.table.itemSelectionChanged.connect(self.on_row_selected)
-        splitter.addWidget(self.table)
+        table_header.sectionClicked.connect(self.on_header_clicked)
+        self.gallery = QListWidget()
+        self.gallery.itemSelectionChanged.connect(self.on_gallery_selected)
+        self.gallery.setSelectionMode(QListWidget.SingleSelection)
+        self.gallery.setViewMode(QListView.IconMode)
+        self.gallery.setIconSize(QSize(160, 120))
+        self.gallery.setGridSize(QSize(220, 180))
+        self.gallery.setResizeMode(QListView.Adjust)
+        self.gallery.setMovement(QListView.Static)
+        self.gallery.setWordWrap(True)
+        self.view_stack.addWidget(self.table)
+        self.view_stack.addWidget(self.gallery)
+        left_layout.addWidget(self.view_stack)
+        splitter.addWidget(left_panel)
         
         # Right: Details (Image + Text)
         right_panel = QWidget()
         r_layout = QVBoxLayout(right_panel)
-        
+
+        detail_splitter = QSplitter(Qt.Vertical)
+        detail_splitter.setChildrenCollapsible(False)
+
         self.lbl_img = QLabel(self.tr("Image Preview"))
         self.lbl_img.setAlignment(Qt.AlignCenter)
-        self.lbl_img.setMinimumSize(400, 400)
+        self.lbl_img.setMinimumSize(360, 220)
         self.lbl_img.setStyleSheet("border: 1px dashed #666; background-color: #333;")
-        r_layout.addWidget(self.lbl_img)
-        
-        r_layout.addWidget(QLabel(self.tr("Text Context")))
+
+        text_panel = QWidget()
+        text_layout = QVBoxLayout(text_panel)
+        text_layout.setContentsMargins(0, 0, 0, 0)
+        text_layout.addWidget(QLabel(self.tr("Text Context")))
         self.txt_context = QTextEdit()
         self.txt_context.setReadOnly(True)
-        r_layout.addWidget(self.txt_context)
+        text_layout.addWidget(self.txt_context, 1)
+
+        detail_splitter.addWidget(self.lbl_img)
+        detail_splitter.addWidget(text_panel)
+        detail_splitter.setSizes([260, 620])
+        detail_splitter.setStretchFactor(0, 1)
+        detail_splitter.setStretchFactor(1, 4)
+        r_layout.addWidget(detail_splitter, 1)
+
+        review_layout = QGridLayout()
+        self.human_status_label = QLabel(self.tr("Human Status:"))
+        self.human_status_group = QButtonGroup(self)
+        self.human_status_buttons = {}
+        human_status_box = QWidget()
+        human_status_layout = QHBoxLayout(human_status_box)
+        human_status_layout.setContentsMargins(0, 0, 0, 0)
+        human_status_layout.setSpacing(8)
+        for label, value in [
+            (self.tr("Unreviewed"), "unreviewed"),
+            (self.tr("Human accepted"), "human_accepted"),
+            (self.tr("Human rejected"), "human_rejected"),
+            (self.tr("Import ready"), "import_ready"),
+            (self.tr("Needs crop"), "needs_crop"),
+        ]:
+            button = QRadioButton(label)
+            button.setProperty("value", value)
+            self.human_status_group.addButton(button)
+            self.human_status_buttons[value] = button
+            human_status_layout.addWidget(button)
+        human_status_layout.addStretch(1)
+        self.human_status_buttons["unreviewed"].setChecked(True)
+        self.review_note_label = QLabel(self.tr("Review Note:"))
+        self.review_note_edit = QLineEdit()
+        self.btn_save_review = QPushButton(self.tr("Save Review"))
+        self.btn_save_review.clicked.connect(self.save_current_review)
+        apply_semantic_button_style(self.btn_save_review, BUTTON_ROLE_COMMIT)
+        review_layout.addWidget(self.human_status_label, 0, 0)
+        review_layout.addWidget(human_status_box, 0, 1)
+        review_layout.addWidget(self.review_note_label, 1, 0)
+        review_layout.addWidget(self.review_note_edit, 1, 1)
+        review_layout.addWidget(self.btn_save_review, 2, 1)
+        r_layout.addLayout(review_layout)
+
+        action_layout = QGridLayout()
+        self.btn_open_image = QPushButton(self.tr("Open Image"))
+        self.btn_open_folder = QPushButton(self.tr("Open Folder"))
+        self.btn_open_pdf = QPushButton(self.tr("Open PDF"))
+        self.btn_export_filtered = QPushButton(self.tr("Export Filtered CSV"))
+        self.btn_copy_filtered = QPushButton(self.tr("Copy Filtered Images"))
+        self.btn_mark_filtered_ready = QPushButton(self.tr("Mark Filtered Import Ready"))
+        self.btn_open_image.clicked.connect(self.open_selected_image)
+        self.btn_open_folder.clicked.connect(self.open_selected_folder)
+        self.btn_open_pdf.clicked.connect(self.open_selected_pdf)
+        self.btn_export_filtered.clicked.connect(self.export_filtered_csv)
+        self.btn_copy_filtered.clicked.connect(self.copy_filtered_images)
+        self.btn_mark_filtered_ready.clicked.connect(self.mark_filtered_import_ready)
+        for button in (self.btn_open_image, self.btn_open_folder, self.btn_open_pdf, self.btn_export_filtered, self.btn_copy_filtered):
+            apply_semantic_button_style(button, BUTTON_ROLE_NEUTRAL)
+        apply_semantic_button_style(self.btn_mark_filtered_ready, BUTTON_ROLE_COMMIT)
+        action_layout.addWidget(self.btn_open_image, 0, 0)
+        action_layout.addWidget(self.btn_open_folder, 0, 1)
+        action_layout.addWidget(self.btn_open_pdf, 0, 2)
+        action_layout.addWidget(self.btn_export_filtered, 1, 0, 1, 2)
+        action_layout.addWidget(self.btn_copy_filtered, 1, 2)
+        action_layout.addWidget(self.btn_mark_filtered_ready, 2, 0, 1, 3)
+        r_layout.addLayout(action_layout)
         
         splitter.addWidget(right_panel)
-        splitter.setSizes([600, 600])
+        splitter.setSizes([520, 1080])
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 5)
         
         layout.addWidget(splitter)
         
         btn_close = QPushButton(self.tr("Close"))
         btn_close.clicked.connect(self.accept)
         layout.addWidget(btn_close)
+
+    def apply_page_controls(self):
+        new_page_size = self._clamped_int(self.page_size_edit.text(), self.page_size, 1, self.MAX_PAGE_SIZE)
+        new_page = self._clamped_int(self.page_edit.text(), self.current_page, 1, 9999999)
+        self.page_size = new_page_size
+        self.current_page = new_page
+        self.load_data()
+
+    def goto_page(self, page):
+        self.current_page = self._clamped_int(page, self.current_page, 1, max(1, self.total_pages))
+        self.load_data()
+
+    def _update_pager_state(self):
+        if self.total_rows <= 0:
+            status = self.tr("No rows")
+            start_row = end_row = 0
+        else:
+            start_row = (self.current_page - 1) * self.page_size + 1
+            end_row = min(self.total_rows, self.current_page * self.page_size)
+            status = self.tr("Showing {0}-{1} of {2} | Page {3}/{4}").format(
+                start_row,
+                end_row,
+                self.total_rows,
+                self.current_page,
+                self.total_pages,
+            )
+        self.page_edit.setText(str(self.current_page))
+        self.page_size_edit.setText(str(self.page_size))
+        self.page_status.setText(status)
+        has_prev = self.current_page > 1
+        has_next = self.current_page < self.total_pages
+        self.btn_first.setEnabled(has_prev)
+        self.btn_prev.setEnabled(has_prev)
+        self.btn_next.setEnabled(has_next)
+        self.btn_last.setEnabled(has_next)
+        self.btn_go.setEnabled(self.total_rows > 0)
+
+    def apply_filters(self):
+        self.current_page = 1
+        self.load_data()
+
+    def clear_filters(self):
+        if self._has_active_filters():
+            reply = themed_yes_no_question(
+                self,
+                self.tr("Clear current filters?"),
+                self.tr("This will reset search, filters, sorting, and page position. It will not delete database records or human review notes."),
+                confirm_role=BUTTON_ROLE_DESTRUCTIVE,
+                default_button=QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+        self.search_edit.clear()
+        self.status_combo.setCurrentIndex(0)
+        self.human_filter_combo.setCurrentIndex(0)
+        self.vlm_filter_combo.setCurrentIndex(0)
+        self.sort_combo.setCurrentIndex(0)
+        self.current_page = 1
+        self.load_data()
+
+    def on_header_clicked(self, section):
+        if self._active_table == "figure_records":
+            mapping = {0: "newest", 3: "score_desc", 5: "oldest", 6: "species", 7: "pdf_name"}
+        else:
+            mapping = {0: "newest", 3: "score_desc", 5: "pdf_name"}
+        sort_value = mapping.get(int(section))
+        if not sort_value:
+            return
+        index = self.sort_combo.findData(sort_value)
+        if index >= 0:
+            self.sort_combo.setCurrentIndex(index)
+            self.apply_filters()
+
+    def _row_to_record(self, row):
+        values = list(row)
+        if self._active_table == "figure_records":
+            return {
+                "source_table": "figure_records",
+                "id": values[0],
+                "image_file_name": values[1] or "",
+                "image_file_path": values[2] or "",
+                "score": values[3],
+                "accepted": values[4],
+                "page_number": values[5],
+                "species": values[6] or "",
+                "review_status": values[7] or "",
+                "multimodal_review_mode": values[8] or "",
+                "multimodal_validated": values[9],
+                "pdf_file_name": values[10] or "",
+                "pdf_file_path": values[11] or "",
+                "human_status": values[12] or "unreviewed",
+                "review_note": values[13] or "",
+            }
+        return {
+            "source_table": "images",
+            "id": values[0],
+            "image_file_name": values[1] or "",
+            "image_file_path": values[2] or "",
+            "score": values[3],
+            "accepted": values[4],
+            "page_number": "",
+            "species": "",
+            "review_status": "legacy",
+            "multimodal_review_mode": "",
+            "multimodal_validated": 0,
+            "pdf_file_name": values[5] or "",
+            "pdf_file_path": values[6] or "",
+            "human_status": values[7] or "unreviewed",
+            "review_note": values[8] or "",
+        }
+
+    def _record_display_values(self, record):
+        if self._active_table == "figure_records":
+            return [
+                record["id"],
+                record["image_file_name"],
+                record["image_file_path"],
+                record["score"],
+                record["accepted"],
+                record["page_number"],
+                record["species"],
+                record["pdf_file_name"],
+                record["human_status"],
+                record["review_note"],
+            ]
+        return [
+            record["id"],
+            record["image_file_name"],
+            record["image_file_path"],
+            record["score"],
+            record["accepted"],
+            record["pdf_file_name"],
+            record["human_status"],
+            record["review_note"],
+        ]
+
+    def _gallery_label(self, record):
+        score = record.get("score")
+        try:
+            score_text = f"{float(score):.3f}"
+        except (TypeError, ValueError):
+            score_text = str(score or "")
+        bits = [
+            f"#{record.get('id')}",
+            record.get("image_file_name") or "",
+            record.get("species") or record.get("pdf_file_name") or "",
+            f"score={score_text}",
+            f"human={record.get('human_status') or 'unreviewed'}",
+        ]
+        return " | ".join(str(bit) for bit in bits if str(bit).strip())
+
+    def _set_selected_record(self, record):
+        self._selected_record = dict(record) if record else None
+        self.review_note_edit.blockSignals(True)
+        self.human_status_group.blockSignals(True)
+        if record:
+            status = record.get("human_status") or "unreviewed"
+            self._set_human_status_choice(status)
+            self.review_note_edit.setText(record.get("review_note") or "")
+        else:
+            self._set_human_status_choice("unreviewed")
+            self.review_note_edit.clear()
+        self.human_status_group.blockSignals(False)
+        self.review_note_edit.blockSignals(False)
+
+    def _update_current_row_review_state(self, status, note):
+        if not self._selected_record:
+            return
+        source_table = self._selected_record.get("source_table") or self._active_table
+        record_id = int(self._selected_record.get("id"))
+        self._selected_record["human_status"] = status
+        self._selected_record["review_note"] = note
+
+        for index, record in enumerate(self._current_rows):
+            if (record.get("source_table") or self._active_table) == source_table and int(record.get("id")) == record_id:
+                record["human_status"] = status
+                record["review_note"] = note
+                display_values = self._record_display_values(record)
+                for column, value in enumerate(display_values):
+                    item = self.table.item(index, column)
+                    if item is None:
+                        item = QTableWidgetItem()
+                        self.table.setItem(index, column, item)
+                    item.setText(str(value))
+                    item.setData(Qt.UserRole, record)
+                break
+
+        for index in range(self.gallery.count()):
+            item = self.gallery.item(index)
+            record = item.data(Qt.UserRole)
+            if not isinstance(record, dict):
+                continue
+            if (record.get("source_table") or self._active_table) == source_table and int(record.get("id")) == record_id:
+                record["human_status"] = status
+                record["review_note"] = note
+                item.setData(Qt.UserRole, record)
+                item.setText(self._gallery_label(record))
+                break
+
+    def _on_review_save_done(self, source_table, record_id, status, note):
+        worker = self.sender()
+        if worker in self._review_save_workers:
+            self._review_save_workers.remove(worker)
+        if worker is not None:
+            worker.deleteLater()
+
+    def _on_review_save_failed(self, detail):
+        worker = self.sender()
+        if worker in self._review_save_workers:
+            self._review_save_workers.remove(worker)
+        if worker is not None:
+            worker.deleteLater()
+        QMessageBox.warning(self, self.tr("Error"), self.tr("DB Error: {0}").format(detail))
+
+    def _wait_for_pending_review_saves(self):
+        for worker in list(self._review_save_workers):
+            if worker.isRunning():
+                worker.wait(1500)
+
+    def closeEvent(self, event):
+        self._wait_for_pending_review_saves()
+        super().closeEvent(event)
+
+    def accept(self):
+        self._wait_for_pending_review_saves()
+        super().accept()
+
+    def reject(self):
+        self._wait_for_pending_review_saves()
+        super().reject()
 
     def load_data(self):
         if not os.path.exists(self.db_path):
@@ -453,20 +1292,24 @@ class DatabaseViewerDialog(QDialog):
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
+            self._ensure_human_review_table(cursor)
+            self._refresh_schema(cursor)
 
             cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='figure_records'")
             has_v2_table = cursor.fetchone() is not None
 
             if has_v2_table:
-                query = """
-                    SELECT id, image_file_name, image_file_path, final_confidence, accepted, page_number, species_candidate
-                    FROM figure_records
-                    ORDER BY id DESC
-                    LIMIT 500
-                """
-                cursor.execute(query)
+                self._active_table = "figure_records"
+                count_query, count_params = self._build_v2_query_parts(count_only=True)
+                cursor.execute(count_query, count_params)
+                self.total_rows = int(cursor.fetchone()[0] or 0)
+                self.total_pages = max(1, (self.total_rows + self.page_size - 1) // self.page_size)
+                self.current_page = max(1, min(self.current_page, self.total_pages))
+                offset = (self.current_page - 1) * self.page_size
+                query, params = self._build_v2_query_parts(count_only=False)
+                cursor.execute(query, params + [self.page_size, offset])
                 rows = cursor.fetchall()
-                self.table.setColumnCount(7)
+                self.table.setColumnCount(10)
                 self.table.setHorizontalHeaderLabels([
                     self.tr("ID"),
                     self.tr("Filename"),
@@ -475,29 +1318,55 @@ class DatabaseViewerDialog(QDialog):
                     self.tr("Accepted"),
                     self.tr("Page"),
                     self.tr("Species"),
+                    "PDF",
+                    self.tr("Human"),
+                    self.tr("Review Note:"),
                 ])
             else:
-                query = """
-                    SELECT i.id, i.image_file_name, i.image_file_path, i.confidence_score, i.is_taxonomic
-                    FROM images i
-                    ORDER BY i.id DESC
-                    LIMIT 500
-                """
-                cursor.execute(query)
+                self._active_table = "images"
+                count_query, count_params = self._build_legacy_query_parts(count_only=True)
+                cursor.execute(count_query, count_params)
+                self.total_rows = int(cursor.fetchone()[0] or 0)
+                self.total_pages = max(1, (self.total_rows + self.page_size - 1) // self.page_size)
+                self.current_page = max(1, min(self.current_page, self.total_pages))
+                offset = (self.current_page - 1) * self.page_size
+                query, params = self._build_legacy_query_parts(count_only=False)
+                cursor.execute(query, params + [self.page_size, offset])
                 rows = cursor.fetchall()
-                self.table.setColumnCount(5)
+                self.table.setColumnCount(8)
                 self.table.setHorizontalHeaderLabels([
                     self.tr("ID"),
                     self.tr("Filename"),
                     self.tr("Path"),
                     self.tr("Score"),
                     self.tr("Taxonomic"),
+                    "PDF",
+                    self.tr("Human"),
+                    self.tr("Review Note:"),
                 ])
             self.table.setRowCount(len(rows))
+            self.gallery.clear()
+            self._current_rows = []
             
             for i, row in enumerate(rows):
-                for j, val in enumerate(row):
-                    self.table.setItem(i, j, QTableWidgetItem(str(val)))
+                record = self._row_to_record(row)
+                self._current_rows.append(record)
+                display_values = self._record_display_values(record)
+                for j, val in enumerate(display_values):
+                    item = QTableWidgetItem(str(val))
+                    item.setData(Qt.UserRole, record)
+                    self.table.setItem(i, j, item)
+                gallery_item = QListWidgetItem(self._gallery_label(record))
+                gallery_item.setData(Qt.UserRole, record)
+                thumb_path = str(record.get("image_file_path") or "")
+                if os.path.exists(thumb_path):
+                    thumb = QPixmap(thumb_path)
+                    if not thumb.isNull():
+                        gallery_item.setIcon(QIcon(thumb.scaled(160, 120, Qt.KeepAspectRatio, Qt.SmoothTransformation)))
+                self.gallery.addItem(gallery_item)
+            self._apply_table_default_widths()
+            self._update_pager_state()
+            self._set_selected_record(None)
             
             conn.close()
         except Exception as e:
@@ -508,9 +1377,22 @@ class DatabaseViewerDialog(QDialog):
         if not items: return
         
         row = items[0].row()
-        image_id = self.table.item(row, 0).text() # ID is column 0
-        img_path = self.table.item(row, 2).text()
-        
+        record = self.table.item(row, 0).data(Qt.UserRole)
+        self._load_record_details(record)
+
+    def on_gallery_selected(self):
+        items = self.gallery.selectedItems()
+        if not items:
+            return
+        self._load_record_details(items[0].data(Qt.UserRole))
+
+    def _load_record_details(self, record):
+        if not record:
+            return
+        self._set_selected_record(record)
+        image_id = str(record.get("id"))
+        img_path = str(record.get("image_file_path") or "")
+
         # Load Image
         if os.path.exists(img_path):
             pix = QPixmap(img_path)
@@ -529,48 +1411,65 @@ class DatabaseViewerDialog(QDialog):
             has_v2_table = cursor.fetchone() is not None
 
             if has_v2_table:
-                cursor.execute(
-                    """
-                    SELECT page_number, species_candidate, category, review_status, rejection_reason, caption_text,
-                           multimodal_validated, multimodal_review_mode, multimodal_model_used
-                    FROM figure_records
-                    WHERE id = ?
-                    """,
-                    (image_id,),
-                )
-                figure_row = cursor.fetchone()
-                cursor.execute(
-                    """
-                    SELECT evidence_level, evidence_type, text_content, match_score, section_title
-                    FROM figure_evidence
-                    WHERE figure_id = ?
-                    ORDER BY CASE evidence_level
-                        WHEN 'figure_local' THEN 1
-                        WHEN 'species_core' THEN 2
-                        ELSE 3
-                    END, match_score DESC, id ASC
-                    """,
-                    (image_id,),
-                )
-                rows = cursor.fetchall()
-
                 display_text = self.tr("File: {0}\n").format(img_path)
-                if figure_row:
-                    page_number, species_candidate, category, review_status, rejection_reason, caption_text, multimodal_validated, review_mode, model_used = figure_row
-                    multimodal_text = 'real' if multimodal_validated else review_mode or 'none'
-                    display_text += self.tr("Page: {0}\nSpecies: {1}\nCategory: {2}\nStatus: {3}\nMultimodal: {4}\n").format(
-                        page_number,
-                        species_candidate or 'Unknown',
-                        category,
-                        review_status,
-                        multimodal_text,
+                page_number = record.get("page_number", "")
+                species_candidate = record.get("species", "")
+                review_status = record.get("review_status", "")
+                review_mode = record.get("multimodal_review_mode", "")
+                multimodal_validated = record.get("multimodal_validated", 0)
+                category = ""
+                rejection_reason = ""
+                caption_text = ""
+                model_used = ""
+                if self._has_col("figure_records", "category") or self._has_col("figure_records", "caption_text"):
+                    cursor.execute(
+                        f"""
+                        SELECT
+                            {self._sql_col('figure_records', 'f', 'category', "''")},
+                            {self._sql_col('figure_records', 'f', 'rejection_reason', "''")},
+                            {self._sql_col('figure_records', 'f', 'caption_text', "''")},
+                            {self._sql_col('figure_records', 'f', 'multimodal_model_used', "''")}
+                        FROM figure_records f
+                        WHERE f.id = ?
+                        """,
+                        (image_id,),
                     )
-                    if model_used:
-                        display_text += self.tr("Model: {0}\n").format(model_used)
-                    if rejection_reason:
-                        display_text += self.tr("Reject Reason: {0}\n").format(rejection_reason)
-                    if caption_text:
-                        display_text += self.tr("\n--- Caption ---\n{0}\n").format(caption_text)
+                    extra_row = cursor.fetchone()
+                    if extra_row:
+                        category, rejection_reason, caption_text, model_used = extra_row
+                multimodal_text = 'real' if multimodal_validated else review_mode or 'none'
+                display_text += self.tr("Page: {0}\nSpecies: {1}\nCategory: {2}\nStatus: {3}\nMultimodal: {4}\n").format(
+                    page_number,
+                    species_candidate or 'Unknown',
+                    category,
+                    review_status,
+                    multimodal_text,
+                )
+                display_text += f"{self.tr('Human:')} {record.get('human_status') or 'unreviewed'}\n"
+                if record.get("review_note"):
+                    display_text += f"{self.tr('Review Note:')} {record.get('review_note')}\n"
+                if model_used:
+                    display_text += self.tr("Model: {0}\n").format(model_used)
+                if rejection_reason:
+                    display_text += self.tr("Reject Reason: {0}\n").format(rejection_reason)
+                if caption_text:
+                    display_text += self.tr("\n--- Caption ---\n{0}\n").format(caption_text)
+                rows = []
+                if self._has_table("figure_evidence"):
+                    cursor.execute(
+                        """
+                        SELECT evidence_level, evidence_type, text_content, match_score, section_title
+                        FROM figure_evidence
+                        WHERE figure_id = ?
+                        ORDER BY CASE evidence_level
+                            WHEN 'figure_local' THEN 1
+                            WHEN 'species_core' THEN 2
+                            ELSE 3
+                        END, match_score DESC, id ASC
+                        """,
+                        (image_id,),
+                    )
+                    rows = cursor.fetchall()
                 if rows:
                     display_text += self.tr("\n--- Evidence ---\n")
                     for level, evidence_type, content, score, section_title in rows:
@@ -578,7 +1477,16 @@ class DatabaseViewerDialog(QDialog):
                         display_text += f"[{level} | {evidence_type}{title_part} | score={score:.3f}]\n{content}\n\n"
                 else:
                     display_text += self.tr("\n(No related evidence found in DB)")
-                if figure_row:
+                required_part_cols = {
+                    "pdf_file_id", "taxon_name", "caste_or_stage", "part_label", "description_text",
+                    "source_pages", "source_block_refs", "confidence", "review_status",
+                    "file_name", "file_path", "file_hash",
+                }
+                if (
+                    self._has_table("taxon_part_descriptions")
+                    and self._has_col("figure_records", "pdf_file_id")
+                    and required_part_cols.issubset(self._table_columns.get("taxon_part_descriptions", set()))
+                ):
                     cursor.execute(
                         """
                         SELECT taxon_name, caste_or_stage, part_label, description_text,
@@ -632,6 +1540,193 @@ class DatabaseViewerDialog(QDialog):
             conn.close()
         except Exception as e:
             self.txt_context.setText(self.tr("Error querying text: {0}").format(e))
+
+    def _selected_path(self):
+        if not self._selected_record:
+            return ""
+        return str(self._selected_record.get("image_file_path") or "")
+
+    def _open_existing_path(self, path):
+        if not path:
+            QMessageBox.information(self, self.tr("Database Viewer"), self.tr("No image path selected."))
+            return
+        if not os.path.exists(path):
+            QMessageBox.warning(self, self.tr("Error"), self.tr("Path does not exist: {0}").format(path))
+            return
+        open_path(path)
+
+    def open_selected_image(self):
+        self._open_existing_path(self._selected_path())
+
+    def open_selected_folder(self):
+        path = self._selected_path()
+        folder = os.path.dirname(path) if path else ""
+        self._open_existing_path(folder)
+
+    def open_selected_pdf(self):
+        if not self._selected_record:
+            QMessageBox.information(self, self.tr("Database Viewer"), self.tr("No source PDF found for this row."))
+            return
+        pdf_path = str(self._selected_record.get("pdf_file_path") or "")
+        if not pdf_path:
+            QMessageBox.information(self, self.tr("Database Viewer"), self.tr("No source PDF found for this row."))
+            return
+        self._open_existing_path(pdf_path)
+
+    def save_current_review(self):
+        if not self._selected_record:
+            return
+        status = self._selected_human_status()
+        note = self.review_note_edit.text().strip()
+        source_table = self._selected_record.get("source_table") or self._active_table
+        record_id = int(self._selected_record.get("id"))
+        self._update_current_row_review_state(status, note)
+        worker = HumanReviewSaveWorker(self.db_path, source_table, record_id, status, note, self)
+        worker.saved.connect(self._on_review_save_done)
+        worker.failed.connect(self._on_review_save_failed)
+        self._review_save_workers.append(worker)
+        worker.start()
+
+    def mark_filtered_import_ready(self):
+        records = self._all_filtered_records()
+        if not records:
+            QMessageBox.information(self, self.tr("Database Viewer"), self.tr("No rows match the current filters."))
+            return
+        protected_statuses = {"human_rejected", "needs_crop"}
+        passable_records = [
+            record
+            for record in records
+            if str(record.get("human_status") or "unreviewed") not in protected_statuses
+        ]
+        if not passable_records:
+            QMessageBox.information(self, self.tr("Database Viewer"), self.tr("No passable rows match the current filters."))
+            return
+        reply = themed_yes_no_question(
+            self,
+            self.tr("Mark Filtered Import Ready"),
+            self.tr("Mark {0} passable rows as import_ready? {1} rows already marked rejected/needs_crop will be kept.").format(
+                len(passable_records),
+                len(records) - len(passable_records),
+            ),
+            confirm_role=BUTTON_ROLE_COMMIT,
+            default_button=QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        now = time.strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            self._ensure_human_review_table(cursor)
+            cursor.executemany(
+                """
+                INSERT INTO figure_human_reviews (source_table, record_id, human_status, review_note, updated_at)
+                VALUES (?, ?, 'import_ready', '', ?)
+                ON CONFLICT(source_table, record_id) DO UPDATE SET
+                    human_status = excluded.human_status,
+                    review_note = figure_human_reviews.review_note,
+                    updated_at = excluded.updated_at
+                """,
+                [
+                    (
+                        record.get("source_table") or self._active_table,
+                        int(record.get("id")),
+                        now,
+                    )
+                    for record in passable_records
+                ],
+            )
+            conn.commit()
+            conn.close()
+            QMessageBox.information(
+                self,
+                self.tr("Database Viewer"),
+                self.tr("Marked {0} filtered rows as import_ready.").format(len(passable_records)),
+            )
+            self.load_data()
+        except Exception as exc:
+            QMessageBox.warning(self, self.tr("Error"), self.tr("DB Error: {0}").format(exc))
+
+    def _all_filtered_records(self):
+        if not os.path.exists(self.db_path):
+            return []
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.cursor()
+            self._ensure_human_review_table(cursor)
+            self._refresh_schema(cursor)
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='figure_records'")
+            has_v2_table = cursor.fetchone() is not None
+            self._active_table = "figure_records" if has_v2_table else "images"
+            if has_v2_table:
+                query, params = self._build_v2_query_parts(count_only=False, include_limit=False)
+            else:
+                query, params = self._build_legacy_query_parts(count_only=False, include_limit=False)
+            cursor.execute(query, params)
+            return [self._row_to_record(row) for row in cursor.fetchall()]
+        finally:
+            conn.close()
+
+    def export_filtered_csv(self):
+        records = self._all_filtered_records()
+        if not records:
+            QMessageBox.information(self, self.tr("Database Viewer"), self.tr("No rows match the current filters."))
+            return
+        start_dir = os.path.dirname(os.path.abspath(self.db_path))
+        out_path, _ = QFileDialog.getSaveFileName(
+            self,
+            self.tr("Export Filtered CSV"),
+            os.path.join(start_dir, "pdf_database_filtered_review.csv"),
+            "CSV (*.csv);;All Files (*)",
+        )
+        if not out_path:
+            return
+        fields = [
+            "source_table", "id", "image_file_name", "image_file_path", "score", "accepted",
+            "page_number", "species", "review_status", "multimodal_review_mode",
+            "pdf_file_name", "pdf_file_path", "human_status", "review_note",
+        ]
+        with open(out_path, "w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields)
+            writer.writeheader()
+            for record in records:
+                writer.writerow({field: record.get(field, "") for field in fields})
+        QMessageBox.information(
+            self,
+            self.tr("Database Viewer"),
+            self.tr("Export finished: {0} rows -> {1}").format(len(records), out_path),
+        )
+
+    def copy_filtered_images(self):
+        records = self._all_filtered_records()
+        if not records:
+            QMessageBox.information(self, self.tr("Database Viewer"), self.tr("No rows match the current filters."))
+            return
+        start_dir = os.path.dirname(os.path.abspath(self.db_path))
+        target_dir = QFileDialog.getExistingDirectory(self, self.tr("Copy Filtered Images"), start_dir)
+        if not target_dir:
+            return
+        copied = 0
+        used_names = set()
+        for record in records:
+            src = str(record.get("image_file_path") or "")
+            if not src or not os.path.exists(src):
+                continue
+            base = os.path.basename(src)
+            stem, ext = os.path.splitext(base)
+            target_name = base
+            suffix = 1
+            while target_name.lower() in used_names or os.path.exists(os.path.join(target_dir, target_name)):
+                target_name = f"{stem}_{suffix:03d}{ext}"
+                suffix += 1
+            shutil.copy2(src, os.path.join(target_dir, target_name))
+            used_names.add(target_name.lower())
+            copied += 1
+        QMessageBox.information(
+            self,
+            self.tr("Database Viewer"),
+            self.tr("Copied {0} images -> {1}").format(copied, target_dir),
+        )
 
 class CSVViewerDialog(QDialog):
     def __init__(self, csv_path, parent=None, lang="en"):
@@ -2106,9 +3201,9 @@ class PdfProcessingWidget(QWidget):
             self.combo_mode.blockSignals(was_blocked)
 
         try:
-            lines_per_pdf = max(1, int(self.screener_config.get("lines_per_pdf", 30)))
+            lines_per_pdf = max(1, int(self.screener_config.get("lines_per_pdf", 50)))
         except (TypeError, ValueError):
-            lines_per_pdf = 30
+            lines_per_pdf = 50
         try:
             batch_size = max(1, int(self.screener_config.get("csv_batch_size", 80)))
         except (TypeError, ValueError):
@@ -2736,7 +3831,7 @@ class PdfProcessingWidget(QWidget):
         self.combo_mode.currentIndexChanged.connect(self.on_mode_changed)
 
         self.lbl_lines_per_pdf = QLabel()
-        self.edit_lines_per_pdf = QLineEdit("30")
+        self.edit_lines_per_pdf = QLineEdit("50")
         self.edit_lines_per_pdf.setValidator(QIntValidator(1, 500, self))
         self.edit_lines_per_pdf.setMaximumWidth(70)
 
@@ -3404,9 +4499,9 @@ class PdfProcessingWidget(QWidget):
             return
 
         try:
-            lines_per_pdf = int(self.edit_lines_per_pdf.text() or "30")
+            lines_per_pdf = int(self.edit_lines_per_pdf.text() or "50")
         except ValueError:
-            lines_per_pdf = 30
+            lines_per_pdf = 50
         try:
             batch_size = int(self.edit_batch_size.text() or "80")
         except ValueError:

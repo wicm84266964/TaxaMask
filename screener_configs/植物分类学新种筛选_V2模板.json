@@ -95,7 +95,7 @@
   "llm_system_prompt": "你是一个严谨的植物分类学文献筛选助手，必须输出可解析JSON。",
   "llm_prompt_template": "你是一个专业的植物分类学专家。你将获得一个文献列表(JSON数组)，每条记录含 record_id、record_index、display_label、filename、title、text。\n\n本批次应判定记录数：{expected_record_count}\n\n任务：判断每条文献是否属于“植物分类学新种/新分类单元报道”。如果你只关注某个科或属，请先把 profile 中的 TARGET_FAMILY / TARGET_GENUS 改成真实名称。\n\n判定标准：\n1) include：文本明确支持植物本身的新种、新属、新组合或分类修订，通常包含植物类群名、新种术语、形态描述、模式标本、herbarium/voucher 或 key to species。\n2) exclude：明确不是植物分类学新种报道，例如生态群落、植被调查、分子系统发育、基因组、栽培、药理、化学成分、病原物、传粉昆虫等。\n3) uncertain：证据不足、文本截断、标题/正文冲突，或只能判断为植物相关但不能确认分类学新单元。\n\n请只输出 JSON 数组，不要输出任何额外文字。每个元素结构必须是：\n{\"record_id\":\"<原值>\",\"decision\":\"include|exclude|uncertain\",\"confidence\":0-1,\"reason\":\"一句话理由\"}\n\n待判定记录：\n{records_json}\n",
   "llm_batch_prompt_template": "你是一个专业的植物分类学专家。你将获得一个文献列表(JSON数组)，每条记录含 record_id、record_index、display_label、filename、title、text。\n\n本批次应判定记录数：{expected_record_count}\n\n任务：判断每条文献是否属于“植物分类学新种/新分类单元报道”。如果你只关注某个科或属，请先把 profile 中的 TARGET_FAMILY / TARGET_GENUS 改成真实名称。\n\n判定标准：\n1) include：文本明确支持植物本身的新种、新属、新组合或分类修订，通常包含植物类群名、新种术语、形态描述、模式标本、herbarium/voucher 或 key to species。\n2) exclude：明确不是植物分类学新种报道，例如生态群落、植被调查、分子系统发育、基因组、栽培、药理、化学成分、病原物、传粉昆虫等。\n3) uncertain：证据不足、文本截断、标题/正文冲突，或只能判断为植物相关但不能确认分类学新单元。\n\n请只输出 JSON 数组，不要输出任何额外文字。每个元素结构必须是：\n{\"record_id\":\"<原值>\",\"decision\":\"include|exclude|uncertain\",\"confidence\":0-1,\"reason\":\"一句话理由\"}\n\n待判定记录：\n{records_json}\n",
-  "lines_per_pdf": 30,
+  "lines_per_pdf": 50,
   "csv_batch_size": 80,
   "csv_batch_fallback_size": 40,
   "batch_char_budget": 100000,

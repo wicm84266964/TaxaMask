@@ -569,6 +569,23 @@ class UiLocalizationTests(unittest.TestCase):
             self.assertEqual(dialog.btn_new_profile.text(), "Save Current Settings as New Profile")
             self.assertEqual(dialog.btn_set_active_profile.text(), "Set as Active Profile")
             self.assertIsNotNone(dialog.findChild(QWidget, "modelSettingsProfileSummary"))
+            self.assertIsNone(dialog.profile_tab_index)
+            advanced_tab = dialog.tabs.widget(dialog.advanced_extensions_tab_index).widget()
+            self.assertIsNotNone(advanced_tab.findChild(QWidget, "modelSettingsProfilePanel"))
+            self.assertIsNotNone(advanced_tab.findChild(QWidget, "modelSettingsModelSourceSwitchPanel"))
+            self.assertIsNotNone(advanced_tab.findChild(QWidget, "modelSettingsParentExtensionPanel"))
+            self.assertIsNotNone(advanced_tab.findChild(QWidget, "modelSettingsExternalBlinkPanel"))
+            self.assertEqual(dialog.tabs.tabText(0), "Parent-part annotation")
+            self.assertEqual(dialog.tabs.tabText(1), "Child-part annotation")
+            self.assertEqual(dialog.tabs.tabText(2), "Inference")
+            self.assertEqual(dialog.tabs.tabText(3), "Advanced Extensions")
+            panel_order = [
+                advanced_tab.findChild(QWidget, "modelSettingsProfilePanel").y(),
+                advanced_tab.findChild(QWidget, "modelSettingsModelSourceSwitchPanel").y(),
+                advanced_tab.findChild(QWidget, "modelSettingsParentExtensionPanel").y(),
+                advanced_tab.findChild(QWidget, "modelSettingsExternalBlinkPanel").y(),
+            ]
+            self.assertEqual(panel_order, sorted(panel_order))
             self.assertIn("Project active profile", dialog.profile_summary_box.toPlainText())
 
             dialog.new_model_profile()
@@ -641,6 +658,12 @@ class UiLocalizationTests(unittest.TestCase):
             self.assertIsNotNone(child_tab.findChild(QWidget, "modelSettingsChildSourceSummary"))
             self.assertIsNotNone(advanced_tab.findChild(QWidget, "modelSettingsParentExtensionPanel"))
             self.assertIsNotNone(advanced_tab.findChild(QWidget, "modelSettingsExternalBlinkPanel"))
+            parent_status = advanced_tab.findChild(QWidget, "modelSettingsParentExtensionStatus")
+            child_status = advanced_tab.findChild(QWidget, "modelSettingsChildExtensionStatus")
+            self.assertIsNotNone(parent_status)
+            self.assertIsNotNone(child_status)
+            self.assertIn("Active now", parent_status.text())
+            self.assertIn("Not active now", child_status.text())
             self.assertIsNone(child_tab.findChild(QWidget, "modelSettingsExternalBlinkPanel"))
             self.assertEqual(dialog._external_backend_validation_errors(), [])
 

@@ -10,20 +10,20 @@
 
 这次工作主要解决两个研究流程痛点。
 
-第一，项目刚开始没有 Locator / Blink 素材时，研究者需要从零手工给 SAM 画提示框。现在可以让多模态大模型先根据无网格输入图提出像素候选框，再由 SAM 生成草稿 polygon，帮助完成最麻烦的“第一公里”。
+第一，项目刚开始没有 Locator / Blink 素材时，研究者需要从零手工给 SAM 画提示框。现在可以让多模态大模型先根据按图片长宽比自适应的轻量网格输入图提出粗定位候选框，再由 SAM 生成草稿 polygon，帮助完成最麻烦的“第一公里”。
 
 第二，Blink 合并进主工作台后，父级上下文解析过于积极。新建部位在只有一个主部位时会看起来自动挂到该父部位下。现在已改为显式确认：只有用户手动选择父级，或项目已有明确 route，才会形成父子关系。
 
 ## 2. 研究者实际怎么用
 
-1. 在 `2D/STL Model Settings -> Training` 的 `AI Multimodal Pre-Annotation` 区域勾选要交给 VLM 预标注的部位。
+1. 在 `2D/STL Model Settings -> Inference` 的 `AI Multimodal Pre-Annotation` 区域勾选要交给 VLM 预标注的部位，并设置批量范围。
 2. 在 PDF Evidence Tools 中配置 Multimodal LLM API；缺少配置时，弹窗按钮会直接跳到 API 设置位置。
-3. 回到主标注工作台，选择当前图像，点击顶部右侧工具流里的 `VLM Pre-Annotate`。
-4. 程序生成无网格 VLM 输入图，调用多模态 API，解析候选框，并用候选框驱动 SAM 生成 `Auto-Annotated` 草稿。
+3. 回到主标注工作台，点击顶部右侧工具流里的 `VLM Pre-Label` / `VLM预标注` 只跑当前图，或点击 `VLM Batch Pre-Label` / `VLM批量预标` 按设置的批量范围运行。
+4. 程序生成自适应轻量网格 VLM 输入图，调用多模态 API，解析网格候选框，并用候选框驱动 SAM 生成 `Auto-Annotated` 草稿。方图通常接近 8x8，宽侧视图会自动增加横向列数。
 5. 复核时，如果草稿正确，可以按空格确认当前部位，或点击 `Accept current image AI drafts` 一键通过当前图像已有 polygon 草稿。
 6. 如果草稿错误，直接重新框选该部位并调用 SAM；人工结果会覆盖同部位 AI 草稿。
 
-批量处理已导入所有图像前会二次确认，并且按图像线性执行。当前图像一键通过不会跨图像批量确认。
+批量处理前会二次确认，并且按图像线性执行；批量范围可以是全部导入图像，也可以是左侧图片列表中的指定分组，例如 `Split Crops`。当前图像一键通过不会跨图像批量确认。
 
 ## 3. 数据安全边界
 
@@ -36,7 +36,7 @@
 
 ## 4. 主要源码位置
 
-- `AntSleap/core/vlm_preannotation.py`：无网格 VLM 输入图、prompt、API 调用、JSON 解析和报告留档。
+- `AntSleap/core/vlm_preannotation.py`：自适应轻量网格 VLM 输入图、prompt、API 调用、JSON 解析和报告留档。
 - `AntSleap/main.py`：GUI 入口、设置读取、批量队列、进度条、SAM 草稿写回、一键通过、设置跳转和 Blink 父级修复。
 - `AntSleap/core/project.py`：VLM 设置、`auto_box_meta`、草稿确认状态和 AI 框清理。
 - `AntSleap/core/training_preflight.py`：训练预检跳过未复核 `Auto-Annotated` 草稿。
@@ -48,7 +48,7 @@
 
 真实运行时会生成：
 
-- VLM 输入图：`<project_dir>/vlm_preannotation/*_vlm_input_*.png`
+- VLM 输入图：`<project_dir>/vlm_preannotation/*_vlm_input_grid_*.png`
 - 原始响应：`<project_dir>/vlm_preannotation/*_raw_response_*.txt`
 - 单图报告：`<project_dir>/vlm_preannotation/*_vlm_preannotation_*.json`
 - 批量汇总：`<project_dir>/vlm_preannotation/vlm_preannotation_summary_*.json`

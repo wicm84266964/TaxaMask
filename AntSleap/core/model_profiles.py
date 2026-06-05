@@ -1,5 +1,6 @@
 from copy import deepcopy
 
+from .vlm_preannotation import DEFAULT_VLM_PROMPT_PROFILE_ID, sanitize_vlm_prompt_profile
 from .taxonomy_defaults import DEFAULT_LOCATOR_SCOPE, sanitize_locator_scope
 
 
@@ -63,6 +64,10 @@ DEFAULT_HEATMAP_BLINK_PARAMS = {
     "wh_loss_weight": 1.0,
     "center_loss_weight": 1.0,
 }
+
+VLM_PROCESSING_SCOPES = {"current_image", "all_images", "image_group"}
+VLM_IMAGE_GROUPS = {"original", "split", "manual_done", "manual"}
+DEFAULT_VLM_IMAGE_GROUP = "split"
 
 
 def _safe_id(value, fallback):
@@ -140,12 +145,20 @@ def _clean_vlm_settings(raw_settings, taxonomy=None):
         clean_part = str(part_name or "").strip()
         if clean_part and (not taxonomy_set or clean_part in taxonomy_set) and clean_part not in target_parts:
             target_parts.append(clean_part)
-    scope = str(raw_settings.get("processing_scope", "current_image") or "current_image").strip()
-    if scope not in {"current_image", "all_images"}:
-        scope = "current_image"
+    scope = str(raw_settings.get("processing_scope", "image_group") or "image_group").strip()
+    if scope not in VLM_PROCESSING_SCOPES:
+        scope = "image_group"
+    image_group = str(raw_settings.get("image_group", DEFAULT_VLM_IMAGE_GROUP) or DEFAULT_VLM_IMAGE_GROUP).strip()
+    if not image_group:
+        image_group = DEFAULT_VLM_IMAGE_GROUP
+    prompt_profile = sanitize_vlm_prompt_profile(raw_settings.get("prompt_profile", {}))
+    prompt_profile_id = str(raw_settings.get("prompt_profile_id") or prompt_profile.get("profile_id") or DEFAULT_VLM_PROMPT_PROFILE_ID).strip()
     return {
         "target_parts": target_parts,
         "processing_scope": scope,
+        "image_group": image_group,
+        "prompt_profile_id": prompt_profile_id or DEFAULT_VLM_PROMPT_PROFILE_ID,
+        "prompt_profile": prompt_profile,
     }
 
 

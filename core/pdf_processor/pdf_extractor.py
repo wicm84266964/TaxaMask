@@ -1512,18 +1512,30 @@ class EnhancedPDFExtractionSystem:
             elif not is_real_multimodal:
                 review_status = "needs_review"
                 rejection_reason = "mock_review_only"
+            elif result.comparison_figure:
+                review_status = "rejected"
+                rejection_reason = "comparison_figure"
+            elif result.multiple_species:
+                review_status = "rejected"
+                rejection_reason = "multiple_species"
             elif result.accept and not required_parts_ok:
                 review_status = "rejected"
                 rejection_reason = "missing_required_parts"
             elif result.accept and not category_ok:
                 review_status = "rejected"
                 rejection_reason = result.category or "blocked_category"
+            elif result.accept and result.confidence_score < self.review_accept_threshold:
+                review_status = "rejected"
+                rejection_reason = "below_accept_threshold"
             elif result.category == "uncertain":
                 review_status = "needs_review"
                 rejection_reason = "uncertain"
+            elif not result.accept:
+                review_status = "rejected"
+                rejection_reason = "model_rejected"
             else:
                 review_status = "rejected"
-                rejection_reason = result.category
+                rejection_reason = "review_rules_not_met"
 
             reviewed.update(
                 {

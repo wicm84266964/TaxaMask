@@ -14,7 +14,37 @@ from PIL import Image, ImageDraw, ImageFont
 
 
 VLM_PREANNOTATION_SCHEMA_VERSION = "taxamask-vlm-first-mile-v1"
-VLM_PREANNOTATION_IMAGE_MODE = "pixel"
+VLM_PREANNOTATION_IMAGE_MODE = "grid"
+DEFAULT_VLM_GRID_COLS = 8
+DEFAULT_VLM_GRID_ROWS = 8
+MIN_VLM_GRID_AXIS = 6
+MAX_VLM_GRID_AXIS = 14
+DEFAULT_VLM_PROMPT_PROFILE_ID = "ant_taxonomy_default"
+DEFAULT_VLM_PROMPT_PROFILE = {
+    "profile_id": DEFAULT_VLM_PROMPT_PROFILE_ID,
+    "display_name": "Ant taxonomy default",
+    "taxon_context": "蚂蚁分类学形态图像，通常包含单只蚂蚁或裁剪后的蚂蚁局部视图。",
+    "body_focus_rules": (
+        "标 Head、Mesosoma、Gaster 等主部位时，只标对应的身体主体。触角、柄节、足、长上颚、毛刺或其他细长附属结构"
+        "容易把框拖大，除非它们本身就是当前目标结构，否则不要让这些结构决定主部位框的边界。"
+    ),
+    "part_anchor_rules": (
+        "先判断蚂蚁的前后轴，再画框。不要假设图片左侧、右侧、上方或下方一定是头部；"
+        "必须根据触角、复眼、上颚/口器、腹柄节和膨腹部判断。\n"
+        "- Head/头部：必须定位在有触角、复眼、上颚/口器的一端；框 Head 时只覆盖头壳/头部主体，"
+        "不要因为触角、柄节或其他细长附属结构伸出而把框拉大；不要把腹端或尾端当作头部。\n"
+        "- Mesosoma/中躯：位于 Head 与腹柄节之间，通常连接足和胸部背板；框 Mesosoma 时只覆盖胸部/中躯主体，"
+        "不要把足、足基部以外的细长腿段或背景一起框入；不要把膨大的腹部当作中躯。\n"
+        "- Gaster/腹部/尾部：是腹柄节或后腹柄节之后的膨大后腹部，也可被模型称为 abdomen/tail；"
+        "框 Gaster 时只覆盖膨腹部主体，不要把腹柄节、后腹柄节、足或背景一起框入；不要把头端当作 Gaster。\n"
+        "- Petiole/腹柄节：位于 Mesosoma 与 Gaster 之间的窄连接节，框要小而集中。\n"
+        "- Postpetiole/后腹柄节：位于 Petiole 与 Gaster 之间的第二个窄连接节，只在清楚可见时标出。\n"
+        "- Eye/复眼：位于 Head 上，通常是头侧深色圆/椭圆结构；不要把体表斑点或背景当作眼。\n"
+        "- Mandible/上颚：位于 Head 前端口器区域，通常成对伸出；不要把触角或足当作上颚。\n"
+        "- Antenna/Scape/触角/柄节：从 Head 前端伸出，细长；Scape 是触角基部较长的一节。"
+    ),
+    "extra_instructions": "如果模型内部使用了“尾部/abdomen/tail”等叫法，最终 part 仍必须写成目标列表中的 Gaster。",
+}
 
 COMMON_ANT_FIRST_MILE_PARTS = [
     "Whole body",
@@ -33,35 +63,98 @@ COMMON_ANT_FIRST_MILE_PARTS = [
     "Clypeus",
 ]
 
+
+def sanitize_vlm_prompt_profile(raw_profile: dict[str, Any] | None = None) -> dict[str, str]:
+    raw_profile = raw_profile if isinstance(raw_profile, dict) else {}
+    fallback = DEFAULT_VLM_PROMPT_PROFILE
+    raw_profile_id = str(raw_profile.get("profile_id") or "").strip()
+    uses_default_text = not raw_profile or raw_profile_id in {"", DEFAULT_VLM_PROMPT_PROFILE_ID}
+
+    def clean_text(key: str, limit: int = 4000) -> str:
+        fallback_value = fallback.get(key, "") if uses_default_text else ""
+        if key == "display_name" and not uses_default_text:
+            fallback_value = raw_profile_id or "Project Custom Prompt"
+        value = raw_profile.get(key, fallback_value)
+        text = str(value or "").strip()
+        if not text and uses_default_text:
+            text = str(fallback.get(key, "") or "").strip()
+        return text[:limit]
+
+    profile_id = str(raw_profile.get("profile_id") or fallback["profile_id"]).strip()
+    profile_id = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in profile_id).strip("_")
+    if not profile_id:
+        profile_id = fallback["profile_id"]
+    return {
+        "profile_id": profile_id[:80],
+        "display_name": clean_text("display_name", 120),
+        "taxon_context": clean_text("taxon_context"),
+        "body_focus_rules": clean_text("body_focus_rules"),
+        "part_anchor_rules": clean_text("part_anchor_rules"),
+        "extra_instructions": clean_text("extra_instructions"),
+    }
+
+
+def default_vlm_prompt_profile() -> dict[str, str]:
+    return sanitize_vlm_prompt_profile(DEFAULT_VLM_PROMPT_PROFILE)
+
 PART_SYNONYMS = {
     "头": "Head",
     "头部": "Head",
     "head": "Head",
+    "headcapsule": "Head",
+    "anteriorhead": "Head",
     "胸": "Mesosoma",
     "胸部": "Mesosoma",
     "中躯": "Mesosoma",
+    "躯干": "Mesosoma",
+    "胸躯": "Mesosoma",
     "mesosoma": "Mesosoma",
+    "thorax": "Mesosoma",
+    "trunk": "Mesosoma",
     "腹": "Gaster",
     "腹部": "Gaster",
+    "尾": "Gaster",
+    "尾部": "Gaster",
+    "后腹": "Gaster",
+    "后腹部": "Gaster",
+    "膨腹部": "Gaster",
+    "腹端": "Gaster",
     "gaster": "Gaster",
+    "abdomen": "Gaster",
+    "metasoma": "Gaster",
+    "tail": "Gaster",
+    "posteriorabdomen": "Gaster",
     "腹柄": "Petiole",
     "腹柄节": "Petiole",
+    "腰": "Petiole",
+    "腰部": "Petiole",
     "petiole": "Petiole",
+    "waist": "Petiole",
     "后腹柄": "Postpetiole",
     "后腹柄节": "Postpetiole",
     "postpetiole": "Postpetiole",
+    "postpetiolar": "Postpetiole",
     "眼": "Eye",
     "眼睛": "Eye",
     "复眼": "Eye",
     "eye": "Eye",
+    "eyes": "Eye",
+    "compoundeye": "Eye",
+    "compoundeyes": "Eye",
     "上颚": "Mandible",
     "大颚": "Mandible",
+    "颚": "Mandible",
     "mandible": "Mandible",
+    "mandibles": "Mandible",
+    "jaw": "Mandible",
+    "jaws": "Mandible",
     "触角": "Antenna",
     "antenna": "Antenna",
+    "antennae": "Antenna",
     "柄节": "Scape",
     "触角柄节": "Scape",
     "scape": "Scape",
+    "antennalscape": "Scape",
 }
 
 
@@ -74,6 +167,44 @@ class VlmApiError(RuntimeError):
 def _normalize_name(value: Any) -> str:
     text = str(value or "").strip()
     return re.sub(r"[\s_\-]+", "", text).lower()
+
+
+def _canonical_part_name(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return (
+        PART_SYNONYMS.get(text)
+        or PART_SYNONYMS.get(text.lower())
+        or PART_SYNONYMS.get(_normalize_name(text))
+        or text
+    )
+
+
+def adaptive_vlm_grid_size(
+    image_size: tuple[int, int] | list[int] | None,
+    base_cells: int = DEFAULT_VLM_GRID_COLS,
+    min_axis: int = MIN_VLM_GRID_AXIS,
+    max_axis: int = MAX_VLM_GRID_AXIS,
+) -> tuple[int, int]:
+    try:
+        width = float(image_size[0]) if image_size else 0.0
+        height = float(image_size[1]) if image_size else 0.0
+    except Exception:
+        width = 0.0
+        height = 0.0
+    base = max(2, int(base_cells or DEFAULT_VLM_GRID_COLS))
+    min_axis = max(2, int(min_axis))
+    max_axis = max(min_axis, int(max_axis))
+    if width <= 0.0 or height <= 0.0:
+        return base, base
+
+    ratio = max(0.35, min(3.0, width / height))
+    cols = int(round(base * math.sqrt(ratio)))
+    rows = int(round(base / math.sqrt(ratio)))
+    cols = max(min_axis, min(max_axis, cols))
+    rows = max(min_axis, min(max_axis, rows))
+    return cols, rows
 
 
 def default_vlm_target_parts(
@@ -115,9 +246,15 @@ def resolve_part_name(raw_part: Any, target_parts: list[str] | tuple[str, ...]) 
     normalized = _normalize_name(text)
     if normalized in normalized_targets:
         return normalized_targets[normalized]
-    synonym = PART_SYNONYMS.get(text) or PART_SYNONYMS.get(normalized)
+    synonym = _canonical_part_name(text)
     if synonym in targets:
         return synonym
+    normalized_synonym = _normalize_name(synonym)
+    if normalized_synonym in normalized_targets:
+        return normalized_targets[normalized_synonym]
+    for target in targets:
+        if _canonical_part_name(target) == synonym:
+            return target
     return None
 
 
@@ -179,8 +316,8 @@ def load_vlm_api_config_from_runtime_settings(settings_path: str | os.PathLike[s
 def create_grid_overlay(
     image_path: str | os.PathLike[str],
     output_path: str | os.PathLike[str],
-    grid_cols: int = 12,
-    grid_rows: int = 12,
+    grid_cols: int = DEFAULT_VLM_GRID_COLS,
+    grid_rows: int = DEFAULT_VLM_GRID_ROWS,
     max_side: int = 1600,
 ) -> dict[str, Any]:
     image_path = str(image_path)
@@ -248,68 +385,77 @@ def create_preannotation_image(
     image_path: str | os.PathLike[str],
     output_path: str | os.PathLike[str],
     max_side: int = 1600,
+    grid_cols: int | None = None,
+    grid_rows: int | None = None,
 ) -> dict[str, Any]:
-    image_path = str(image_path)
-    output_path = str(output_path)
-    max_side = max(256, int(max_side))
-
     with Image.open(image_path) as image:
-        rgb = image.convert("RGB")
-    original_width, original_height = rgb.size
-    scale = min(1.0, float(max_side) / float(max(original_width, original_height)))
-    if scale < 1.0:
-        prepared = rgb.resize((max(1, int(original_width * scale)), max(1, int(original_height * scale))), Image.LANCZOS)
-    else:
-        prepared = rgb.copy()
-
-    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-    prepared.save(output_path)
-    width, height = prepared.size
-    return {
-        "image_path": os.path.abspath(image_path),
-        "overlay_path": os.path.abspath(output_path),
-        "prepared_path": os.path.abspath(output_path),
-        "original_size": [original_width, original_height],
-        "overlay_size": [width, height],
-        "prepared_size": [width, height],
-        "image_mode": VLM_PREANNOTATION_IMAGE_MODE,
-        "grid_cols": 0,
-        "grid_rows": 0,
-        "scale": scale,
-    }
+        source_size = image.size
+    auto_cols, auto_rows = adaptive_vlm_grid_size(source_size)
+    grid_cols = int(grid_cols or auto_cols)
+    grid_rows = int(grid_rows or auto_rows)
+    meta = create_grid_overlay(
+        image_path,
+        output_path,
+        grid_cols=grid_cols,
+        grid_rows=grid_rows,
+        max_side=max_side,
+    )
+    meta["prepared_path"] = meta["overlay_path"]
+    meta["prepared_size"] = list(meta["overlay_size"])
+    meta["image_mode"] = VLM_PREANNOTATION_IMAGE_MODE
+    return meta
 
 
 def build_vlm_preannotation_prompt(
     target_parts: list[str] | tuple[str, ...],
     image_size: tuple[int, int],
     input_size: tuple[int, int] | None = None,
-    grid_cols: int = 0,
-    grid_rows: int = 0,
+    grid_cols: int = DEFAULT_VLM_GRID_COLS,
+    grid_rows: int = DEFAULT_VLM_GRID_ROWS,
+    prompt_profile: dict[str, Any] | None = None,
 ) -> str:
     input_width, input_height = input_size or image_size
-    parts_text = ", ".join(target_parts)
+    grid_cols = max(2, int(grid_cols or DEFAULT_VLM_GRID_COLS))
+    grid_rows = max(2, int(grid_rows or DEFAULT_VLM_GRID_ROWS))
+    clean_parts = [str(part).strip() for part in target_parts if str(part).strip()]
+    parts_text = ", ".join(clean_parts)
+    example_part = clean_parts[0] if clean_parts else "target_part"
+    profile = sanitize_vlm_prompt_profile(prompt_profile)
+    taxon_context = str(profile.get("taxon_context", "") or "").strip()
+    body_focus_rules = str(profile.get("body_focus_rules", "") or "").strip()
+    profile_anchor_rules = str(profile.get("part_anchor_rules", "") or "").strip()
+    extra_instructions = str(profile.get("extra_instructions", "") or "").strip()
+    anchor_text = profile_anchor_rules or "先根据可见解剖结构判断目标部位，不要只根据画面左/右、上/下猜测。"
     return (
-        "你正在帮助蚂蚁分类学图片完成第一公里预标注。"
+        "你正在帮助形态学图片完成预标注。"
+        f"研究对象/图像背景：{taxon_context}\n"
         f"当前输入图片像素尺寸为 width={input_width}, height={input_height}。"
-        "请直接按当前输入图片像素坐标输出候选框。\n\n"
-        "任务：为目标结构画宽松提示框，供 SAM 后续分割和人工复核使用。"
-        "这些框不是最终分类学标注；如果目标结构主体可见，请尽量给出候选框，"
+        f"图片上叠加了一个轻量 {grid_cols} 列 x {grid_rows} 行网格，列编号为 0 到 {grid_cols}，行编号为 0 到 {grid_rows}。"
+        "请用网格坐标输出候选框。\n\n"
+        "任务：为目标结构画尽量贴合可见结构主体的提示框，供 SAM 后续分割和人工复核使用。"
+        "这些框不是最终分类学标注，但画框时不要故意放宽；如果目标结构主体可见，请尽量给出候选框，"
         "不要因为局部遮挡、姿态变化或边界不完美就直接漏报。"
-        "框应覆盖目标结构主体，允许少量边缘余量，但不要包含明显无关的大面积背景。\n\n"
+        "候选框应围绕目标结构主体，不要把明显无关的大面积背景纳入框内。\n\n"
+        f"主部位主体规则：{body_focus_rules}\n\n"
         "重要标注规则：不同解剖结构的提示框不是互斥切片。"
-        "相邻或连接的结构（例如 Head 与 Mesosoma）允许合理重叠；"
+        "相邻或连接的结构允许合理重叠；"
         "不要为了让框不重叠而把某个结构挤小、贴边、错开，或切掉真实可见范围。"
         "每个框应以对应结构主体为中心，覆盖该结构完整可见范围，并可与邻近结构框相交。\n\n"
+        "类群方向与结构锚点规则：\n"
+        f"{anchor_text}\n\n"
+        + (f"用户补充说明：{extra_instructions}\n\n" if extra_instructions else "")
+        +
         f"目标结构名称必须从以下列表中原样选择：{parts_text}\n\n"
         "请只输出 JSON 对象，不要输出 Markdown 或解释文字。格式必须为：\n"
         "{\n"
         f'  "schema_version": "{VLM_PREANNOTATION_SCHEMA_VERSION}",\n'
         '  "detections": [\n'
-        '    {"part": "Head", "bbox_xyxy": [x1, y1, x2, y2], "confidence": 0.0, "reason": "简短理由"}\n'
+        f'    {{"part": "{example_part}", "bbox_grid_xyxy": [col1, row1, col2, row2], "confidence": 0.0, "reason": "简短理由"}}\n'
         "  ]\n"
         "}\n\n"
-        "bbox_xyxy 必须使用当前输入图片像素坐标，格式为左上角 x1,y1 和右下角 x2,y2。"
-        "x 的范围是 0 到 width，y 的范围是 0 到 height。"
+        "bbox_grid_xyxy 必须使用网格坐标，格式为左上角 col1,row1 和右下角 col2,row2。"
+        f"col 范围是 0 到 {grid_cols}，row 范围是 0 到 {grid_rows}；可以使用小数来表达半格位置。"
+        "请不要输出 bbox_xyxy 像素坐标，除非服务商完全不支持网格坐标。"
     )
 
 
@@ -343,11 +489,12 @@ def _json_schema() -> dict[str, Any]:
                     "type": "object",
                     "properties": {
                         "part": {"type": "string"},
+                        "bbox_grid_xyxy": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4},
                         "bbox_xyxy": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4},
                         "confidence": {"type": "number"},
                         "reason": {"type": "string"},
                     },
-                    "required": ["part", "bbox_xyxy", "confidence"],
+                    "required": ["part", "bbox_grid_xyxy", "confidence"],
                     "additionalProperties": True,
                 },
             },
@@ -498,6 +645,67 @@ def _extract_json_payload(raw_response: str) -> Any:
         raise ValueError(f"vlm_response_not_json: {preview}")
 
 
+def _extract_complete_json_objects(text: str) -> list[dict[str, Any]]:
+    objects: list[dict[str, Any]] = []
+    depth = 0
+    start_index: int | None = None
+    in_string = False
+    escape = False
+    for index, char in enumerate(str(text or "")):
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+            continue
+        if char == "{":
+            if depth == 0:
+                start_index = index
+            depth += 1
+            continue
+        if char == "}":
+            if depth <= 0:
+                continue
+            depth -= 1
+            if depth == 0 and start_index is not None:
+                fragment = text[start_index : index + 1]
+                start_index = None
+                try:
+                    payload = json.loads(fragment)
+                except Exception:
+                    continue
+                if isinstance(payload, dict):
+                    objects.append(payload)
+    return objects
+
+
+def _recover_partial_detection_payload(raw_response: str) -> dict[str, Any] | None:
+    text = str(raw_response or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?", "", text, flags=re.IGNORECASE).strip()
+        text = re.sub(r"```$", "", text).strip()
+    detections_match = re.search(r'"(?:detections|candidates|predictions|boxes|results)"\s*:\s*\[', text)
+    if not detections_match:
+        return None
+    array_text = text[detections_match.end() :]
+    detections = _extract_complete_json_objects(array_text)
+    if not detections:
+        return None
+    payload: dict[str, Any] = {
+        "detections": detections,
+        "_partial_recovered": True,
+    }
+    schema_match = re.search(r'"schema_version"\s*:\s*"([^"]+)"', text)
+    if schema_match:
+        payload["schema_version"] = schema_match.group(1)
+    return payload
+
+
 def _as_box_list(raw_box: Any) -> list[float] | None:
     if isinstance(raw_box, dict):
         keys = ("x1", "y1", "x2", "y2")
@@ -535,7 +743,7 @@ def _box_from_detection(
     grid_cols: int,
     grid_rows: int,
     default_coordinate_space: str = "original",
-) -> list[float] | None:
+) -> tuple[list[float], dict[str, Any]] | None:
     width, height = image_size
     overlay_width, overlay_height = overlay_size
     coordinate_space = str(item.get("coordinate_space", item.get("coord_frame", "")) or default_coordinate_space).strip().lower()
@@ -543,7 +751,18 @@ def _box_from_detection(
     for key in ("bbox_norm_xyxy", "bbox_normalized", "normalized_bbox"):
         box = _as_box_list(item.get(key))
         if box:
-            return _clamp_box([box[0] * width, box[1] * height, box[2] * width, box[3] * height], image_size)
+            mapped = _clamp_box([box[0] * width, box[1] * height, box[2] * width, box[3] * height], image_size)
+            if mapped:
+                return mapped, {
+                    "source_key": key,
+                    "source_box": box,
+                    "coordinate_space": "normalized",
+                    "input_size": [overlay_width, overlay_height],
+                    "original_size": [width, height],
+                    "scale_x": 1.0,
+                    "scale_y": 1.0,
+                }
+            return None
 
     box = _as_box_list(
         item.get("bbox_xyxy")
@@ -554,22 +773,49 @@ def _box_from_detection(
     )
     if box:
         if coordinate_space in {"normalized", "norm", "relative"} or all(0.0 <= value <= 1.0 for value in box):
-            return _clamp_box([box[0] * width, box[1] * height, box[2] * width, box[3] * height], image_size)
+            mapped = _clamp_box([box[0] * width, box[1] * height, box[2] * width, box[3] * height], image_size)
+            if mapped:
+                return mapped, {
+                    "source_key": "bbox_xyxy",
+                    "source_box": box,
+                    "coordinate_space": "normalized",
+                    "input_size": [overlay_width, overlay_height],
+                    "original_size": [width, height],
+                    "scale_x": 1.0,
+                    "scale_y": 1.0,
+                }
+            return None
         if coordinate_space in {"overlay", "overlay_pixel", "overlay_pixels", "input", "input_pixel", "input_pixels", "input_image"}:
-            return _clamp_box(
-                [
-                    box[0] / float(overlay_width) * width,
-                    box[1] / float(overlay_height) * height,
-                    box[2] / float(overlay_width) * width,
-                    box[3] / float(overlay_height) * height,
-                ],
-                image_size,
-            )
-        return _clamp_box(box, image_size)
+            scale_x = float(width) / float(overlay_width)
+            scale_y = float(height) / float(overlay_height)
+            mapped = _clamp_box([box[0] * scale_x, box[1] * scale_y, box[2] * scale_x, box[3] * scale_y], image_size)
+            if mapped:
+                return mapped, {
+                    "source_key": "bbox_xyxy",
+                    "source_box": box,
+                    "coordinate_space": "input",
+                    "input_size": [overlay_width, overlay_height],
+                    "original_size": [width, height],
+                    "scale_x": scale_x,
+                    "scale_y": scale_y,
+                }
+            return None
+        mapped = _clamp_box(box, image_size)
+        if mapped:
+            return mapped, {
+                "source_key": "bbox_xyxy",
+                "source_box": box,
+                "coordinate_space": "original",
+                "input_size": [overlay_width, overlay_height],
+                "original_size": [width, height],
+                "scale_x": 1.0,
+                "scale_y": 1.0,
+            }
+        return None
 
     grid_box = _as_box_list(item.get("bbox_grid_xyxy") or item.get("grid_bbox") or item.get("grid_box"))
     if grid_box and grid_cols > 0 and grid_rows > 0:
-        return _clamp_box(
+        mapped = _clamp_box(
             [
                 grid_box[0] / float(grid_cols) * width,
                 grid_box[1] / float(grid_rows) * height,
@@ -578,6 +824,18 @@ def _box_from_detection(
             ],
             image_size,
         )
+        if mapped:
+            return mapped, {
+                "source_key": "bbox_grid_xyxy",
+                "source_box": grid_box,
+                "coordinate_space": "grid",
+                "input_size": [overlay_width, overlay_height],
+                "original_size": [width, height],
+                "grid_cols": int(grid_cols),
+                "grid_rows": int(grid_rows),
+                "scale_x": float(width) / float(grid_cols),
+                "scale_y": float(height) / float(grid_rows),
+            }
     return None
 
 
@@ -598,15 +856,22 @@ def parse_vlm_response(
     target_parts: list[str] | tuple[str, ...],
     image_size: tuple[int, int],
     overlay_size: tuple[int, int] | None = None,
-    grid_cols: int = 12,
-    grid_rows: int = 12,
+    grid_cols: int = DEFAULT_VLM_GRID_COLS,
+    grid_rows: int = DEFAULT_VLM_GRID_ROWS,
     min_confidence: float = 0.0,
     default_coordinate_space: str = "original",
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], Any]:
-    parsed = _extract_json_payload(raw_response)
+    rejected: list[dict[str, Any]] = []
+    try:
+        parsed = _extract_json_payload(raw_response)
+    except Exception as exc:
+        recovered = _recover_partial_detection_payload(raw_response)
+        if not recovered:
+            raise
+        parsed = recovered
+        rejected.append({"part": "", "reason": f"partial_json_recovered: {exc}"})
     overlay_size = overlay_size or image_size
     candidates: list[dict[str, Any]] = []
-    rejected: list[dict[str, Any]] = []
     best_by_part: dict[str, dict[str, Any]] = {}
 
     for item in _candidate_items(parsed):
@@ -622,7 +887,7 @@ def parse_vlm_response(
         if confidence < float(min_confidence):
             rejected.append({"part": part_name, "reason": "below_confidence_threshold"})
             continue
-        box = _box_from_detection(
+        box_payload = _box_from_detection(
             item,
             image_size,
             overlay_size,
@@ -630,15 +895,17 @@ def parse_vlm_response(
             int(grid_rows),
             default_coordinate_space=default_coordinate_space,
         )
-        if not box:
+        if not box_payload:
             rejected.append({"part": part_name, "reason": "invalid_box"})
             continue
+        box, coordinate_mapping = box_payload
         payload = {
             "part": part_name,
             "box_xyxy": box,
             "confidence": max(0.0, min(1.0, confidence)),
             "reason": str(item.get("reason", item.get("rationale", "")) or "").strip(),
             "raw_part": str(raw_part or ""),
+            "coordinate_mapping": coordinate_mapping,
         }
         existing = best_by_part.get(part_name)
         if existing is None or payload["confidence"] > existing.get("confidence", 0.0):
@@ -655,8 +922,9 @@ def run_vlm_preannotation(
     target_parts: list[str] | tuple[str, ...],
     output_dir: str | os.PathLike[str],
     api_config: dict[str, Any] | None = None,
-    grid_cols: int = 12,
-    grid_rows: int = 12,
+    prompt_profile: dict[str, Any] | None = None,
+    grid_cols: int | None = None,
+    grid_rows: int | None = None,
     min_confidence: float = 0.25,
     dry_run: bool = False,
     raw_response: str | None = None,
@@ -668,13 +936,23 @@ def run_vlm_preannotation(
     os.makedirs(output_dir, exist_ok=True)
     started = time.time()
     run_id = str(run_id or time.strftime("%Y%m%d_%H%M%S"))
-    overlay_path = os.path.join(output_dir, f"{Path(image_path).stem}_vlm_input_{run_id}.png")
-    overlay_meta = create_preannotation_image(image_path, overlay_path)
+    overlay_path = os.path.join(output_dir, f"{Path(image_path).stem}_vlm_input_grid_{run_id}.png")
+    overlay_meta = create_preannotation_image(image_path, overlay_path, grid_cols=grid_cols, grid_rows=grid_rows)
     if callable(progress_callback):
         progress_callback("prepare")
     image_size = tuple(int(value) for value in overlay_meta["original_size"])
     overlay_size = tuple(int(value) for value in overlay_meta["overlay_size"])
-    prompt = build_vlm_preannotation_prompt(list(target_parts), image_size, input_size=overlay_size)
+    actual_grid_cols = int(overlay_meta.get("grid_cols", grid_cols or DEFAULT_VLM_GRID_COLS) or DEFAULT_VLM_GRID_COLS)
+    actual_grid_rows = int(overlay_meta.get("grid_rows", grid_rows or DEFAULT_VLM_GRID_ROWS) or DEFAULT_VLM_GRID_ROWS)
+    prompt = build_vlm_preannotation_prompt(
+        list(target_parts),
+        image_size,
+        input_size=overlay_size,
+        grid_cols=actual_grid_cols,
+        grid_rows=actual_grid_rows,
+        prompt_profile=prompt_profile,
+    )
+    clean_prompt_profile = sanitize_vlm_prompt_profile(prompt_profile)
 
     finish_reason = "dry_run" if dry_run else ""
     raw_text = raw_response or ""
@@ -697,10 +975,10 @@ def run_vlm_preannotation(
                 list(target_parts),
                 image_size,
                 overlay_size=overlay_size,
-                grid_cols=grid_cols,
-                grid_rows=grid_rows,
+                grid_cols=actual_grid_cols,
+                grid_rows=actual_grid_rows,
                 min_confidence=min_confidence,
-                default_coordinate_space="input",
+                default_coordinate_space="grid",
             )
             if callable(progress_callback):
                 progress_callback("parse")
@@ -724,6 +1002,7 @@ def run_vlm_preannotation(
         "status": status,
         "image_path": image_path,
         "target_parts": list(target_parts),
+        "prompt_profile": clean_prompt_profile,
         "overlay": overlay_meta,
         "prompt": prompt,
         "finish_reason": finish_reason,

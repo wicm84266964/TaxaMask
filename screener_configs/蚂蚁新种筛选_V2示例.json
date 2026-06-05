@@ -98,7 +98,7 @@
   "llm_system_prompt": "你是一个严谨的蚂蚁分类学文献筛选助手，必须输出可解析JSON。",
   "llm_prompt_template": "你是一个专业的蚂蚁分类学专家。你将获得一个文献列表(JSON数组)，每条记录含 record_id、record_index、display_label、filename、title、text。\n\n本批次应判定记录数：{expected_record_count}\n\n任务：判断每条文献是否属于“蚂蚁分类学新种/新分类单元报道”。\n\n判定标准：\n1) include：文本明确支持蚂蚁本身的新种、新属、新分类单元描述，或与蚂蚁分类修订直接相关的 redescription / new record，通常能看到 Formicidae 或蚁亚科/属名、新种术语、形态描述、类型标本或 material examined。\n2) exclude：明确不是蚂蚁分类学新种报道，例如生态行为、群落、分子系统发育、算法、医学、微生物、真菌、病毒、寄生蜂/寄生蝇，或只是以蚂蚁为宿主/环境对象。\n3) uncertain：证据不足、文本截断、标题/正文冲突，或只能判断为分类学相关但不能确认目标。\n\n请只输出 JSON 数组，不要输出任何额外文字。每个元素结构必须是：\n{\"record_id\":\"<原值>\",\"decision\":\"include|exclude|uncertain\",\"confidence\":0-1,\"reason\":\"一句话理由\"}\n\n待判定记录：\n{records_json}\n",
   "llm_batch_prompt_template": "你是一个专业的蚂蚁分类学专家。你将获得一个文献列表(JSON数组)，每条记录含 record_id、record_index、display_label、filename、title、text。\n\n本批次应判定记录数：{expected_record_count}\n\n任务：判断每条文献是否属于“蚂蚁分类学新种/新分类单元报道”。\n\n判定标准：\n1) include：文本明确支持蚂蚁本身的新种、新属、新分类单元描述，或与蚂蚁分类修订直接相关的 redescription / new record，通常能看到 Formicidae 或蚁亚科/属名、新种术语、形态描述、类型标本或 material examined。\n2) exclude：明确不是蚂蚁分类学新种报道，例如生态行为、群落、分子系统发育、算法、医学、微生物、真菌、病毒、寄生蜂/寄生蝇，或只是以蚂蚁为宿主/环境对象。\n3) uncertain：证据不足、文本截断、标题/正文冲突，或只能判断为分类学相关但不能确认目标。\n\n请只输出 JSON 数组，不要输出任何额外文字。每个元素结构必须是：\n{\"record_id\":\"<原值>\",\"decision\":\"include|exclude|uncertain\",\"confidence\":0-1,\"reason\":\"一句话理由\"}\n\n待判定记录：\n{records_json}\n",
-  "lines_per_pdf": 30,
+  "lines_per_pdf": 50,
   "csv_batch_size": 80,
   "csv_batch_fallback_size": 40,
   "batch_char_budget": 100000,

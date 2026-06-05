@@ -25,7 +25,7 @@ Current landed state as of 2026-06-04:
 - STL currently means rendered 2D views imported into the existing Labeling Workbench, not direct 3D mesh painting.
 - TIF uses independent material-ID volume labels, sidecars, train-ready checks, and a separate TIF backend contract.
 - TIF 3D preview now defaults to offscreen GPU rendering into a normal Qt display widget, with legacy embedded `QOpenGLWidget` kept out of the default path to reduce Ant-Code WebEngine / Qt Quick composition conflicts.
-- 2D/STL VLM first-mile preannotation now uses grid-free VLM input images and current-input-image pixel boxes, which is the preferred route for MIMO/domestic multimodal batch drafting.
+- 2D/STL VLM first-mile preannotation now uses adaptive light-grid VLM input images and grid-coordinate coarse boxes for MIMO/domestic multimodal batch drafting.
 - 2D/STL daily annotation uses the Labeling Workbench with parent-part annotation, child-part annotation, Locator/SAM, Blink route experts, and PDF-derived literature trait lookup.
 - PDF is evidence/provenance and Agent/headless workflow, not the primary visual workbench. It now separates accepted figures from needs-review figures, structures PDF text into `taxon -> part -> description`, and defaults local run artifacts to `TaxaMask_outputs/`.
 - Locator/SAM no longer load at startup or when entering TIF; they preload when entering 2D/STL and remain alive when returning to the Agent Center.
@@ -39,7 +39,7 @@ Primary Chinese design documents:
 - `TIF后端契约_v1_实施设计_zh.md`: first implementation design for the independent TIF external backend contract covering `prepare_dataset`, `train`, `predict`, model manifests, prediction outputs, and safety rules.
 - `TaxaMask_Agent侧栏与PDF_Skill设计_zh.md`: startup-center Ant-Code Agent design, using the main start-center area for the embedded Ant-Code Dashboard and a right rail for 2D/STL and TIF workflow shortcuts.
 - `TaxaMask_AntCode项目记忆与对接手册_zh.md`: detailed operating handbook for the embedded Ant-Code agent, paired with `.lab-agent/memory.md` so common TaxaMask tasks do not require rediscovering the codebase from scratch.
-- `VLM第一公里预标注方案_zh.md` and `VLM第一公里预标注实施记录_zh.md`: current 2D/STL VLM preannotation behavior, including the 2026-06-04 grid-free pixel-coordinate route.
+- `VLM第一公里预标注方案_zh.md` and `VLM第一公里预标注实施记录_zh.md`: current 2D/STL VLM preannotation behavior, including the 2026-06-05 light-grid route and `VLM Pre-Label` / `VLM Batch Pre-Label` buttons.
 - `TIF_GPU体预览实施记录_zh.md`: current TIF 3D preview behavior, including offscreen GPU rendering, render modes, ROI high-detail viewing, and remaining volume-standardization limits.
 
 ## Product Direction

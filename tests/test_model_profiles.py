@@ -22,7 +22,20 @@ class ModelProfileTests(unittest.TestCase):
             taxonomy=["Head", "Mesosoma", "Gaster", "Mandible"],
             locator_scope=["Head", "Mesosoma", "Gaster"],
             parent_box_aspect_ratios={"Head": 1.0},
-            vlm_preannotation={"target_parts": ["Mandible"], "processing_scope": "all_images"},
+            vlm_preannotation={
+                "target_parts": ["Mandible"],
+                "processing_scope": "image_group",
+                "image_group": "split",
+                "prompt_profile_id": "project_custom",
+                "prompt_profile": {
+                    "profile_id": "project_custom",
+                    "display_name": "Bee prompt",
+                    "taxon_context": "蜂类图像",
+                    "body_focus_rules": "不要把翅纳入胸部主体框。",
+                    "part_anchor_rules": "Thorax 在 Head 和 Abdomen 之间。",
+                    "extra_instructions": "",
+                },
+            },
         )
 
         self.assertEqual(profiles["schema_version"], MODEL_PROFILES_SCHEMA_VERSION)
@@ -33,6 +46,10 @@ class ModelProfileTests(unittest.TestCase):
         self.assertEqual(profile["child_backend_defaults"]["backend_type"], CHILD_BACKEND_VIT_B)
         self.assertEqual(profile["child_backend_defaults"]["input_size"], 224)
         self.assertEqual(profile["inference_params"]["vlm_preannotation"]["target_parts"], ["Mandible"])
+        self.assertEqual(profile["inference_params"]["vlm_preannotation"]["processing_scope"], "image_group")
+        self.assertEqual(profile["inference_params"]["vlm_preannotation"]["image_group"], "split")
+        self.assertEqual(profile["inference_params"]["vlm_preannotation"]["prompt_profile_id"], "project_custom")
+        self.assertIn("蜂类", profile["inference_params"]["vlm_preannotation"]["prompt_profile"]["taxon_context"])
 
     def test_new_project_writes_default_model_profiles(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -61,7 +78,8 @@ class ModelProfileTests(unittest.TestCase):
                         "scales": {},
                         "vlm_preannotation": {
                             "target_parts": ["Mandible"],
-                            "processing_scope": "all_images",
+                            "processing_scope": "image_group",
+                            "image_group": "split",
                         },
                     },
                     ensure_ascii=False,
@@ -76,7 +94,51 @@ class ModelProfileTests(unittest.TestCase):
             self.assertEqual(pm.get_vlm_preannotation_settings()["target_parts"], ["Mandible"])
             profile = pm.get_active_model_profile()
             self.assertEqual(profile["parent_backend"]["locator_scope"], ["Head"])
-            self.assertEqual(profile["inference_params"]["vlm_preannotation"]["processing_scope"], "all_images")
+            self.assertEqual(profile["inference_params"]["vlm_preannotation"]["processing_scope"], "image_group")
+            self.assertEqual(profile["inference_params"]["vlm_preannotation"]["image_group"], "split")
+
+    def test_project_preserves_custom_image_groups_and_vlm_group(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            project_path = Path(tmp_dir) / "custom_groups.json"
+            image_path = Path(tmp_dir) / "specimen.png"
+            image_path.write_bytes(b"image")
+            project_path.write_text(
+                json.dumps(
+                    {
+                        "name": "custom groups",
+                        "taxonomy": ["Head"],
+                        "locator_scope": ["Head"],
+                        "images": [image_path.name],
+                        "labels": {},
+                        "scales": {},
+                        "image_groups": {
+                            "custom_groups": [
+                                {"id": "review_ready", "name": "Review Ready"},
+                            ]
+                        },
+                        "image_provenance": {
+                            image_path.name: {"manual_image_group": "review_ready"}
+                        },
+                        "vlm_preannotation": {
+                            "target_parts": ["Head"],
+                            "processing_scope": "image_group",
+                            "image_group": "review_ready",
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            pm = ProjectManager()
+            pm.load_project(str(project_path))
+
+            self.assertEqual(pm.project_data["image_groups"]["custom_groups"][0]["id"], "review_ready")
+            self.assertEqual(pm.get_vlm_preannotation_settings()["image_group"], "review_ready")
+            pm.save_project()
+            saved = json.loads(project_path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["image_groups"]["custom_groups"][0]["name"], "Review Ready")
+            self.assertEqual(saved["vlm_preannotation"]["image_group"], "review_ready")
 
     def test_project_model_profiles_round_trip_active_profile(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

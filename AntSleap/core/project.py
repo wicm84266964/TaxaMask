@@ -24,11 +24,15 @@ from .cascade_routes import (
     sanitize_project_route_manifest,
 )
 from .model_profiles import (
+    DEFAULT_VLM_IMAGE_GROUP,
     DEFAULT_MODEL_PROFILE_ID,
+    VLM_IMAGE_GROUPS,
+    VLM_PROCESSING_SCOPES,
     clone_model_profiles,
     sanitize_model_profiles,
     set_active_model_profile as set_active_model_profile_id,
 )
+from .vlm_preannotation import DEFAULT_VLM_PROMPT_PROFILE_ID, sanitize_vlm_prompt_profile
 
 DEFAULT_CATEGORY_SUPERCATEGORY = "biological_structure"
 MULTIMODAL_SAMPLE_SCHEMA_VERSION = "taxamask-multimodal-sample-v1"
@@ -54,9 +58,15 @@ class ProjectManager:
             "taxon_label": "Genus",
             "scales": {}, # Map: image_path -> float (pixels_per_mm)
             "image_provenance": {},
+            "image_groups": {
+                "custom_groups": [],
+            },
             "vlm_preannotation": {
                 "target_parts": [],
-                "processing_scope": "current_image",
+                "processing_scope": "image_group",
+                "image_group": DEFAULT_VLM_IMAGE_GROUP,
+                "prompt_profile_id": DEFAULT_VLM_PROMPT_PROFILE_ID,
+                "prompt_profile": sanitize_vlm_prompt_profile({}),
             },
             "blink_context_roi_parents": {},
             "parent_box_aspect_ratios": dict(DEFAULT_PARENT_BOX_ASPECT_RATIOS),
@@ -163,6 +173,45 @@ class ProjectManager:
                 clean_map.setdefault(part_name, float(ratio))
         return clean_map
 
+    def _safe_image_group_id(self, value, fallback):
+        text = str(value or "").strip()
+        clean = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in text)
+        clean = clean.strip("_")
+        return clean or fallback
+
+    def _sanitize_image_groups(self, image_groups):
+        if not isinstance(image_groups, dict):
+            image_groups = {}
+        builtin_ids = {"original", "split", "manual_done", "manual"}
+        seen = set()
+        custom_groups = []
+        raw_groups = image_groups.get("custom_groups", [])
+        if isinstance(raw_groups, dict):
+            raw_groups = [
+                {"id": group_id, "name": group_name}
+                for group_id, group_name in raw_groups.items()
+            ]
+        if not isinstance(raw_groups, list):
+            raw_groups = []
+
+        for index, group in enumerate(raw_groups, start=1):
+            if not isinstance(group, dict):
+                continue
+            name = str(group.get("name", "") or "").strip()
+            if not name:
+                continue
+            group_id = self._safe_image_group_id(group.get("id", ""), f"custom_{index}")
+            if group_id in builtin_ids:
+                group_id = f"custom_{group_id}"
+            base_id = group_id
+            suffix = 2
+            while group_id in seen or group_id in builtin_ids:
+                group_id = f"{base_id}_{suffix}"
+                suffix += 1
+            seen.add(group_id)
+            custom_groups.append({"id": group_id, "name": name[:80]})
+        return {"custom_groups": custom_groups}
+
     def _sanitize_vlm_preannotation_settings(self, settings):
         taxonomy = list(self.project_data.get("taxonomy", []))
         taxonomy_set = set(taxonomy)
@@ -173,12 +222,27 @@ class ProjectManager:
             clean_part = str(part_name or "").strip()
             if clean_part and clean_part in taxonomy_set and clean_part not in target_parts:
                 target_parts.append(clean_part)
-        processing_scope = str(settings.get("processing_scope", "current_image") or "current_image").strip()
-        if processing_scope not in {"current_image", "all_images"}:
-            processing_scope = "current_image"
+        processing_scope = str(settings.get("processing_scope", "image_group") or "image_group").strip()
+        if processing_scope not in VLM_PROCESSING_SCOPES:
+            processing_scope = "image_group"
+        image_group = str(settings.get("image_group", DEFAULT_VLM_IMAGE_GROUP) or DEFAULT_VLM_IMAGE_GROUP).strip()
+        custom_group_ids = {
+            str(group.get("id", "")).strip()
+            for group in self._sanitize_image_groups(self.project_data.get("image_groups", {})).get("custom_groups", [])
+            if str(group.get("id", "")).strip()
+        }
+        if image_group not in VLM_IMAGE_GROUPS and image_group not in custom_group_ids:
+            image_group = DEFAULT_VLM_IMAGE_GROUP
         return {
             "target_parts": target_parts,
             "processing_scope": processing_scope,
+            "image_group": image_group,
+            "prompt_profile_id": str(
+                settings.get("prompt_profile_id")
+                or (settings.get("prompt_profile") if isinstance(settings.get("prompt_profile"), dict) else {}).get("profile_id")
+                or DEFAULT_VLM_PROMPT_PROFILE_ID
+            ).strip() or DEFAULT_VLM_PROMPT_PROFILE_ID,
+            "prompt_profile": sanitize_vlm_prompt_profile(settings.get("prompt_profile", {})),
         }
 
     def get_vlm_preannotation_settings(self):
@@ -508,9 +572,15 @@ class ProjectManager:
             "taxon_label": "Genus",
             "scales": {},
             "image_provenance": {},
+            "image_groups": {
+                "custom_groups": [],
+            },
             "vlm_preannotation": {
                 "target_parts": [],
-                "processing_scope": "current_image",
+                "processing_scope": "image_group",
+                "image_group": DEFAULT_VLM_IMAGE_GROUP,
+                "prompt_profile_id": DEFAULT_VLM_PROMPT_PROFILE_ID,
+                "prompt_profile": sanitize_vlm_prompt_profile({}),
             },
             "blink_context_roi_parents": {},
             "parent_box_aspect_ratios": dict(DEFAULT_PARENT_BOX_ASPECT_RATIOS),
@@ -558,6 +628,9 @@ class ProjectManager:
         )
         self.project_data["parent_box_aspect_ratios"] = self._sanitize_parent_box_aspect_ratios(
             loaded_data.get("parent_box_aspect_ratios", DEFAULT_PARENT_BOX_ASPECT_RATIOS)
+        )
+        self.project_data["image_groups"] = self._sanitize_image_groups(
+            loaded_data.get("image_groups", {})
         )
         self.project_data["vlm_preannotation"] = self._sanitize_vlm_preannotation_settings(
             loaded_data.get("vlm_preannotation", {})
@@ -637,6 +710,7 @@ class ProjectManager:
                 "labels": {},
                 "scales": {},
                 "image_provenance": {},
+                "image_groups": self._sanitize_image_groups(self.project_data.get("image_groups", {})),
             }
             
             for img_abs in self.project_data["images"]:

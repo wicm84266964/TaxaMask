@@ -39,8 +39,8 @@ from PySide6.QtWidgets import (
     QDialogButtonBox, QGridLayout, QSizePolicy, QFrame, QFormLayout,
     QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView,
     QAbstractItemView, QTreeWidget, QTreeWidgetItem)
-from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSize
-from PySide6.QtGui import QIcon, QAction, QColor
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSize, QMimeData
+from PySide6.QtGui import QIcon, QAction, QColor, QDrag
 import numpy as np
 import torch
 from PIL import Image as PILImage
@@ -118,9 +118,12 @@ try:
     from AntSleap.core.runtime_device import normalize_device_preference, resolve_torch_device
     from AntSleap.core.agent_context_routes import enrich_agent_context
     from AntSleap.core.vlm_preannotation import (
+        DEFAULT_VLM_PROMPT_PROFILE_ID,
         VLM_PREANNOTATION_SCHEMA_VERSION,
+        default_vlm_prompt_profile,
         load_vlm_api_config_from_runtime_settings,
         run_vlm_preannotation,
+        sanitize_vlm_prompt_profile,
     )
     from AntSleap.core.literature_descriptions import (
         build_text_block_source,
@@ -205,9 +208,12 @@ except ImportError:
     from core.runtime_device import normalize_device_preference, resolve_torch_device
     from core.agent_context_routes import enrich_agent_context
     from core.vlm_preannotation import (
+        DEFAULT_VLM_PROMPT_PROFILE_ID,
         VLM_PREANNOTATION_SCHEMA_VERSION,
+        default_vlm_prompt_profile,
         load_vlm_api_config_from_runtime_settings,
         run_vlm_preannotation,
+        sanitize_vlm_prompt_profile,
     )
     from core.literature_descriptions import (
         build_text_block_source,
@@ -284,9 +290,10 @@ class VlmPreannotationThread(QThread):
         artifacts_dir,
         api_config,
         run_id,
-        grid_cols=12,
-        grid_rows=12,
+        grid_cols=None,
+        grid_rows=None,
         min_confidence=0.25,
+        prompt_profile=None,
     ):
         super().__init__()
         self.image_path = image_path
@@ -294,9 +301,10 @@ class VlmPreannotationThread(QThread):
         self.artifacts_dir = artifacts_dir
         self.api_config = dict(api_config or {})
         self.run_id = str(run_id or time.strftime("%Y%m%d_%H%M%S"))
-        self.grid_cols = int(grid_cols)
-        self.grid_rows = int(grid_rows)
+        self.grid_cols = int(grid_cols) if grid_cols else None
+        self.grid_rows = int(grid_rows) if grid_rows else None
         self.min_confidence = float(min_confidence)
+        self.prompt_profile = sanitize_vlm_prompt_profile(prompt_profile)
 
     def run(self):
         def mark_step(step_name):
@@ -312,6 +320,7 @@ class VlmPreannotationThread(QThread):
                 grid_cols=self.grid_cols,
                 grid_rows=self.grid_rows,
                 min_confidence=self.min_confidence,
+                prompt_profile=self.prompt_profile,
                 run_id=self.run_id,
                 progress_callback=mark_step,
             )
@@ -346,8 +355,10 @@ TRANSLATIONS = {
         "Manual Draw": "手动绘制",
         "Magic Wand (SAM)": "魔棒 (SAM)",
         "Box Prompt (SAM)": "框选 (SAM)",
+        "SAM Box Segmentation": "SAM框选分割",
         "Tool: Magic Wand (SAM) - Click to auto-segment.": "工具: 魔棒 - 点击自动分割",
         "Tool: Box Prompt (SAM) - Drag to segment area.": "工具: 框选 - 拖拽选择区域",
+        "Draw a box to run SAM immediately and create a draft polygon for the current part.": "拖拽框选后立即调用 SAM，为当前部位生成草稿轮廓。",
         "Tool: Manual Draw - Click points to outline.": "工具: 手动 - 点击绘制轮廓",
         "Taxon": "分类单元",
         "Current image taxon": "当前图片物种",
@@ -400,13 +411,28 @@ TRANSLATIONS = {
         "Batch (All)": "批量标注 (全部)",
         "VLM First-Mile Boxes": "VLM 第一公里框",
         "VLM Pre-Annotate": "VLM 预标注",
+        "VLM Pre-Label": "VLM预标注",
+        "VLM Batch Pre-Label": "VLM批量预标",
         "Use the configured multimodal model to propose SAM prompt boxes for the current image. Results are draft AI boxes until reviewed.": "使用已配置的多模态模型为当前图片生成 SAM 提示框。结果在复核前只是 AI 草稿框。",
+        "Use the configured multimodal model to propose draft boxes for the current image only.": "仅对当前图片调用多模态模型生成草稿框。",
+        "Use the configured multimodal model to batch pre-annotate the configured image range.": "按设置的批量范围调用多模态模型批量生成草稿框。",
         "AI Multimodal Pre-Annotation:": "AI 多模态预标注：",
         "Choose which existing project structures will be sent to the multimodal model. This list is separate from main locator parts.": "选择哪些已有项目结构会发送给多模态大模型。这个列表与主定位结构分开。",
         "VLM Target Parts:": "VLM 目标部位：",
-        "VLM Processing Scope:": "VLM 处理范围：",
-        "Current image only": "仅当前图像",
+        "VLM Batch Scope:": "VLM 批量范围：",
         "All imported images": "已导入所有图像",
+        "Images in selected list group": "指定图片列表分组",
+        "VLM Image Group:": "VLM 图片分组：",
+        "VLM Prompt Profile:": "VLM 提示词方案：",
+        "Built-in Ant Taxonomy Default": "内置蚂蚁分类学默认",
+        "Project Custom Prompt": "项目自定义提示词",
+        "Profile Name:": "方案名称：",
+        "Research Taxon / Image Context:": "研究类群 / 图像背景：",
+        "Main Body / Attachment Rules:": "主体与附属结构规则：",
+        "Part Anchor Rules:": "部位锚点规则：",
+        "Extra VLM Instructions:": "额外 VLM 指令：",
+        "Prompt profile only changes the instructions sent to the multimodal model. The grid input, JSON schema, coordinate mapping, and SAM draft generation stay locked.": "提示词方案只改变发送给多模态模型的说明；网格输入、JSON 格式、坐标映射和 SAM 草稿生成仍保持锁定。",
+        "Use the built-in ant prompt profile as a stable baseline. Choose Project Custom Prompt when adapting VLM pre-annotation to another taxon or a special image style.": "内置蚂蚁提示词方案是稳定基线。需要适配其它类群或特殊图像风格时，请选择“项目自定义提示词”。",
         "Select at least one VLM target part before running pre-annotation.": "运行预标注前，请至少选择一个 VLM 目标部位。",
         "Open VLM settings": "打开 VLM 设置",
         "Please select an image first.": "请先选择一张图片。",
@@ -416,6 +442,7 @@ TRANSLATIONS = {
         "Open API settings": "打开 API 设置",
         "VLM first-mile preannotation started for {0}.": "VLM 第一公里预标注已开始：{0}。",
         "Run VLM preannotation on all imported images?\n\nThis will call the multimodal API, may incur provider cost, and will write draft AI boxes and SAM polygons for later review.": "对已导入的所有图像运行 VLM 预标注？\n\n这会调用多模态 API，可能产生服务商费用，并写入待复核的 AI 草稿框和 SAM 掩码。",
+        "Run VLM preannotation on {0} image(s) in {1}?\n\nThis will call the multimodal API, may incur provider cost, and will write draft AI boxes and SAM polygons for later review.": "对“{1}”中的 {0} 张图像运行 VLM 预标注？\n\n这会调用多模态 API，可能产生服务商费用，并写入待复核的 AI 草稿框和 SAM 掩码。",
         "VLM batch progress: {0}/{1} steps ({2}).": "VLM 批量进度：{0}/{1} 步（{2}）。",
         "VLM Pre-Annotation Progress": "VLM 预标注进度",
         "VLM progress: {0}% ({1}/{2}) {3}": "VLM 进度：{0}%（{1}/{2}）{3}",
@@ -437,6 +464,7 @@ TRANSLATIONS = {
         "Accepted {0} AI draft(s) on current image.": "已通过当前图像 {0} 个 AI 草稿。",
         "No reviewable AI polygon drafts on current image.": "当前图像没有可通过的 AI 多边形草稿。",
         "SAM draft failed for {0}: {1}": "SAM 草稿生成失败：{0}，原因：{1}",
+        "VLM part coverage for {0}: requested [{1}]; returned [{2}]; missing [{3}].": "VLM 部位覆盖（{0}）：请求 [{1}]；返回 [{2}]；缺失 [{3}]。",
         "VLM first-mile preannotation returned no usable boxes.": "VLM 第一公里预标注没有返回可用框。",
         "VLM preannotation saved {0} draft(s): {1} SAM polygon(s), {2} box-only draft(s), skipped {3}. Report: {4}": "VLM 预标注已保存 {0} 个草稿：{1} 个 SAM 多边形，{2} 个仅框草稿，跳过 {3} 个。报告：{4}",
         "VLM first-mile preannotation failed: {0}": "VLM 第一公里预标注失败：{0}",
@@ -564,6 +592,11 @@ TRANSLATIONS = {
     "External backend note:": "外部后端说明：",
     "Use this advanced entry when you want TaxaMask to call your own training or prediction scripts. Commands run in an isolated external_runs directory and receive a contract JSON path through {contract} or {contract_json}. When this backend is selected, built-in Locator/SAM training and prediction do not run for that task.": "当你希望 TaxaMask 调用自己的训练或推理脚本时使用这个高级入口。命令会在独立的 external_runs 目录中运行，并通过 {contract} 或 {contract_json} 接收契约 JSON 路径。选择该后端后，本次任务不会运行内置 Locator/SAM 训练或推理。",
         "Advanced extensions collect high-impact model source switches plus custom script and manifest settings for the current model profile. Parent-part and child-part pages show the active sources as read-only summaries.": "高级拓展集中保存当前模型方案里的关键模型来源切换，以及自定义脚本和 manifest 设置。父部位、子部位页面只读展示当前生效来源。",
+        "Advanced extension order: 1) choose or save the model profile, 2) choose parent/default child model sources, 3) fill the parent or child custom extension blocks only when those sources are selected.": "高级拓展按运行关系排列：1）选择或保存模型方案；2）选择父部位/默认子部位模型来源；3）只有选中自定义来源时，下面的父部位或子部位自定义拓展才会参与运行。",
+        "1. Model Profiles": "1. 模型方案",
+        "2. Model Source Switches": "2. 模型来源切换",
+        "3. Parent-part Custom Extension": "3. 父部位自定义拓展",
+        "4. Child-part Custom Extension": "4. 子部位自定义拓展",
         "Use this advanced entry when you want TaxaMask to call your own parent-part training or prediction scripts. Commands run in an isolated external_runs directory and receive a contract JSON path through {contract} or {contract_json}. When Parent Model Source is set to Custom Parent Extension for the active model profile, built-in Locator/SAM training and prediction do not run for that task.": "当你希望 TaxaMask 调用自己的父部位训练或推理脚本时，在这里配置。命令会在独立的 external_runs 目录中运行，并通过 {contract} 或 {contract_json} 接收契约 JSON 路径。当当前模型方案的父部位模型来源设为“自定义父部位拓展”时，本次任务不会运行内置 Locator/SAM 训练或推理。",
         "Compatibility display only. Choose Parent Model Source in Advanced Extensions to switch the active parent model source.": "这里只是旧字段兼容显示。要切换实际父部位模型来源，请在“高级拓展”页选择父部位模型来源。",
     "External backend configuration looks valid.": "父部位拓展配置看起来可用。",
@@ -595,6 +628,10 @@ TRANSLATIONS = {
         "External parent backend settings are saved inside the current model profile when Parent Backend is set to External Parent Backend.": "当父部位模型来源设为“自定义父部位拓展”时，这里的父部位拓展配置会保存到当前模型方案中。",
         "Child extension settings are saved inside the current model profile when Default Child Backend is set to Custom Child Extension.": "当默认子部位专家设为“自定义子部位拓展”时，这里的子部位拓展配置会保存到当前模型方案中。",
         "External Blink backend settings are saved inside the current model profile when Default Child Backend is set to External Blink Expert.": "当默认子部位专家设为“自定义子部位拓展”时，这里的子部位拓展配置会保存到当前模型方案中。",
+        "Active now: parent-part training and Auto annotation will call this custom parent extension.": "当前生效：父部位训练和自动标注会调用这个自定义父部位拓展。",
+        "Not active now: parent-part tasks use Built-in Locator + SAM. These fields are saved for profiles that switch Parent Model Source to Custom Parent Extension.": "当前未生效：父部位任务会使用内置 Locator + SAM。这里的字段会保留给切换到“自定义父部位拓展”的模型方案使用。",
+        "Active now: this custom child extension is the default child expert for unresolved routes. Appointed route experts still keep their own bindings.": "当前生效：这个自定义子部位拓展会作为未指定路由的默认子部位专家。已经指定的路由专家仍保留自己的绑定。",
+        "Not active now: the default child expert is {0}. These fields are saved for profiles that switch Default Child Expert to Custom Child Extension.": "当前未生效：默认子部位专家是 {0}。这里的字段会保留给切换到“自定义子部位拓展”的模型方案使用。",
         "Model Source Switches": "模型来源切换",
         "Choose the high-impact model sources for the current profile here. Existing child route experts stay route-specific; this default mainly affects new/default child expert training and unresolved route defaults.": "在这里选择当前方案的关键模型来源。已有子部位路由专家仍按各自路由保存；这个默认值主要影响新建/默认子部位专家训练，以及未明确指定时的路由默认值。",
         "Current parent model source: {0}": "当前父部位模型来源：{0}",
@@ -685,7 +722,7 @@ TRANSLATIONS = {
         "Default Blink Input Size:": "默认 Blink 输入尺寸：",
         "These defaults are shown in Blink Workbench when the app starts or settings are saved. You can still adjust them for a single expert before training.": "这些默认值会在应用启动或保存设置后显示到 Blink 工作台。训练单个专家前仍可在 Blink 工作台临时调整。",
         "Parent Box Aspect Ratios:": "父级框长宽比：",
-        "Used when the main labeling workbench draws parent context boxes. Child boxes and loose shrink boxes stay free-ratio.": "主标注工作台绘制父级上下文框时使用；子部位框和收缩松框保持自由比例。",
+        "Used when the main labeling workbench draws parent context boxes. Child boxes and Blink shrink start boxes stay free-ratio.": "主标注工作台绘制父级上下文框时使用；子部位框和 Blink 收缩起始框保持自由比例。",
         "Learning Rate:": "学习率 (LR):",
         "Weight Decay (L2 Reg):": "权重衰减 (L2正则):",
         "Main Locator Parts:": "主定位结构：",
@@ -782,7 +819,18 @@ TRANSLATIONS = {
         "No panel crops were detected.": "未检测到可切分的拼图。",
         "Original Images": "原图",
         "Split Crops": "切分图",
+        "Manual Split Done": "已完成手动切分",
         "Manual Split Needed": "待手动切分",
+        "Custom Image Groups": "自定义图片分组",
+        "New Image Group": "新建图片分组",
+        "Move to Image Group": "移动到图片分组",
+        "Clear Custom Image Group": "清除自定义图片分组",
+        "Group Name:": "分组名称：",
+        "Image group already exists.": "图片分组已存在。",
+        "Moved {0} image(s) to {1}.": "已将 {0} 张图片移动到“{1}”。",
+        "Mark Manual Split Done": "标记为已完成手动切分",
+        "Mark Needs Manual Split": "标记为待手动切分",
+        "Clear Split Status": "清除切分状态",
         "Error": "错误",
         "Success": "成功",
         "Open in Blink Workbench": "在 Blink 工作台中打开",
@@ -792,8 +840,12 @@ TRANSLATIONS = {
         "Configure Route Expert": "配置路由专家",
         "Annotation Box": "标注框",
         "Annotation box": "正式标注框",
+        "Manual ROI Box": "人工ROI框",
+        "Draw or replace the manually confirmed ROI box saved with the current part. It does not run SAM by itself.": "为当前部位保存或替换人工 ROI 框；这个工具只保存框，不会自动调用 SAM。",
         "Loose shrink box": "收缩松框",
         "Loose Shrink Box": "收缩松框",
+        "Blink Shrink Start Box": "Blink收缩起始框",
+        "Draw a loose starting box around a child structure for Blink auto-shrink trajectory training. It is not the final annotation box.": "围绕子部位画一个宽松起始框，用于 Blink 自动收缩轨迹训练；它不是最终标注框。",
         "Annotate child from existing parent box": "用已有父框标注子部位",
         "Run auto-shrink": "执行自动收缩",
         "Train current child expert": "训练当前子部位专家",
@@ -832,9 +884,9 @@ TRANSLATIONS = {
         "Enable the current route before automatic child annotation.": "请先启用当前路由，再自动标注子部位。",
         "Training uses saved shrink trajectories for this parent-child route.": "训练会使用这条父子路由下已保存的收缩轨迹。",
         "Configure the current route before continuing.": "请先配置当前路由再继续。",
-        "Saved loose shrink box for {0}.": "已为 {0} 保存收缩松框。",
-        "Loose shrink boxes are only used for child structures. Select a child structure first.": "收缩松框只用于子部位。请先选择一个子部位。",
-        "Saved annotation box for {0}.": "已为 {0} 保存标注框。",
+        "Saved Blink shrink start box for {0}.": "已为 {0} 保存 Blink 收缩起始框。",
+        "Blink shrink start boxes are only used for child structures. Select a child structure first.": "Blink 收缩起始框只用于子部位。请先选择一个子部位。",
+        "Saved manual ROI box for {0}.": "已为 {0} 保存人工 ROI 框。",
         "Running child auto-annotation for {0} via {1}.": "正在通过 {1} 自动标注子部位 {0}。",
         "No usable route expert result was returned for this child structure.": "当前子部位没有返回可用的路由专家结果。",
         "The route expert did not return a valid child box.": "路由专家没有返回有效的子部位框。",
@@ -843,7 +895,7 @@ TRANSLATIONS = {
         "Route expert produced a child box for {0}; refine polygon manually.": "路由专家已为 {0} 生成子部位框；请手动精修多边形。",
         "Child auto-annotation failed: {0}": "子部位自动标注失败：{0}",
         "Draw or confirm the child polygon before auto-shrink.": "请先绘制或确认子部位多边形，再执行自动收缩。",
-        "Select Loose Shrink Box on the canvas toolbar and draw one around the child first.": "请先在画布上方选择收缩松框，并围绕子部位画一个松框。",
+        "Select Blink Shrink Start Box on the canvas toolbar and draw one around the child first.": "请先在画布上方选择 Blink 收缩起始框，并围绕子部位画一个宽松起始框。",
         "Auto-shrink did not generate a trajectory.": "自动收缩没有生成轨迹。",
         "Saved {0} shrink trajectory frames for {1}.": "已为 {1} 保存 {0} 帧收缩轨迹。",
         "Auto-shrink failed: {0}": "自动收缩失败：{0}",
@@ -1281,6 +1333,65 @@ class NoWheelComboBox(QComboBox):
 
     def wheelEvent(self, event):
         event.ignore()
+
+
+class ImageGroupListWidget(QListWidget):
+    """Image list with project-internal drag/drop grouping."""
+
+    imagesDroppedToGroup = Signal(list, str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self.setDragEnabled(True)
+        self.setDragDropMode(QAbstractItemView.InternalMove)
+        self.setDefaultDropAction(Qt.MoveAction)
+
+    def startDrag(self, _supported_actions):
+        paths = [
+            item.data(Qt.UserRole)
+            for item in self.selectedItems()
+            if item and item.data(Qt.UserRole)
+        ]
+        if not paths:
+            return
+        mime = QMimeData()
+        mime.setData("application/x-taxamask-image-paths", json.dumps(paths).encode("utf-8"))
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.exec(Qt.MoveAction)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasFormat("application/x-taxamask-image-paths"):
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasFormat("application/x-taxamask-image-paths"):
+            event.acceptProposedAction()
+            return
+        super().dragMoveEvent(event)
+
+    def dropEvent(self, event):
+        if not event.mimeData().hasFormat("application/x-taxamask-image-paths"):
+            super().dropEvent(event)
+            return
+        target_item = self.itemAt(event.position().toPoint())
+        if target_item is None:
+            return
+        group_key = target_item.data(Qt.UserRole + 1) or target_item.data(Qt.UserRole + 2)
+        if not group_key:
+            return
+        try:
+            paths = json.loads(bytes(event.mimeData().data("application/x-taxamask-image-paths")).decode("utf-8"))
+        except Exception:
+            paths = []
+        paths = [str(path) for path in paths if str(path or "").strip()]
+        if not paths:
+            return
+        self.imagesDroppedToGroup.emit(paths, str(group_key))
+        event.acceptProposedAction()
 
 
 def _agent_yes_no(value):
@@ -2563,6 +2674,9 @@ class ModelSettingsDialog(QDialog):
         self.vlm_target_part_checks = []
         self.taxonomy = [str(part) for part in params.get("taxonomy", []) if str(part).strip()]
         self.initial_locator_scope = [str(part) for part in params.get("locator_scope", []) if str(part).strip()]
+        self.vlm_image_group_definitions = self._normalize_vlm_image_group_definitions(
+            params.get("vlm_image_group_definitions", [])
+        )
         if not self.taxonomy:
             self.taxonomy = list(self.initial_locator_scope)
         if not self.initial_locator_scope:
@@ -2598,9 +2712,6 @@ class ModelSettingsDialog(QDialog):
         workflow_note.setObjectName("mutedLabel")
         layout.addWidget(workflow_note)
 
-        tab_profile = QWidget()
-        tab_profile.setObjectName("modelSettingsProfileTab")
-        profile_layout = QVBoxLayout(tab_profile)
         profile_group = QGroupBox(tr("Model Profiles", lang))
         apply_surface_role(profile_group, SURFACE_ROLE_SUBTLE, "modelSettingsProfilePanel")
         profile_form = QGridLayout(profile_group)
@@ -2648,8 +2759,6 @@ class ModelSettingsDialog(QDialog):
             apply_semantic_button_style(button, role)
             profile_buttons.addWidget(button)
         profile_form.addLayout(profile_buttons, 6, 0, 1, 3)
-        profile_layout.addWidget(profile_group)
-        profile_layout.addStretch()
         self._refresh_profile_combo()
         self.combo_model_profile.currentIndexChanged.connect(self._load_selected_profile_fields)
         self.profile_name_edit.textChanged.connect(self._update_current_profile_metadata)
@@ -2658,7 +2767,7 @@ class ModelSettingsDialog(QDialog):
         self.btn_copy_profile.clicked.connect(self.copy_model_profile)
         self.btn_delete_profile.clicked.connect(self.delete_model_profile)
         self.btn_set_active_profile.clicked.connect(self.set_selected_profile_active)
-        self.profile_tab_index = self.tabs.addTab(self._make_scroll_tab(tab_profile), tr("Profile", lang))
+        self.profile_tab_index = None
 
         tab_backend = QWidget()
         tab_backend.setObjectName("modelSettingsAdvancedExtensionsTab")
@@ -2672,6 +2781,17 @@ class ModelSettingsDialog(QDialog):
         advanced_note.setWordWrap(True)
         advanced_note.setObjectName("mutedLabel")
         form_backend.addWidget(advanced_note)
+        advanced_order_note = QLabel(
+            tr(
+                "Advanced extension order: 1) choose or save the model profile, 2) choose parent/default child model sources, 3) fill the parent or child custom extension blocks only when those sources are selected.",
+                lang,
+            )
+        )
+        advanced_order_note.setWordWrap(True)
+        advanced_order_note.setObjectName("mutedLabel")
+        form_backend.addWidget(advanced_order_note)
+        profile_group.setTitle(tr("1. Model Profiles", lang))
+        form_backend.addWidget(profile_group)
         self.backend_combo = NoWheelComboBox()
         self.backend_combo.addItem(tr("Built-in Locator + SAM", lang), BUILTIN_BACKEND_ID)
         self.backend_combo.addItem(tr("Custom Script Extension", lang), EXTERNAL_BACKEND_ID)
@@ -2692,7 +2812,7 @@ class ModelSettingsDialog(QDialog):
         )
         self.backend_combo.setVisible(False)
 
-        model_source_group = QGroupBox(tr("Model Source Switches", lang))
+        model_source_group = QGroupBox(tr("2. Model Source Switches", lang))
         model_source_group.setObjectName("modelSettingsModelSourceSwitchPanel")
         apply_surface_role(model_source_group, SURFACE_ROLE_SUBTLE, "modelSettingsModelSourceSwitchPanel")
         model_source_layout = QVBoxLayout(model_source_group)
@@ -2745,12 +2865,16 @@ class ModelSettingsDialog(QDialog):
         model_source_layout.addWidget(child_source_note)
         form_backend.addWidget(model_source_group)
 
-        parent_extension_group = QGroupBox(tr("Parent-part Custom Extension", lang))
+        parent_extension_group = QGroupBox(tr("3. Parent-part Custom Extension", lang))
         parent_extension_group.setObjectName("modelSettingsParentExtensionPanel")
         apply_surface_role(parent_extension_group, SURFACE_ROLE_SUBTLE, "modelSettingsParentExtensionPanel")
         parent_extension_layout = QVBoxLayout(parent_extension_group)
         parent_extension_layout.setContentsMargins(12, 12, 12, 12)
         parent_extension_layout.setSpacing(8)
+        self.parent_extension_status_label = QLabel()
+        self.parent_extension_status_label.setObjectName("modelSettingsParentExtensionStatus")
+        self.parent_extension_status_label.setWordWrap(True)
+        parent_extension_layout.addWidget(self.parent_extension_status_label)
         external_note = QLabel(
             tr("Use this advanced entry when you want TaxaMask to call your own parent-part training or prediction scripts. Commands run in an isolated external_runs directory and receive a contract JSON path through {contract} or {contract_json}. When Parent Model Source is set to Custom Parent Extension for the active model profile, built-in Locator/SAM training and prediction do not run for that task.", lang)
         )
@@ -2865,7 +2989,7 @@ class ModelSettingsDialog(QDialog):
         ratio_layout.setVerticalSpacing(8)
         ratio_note = QLabel(
             tr(
-                "Used when the main labeling workbench draws parent context boxes. Child boxes and loose shrink boxes stay free-ratio.",
+                "Used when the main labeling workbench draws parent context boxes. Child boxes and Blink shrink start boxes stay free-ratio.",
                 lang,
             )
         )
@@ -2990,11 +3114,15 @@ class ModelSettingsDialog(QDialog):
             heatmap_layout.addWidget(editor)
         form_child.addWidget(heatmap_group)
 
-        external_blink_group = QGroupBox(tr("Child-part Custom Extension", lang))
+        external_blink_group = QGroupBox(tr("4. Child-part Custom Extension", lang))
         apply_surface_role(external_blink_group, SURFACE_ROLE_SUBTLE, "modelSettingsExternalBlinkPanel")
         external_blink_layout = QVBoxLayout(external_blink_group)
         external_blink_layout.setContentsMargins(12, 12, 12, 12)
         external_blink_layout.setSpacing(8)
+        self.child_extension_status_label = QLabel()
+        self.child_extension_status_label.setObjectName("modelSettingsChildExtensionStatus")
+        self.child_extension_status_label.setWordWrap(True)
+        external_blink_layout.addWidget(self.child_extension_status_label)
         external_blink_note = QLabel(
             tr(
                 "Child extension settings are saved inside the current model profile when Default Child Backend is set to Custom Child Extension.",
@@ -3092,14 +3220,64 @@ class ModelSettingsDialog(QDialog):
             self.vlm_target_part_checks.append(check)
             vlm_grid.addWidget(check, index // 2, index % 2)
         vlm_layout.addLayout(vlm_grid)
-        vlm_layout.addWidget(QLabel(tr("VLM Processing Scope:", lang)))
+        vlm_layout.addWidget(QLabel(tr("VLM Batch Scope:", lang)))
         self.combo_vlm_processing_scope = NoWheelComboBox()
-        self.combo_vlm_processing_scope.addItem(tr("Current image only", lang), "current_image")
+        self.combo_vlm_processing_scope.setObjectName("modelSettingsVlmBatchScopeCombo")
         self.combo_vlm_processing_scope.addItem(tr("All imported images", lang), "all_images")
-        scope_value = str(vlm_settings.get("processing_scope", "current_image") or "current_image")
+        self.combo_vlm_processing_scope.addItem(tr("Images in selected list group", lang), "image_group")
+        scope_value = str(vlm_settings.get("processing_scope", "image_group") or "image_group")
+        if scope_value == "current_image":
+            scope_value = "image_group"
         scope_index = self.combo_vlm_processing_scope.findData(scope_value)
         self.combo_vlm_processing_scope.setCurrentIndex(scope_index if scope_index >= 0 else 0)
         vlm_layout.addWidget(self.combo_vlm_processing_scope)
+        vlm_layout.addWidget(QLabel(tr("VLM Image Group:", lang)))
+        self.combo_vlm_image_group = NoWheelComboBox()
+        self.combo_vlm_image_group.setObjectName("modelSettingsVlmImageGroupCombo")
+        self._populate_vlm_image_group_combo(str(vlm_settings.get("image_group", "split") or "split"))
+        vlm_layout.addWidget(self.combo_vlm_image_group)
+        vlm_layout.addWidget(QLabel(tr("VLM Prompt Profile:", lang)))
+        vlm_profile_note = QLabel(
+            tr(
+                "Prompt profile only changes the instructions sent to the multimodal model. The grid input, JSON schema, coordinate mapping, and SAM draft generation stay locked.",
+                lang,
+            )
+        )
+        vlm_profile_note.setWordWrap(True)
+        vlm_profile_note.setObjectName("mutedLabel")
+        vlm_layout.addWidget(vlm_profile_note)
+        self.combo_vlm_prompt_profile = NoWheelComboBox()
+        self.combo_vlm_prompt_profile.setObjectName("modelSettingsVlmPromptProfileCombo")
+        self.combo_vlm_prompt_profile.addItem(tr("Built-in Ant Taxonomy Default", lang), DEFAULT_VLM_PROMPT_PROFILE_ID)
+        self.combo_vlm_prompt_profile.addItem(tr("Project Custom Prompt", lang), "project_custom")
+        self.combo_vlm_prompt_profile.currentIndexChanged.connect(lambda _index: self._refresh_vlm_prompt_profile_editors())
+        vlm_layout.addWidget(self.combo_vlm_prompt_profile)
+        vlm_prompt_help = QLabel(
+            tr(
+                "Use the built-in ant prompt profile as a stable baseline. Choose Project Custom Prompt when adapting VLM pre-annotation to another taxon or a special image style.",
+                lang,
+            )
+        )
+        vlm_prompt_help.setWordWrap(True)
+        vlm_prompt_help.setObjectName("mutedLabel")
+        vlm_layout.addWidget(vlm_prompt_help)
+        vlm_layout.addWidget(QLabel(tr("Profile Name:", lang)))
+        self.vlm_prompt_profile_name = QLineEdit()
+        self.vlm_prompt_profile_name.setObjectName("modelSettingsVlmPromptProfileName")
+        vlm_layout.addWidget(self.vlm_prompt_profile_name)
+        self.vlm_prompt_taxon_context = self._make_prompt_profile_editor()
+        self.vlm_prompt_body_rules = self._make_prompt_profile_editor()
+        self.vlm_prompt_anchor_rules = self._make_prompt_profile_editor()
+        self.vlm_prompt_extra_instructions = self._make_prompt_profile_editor()
+        for label_text, editor in [
+            (tr("Research Taxon / Image Context:", lang), self.vlm_prompt_taxon_context),
+            (tr("Main Body / Attachment Rules:", lang), self.vlm_prompt_body_rules),
+            (tr("Part Anchor Rules:", lang), self.vlm_prompt_anchor_rules),
+            (tr("Extra VLM Instructions:", lang), self.vlm_prompt_extra_instructions),
+        ]:
+            vlm_layout.addWidget(QLabel(label_text))
+            vlm_layout.addWidget(editor)
+        self._set_vlm_prompt_profile_controls(vlm_settings)
         form_inf.addWidget(vlm_group)
 
         self.lbl_cascade_note = QLabel(
@@ -3165,8 +3343,96 @@ class ModelSettingsDialog(QDialog):
         editor.setPlaceholderText(placeholder)
         return editor
 
+    def _make_prompt_profile_editor(self):
+        editor = QTextEdit()
+        editor.setAcceptRichText(False)
+        editor.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        editor.setMinimumHeight(72)
+        return editor
+
     def _command_text(self, editor):
         return editor.toPlainText().strip()
+
+    def _set_prompt_editor_read_only(self, read_only):
+        for widget in [
+            getattr(self, "vlm_prompt_profile_name", None),
+            getattr(self, "vlm_prompt_taxon_context", None),
+            getattr(self, "vlm_prompt_body_rules", None),
+            getattr(self, "vlm_prompt_anchor_rules", None),
+            getattr(self, "vlm_prompt_extra_instructions", None),
+        ]:
+            if widget is not None:
+                widget.setReadOnly(bool(read_only))
+
+    def _set_vlm_prompt_profile_controls(self, settings):
+        if not hasattr(self, "combo_vlm_prompt_profile"):
+            return
+        settings = settings if isinstance(settings, dict) else {}
+        profile = sanitize_vlm_prompt_profile(settings.get("prompt_profile", {}))
+        profile_id = str(settings.get("prompt_profile_id") or profile.get("profile_id") or DEFAULT_VLM_PROMPT_PROFILE_ID)
+        if profile_id == DEFAULT_VLM_PROMPT_PROFILE_ID:
+            profile = default_vlm_prompt_profile()
+        else:
+            profile_id = "project_custom"
+        self._last_custom_vlm_prompt_profile = sanitize_vlm_prompt_profile(profile if profile_id != DEFAULT_VLM_PROMPT_PROFILE_ID else {"profile_id": "project_custom"})
+        self.combo_vlm_prompt_profile.blockSignals(True)
+        index = self.combo_vlm_prompt_profile.findData(profile_id)
+        self.combo_vlm_prompt_profile.setCurrentIndex(index if index >= 0 else 0)
+        self.combo_vlm_prompt_profile.blockSignals(False)
+        self.vlm_prompt_profile_name.setText(str(profile.get("display_name", "")))
+        self.vlm_prompt_taxon_context.setPlainText(str(profile.get("taxon_context", "")))
+        self.vlm_prompt_body_rules.setPlainText(str(profile.get("body_focus_rules", "")))
+        self.vlm_prompt_anchor_rules.setPlainText(str(profile.get("part_anchor_rules", "")))
+        self.vlm_prompt_extra_instructions.setPlainText(str(profile.get("extra_instructions", "")))
+        self._refresh_vlm_prompt_profile_editors()
+
+    def _refresh_vlm_prompt_profile_editors(self):
+        if not hasattr(self, "combo_vlm_prompt_profile"):
+            return
+        is_builtin = self.combo_vlm_prompt_profile.currentData() == DEFAULT_VLM_PROMPT_PROFILE_ID
+        if is_builtin:
+            self._last_custom_vlm_prompt_profile = self._current_vlm_prompt_profile_values()["prompt_profile"]
+            profile = default_vlm_prompt_profile()
+            self.vlm_prompt_profile_name.setText(str(profile.get("display_name", "")))
+            self.vlm_prompt_taxon_context.setPlainText(str(profile.get("taxon_context", "")))
+            self.vlm_prompt_body_rules.setPlainText(str(profile.get("body_focus_rules", "")))
+            self.vlm_prompt_anchor_rules.setPlainText(str(profile.get("part_anchor_rules", "")))
+            self.vlm_prompt_extra_instructions.setPlainText(str(profile.get("extra_instructions", "")))
+        else:
+            profile = sanitize_vlm_prompt_profile(getattr(self, "_last_custom_vlm_prompt_profile", {}) or {"profile_id": "project_custom"})
+            self.vlm_prompt_profile_name.setText(str(profile.get("display_name", "")))
+            self.vlm_prompt_taxon_context.setPlainText(str(profile.get("taxon_context", "")))
+            self.vlm_prompt_body_rules.setPlainText(str(profile.get("body_focus_rules", "")))
+            self.vlm_prompt_anchor_rules.setPlainText(str(profile.get("part_anchor_rules", "")))
+            self.vlm_prompt_extra_instructions.setPlainText(str(profile.get("extra_instructions", "")))
+        self._set_prompt_editor_read_only(is_builtin)
+
+    def _current_vlm_prompt_profile_values(self):
+        if not hasattr(self, "combo_vlm_prompt_profile"):
+            profile = default_vlm_prompt_profile()
+            return {
+                "prompt_profile_id": profile["profile_id"],
+                "prompt_profile": profile,
+            }
+        if self.combo_vlm_prompt_profile.currentData() == DEFAULT_VLM_PROMPT_PROFILE_ID:
+            profile = default_vlm_prompt_profile()
+            return {
+                "prompt_profile_id": DEFAULT_VLM_PROMPT_PROFILE_ID,
+                "prompt_profile": profile,
+            }
+        raw_profile = {
+            "profile_id": "project_custom",
+            "display_name": self.vlm_prompt_profile_name.text().strip() or tr("Project Custom Prompt", self.lang),
+            "taxon_context": self.vlm_prompt_taxon_context.toPlainText().strip(),
+            "body_focus_rules": self.vlm_prompt_body_rules.toPlainText().strip(),
+            "part_anchor_rules": self.vlm_prompt_anchor_rules.toPlainText().strip(),
+            "extra_instructions": self.vlm_prompt_extra_instructions.toPlainText().strip(),
+        }
+        profile = sanitize_vlm_prompt_profile(raw_profile)
+        return {
+            "prompt_profile_id": "project_custom",
+            "prompt_profile": profile,
+        }
 
     def _active_profile_id(self):
         selected = ""
@@ -3481,6 +3747,30 @@ class ModelSettingsDialog(QDialog):
                     _child_backend_label(self.child_backend_combo.currentData(), self.lang)
                 )
             )
+        if hasattr(self, "parent_extension_status_label") and hasattr(self, "parent_backend_combo"):
+            if self.parent_backend_combo.currentData() == PARENT_BACKEND_EXTERNAL:
+                parent_text = tr(
+                    "Active now: parent-part training and Auto annotation will call this custom parent extension.",
+                    self.lang,
+                )
+            else:
+                parent_text = tr(
+                    "Not active now: parent-part tasks use Built-in Locator + SAM. These fields are saved for profiles that switch Parent Model Source to Custom Parent Extension.",
+                    self.lang,
+                )
+            self.parent_extension_status_label.setText(parent_text)
+        if hasattr(self, "child_extension_status_label") and hasattr(self, "child_backend_combo"):
+            if self.child_backend_combo.currentData() == CHILD_BACKEND_EXTERNAL:
+                child_text = tr(
+                    "Active now: this custom child extension is the default child expert for unresolved routes. Appointed route experts still keep their own bindings.",
+                    self.lang,
+                )
+            else:
+                child_text = tr(
+                    "Not active now: the default child expert is {0}. These fields are saved for profiles that switch Default Child Expert to Custom Child Extension.",
+                    self.lang,
+                ).format(_child_backend_label(self.child_backend_combo.currentData(), self.lang))
+            self.child_extension_status_label.setText(child_text)
         if hasattr(self, "profile_summary_box"):
             self._refresh_profile_summary()
 
@@ -3599,8 +3889,58 @@ class ModelSettingsDialog(QDialog):
             part_name = str(check.property("part_name") or check.text()).strip()
             check.setChecked(part_name in selected_vlm)
         if hasattr(self, "combo_vlm_processing_scope"):
-            index = self.combo_vlm_processing_scope.findData(str(vlm.get("processing_scope", "current_image")))
+            scope_value = str(vlm.get("processing_scope", "image_group") or "image_group")
+            if scope_value == "current_image":
+                scope_value = "image_group"
+            index = self.combo_vlm_processing_scope.findData(scope_value)
             self.combo_vlm_processing_scope.setCurrentIndex(index if index >= 0 else 0)
+        if hasattr(self, "combo_vlm_image_group"):
+            self._populate_vlm_image_group_combo(str(vlm.get("image_group", "split") or "split"))
+        self._set_vlm_prompt_profile_controls(vlm)
+
+    def _default_vlm_image_group_definitions(self):
+        return [
+            ("original", tr("Original Images", self.lang)),
+            ("split", tr("Split Crops", self.lang)),
+            ("manual_done", tr("Manual Split Done", self.lang)),
+            ("manual", tr("Manual Split Needed", self.lang)),
+        ]
+
+    def _normalize_vlm_image_group_definitions(self, raw_definitions):
+        clean = []
+        seen = set()
+
+        def add(group_id, label):
+            group_id = str(group_id or "").strip()
+            label = str(label or "").strip()
+            if not group_id or not label or group_id in seen:
+                return
+            seen.add(group_id)
+            clean.append((group_id, label))
+
+        for group_id, label in self._default_vlm_image_group_definitions():
+            add(group_id, label)
+        if isinstance(raw_definitions, list):
+            for item in raw_definitions:
+                if isinstance(item, dict):
+                    add(item.get("id", ""), item.get("name", ""))
+                elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                    add(item[0], item[1])
+        return clean
+
+    def _populate_vlm_image_group_combo(self, selected_group=None):
+        if not hasattr(self, "combo_vlm_image_group"):
+            return
+        current = str(selected_group or self.combo_vlm_image_group.currentData() or "split")
+        self.combo_vlm_image_group.blockSignals(True)
+        self.combo_vlm_image_group.clear()
+        for group_id, label in self.vlm_image_group_definitions:
+            self.combo_vlm_image_group.addItem(label, group_id)
+        index = self.combo_vlm_image_group.findData(current)
+        if index < 0:
+            index = self.combo_vlm_image_group.findData("split")
+        self.combo_vlm_image_group.setCurrentIndex(index if index >= 0 else 0)
+        self.combo_vlm_image_group.blockSignals(False)
 
     def _external_blink_config_values(self):
         return {
@@ -3708,7 +4048,9 @@ class ModelSettingsDialog(QDialog):
                 "poly_epsilon": float(self.spin_poly.text()),
                 "vlm_preannotation": {
                     "target_parts": self._selected_vlm_target_parts(),
-                    "processing_scope": self.combo_vlm_processing_scope.currentData() or "current_image",
+                    "processing_scope": self.combo_vlm_processing_scope.currentData() or "image_group",
+                    "image_group": self.combo_vlm_image_group.currentData() if hasattr(self, "combo_vlm_image_group") else "split",
+                    **self._current_vlm_prompt_profile_values(),
                 },
             }
         )
@@ -3748,7 +4090,9 @@ class ModelSettingsDialog(QDialog):
             parent_box_aspect_ratios=self._parent_box_aspect_ratio_values(),
             vlm_preannotation={
                 "target_parts": self._selected_vlm_target_parts(),
-                "processing_scope": self.combo_vlm_processing_scope.currentData() or "current_image",
+                "processing_scope": self.combo_vlm_processing_scope.currentData() or "image_group",
+                "image_group": self.combo_vlm_image_group.currentData() if hasattr(self, "combo_vlm_image_group") else "split",
+                **self._current_vlm_prompt_profile_values(),
             },
         )
         self.model_profiles = clean
@@ -3787,7 +4131,10 @@ class ModelSettingsDialog(QDialog):
             "locator_scope": list(parent_backend.get("locator_scope", self._selected_locator_scope()) or []),
             "vlm_preannotation": {
                 "target_parts": list(vlm.get("target_parts", self._selected_vlm_target_parts()) or []),
-                "processing_scope": str(vlm.get("processing_scope", self.combo_vlm_processing_scope.currentData() or "current_image") or "current_image"),
+                "processing_scope": str(vlm.get("processing_scope", self.combo_vlm_processing_scope.currentData() or "image_group") or "image_group"),
+                "image_group": str(vlm.get("image_group", self.combo_vlm_image_group.currentData() if hasattr(self, "combo_vlm_image_group") else "split") or "split"),
+                "prompt_profile_id": str(vlm.get("prompt_profile_id", DEFAULT_VLM_PROMPT_PROFILE_ID) or DEFAULT_VLM_PROMPT_PROFILE_ID),
+                "prompt_profile": sanitize_vlm_prompt_profile(vlm.get("prompt_profile", {})),
             },
             "parent_box_aspect_ratios": dict(parent_backend.get("parent_box_aspect_ratios", self._parent_box_aspect_ratio_values()) or {}),
         }
@@ -4966,10 +5313,14 @@ class MainWindow(QMainWindow):
         self.btn_agent_from_workbench.setObjectName("workbenchAskAgentButton")
         self.btn_agent_from_workbench.clicked.connect(lambda: self.open_agent_from_context(self._collect_image_workbench_agent_context()))
         apply_semantic_button_style(self.btn_agent_from_workbench, BUTTON_ROLE_NEUTRAL)
-        self.btn_vlm_preannotate = QPushButton()
-        self.btn_vlm_preannotate.setObjectName("workbenchVlmPreannotateButton")
-        self.btn_vlm_preannotate.clicked.connect(self.run_vlm_preannotation_from_settings)
-        apply_semantic_button_style(self.btn_vlm_preannotate, BUTTON_ROLE_RUN)
+        self.btn_vlm_preannotate_current = QPushButton()
+        self.btn_vlm_preannotate_current.setObjectName("workbenchVlmPreannotateCurrentButton")
+        self.btn_vlm_preannotate_current.clicked.connect(self.run_vlm_preannotation_current)
+        apply_semantic_button_style(self.btn_vlm_preannotate_current, BUTTON_ROLE_RUN)
+        self.btn_vlm_preannotate_batch = QPushButton()
+        self.btn_vlm_preannotate_batch.setObjectName("workbenchVlmPreannotateBatchButton")
+        self.btn_vlm_preannotate_batch.clicked.connect(self.run_vlm_preannotation_batch)
+        apply_semantic_button_style(self.btn_vlm_preannotate_batch, BUTTON_ROLE_RUN)
 
         self.workbench_top_bar = QWidget()
         apply_surface_role(self.workbench_top_bar, SURFACE_ROLE_TOOLBAR, "workbenchTopBar")
@@ -4993,7 +5344,8 @@ class MainWindow(QMainWindow):
         toolbar_flow_layout.setSpacing(8)
         toolbar_flow_layout.addWidget(self.btn_blink_entry)
         toolbar_flow_layout.addWidget(self.btn_start_center_from_workbench)
-        toolbar_flow_layout.addWidget(self.btn_vlm_preannotate)
+        toolbar_flow_layout.addWidget(self.btn_vlm_preannotate_current)
+        toolbar_flow_layout.addWidget(self.btn_vlm_preannotate_batch)
         toolbar_flow_layout.addWidget(self.btn_agent_from_workbench)
 
         top_bar_layout.addWidget(self.toolbar_project_panel, 0)
@@ -5015,13 +5367,14 @@ class MainWindow(QMainWindow):
         self.label_project_images = QLabel()
         self.label_project_images.setObjectName("HeaderLabel")
         left_layout.addWidget(self.label_project_images)
-        self.file_list = QListWidget()
+        self.file_list = ImageGroupListWidget()
         self.file_list.setObjectName("imageList")
         self.file_list.setSelectionMode(QListWidget.ExtendedSelection)
         self.file_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.file_list.customContextMenuRequested.connect(self.show_file_list_context_menu)
         self.file_list.itemClicked.connect(self._handle_image_list_item_clicked)
         self.file_list.currentItemChanged.connect(self.on_file_selected)
+        self.file_list.imagesDroppedToGroup.connect(self.move_images_to_group)
         left_layout.addWidget(self.file_list)
         self.btn_add = QPushButton()
         self.btn_add.clicked.connect(self.add_images)
@@ -5074,26 +5427,6 @@ class MainWindow(QMainWindow):
         self.radio_scale.setVisible(False) 
         tool_layout.addWidget(self.radio_scale)
         tool_layout.addStretch(1)
-        enh_layout = QHBoxLayout()
-        self.lbl_bright = QLabel("Brightness:")
-        self.lbl_bright.setObjectName("mutedLabel")
-        enh_layout.addWidget(self.lbl_bright)
-        self.slider_bright = QSlider(Qt.Horizontal)
-        self.slider_bright.setRange(-100, 100)
-        self.slider_bright.setValue(0)
-        self.slider_bright.setFixedWidth(120)
-        self.slider_bright.valueChanged.connect(self.on_enhancement_changed)
-        enh_layout.addWidget(self.slider_bright)
-        self.lbl_contrast = QLabel("Contrast:")
-        self.lbl_contrast.setObjectName("mutedLabel")
-        enh_layout.addWidget(self.lbl_contrast)
-        self.slider_contrast = QSlider(Qt.Horizontal)
-        self.slider_contrast.setRange(1, 30)
-        self.slider_contrast.setValue(10)
-        self.slider_contrast.setFixedWidth(120)
-        self.slider_contrast.valueChanged.connect(self.on_enhancement_changed)
-        enh_layout.addWidget(self.slider_contrast)
-        tool_layout.addLayout(enh_layout)
         center_layout.addWidget(self.tool_strip)
 
         self.canvas = AnnotationCanvas()
@@ -7878,11 +8211,19 @@ class MainWindow(QMainWindow):
         self.label_model_backend.setText(f"{tr('Model Backend:', self.current_lang)} {backend_label}")
         self.btn_predict.setText(tr("Auto (Current)", self.current_lang))
         self.btn_batch.setText(tr("Batch (All)", self.current_lang))
-        if hasattr(self, "btn_vlm_preannotate"):
-            self.btn_vlm_preannotate.setText(tr("VLM Pre-Annotate", self.current_lang))
-            self.btn_vlm_preannotate.setToolTip(
+        if hasattr(self, "btn_vlm_preannotate_current"):
+            self.btn_vlm_preannotate_current.setText(tr("VLM Pre-Label", self.current_lang))
+            self.btn_vlm_preannotate_current.setToolTip(
                 tr(
-                    "Use the configured multimodal model to propose SAM prompt boxes for the current image. Results are draft AI boxes until reviewed.",
+                    "Use the configured multimodal model to propose draft boxes for the current image only.",
+                    self.current_lang,
+                )
+            )
+        if hasattr(self, "btn_vlm_preannotate_batch"):
+            self.btn_vlm_preannotate_batch.setText(tr("VLM Batch Pre-Label", self.current_lang))
+            self.btn_vlm_preannotate_batch.setToolTip(
+                tr(
+                    "Use the configured multimodal model to batch pre-annotate the configured image range.",
                     self.current_lang,
                 )
             )
@@ -7920,12 +8261,28 @@ class MainWindow(QMainWindow):
         self.label_logs.setText(tr("LOGS", self.current_lang))
         self.radio_draw.setText(tr("Manual Draw", self.current_lang))
         self.radio_magic.setText(tr("Magic Wand (SAM)", self.current_lang))
-        self.radio_box.setText(tr("Box Prompt (SAM)", self.current_lang))
-        self.radio_annotation_box.setText(tr("Annotation Box", self.current_lang))
-        self.radio_loose_shrink_box.setText(tr("Loose Shrink Box", self.current_lang))
+        self.radio_box.setText(tr("SAM Box Segmentation", self.current_lang))
+        self.radio_box.setToolTip(
+            tr(
+                "Draw a box to run SAM immediately and create a draft polygon for the current part.",
+                self.current_lang,
+            )
+        )
+        self.radio_annotation_box.setText(tr("Manual ROI Box", self.current_lang))
+        self.radio_annotation_box.setToolTip(
+            tr(
+                "Draw or replace the manually confirmed ROI box saved with the current part. It does not run SAM by itself.",
+                self.current_lang,
+            )
+        )
+        self.radio_loose_shrink_box.setText(tr("Blink Shrink Start Box", self.current_lang))
+        self.radio_loose_shrink_box.setToolTip(
+            tr(
+                "Draw a loose starting box around a child structure for Blink auto-shrink trajectory training. It is not the final annotation box.",
+                self.current_lang,
+            )
+        )
         self.radio_scale.setText(tr("Scale Tool", self.current_lang))
-        self.lbl_bright.setText(tr("Brightness:", self.current_lang))
-        self.lbl_contrast.setText(tr("Contrast:", self.current_lang))
         self.check_morpho.setText(tr("Enable Morphometrics", self.current_lang))
         self.group_morpho.setTitle(tr("Measurements", self.current_lang))
         self.lbl_locator.setText(tr("Locator:", self.current_lang))
@@ -8131,6 +8488,7 @@ class MainWindow(QMainWindow):
             'taxonomy': self.project.project_data.get("taxonomy", []),
             'locator_scope': self.project.get_locator_scope(),
             'vlm_preannotation': self.project.get_vlm_preannotation_settings() if hasattr(self.project, "get_vlm_preannotation_settings") else {},
+            'vlm_image_group_definitions': self._all_image_group_definitions(),
             'parent_box_aspect_ratios': self.project.get_parent_box_aspect_ratios() if hasattr(self.project, "get_parent_box_aspect_ratios") else {},
             'model_profiles': self.project.get_model_profiles() if hasattr(self.project, "get_model_profiles") else {},
         }
@@ -8260,6 +8618,7 @@ class MainWindow(QMainWindow):
             self.route_settings_panel.set_language(lang)
         self.refresh_model_list()
         self.refresh_ui()
+        self._refresh_vlm_image_group_combo()
         self.change_theme(self.current_theme)
         self.log(tr("Language: {0}", self.current_lang).format(lang))
 
@@ -8332,8 +8691,10 @@ class MainWindow(QMainWindow):
             apply_theme_button_style(self.btn_predict, BUTTON_ROLE_RUN, "padding: 5px;", self.current_theme)
         if hasattr(self, "btn_batch"):
             apply_theme_button_style(self.btn_batch, BUTTON_ROLE_RUN, "padding: 5px;", self.current_theme)
-        if hasattr(self, "btn_vlm_preannotate"):
-            apply_theme_button_style(self.btn_vlm_preannotate, BUTTON_ROLE_RUN, "padding: 6px;", self.current_theme)
+        if hasattr(self, "btn_vlm_preannotate_current"):
+            apply_theme_button_style(self.btn_vlm_preannotate_current, BUTTON_ROLE_RUN, "padding: 6px;", self.current_theme)
+        if hasattr(self, "btn_vlm_preannotate_batch"):
+            apply_theme_button_style(self.btn_vlm_preannotate_batch, BUTTON_ROLE_RUN, "padding: 6px;", self.current_theme)
         if hasattr(self, "btn_accept_current_ai_drafts"):
             apply_theme_button_style(self.btn_accept_current_ai_drafts, BUTTON_ROLE_COMMIT, "padding: 6px;", self.current_theme)
         if hasattr(self, "btn_train"):
@@ -8409,12 +8770,52 @@ class MainWindow(QMainWindow):
             for path in self.project.project_data.get("images", [])
         )
 
+    def _has_split_crops_from_image(self, image_path):
+        if not image_path or not hasattr(self.project, "get_image_provenance"):
+            return False
+        source_abs = os.path.normcase(os.path.abspath(str(image_path)))
+        source_dir = os.path.normcase(os.path.abspath(os.path.dirname(str(image_path))))
+        source_stem = os.path.normcase(os.path.splitext(os.path.basename(str(image_path)))[0])
+        for path in self.project.project_data.get("images", []):
+            if not path:
+                continue
+            crop_abs = os.path.normcase(os.path.abspath(str(path)))
+            if crop_abs == source_abs:
+                continue
+            provenance = self.project.get_image_provenance(path)
+            derived_from = provenance.get("derived_from") if isinstance(provenance, dict) else {}
+            if isinstance(derived_from, dict) and derived_from.get("image_path"):
+                derived_abs = os.path.normcase(os.path.abspath(str(derived_from.get("image_path"))))
+                if derived_abs == source_abs:
+                    return True
+            if not self._looks_like_panel_crop_path(path):
+                continue
+            crop_dir = os.path.normcase(os.path.abspath(os.path.dirname(str(path))))
+            crop_stem = os.path.splitext(os.path.basename(str(path)))[0]
+            parent_stem = re.sub(r"__(?:panel|crop)_\d{3}(?:_\d+)?$", "", crop_stem, flags=re.IGNORECASE)
+            if crop_dir == source_dir and os.path.normcase(parent_stem) == source_stem:
+                return True
+        return False
+
     def _needs_manual_panel_split(self, image_path):
         if not image_path or not hasattr(self.project, "get_image_provenance"):
+            return False
+        if self._is_split_crop_image(image_path):
+            return False
+        if self._has_split_crops_from_image(image_path):
             return False
         provenance = self.project.get_image_provenance(image_path)
         review = provenance.get("panel_split_review") if isinstance(provenance, dict) else {}
         return isinstance(review, dict) and review.get("status") == "manual_required"
+
+    def _is_manual_panel_split_done(self, image_path):
+        if not image_path or not hasattr(self.project, "get_image_provenance"):
+            return False
+        if self._is_split_crop_image(image_path):
+            return False
+        provenance = self.project.get_image_provenance(image_path)
+        review = provenance.get("panel_split_review") if isinstance(provenance, dict) else {}
+        return isinstance(review, dict) and review.get("status") == "manual_done"
 
     def _set_panel_split_review(self, image_path, status, reason="", detections=None):
         if not image_path or not hasattr(self.project, "get_image_provenance"):
@@ -8426,6 +8827,147 @@ class MainWindow(QMainWindow):
             "candidate_count": len(detections or []),
         }
         self.project.set_image_provenance(image_path, provenance, save=False)
+
+    def _clear_panel_split_review(self, image_path):
+        if not image_path or not hasattr(self.project, "get_image_provenance"):
+            return
+        provenance = self.project.get_image_provenance(image_path)
+        if "panel_split_review" in provenance:
+            del provenance["panel_split_review"]
+            self.project.set_image_provenance(image_path, provenance, save=False)
+
+    def _builtin_image_group_definitions(self):
+        return [
+            ("original", tr("Original Images", self.current_lang)),
+            ("split", tr("Split Crops", self.current_lang)),
+            ("manual_done", tr("Manual Split Done", self.current_lang)),
+            ("manual", tr("Manual Split Needed", self.current_lang)),
+        ]
+
+    def _custom_image_group_definitions(self):
+        groups = self.project.project_data.get("image_groups", {}) if hasattr(self, "project") else {}
+        raw_groups = groups.get("custom_groups", []) if isinstance(groups, dict) else []
+        clean = []
+        seen = set()
+        if isinstance(raw_groups, list):
+            for group in raw_groups:
+                if not isinstance(group, dict):
+                    continue
+                group_id = str(group.get("id", "") or "").strip()
+                name = str(group.get("name", "") or "").strip()
+                if not group_id or not name or group_id in seen:
+                    continue
+                seen.add(group_id)
+                clean.append((group_id, name))
+        return clean
+
+    def _all_image_group_definitions(self):
+        return self._builtin_image_group_definitions() + self._custom_image_group_definitions()
+
+    def _populate_vlm_image_group_combo(self, selected_group=None):
+        if not hasattr(self, "combo_vlm_image_group"):
+            return
+        current = str(selected_group or self.combo_vlm_image_group.currentData() or "split")
+        self.combo_vlm_image_group.blockSignals(True)
+        self.combo_vlm_image_group.clear()
+        for group_id, label in self._all_image_group_definitions():
+            self.combo_vlm_image_group.addItem(label, group_id)
+        index = self.combo_vlm_image_group.findData(current)
+        if index < 0:
+            index = self.combo_vlm_image_group.findData("split")
+        self.combo_vlm_image_group.setCurrentIndex(index if index >= 0 else 0)
+        self.combo_vlm_image_group.blockSignals(False)
+
+    def _refresh_vlm_image_group_combo(self):
+        selected = "split"
+        if hasattr(self, "combo_vlm_image_group"):
+            selected = str(self.combo_vlm_image_group.currentData() or selected)
+        self._populate_vlm_image_group_combo(selected)
+
+    def _image_group_display_name(self, group_key):
+        key = str(group_key or "").strip()
+        for group_id, label in self._all_image_group_definitions():
+            if group_id == key:
+                return label
+        return key
+
+    def _safe_custom_image_group_id(self, name):
+        text = str(name or "").strip()
+        clean = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in text).strip("_")
+        clean = clean or "custom_group"
+        if clean in {"original", "split", "manual_done", "manual"}:
+            clean = f"custom_{clean}"
+        existing = {group_id for group_id, _label in self._all_image_group_definitions()}
+        group_id = clean
+        suffix = 2
+        while group_id in existing:
+            group_id = f"{clean}_{suffix}"
+            suffix += 1
+        return group_id
+
+    def create_custom_image_group(self):
+        name, ok = QInputDialog.getText(
+            self,
+            tr("New Image Group", self.current_lang),
+            tr("Group Name:", self.current_lang),
+        )
+        name = str(name or "").strip()
+        if not ok or not name:
+            return ""
+        existing_names = {
+            str(label).strip().lower()
+            for _group_id, label in self._all_image_group_definitions()
+            if str(label).strip()
+        }
+        if name.lower() in existing_names:
+            QMessageBox.information(self, tr("New Image Group", self.current_lang), tr("Image group already exists.", self.current_lang))
+            return ""
+        groups = dict(self.project.project_data.get("image_groups", {}) or {})
+        custom_groups = list(groups.get("custom_groups", []) or [])
+        group_id = self._safe_custom_image_group_id(name)
+        custom_groups.append({"id": group_id, "name": name[:80]})
+        groups["custom_groups"] = custom_groups
+        self.project.project_data["image_groups"] = groups
+        self.project.save_project()
+        self.refresh_file_list()
+        self._refresh_vlm_image_group_combo()
+        return group_id
+
+    def _set_image_manual_group(self, image_path, group_key):
+        if not image_path or not hasattr(self.project, "get_image_provenance"):
+            return
+        key = str(group_key or "").strip()
+        provenance = self.project.get_image_provenance(image_path)
+        if key:
+            provenance["manual_image_group"] = key
+        else:
+            provenance.pop("manual_image_group", None)
+        self.project.set_image_provenance(image_path, provenance, save=False)
+
+    def move_images_to_group(self, image_paths, group_key):
+        paths = [path for path in (image_paths or []) if path]
+        key = str(group_key or "").strip()
+        if not paths or not key:
+            return
+        allowed = {group_id for group_id, _label in self._all_image_group_definitions()}
+        if key not in allowed:
+            return
+        self._flush_pending_project_save()
+        for path in paths:
+            self._set_image_manual_group(path, key)
+        self.project.save_project()
+        self.refresh_file_list()
+        self.log(tr("Moved {0} image(s) to {1}.", self.current_lang).format(len(paths), self._image_group_display_name(key)))
+
+    def clear_selected_custom_image_group(self):
+        paths = self._selected_image_paths()
+        if not paths:
+            return
+        self._flush_pending_project_save()
+        for path in paths:
+            self._set_image_manual_group(path, "")
+        self.project.save_project()
+        self.refresh_file_list()
 
     def _short_progress_path(self, path, limit=64):
         name = os.path.basename(str(path or ""))
@@ -8633,21 +9175,61 @@ class MainWindow(QMainWindow):
                 continue
             parent_provenance = self.project.get_image_provenance(source_image)
             crop_provenance = dict(parent_provenance)
+            parent_review = parent_provenance.get("panel_split_review") if isinstance(parent_provenance, dict) else {}
+            parent_was_manual_required = isinstance(parent_review, dict) and parent_review.get("status") == "manual_required"
+            crop_provenance.pop("panel_split_review", None)
             parent_source_type = str(parent_provenance.get("source_type", "") or "image").strip() or "image"
+            crop_source = str(record.get("crop_source") or "manual")
             crop_provenance["source_type"] = "pdf_candidate_crop" if self._is_pdf_candidate_provenance(parent_provenance) else f"{parent_source_type}_crop"
             crop_provenance["derived_from"] = {
                 "image_path": os.path.abspath(source_image),
                 "crop_index": int(record.get("crop_index", 0) or 0),
                 "crop_box": list(record.get("crop_box", []) or []),
                 "source_size": list(record.get("source_size", []) or []),
-                "crop_source": str(record.get("crop_source") or "manual"),
+                "crop_source": crop_source,
             }
             self.project.set_image_provenance(crop_path, crop_provenance, save=False)
-            if str(record.get("crop_source") or "") == "manual":
+            if crop_source == "manual" or parent_was_manual_required:
                 self._set_panel_split_review(source_image, "manual_done", reason="manual_crop_saved")
             changed = True
         if changed:
             self.project.save_project()
+
+    def _selected_image_paths(self):
+        if not hasattr(self, "file_list"):
+            return []
+        paths = []
+        for item in self.file_list.selectedItems():
+            path = item.data(Qt.UserRole)
+            if path:
+                paths.append(path)
+        return paths
+
+    def _set_selected_panel_split_status(self, status, reason):
+        paths = self._selected_image_paths()
+        if not paths:
+            return
+        self._flush_pending_project_save()
+        for path in paths:
+            self._set_panel_split_review(path, status, reason=reason)
+        self.project.save_project()
+        self.refresh_file_list()
+
+    def mark_selected_manual_split_done(self):
+        self._set_selected_panel_split_status("manual_done", "user_marked_done")
+
+    def mark_selected_manual_split_needed(self):
+        self._set_selected_panel_split_status("manual_required", "user_marked_manual_required")
+
+    def clear_selected_split_status(self):
+        paths = self._selected_image_paths()
+        if not paths:
+            return
+        self._flush_pending_project_save()
+        for path in paths:
+            self._clear_panel_split_review(path)
+        self.project.save_project()
+        self.refresh_file_list()
 
     def show_file_list_context_menu(self, pos):
         its = self.file_list.selectedItems()
@@ -8659,8 +9241,28 @@ class MainWindow(QMainWindow):
         m = QMenu(self)
         if len(its) == 1:
             m.addAction(tr("Crop this Image", self.current_lang), self.open_cropper)
+        m.addSeparator()
+        m.addAction(tr("Mark Manual Split Done", self.current_lang), self.mark_selected_manual_split_done)
+        m.addAction(tr("Mark Needs Manual Split", self.current_lang), self.mark_selected_manual_split_needed)
+        m.addAction(tr("Clear Split Status", self.current_lang), self.clear_selected_split_status)
+        m.addSeparator()
+        move_menu = m.addMenu(tr("Move to Image Group", self.current_lang))
+        for group_id, label in self._all_image_group_definitions():
+            move_menu.addAction(label, lambda checked=False, gid=group_id: self.move_images_to_group(self._selected_image_paths(), gid))
+        move_menu.addSeparator()
+        move_menu.addAction(tr("New Image Group", self.current_lang), self._move_selected_images_to_new_group)
+        m.addAction(tr("Clear Custom Image Group", self.current_lang), self.clear_selected_custom_image_group)
+        m.addSeparator()
         m.addAction(tr("Remove Image", self.current_lang), self.remove_selected_images)
         m.exec(self.file_list.mapToGlobal(pos))
+
+    def _move_selected_images_to_new_group(self):
+        paths = self._selected_image_paths()
+        if not paths:
+            return
+        group_id = self.create_custom_image_group()
+        if group_id:
+            self.move_images_to_group(paths, group_id)
 
     def remove_selected_images(self):
         its = self.file_list.selectedItems()
@@ -8691,35 +9293,19 @@ class MainWindow(QMainWindow):
         total_count = len(self.project.project_data["images"])
         labeled_count = 0
         
-        original_labeled_imgs = []
-        original_unlabeled_imgs = []
-        manual_split_imgs = []
-        crop_labeled_imgs = []
-        crop_unlabeled_imgs = []
+        image_groups = self._project_image_groups()
 
         for img in self.project.project_data["images"]:
             if not img: continue
             is_labeled = bool(self.project.get_labels(img) or self.project.get_auto_boxes(img))
-            is_split_crop = self._is_split_crop_image(img)
-            needs_manual_split = self._needs_manual_panel_split(img)
             if is_labeled:
                 labeled_count += 1
-            if needs_manual_split:
-                manual_split_imgs.append(img)
-            elif is_split_crop and is_labeled:
-                crop_labeled_imgs.append(img)
-            elif is_split_crop:
-                crop_unlabeled_imgs.append(img)
-            elif is_labeled:
-                original_labeled_imgs.append(img)
-            else:
-                original_unlabeled_imgs.append(img)
 
-        group_definitions = [
-            ("original", tr("Original Images", self.current_lang), original_labeled_imgs + original_unlabeled_imgs, False),
-            ("split", tr("Split Crops", self.current_lang), crop_labeled_imgs + crop_unlabeled_imgs, True),
-            ("manual", tr("Manual Split Needed", self.current_lang), manual_split_imgs, False),
-        ]
+        group_definitions = []
+        for group_key, label in self._builtin_image_group_definitions():
+            group_definitions.append((group_key, label, image_groups.get(group_key, []), group_key == "split"))
+        for group_key, label in self._custom_image_group_definitions():
+            group_definitions.append((group_key, label, image_groups.get(group_key, []), False))
         non_empty_groups = [group for group in group_definitions if group[2]]
         use_group_headers = not (len(non_empty_groups) == 1 and non_empty_groups[0][0] == "original")
 
@@ -8737,12 +9323,13 @@ class MainWindow(QMainWindow):
             self.file_list.addItem(item)
             return collapsed
 
-        def add_image_item(img, is_split_crop=False):
+        def add_image_item(img, is_split_crop=False, group_key=""):
             nonlocal item_to_select, first_image_item
             base_name = os.path.basename(img)
             display_name = f"  {base_name}" if is_split_crop else base_name
             item = QListWidgetItem(display_name)
             item.setData(Qt.UserRole, img) # Store full path for safer lookup
+            item.setData(Qt.UserRole + 2, group_key)
             if is_split_crop:
                 item.setToolTip(tr("Split Crops", self.current_lang))
 
@@ -8769,7 +9356,7 @@ class MainWindow(QMainWindow):
                 if collapsed:
                     continue
             for img in images:
-                add_image_item(img, is_split_crop=is_split_group)
+                add_image_item(img, is_split_crop=is_split_group, group_key=group_key)
         
         self.file_list.blockSignals(False)
         
@@ -9307,7 +9894,7 @@ class MainWindow(QMainWindow):
             self.desc_box.setFocus(Qt.OtherFocusReason)
 
     def on_enhancement_changed(self):
-        self.canvas.set_enhancements(self.slider_bright.value(), self.slider_contrast.value() / 10.0)
+        self.canvas.set_enhancements(0, 1.0)
 
     def on_tool_changed(self):
         if self.radio_magic.isChecked():
@@ -9364,13 +9951,13 @@ class MainWindow(QMainWindow):
         if self._active_box_tool_role() == "shrink":
             if context.get("role") != "child":
                 self._warn_blink_context(
-                    tr("Loose shrink boxes are only used for child structures. Select a child structure first.", self.current_lang)
+                    tr("Blink shrink start boxes are only used for child structures. Select a child structure first.", self.current_lang)
                 )
                 return
             update_loose_box = getattr(self.project, "update_shrink_loose_box", None)
             if callable(update_loose_box):
                 update_loose_box(self.current_image, part, clean_box, save=False)
-            self.log(tr("Saved loose shrink box for {0}.", self.current_lang).format(part))
+            self.log(tr("Saved Blink shrink start box for {0}.", self.current_lang).format(part))
         else:
             existing_points = self.project.get_labels(self.current_image).get(part, [])
             self.project.update_label(
@@ -9384,7 +9971,7 @@ class MainWindow(QMainWindow):
             self.canvas.set_boxes(self.project.get_boxes(self.current_image), self.project.get_auto_boxes(self.current_image))
             if context.get("role") == "child" and context.get("parent_part"):
                 self.project.remember_blink_context_parent(part, context.get("parent_part"), save=False)
-            self.log(tr("Saved annotation box for {0}.", self.current_lang).format(part))
+            self.log(tr("Saved manual ROI box for {0}.", self.current_lang).format(part))
         self._schedule_project_save()
         self._refresh_blink_refine_state()
 
@@ -9460,7 +10047,7 @@ class MainWindow(QMainWindow):
         loose_boxes = self.project.get_shrink_loose_boxes(self.current_image) if hasattr(self.project, "get_shrink_loose_boxes") else {}
         loose_box = _clean_box(loose_boxes.get(child_part) if isinstance(loose_boxes, dict) else None)
         if not loose_box:
-            self._warn_blink_context(tr("Select Loose Shrink Box on the canvas toolbar and draw one around the child first.", self.current_lang))
+            self._warn_blink_context(tr("Select Blink Shrink Start Box on the canvas toolbar and draw one around the child first.", self.current_lang))
             return
         try:
             if "core.blink_refiner" in sys.modules:
@@ -9831,6 +10418,58 @@ class MainWindow(QMainWindow):
             return self.project.get_vlm_preannotation_settings().get("processing_scope", "current_image")
         return "current_image"
 
+    def _current_vlm_batch_scope(self):
+        scope = self._current_vlm_processing_scope()
+        return scope if scope in {"all_images", "image_group"} else "image_group"
+
+    def _current_vlm_image_group(self):
+        if hasattr(self.project, "get_vlm_preannotation_settings"):
+            return self.project.get_vlm_preannotation_settings().get("image_group", "split")
+        return "split"
+
+    def _current_vlm_prompt_profile(self):
+        if hasattr(self.project, "get_vlm_preannotation_settings"):
+            settings = self.project.get_vlm_preannotation_settings()
+            return sanitize_vlm_prompt_profile(settings.get("prompt_profile", {}))
+        return default_vlm_prompt_profile()
+
+    def _vlm_image_group_label(self, group_key):
+        return self._image_group_display_name(group_key)
+
+    def _project_image_groups(self):
+        groups = {group_id: [] for group_id, _label in self._all_image_group_definitions()}
+        original_labeled_imgs = []
+        original_unlabeled_imgs = []
+        split_labeled_imgs = []
+        split_unlabeled_imgs = []
+        for img in self.project.project_data.get("images", []):
+            if not img:
+                continue
+            provenance = self.project.get_image_provenance(img) if hasattr(self.project, "get_image_provenance") else {}
+            manual_group = str(provenance.get("manual_image_group", "") or "").strip() if isinstance(provenance, dict) else ""
+            if manual_group and manual_group in groups:
+                groups[manual_group].append(img)
+                continue
+            is_labeled = bool(self.project.get_labels(img) or self.project.get_auto_boxes(img))
+            is_split_crop = self._is_split_crop_image(img)
+            needs_manual_split = self._needs_manual_panel_split(img)
+            manual_split_done = self._is_manual_panel_split_done(img)
+            if needs_manual_split:
+                groups.setdefault("manual", []).append(img)
+            elif is_split_crop and is_labeled:
+                split_labeled_imgs.append(img)
+            elif is_split_crop:
+                split_unlabeled_imgs.append(img)
+            elif manual_split_done:
+                groups.setdefault("manual_done", []).append(img)
+            elif is_labeled:
+                original_labeled_imgs.append(img)
+            else:
+                original_unlabeled_imgs.append(img)
+        groups["original"] = original_labeled_imgs + original_unlabeled_imgs + groups.get("original", [])
+        groups["split"] = split_labeled_imgs + split_unlabeled_imgs + groups.get("split", [])
+        return groups
+
     def _vlm_candidate_source_meta(self, candidate, result):
         return {
             "source": "vlm_first_mile",
@@ -9842,11 +10481,16 @@ class MainWindow(QMainWindow):
             "report_path": str(result.get("report_path", "") or ""),
         }
 
-    def _vlm_image_paths_from_settings(self):
-        scope = self._current_vlm_processing_scope()
+    def _vlm_image_paths_for_scope(self, scope):
         if scope == "all_images":
             return [path for path in self.project.project_data.get("images", []) if path]
+        if scope == "image_group":
+            groups = self._project_image_groups()
+            return list(groups.get(self._current_vlm_image_group(), []))
         return [self.current_image] if self.current_image else []
+
+    def _vlm_image_paths_from_settings(self):
+        return self._vlm_image_paths_for_scope(self._current_vlm_processing_scope())
 
     def _same_project_image_path(self, left, right):
         if not left or not right:
@@ -9866,8 +10510,58 @@ class MainWindow(QMainWindow):
                 return candidate
         return ""
 
-    def run_vlm_preannotation_from_settings(self):
-        if not self.current_image:
+    def _vlm_part_list_text(self, parts):
+        clean_parts = []
+        for part in parts or []:
+            clean_part = str(part or "").strip()
+            if clean_part and clean_part not in clean_parts:
+                clean_parts.append(clean_part)
+        return ", ".join(clean_parts) if clean_parts else tr("none", self.current_lang)
+
+    def _vlm_part_coverage(self, result):
+        requested = []
+        for part in result.get("target_parts", []) or getattr(self, "vlm_preannotation_target_parts", []) or []:
+            clean_part = str(part or "").strip()
+            if clean_part and clean_part not in requested:
+                requested.append(clean_part)
+
+        returned = []
+        for candidate in result.get("candidates", []) or []:
+            if not isinstance(candidate, dict):
+                continue
+            clean_part = str(candidate.get("part", "") or "").strip()
+            if clean_part and clean_part not in returned:
+                returned.append(clean_part)
+
+        returned_lookup = {part.lower(): part for part in returned}
+        missing = [part for part in requested if part.lower() not in returned_lookup]
+        return requested, returned, missing
+
+    def _log_vlm_part_coverage(self, result):
+        image_path = str(result.get("image_path", "") or "")
+        image_name = os.path.basename(image_path) if image_path else tr("Current Image", self.current_lang)
+        requested, returned, missing = self._vlm_part_coverage(result)
+        self.log(
+            tr(
+                "VLM part coverage for {0}: requested [{1}]; returned [{2}]; missing [{3}].",
+                self.current_lang,
+            ).format(
+                image_name,
+                self._vlm_part_list_text(requested),
+                self._vlm_part_list_text(returned),
+                self._vlm_part_list_text(missing),
+            )
+        )
+
+    def run_vlm_preannotation_current(self):
+        self.run_vlm_preannotation_from_settings(scope_override="current_image")
+
+    def run_vlm_preannotation_batch(self):
+        self.run_vlm_preannotation_from_settings(scope_override=self._current_vlm_batch_scope())
+
+    def run_vlm_preannotation_from_settings(self, scope_override=None):
+        processing_scope = str(scope_override or self._current_vlm_processing_scope() or "current_image")
+        if processing_scope == "current_image" and not self.current_image:
             QMessageBox.warning(self, tr("VLM Pre-Annotate", self.current_lang), tr("Please select an image first.", self.current_lang))
             return
         if self.vlm_preannotation_thread is not None and self.vlm_preannotation_thread.isRunning():
@@ -9885,11 +10579,11 @@ class MainWindow(QMainWindow):
             if box.clickedButton() == open_button:
                 self.open_stl_model_settings(focus_vlm=True)
             return
-        image_paths = self._vlm_image_paths_from_settings()
+        image_paths = self._vlm_image_paths_for_scope(processing_scope)
         if not image_paths:
             QMessageBox.warning(self, tr("VLM Pre-Annotate", self.current_lang), tr("Please select an image first.", self.current_lang))
             return
-        if self._current_vlm_processing_scope() == "all_images":
+        if processing_scope == "all_images":
             if themed_yes_no_question(
                 self,
                 tr("VLM Pre-Annotate", self.current_lang),
@@ -9897,6 +10591,18 @@ class MainWindow(QMainWindow):
                     "Run VLM preannotation on all imported images?\n\nThis will call the multimodal API, may incur provider cost, and will write draft AI boxes and SAM polygons for later review.",
                     self.current_lang,
                 ),
+                confirm_role=BUTTON_ROLE_RUN,
+            ) != QMessageBox.Yes:
+                return
+        elif processing_scope == "image_group":
+            image_group = self._current_vlm_image_group()
+            if themed_yes_no_question(
+                self,
+                tr("VLM Pre-Annotate", self.current_lang),
+                tr(
+                    "Run VLM preannotation on {0} image(s) in {1}?\n\nThis will call the multimodal API, may incur provider cost, and will write draft AI boxes and SAM polygons for later review.",
+                    self.current_lang,
+                ).format(len(image_paths), self._vlm_image_group_label(image_group)),
                 confirm_role=BUTTON_ROLE_RUN,
             ) != QMessageBox.Yes:
                 return
@@ -9923,7 +10629,10 @@ class MainWindow(QMainWindow):
             return
 
         self.vlm_preannotation_api_config = dict(api_config)
-        self.btn_vlm_preannotate.setEnabled(False)
+        for button_name in ("btn_vlm_preannotate_current", "btn_vlm_preannotate_batch", "btn_vlm_preannotate"):
+            button = getattr(self, button_name, None)
+            if button is not None:
+                button.setEnabled(False)
         self.vlm_preannotation_saved_total = 0
         self.vlm_preannotation_run_id = time.strftime("%Y%m%d_%H%M%S")
         self.vlm_preannotation_records = []
@@ -9937,6 +10646,7 @@ class MainWindow(QMainWindow):
         self.vlm_preannotation_target_parts = list(target_parts)
         self.vlm_preannotation_artifacts_dir = self._vlm_preannotation_artifacts_dir()
         self.vlm_preannotation_api_config = dict(api_config)
+        self.vlm_preannotation_prompt_profile = self._current_vlm_prompt_profile()
         self._create_vlm_progress_dialog()
         self._set_vlm_progress_ui(0, "start")
         self._start_next_vlm_preannotation_image()
@@ -9960,9 +10670,10 @@ class MainWindow(QMainWindow):
             getattr(self, "vlm_preannotation_artifacts_dir", self._vlm_preannotation_artifacts_dir()),
             getattr(self, "vlm_preannotation_api_config", {}),
             getattr(self, "vlm_preannotation_run_id", time.strftime("%Y%m%d_%H%M%S")),
-            grid_cols=12,
-            grid_rows=12,
+            grid_cols=None,
+            grid_rows=None,
             min_confidence=0.25,
+            prompt_profile=getattr(self, "vlm_preannotation_prompt_profile", default_vlm_prompt_profile()),
         )
         self.vlm_preannotation_thread.log_signal.connect(self.log)
         self.vlm_preannotation_thread.image_result_signal.connect(self._on_vlm_preannotation_image_result)
@@ -10062,6 +10773,7 @@ class MainWindow(QMainWindow):
     def _on_vlm_preannotation_image_result(self, result):
         image_path = str(result.get("image_path", "") or "")
         if not image_path or result.get("status") == "failed":
+            self._log_vlm_part_coverage(result)
             self.log(tr("VLM first-mile preannotation failed: {0}", self.current_lang).format(result.get("error", "")))
             self._complete_current_vlm_image_steps("failed")
             self.vlm_preannotation_records.append(result)
@@ -10069,6 +10781,7 @@ class MainWindow(QMainWindow):
             return
         candidates = list(result.get("candidates", []) or []) if isinstance(result, dict) else []
         if not candidates:
+            self._log_vlm_part_coverage(result)
             self.log(tr("VLM first-mile preannotation returned no usable boxes.", self.current_lang))
             self._complete_current_vlm_image_steps("no_candidates")
             self.vlm_preannotation_records.append(result)
@@ -10117,6 +10830,7 @@ class MainWindow(QMainWindow):
             self._advance_vlm_progress("sam")
             self._advance_vlm_progress("report")
             self._mark_current_vlm_image_done("done")
+            self._log_vlm_part_coverage(result)
             self.log(
                 tr(
                     "VLM preannotation saved {0} draft(s): {1} SAM polygon(s), {2} box-only draft(s), skipped {3}. Report: {4}",
@@ -10232,6 +10946,9 @@ class MainWindow(QMainWindow):
             "run_id": run_id,
             "artifacts_dir": artifacts_dir,
             "target_parts": list(getattr(self, "vlm_preannotation_target_parts", []) or []),
+            "prompt_profile": sanitize_vlm_prompt_profile(
+                getattr(self, "vlm_preannotation_prompt_profile", default_vlm_prompt_profile())
+            ),
             "image_count": len(records),
             "candidate_count": sum(len(item.get("candidates", []) or []) for item in records),
             "saved_box_count": int(getattr(self, "vlm_preannotation_saved_total", 0) or 0),
@@ -10249,8 +10966,10 @@ class MainWindow(QMainWindow):
             )
         )
         self.vlm_preannotation_run_active = False
-        if hasattr(self, "btn_vlm_preannotate"):
-            self.btn_vlm_preannotate.setEnabled(True)
+        for button_name in ("btn_vlm_preannotate_current", "btn_vlm_preannotate_batch", "btn_vlm_preannotate"):
+            button = getattr(self, button_name, None)
+            if button is not None:
+                button.setEnabled(True)
         progress = getattr(self, "vlm_preannotation_progress_dialog", None)
         if progress is not None:
             label_widget = getattr(self, "vlm_preannotation_progress_label", None)

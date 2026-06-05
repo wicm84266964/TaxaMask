@@ -3,10 +3,12 @@
 import os
 import base64
 import io
+import json
 import sys
 import tempfile
 import sqlite3
 import csv
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -18,6 +20,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 has_pyside6 = False
+
+
+def _same_path(left, right):
+    return os.path.normcase(os.path.abspath(str(left))) == os.path.normcase(os.path.abspath(str(right)))
+
 
 try:
     from PySide6.QtWidgets import QApplication
@@ -211,6 +218,16 @@ class GuiSmokeTests(unittest.TestCase):
         for patcher in reversed(getattr(self, "_runtime_patchers", [])):
             patcher.stop()
         self.temp_dir.cleanup()
+
+    def _wait_until(self, predicate, timeout=2.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            self.app.processEvents()
+            if predicate():
+                return True
+            time.sleep(0.01)
+        self.app.processEvents()
+        return predicate()
 
     def _make_window(self):
         with patch.object(main_module, "ConfigManager", SmokeConfigManager), \
@@ -1015,7 +1032,8 @@ class GuiSmokeTests(unittest.TestCase):
                 "locator_scope": ["Head"],
                 "vlm_preannotation": {
                     "target_parts": ["Mesosoma", "Gaster"],
-                    "processing_scope": "all_images",
+                    "processing_scope": "image_group",
+                    "image_group": "split",
                 },
             },
             lang="en",
@@ -1035,13 +1053,110 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertIsNotNone(vlm_panel)
             self.assertFalse(has_ancestor(vlm_panel, parent_content))
             self.assertTrue(has_ancestor(vlm_panel, inference_content))
-            self.assertEqual(dialog.get_values()["vlm_preannotation"]["processing_scope"], "all_images")
+            self.assertEqual(dialog.get_values()["vlm_preannotation"]["processing_scope"], "image_group")
+            self.assertEqual(dialog.get_values()["vlm_preannotation"]["image_group"], "split")
+            scope_combo = dialog.findChild(main_module.QComboBox, "modelSettingsVlmBatchScopeCombo")
+            self.assertIsNotNone(scope_combo)
+            scope_values = {scope_combo.itemData(index) for index in range(scope_combo.count())}
+            self.assertEqual(scope_values, {"all_images", "image_group"})
+            profile_combo = dialog.findChild(main_module.QComboBox, "modelSettingsVlmPromptProfileCombo")
+            self.assertIsNotNone(profile_combo)
+            self.assertTrue(has_ancestor(profile_combo, inference_content))
             self.assertEqual(
                 dialog.get_values()["vlm_preannotation"]["target_parts"],
                 ["Mesosoma", "Gaster"],
             )
         finally:
             dialog.deleteLater()
+
+    def test_model_settings_vlm_group_combo_accepts_custom_groups(self):
+        dialog = main_module.ModelSettingsDialog(
+            {
+                "epochs": 1,
+                "batch": 1,
+                "lr": 1e-4,
+                "wd": 1e-4,
+                "conf": 0.1,
+                "adapt": 0.4,
+                "pad": 0.4,
+                "noise_floor": 0.15,
+                "poly_epsilon": 2.0,
+                "runtime_device": "cpu",
+                "taxonomy": ["Head"],
+                "locator_scope": ["Head"],
+                "vlm_preannotation": {
+                    "target_parts": ["Head"],
+                    "processing_scope": "image_group",
+                    "image_group": "review_ready",
+                },
+                "vlm_image_group_definitions": [
+                    ("review_ready", "Review Ready"),
+                ],
+            },
+            lang="en",
+        )
+        try:
+            combo = dialog.findChild(main_module.QComboBox, "modelSettingsVlmImageGroupCombo")
+            self.assertIsNotNone(combo)
+            self.assertGreaterEqual(combo.findData("review_ready"), 0)
+            self.assertEqual(combo.currentData(), "review_ready")
+            values = dialog.get_values()
+            self.assertEqual(values["vlm_preannotation"]["image_group"], "review_ready")
+        finally:
+            dialog.deleteLater()
+
+    def test_model_settings_vlm_custom_prompt_profile_round_trips(self):
+        dialog = main_module.ModelSettingsDialog(
+            {
+                "epochs": 1,
+                "batch": 1,
+                "lr": 1e-4,
+                "wd": 1e-4,
+                "conf": 0.1,
+                "adapt": 0.4,
+                "pad": 0.4,
+                "noise_floor": 0.15,
+                "poly_epsilon": 2.0,
+                "runtime_device": "cpu",
+                "taxonomy": ["Head", "Thorax", "Abdomen"],
+                "locator_scope": ["Head"],
+                "vlm_preannotation": {
+                    "target_parts": ["Head", "Thorax"],
+                    "processing_scope": "image_group",
+                    "image_group": "split",
+                    "prompt_profile_id": "project_custom",
+                    "prompt_profile": {
+                        "profile_id": "project_custom",
+                        "display_name": "Dragonfly prompt",
+                        "taxon_context": "蜻蜓图像",
+                        "body_focus_rules": "不要把翅纳入胸部主体框。",
+                        "part_anchor_rules": "Thorax 位于头和腹之间。",
+                        "extra_instructions": "先看节段连接。",
+                    },
+                },
+            },
+            lang="zh",
+        )
+        try:
+            values = dialog.get_values()["vlm_preannotation"]
+            self.assertEqual(values["prompt_profile_id"], "project_custom")
+            self.assertEqual(values["prompt_profile"]["display_name"], "Dragonfly prompt")
+            self.assertIn("蜻蜓", values["prompt_profile"]["taxon_context"])
+            self.assertIn("不要把翅", values["prompt_profile"]["body_focus_rules"])
+        finally:
+            dialog.deleteLater()
+
+    def test_vlm_workbench_buttons_use_action_specific_labels(self):
+        window = self._make_window()
+        try:
+            window.change_language("zh")
+            self.assertEqual(window.btn_vlm_preannotate_current.text(), "VLM预标注")
+            self.assertEqual(window.btn_vlm_preannotate_batch.text(), "VLM批量预标")
+            window.change_language("en")
+            self.assertEqual(window.btn_vlm_preannotate_current.text(), "VLM Pre-Label")
+            self.assertEqual(window.btn_vlm_preannotate_batch.text(), "VLM Batch Pre-Label")
+        finally:
+            window.deleteLater()
 
     def test_general_settings_are_not_2d_stl_model_settings(self):
         dialog = main_module.GeneralSettingsDialog(
@@ -1421,6 +1536,93 @@ class GuiSmokeTests(unittest.TestCase):
         finally:
             window.deleteLater()
 
+    def test_vlm_result_logs_requested_returned_and_missing_parts(self):
+        window = self._make_window()
+        try:
+            project_dir = self.project_dir / "coverage_log_project"
+            project_dir.mkdir(parents=True, exist_ok=True)
+            image_path = project_dir / "specimen.png"
+            Image.new("RGB", (120, 80), color=(140, 150, 160)).save(image_path)
+            window.project.create_project("review", str(project_dir), template_id=PROJECT_TEMPLATE_GENERIC)
+            window.project.add_images([str(image_path)])
+            image_key = window.project.project_data["images"][0]
+            window.current_image = image_key
+            window.canvas.load_image(str(image_path))
+            window.vlm_preannotation_total_images = 1
+            window.vlm_preannotation_completed_images = 0
+            window.vlm_preannotation_total_steps = 6
+            window.vlm_preannotation_completed_steps = 3
+            window.vlm_preannotation_current_image_steps_completed = 3
+            window.vlm_preannotation_current_image = str(image_path)
+            window.vlm_preannotation_target_parts = ["Head", "Eye", "Mandible"]
+            window.vlm_preannotation_records = []
+            window.vlm_preannotation_saved_total = 0
+            log_lines = []
+            window.log = lambda message: log_lines.append(str(message))
+
+            window.engine.predict_base_sam_polygon = lambda *_args, **_kwargs: None
+            window._on_vlm_preannotation_image_result(
+                {
+                    "status": "passed",
+                    "image_path": str(image_path),
+                    "target_parts": ["Head", "Eye", "Mandible"],
+                    "candidates": [
+                        {
+                            "part": "Head",
+                            "box_xyxy": [10.0, 12.0, 50.0, 44.0],
+                            "confidence": 0.8,
+                            "reason": "visible head",
+                        }
+                    ],
+                    "report_path": str(project_dir / "vlm_report.json"),
+                }
+            )
+
+            coverage_lines = [line for line in log_lines if "VLM part coverage" in line]
+            self.assertEqual(len(coverage_lines), 1)
+            self.assertIn("requested [Head, Eye, Mandible]", coverage_lines[0])
+            self.assertIn("returned [Head]", coverage_lines[0])
+            self.assertIn("missing [Eye, Mandible]", coverage_lines[0])
+        finally:
+            window.deleteLater()
+
+    def test_vlm_no_candidate_result_logs_all_requested_parts_missing(self):
+        window = self._make_window()
+        try:
+            image_path = self.project_dir / "specimen.png"
+            Image.new("RGB", (120, 80), color=(140, 150, 160)).save(image_path)
+            window.project.add_images([str(image_path)])
+            window.current_image = str(image_path)
+            window.vlm_preannotation_total_images = 1
+            window.vlm_preannotation_completed_images = 0
+            window.vlm_preannotation_total_steps = 6
+            window.vlm_preannotation_completed_steps = 3
+            window.vlm_preannotation_current_image_steps_completed = 3
+            window.vlm_preannotation_current_image = str(image_path)
+            window.vlm_preannotation_target_parts = ["Head", "Eye"]
+            window.vlm_preannotation_records = []
+            window.vlm_preannotation_saved_total = 0
+            log_lines = []
+            window.log = lambda message: log_lines.append(str(message))
+
+            window._on_vlm_preannotation_image_result(
+                {
+                    "status": "passed",
+                    "image_path": str(image_path),
+                    "target_parts": ["Head", "Eye"],
+                    "candidates": [],
+                    "report_path": str(self.project_dir / "vlm_report.json"),
+                }
+            )
+
+            coverage_lines = [line for line in log_lines if "VLM part coverage" in line]
+            self.assertEqual(len(coverage_lines), 1)
+            self.assertIn("requested [Head, Eye]", coverage_lines[0])
+            self.assertIn("returned [none]", coverage_lines[0])
+            self.assertIn("missing [Head, Eye]", coverage_lines[0])
+        finally:
+            window.deleteLater()
+
     def test_vlm_result_repaints_canvas_while_progress_dialog_is_open(self):
         window = self._make_window()
         try:
@@ -1490,6 +1692,49 @@ class GuiSmokeTests(unittest.TestCase):
                 window.vlm_preannotation_progress_dialog.close()
                 window.vlm_preannotation_progress_dialog.deleteLater()
                 window.vlm_preannotation_progress_dialog = None
+            window.deleteLater()
+
+    def test_vlm_preannotation_scope_can_target_split_crop_group(self):
+        window = self._make_window()
+        try:
+            original_image = self.project_dir / "plate.png"
+            crop_image = self.project_dir / "plate__crop_001.jpg"
+            manual_image = self.project_dir / "manual_plate.png"
+            for path in [original_image, crop_image, manual_image]:
+                Image.new("RGB", (32, 32), "white").save(path)
+            window.project.add_images([str(original_image), str(crop_image), str(manual_image)])
+            window.project.set_image_provenance(
+                str(crop_image),
+                {
+                    "source_type": "image_crop",
+                    "derived_from": {"image_path": str(original_image), "crop_index": 1},
+                },
+                save=False,
+            )
+            window._set_panel_split_review(str(manual_image), "manual_required", reason="hard_seam_panel_split")
+            window.project.set_vlm_preannotation_settings(
+                {
+                    "target_parts": ["Head"],
+                    "processing_scope": "image_group",
+                    "image_group": "split",
+                },
+                save=False,
+            )
+            window.current_image = str(original_image)
+
+            batch_paths = window._vlm_image_paths_for_scope(window._current_vlm_batch_scope())
+            self.assertEqual(len(batch_paths), 1)
+            self.assertTrue(_same_path(batch_paths[0], crop_image))
+            current_paths = window._vlm_image_paths_for_scope("current_image")
+            self.assertEqual(len(current_paths), 1)
+            self.assertTrue(_same_path(current_paths[0], original_image))
+            self.assertEqual(window.btn_vlm_preannotate_current.objectName(), "workbenchVlmPreannotateCurrentButton")
+            self.assertEqual(window.btn_vlm_preannotate_batch.objectName(), "workbenchVlmPreannotateBatchButton")
+            groups = window._project_image_groups()
+            self.assertEqual([Path(path).name for path in groups["original"]], [original_image.name])
+            self.assertEqual([Path(path).name for path in groups["split"]], [crop_image.name])
+            self.assertEqual([Path(path).name for path in groups["manual"]], [manual_image.name])
+        finally:
             window.deleteLater()
 
     def test_vlm_result_reloads_workbench_after_file_list_refresh_blocks_selection_signal(self):
@@ -1608,6 +1853,62 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(mode, "polygon")
             self.assertEqual(window.project.get_auto_boxes(image_key)["Head"], [10.0, 12.0, 50.0, 44.0])
             self.assertEqual(len(window.project.get_labels(image_key)["Head"]), 4)
+        finally:
+            window.deleteLater()
+
+    def test_vlm_grid_box_is_mapped_before_sam_prompt(self):
+        from AntSleap.core.vlm_preannotation import parse_vlm_response
+
+        window = self._make_window()
+        try:
+            image_path = self.project_dir / "large_specimen.png"
+            Image.new("RGB", (1200, 800), color=(140, 150, 160)).save(image_path)
+            window.project.add_images([str(image_path)])
+            image_key = window.project.project_data["images"][0]
+            raw_response = json.dumps(
+                {
+                    "detections": [
+                        {
+                            "part": "Head",
+                            "bbox_grid_xyxy": [1, 2, 4, 5],
+                            "confidence": 0.82,
+                        }
+                    ]
+                }
+            )
+            candidates, _rejected, _parsed = parse_vlm_response(
+                raw_response,
+                ["Head"],
+                image_size=(1200, 800),
+                overlay_size=(600, 400),
+                grid_cols=8,
+                grid_rows=8,
+                min_confidence=0.25,
+                default_coordinate_space="grid",
+            )
+            captured_boxes = []
+
+            def fake_sam(_image_rgb, prompt_box, **_kwargs):
+                captured_boxes.append(list(prompt_box))
+                return [[150, 200], [600, 200], [600, 500], [150, 500]]
+
+            window.engine.predict_base_sam_polygon = fake_sam
+            ok, mode = window._apply_vlm_candidate(
+                image_key,
+                None,
+                candidates[0],
+                {"report_path": str(self.project_dir / "vlm_report.json")},
+            )
+
+            self.assertTrue(ok)
+            self.assertEqual(mode, "polygon")
+            self.assertEqual(captured_boxes, [[150.0, 200.0, 600.0, 500.0]])
+            self.assertEqual(window.project.get_auto_boxes(image_key)["Head"], [150.0, 200.0, 600.0, 500.0])
+            mapping = candidates[0]["coordinate_mapping"]
+            self.assertEqual(mapping["source_box"], [1.0, 2.0, 4.0, 5.0])
+            self.assertEqual(mapping["coordinate_space"], "grid")
+            self.assertEqual(mapping["grid_cols"], 8)
+            self.assertEqual(mapping["grid_rows"], 8)
         finally:
             window.deleteLater()
 
@@ -1793,6 +2094,130 @@ class GuiSmokeTests(unittest.TestCase):
         finally:
             window.deleteLater()
 
+    def test_pdf_database_viewer_paginates_figure_records(self):
+        db_path = self.project_dir / "paged_figures.db"
+        conn = sqlite3.connect(db_path)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                CREATE TABLE figure_records (
+                    id INTEGER PRIMARY KEY,
+                    image_file_name TEXT,
+                    image_file_path TEXT,
+                    final_confidence REAL,
+                    accepted INTEGER,
+                    page_number INTEGER,
+                    species_candidate TEXT
+                )
+                """
+            )
+            for idx in range(1, 8):
+                (self.project_dir / f"fig_{idx}.png").write_bytes(f"image-{idx}".encode("utf-8"))
+                cur.execute(
+                    """
+                    INSERT INTO figure_records
+                        (id, image_file_name, image_file_path, final_confidence, accepted, page_number, species_candidate)
+                    VALUES (?, ?, ?, 0.9, 1, ?, ?)
+                    """,
+                    (idx, f"fig_{idx}.png", str(self.project_dir / f"fig_{idx}.png"), idx, f"Species {idx}"),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        dialog = pdf_widget_module.DatabaseViewerDialog(str(db_path), lang="en")
+        try:
+            dialog.page_size_edit.setText("3")
+            dialog.apply_page_controls()
+            self.assertEqual(dialog.total_rows, 7)
+            self.assertEqual(dialog.total_pages, 3)
+            self.assertEqual(dialog.table.rowCount(), 3)
+            self.assertEqual(dialog.table.item(0, 0).text(), "7")
+            self.assertIn("Showing 1-3 of 7 | Page 1/3", dialog.page_status.text())
+
+            dialog.goto_page(2)
+            self.assertEqual(dialog.table.item(0, 0).text(), "4")
+            self.assertIn("Showing 4-6 of 7 | Page 2/3", dialog.page_status.text())
+
+            dialog.goto_page(3)
+            self.assertEqual(dialog.table.rowCount(), 1)
+            self.assertEqual(dialog.table.item(0, 0).text(), "1")
+            self.assertFalse(dialog.btn_next.isEnabled())
+            self.assertTrue(dialog.btn_prev.isEnabled())
+
+            dialog.search_edit.setText("Species 6")
+            dialog.apply_filters()
+            self.assertEqual(dialog.total_rows, 1)
+            self.assertEqual(dialog.table.item(0, 0).text(), "6")
+
+            dialog.table.selectRow(0)
+            dialog.human_status_buttons["human_rejected"].setChecked(True)
+            dialog.review_note_edit.setText("good dorsal plate")
+            dialog.save_current_review()
+
+            def saved_review_row():
+                conn = sqlite3.connect(db_path)
+                try:
+                    return conn.execute(
+                        "SELECT human_status, review_note FROM figure_human_reviews WHERE source_table='figure_records' AND record_id=6"
+                    ).fetchone()
+                finally:
+                    conn.close()
+
+            self.assertTrue(self._wait_until(lambda: saved_review_row() == ("human_rejected", "good dorsal plate")))
+            row = saved_review_row()
+            self.assertEqual(row, ("human_rejected", "good dorsal plate"))
+
+            dialog.search_edit.clear()
+            dialog.apply_filters()
+            with patch.object(pdf_widget_module, "themed_yes_no_question", return_value=pdf_widget_module.QMessageBox.Yes), \
+                 patch.object(pdf_widget_module.QMessageBox, "information"):
+                dialog.mark_filtered_import_ready()
+            conn = sqlite3.connect(db_path)
+            try:
+                statuses = dict(
+                    conn.execute(
+                        "SELECT record_id, human_status FROM figure_human_reviews WHERE source_table='figure_records'"
+                    ).fetchall()
+                )
+                rejected_note = conn.execute(
+                    "SELECT review_note FROM figure_human_reviews WHERE source_table='figure_records' AND record_id=6"
+                ).fetchone()[0]
+            finally:
+                conn.close()
+            self.assertEqual(statuses[6], "human_rejected")
+            self.assertEqual(rejected_note, "good dorsal plate")
+            self.assertEqual(
+                {record_id: status for record_id, status in statuses.items() if record_id != 6},
+                {1: "import_ready", 2: "import_ready", 3: "import_ready", 4: "import_ready", 5: "import_ready", 7: "import_ready"},
+            )
+
+            dialog.search_edit.setText("Species 6")
+            with patch.object(pdf_widget_module, "themed_yes_no_question", return_value=pdf_widget_module.QMessageBox.No):
+                dialog.clear_filters()
+            self.assertEqual(dialog.search_edit.text(), "Species 6")
+            with patch.object(pdf_widget_module, "themed_yes_no_question", return_value=pdf_widget_module.QMessageBox.Yes):
+                dialog.clear_filters()
+            self.assertEqual(dialog.search_edit.text(), "")
+
+            dialog.search_edit.setText("Species 6")
+            dialog.apply_filters()
+            export_path = self.project_dir / "filtered.csv"
+            with patch.object(pdf_widget_module.QFileDialog, "getSaveFileName", return_value=(str(export_path), "CSV (*.csv)")), \
+                 patch.object(pdf_widget_module.QMessageBox, "information"):
+                dialog.export_filtered_csv()
+            self.assertIn("Species 6", export_path.read_text(encoding="utf-8-sig"))
+
+            copy_dir = self.project_dir / "copied"
+            copy_dir.mkdir()
+            with patch.object(pdf_widget_module.QFileDialog, "getExistingDirectory", return_value=str(copy_dir)), \
+                 patch.object(pdf_widget_module.QMessageBox, "information"):
+                dialog.copy_filtered_images()
+            self.assertTrue((copy_dir / "fig_6.png").exists())
+        finally:
+            dialog.deleteLater()
+
     def test_pdf_candidate_crop_inherits_parent_provenance(self):
         window = self._make_window()
         try:
@@ -1860,9 +2285,197 @@ class GuiSmokeTests(unittest.TestCase):
 
             crop_provenance = window.project.get_image_provenance(str(crop_image))
             self.assertEqual(crop_provenance["source_type"], "image_crop")
-            self.assertEqual(crop_provenance["derived_from"]["image_path"], str(parent_image.resolve()))
+            self.assertTrue(_same_path(crop_provenance["derived_from"]["image_path"], parent_image))
             self.assertEqual(crop_provenance["derived_from"]["crop_source"], "white_separator_panel_split")
             self.assertTrue(window._is_split_crop_image(str(crop_image)))
+        finally:
+            window.deleteLater()
+
+    def test_crop_from_manual_required_parent_leaves_manual_queue(self):
+        window = self._make_window()
+        try:
+            parent_image = self.project_dir / "manual_plate.png"
+            crop_image = self.project_dir / "manual_plate__crop_001.jpg"
+            parent_image.write_bytes(b"parent")
+            crop_image.write_bytes(b"crop")
+            window.project.add_images([str(parent_image), str(crop_image)])
+            window._set_panel_split_review(str(parent_image), "manual_required", reason="hard_seam_panel_split")
+
+            window._inherit_crop_provenance(
+                [
+                    {
+                        "path": str(crop_image),
+                        "source_image": str(parent_image),
+                        "crop_index": 1,
+                        "crop_box": [0, 0, 50, 50],
+                        "source_size": [100, 100],
+                        "crop_source": "hard_seam_panel_split",
+                    }
+                ]
+            )
+
+            parent_review = window.project.get_image_provenance(str(parent_image))["panel_split_review"]
+            crop_provenance = window.project.get_image_provenance(str(crop_image))
+            self.assertEqual(parent_review["status"], "manual_done")
+            self.assertNotIn("panel_split_review", crop_provenance)
+            self.assertFalse(window._needs_manual_panel_split(str(parent_image)))
+            self.assertFalse(window._needs_manual_panel_split(str(crop_image)))
+
+            window.refresh_file_list()
+            list_texts = [window.file_list.item(index).text().strip() for index in range(window.file_list.count())]
+            self.assertFalse(any("Manual Split Needed" in text for text in list_texts))
+            self.assertTrue(any("Split Crops" in text for text in list_texts))
+        finally:
+            window.deleteLater()
+
+    def test_existing_crop_from_manual_required_parent_is_not_manual_queue(self):
+        window = self._make_window()
+        try:
+            parent_image = self.project_dir / "legacy_manual_plate.png"
+            crop_image = self.project_dir / "legacy_manual_plate__crop_001.jpg"
+            parent_image.write_bytes(b"parent")
+            crop_image.write_bytes(b"crop")
+            window.project.add_images([str(parent_image), str(crop_image)])
+            window.project.set_image_provenance(
+                str(crop_image),
+                {
+                    "source_type": "image_crop",
+                    "derived_from": {"image_path": str(parent_image), "crop_index": 1},
+                },
+                save=False,
+            )
+            window._set_panel_split_review(str(parent_image), "manual_required", reason="hard_seam_panel_split")
+
+            self.assertTrue(window._has_split_crops_from_image(str(parent_image)))
+            self.assertFalse(window._needs_manual_panel_split(str(parent_image)))
+            self.assertFalse(window._needs_manual_panel_split(str(crop_image)))
+
+            window.refresh_file_list()
+            list_texts = [window.file_list.item(index).text().strip() for index in range(window.file_list.count())]
+            self.assertFalse(any("Manual Split Needed" in text for text in list_texts))
+            self.assertTrue(any("Split Crops" in text for text in list_texts))
+            self.assertIn(crop_image.name, list_texts)
+        finally:
+            window.deleteLater()
+
+    def test_user_can_adjust_panel_split_status_from_image_list(self):
+        window = self._make_window()
+        try:
+            image_path = self.project_dir / "status_plate.png"
+            image_path.write_bytes(b"image")
+            window.project.add_images([str(image_path)])
+            window.refresh_file_list()
+            for index in range(window.file_list.count()):
+                item = window.file_list.item(index)
+                if _same_path(item.data(256), image_path):
+                    window.file_list.setCurrentItem(item)
+                    break
+
+            window.mark_selected_manual_split_needed()
+            self.assertTrue(window._needs_manual_panel_split(str(image_path)))
+            window.refresh_file_list()
+            list_texts = [window.file_list.item(index).text().strip() for index in range(window.file_list.count())]
+            self.assertTrue(any("Manual Split Needed" in text for text in list_texts))
+
+            window.mark_selected_manual_split_done()
+            self.assertFalse(window._needs_manual_panel_split(str(image_path)))
+            self.assertEqual(
+                window.project.get_image_provenance(str(image_path))["panel_split_review"]["status"],
+                "manual_done",
+            )
+            window.refresh_file_list()
+            list_texts = [window.file_list.item(index).text().strip() for index in range(window.file_list.count())]
+            self.assertFalse(any("Manual Split Needed" in text for text in list_texts))
+            self.assertTrue(any("Manual Split Done" in text for text in list_texts))
+
+            window.clear_selected_split_status()
+            self.assertNotIn("panel_split_review", window.project.get_image_provenance(str(image_path)))
+        finally:
+            window.deleteLater()
+
+    def test_multi_selected_manual_split_done_moves_to_done_group(self):
+        window = self._make_window()
+        try:
+            image_a = self.project_dir / "manual_a.png"
+            image_b = self.project_dir / "manual_b.png"
+            image_a.write_bytes(b"a")
+            image_b.write_bytes(b"b")
+            window.project.add_images([str(image_a), str(image_b)])
+            window._set_panel_split_review(str(image_a), "manual_required", reason="hard_seam_panel_split")
+            window._set_panel_split_review(str(image_b), "manual_required", reason="hard_seam_panel_split")
+            window.refresh_file_list()
+
+            for index in range(window.file_list.count()):
+                item = window.file_list.item(index)
+                if _same_path(item.data(256), image_a) or _same_path(item.data(256), image_b):
+                    item.setSelected(True)
+
+            window.mark_selected_manual_split_done()
+
+            groups = window._project_image_groups()
+            self.assertEqual(
+                {Path(path).name for path in groups["manual_done"]},
+                {image_a.name, image_b.name},
+            )
+            self.assertEqual(groups["manual"], [])
+            list_texts = [window.file_list.item(index).text().strip() for index in range(window.file_list.count())]
+            self.assertTrue(any("Manual Split Done" in text for text in list_texts))
+            self.assertFalse(any("Manual Split Needed" in text for text in list_texts))
+        finally:
+            window.deleteLater()
+
+    def test_manual_done_images_can_be_moved_into_split_group(self):
+        window = self._make_window()
+        try:
+            image_path = self.project_dir / "manual_done_plate.png"
+            image_path.write_bytes(b"image")
+            window.project.add_images([str(image_path)])
+            window._set_panel_split_review(str(image_path), "manual_done", reason="user_marked_done")
+
+            self.assertEqual([Path(path).name for path in window._project_image_groups()["manual_done"]], [image_path.name])
+
+            window.move_images_to_group([str(image_path)], "split")
+            groups = window._project_image_groups()
+            self.assertEqual([Path(path).name for path in groups["split"]], [image_path.name])
+            self.assertEqual(groups["manual_done"], [])
+            self.assertEqual(
+                window.project.get_image_provenance(str(image_path))["manual_image_group"],
+                "split",
+            )
+        finally:
+            window.deleteLater()
+
+    def test_custom_image_group_can_collect_images_and_feed_vlm_scope(self):
+        window = self._make_window()
+        try:
+            image_a = self.project_dir / "review_a.png"
+            image_b = self.project_dir / "review_b.png"
+            image_a.write_bytes(b"a")
+            image_b.write_bytes(b"b")
+            window.project.add_images([str(image_a), str(image_b)])
+            window.project.project_data["image_groups"] = {
+                "custom_groups": [{"id": "review_ready", "name": "Review Ready"}]
+            }
+
+            window.move_images_to_group([str(image_b)], "review_ready")
+
+            groups = window._project_image_groups()
+            self.assertEqual([Path(path).name for path in groups["review_ready"]], [image_b.name])
+            self.assertEqual([Path(path).name for path in groups["original"]], [image_a.name])
+            self.assertEqual(window._vlm_image_group_label("review_ready"), "Review Ready")
+
+            window.project.set_vlm_preannotation_settings(
+                {
+                    "target_parts": ["Head"],
+                    "processing_scope": "image_group",
+                    "image_group": "review_ready",
+                },
+                save=False,
+            )
+            self.assertEqual(window._current_vlm_image_group(), "review_ready")
+            paths = window._vlm_image_paths_for_scope("image_group")
+            self.assertEqual(len(paths), 1)
+            self.assertTrue(_same_path(paths[0], image_b))
         finally:
             window.deleteLater()
 
@@ -1928,15 +2541,18 @@ class GuiSmokeTests(unittest.TestCase):
                     window.batch_split_panel_images()
 
             images = list(window.project.project_data["images"])
-            self.assertEqual(images[0], str(parent_image.resolve()))
-            self.assertEqual(images[1], str(hard_seam_image.resolve()))
-            self.assertEqual(images[2], str(existing_crop.resolve()))
-            self.assertEqual(len(images), 4)
-            generated = images[3]
-            self.assertTrue(Path(generated).name.startswith("paper__accepted_000008__figure__panel_"))
-            provenance = window.project.get_image_provenance(generated)
-            self.assertEqual(provenance["source_type"], "pdf_candidate_crop")
-            self.assertEqual(provenance["derived_from"]["crop_source"], "white_separator_panel_split")
+            self.assertTrue(_same_path(images[0], parent_image))
+            self.assertTrue(_same_path(images[1], hard_seam_image))
+            self.assertTrue(_same_path(images[2], existing_crop))
+            generated_paths = images[3:]
+            self.assertGreaterEqual(len(generated_paths), 1)
+            for generated in generated_paths:
+                self.assertTrue(Path(generated).name.startswith("paper__accepted_000008__figure__panel_"))
+                provenance = window.project.get_image_provenance(generated)
+                self.assertEqual(provenance["source_type"], "pdf_candidate_crop")
+                self.assertEqual(provenance["derived_from"]["crop_source"], "white_separator_panel_split")
+                self.assertTrue(window._is_split_crop_image(generated))
+                self.assertFalse(window._needs_manual_panel_split(generated))
             hard_review = window.project.get_image_provenance(str(hard_seam_image))["panel_split_review"]
             self.assertEqual(hard_review["status"], "manual_required")
             self.assertEqual(hard_review["reason"], "hard_seam_panel_split")
@@ -1946,7 +2562,9 @@ class GuiSmokeTests(unittest.TestCase):
             split_index = next(index for index, text in enumerate(list_texts) if "Split Crops" in text)
             manual_index = next(index for index, text in enumerate(list_texts) if "Manual Split Needed" in text)
             self.assertLess(original_index, split_index)
-            self.assertLess(list_texts.index(parent_image.name), list_texts.index(Path(generated).name))
+            for generated in generated_paths:
+                self.assertLess(list_texts.index(parent_image.name), list_texts.index(Path(generated).name))
+                self.assertLess(list_texts.index(Path(generated).name), manual_index)
             self.assertLess(split_index, manual_index)
             self.assertGreater(list_texts.index(hard_seam_image.name), manual_index)
 

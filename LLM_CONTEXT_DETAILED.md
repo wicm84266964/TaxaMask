@@ -1,12 +1,50 @@
 # TAXAMASK / FORMICA-FLOW SYSTEM TECHNICAL MANUAL (Deep Dive)
 
 > **Target Audience**: Expert LLM Assistants, Senior Developers
-> **Version**: v3.33 (June 6, 2026, Blink strategy comparison + shared training result browser)
+> **Version**: v3.34 / TaxaMask v3.0 official milestone (June 6, 2026, full workflow validation + dataset export progress)
 > **Purpose**: Up-to-date architectural, workflow, and governance context for implementation and maintenance.
 
 ---
 
-## 0) v3.33 Blink Strategy Comparison + Shared Training Result Browser (2026-06-06)
+## 0) v3.34 / TaxaMask v3.0 Official Milestone (2026-06-06)
+
+### 0.0 Current milestone status
+- User completed an end-to-end field test pass across the major current workflows:
+  - PDF evidence processing and candidate review
+  - 2D/STL labeling workbench
+  - VLM adaptive light-grid preannotation
+  - parent-part and child-part/Blink training controls
+  - TIF/STL critical viewing and handoff paths
+  - 2D/STL dataset export
+- The current stable research milestone is named **TaxaMask v3.0 official research workflow release**.
+- This v3.0 label refers to the public TaxaMask workflow milestone. Older AntSleap/Formica-Flow `v3.x` entries in the historical changelog are preserved as internal development history and should not be retroactively rewritten.
+- Most validated route for daily research remains ant 2D/STL morphology plus PDF evidence. TIF volume support remains experimental but usable for small validation passes.
+
+### 0.1 Dataset export current behavior
+- `MainWindow.export_dataset()` now delegates to `DatasetExportThread` instead of running export synchronously on the UI thread.
+- `DatasetExportThread` supports the existing 2D/STL export formats:
+  - `multimodal`: `ProjectManager.export_multimodal_dataset(...)`
+  - `coco`: `ProjectManager.export_coco(...)`
+  - `yolo`: `ProjectManager.export_yolo(...)`
+- `ProjectManager` export functions accept optional `progress_callback(done, total, label)`.
+- The GUI shows an `Export Progress` dialog while exporting and updates the label with the current image or final output file.
+- On success:
+  - writes `model_profile_summary.json` when available
+  - opens the output folder via `open_path(folder)`
+  - shows exported sample count and output path
+- Duplicate export clicks are blocked while an export thread is running.
+- The progress dialog intentionally has no cancel button in this pass. Partial-output cleanup semantics are not yet defined, so pretending cancellation is safe would be misleading for research data handoff.
+
+### 0.2 Validation note
+- Targeted validation used for the dataset export closeout:
+  - `C:\Users\admin\anaconda3\envs\antsleap\python.exe -m py_compile AntSleap\main.py AntSleap\core\project.py`
+  - small temporary project exported all three formats: COCO, YOLO, and Multimodal JSONL
+  - `git diff --check`
+- `pytest` was not available in the current `antsleap` environment during this last closeout. The default/base Python had `pytest` but lacked PySide6/PIL parity, so this pass used compile plus real export smoke validation instead.
+
+---
+
+## 0A) v3.33 Blink Strategy Comparison + Shared Training Result Browser (2026-06-06)
 
 ### 0.0 Current milestone status
 - The June 6 pass closes the immediate child-part training workflow cleanup after user testing:

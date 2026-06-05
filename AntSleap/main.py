@@ -365,6 +365,39 @@ class VlmPreannotationThread(QThread):
         finally:
             self.finished_signal.emit()
 
+
+class DatasetExportThread(QThread):
+    progress_signal = Signal(int, int, str)
+    success_signal = Signal(int, str, str)
+    error_signal = Signal(str)
+    finished_signal = Signal()
+
+    def __init__(self, project, output_dir, export_format, lang="en"):
+        super().__init__()
+        self.project = project
+        self.output_dir = output_dir
+        self.export_format = export_format
+        self.lang = lang
+
+    def run(self):
+        def progress(done, total, label):
+            self.progress_signal.emit(int(done), int(total), str(label or ""))
+
+        try:
+            if self.export_format == "multimodal":
+                count = self.project.export_multimodal_dataset(self.output_dir, progress_callback=progress)
+            elif self.export_format == "coco":
+                count = self.project.export_coco(self.output_dir, progress_callback=progress)
+            else:
+                count = self.project.export_yolo(self.output_dir, progress_callback=progress)
+            if hasattr(self.project, "write_model_profile_export_summary"):
+                self.project.write_model_profile_export_summary(self.output_dir, export_format=self.export_format)
+            self.success_signal.emit(int(count), self.output_dir, self.export_format)
+        except Exception as exc:
+            self.error_signal.emit(str(exc))
+        finally:
+            self.finished_signal.emit()
+
 # --- Localization ---
 TRANSLATIONS = {
     "zh": {
@@ -775,6 +808,13 @@ TRANSLATIONS = {
         "Close": "关闭",
         "Save": "保存",
         "Export": "导出",
+        "Export Progress": "导出进度",
+        "Preparing dataset export...": "正在准备导出数据集...",
+        "Exporting dataset...": "正在导出数据集...",
+        "Exporting dataset: {0}": "正在导出数据集：{0}",
+        "Dataset export is already running.": "数据集正在导出中。",
+        "Dataset export failed: {0}": "数据集导出失败：{0}",
+        "Exported {0} samples.\n\nOutput folder: {1}": "已导出 {0} 个样本。\n\n输出文件夹：{1}",
         "Browse": "浏览",
         "Select Directory": "选择目录",
         "Export Format:": "导出格式:",
@@ -12545,15 +12585,85 @@ class MainWindow(QMainWindow):
         if dlg.exec():
             self._flush_pending_project_save()
             p, f = dlg.get_path(), dlg.get_format()
-            if f == "multimodal":
-                c = self.project.export_multimodal_dataset(p)
-            elif f == "coco":
-                c = self.project.export_coco(p)
-            else:
-                c = self.project.export_yolo(p)
-            if hasattr(self.project, "write_model_profile_export_summary"):
-                self.project.write_model_profile_export_summary(p, export_format=f)
-            QMessageBox.information(self, tr("Export", self.current_lang), tr("Exported {0} samples.", self.current_lang).format(c))
+            if not p:
+                return
+            self._start_dataset_export(p, f)
+
+    def _start_dataset_export(self, output_dir, export_format):
+        if getattr(self, "dataset_export_thread", None) is not None and self.dataset_export_thread.isRunning():
+            QMessageBox.information(
+                self,
+                tr("Export", self.current_lang),
+                tr("Dataset export is already running.", self.current_lang),
+            )
+            return
+
+        progress = QProgressDialog(
+            tr("Preparing dataset export...", self.current_lang),
+            "",
+            0,
+            0,
+            self,
+        )
+        progress.setWindowTitle(tr("Export Progress", self.current_lang))
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setCancelButton(None)
+        self._prepare_progress_dialog(progress, width=520)
+        progress.show()
+
+        self.dataset_export_thread = DatasetExportThread(
+            self.project,
+            output_dir,
+            export_format,
+            lang=self.current_lang,
+        )
+        thread = self.dataset_export_thread
+
+        def on_progress(done, total, label):
+            total = max(0, int(total))
+            done = max(0, int(done))
+            if total > 0 and progress.maximum() != total:
+                progress.setRange(0, total)
+            elif total <= 0 and progress.maximum() != 0:
+                progress.setRange(0, 0)
+            if total > 0:
+                progress.setValue(min(done, total))
+            message = tr("Exporting dataset...", self.current_lang)
+            if label:
+                message = tr("Exporting dataset: {0}", self.current_lang).format(label)
+            progress.setLabelText(message)
+
+        def on_success(count, folder, _export_format):
+            progress.setValue(progress.maximum())
+            progress.close()
+            message = tr("Exported {0} samples.\n\nOutput folder: {1}", self.current_lang).format(count, folder)
+            self.log(message)
+            try:
+                open_path(folder)
+            except Exception as exc:
+                self.log(f"Could not open export folder: {exc}")
+            QMessageBox.information(self, tr("Export", self.current_lang), message)
+
+        def on_error(message):
+            progress.close()
+            QMessageBox.warning(
+                self,
+                tr("Export", self.current_lang),
+                tr("Dataset export failed: {0}", self.current_lang).format(message),
+            )
+
+        def on_finished():
+            if getattr(self, "dataset_export_thread", None) is thread:
+                self.dataset_export_thread = None
+
+        thread.progress_signal.connect(on_progress)
+        thread.success_signal.connect(on_success)
+        thread.error_signal.connect(on_error)
+        thread.finished_signal.connect(on_finished)
+        thread.start()
 
     def init_sam(self):
         if self.sam_thread and self.sam_thread.isRunning():

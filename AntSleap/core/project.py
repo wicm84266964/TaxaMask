@@ -1983,7 +1983,7 @@ class ProjectManager:
             self.save_project()
         return count
 
-    def export_coco(self, output_dir):
+    def export_coco(self, output_dir, progress_callback=None):
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
         
@@ -2009,7 +2009,12 @@ class ProjectManager:
         img_id = 1
         count = 0
         
-        for img_path in self.project_data["images"]:
+        image_paths = list(self.project_data["images"])
+        total = len(image_paths)
+
+        for index, img_path in enumerate(image_paths, start=1):
+            if progress_callback:
+                progress_callback(index - 1, total, os.path.basename(img_path))
             if not os.path.exists(img_path): continue
             fname = os.path.basename(img_path)
             shutil.copy(img_path, os.path.join(images_dir, fname))
@@ -2052,12 +2057,15 @@ class ProjectManager:
                 ann_id += 1
             img_id += 1
             count += 1
+
+        if progress_callback:
+            progress_callback(total, total, "annotations.json")
             
         with open(os.path.join(output_dir, "annotations.json"), 'w', encoding='utf-8') as f:
             json.dump(coco_data, f, indent=4, ensure_ascii=False)
         return count
 
-    def export_yolo(self, output_dir):
+    def export_yolo(self, output_dir, progress_callback=None):
         """
         Export in YOLOv8-segmentation format.
         Structure: <class_id> <x1_norm> <y1_norm> ... <xn_norm> <yn_norm>
@@ -2075,7 +2083,12 @@ class ProjectManager:
         cat_map = {name: i for i, name in enumerate(self.project_data["taxonomy"])}
         count = 0
         
-        for img_path in self.project_data["images"]:
+        image_paths = list(self.project_data["images"])
+        total = len(image_paths)
+
+        for index, img_path in enumerate(image_paths, start=1):
+            if progress_callback:
+                progress_callback(index - 1, total, os.path.basename(img_path))
             if not os.path.exists(img_path): continue
             
             # Copy Image
@@ -2108,6 +2121,9 @@ class ProjectManager:
                     line = f"{class_id} " + " ".join(norm_points) + "\n"
                     f.write(line)
             count += 1
+
+        if progress_callback:
+            progress_callback(total, total, "dataset.yaml")
             
         # Create dataset.yaml
         yaml_content = (
@@ -2124,7 +2140,7 @@ class ProjectManager:
             
         return count
 
-    def export_multimodal_dataset(self, output_dir, crop_size=512, global_size=1024):
+    def export_multimodal_dataset(self, output_dir, crop_size=512, global_size=1024, progress_callback=None):
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
         
@@ -2137,9 +2153,17 @@ class ProjectManager:
         
         count = 0
         processed_globals = set() # Avoid re-processing same global image multiple times
+        label_items = [
+            (img_path, data)
+            for img_path, data in self.project_data["labels"].items()
+            if isinstance(data, dict)
+        ]
+        total = len(label_items)
         
         with open(jsonl_path, 'w', encoding='utf-8') as f:
-            for img_path, data in self.project_data["labels"].items():
+            for index, (img_path, data) in enumerate(label_items, start=1):
+                if progress_callback:
+                    progress_callback(index - 1, total, os.path.basename(img_path))
                 if not os.path.exists(img_path): continue
                 try:
                     img = Image.open(img_path).convert('RGB')
@@ -2234,4 +2258,7 @@ class ProjectManager:
                     }
                     f.write(json.dumps(entry, ensure_ascii=False) + "\n")
                     count += 1
+
+        if progress_callback:
+            progress_callback(total, total, "multimodal_dataset.jsonl")
         return count

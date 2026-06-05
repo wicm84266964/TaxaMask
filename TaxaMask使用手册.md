@@ -1,6 +1,6 @@
 # TaxaMask 完整中文操作手册
 
-> 适用版本：2026-06-05 Agent Center / Ask Agent 路由 / TIF-STL 分流 / 主工作台父部位与子部位标注 / 2D-STL 模型方案与 Blink 后端切换 / VLM 自适应轻量网格第一公里预标注 / TIF 离屏 GPU 体预览 / PDF 文献证据与性状描述闭环收尾版
+> 适用版本：TaxaMask v3.0 正式版（2026-06-06）：Agent Center / Ask Agent 路由 / PDF 文献证据闭环 / 2D-STL 父部位与子部位标注 / 模型方案与 Blink 后端切换 / VLM 自适应轻量网格预标注 / TIF 离屏 GPU 体预览 / 数据集导出进度收尾版
 >
 > 适用对象：需要独立使用 TaxaMask 进行 Agent 辅助配置、PDF 文献证据处理、2D/STL 形态学标注、TIF 体数据标注、Blink 精修、模型训练与数据导出的研究者
 >
@@ -1905,6 +1905,12 @@ TIF 后端不使用这份 2D 契约。TIF 使用独立的 `ant3d_tif_backend_con
 ## 12. 导出数据集：Multimodal / COCO / YOLO 与 TIF 训练体
 
 路径：`File -> Export Dataset`
+
+导出时会弹出进度窗口，显示当前正在处理的图片或写出的文件。导出在后台线程中执行，主界面不会因为大项目导出而看起来卡死。
+
+导出完成后，TaxaMask 会自动打开本次数据集所在文件夹，并弹出导出样本数提示。这样你可以立刻检查 `images/`、`labels/`、`annotations.json`、`multimodal_dataset.jsonl` 或 `model_profile_summary.json` 是否已经写出。
+
+如果导出还没有完成又再次点击导出，程序会提示“数据集正在导出中”，避免同一目录里同时写入两套半成品。
 
 ### 12.1 Multimodal
 

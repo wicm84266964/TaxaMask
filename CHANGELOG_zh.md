@@ -4,6 +4,16 @@
 
 ## 📅 更新日志 (Update Log)
 
+### **[2026-06-06] TaxaMask v3.0 正式版：全流程测试收口与数据集导出进度**
+> **本次重点：用户完成 PDF 文献证据、2D/STL 标注、VLM 预标注、Blink 子部位训练、TIF/STL 关键路径和数据导出的整体测试后，将当前稳定工作流定为 TaxaMask v3.0 正式版里程碑。**
+
+- 2D/STL 主工作台 `Export Dataset / 导出数据集` 从同步执行改为后台导出线程，导出 COCO、YOLO 和 Multimodal JSONL 时都会显示进度窗口，避免大项目导出时界面像卡死。
+- 三种 2D/STL 导出函数补充 `progress_callback`：COCO 按图片和 `annotations.json` 更新进度；YOLO 按图片和 `dataset.yaml` 更新进度；Multimodal 按图片记录和 `multimodal_dataset.jsonl` 更新进度。
+- 数据集导出完成后会自动打开输出文件夹，并弹出导出样本数和路径提示；重复点击导出时会提示已有导出任务正在运行，避免同一目录被并发写入半成品。
+- `README.md`、`CITATION.cff`、`TaxaMask使用手册.md` 和 `LLM_CONTEXT_DETAILED.md` 同步到 `TaxaMask v3.0` 正式版状态。这里的 v3.0 指当前 TaxaMask 公开研究工作流里程碑；旧日志底部的 AntSleap/Formica-Flow 早期 v3.x 记录保留为历史开发阶段，不做回改。
+- 当前 v3.0 研究流程边界：蚂蚁 2D/STL + PDF evidence 是最完整验证路线；VLM 预标注和 Blink 子部位训练已经可用于大规模实验前的人工复核闭环；TIF 体数据路线仍保留为实验性工作流，但离屏 GPU 预览和导出链路已可继续小批量验证。
+- 本轮验证：`py_compile` 覆盖 `AntSleap/main.py` 和 `AntSleap/core/project.py`；临时小项目实际导出 COCO、YOLO、Multimodal JSONL 三种格式并确认进度回调和输出文件正常；`git diff --check` 通过。用户随后完成真实界面测试并确认通过。
+
 ### **[2026-06-06] Blink 训练方案对比、子部位训练交互与训练结果统一入口**
 > **本次重点：在真实手工测试后，把 Blink 子部位训练从单一路线扩展为可对比策略，并把父部位/子部位训练结果收进统一浏览入口，方便后续用大数据集做方案验证。**
 

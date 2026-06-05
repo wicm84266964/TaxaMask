@@ -1,8 +1,8 @@
 cff-version: 1.2.0
 message: "If TaxaMask helps your research, please cite this software release."
 title: "TaxaMask: a taxonomy-oriented mask annotation and multimodal dataset workbench"
-version: "0.1.0"
-date-released: "2026-05-12"
+version: "3.0.0"
+date-released: "2026-06-06"
 type: software
 license: other
 repository-code: "https://github.com/wicm84266964/TaxaMask"

@@ -2,6 +2,8 @@
 
 TaxaMask is a research workbench for taxonomy-oriented mask annotation, literature figure extraction, and multimodal dataset production.
 
+Current release milestone: **TaxaMask v3.0 official research workflow release**.
+
 It was originally built for ant taxonomy research, with an ant morphology workflow as the most validated example. The current architecture also exposes configurable profiles and templates for other biological taxa, so researchers can adapt PDF screening, figure extraction, structure labels, model training, and dataset export to their own organisms.
 
 > License note: TaxaMask is released for academic and research use. See [LICENSE](LICENSE), [NOTICE](NOTICE), and [CITATION.cff](CITATION.cff) before redistribution or reuse.
@@ -38,6 +40,7 @@ Agent Center -> choose PDF / 2D-STL / TIF workflow
 - Built-in training/inference paths plus external backend contracts for advanced users who want to connect custom parent-part or child-part models.
 - Guarded custom-model adaptation: external backend scripts/configs can be approved separately from TaxaMask source development, so users know when they are changing a model adapter versus changing the program itself.
 - Export paths for multimodal JSONL, COCO, YOLO-style datasets, and TIF volume exchange formats including OME-TIFF, NRRD, MHA, NIfTI, nnU-Net-style layout, and MONAI-style datalists.
+- 2D/STL dataset export runs with a visible progress dialog and opens the output folder when finished, so large reviewed projects do not look frozen during handoff.
 - 2D/STL dataset exports include a compact model-profile summary for auditing the active parent/child backend scheme used around training and prediction.
 - Headless agentic tools for PDF screening, figure extraction, candidate import, auto-annotation, and dataset export.
 
@@ -211,7 +214,7 @@ Until a DOI or paper is available, cite the GitHub repository and release versio
 
 ```text
 TaxaMask: a taxonomy-oriented mask annotation and multimodal dataset workbench.
-GitHub repository, version v0.1.0.
+GitHub repository, version v3.0.
 ```
 
 ## License

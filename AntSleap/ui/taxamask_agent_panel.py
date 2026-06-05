@@ -19,11 +19,11 @@ def _ensure_qtwebengine_cpu_compositing():
 
 _ensure_qtwebengine_cpu_compositing()
 
-from PySide6.QtCore import QTimer, QUrl, Signal
+from PySide6.QtCore import Qt, QTimer, QUrl, Signal
 from PySide6.QtWidgets import (
+    QLabel,
     QSizePolicy,
     QStackedWidget,
-    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -216,10 +216,23 @@ class TaxaMaskAgentPanel(QWidget):
 
         self.stack = QStackedWidget()
         self.stack.setObjectName("taxamaskAgentStack")
-        self.fallback = QTextEdit()
+        self.fallback = QWidget()
         self.fallback.setObjectName("taxamaskAgentFallback")
-        self.fallback.setReadOnly(True)
         self.fallback.setMinimumHeight(360)
+        fallback_layout = QVBoxLayout(self.fallback)
+        fallback_layout.setContentsMargins(28, 28, 28, 28)
+        fallback_layout.setSpacing(10)
+        fallback_layout.addStretch(1)
+        self.fallback_logo = QLabel("TAXAMASK")
+        self.fallback_logo.setObjectName("taxamaskAgentFallbackLogo")
+        self.fallback_logo.setAlignment(Qt.AlignCenter)
+        fallback_layout.addWidget(self.fallback_logo)
+        self.fallback_detail = QLabel("")
+        self.fallback_detail.setObjectName("taxamaskAgentFallbackDetail")
+        self.fallback_detail.setAlignment(Qt.AlignCenter)
+        self.fallback_detail.setWordWrap(True)
+        fallback_layout.addWidget(self.fallback_detail)
+        fallback_layout.addStretch(1)
         self.stack.addWidget(self.fallback)
         self.web_view = QWebEngineView() if QWebEngineView is not None else None
         if self.web_view is not None:
@@ -391,12 +404,20 @@ class TaxaMaskAgentPanel(QWidget):
                 border: 1px solid #364149;
                 border-radius: 16px;
             }
-            QTextEdit#taxamaskAgentFallback {
+            QWidget#taxamaskAgentFallback {
                 background: #11161A;
                 border: 1px solid #303A42;
                 border-radius: 12px;
-                color: #DCE4E8;
-                padding: 10px;
+            }
+            QLabel#taxamaskAgentFallbackLogo {
+                color: #E7F6F2;
+                font-size: 56px;
+                font-weight: 800;
+                letter-spacing: 0px;
+            }
+            QLabel#taxamaskAgentFallbackDetail {
+                color: #8EA0A8;
+                font-size: 12px;
             }
             QStackedWidget#taxamaskAgentStack {
                 background: transparent;
@@ -1181,27 +1202,19 @@ class TaxaMaskAgentPanel(QWidget):
         return self._status_text
 
     def _update_fallback(self):
-        lines = [
-            at("Ant-Code embedded", self.lang),
-            "",
-            f"{at('Project', self.lang)}: {self._project_display or self.workspace_dir}",
-            f"Ant-Code root: {self.ant_code_root}",
-            f"Ant-Code dashboard: {self.ant_code_dashboard_entry or at('not found', self.lang)}",
-            f"Ant-Code config: {self.ant_code_config_path}",
-            "",
-            at("Workspace permission is the default for this embedded TaxaMask agent.", self.lang),
-            "TaxaMask source guard: enabled",
-        ]
+        lines = []
         if QWebEngineView is None:
-            lines.extend(["", at("Qt WebEngine is unavailable in this environment. Start Ant-Code and open it in a browser.", self.lang)])
+            lines.append(at("Qt WebEngine is unavailable in this environment. Start Ant-Code and open it in a browser.", self.lang))
         if self.dashboard_url:
-            lines.extend(["", self.dashboard_url])
+            lines.append(self.dashboard_url)
         if self._preflight_error:
-            lines.extend(["", f"Preflight error: {self._preflight_error}"])
+            lines.append(f"Preflight error: {self._preflight_error}")
         if self._embedded_page_error:
             label = "内嵌页面错误" if self.lang == "zh" else "Embedded page error"
-            lines.extend(["", f"{label}: {self._embedded_page_error}"])
+            lines.append(f"{label}: {self._embedded_page_error}")
         if self._json_health_warning:
             warning_label = "JSON 提醒（不影响 Ant-Code 启动）" if self.lang == "zh" else "JSON warning (does not block Ant-Code launch)"
-            lines.extend(["", f"{warning_label}: {self._json_health_warning}"])
-        self.fallback.setPlainText("\n".join(lines))
+            lines.append(f"{warning_label}: {self._json_health_warning}")
+        detail = "\n".join(line for line in lines if str(line or "").strip())
+        self.fallback_detail.setText(detail)
+        self.fallback_detail.setVisible(bool(detail))

@@ -729,6 +729,17 @@ class AntEngine:
         if not cascade_routes_ready and runtime_route_source != "project":
             runtime_route_source = "none"
 
+        def _routes_for_child(child_part):
+            route_list = runtime_route_manifest.get("routes", []) if isinstance(runtime_route_manifest, dict) else []
+            if not isinstance(route_list, list):
+                return []
+            clean_child = str(child_part or "").strip()
+            return [
+                route
+                for route in route_list
+                if isinstance(route, dict) and str(route.get("child") or "").strip() == clean_child
+            ]
+
         predictions = {
             "polygons": {},
             "auto_boxes": {},
@@ -829,65 +840,60 @@ class AntEngine:
             # --- CASCADE ROUTE INTERCEPTION (manifest-driven) ---
             if cascade_routes_ready:
                 parent_part = "macro_locator"
-                if not cascade_routes_ready:
-                    cascade_block_reasons[part_name] = "routes_not_ready"
-                else:
-                    route = self.cascade_manager._find_route(parent_part, part_name, route_manifest=runtime_route_manifest)
-                    if route is None:
-                        cascade_block_reasons[part_name] = "route_missing"
+                route = self.cascade_manager._find_route(parent_part, part_name, route_manifest=runtime_route_manifest)
+                if route is not None:
+                    route_block_reason = self.cascade_manager.get_route_block_reason(route)
+                    if route_block_reason:
+                        cascade_block_reasons[part_name] = route_block_reason
                     else:
-                        route_block_reason = self.cascade_manager.get_route_block_reason(route)
-                        if route_block_reason:
-                            cascade_block_reasons[part_name] = route_block_reason
-                        else:
-                            cascade_attempted_routes.append(self.cascade_manager.describe_route(route))
-                            expert_result = self.cascade_manager.infer_child_part(
-                                image_path,
-                                parent_box=[orig_bx1, orig_by1, orig_bx2, orig_by2],
-                                child_part_name=part_name,
-                                parent_part=parent_part,
-                                route_manifest=runtime_route_manifest,
-                            )
+                        cascade_attempted_routes.append(self.cascade_manager.describe_route(route))
+                        expert_result = self.cascade_manager.infer_child_part(
+                            image_path,
+                            parent_box=[orig_bx1, orig_by1, orig_bx2, orig_by2],
+                            child_part_name=part_name,
+                            parent_part=parent_part,
+                            route_manifest=runtime_route_manifest,
+                        )
 
-                            expert_box = None
-                            expert_conf = 0.0
-                            if isinstance(expert_result, dict):
-                                raw_box = expert_result.get("box")
-                                if isinstance(raw_box, (list, tuple)) and len(raw_box) == 4:
-                                    expert_box = list(raw_box)
+                        expert_box = None
+                        expert_conf = 0.0
+                        if isinstance(expert_result, dict):
+                            raw_box = expert_result.get("box")
+                            if isinstance(raw_box, (list, tuple)) and len(raw_box) == 4:
+                                expert_box = list(raw_box)
 
-                                raw_conf = expert_result.get("confidence", 0.0)
-                                if isinstance(raw_conf, (int, float)):
-                                    expert_conf = float(raw_conf)
-                            elif isinstance(expert_result, (list, tuple)) and len(expert_result) == 4:
-                                expert_box = list(expert_result)
-                                expert_conf = 1.0
+                            raw_conf = expert_result.get("confidence", 0.0)
+                            if isinstance(raw_conf, (int, float)):
+                                expert_conf = float(raw_conf)
+                        elif isinstance(expert_result, (list, tuple)) and len(expert_result) == 4:
+                            expert_box = list(expert_result)
+                            expert_conf = 1.0
 
-                            if expert_box:
-                                expert_box = CoordinateMapper.clamp_bbox_to_size(expert_box, w_orig, h_orig)
+                        if expert_box:
+                            expert_box = CoordinateMapper.clamp_bbox_to_size(expert_box, w_orig, h_orig)
 
-                                route_min_conf = self.cascade_manager.get_route_min_conf(parent_part, part_name, route_manifest=runtime_route_manifest)
-                                conf_gate = float(adapt_thresh)
-                                if isinstance(route_min_conf, (int, float)):
-                                    conf_gate = max(conf_gate, float(route_min_conf))
+                            route_min_conf = self.cascade_manager.get_route_min_conf(parent_part, part_name, route_manifest=runtime_route_manifest)
+                            conf_gate = float(conf_thresh)
+                            if isinstance(route_min_conf, (int, float)):
+                                conf_gate = max(conf_gate, float(route_min_conf))
 
-                                if expert_conf >= conf_gate:
-                                    orig_bx1, orig_by1, orig_bx2, orig_by2 = expert_box
-                                    cascade_applied_count += 1
-                                    cascade_applied_routes.append(self.cascade_manager.describe_route(route))
-                                    print(f"[{part_name}] Macro box overridden by Micro-Expert (conf={expert_conf:.3f}).")
+                            if expert_conf >= conf_gate:
+                                orig_bx1, orig_by1, orig_bx2, orig_by2 = expert_box
+                                cascade_applied_count += 1
+                                cascade_applied_routes.append(self.cascade_manager.describe_route(route))
+                                print(f"[{part_name}] Macro box overridden by Micro-Expert (conf={expert_conf:.3f}).")
 
-                                    px1 = max(0.0, orig_bx1 - left)
-                                    py1 = max(0.0, orig_by1 - top)
-                                    px2 = min(float(img_crop.width), orig_bx2 - left)
-                                    py2 = min(float(img_crop.height), orig_by2 - top)
-                                    if px2 > px1 and py2 > py1:
-                                        prompt_box = [px1, py1, px2, py2]
-                                else:
-                                    cascade_block_reasons[part_name] = "confidence_below_gate"
-                                    print(f"[{part_name}] Expert suggestion ignored (conf={expert_conf:.3f} < gate={conf_gate:.3f}).")
+                                px1 = max(0.0, orig_bx1 - left)
+                                py1 = max(0.0, orig_by1 - top)
+                                px2 = min(float(img_crop.width), orig_bx2 - left)
+                                py2 = min(float(img_crop.height), orig_by2 - top)
+                                if px2 > px1 and py2 > py1:
+                                    prompt_box = [px1, py1, px2, py2]
                             else:
-                                cascade_block_reasons[part_name] = "expert_unavailable"
+                                cascade_block_reasons[part_name] = "confidence_below_gate"
+                                print(f"[{part_name}] Expert suggestion ignored (conf={expert_conf:.3f} < gate={conf_gate:.3f}).")
+                        else:
+                            cascade_block_reasons[part_name] = "expert_unavailable"
 
             final_box = CoordinateMapper.clamp_bbox_to_size(
                 [orig_bx1, orig_by1, orig_bx2, orig_by2],
@@ -915,7 +921,17 @@ class AntEngine:
                     route_manifest=runtime_route_manifest,
                 )
                 if not route:
-                    cascade_block_reasons[child_part] = "route_missing"
+                    configured_child_routes = _routes_for_child(child_part)
+                    if configured_child_routes:
+                        enabled_child_routes = [
+                            candidate
+                            for candidate in configured_child_routes
+                            if bool(candidate.get("enabled", False))
+                        ]
+                        if not enabled_child_routes:
+                            cascade_block_reasons[child_part] = "route_disabled"
+                        else:
+                            cascade_block_reasons[child_part] = "parent_box_missing"
                     continue
 
                 route_block_reason = self.cascade_manager.get_route_block_reason(route)
@@ -959,7 +975,7 @@ class AntEngine:
 
                 expert_box = CoordinateMapper.clamp_bbox_to_size(expert_box, w_orig, h_orig)
                 route_min_conf = self.cascade_manager.get_route_min_conf(parent_part, child_part, route_manifest=runtime_route_manifest)
-                conf_gate = float(adapt_thresh)
+                conf_gate = float(conf_thresh)
                 if isinstance(route_min_conf, (int, float)):
                     conf_gate = max(conf_gate, float(route_min_conf))
                 if expert_conf < conf_gate:

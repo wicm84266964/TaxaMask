@@ -2,6 +2,7 @@ from copy import deepcopy
 
 from .vlm_preannotation import DEFAULT_VLM_PROMPT_PROFILE_ID, sanitize_vlm_prompt_profile
 from .taxonomy_defaults import DEFAULT_LOCATOR_SCOPE, sanitize_locator_scope
+from .blink_training_strategy import DEFAULT_BLINK_TRAINING_STRATEGY, sanitize_blink_training_strategy
 
 
 MODEL_PROFILES_SCHEMA_VERSION = "taxamask_model_profiles_v1"
@@ -49,6 +50,8 @@ DEFAULT_CHILD_TRAIN_PARAMS = {
     "lr": 1e-3,
     "weight_decay": 1e-4,
 }
+
+DEFAULT_CHILD_AUTO_SHRINK_STEPS = 20
 
 DEFAULT_INFERENCE_PARAMS = {
     "conf": 0.1,
@@ -207,6 +210,7 @@ def make_default_model_profile(
     vlm_preannotation=None,
     parent_train_params=None,
     child_train_params=None,
+    child_auto_shrink_steps=DEFAULT_CHILD_AUTO_SHRINK_STEPS,
     inference_params=None,
     parent_backend_type=PARENT_BACKEND_BUILTIN,
     external_parent_backend=None,
@@ -237,6 +241,8 @@ def make_default_model_profile(
         "child_backend_defaults": {
             "backend_type": CHILD_BACKEND_VIT_B,
             "input_size": 224,
+            "auto_shrink_steps": _safe_int(child_auto_shrink_steps, DEFAULT_CHILD_AUTO_SHRINK_STEPS, minimum=1),
+            "training_strategy": DEFAULT_BLINK_TRAINING_STRATEGY,
             "train_params": _clean_train_params(child_train_params, DEFAULT_CHILD_TRAIN_PARAMS),
             "heatmap_params": dict(DEFAULT_HEATMAP_BLINK_PARAMS),
             "external_blink_backend": dict(DEFAULT_EXTERNAL_BLINK_BACKEND),
@@ -303,6 +309,15 @@ def sanitize_model_profile(raw_profile, *, taxonomy=None, defaults=None):
         "child_backend_defaults": {
             "backend_type": clean_child_backend,
             "input_size": _safe_int(child_raw.get("input_size"), child_defaults.get("input_size", 224), minimum=64),
+            "auto_shrink_steps": _safe_int(
+                child_raw.get("auto_shrink_steps"),
+                child_defaults.get("auto_shrink_steps", DEFAULT_CHILD_AUTO_SHRINK_STEPS),
+                minimum=1,
+            ),
+            "training_strategy": sanitize_blink_training_strategy(
+                child_raw.get("training_strategy"),
+                child_defaults.get("training_strategy", DEFAULT_BLINK_TRAINING_STRATEGY),
+            ),
             "train_params": _clean_train_params(child_raw.get("train_params"), child_defaults.get("train_params", DEFAULT_CHILD_TRAIN_PARAMS)),
             "heatmap_params": _clean_heatmap_params(child_raw.get("heatmap_params", child_defaults.get("heatmap_params", {}))),
             "external_blink_backend": _clean_external_config(

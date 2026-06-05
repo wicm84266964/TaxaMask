@@ -33,7 +33,7 @@ Agent Center -> choose PDF / 2D-STL / TIF workflow
 - Labeling Workbench for biological structure masks, including specimen-grouped STL-rendered surface views imported as derived 2D review images, adaptive light-grid VLM first-mile draft boxes for SAM prompts with project-path-safe live refresh, plus integrated parent-part and child-part annotation sections for small-structure refinement.
 - TIF Volume Workbench for stack viewing, read-only offscreen-GPU 3D volume preview, overlay review, material-map editing, working edits, and explicit promotion to manual training truth.
 - Project-saved 2D/STL model profiles for switching parent-part and child-part annotation schemes without rewriting scattered settings.
-- Route-appointed child-part experts for parent-structure to child-structure pre-annotation, shrink-trajectory generation, and local expert training from the main 2D/STL labeling surface. Current route backends include ViT-B Blink, heatmap Blink, and external Blink scripts.
+- Route-appointed child-part experts for parent-structure to child-structure pre-annotation, shrink-trajectory generation, and local expert training from the main 2D/STL labeling surface. Current route backends include ViT-B Blink, heatmap Blink, and external Blink scripts; Blink training can compare full/inside/outside random, full/inside random, and full-first-then-inside trajectory strategies.
 - Configurable main locator structures for non-ant projects.
 - Built-in training/inference paths plus external backend contracts for advanced users who want to connect custom parent-part or child-part models.
 - Guarded custom-model adaptation: external backend scripts/configs can be approved separately from TaxaMask source development, so users know when they are changing a model adapter versus changing the program itself.
@@ -152,9 +152,10 @@ TaxaMask Workbench
 3. For 2D/STL morphology, create/open a 2D project, import ordinary images or STL-rendered views, then annotate in the Labeling Workbench.
 4. Optionally configure VLM target structures, then run `VLM Pre-Label` for the current image or `VLM Batch Pre-Label` for all images / a selected image-list group to create draft AI boxes/SAM polygons for human review before training.
 5. For child structures, use the Labeling Workbench's `Child-part annotation` section to pick the parent context, configure the route expert backend, annotate from an existing parent box, generate shrink trajectories, and train the current child expert.
-6. For TIF volume work, create/open a TIF project, import TIF stacks or AMIRA directories, review material maps, and promote reviewed edits to `manual_truth`.
-7. Train or connect the workflow-specific backend.
-8. Run pre-annotation/prediction, review results, and export a dataset or training handoff.
+6. Use the shared training progress area and `Training Results` browser to reopen parent-part and child-part validation reports without merging their detail views.
+7. For TIF volume work, create/open a TIF project, import TIF stacks or AMIRA directories, review material maps, and promote reviewed edits to `manual_truth`.
+8. Train or connect the workflow-specific backend.
+9. Run pre-annotation/prediction, review results, and export a dataset or training handoff.
 
 See [TaxaMask使用手册.md](TaxaMask使用手册.md) for the detailed Chinese manual.
 

@@ -21,6 +21,7 @@ class AnnotationCanvas(QWidget):
         self.polygons = {} 
         self.manual_boxes = {} # part -> [x1, y1, x2, y2]
         self.auto_boxes = {}   # part -> [x1, y1, x2, y2]
+        self.shrink_loose_boxes = {} # part -> [x1, y1, x2, y2]
         
         # Image Enhancement
         self.brightness = 0
@@ -78,6 +79,9 @@ class AnnotationCanvas(QWidget):
         self.history = []
         self.redo_stack = []
         self.polygons = {}
+        self.manual_boxes = {}
+        self.auto_boxes = {}
+        self.shrink_loose_boxes = {}
         self.update()
         self.setFocus()
 
@@ -126,11 +130,13 @@ class AnnotationCanvas(QWidget):
         self.hover_vertex = None
         self.update()
 
-    def set_boxes(self, manual=None, auto=None):
+    def set_boxes(self, manual=None, auto=None, shrink=None):
         if manual is not None:
             self.manual_boxes = copy.deepcopy(manual)
         if auto is not None:
             self.auto_boxes = copy.deepcopy(auto)
+        if shrink is not None:
+            self.shrink_loose_boxes = copy.deepcopy(shrink)
         self.update()
 
     def save_state(self):
@@ -329,6 +335,19 @@ class AnnotationCanvas(QWidget):
                 painter.setBrush(Qt.NoBrush)
                 painter.drawRect(rect)
                 painter.drawText(tl + QPointF(5, -5), f"{part} [Auto]")
+
+            # Draw Blink Shrink Start Boxes (Blue Dashed - trajectory start prompt)
+            for part, box in self.shrink_loose_boxes.items():
+                if not box or len(box) != 4: continue
+                x1, y1, x2, y2 = box
+                tl = self.image_to_screen(x1, y1)
+                br = self.image_to_screen(x2, y2)
+                rect = QRectF(tl, br)
+
+                painter.setPen(QPen(QColor(80, 180, 255), 2, Qt.DashLine))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawRect(rect)
+                painter.drawText(tl + QPointF(5, 30), f"{part} [Shrink Start]")
 
             # Draw Highlighted Vertex
             if self.hover_vertex:

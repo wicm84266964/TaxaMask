@@ -4,6 +4,7 @@ import os
 import sys
 import tempfile
 import unittest
+import copy
 from pathlib import Path
 from unittest.mock import patch
 
@@ -20,7 +21,7 @@ has_pyside6 = False
 try:
     from PySide6.QtCore import QPointF, QRectF
     from PySide6.QtGui import QColor, QImage, QPainter
-    from PySide6.QtWidgets import QApplication, QWidget, QGridLayout, QDialogButtonBox, QTreeWidget
+    from PySide6.QtWidgets import QApplication, QWidget, QGridLayout, QDialogButtonBox, QTreeWidget, QTableWidget, QLabel, QPushButton
 except ModuleNotFoundError as exc:
     if exc.name and exc.name.startswith("PySide6"):
         QApplication = None
@@ -30,6 +31,7 @@ except ModuleNotFoundError as exc:
         QImage = None
         QPainter = None
         QTreeWidget = None
+        QPushButton = None
         QWidget = object
         main_module = None
         BlinkLabWidget = None
@@ -39,7 +41,7 @@ except ModuleNotFoundError as exc:
         raise
 else:
     import AntSleap.main as main_module
-    from AntSleap.ui.blink_lab import BlinkLabWidget
+    from AntSleap.ui.blink_lab import BlinkExpertTrainingReportDialog, BlinkLabWidget
     from AntSleap.ui.cropper import ImageCropper
     from AntSleap.ui.pdf_processing_widget import PdfProcessingWidget
     from AntSleap.ui.style import SCI_THEME
@@ -108,9 +110,11 @@ class DummySamWorker:
 
 
 class DummyCascadeManager:
-    def __init__(self):
+    def __init__(self, weights_dir=None):
         self.infer_calls = []
         self.infer_result = {"box": [18.0, 18.0, 42.0, 42.0], "confidence": 0.9}
+        self.weights_dir = str(weights_dir or "")
+        self.loaded_experts = {}
 
     def get_route_block_reason(self, route):
         if not isinstance(route, dict):
@@ -122,10 +126,35 @@ class DummyCascadeManager:
         expert_filename = appointed.get("expert_filename") or route.get("expert_filename")
         if not expert_part or not expert_filename:
             return "expert_unappointed"
+        if not (Path(self.weights_dir) / "experts" / str(expert_part) / str(expert_filename)).exists():
+            return "expert_model_missing"
         return None
 
     def list_available_experts(self):
-        return []
+        expert_root = Path(self.weights_dir) / "experts"
+        if not expert_root.exists():
+            return []
+        experts = []
+        for part_dir in sorted(path for path in expert_root.iterdir() if path.is_dir()):
+            for model_path in sorted(part_dir.glob("*.pth")):
+                expert_id = f"{part_dir.name}/{model_path.name}"
+                experts.append(
+                    {
+                        "expert_part": part_dir.name,
+                        "expert_filename": model_path.name,
+                        "expert_id": expert_id,
+                        "path": str(model_path),
+                        "expert_backend": "vit_b_blink",
+                    }
+                )
+        return experts
+
+    def resolve_route_expert_path(self, route):
+        expert_part = route.get("expert_part") or route.get("child")
+        expert_filename = route.get("expert_filename")
+        if not expert_part or not expert_filename:
+            return None
+        return str(Path(self.weights_dir) / "experts" / str(expert_part) / str(expert_filename))
 
     def infer_child_part(self, image_path, parent_box, child_part_name, parent_part="macro_locator", route_manifest=None):
         self.infer_calls.append(
@@ -145,7 +174,7 @@ class DummyEngine:
         self.weights_dir = weights_dir
         self.locator = None
         self.parts_model = DummyPartsModel()
-        self.cascade_manager = DummyCascadeManager()
+        self.cascade_manager = DummyCascadeManager(weights_dir)
         self.current_num_classes = 3
         self.locator_resolution = (512, 512)
         self.loaded_locator_requires_legacy_confirmation = False
@@ -220,6 +249,7 @@ class DummyProjectManager:
             "taxonomy": ["Head", "Mesosoma", "Gaster"],
             "images": [],
             "labels": {},
+            "image_provenance": {},
             "blink_context_roi_parents": {},
             "parent_box_aspect_ratios": {"Head": 1.0, "Mesosoma": 4 / 3, "Gaster": 4 / 3},
             "cascade_routes": {"version": "project-v2", "routes": []},
@@ -277,6 +307,91 @@ class DummyProjectManager:
     def get_auto_boxes(self, image_path):
         return self.project_data["labels"].get(image_path, {}).get("auto_boxes", {})
 
+    def set_image_provenance(self, image_path, provenance, save=True):
+        self.project_data.setdefault("image_provenance", {})[str(image_path)] = dict(provenance or {})
+        if save:
+            self.save_project()
+        return None
+
+    def get_image_provenance(self, image_path):
+        return dict(self.project_data.get("image_provenance", {}).get(str(image_path), {}))
+
+    def summarize_image_ai_drafts(self, image_path):
+        entry = self.project_data["labels"].get(image_path, {})
+        parts = entry.get("parts", {}) if isinstance(entry.get("parts", {}), dict) else {}
+        auto_boxes = entry.get("auto_boxes", {}) if isinstance(entry.get("auto_boxes", {}), dict) else {}
+        descriptions = entry.get("descriptions", {}) if isinstance(entry.get("descriptions", {}), dict) else {}
+        reviewable = []
+        box_only = []
+        for part_name, desc in descriptions.items():
+            if desc != "Auto-Annotated":
+                continue
+            if parts.get(part_name):
+                reviewable.append(part_name)
+            elif part_name in auto_boxes:
+                box_only.append(part_name)
+        return {"reviewable_polygon_parts": reviewable, "box_only_parts": box_only}
+
+    def summarize_ai_drafts_for_images(self, image_paths):
+        image_summaries = []
+        reviewable_count = 0
+        box_only_count = 0
+        for image_path in image_paths or []:
+            summary = self.summarize_image_ai_drafts(image_path)
+            image_reviewable = len(summary["reviewable_polygon_parts"])
+            image_box_only = len(summary["box_only_parts"])
+            if image_reviewable or image_box_only:
+                item = dict(summary)
+                item["image_path"] = image_path
+                item["reviewable_count"] = image_reviewable
+                item["box_only_count"] = image_box_only
+                image_summaries.append(item)
+                reviewable_count += image_reviewable
+                box_only_count += image_box_only
+        return {
+            "images_with_drafts": image_summaries,
+            "image_count": len(image_summaries),
+            "reviewable_polygon_count": reviewable_count,
+            "box_only_count": box_only_count,
+        }
+
+    def set_auto_box_review_status(self, image_path, part_name, review_status, save=True):
+        entry = self.project_data["labels"].get(image_path)
+        if not entry or part_name not in entry.get("auto_boxes", {}):
+            return False
+        entry.setdefault("auto_box_meta", {}).setdefault(part_name, {})["review_status"] = review_status
+        if save:
+            self.save_project()
+        return True
+
+    def verify_image_labels(self, image_path, save=True):
+        labels = self.project_data["labels"].get(image_path)
+        if not labels:
+            return 0
+        parts = labels.get("parts", {}) if isinstance(labels.get("parts", {}), dict) else {}
+        descriptions = labels.get("descriptions", {}) if isinstance(labels.get("descriptions", {}), dict) else {}
+        count = 0
+        for part_name in list(descriptions.keys()):
+            if descriptions.get(part_name) == "Auto-Annotated" and parts.get(part_name):
+                descriptions.pop(part_name, None)
+                self.set_auto_box_review_status(image_path, part_name, "confirmed", save=False)
+                count += 1
+        if count and save:
+            self.save_project()
+        return count
+
+    def verify_ai_drafts_for_images(self, image_paths):
+        accepted_count = 0
+        accepted_images = 0
+        for image_path in image_paths or []:
+            count = self.verify_image_labels(image_path, save=False)
+            if count:
+                accepted_count += count
+                accepted_images += 1
+        if accepted_count:
+            self.save_project()
+        return {"accepted_count": accepted_count, "accepted_images": accepted_images}
+
     def get_blink_context_parent(self, target_part):
         return self.project_data.get("blink_context_roi_parents", {}).get(target_part)
 
@@ -298,6 +413,9 @@ class DummyProjectManager:
 
     def get_parent_box_aspect_ratios(self):
         return dict(self.project_data.get("parent_box_aspect_ratios", {}))
+
+    def get_active_model_profile(self):
+        return dict(self.project_data.get("active_model_profile", {}))
 
     def get_cascade_route(self, parent_part, child_part):
         for route in self.project_data.get("cascade_routes", {}).get("routes", []):
@@ -392,6 +510,8 @@ class DummyProjectManager:
             entry["auto_boxes"][part_name] = [float(v) for v in auto_box]
         if description_text:
             entry["descriptions"][part_name] = description_text
+        elif not auto_box and entry.get("descriptions", {}).get(part_name) == "Auto-Annotated":
+            entry["descriptions"].pop(part_name, None)
         if save:
             self.save_project()
         return None
@@ -411,12 +531,60 @@ class DummyProjectManager:
             self.save_project()
         return None
 
-    def update_trajectory(self, image_path, part_name, trajectory, parent_context=None):
+    def update_trajectory(self, image_path, part_name, trajectory, parent_context=None, save=True):
         entry = self._ensure_label_entry(image_path)
         entry.setdefault("trajectories", {})[part_name] = {"frames": list(trajectory or [])}
         if parent_context:
             entry["trajectories"][part_name]["parent_context"] = dict(parent_context)
+        if save:
+            self.save_project()
         return None
+
+    def summarize_blink_trajectory_datasets(self):
+        summaries = {}
+        for image_path, entry in self.project_data.get("labels", {}).items():
+            trajectories = entry.get("trajectories", {}) if isinstance(entry.get("trajectories", {}), dict) else {}
+            for child_part, payload in trajectories.items():
+                frames = payload.get("frames", []) if isinstance(payload, dict) else []
+                parent_context = payload.get("parent_context", {}) if isinstance(payload, dict) else {}
+                parent_part = str(parent_context.get("parent_part") or "Unknown parent")
+                key = (parent_part, child_part)
+                item = summaries.setdefault(
+                    key,
+                    {"parent_part": parent_part, "child_part": child_part, "image_count": 0, "frame_count": 0, "sources": set(), "images": []},
+                )
+                item["image_count"] += 1
+                item["frame_count"] += len(frames)
+                source = str(parent_context.get("source") or "unknown")
+                item["sources"].add(source)
+                item["images"].append(
+                    {
+                        "image_path": image_path,
+                        "frame_count": len(frames),
+                        "source": source,
+                        "parent_box": parent_context.get("parent_box"),
+                    }
+                )
+        result = []
+        for item in summaries.values():
+            clean = dict(item)
+            clean["sources"] = sorted(clean["sources"])
+            result.append(clean)
+        return sorted(result, key=lambda item: (item["parent_part"], item["child_part"]))
+
+    def delete_blink_trajectory_dataset(self, parent_part, child_part, save=True):
+        removed = 0
+        for entry in self.project_data.get("labels", {}).values():
+            trajectories = entry.get("trajectories", {}) if isinstance(entry.get("trajectories", {}), dict) else {}
+            payload = trajectories.get(child_part)
+            parent_context = payload.get("parent_context", {}) if isinstance(payload, dict) else {}
+            stored_parent = str(parent_context.get("parent_part") or "Unknown parent")
+            if payload is not None and stored_parent == parent_part:
+                del trajectories[child_part]
+                removed += 1
+        if save and removed:
+            self.save_project()
+        return removed
 
     def iter_cascade_routes(self):
         return [dict(route) for route in self.project_data.get("cascade_routes", {}).get("routes", [])]
@@ -501,6 +669,39 @@ class DummyProjectManager:
         if removed and save:
             self.save_project()
         return removed
+
+    def remove_cascade_route_expert_references(self, expert_id, save=True):
+        clean_expert_id = str(expert_id or "").strip()
+        if not clean_expert_id:
+            return 0
+        changed_count = 0
+        routes = []
+        for route in self.project_data.setdefault("cascade_routes", {"version": "project-v2", "routes": []}).get("routes", []):
+            candidate = dict(route)
+            changed = False
+            appointed = candidate.get("appointed_expert") if isinstance(candidate.get("appointed_expert"), dict) else {}
+            if appointed.get("expert_id") == clean_expert_id or candidate.get("expert_id") == clean_expert_id:
+                candidate["appointed_expert"] = {"expert_id": None, "expert_part": None, "expert_filename": None}
+                candidate["expert_id"] = None
+                candidate["expert_part"] = None
+                candidate["expert_filename"] = None
+                changed = True
+            candidates = [
+                dict(item)
+                for item in candidate.get("expert_candidates", [])
+                if isinstance(item, dict)
+            ]
+            kept = [item for item in candidates if item.get("expert_id") != clean_expert_id]
+            if len(kept) != len(candidates):
+                changed = True
+            candidate["expert_candidates"] = kept
+            if changed:
+                changed_count += 1
+            routes.append(candidate)
+        self.project_data["cascade_routes"]["routes"] = routes
+        if changed_count and save:
+            self.save_project()
+        return changed_count
 
     def remove_taxonomy_part(self, part_name, save=True):
         if part_name not in self.project_data.get("taxonomy", []):
@@ -727,6 +928,53 @@ class UiPolishScopeTests(unittest.TestCase):
         self.assertLess(widget.canvas.blink_alpha, 245)
         self.assertGreaterEqual(widget.canvas.blink_alpha, 160)
         self.assertLessEqual(widget.canvas.blink_alpha, 220)
+        widget.close()
+
+    def test_blink_training_report_matches_parent_dataset_browsing(self):
+        report_dir = Path(self.temp_dir.name) / "blink_report"
+        details_dir = report_dir / "val_details"
+        details_dir.mkdir(parents=True, exist_ok=True)
+        image = QImage(120, 80, QImage.Format_RGB32)
+        image.fill(QColor("#223344"))
+        detail_path = details_dir / "blink_val_0000.png"
+        self.assertTrue(image.save(str(detail_path)))
+        report = {
+            "dir": str(report_dir),
+            "details_dir": str(details_dir),
+            "validation_rows": [
+                {
+                    "sample_id": "blink_0000",
+                    "image_name": "blink_val_0000.png",
+                    "detail_image": "blink_val_0000.png",
+                    "provenance": "blink_expert",
+                    "valid_parts": "Mandible",
+                    "peak_summary": "IoU 0.800",
+                    "error_summary": "center 2.0px",
+                }
+            ],
+            "validation_summary": {
+                "kind": "blink_expert_report",
+                "part_name": "Mandible",
+                "parent_part": "Head",
+                "validation_count": 1,
+            },
+        }
+
+        dialog = BlinkExpertTrainingReportDialog(report, lang="en")
+        try:
+            table = dialog.findChild(QTableWidget, "blinkTrainingValidationTable")
+            preview = dialog.findChild(QLabel, "blinkTrainingValidationPreview")
+            self.assertIsNotNone(table)
+            self.assertIsNotNone(preview)
+            self.assertEqual(table.rowCount(), 1)
+            self.assertEqual(table.item(0, 0).text(), "blink_0000")
+            self.assertEqual(table.item(0, 3).text(), "Mandible")
+            table.setCurrentCell(0, 0)
+            self.app.processEvents()
+            self.assertIsNotNone(preview.pixmap())
+            self.assertFalse(preview.pixmap().isNull())
+        finally:
+            dialog.close()
 
     def test_cropper_exposes_load_draw_export_flow_panels(self):
         dialog = ImageCropper(lang="en")
@@ -898,6 +1146,50 @@ class UiPolishScopeTests(unittest.TestCase):
             self.assertEqual(window.part_list.objectName(), "workbenchPartTree")
             self.assertIsNone(window.findChild(QWidget, "workbenchRoutePanel"))
             self.assertEqual(window.workbench_splitter.handleWidth(), 8)
+        finally:
+            window.deleteLater()
+
+    def test_image_group_header_collapse_does_not_load_image_during_startup(self):
+        window = self.make_main_window()
+        try:
+            original_image = Path(self.temp_dir.name) / "original.png"
+            crop_image = Path(self.temp_dir.name) / "original__panel_001.jpg"
+            for path in (original_image, crop_image):
+                image = QImage(120, 80, QImage.Format_RGB32)
+                image.fill(0xFFB0B0B0)
+                self.assertTrue(image.save(str(path)))
+
+            original_key = str(original_image)
+            crop_key = str(crop_image)
+            self.project_manager.project_data["images"] = [original_key, crop_key]
+            self.project_manager.project_data["labels"] = {
+                original_key: {"parts": {}, "boxes": {}, "auto_boxes": {}, "descriptions": {}, "status": "unlabeled", "genus": "Unknown"},
+                crop_key: {"parts": {}, "boxes": {}, "auto_boxes": {}, "descriptions": {}, "status": "unlabeled", "genus": "Unknown"},
+            }
+            self.project_manager.set_image_provenance(
+                crop_key,
+                {"source_type": "image_crop", "derived_from": {"image_path": original_key, "crop_index": 1}},
+                save=False,
+            )
+            window.current_image = original_key
+            window.refresh_file_list()
+            window.canvas.load_image("")
+
+            original_header = None
+            for index in range(window.file_list.count()):
+                item = window.file_list.item(index)
+                if item.data(main_module.Qt.UserRole + 1) == "original":
+                    original_header = item
+                    break
+            self.assertIsNotNone(original_header)
+            self.assertTrue(window.canvas.original_pixmap is None or window.canvas.original_pixmap.isNull())
+
+            window._handle_image_list_item_clicked(original_header)
+
+            self.assertTrue(window.image_list_group_collapsed.get("original"))
+            self.assertIsNone(window.file_list.currentItem())
+            self.assertTrue(window.canvas.original_pixmap is None or window.canvas.original_pixmap.isNull())
+            self.assertEqual(window.current_image, original_key)
         finally:
             window.deleteLater()
 
@@ -1210,6 +1502,7 @@ class UiPolishScopeTests(unittest.TestCase):
             window.on_annotation_box_completed(15, 15, 45, 45)
             self.assertEqual(self.project_manager.get_boxes(image_path)["Mandible"], [20.0, 20.0, 40.0, 40.0])
             self.assertEqual(self.project_manager.get_shrink_loose_boxes(image_path)["Mandible"], [15.0, 15.0, 45.0, 45.0])
+            self.assertEqual(window.canvas.shrink_loose_boxes["Mandible"], [15.0, 15.0, 45.0, 45.0])
         finally:
             window.deleteLater()
 
@@ -1326,6 +1619,75 @@ class UiPolishScopeTests(unittest.TestCase):
         finally:
             window.deleteLater()
 
+    def test_workbench_child_auto_annotate_accepts_parent_auto_box_after_prediction_refresh(self):
+        image_path = Path(self.temp_dir.name) / "specimen.png"
+        image = QImage(96, 72, QImage.Format_RGB32)
+        image.fill(0xFFCCCCCC)
+        self.assertTrue(image.save(str(image_path)))
+
+        window = self.make_main_window()
+        try:
+            image_key = str(image_path)
+            self.project_manager.project_data["taxonomy"] = ["Head", "Mandible"]
+            self.project_manager.project_data["locator_scope"] = ["Head"]
+            self.project_manager.project_data["images"] = [image_key]
+            self.project_manager.project_data["labels"] = {
+                image_key: {
+                    "parts": {},
+                    "boxes": {},
+                    "auto_boxes": {},
+                    "descriptions": {},
+                    "status": "unlabeled",
+                    "genus": "Unknown",
+                }
+            }
+            self.project_manager.project_data["blink_context_roi_parents"] = {"Mandible": "Head"}
+            self.project_manager.project_data["cascade_routes"] = {
+                "version": "project-v2",
+                "routes": [
+                    {
+                        "parent": "Head",
+                        "child": "Mandible",
+                        "enabled": True,
+                        "appointed_expert": {
+                            "expert_id": "Mandible/expert_v20260501_090000.pth",
+                            "expert_part": "Mandible",
+                            "expert_filename": "expert_v20260501_090000.pth",
+                        },
+                        "expert_id": "Mandible/expert_v20260501_090000.pth",
+                        "expert_part": "Mandible",
+                        "expert_filename": "expert_v20260501_090000.pth",
+                    }
+                ],
+            }
+            self.engine.predict_calls.clear()
+            self.engine.predict_full_pipeline = lambda **_kwargs: {
+                "polygons": {"Head": [[12.0, 14.0], [74.0, 14.0], [74.0, 58.0], [12.0, 58.0]]},
+                "auto_boxes": {"Head": [12.0, 14.0, 74.0, 58.0]},
+                "meta": {},
+            }
+            window.refresh_route_table()
+            window.current_image = image_key
+            window._select_part_in_tree("Mandible")
+            before_context = window._refresh_blink_refine_state()
+            self.assertFalse(before_context["has_parent_box"])
+            self.assertFalse(window.btn_blink_auto_annotate.isEnabled())
+
+            window.run_prediction()
+
+            after_context = window._refresh_blink_refine_state()
+            self.assertTrue(after_context["has_parent_box"])
+            self.assertEqual(after_context["parent_box_source"], "auto")
+            self.assertTrue(after_context["can_refine"])
+            self.assertTrue(window.btn_blink_auto_annotate.isEnabled())
+
+            window.run_blink_child_auto_annotate()
+
+            self.assertEqual(len(self.engine.cascade_manager.infer_calls), 1)
+            self.assertEqual(self.engine.cascade_manager.infer_calls[0]["parent_box"], [12.0, 14.0, 74.0, 58.0])
+        finally:
+            window.deleteLater()
+
     def test_workbench_child_auto_annotate_requires_ready_route_and_parent_box(self):
         window = self.make_main_window()
         try:
@@ -1425,11 +1787,14 @@ class UiPolishScopeTests(unittest.TestCase):
         module = type(sys)("core.blink_refiner")
 
         class FakeRefiner:
+            steps = None
+
             def __init__(self, sam_model=None, device="auto"):
                 self.sam_model = sam_model
                 self.device = device
 
-            def generate_shrink_trajectory(self, image_input, initial_box, golden_poly):
+            def generate_shrink_trajectory(self, image_input, initial_box, golden_poly, steps=20):
+                FakeRefiner.steps = steps
                 return [
                     {"step": 0, "alpha": 0.0, "box": list(initial_box), "is_golden": False},
                     {"step": 1, "alpha": 1.0, "box": [22.0, 22.0, 38.0, 38.0], "is_golden": True},
@@ -1460,6 +1825,9 @@ class UiPolishScopeTests(unittest.TestCase):
                     "genus": "Unknown",
                 }
             }
+            self.project_manager.project_data["active_model_profile"] = {
+                "child_backend_defaults": {"auto_shrink_steps": 12}
+            }
             self.project_manager.project_data["blink_context_roi_parents"] = {"Mandible": "Head"}
             window.refresh_route_table()
             window.current_image = image_key
@@ -1472,6 +1840,83 @@ class UiPolishScopeTests(unittest.TestCase):
             self.assertEqual(trajectory["parent_context"]["parent_part"], "Head")
             self.assertEqual(trajectory["parent_context"]["parent_box"], [5.0, 5.0, 80.0, 60.0])
             self.assertEqual(self.project_manager.get_boxes(image_key)["Mandible"], [22.0, 22.0, 38.0, 38.0])
+            self.assertEqual(FakeRefiner.steps, 12)
+        finally:
+            window.deleteLater()
+            if previous_module is not None:
+                sys.modules["core.blink_refiner"] = previous_module
+            else:
+                sys.modules.pop("core.blink_refiner", None)
+
+    def test_workbench_batch_auto_shrink_skips_existing_trajectories(self):
+        module = type(sys)("core.blink_refiner")
+
+        class FakeRefiner:
+            calls = []
+
+            def __init__(self, sam_model=None, device="auto"):
+                self.sam_model = sam_model
+                self.device = device
+
+            def generate_shrink_trajectory(self, image_input, initial_box, golden_poly, steps=20):
+                FakeRefiner.calls.append((tuple(initial_box), len(golden_poly), steps))
+                return [
+                    {"step": 0, "alpha": 0.0, "box": list(initial_box), "is_golden": False},
+                    {"step": 1, "alpha": 1.0, "box": [22.0, 22.0, 38.0, 38.0], "is_golden": True},
+                ]
+
+        module.BlinkRefiner = FakeRefiner
+        previous_module = sys.modules.get("core.blink_refiner")
+        sys.modules["core.blink_refiner"] = module
+
+        first_path = Path(self.temp_dir.name) / "specimen_a.png"
+        second_path = Path(self.temp_dir.name) / "specimen_b.png"
+        for path in (first_path, second_path):
+            image = QImage(96, 72, QImage.Format_RGB32)
+            image.fill(0xFFCCCCCC)
+            self.assertTrue(image.save(str(path)))
+        window = self.make_main_window()
+        try:
+            first_key = str(first_path)
+            second_key = str(second_path)
+            self.project_manager.project_data["taxonomy"] = ["Head", "Mandible"]
+            self.project_manager.project_data["locator_scope"] = ["Head"]
+            self.project_manager.project_data["images"] = [first_key, second_key]
+            base_label = {
+                "parts": {"Mandible": [[24, 24], [38, 24], [38, 38], [24, 38]]},
+                "boxes": {"Head": [5, 5, 80, 60], "Mandible": [24, 24, 38, 38]},
+                "auto_boxes": {},
+                "descriptions": {},
+                "shrink_loose_boxes": {"Mandible": [18, 18, 44, 44]},
+                "status": "labeled",
+                "genus": "Unknown",
+            }
+            self.project_manager.project_data["labels"] = {
+                first_key: copy.deepcopy(base_label),
+                second_key: {
+                    **copy.deepcopy(base_label),
+                    "trajectories": {"Mandible": {"frames": [{"box": [1, 1, 2, 2]}]}},
+                },
+            }
+            self.project_manager.project_data["active_model_profile"] = {
+                "child_backend_defaults": {"auto_shrink_steps": 9}
+            }
+            self.project_manager.project_data["blink_context_roi_parents"] = {"Mandible": "Head"}
+            window.refresh_route_table()
+            window.current_image = first_key
+            window._select_part_in_tree("Mandible")
+
+            with patch.object(main_module, "themed_yes_no_question", return_value=main_module.QMessageBox.Yes):
+                window.run_blink_batch_auto_shrink()
+
+            self.assertEqual(len(FakeRefiner.calls), 1)
+            self.assertEqual(FakeRefiner.calls[0][2], 9)
+            first_trajectory = self.project_manager.project_data["labels"][first_key]["trajectories"]["Mandible"]
+            second_trajectory = self.project_manager.project_data["labels"][second_key]["trajectories"]["Mandible"]
+            self.assertEqual(len(first_trajectory["frames"]), 2)
+            self.assertEqual(first_trajectory["parent_context"]["parent_part"], "Head")
+            self.assertEqual(second_trajectory["frames"], [{"box": [1, 1, 2, 2]}])
+            self.assertEqual(self.project_manager.get_boxes(first_key)["Mandible"], [22.0, 22.0, 38.0, 38.0])
         finally:
             window.deleteLater()
             if previous_module is not None:
@@ -1546,6 +1991,206 @@ class UiPolishScopeTests(unittest.TestCase):
         finally:
             window.deleteLater()
 
+    def test_workbench_shared_training_progress_tracks_child_expert_thread(self):
+        class FakeBlinkTrainingThread:
+            def __init__(self):
+                self.progress_signal = DummySignal()
+                self.result_signal = DummySignal()
+                self.error_signal = DummySignal()
+                self.cancelled_signal = DummySignal()
+                self.finished = DummySignal()
+                self._running = True
+
+            def isRunning(self):
+                return self._running
+
+        window = self.make_main_window()
+        try:
+            image_path = str(Path(self.temp_dir.name) / "specimen.png")
+            self.project_manager.project_data["taxonomy"] = ["Head", "Mandible"]
+            self.project_manager.project_data["locator_scope"] = ["Head"]
+            self.project_manager.project_data["images"] = [image_path]
+            self.project_manager.project_data["labels"] = {
+                image_path: {
+                    "parts": {"Mandible": [[24, 24], [38, 24], [38, 38], [24, 38]]},
+                    "boxes": {"Head": [5, 5, 80, 60]},
+                    "auto_boxes": {},
+                    "descriptions": {},
+                    "status": "labeled",
+                    "genus": "Unknown",
+                }
+            }
+            self.project_manager.project_data["blink_context_roi_parents"] = {"Mandible": "Head"}
+            window.refresh_route_table()
+            window.current_image = image_path
+            window._select_part_in_tree("Mandible")
+            fake_thread = FakeBlinkTrainingThread()
+
+            def start_fake_training():
+                window.blink_lab.training_thread = fake_thread
+
+            with patch.object(window.blink_lab, "train_expert_model", side_effect=start_fake_training):
+                window.train_current_blink_expert()
+
+            self.assertTrue(window.btn_blink_stop_training.isEnabled())
+            fake_thread.progress_signal.emit(37)
+            self.assertEqual(window.progress.value(), 37)
+            self.assertIn("Child-part expert training", window.label_training_progress_status.text())
+            self.assertIn("Head -> Mandible", window.label_training_progress_status.text())
+
+            fake_thread.result_signal.emit(str(Path(self.temp_dir.name) / "mandible_expert.pt"))
+            fake_thread._running = False
+            fake_thread.finished.emit()
+            self.assertEqual(window.progress.value(), 100)
+            self.assertTrue(window.btn_train.isEnabled())
+            self.assertFalse(window.btn_blink_stop_training.isEnabled())
+        finally:
+            window.deleteLater()
+
+    def test_workbench_child_training_stop_button_delegates_to_blink_lab(self):
+        class FakeBlinkTrainingThread:
+            def __init__(self):
+                self.progress_signal = DummySignal()
+                self.result_signal = DummySignal()
+                self.error_signal = DummySignal()
+                self.cancelled_signal = DummySignal()
+                self.finished = DummySignal()
+                self._running = True
+
+            def isRunning(self):
+                return self._running
+
+        window = self.make_main_window()
+        try:
+            fake_thread = FakeBlinkTrainingThread()
+            window.blink_lab.training_thread = fake_thread
+            window._connect_child_training_progress()
+            window.btn_blink_stop_training.setEnabled(True)
+            with patch.object(window.blink_lab, "stop_expert_training") as stop:
+                window.stop_current_blink_expert_training()
+
+            stop.assert_called_once()
+            self.assertTrue(window.child_training_cancel_requested)
+            self.assertFalse(window.btn_blink_stop_training.isEnabled())
+            self.assertIn("Stopping child-part expert training", window.label_training_progress_status.text())
+        finally:
+            window.deleteLater()
+
+    def test_workbench_training_results_browser_discovers_parent_and_child_reports(self):
+        experiments_dir = Path(self.temp_dir.name) / "experiments"
+        parent_dir = experiments_dir / "exp_20260606_010101"
+        child_dir = experiments_dir / "heatmap_blink_Mandible_20260606_010102"
+        for report_dir in [parent_dir, child_dir]:
+            (report_dir / "val_details").mkdir(parents=True, exist_ok=True)
+            (report_dir / "validation_index.csv").write_text(
+                "sample_id,image_name,image_path,detail_image,provenance,valid_parts,predicted_parts,peak_summary,error_summary,max_error_px\n",
+                encoding="utf-8",
+            )
+
+        (parent_dir / "report_summary.json").write_text(
+            main_module.json.dumps(
+                {
+                    "validation_count": 6,
+                    "metrics_plot": "metrics_plot.png",
+                    "validation_summary_image": "validation_samples.png",
+                    "validation_details_dir": "val_details",
+                    "validation_index_csv": "validation_index.csv",
+                    "training_context": {
+                        "parent_backend": main_module.PARENT_BACKEND_BUILTIN,
+                        "locator_scope": ["Head", "Mesosoma", "Gaster"],
+                        "train_segmenter": True,
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        (child_dir / "report_summary.json").write_text(
+            main_module.json.dumps(
+                {
+                    "kind": "heatmap_blink_expert_report",
+                    "part_name": "Mandible",
+                    "parent_part": "Head",
+                    "model_path": str(self.weights_dir / "experts" / "Mandible" / "model.pth"),
+                    "training_strategy": main_module.BLINK_STRATEGY_TWO_STAGE_FULL_THEN_INSIDE,
+                    "validation_count": 4,
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        window = self.make_main_window()
+        try:
+            self.assertIsNotNone(getattr(window, "btn_training_results", None))
+            self.assertEqual(window.btn_training_results.objectName(), "workbenchTrainingResultsButton")
+            self.assertEqual(window.btn_training_results.text(), "Training Results")
+            reports = [
+                report
+                for report in window.discover_training_reports()
+                if str(report.get("dir", "")).startswith(str(experiments_dir))
+            ]
+            self.assertEqual(len(reports), 2)
+            report_types = {report["report_type"] for report in reports}
+            self.assertEqual(report_types, {"parent", "child"})
+            child_report = next(report for report in reports if report["report_type"] == "child")
+            self.assertEqual(child_report["target_label"], "Head -> Mandible")
+            self.assertIn("Plan 3", child_report["strategy_label"])
+
+            dialog = main_module.TrainingResultBrowserDialog(reports, lang="en")
+            try:
+                self.assertEqual(dialog.table.rowCount(), 2)
+                self.assertEqual(
+                    [dialog.table.horizontalHeaderItem(i).text() for i in range(dialog.table.columnCount())],
+                    ["Type", "Target", "Backend", "Strategy", "Samples", "Time", "Report Folder"],
+                )
+            finally:
+                dialog.close()
+        finally:
+            window.deleteLater()
+
+    def test_workbench_training_buttons_are_mutually_exclusive(self):
+        class FakeRunningTraining:
+            def isRunning(self):
+                return True
+
+        window = self.make_main_window()
+        try:
+            image_path = str(Path(self.temp_dir.name) / "specimen.png")
+            self.project_manager.project_data["taxonomy"] = ["Head", "Mandible"]
+            self.project_manager.project_data["locator_scope"] = ["Head"]
+            self.project_manager.project_data["images"] = [image_path]
+            self.project_manager.project_data["labels"] = {
+                image_path: {
+                    "parts": {"Mandible": [[24, 24], [38, 24], [38, 38], [24, 38]]},
+                    "boxes": {"Head": [5, 5, 80, 60]},
+                    "auto_boxes": {},
+                    "descriptions": {},
+                    "status": "labeled",
+                    "genus": "Unknown",
+                }
+            }
+            self.project_manager.project_data["blink_context_roi_parents"] = {"Mandible": "Head"}
+            window.refresh_route_table()
+            window.current_image = image_path
+            window._select_part_in_tree("Mandible")
+
+            window.trainer = FakeRunningTraining()
+            with patch.object(window.blink_lab, "train_expert_model") as train, \
+                 patch.object(main_module.QMessageBox, "information") as info:
+                window.train_current_blink_expert()
+
+            train.assert_not_called()
+            info.assert_called()
+
+            window.trainer = None
+            window.blink_lab.training_thread = FakeRunningTraining()
+            with patch.object(main_module.QMessageBox, "information") as info:
+                window.run_training()
+            info.assert_called()
+        finally:
+            window.deleteLater()
+
     def test_remove_selected_tree_part_delegates_to_project_cleanup(self):
         window = self.make_main_window()
         try:
@@ -1597,6 +2242,34 @@ class UiPolishScopeTests(unittest.TestCase):
                     }
                 ],
             }
+            image_a = str(Path(self.temp_dir.name) / "specimen_a.png")
+            image_b = str(Path(self.temp_dir.name) / "specimen_b.png")
+            self.project_manager.project_data["labels"] = {
+                image_a: {
+                    "trajectories": {
+                        "Mandible": {
+                            "frames": [{"box": [1, 1, 10, 10]}, {"box": [2, 2, 9, 9]}],
+                            "parent_context": {
+                                "parent_part": "Head",
+                                "parent_box": [5, 5, 80, 60],
+                                "source": "manual",
+                            },
+                        }
+                    }
+                },
+                image_b: {
+                    "trajectories": {
+                        "Mandible": {
+                            "frames": [{"box": [3, 3, 8, 8]}],
+                            "parent_context": {
+                                "parent_part": "Head",
+                                "parent_box": [6, 6, 81, 61],
+                                "source": "auto",
+                            },
+                        }
+                    }
+                },
+            }
 
             route_panel = window.route_settings_panel
             route_panel.refresh_route_table()
@@ -1611,6 +2284,8 @@ class UiPolishScopeTests(unittest.TestCase):
                     "pad": 0.4,
                     "noise_floor": 0.15,
                     "poly_epsilon": 2.0,
+                    "taxonomy": ["Head", "Mesosoma", "Gaster", "Mandible"],
+                    "locator_scope": ["Head", "Mesosoma", "Gaster"],
                 },
                 lang="en",
                 parent=window,
@@ -1632,6 +2307,49 @@ class UiPolishScopeTests(unittest.TestCase):
             self.assertIsNotNone(child_tab.findChild(QWidget, "modelSettingsChildSourceSummary"))
             self.assertIsNotNone(advanced_tab.findChild(QWidget, "modelSettingsParentExtensionPanel"))
             self.assertIsNotNone(advanced_tab.findChild(QWidget, "modelSettingsExternalBlinkPanel"))
+            vlm_panel = dialog.findChild(QWidget, "modelSettingsVlmPreannotationPanel")
+            self.assertIsNotNone(vlm_panel)
+            vlm_details = dialog.findChild(QWidget, "modelSettingsVlmDetailsPanel")
+            self.assertIsNotNone(vlm_details)
+            self.assertFalse(vlm_details.isVisible())
+            self.assertIsNotNone(dialog.findChild(main_module.QToolButton, "modelSettingsVlmDetailToggle"))
+            self.assertGreaterEqual(len(dialog.vlm_target_part_checks), 4)
+            dataset_panel = child_tab.findChild(QWidget, "modelSettingsBlinkDatasetPanel")
+            self.assertIsNotNone(dataset_panel)
+            dataset_tree = child_tab.findChild(QTreeWidget, "modelSettingsBlinkDatasetTree")
+            self.assertIsNotNone(dataset_tree)
+            self.assertEqual(dataset_tree.topLevelItemCount(), 1)
+            dataset_item = dataset_tree.topLevelItem(0)
+            self.assertEqual(dataset_item.text(0), "Head -> Mandible")
+            self.assertEqual(dataset_item.text(1), "2")
+            self.assertEqual(dataset_item.text(2), "3")
+            self.assertIn("manual", dataset_item.text(3))
+            self.assertIn("auto", dataset_item.text(3))
+            dataset_tree.setCurrentItem(dataset_item)
+            details = dialog._format_blink_dataset_details(dialog._selected_blink_dataset_summary())
+            self.assertIn(image_a, details)
+            self.assertIn("Parent box", details)
+            with patch.object(main_module.QDialog, "exec", return_value=main_module.QDialog.DialogCode.Accepted) as exec_dialog:
+                dialog._show_blink_dataset_details()
+            exec_dialog.assert_called_once()
+            with patch.object(main_module, "themed_yes_no_question", return_value=main_module.QMessageBox.Yes):
+                dialog._delete_selected_blink_dataset()
+            self.assertEqual(self.project_manager.project_data["labels"][image_a].get("trajectories", {}), {})
+            self.assertEqual(self.project_manager.project_data["labels"][image_b].get("trajectories", {}), {})
+            self.assertIn("No Blink shrink trajectory datasets", dataset_tree.topLevelItem(0).text(0))
+            self.assertIsNotNone(dialog.spin_blink_auto_shrink_steps)
+            self.assertEqual(dialog.spin_blink_auto_shrink_steps.value(), 20)
+            self.assertIsNotNone(dialog.combo_blink_training_strategy)
+            strategy_index = dialog.combo_blink_training_strategy.findData("two_stage_full_then_inside")
+            self.assertGreaterEqual(strategy_index, 0)
+            dialog.combo_blink_training_strategy.setCurrentIndex(strategy_index)
+            dialog.spin_blink_auto_shrink_steps.setValue(35)
+            values = dialog.get_values()
+            self.assertEqual(values["blink_auto_shrink_steps"], 35)
+            self.assertEqual(values["blink_training_strategy"], "two_stage_full_then_inside")
+            active_profile = values["model_profiles"]["profiles"][0]
+            self.assertEqual(active_profile["child_backend_defaults"]["auto_shrink_steps"], 35)
+            self.assertEqual(active_profile["child_backend_defaults"]["training_strategy"], "two_stage_full_then_inside")
             self.assertIn("Deleting a route removes only this project record", route_panel.note_label.text())
             self.assertEqual(route_panel.route_tree.objectName(), "projectRouteTree")
             self.assertGreaterEqual(route_panel.route_tree.minimumHeight(), 360)
@@ -1650,6 +2368,70 @@ class UiPolishScopeTests(unittest.TestCase):
                 dialog.deleteLater()
             except Exception:
                 pass
+            window.deleteLater()
+
+    def test_route_panel_can_delete_selected_child_expert_file(self):
+        expert_dir = self.weights_dir / "experts" / "Mandible"
+        expert_dir.mkdir(parents=True, exist_ok=True)
+        expert_path = expert_dir / "expert_v20260501_090000.pth"
+        expert_path.write_bytes(b"expert")
+
+        window = self.make_main_window()
+        try:
+            self.project_manager.project_data["taxonomy"] = ["Head", "Mesosoma", "Gaster", "Mandible"]
+            self.project_manager.project_data["cascade_routes"] = {
+                "version": "project-v2",
+                "routes": [
+                    {
+                        "parent": "Head",
+                        "child": "Mandible",
+                        "enabled": True,
+                        "appointed_expert": {
+                            "expert_id": "Mandible/expert_v20260501_090000.pth",
+                            "expert_part": "Mandible",
+                            "expert_filename": "expert_v20260501_090000.pth",
+                        },
+                        "expert_id": "Mandible/expert_v20260501_090000.pth",
+                        "expert_part": "Mandible",
+                        "expert_filename": "expert_v20260501_090000.pth",
+                        "expert_candidates": [],
+                    }
+                ],
+            }
+            window.engine.cascade_manager.loaded_experts["cached-model"] = object()
+
+            route_panel = window.route_settings_panel
+            route_panel.refresh_route_table()
+            route_item = route_panel._find_route_item("Head", "Mandible")
+            self.assertIsNotNone(route_item)
+            self.assertEqual(route_item.childCount(), 1)
+            expert_item = route_item.child(0)
+            route_panel.route_tree.setCurrentItem(expert_item)
+            route_panel.update_action_buttons()
+
+            self.assertTrue(route_panel.btn_delete_expert_file.isEnabled())
+            self.assertEqual(route_panel.btn_delete_route.text(), "Delete Route")
+            self.assertEqual(route_panel.btn_delete_expert_file.text(), "Delete Expert File")
+
+            with patch.object(
+                main_module,
+                "themed_yes_no_question",
+                return_value=main_module.QMessageBox.Yes,
+            ):
+                route_panel.delete_selected_expert_file()
+
+            self.assertFalse(expert_path.exists())
+            self.assertEqual(len(self.project_manager.project_data["cascade_routes"]["routes"]), 1)
+            refreshed_route_item = route_panel._find_route_item("Head", "Mandible")
+            self.assertEqual(refreshed_route_item.text(5), "Expert not appointed yet")
+            self.assertEqual(refreshed_route_item.text(4), "Not appointed")
+            self.assertEqual(refreshed_route_item.childCount(), 1)
+            self.assertEqual(refreshed_route_item.child(0).text(5), "Expert not appointed yet")
+            route_record = self.project_manager.project_data["cascade_routes"]["routes"][0]
+            self.assertIsNone(route_record.get("expert_id"))
+            self.assertEqual(route_record.get("expert_candidates"), [])
+            self.assertEqual(window.engine.cascade_manager.loaded_experts, {})
+        finally:
             window.deleteLater()
 
     def test_model_settings_exposes_locator_scope_selection(self):
@@ -2066,6 +2848,162 @@ class UiPolishScopeTests(unittest.TestCase):
             self.assertEqual(self.project_manager.save_calls, baseline_save_calls + 1)
             self.assertFalse(window.project_save_pending)
             self.assertFalse(window.project_save_timer.isActive())
+        finally:
+            window.hide()
+            window.deleteLater()
+
+    def test_main_window_manual_polygon_edit_clears_auto_annotated_blocker(self):
+        image_path = Path(self.temp_dir.name) / "specimen.png"
+        image = QImage(240, 180, QImage.Format_RGB32)
+        image.fill(0xFFB0B0B0)
+        self.assertTrue(image.save(str(image_path)))
+
+        image_key = str(image_path)
+        window = self.make_main_window()
+        try:
+            self.project_manager.project_data["images"] = [image_key]
+            self.project_manager.project_data["labels"] = {
+                image_key: {
+                    "parts": {"Head": [[20.0, 20.0], [60.0, 20.0], [40.0, 55.0]]},
+                    "boxes": {},
+                    "auto_boxes": {"Head": [20.0, 20.0, 80.0, 68.0]},
+                    "auto_box_meta": {"Head": {"source": "vlm_first_mile", "review_status": "draft"}},
+                    "descriptions": {"Head": "Auto-Annotated"},
+                    "status": "labeled",
+                    "genus": "Unknown",
+                }
+            }
+
+            window.show()
+            self.app.processEvents()
+            window.refresh_file_list()
+            window.file_list.setCurrentItem(window.file_list.item(0))
+            self.app.processEvents()
+            window.desc_box.setPlainText("Auto-Annotated")
+
+            updated_points = [[24.0, 24.0], [80.0, 24.0], [52.0, 70.0]]
+            window.on_polygon_completed("Head", updated_points)
+            self.app.processEvents()
+
+            labels = self.project_manager.project_data["labels"][image_key]
+            self.assertNotIn("Head", labels.get("descriptions", {}))
+            self.assertEqual(labels["parts"]["Head"], updated_points)
+        finally:
+            window.hide()
+            window.deleteLater()
+
+    def test_main_window_accept_current_ai_drafts_requires_confirmation(self):
+        image_path = Path(self.temp_dir.name) / "specimen.png"
+        image = QImage(240, 180, QImage.Format_RGB32)
+        image.fill(0xFFB0B0B0)
+        self.assertTrue(image.save(str(image_path)))
+
+        image_key = str(image_path)
+        window = self.make_main_window()
+        try:
+            self.project_manager.project_data["images"] = [image_key]
+            self.project_manager.project_data["labels"] = {
+                image_key: {
+                    "parts": {"Head": [[20.0, 20.0], [60.0, 20.0], [40.0, 55.0]]},
+                    "boxes": {},
+                    "auto_boxes": {"Head": [20.0, 20.0, 80.0, 68.0]},
+                    "auto_box_meta": {"Head": {"source": "vlm_first_mile", "review_status": "draft"}},
+                    "descriptions": {"Head": "Auto-Annotated"},
+                    "status": "labeled",
+                    "genus": "Unknown",
+                }
+            }
+
+            window.show()
+            self.app.processEvents()
+            window.refresh_file_list()
+            window.file_list.setCurrentItem(window.file_list.item(0))
+            self.app.processEvents()
+
+            with patch.object(
+                main_module,
+                "themed_yes_no_question",
+                return_value=main_module.QMessageBox.No,
+            ) as confirm:
+                window.accept_current_image_ai_drafts()
+            confirm.assert_called_once()
+            self.assertEqual(self.project_manager.project_data["labels"][image_key]["descriptions"]["Head"], "Auto-Annotated")
+
+            with patch.object(
+                main_module,
+                "themed_yes_no_question",
+                return_value=main_module.QMessageBox.Yes,
+            ) as confirm:
+                window.accept_current_image_ai_drafts()
+            confirm.assert_called_once()
+            labels = self.project_manager.project_data["labels"][image_key]
+            self.assertNotIn("Head", labels.get("descriptions", {}))
+            self.assertEqual(labels["auto_box_meta"]["Head"]["review_status"], "confirmed")
+        finally:
+            window.hide()
+            window.deleteLater()
+
+    def test_main_window_accept_batch_ai_drafts_confirms_project_auto_drafts(self):
+        first_image = Path(self.temp_dir.name) / "split_a.png"
+        second_image = Path(self.temp_dir.name) / "split_b.png"
+        for path in (first_image, second_image):
+            image = QImage(240, 180, QImage.Format_RGB32)
+            image.fill(0xFFB0B0B0)
+            self.assertTrue(image.save(str(path)))
+
+        first_key = str(first_image)
+        second_key = str(second_image)
+        window = self.make_main_window()
+        try:
+            self.project_manager.project_data["images"] = [first_key, second_key]
+            self.project_manager.project_data["labels"] = {
+                first_key: {
+                    "parts": {"Head": [[20.0, 20.0], [60.0, 20.0], [40.0, 55.0]]},
+                    "boxes": {},
+                    "auto_boxes": {
+                        "Head": [20.0, 20.0, 80.0, 68.0],
+                        "Eye": [40.0, 30.0, 52.0, 42.0],
+                    },
+                    "auto_box_meta": {
+                        "Head": {"source": "vlm_first_mile", "review_status": "draft"},
+                        "Eye": {"source": "vlm_first_mile", "review_status": "draft"},
+                    },
+                    "descriptions": {"Head": "Auto-Annotated", "Eye": "Auto-Annotated"},
+                    "status": "labeled",
+                    "genus": "Unknown",
+                },
+                second_key: {
+                    "parts": {"Mesosoma": [[40.0, 20.0], [100.0, 20.0], [100.0, 70.0], [40.0, 70.0]]},
+                    "boxes": {},
+                    "auto_boxes": {"Mesosoma": [40.0, 20.0, 100.0, 70.0]},
+                    "auto_box_meta": {"Mesosoma": {"source": "vlm_first_mile", "review_status": "draft"}},
+                    "descriptions": {"Mesosoma": "Auto-Annotated"},
+                    "status": "labeled",
+                    "genus": "Unknown",
+                },
+            }
+
+            window.show()
+            self.app.processEvents()
+            window.refresh_file_list()
+            window.file_list.setCurrentItem(window.file_list.item(0))
+            self.app.processEvents()
+
+            with patch.object(
+                main_module,
+                "themed_yes_no_question",
+                return_value=main_module.QMessageBox.Yes,
+            ) as confirm:
+                window.accept_batch_ai_drafts()
+            confirm.assert_called_once()
+
+            first_labels = self.project_manager.project_data["labels"][first_key]
+            second_labels = self.project_manager.project_data["labels"][second_key]
+            self.assertNotIn("Head", first_labels.get("descriptions", {}))
+            self.assertEqual(first_labels["descriptions"]["Eye"], "Auto-Annotated")
+            self.assertNotIn("Mesosoma", second_labels.get("descriptions", {}))
+            self.assertEqual(first_labels["auto_box_meta"]["Head"]["review_status"], "confirmed")
+            self.assertEqual(second_labels["auto_box_meta"]["Mesosoma"]["review_status"], "confirmed")
         finally:
             window.hide()
             window.deleteLater()

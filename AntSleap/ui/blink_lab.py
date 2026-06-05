@@ -1,12 +1,13 @@
 # pyright: reportMissingImports=false, reportAttributeAccessIssue=false, reportIncompatibleMethodOverride=false, reportArgumentType=false, reportOptionalMemberAccess=false, reportOptionalCall=false, reportUninitializedInstanceVariable=false
 
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, 
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                               QPushButton, QLabel, QSplitter, QListWidget,
-                              QGroupBox, QSlider, QProgressBar, QRadioButton, QButtonGroup, QSpinBox, QTreeWidget, QTreeWidgetItem, QMessageBox, QTextEdit, QCheckBox, QDialog, QDialogButtonBox, QLineEdit, QHeaderView, QSizePolicy, QScrollArea, QFrame, QComboBox, QTabWidget, QInputDialog)
+                              QGroupBox, QSlider, QProgressBar, QRadioButton, QButtonGroup, QSpinBox, QTreeWidget, QTreeWidgetItem, QMessageBox, QTextEdit, QCheckBox, QDialog, QDialogButtonBox, QLineEdit, QHeaderView, QSizePolicy, QScrollArea, QFrame, QComboBox, QTabWidget, QInputDialog, QTableWidget, QTableWidgetItem, QAbstractItemView)
 import os
 import shutil
 import sys
-from PySide6.QtCore import Qt, Signal, QPointF, QRectF, QThread
+import csv
+from PySide6.QtCore import Qt, Signal, QPointF, QRectF, QThread, QTimer
 from PySide6.QtGui import QColor, QPainter, QBrush, QPen, QPainterPath, QPixmap
 try:
     from AntSleap.core.taxonomy_defaults import is_safe_part_name
@@ -18,6 +19,11 @@ try:
         default_manifest_path_for_weights,
         load_blink_expert_manifest,
     )
+    from AntSleap.core.blink_training_strategy import (
+        DEFAULT_BLINK_TRAINING_STRATEGY,
+        blink_training_strategy_label,
+        sanitize_blink_training_strategy,
+    )
 except ImportError:
     from core.taxonomy_defaults import is_safe_part_name
     from core.cascade_routes import build_expert_id
@@ -27,6 +33,11 @@ except ImportError:
         BLINK_EXPERT_BACKEND_VIT_B,
         default_manifest_path_for_weights,
         load_blink_expert_manifest,
+    )
+    from core.blink_training_strategy import (
+        DEFAULT_BLINK_TRAINING_STRATEGY,
+        blink_training_strategy_label,
+        sanitize_blink_training_strategy,
     )
 from .canvas import AnnotationCanvas
 from .style import (
@@ -80,6 +91,7 @@ BLINK_TRANSLATIONS = {
         "Learning Rate:": "学习率 (LR):",
         "Weight Decay:": "权重衰减：",
         "Input Size:": "输入尺寸：",
+        "Auto-shrink Steps:": "自动收缩步数：",
         "Trainer Backend:": "训练后端：",
         "ViT-B Blink": "ViT-B Blink",
         "Heatmap Blink": "热力图 Blink",
@@ -87,6 +99,27 @@ BLINK_TRANSLATIONS = {
         "Summary": "摘要",
         "Metrics": "指标",
         "Box Validation": "框验证",
+        "Validation Inspection": "验证样本检查",
+        "Show Validation Set %:": "显示验证集比例：",
+        "All validation": "全部验证样本",
+        "ViT-B Blink Expert": "ViT-B Blink 专家",
+        "Heatmap Blink Expert": "热力图 Blink 专家",
+        "Load Samples": "加载样本",
+        "Open Report Folder": "打开报告文件夹",
+        "ID": "编号",
+        "Image": "图像",
+        "Source": "来源",
+        "Valid Parts": "有效部位",
+        "Score / IoU": "分数 / IoU",
+        "Error": "误差",
+        "{0}% ({1} images)": "{0}%（{1} 张图）",
+        "Validation samples: {0}": "验证样本：{0}",
+        "Report folder: {0}": "报告文件夹：{0}",
+        "Model: {0}": "模型：{0}",
+        "Green box = trajectory target / golden box": "绿色框 = 轨迹目标 / 真值框",
+        "Cyan box = Blink expert prediction": "青色框 = Blink 专家预测",
+        "No validation details found at {0}": "未在 {0} 找到验证详情",
+        "No validation samples found.": "没有找到验证样本。",
         "No report image generated.": "没有生成报告图像。",
         "Close": "关闭",
         "TRAIN EXPERT MODEL": "训练专家模型",
@@ -297,6 +330,7 @@ class BlinkTrainingThread(QThread):
         input_size=224,
         trainer_backend=BLINK_EXPERT_BACKEND_VIT_B,
         heatmap_params=None,
+        training_strategy=DEFAULT_BLINK_TRAINING_STRATEGY,
         device="auto",
     ):
         super().__init__()
@@ -310,6 +344,7 @@ class BlinkTrainingThread(QThread):
         self.input_size = input_size
         self.trainer_backend = str(trainer_backend or BLINK_EXPERT_BACKEND_VIT_B)
         self.heatmap_params = dict(heatmap_params or {})
+        self.training_strategy = sanitize_blink_training_strategy(training_strategy)
         self.device = device
 
     def run(self):
@@ -330,6 +365,7 @@ class BlinkTrainingThread(QThread):
                     heatmap_sigma=self.heatmap_params.get("heatmap_sigma", 2.0),
                     wh_loss_weight=self.heatmap_params.get("wh_loss_weight", 1.0),
                     center_loss_weight=self.heatmap_params.get("center_loss_weight", 1.0),
+                    training_strategy=self.training_strategy,
                     device=self.device,
                 )
             else:
@@ -345,6 +381,7 @@ class BlinkTrainingThread(QThread):
                     learning_rate=self.learning_rate,
                     weight_decay=self.weight_decay,
                     input_size=self.input_size,
+                    training_strategy=self.training_strategy,
                     device=self.device,
                 )
             save_path = trainer.train(
@@ -371,25 +408,33 @@ class BlinkExpertTrainingReportDialog(QDialog):
         self.report_data = dict(report_data or {})
         self.lang = lang
         self.setWindowTitle(translate_blink_text("Blink Training Report", lang))
-        self.resize(1100, 760)
+        self.resize(1200, 800)
+        self.validation_rows = self._load_validation_rows()
+        self.filtered_validation_rows = list(self.validation_rows)
 
         layout = QVBoxLayout(self)
         tabs = QTabWidget()
 
         summary = self.report_data.get("validation_summary") or {}
+        backend_name = "Heatmap Blink Expert" if str(summary.get("kind", "")).startswith("heatmap") else "ViT-B Blink Expert"
         summary_text = [
             f"Part: {summary.get('part_name', '')}",
             f"Parent: {summary.get('parent_part') or 'N/A'}",
+            f"Backend: {translate_blink_text(backend_name, lang)}",
             f"Input size: {summary.get('input_size', '')}",
             f"Learning rate: {summary.get('learning_rate', '')}",
             f"Weight decay: {summary.get('weight_decay', '')}",
-            f"Validation samples: {summary.get('validation_count', 0)}",
-            f"Model: {self.report_data.get('model_path', '')}",
-            f"Report folder: {self.report_data.get('dir', '')}",
+            translate_blink_text("Validation samples: {0}", lang).format(summary.get('validation_count', 0)),
+            translate_blink_text("Model: {0}", lang).format(self.report_data.get('model_path', '')),
+            translate_blink_text("Report folder: {0}", lang).format(self.report_data.get('dir', '')),
             "",
-            "Green box = trajectory target / golden box",
-            "Cyan box = Blink expert prediction",
+            translate_blink_text("Green box = trajectory target / golden box", lang),
+            translate_blink_text("Cyan box = Blink expert prediction", lang),
         ]
+        if summary.get("trajectory_sequence_count") is not None:
+            summary_text.insert(6, f"Trajectory sequences: {summary.get('trajectory_sequence_count')}")
+        if summary.get("expanded_training_sample_count") is not None:
+            summary_text.insert(7, f"Expanded training samples: {summary.get('expanded_training_sample_count')}")
         summary_box = QTextEdit()
         summary_box.setReadOnly(True)
         summary_box.setPlainText("\n".join(str(line) for line in summary_text))
@@ -403,14 +448,23 @@ class BlinkExpertTrainingReportDialog(QDialog):
             self._image_tab(self.report_data.get("val")),
             translate_blink_text("Box Validation", lang),
         )
+        tabs.addTab(self._validation_inspection_tab(), translate_blink_text("Validation Inspection", lang))
 
         layout.addWidget(tabs, 1)
+        button_row = QHBoxLayout()
+        btn_open = QPushButton(translate_blink_text("Open Report Folder", lang))
+        btn_open.clicked.connect(self.open_folder)
+        apply_semantic_button_style(btn_open, BUTTON_ROLE_NEUTRAL)
+        button_row.addWidget(btn_open)
+        button_row.addStretch()
+
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         close_button = buttons.button(QDialogButtonBox.StandardButton.Close)
         if close_button:
             close_button.setText(translate_blink_text("Close", lang))
         buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        button_row.addWidget(buttons)
+        layout.addLayout(button_row)
 
     def _image_tab(self, image_path):
         scroll = QScrollArea()
@@ -426,6 +480,201 @@ class BlinkExpertTrainingReportDialog(QDialog):
         layout.addStretch()
         scroll.setWidget(holder)
         return scroll
+
+    def _load_validation_rows(self):
+        rows = []
+        if isinstance(self.report_data.get("validation_rows"), list):
+            rows = [dict(row) for row in self.report_data.get("validation_rows", []) if isinstance(row, dict)]
+        if rows:
+            return rows
+        index_path = self.report_data.get("validation_index")
+        if index_path and os.path.exists(index_path):
+            try:
+                with open(index_path, "r", encoding="utf-8", newline="") as handle:
+                    reader = csv.DictReader(handle)
+                    rows = [dict(row) for row in reader]
+            except Exception:
+                rows = []
+        return rows
+
+    def _validation_source_label(self, provenance):
+        value = str(provenance or "")
+        if value == "heatmap_blink_expert":
+            return translate_blink_text("Heatmap Blink Expert", self.lang)
+        if value == "blink_expert":
+            return translate_blink_text("ViT-B Blink Expert", self.lang)
+        return value
+
+    def _validation_detail_path(self, row):
+        details_dir = self.report_data.get("details_dir") or os.path.join(self.report_data.get("dir", ""), "val_details")
+        detail_name = row.get("detail_image") if isinstance(row, dict) else None
+        if not detail_name:
+            return None
+        path = os.path.join(details_dir, detail_name)
+        return path if os.path.exists(path) else None
+
+    def _validation_inspection_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        ctrl_layout = QHBoxLayout()
+        ctrl_layout.addWidget(QLabel(translate_blink_text("Show Validation Set %:", self.lang)))
+
+        self.validation_pct_slider = QSlider(Qt.Horizontal)
+        self.validation_pct_slider.setRange(5, 100)
+        self.validation_pct_slider.setValue(100)
+        self.validation_pct_slider.setTickPosition(QSlider.TicksBelow)
+        self.validation_pct_slider.setTickInterval(10)
+        self.validation_pct_label = QLabel("100%")
+        self.validation_pct_slider.valueChanged.connect(lambda value: self.validation_pct_label.setText(f"{value}%"))
+        ctrl_layout.addWidget(self.validation_pct_slider, 1)
+        ctrl_layout.addWidget(self.validation_pct_label)
+
+        self.validation_filter = NoWheelComboBox()
+        self.validation_filter.addItem(translate_blink_text("All validation", self.lang), "all")
+        self.validation_filter.addItem(translate_blink_text("ViT-B Blink Expert", self.lang), "blink_expert")
+        self.validation_filter.addItem(translate_blink_text("Heatmap Blink Expert", self.lang), "heatmap_blink_expert")
+        self.validation_filter.currentIndexChanged.connect(self.load_validation_samples)
+        ctrl_layout.addWidget(self.validation_filter)
+
+        btn_load = QPushButton(translate_blink_text("Load Samples", self.lang))
+        btn_load.clicked.connect(self.load_validation_samples)
+        apply_semantic_button_style(btn_load, BUTTON_ROLE_NEUTRAL)
+        ctrl_layout.addWidget(btn_load)
+        layout.addLayout(ctrl_layout)
+
+        splitter = QSplitter(Qt.Horizontal)
+        self.validation_table = QTableWidget(0, 6)
+        self.validation_table.setObjectName("blinkTrainingValidationTable")
+        self.validation_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.validation_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.validation_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.validation_table.setAlternatingRowColors(True)
+        self.validation_table.verticalHeader().setVisible(False)
+        header = self.validation_table.horizontalHeader()
+        header.setStretchLastSection(True)
+        header.setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.validation_table.setHorizontalHeaderLabels([
+            translate_blink_text("ID", self.lang),
+            translate_blink_text("Image", self.lang),
+            translate_blink_text("Source", self.lang),
+            translate_blink_text("Valid Parts", self.lang),
+            translate_blink_text("Score / IoU", self.lang),
+            translate_blink_text("Error", self.lang),
+        ])
+        self.validation_table.itemSelectionChanged.connect(self._load_selected_validation_preview)
+        splitter.addWidget(self.validation_table)
+
+        preview_scroll = QScrollArea()
+        preview_scroll.setWidgetResizable(True)
+        preview_holder = QWidget()
+        preview_layout = QVBoxLayout(preview_holder)
+        self.validation_preview_label = QLabel(translate_blink_text("No report image generated.", self.lang))
+        self.validation_preview_label.setObjectName("blinkTrainingValidationPreview")
+        self.validation_preview_label.setAlignment(Qt.AlignCenter)
+        self.validation_preview_label.setMinimumSize(460, 360)
+        self.validation_preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        preview_layout.addWidget(self.validation_preview_label, 1)
+        preview_scroll.setWidget(preview_holder)
+        splitter.addWidget(preview_scroll)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 2)
+        layout.addWidget(splitter, 1)
+
+        self.load_validation_samples()
+        return tab
+
+    def _current_validation_rows(self):
+        filter_value = self.validation_filter.currentData() if hasattr(self, "validation_filter") else "all"
+        if filter_value in (None, "all"):
+            return list(self.validation_rows)
+        return [row for row in self.validation_rows if row.get("provenance") == filter_value]
+
+    def load_validation_samples(self):
+        if not hasattr(self, "validation_table"):
+            return
+        details_dir = self.report_data.get("details_dir") or os.path.join(self.report_data.get("dir", ""), "val_details")
+        rows = self._current_validation_rows()
+        if not rows:
+            self.filtered_validation_rows = []
+            self.validation_table.setRowCount(0)
+            self.validation_preview_label.setText(translate_blink_text("No validation samples found.", self.lang))
+            return
+        if not os.path.exists(details_dir):
+            self.validation_preview_label.setText(
+                translate_blink_text("No validation details found at {0}", self.lang).format(details_dir)
+            )
+
+        pct = self.validation_pct_slider.value() if hasattr(self, "validation_pct_slider") else 100
+        count = max(1, int(len(rows) * (pct / 100.0)))
+        selected_rows = rows[:count]
+        self.filtered_validation_rows = list(selected_rows)
+        self.validation_table.setRowCount(len(selected_rows))
+        for row_idx, row in enumerate(selected_rows):
+            values = [
+                row.get("sample_id", ""),
+                row.get("image_name", ""),
+                self._validation_source_label(row.get("provenance", "")),
+                row.get("valid_parts", ""),
+                row.get("peak_summary", ""),
+                row.get("error_summary", "") or row.get("max_error_px", ""),
+            ]
+            for col_idx, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                item.setData(Qt.UserRole, dict(row))
+                self.validation_table.setItem(row_idx, col_idx, item)
+        self.validation_pct_label.setText(
+            translate_blink_text("{0}% ({1} images)", self.lang).format(pct, count)
+        )
+        self.validation_table.resizeColumnsToContents()
+        if selected_rows:
+            self.validation_table.setCurrentCell(0, 0)
+            self._load_selected_validation_preview()
+
+    def _load_selected_validation_preview(self):
+        if not hasattr(self, "validation_table") or not hasattr(self, "validation_preview_label"):
+            return
+        current_row = self.validation_table.currentRow()
+        if current_row < 0:
+            return
+        item = self.validation_table.item(current_row, 0)
+        if not item:
+            return
+        row = item.data(Qt.UserRole)
+        if not isinstance(row, dict):
+            return
+        detail_path = self._validation_detail_path(row)
+        if not detail_path:
+            self.validation_preview_label.setPixmap(QPixmap())
+            self.validation_preview_label.setText(translate_blink_text("No report image generated.", self.lang))
+            return
+        pix = QPixmap(detail_path)
+        if pix.isNull():
+            self.validation_preview_label.setPixmap(QPixmap())
+            self.validation_preview_label.setText(translate_blink_text("No report image generated.", self.lang))
+            return
+        max_width = max(420, self.validation_preview_label.width() - 24)
+        max_height = max(320, self.validation_preview_label.height() - 24)
+        scaled = pix.scaled(max_width, max_height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.validation_preview_label.setText("")
+        self.validation_preview_label.setPixmap(scaled)
+        self.validation_preview_label.setToolTip(f"{row.get('sample_id', '')} | {detail_path}")
+
+    def open_folder(self):
+        folder = self.report_data.get("dir")
+        if not folder:
+            return
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(folder)
+            elif sys.platform == "darwin":
+                import subprocess
+                subprocess.Popen(["open", folder])
+            else:
+                import subprocess
+                subprocess.Popen(["xdg-open", folder])
+        except Exception:
+            pass
 
 
 class BucketDeletePreviewDialog(QDialog):
@@ -555,6 +804,8 @@ class BlinkLabWidget(QWidget):
         blink_lr=1e-3,
         blink_weight_decay=1e-4,
         blink_input_size=224,
+        blink_auto_shrink_steps=20,
+        blink_training_strategy=DEFAULT_BLINK_TRAINING_STRATEGY,
         runtime_device="auto",
     ):
         super().__init__(parent)
@@ -567,10 +818,13 @@ class BlinkLabWidget(QWidget):
         self.default_learning_rate = self._coerce_float(blink_lr, 1e-3)
         self.default_weight_decay = self._coerce_float(blink_weight_decay, 1e-4)
         self.default_input_size = self._normalize_input_size(blink_input_size)
+        self.default_auto_shrink_steps = self._clamp_training_value(blink_auto_shrink_steps, 1, 200, 20)
+        self.default_training_strategy = sanitize_blink_training_strategy(blink_training_strategy)
         self.default_trainer_backend = BLINK_EXPERT_BACKEND_VIT_B
         self.default_heatmap_params = {}
         self.runtime_device = str(runtime_device or "auto")
         self.training_thread = None
+        self.pending_training_report = None
         self.active_session = None
         self.session_target_part = None
         self.session_dirty = False
@@ -615,6 +869,8 @@ class BlinkLabWidget(QWidget):
         runtime_device=None,
         trainer_backend=None,
         heatmap_params=None,
+        auto_shrink_steps=None,
+        training_strategy=None,
         apply_to_controls=True,
     ):
         if epochs is not None:
@@ -627,6 +883,10 @@ class BlinkLabWidget(QWidget):
             self.default_weight_decay = self._coerce_float(weight_decay, self.default_weight_decay)
         if input_size is not None:
             self.default_input_size = self._normalize_input_size(input_size)
+        if auto_shrink_steps is not None:
+            self.default_auto_shrink_steps = self._clamp_training_value(auto_shrink_steps, 1, 200, self.default_auto_shrink_steps)
+        if training_strategy is not None:
+            self.default_training_strategy = sanitize_blink_training_strategy(training_strategy)
         if runtime_device is not None:
             self.runtime_device = str(runtime_device or "auto")
         if trainer_backend is not None:
@@ -643,9 +903,12 @@ class BlinkLabWidget(QWidget):
             if hasattr(self, "combo_input_size"):
                 index = self.combo_input_size.findData(self.default_input_size)
                 self.combo_input_size.setCurrentIndex(index if index >= 0 else 0)
+            if hasattr(self, "spin_auto_shrink_steps"):
+                self.spin_auto_shrink_steps.setValue(self.default_auto_shrink_steps)
             if hasattr(self, "lbl_trainer_backend"):
                 backend_label = self.tr("Heatmap Blink") if self.default_trainer_backend == BLINK_EXPERT_BACKEND_HEATMAP else self.tr("ViT-B Blink")
-                self.lbl_trainer_backend.setText(f"{self.tr('Trainer Backend:')} {backend_label}")
+                strategy_label = blink_training_strategy_label(self.default_training_strategy, self.lang)
+                self.lbl_trainer_backend.setText(f"{self.tr('Trainer Backend:')} {backend_label} | {strategy_label}")
 
     def tr(self, text):
         return translate_blink_text(text, self.lang)
@@ -673,7 +936,8 @@ class BlinkLabWidget(QWidget):
         self.training_log_box.setTitle(self.tr("Training Log"))
         if hasattr(self, "lbl_trainer_backend"):
             backend_label = self.tr("Heatmap Blink") if self.default_trainer_backend == BLINK_EXPERT_BACKEND_HEATMAP else self.tr("ViT-B Blink")
-            self.lbl_trainer_backend.setText(f"{self.tr('Trainer Backend:')} {backend_label}")
+            strategy_label = blink_training_strategy_label(self.default_training_strategy, self.lang)
+            self.lbl_trainer_backend.setText(f"{self.tr('Trainer Backend:')} {backend_label} | {strategy_label}")
         self.btn_clear_training_log.setText(self.tr("Clear Log"))
         if not self.training_log_console.toPlainText().strip():
             self.training_log_console.setPlaceholderText(self.tr("Blink training log will appear here during expert training."))
@@ -689,6 +953,7 @@ class BlinkLabWidget(QWidget):
         self.lbl_learning_rate.setText(self.tr("Learning Rate:"))
         self.lbl_weight_decay.setText(self.tr("Weight Decay:"))
         self.lbl_input_size.setText(self.tr("Input Size:"))
+        self.lbl_auto_shrink_steps.setText(self.tr("Auto-shrink Steps:"))
         self.btn_train_expert.setText(self.tr("TRAIN EXPERT MODEL"))
         self.btn_stop_training.setText(self.tr("STOP TRAINING"))
         self.lbl_training_progress.setText(self.tr("Training Progress"))
@@ -701,7 +966,7 @@ class BlinkLabWidget(QWidget):
         self.current_theme = theme
         c = get_theme_config(theme)
         self.lbl_status.setStyleSheet(f"color: {c['success']}; font-weight: bold;")
-        for label in [self.lbl_epochs, self.lbl_batch_size, self.lbl_learning_rate, self.lbl_weight_decay, self.lbl_input_size]:
+        for label in [self.lbl_epochs, self.lbl_batch_size, self.lbl_learning_rate, self.lbl_weight_decay, self.lbl_input_size, self.lbl_auto_shrink_steps]:
             label.setStyleSheet(f"color: {c['text_soft']}; font-weight: 600;")
         self.training_settings_box.setStyleSheet(
             f"QGroupBox {{ background-color: {c['bg_surface_alt']}; border: 1px solid {c['border']}; "
@@ -929,6 +1194,8 @@ class BlinkLabWidget(QWidget):
         self.lbl_weight_decay.setObjectName("BlinkFormLabel")
         self.lbl_input_size = QLabel("Input Size:")
         self.lbl_input_size.setObjectName("BlinkFormLabel")
+        self.lbl_auto_shrink_steps = QLabel("Auto-shrink Steps:")
+        self.lbl_auto_shrink_steps.setObjectName("BlinkFormLabel")
         self.lbl_trainer_backend = QLabel("Trainer Backend:")
         self.lbl_trainer_backend.setObjectName("BlinkFormLabel")
         tc_layout.addWidget(self.lbl_trainer_backend)
@@ -945,12 +1212,17 @@ class BlinkLabWidget(QWidget):
             self.combo_input_size.addItem(f"{side} x {side}", side)
         input_index = self.combo_input_size.findData(self.default_input_size)
         self.combo_input_size.setCurrentIndex(input_index if input_index >= 0 else 0)
+        self.spin_auto_shrink_steps = QSpinBox()
+        self.spin_auto_shrink_steps.setRange(1, 200)
+        self.spin_auto_shrink_steps.setValue(self.default_auto_shrink_steps)
         tc_layout.addWidget(self.lbl_learning_rate)
         tc_layout.addWidget(self.edit_lr)
         tc_layout.addWidget(self.lbl_weight_decay)
         tc_layout.addWidget(self.edit_weight_decay)
         tc_layout.addWidget(self.lbl_input_size)
         tc_layout.addWidget(self.combo_input_size)
+        tc_layout.addWidget(self.lbl_auto_shrink_steps)
+        tc_layout.addWidget(self.spin_auto_shrink_steps)
         training_panel_layout.addWidget(self.training_settings_box)
         
         self.btn_train_expert = QPushButton("TRAIN EXPERT MODEL")
@@ -2015,7 +2287,8 @@ class BlinkLabWidget(QWidget):
         trajectory = refiner.generate_shrink_trajectory(
             image_input=self.zoomed_img_np,
             initial_box=initial_box,
-            golden_poly=golden_poly
+            golden_poly=golden_poly,
+            steps=int(self.spin_auto_shrink_steps.value()) if hasattr(self, "spin_auto_shrink_steps") else self.default_auto_shrink_steps,
         )
         
         if not trajectory:
@@ -2102,6 +2375,7 @@ class BlinkLabWidget(QWidget):
             input_size=input_size,
             trainer_backend=self.default_trainer_backend,
             heatmap_params=self.default_heatmap_params,
+            training_strategy=self.default_training_strategy,
             device=self.runtime_device,
         )
         self.training_thread.result_signal.connect(self._on_training_result)
@@ -2112,15 +2386,24 @@ class BlinkLabWidget(QWidget):
         self.training_thread.cancelled_signal.connect(self._on_training_cancelled)
         self.training_thread.finished.connect(self._on_training_finished)
         self.training_log_console.clear()
+        self.pending_training_report = None
         self.prog_training.setValue(0)
         self.append_training_log(self.tr("Training Expert for {0}...").format(part))
+        self.append_training_log(f"Blink training strategy: {self.default_training_strategy} ({blink_training_strategy_label(self.default_training_strategy, self.lang)})")
         self.btn_stop_training.setEnabled(True)
         self.training_thread.start()
 
     def _on_training_report(self, report_data):
         if isinstance(report_data, dict) and report_data:
-            dlg = BlinkExpertTrainingReportDialog(report_data, self.lang, self)
-            dlg.exec()
+            self.pending_training_report = dict(report_data)
+
+    def _show_pending_training_report(self):
+        report_data = self.pending_training_report
+        self.pending_training_report = None
+        if not isinstance(report_data, dict) or not report_data:
+            return
+        dlg = BlinkExpertTrainingReportDialog(report_data, self.lang, self)
+        dlg.exec()
 
     def stop_expert_training(self):
         if self.training_thread and self.training_thread.isRunning():
@@ -2215,13 +2498,26 @@ class BlinkLabWidget(QWidget):
             registration_source="blink_training",
             save=True,
         )
+        appoint_route = getattr(self.pm, "appoint_cascade_route_expert", None)
+        enable_route = getattr(self.pm, "set_cascade_route_enabled", None)
+        if callable(appoint_route):
+            appoint_route(
+                parent_part,
+                child_part,
+                expert_id=expert_id,
+                expert_backend=expert_backend,
+                expert_manifest=manifest_path,
+                input_size=input_size,
+                save=True,
+            )
+        if callable(enable_route):
+            enable_route(parent_part, child_part, True, save=True)
 
         self.route_registry_refresh_requested.emit()
         return {
             "parent_part": parent_part,
             "child_part": child_part,
             "expert_id": expert_id,
-            "candidate_only": True,
         }
 
     def _on_training_result(self, save_path):
@@ -2276,6 +2572,8 @@ class BlinkLabWidget(QWidget):
         if self.training_thread:
             self.training_thread.deleteLater()
             self.training_thread = None
+        if self.pending_training_report:
+            QTimer.singleShot(0, self._show_pending_training_report)
 
     def keyPressEvent(self, event):
         super().keyPressEvent(event)

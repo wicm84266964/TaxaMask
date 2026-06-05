@@ -341,7 +341,7 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertIsNotNone(window.findChild(main_module.QWidget, "start2DWorkflowCard"))
             self.assertIsNotNone(window.findChild(main_module.QWidget, "startTifWorkflowCard"))
             self.assertIsNotNone(window.findChild(main_module.QWidget, "startProjectConsole"))
-            self.assertFalse(window.start_console_body.isVisible())
+            self.assertTrue(window.start_console_body.isHidden())
             self.assertEqual(window.btn_start_console_toggle.text(), "+")
             self.assertIn("Project Console", window.start_console_title.text())
             self.assertTrue(window.start_console_summary.text())
@@ -358,13 +358,15 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertIn("2D views", window.start_console_stl_note.text())
             self.assertNotIn("3D mesh annotation", window.start_console_stl_note.text())
             window.btn_start_console_toggle.click()
-            self.assertTrue(window.start_console_body.isVisible())
+            self.assertTrue(window.start_console_expanded)
+            self.assertFalse(window.start_console_body.isHidden())
             self.assertEqual(window.btn_start_console_toggle.text(), "−")
             self.assertEqual(window.btn_start_ant_code.text(), "Start Ant-Code")
             self.assertEqual(window.btn_stop_ant_code.text(), "Stop Ant-Code")
             self.assertIsNone(window.agent_panel.findChild(main_module.QWidget, "taxamaskAgentInlineStatus"))
             self.assertIsNone(window.agent_panel.findChild(main_module.QWidget, "taxamaskStartAntCodeButton"))
-            self.assertIn("Workspace permission", window.agent_panel.fallback.toPlainText())
+            self.assertEqual(window.agent_panel.fallback_logo.text(), "TAXAMASK")
+            self.assertFalse(window.agent_panel.fallback_detail.isVisible())
             menu_texts = [
                 action.text()
                 for menu_action in window.menuBar().actions()
@@ -493,8 +495,8 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(env["LAB_AGENT_PACKAGE_ROOT"], window.agent_panel.ant_code_root)
             self.assertEqual(env["LAB_AGENT_CONFIG"], window.agent_panel.ant_code_config_path)
             self.assertIsNotNone(window.agent_panel.findChild(main_module.QWidget, "taxamaskAgentStack"))
-            self.assertIn("Ant-Code embedded", window.agent_panel.fallback.toPlainText())
-            self.assertIn("TaxaMask source guard", window.agent_panel.fallback.toPlainText())
+            self.assertEqual(window.agent_panel.fallback_logo.text(), "TAXAMASK")
+            self.assertFalse(window.agent_panel.fallback_detail.isVisible())
             self.assertFalse(window.agent_panel.is_running())
         finally:
             window.deleteLater()
@@ -711,7 +713,7 @@ class GuiSmokeTests(unittest.TestCase):
 
             self.assertEqual(panel.stack.currentWidget(), panel.fallback)
             self.assertIn("embedded page init failed", statuses[-1])
-            self.assertIn("embedded page init failed", panel.fallback.toPlainText())
+            self.assertIn("embedded page init failed", panel.fallback_detail.text())
         finally:
             window.deleteLater()
 
@@ -730,7 +732,7 @@ class GuiSmokeTests(unittest.TestCase):
 
             self.assertEqual(panel.stack.currentWidget(), panel.fallback)
             self.assertIn("embedded page load failed", statuses[-1])
-            self.assertIn("embedded page load failed", panel.fallback.toPlainText())
+            self.assertIn("embedded page load failed", panel.fallback_detail.text())
         finally:
             window.deleteLater()
 

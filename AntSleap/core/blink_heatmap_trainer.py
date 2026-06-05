@@ -22,6 +22,13 @@ except Exception:
 
 from .blink_expert_manifest import BLINK_EXPERT_BACKEND_HEATMAP, write_blink_expert_manifest
 from .blink_heatmap_dataset import BlinkHeatmapDataset
+from .blink_training_strategy import (
+    BLINK_STRATEGY_FULL_INSIDE_RANDOM,
+    BLINK_STRATEGY_TRIVIEW_RANDOM,
+    BLINK_STRATEGY_TWO_STAGE_FULL_THEN_INSIDE,
+    blink_training_strategy_label,
+    sanitize_blink_training_strategy,
+)
 from .projection import CoordinateMapper
 from .runtime_device import resolve_torch_device
 from .taxonomy_defaults import is_safe_part_name
@@ -104,6 +111,7 @@ class BlinkHeatmapTrainer:
         heatmap_sigma=2.0,
         wh_loss_weight=1.0,
         center_loss_weight=1.0,
+        training_strategy=BLINK_STRATEGY_TRIVIEW_RANDOM,
     ):
         self.device = resolve_torch_device(device)
         self.part_name = str(part_name or "").strip()
@@ -117,7 +125,15 @@ class BlinkHeatmapTrainer:
         self.heatmap_sigma = max(0.1, float(heatmap_sigma or 2.0))
         self.wh_loss_weight = max(0.0, float(wh_loss_weight))
         self.center_loss_weight = max(0.0, float(center_loss_weight))
-        self.history = {"loss": [], "loss_center": [], "loss_wh": []}
+        self.training_strategy = sanitize_blink_training_strategy(training_strategy)
+        self.history = {
+            "loss": [],
+            "loss_final": [],
+            "loss_step": [],
+            "loss_view": [],
+            "loss_consistency": [],
+            "stage": [],
+        }
         self.last_report = {}
 
         if save_dir is None:
@@ -170,14 +186,12 @@ class BlinkHeatmapTrainer:
             f"weight_decay={self.weight_decay:g}, input_size={target_size[0]}, sigma={self.heatmap_sigma:g}",
             log_callback=log_callback,
         )
-
-        dataset = BlinkHeatmapDataset(
-            self.project_path,
-            self.part_name,
-            parent_part=self.parent_part,
-            input_size=target_size[0],
-            heatmap_sigma=self.heatmap_sigma,
+        self._emit_training_log(
+            f"Heatmap Blink training strategy: {self.training_strategy} ({blink_training_strategy_label(self.training_strategy)})",
+            log_callback=log_callback,
         )
+
+        dataset = self._make_dataset(target_size)
         if len(dataset) == 0:
             self._emit_training_log(
                 "Error: Not enough parent ROI trajectory data for heatmap Blink training.",
@@ -185,7 +199,6 @@ class BlinkHeatmapTrainer:
             )
             return None
 
-        dataloader = DataLoader(dataset, batch_size=int(batch_size), shuffle=True, num_workers=0)
         best_loss = float("inf")
         save_path = self._next_versioned_save_path()
         self._emit_training_log(
@@ -197,66 +210,59 @@ class BlinkHeatmapTrainer:
         if callable(progress_callback):
             progress_callback(0)
 
-        for epoch in range(int(epochs)):
-            if callable(stop_callback) and stop_callback():
-                self._emit_training_log("Training cancelled before starting the next epoch.", log_callback=log_callback)
-                return None
-
-            epoch_loss = 0.0
-            epoch_center = 0.0
-            epoch_wh = 0.0
-            start_time = time.time()
-
-            for batch_data in dataloader:
-                if callable(stop_callback) and stop_callback():
-                    self._emit_training_log("Training cancellation requested. Stopping after the current batch.", log_callback=log_callback)
-                    return None
-
-                imgs = batch_data["image"].to(self.device)
-                heatmap_target = batch_data["heatmap"].to(self.device)
-                wh_target = batch_data["wh"].to(self.device).float().view(-1, 1, 2)
-
-                self.optimizer.zero_grad()
-                heatmap_logits, wh_pred = self.model(imgs)
-                center_loss = F.mse_loss(torch.sigmoid(heatmap_logits), heatmap_target)
-                wh_loss = F.smooth_l1_loss(wh_pred, wh_target)
-                loss = self.center_loss_weight * center_loss + self.wh_loss_weight * wh_loss
-                loss.backward()
-                self.optimizer.step()
-
-                epoch_loss += float(loss.item())
-                epoch_center += float(center_loss.item())
-                epoch_wh += float(wh_loss.item())
-
-            avg_loss = epoch_loss / max(1, len(dataloader))
-            avg_center = epoch_center / max(1, len(dataloader))
-            avg_wh = epoch_wh / max(1, len(dataloader))
-            self.scheduler.step(avg_loss)
-            self.history["loss"].append(avg_loss)
-            self.history["loss_center"].append(avg_center)
-            self.history["loss_wh"].append(avg_wh)
-            elapsed = time.time() - start_time
+        stages = self._training_stages(int(epochs))
+        global_epoch = 0
+        for stage in stages:
+            stage_name = stage["name"]
+            stage_epochs = int(stage["epochs"])
+            stage_dataset = self._make_dataset(target_size, stage_view_mode=stage.get("view_mode"))
+            dataloader = DataLoader(stage_dataset, batch_size=int(batch_size), shuffle=True, num_workers=0)
             self._emit_training_log(
-                f"Epoch [{epoch + 1}/{epochs}] Loss: {avg_loss:.4f} "
-                f"(center={avg_center:.4f}, wh={avg_wh:.4f}) - {elapsed:.1f}s",
+                f"--- Heatmap Blink stage: {stage_name} | view_mode={stage.get('view_mode') or 'random'} | epochs={stage_epochs} ---",
                 log_callback=log_callback,
             )
-            if callable(progress_callback):
-                progress_callback(int(((epoch + 1) / max(1, int(epochs))) * 100))
+            for _stage_epoch in range(stage_epochs):
+                global_epoch += 1
+                if callable(stop_callback) and stop_callback():
+                    self._emit_training_log("Training cancelled before starting the next epoch.", log_callback=log_callback)
+                    return None
 
-            if avg_loss < best_loss:
-                best_loss = avg_loss
-                torch.save(
-                    {
-                        "state_dict": self.model.state_dict(),
-                        "meta": self._build_checkpoint_meta(target_size, epochs, batch_size, best_loss),
-                    },
-                    save_path,
-                )
-                self._emit_training_log(
-                    f"  -> Saved improved heatmap checkpoint candidate for {self.part_name}.",
+                avg_loss, avg_final, avg_step, avg_view, avg_consistency, elapsed = self._run_epoch(
+                    dataloader,
+                    stage_name,
+                    stop_callback=stop_callback,
                     log_callback=log_callback,
                 )
+                if avg_loss is None:
+                    return None
+                self.scheduler.step(avg_loss)
+                self.history["loss"].append(avg_loss)
+                self.history["loss_final"].append(avg_final)
+                self.history["loss_step"].append(avg_step)
+                self.history["loss_view"].append(avg_view)
+                self.history["loss_consistency"].append(avg_consistency)
+                self.history["stage"].append(stage_name)
+                self._emit_training_log(
+                    f"Epoch [{global_epoch}/{epochs}] Stage={stage_name} Loss: {avg_loss:.4f} "
+                    f"(final={avg_final:.4f}, step={avg_step:.4f}, view={avg_view:.4f}, consistency={avg_consistency:.4f}) - {elapsed:.1f}s",
+                    log_callback=log_callback,
+                )
+                if callable(progress_callback):
+                    progress_callback(int((global_epoch / max(1, int(epochs))) * 100))
+
+                if avg_loss < best_loss:
+                    best_loss = avg_loss
+                    torch.save(
+                        {
+                            "state_dict": self.model.state_dict(),
+                            "meta": self._build_checkpoint_meta(target_size, epochs, batch_size, best_loss),
+                        },
+                        save_path,
+                    )
+                    self._emit_training_log(
+                        f"  -> Saved improved heatmap checkpoint candidate for {self.part_name}.",
+                        log_callback=log_callback,
+                    )
 
         if os.path.exists(save_path):
             saved_payload = torch.load(save_path, map_location=self.device)
@@ -273,6 +279,102 @@ class BlinkHeatmapTrainer:
         )
         return save_path
 
+    def _make_dataset(self, target_size, stage_view_mode=None):
+        return BlinkHeatmapDataset(
+            self.project_path,
+            self.part_name,
+            parent_part=self.parent_part,
+            input_size=target_size[0],
+            heatmap_sigma=self.heatmap_sigma,
+            training_strategy=self.training_strategy,
+            stage_view_mode=stage_view_mode,
+        )
+
+    def _training_stages(self, epochs):
+        total = max(1, int(epochs))
+        if self.training_strategy != BLINK_STRATEGY_TWO_STAGE_FULL_THEN_INSIDE:
+            return [{"name": self.training_strategy, "view_mode": None, "epochs": total}]
+        full_epochs = max(1, total // 2)
+        inside_epochs = max(1, total - full_epochs)
+        if total == 1:
+            return [{"name": "stage1_full", "view_mode": "full", "epochs": 1}]
+        return [
+            {"name": "stage1_full", "view_mode": "full", "epochs": full_epochs},
+            {"name": "stage2_inside", "view_mode": "inside", "epochs": inside_epochs},
+        ]
+
+    def _run_epoch(self, dataloader, stage_name, stop_callback=None, log_callback=None):
+        epoch_loss = 0.0
+        epoch_final = 0.0
+        epoch_step = 0.0
+        epoch_view = 0.0
+        epoch_consistency = 0.0
+        start_time = time.time()
+
+        for batch_data in dataloader:
+            if callable(stop_callback) and stop_callback():
+                self._emit_training_log("Training cancellation requested. Stopping after the current batch.", log_callback=log_callback)
+                return None, None, None, None, None, None
+
+            imgs = batch_data["image"].to(self.device)
+            heatmap_target = batch_data["heatmap"].to(self.device)
+            wh_target = batch_data["wh"].to(self.device).float().view(-1, 1, 2)
+            step_heatmap_target = batch_data.get("step_heatmap", batch_data["heatmap"]).to(self.device)
+            step_wh_target = batch_data.get("step_wh", batch_data["wh"]).to(self.device).float().view(-1, 1, 2)
+
+            self.optimizer.zero_grad()
+            heatmap_logits, wh_pred = self.model(imgs)
+            heatmap_pred = torch.sigmoid(heatmap_logits)
+            final_center_loss = F.mse_loss(heatmap_pred, heatmap_target)
+            final_wh_loss = F.smooth_l1_loss(wh_pred, wh_target)
+            step_center_loss = F.mse_loss(heatmap_pred, step_heatmap_target)
+            step_wh_loss = F.smooth_l1_loss(wh_pred, step_wh_target)
+
+            view_loss = torch.tensor(0.0, device=self.device)
+            consistency_loss = torch.tensor(0.0, device=self.device)
+            if "inside_image" in batch_data:
+                inside_imgs = batch_data["inside_image"].to(self.device)
+                inside_logits, inside_wh = self.model(inside_imgs)
+                inside_heatmap = torch.sigmoid(inside_logits)
+                inside_center_loss = F.mse_loss(inside_heatmap, heatmap_target)
+                inside_wh_loss = F.smooth_l1_loss(inside_wh, wh_target)
+                inside_loss = self.center_loss_weight * inside_center_loss + self.wh_loss_weight * inside_wh_loss
+                if self.training_strategy == BLINK_STRATEGY_TRIVIEW_RANDOM and "outside_image" in batch_data:
+                    outside_imgs = batch_data["outside_image"].to(self.device)
+                    outside_logits, outside_wh = self.model(outside_imgs)
+                    outside_heatmap = torch.sigmoid(outside_logits)
+                    outside_center_loss = F.mse_loss(outside_heatmap, heatmap_target)
+                    outside_wh_loss = F.smooth_l1_loss(outside_wh, wh_target)
+                    outside_loss = self.center_loss_weight * outside_center_loss + self.wh_loss_weight * outside_wh_loss
+                    view_loss = 0.5 * (inside_loss + outside_loss)
+                    consistency_loss = F.smooth_l1_loss(inside_heatmap, outside_heatmap) + F.smooth_l1_loss(inside_wh, outside_wh)
+                elif self.training_strategy == BLINK_STRATEGY_FULL_INSIDE_RANDOM:
+                    view_loss = inside_loss
+                elif self.training_strategy == BLINK_STRATEGY_TWO_STAGE_FULL_THEN_INSIDE and stage_name == "stage2_inside":
+                    view_loss = inside_loss
+
+            final_loss = self.center_loss_weight * final_center_loss + self.wh_loss_weight * final_wh_loss
+            step_loss = self.center_loss_weight * step_center_loss + self.wh_loss_weight * step_wh_loss
+            loss = final_loss + 0.35 * step_loss + 0.20 * view_loss + 0.10 * consistency_loss
+            loss.backward()
+            self.optimizer.step()
+
+            epoch_loss += float(loss.item())
+            epoch_final += float(final_loss.item())
+            epoch_step += float(step_loss.item())
+            epoch_view += float(view_loss.item())
+            epoch_consistency += float(consistency_loss.item())
+
+        denom = max(1, len(dataloader))
+        return (
+            epoch_loss / denom,
+            epoch_final / denom,
+            epoch_step / denom,
+            epoch_view / denom,
+            epoch_consistency / denom,
+            time.time() - start_time,
+        )
+
     def _build_checkpoint_meta(self, target_size, epochs, batch_size, best_loss):
         return {
             "kind": "blink_heatmap_expert",
@@ -288,6 +390,7 @@ class BlinkHeatmapTrainer:
             "epochs": int(epochs),
             "batch_size": int(batch_size),
             "best_loss": float(best_loss),
+            "training_strategy": self.training_strategy,
             "created_at": datetime.now().isoformat(timespec="seconds"),
         }
 
@@ -299,7 +402,7 @@ class BlinkHeatmapTrainer:
             child_part=self.part_name,
             input_size=target_size,
             project_json=self.project_path,
-            trajectory_count=len(dataset) if dataset is not None else 0,
+            trajectory_count=int(getattr(dataset, "sequence_count", len(dataset) if dataset is not None else 0) or 0),
             output_schema=HEATMAP_BLINK_OUTPUT_SCHEMA,
             train_params={
                 "learning_rate": float(self.learning_rate),
@@ -307,6 +410,7 @@ class BlinkHeatmapTrainer:
                 "heatmap_sigma": float(self.heatmap_sigma),
                 "wh_loss_weight": float(self.wh_loss_weight),
                 "center_loss_weight": float(self.center_loss_weight),
+                "training_strategy": self.training_strategy,
             },
         )
         return manifest_path, manifest
@@ -339,6 +443,8 @@ class BlinkHeatmapTrainer:
         metrics_path = os.path.join(exp_dir, "metrics_plot.png")
         fig, ax = plt.subplots(figsize=(10, 6))
         for key, values in self.history.items():
+            if key == "stage":
+                continue
             if values:
                 ax.plot(values, label=key)
         ax.set_title(f"Heatmap Blink Expert Training: {self.part_name}")
@@ -477,6 +583,9 @@ class BlinkHeatmapTrainer:
             "heatmap_sigma": float(self.heatmap_sigma),
             "learning_rate": float(self.learning_rate),
             "weight_decay": float(self.weight_decay),
+            "training_strategy": self.training_strategy,
+            "trajectory_sequence_count": int(getattr(dataset, "sequence_count", 0) or 0),
+            "expanded_training_sample_count": int(len(dataset) if dataset is not None else 0),
             "validation_count": len(validation_rows),
             "validation_preview_count": min(8, len(validation_rows)),
             "validation_provenance_counts": {"heatmap_blink_expert": len(validation_rows)},

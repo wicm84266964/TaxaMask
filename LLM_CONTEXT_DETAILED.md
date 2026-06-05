@@ -1,12 +1,87 @@
 # TAXAMASK / FORMICA-FLOW SYSTEM TECHNICAL MANUAL (Deep Dive)
 
 > **Target Audience**: Expert LLM Assistants, Senior Developers
-> **Version**: v3.32 (June 5, 2026, VLM adaptive light-grid preannotation + PDF review tooling + model-profile safeguards)
+> **Version**: v3.33 (June 6, 2026, Blink strategy comparison + shared training result browser)
 > **Purpose**: Up-to-date architectural, workflow, and governance context for implementation and maintenance.
 
 ---
 
-## 0) v3.32 VLM Adaptive Light-Grid Preannotation + PDF Review Tooling + Model-Profile Safeguards (2026-06-05)
+## 0) v3.33 Blink Strategy Comparison + Shared Training Result Browser (2026-06-06)
+
+### 0.0 Current milestone status
+- The June 6 pass closes the immediate child-part training workflow cleanup after user testing:
+  - Blink child-part training now supports three explicit strategies for later large-dataset comparison.
+  - ViT-B Blink and heatmap Blink both receive the selected strategy from the active 2D/STL model profile.
+  - Main workbench child-part controls now expose batch auto-shrink, child training stop, shrink trajectory dataset review/delete, and route/expert cleanup.
+  - Parent-part and child-part training now share the right-panel training progress area and a single `Training Results` browser entry.
+- The research-facing goal is to let the user compare Blink training strategies on thousands of images without changing source code between runs, while keeping parent Locator/SAM reports and child Blink reports auditable but not merged into one detail UI.
+
+### 0.1 Blink training strategies
+- New module: `AntSleap/core/blink_training_strategy.py`.
+- Strategy IDs:
+  - `triview_random`: current baseline; samples shrink trajectory frames with full / inside / outside views and supervises next-step plus final boxes.
+  - `full_inside_random`: removes outside-view training, keeping parent full view and current inside view.
+  - `two_stage_full_then_inside`: trains full parent view first, then inside view.
+- Integrated files:
+  - `AntSleap/core/blink_dataset.py`
+  - `AntSleap/core/blink_heatmap_dataset.py`
+  - `AntSleap/core/blink_trainer.py`
+  - `AntSleap/core/blink_heatmap_trainer.py`
+  - `AntSleap/core/model_profiles.py`
+  - `AntSleap/core/config.py`
+  - `AntSleap/ui/blink_lab.py`
+  - `AntSleap/main.py`
+- Training metadata now records `training_strategy` in checkpoints/manifests and `report_summary.json`.
+- Heatmap Blink and ViT-B Blink both use the same strategy selector so experiments can compare model backend and training-sample construction separately.
+
+### 0.2 2D/STL UI and profile behavior
+- `2D/STL Model Settings -> Child-part annotation` exposes:
+  - Blink training strategy selector with explanatory notes.
+  - Auto-shrink steps, default 20, clamped to 1-200.
+  - Blink shrink trajectory dataset table with route, image count, frame count, sources, details, and delete action.
+- The active model profile stores child defaults:
+  - `child_backend_defaults.auto_shrink_steps`
+  - `child_backend_defaults.training_strategy`
+- `MainWindow._sync_blink_lab_model_profile_defaults(...)` passes the active child backend, heatmap params, auto-shrink steps, and training strategy into `BlinkLabWidget`.
+- `BlinkLabWidget` still exists as compatibility/development fallback, but ordinary workflow should use the main Labeling Workbench child-part annotation section.
+
+### 0.3 Shared training progress and result browser
+- Right-panel `workbenchTrainingProgressPanel` now has a title row with `Training Results`.
+- `TrainingResultBrowserDialog` in `AntSleap/main.py` lists historical parent/child training reports.
+- Discovery scans likely `experiments/` roots:
+  - sibling of `engine.weights_dir`
+  - current project directory and its parent
+  - package-level `AntSleap/experiments`
+- Classification:
+  - child reports if `report_summary.kind` is `blink_expert_report` / `heatmap_blink_expert_report` or directory starts `blink_` / `heatmap_blink_`
+  - parent reports otherwise, especially `exp_YYYYMMDD_HHMMSS`
+- The browser is only an index and router:
+  - parent reports open `TrainingReportDialog`
+  - child/Blink reports open `BlinkExpertTrainingReportDialog`
+  - do not merge the detail UIs unless the user explicitly requests a redesign.
+
+### 0.4 Current test focus
+- Key focused validation used for this pass:
+  - `C:\Users\admin\anaconda3\envs\antsleap\python.exe -B -m py_compile AntSleap\main.py AntSleap\core\blink_trainer.py AntSleap\core\blink_heatmap_trainer.py tests\test_ui_polish_scope.py`
+  - `C:\Users\admin\anaconda3\envs\antsleap\python.exe -B -m unittest tests.test_ui_polish_scope.UiPolishScopeTests.test_workbench_shared_training_progress_tracks_child_expert_thread tests.test_ui_polish_scope.UiPolishScopeTests.test_workbench_child_training_stop_button_delegates_to_blink_lab tests.test_ui_polish_scope.UiPolishScopeTests.test_workbench_training_buttons_are_mutually_exclusive tests.test_ui_polish_scope.UiPolishScopeTests.test_workbench_training_results_browser_discovers_parent_and_child_reports`
+- Broader expected targeted suites before final local commit:
+  - `tests.test_blink_training_strategy`
+  - `tests.test_blink_bridge`
+  - `tests.test_blink_heatmap_dataset`
+  - `tests.test_vlm_preannotation`
+  - selected `tests.test_gui_smoke` and `tests.test_macro_micro_pipeline` cases touched by this milestone.
+
+### 0.5 Research workflow consequences
+- A child-part expert now depends on three distinct layers:
+  - reviewed child polygon and parent context in the project
+  - saved shrink trajectories for that route
+  - selected Blink strategy and backend in the active model profile
+- Operators should not judge Blink readiness by polygon count alone. They should inspect trajectory counts and training report validation samples.
+- The `Training Results` button is meant for post-training review, not for selecting active models. Route appointment still happens in the route/expert management UI.
+
+---
+
+## 0A) v3.32 VLM Adaptive Light-Grid Preannotation + PDF Review Tooling + Model-Profile Safeguards (2026-06-05)
 
 ### 0.0 Current milestone status
 - The June 5 consolidation closes several practical stability tracks before experimental SAM3 / parent-backend switching work:

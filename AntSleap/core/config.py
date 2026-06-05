@@ -27,6 +27,8 @@ DEFAULT_CONFIG = {
     "blink_train_lr": 1e-3,
     "blink_train_weight_decay": 1e-4,
     "blink_train_input_size": 224,
+    "blink_auto_shrink_steps": 20,
+    "blink_training_strategy": "triview_random",
     "train_lr": 1e-4,
     "train_weight_decay": 1e-4, # L2 Regularization (Higher = Less Overfitting)
     "train_from_scratch": False, # If True, resets weights before training

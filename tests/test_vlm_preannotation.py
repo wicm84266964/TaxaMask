@@ -727,6 +727,69 @@ class VlmPreannotationTests(unittest.TestCase):
         self.assertNotIn("Head", labels["descriptions"])
         self.assertEqual(labels["descriptions"]["Eye"], "Auto-Annotated")
 
+    def test_ai_draft_summary_distinguishes_polygon_and_box_only(self):
+        manager = ProjectManager()
+        image_path = "memory/specimen.png"
+        manager.project_data["labels"][image_path] = {
+            "parts": {
+                "Head": [[10, 10], [50, 10], [30, 40]],
+            },
+            "auto_boxes": {
+                "Head": [10, 10, 50, 40],
+                "Eye": [20, 18, 28, 26],
+            },
+            "descriptions": {
+                "Head": "Auto-Annotated",
+                "Eye": "Auto-Annotated",
+            },
+            "status": "labeled",
+        }
+
+        summary = manager.summarize_image_ai_drafts(image_path)
+
+        self.assertEqual(summary["reviewable_polygon_parts"], ["Head"])
+        self.assertEqual(summary["box_only_parts"], ["Eye"])
+
+    def test_batch_ai_draft_verification_skips_box_only_drafts(self):
+        manager = ProjectManager()
+        first_image = "memory/specimen_a.png"
+        second_image = "memory/specimen_b.png"
+        manager.project_data["labels"][first_image] = {
+            "parts": {"Head": [[10, 10], [50, 10], [30, 40]]},
+            "auto_boxes": {
+                "Head": [10, 10, 50, 40],
+                "Eye": [20, 18, 28, 26],
+            },
+            "auto_box_meta": {
+                "Head": {"source": "vlm_first_mile", "review_status": "draft"},
+                "Eye": {"source": "vlm_first_mile", "review_status": "draft"},
+            },
+            "descriptions": {
+                "Head": "Auto-Annotated",
+                "Eye": "Auto-Annotated",
+            },
+            "status": "labeled",
+        }
+        manager.project_data["labels"][second_image] = {
+            "parts": {"Mesosoma": [[40, 20], [80, 20], [80, 70], [40, 70]]},
+            "auto_boxes": {"Mesosoma": [40, 20, 80, 70]},
+            "auto_box_meta": {"Mesosoma": {"source": "vlm_first_mile", "review_status": "draft"}},
+            "descriptions": {"Mesosoma": "Auto-Annotated"},
+            "status": "labeled",
+        }
+
+        summary = manager.summarize_ai_drafts_for_images([first_image, second_image])
+        result = manager.verify_ai_drafts_for_images([first_image, second_image])
+
+        self.assertEqual(summary["reviewable_polygon_count"], 2)
+        self.assertEqual(summary["box_only_count"], 1)
+        self.assertEqual(result["accepted_count"], 2)
+        self.assertEqual(result["accepted_images"], 2)
+        self.assertNotIn("Head", manager.project_data["labels"][first_image]["descriptions"])
+        self.assertEqual(manager.project_data["labels"][first_image]["descriptions"]["Eye"], "Auto-Annotated")
+        self.assertEqual(manager.project_data["labels"][first_image]["auto_box_meta"]["Head"]["review_status"], "confirmed")
+        self.assertEqual(manager.project_data["labels"][second_image]["auto_box_meta"]["Mesosoma"]["review_status"], "confirmed")
+
 
 if __name__ == "__main__":
     unittest.main()

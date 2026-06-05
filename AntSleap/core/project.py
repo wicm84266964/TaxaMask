@@ -1270,6 +1270,56 @@ class ProjectManager:
         route_payload["expert_candidates"] = kept_candidates
         return bool(self.set_cascade_route(route_payload, save=save))
 
+    def remove_cascade_route_expert_references(self, expert_id, save=True):
+        clean_expert_id = str(expert_id or "").strip()
+        if not clean_expert_id:
+            return 0
+
+        manifest = self.get_cascade_routes()
+        updated_routes = []
+        changed_count = 0
+        empty_expert = sanitize_expert_reference()
+
+        for route in manifest.get("routes", []):
+            route_payload = dict(route)
+            changed = False
+            appointed_id = str(get_route_appointed_expert(route_payload).get("expert_id") or "").strip()
+
+            candidates = [
+                dict(candidate)
+                for candidate in route_payload.get("expert_candidates", [])
+                if isinstance(candidate, dict)
+            ]
+            kept_candidates = [
+                candidate
+                for candidate in candidates
+                if str(candidate.get("expert_id") or "").strip() != clean_expert_id
+            ]
+            if len(kept_candidates) != len(candidates):
+                changed = True
+            route_payload["expert_candidates"] = kept_candidates
+
+            if appointed_id == clean_expert_id:
+                route_payload["appointed_expert"] = dict(empty_expert)
+                route_payload["expert_id"] = None
+                route_payload["expert_part"] = None
+                route_payload["expert_filename"] = None
+                changed = True
+
+            if changed:
+                changed_count += 1
+            updated_routes.append(route_payload)
+
+        if changed_count <= 0:
+            return 0
+
+        self.project_data["cascade_routes"] = self._sanitize_cascade_routes(
+            {"version": PROJECT_ROUTE_MANIFEST_VERSION, "routes": updated_routes}
+        )
+        if save:
+            self.save_project()
+        return changed_count
+
     def get_current_project_expert_bucket_impacts(self, child_part):
         clean_child = str(child_part or "").strip()
         impacts = {
@@ -1506,6 +1556,74 @@ class ProjectManager:
             self.save_project()
         return True
 
+    def summarize_image_ai_drafts(self, image_path):
+        if image_path not in self.project_data["labels"]:
+            return {
+                "reviewable_polygon_parts": [],
+                "box_only_parts": [],
+            }
+        entry = self.project_data["labels"][image_path]
+        parts = entry.get("parts", {}) if isinstance(entry.get("parts", {}), dict) else {}
+        auto_boxes = entry.get("auto_boxes", {}) if isinstance(entry.get("auto_boxes", {}), dict) else {}
+        descriptions = entry.get("descriptions", {}) if isinstance(entry.get("descriptions", {}), dict) else {}
+        reviewable = []
+        box_only = []
+        for part_name, desc in descriptions.items():
+            if desc != "Auto-Annotated":
+                continue
+            has_polygon = bool(parts.get(part_name))
+            has_auto_box = part_name in auto_boxes
+            if has_polygon:
+                reviewable.append(part_name)
+            elif has_auto_box:
+                box_only.append(part_name)
+        return {
+            "reviewable_polygon_parts": reviewable,
+            "box_only_parts": box_only,
+        }
+
+    def summarize_ai_drafts_for_images(self, image_paths):
+        summaries = []
+        total_reviewable = 0
+        total_box_only = 0
+        for image_path in image_paths or []:
+            if not image_path:
+                continue
+            summary = self.summarize_image_ai_drafts(image_path)
+            reviewable_count = len(summary.get("reviewable_polygon_parts", []) or [])
+            box_only_count = len(summary.get("box_only_parts", []) or [])
+            if reviewable_count or box_only_count:
+                item = dict(summary)
+                item["image_path"] = image_path
+                item["reviewable_count"] = reviewable_count
+                item["box_only_count"] = box_only_count
+                summaries.append(item)
+                total_reviewable += reviewable_count
+                total_box_only += box_only_count
+        return {
+            "images_with_drafts": summaries,
+            "image_count": len(summaries),
+            "reviewable_polygon_count": total_reviewable,
+            "box_only_count": total_box_only,
+        }
+
+    def verify_ai_drafts_for_images(self, image_paths):
+        accepted_count = 0
+        accepted_images = 0
+        for image_path in image_paths or []:
+            if not image_path:
+                continue
+            count = self.verify_image_labels(image_path, save=False)
+            if count:
+                accepted_count += count
+                accepted_images += 1
+        if accepted_count:
+            self.save_project()
+        return {
+            "accepted_count": accepted_count,
+            "accepted_images": accepted_images,
+        }
+
     def remove_auto_box(self, image_path, part_name, save=True):
         clean_part = str(part_name or "").strip()
         if not clean_part or image_path not in self.project_data["labels"]:
@@ -1546,7 +1664,7 @@ class ProjectManager:
             self.save_project()
         return clean_scope
 
-    def update_trajectory(self, image_path, part_name, trajectory, parent_context=None):
+    def update_trajectory(self, image_path, part_name, trajectory, parent_context=None, save=True):
         """
         Stores the blink shrink trajectory data for a specific part.
         This is the core training material for the Stage 3 Expert Models.
@@ -1616,10 +1734,89 @@ class ProjectManager:
             trajectory_payload["parent_context"] = clean_parent_context
 
         self.project_data["labels"][image_path]["trajectories"][part_name] = trajectory_payload
-        self.save_project()
+        if save:
+            self.save_project()
         
     def get_trajectories(self, image_path):
         return self.project_data["labels"].get(image_path, {}).get("trajectories", {})
+
+    def summarize_blink_trajectory_datasets(self):
+        summaries = {}
+        for image_path, entry in self.project_data.get("labels", {}).items():
+            if not isinstance(entry, dict):
+                continue
+            trajectories = entry.get("trajectories", {})
+            if not isinstance(trajectories, dict):
+                continue
+            for child_part, payload in trajectories.items():
+                if not isinstance(payload, dict):
+                    continue
+                frames = payload.get("frames", [])
+                if not isinstance(frames, list) or not frames:
+                    continue
+                parent_context = payload.get("parent_context", {})
+                if not isinstance(parent_context, dict):
+                    parent_context = {}
+                parent_part = str(parent_context.get("parent_part") or "").strip() or "Unknown parent"
+                child_part = str(child_part or "").strip() or "Unknown child"
+                key = (parent_part, child_part)
+                item = summaries.setdefault(
+                    key,
+                    {
+                        "parent_part": parent_part,
+                        "child_part": child_part,
+                        "image_count": 0,
+                        "frame_count": 0,
+                        "sources": set(),
+                        "images": [],
+                    },
+                )
+                item["image_count"] += 1
+                item["frame_count"] += len(frames)
+                source = str(parent_context.get("source") or "").strip() or "unknown"
+                item["sources"].add(source)
+                item["images"].append(
+                    {
+                        "image_path": image_path,
+                        "frame_count": len(frames),
+                        "source": source,
+                        "parent_box": parent_context.get("parent_box"),
+                    }
+                )
+        result = []
+        for item in summaries.values():
+            clean = dict(item)
+            clean["sources"] = sorted(clean.get("sources", []))
+            clean["images"] = sorted(clean.get("images", []), key=lambda value: str(value.get("image_path", "")))
+            result.append(clean)
+        return sorted(result, key=lambda value: (value.get("parent_part", ""), value.get("child_part", "")))
+
+    def delete_blink_trajectory_dataset(self, parent_part, child_part, save=True):
+        clean_parent = str(parent_part or "").strip()
+        clean_child = str(child_part or "").strip()
+        if not clean_child:
+            return 0
+        removed = 0
+        for entry in self.project_data.get("labels", {}).values():
+            if not isinstance(entry, dict):
+                continue
+            trajectories = entry.get("trajectories", {})
+            if not isinstance(trajectories, dict) or clean_child not in trajectories:
+                continue
+            payload = trajectories.get(clean_child)
+            parent_context = payload.get("parent_context", {}) if isinstance(payload, dict) else {}
+            if not isinstance(parent_context, dict):
+                parent_context = {}
+            stored_parent = str(parent_context.get("parent_part") or "").strip() or "Unknown parent"
+            if clean_parent and stored_parent != clean_parent:
+                continue
+            del trajectories[clean_child]
+            removed += 1
+            if not trajectories:
+                entry.pop("trajectories", None)
+        if removed and save:
+            self.save_project()
+        return removed
 
     def delete_label(self, image_path, part_name, save=True):
         """
@@ -1768,7 +1965,7 @@ class ProjectManager:
         self.save_project()
         return removed_count
 
-    def verify_image_labels(self, image_path):
+    def verify_image_labels(self, image_path, save=True):
         """Removes 'Auto-Annotated' only from labels with a saved polygon."""
         if image_path not in self.project_data["labels"]: return 0
         
@@ -1782,7 +1979,7 @@ class ProjectManager:
                     self.set_auto_box_review_status(image_path, part, "confirmed", save=False)
                     count += 1
         
-        if count > 0:
+        if count > 0 and save:
             self.save_project()
         return count
 

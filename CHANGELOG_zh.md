@@ -4,6 +4,18 @@
 
 ## 📅 更新日志 (Update Log)
 
+### **[2026-06-06] Blink 训练方案对比、子部位训练交互与训练结果统一入口**
+> **本次重点：在真实手工测试后，把 Blink 子部位训练从单一路线扩展为可对比策略，并把父部位/子部位训练结果收进统一浏览入口，方便后续用大数据集做方案验证。**
+
+- 新增 `AntSleap/core/blink_training_strategy.py`，统一管理三种 Blink 训练方案：方案一 `全图/内视角/外视角随机`、方案二 `全图/内视角随机`、方案三 `先全图后内视角`。ViT-B Blink 和热力图 Blink 训练器都接入该策略，训练日志、manifest 和 `report_summary.json` 会记录本次使用的方案。
+- Blink / 热力图 Blink 数据集生成支持按方案构造训练视角。方案二去掉可能缺失目标的外视角；方案三先用父框全图做粗定位训练，再用内视角做收紧训练，便于后续用上千张图和 100-500 epoch 实验比较。
+- `2D/STL Model Settings -> Child-part annotation` 增加 Blink 训练方案选择和自动收缩步数设置；主工作台子部位训练会读取当前 active profile 的默认值，减少每次训练前反复手工调整。
+- 主工作台右侧子部位标注区补齐批量自动收缩、子部位训练停止按钮、Blink shrink trajectory 数据集展示/详情/删除能力；研究者可以更清楚地看到当前 route 下到底积累了多少训练轨迹。
+- 父部位和子部位训练共用右侧训练进度条；标题行新增 `训练结果 / Training Results` 入口。该入口只做历史报告索引和分流，父部位仍打开原有 `TrainingReportDialog`，子部位/Blink 仍打开原有 `BlinkExpertTrainingReportDialog`，不合并详情页。
+- 训练结果浏览器会扫描常见 `experiments/` 目录，显示报告类型、目标、后端、Blink 方案、验证样本数、时间和报告文件夹；这解决了父部位报告和子部位报告分散保存、不便复盘的问题。
+- VLM 预标注、AI 草稿确认、图片分组和子部位路由相关 UI 流程同步补测试，确保一键确认不会把纯框草稿误入训练，切分/手动分组、路由删除、专家文件删除和训练结果浏览都能被回归覆盖。
+- 本轮重点验证通过：`py_compile` 覆盖 `AntSleap/main.py`、Blink 训练器和核心测试文件；`tests.test_blink_training_strategy`、Blink/heatmap 数据集与桥接测试、VLM 预标注测试、UI polish 中训练进度/训练结果相关用例均通过。
+
 ### **[2026-06-05] PDF 复核分页增强、VLM 轻量网格回归与提示词 Profile 收口**
 > **本次重点：在进入 SAM3 / 父部位高级拓展测试前，先把当前已验证的 PDF 人工复核、VLM 预标注和模型设置改动落成本地保护性里程碑。**
 

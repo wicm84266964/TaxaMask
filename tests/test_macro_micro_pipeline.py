@@ -63,6 +63,7 @@ class _FakePartsModel:
 class _FakeCascadeManager:
     def __init__(self):
         self.calls = []
+        self.infer_confidence = 1.0
         self.legacy_manifest = {
             "version": "legacy",
             "routes": [
@@ -124,7 +125,7 @@ class _FakeCascadeManager:
                 "parent_part": parent_part,
             }
         )
-        return {"box": [32.0, 34.0, 66.0, 70.0], "confidence": 1.0}
+        return {"box": [32.0, 34.0, 66.0, 70.0], "confidence": self.infer_confidence}
 
 
 class MacroMicroPipelineTests(unittest.TestCase):
@@ -368,6 +369,46 @@ class MacroMicroPipelineTests(unittest.TestCase):
             self.assertEqual(preds["meta"]["cascade_applied_count"], 1)
             self.assertEqual(len(engine.cascade_manager.calls), 1)
             self.assertEqual(engine.cascade_manager.calls[0]["parent_part"], "Head")
+
+    def test_child_route_confidence_gate_uses_conf_threshold_not_adaptive_ratio(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            image_path = Path(tmp_dir) / "specimen.png"
+            Image.new("RGB", (200, 180), color=(180, 180, 180)).save(image_path)
+
+            engine = AntEngine.__new__(AntEngine)
+            engine.device = "cpu"
+            engine.locator = _FakeLocator()
+            engine.parts_model = _FakePartsModel()
+            engine.cascade_manager = _FakeCascadeManager()
+            engine.cascade_manager.infer_confidence = 0.05
+
+            preds = engine.predict_full_pipeline(
+                str(image_path),
+                current_taxonomy=["Head", "Mesosoma", "Gaster", "Mandible"],
+                locator_scope=["Head"],
+                conf_thresh=0.01,
+                adapt_thresh=0.4,
+                project_route_manifest={
+                    "version": "project-v2",
+                    "routes": [
+                        {
+                            "parent": "Head",
+                            "child": "Mandible",
+                            "enabled": True,
+                            "expert_id": "Mandible/mandible_v2.pth",
+                            "expert_part": "Mandible",
+                            "expert_filename": "mandible_v2.pth",
+                            "registration_source": "project",
+                        }
+                    ],
+                },
+            )
+
+            self.assertIn("Mandible", preds["auto_boxes"])
+            self.assertNotEqual(preds["meta"]["cascade_block_reasons"].get("Mandible"), "confidence_below_gate")
+            self.assertNotIn("Head", preds["meta"]["cascade_block_reasons"])
+            self.assertNotIn("Mesosoma", preds["meta"]["cascade_block_reasons"])
+            self.assertNotIn("Gaster", preds["meta"]["cascade_block_reasons"])
 
     def test_blink_dataset_reads_parent_context_crop_format(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

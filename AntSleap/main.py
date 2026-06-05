@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QScrollArea, QRadioButton, QButtonGroup, QSlider,
     QCheckBox, QInputDialog, QGroupBox, QListWidgetItem, QMenu,
     QDialogButtonBox, QGridLayout, QSizePolicy, QFrame, QFormLayout,
-    QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView,
+    QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView, QSpinBox, QToolButton,
     QAbstractItemView, QTreeWidget, QTreeWidgetItem)
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSize, QMimeData
 from PySide6.QtGui import QIcon, QAction, QColor, QDrag
@@ -78,7 +78,7 @@ try:
     )
     from AntSleap.ui.cropper import ImageCropper
     from AntSleap.ui.pdf_processing_widget import PdfProcessingWidget
-    from AntSleap.ui.blink_lab import BlinkLabWidget
+    from AntSleap.ui.blink_lab import BlinkExpertTrainingReportDialog, BlinkLabWidget
     from AntSleap.ui.tif_workbench import TifWorkbenchWidget
     from AntSleap.ui.taxamask_agent_panel import TaxaMaskAgentPanel
     from AntSleap.core.dataset import TwoStageDataset
@@ -92,17 +92,27 @@ try:
         get_route_persisted_expert_candidates,
         merge_expert_candidates,
     )
-    from AntSleap.core.expert_notes import format_expert_display_name, load_expert_notes
+    from AntSleap.core.expert_notes import format_expert_display_name, load_expert_notes, set_expert_note
     from AntSleap.core.model_profiles import (
         CHILD_BACKEND_EXTERNAL,
         CHILD_BACKEND_HEATMAP,
         CHILD_BACKEND_VIT_B,
         DEFAULT_EXTERNAL_BLINK_BACKEND,
+        DEFAULT_CHILD_AUTO_SHRINK_STEPS,
         DEFAULT_HEATMAP_BLINK_PARAMS,
         DEFAULT_MODEL_PROFILE_ID,
         PARENT_BACKEND_BUILTIN,
         PARENT_BACKEND_EXTERNAL,
         sanitize_model_profiles,
+    )
+    from AntSleap.core.blink_training_strategy import (
+        BLINK_STRATEGY_FULL_INSIDE_RANDOM,
+        BLINK_STRATEGY_TRIVIEW_RANDOM,
+        BLINK_STRATEGY_TWO_STAGE_FULL_THEN_INSIDE,
+        DEFAULT_BLINK_TRAINING_STRATEGY,
+        blink_training_strategy_label,
+        blink_training_strategy_note,
+        sanitize_blink_training_strategy,
     )
     from AntSleap.core.project_templates import DEFAULT_PROJECT_TEMPLATE_ID, iter_project_templates
     from AntSleap.core.external_backend import BUILTIN_BACKEND_ID, EXTERNAL_BACKEND_ID, ExternalBackendRunner, sanitize_external_backend_config
@@ -168,7 +178,7 @@ except ImportError:
     )
     from ui.cropper import ImageCropper
     from ui.pdf_processing_widget import PdfProcessingWidget
-    from ui.blink_lab import BlinkLabWidget
+    from ui.blink_lab import BlinkExpertTrainingReportDialog, BlinkLabWidget
     from ui.tif_workbench import TifWorkbenchWidget
     from ui.taxamask_agent_panel import TaxaMaskAgentPanel
     from core.dataset import TwoStageDataset
@@ -182,17 +192,27 @@ except ImportError:
         get_route_persisted_expert_candidates,
         merge_expert_candidates,
     )
-    from core.expert_notes import format_expert_display_name, load_expert_notes
+    from core.expert_notes import format_expert_display_name, load_expert_notes, set_expert_note
     from core.model_profiles import (
         CHILD_BACKEND_EXTERNAL,
         CHILD_BACKEND_HEATMAP,
         CHILD_BACKEND_VIT_B,
         DEFAULT_EXTERNAL_BLINK_BACKEND,
+        DEFAULT_CHILD_AUTO_SHRINK_STEPS,
         DEFAULT_HEATMAP_BLINK_PARAMS,
         DEFAULT_MODEL_PROFILE_ID,
         PARENT_BACKEND_BUILTIN,
         PARENT_BACKEND_EXTERNAL,
         sanitize_model_profiles,
+    )
+    from core.blink_training_strategy import (
+        BLINK_STRATEGY_FULL_INSIDE_RANDOM,
+        BLINK_STRATEGY_TRIVIEW_RANDOM,
+        BLINK_STRATEGY_TWO_STAGE_FULL_THEN_INSIDE,
+        DEFAULT_BLINK_TRAINING_STRATEGY,
+        blink_training_strategy_label,
+        blink_training_strategy_note,
+        sanitize_blink_training_strategy,
     )
     from core.project_templates import DEFAULT_PROJECT_TEMPLATE_ID, iter_project_templates
     from core.external_backend import BUILTIN_BACKEND_ID, EXTERNAL_BACKEND_ID, ExternalBackendRunner, sanitize_external_backend_config
@@ -423,6 +443,7 @@ TRANSLATIONS = {
         "All imported images": "已导入所有图像",
         "Images in selected list group": "指定图片列表分组",
         "VLM Image Group:": "VLM 图片分组：",
+        "VLM Detailed Settings": "VLM 详细设置",
         "VLM Prompt Profile:": "VLM 提示词方案：",
         "Built-in Ant Taxonomy Default": "内置蚂蚁分类学默认",
         "Project Custom Prompt": "项目自定义提示词",
@@ -460,9 +481,19 @@ TRANSLATIONS = {
         "failed": "失败",
         "no_candidates": "无可用框",
         "VLM preannotation finished. Images: {0}; saved drafts: {1}; report: {2}": "VLM 预标注完成。图像：{0}；保存草稿：{1}；报告：{2}",
-        "Accept current image AI drafts": "一键通过当前图 AI 草稿",
+        "Confirm current AI polygon drafts": "通过当前图可训练 AI 草稿",
+        "Confirm batch AI polygon drafts": "批量通过可训练 AI 草稿",
+        "Confirm AI Drafts": "确认 AI 草稿",
+        "Only confirms AI drafts that already have polygons. Box-only drafts stay pending until SAM or manual drawing creates a polygon.": "只通过已经有多边形轮廓的 AI 草稿。仅框草稿会继续待处理，直到用 SAM 或手工绘制生成多边形。",
+        "Confirms polygon AI drafts across the current project after a confirmation dialog.": "弹窗确认后，通过当前项目中已有多边形的 AI 草稿。",
+        "Accept {0} AI polygon draft(s) on the current image?\n\nOnly drafts that already have a polygon will become training labels. Box-only drafts will stay pending until you run SAM from the box or redraw a polygon.": "通过当前图像 {0} 个 AI 多边形草稿吗？\n\n只有已经生成多边形轮廓的草稿会变成可训练标签。仅框草稿会继续保留为待处理，需要先用框调用 SAM 或手工重画多边形。",
+        "Accept {0} AI polygon draft(s) from {1} image(s) in the current project?\n\nOnly drafts that already have polygons will become training labels. {2} box-only draft(s) will be skipped and stay pending.": "通过当前项目中 {1} 张图像里的 {0} 个 AI 多边形草稿吗？\n\n只有已经生成多边形轮廓的草稿会变成可训练标签。{2} 个仅框草稿会被跳过并继续保留为待处理。",
         "Accepted {0} AI draft(s) on current image.": "已通过当前图像 {0} 个 AI 草稿。",
+        "Accepted {0} AI polygon draft(s) from {1} image(s) in the current project.": "已通过当前项目中 {1} 张图像里的 {0} 个 AI 多边形草稿。",
         "No reviewable AI polygon drafts on current image.": "当前图像没有可通过的 AI 多边形草稿。",
+        "No reviewable AI polygon drafts in the current project.": "当前项目中没有可通过的 AI 多边形草稿。",
+        "Current image still has {0} AI box-only draft(s): {1}. Box-only drafts cannot enter training; run SAM from the box or redraw a polygon first.": "当前图像还有 {0} 个仅框 AI 草稿：{1}。仅框草稿不能进入训练；请先用框调用 SAM 或手工重画多边形。",
+        "{0} image(s) in the current project still have {1} AI box-only draft(s). Box-only drafts cannot enter training; run SAM from the box or redraw polygons first.": "当前项目中还有 {0} 张图像共 {1} 个仅框 AI 草稿。仅框草稿不能进入训练；请先用框调用 SAM 或手工重画多边形。",
         "SAM draft failed for {0}: {1}": "SAM 草稿生成失败：{0}，原因：{1}",
         "VLM part coverage for {0}: requested [{1}]; returned [{2}]; missing [{3}].": "VLM 部位覆盖（{0}）：请求 [{1}]；返回 [{2}]；缺失 [{3}]。",
         "VLM first-mile preannotation returned no usable boxes.": "VLM 第一公里预标注没有返回可用框。",
@@ -715,11 +746,15 @@ TRANSLATIONS = {
         "Epochs:": "训练轮数 (Epochs):",
         "Batch Size:": "批次大小 (Batch Size):",
         "Blink Expert Training Defaults:": "Blink 专家训练默认值：",
+        "Blink Training Strategy:": "Blink 训练方案：",
+        "Choose which Blink training process to use for child-part experts. Plan 1 is the current baseline; Plan 2 removes outside-view training; Plan 3 trains full-view first and inside-view second.": "选择子部位专家使用哪种 Blink 训练流程。方案一是当前基线；方案二去掉外视角训练；方案三先训练全图视角，再训练内视角。",
         "Default Blink Epochs:": "默认 Blink 训练轮数：",
         "Default Blink Batch Size:": "默认 Blink 批次大小：",
         "Default Blink Learning Rate:": "默认 Blink 学习率：",
         "Default Blink Weight Decay:": "默认 Blink 权重衰减：",
         "Default Blink Input Size:": "默认 Blink 输入尺寸：",
+        "Auto-shrink Steps:": "自动收缩步数：",
+        "Number of interpolation steps from the loose shrink start box to the final target box. 20 steps saves 21 trajectory frames including the starting frame.": "从宽松收缩起始框到最终目标框的插值步数。20 步会保存包含起始帧在内的 21 个轨迹帧。",
         "These defaults are shown in Blink Workbench when the app starts or settings are saved. You can still adjust them for a single expert before training.": "这些默认值会在应用启动或保存设置后显示到 Blink 工作台。训练单个专家前仍可在 Blink 工作台临时调整。",
         "Parent Box Aspect Ratios:": "父级框长宽比：",
         "Used when the main labeling workbench draws parent context boxes. Child boxes and Blink shrink start boxes stay free-ratio.": "主标注工作台绘制父级上下文框时使用；子部位框和 Blink 收缩起始框保持自由比例。",
@@ -883,6 +918,33 @@ TRANSLATIONS = {
         "Configure a route expert before automatic child annotation.": "请先配置路由专家，再自动标注子部位。",
         "Enable the current route before automatic child annotation.": "请先启用当前路由，再自动标注子部位。",
         "Training uses saved shrink trajectories for this parent-child route.": "训练会使用这条父子路由下已保存的收缩轨迹。",
+        "Training progress": "训练进度",
+        "Training Results": "训练结果",
+        "Training Result Browser": "训练结果浏览器",
+        "Preview Report": "预览报告",
+        "No training reports found.": "未找到训练报告。",
+        "Type": "类型",
+        "Target": "目标",
+        "Backend": "后端",
+        "Strategy": "方案",
+        "Samples": "样本数",
+        "Time": "时间",
+        "Report Folder": "报告文件夹",
+        "Parent-part": "父部位",
+        "Child-part": "子部位",
+        "Unknown time": "未知时间",
+        "Unknown target": "未知目标",
+        "No training running.": "当前没有训练任务。",
+        "Parent-part model training": "父部位模型训练",
+        "Child-part expert training": "子部位专家训练",
+        "Parent-part model training finished.": "父部位模型训练完成。",
+        "Child-part expert training finished.": "子部位专家训练完成。",
+        "Parent-part model training failed.": "父部位模型训练失败。",
+        "Child-part expert training failed.": "子部位专家训练失败。",
+        "Stopping parent-part training...": "正在停止父部位模型训练...",
+        "Stopping child-part expert training...": "正在停止子部位专家训练...",
+        "Child-part expert training is running. Wait for it to finish before training parent models.": "子部位专家训练正在进行，请等待结束后再训练父部位模型。",
+        "Parent-part training is running. Wait for it to finish before training a child expert.": "父部位模型训练正在进行，请等待结束后再训练子部位专家。",
         "Configure the current route before continuing.": "请先配置当前路由再继续。",
         "Saved Blink shrink start box for {0}.": "已为 {0} 保存 Blink 收缩起始框。",
         "Blink shrink start boxes are only used for child structures. Select a child structure first.": "Blink 收缩起始框只用于子部位。请先选择一个子部位。",
@@ -899,6 +961,23 @@ TRANSLATIONS = {
         "Auto-shrink did not generate a trajectory.": "自动收缩没有生成轨迹。",
         "Saved {0} shrink trajectory frames for {1}.": "已为 {1} 保存 {0} 帧收缩轨迹。",
         "Auto-shrink failed: {0}": "自动收缩失败：{0}",
+        "Batch auto-shrink": "批量自动收缩",
+        "Batch auto-shrink prepared {0} image(s) for {1}. Existing trajectories skipped: {2}; missing polygon: {3}; missing shrink box: {4}; missing parent box: {5}.\n\nRun auto-shrink for all prepared images?": "已为 {1} 准备 {0} 张可批量自动收缩的图片。已跳过已有轨迹：{2}；缺少多边形：{3}；缺少收缩起始框：{4}；缺少父框：{5}。\n\n是否对这些图片执行自动收缩？",
+        "No prepared images for batch auto-shrink. Existing trajectories: {0}; missing polygon: {1}; missing shrink box: {2}; missing parent box: {3}.": "没有可批量自动收缩的图片。已有轨迹：{0}；缺少多边形：{1}；缺少收缩起始框：{2}；缺少父框：{3}。",
+        "Batch auto-shrink finished for {0}/{1} image(s) of {2}. Failed: {3}.": "{2} 的批量自动收缩完成：{0}/{1} 张成功。失败：{3}。",
+        "Blink Shrink Training Datasets": "Blink收缩训练数据集",
+        "Shows saved auto-shrink trajectories used to train child-part experts. Each row is grouped by parent -> child route.": "展示已保存的自动收缩轨迹，这些数据用于训练子部位专家。每行按父部位 -> 子部位路由分组。",
+        "No Blink shrink trajectory datasets have been generated yet.": "尚未生成 Blink 收缩轨迹数据集。",
+        "Route": "路由",
+        "Images": "图片数",
+        "Frames": "帧数",
+        "Sources": "来源",
+        "View Details": "查看详情",
+        "Delete Dataset": "删除数据集",
+        "Blink Shrink Dataset Details": "Blink收缩数据集详情",
+        "Delete Blink Shrink Dataset": "删除 Blink 收缩数据集",
+        "Delete Blink shrink dataset for {0}?\n\nThis removes {1} image trajectory record(s) from the current project. It does not delete labels or images.": "删除 {0} 的 Blink 收缩数据集吗？\n\n这会从当前项目中移除 {1} 条图片轨迹记录，不会删除标注或图片。",
+        "Deleted {0} Blink shrink trajectory record(s) for {1}.": "已删除 {1} 的 {0} 条 Blink 收缩轨迹记录。",
         "Blink expert training is already running.": "Blink 专家训练已经在运行。",
         "Started Blink expert training for {0} -> {1}.": "已开始训练 Blink 专家：{0} -> {1}。",
         "Training Report & Validation": "训练报告与验证",
@@ -919,6 +998,11 @@ TRANSLATIONS = {
         "{0}% ({1} images)": "{0}%（{1} 张图片）",
         "Cascade Routes": "级联路由",
         "Appoint Expert": "指定专家",
+        "Delete Route": "删除路由",
+        "Delete Expert File": "删除专家文件",
+        "Delete the selected project route only.": "只删除当前选中的项目路由。",
+        "Delete the selected expert model file from disk.": "从磁盘删除当前选中的专家模型文件。",
+        "Select an available expert file to delete the model file from disk.": "请选择一个真实存在的专家文件，才能从磁盘删除模型文件。",
         "Enable Route": "启用路由",
         "Disable Route": "停用路由",
         "Awaiting expert": "待指定专家",
@@ -1083,6 +1167,11 @@ SECTION_TRANSLATIONS = {
         "Project Route Management": "项目路由管理",
         "Manage Blink-discovered or manually appointed project routes here. Deleting a route removes only this project record; reopening Blink later with the same parent/child context can register a candidate again.": "可在这里管理由 Blink 发现或手动指定的项目 route。删除 route 只会移除当前项目中的这条记录；如果之后在相同父/子部位上下文下再次打开 Blink，仍可重新登记为候选 route。",
         "Project routes below control which parent -> child expert links are available.": "下方项目中的 route 决定哪些 parent -> child expert 链路可以实际使用。",
+        "Delete Route": "删除路由",
+        "Delete Expert File": "删除专家文件",
+        "Delete the selected project route only.": "只删除当前选中的项目路由。",
+        "Delete the selected expert model file from disk.": "从磁盘删除当前选中的专家模型文件。",
+        "Select an available expert file to delete the model file from disk.": "请选择一个真实存在的专家文件，才能从磁盘删除模型文件。",
         "Parent": "父部位",
         "Child": "子部位",
         "Cross-region structures": "跨区域结构",
@@ -1118,6 +1207,9 @@ SECTION_TRANSLATIONS = {
         "Route {0} -> {1} now uses expert {2}.": "路由 {0} -> {1} 现已指定专家 {2}。",
         "Route {0} -> {1} enabled.": "路由 {0} -> {1} 已启用。",
         "Route {0} -> {1} disabled.": "路由 {0} -> {1} 已停用。",
+        "Delete expert file {0}?\n\nThis removes the model file from disk and clears current-project expert references to it. Parent -> child route records are kept, but they will return to an unappointed state if this was the appointed expert.": "删除专家文件 {0}？\n\n这会从磁盘删除模型文件，并清理当前项目中指向它的专家引用。父 -> 子路由记录会保留；如果它原本是指定专家，该路由会回到未指定专家状态。",
+        "Deleted expert file {0}. Cleared {1} current-project route reference(s).": "已删除专家文件 {0}，并清理当前项目中的 {1} 条路由引用。",
+        "Failed to delete expert file: {0}": "删除专家文件失败：{0}",
         "Delete project route {0} -> {1}?\n\nThis removes the current project route record only. If you reopen Blink later with the same parent/child context, Blink can register this route again as a candidate.": "删除项目路由 {0} -> {1}？\n\n这只会移除当前项目里的这条路由记录。如果你之后在相同父/子部位上下文下再次打开 Blink，Blink 仍可把这条路由重新登记为候选。",
         "Deleted route {0} -> {1}.": "已删除路由 {0} -> {1}。",
         "Remove missing expert history {0} from route {1} -> {2}?\n\nThis only cleans the current project route history. It does not delete any model file.": "从路由 {1} -> {2} 中移除缺文件专家历史 {0}？\n\n这只会清理当前项目里的路由历史，不会删除任何模型文件。",
@@ -1208,7 +1300,8 @@ def _active_profile_from_manager(project_manager):
     if callable(get_profile):
         try:
             profile = get_profile()
-            return profile if isinstance(profile, dict) else {}
+            if isinstance(profile, dict) and profile:
+                return profile
         except Exception:
             pass
     return {
@@ -2115,6 +2208,121 @@ class TrainingReportDialog(QDialog):
             open_path(d)
 
 
+class TrainingResultBrowserDialog(QDialog):
+    def __init__(self, reports, parent=None, lang="en", preview_callback=None, refresh_callback=None):
+        super().__init__(parent)
+        self.lang = lang
+        self.reports = list(reports or [])
+        self.preview_callback = preview_callback
+        self.refresh_callback = refresh_callback
+        self.setWindowTitle(tr("Training Result Browser", self.lang))
+        self.resize(1120, 620)
+
+        layout = QVBoxLayout(self)
+
+        self.table = QTableWidget(0, 7)
+        self.table.setObjectName("trainingResultBrowserTable")
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        self.table.setHorizontalHeaderLabels([
+            tr("Type", self.lang),
+            tr("Target", self.lang),
+            tr("Backend", self.lang),
+            tr("Strategy", self.lang),
+            tr("Samples", self.lang),
+            tr("Time", self.lang),
+            tr("Report Folder", self.lang),
+        ])
+        self.table.itemSelectionChanged.connect(self._refresh_actions)
+        self.table.doubleClicked.connect(lambda _index=None: self.preview_selected())
+        layout.addWidget(self.table, 1)
+
+        button_row = QHBoxLayout()
+        self.btn_preview = QPushButton(tr("Preview Report", self.lang))
+        self.btn_preview.clicked.connect(self.preview_selected)
+        apply_semantic_button_style(self.btn_preview, BUTTON_ROLE_RUN)
+        button_row.addWidget(self.btn_preview)
+
+        self.btn_open_folder = QPushButton(tr("Open Report Folder", self.lang))
+        self.btn_open_folder.clicked.connect(self.open_selected_folder)
+        apply_semantic_button_style(self.btn_open_folder, BUTTON_ROLE_NEUTRAL)
+        button_row.addWidget(self.btn_open_folder)
+
+        self.btn_refresh = QPushButton(tr("Refresh", self.lang))
+        self.btn_refresh.clicked.connect(self.refresh_reports)
+        apply_semantic_button_style(self.btn_refresh, BUTTON_ROLE_NEUTRAL)
+        button_row.addWidget(self.btn_refresh)
+
+        button_row.addStretch()
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        close_button = buttons.button(QDialogButtonBox.StandardButton.Close)
+        if close_button:
+            close_button.setText(tr("Close", self.lang))
+        buttons.rejected.connect(self.reject)
+        button_row.addWidget(buttons)
+        layout.addLayout(button_row)
+
+        self.populate(self.reports)
+
+    def populate(self, reports):
+        self.reports = list(reports or [])
+        self.table.setRowCount(len(self.reports))
+        for row_idx, report in enumerate(self.reports):
+            values = [
+                report.get("type_label", ""),
+                report.get("target_label", ""),
+                report.get("backend_label", ""),
+                report.get("strategy_label", ""),
+                report.get("samples_label", ""),
+                report.get("time_label", ""),
+                report.get("dir", ""),
+            ]
+            for col_idx, value in enumerate(values):
+                item = QTableWidgetItem(str(value or ""))
+                item.setToolTip(str(value or ""))
+                item.setData(Qt.UserRole, dict(report))
+                self.table.setItem(row_idx, col_idx, item)
+        self.table.resizeColumnsToContents()
+        if self.reports:
+            self.table.setCurrentCell(0, 0)
+        self._refresh_actions()
+
+    def selected_report(self):
+        row = self.table.currentRow()
+        if row < 0:
+            return None
+        item = self.table.item(row, 0)
+        if not item:
+            return None
+        data = item.data(Qt.UserRole)
+        return dict(data) if isinstance(data, dict) else None
+
+    def _refresh_actions(self):
+        has_selection = self.selected_report() is not None
+        self.btn_preview.setEnabled(has_selection)
+        self.btn_open_folder.setEnabled(has_selection)
+
+    def preview_selected(self):
+        report = self.selected_report()
+        if report and callable(self.preview_callback):
+            self.preview_callback(report)
+
+    def open_selected_folder(self):
+        report = self.selected_report()
+        folder = report.get("dir") if isinstance(report, dict) else ""
+        if folder:
+            open_path(folder)
+
+    def refresh_reports(self):
+        if callable(self.refresh_callback):
+            self.populate(self.refresh_callback() or [])
+
+
 class RouteManagementPanel(QWidget):
     NODE_TYPE_ROLE = Qt.UserRole
     NODE_PAYLOAD_ROLE = Qt.UserRole + 1
@@ -2183,6 +2391,11 @@ class RouteManagementPanel(QWidget):
         apply_semantic_button_style(self.btn_delete_route, BUTTON_ROLE_DESTRUCTIVE)
         button_row.addWidget(self.btn_delete_route)
 
+        self.btn_delete_expert_file = QPushButton()
+        self.btn_delete_expert_file.clicked.connect(self.delete_selected_expert_file)
+        apply_semantic_button_style(self.btn_delete_expert_file, BUTTON_ROLE_DESTRUCTIVE)
+        button_row.addWidget(self.btn_delete_expert_file)
+
         layout.addLayout(button_row)
 
     def set_language(self, lang):
@@ -2195,6 +2408,7 @@ class RouteManagementPanel(QWidget):
         apply_theme_button_style(self.btn_appoint_route_expert, BUTTON_ROLE_COMMIT, "", theme)
         apply_theme_button_style(self.btn_toggle_route, BUTTON_ROLE_NEUTRAL, "", theme)
         apply_theme_button_style(self.btn_delete_route, BUTTON_ROLE_DESTRUCTIVE, "", theme)
+        apply_theme_button_style(self.btn_delete_expert_file, BUTTON_ROLE_DESTRUCTIVE, "", theme)
 
     def retranslate_ui(self):
         self.header_label.setText(self._ui("Project Routes"))
@@ -2205,7 +2419,10 @@ class RouteManagementPanel(QWidget):
         )
         self.btn_refresh_routes.setText(self._tr("Refresh"))
         self.btn_appoint_route_expert.setText(self._tr("Appoint Expert"))
-        self.btn_delete_route.setText(self._tr("Delete"))
+        self.btn_delete_route.setText(self._ui("Delete Route"))
+        self.btn_delete_route.setToolTip(self._ui("Delete the selected project route only."))
+        self.btn_delete_expert_file.setText(self._ui("Delete Expert File"))
+        self.btn_delete_expert_file.setToolTip(self._ui("Select an available expert file to delete the model file from disk."))
         self.route_tree.setHeaderLabels([
             self._ui("Parent"),
             self._ui("Child"),
@@ -2263,6 +2480,34 @@ class RouteManagementPanel(QWidget):
     def _expert_notes(self):
         weights_dir = getattr(getattr(self.owner, "engine", None), "weights_dir", "")
         return load_expert_notes(weights_dir)
+
+    def _expert_root_dir(self):
+        weights_dir = getattr(getattr(self.owner, "engine", None), "weights_dir", "")
+        return os.path.abspath(os.path.join(str(weights_dir or ""), "experts"))
+
+    def _is_safe_expert_file_path(self, file_path):
+        if not isinstance(file_path, str) or not file_path:
+            return False
+        try:
+            expert_root = self._expert_root_dir()
+            file_abs = os.path.abspath(file_path)
+            return (
+                os.path.commonpath([expert_root, file_abs]) == expert_root
+                and os.path.isfile(file_abs)
+                and file_abs.lower().endswith(".pth")
+            )
+        except Exception:
+            return False
+
+    def _selected_existing_expert_file(self):
+        expert = self._selected_expert_entry()
+        if not expert:
+            return None
+        file_path = expert.get("path")
+        if not self._is_safe_expert_file_path(file_path):
+            return None
+        expert_id = str(expert.get("expert_id") or "").strip()
+        return {"path": os.path.abspath(file_path), "expert_id": expert_id}
 
     def _route_expert_candidates(self, route_entry, available_experts_by_part):
         route = dict(route_entry or {})
@@ -2537,6 +2782,12 @@ class RouteManagementPanel(QWidget):
         )
         self.btn_appoint_route_expert.setEnabled(selected_kind == "expert" and bool(self._selected_expert_entry()))
         self.btn_delete_route.setEnabled((selected_kind == "route" and bool(route)) or can_delete_missing_history)
+        can_delete_expert_file = selected_kind == "expert" and bool(self._selected_existing_expert_file())
+        self.btn_delete_expert_file.setEnabled(can_delete_expert_file)
+        if can_delete_expert_file:
+            self.btn_delete_expert_file.setToolTip(self._ui("Delete the selected expert model file from disk."))
+        else:
+            self.btn_delete_expert_file.setToolTip(self._ui("Select an available expert file to delete the model file from disk."))
         self.btn_toggle_route.setEnabled(selected_kind == "route" and bool(route))
         self.btn_toggle_route.setText(
             self._tr("Disable Route") if route and route.get("enabled") else self._tr("Enable Route")
@@ -2625,6 +2876,44 @@ class RouteManagementPanel(QWidget):
             self.refresh_route_table()
             self.owner.log(self._ui("Deleted route {0} -> {1}.").format(route.get("parent"), route.get("child")))
 
+    def delete_selected_expert_file(self):
+        file_info = self._selected_existing_expert_file()
+        if not file_info:
+            return
+        file_path = file_info["path"]
+        expert_id = file_info.get("expert_id") or os.path.basename(file_path)
+        reply = themed_yes_no_question(
+            self,
+            self._ui("Delete Expert File"),
+            self._ui(
+                "Delete expert file {0}?\n\nThis removes the model file from disk and clears current-project expert references to it. Parent -> child route records are kept, but they will return to an unappointed state if this was the appointed expert."
+            ).format(expert_id),
+            confirm_role=BUTTON_ROLE_DESTRUCTIVE,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        try:
+            os.remove(file_path)
+            if expert_id:
+                weights_dir = getattr(getattr(self.owner, "engine", None), "weights_dir", "")
+                set_expert_note(weights_dir, expert_id, "")
+            cascade_manager = getattr(getattr(self.owner, "engine", None), "cascade_manager", None)
+            loaded_experts = getattr(cascade_manager, "loaded_experts", None)
+            if isinstance(loaded_experts, dict):
+                loaded_experts.clear()
+            cleanup_refs = getattr(getattr(self.owner, "project", None), "remove_cascade_route_expert_references", None)
+            cleanup_count = 0
+            if callable(cleanup_refs):
+                cleanup_count = int(cleanup_refs(expert_id, save=True) or 0)
+            self.refresh_route_table()
+            self.owner.log(self._ui("Deleted expert file {0}. Cleared {1} current-project route reference(s).").format(expert_id, cleanup_count))
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                self._tr("Delete Model"),
+                self._ui("Failed to delete expert file: {0}").format(exc),
+            )
+
     def remove_selected_missing_expert_history(self):
         route = self._selected_route_entry()
         expert = self._selected_expert_entry()
@@ -2686,6 +2975,7 @@ class ModelSettingsDialog(QDialog):
             "locator_scope": self.initial_locator_scope,
             "parent_box_aspect_ratios": params.get("parent_box_aspect_ratios", {}),
             "vlm_preannotation": params.get("vlm_preannotation", {}),
+            "child_auto_shrink_steps": params.get("blink_auto_shrink_steps", DEFAULT_CHILD_AUTO_SHRINK_STEPS),
         }
         raw_model_profiles = params.get("model_profiles", {})
         if (
@@ -2701,6 +2991,7 @@ class ModelSettingsDialog(QDialog):
         active_profile = self._active_profile()
         parent_backend = active_profile.get("parent_backend", {}) if isinstance(active_profile, dict) else {}
         child_defaults = active_profile.get("child_backend_defaults", {}) if isinstance(active_profile, dict) else {}
+        self.owner_window = parent if hasattr(parent, "project") else None
 
         workflow_note = QLabel(
             tr(
@@ -3071,6 +3362,27 @@ class ModelSettingsDialog(QDialog):
         blink_note.setWordWrap(True)
         blink_note.setObjectName("mutedLabel")
         blink_layout.addWidget(blink_note)
+        blink_layout.addWidget(QLabel(tr("Blink Training Strategy:", lang)))
+        self.combo_blink_training_strategy = NoWheelComboBox()
+        for strategy in (
+            BLINK_STRATEGY_TRIVIEW_RANDOM,
+            BLINK_STRATEGY_FULL_INSIDE_RANDOM,
+            BLINK_STRATEGY_TWO_STAGE_FULL_THEN_INSIDE,
+        ):
+            self.combo_blink_training_strategy.addItem(blink_training_strategy_label(strategy, lang), strategy)
+        selected_strategy = sanitize_blink_training_strategy(
+            child_defaults.get("training_strategy"),
+            params.get("blink_training_strategy", DEFAULT_BLINK_TRAINING_STRATEGY),
+        )
+        strategy_index = self.combo_blink_training_strategy.findData(selected_strategy)
+        self.combo_blink_training_strategy.setCurrentIndex(strategy_index if strategy_index >= 0 else 0)
+        self.combo_blink_training_strategy.currentIndexChanged.connect(self._update_blink_training_strategy_note)
+        blink_layout.addWidget(self.combo_blink_training_strategy)
+        self.blink_training_strategy_note = QLabel("")
+        self.blink_training_strategy_note.setWordWrap(True)
+        self.blink_training_strategy_note.setObjectName("mutedLabel")
+        blink_layout.addWidget(self.blink_training_strategy_note)
+        self._update_blink_training_strategy_note()
         blink_layout.addWidget(QLabel(tr("Default Blink Epochs:", lang)))
         self.spin_blink_epochs = QLineEdit(str(params.get("blink_epochs", 5)))
         blink_layout.addWidget(self.spin_blink_epochs)
@@ -3094,7 +3406,72 @@ class ModelSettingsDialog(QDialog):
         input_index = self.combo_blink_input_size.findData(input_side)
         self.combo_blink_input_size.setCurrentIndex(input_index if input_index >= 0 else 0)
         blink_layout.addWidget(self.combo_blink_input_size)
+        blink_layout.addWidget(QLabel(tr("Auto-shrink Steps:", lang)))
+        self.spin_blink_auto_shrink_steps = QSpinBox()
+        self.spin_blink_auto_shrink_steps.setRange(1, 200)
+        try:
+            shrink_steps = int(child_defaults.get("auto_shrink_steps", params.get("blink_auto_shrink_steps", DEFAULT_CHILD_AUTO_SHRINK_STEPS)))
+        except Exception:
+            shrink_steps = DEFAULT_CHILD_AUTO_SHRINK_STEPS
+        self.spin_blink_auto_shrink_steps.setValue(max(1, min(200, shrink_steps)))
+        self.spin_blink_auto_shrink_steps.setToolTip(
+            tr(
+                "Number of interpolation steps from the loose shrink start box to the final target box. 20 steps saves 21 trajectory frames including the starting frame.",
+                lang,
+            )
+        )
+        blink_layout.addWidget(self.spin_blink_auto_shrink_steps)
         form_child.addWidget(blink_group)
+
+        blink_dataset_group = QGroupBox(tr("Blink Shrink Training Datasets", lang))
+        blink_dataset_group.setObjectName("modelSettingsBlinkDatasetPanel")
+        apply_surface_role(blink_dataset_group, SURFACE_ROLE_SUBTLE, "modelSettingsBlinkDatasetPanel")
+        blink_dataset_layout = QVBoxLayout(blink_dataset_group)
+        blink_dataset_layout.setContentsMargins(12, 12, 12, 12)
+        blink_dataset_layout.setSpacing(8)
+        self.blink_dataset_note = QLabel(
+            tr(
+                "Shows saved auto-shrink trajectories used to train child-part experts. Each row is grouped by parent -> child route.",
+                lang,
+            )
+        )
+        self.blink_dataset_note.setWordWrap(True)
+        self.blink_dataset_note.setObjectName("mutedLabel")
+        blink_dataset_layout.addWidget(self.blink_dataset_note)
+        self.blink_dataset_tree = QTreeWidget()
+        self.blink_dataset_tree.setObjectName("modelSettingsBlinkDatasetTree")
+        self.blink_dataset_tree.setRootIsDecorated(False)
+        self.blink_dataset_tree.setAlternatingRowColors(True)
+        self.blink_dataset_tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.blink_dataset_tree.setHeaderLabels(
+            [
+                tr("Route", lang),
+                tr("Images", lang),
+                tr("Frames", lang),
+                tr("Sources", lang),
+            ]
+        )
+        self.blink_dataset_tree.setMinimumHeight(160)
+        self.blink_dataset_tree.itemSelectionChanged.connect(self._refresh_blink_dataset_actions)
+        header = self.blink_dataset_tree.header()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for column in range(1, 4):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
+        blink_dataset_layout.addWidget(self.blink_dataset_tree)
+        dataset_buttons = QHBoxLayout()
+        self.btn_blink_dataset_details = QPushButton(tr("View Details", lang))
+        self.btn_blink_dataset_details.setObjectName("modelSettingsBlinkDatasetDetailsButton")
+        self.btn_blink_dataset_details.clicked.connect(self._show_blink_dataset_details)
+        apply_semantic_button_style(self.btn_blink_dataset_details, BUTTON_ROLE_NEUTRAL)
+        self.btn_blink_dataset_delete = QPushButton(tr("Delete Dataset", lang))
+        self.btn_blink_dataset_delete.setObjectName("modelSettingsBlinkDatasetDeleteButton")
+        self.btn_blink_dataset_delete.clicked.connect(self._delete_selected_blink_dataset)
+        apply_semantic_button_style(self.btn_blink_dataset_delete, BUTTON_ROLE_DESTRUCTIVE)
+        dataset_buttons.addWidget(self.btn_blink_dataset_details)
+        dataset_buttons.addWidget(self.btn_blink_dataset_delete)
+        dataset_buttons.addStretch(1)
+        blink_dataset_layout.addLayout(dataset_buttons)
+        form_child.addWidget(blink_dataset_group)
 
         heatmap_group = QGroupBox(tr("Heatmap Blink Parameters:", lang))
         apply_surface_role(heatmap_group, SURFACE_ROLE_SUBTLE, "modelSettingsHeatmapBlinkPanel")
@@ -3220,7 +3597,25 @@ class ModelSettingsDialog(QDialog):
             self.vlm_target_part_checks.append(check)
             vlm_grid.addWidget(check, index // 2, index % 2)
         vlm_layout.addLayout(vlm_grid)
-        vlm_layout.addWidget(QLabel(tr("VLM Batch Scope:", lang)))
+
+        self.btn_vlm_detail_toggle = QToolButton()
+        self.btn_vlm_detail_toggle.setObjectName("modelSettingsVlmDetailToggle")
+        self.btn_vlm_detail_toggle.setText(tr("VLM Detailed Settings", lang))
+        self.btn_vlm_detail_toggle.setCheckable(True)
+        self.btn_vlm_detail_toggle.setChecked(False)
+        self.btn_vlm_detail_toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.btn_vlm_detail_toggle.setArrowType(Qt.RightArrow)
+        vlm_layout.addWidget(self.btn_vlm_detail_toggle)
+
+        self.vlm_details_widget = QWidget()
+        self.vlm_details_widget.setObjectName("modelSettingsVlmDetailsPanel")
+        vlm_details_layout = QVBoxLayout(self.vlm_details_widget)
+        vlm_details_layout.setContentsMargins(0, 4, 0, 0)
+        vlm_details_layout.setSpacing(8)
+        self.vlm_details_widget.setVisible(False)
+        self.btn_vlm_detail_toggle.toggled.connect(self._toggle_vlm_details)
+
+        vlm_details_layout.addWidget(QLabel(tr("VLM Batch Scope:", lang)))
         self.combo_vlm_processing_scope = NoWheelComboBox()
         self.combo_vlm_processing_scope.setObjectName("modelSettingsVlmBatchScopeCombo")
         self.combo_vlm_processing_scope.addItem(tr("All imported images", lang), "all_images")
@@ -3230,13 +3625,13 @@ class ModelSettingsDialog(QDialog):
             scope_value = "image_group"
         scope_index = self.combo_vlm_processing_scope.findData(scope_value)
         self.combo_vlm_processing_scope.setCurrentIndex(scope_index if scope_index >= 0 else 0)
-        vlm_layout.addWidget(self.combo_vlm_processing_scope)
-        vlm_layout.addWidget(QLabel(tr("VLM Image Group:", lang)))
+        vlm_details_layout.addWidget(self.combo_vlm_processing_scope)
+        vlm_details_layout.addWidget(QLabel(tr("VLM Image Group:", lang)))
         self.combo_vlm_image_group = NoWheelComboBox()
         self.combo_vlm_image_group.setObjectName("modelSettingsVlmImageGroupCombo")
         self._populate_vlm_image_group_combo(str(vlm_settings.get("image_group", "split") or "split"))
-        vlm_layout.addWidget(self.combo_vlm_image_group)
-        vlm_layout.addWidget(QLabel(tr("VLM Prompt Profile:", lang)))
+        vlm_details_layout.addWidget(self.combo_vlm_image_group)
+        vlm_details_layout.addWidget(QLabel(tr("VLM Prompt Profile:", lang)))
         vlm_profile_note = QLabel(
             tr(
                 "Prompt profile only changes the instructions sent to the multimodal model. The grid input, JSON schema, coordinate mapping, and SAM draft generation stay locked.",
@@ -3245,13 +3640,13 @@ class ModelSettingsDialog(QDialog):
         )
         vlm_profile_note.setWordWrap(True)
         vlm_profile_note.setObjectName("mutedLabel")
-        vlm_layout.addWidget(vlm_profile_note)
+        vlm_details_layout.addWidget(vlm_profile_note)
         self.combo_vlm_prompt_profile = NoWheelComboBox()
         self.combo_vlm_prompt_profile.setObjectName("modelSettingsVlmPromptProfileCombo")
         self.combo_vlm_prompt_profile.addItem(tr("Built-in Ant Taxonomy Default", lang), DEFAULT_VLM_PROMPT_PROFILE_ID)
         self.combo_vlm_prompt_profile.addItem(tr("Project Custom Prompt", lang), "project_custom")
         self.combo_vlm_prompt_profile.currentIndexChanged.connect(lambda _index: self._refresh_vlm_prompt_profile_editors())
-        vlm_layout.addWidget(self.combo_vlm_prompt_profile)
+        vlm_details_layout.addWidget(self.combo_vlm_prompt_profile)
         vlm_prompt_help = QLabel(
             tr(
                 "Use the built-in ant prompt profile as a stable baseline. Choose Project Custom Prompt when adapting VLM pre-annotation to another taxon or a special image style.",
@@ -3260,11 +3655,11 @@ class ModelSettingsDialog(QDialog):
         )
         vlm_prompt_help.setWordWrap(True)
         vlm_prompt_help.setObjectName("mutedLabel")
-        vlm_layout.addWidget(vlm_prompt_help)
-        vlm_layout.addWidget(QLabel(tr("Profile Name:", lang)))
+        vlm_details_layout.addWidget(vlm_prompt_help)
+        vlm_details_layout.addWidget(QLabel(tr("Profile Name:", lang)))
         self.vlm_prompt_profile_name = QLineEdit()
         self.vlm_prompt_profile_name.setObjectName("modelSettingsVlmPromptProfileName")
-        vlm_layout.addWidget(self.vlm_prompt_profile_name)
+        vlm_details_layout.addWidget(self.vlm_prompt_profile_name)
         self.vlm_prompt_taxon_context = self._make_prompt_profile_editor()
         self.vlm_prompt_body_rules = self._make_prompt_profile_editor()
         self.vlm_prompt_anchor_rules = self._make_prompt_profile_editor()
@@ -3275,8 +3670,9 @@ class ModelSettingsDialog(QDialog):
             (tr("Part Anchor Rules:", lang), self.vlm_prompt_anchor_rules),
             (tr("Extra VLM Instructions:", lang), self.vlm_prompt_extra_instructions),
         ]:
-            vlm_layout.addWidget(QLabel(label_text))
-            vlm_layout.addWidget(editor)
+            vlm_details_layout.addWidget(QLabel(label_text))
+            vlm_details_layout.addWidget(editor)
+        vlm_layout.addWidget(self.vlm_details_widget)
         self._set_vlm_prompt_profile_controls(vlm_settings)
         form_inf.addWidget(vlm_group)
 
@@ -3322,6 +3718,7 @@ class ModelSettingsDialog(QDialog):
         btn_layout.addWidget(btn_save)
         btn_layout.addWidget(btn_cancel)
         layout.addLayout(btn_layout)
+        self._refresh_blink_dataset_table()
         self._load_selected_profile_fields()
 
     def _make_scroll_tab(self, content_widget):
@@ -3349,6 +3746,22 @@ class ModelSettingsDialog(QDialog):
         editor.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         editor.setMinimumHeight(72)
         return editor
+
+    def _toggle_vlm_details(self, checked):
+        details = getattr(self, "vlm_details_widget", None)
+        if details is not None:
+            details.setVisible(bool(checked))
+        toggle = getattr(self, "btn_vlm_detail_toggle", None)
+        if toggle is not None:
+            toggle.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
+
+    def _update_blink_training_strategy_note(self):
+        combo = getattr(self, "combo_blink_training_strategy", None)
+        label = getattr(self, "blink_training_strategy_note", None)
+        if combo is None or label is None:
+            return
+        strategy = sanitize_blink_training_strategy(combo.currentData())
+        label.setText(blink_training_strategy_note(strategy, self.lang))
 
     def _command_text(self, editor):
         return editor.toPlainText().strip()
@@ -3433,6 +3846,172 @@ class ModelSettingsDialog(QDialog):
             "prompt_profile_id": "project_custom",
             "prompt_profile": profile,
         }
+
+    def _blink_dataset_owner_project(self):
+        owner = getattr(self, "owner_window", None)
+        project = getattr(owner, "project", None) if owner is not None else None
+        if project is None:
+            project = getattr(owner, "project_manager", None) if owner is not None else None
+        return owner, project
+
+    def _refresh_blink_dataset_table(self):
+        if not hasattr(self, "blink_dataset_tree"):
+            return
+        self.blink_dataset_tree.clear()
+        self.blink_dataset_rows = []
+        _owner, project = self._blink_dataset_owner_project()
+        summarize = getattr(project, "summarize_blink_trajectory_datasets", None)
+        if callable(summarize):
+            try:
+                self.blink_dataset_rows = [
+                    dict(row)
+                    for row in summarize()
+                    if isinstance(row, dict)
+                ]
+            except Exception:
+                self.blink_dataset_rows = []
+        if not self.blink_dataset_rows:
+            item = QTreeWidgetItem(
+                [
+                    tr("No Blink shrink trajectory datasets have been generated yet.", self.lang),
+                    "",
+                    "",
+                    "",
+                ]
+            )
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+            self.blink_dataset_tree.addTopLevelItem(item)
+        else:
+            for row in self.blink_dataset_rows:
+                parent_part = str(row.get("parent_part") or tr("Unknown", self.lang))
+                child_part = str(row.get("child_part") or tr("Unknown", self.lang))
+                sources = row.get("sources", [])
+                if not isinstance(sources, list):
+                    sources = []
+                item = QTreeWidgetItem(
+                    [
+                        f"{parent_part} -> {child_part}",
+                        str(row.get("image_count", 0)),
+                        str(row.get("frame_count", 0)),
+                        ", ".join(str(source) for source in sources if str(source).strip()) or tr("Unknown", self.lang),
+                    ]
+                )
+                item.setData(0, Qt.ItemDataRole.UserRole, dict(row))
+                self.blink_dataset_tree.addTopLevelItem(item)
+        self.blink_dataset_tree.resizeColumnToContents(1)
+        self.blink_dataset_tree.resizeColumnToContents(2)
+        self.blink_dataset_tree.resizeColumnToContents(3)
+        self._refresh_blink_dataset_actions()
+
+    def _selected_blink_dataset_summary(self):
+        if not hasattr(self, "blink_dataset_tree"):
+            return None
+        item = self.blink_dataset_tree.currentItem()
+        if item is None:
+            return None
+        summary = item.data(0, Qt.ItemDataRole.UserRole)
+        return dict(summary) if isinstance(summary, dict) else None
+
+    def _refresh_blink_dataset_actions(self):
+        summary = self._selected_blink_dataset_summary()
+        enabled = bool(summary)
+        if hasattr(self, "btn_blink_dataset_details"):
+            self.btn_blink_dataset_details.setEnabled(enabled)
+        if hasattr(self, "btn_blink_dataset_delete"):
+            self.btn_blink_dataset_delete.setEnabled(enabled)
+
+    def _format_blink_dataset_details(self, summary):
+        parent_part = str(summary.get("parent_part") or tr("Unknown", self.lang))
+        child_part = str(summary.get("child_part") or tr("Unknown", self.lang))
+        sources = summary.get("sources", [])
+        if not isinstance(sources, list):
+            sources = []
+        lines = [
+            tr("Route", self.lang) + f": {parent_part} -> {child_part}",
+            tr("Images", self.lang) + f": {summary.get('image_count', 0)}",
+            tr("Frames", self.lang) + f": {summary.get('frame_count', 0)}",
+            tr("Sources", self.lang) + ": " + (", ".join(str(source) for source in sources if str(source).strip()) or tr("Unknown", self.lang)),
+            "",
+        ]
+        images = summary.get("images", [])
+        if isinstance(images, list):
+            for index, image_info in enumerate(images, start=1):
+                if not isinstance(image_info, dict):
+                    continue
+                image_path = str(image_info.get("image_path") or "")
+                source = str(image_info.get("source") or "unknown")
+                frame_count = image_info.get("frame_count", 0)
+                parent_box = image_info.get("parent_box")
+                lines.append(f"{index}. {image_path}")
+                lines.append(f"   {tr('Frames', self.lang)}: {frame_count}; {tr('Source', self.lang)}: {source}")
+                if parent_box:
+                    lines.append(f"   {tr('Parent box: {0}', self.lang).format(parent_box)}")
+        return "\n".join(lines).strip()
+
+    def _show_blink_dataset_details(self):
+        summary = self._selected_blink_dataset_summary()
+        if not summary:
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle(tr("Blink Shrink Dataset Details", self.lang))
+        dialog.resize(720, 520)
+        layout = QVBoxLayout(dialog)
+        details = QTextEdit()
+        details.setReadOnly(True)
+        details.setAcceptRichText(False)
+        details.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        details.setPlainText(self._format_blink_dataset_details(summary))
+        layout.addWidget(details)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+        apply_theme_dialog_button_box_style(
+            buttons,
+            ok_role=BUTTON_ROLE_COMMIT,
+            cancel_role=BUTTON_ROLE_STOP,
+            theme=getattr(getattr(self, "owner_window", None), "current_theme", "dark"),
+        )
+        buttons.accepted.connect(dialog.accept)
+        layout.addWidget(buttons)
+        dialog.exec()
+
+    def _delete_selected_blink_dataset(self):
+        summary = self._selected_blink_dataset_summary()
+        if not summary:
+            return
+        parent_part = str(summary.get("parent_part") or "").strip()
+        child_part = str(summary.get("child_part") or "").strip()
+        route_label = f"{parent_part} -> {child_part}"
+        image_count = int(summary.get("image_count") or 0)
+        reply = themed_yes_no_question(
+            self,
+            tr("Delete Blink Shrink Dataset", self.lang),
+            tr(
+                "Delete Blink shrink dataset for {0}?\n\nThis removes {1} image trajectory record(s) from the current project. It does not delete labels or images.",
+                self.lang,
+            ).format(route_label, image_count),
+            confirm_role=BUTTON_ROLE_DESTRUCTIVE,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        owner, project = self._blink_dataset_owner_project()
+        delete_dataset = getattr(project, "delete_blink_trajectory_dataset", None)
+        removed = 0
+        if callable(delete_dataset):
+            removed = int(delete_dataset(parent_part, child_part) or 0)
+        self._refresh_blink_dataset_table()
+        refresh_state = getattr(owner, "_refresh_blink_refine_state", None)
+        if callable(refresh_state):
+            refresh_state()
+        refresh_files = getattr(owner, "refresh_file_list", None)
+        if callable(refresh_files):
+            refresh_files()
+        log = getattr(owner, "log", None)
+        if callable(log):
+            log(
+                tr("Deleted {0} Blink shrink trajectory record(s) for {1}.", self.lang).format(
+                    removed,
+                    route_label,
+                )
+            )
 
     def _active_profile_id(self):
         selected = ""
@@ -3833,6 +4412,20 @@ class ModelSettingsDialog(QDialog):
                 input_size = 224
             index = self.combo_blink_input_size.findData(input_size)
             self.combo_blink_input_size.setCurrentIndex(index if index >= 0 else 0)
+        if hasattr(self, "spin_blink_auto_shrink_steps"):
+            try:
+                shrink_steps = int(child_defaults.get("auto_shrink_steps", DEFAULT_CHILD_AUTO_SHRINK_STEPS))
+            except Exception:
+                shrink_steps = DEFAULT_CHILD_AUTO_SHRINK_STEPS
+            self.spin_blink_auto_shrink_steps.setValue(max(1, min(200, shrink_steps)))
+        if hasattr(self, "combo_blink_training_strategy"):
+            strategy = sanitize_blink_training_strategy(
+                child_defaults.get("training_strategy"),
+                DEFAULT_BLINK_TRAINING_STRATEGY,
+            )
+            index = self.combo_blink_training_strategy.findData(strategy)
+            self.combo_blink_training_strategy.setCurrentIndex(index if index >= 0 else 0)
+            self._update_blink_training_strategy_note()
 
         heatmap_params = child_defaults.get("heatmap_params", {}) if isinstance(child_defaults.get("heatmap_params"), dict) else {}
         for editor_name, key in [
@@ -4024,6 +4617,14 @@ class ModelSettingsDialog(QDialog):
             {
                 "backend_type": self.child_backend_combo.currentData() or CHILD_BACKEND_VIT_B,
                 "input_size": int(self.combo_blink_input_size.currentData() or 224),
+                "auto_shrink_steps": int(self.spin_blink_auto_shrink_steps.value())
+                if hasattr(self, "spin_blink_auto_shrink_steps")
+                else DEFAULT_CHILD_AUTO_SHRINK_STEPS,
+                "training_strategy": sanitize_blink_training_strategy(
+                    self.combo_blink_training_strategy.currentData()
+                    if hasattr(self, "combo_blink_training_strategy")
+                    else DEFAULT_BLINK_TRAINING_STRATEGY
+                ),
                 "train_params": {
                     "epochs": int(self.spin_blink_epochs.text()),
                     "batch": int(self.spin_blink_batch.text()),
@@ -4121,6 +4722,11 @@ class ModelSettingsDialog(QDialog):
             "blink_lr": float(child_train.get("lr", self.spin_blink_lr.text())),
             "blink_weight_decay": float(child_train.get("weight_decay", self.spin_blink_wd.text())),
             "blink_input_size": int(child_defaults.get("input_size", self.combo_blink_input_size.currentData() or 224)),
+            "blink_auto_shrink_steps": int(child_defaults.get("auto_shrink_steps", DEFAULT_CHILD_AUTO_SHRINK_STEPS)),
+            "blink_training_strategy": sanitize_blink_training_strategy(
+                child_defaults.get("training_strategy"),
+                DEFAULT_BLINK_TRAINING_STRATEGY,
+            ),
             "lr": float(parent_train.get("lr", self.spin_lr.text())),
             "wd": float(parent_train.get("weight_decay", self.spin_wd.text())),
             "conf": float(inference_params.get("conf", self.spin_conf.text())),
@@ -4255,6 +4861,10 @@ class ModelSettingsDialog(QDialog):
         child_defaults = selected_profile.get("child_backend_defaults", {}) if isinstance(selected_profile.get("child_backend_defaults"), dict) else {}
         parent_backend_type = parent_backend.get("backend_type", self.parent_backend_combo.currentData() if hasattr(self, "parent_backend_combo") else PARENT_BACKEND_BUILTIN)
         child_backend_type = child_defaults.get("backend_type", self.child_backend_combo.currentData() if hasattr(self, "child_backend_combo") else CHILD_BACKEND_VIT_B)
+        child_training_strategy = sanitize_blink_training_strategy(
+            child_defaults.get("training_strategy"),
+            DEFAULT_BLINK_TRAINING_STRATEGY,
+        )
         route_differences = self._routes_differing_from_child_default(selected_profile)
         route_summary = []
         for route in route_differences[:8]:
@@ -4276,6 +4886,8 @@ class ModelSettingsDialog(QDialog):
             "parent_model_source_label": _parent_backend_label(parent_backend_type, self.lang),
             "default_child_expert": str(child_backend_type or ""),
             "default_child_expert_label": _child_backend_label(child_backend_type, self.lang),
+            "blink_training_strategy": child_training_strategy,
+            "blink_training_strategy_label": blink_training_strategy_label(child_training_strategy, self.lang),
             "default_child_route_backend": _route_backend_from_child_backend(child_backend_type),
             "route_specific_backend_count": str(len(route_differences)),
             "route_specific_backend_summary": "; ".join(route_summary),
@@ -4326,6 +4938,8 @@ class ModelSettingsDialog(QDialog):
                 'blink_lr': active_values["blink_lr"],
                 'blink_weight_decay': active_values["blink_weight_decay"],
                 'blink_input_size': active_values["blink_input_size"],
+                'blink_auto_shrink_steps': active_values["blink_auto_shrink_steps"],
+                'blink_training_strategy': active_values["blink_training_strategy"],
                 'lr': active_values["lr"],
                 'wd': active_values["wd"],
                 'conf': active_values["conf"],
@@ -5234,6 +5848,10 @@ class MainWindow(QMainWindow):
         self.blink_train_lr = self.config.get("blink_train_lr", 1e-3)
         self.blink_train_weight_decay = self.config.get("blink_train_weight_decay", 1e-4)
         self.blink_train_input_size = self.config.get("blink_train_input_size", 224)
+        self.blink_auto_shrink_steps = int(self.config.get("blink_auto_shrink_steps", DEFAULT_CHILD_AUTO_SHRINK_STEPS) or DEFAULT_CHILD_AUTO_SHRINK_STEPS)
+        self.blink_training_strategy = sanitize_blink_training_strategy(
+            self.config.get("blink_training_strategy", DEFAULT_BLINK_TRAINING_STRATEGY)
+        )
         self.train_lr = self.config.get("train_lr", 1e-4)
         self.train_wd = self.config.get("train_weight_decay", 1e-4)
         self.runtime_device = normalize_device_preference(self.config.get("runtime_device", "auto"))
@@ -5269,6 +5887,12 @@ class MainWindow(QMainWindow):
         self.last_confirmed_locator_timestamp = None
         self.pending_training_preflight = None
         self.training_retry_requested = False
+        self.parent_training_failed = False
+        self.parent_training_cancel_requested = False
+        self.child_training_failed = False
+        self.child_training_cancel_requested = False
+        self.active_training_kind = None
+        self.active_training_label = ""
         self.current_blink_context = {}
         self.vlm_preannotation_thread = None
         self.vlm_preannotation_progress_dialog = None
@@ -5628,6 +6252,10 @@ class MainWindow(QMainWindow):
         self.btn_accept_current_ai_drafts.clicked.connect(self.accept_current_image_ai_drafts)
         apply_semantic_button_style(self.btn_accept_current_ai_drafts, BUTTON_ROLE_COMMIT, "padding: 6px;")
         ai_action_layout.addWidget(self.btn_accept_current_ai_drafts)
+        self.btn_accept_batch_ai_drafts = QPushButton()
+        self.btn_accept_batch_ai_drafts.clicked.connect(self.accept_batch_ai_drafts)
+        apply_semantic_button_style(self.btn_accept_batch_ai_drafts, BUTTON_ROLE_COMMIT, "padding: 6px;")
+        ai_action_layout.addWidget(self.btn_accept_batch_ai_drafts)
         self.chk_train_locator_only = QCheckBox()
         self.chk_train_locator_only.setToolTip(
             tr(
@@ -5652,8 +6280,6 @@ class MainWindow(QMainWindow):
         self.btn_clear_ai.clicked.connect(self.clear_ai_labels)
         apply_semantic_button_style(self.btn_clear_ai, BUTTON_ROLE_DESTRUCTIVE, "font-weight: bold; margin-top: 5px;")
         ai_action_layout.addWidget(self.btn_clear_ai)
-        self.progress = QProgressBar()
-        ai_action_layout.addWidget(self.progress)
         parent_annotation_layout.addWidget(self.ai_action_panel)
         ai_layout.addWidget(self.parent_annotation_panel)
 
@@ -5695,15 +6321,62 @@ class MainWindow(QMainWindow):
         self.btn_blink_auto_annotate.clicked.connect(self.run_blink_child_auto_annotate)
         apply_semantic_button_style(self.btn_blink_auto_annotate, BUTTON_ROLE_RUN, "padding: 6px;")
         blink_refine_layout.addWidget(self.btn_blink_auto_annotate)
+        blink_shrink_buttons = QHBoxLayout()
+        blink_shrink_buttons.setContentsMargins(0, 0, 0, 0)
+        blink_shrink_buttons.setSpacing(8)
         self.btn_blink_auto_shrink = QPushButton()
         self.btn_blink_auto_shrink.clicked.connect(self.run_blink_auto_shrink)
         apply_semantic_button_style(self.btn_blink_auto_shrink, BUTTON_ROLE_RUN, "padding: 6px;")
-        blink_refine_layout.addWidget(self.btn_blink_auto_shrink)
+        blink_shrink_buttons.addWidget(self.btn_blink_auto_shrink)
+        self.btn_blink_batch_auto_shrink = QPushButton()
+        self.btn_blink_batch_auto_shrink.clicked.connect(self.run_blink_batch_auto_shrink)
+        apply_semantic_button_style(self.btn_blink_batch_auto_shrink, BUTTON_ROLE_RUN, "padding: 6px;")
+        blink_shrink_buttons.addWidget(self.btn_blink_batch_auto_shrink)
+        blink_refine_layout.addLayout(blink_shrink_buttons)
+        blink_train_buttons = QHBoxLayout()
+        blink_train_buttons.setContentsMargins(0, 0, 0, 0)
+        blink_train_buttons.setSpacing(8)
         self.btn_blink_train_expert = QPushButton()
         self.btn_blink_train_expert.clicked.connect(self.train_current_blink_expert)
         apply_semantic_button_style(self.btn_blink_train_expert, BUTTON_ROLE_RUN, "padding: 6px;")
-        blink_refine_layout.addWidget(self.btn_blink_train_expert)
+        blink_train_buttons.addWidget(self.btn_blink_train_expert, 3)
+        self.btn_blink_stop_training = QPushButton()
+        self.btn_blink_stop_training.setEnabled(False)
+        self.btn_blink_stop_training.clicked.connect(self.stop_current_blink_expert_training)
+        apply_semantic_button_style(self.btn_blink_stop_training, BUTTON_ROLE_STOP, "padding: 6px;")
+        blink_train_buttons.addWidget(self.btn_blink_stop_training, 2)
+        blink_refine_layout.addLayout(blink_train_buttons)
         ai_layout.addWidget(self.blink_refine_panel)
+
+        self.training_progress_panel = QWidget()
+        apply_surface_role(self.training_progress_panel, SURFACE_ROLE_SUBTLE, "workbenchTrainingProgressPanel")
+        training_progress_layout = QVBoxLayout(self.training_progress_panel)
+        training_progress_layout.setContentsMargins(10, 10, 10, 10)
+        training_progress_layout.setSpacing(6)
+        training_progress_header = QHBoxLayout()
+        training_progress_header.setContentsMargins(0, 0, 0, 0)
+        training_progress_header.setSpacing(8)
+        self.label_training_progress = QLabel()
+        self.label_training_progress.setObjectName("HeaderLabel")
+        self.label_training_progress.setText(tr("Training progress", self.current_lang))
+        training_progress_header.addWidget(self.label_training_progress)
+        training_progress_header.addStretch()
+        self.btn_training_results = QPushButton()
+        self.btn_training_results.setObjectName("workbenchTrainingResultsButton")
+        self.btn_training_results.clicked.connect(self.open_training_results_browser)
+        apply_semantic_button_style(self.btn_training_results, BUTTON_ROLE_NEUTRAL, "padding: 4px 8px;")
+        training_progress_header.addWidget(self.btn_training_results)
+        training_progress_layout.addLayout(training_progress_header)
+        self.label_training_progress_status = QLabel()
+        self.label_training_progress_status.setObjectName("mutedLabel")
+        self.label_training_progress_status.setWordWrap(True)
+        self.label_training_progress_status.setText(tr("No training running.", self.current_lang))
+        training_progress_layout.addWidget(self.label_training_progress_status)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        training_progress_layout.addWidget(self.progress)
+        ai_layout.addWidget(self.training_progress_panel)
         right_layout.addWidget(self.ai_panel)
 
         self.logs_panel = QWidget()
@@ -5744,6 +6417,8 @@ class MainWindow(QMainWindow):
             blink_lr=self.blink_train_lr,
             blink_weight_decay=self.blink_train_weight_decay,
             blink_input_size=self.blink_train_input_size,
+            blink_auto_shrink_steps=self.blink_auto_shrink_steps,
+            blink_training_strategy=self.blink_training_strategy,
             runtime_device=self.runtime_device,
         )
         self.blink_lab.start_center_requested.connect(self.return_to_start_center_with_context)
@@ -7124,7 +7799,84 @@ class MainWindow(QMainWindow):
                 return tuple(candidate)
         return None
 
+    def _is_parent_training_running(self):
+        return bool(self.trainer and self.trainer.isRunning())
+
+    def _is_child_training_running(self):
+        blink_lab = getattr(self, "blink_lab", None)
+        thread = getattr(blink_lab, "training_thread", None) if blink_lab is not None else None
+        return bool(thread and thread.isRunning())
+
+    def _is_any_training_running(self):
+        return self._is_parent_training_running() or self._is_child_training_running()
+
+    def _set_training_progress(self, kind=None, status_text=None, percent=None):
+        if kind:
+            self.active_training_kind = kind
+        if status_text is not None:
+            self.active_training_label = str(status_text)
+        if percent is not None:
+            try:
+                progress_value = max(0, min(100, int(percent)))
+            except Exception:
+                progress_value = None
+        else:
+            progress_value = None
+        if hasattr(self, "label_training_progress_status"):
+            text = self.active_training_label or tr("No training running.", self.current_lang)
+            if progress_value is not None:
+                text = f"{text} | {progress_value}%"
+            self.label_training_progress_status.setText(text)
+        if progress_value is not None and hasattr(self, "progress"):
+            self.progress.setValue(progress_value)
+
+    def _connect_child_training_progress(self):
+        blink_lab = getattr(self, "blink_lab", None)
+        thread = getattr(blink_lab, "training_thread", None) if blink_lab is not None else None
+        if thread is None or getattr(thread, "_taxamask_shared_progress_connected", False):
+            return
+        thread._taxamask_shared_progress_connected = True
+        thread.progress_signal.connect(lambda value: self._set_training_progress("child", None, value))
+        thread.result_signal.connect(self._on_child_training_result)
+        thread.error_signal.connect(self._on_child_training_error)
+        thread.cancelled_signal.connect(self._on_child_training_cancelled)
+        thread.finished.connect(self._on_child_training_finished)
+
+    def _on_child_training_result(self, save_path):
+        self.child_training_failed = not bool(save_path)
+        if save_path:
+            self._set_training_progress("child", tr("Child-part expert training finished.", self.current_lang), 100)
+        else:
+            self._set_training_progress("child", tr("Child-part expert training failed.", self.current_lang), self.progress.value())
+
+    def _on_child_training_error(self, _error_msg):
+        self.child_training_failed = True
+        self._set_training_progress("child", tr("Child-part expert training failed.", self.current_lang), self.progress.value())
+
+    def _on_child_training_cancelled(self):
+        self.child_training_cancel_requested = True
+        self._set_training_progress("child", tr("Training cancelled.", self.current_lang), self.progress.value())
+
+    def _on_child_training_finished(self):
+        if self.active_training_kind == "child" and not self.child_training_failed and not self.child_training_cancel_requested:
+            self._set_training_progress("child", tr("Child-part expert training finished.", self.current_lang), 100)
+        if hasattr(self, "btn_train"):
+            self.btn_train.setEnabled(True)
+        if hasattr(self, "btn_blink_stop_training"):
+            self.btn_blink_stop_training.setEnabled(False)
+        self.child_training_failed = False
+        self.child_training_cancel_requested = False
+        self._refresh_blink_refine_state()
+
     def _launch_training_with_preflight(self, preflight, tax, locator_scope, train_segmenter=True):
+        if self._is_child_training_running():
+            self.log(tr("Child-part expert training is running. Wait for it to finish before training parent models.", self.current_lang))
+            QMessageBox.information(
+                self,
+                tr("Training", self.current_lang),
+                tr("Child-part expert training is running. Wait for it to finish before training parent models.", self.current_lang),
+            )
+            return
         active_preflight = dict(preflight or {})
         self.pending_training_preflight = {
             "preflight": active_preflight,
@@ -7133,6 +7885,8 @@ class MainWindow(QMainWindow):
             "train_segmenter": bool(train_segmenter),
         }
         self.training_retry_requested = False
+        self.parent_training_failed = False
+        self.parent_training_cancel_requested = False
 
         self.engine.locator_resolution = tuple(active_preflight.get("selected_locator_size") or (512, 512))
         active_profile = _active_profile_from_manager(self.project)
@@ -7155,14 +7909,15 @@ class MainWindow(QMainWindow):
             },
         )
         self.trainer.log_signal.connect(self.log)
-        self.trainer.progress_signal.connect(self.progress.setValue)
+        self.trainer.progress_signal.connect(lambda value: self._set_training_progress("parent", None, value))
         self.trainer.report_signal.connect(self.show_training_report)
         self.trainer.success_signal.connect(self._on_training_success)
         self.trainer.error_signal.connect(self._on_training_error)
         self.trainer.finished_signal.connect(self._on_training_finished)
         self.btn_train.setEnabled(False)
         self.btn_stop_training.setEnabled(True)
-        self.progress.setValue(0)
+        self._set_training_progress("parent", tr("Parent-part model training", self.current_lang), 0)
+        self._refresh_blink_refine_state()
         self.trainer.start()
 
     def _on_training_success(self):
@@ -7184,13 +7939,22 @@ class MainWindow(QMainWindow):
     def _on_training_finished(self):
         self.btn_train.setEnabled(False if self.training_retry_requested else True)
         self.btn_stop_training.setEnabled(False)
-        if not self.training_retry_requested:
+        if not self.training_retry_requested and not self.parent_training_failed and not self.parent_training_cancel_requested:
+            if self.active_training_kind == "parent":
+                self._set_training_progress("parent", tr("Parent-part model training finished.", self.current_lang), 100)
             self.refresh_model_list()
+        if not self.training_retry_requested:
+            finished_trainer = self.trainer
+            self.trainer = None
+            if finished_trainer is not None and hasattr(finished_trainer, "deleteLater"):
+                finished_trainer.deleteLater()
+        self._refresh_blink_refine_state()
 
     def _on_training_error(self, payload):
         payload = dict(payload or {})
         error_type = payload.get("type")
         self.training_retry_requested = False
+        self.parent_training_failed = True
 
         if error_type == "oom" and payload.get("stage") == "locator":
             retry_resolution = self._ask_locator_oom_retry_resolution(
@@ -7207,6 +7971,7 @@ class MainWindow(QMainWindow):
                     if tuple(value) != tuple(retry_resolution)
                 ]
                 self.pending_training_preflight["preflight"] = updated_preflight
+                self.parent_training_failed = False
                 QTimer.singleShot(
                     0,
                     lambda: self._launch_training_with_preflight(
@@ -7219,6 +7984,7 @@ class MainWindow(QMainWindow):
                 return
 
         message = str(payload.get("message") or "Training failed.")
+        self._set_training_progress("parent", tr("Parent-part model training failed.", self.current_lang), self.progress.value())
         self.log(tr("Training aborted: {0}", self.current_lang).format(message))
         QMessageBox.critical(self, tr("Error", self.current_lang), message)
 
@@ -7226,6 +7992,8 @@ class MainWindow(QMainWindow):
         if self.trainer and self.trainer.isRunning():
             self.trainer.requestInterruption()
             self.btn_stop_training.setEnabled(False)
+            self.parent_training_cancel_requested = True
+            self._set_training_progress("parent", tr("Stopping parent-part training...", self.current_lang), self.progress.value())
             self.log(tr("Stopping training after the current epoch/batch...", self.current_lang))
 
     def _apply_segmenter_selection_to_runtime(self, *, log_change=False):
@@ -7814,6 +8582,21 @@ class MainWindow(QMainWindow):
             return box, "auto"
         return None, "none"
 
+    def _current_shrink_loose_boxes(self):
+        if not self.current_image or not hasattr(self.project, "get_shrink_loose_boxes"):
+            return {}
+        boxes = self.project.get_shrink_loose_boxes(self.current_image)
+        return boxes if isinstance(boxes, dict) else {}
+
+    def _refresh_current_canvas_boxes(self):
+        if not self.current_image:
+            return
+        self.canvas.set_boxes(
+            self.project.get_boxes(self.current_image),
+            self.project.get_auto_boxes(self.current_image),
+            self._current_shrink_loose_boxes(),
+        )
+
     def _route_entry_for_context(self, parent_part, child_part):
         get_route = getattr(self.project, "get_cascade_route", None)
         if callable(get_route):
@@ -8156,10 +8939,7 @@ class MainWindow(QMainWindow):
         """Called when Blink Workbench applies changes back to the global project."""
         if self.current_image:
             self.canvas.set_polygons(self.project.get_labels(self.current_image))
-            self.canvas.set_boxes(
-                self.project.get_boxes(self.current_image), 
-                self.project.get_auto_boxes(self.current_image)
-            )
+            self._refresh_current_canvas_boxes()
         self.log(tr("Global labels updated from Blink Workbench.", self.current_lang))
 
     def refresh_ui(self):
@@ -8228,7 +9008,21 @@ class MainWindow(QMainWindow):
                 )
             )
         if hasattr(self, "btn_accept_current_ai_drafts"):
-            self.btn_accept_current_ai_drafts.setText(tr("Accept current image AI drafts", self.current_lang))
+            self.btn_accept_current_ai_drafts.setText(tr("Confirm current AI polygon drafts", self.current_lang))
+            self.btn_accept_current_ai_drafts.setToolTip(
+                tr(
+                    "Only confirms AI drafts that already have polygons. Box-only drafts stay pending until SAM or manual drawing creates a polygon.",
+                    self.current_lang,
+                )
+            )
+        if hasattr(self, "btn_accept_batch_ai_drafts"):
+            self.btn_accept_batch_ai_drafts.setText(tr("Confirm batch AI polygon drafts", self.current_lang))
+            self.btn_accept_batch_ai_drafts.setToolTip(
+                tr(
+                    "Confirms polygon AI drafts across the current project after a confirmation dialog.",
+                    self.current_lang,
+                )
+            )
         self.chk_train_locator_only.setText(tr("Train Locator only (skip SAM)", self.current_lang))
         self.chk_train_locator_only.setToolTip(
             tr(
@@ -8239,6 +9033,12 @@ class MainWindow(QMainWindow):
         self.btn_train.setText(tr("Train Models", self.current_lang))
         self.btn_stop_training.setText(tr("Stop Training", self.current_lang))
         self.btn_clear_ai.setText(tr("Clear AI Labels", self.current_lang))
+        if hasattr(self, "label_training_progress"):
+            self.label_training_progress.setText(tr("Training progress", self.current_lang))
+        if hasattr(self, "btn_training_results"):
+            self.btn_training_results.setText(tr("Training Results", self.current_lang))
+        if hasattr(self, "label_training_progress_status") and not self.active_training_label:
+            self.label_training_progress_status.setText(tr("No training running.", self.current_lang))
         self.btn_blink_entry.setText(tr("Open in Blink Workbench", self.current_lang))
         self.btn_blink_entry.setVisible(False)
         if hasattr(self, "btn_literature_descriptions"):
@@ -8255,7 +9055,11 @@ class MainWindow(QMainWindow):
         self.btn_configure_route_expert.setText(tr("Configure Route Expert", self.current_lang))
         self.btn_blink_auto_annotate.setText(tr("Annotate child from existing parent box", self.current_lang))
         self.btn_blink_auto_shrink.setText(tr("Run auto-shrink", self.current_lang))
+        if hasattr(self, "btn_blink_batch_auto_shrink"):
+            self.btn_blink_batch_auto_shrink.setText(tr("Batch auto-shrink", self.current_lang))
         self.btn_blink_train_expert.setText(tr("Train current child expert", self.current_lang))
+        if hasattr(self, "btn_blink_stop_training"):
+            self.btn_blink_stop_training.setText(tr("Stop Training", self.current_lang))
         if hasattr(self, "label_blink_parent_context"):
             self.label_blink_parent_context.setText(tr("Parent context:", self.current_lang))
         self.label_logs.setText(tr("LOGS", self.current_lang))
@@ -8373,11 +9177,24 @@ class MainWindow(QMainWindow):
         self.btn_blink_auto_annotate.setToolTip(disabled_reason)
         self.btn_blink_auto_shrink.setEnabled(bool(role == "child" and parent_part and context.get("has_parent_box")))
         self.btn_blink_auto_shrink.setToolTip(disabled_reason if not self.btn_blink_auto_shrink.isEnabled() else "")
-        self.btn_blink_train_expert.setEnabled(bool(role == "child" and parent_part))
+        if hasattr(self, "btn_blink_batch_auto_shrink"):
+            self.btn_blink_batch_auto_shrink.setEnabled(bool(role == "child" and parent_part))
+            self.btn_blink_batch_auto_shrink.setToolTip(disabled_reason if not self.btn_blink_batch_auto_shrink.isEnabled() else "")
+        parent_training_busy = self._is_parent_training_running()
+        child_training_busy = self._is_child_training_running()
+        training_busy = parent_training_busy or child_training_busy
+        can_train_child = bool(role == "child" and parent_part) and not training_busy
+        self.btn_blink_train_expert.setEnabled(can_train_child)
+        if self.btn_blink_train_expert.isEnabled():
+            train_child_tooltip = tr("Training uses saved shrink trajectories for this parent-child route.", self.current_lang)
+        elif parent_training_busy:
+            train_child_tooltip = tr("Parent-part training is running. Wait for it to finish before training a child expert.", self.current_lang)
+        elif child_training_busy:
+            train_child_tooltip = tr("Blink expert training is already running.", self.current_lang)
+        else:
+            train_child_tooltip = tr("Select a child structure with a parent context first.", self.current_lang)
         self.btn_blink_train_expert.setToolTip(
-            tr("Training uses saved shrink trajectories for this parent-child route.", self.current_lang)
-            if self.btn_blink_train_expert.isEnabled()
-            else tr("Select a child structure with a parent context first.", self.current_lang)
+            train_child_tooltip
         )
 
     def _update_blink_parent_context_combo(self, context):
@@ -8480,6 +9297,8 @@ class MainWindow(QMainWindow):
             'blink_lr': self.blink_train_lr,
             'blink_weight_decay': self.blink_train_weight_decay,
             'blink_input_size': self.blink_train_input_size,
+            'blink_auto_shrink_steps': self.blink_auto_shrink_steps,
+            'blink_training_strategy': self.blink_training_strategy,
             'conf': self.inf_conf, 'adapt': self.inf_adapt, 'pad': self.inf_pad, 
             'noise_floor': self.inf_noise_floor, 'poly_epsilon': self.inf_poly_epsilon,
             'model_backend': self.model_backend,
@@ -8519,6 +9338,10 @@ class MainWindow(QMainWindow):
             self.blink_train_lr = v['blink_lr']
             self.blink_train_weight_decay = v['blink_weight_decay']
             self.blink_train_input_size = v['blink_input_size']
+            self.blink_auto_shrink_steps = v.get('blink_auto_shrink_steps', DEFAULT_CHILD_AUTO_SHRINK_STEPS)
+            self.blink_training_strategy = sanitize_blink_training_strategy(
+                v.get("blink_training_strategy", DEFAULT_BLINK_TRAINING_STRATEGY)
+            )
             self.train_lr, self.train_wd = v['lr'], v['wd']
             self.inf_conf, self.inf_adapt = v['conf'], v['adapt']
             self.inf_pad, self.inf_noise_floor = v['pad'], v['noise_floor']
@@ -8552,6 +9375,8 @@ class MainWindow(QMainWindow):
             self.config.set("blink_train_lr", self.blink_train_lr)
             self.config.set("blink_train_weight_decay", self.blink_train_weight_decay)
             self.config.set("blink_train_input_size", self.blink_train_input_size)
+            self.config.set("blink_auto_shrink_steps", self.blink_auto_shrink_steps)
+            self.config.set("blink_training_strategy", self.blink_training_strategy)
             self.config.set("train_lr", self.train_lr)
             self.config.set("train_weight_decay", self.train_wd)
             self.config.set("inf_conf_thresh", self.inf_conf)
@@ -8697,10 +9522,14 @@ class MainWindow(QMainWindow):
             apply_theme_button_style(self.btn_vlm_preannotate_batch, BUTTON_ROLE_RUN, "padding: 6px;", self.current_theme)
         if hasattr(self, "btn_accept_current_ai_drafts"):
             apply_theme_button_style(self.btn_accept_current_ai_drafts, BUTTON_ROLE_COMMIT, "padding: 6px;", self.current_theme)
+        if hasattr(self, "btn_accept_batch_ai_drafts"):
+            apply_theme_button_style(self.btn_accept_batch_ai_drafts, BUTTON_ROLE_COMMIT, "padding: 6px;", self.current_theme)
         if hasattr(self, "btn_train"):
             apply_theme_button_style(self.btn_train, BUTTON_ROLE_RUN, "padding: 8px; margin-top: 5px;", self.current_theme)
         if hasattr(self, "btn_stop_training"):
             apply_theme_button_style(self.btn_stop_training, BUTTON_ROLE_STOP, "padding: 8px; margin-top: 5px;", self.current_theme)
+        if hasattr(self, "btn_training_results"):
+            apply_theme_button_style(self.btn_training_results, BUTTON_ROLE_NEUTRAL, "padding: 4px 8px;", self.current_theme)
         if hasattr(self, "btn_clear_ai"):
             apply_theme_button_style(self.btn_clear_ai, BUTTON_ROLE_DESTRUCTIVE, "font-weight: bold; margin-top: 5px;", self.current_theme)
 
@@ -8710,8 +9539,12 @@ class MainWindow(QMainWindow):
             apply_theme_button_style(self.btn_blink_auto_annotate, BUTTON_ROLE_RUN, "padding: 6px;", self.current_theme)
         if hasattr(self, "btn_blink_auto_shrink"):
             apply_theme_button_style(self.btn_blink_auto_shrink, BUTTON_ROLE_RUN, "padding: 6px;", self.current_theme)
+        if hasattr(self, "btn_blink_batch_auto_shrink"):
+            apply_theme_button_style(self.btn_blink_batch_auto_shrink, BUTTON_ROLE_RUN, "padding: 6px;", self.current_theme)
         if hasattr(self, "btn_blink_train_expert"):
             apply_theme_button_style(self.btn_blink_train_expert, BUTTON_ROLE_RUN, "padding: 6px;", self.current_theme)
+        if hasattr(self, "btn_blink_stop_training"):
+            apply_theme_button_style(self.btn_blink_stop_training, BUTTON_ROLE_STOP, "padding: 6px;", self.current_theme)
     def add_images(self):
         fs, _ = QFileDialog.getOpenFileNames(self, tr("Select Images", self.current_lang), "", "Images (*.png *.jpg *.jpeg *.tif)")
         if fs:
@@ -9284,7 +10117,7 @@ class MainWindow(QMainWindow):
                 self.current_image = None
                 self.canvas.load_image("")
 
-    def refresh_file_list(self):
+    def refresh_file_list(self, restore_selection=True):
         # 1. Remember the currently selected image path
         current_selection_path = self.current_image
 
@@ -9361,10 +10194,11 @@ class MainWindow(QMainWindow):
         self.file_list.blockSignals(False)
         
         # 2. Restore Selection
-        target_item = item_to_select or first_image_item
-        if target_item:
-            self.file_list.setCurrentItem(target_item)
-            self.file_list.scrollToItem(target_item) # Ensure visible
+        if restore_selection:
+            target_item = item_to_select or first_image_item
+            if target_item:
+                self.file_list.setCurrentItem(target_item)
+                self.file_list.scrollToItem(target_item) # Ensure visible
         
         # Update the header label on the left side
         header_base = tr("PROJECT IMAGES", self.current_lang)
@@ -9381,7 +10215,7 @@ class MainWindow(QMainWindow):
         self.file_list.blockSignals(True)
         self.file_list.setCurrentItem(None)
         self.file_list.blockSignals(False)
-        self.refresh_file_list()
+        self.refresh_file_list(restore_selection=False)
 
     def _collect_blink_roi_candidates(self, image_path, selected_part=None, preferred_roi_parts=None):
         manual_boxes = self.project.get_boxes(image_path)
@@ -9420,6 +10254,8 @@ class MainWindow(QMainWindow):
     def on_file_selected(self, curr, prev):
         if not curr:
             return
+        if curr.data(Qt.UserRole + 1):
+            return
         
         # Robust Retrieval: Try getting data from UserRole first
         p = curr.data(Qt.UserRole)
@@ -9447,7 +10283,7 @@ class MainWindow(QMainWindow):
                 self.canvas.load_image(p)
                 self.on_enhancement_changed()
             self.canvas.set_polygons(labels)
-            self.canvas.set_boxes(manual_boxes, auto_boxes)
+            self.canvas.set_boxes(manual_boxes, auto_boxes, self._current_shrink_loose_boxes())
             get_taxon = getattr(self.project, "get_taxon", self.project.get_genus)
             self.genus_combo.setCurrentText(get_taxon(p))
             self._refresh_blink_refine_state()
@@ -9957,6 +10793,7 @@ class MainWindow(QMainWindow):
             update_loose_box = getattr(self.project, "update_shrink_loose_box", None)
             if callable(update_loose_box):
                 update_loose_box(self.current_image, part, clean_box, save=False)
+            self._refresh_current_canvas_boxes()
             self.log(tr("Saved Blink shrink start box for {0}.", self.current_lang).format(part))
         else:
             existing_points = self.project.get_labels(self.current_image).get(part, [])
@@ -9968,7 +10805,7 @@ class MainWindow(QMainWindow):
                 box=clean_box,
                 save=False,
             )
-            self.canvas.set_boxes(self.project.get_boxes(self.current_image), self.project.get_auto_boxes(self.current_image))
+            self._refresh_current_canvas_boxes()
             if context.get("role") == "child" and context.get("parent_part"):
                 self.project.remember_blink_context_parent(part, context.get("parent_part"), save=False)
             self.log(tr("Saved manual ROI box for {0}.", self.current_lang).format(part))
@@ -10022,12 +10859,12 @@ class MainWindow(QMainWindow):
             if polygon and len(polygon) >= 3:
                 self.project.update_label(self.current_image, child_part, polygon, self.desc_box.toPlainText(), box=raw_box, save=False)
                 self.canvas.set_polygons(self.project.get_labels(self.current_image))
-                self.canvas.set_boxes(self.project.get_boxes(self.current_image), self.project.get_auto_boxes(self.current_image))
+                self._refresh_current_canvas_boxes()
                 self.log(tr("Generated child draft polygon for {0}.", self.current_lang).format(child_part))
             else:
                 existing_points = self.project.get_labels(self.current_image).get(child_part, [])
                 self.project.update_label(self.current_image, child_part, existing_points, self.desc_box.toPlainText(), box=raw_box, save=False)
-                self.canvas.set_boxes(self.project.get_boxes(self.current_image), self.project.get_auto_boxes(self.current_image))
+                self._refresh_current_canvas_boxes()
                 self.log(tr("Route expert produced a child box for {0}; refine polygon manually.", self.current_lang).format(child_part))
             self.project.remember_blink_context_parent(child_part, parent_part, save=False)
             self._schedule_project_save()
@@ -10035,11 +10872,130 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._warn_blink_context(tr("Child auto-annotation failed: {0}", self.current_lang).format(str(exc)))
 
+    def _load_blink_refiner_class(self):
+        if "core.blink_refiner" in sys.modules:
+            from core.blink_refiner import BlinkRefiner
+            return BlinkRefiner
+        try:
+            from AntSleap.core.blink_refiner import BlinkRefiner
+        except ImportError:
+            from core.blink_refiner import BlinkRefiner
+        return BlinkRefiner
+
+    def _active_blink_auto_shrink_steps(self):
+        child_defaults = _runtime_child_backend_defaults(self.project)
+        try:
+            value = int(child_defaults.get("auto_shrink_steps", self.blink_auto_shrink_steps))
+        except Exception:
+            value = self.blink_auto_shrink_steps
+        try:
+            value = int(value)
+        except Exception:
+            value = DEFAULT_CHILD_AUTO_SHRINK_STEPS
+        return max(1, min(200, value))
+
+    def _blink_parent_context_for_image(self, image_path, child_part, parent_part):
+        previous_current = self.current_image
+        try:
+            self.current_image = image_path
+            parent_box, parent_box_source = self._parent_context_box(parent_part)
+        finally:
+            self.current_image = previous_current
+        if not parent_box:
+            return None
+        return {
+            "parent_part": parent_part,
+            "parent_box": parent_box,
+            "source": parent_box_source or "workbench",
+        }
+
+    def _prepared_blink_auto_shrink_images(self, child_part, parent_part):
+        prepared = []
+        missing_polygon = 0
+        missing_loose_box = 0
+        missing_parent_box = 0
+        existing_trajectory = 0
+        for image_path in self.project.project_data.get("images", []):
+            if not image_path:
+                continue
+            labels = self.project.project_data.get("labels", {}).get(image_path, {})
+            parts = labels.get("parts", {}) if isinstance(labels.get("parts", {}), dict) else {}
+            polygon = parts.get(child_part, [])
+            if not polygon or len(polygon) < 3:
+                missing_polygon += 1
+                continue
+            loose_boxes = labels.get("shrink_loose_boxes", {}) if isinstance(labels.get("shrink_loose_boxes", {}), dict) else {}
+            loose_box = _clean_box(loose_boxes.get(child_part))
+            if not loose_box:
+                missing_loose_box += 1
+                continue
+            trajectories = labels.get("trajectories", {}) if isinstance(labels.get("trajectories", {}), dict) else {}
+            if child_part in trajectories:
+                existing_trajectory += 1
+                continue
+            parent_context = self._blink_parent_context_for_image(image_path, child_part, parent_part)
+            if not parent_context:
+                missing_parent_box += 1
+                continue
+            prepared.append({
+                "image_path": image_path,
+                "polygon": polygon,
+                "loose_box": loose_box,
+                "parent_context": parent_context,
+            })
+        return {
+            "prepared": prepared,
+            "missing_polygon": missing_polygon,
+            "missing_loose_box": missing_loose_box,
+            "missing_parent_box": missing_parent_box,
+            "existing_trajectory": existing_trajectory,
+        }
+
+    def _generate_blink_shrink_for_image(self, image_path, child_part, polygon, loose_box, parent_context, refiner, steps=None):
+        image_bgr = cv2.imread(image_path)
+        if image_bgr is None:
+            raise RuntimeError(tr("Could not read the current image.", self.current_lang))
+        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+        trajectory = refiner.generate_shrink_trajectory(
+            image_rgb,
+            loose_box,
+            polygon,
+            steps=steps or self._active_blink_auto_shrink_steps(),
+        )
+        if not trajectory:
+            return []
+        self.project.update_trajectory(
+            image_path,
+            child_part,
+            trajectory,
+            parent_context=parent_context,
+            save=False,
+        )
+        best_box = _clean_box(trajectory[-1].get("box") if isinstance(trajectory[-1], dict) else None)
+        if best_box:
+            description = ""
+            if self.current_image and self._same_project_image_path(image_path, self.current_image):
+                description = self.desc_box.toPlainText()
+            else:
+                descriptions = self.project.project_data.get("labels", {}).get(image_path, {}).get("descriptions", {})
+                if isinstance(descriptions, dict):
+                    description = descriptions.get(child_part, "")
+            self.project.update_label(
+                image_path,
+                child_part,
+                polygon,
+                description,
+                box=best_box,
+                save=False,
+            )
+        return trajectory
+
     def run_blink_auto_shrink(self):
         context = self._active_child_blink_context(require_ready=False)
         if not context or not self.current_image:
             return
         child_part = context.get("child_part")
+        parent_part = context.get("parent_part")
         polygon = self.project.get_labels(self.current_image).get(child_part, [])
         if not polygon or len(polygon) < 3:
             self._warn_blink_context(tr("Draw or confirm the child polygon before auto-shrink.", self.current_lang))
@@ -10050,49 +11006,121 @@ class MainWindow(QMainWindow):
             self._warn_blink_context(tr("Select Blink Shrink Start Box on the canvas toolbar and draw one around the child first.", self.current_lang))
             return
         try:
-            if "core.blink_refiner" in sys.modules:
-                from core.blink_refiner import BlinkRefiner
-            else:
-                try:
-                    from AntSleap.core.blink_refiner import BlinkRefiner
-                except ImportError:
-                    from core.blink_refiner import BlinkRefiner
+            BlinkRefiner = self._load_blink_refiner_class()
             parts_model = self.engine.ensure_parts_model_loaded() if hasattr(self.engine, "ensure_parts_model_loaded") else self.engine.parts_model
             sam_model = getattr(parts_model, "ultralytics_sam", None)
-            image_bgr = cv2.imread(self.current_image)
-            if image_bgr is None:
-                raise RuntimeError(tr("Could not read the current image.", self.current_lang))
-            image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
             refiner = BlinkRefiner(sam_model=sam_model, device=self.runtime_device)
-            trajectory = refiner.generate_shrink_trajectory(image_rgb, loose_box, polygon)
-            if not trajectory:
-                self._warn_blink_context(tr("Auto-shrink did not generate a trajectory.", self.current_lang))
-                return
-            self.project.update_trajectory(
+            trajectory = self._generate_blink_shrink_for_image(
                 self.current_image,
                 child_part,
-                trajectory,
-                parent_context={
-                    "parent_part": context.get("parent_part"),
+                polygon,
+                loose_box,
+                {
+                    "parent_part": parent_part,
                     "parent_box": context.get("parent_box"),
                     "source": context.get("parent_box_source") or "workbench",
                 },
+                refiner,
             )
-            best_box = _clean_box(trajectory[-1].get("box") if isinstance(trajectory[-1], dict) else None)
-            if best_box:
-                self.project.update_label(
-                    self.current_image,
-                    child_part,
-                    polygon,
-                    self.desc_box.toPlainText(),
-                    box=best_box,
-                    save=False,
-                )
-                self.canvas.set_boxes(self.project.get_boxes(self.current_image), self.project.get_auto_boxes(self.current_image))
-            self.project.remember_blink_context_parent(child_part, context.get("parent_part"), save=False)
+            if not trajectory:
+                self._warn_blink_context(tr("Auto-shrink did not generate a trajectory.", self.current_lang))
+                return
+            self.project.remember_blink_context_parent(child_part, parent_part, save=False)
             self._schedule_project_save()
+            self._refresh_current_canvas_boxes()
             self._refresh_blink_refine_state()
             self.log(tr("Saved {0} shrink trajectory frames for {1}.", self.current_lang).format(len(trajectory), child_part))
+        except Exception as exc:
+            self._warn_blink_context(tr("Auto-shrink failed: {0}", self.current_lang).format(str(exc)))
+
+    def run_blink_batch_auto_shrink(self):
+        context = self._active_child_blink_context(require_ready=False)
+        if not context:
+            return
+        child_part = context.get("child_part")
+        parent_part = context.get("parent_part")
+        if not child_part or not parent_part:
+            return
+
+        summary = self._prepared_blink_auto_shrink_images(child_part, parent_part)
+        prepared = list(summary.get("prepared", []) or [])
+        if not prepared:
+            self.log(
+                tr(
+                    "No prepared images for batch auto-shrink. Existing trajectories: {0}; missing polygon: {1}; missing shrink box: {2}; missing parent box: {3}.",
+                    self.current_lang,
+                ).format(
+                    summary.get("existing_trajectory", 0),
+                    summary.get("missing_polygon", 0),
+                    summary.get("missing_loose_box", 0),
+                    summary.get("missing_parent_box", 0),
+                )
+            )
+            return
+
+        reply = themed_yes_no_question(
+            self,
+            tr("Batch auto-shrink", self.current_lang),
+            tr(
+                "Batch auto-shrink prepared {0} image(s) for {1}. Existing trajectories skipped: {2}; missing polygon: {3}; missing shrink box: {4}; missing parent box: {5}.\n\nRun auto-shrink for all prepared images?",
+                self.current_lang,
+            ).format(
+                len(prepared),
+                child_part,
+                summary.get("existing_trajectory", 0),
+                summary.get("missing_polygon", 0),
+                summary.get("missing_loose_box", 0),
+                summary.get("missing_parent_box", 0),
+            ),
+            confirm_role=BUTTON_ROLE_RUN,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        try:
+            BlinkRefiner = self._load_blink_refiner_class()
+            parts_model = self.engine.ensure_parts_model_loaded() if hasattr(self.engine, "ensure_parts_model_loaded") else self.engine.parts_model
+            sam_model = getattr(parts_model, "ultralytics_sam", None)
+            refiner = BlinkRefiner(sam_model=sam_model, device=self.runtime_device)
+            success = 0
+            failed = 0
+            for item in prepared:
+                try:
+                    trajectory = self._generate_blink_shrink_for_image(
+                        item["image_path"],
+                        child_part,
+                        item["polygon"],
+                        item["loose_box"],
+                        item["parent_context"],
+                        refiner,
+                    )
+                    if trajectory:
+                        success += 1
+                    else:
+                        failed += 1
+                except Exception as exc:
+                    failed += 1
+                    self.log(
+                        tr("Auto-shrink failed: {0}", self.current_lang).format(
+                            f"{os.path.basename(str(item.get('image_path', '')))} | {exc}"
+                        )
+                    )
+            if success:
+                self.project.remember_blink_context_parent(child_part, parent_part, save=False)
+                self.project.save_project()
+            if self.current_image:
+                self.canvas.set_polygons(self.project.get_labels(self.current_image))
+                self._refresh_current_canvas_boxes()
+            self.refresh_file_list()
+            self._refresh_blink_refine_state()
+            self.log(
+                tr("Batch auto-shrink finished for {0}/{1} image(s) of {2}. Failed: {3}.", self.current_lang).format(
+                    success,
+                    len(prepared),
+                    child_part,
+                    failed,
+                )
+            )
         except Exception as exc:
             self._warn_blink_context(tr("Auto-shrink failed: {0}", self.current_lang).format(str(exc)))
 
@@ -10100,11 +11128,22 @@ class MainWindow(QMainWindow):
         context = self._active_child_blink_context(require_ready=False)
         if not context:
             return
+        if self._is_parent_training_running():
+            self._warn_blink_context(tr("Parent-part training is running. Wait for it to finish before training a child expert.", self.current_lang))
+            return
         if getattr(self.blink_lab, "training_thread", None) is not None and self.blink_lab.training_thread.isRunning():
             self._warn_blink_context(tr("Blink expert training is already running.", self.current_lang))
             return
         child_part = context.get("child_part")
         parent_part = context.get("parent_part")
+        self.child_training_failed = False
+        self.child_training_cancel_requested = False
+        self.btn_train.setEnabled(False)
+        self._set_training_progress(
+            "child",
+            f"{tr('Child-part expert training', self.current_lang)}: {parent_part} -> {child_part}",
+            0,
+        )
         self.blink_lab.canvas.current_tool_part = child_part
         self.blink_lab.session_target_part = child_part
         self.blink_lab.current_image_path = self.current_image
@@ -10119,7 +11158,28 @@ class MainWindow(QMainWindow):
         }
         self.blink_lab.training_route_context = self.blink_lab._route_context_for_training(parent_part, child_part)
         self.blink_lab.train_expert_model()
+        self._connect_child_training_progress()
+        if getattr(self.blink_lab, "training_thread", None) is None:
+            self.btn_train.setEnabled(True)
+            if hasattr(self, "btn_blink_stop_training"):
+                self.btn_blink_stop_training.setEnabled(False)
+            self._set_training_progress(None, tr("No training running.", self.current_lang), 0)
+        else:
+            if hasattr(self, "btn_blink_stop_training"):
+                self.btn_blink_stop_training.setEnabled(True)
+        self._refresh_blink_refine_state()
         self.log(tr("Started Blink expert training for {0} -> {1}.", self.current_lang).format(parent_part, child_part))
+
+    def stop_current_blink_expert_training(self):
+        if not self._is_child_training_running():
+            if hasattr(self, "btn_blink_stop_training"):
+                self.btn_blink_stop_training.setEnabled(False)
+            return
+        self.child_training_cancel_requested = True
+        if hasattr(self, "btn_blink_stop_training"):
+            self.btn_blink_stop_training.setEnabled(False)
+        self._set_training_progress("child", tr("Stopping child-part expert training...", self.current_lang), self.progress.value())
+        self.blink_lab.stop_expert_training()
 
     def open_current_route_expert_settings(self):
         context = self._refresh_blink_refine_state()
@@ -10146,7 +11206,7 @@ class MainWindow(QMainWindow):
             self.on_polygon_completed(p, pts, box)
             # Re-fetch from project to ensure consistency (and display updated boxes)
             self.canvas.set_polygons(self.project.get_labels(self.current_image))
-            self.canvas.set_boxes(self.project.get_boxes(self.current_image), self.project.get_auto_boxes(self.current_image))
+            self._refresh_current_canvas_boxes()
 
     def on_polygon_completed(self, p, pts, box=None):
         if self.current_image:
@@ -10154,10 +11214,13 @@ class MainWindow(QMainWindow):
                 # Empty points means DELETE
                 self.project.delete_label(self.current_image, p, save=False)
             else:
-                self.project.update_label(self.current_image, p, pts, self.desc_box.toPlainText(), box=box, save=False)
+                description_text = self.desc_box.toPlainText()
+                if description_text.strip() == "Auto-Annotated":
+                    description_text = ""
+                self.project.update_label(self.current_image, p, pts, description_text, box=box, save=False)
             self._schedule_project_save()
             self.canvas.set_polygons(self.project.get_labels(self.current_image))
-            self.canvas.set_boxes(self.project.get_boxes(self.current_image), self.project.get_auto_boxes(self.current_image))
+            self._refresh_current_canvas_boxes()
             
             # Update counts on the left panel
             self.refresh_file_list()
@@ -10201,6 +11264,14 @@ class MainWindow(QMainWindow):
         self._flush_pending_project_save()
         if self.trainer and self.trainer.isRunning():
             self.log(tr("Training already running...", self.current_lang))
+            return
+        if self._is_child_training_running():
+            self.log(tr("Child-part expert training is running. Wait for it to finish before training parent models.", self.current_lang))
+            QMessageBox.information(
+                self,
+                tr("Training", self.current_lang),
+                tr("Child-part expert training is running. Wait for it to finish before training parent models.", self.current_lang),
+            )
             return
         if _runtime_parent_backend(self.project, self.model_backend) == EXTERNAL_BACKEND_ID:
             self.run_external_training()
@@ -10256,6 +11327,11 @@ class MainWindow(QMainWindow):
         heatmap_params = child_defaults.get("heatmap_params", {}) if isinstance(child_defaults.get("heatmap_params"), dict) else {}
         backend_type = child_defaults.get("backend_type") or CHILD_BACKEND_VIT_B
         input_size = child_defaults.get("input_size", self.blink_train_input_size)
+        auto_shrink_steps = child_defaults.get("auto_shrink_steps", self.blink_auto_shrink_steps)
+        training_strategy = sanitize_blink_training_strategy(
+            child_defaults.get("training_strategy"),
+            DEFAULT_BLINK_TRAINING_STRATEGY,
+        )
         if backend_type == CHILD_BACKEND_HEATMAP:
             input_size = heatmap_params.get("input_size", input_size)
         self.blink_lab.set_training_defaults(
@@ -10267,29 +11343,215 @@ class MainWindow(QMainWindow):
             self.runtime_device,
             trainer_backend=backend_type,
             heatmap_params=heatmap_params,
+            auto_shrink_steps=auto_shrink_steps,
+            training_strategy=training_strategy,
         )
 
     def run_external_training(self):
         self._flush_pending_project_save()
+        if self._is_child_training_running():
+            self.log(tr("Child-part expert training is running. Wait for it to finish before training parent models.", self.current_lang))
+            QMessageBox.information(
+                self,
+                tr("Training", self.current_lang),
+                tr("Child-part expert training is running. Wait for it to finish before training parent models.", self.current_lang),
+            )
+            return
         if not self.project.current_project_path:
             QMessageBox.warning(self, tr("Training", self.current_lang), tr("Save Project", self.current_lang))
             return
         try:
+            self.active_training_kind = "parent"
             self.btn_train.setEnabled(False)
             self.btn_stop_training.setEnabled(False)
+            self._set_training_progress("parent", tr("Parent-part model training", self.current_lang), 0)
             self.log("External backend training started.")
             summary = self._external_backend_runner().run_prepare_and_train()
+            self._set_training_progress("parent", tr("Parent-part model training finished.", self.current_lang), 100)
             self.log(f"External training complete. Contract: {summary.get('contract_json')}")
             self.log(f"External model manifest: {summary.get('model_manifest')}")
         except Exception as exc:
+            self._set_training_progress("parent", tr("Parent-part model training failed.", self.current_lang), self.progress.value())
             self.log(f"External training failed: {exc}")
             QMessageBox.critical(self, tr("Error", self.current_lang), str(exc))
         finally:
             self.btn_train.setEnabled(True)
             self.btn_stop_training.setEnabled(False)
+            self._refresh_blink_refine_state()
 
     def show_training_report(self, report_data):
         dlg = TrainingReportDialog(report_data, self, self.current_lang)
+        dlg.exec()
+
+    def _candidate_training_experiment_dirs(self):
+        roots = []
+
+        weights_dir = getattr(self.engine, "weights_dir", "")
+        if weights_dir:
+            roots.append(os.path.join(os.path.dirname(os.path.abspath(weights_dir)), "experiments"))
+
+        project_path = getattr(self.project, "current_project_path", "") or ""
+        if project_path:
+            project_root = os.path.dirname(os.path.abspath(project_path))
+            roots.append(os.path.join(project_root, "experiments"))
+            roots.append(os.path.join(os.path.dirname(project_root), "experiments"))
+
+        roots.append(os.path.join(PACKAGE_DIR, "experiments"))
+
+        seen = set()
+        clean_roots = []
+        for root in roots:
+            if not root:
+                continue
+            root_abs = os.path.abspath(root)
+            if root_abs in seen:
+                continue
+            seen.add(root_abs)
+            clean_roots.append(root_abs)
+        return clean_roots
+
+    def _resolve_report_artifact_path(self, report_dir, summary, summary_key, fallback_name=None):
+        value = summary.get(summary_key) if isinstance(summary, dict) else None
+        if isinstance(value, str) and value.strip():
+            candidate = value.strip()
+            if not os.path.isabs(candidate):
+                candidate = os.path.join(report_dir, candidate)
+            return candidate
+        if fallback_name:
+            return os.path.join(report_dir, fallback_name)
+        return None
+
+    def _training_report_time_label(self, report_dir):
+        name = os.path.basename(os.path.normpath(report_dir))
+        match = re.search(r"(\d{8})_(\d{6})", name)
+        if match:
+            date_value, time_value = match.groups()
+            return f"{date_value[0:4]}-{date_value[4:6]}-{date_value[6:8]} {time_value[0:2]}:{time_value[2:4]}:{time_value[4:6]}"
+        try:
+            timestamp = os.path.getmtime(report_dir)
+            return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
+        except Exception:
+            return tr("Unknown time", self.current_lang)
+
+    def _training_report_payload_from_summary(self, report_dir, summary_path):
+        try:
+            with open(summary_path, "r", encoding="utf-8") as handle:
+                summary = json.load(handle)
+        except Exception:
+            return None
+        if not isinstance(summary, dict):
+            return None
+
+        dir_name = os.path.basename(os.path.normpath(report_dir))
+        kind = str(summary.get("kind") or "").strip()
+        is_child = kind in {"blink_expert_report", "heatmap_blink_expert_report"} or dir_name.startswith(("blink_", "heatmap_blink_"))
+        report_type = "child" if is_child else "parent"
+        if is_child:
+            target = str(summary.get("part_name") or "").strip() or tr("Unknown target", self.current_lang)
+            parent_part = str(summary.get("parent_part") or "").strip()
+            target_label = f"{parent_part} -> {target}" if parent_part else target
+            backend_label = tr("Heatmap Blink Expert", self.current_lang) if kind.startswith("heatmap") or dir_name.startswith("heatmap_blink_") else tr("ViT-B Blink Expert", self.current_lang)
+            strategy = (
+                summary.get("training_strategy")
+                or (summary.get("train_params") if isinstance(summary.get("train_params"), dict) else {}).get("training_strategy")
+                or (summary.get("manifest") if isinstance(summary.get("manifest"), dict) else {}).get("training_strategy")
+            )
+        else:
+            context = summary.get("training_context") if isinstance(summary.get("training_context"), dict) else {}
+            locator_scope = context.get("locator_scope") if isinstance(context.get("locator_scope"), list) else []
+            target_label = ", ".join(str(part) for part in locator_scope) if locator_scope else tr("Parent-part model training", self.current_lang)
+            backend_label = _parent_backend_label(context.get("parent_backend", PARENT_BACKEND_BUILTIN), self.current_lang)
+            strategy = "locator-only" if context.get("train_segmenter") is False else ""
+
+        if is_child and strategy:
+            strategy_label = blink_training_strategy_label(strategy, self.current_lang)
+        elif (not is_child) and strategy == "locator-only":
+            strategy_label = tr("Train Locator only (skip SAM)", self.current_lang)
+        else:
+            strategy_label = str(strategy or "")
+        validation_count = summary.get("validation_count", "")
+        try:
+            samples_label = str(int(validation_count))
+        except Exception:
+            samples_label = str(validation_count or "")
+
+        metrics_path = self._resolve_report_artifact_path(report_dir, summary, "metrics_plot", "metrics_plot.png")
+        val_path = self._resolve_report_artifact_path(report_dir, summary, "validation_summary_image", "validation_samples.png")
+        validation_index_path = self._resolve_report_artifact_path(report_dir, summary, "validation_index_csv", "validation_index.csv")
+        details_dir = self._resolve_report_artifact_path(report_dir, summary, "validation_details_dir", "val_details")
+
+        report = {
+            "report_type": report_type,
+            "type_label": tr("Child-part", self.current_lang) if is_child else tr("Parent-part", self.current_lang),
+            "target_label": target_label,
+            "backend_label": backend_label,
+            "strategy_label": strategy_label,
+            "samples_label": samples_label,
+            "time_label": self._training_report_time_label(report_dir),
+            "dir": report_dir,
+            "csv": self._resolve_report_artifact_path(report_dir, summary, "training_log_csv", "training_log.csv"),
+            "metrics": metrics_path if metrics_path and os.path.exists(metrics_path) else metrics_path,
+            "val": val_path if val_path and os.path.exists(val_path) else val_path,
+            "validation_index": validation_index_path,
+            "report_summary": summary_path,
+            "validation_summary": summary,
+            "details_dir": details_dir,
+            "model_path": summary.get("model_path", ""),
+        }
+        return report
+
+    def discover_training_reports(self):
+        reports = []
+        seen_dirs = set()
+        for experiments_root in self._candidate_training_experiment_dirs():
+            if not os.path.isdir(experiments_root):
+                continue
+            try:
+                entries = sorted(os.scandir(experiments_root), key=lambda entry: entry.name.lower())
+            except Exception:
+                continue
+            for entry in entries:
+                if not entry.is_dir():
+                    continue
+                report_dir = os.path.abspath(entry.path)
+                if report_dir in seen_dirs:
+                    continue
+                summary_path = os.path.join(report_dir, "report_summary.json")
+                if not os.path.exists(summary_path):
+                    continue
+                report = self._training_report_payload_from_summary(report_dir, summary_path)
+                if not report:
+                    continue
+                seen_dirs.add(report_dir)
+                reports.append(report)
+        reports.sort(key=lambda item: item.get("time_label", ""), reverse=True)
+        return reports
+
+    def open_training_report_payload(self, report):
+        if not isinstance(report, dict):
+            return
+        if report.get("report_type") == "child":
+            dlg = BlinkExpertTrainingReportDialog(report, self.current_lang, self)
+        else:
+            dlg = TrainingReportDialog(report, self, self.current_lang)
+        dlg.exec()
+
+    def open_training_results_browser(self):
+        reports = self.discover_training_reports()
+        if not reports:
+            QMessageBox.information(
+                self,
+                tr("Training Results", self.current_lang),
+                tr("No training reports found.", self.current_lang),
+            )
+            return
+        dlg = TrainingResultBrowserDialog(
+            reports,
+            parent=self,
+            lang=self.current_lang,
+            preview_callback=self.open_training_report_payload,
+            refresh_callback=self.discover_training_reports,
+        )
         dlg.exec()
 
     def _extract_prediction_payload(self, payload):
@@ -10735,7 +11997,7 @@ class MainWindow(QMainWindow):
     def _refresh_vlm_canvas_if_current(self, image_path):
         if self._same_project_image_path(image_path, self.current_image):
             self.canvas.set_polygons(self.project.get_labels(image_path))
-            self.canvas.set_boxes(self.project.get_boxes(image_path), self.project.get_auto_boxes(image_path))
+            self._refresh_current_canvas_boxes()
             self.canvas.update()
             self.canvas.repaint()
 
@@ -10752,7 +12014,7 @@ class MainWindow(QMainWindow):
                 self.canvas.load_image(current_path)
                 self.on_enhancement_changed()
             self.canvas.set_polygons(self.project.get_labels(current_path))
-            self.canvas.set_boxes(self.project.get_boxes(current_path), self.project.get_auto_boxes(current_path))
+            self._refresh_current_canvas_boxes()
             self.canvas.update()
             self.canvas.repaint()
         get_taxon = getattr(self.project, "get_taxon", self.project.get_genus)
@@ -10991,15 +12253,132 @@ class MainWindow(QMainWindow):
     def accept_current_image_ai_drafts(self):
         if not self.current_image:
             return
+        summarize = getattr(self.project, "summarize_image_ai_drafts", None)
+        draft_summary = summarize(self.current_image) if callable(summarize) else {}
+        reviewable_parts = list((draft_summary or {}).get("reviewable_polygon_parts", []) or [])
+        if reviewable_parts:
+            reply = themed_yes_no_question(
+                self,
+                tr("Confirm AI Drafts", self.current_lang),
+                tr(
+                    "Accept {0} AI polygon draft(s) on the current image?\n\nOnly drafts that already have a polygon will become training labels. Box-only drafts will stay pending until you run SAM from the box or redraw a polygon.",
+                    self.current_lang,
+                ).format(len(reviewable_parts)),
+                confirm_role=BUTTON_ROLE_COMMIT,
+            )
+            if reply != QMessageBox.Yes:
+                return
         count = self.project.verify_image_labels(self.current_image)
         if count:
             self.canvas.set_polygons(self.project.get_labels(self.current_image))
-            self.canvas.set_boxes(self.project.get_boxes(self.current_image), self.project.get_auto_boxes(self.current_image))
+            self._refresh_current_canvas_boxes()
             self.refresh_file_list()
             self._refresh_blink_refine_state()
             self.log(tr("Accepted {0} AI draft(s) on current image.", self.current_lang).format(count))
         else:
             self.log(tr("No reviewable AI polygon drafts on current image.", self.current_lang))
+        box_only_parts = list((draft_summary or {}).get("box_only_parts", []) or [])
+        if box_only_parts:
+            self.log(
+                tr(
+                    "Current image still has {0} AI box-only draft(s): {1}. Box-only drafts cannot enter training; run SAM from the box or redraw a polygon first.",
+                    self.current_lang,
+                ).format(len(box_only_parts), ", ".join(box_only_parts))
+            )
+
+    def accept_batch_ai_drafts(self):
+        image_paths = [path for path in self.project.project_data.get("images", []) if path]
+        if not image_paths:
+            self.log(tr("No reviewable AI polygon drafts in the current project.", self.current_lang))
+            return
+
+        self._flush_pending_project_save()
+        summarize_many = getattr(self.project, "summarize_ai_drafts_for_images", None)
+        if callable(summarize_many):
+            summary = summarize_many(image_paths)
+        else:
+            image_summaries = []
+            reviewable_count = 0
+            box_only_count = 0
+            summarize_one = getattr(self.project, "summarize_image_ai_drafts", None)
+            for image_path in image_paths:
+                item = summarize_one(image_path) if callable(summarize_one) else {}
+                item_reviewable = len(item.get("reviewable_polygon_parts", []) or [])
+                item_box_only = len(item.get("box_only_parts", []) or [])
+                if item_reviewable or item_box_only:
+                    image_summaries.append({"image_path": image_path, "reviewable_count": item_reviewable, "box_only_count": item_box_only})
+                    reviewable_count += item_reviewable
+                    box_only_count += item_box_only
+            summary = {
+                "images_with_drafts": image_summaries,
+                "image_count": len(image_summaries),
+                "reviewable_polygon_count": reviewable_count,
+                "box_only_count": box_only_count,
+            }
+
+        reviewable_count = int(summary.get("reviewable_polygon_count", 0) or 0)
+        image_count = int(summary.get("image_count", 0) or 0)
+        box_only_count = int(summary.get("box_only_count", 0) or 0)
+        if not reviewable_count:
+            self.log(tr("No reviewable AI polygon drafts in the current project.", self.current_lang))
+            if box_only_count:
+                box_only_images = sum(1 for item in summary.get("images_with_drafts", []) if int(item.get("box_only_count", 0) or 0) > 0)
+                self.log(
+                    tr(
+                        "{0} image(s) in the current project still have {1} AI box-only draft(s). Box-only drafts cannot enter training; run SAM from the box or redraw polygons first.",
+                        self.current_lang,
+                    ).format(box_only_images, box_only_count)
+                )
+            return
+
+        reply = themed_yes_no_question(
+            self,
+            tr("Confirm AI Drafts", self.current_lang),
+            tr(
+                "Accept {0} AI polygon draft(s) from {1} image(s) in the current project?\n\nOnly drafts that already have polygons will become training labels. {2} box-only draft(s) will be skipped and stay pending.",
+                self.current_lang,
+            ).format(reviewable_count, image_count, box_only_count),
+            confirm_role=BUTTON_ROLE_COMMIT,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        verify_many = getattr(self.project, "verify_ai_drafts_for_images", None)
+        if callable(verify_many):
+            result = verify_many(image_paths)
+            accepted_count = int(result.get("accepted_count", 0) or 0)
+            accepted_images = int(result.get("accepted_images", 0) or 0)
+        else:
+            accepted_count = 0
+            accepted_images = 0
+            for image_path in image_paths:
+                count = self.project.verify_image_labels(image_path)
+                if count:
+                    accepted_count += count
+                    accepted_images += 1
+
+        if self.current_image:
+            self.canvas.set_polygons(self.project.get_labels(self.current_image))
+            self._refresh_current_canvas_boxes()
+        self.refresh_file_list()
+        self._refresh_blink_refine_state()
+        if accepted_count:
+            self.log(
+                tr("Accepted {0} AI polygon draft(s) from {1} image(s) in the current project.", self.current_lang).format(
+                    accepted_count,
+                    accepted_images,
+                )
+            )
+        else:
+            self.log(tr("No reviewable AI polygon drafts in the current project.", self.current_lang))
+        if box_only_count:
+            box_only_images = sum(1 for item in summary.get("images_with_drafts", []) if int(item.get("box_only_count", 0) or 0) > 0)
+            self.log(
+                tr(
+                    "{0} image(s) in the current project still have {1} AI box-only draft(s). Box-only drafts cannot enter training; run SAM from the box or redraw polygons first.",
+                    self.current_lang,
+                ).format(box_only_images, box_only_count)
+            )
 
     def _on_vlm_preannotation_error(self, message):
         self.log(tr("VLM first-mile preannotation failed: {0}", self.current_lang).format(message))
@@ -11044,8 +12423,9 @@ class MainWindow(QMainWindow):
             manual_boxes = self.project.get_boxes(self.current_image)
             auto_boxes = self.project.get_auto_boxes(self.current_image)
             self.canvas.set_polygons(labels)
-            self.canvas.set_boxes(manual_boxes, auto_boxes)
+            self.canvas.set_boxes(manual_boxes, auto_boxes, self._current_shrink_loose_boxes())
             self.refresh_file_list()
+            self._refresh_blink_refine_state()
             self._log_route_usage_summary(ps, self.current_image)
             self.log(tr("Inference complete. Detected {0} parts, saved {1} new labels.", self.current_lang).format(total_detected, count))
         finally:
@@ -11063,7 +12443,8 @@ class MainWindow(QMainWindow):
             count, total_detected = self._apply_prediction_to_project(image_path, result.get("payload", {}), only_new=True)
             if image_path == self.current_image:
                 self.canvas.set_polygons(self.project.get_labels(image_path))
-                self.canvas.set_boxes(self.project.get_boxes(image_path), self.project.get_auto_boxes(image_path))
+                self._refresh_current_canvas_boxes()
+                self._refresh_blink_refine_state()
             self.refresh_file_list()
             self.log(f"External inference complete. Contract: {result.get('contract_json')}")
             self.log(tr("Inference complete. Detected {0} parts, saved {1} new labels.", self.current_lang).format(total_detected, count))
@@ -11099,6 +12480,7 @@ class MainWindow(QMainWindow):
                         saved, total = self._apply_prediction_to_project(image_path, result.get("payload", {}), only_new=True)
                         self.log(tr("Batch saved {0}/{1} for {2}", self.current_lang).format(saved, total, os.path.basename(image_path)))
                     self.refresh_file_list()
+                    self._refresh_blink_refine_state()
                 except Exception as exc:
                     self.log(f"External batch inference failed: {exc}")
                     QMessageBox.critical(self, tr("Error", self.current_lang), str(exc))
@@ -11149,7 +12531,13 @@ class MainWindow(QMainWindow):
                 )
                 self.log(tr("Batch saved {0}/{1} for {2}", self.current_lang).format(saved, total, os.path.basename(p)))
             self.inf_thread.result_signal.connect(on_batch_res)
-            self.inf_thread.finished_signal.connect(lambda: [self.btn_batch.setEnabled(True), self.btn_predict.setEnabled(True)])
+            self.inf_thread.finished_signal.connect(
+                lambda: [
+                    self.btn_batch.setEnabled(True),
+                    self.btn_predict.setEnabled(True),
+                    self._refresh_blink_refine_state(),
+                ]
+            )
             self.inf_thread.start()
 
     def export_dataset(self):

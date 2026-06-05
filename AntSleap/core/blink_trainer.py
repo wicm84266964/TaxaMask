@@ -22,6 +22,22 @@ from .blink_dataset import BlinkTrajectoryDataset
 from .taxonomy_defaults import is_safe_part_name
 from torchvision.ops import generalized_box_iou_loss, box_convert
 try:
+    from AntSleap.core.blink_training_strategy import (
+        BLINK_STRATEGY_FULL_INSIDE_RANDOM,
+        BLINK_STRATEGY_TRIVIEW_RANDOM,
+        BLINK_STRATEGY_TWO_STAGE_FULL_THEN_INSIDE,
+        blink_training_strategy_label,
+        sanitize_blink_training_strategy,
+    )
+except ImportError:
+    from .blink_training_strategy import (
+        BLINK_STRATEGY_FULL_INSIDE_RANDOM,
+        BLINK_STRATEGY_TRIVIEW_RANDOM,
+        BLINK_STRATEGY_TWO_STAGE_FULL_THEN_INSIDE,
+        blink_training_strategy_label,
+        sanitize_blink_training_strategy,
+    )
+try:
     from AntSleap.core.runtime_device import resolve_torch_device
 except ImportError:
     from .runtime_device import resolve_torch_device
@@ -62,6 +78,7 @@ class BlinkExpertTrainer:
         learning_rate=1e-3,
         weight_decay=1e-4,
         input_size=224,
+        training_strategy=BLINK_STRATEGY_TRIVIEW_RANDOM,
     ):
         self.device = resolve_torch_device(device)
         self.part_name = str(part_name).strip()
@@ -72,12 +89,14 @@ class BlinkExpertTrainer:
         self.learning_rate = float(learning_rate)
         self.weight_decay = float(weight_decay)
         self.input_size = self._normalize_input_size(input_size)
+        self.training_strategy = sanitize_blink_training_strategy(training_strategy)
         self.history = {
             "loss": [],
             "loss_final": [],
             "loss_step": [],
             "loss_view": [],
             "loss_consistency": [],
+            "stage": [],
         }
         self.last_report = {}
 
@@ -175,154 +194,93 @@ class BlinkExpertTrainer:
             f"weight_decay={self.weight_decay:g}, input_size={target_size[0]}",
             log_callback=log_callback,
         )
-        
-        # 加载刚才写的数据集生成器 (它会自动执行 Inside/Outside 的盲盒遮罩)
-        dataset = BlinkTrajectoryDataset(
-            self.project_path,
-            self.part_name,
-            parent_part=self.parent_part,
-            target_size=target_size,
+        self._emit_training_log(
+            f"Blink training strategy: {self.training_strategy} ({blink_training_strategy_label(self.training_strategy)})",
+            log_callback=log_callback,
         )
-        
+
+        dataset = self._make_dataset(target_size)
+
         if len(dataset) == 0:
             self._emit_training_log(
                 "Error: Not enough trajectory data. Please go to Blink Lab and run 'Auto-Shrink' on a few images first!",
                 log_callback=log_callback,
             )
             return None
-            
-        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=0)
-        
+
         best_loss = float('inf')
         save_path = self._next_versioned_save_path()
         self._emit_training_log(
             f"New Blink training will be saved as a candidate: {save_path}",
             log_callback=log_callback,
         )
-        
+
         self.model.train()
-        
+
         if callable(progress_callback):
             progress_callback(0)
 
-        for epoch in range(epochs):
-            if callable(stop_callback) and stop_callback():
-                self._emit_training_log(
-                    "Training cancelled before starting the next epoch.",
-                    log_callback=log_callback,
-                )
-                return None
-
-            epoch_loss = 0.0
-            epoch_loss_final = 0.0
-            epoch_loss_step = 0.0
-            epoch_loss_view = 0.0
-            epoch_loss_consistency = 0.0
-            start_time = time.time()
-            
-            for batch_data in dataloader:
+        stages = self._training_stages(int(epochs))
+        global_epoch = 0
+        for stage in stages:
+            stage_name = stage["name"]
+            stage_epochs = int(stage["epochs"])
+            stage_dataset = self._make_dataset(target_size, stage_view_mode=stage.get("view_mode"))
+            dataloader = DataLoader(stage_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
+            self._emit_training_log(
+                f"--- Blink stage: {stage_name} | view_mode={stage.get('view_mode') or 'random'} | epochs={stage_epochs} ---",
+                log_callback=log_callback,
+            )
+            for _stage_epoch in range(stage_epochs):
+                global_epoch += 1
                 if callable(stop_callback) and stop_callback():
                     self._emit_training_log(
-                        "Training cancellation requested. Stopping after the current batch.",
+                        "Training cancelled before starting the next epoch.",
                         log_callback=log_callback,
                     )
                     return None
 
-                imgs_inside = None
-                imgs_outside = None
-                if isinstance(batch_data, dict):
-                    imgs = batch_data["image"].to(self.device)
-                    imgs_inside = batch_data["inside_image"].to(self.device)
-                    imgs_outside = batch_data["outside_image"].to(self.device)
-                    targets_step = self._sanitize_xyxy_rel(batch_data["target_step"].to(self.device).float())
-                    targets_final = self._sanitize_xyxy_rel(batch_data["target_final"].to(self.device).float())
-                    use_pairwise_losses = True
-                else:
-                    imgs, targets = batch_data
-                    imgs = imgs.to(self.device)
-                    targets = targets.to(self.device).float()
-                    if targets.max().item() > 1.5:
-                        norm = torch.tensor(
-                            [target_size[0], target_size[1], target_size[0], target_size[1]],
-                            dtype=targets.dtype,
-                            device=self.device,
-                        )
-                        targets = targets / norm
-                    targets_final = self._sanitize_xyxy_rel(targets)
-                    targets_step = targets_final
-                    use_pairwise_losses = False
-
-                self.optimizer.zero_grad()
-
-                preds_main = self._predict_xyxy_rel(imgs)
-                loss_final = generalized_box_iou_loss(preds_main, targets_final, reduction="mean")
-                loss_step = F.smooth_l1_loss(preds_main, targets_step)
-
-                if use_pairwise_losses and imgs_inside is not None and imgs_outside is not None:
-                    preds_inside = self._predict_xyxy_rel(imgs_inside)
-                    preds_outside = self._predict_xyxy_rel(imgs_outside)
-
-                    loss_inside = generalized_box_iou_loss(preds_inside, targets_final, reduction="mean")
-                    loss_outside = generalized_box_iou_loss(preds_outside, targets_final, reduction="mean")
-                    loss_view = 0.5 * (loss_inside + loss_outside)
-                    loss_consistency = F.smooth_l1_loss(preds_inside, preds_outside)
-                else:
-                    loss_view = torch.tensor(0.0, device=self.device)
-                    loss_consistency = torch.tensor(0.0, device=self.device)
-
-                loss = (
-                    loss_final
-                    + 0.35 * loss_step
-                    + 0.20 * loss_view
-                    + 0.10 * loss_consistency
-                )
-                
-                loss.backward()
-                self.optimizer.step()
-                
-                epoch_loss += loss.item()
-                epoch_loss_final += loss_final.item()
-                epoch_loss_step += loss_step.item()
-                epoch_loss_view += loss_view.item()
-                epoch_loss_consistency += loss_consistency.item()
-                
-            avg_loss = epoch_loss / len(dataloader)
-            avg_final = epoch_loss_final / len(dataloader)
-            avg_step = epoch_loss_step / len(dataloader)
-            avg_view = epoch_loss_view / len(dataloader)
-            avg_consistency = epoch_loss_consistency / len(dataloader)
-            self.scheduler.step(avg_loss)
-            self.history["loss"].append(float(avg_loss))
-            self.history["loss_final"].append(float(avg_final))
-            self.history["loss_step"].append(float(avg_step))
-            self.history["loss_view"].append(float(avg_view))
-            self.history["loss_consistency"].append(float(avg_consistency))
-            
-            elapsed = time.time() - start_time
-            self._emit_training_log(
-                f"Epoch [{epoch+1}/{epochs}] Loss: {avg_loss:.4f} "
-                f"(final={avg_final:.4f}, step={avg_step:.4f}, view={avg_view:.4f}, cons={avg_consistency:.4f}) "
-                f"- {elapsed:.1f}s",
-                log_callback=log_callback,
-            )
-            if callable(progress_callback):
-                progress_callback(int(((epoch + 1) / max(1, epochs)) * 100))
-            
-            # Save the best checkpoint within this training run; route appointment is handled separately.
-            if avg_loss < best_loss:
-                best_loss = avg_loss
-                torch.save(
-                    {
-                        "state_dict": self.model.state_dict(),
-                        "meta": self._build_checkpoint_meta(target_size, epochs, batch_size, best_loss),
-                    },
-                    save_path,
-                )
-                self._emit_training_log(
-                    f"  -> Saved improved checkpoint candidate for {self.part_name}.",
+                avg_loss, avg_final, avg_step, avg_view, avg_consistency, elapsed = self._run_epoch(
+                    dataloader,
+                    target_size,
+                    stage_name,
+                    stop_callback=stop_callback,
                     log_callback=log_callback,
                 )
-                
+                if avg_loss is None:
+                    return None
+                self.scheduler.step(avg_loss)
+                self.history["loss"].append(float(avg_loss))
+                self.history["loss_final"].append(float(avg_final))
+                self.history["loss_step"].append(float(avg_step))
+                self.history["loss_view"].append(float(avg_view))
+                self.history["loss_consistency"].append(float(avg_consistency))
+                self.history["stage"].append(stage_name)
+
+                self._emit_training_log(
+                    f"Epoch [{global_epoch}/{epochs}] Stage={stage_name} Loss: {avg_loss:.4f} "
+                    f"(final={avg_final:.4f}, step={avg_step:.4f}, view={avg_view:.4f}, cons={avg_consistency:.4f}) "
+                    f"- {elapsed:.1f}s",
+                    log_callback=log_callback,
+                )
+                if callable(progress_callback):
+                    progress_callback(int((global_epoch / max(1, int(epochs))) * 100))
+
+                # Save the best checkpoint within this training run; route appointment is handled separately.
+                if avg_loss < best_loss:
+                    best_loss = avg_loss
+                    torch.save(
+                        {
+                            "state_dict": self.model.state_dict(),
+                            "meta": self._build_checkpoint_meta(target_size, epochs, batch_size, best_loss),
+                        },
+                        save_path,
+                    )
+                    self._emit_training_log(
+                        f"  -> Saved improved checkpoint candidate for {self.part_name}.",
+                        log_callback=log_callback,
+                    )
+
         if os.path.exists(save_path):
             saved_payload = torch.load(save_path, map_location=self.device)
             saved_state = saved_payload.get("state_dict", saved_payload) if isinstance(saved_payload, dict) else saved_payload
@@ -337,6 +295,118 @@ class BlinkExpertTrainer:
         )
         return save_path
 
+    def _make_dataset(self, target_size, stage_view_mode=None):
+        return BlinkTrajectoryDataset(
+            self.project_path,
+            self.part_name,
+            parent_part=self.parent_part,
+            target_size=target_size,
+            training_strategy=self.training_strategy,
+            stage_view_mode=stage_view_mode,
+        )
+
+    def _training_stages(self, epochs):
+        total = max(1, int(epochs))
+        if self.training_strategy != BLINK_STRATEGY_TWO_STAGE_FULL_THEN_INSIDE:
+            return [{"name": self.training_strategy, "view_mode": None, "epochs": total}]
+        full_epochs = max(1, total // 2)
+        inside_epochs = max(1, total - full_epochs)
+        if total == 1:
+            return [{"name": "stage1_full", "view_mode": "full", "epochs": 1}]
+        return [
+            {"name": "stage1_full", "view_mode": "full", "epochs": full_epochs},
+            {"name": "stage2_inside", "view_mode": "inside", "epochs": inside_epochs},
+        ]
+
+    def _run_epoch(self, dataloader, target_size, stage_name, stop_callback=None, log_callback=None):
+        epoch_loss = 0.0
+        epoch_loss_final = 0.0
+        epoch_loss_step = 0.0
+        epoch_loss_view = 0.0
+        epoch_loss_consistency = 0.0
+        start_time = time.time()
+
+        for batch_data in dataloader:
+            if callable(stop_callback) and stop_callback():
+                self._emit_training_log(
+                    "Training cancellation requested. Stopping after the current batch.",
+                    log_callback=log_callback,
+                )
+                return None, None, None, None, None, None
+
+            imgs_inside = None
+            imgs_outside = None
+            if isinstance(batch_data, dict):
+                imgs = batch_data["image"].to(self.device)
+                imgs_inside = batch_data.get("inside_image")
+                imgs_outside = batch_data.get("outside_image")
+                imgs_inside = imgs_inside.to(self.device) if imgs_inside is not None else None
+                imgs_outside = imgs_outside.to(self.device) if imgs_outside is not None else None
+                targets_step = self._sanitize_xyxy_rel(batch_data["target_step"].to(self.device).float())
+                targets_final = self._sanitize_xyxy_rel(batch_data["target_final"].to(self.device).float())
+                use_pairwise_losses = True
+            else:
+                imgs, targets = batch_data
+                imgs = imgs.to(self.device)
+                targets = targets.to(self.device).float()
+                if targets.max().item() > 1.5:
+                    norm = torch.tensor(
+                        [target_size[0], target_size[1], target_size[0], target_size[1]],
+                        dtype=targets.dtype,
+                        device=self.device,
+                    )
+                    targets = targets / norm
+                targets_final = self._sanitize_xyxy_rel(targets)
+                targets_step = targets_final
+                use_pairwise_losses = False
+
+            self.optimizer.zero_grad()
+
+            preds_main = self._predict_xyxy_rel(imgs)
+            loss_final = generalized_box_iou_loss(preds_main, targets_final, reduction="mean")
+            loss_step = F.smooth_l1_loss(preds_main, targets_step)
+
+            loss_view = torch.tensor(0.0, device=self.device)
+            loss_consistency = torch.tensor(0.0, device=self.device)
+            if use_pairwise_losses and imgs_inside is not None:
+                preds_inside = self._predict_xyxy_rel(imgs_inside)
+                loss_inside = generalized_box_iou_loss(preds_inside, targets_final, reduction="mean")
+                if self.training_strategy == BLINK_STRATEGY_TRIVIEW_RANDOM and imgs_outside is not None:
+                    preds_outside = self._predict_xyxy_rel(imgs_outside)
+                    loss_outside = generalized_box_iou_loss(preds_outside, targets_final, reduction="mean")
+                    loss_view = 0.5 * (loss_inside + loss_outside)
+                    loss_consistency = F.smooth_l1_loss(preds_inside, preds_outside)
+                elif self.training_strategy == BLINK_STRATEGY_FULL_INSIDE_RANDOM:
+                    loss_view = loss_inside
+                elif self.training_strategy == BLINK_STRATEGY_TWO_STAGE_FULL_THEN_INSIDE and stage_name == "stage2_inside":
+                    loss_view = loss_inside
+
+            loss = (
+                loss_final
+                + 0.35 * loss_step
+                + 0.20 * loss_view
+                + 0.10 * loss_consistency
+            )
+
+            loss.backward()
+            self.optimizer.step()
+
+            epoch_loss += loss.item()
+            epoch_loss_final += loss_final.item()
+            epoch_loss_step += loss_step.item()
+            epoch_loss_view += loss_view.item()
+            epoch_loss_consistency += loss_consistency.item()
+
+        denom = max(1, len(dataloader))
+        return (
+            epoch_loss / denom,
+            epoch_loss_final / denom,
+            epoch_loss_step / denom,
+            epoch_loss_view / denom,
+            epoch_loss_consistency / denom,
+            time.time() - start_time,
+        )
+
     def _build_checkpoint_meta(self, target_size, epochs, batch_size, best_loss):
         return {
             "kind": "blink_expert_locator",
@@ -348,6 +418,7 @@ class BlinkExpertTrainer:
             "epochs": int(epochs),
             "batch_size": int(batch_size),
             "best_loss": float(best_loss),
+            "training_strategy": self.training_strategy,
             "created_at": datetime.now().isoformat(timespec="seconds"),
         }
 
@@ -355,6 +426,7 @@ class BlinkExpertTrainer:
         train_params = {
             "learning_rate": float(self.learning_rate),
             "weight_decay": float(self.weight_decay),
+            "training_strategy": self.training_strategy,
         }
         manifest_path, manifest = write_blink_expert_manifest(
             save_path,
@@ -555,6 +627,7 @@ class BlinkExpertTrainer:
             "input_size": [int(target_size[0]), int(target_size[1])],
             "learning_rate": float(self.learning_rate),
             "weight_decay": float(self.weight_decay),
+            "training_strategy": self.training_strategy,
             "validation_count": len(validation_rows),
             "validation_preview_count": min(8, len(validation_rows)),
             "validation_provenance_counts": {"blink_expert": len(validation_rows)},

@@ -6,6 +6,20 @@ import torch
 from torch.utils.data import Dataset
 import random
 from .projection import CoordinateMapper
+try:
+    from .blink_training_strategy import (
+        BLINK_STRATEGY_FULL_INSIDE_RANDOM,
+        BLINK_STRATEGY_TRIVIEW_RANDOM,
+        BLINK_STRATEGY_TWO_STAGE_FULL_THEN_INSIDE,
+        sanitize_blink_training_strategy,
+    )
+except ImportError:
+    from blink_training_strategy import (
+        BLINK_STRATEGY_FULL_INSIDE_RANDOM,
+        BLINK_STRATEGY_TRIVIEW_RANDOM,
+        BLINK_STRATEGY_TWO_STAGE_FULL_THEN_INSIDE,
+        sanitize_blink_training_strategy,
+    )
 
 class BlinkTrajectoryDataset(Dataset):
     """
@@ -17,7 +31,16 @@ class BlinkTrajectoryDataset(Dataset):
     2. 动态应用 Blink 遮罩增强 (Inside-View / Outside-View)。
     3. 生成回归目标 (Regression Targets)。
     """
-    def __init__(self, project_json_path, part_name="Mandible", parent_part=None, target_size=(512, 512), blink_prob=0.5):
+    def __init__(
+        self,
+        project_json_path,
+        part_name="Mandible",
+        parent_part=None,
+        target_size=(512, 512),
+        blink_prob=0.5,
+        training_strategy=BLINK_STRATEGY_TRIVIEW_RANDOM,
+        stage_view_mode=None,
+    ):
         """
         :param project_json_path: project.json 的路径
         :param part_name: 专注训练的解剖学部位 (如 Mandible)
@@ -29,6 +52,8 @@ class BlinkTrajectoryDataset(Dataset):
         self.parent_part = str(parent_part).strip() if isinstance(parent_part, str) and parent_part.strip() else None
         self.target_size = target_size
         self.blink_prob = blink_prob
+        self.training_strategy = sanitize_blink_training_strategy(training_strategy)
+        self.stage_view_mode = str(stage_view_mode or "").strip().lower()
         self.samples = []
         
         self._load_data()
@@ -170,13 +195,30 @@ class BlinkTrajectoryDataset(Dataset):
         else:
             source_img_np = img_np
 
-        # 4. 生成三种视角：随机主视角 + Inside + Outside（用于一致性约束）
+        # 4. 生成视角：主视角用于本轮输入，Inside/Outside 仅在方案一中参与额外对照 loss。
         inside_img_np = self.apply_blink_mask(source_img_np, global_box, "INSIDE")
         outside_img_np = self.apply_blink_mask(source_img_np, global_box, "OUTSIDE")
 
         primary_img_np = source_img_np
-        if random.random() < self.blink_prob:
-            primary_img_np = inside_img_np if random.random() < 0.5 else outside_img_np
+        primary_view = "full"
+        if self.training_strategy == BLINK_STRATEGY_TWO_STAGE_FULL_THEN_INSIDE:
+            if self.stage_view_mode == "inside":
+                primary_img_np = inside_img_np
+                primary_view = "inside"
+            else:
+                primary_img_np = source_img_np
+                primary_view = "full"
+        elif self.training_strategy == BLINK_STRATEGY_FULL_INSIDE_RANDOM:
+            if random.random() < self.blink_prob:
+                primary_img_np = inside_img_np
+                primary_view = "inside"
+        elif random.random() < self.blink_prob:
+            if random.random() < 0.5:
+                primary_img_np = inside_img_np
+                primary_view = "inside"
+            else:
+                primary_img_np = outside_img_np
+                primary_view = "outside"
 
         # 5. 目标框映射到网络输入尺寸，再转归一化坐标
         if has_parent_crop:
@@ -201,4 +243,5 @@ class BlinkTrajectoryDataset(Dataset):
             "outside_image": self._img_to_tensor(outside_img_np),
             "target_step": target_step,
             "target_final": target_final,
+            "view_mode": primary_view,
         }

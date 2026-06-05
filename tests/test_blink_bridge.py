@@ -704,12 +704,14 @@ class BlinkBridgeTests(unittest.TestCase):
 
         class FakeBlinkRefiner:
             last_device = None
+            last_steps = None
 
             def __init__(self, sam_model=None, device="auto"):
                 self.sam_model = sam_model
                 FakeBlinkRefiner.last_device = device
 
-            def generate_shrink_trajectory(self, image_input, initial_box, golden_poly):
+            def generate_shrink_trajectory(self, image_input, initial_box, golden_poly, steps=20):
+                FakeBlinkRefiner.last_steps = steps
                 return [
                     {"box": [18.0, 18.0, 42.0, 42.0], "step": 0, "alpha": 0.0, "coord_frame": "local"},
                     {"box": [20.0, 20.0, 40.0, 40.0], "step": 1, "alpha": 1.0, "coord_frame": "local"},
@@ -719,7 +721,7 @@ class BlinkBridgeTests(unittest.TestCase):
         previous_module = sys.modules.get("core.blink_refiner")
         sys.modules["core.blink_refiner"] = module
         try:
-            widget = BlinkLabWidget(self.engine, self.pm)
+            widget = BlinkLabWidget(self.engine, self.pm, blink_auto_shrink_steps=7)
             session = {
                 "image_path": self.image_path,
                 "target_part": "Mandible",
@@ -744,6 +746,7 @@ class BlinkBridgeTests(unittest.TestCase):
             self.assertIsInstance(parent_context, dict)
             self.assertEqual(parent_context.get("parent_part"), "Head")
             self.assertEqual(FakeBlinkRefiner.last_device, "auto")
+            self.assertEqual(FakeBlinkRefiner.last_steps, 7)
         finally:
             if previous_module is not None:
                 sys.modules["core.blink_refiner"] = previous_module
@@ -951,6 +954,27 @@ class BlinkBridgeTests(unittest.TestCase):
         self.assertIn("Epoch [1/2] Loss: 0.3210", console_text)
         self.assertIn("Epoch [2/2] Loss: 0.1230", console_text)
 
+    def test_blink_training_report_waits_until_thread_finished(self):
+        widget = BlinkLabWidget(self.engine, self.pm)
+        report = {"validation_summary": {"part_name": "Mandible"}, "dir": "report_dir"}
+        opened_reports = []
+
+        def fake_show_report():
+            opened_reports.append(dict(widget.pending_training_report or {}))
+            widget.pending_training_report = None
+
+        widget._show_pending_training_report = fake_show_report
+        widget._on_training_report(report)
+
+        self.assertEqual(opened_reports, [])
+        self.assertEqual(widget.pending_training_report.get("validation_summary", {}).get("part_name"), "Mandible")
+
+        widget._on_training_finished()
+        self.app.processEvents()
+
+        self.assertEqual(opened_reports, [report])
+        self.assertIsNone(widget.pending_training_report)
+
     def test_blink_training_thread_passes_candidate_training_params_to_trainer(self):
         trainer_kwargs = {}
 
@@ -987,14 +1011,49 @@ class BlinkBridgeTests(unittest.TestCase):
 
         self.assertEqual(
             set(trainer_kwargs),
-            {"project_path", "part_name", "parent_part", "learning_rate", "weight_decay", "input_size", "device"},
+            {"project_path", "part_name", "parent_part", "learning_rate", "weight_decay", "input_size", "training_strategy", "device"},
         )
         self.assertEqual(trainer_kwargs.get("learning_rate"), 0.002)
         self.assertEqual(trainer_kwargs.get("weight_decay"), 0.0003)
         self.assertEqual(trainer_kwargs.get("input_size"), 384)
+        self.assertEqual(trainer_kwargs.get("training_strategy"), "triview_random")
         self.assertEqual(trainer_kwargs.get("device"), "cpu")
 
-    def test_training_success_registers_candidate_without_enabling_current_route(self):
+    def test_blink_training_thread_passes_selected_training_strategy(self):
+        trainer_kwargs = {}
+
+        class FakeTrainer:
+            def __init__(self, **kwargs):
+                trainer_kwargs.update(kwargs)
+
+            def train(
+                self,
+                epochs=0,
+                batch_size=0,
+                target_size=(224, 224),
+                log_callback=None,
+                progress_callback=None,
+                stop_callback=None,
+            ):
+                return "saved_expert.pth"
+
+        thread = BlinkTrainingThread(
+            project_path=self.pm.current_project_path,
+            part_name="Mandible",
+            parent_part="Head",
+            epochs=2,
+            batch_size=1,
+            training_strategy="full_inside_random",
+            device="cpu",
+        )
+        with patch("AntSleap.core.blink_trainer.BlinkExpertTrainer", FakeTrainer):
+            thread.start()
+            thread.wait()
+            self.app.processEvents()
+
+        self.assertEqual(trainer_kwargs.get("training_strategy"), "full_inside_random")
+
+    def test_training_success_appoints_and_enables_new_route_expert(self):
         widget = BlinkLabWidget(self.engine, self.pm)
         widget.training_route_context = {
             "parent_part": "Head",
@@ -1012,15 +1071,15 @@ class BlinkBridgeTests(unittest.TestCase):
 
         route = self.pm.get_cascade_route("Head", "Mandible")
         self.assertIsNotNone(route)
-        self.assertFalse(route.get("enabled"))
-        self.assertIsNone(route.get("expert_id"))
-        self.assertIsNone(route.get("appointed_expert", {}).get("expert_id"))
+        self.assertTrue(route.get("enabled"))
+        self.assertEqual(route.get("expert_id"), "Mandible/expert_v20260512_120000.pth")
+        self.assertEqual(route.get("appointed_expert", {}).get("expert_id"), "Mandible/expert_v20260512_120000.pth")
         self.assertEqual(
             [candidate.get("expert_id") for candidate in route.get("expert_candidates", [])],
             ["Mandible/expert_v20260512_120000.pth"],
         )
         self.assertEqual(refresh_hits, ["refresh"])
-        self.assertIn("candidate", widget.lbl_status.text())
+        self.assertIn("enabled", widget.lbl_status.text())
         self.assertIn("Head -> Mandible", widget.lbl_status.text())
 
     def test_training_success_does_not_override_existing_appointed_route_expert(self):

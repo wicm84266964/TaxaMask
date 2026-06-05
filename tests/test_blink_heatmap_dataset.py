@@ -52,14 +52,20 @@ class BlinkHeatmapDatasetTests(unittest.TestCase):
 
             dataset = BlinkHeatmapDataset(str(project_json), "Eye", parent_part="Head", input_size=64, heatmap_sigma=1.5)
 
-            self.assertEqual(len(dataset), 1)
+            self.assertEqual(dataset.sequence_count, 1)
+            self.assertEqual(len(dataset), 10)
             sample = dataset[0]
             self.assertEqual(tuple(sample["image"].shape), (3, 64, 64))
+            self.assertEqual(tuple(sample["inside_image"].shape), (3, 64, 64))
+            self.assertEqual(tuple(sample["outside_image"].shape), (3, 64, 64))
             self.assertEqual(tuple(sample["heatmap"].shape), (1, 64, 64))
+            self.assertEqual(tuple(sample["step_heatmap"].shape), (1, 64, 64))
             self.assertEqual(tuple(sample["wh"].shape), (2,))
+            self.assertEqual(tuple(sample["step_wh"].shape), (2,))
             self.assertGreater(float(sample["heatmap"].max()), 0.9)
             self.assertTrue(torch.all(sample["wh"] > 0.0))
             self.assertTrue(torch.all(sample["wh"] <= 1.0))
+            self.assertFalse(torch.equal(sample["inside_image"], sample["outside_image"]))
 
     def test_heatmap_network_preserves_heatmap_resolution_and_wh_shape(self):
         model = HeatmapBlinkNet(base_channels=8)

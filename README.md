@@ -2,7 +2,7 @@
 
 TaxaMask is a research workbench for taxonomy-oriented mask annotation, literature figure extraction, and multimodal dataset production.
 
-Current release milestone: **TaxaMask v3.0 official research workflow release**.
+Current release milestone: **TaxaMask open-source official release v1.0**.
 
 It was originally built for ant taxonomy research, with an ant morphology workflow as the most validated example. The current architecture also exposes configurable profiles and templates for other biological taxa, so researchers can adapt PDF screening, figure extraction, structure labels, model training, and dataset export to their own organisms.
 
@@ -32,7 +32,7 @@ Agent Center -> choose PDF / 2D-STL / TIF workflow
 - PDF literature trait search from the Labeling Workbench, linking PDF-derived taxon/part descriptions to the current image and part description box.
 - Embedded TaxaMask Agent Center powered by a local Ant-Code dashboard, with workflow shortcuts for 2D/STL morphology and TIF volume projects.
 - Taxa-aware project templates, including a validated ant morphology example and a generic taxonomy mask template.
-- Labeling Workbench for biological structure masks, including specimen-grouped STL-rendered surface views imported as derived 2D review images, adaptive light-grid VLM first-mile draft boxes for SAM prompts with project-path-safe live refresh, plus integrated parent-part and child-part annotation sections for small-structure refinement.
+- Labeling Workbench for biological structure masks, including specimen-grouped STL-rendered surface views imported as derived 2D review images, adaptive light-grid VLM first-mile draft boxes for SAM prompts with cancellable/concurrent batch runs, project-path-safe live refresh, plus integrated parent-part and child-part annotation sections for small-structure refinement.
 - TIF Volume Workbench for stack viewing, read-only offscreen-GPU 3D volume preview, overlay review, material-map editing, working edits, and explicit promotion to manual training truth.
 - Project-saved 2D/STL model profiles for switching parent-part and child-part annotation schemes without rewriting scattered settings.
 - Route-appointed child-part experts for parent-structure to child-structure pre-annotation, shrink-trajectory generation, and local expert training from the main 2D/STL labeling surface. Current route backends include ViT-B Blink, heatmap Blink, and external Blink scripts; Blink training can compare full/inside/outside random, full/inside random, and full-first-then-inside trajectory strategies.
@@ -52,7 +52,7 @@ The GUI starts at the TaxaMask Agent Center by default. The center area embeds t
 - `TIF Volume`: continuous TIF/AMIRA-style volumes. This route uses independent TIF projects, material-ID label fields, slice review plus read-only 3D volume preview, `manual_truth` / `working_edit` / `model_draft` layers, TIF exports, and the TIF backend contract.
 - `PDF Evidence`: available through Agent/headless tools and `File -> Open PDF Evidence Tools`. PDF outputs are evidence/provenance artifacts, not automatic training truth.
 
-Locator and SAM are lazy-loaded. Starting the app or entering the TIF workflow does not load them; entering the 2D/STL workflow preloads them, and returning to the Agent Center keeps already loaded models alive.
+Locator and SAM are lazy-loaded. Starting the app or entering the TIF workflow does not load them; entering the 2D/STL workflow usually preloads them, and returning to the Agent Center keeps already loaded models alive. Very large 2D/STL projects open first with collapsed image groups and defer model preload until annotation/training is requested, so continuing a thousand-image review project does not feel frozen at the doorway.
 
 TIF volume support is currently an experimental side workflow. The most validated daily route is still ant 2D/STL morphology plus PDF evidence. The TIF preview now defaults to offscreen GPU rendering to reduce Qt WebEngine/OpenGL composition conflicts, but TIF projects should still be treated as a separate validation path and tested on the target machine before production use.
 
@@ -140,7 +140,9 @@ For a configured Python environment:
 python AntSleap/main.py
 ```
 
-On the current Windows maintainer workstation, the repository also includes `启动TaxaMask.bat`, a local convenience launcher that calls the `antsleap` conda environment directly. It is not a cross-platform installer; other machines should adapt the environment path or use the Python command above.
+On Windows, the repository also includes `启动TaxaMask.bat`. It searches for a local `.venv`, an active Conda environment, common `antsleap` Conda locations, and finally Python on `PATH`. For a custom environment, set `TAXAMASK_PYTHON_EXE` to the full path of `python.exe` before running the script.
+
+If TaxaMask cannot start after local source-code customization, run `启动AntCode修复面板.bat`. This starts the bundled Ant-Code Dashboard in a browser without importing the TaxaMask Python GUI, so it can be used as a recovery path to inspect and repair broken TaxaMask code. The recovery launcher skips project-local Ant-Code config files so it can still open if `.lab-agent/config.json` was damaged; model/API settings may need to be confirmed again inside the Dashboard. The recovery script requires Node.js 20 or newer, or a packaged `node.exe`; set `TAXAMASK_NODE_EXE` if Node is installed in a custom location.
 
 The main window title should show:
 
@@ -153,7 +155,7 @@ TaxaMask Workbench
 1. Start in the Agent Center and choose whether the task is PDF evidence, 2D/STL morphology, or TIF volume annotation.
 2. For PDF evidence, configure API/profile settings and run a small batch before scaling.
 3. For 2D/STL morphology, create/open a 2D project, import ordinary images or STL-rendered views, then annotate in the Labeling Workbench.
-4. Optionally configure VLM target structures, then run `VLM Pre-Label` for the current image or `VLM Batch Pre-Label` for all images / a selected image-list group to create draft AI boxes/SAM polygons for human review before training.
+4. Optionally configure VLM target structures and API concurrency, then run `VLM Pre-Label` for the current image or `VLM Batch Pre-Label` for all images / a selected image-list group to create draft AI boxes/SAM polygons for human review before training. Batch VLM runs can be stopped from the progress dialog; confirmed/manual labels are preserved while unconfirmed AI drafts can be regenerated.
 5. For child structures, use the Labeling Workbench's `Child-part annotation` section to pick the parent context, configure the route expert backend, annotate from an existing parent box, generate shrink trajectories, and train the current child expert.
 6. Use the shared training progress area and `Training Results` browser to reopen parent-part and child-part validation reports without merging their detail views.
 7. For TIF volume work, create/open a TIF project, import TIF stacks or AMIRA directories, review material maps, and promote reviewed edits to `manual_truth`.
@@ -214,7 +216,7 @@ Until a DOI or paper is available, cite the GitHub repository and release versio
 
 ```text
 TaxaMask: a taxonomy-oriented mask annotation and multimodal dataset workbench.
-GitHub repository, version v3.0.
+GitHub repository, version v1.0.
 ```
 
 ## License

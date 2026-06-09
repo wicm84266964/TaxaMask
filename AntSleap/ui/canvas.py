@@ -184,7 +184,7 @@ class AnnotationCanvas(QWidget):
 
     def _box_rect_for_current_mode(self, start_pos, current_pos):
         rect = QRectF(start_pos, current_pos).normalized()
-        if self.mode != "ANNOTATION_BOX" or not self.annotation_box_aspect_ratio:
+        if self.mode not in {"BOX_PROMPT", "ANNOTATION_BOX"} or not self.annotation_box_aspect_ratio:
             return rect
 
         dx = current_pos.x() - start_pos.x()
@@ -192,13 +192,9 @@ class AnnotationCanvas(QWidget):
         if dx == 0 or dy == 0:
             return rect
 
-        width = abs(dx)
-        height = abs(dy)
         ratio = self.annotation_box_aspect_ratio
-        if width / max(height, 1e-6) > ratio:
-            width = height * ratio
-        else:
-            height = width / ratio
+        width = max(abs(dx), abs(dy) * ratio)
+        height = width / ratio
 
         end_x = start_pos.x() + (width if dx >= 0 else -width)
         end_y = start_pos.y() + (height if dy >= 0 else -height)

@@ -32,9 +32,10 @@ Use this skill as the compact operating map for TaxaMask. It is not merely an op
 ## Current Product Shape
 
 - Visible product name: TaxaMask.
+- Current public milestone: TaxaMask open-source official release v1.0 (2026-06-09).
 - Internal Python package: `AntSleap`, kept for compatibility and project history.
 - Startup page: TaxaMask Agent Center with embedded Ant-Code dashboard in the main area.
-- Right rail: direct workflow cards for `2D/STL Morphology` and `TIF Volume`.
+- Right rail: recent/open/settings controls followed by direct workflow cards for `PDF evidence workflow`, `2D/STL Morphology`, and `TIF Volume`.
 - Workbenches keep only lightweight `Start Center` / `Ask Agent` entries, not full chat panels.
 - PDF is an evidence/provenance and agent/headless workflow, not the primary visual workbench.
 
@@ -43,7 +44,7 @@ Use this skill as the compact operating map for TaxaMask. It is not merely an op
 Choose the route before editing or advising:
 
 - `2D/STL morphology`: ordinary morphology images plus STL-rendered 2D views. Uses the Labeling Workbench as the daily surface, with `Parent-part annotation` and `Child-part annotation` sections for parent boxes, child structures, project model profiles, Locator/SAM, route-appointed child experts, literature trait alignment, and the 2D external backend. The standalone Blink widget is compatibility/development fallback, not the normal operator route.
-- `VLM first-mile preannotation`: part of the 2D/STL morphology route. It now sends a grid-free VLM input image, asks for current-input pixel boxes, maps coordinates back to the original image, and generates reviewable `auto_boxes` plus optional SAM draft polygons for selected target parts. Treat these as drafts until the researcher confirms them. If VLM results appear saved but not visible, first suspect image-key drift between project-relative paths and absolute paths; current `ProjectManager` should canonicalize these on load and VLM writeback should use registered project image keys only.
+- `VLM first-mile preannotation`: part of the 2D/STL morphology route. It uses adaptive light-grid VLM input, asks for grid boxes, maps coordinates back to the original image, and generates reviewable `auto_boxes` plus optional SAM draft polygons for selected target parts. Pixel-box parsing remains a legacy fallback. Treat these as drafts until the researcher confirms them. Batch runs have a stop button and API concurrency defaults to 1; reruns replace unconfirmed AI drafts but preserve manual/confirmed labels. If VLM results appear saved but not visible, first suspect image-key drift between project-relative paths and absolute paths; current `ProjectManager` should canonicalize these on load and VLM writeback should use registered project image keys only.
 - `TIF volume`: continuous TIF/AMIRA-style volumes. Uses TIF Volume Workbench, material IDs, `working_edit`, `manual_truth`, `model_draft`, TIF export, and the TIF backend contract.
 - `PDF evidence`: screens PDFs, extracts figure/caption evidence, writes accepted and needs-review figure artifacts, and can structure pure PDF text into `taxon -> part -> description` records. Load `.lab-agent/skills/taxamask-pdf-evidence/SKILL.md` for PDF runs, candidate import, evidence indexes, literature trait lookup, or PDF failure triage. The current default ant figure review profile is the broad `蚂蚁分类学图版宽松复核_示例`: it accepts single-ant-taxon morphology figures and local diagnostic structures, and rejects multi-species/multi-taxon comparison figures. The current default part-description profile is `part_description_configs/蚂蚁分类学部位描述抽取_示例.json`; it uses Text LLM text blocks only, not images. Results are candidate/evidence artifacts and must not automatically become training truth.
 - `Agent Center`: natural-language configuration, error triage, PDF workflow orchestration, training-readiness checks, and project documentation support.
@@ -63,7 +64,9 @@ Choose the route before editing or advising:
 
 - General Settings: language, theme, startup behavior, autosave, and default internal runtime device.
 - 2D/STL Model Settings: Profile, Parent-part annotation, Child-part annotation, Inference, and Advanced Extensions pages. The active project model profile controls parent backend, child default backend, locator scope, parent-context box aspect ratios, VLM target parts, and inference defaults.
-- VLM progress UI should keep status and current image names readable. The first step is `prepare` for the grid-free VLM input image, not grid generation. Long filenames are shortened in the dialog, with full paths kept in tooltips rather than squeezed into the same progress line.
+- `Lock parent box ratio` is off by default. When enabled, it constrains parent-role `Annotation Box` and parent-role `Box Prompt (SAM)`; child boxes and shrink loose boxes stay free-ratio. Parent ratios are entered as width : height, not as precomputed decimal values.
+- VLM progress UI should keep status and current image names readable. Long filenames are shortened in the dialog, with full paths kept in tooltips rather than squeezed into the same progress line.
+- `Clear AI Labels` should offer all-project and image-group scopes with affected counts. Structure rename should migrate labels, VLM targets, parent ratios, routes, Blink context, and trajectories.
 - Advanced Extensions is the main switching/configuration surface for high-impact custom parent and child model sources. Parent-part and Child-part pages should remain operator-facing summaries plus ordinary training parameters.
 - Parent-part backends: built-in Locator/SAM or external parent backend through `docs/contracts/external_backend_contract_v1.md`.
 - Child-part route backends: `vit_b_blink`, `heatmap_blink`, or `external_blink`. External Blink uses `docs/contracts/external_blink_backend_contract_v1.md` and predicts a child box from an existing parent box.
@@ -100,6 +103,7 @@ Locator and SAM are lazy-loaded:
 - Startup Agent Center does not load Locator or SAM.
 - TIF workflow does not load Locator or SAM.
 - Entering/opening/importing the 2D/STL workflow preloads Locator and SAM.
+- Opening/continuing a large 2D/STL project with 500+ images should first show collapsed groups without automatically loading the first image or preloading Locator/SAM.
 - Returning to the Agent Center keeps already loaded 2D/STL models alive.
 - On application close, the SAM worker thread should shut down cleanly.
 

@@ -69,7 +69,7 @@ DEFAULT_HEATMAP_BLINK_PARAMS = {
 }
 
 VLM_PROCESSING_SCOPES = {"current_image", "all_images", "image_group"}
-VLM_IMAGE_GROUPS = {"original", "split", "manual_done", "manual"}
+VLM_IMAGE_GROUPS = {"original", "split", "hard_candidates", "manual_done", "manual"}
 DEFAULT_VLM_IMAGE_GROUP = "split"
 
 
@@ -156,10 +156,16 @@ def _clean_vlm_settings(raw_settings, taxonomy=None):
         image_group = DEFAULT_VLM_IMAGE_GROUP
     prompt_profile = sanitize_vlm_prompt_profile(raw_settings.get("prompt_profile", {}))
     prompt_profile_id = str(raw_settings.get("prompt_profile_id") or prompt_profile.get("profile_id") or DEFAULT_VLM_PROMPT_PROFILE_ID).strip()
+    try:
+        concurrency = int(raw_settings.get("concurrency", 1))
+    except Exception:
+        concurrency = 1
+    concurrency = max(1, min(8, concurrency))
     return {
         "target_parts": target_parts,
         "processing_scope": scope,
         "image_group": image_group,
+        "concurrency": concurrency,
         "prompt_profile_id": prompt_profile_id or DEFAULT_VLM_PROMPT_PROFILE_ID,
         "prompt_profile": prompt_profile,
     }

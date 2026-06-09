@@ -48,6 +48,24 @@ test("loads gateway retry budget from environment and project config", async () 
   assert.equal(fromEnv.lab.gatewayMaxRetries, 3);
 });
 
+test("can skip broken project config for recovery launchers", async () => {
+  const cwd = await makeTempWorkspace();
+  await fs.mkdir(path.join(cwd, ".lab-agent"), { recursive: true });
+  await fs.writeFile(path.join(cwd, ".lab-agent", "config.json"), "{broken", "utf8");
+
+  await assert.rejects(loadConfig({ cwd, env: {} }), /Unexpected token|Expected property name/);
+
+  const config = await loadConfig({
+    cwd,
+    env: {
+      LAB_AGENT_SKIP_PROJECT_CONFIG: "1"
+    }
+  });
+
+  assert.equal(config.projectConfigPath, null);
+  assert.deepEqual(config.projectConfigPaths, []);
+});
+
 test("loads transcript policy from environment", async () => {
   const config = await loadConfig({
     cwd: process.cwd(),

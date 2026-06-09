@@ -6,6 +6,7 @@ import re
 import threading
 import time
 import cv2
+from fractions import Fraction
 
 # pyright: reportMissingImports=false, reportGeneralTypeIssues=false, reportAttributeAccessIssue=false, reportArgumentType=false, reportCallIssue=false, reportOptionalMemberAccess=false, reportOptionalCall=false, reportUninitializedInstanceVariable=false, reportOperatorIssue=false
 
@@ -39,7 +40,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox, QGridLayout, QSizePolicy, QFrame, QFormLayout,
     QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView, QSpinBox, QToolButton,
     QAbstractItemView, QTreeWidget, QTreeWidgetItem)
-from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSize, QMimeData
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSize, QMimeData, QEvent
 from PySide6.QtGui import QIcon, QAction, QColor, QDrag
 import numpy as np
 import torch
@@ -101,6 +102,7 @@ try:
         DEFAULT_CHILD_AUTO_SHRINK_STEPS,
         DEFAULT_HEATMAP_BLINK_PARAMS,
         DEFAULT_MODEL_PROFILE_ID,
+        DEFAULT_VLM_IMAGE_GROUP,
         PARENT_BACKEND_BUILTIN,
         PARENT_BACKEND_EXTERNAL,
         sanitize_model_profiles,
@@ -201,6 +203,7 @@ except ImportError:
         DEFAULT_CHILD_AUTO_SHRINK_STEPS,
         DEFAULT_HEATMAP_BLINK_PARAMS,
         DEFAULT_MODEL_PROFILE_ID,
+        DEFAULT_VLM_IMAGE_GROUP,
         PARENT_BACKEND_BUILTIN,
         PARENT_BACKEND_EXTERNAL,
         sanitize_model_profiles,
@@ -398,6 +401,84 @@ class DatasetExportThread(QThread):
         finally:
             self.finished_signal.emit()
 
+
+class ImageImportThread(QThread):
+    progress_signal = Signal(int, int, str)
+    success_signal = Signal(int, int)
+    error_signal = Signal(str)
+    finished_signal = Signal()
+
+    def __init__(self, project, image_paths):
+        super().__init__()
+        self.project = project
+        self.image_paths = list(image_paths or [])
+
+    def run(self):
+        def progress(done, total, label):
+            self.progress_signal.emit(int(done), int(total), str(label or ""))
+
+        try:
+            added = self.project.add_images(self.image_paths, progress_callback=progress)
+            self.success_signal.emit(int(added), len(self.image_paths))
+        except Exception as exc:
+            self.error_signal.emit(str(exc))
+        finally:
+            self.finished_signal.emit()
+
+
+class ExternalBatchInferenceThread(QThread):
+    log_signal = Signal(str)
+    progress_signal = Signal(int, int, str)
+    result_signal = Signal(str, dict)
+    error_signal = Signal(str)
+    finished_signal = Signal()
+
+    def __init__(self, project, backend_config, image_paths, model_manifest="", lang="en"):
+        super().__init__()
+        self.project = project
+        self.backend_config = sanitize_external_backend_config(backend_config)
+        self.image_paths = list(image_paths or [])
+        self.model_manifest = str(model_manifest or "")
+        self.lang = lang
+
+    def run(self):
+        total = len(self.image_paths)
+        self.log_signal.emit(tr("Starting batch inference on {0} images...", self.lang).format(total))
+        runner = ExternalBackendRunner(self.project, self.backend_config)
+        for index, image_path in enumerate(self.image_paths, start=1):
+            try:
+                self.progress_signal.emit(index - 1, total, str(image_path))
+                result = runner.run_predict(image_path, model_manifest=self.model_manifest)
+                self.result_signal.emit(str(image_path), result)
+                self.log_signal.emit(tr("Processed {0}", self.lang).format(os.path.basename(str(image_path))))
+                self.progress_signal.emit(index, total, str(image_path))
+            except Exception as exc:
+                self.error_signal.emit(str(exc))
+                break
+        self.finished_signal.emit()
+
+
+class ExternalTrainingThread(QThread):
+    log_signal = Signal(str)
+    success_signal = Signal(dict)
+    error_signal = Signal(str)
+    finished_signal = Signal()
+
+    def __init__(self, project, backend_config):
+        super().__init__()
+        self.project = project
+        self.backend_config = sanitize_external_backend_config(backend_config)
+
+    def run(self):
+        try:
+            self.log_signal.emit("External backend training started.")
+            summary = ExternalBackendRunner(self.project, self.backend_config).run_prepare_and_train()
+            self.success_signal.emit(dict(summary or {}))
+        except Exception as exc:
+            self.error_signal.emit(str(exc))
+        finally:
+            self.finished_signal.emit()
+
 # --- Localization ---
 TRANSLATIONS = {
     "zh": {
@@ -476,6 +557,8 @@ TRANSLATIONS = {
         "All imported images": "已导入所有图像",
         "Images in selected list group": "指定图片列表分组",
         "VLM Image Group:": "VLM 图片分组：",
+        "VLM API Concurrency:": "VLM API 并发数：",
+        "Default is 1 to protect rate-limited API keys. Increase only if your provider explicitly allows parallel requests; high concurrency can trigger throttling, extra charges, or account blocking.": "默认 1，用于保护有速率限制的 API key。只有当服务商明确允许并行请求时再调高；高并发可能触发限速、额外费用或封号。",
         "VLM Detailed Settings": "VLM 详细设置",
         "VLM Prompt Profile:": "VLM 提示词方案：",
         "Built-in Ant Taxonomy Default": "内置蚂蚁分类学默认",
@@ -497,8 +580,16 @@ TRANSLATIONS = {
         "VLM first-mile preannotation started for {0}.": "VLM 第一公里预标注已开始：{0}。",
         "Run VLM preannotation on all imported images?\n\nThis will call the multimodal API, may incur provider cost, and will write draft AI boxes and SAM polygons for later review.": "对已导入的所有图像运行 VLM 预标注？\n\n这会调用多模态 API，可能产生服务商费用，并写入待复核的 AI 草稿框和 SAM 掩码。",
         "Run VLM preannotation on {0} image(s) in {1}?\n\nThis will call the multimodal API, may incur provider cost, and will write draft AI boxes and SAM polygons for later review.": "对“{1}”中的 {0} 张图像运行 VLM 预标注？\n\n这会调用多模态 API，可能产生服务商费用，并写入待复核的 AI 草稿框和 SAM 掩码。",
+        "VLM API concurrency: {0}. Increase this only if your provider allows parallel requests.": "VLM API 并发数：{0}。只有服务商允许并行请求时才建议调高。",
         "VLM batch progress: {0}/{1} steps ({2}).": "VLM 批量进度：{0}/{1} 步（{2}）。",
         "VLM Pre-Annotation Progress": "VLM 预标注进度",
+        "Stop VLM Batch": "停止 VLM 批量任务",
+        "Stop VLM preannotation after active request(s) finish?": "在已发出的请求结束后停止 VLM 预标注吗？",
+        "Active API request(s) may already have been sent, but no more queued images will be processed. This helps avoid unintended large API bills.": "已经发出的 API 请求可能无法撤回，但剩余队列不会继续处理。这样可以避免意外产生大额 API 费用。",
+        "VLM stop requested. Remaining queued images were cancelled; waiting for active request(s) to finish.": "已请求停止 VLM。剩余队列已取消，正在等待已发出的请求结束。",
+        "VLM preannotation stopped. Images processed: {0}; queued images cancelled: {1}; saved drafts: {2}; report: {3}": "VLM 预标注已停止。已处理图像：{0}；已取消排队图像：{1}；保存草稿：{2}；报告：{3}",
+        "VLM progress: stopped ({0} draft boxes; {1} queued images cancelled)": "VLM 进度：已停止（{0} 个草稿框；已取消 {1} 张排队图像）",
+        "Stopping after current image...": "将在当前图片结束后停止...",
         "VLM progress: {0}% ({1}/{2}) {3}": "VLM 进度：{0}%（{1}/{2}）{3}",
         "VLM progress: {0}% ({1}/{2}) {3} - {4}": "VLM 进度：{0}%（{1}/{2}）{3} - {4}",
         "VLM progress: finished ({0} draft boxes)": "VLM 进度：完成（{0} 个草稿框）",
@@ -511,6 +602,7 @@ TRANSLATIONS = {
         "sam": "生成 SAM 草稿",
         "report": "写入报告",
         "done": "完成当前图",
+        "cancelled": "已请求停止",
         "failed": "失败",
         "no_candidates": "无可用框",
         "VLM preannotation finished. Images: {0}; saved drafts: {1}; report: {2}": "VLM 预标注完成。图像：{0}；保存草稿：{1}；报告：{2}",
@@ -790,7 +882,10 @@ TRANSLATIONS = {
         "Number of interpolation steps from the loose shrink start box to the final target box. 20 steps saves 21 trajectory frames including the starting frame.": "从宽松收缩起始框到最终目标框的插值步数。20 步会保存包含起始帧在内的 21 个轨迹帧。",
         "These defaults are shown in Blink Workbench when the app starts or settings are saved. You can still adjust them for a single expert before training.": "这些默认值会在应用启动或保存设置后显示到 Blink 工作台。训练单个专家前仍可在 Blink 工作台临时调整。",
         "Parent Box Aspect Ratios:": "父级框长宽比：",
-        "Used when the main labeling workbench draws parent context boxes. Child boxes and Blink shrink start boxes stay free-ratio.": "主标注工作台绘制父级上下文框时使用；子部位框和 Blink 收缩起始框保持自由比例。",
+        "Used when the main labeling workbench draws parent context boxes. Enter each as width : height, for example 4 : 3. Child boxes and Blink shrink start boxes stay free-ratio.": "主标注工作台绘制父级上下文框时使用。请按宽 : 高输入，例如 4 : 3。子部位框和 Blink 收缩起始框保持自由比例。",
+        "Width": "宽",
+        "Height": "高",
+        "Parent box ratio for {0} must have positive width and height values.": "{0} 的父级框比例必须填写正数宽度和高度。",
         "Learning Rate:": "学习率 (LR):",
         "Weight Decay (L2 Reg):": "权重衰减 (L2正则):",
         "Main Locator Parts:": "主定位结构：",
@@ -815,6 +910,20 @@ TRANSLATIONS = {
         "Dataset export is already running.": "数据集正在导出中。",
         "Dataset export failed: {0}": "数据集导出失败：{0}",
         "Exported {0} samples.\n\nOutput folder: {1}": "已导出 {0} 个样本。\n\n输出文件夹：{1}",
+        "Image Import": "图片导入",
+        "Image Import Progress": "图片导入进度",
+        "Preparing image import...": "正在准备导入图片...",
+        "Importing images: {0}/{1}": "正在导入图片：{0}/{1}",
+        "Importing images: {0}/{1}\n{2}": "正在导入图片：{0}/{1}\n{2}",
+        "Imported {0}/{1} image(s).": "已导入 {0}/{1} 张图片。",
+        "Image import is already running.": "图片导入正在进行中。",
+        "Image import is running. Please wait for it to finish before closing TaxaMask.": "图片导入正在进行中，请等待完成后再关闭 TaxaMask。",
+        "Image import failed: {0}": "图片导入失败：{0}",
+        "Batch inference is already running.": "批量推理正在进行中。",
+        "Batch inference is running. Please wait for it to finish before closing TaxaMask.": "批量推理正在进行中，请等待完成后再关闭 TaxaMask。",
+        "External batch inference failed: {0}": "外部批量推理失败：{0}",
+        "External batch inference finished.": "外部批量推理已结束。",
+        "External backend training is running. Please wait for it to finish before closing TaxaMask.": "外部后端训练正在进行中，请等待完成后再关闭 TaxaMask。",
         "Browse": "浏览",
         "Select Directory": "选择目录",
         "Export Format:": "导出格式:",
@@ -885,15 +994,17 @@ TRANSLATIONS = {
         "Opened TIF volume project: {0}": "已打开 TIF 体数据项目：{0}",
         "Opened STL rendered-view project and registered it into the Labeling Workbench: {0}": "已打开 STL 渲染视图项目，并登记进标注工作台：{0}",
         "Add Structure": "添加结构标签",
+        "Rename Structure": "重命名结构标签",
         "Remove Structure": "删除结构标签",
         "Crop this Image": "裁剪此图片",
         "Remove Image": "移除图片",
         "Run automatic panel splitting on {0} original image(s)?\n\nDetected crops will be added after the original images. Please review the generated crops before training.": "对 {0} 张原图执行自动拼图切分？\n\n检测到的裁剪图会追加在原图后面。训练前请先复核生成的小图。",
-        "Panel splitting finished: {0} crop(s) from {1} image(s); hard-joined plates needing manual crop: {2}; no split detected/errors: {3}.": "拼图切分完成：从 {1} 张图片生成 {0} 张裁剪图；硬拼接需人工裁剪 {2} 张；未检测到或读取失败 {3} 张。",
+        "Panel splitting finished: {0} crop(s) from {1} image(s); hard-joined candidate plates needing review: {2}; no split detected/errors: {3}.": "拼图切分完成：从 {1} 张图片生成 {0} 张裁剪图；硬拼接候选需复核 {2} 张；未检测到或读取失败 {3} 张。",
         "Panel splitting cancelled.": "拼图切分已取消。",
         "No panel crops were detected.": "未检测到可切分的拼图。",
         "Original Images": "原图",
         "Split Crops": "切分图",
+        "Hard-joined Candidates": "硬拼接候选",
         "Manual Split Done": "已完成手动切分",
         "Manual Split Needed": "待手动切分",
         "Custom Image Groups": "自定义图片分组",
@@ -949,6 +1060,7 @@ TRANSLATIONS = {
         "Manual parent context set: {0} -> {1}.": "已手动设置父级上下文：{0} -> {1}。",
         "Route not configured": "路由未配置",
         "Lock parent box ratio": "锁定父级框比例",
+        "Off by default. Enable when preparing fixed-ratio parent boxes for child-part training; it affects parent SAM box prompts and parent manual ROI boxes.": "默认关闭。准备子部位训练所需的固定比例父级框时再开启；开启后会影响父级 SAM 框选和父级人工 ROI 框。",
         "Open route expert settings for {0}.": "打开 {0} 的路由专家设置。",
         "Select a child structure first.": "请先选择子部位。",
         "Select a child structure for refinement.": "请选择子部位进行精修。",
@@ -1081,11 +1193,22 @@ TRANSLATIONS = {
         "New Project Directory": "新建项目目录",
         "Project Name:": "项目名称：",
         "Structure Name:": "结构标签名称：",
+        "New Structure Name:": "新的结构标签名称：",
         "Exists.": "已存在。",
+        "Rename '{0}' to '{1}'? Existing labels, VLM drafts, parent-child routes, and training context for this structure will be moved to the new name.": "将“{0}”重命名为“{1}”？这个结构已有的标注、VLM 草稿、父子路由和训练上下文都会迁移到新名称。",
+        "Could not rename structure. The new name may already exist or contain unsafe characters.": "无法重命名结构标签。新名称可能已存在，或包含不安全字符。",
         "Delete '{0}'?": "删除“{0}”？",
         "Clear AI": "清除 AI",
         "Are you sure?": "确定吗？",
         "Clear all AI labels from the current project?": "清除当前项目中的全部 AI 标签？",
+        "Clear AI Label Scope": "清除 AI 标签范围",
+        "Scope:": "范围：",
+        "All project images": "全部项目图片",
+        "Images in group: {0}": "图片分组：{0}",
+        "This will remove {0} AI label(s) from {1} image(s). Manual and confirmed labels are kept.": "将从 {1} 张图片中清除 {0} 个 AI 标签。人工标签和已确认标签会保留。",
+        "No AI labels found in the selected scope.": "所选范围内没有 AI 标签。",
+        "Clear selected AI labels?": "清除所选范围内的 AI 标签吗？",
+        "Removed {0} AI labels from {1}.": "已从 {1} 清除 {0} 个 AI 标签。",
         "Select Images": "选择图片",
         "Remove": "移除",
         "Remove {0} images?": "移除 {0} 张图片？",
@@ -1459,10 +1582,29 @@ DEFAULT_OUTPUTS_DIR_NAME = "TaxaMask_outputs"
 DEFAULT_2D_STL_PROJECTS_DIR_NAME = "2d_stl_projects"
 DEFAULT_TIF_PROJECTS_DIR_NAME = "tif_projects"
 DEFAULT_STARTUP_PROJECT_DIR_NAME = "_startup"
+BACKGROUND_IMAGE_IMPORT_THRESHOLD = 20
+LARGE_PROJECT_OPEN_LIGHTWEIGHT_THRESHOLD = 500
+BRAND_ASSETS_DIR = os.path.join(PACKAGE_DIR, "assets", "brand")
+APP_ICON_PATH = os.path.join(BRAND_ASSETS_DIR, "taxamask_app_icon_white.ico")
+APP_ICON_FALLBACK_PATH = os.path.join(BRAND_ASSETS_DIR, "taxamask_app_icon_white.png")
 
 
 class NoWheelComboBox(QComboBox):
     """Combo box that ignores mouse-wheel changes to avoid accidental selection changes."""
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+
+class NoWheelSpinBox(QSpinBox):
+    """Spin box that lets scroll areas handle the wheel instead of changing values."""
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+
+class NoWheelSlider(QSlider):
+    """Slider that ignores wheel changes to prevent accidental parameter edits."""
 
     def wheelEvent(self, event):
         event.ignore()
@@ -1994,7 +2136,7 @@ class TrainingReportDialog(QDialog):
         ctrl_layout = QHBoxLayout()
         ctrl_layout.addWidget(QLabel(tr("Show Validation Set %:", self.lang)))
         
-        self.slider_pct = QSlider(Qt.Horizontal)
+        self.slider_pct = NoWheelSlider(Qt.Horizontal)
         self.slider_pct.setRange(5, 100)
         self.slider_pct.setValue(20)
         self.slider_pct.setTickPosition(QSlider.TicksBelow)
@@ -3320,13 +3462,13 @@ class ModelSettingsDialog(QDialog):
         ratio_layout.setVerticalSpacing(8)
         ratio_note = QLabel(
             tr(
-                "Used when the main labeling workbench draws parent context boxes. Child boxes and Blink shrink start boxes stay free-ratio.",
+                "Used when the main labeling workbench draws parent context boxes. Enter each as width : height, for example 4 : 3. Child boxes and Blink shrink start boxes stay free-ratio.",
                 lang,
             )
         )
         ratio_note.setWordWrap(True)
         ratio_note.setObjectName("mutedLabel")
-        ratio_layout.addWidget(ratio_note, 0, 0, 1, 2)
+        ratio_layout.addWidget(ratio_note, 0, 0, 1, 4)
         self.parent_box_ratio_inputs = {}
         ratio_map = params.get("parent_box_aspect_ratios", {}) if isinstance(params.get("parent_box_aspect_ratios", {}), dict) else {}
         default_ratio_parts = ["Head", "Mesosoma", "Gaster", "Whole body"]
@@ -3335,12 +3477,21 @@ class ModelSettingsDialog(QDialog):
             clean_part = str(part_name or "").strip()
             if clean_part and clean_part not in ratio_parts:
                 ratio_parts.append(clean_part)
-        for index, part_name in enumerate(ratio_parts, start=1):
+        ratio_layout.addWidget(QLabel(tr("Width", lang)), 1, 1)
+        ratio_layout.addWidget(QLabel(tr("Height", lang)), 1, 3)
+        for index, part_name in enumerate(ratio_parts, start=2):
             ratio_layout.addWidget(QLabel(part_name), index, 0)
-            edit = QLineEdit(str(ratio_map.get(part_name, "")))
-            edit.setPlaceholderText("1.0")
-            self.parent_box_ratio_inputs[part_name] = edit
-            ratio_layout.addWidget(edit, index, 1)
+            width_edit = QLineEdit()
+            width_edit.setPlaceholderText("4")
+            width_edit.setMaximumWidth(90)
+            height_edit = QLineEdit()
+            height_edit.setPlaceholderText("3")
+            height_edit.setMaximumWidth(90)
+            self.parent_box_ratio_inputs[part_name] = (width_edit, height_edit)
+            self._set_parent_box_ratio_input(part_name, ratio_map.get(part_name, ""))
+            ratio_layout.addWidget(width_edit, index, 1)
+            ratio_layout.addWidget(QLabel(":"), index, 2)
+            ratio_layout.addWidget(height_edit, index, 3)
         form_parent.addWidget(parent_ratio_group)
 
         locator_group = QGroupBox(tr("Main Locator Parts:", lang))
@@ -3447,7 +3598,7 @@ class ModelSettingsDialog(QDialog):
         self.combo_blink_input_size.setCurrentIndex(input_index if input_index >= 0 else 0)
         blink_layout.addWidget(self.combo_blink_input_size)
         blink_layout.addWidget(QLabel(tr("Auto-shrink Steps:", lang)))
-        self.spin_blink_auto_shrink_steps = QSpinBox()
+        self.spin_blink_auto_shrink_steps = NoWheelSpinBox()
         self.spin_blink_auto_shrink_steps.setRange(1, 200)
         try:
             shrink_steps = int(child_defaults.get("auto_shrink_steps", params.get("blink_auto_shrink_steps", DEFAULT_CHILD_AUTO_SHRINK_STEPS)))
@@ -3671,6 +3822,27 @@ class ModelSettingsDialog(QDialog):
         self.combo_vlm_image_group.setObjectName("modelSettingsVlmImageGroupCombo")
         self._populate_vlm_image_group_combo(str(vlm_settings.get("image_group", "split") or "split"))
         vlm_details_layout.addWidget(self.combo_vlm_image_group)
+        vlm_details_layout.addWidget(QLabel(tr("VLM API Concurrency:", lang)))
+        self.spin_vlm_concurrency = NoWheelSpinBox()
+        self.spin_vlm_concurrency.setObjectName("modelSettingsVlmConcurrencySpin")
+        self.spin_vlm_concurrency.setRange(1, 8)
+        self.spin_vlm_concurrency.setValue(max(1, min(8, int(vlm_settings.get("concurrency", 1) or 1))))
+        self.spin_vlm_concurrency.setToolTip(
+            tr(
+                "Default is 1 to protect rate-limited API keys. Increase only if your provider explicitly allows parallel requests; high concurrency can trigger throttling, extra charges, or account blocking.",
+                lang,
+            )
+        )
+        vlm_details_layout.addWidget(self.spin_vlm_concurrency)
+        vlm_concurrency_note = QLabel(
+            tr(
+                "Default is 1 to protect rate-limited API keys. Increase only if your provider explicitly allows parallel requests; high concurrency can trigger throttling, extra charges, or account blocking.",
+                lang,
+            )
+        )
+        vlm_concurrency_note.setWordWrap(True)
+        vlm_concurrency_note.setObjectName("mutedLabel")
+        vlm_details_layout.addWidget(vlm_concurrency_note)
         vlm_details_layout.addWidget(QLabel(tr("VLM Prompt Profile:", lang)))
         vlm_profile_note = QLabel(
             tr(
@@ -4502,9 +4674,8 @@ class ModelSettingsDialog(QDialog):
 
         ratios = parent_backend.get("parent_box_aspect_ratios", {})
         if isinstance(ratios, dict):
-            for part_name, editor in getattr(self, "parent_box_ratio_inputs", {}).items():
-                value = ratios.get(part_name, "")
-                editor.setText(str(value) if value != "" else "")
+            for part_name in getattr(self, "parent_box_ratio_inputs", {}):
+                self._set_parent_box_ratio_input(part_name, ratios.get(part_name, ""))
 
         for editor_name, key in [
             ("spin_conf", "conf"),
@@ -4529,12 +4700,19 @@ class ModelSettingsDialog(QDialog):
             self.combo_vlm_processing_scope.setCurrentIndex(index if index >= 0 else 0)
         if hasattr(self, "combo_vlm_image_group"):
             self._populate_vlm_image_group_combo(str(vlm.get("image_group", "split") or "split"))
+        if hasattr(self, "spin_vlm_concurrency"):
+            try:
+                concurrency = int(vlm.get("concurrency", 1))
+            except Exception:
+                concurrency = 1
+            self.spin_vlm_concurrency.setValue(max(1, min(8, concurrency)))
         self._set_vlm_prompt_profile_controls(vlm)
 
     def _default_vlm_image_group_definitions(self):
         return [
             ("original", tr("Original Images", self.lang)),
             ("split", tr("Split Crops", self.lang)),
+            ("hard_candidates", tr("Hard-joined Candidates", self.lang)),
             ("manual_done", tr("Manual Split Done", self.lang)),
             ("manual", tr("Manual Split Needed", self.lang)),
         ]
@@ -4691,6 +4869,7 @@ class ModelSettingsDialog(QDialog):
                     "target_parts": self._selected_vlm_target_parts(),
                     "processing_scope": self.combo_vlm_processing_scope.currentData() or "image_group",
                     "image_group": self.combo_vlm_image_group.currentData() if hasattr(self, "combo_vlm_image_group") else "split",
+                    "concurrency": int(self.spin_vlm_concurrency.value()) if hasattr(self, "spin_vlm_concurrency") else 1,
                     **self._current_vlm_prompt_profile_values(),
                 },
             }
@@ -4733,6 +4912,7 @@ class ModelSettingsDialog(QDialog):
                 "target_parts": self._selected_vlm_target_parts(),
                 "processing_scope": self.combo_vlm_processing_scope.currentData() or "image_group",
                 "image_group": self.combo_vlm_image_group.currentData() if hasattr(self, "combo_vlm_image_group") else "split",
+                "concurrency": int(self.spin_vlm_concurrency.value()) if hasattr(self, "spin_vlm_concurrency") else 1,
                 **self._current_vlm_prompt_profile_values(),
             },
         )
@@ -4779,6 +4959,7 @@ class ModelSettingsDialog(QDialog):
                 "target_parts": list(vlm.get("target_parts", self._selected_vlm_target_parts()) or []),
                 "processing_scope": str(vlm.get("processing_scope", self.combo_vlm_processing_scope.currentData() or "image_group") or "image_group"),
                 "image_group": str(vlm.get("image_group", self.combo_vlm_image_group.currentData() if hasattr(self, "combo_vlm_image_group") else "split") or "split"),
+                "concurrency": int(vlm.get("concurrency", self.spin_vlm_concurrency.value() if hasattr(self, "spin_vlm_concurrency") else 1) or 1),
                 "prompt_profile_id": str(vlm.get("prompt_profile_id", DEFAULT_VLM_PROMPT_PROFILE_ID) or DEFAULT_VLM_PROMPT_PROFILE_ID),
                 "prompt_profile": sanitize_vlm_prompt_profile(vlm.get("prompt_profile", {})),
             },
@@ -4839,6 +5020,7 @@ class ModelSettingsDialog(QDialog):
     def accept_with_validation(self):
         errors = self._external_backend_validation_errors()
         errors.extend(self._external_blink_validation_errors())
+        errors.extend(self._parent_box_aspect_ratio_errors())
         if not self._selected_locator_scope():
             errors.append(tr("At least one main locator part must be selected.", self.lang))
         if errors:
@@ -4869,16 +5051,102 @@ class ModelSettingsDialog(QDialog):
                     selected.append(part_name)
         return selected
 
-    def _parent_box_aspect_ratio_values(self):
-        ratios = {}
-        for part_name, editor in getattr(self, "parent_box_ratio_inputs", {}).items():
-            text = editor.text().strip()
-            if not text:
+    def _format_parent_ratio_number(self, value):
+        try:
+            number = float(value)
+        except Exception:
+            return ""
+        if number <= 0:
+            return ""
+        if abs(number - round(number)) < 1e-9:
+            return str(int(round(number)))
+        return f"{number:.6g}"
+
+    def _parent_ratio_display_values(self, aspect_ratio):
+        try:
+            ratio = float(aspect_ratio)
+        except Exception:
+            return "", ""
+        if ratio <= 0:
+            return "", ""
+        fraction = Fraction(ratio).limit_denominator(64)
+        approximate = fraction.numerator / fraction.denominator
+        if abs(approximate - ratio) <= max(1e-6, abs(ratio) * 1e-4):
+            return str(fraction.numerator), str(fraction.denominator)
+        return self._format_parent_ratio_number(ratio), "1"
+
+    def _parent_ratio_editor_pair(self, editors):
+        if isinstance(editors, (tuple, list)) and len(editors) >= 2:
+            return editors[0], editors[1]
+        return None, None
+
+    def _set_parent_box_ratio_input(self, part_name, aspect_ratio):
+        editors = getattr(self, "parent_box_ratio_inputs", {}).get(part_name)
+        width_edit, height_edit = self._parent_ratio_editor_pair(editors)
+        if width_edit is None or height_edit is None:
+            if hasattr(editors, "setText"):
+                editors.setText(str(aspect_ratio) if aspect_ratio != "" else "")
+            return
+        width_text, height_text = self._parent_ratio_display_values(aspect_ratio)
+        width_edit.setText(width_text)
+        height_edit.setText(height_text)
+
+    def _parent_box_aspect_ratio_errors(self):
+        errors = []
+        for part_name, editors in getattr(self, "parent_box_ratio_inputs", {}).items():
+            width_edit, height_edit = self._parent_ratio_editor_pair(editors)
+            if width_edit is None or height_edit is None:
+                text = editors.text().strip() if hasattr(editors, "text") else ""
+                if not text:
+                    continue
+                try:
+                    ratio = float(text)
+                except Exception:
+                    ratio = 0
+                if ratio <= 0:
+                    errors.append(tr("Parent box ratio for {0} must have positive width and height values.", self.lang).format(part_name))
+                continue
+            width_text = width_edit.text().strip()
+            height_text = height_edit.text().strip()
+            if not width_text and not height_text:
                 continue
             try:
-                ratio = float(text)
+                width_value = float(width_text)
+                height_value = float(height_text)
+            except Exception:
+                width_value = 0
+                height_value = 0
+            if width_value <= 0 or height_value <= 0:
+                errors.append(tr("Parent box ratio for {0} must have positive width and height values.", self.lang).format(part_name))
+        return errors
+
+    def _parent_box_aspect_ratio_values(self):
+        ratios = {}
+        for part_name, editors in getattr(self, "parent_box_ratio_inputs", {}).items():
+            width_edit, height_edit = self._parent_ratio_editor_pair(editors)
+            if width_edit is None or height_edit is None:
+                text = editors.text().strip() if hasattr(editors, "text") else ""
+                if not text:
+                    continue
+                try:
+                    ratio = float(text)
+                except Exception:
+                    continue
+                if ratio > 0:
+                    ratios[part_name] = ratio
+                continue
+            width_text = width_edit.text().strip()
+            height_text = height_edit.text().strip()
+            if not width_text and not height_text:
+                continue
+            try:
+                width_value = float(width_text)
+                height_value = float(height_text)
             except Exception:
                 continue
+            if width_value <= 0 or height_value <= 0:
+                continue
+            ratio = width_value / height_value
             if ratio > 0:
                 ratios[part_name] = ratio
         return ratios
@@ -5863,8 +6131,12 @@ class LiteratureDescriptionDialog(QDialog):
 
 
 class MainWindow(QMainWindow):
+    sam_point_requested = Signal(str, float, float)
+    sam_box_requested = Signal(str, float, float, float, float)
+
     def __init__(self):
         super().__init__()
+        self._apply_window_icon()
         self.startup_size = QSize(1480, 920)
         self.resize(self.startup_size)
         self.config = ConfigManager()
@@ -5912,6 +6184,18 @@ class MainWindow(QMainWindow):
         self.inf_thread = None
         self.sam_thread = None
         self.sam_worker = None
+        self.sam_busy = False
+        self.pending_sam_part = None
+        self.pending_sam_image = None
+        self.pending_sam_description = ""
+        self.image_import_thread = None
+        self.image_import_progress_dialog = None
+        self.external_batch_inference_thread = None
+        self.external_batch_inference_progress_dialog = None
+        self.external_batch_inference_failed = False
+        self.external_batch_inference_saved_any = False
+        self.external_training_thread = None
+        self.external_training_failed = False
         self.trainer = None
         self.locator_preload_thread = None
         self.parts_model_preload_thread = None
@@ -5920,6 +6204,8 @@ class MainWindow(QMainWindow):
         except Exception:
             autosave_seconds = 3
         self.project_autosave_delay_ms = max(1, autosave_seconds) * 1000
+        self.project_save_navigation_idle_ms = max(1200, min(5000, self.project_autosave_delay_ms))
+        self.project_last_image_switch_at = 0.0
         self.project_save_pending = False
         self.project_save_timer = QTimer(self)
         self.project_save_timer.setSingleShot(True)
@@ -5935,12 +6221,16 @@ class MainWindow(QMainWindow):
         self.active_training_label = ""
         self.current_blink_context = {}
         self.vlm_preannotation_thread = None
+        self.vlm_preannotation_threads = []
         self.vlm_preannotation_progress_dialog = None
+        self.vlm_preannotation_cancel_requested = False
+        self.vlm_preannotation_cancelled_queued_images = 0
         self.image_list_group_collapsed = {
             "original": False,
             "split": False,
             "manual": False,
         }
+        self._image_list_state_cache = None
         self.parent_box_aspect_ratios = (
             self.project.get_parent_box_aspect_ratios()
             if hasattr(self.project, "get_parent_box_aspect_ratios")
@@ -6162,10 +6452,14 @@ class MainWindow(QMainWindow):
         self.btn_add_part = QPushButton("+")
         self.btn_add_part.clicked.connect(self.add_taxonomy_part)
         apply_semantic_button_style(self.btn_add_part, BUTTON_ROLE_NEUTRAL, "font-weight: bold;")
+        self.btn_rename_part = QPushButton(tr("Rename Structure", self.current_lang))
+        self.btn_rename_part.clicked.connect(self.rename_taxonomy_part)
+        apply_semantic_button_style(self.btn_rename_part, BUTTON_ROLE_NEUTRAL, "padding: 4px 8px;")
         self.btn_del_part = QPushButton("-")
         self.btn_del_part.clicked.connect(self.remove_taxonomy_part)
         apply_semantic_button_style(self.btn_del_part, BUTTON_ROLE_DESTRUCTIVE, "font-weight: bold;")
         tax_btn_layout.addWidget(self.btn_add_part)
+        tax_btn_layout.addWidget(self.btn_rename_part)
         tax_btn_layout.addWidget(self.btn_del_part)
         metadata_layout.addLayout(tax_btn_layout)
         
@@ -6350,7 +6644,7 @@ class MainWindow(QMainWindow):
         self.label_blink_expert.setWordWrap(True)
         blink_refine_layout.addWidget(self.label_blink_expert)
         self.check_lock_parent_box_ratio = QCheckBox()
-        self.check_lock_parent_box_ratio.setChecked(True)
+        self.check_lock_parent_box_ratio.setChecked(False)
         self.check_lock_parent_box_ratio.stateChanged.connect(self._refresh_annotation_box_constraints)
         blink_refine_layout.addWidget(self.check_lock_parent_box_ratio)
         self.btn_configure_route_expert = QPushButton()
@@ -6466,6 +6760,9 @@ class MainWindow(QMainWindow):
         self.blink_lab.global_labels_updated.connect(self.on_global_labels_updated)
         self.blink_lab.route_registry_refresh_requested.connect(self.refresh_route_table)
         self.route_settings_panel = RouteManagementPanel(self, self.current_lang)
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
 
         self.project.create_project(DEFAULT_PROJECT_NAME, self._default_startup_project_dir(), template_id=DEFAULT_PROJECT_TEMPLATE_ID)
         self.active_project_entry_path = self.project.current_project_path or ""
@@ -6482,6 +6779,17 @@ class MainWindow(QMainWindow):
         self.refresh_route_table()
         self.change_theme(self.current_theme)
         self.apply_startup_window_geometry()
+
+    def _apply_window_icon(self):
+        for icon_path in (APP_ICON_PATH, APP_ICON_FALLBACK_PATH):
+            if icon_path and os.path.exists(icon_path):
+                icon = QIcon(icon_path)
+                if not icon.isNull():
+                    self.setWindowIcon(icon)
+                    app = QApplication.instance()
+                    if app is not None:
+                        app.setWindowIcon(icon)
+                    return
 
     def apply_startup_window_geometry(self):
         if QApplication.platformName() == "offscreen":
@@ -6616,9 +6924,9 @@ class MainWindow(QMainWindow):
             "Open PDF tools",
             self.open_pdf_evidence_tools,
         )
+        rail_layout.addWidget(self.start_pdf_card)
         rail_layout.addWidget(self.start_image_card)
         rail_layout.addWidget(self.start_tif_card)
-        rail_layout.addWidget(self.start_pdf_card)
         rail_layout.addStretch(1)
         workflow_rail_scroll.setWidget(workflow_rail)
         outer_layout.addWidget(workflow_rail_scroll, 0)
@@ -7407,8 +7715,44 @@ class MainWindow(QMainWindow):
         self.open_project_path(last_project)
 
     def closeEvent(self, event):
+        if getattr(self, "image_import_thread", None) is not None and self.image_import_thread.isRunning():
+            QMessageBox.information(
+                self,
+                tr("Image Import", self.current_lang),
+                tr("Image import is running. Please wait for it to finish before closing TaxaMask.", self.current_lang),
+            )
+            event.ignore()
+            return
+        if getattr(self, "external_batch_inference_thread", None) is not None and self.external_batch_inference_thread.isRunning():
+            QMessageBox.information(
+                self,
+                tr("Batch Inference", self.current_lang),
+                tr("Batch inference is running. Please wait for it to finish before closing TaxaMask.", self.current_lang),
+            )
+            event.ignore()
+            return
+        if getattr(self, "vlm_preannotation_run_active", False):
+            QMessageBox.information(
+                self,
+                tr("VLM Pre-Annotate", self.current_lang),
+                tr(
+                    "VLM stop requested. Remaining queued images were cancelled; waiting for active request(s) to finish.",
+                    self.current_lang,
+                ),
+            )
+            self.request_stop_vlm_preannotation(confirm=False)
+            event.ignore()
+            return
+        if getattr(self, "external_training_thread", None) is not None and self.external_training_thread.isRunning():
+            QMessageBox.information(
+                self,
+                tr("Training", self.current_lang),
+                tr("External backend training is running. Please wait for it to finish before closing TaxaMask.", self.current_lang),
+            )
+            event.ignore()
+            return
         self._shutdown_background_workers()
-        self._flush_pending_project_save()
+        self._flush_pending_project_save(defer_for_navigation=False)
         recent_project_path = self._active_recent_project_path()
         if recent_project_path:
             self.config.set("last_project_path", recent_project_path)
@@ -7443,6 +7787,9 @@ class MainWindow(QMainWindow):
         if self.sam_thread and self.sam_thread.isRunning():
             self.sam_thread.quit()
             self.sam_thread.wait(1000)
+        thread = getattr(self, "image_import_thread", None)
+        if thread is not None and thread.isRunning():
+            thread.wait(30000)
         thread = getattr(self, "parts_model_preload_thread", None)
         if thread is not None and thread.is_alive():
             thread.join(timeout=1.0)
@@ -7455,7 +7802,13 @@ class MainWindow(QMainWindow):
         self.project_save_pending = True
         self.project_save_timer.start(self.project_autosave_delay_ms)
 
-    def _flush_pending_project_save(self, force=False):
+    def _defer_project_save_for_active_navigation(self):
+        if not self.project_save_pending:
+            return
+        self.project_last_image_switch_at = time.monotonic()
+        self.project_save_timer.start(self.project_autosave_delay_ms)
+
+    def _flush_pending_project_save(self, force=False, defer_for_navigation=True):
         if self.project_save_timer.isActive():
             self.project_save_timer.stop()
 
@@ -7465,6 +7818,16 @@ class MainWindow(QMainWindow):
 
         if not force and not self.project_save_pending:
             return False
+
+        if defer_for_navigation and not force and self.project_last_image_switch_at:
+            elapsed_ms = (time.monotonic() - self.project_last_image_switch_at) * 1000.0
+            if elapsed_ms < self.project_save_navigation_idle_ms:
+                remaining_ms = max(
+                    250,
+                    int(self.project_save_navigation_idle_ms - elapsed_ms),
+                )
+                self.project_save_timer.start(remaining_ms)
+                return False
 
         self.project.save_project()
         self.project_save_pending = False
@@ -7637,6 +8000,43 @@ class MainWindow(QMainWindow):
         self.refresh_file_list()
         self.refresh_ui()
         self.refresh_route_table()
+
+    def _project_image_count(self):
+        try:
+            return len([img for img in self.project.project_data.get("images", []) if img])
+        except Exception:
+            return 0
+
+    def _prepare_image_list_for_project_open(self):
+        image_count = self._project_image_count()
+        self._image_list_state_cache = None
+        should_collapse = image_count >= LARGE_PROJECT_OPEN_LIGHTWEIGHT_THRESHOLD
+
+        for group_key, _label in self._all_image_group_definitions():
+            self.image_list_group_collapsed[str(group_key)] = should_collapse
+        if not should_collapse:
+            return False
+        self.current_image = None
+        self.log(
+            tr(
+                "Large project detected ({0} images). The image groups are collapsed for faster opening; expand a group when you are ready to review images.",
+                self.current_lang,
+            ).format(image_count)
+        )
+        return True
+
+    def _preload_2d_stl_models_after_open(self):
+        if getattr(self, "active_project_kind", "image") != "image":
+            return
+        if self._project_image_count() >= LARGE_PROJECT_OPEN_LIGHTWEIGHT_THRESHOLD:
+            self.log(
+                tr(
+                    "Large project opened without startup model preloading. Models will load when auto annotation or training starts.",
+                    self.current_lang,
+                )
+            )
+            return
+        QTimer.singleShot(0, self.ensure_2d_stl_models_preloaded)
 
     def _ensure_tab_visible(self, widget, title):
         if not hasattr(self, "tabs") or widget is None:
@@ -7840,7 +8240,8 @@ class MainWindow(QMainWindow):
         return None
 
     def _is_parent_training_running(self):
-        return bool(self.trainer and self.trainer.isRunning())
+        external_thread = getattr(self, "external_training_thread", None)
+        return bool((self.trainer and self.trainer.isRunning()) or (external_thread and external_thread.isRunning()))
 
     def _is_child_training_running(self):
         blink_lab = getattr(self, "blink_lab", None)
@@ -8200,7 +8601,7 @@ class MainWindow(QMainWindow):
                 template = self._choose_project_template()
                 if template is None:
                     return
-                self._flush_pending_project_save()
+                self._flush_pending_project_save(defer_for_navigation=False)
                 self.project.create_project(name, d, template_id=template["template_id"])
                 self.active_project_kind = "image"
                 self.active_project_source_kind = "image"
@@ -8221,7 +8622,7 @@ class MainWindow(QMainWindow):
         name, ok = QInputDialog.getText(self, tr("New TIF Volume Project", self.current_lang), tr("Project Name:", self.current_lang))
         if not ok or not name:
             return
-        self._flush_pending_project_save()
+        self._flush_pending_project_save(defer_for_navigation=False)
         self.tif_project.create_project(name, d)
         self.active_project_kind = "tif"
         self.active_project_source_kind = "tif"
@@ -8408,7 +8809,7 @@ class MainWindow(QMainWindow):
 
     def open_project_path(self, path):
         f = os.path.abspath(str(path))
-        self._flush_pending_project_save()
+        self._flush_pending_project_save(defer_for_navigation=False)
         if self._is_tif_project_file(f):
             self.tif_project.load_project(f)
             self.active_project_kind = "tif"
@@ -8423,6 +8824,7 @@ class MainWindow(QMainWindow):
             self.active_project_source_kind = "stl"
             self.active_project_entry_path = f
             self.config.set("last_project_path", f)
+            self._prepare_image_list_for_project_open()
             self.log(tr("Opened STL rendered-view project and registered it into the Labeling Workbench: {0}", self.current_lang).format(f))
             self.log(
                 tr("Registered STL rendered-view project into the Labeling Workbench. Views: {0}, missing files: {1}.", self.current_lang).format(
@@ -8436,12 +8838,13 @@ class MainWindow(QMainWindow):
             self.active_project_source_kind = "image"
             self.active_project_entry_path = f
             self.config.set("last_project_path", f)
+            self._prepare_image_list_for_project_open()
         self._refresh_project_bound_views()
         if hasattr(self.engine, "cascade_manager"):
             self.engine.cascade_manager.project_manager = self.project
         self._sync_blink_lab_model_profile_defaults()
         if getattr(self, "active_project_kind", "image") == "image":
-            self.ensure_2d_stl_models_preloaded()
+            self._preload_2d_stl_models_after_open()
         self.canvas.load_image("")
 
     def _format_relocation_preview(self, matches, limit=8):
@@ -8500,7 +8903,7 @@ class MainWindow(QMainWindow):
         if reply != QMessageBox.Yes:
             return
 
-        self._flush_pending_project_save()
+        self._flush_pending_project_save(defer_for_navigation=False)
         changed = self.project.apply_image_path_remap(matches, save=True)
         self.refresh_file_list()
         if self.current_image and not os.path.exists(self.current_image):
@@ -8796,7 +9199,11 @@ class MainWindow(QMainWindow):
         lock_parent_ratio = True
         if hasattr(self, "check_lock_parent_box_ratio"):
             lock_parent_ratio = self.check_lock_parent_box_ratio.isChecked()
-        if self._active_box_tool_role() == "annotation" and lock_parent_ratio and context.get("role") == "parent":
+        if (
+            self._active_box_tool_role() in {"sam", "annotation"}
+            and lock_parent_ratio
+            and context.get("role") == "parent"
+        ):
             ratio = self._parent_box_aspect_ratio(context.get("parent_part"))
         self.canvas.set_annotation_box_aspect_ratio(ratio)
 
@@ -8805,6 +9212,8 @@ class MainWindow(QMainWindow):
             return "shrink"
         if hasattr(self, "radio_annotation_box") and self.radio_annotation_box.isChecked():
             return "annotation"
+        if hasattr(self, "radio_box") and self.radio_box.isChecked():
+            return "sam"
         return "other"
 
     def _refresh_blink_refine_state(self):
@@ -8948,6 +9357,124 @@ class MainWindow(QMainWindow):
             else:
                 QMessageBox.warning(self, tr("Error", self.current_lang), tr("Exists.", self.current_lang))
 
+    def _count_ai_labels_for_images(self, image_paths):
+        count = 0
+        for image_path in image_paths or []:
+            entry = self.project.project_data.get("labels", {}).get(image_path, {})
+            descriptions = entry.get("descriptions", {}) if isinstance(entry.get("descriptions", {}), dict) else {}
+            count += sum(1 for desc in descriptions.values() if desc == "Auto-Annotated")
+        return count
+
+    def _choose_clear_ai_scope(self):
+        all_images = [path for path in self.project.project_data.get("images", []) if path]
+        scope_options = [("__all__", tr("All project images", self.current_lang), all_images)]
+        image_groups = self._project_image_groups(images=all_images)
+        for group_id, group_label in self._all_image_group_definitions():
+            group_images = list(image_groups.get(group_id, []) or [])
+            if group_images:
+                scope_options.append((group_id, tr("Images in group: {0}", self.current_lang).format(group_label), group_images))
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(tr("Clear AI Label Scope", self.current_lang))
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(10)
+        layout.addWidget(QLabel(tr("Scope:", self.current_lang)))
+        scope_combo = NoWheelComboBox()
+        for group_id, label, paths in scope_options:
+            scope_combo.addItem(label, {"group_id": group_id, "label": label, "paths": list(paths)})
+        layout.addWidget(scope_combo)
+        summary_label = QLabel()
+        summary_label.setWordWrap(True)
+        summary_label.setObjectName("mutedLabel")
+        layout.addWidget(summary_label)
+        button_row = QHBoxLayout()
+        clear_button = QPushButton(tr("Clear AI", self.current_lang))
+        apply_semantic_button_style(clear_button, BUTTON_ROLE_DESTRUCTIVE)
+        cancel_button = QPushButton(tr("Cancel", self.current_lang))
+        apply_semantic_button_style(cancel_button, BUTTON_ROLE_STOP)
+        button_row.addStretch(1)
+        button_row.addWidget(clear_button)
+        button_row.addWidget(cancel_button)
+        layout.addLayout(button_row)
+        selected_payload = {"accepted": False, "paths": [], "label": "", "count": 0}
+
+        def refresh_summary():
+            payload = scope_combo.currentData() or {}
+            paths = list(payload.get("paths", []) or [])
+            count = self._count_ai_labels_for_images(paths)
+            selected_payload.update({"paths": paths, "label": payload.get("label", ""), "count": count})
+            if count:
+                summary_label.setText(
+                    tr(
+                        "This will remove {0} AI label(s) from {1} image(s). Manual and confirmed labels are kept.",
+                        self.current_lang,
+                    ).format(count, len(paths))
+                )
+                clear_button.setEnabled(True)
+            else:
+                summary_label.setText(tr("No AI labels found in the selected scope.", self.current_lang))
+                clear_button.setEnabled(False)
+
+        def accept_scope():
+            selected_payload["accepted"] = True
+            dialog.accept()
+
+        scope_combo.currentIndexChanged.connect(lambda _index: refresh_summary())
+        clear_button.clicked.connect(accept_scope)
+        cancel_button.clicked.connect(dialog.reject)
+        refresh_summary()
+        self._prepare_progress_dialog(dialog, width=460)
+        if not dialog.exec() or not selected_payload["accepted"]:
+            return None
+        return {
+            "paths": list(selected_payload.get("paths", []) or []),
+            "label": str(selected_payload.get("label", "") or ""),
+            "count": int(selected_payload.get("count", 0) or 0),
+        }
+
+    def rename_taxonomy_part(self):
+        old_name = self._current_part_name()
+        if not old_name:
+            return
+        new_name, ok = QInputDialog.getText(
+            self,
+            tr("Rename Structure", self.current_lang),
+            tr("New Structure Name:", self.current_lang),
+            text=old_name,
+        )
+        new_name = str(new_name or "").strip()
+        if not ok or not new_name or new_name == old_name:
+            return
+        if themed_yes_no_question(
+            self,
+            tr("Rename Structure", self.current_lang),
+            tr(
+                "Rename '{0}' to '{1}'? Existing labels, VLM drafts, parent-child routes, and training context for this structure will be moved to the new name.",
+                self.current_lang,
+            ).format(old_name, new_name),
+            confirm_role=BUTTON_ROLE_COMMIT,
+        ) != QMessageBox.Yes:
+            return
+
+        rename_part = getattr(self.project, "rename_taxonomy_part", None)
+        renamed = bool(rename_part(old_name, new_name, save=False)) if callable(rename_part) else False
+        if not renamed:
+            QMessageBox.warning(
+                self,
+                tr("Rename Structure", self.current_lang),
+                tr("Could not rename structure. The new name may already exist or contain unsafe characters.", self.current_lang),
+            )
+            return
+
+        self._schedule_project_save()
+        self.refresh_ui()
+        self._select_part_in_tree(new_name)
+        if self.current_image:
+            self.canvas.set_polygons(self.project.get_labels(self.current_image))
+            self._refresh_current_canvas_boxes()
+        self._refresh_blink_refine_state()
+
     def remove_taxonomy_part(self):
         part_name = self._current_part_name()
         if not part_name:
@@ -8963,17 +9490,48 @@ class MainWindow(QMainWindow):
                 self.project.save_project()
 
     def clear_ai_labels(self):
+        scope = self._choose_clear_ai_scope()
+        if not scope:
+            return
+        paths = list(scope.get("paths", []) or [])
+        expected_count = int(scope.get("count", 0) or 0)
+        scope_label = str(scope.get("label", "") or tr("All project images", self.current_lang))
+        if expected_count <= 0 or not paths:
+            self.log(tr("No AI labels found in the selected scope.", self.current_lang))
+            return
+        message = (
+            tr("Clear selected AI labels?", self.current_lang)
+            + "\n\n"
+            + tr(
+                "This will remove {0} AI label(s) from {1} image(s). Manual and confirmed labels are kept.",
+                self.current_lang,
+            ).format(expected_count, len(paths))
+            + f"\n{scope_label}"
+        )
         if themed_yes_no_question(
             self,
             tr("Clear AI Labels", self.current_lang),
-            tr("Clear all AI labels from the current project?", self.current_lang),
+            message,
             confirm_role=BUTTON_ROLE_DESTRUCTIVE,
-        ) == QMessageBox.Yes:
-            c = self.project.remove_auto_labels()
-            self.refresh_file_list()
-            if self.current_image:
-                self.canvas.set_polygons(self.project.get_labels(self.current_image))
-            self.log(f"Removed {c} AI labels.")
+        ) != QMessageBox.Yes:
+            return
+        remove_auto_labels_for_images = getattr(self.project, "remove_auto_labels_for_images", None)
+        if callable(remove_auto_labels_for_images):
+            c = remove_auto_labels_for_images(paths, save=False)
+        else:
+            remove_auto_labels = getattr(self.project, "remove_auto_labels")
+            try:
+                c = remove_auto_labels(save=False)
+            except TypeError:
+                c = remove_auto_labels()
+        if c:
+            self._schedule_project_save()
+        self.refresh_file_list()
+        if self.current_image:
+            self.canvas.set_polygons(self.project.get_labels(self.current_image))
+            self._refresh_current_canvas_boxes()
+        self._refresh_blink_refine_state()
+        self.log(tr("Removed {0} AI labels from {1}.", self.current_lang).format(c, scope_label))
 
     def on_global_labels_updated(self):
         """Called when Blink Workbench applies changes back to the global project."""
@@ -9017,6 +9575,8 @@ class MainWindow(QMainWindow):
         self.label_taxonomy.setToolTip(taxon_tooltip)
         self.genus_combo.setToolTip(taxon_tooltip)
         self.label_structures.setText(tr("Structures", self.current_lang))
+        if hasattr(self, "btn_rename_part"):
+            self.btn_rename_part.setText(tr("Rename Structure", self.current_lang))
         self.label_ai_workflow.setText(tr("Auto Annotation", self.current_lang))
         self.label_parent_annotation.setText(tr("Parent-part annotation", self.current_lang))
         backend_label = tr("Built-in Locator + SAM", self.current_lang)
@@ -9202,6 +9762,12 @@ class MainWindow(QMainWindow):
             tr("Route expert: {0}", self.current_lang).format(context.get("route_status_text") or ui_text("Unknown", self.current_lang))
         )
         self.check_lock_parent_box_ratio.setText(tr("Lock parent box ratio", self.current_lang))
+        self.check_lock_parent_box_ratio.setToolTip(
+            tr(
+                "Off by default. Enable when preparing fixed-ratio parent boxes for child-part training; it affects parent SAM box prompts and parent manual ROI boxes.",
+                self.current_lang,
+            )
+        )
 
         can_open_route = bool(parent_part and child_part)
         self.btn_configure_route_expert.setEnabled(can_open_route)
@@ -9546,6 +10112,8 @@ class MainWindow(QMainWindow):
             apply_theme_button_style(self.btn_add, BUTTON_ROLE_NEUTRAL, "", self.current_theme)
         if hasattr(self, "btn_add_part"):
             apply_theme_button_style(self.btn_add_part, BUTTON_ROLE_NEUTRAL, "font-weight: bold;", self.current_theme)
+        if hasattr(self, "btn_rename_part"):
+            apply_theme_button_style(self.btn_rename_part, BUTTON_ROLE_NEUTRAL, "padding: 4px 8px;", self.current_theme)
         if hasattr(self, "btn_del_part"):
             apply_theme_button_style(self.btn_del_part, BUTTON_ROLE_DESTRUCTIVE, "font-weight: bold;", self.current_theme)
         if hasattr(self, "btn_del_locator"):
@@ -9588,9 +10156,108 @@ class MainWindow(QMainWindow):
     def add_images(self):
         fs, _ = QFileDialog.getOpenFileNames(self, tr("Select Images", self.current_lang), "", "Images (*.png *.jpg *.jpeg *.tif)")
         if fs:
-            self._flush_pending_project_save()
-            self.project.add_images(fs)
+            self._start_image_import(fs)
+
+    def _start_image_import(self, image_paths, crop_records=None, completion_message=None, show_success_message=False):
+        paths = [path for path in list(image_paths or []) if path]
+        if not paths:
+            return False
+        if getattr(self, "image_import_thread", None) is not None and self.image_import_thread.isRunning():
+            QMessageBox.information(
+                self,
+                tr("Image Import", self.current_lang),
+                tr("Image import is already running.", self.current_lang),
+            )
+            return False
+
+        crop_records = list(crop_records or [])
+        self._flush_pending_project_save(defer_for_navigation=False)
+        if len(paths) < BACKGROUND_IMAGE_IMPORT_THRESHOLD:
+            added = self.project.add_images(paths)
+            self._inherit_crop_provenance(crop_records)
             self.refresh_file_list()
+            message = completion_message or tr("Imported {0}/{1} image(s).", self.current_lang).format(added, len(paths))
+            self.log(message)
+            if show_success_message:
+                QMessageBox.information(self, tr("Success", self.current_lang), message)
+            return True
+
+        progress = QProgressDialog(
+            tr("Preparing image import...", self.current_lang),
+            "",
+            0,
+            len(paths),
+            self,
+        )
+        progress.setWindowTitle(tr("Image Import Progress", self.current_lang))
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setCancelButton(None)
+        self._prepare_progress_dialog(progress, width=520)
+        progress.show()
+        self.image_import_progress_dialog = progress
+        self._set_image_import_controls_enabled(False)
+
+        self.image_import_thread = ImageImportThread(self.project, paths)
+        thread = self.image_import_thread
+
+        def on_progress(done, total, label):
+            total = max(0, int(total))
+            done = max(0, int(done))
+            if total > 0 and progress.maximum() != total:
+                progress.setRange(0, total)
+            if total > 0:
+                progress.setValue(min(done, total))
+            if label:
+                message = tr("Importing images: {0}/{1}\n{2}", self.current_lang).format(
+                    min(done, total),
+                    total,
+                    self._short_progress_path(label, limit=72),
+                )
+            else:
+                message = tr("Importing images: {0}/{1}", self.current_lang).format(min(done, total), total)
+            progress.setLabelText(message)
+
+        def on_success(added, total):
+            progress.setValue(progress.maximum())
+            self._inherit_crop_provenance(crop_records)
+            self.refresh_file_list()
+            message = completion_message or tr("Imported {0}/{1} image(s).", self.current_lang).format(added, total)
+            self.log(message)
+            if show_success_message:
+                QMessageBox.information(self, tr("Success", self.current_lang), message)
+
+        def on_error(message):
+            self.log(tr("Image import failed: {0}", self.current_lang).format(message))
+            QMessageBox.critical(
+                self,
+                tr("Image Import", self.current_lang),
+                tr("Image import failed: {0}", self.current_lang).format(message),
+            )
+
+        def on_finished():
+            progress.close()
+            if self.image_import_progress_dialog is progress:
+                self.image_import_progress_dialog = None
+            self._set_image_import_controls_enabled(True)
+            thread.deleteLater()
+            if self.image_import_thread is thread:
+                self.image_import_thread = None
+
+        thread.progress_signal.connect(on_progress)
+        thread.success_signal.connect(on_success)
+        thread.error_signal.connect(on_error)
+        thread.finished_signal.connect(on_finished)
+        thread.start()
+        return True
+
+    def _set_image_import_controls_enabled(self, enabled):
+        for attr in ("btn_add", "btn_crop", "btn_batch_split_panels"):
+            widget = getattr(self, attr, None)
+            if widget is not None:
+                widget.setEnabled(bool(enabled))
 
     def open_cropper(self):
         img = None
@@ -9608,13 +10275,10 @@ class MainWindow(QMainWindow):
         if dlg.exec():
             nf = dlg.get_files()
             if nf:
-                self._flush_pending_project_save()
-                self.project.add_images(nf)
                 crop_records = []
                 if hasattr(dlg, "get_crop_records"):
                     crop_records = dlg.get_crop_records()
-                self._inherit_crop_provenance(crop_records)
-                self.refresh_file_list()
+                self._start_image_import(nf, crop_records=crop_records)
 
     def _is_split_crop_image(self, image_path):
         if not image_path or not hasattr(self.project, "get_image_provenance"):
@@ -9624,6 +10288,22 @@ class MainWindow(QMainWindow):
         if isinstance(derived_from, dict) and bool(derived_from.get("image_path")):
             return True
         return self._looks_like_panel_crop_path(image_path)
+
+    def _is_hard_joined_candidate_crop(self, image_path, provenance=None):
+        if not image_path or not hasattr(self.project, "get_image_provenance"):
+            return False
+        if provenance is None:
+            provenance = self.project.get_image_provenance(image_path)
+        if not isinstance(provenance, dict):
+            return False
+        derived_from = provenance.get("derived_from")
+        if not isinstance(derived_from, dict):
+            return False
+        return str(derived_from.get("crop_source") or "").strip() in {
+            "hard_seam_panel_split",
+            "letter_label_panel_split",
+            "label_guided_panel_split",
+        }
 
     def _looks_like_panel_crop_path(self, image_path):
         """Fallback for crops created before provenance was available."""
@@ -9713,6 +10393,7 @@ class MainWindow(QMainWindow):
         return [
             ("original", tr("Original Images", self.current_lang)),
             ("split", tr("Split Crops", self.current_lang)),
+            ("hard_candidates", tr("Hard-joined Candidates", self.current_lang)),
             ("manual_done", tr("Manual Split Done", self.current_lang)),
             ("manual", tr("Manual Split Needed", self.current_lang)),
         ]
@@ -9764,11 +10445,68 @@ class MainWindow(QMainWindow):
                 return label
         return key
 
+    def _custom_image_group_ids(self):
+        return {group_id for group_id, _label in self._custom_image_group_definitions()}
+
+    def _image_group_move_target_definitions(self):
+        definitions = list(self._builtin_image_group_definitions())
+        custom_groups = self._custom_image_group_definitions()
+        if custom_groups:
+            image_groups = self._project_image_groups()
+            for group_id, label in custom_groups:
+                if image_groups.get(group_id):
+                    definitions.append((group_id, label))
+        return definitions
+
+    def _remove_empty_custom_image_groups(self):
+        if not hasattr(self, "project"):
+            return set()
+        groups_config = self.project.project_data.get("image_groups", {})
+        if not isinstance(groups_config, dict):
+            return set()
+        custom_groups = list(groups_config.get("custom_groups", []) or [])
+        if not custom_groups:
+            return set()
+
+        image_groups = self._project_image_groups()
+        kept_groups = []
+        removed_ids = set()
+        seen = set()
+        for group in custom_groups:
+            if not isinstance(group, dict):
+                continue
+            group_id = str(group.get("id", "") or "").strip()
+            name = str(group.get("name", "") or "").strip()
+            if not group_id or not name or group_id in seen:
+                continue
+            seen.add(group_id)
+            if image_groups.get(group_id):
+                kept_groups.append(group)
+            else:
+                removed_ids.add(group_id)
+
+        if not removed_ids:
+            return set()
+
+        groups_config["custom_groups"] = kept_groups
+        self.project.project_data["image_groups"] = groups_config
+
+        settings = self.project.project_data.get("vlm_preannotation")
+        if isinstance(settings, dict) and str(settings.get("image_group", "") or "").strip() in removed_ids:
+            settings["image_group"] = DEFAULT_VLM_IMAGE_GROUP
+
+        collapsed = getattr(self, "image_list_group_collapsed", None)
+        if isinstance(collapsed, dict):
+            for group_id in removed_ids:
+                collapsed.pop(group_id, None)
+
+        return removed_ids
+
     def _safe_custom_image_group_id(self, name):
         text = str(name or "").strip()
         clean = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in text).strip("_")
         clean = clean or "custom_group"
-        if clean in {"original", "split", "manual_done", "manual"}:
+        if clean in {"original", "split", "hard_candidates", "manual_done", "manual"}:
             clean = f"custom_{clean}"
         existing = {group_id for group_id, _label in self._all_image_group_definitions()}
         group_id = clean
@@ -9779,6 +10517,11 @@ class MainWindow(QMainWindow):
         return group_id
 
     def create_custom_image_group(self):
+        removed_empty = self._remove_empty_custom_image_groups()
+        if removed_empty:
+            self._schedule_project_save()
+            self.refresh_file_list()
+            self._refresh_vlm_image_group_combo()
         name, ok = QInputDialog.getText(
             self,
             tr("New Image Group", self.current_lang),
@@ -9801,7 +10544,7 @@ class MainWindow(QMainWindow):
         custom_groups.append({"id": group_id, "name": name[:80]})
         groups["custom_groups"] = custom_groups
         self.project.project_data["image_groups"] = groups
-        self.project.save_project()
+        self._schedule_project_save()
         self.refresh_file_list()
         self._refresh_vlm_image_group_combo()
         return group_id
@@ -9825,22 +10568,24 @@ class MainWindow(QMainWindow):
         allowed = {group_id for group_id, _label in self._all_image_group_definitions()}
         if key not in allowed:
             return
-        self._flush_pending_project_save()
         for path in paths:
             self._set_image_manual_group(path, key)
-        self.project.save_project()
+        self._remove_empty_custom_image_groups()
+        self._schedule_project_save()
         self.refresh_file_list()
+        self._refresh_vlm_image_group_combo()
         self.log(tr("Moved {0} image(s) to {1}.", self.current_lang).format(len(paths), self._image_group_display_name(key)))
 
     def clear_selected_custom_image_group(self):
         paths = self._selected_image_paths()
         if not paths:
             return
-        self._flush_pending_project_save()
         for path in paths:
             self._set_image_manual_group(path, "")
-        self.project.save_project()
+        self._remove_empty_custom_image_groups()
+        self._schedule_project_save()
         self.refresh_file_list()
+        self._refresh_vlm_image_group_combo()
 
     def _short_progress_path(self, path, limit=64):
         name = os.path.basename(str(path or ""))
@@ -9933,7 +10678,7 @@ class MainWindow(QMainWindow):
             hard_joined_detections = [
                 detection
                 for detection in detections
-                if str(detection.get("source") or "") == "hard_seam_panel_split"
+                if str(detection.get("source") or "") in {"hard_seam_panel_split", "letter_label_panel_split", "label_guided_panel_split"}
             ]
             if hard_joined_detections and not any(
                 str(detection.get("source") or "") in {"white_separator_panel_split", "mixed_separator_panel_split"}
@@ -9942,10 +10687,14 @@ class MainWindow(QMainWindow):
                 manual_required += 1
                 self._set_panel_split_review(
                     source_image,
-                    "manual_required",
-                    reason="hard_seam_panel_split",
+                    "candidate_split",
+                    reason="hard_seam_panel_split_candidate",
                     detections=hard_joined_detections,
                 )
+                crop_records.extend(self._save_detected_panel_crops(source_image, hard_joined_detections))
+                progress.setValue(index)
+                if app is not None:
+                    app.processEvents()
                 continue
             detections = [
                 detection
@@ -9975,7 +10724,7 @@ class MainWindow(QMainWindow):
             if manual_required:
                 self.refresh_file_list()
                 message = tr(
-                    "Panel splitting finished: {0} crop(s) from {1} image(s); hard-joined plates needing manual crop: {2}; no split detected/errors: {3}.",
+                    "Panel splitting finished: {0} crop(s) from {1} image(s); hard-joined candidate plates needing review: {2}; no split detected/errors: {3}.",
                     self.current_lang,
                 ).format(0, 0, manual_required, skipped)
                 QMessageBox.information(self, tr("Batch Split Plates", self.current_lang), message)
@@ -9983,12 +10732,8 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, tr("Empty", self.current_lang), tr("No panel crops were detected.", self.current_lang))
             return
 
-        self._flush_pending_project_save()
-        self.project.add_images([record["path"] for record in crop_records])
-        self._inherit_crop_provenance(crop_records)
-        self.refresh_file_list()
         message = tr(
-            "Panel splitting finished: {0} crop(s) from {1} image(s); hard-joined plates needing manual crop: {2}; no split detected/errors: {3}.",
+            "Panel splitting finished: {0} crop(s) from {1} image(s); hard-joined candidate plates needing review: {2}; no split detected/errors: {3}.",
             self.current_lang,
         ).format(
             len(crop_records),
@@ -9998,8 +10743,13 @@ class MainWindow(QMainWindow):
         )
         if cancelled:
             message = f"{message}\n{tr('Panel splitting cancelled.', self.current_lang)}"
-        self.log(message)
-        QMessageBox.information(self, tr("Success", self.current_lang), message)
+        progress.close()
+        self._start_image_import(
+            [record["path"] for record in crop_records],
+            crop_records=crop_records,
+            completion_message=message,
+            show_success_message=True,
+        )
 
     def _save_detected_panel_crops(self, source_image, detections):
         records = []
@@ -10082,10 +10832,9 @@ class MainWindow(QMainWindow):
         paths = self._selected_image_paths()
         if not paths:
             return
-        self._flush_pending_project_save()
         for path in paths:
             self._set_panel_split_review(path, status, reason=reason)
-        self.project.save_project()
+        self._schedule_project_save()
         self.refresh_file_list()
 
     def mark_selected_manual_split_done(self):
@@ -10098,10 +10847,9 @@ class MainWindow(QMainWindow):
         paths = self._selected_image_paths()
         if not paths:
             return
-        self._flush_pending_project_save()
         for path in paths:
             self._clear_panel_split_review(path)
-        self.project.save_project()
+        self._schedule_project_save()
         self.refresh_file_list()
 
     def show_file_list_context_menu(self, pos):
@@ -10119,11 +10867,10 @@ class MainWindow(QMainWindow):
         m.addAction(tr("Mark Needs Manual Split", self.current_lang), self.mark_selected_manual_split_needed)
         m.addAction(tr("Clear Split Status", self.current_lang), self.clear_selected_split_status)
         m.addSeparator()
+        m.addAction(tr("New Image Group", self.current_lang), self._move_selected_images_to_new_group)
         move_menu = m.addMenu(tr("Move to Image Group", self.current_lang))
-        for group_id, label in self._all_image_group_definitions():
+        for group_id, label in self._image_group_move_target_definitions():
             move_menu.addAction(label, lambda checked=False, gid=group_id: self.move_images_to_group(self._selected_image_paths(), gid))
-        move_menu.addSeparator()
-        move_menu.addAction(tr("New Image Group", self.current_lang), self._move_selected_images_to_new_group)
         m.addAction(tr("Clear Custom Image Group", self.current_lang), self.clear_selected_custom_image_group)
         m.addSeparator()
         m.addAction(tr("Remove Image", self.current_lang), self.remove_selected_images)
@@ -10138,111 +10885,412 @@ class MainWindow(QMainWindow):
             self.move_images_to_group(paths, group_id)
 
     def remove_selected_images(self):
-        its = self.file_list.selectedItems()
-        if not its:
+        paths = self._selected_image_paths()
+        if not paths:
             return
         if themed_yes_no_question(
             self,
             tr("Remove", self.current_lang),
-            tr("Remove {0} images?", self.current_lang).format(len(its)),
+            tr("Remove {0} images?", self.current_lang).format(len(paths)),
             confirm_role=BUTTON_ROLE_DESTRUCTIVE,
         ) == QMessageBox.Yes:
-            self._flush_pending_project_save()
-            for it in its:
-                p = it.data(Qt.UserRole)
-                if p:
-                    self.project.remove_image(p)
-            self.refresh_file_list()
-            if self.current_image not in self.project.project_data["images"]:
+            was_current_removed = bool(
+                self.current_image
+                and any(self._same_project_image_path(path, self.current_image) for path in paths)
+            )
+            previous_current_image = self.current_image
+            previous_visible_paths = self._visible_image_list_paths()
+            replacement_image = None
+            if was_current_removed:
+                replacement_image = self._replacement_image_after_removal(
+                    previous_visible_paths,
+                    paths,
+                    previous_current_image,
+                )
+            remove_many = getattr(self.project, "remove_images", None)
+            if callable(remove_many):
+                remove_many(paths, save=False)
+            else:
+                for path in paths:
+                    self.project.remove_image(path, save=False)
+            self._schedule_project_save()
+            current_still_registered = bool(
+                self.current_image
+                and any(
+                    self._same_project_image_path(path, self.current_image)
+                    for path in self.project.project_data.get("images", [])
+                )
+            )
+            if not current_still_registered:
                 self.current_image = None
                 self.canvas.load_image("")
+            if not self._remove_visible_image_list_items(paths):
+                self._image_list_state_cache = None
+                self.refresh_file_list(restore_selection=bool(self.current_image))
+                if was_current_removed and replacement_image:
+                    self._select_first_visible_image_after_removal(replacement_image)
+            elif was_current_removed:
+                self._select_first_visible_image_after_removal(replacement_image)
 
-    def refresh_file_list(self, restore_selection=True):
+    def refresh_file_list(self, restore_selection=True, reuse_group_cache=False):
         # 1. Remember the currently selected image path
         current_selection_path = self.current_image
 
         self.file_list.blockSignals(True) # Prevent signal spam during rebuild
-        self.file_list.clear()
-        total_count = len(self.project.project_data["images"])
-        labeled_count = 0
-        
-        image_groups = self._project_image_groups()
+        self.file_list.setUpdatesEnabled(False)
+        try:
+            self.file_list.clear()
+            state = self._image_list_state_cache if reuse_group_cache else None
+            if not isinstance(state, dict):
+                state = self._build_image_list_state()
+                self._image_list_state_cache = state
 
-        for img in self.project.project_data["images"]:
-            if not img: continue
-            is_labeled = bool(self.project.get_labels(img) or self.project.get_auto_boxes(img))
-            if is_labeled:
-                labeled_count += 1
+            total_count = int(state.get("total_count", 0) or 0)
+            labeled_count = int(state.get("labeled_count", 0) or 0)
+            group_definitions = list(state.get("group_definitions", []) or [])
+            labeled_images = set(state.get("labeled_images", set()) or set())
+            split_images = set(state.get("split_images", set()) or set())
+            non_empty_groups = [group for group in group_definitions if group[2]]
+            has_collapsed_group = any(
+                bool(self.image_list_group_collapsed.get(group[0], False))
+                for group in non_empty_groups
+            )
+            use_group_headers = (
+                total_count >= LARGE_PROJECT_OPEN_LIGHTWEIGHT_THRESHOLD
+                or has_collapsed_group
+                or not (len(non_empty_groups) == 1 and non_empty_groups[0][0] == "original")
+            )
+
+            item_to_select = None
+            first_image_item = None
+
+            def add_group_header(group_key, text, count):
+                collapsed = bool(self.image_list_group_collapsed.get(group_key, False))
+                arrow = "▸" if collapsed else "▾"
+                item = QListWidgetItem(f"{arrow} {text} ({count})")
+                item.setData(Qt.UserRole, None)
+                item.setData(Qt.UserRole + 1, group_key)
+                item.setFlags((item.flags() | Qt.ItemIsEnabled | Qt.ItemIsSelectable) & ~Qt.ItemIsEditable)
+                item.setForeground(QColor("#8EA0A8"))
+                self.file_list.addItem(item)
+                return collapsed
+
+            def add_image_item(img, is_split_crop=False, group_key=""):
+                nonlocal item_to_select, first_image_item
+                base_name = os.path.basename(img)
+                display_name = f"  {base_name}" if is_split_crop else base_name
+                item = QListWidgetItem(display_name)
+                item.setData(Qt.UserRole, img) # Store full path for safer lookup
+                item.setData(Qt.UserRole + 2, group_key)
+                if is_split_crop:
+                    item.setToolTip(tr("Split Crops", self.current_lang))
+
+                if img in labeled_images:
+                    item.setForeground(QColor("#8FBC8F")) # DarkSeaGreen
+                elif is_split_crop:
+                    item.setForeground(QColor("#AAB4C2"))
+                else:
+                    item.setForeground(QColor("#CCCCCC")) # Grey
+
+                self.file_list.addItem(item)
+                if first_image_item is None:
+                    first_image_item = item
+
+                # Check if this is the one we were looking at
+                if current_selection_path and self._same_project_image_path(img, current_selection_path):
+                    item_to_select = item
+
+            for group_key, label, images, is_split_group in group_definitions:
+                if not images:
+                    continue
+                if use_group_headers:
+                    collapsed = add_group_header(group_key, label, len(images))
+                    if collapsed:
+                        continue
+                for img in images:
+                    add_image_item(img, is_split_crop=(is_split_group or img in split_images), group_key=group_key)
+
+            # 2. Restore Selection
+            if restore_selection:
+                target_item = item_to_select or first_image_item
+                if target_item:
+                    self.file_list.setCurrentItem(target_item)
+                    self.file_list.scrollToItem(target_item) # Ensure visible
+                    if target_item.data(Qt.UserRole):
+                        self.on_file_selected(target_item, None)
+
+            # Update the header label on the left side
+            header_base = tr("PROJECT IMAGES", self.current_lang)
+            self.label_project_images.setText(f"{header_base} ({labeled_count}/{total_count})")
+        finally:
+            self.file_list.setUpdatesEnabled(True)
+            self.file_list.blockSignals(False)
+
+    def _image_has_review_content(self, image_path):
+        if not image_path:
+            return False
+        return bool(self.project.get_labels(image_path) or self.project.get_auto_boxes(image_path))
+
+    def _set_image_list_item_status(self, item, image_path, labeled_images=None, split_images=None):
+        if item is None or not image_path:
+            return
+        group_key = str(item.data(Qt.UserRole + 2) or "")
+        if labeled_images is None:
+            is_labeled = self._image_has_review_content(image_path)
+        else:
+            is_labeled = image_path in set(labeled_images or [])
+        if split_images is None:
+            is_split_crop = group_key == "split" or self._is_split_crop_image(image_path)
+        else:
+            is_split_crop = group_key == "split" or image_path in set(split_images or [])
+        if is_labeled:
+            item.setForeground(QColor("#8FBC8F"))
+        elif is_split_crop:
+            item.setForeground(QColor("#AAB4C2"))
+        else:
+            item.setForeground(QColor("#CCCCCC"))
+
+    def _refresh_current_image_list_status(self, image_path=None):
+        image_path = image_path or self.current_image
+        if not image_path or not hasattr(self, "file_list"):
+            return False
+
+        state = self._image_list_state_cache
+        if not isinstance(state, dict):
+            state = self._build_image_list_state()
+            self._image_list_state_cache = state
+
+        labeled_images = set(state.get("labeled_images", set()) or set())
+        before_labeled = image_path in labeled_images
+        after_labeled = self._image_has_review_content(image_path)
+        if after_labeled:
+            labeled_images.add(image_path)
+        else:
+            labeled_images.discard(image_path)
+
+        state["labeled_images"] = labeled_images
+        if before_labeled != after_labeled:
+            state["labeled_count"] = max(0, int(state.get("labeled_count", 0) or 0) + (1 if after_labeled else -1))
+
+        target_item = None
+        for index in range(self.file_list.count()):
+            item = self.file_list.item(index)
+            if item is not None and self._same_project_image_path(item.data(Qt.UserRole), image_path):
+                target_item = item
+                break
+        if target_item is not None:
+            self._set_image_list_item_status(
+                target_item,
+                image_path,
+                labeled_images=labeled_images,
+                split_images=set(state.get("split_images", set()) or set()),
+            )
+
+        header_base = tr("PROJECT IMAGES", self.current_lang)
+        self.label_project_images.setText(
+            f"{header_base} ({int(state.get('labeled_count', 0) or 0)}/{int(state.get('total_count', 0) or 0)})"
+        )
+        return target_item is not None
+
+    def _refresh_image_list_status_or_rebuild(self, image_path=None):
+        if self._refresh_current_image_list_status(image_path):
+            return True
+        self._image_list_state_cache = None
+        self.refresh_file_list(restore_selection=bool(self.current_image))
+        return False
+
+    def _image_list_path_identity(self, path):
+        if not path:
+            return ""
+        try:
+            return os.path.normcase(os.path.normpath(os.path.abspath(str(path))))
+        except Exception:
+            return str(path)
+
+    def _visible_image_list_paths(self):
+        if not hasattr(self, "file_list"):
+            return []
+        paths = []
+        for row in range(self.file_list.count()):
+            item = self.file_list.item(row)
+            path = item.data(Qt.UserRole) if item is not None else None
+            if path:
+                paths.append(path)
+        return paths
+
+    def _replacement_image_after_removal(self, previous_visible_paths, removed_paths, previous_current_image):
+        visible_paths = [path for path in list(previous_visible_paths or []) if path]
+        if not visible_paths:
+            return None
+
+        removed_identities = {
+            self._image_list_path_identity(path)
+            for path in list(removed_paths or [])
+            if path
+        }
+        removed_identities.discard("")
+
+        current_index = -1
+        for index, path in enumerate(visible_paths):
+            if self._same_project_image_path(path, previous_current_image):
+                current_index = index
+                break
+
+        if current_index < 0:
+            search_order = visible_paths
+        else:
+            search_order = visible_paths[current_index + 1:] + list(reversed(visible_paths[:current_index]))
+
+        for path in search_order:
+            if self._image_list_path_identity(path) not in removed_identities:
+                return path
+        return None
+
+    def _remove_visible_image_list_items(self, image_paths):
+        if not image_paths or not hasattr(self, "file_list"):
+            return False
+        state = self._image_list_state_cache
+        if not isinstance(state, dict):
+            return False
+
+        remove_identities = set()
+        for path in image_paths:
+            identity = self._image_list_path_identity(path)
+            if identity:
+                remove_identities.add(identity)
+        if not remove_identities:
+            return False
+
+        removed_visible_rows = 0
+        self.file_list.blockSignals(True)
+        self.file_list.setUpdatesEnabled(False)
+        try:
+            for row in range(self.file_list.count() - 1, -1, -1):
+                item = self.file_list.item(row)
+                path = item.data(Qt.UserRole) if item is not None else None
+                if not path:
+                    continue
+                identity = self._image_list_path_identity(path)
+                if identity in remove_identities:
+                    removed_visible_rows += 1
+                    self.file_list.takeItem(row)
+        finally:
+            self.file_list.setUpdatesEnabled(True)
+            self.file_list.blockSignals(False)
+
+        labeled_images = set(state.get("labeled_images", set()) or set())
+        removed_labeled = 0
+        filtered_labeled = set()
+        for path in labeled_images:
+            identity = self._image_list_path_identity(path)
+            if identity in remove_identities:
+                removed_labeled += 1
+            else:
+                filtered_labeled.add(path)
+        state["labeled_images"] = filtered_labeled
+        state["split_images"] = {
+            path
+            for path in set(state.get("split_images", set()) or set())
+            if self._image_list_path_identity(path) not in remove_identities
+        }
+        state["total_count"] = max(0, int(state.get("total_count", 0) or 0) - len(remove_identities))
+        state["labeled_count"] = max(0, int(state.get("labeled_count", 0) or 0) - removed_labeled)
+        state["group_definitions"] = self._filtered_group_definitions_after_removal(
+            state.get("group_definitions", []),
+            remove_identities,
+        )
+        self._refresh_visible_image_group_header_counts(state.get("group_definitions", []))
+
+        header_base = tr("PROJECT IMAGES", self.current_lang)
+        self.label_project_images.setText(
+            f"{header_base} ({int(state.get('labeled_count', 0) or 0)}/{int(state.get('total_count', 0) or 0)})"
+        )
+        return removed_visible_rows > 0
+
+    def _filtered_group_definitions_after_removal(self, group_definitions, remove_identities):
+        filtered = []
+        for group_key, label, images, is_split_group in list(group_definitions or []):
+            kept_images = []
+            for path in list(images or []):
+                identity = self._image_list_path_identity(path)
+                if identity not in remove_identities:
+                    kept_images.append(path)
+            filtered.append((group_key, label, kept_images, is_split_group))
+        return filtered
+
+    def _refresh_visible_image_group_header_counts(self, group_definitions):
+        counts = {
+            str(group_key): len(list(images or []))
+            for group_key, _label, images, _is_split_group in list(group_definitions or [])
+        }
+        for row in range(self.file_list.count()):
+            item = self.file_list.item(row)
+            group_key = item.data(Qt.UserRole + 1) if item is not None else None
+            if not group_key:
+                continue
+            key = str(group_key)
+            collapsed = bool(self.image_list_group_collapsed.get(key, False))
+            arrow = "▸" if collapsed else "▾"
+            item.setText(f"{arrow} {self._image_group_display_name(key)} ({counts.get(key, 0)})")
+
+    def _select_first_visible_image_after_removal(self, preferred_path=None):
+        if not hasattr(self, "file_list"):
+            return False
+        if preferred_path:
+            for row in range(self.file_list.count()):
+                item = self.file_list.item(row)
+                if item is not None and self._same_project_image_path(item.data(Qt.UserRole), preferred_path):
+                    previous = bool(getattr(self, "_suppress_selection_save_flush", False))
+                    self._suppress_selection_save_flush = True
+                    try:
+                        self.file_list.setCurrentItem(item)
+                        self.file_list.scrollToItem(item)
+                        if not self.current_image or not self._same_project_image_path(self.current_image, item.data(Qt.UserRole)):
+                            self.on_file_selected(item, None)
+                    finally:
+                        self._suppress_selection_save_flush = previous
+                    return True
+        for row in range(self.file_list.count()):
+            item = self.file_list.item(row)
+            if item is not None and item.data(Qt.UserRole):
+                previous = bool(getattr(self, "_suppress_selection_save_flush", False))
+                self._suppress_selection_save_flush = True
+                try:
+                    self.file_list.setCurrentItem(item)
+                    self.file_list.scrollToItem(item)
+                    if not self.current_image or not self._same_project_image_path(self.current_image, item.data(Qt.UserRole)):
+                        self.on_file_selected(item, None)
+                finally:
+                    self._suppress_selection_save_flush = previous
+                return True
+        return False
+
+    def _build_image_list_state(self):
+        images = [img for img in self.project.project_data.get("images", []) if img]
+        total_count = len(images)
+        labeled_images = {
+            img
+            for img in images
+            if bool(self.project.get_labels(img) or self.project.get_auto_boxes(img))
+        }
+        image_groups = self._project_image_groups(
+            images=images,
+            labeled_images=labeled_images,
+        )
 
         group_definitions = []
         for group_key, label in self._builtin_image_group_definitions():
             group_definitions.append((group_key, label, image_groups.get(group_key, []), group_key == "split"))
         for group_key, label in self._custom_image_group_definitions():
             group_definitions.append((group_key, label, image_groups.get(group_key, []), False))
-        non_empty_groups = [group for group in group_definitions if group[2]]
-        use_group_headers = not (len(non_empty_groups) == 1 and non_empty_groups[0][0] == "original")
 
-        item_to_select = None
-        first_image_item = None
-
-        def add_group_header(group_key, text, count):
-            collapsed = bool(self.image_list_group_collapsed.get(group_key, False))
-            arrow = "▸" if collapsed else "▾"
-            item = QListWidgetItem(f"{arrow} {text} ({count})")
-            item.setData(Qt.UserRole, None)
-            item.setData(Qt.UserRole + 1, group_key)
-            item.setFlags((item.flags() | Qt.ItemIsEnabled | Qt.ItemIsSelectable) & ~Qt.ItemIsEditable)
-            item.setForeground(QColor("#8EA0A8"))
-            self.file_list.addItem(item)
-            return collapsed
-
-        def add_image_item(img, is_split_crop=False, group_key=""):
-            nonlocal item_to_select, first_image_item
-            base_name = os.path.basename(img)
-            display_name = f"  {base_name}" if is_split_crop else base_name
-            item = QListWidgetItem(display_name)
-            item.setData(Qt.UserRole, img) # Store full path for safer lookup
-            item.setData(Qt.UserRole + 2, group_key)
-            if is_split_crop:
-                item.setToolTip(tr("Split Crops", self.current_lang))
-
-            if self.project.get_labels(img):
-                item.setForeground(QColor("#8FBC8F")) # DarkSeaGreen
-            elif is_split_crop:
-                item.setForeground(QColor("#AAB4C2"))
-            else:
-                item.setForeground(QColor("#CCCCCC")) # Grey
-
-            self.file_list.addItem(item)
-            if first_image_item is None:
-                first_image_item = item
-
-            # Check if this is the one we were looking at
-            if current_selection_path and self._same_project_image_path(img, current_selection_path):
-                item_to_select = item
-
-        for group_key, label, images, is_split_group in group_definitions:
-            if not images:
-                continue
-            if use_group_headers:
-                collapsed = add_group_header(group_key, label, len(images))
-                if collapsed:
-                    continue
-            for img in images:
-                add_image_item(img, is_split_crop=is_split_group, group_key=group_key)
-        
-        self.file_list.blockSignals(False)
-        
-        # 2. Restore Selection
-        if restore_selection:
-            target_item = item_to_select or first_image_item
-            if target_item:
-                self.file_list.setCurrentItem(target_item)
-                self.file_list.scrollToItem(target_item) # Ensure visible
-        
-        # Update the header label on the left side
-        header_base = tr("PROJECT IMAGES", self.current_lang)
-        self.label_project_images.setText(f"{header_base} ({labeled_count}/{total_count})")
+        return {
+            "total_count": total_count,
+            "labeled_count": len(labeled_images),
+            "labeled_images": labeled_images,
+            "split_images": set(image_groups.get("split", []) or []),
+            "group_definitions": group_definitions,
+        }
 
     def _handle_image_list_item_clicked(self, item):
         if item is None:
@@ -10255,7 +11303,89 @@ class MainWindow(QMainWindow):
         self.file_list.blockSignals(True)
         self.file_list.setCurrentItem(None)
         self.file_list.blockSignals(False)
-        self.refresh_file_list(restore_selection=False)
+        self.refresh_file_list(restore_selection=False, reuse_group_cache=True)
+
+    def eventFilter(self, watched, event):
+        if (
+            event is not None
+            and event.type() == QEvent.Close
+            and watched is getattr(self, "vlm_preannotation_progress_dialog", None)
+            and getattr(self, "vlm_preannotation_run_active", False)
+        ):
+            if self.request_stop_vlm_preannotation(confirm=True):
+                event.ignore()
+                return True
+            event.ignore()
+            return True
+        if (
+            event is not None
+            and event.type() == QEvent.KeyPress
+            and event.key() in (Qt.Key_Up, Qt.Key_Down)
+            and event.modifiers() == Qt.NoModifier
+            and self._should_use_image_list_arrow_navigation(watched)
+        ):
+            self._select_adjacent_image(1 if event.key() == Qt.Key_Down else -1)
+            event.accept()
+            return True
+        return super().eventFilter(watched, event)
+
+    def _should_use_image_list_arrow_navigation(self, watched):
+        if not hasattr(self, "tabs") or not hasattr(self, "workbench_widget") or not hasattr(self, "file_list"):
+            return False
+        if self.tabs.currentWidget() is not self.workbench_widget:
+            return False
+        if getattr(self, "active_project_kind", "image") != "image":
+            return False
+        if getattr(self.file_list, "count", lambda: 0)() <= 0:
+            return False
+
+        focus = QApplication.focusWidget()
+        widget = watched if isinstance(watched, QWidget) else focus
+        if widget is None:
+            return False
+
+        blocked_types = (
+            QLineEdit,
+            QTextEdit,
+            QComboBox,
+            QSpinBox,
+            QSlider,
+            QTreeWidget,
+            QTableWidget,
+        )
+        if isinstance(widget, blocked_types):
+            return False
+
+        parent = widget
+        while parent is not None:
+            if parent in (self.file_list, self.canvas, self.canvas_shell, self.workbench_widget):
+                return True
+            if isinstance(parent, (QLineEdit, QTextEdit, QComboBox, QSpinBox, QSlider, QTreeWidget, QTableWidget)):
+                return False
+            parent = parent.parentWidget()
+        return False
+
+    def _select_adjacent_image(self, direction):
+        if not hasattr(self, "file_list"):
+            return False
+        direction = 1 if int(direction or 0) >= 0 else -1
+        count = self.file_list.count()
+        if count <= 0:
+            return False
+
+        current_row = self.file_list.currentRow()
+        if current_row < 0:
+            current_row = -1 if direction > 0 else count
+
+        row = current_row + direction
+        while 0 <= row < count:
+            item = self.file_list.item(row)
+            if item is not None and item.data(Qt.UserRole):
+                self.file_list.setCurrentItem(item)
+                self.file_list.scrollToItem(item, QAbstractItemView.PositionAtCenter)
+                return True
+            row += direction
+        return False
 
     def _collect_blink_roi_candidates(self, image_path, selected_part=None, preferred_roi_parts=None):
         manual_boxes = self.project.get_boxes(image_path)
@@ -10310,10 +11440,9 @@ class MainWindow(QMainWindow):
         if p:
             previous_image = self.current_image
             same_image = bool(previous_image) and self._same_project_image_path(previous_image, p)
-            has_loaded_pixmap = bool(self.canvas.original_pixmap and not self.canvas.original_pixmap.isNull())
-
             if not same_image:
-                self._flush_pending_project_save()
+                self._defer_project_save_for_active_navigation()
+            has_loaded_pixmap = bool(self.canvas.original_pixmap and not self.canvas.original_pixmap.isNull())
 
             self.current_image = p
             labels = self.project.get_labels(p)
@@ -10325,7 +11454,11 @@ class MainWindow(QMainWindow):
             self.canvas.set_polygons(labels)
             self.canvas.set_boxes(manual_boxes, auto_boxes, self._current_shrink_loose_boxes())
             get_taxon = getattr(self.project, "get_taxon", self.project.get_genus)
-            self.genus_combo.setCurrentText(get_taxon(p))
+            self.genus_combo.blockSignals(True)
+            try:
+                self.genus_combo.setCurrentText(get_taxon(p))
+            finally:
+                self.genus_combo.blockSignals(False)
             self._refresh_blink_refine_state()
 
     def on_part_selected(self, curr, prev):
@@ -10426,7 +11559,11 @@ class MainWindow(QMainWindow):
     def on_genus_changed(self, txt):
         if self.current_image:
             set_taxon = getattr(self.project, "set_taxon", self.project.set_genus)
-            set_taxon(self.current_image, txt)
+            try:
+                set_taxon(self.current_image, txt, save=False)
+            except TypeError:
+                set_taxon(self.current_image, txt)
+            self._schedule_project_save()
 
     def update_db_description(self, p):
         if p:
@@ -10458,7 +11595,11 @@ class MainWindow(QMainWindow):
         if not self.current_image or not taxon:
             return False
         set_taxon = getattr(self.project, "set_taxon", self.project.set_genus)
-        set_taxon(self.current_image, taxon)
+        try:
+            set_taxon(self.current_image, taxon, save=False)
+        except TypeError:
+            set_taxon(self.current_image, taxon)
+        self._schedule_project_save()
         if hasattr(self, "genus_combo"):
             self.genus_combo.blockSignals(True)
             try:
@@ -10775,15 +11916,19 @@ class MainWindow(QMainWindow):
     def on_tool_changed(self):
         if self.radio_magic.isChecked():
             self.canvas.set_mode("MAGIC_WAND")
+            self._refresh_annotation_box_constraints()
         elif self.radio_box.isChecked():
             self.canvas.set_mode("BOX_PROMPT")
+            self._refresh_annotation_box_constraints()
         elif self.radio_annotation_box.isChecked() or self.radio_loose_shrink_box.isChecked():
             self.canvas.set_mode("ANNOTATION_BOX")
             self._refresh_annotation_box_constraints()
         elif self.radio_scale.isChecked():
             self.canvas.set_mode("SCALE")
+            self._refresh_annotation_box_constraints()
         else:
             self.canvas.set_mode("DRAW")
+            self._refresh_annotation_box_constraints()
 
     def on_blink_parent_context_changed(self, _index=None):
         if getattr(self, "_updating_blink_parent_context", False):
@@ -10810,12 +11955,49 @@ class MainWindow(QMainWindow):
         self.log(tr("Manual parent context set: {0} -> {1}.", self.current_lang).format(parent_part, child_part))
 
     def on_magic_wand_clicked(self, x, y):
-        if self.current_image and self.sam_worker and self.sam_worker.model:
-            self.sam_worker.predict_point(self.current_image, x, y)
+        self._request_sam_point(x, y)
 
     def on_magic_box_completed(self, x1, y1, x2, y2):
-        if self.current_image and self.sam_worker and self.sam_worker.model:
-            self.sam_worker.predict_box(self.current_image, x1, y1, x2, y2)
+        self._request_sam_box(x1, y1, x2, y2)
+
+    def _sam_worker_ready(self):
+        return bool(self.sam_worker and getattr(self.sam_worker, "model", None) is not None)
+
+    def _on_sam_model_loaded(self):
+        self.log(tr("SAM Model Loaded and Ready!", self.current_lang))
+
+    def _begin_sam_prompt(self):
+        if not self.current_image:
+            return None
+        if not self._sam_worker_ready():
+            self.ensure_sam_preloaded()
+            self.log(tr("SAM is still loading. Try the box again after the ready message.", self.current_lang))
+            return None
+        if self.sam_busy:
+            self.log(tr("SAM is still processing the previous prompt. Please wait a moment.", self.current_lang))
+            return None
+        part = self._current_part_name()
+        if not part:
+            return None
+        self.sam_busy = True
+        self.pending_sam_part = part
+        self.pending_sam_image = self.current_image
+        self.pending_sam_description = self.desc_box.toPlainText()
+        return self.current_image, part
+
+    def _request_sam_point(self, x, y):
+        prompt = self._begin_sam_prompt()
+        if not prompt:
+            return
+        image_path, _part = prompt
+        self.sam_point_requested.emit(image_path, float(x), float(y))
+
+    def _request_sam_box(self, x1, y1, x2, y2):
+        prompt = self._begin_sam_prompt()
+        if not prompt:
+            return
+        image_path, _part = prompt
+        self.sam_box_requested.emit(image_path, float(x1), float(y1), float(x2), float(y2))
 
     def on_annotation_box_completed(self, x1, y1, x2, y2):
         part = self._current_part_name()
@@ -11151,7 +12333,7 @@ class MainWindow(QMainWindow):
             if self.current_image:
                 self.canvas.set_polygons(self.project.get_labels(self.current_image))
                 self._refresh_current_canvas_boxes()
-            self.refresh_file_list()
+            self._refresh_image_list_status_or_rebuild(self.current_image)
             self._refresh_blink_refine_state()
             self.log(
                 tr("Batch auto-shrink finished for {0}/{1} image(s) of {2}. Failed: {3}.", self.current_lang).format(
@@ -11241,33 +12423,47 @@ class MainWindow(QMainWindow):
         self.open_stl_model_settings(target_route=(parent_part, child_part))
 
     def on_sam_mask_generated(self, pts, box=None):
-        p = self._current_part_name()
-        if p:
-            self.on_polygon_completed(p, pts, box)
-            # Re-fetch from project to ensure consistency (and display updated boxes)
-            self.canvas.set_polygons(self.project.get_labels(self.current_image))
-            self._refresh_current_canvas_boxes()
+        image_path = self.pending_sam_image or self.current_image
+        part = self.pending_sam_part or self._current_part_name()
+        description_text = self.pending_sam_description
+        self.sam_busy = False
+        self.pending_sam_part = None
+        self.pending_sam_image = None
+        self.pending_sam_description = ""
+        if image_path and part:
+            self.on_polygon_completed(part, pts, box, image_path=image_path, description_text=description_text)
 
-    def on_polygon_completed(self, p, pts, box=None):
-        if self.current_image:
+    def on_sam_prompt_failed(self, message):
+        self.sam_busy = False
+        self.pending_sam_part = None
+        self.pending_sam_image = None
+        self.pending_sam_description = ""
+        if message:
+            self.log(str(message))
+
+    def on_polygon_completed(self, p, pts, box=None, image_path=None, description_text=None):
+        target_image = image_path or self.current_image
+        if target_image:
             if not pts:
                 # Empty points means DELETE
-                self.project.delete_label(self.current_image, p, save=False)
+                self.project.delete_label(target_image, p, save=False)
             else:
-                description_text = self.desc_box.toPlainText()
-                if description_text.strip() == "Auto-Annotated":
-                    description_text = ""
-                self.project.update_label(self.current_image, p, pts, description_text, box=box, save=False)
+                label_description = self.desc_box.toPlainText() if description_text is None else str(description_text)
+                if label_description.strip() == "Auto-Annotated":
+                    label_description = ""
+                self.project.update_label(target_image, p, pts, label_description, box=box, save=False)
             self._schedule_project_save()
-            self.canvas.set_polygons(self.project.get_labels(self.current_image))
-            self._refresh_current_canvas_boxes()
+            is_current_image = bool(self.current_image) and self._same_project_image_path(target_image, self.current_image)
+            if is_current_image:
+                self.canvas.set_polygons(self.project.get_labels(self.current_image))
+                self._refresh_current_canvas_boxes()
             
-            # Update counts on the left panel
-            self.refresh_file_list()
+            self._refresh_current_image_list_status(target_image)
             
-            if self.check_morpho.isChecked():
+            if is_current_image and self.check_morpho.isChecked():
                 self.update_measurements(p)
-            self._refresh_blink_refine_state()
+            if is_current_image:
+                self._refresh_blink_refine_state()
 
     def toggle_morphometrics(self, state):
         on = self.check_morpho.isChecked()
@@ -11280,7 +12476,11 @@ class MainWindow(QMainWindow):
     def on_scale_defined(self, lpx):
         v, ok = QInputDialog.getDouble(self, tr("Scale Tool", self.current_lang), tr("mm:", self.current_lang), 1.0, 0.001, 1000.0, 3)
         if ok and self.current_image:
-            self.project.set_scale(self.current_image, lpx/v)
+            try:
+                self.project.set_scale(self.current_image, lpx/v, save=False)
+            except TypeError:
+                self.project.set_scale(self.current_image, lpx/v)
+            self._schedule_project_save()
             self.refresh_ui()
 
     def update_measurements(self, p):
@@ -11301,7 +12501,7 @@ class MainWindow(QMainWindow):
             self.label_measurements.setText(tr("No Polygon.", self.current_lang))
 
     def run_training(self):
-        self._flush_pending_project_save()
+        self._flush_pending_project_save(defer_for_navigation=False)
         if self.trainer and self.trainer.isRunning():
             self.log(tr("Training already running...", self.current_lang))
             return
@@ -11388,7 +12588,10 @@ class MainWindow(QMainWindow):
         )
 
     def run_external_training(self):
-        self._flush_pending_project_save()
+        self._flush_pending_project_save(defer_for_navigation=False)
+        if getattr(self, "external_training_thread", None) is not None and self.external_training_thread.isRunning():
+            self.log(tr("Training already running...", self.current_lang))
+            return
         if self._is_child_training_running():
             self.log(tr("Child-part expert training is running. Wait for it to finish before training parent models.", self.current_lang))
             QMessageBox.information(
@@ -11400,24 +12603,41 @@ class MainWindow(QMainWindow):
         if not self.project.current_project_path:
             QMessageBox.warning(self, tr("Training", self.current_lang), tr("Save Project", self.current_lang))
             return
-        try:
-            self.active_training_kind = "parent"
-            self.btn_train.setEnabled(False)
-            self.btn_stop_training.setEnabled(False)
-            self._set_training_progress("parent", tr("Parent-part model training", self.current_lang), 0)
-            self.log("External backend training started.")
-            summary = self._external_backend_runner().run_prepare_and_train()
+
+        self.external_training_failed = False
+        self.active_training_kind = "parent"
+        self.btn_train.setEnabled(False)
+        self.btn_stop_training.setEnabled(False)
+        self._set_training_progress("parent", tr("Parent-part model training", self.current_lang), 0)
+        thread = ExternalTrainingThread(self.project, self._active_external_backend_config())
+        self.external_training_thread = thread
+
+        def on_success(summary):
             self._set_training_progress("parent", tr("Parent-part model training finished.", self.current_lang), 100)
             self.log(f"External training complete. Contract: {summary.get('contract_json')}")
             self.log(f"External model manifest: {summary.get('model_manifest')}")
-        except Exception as exc:
+
+        def on_error(message):
+            self.external_training_failed = True
             self._set_training_progress("parent", tr("Parent-part model training failed.", self.current_lang), self.progress.value())
-            self.log(f"External training failed: {exc}")
-            QMessageBox.critical(self, tr("Error", self.current_lang), str(exc))
-        finally:
+            self.log(f"External training failed: {message}")
+            QMessageBox.critical(self, tr("Error", self.current_lang), str(message))
+
+        def on_finished():
+            if not getattr(self, "external_training_failed", False):
+                self._set_training_progress("parent", tr("Parent-part model training finished.", self.current_lang), 100)
+            if getattr(self, "external_training_thread", None) is thread:
+                self.external_training_thread = None
+            thread.deleteLater()
             self.btn_train.setEnabled(True)
             self.btn_stop_training.setEnabled(False)
             self._refresh_blink_refine_state()
+
+        thread.log_signal.connect(self.log)
+        thread.success_signal.connect(on_success)
+        thread.error_signal.connect(on_error)
+        thread.finished_signal.connect(on_finished)
+        thread.start()
 
     def show_training_report(self, report_data):
         dlg = TrainingReportDialog(report_data, self, self.current_lang)
@@ -11632,13 +12852,26 @@ class MainWindow(QMainWindow):
 
         return polygons, auto_boxes
 
-    def _apply_prediction_to_project(self, image_path, payload, only_new=True):
+    def _is_unconfirmed_ai_draft(self, image_path, part_name):
+        entry = self.project.project_data.get("labels", {}).get(image_path, {})
+        if not isinstance(entry, dict):
+            return False
+        descriptions = entry.get("descriptions", {}) if isinstance(entry.get("descriptions", {}), dict) else {}
+        if descriptions.get(part_name) != "Auto-Annotated":
+            return False
+        meta = entry.get("auto_box_meta", {}) if isinstance(entry.get("auto_box_meta", {}), dict) else {}
+        review_status = ""
+        if isinstance(meta.get(part_name), dict):
+            review_status = str(meta.get(part_name, {}).get("review_status") or "").strip()
+        return review_status != "confirmed"
+
+    def _apply_prediction_to_project(self, image_path, payload, only_new=True, save=True):
         polygons, auto_boxes = self._extract_prediction_payload(payload)
         existing_parts = set(self.project.get_labels(image_path).keys())
         saved_count = 0
 
         for part_name, points in polygons.items():
-            if only_new and part_name in existing_parts:
+            if only_new and part_name in existing_parts and not self._is_unconfirmed_ai_draft(image_path, part_name):
                 continue
 
             auto_box = auto_boxes.get(part_name)
@@ -11648,10 +12881,12 @@ class MainWindow(QMainWindow):
                 if xs and ys:
                     auto_box = [float(min(xs)), float(min(ys)), float(max(xs)), float(max(ys))]
 
-            self.project.update_label(image_path, part_name, points, "Auto-Annotated", auto_box=auto_box)
+            self.project.update_label(image_path, part_name, points, "Auto-Annotated", auto_box=auto_box, save=False)
             existing_parts.add(part_name)
             saved_count += 1
 
+        if saved_count and save:
+            self.project.save_project()
         return saved_count, len(polygons)
 
     def _vlm_api_settings_path(self):
@@ -11729,6 +12964,15 @@ class MainWindow(QMainWindow):
             return self.project.get_vlm_preannotation_settings().get("image_group", "split")
         return "split"
 
+    def _current_vlm_concurrency(self):
+        if hasattr(self.project, "get_vlm_preannotation_settings"):
+            settings = self.project.get_vlm_preannotation_settings()
+            try:
+                return max(1, min(8, int(settings.get("concurrency", 1) or 1)))
+            except Exception:
+                return 1
+        return 1
+
     def _current_vlm_prompt_profile(self):
         if hasattr(self.project, "get_vlm_preannotation_settings"):
             settings = self.project.get_vlm_preannotation_settings()
@@ -11738,38 +12982,120 @@ class MainWindow(QMainWindow):
     def _vlm_image_group_label(self, group_key):
         return self._image_group_display_name(group_key)
 
-    def _project_image_groups(self):
-        groups = {group_id: [] for group_id, _label in self._all_image_group_definitions()}
-        original_labeled_imgs = []
-        original_unlabeled_imgs = []
-        split_labeled_imgs = []
-        split_unlabeled_imgs = []
-        for img in self.project.project_data.get("images", []):
+    def _panel_crop_identity_index(self, images, provenance_by_image=None):
+        provenance_by_image = provenance_by_image or {}
+        image_identities = {}
+        stem_dir_index = set()
+        stem_identity_index = {}
+        split_crop_identities = set()
+        source_with_crops = set()
+        for img in images or []:
             if not img:
                 continue
-            provenance = self.project.get_image_provenance(img) if hasattr(self.project, "get_image_provenance") else {}
+            try:
+                identity = os.path.normcase(os.path.normpath(os.path.abspath(str(img))))
+            except Exception:
+                identity = str(img)
+            image_identities[img] = identity
+            try:
+                directory = os.path.normcase(os.path.abspath(os.path.dirname(str(img))))
+                stem = os.path.normcase(os.path.splitext(os.path.basename(str(img)))[0])
+                stem_dir_index.add((directory, stem))
+                stem_identity_index.setdefault((directory, stem), identity)
+            except Exception:
+                pass
+
+        for img in images or []:
+            if not img:
+                continue
+            identity = image_identities.get(img, "")
+            provenance = provenance_by_image.get(img, {})
+            derived_from = provenance.get("derived_from") if isinstance(provenance, dict) else {}
+            if isinstance(derived_from, dict) and bool(derived_from.get("image_path")):
+                split_crop_identities.add(identity)
+                try:
+                    source_identity = os.path.normcase(
+                        os.path.normpath(os.path.abspath(str(derived_from.get("image_path"))))
+                    )
+                    source_with_crops.add(source_identity)
+                except Exception:
+                    pass
+                continue
+
+            base_name = os.path.basename(str(img))
+            if not re.search(r"__(?:panel|crop)_\d{3}(?:_\d+)?\.(?:png|jpe?g|tif|tiff)$", base_name, re.IGNORECASE):
+                continue
+            try:
+                crop_dir = os.path.normcase(os.path.abspath(os.path.dirname(str(img))))
+                crop_stem = os.path.splitext(base_name)[0]
+                source_stem = re.sub(r"__(?:panel|crop)_\d{3}(?:_\d+)?$", "", crop_stem, flags=re.IGNORECASE)
+                source_key = (crop_dir, os.path.normcase(source_stem))
+                if source_key in stem_dir_index:
+                    split_crop_identities.add(identity)
+                    source_identity = stem_identity_index.get(source_key)
+                    if source_identity and source_identity != identity:
+                        source_with_crops.add(source_identity)
+            except Exception:
+                continue
+
+        return image_identities, split_crop_identities, source_with_crops
+
+    def _project_image_groups(self, images=None, labeled_images=None):
+        groups = {group_id: [] for group_id, _label in self._all_image_group_definitions()}
+        images = [img for img in (images if images is not None else self.project.project_data.get("images", [])) if img]
+        image_order = {img: index for index, img in enumerate(images)}
+        provenance_by_image = {
+            img: self.project.get_image_provenance(img)
+            for img in images
+            if hasattr(self.project, "get_image_provenance")
+        }
+        image_identities, split_crop_identities, source_with_crops = self._panel_crop_identity_index(
+            images,
+            provenance_by_image=provenance_by_image,
+        )
+        if labeled_images is None:
+            labeled_images = {
+                img
+                for img in images
+                if bool(self.project.get_labels(img) or self.project.get_auto_boxes(img))
+            }
+        else:
+            labeled_images = set(labeled_images or [])
+
+        def sort_group_items(items):
+            return sorted(
+                list(items or []),
+                key=lambda path: (0 if path in labeled_images else 1, image_order.get(path, len(image_order))),
+            )
+
+        for img in images:
+            if not img:
+                continue
+            provenance = provenance_by_image.get(img, {})
             manual_group = str(provenance.get("manual_image_group", "") or "").strip() if isinstance(provenance, dict) else ""
             if manual_group and manual_group in groups:
                 groups[manual_group].append(img)
                 continue
-            is_labeled = bool(self.project.get_labels(img) or self.project.get_auto_boxes(img))
-            is_split_crop = self._is_split_crop_image(img)
-            needs_manual_split = self._needs_manual_panel_split(img)
-            manual_split_done = self._is_manual_panel_split_done(img)
+            identity = image_identities.get(img, "")
+            is_labeled = img in labeled_images
+            is_split_crop = identity in split_crop_identities
+            is_hard_candidate_crop = is_split_crop and self._is_hard_joined_candidate_crop(img, provenance=provenance)
+            review = provenance.get("panel_split_review") if isinstance(provenance, dict) else {}
+            review_status = review.get("status") if isinstance(review, dict) else ""
+            needs_manual_split = (not is_split_crop) and identity not in source_with_crops and review_status == "manual_required"
+            manual_split_done = (not is_split_crop) and review_status == "manual_done"
             if needs_manual_split:
                 groups.setdefault("manual", []).append(img)
-            elif is_split_crop and is_labeled:
-                split_labeled_imgs.append(img)
+            elif is_hard_candidate_crop:
+                groups.setdefault("hard_candidates", []).append(img)
             elif is_split_crop:
-                split_unlabeled_imgs.append(img)
+                groups.setdefault("split", []).append(img)
             elif manual_split_done:
                 groups.setdefault("manual_done", []).append(img)
-            elif is_labeled:
-                original_labeled_imgs.append(img)
             else:
-                original_unlabeled_imgs.append(img)
-        groups["original"] = original_labeled_imgs + original_unlabeled_imgs + groups.get("original", [])
-        groups["split"] = split_labeled_imgs + split_unlabeled_imgs + groups.get("split", [])
+                groups.setdefault("original", []).append(img)
+        for group_id in list(groups.keys()):
+            groups[group_id] = sort_group_items(groups.get(group_id, []))
         return groups
 
     def _vlm_candidate_source_meta(self, candidate, result):
@@ -11866,7 +13192,12 @@ class MainWindow(QMainWindow):
         if processing_scope == "current_image" and not self.current_image:
             QMessageBox.warning(self, tr("VLM Pre-Annotate", self.current_lang), tr("Please select an image first.", self.current_lang))
             return
-        if self.vlm_preannotation_thread is not None and self.vlm_preannotation_thread.isRunning():
+        active_vlm_threads = [
+            thread
+            for thread in (getattr(self, "vlm_preannotation_threads", []) or [])
+            if thread is not None and thread.isRunning()
+        ]
+        if active_vlm_threads or (self.vlm_preannotation_thread is not None and self.vlm_preannotation_thread.isRunning()):
             QMessageBox.information(self, tr("VLM Pre-Annotate", self.current_lang), tr("VLM preannotation is already running.", self.current_lang))
             return
         target_parts = self._current_vlm_target_parts()
@@ -11885,6 +13216,11 @@ class MainWindow(QMainWindow):
         if not image_paths:
             QMessageBox.warning(self, tr("VLM Pre-Annotate", self.current_lang), tr("Please select an image first.", self.current_lang))
             return
+        vlm_concurrency = self._current_vlm_concurrency()
+        concurrency_note = "\n\n" + tr(
+            "VLM API concurrency: {0}. Increase this only if your provider allows parallel requests.",
+            self.current_lang,
+        ).format(vlm_concurrency)
         if processing_scope == "all_images":
             if themed_yes_no_question(
                 self,
@@ -11892,7 +13228,8 @@ class MainWindow(QMainWindow):
                 tr(
                     "Run VLM preannotation on all imported images?\n\nThis will call the multimodal API, may incur provider cost, and will write draft AI boxes and SAM polygons for later review.",
                     self.current_lang,
-                ),
+                )
+                + concurrency_note,
                 confirm_role=BUTTON_ROLE_RUN,
             ) != QMessageBox.Yes:
                 return
@@ -11904,7 +13241,8 @@ class MainWindow(QMainWindow):
                 tr(
                     "Run VLM preannotation on {0} image(s) in {1}?\n\nThis will call the multimodal API, may incur provider cost, and will write draft AI boxes and SAM polygons for later review.",
                     self.current_lang,
-                ).format(len(image_paths), self._vlm_image_group_label(image_group)),
+                ).format(len(image_paths), self._vlm_image_group_label(image_group))
+                + concurrency_note,
                 confirm_role=BUTTON_ROLE_RUN,
             ) != QMessageBox.Yes:
                 return
@@ -11939,7 +13277,11 @@ class MainWindow(QMainWindow):
         self.vlm_preannotation_run_id = time.strftime("%Y%m%d_%H%M%S")
         self.vlm_preannotation_records = []
         self.vlm_preannotation_queue = list(image_paths)
+        self.vlm_preannotation_threads = []
         self.vlm_preannotation_run_active = True
+        self.vlm_preannotation_cancel_requested = False
+        self.vlm_preannotation_cancelled_queued_images = 0
+        self.vlm_preannotation_concurrency = vlm_concurrency
         self.vlm_preannotation_total_steps = max(1, len(image_paths) * 6)
         self.vlm_preannotation_completed_steps = 0
         self.vlm_preannotation_total_images = len(image_paths)
@@ -11951,13 +13293,85 @@ class MainWindow(QMainWindow):
         self.vlm_preannotation_prompt_profile = self._current_vlm_prompt_profile()
         self._create_vlm_progress_dialog()
         self._set_vlm_progress_ui(0, "start")
-        self._start_next_vlm_preannotation_image()
+        self.log(tr("VLM API concurrency: {0}. Increase this only if your provider allows parallel requests.", self.current_lang).format(self.vlm_preannotation_concurrency))
+        self._start_vlm_preannotation_workers()
+
+    def request_stop_vlm_preannotation(self, confirm=True):
+        if not getattr(self, "vlm_preannotation_run_active", False):
+            return False
+        if confirm:
+            message = (
+                tr("Stop VLM preannotation after active request(s) finish?", self.current_lang)
+                + "\n\n"
+                + tr(
+                    "Active API request(s) may already have been sent, but no more queued images will be processed. This helps avoid unintended large API bills.",
+                    self.current_lang,
+                )
+            )
+            if themed_yes_no_question(
+                self,
+                tr("VLM Pre-Annotate", self.current_lang),
+                message,
+                confirm_role=BUTTON_ROLE_STOP,
+            ) != QMessageBox.Yes:
+                return False
+        queued = list(getattr(self, "vlm_preannotation_queue", []) or [])
+        self.vlm_preannotation_cancel_requested = True
+        self.vlm_preannotation_cancelled_queued_images = int(getattr(self, "vlm_preannotation_cancelled_queued_images", 0) or 0) + len(queued)
+        self.vlm_preannotation_queue = []
+        button = getattr(self, "vlm_preannotation_stop_button", None)
+        if button is not None:
+            button.setEnabled(False)
+            button.setText(tr("Stopping after current image...", self.current_lang))
+        self.log(
+            tr(
+                "VLM stop requested. Remaining queued images were cancelled; waiting for active request(s) to finish.",
+                self.current_lang,
+            )
+        )
+        self._set_vlm_progress_ui(
+            int(
+                int(getattr(self, "vlm_preannotation_completed_steps", 0) or 0)
+                / max(1, int(getattr(self, "vlm_preannotation_total_steps", 1) or 1))
+                * 100
+            ),
+            "cancelled",
+        )
+        return True
+
+    def _active_vlm_preannotation_threads(self):
+        active = []
+        for thread in getattr(self, "vlm_preannotation_threads", []) or []:
+            try:
+                if thread is not None and thread.isRunning():
+                    active.append(thread)
+            except RuntimeError:
+                continue
+        self.vlm_preannotation_threads = active
+        self.vlm_preannotation_thread = active[0] if active else None
+        return active
+
+    def _start_vlm_preannotation_workers(self):
+        if not getattr(self, "vlm_preannotation_run_active", False):
+            return
+        if getattr(self, "vlm_preannotation_cancel_requested", False):
+            return
+        active = self._active_vlm_preannotation_threads()
+        limit = max(1, min(8, int(getattr(self, "vlm_preannotation_concurrency", 1) or 1)))
+        while len(active) < limit and getattr(self, "vlm_preannotation_queue", []):
+            thread = self._start_next_vlm_preannotation_image()
+            if thread is None:
+                break
+            active.append(thread)
+        self.vlm_preannotation_threads = active
+        self.vlm_preannotation_thread = active[0] if active else None
 
     def _start_next_vlm_preannotation_image(self):
         queue = list(getattr(self, "vlm_preannotation_queue", []) or [])
         if not queue:
-            self._finish_vlm_preannotation_run()
-            return
+            if not self._active_vlm_preannotation_threads():
+                self._finish_vlm_preannotation_run()
+            return None
         image_path = queue.pop(0)
         self.vlm_preannotation_queue = queue
         self.vlm_preannotation_current_image_steps_completed = 0
@@ -11983,6 +13397,7 @@ class MainWindow(QMainWindow):
         self.vlm_preannotation_thread.error_signal.connect(self._on_vlm_preannotation_error)
         self.vlm_preannotation_thread.finished_signal.connect(self._on_vlm_preannotation_finished)
         self.vlm_preannotation_thread.start()
+        return self.vlm_preannotation_thread
 
     def _apply_vlm_candidate(self, image_path, image_rgb, candidate, result):
         part_name = str(candidate.get("part", "") or "").strip()
@@ -11991,7 +13406,7 @@ class MainWindow(QMainWindow):
             return False, "invalid_candidate"
 
         existing_points = self.project.get_labels(image_path).get(part_name, [])
-        if existing_points:
+        if existing_points and not self._is_unconfirmed_ai_draft(image_path, part_name):
             return False, "already_labeled"
 
         polygon = None
@@ -12059,7 +13474,11 @@ class MainWindow(QMainWindow):
             self.canvas.repaint()
         get_taxon = getattr(self.project, "get_taxon", self.project.get_genus)
         if hasattr(self, "genus_combo"):
-            self.genus_combo.setCurrentText(get_taxon(current_path))
+            self.genus_combo.blockSignals(True)
+            try:
+                self.genus_combo.setCurrentText(get_taxon(current_path))
+            finally:
+                self.genus_combo.blockSignals(False)
         if hasattr(self, "blink_lab"):
             try:
                 self.blink_lab.refresh_from_workbench(
@@ -12119,7 +13538,7 @@ class MainWindow(QMainWindow):
             self.vlm_preannotation_saved_total = int(getattr(self, "vlm_preannotation_saved_total", 0)) + saved
             self._schedule_project_save()
             self._refresh_vlm_canvas_if_current(project_image_path)
-            self.refresh_file_list()
+            self._refresh_image_list_status_or_rebuild(project_image_path)
             self._reload_current_image_for_workbench()
             self._refresh_blink_refine_state()
             report_path = result.get("report_path", "")
@@ -12193,11 +13612,20 @@ class MainWindow(QMainWindow):
         progress = QDialog(self)
         progress.setWindowTitle(tr("VLM Pre-Annotate", self.current_lang))
         progress.setWindowModality(Qt.NonModal)
+        progress.installEventFilter(self)
         layout = QVBoxLayout(progress)
         layout.setContentsMargins(18, 16, 18, 16)
         layout.setSpacing(8)
         title_label = QLabel(tr("VLM Pre-Annotation Progress", self.current_lang))
         title_label.setWordWrap(True)
+        notice_label = QLabel(
+            tr(
+                "Active API request(s) may already have been sent, but no more queued images will be processed. This helps avoid unintended large API bills.",
+                self.current_lang,
+            )
+        )
+        notice_label.setWordWrap(True)
+        notice_label.setStyleSheet("color: #9CA3AF;")
         label = QLabel("")
         label.setWordWrap(True)
         label.setMinimumHeight(36)
@@ -12209,16 +13637,26 @@ class MainWindow(QMainWindow):
         bar = QProgressBar()
         bar.setRange(0, 100)
         bar.setValue(0)
+        stop_button = QPushButton(tr("Stop VLM Batch", self.current_lang))
+        stop_button.clicked.connect(lambda: self.request_stop_vlm_preannotation(confirm=True))
+        apply_semantic_button_style(stop_button, BUTTON_ROLE_STOP, "padding: 6px 12px;")
+        button_layout = QHBoxLayout()
+        button_layout.addStretch(1)
+        button_layout.addWidget(stop_button)
         layout.addWidget(title_label)
+        layout.addWidget(notice_label)
         layout.addWidget(label)
         layout.addWidget(path_label)
         layout.addWidget(bar)
+        layout.addLayout(button_layout)
         self._prepare_progress_dialog(progress, width=560)
         self.vlm_preannotation_progress_dialog = progress
         self.vlm_preannotation_progress_title_label = title_label
+        self.vlm_preannotation_progress_notice_label = notice_label
         self.vlm_preannotation_progress_label = label
         self.vlm_preannotation_progress_path_label = path_label
         self.vlm_preannotation_progress_bar = bar
+        self.vlm_preannotation_stop_button = stop_button
         progress.show()
 
     def _advance_vlm_progress(self, step_name):
@@ -12242,11 +13680,16 @@ class MainWindow(QMainWindow):
         records = list(getattr(self, "vlm_preannotation_records", []) or [])
         artifacts_dir = getattr(self, "vlm_preannotation_artifacts_dir", self._vlm_preannotation_artifacts_dir())
         run_id = getattr(self, "vlm_preannotation_run_id", time.strftime("%Y%m%d_%H%M%S"))
+        cancelled = bool(getattr(self, "vlm_preannotation_cancel_requested", False))
+        cancelled_queued = int(getattr(self, "vlm_preannotation_cancelled_queued_images", 0) or 0)
         report_path = os.path.join(artifacts_dir, f"vlm_preannotation_summary_{run_id}.json")
         summary = {
             "schema_version": "taxamask-vlm-preannotation-gui-summary-v1",
             "run_id": run_id,
             "artifacts_dir": artifacts_dir,
+            "status": "cancelled" if cancelled else "finished",
+            "concurrency": max(1, min(8, int(getattr(self, "vlm_preannotation_concurrency", 1) or 1))),
+            "cancelled_queued_image_count": cancelled_queued,
             "target_parts": list(getattr(self, "vlm_preannotation_target_parts", []) or []),
             "prompt_profile": sanitize_vlm_prompt_profile(
                 getattr(self, "vlm_preannotation_prompt_profile", default_vlm_prompt_profile())
@@ -12260,13 +13703,26 @@ class MainWindow(QMainWindow):
         os.makedirs(artifacts_dir, exist_ok=True)
         with open(report_path, "w", encoding="utf-8") as handle:
             json.dump(summary, handle, ensure_ascii=False, indent=2)
-        self.log(
-            tr("VLM preannotation finished. Images: {0}; saved drafts: {1}; report: {2}", self.current_lang).format(
-                summary.get("image_count", 0),
-                summary.get("saved_box_count", 0),
-                report_path,
+        if cancelled:
+            self.log(
+                tr(
+                    "VLM preannotation stopped. Images processed: {0}; queued images cancelled: {1}; saved drafts: {2}; report: {3}",
+                    self.current_lang,
+                ).format(
+                    summary.get("image_count", 0),
+                    cancelled_queued,
+                    summary.get("saved_box_count", 0),
+                    report_path,
+                )
             )
-        )
+        else:
+            self.log(
+                tr("VLM preannotation finished. Images: {0}; saved drafts: {1}; report: {2}", self.current_lang).format(
+                    summary.get("image_count", 0),
+                    summary.get("saved_box_count", 0),
+                    report_path,
+                )
+            )
         self.vlm_preannotation_run_active = False
         for button_name in ("btn_vlm_preannotate_current", "btn_vlm_preannotate_batch", "btn_vlm_preannotate"):
             button = getattr(self, button_name, None)
@@ -12277,18 +13733,33 @@ class MainWindow(QMainWindow):
             label_widget = getattr(self, "vlm_preannotation_progress_label", None)
             bar_widget = getattr(self, "vlm_preannotation_progress_bar", None)
             if label_widget is not None:
-                label_widget.setText(
-                    tr("VLM progress: finished ({0} draft boxes)", self.current_lang).format(summary.get("saved_box_count", 0))
-                )
+                if cancelled:
+                    label_widget.setText(
+                        tr("VLM progress: stopped ({0} draft boxes; {1} queued images cancelled)", self.current_lang).format(
+                            summary.get("saved_box_count", 0),
+                            cancelled_queued,
+                        )
+                    )
+                else:
+                    label_widget.setText(
+                        tr("VLM progress: finished ({0} draft boxes)", self.current_lang).format(summary.get("saved_box_count", 0))
+                    )
             if bar_widget is not None:
                 bar_widget.setValue(100)
+            progress.removeEventFilter(self)
             progress.close()
             progress.deleteLater()
             self.vlm_preannotation_progress_dialog = None
             self.vlm_preannotation_progress_title_label = None
+            self.vlm_preannotation_progress_notice_label = None
             self.vlm_preannotation_progress_label = None
             self.vlm_preannotation_progress_path_label = None
             self.vlm_preannotation_progress_bar = None
+            self.vlm_preannotation_stop_button = None
+        self.vlm_preannotation_cancel_requested = False
+        self.vlm_preannotation_cancelled_queued_images = 0
+        self.vlm_preannotation_threads = []
+        self.vlm_preannotation_thread = None
 
     def accept_current_image_ai_drafts(self):
         if not self.current_image:
@@ -12308,11 +13779,12 @@ class MainWindow(QMainWindow):
             )
             if reply != QMessageBox.Yes:
                 return
-        count = self.project.verify_image_labels(self.current_image)
+        count = self.project.verify_image_labels(self.current_image, save=False)
         if count:
+            self._schedule_project_save()
             self.canvas.set_polygons(self.project.get_labels(self.current_image))
             self._refresh_current_canvas_boxes()
-            self.refresh_file_list()
+            self._refresh_image_list_status_or_rebuild(self.current_image)
             self._refresh_blink_refine_state()
             self.log(tr("Accepted {0} AI draft(s) on current image.", self.current_lang).format(count))
         else:
@@ -12332,7 +13804,7 @@ class MainWindow(QMainWindow):
             self.log(tr("No reviewable AI polygon drafts in the current project.", self.current_lang))
             return
 
-        self._flush_pending_project_save()
+        self._flush_pending_project_save(defer_for_navigation=False)
         summarize_many = getattr(self.project, "summarize_ai_drafts_for_images", None)
         if callable(summarize_many):
             summary = summarize_many(image_paths)
@@ -12427,9 +13899,23 @@ class MainWindow(QMainWindow):
     def _on_vlm_preannotation_finished(self):
         if not getattr(self, "vlm_preannotation_run_active", False):
             return
+        sender_thread = self.sender()
+        if sender_thread is not None:
+            self.vlm_preannotation_threads = [
+                thread
+                for thread in (getattr(self, "vlm_preannotation_threads", []) or [])
+                if thread is not sender_thread
+            ]
+        active = self._active_vlm_preannotation_threads()
+        if getattr(self, "vlm_preannotation_cancel_requested", False):
+            self.vlm_preannotation_queue = []
+            if not active:
+                self._finish_vlm_preannotation_run()
+            return
         if getattr(self, "vlm_preannotation_queue", []):
-            self._start_next_vlm_preannotation_image()
-        else:
+            self._start_vlm_preannotation_workers()
+            return
+        if not active:
             self._finish_vlm_preannotation_run()
 
     def run_prediction(self):
@@ -12457,14 +13943,16 @@ class MainWindow(QMainWindow):
                 project_route_manifest=self._active_project_route_manifest(),
                 model_profile_context=self._active_model_profile_context(),
             )
-            count, total_detected = self._apply_prediction_to_project(self.current_image, ps, only_new=True)
+            count, total_detected = self._apply_prediction_to_project(self.current_image, ps, only_new=True, save=False)
+            if count:
+                self._schedule_project_save()
             
             labels = self.project.get_labels(self.current_image)
             manual_boxes = self.project.get_boxes(self.current_image)
             auto_boxes = self.project.get_auto_boxes(self.current_image)
             self.canvas.set_polygons(labels)
             self.canvas.set_boxes(manual_boxes, auto_boxes, self._current_shrink_loose_boxes())
-            self.refresh_file_list()
+            self._refresh_image_list_status_or_rebuild(self.current_image)
             self._refresh_blink_refine_state()
             self._log_route_usage_summary(ps, self.current_image)
             self.log(tr("Inference complete. Detected {0} parts, saved {1} new labels.", self.current_lang).format(total_detected, count))
@@ -12472,7 +13960,7 @@ class MainWindow(QMainWindow):
             QApplication.restoreOverrideCursor()
 
     def run_external_prediction(self, image_path):
-        self._flush_pending_project_save()
+        self._flush_pending_project_save(defer_for_navigation=False)
         self.log(tr("Running inference on: {0}...", self.current_lang).format(os.path.basename(image_path)))
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
@@ -12480,12 +13968,19 @@ class MainWindow(QMainWindow):
                 image_path,
                 model_manifest=self._active_external_backend_config().get("model_manifest", ""),
             )
-            count, total_detected = self._apply_prediction_to_project(image_path, result.get("payload", {}), only_new=True)
+            count, total_detected = self._apply_prediction_to_project(
+                image_path,
+                result.get("payload", {}),
+                only_new=True,
+                save=False,
+            )
+            if count:
+                self._schedule_project_save()
             if image_path == self.current_image:
                 self.canvas.set_polygons(self.project.get_labels(image_path))
                 self._refresh_current_canvas_boxes()
                 self._refresh_blink_refine_state()
-            self.refresh_file_list()
+            self._refresh_image_list_status_or_rebuild(image_path)
             self.log(f"External inference complete. Contract: {result.get('contract_json')}")
             self.log(tr("Inference complete. Detected {0} parts, saved {1} new labels.", self.current_lang).format(total_detected, count))
         except Exception as exc:
@@ -12496,7 +13991,111 @@ class MainWindow(QMainWindow):
 
     def verify_current_image(self):
         if self.current_image:
-            self.project.verify_image_labels(self.current_image)
+            count = self.project.verify_image_labels(self.current_image, save=False)
+            if count:
+                self._schedule_project_save()
+                self.canvas.set_polygons(self.project.get_labels(self.current_image))
+                self._refresh_current_canvas_boxes()
+                self._refresh_image_list_status_or_rebuild(self.current_image)
+                self._refresh_blink_refine_state()
+
+    def _start_external_batch_inference(self, image_paths):
+        if getattr(self, "external_batch_inference_thread", None) is not None and self.external_batch_inference_thread.isRunning():
+            QMessageBox.information(
+                self,
+                tr("Batch Inference", self.current_lang),
+                tr("Batch inference is already running.", self.current_lang),
+            )
+            return
+
+        self._flush_pending_project_save(defer_for_navigation=False)
+        self.external_batch_inference_failed = False
+        self.external_batch_inference_saved_any = False
+        self.btn_batch.setEnabled(False)
+        self.btn_predict.setEnabled(False)
+
+        progress = QProgressDialog(
+            tr("Starting batch inference on {0} images...", self.current_lang).format(len(image_paths)),
+            "",
+            0,
+            max(1, len(image_paths)),
+            self,
+        )
+        progress.setWindowTitle(tr("Batch Inference", self.current_lang))
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setCancelButton(None)
+        self._prepare_progress_dialog(progress, width=520)
+        progress.show()
+        self.external_batch_inference_progress_dialog = progress
+
+        backend_config = self._active_external_backend_config()
+        thread = ExternalBatchInferenceThread(
+            self.project,
+            backend_config,
+            image_paths,
+            model_manifest=backend_config.get("model_manifest", ""),
+            lang=self.current_lang,
+        )
+        self.external_batch_inference_thread = thread
+
+        def on_progress(done, total, label):
+            total = max(0, int(total))
+            done = max(0, int(done))
+            if total > 0 and progress.maximum() != total:
+                progress.setRange(0, total)
+            if total > 0:
+                progress.setValue(min(done, total))
+            message = tr("Starting batch inference on {0} images...", self.current_lang).format(total)
+            if label:
+                message = f"{message}\n{self._short_progress_path(label)}"
+            progress.setLabelText(message)
+
+        def on_result(image_path, result):
+            saved, total = self._apply_prediction_to_project(
+                image_path,
+                result.get("payload", {}),
+                only_new=True,
+                save=False,
+            )
+            if saved:
+                self.external_batch_inference_saved_any = True
+            self.log(tr("Batch saved {0}/{1} for {2}", self.current_lang).format(saved, total, os.path.basename(image_path)))
+
+        def on_error(message):
+            self.external_batch_inference_failed = True
+            self.log(tr("External batch inference failed: {0}", self.current_lang).format(message))
+            QMessageBox.critical(
+                self,
+                tr("Error", self.current_lang),
+                tr("External batch inference failed: {0}", self.current_lang).format(message),
+            )
+
+        def on_finished():
+            if getattr(self, "external_batch_inference_saved_any", False):
+                self.project.save_project()
+            progress.close()
+            progress.deleteLater()
+            if getattr(self, "external_batch_inference_progress_dialog", None) is progress:
+                self.external_batch_inference_progress_dialog = None
+            if getattr(self, "external_batch_inference_thread", None) is thread:
+                self.external_batch_inference_thread = None
+            thread.deleteLater()
+            self.btn_batch.setEnabled(True)
+            self.btn_predict.setEnabled(True)
+            self.refresh_file_list()
+            self._refresh_blink_refine_state()
+            if not getattr(self, "external_batch_inference_failed", False):
+                self.log(tr("External batch inference finished.", self.current_lang))
+
+        thread.log_signal.connect(self.log)
+        thread.progress_signal.connect(on_progress)
+        thread.result_signal.connect(on_result)
+        thread.error_signal.connect(on_error)
+        thread.finished_signal.connect(on_finished)
+        thread.start()
 
     def run_batch_inference(self):
         ul = [img for img in self.project.project_data["images"] if not self.project.get_labels(img)]
@@ -12509,24 +14108,7 @@ class MainWindow(QMainWindow):
                 tr("Annotate {0} images?", self.current_lang).format(len(ul)),
                 confirm_role=BUTTON_ROLE_RUN,
             ) == QMessageBox.Yes:
-                self.btn_batch.setEnabled(False)
-                self.btn_predict.setEnabled(False)
-                try:
-                    for image_path in ul:
-                        result = self._external_backend_runner().run_predict(
-                            image_path,
-                            model_manifest=self._active_external_backend_config().get("model_manifest", ""),
-                        )
-                        saved, total = self._apply_prediction_to_project(image_path, result.get("payload", {}), only_new=True)
-                        self.log(tr("Batch saved {0}/{1} for {2}", self.current_lang).format(saved, total, os.path.basename(image_path)))
-                    self.refresh_file_list()
-                    self._refresh_blink_refine_state()
-                except Exception as exc:
-                    self.log(f"External batch inference failed: {exc}")
-                    QMessageBox.critical(self, tr("Error", self.current_lang), str(exc))
-                finally:
-                    self.btn_batch.setEnabled(True)
-                    self.btn_predict.setEnabled(True)
+                self._start_external_batch_inference(ul)
             return
         self.ensure_locator_preloaded()
         if not self._confirm_legacy_locator_selection_if_needed():
@@ -12563,7 +14145,7 @@ class MainWindow(QMainWindow):
             )
             self.inf_thread.log_signal.connect(self.log) # Fix: Connect log signal
             def on_batch_res(p, d):
-                saved, total = self._apply_prediction_to_project(p, d, only_new=True)
+                saved, total = self._apply_prediction_to_project(p, d, only_new=True, save=False)
                 self._log_route_usage_summary(
                     d,
                     p,
@@ -12573,8 +14155,10 @@ class MainWindow(QMainWindow):
             self.inf_thread.result_signal.connect(on_batch_res)
             self.inf_thread.finished_signal.connect(
                 lambda: [
+                    self.project.save_project(),
                     self.btn_batch.setEnabled(True),
                     self.btn_predict.setEnabled(True),
+                    self.refresh_file_list(),
                     self._refresh_blink_refine_state(),
                 ]
             )
@@ -12583,7 +14167,7 @@ class MainWindow(QMainWindow):
     def export_dataset(self):
         dlg = ExportDialog(self, self.current_lang, default_dir=self._default_2d_export_dir())
         if dlg.exec():
-            self._flush_pending_project_save()
+            self._flush_pending_project_save(defer_for_navigation=False)
             p, f = dlg.get_path(), dlg.get_format()
             if not p:
                 return
@@ -12677,8 +14261,15 @@ class MainWindow(QMainWindow):
         self.sam_worker = SAMWorker(model_type=mp, poly_epsilon=self.inf_poly_epsilon, device=self.runtime_device)
         self.sam_worker.moveToThread(self.sam_thread)
         self.sam_thread.started.connect(self.sam_worker.load_model)
+        queued_connection = Qt.ConnectionType.QueuedConnection
+        if hasattr(self.sam_worker, "predict_point"):
+            self.sam_point_requested.connect(self.sam_worker.predict_point, queued_connection)
+        if hasattr(self.sam_worker, "predict_box"):
+            self.sam_box_requested.connect(self.sam_worker.predict_box, queued_connection)
         self.sam_worker.mask_generated.connect(self.on_sam_mask_generated)
-        self.sam_worker.model_loaded.connect(lambda: self.log(tr("SAM Model Loaded and Ready!", self.current_lang)))
+        if hasattr(self.sam_worker, "prompt_failed"):
+            self.sam_worker.prompt_failed.connect(self.on_sam_prompt_failed)
+        self.sam_worker.model_loaded.connect(self._on_sam_model_loaded)
         self.sam_worker.model_load_error.connect(lambda message: self.log(str(message)))
         self.sam_thread.start()
 
@@ -12754,6 +14345,12 @@ if __name__ == "__main__":
         sys.__excepthook__(t, v, tb)
     sys.excepthook = excepthook
     app = QApplication(sys.argv)
+    for icon_path in (APP_ICON_PATH, APP_ICON_FALLBACK_PATH):
+        if os.path.exists(icon_path):
+            icon = QIcon(icon_path)
+            if not icon.isNull():
+                app.setWindowIcon(icon)
+                break
     register_windows_scholarly_ui_fonts()
     window = MainWindow()
     window.show()

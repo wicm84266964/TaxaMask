@@ -157,7 +157,8 @@ export async function loadConfig(options = {}) {
   const cwd = options.cwd ?? process.cwd();
   const env = options.env ?? process.env;
 
-  const projectConfigs = await loadProjectConfigs(cwd);
+  const skipProjectConfig = parseBoolean(env.LAB_AGENT_SKIP_PROJECT_CONFIG ?? "false");
+  const projectConfigs = skipProjectConfig ? [] : await loadProjectConfigs(cwd);
   const project = mergeProjectConfigs(projectConfigs);
   const labConfigPath = env.LAB_AGENT_CONFIG ?? null;
   const bundled = await readJsonIfExists(BUNDLED_CONFIG_PATH);

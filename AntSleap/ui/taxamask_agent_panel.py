@@ -20,6 +20,7 @@ def _ensure_qtwebengine_cpu_compositing():
 _ensure_qtwebengine_cpu_compositing()
 
 from PySide6.QtCore import Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QLabel,
     QSizePolicy,
@@ -221,9 +222,14 @@ class TaxaMaskAgentPanel(QWidget):
         self.fallback.setMinimumHeight(360)
         fallback_layout = QVBoxLayout(self.fallback)
         fallback_layout.setContentsMargins(28, 28, 28, 28)
-        fallback_layout.setSpacing(10)
+        fallback_layout.setSpacing(14)
         fallback_layout.addStretch(1)
-        self.fallback_logo = QLabel("TAXAMASK")
+        self.fallback_mark = QLabel()
+        self.fallback_mark.setObjectName("taxamaskAgentFallbackMark")
+        self.fallback_mark.setAlignment(Qt.AlignCenter)
+        self._load_fallback_mark()
+        fallback_layout.addWidget(self.fallback_mark)
+        self.fallback_logo = QLabel("TaxaMask")
         self.fallback_logo.setObjectName("taxamaskAgentFallbackLogo")
         self.fallback_logo.setAlignment(Qt.AlignCenter)
         fallback_layout.addWidget(self.fallback_logo)
@@ -251,6 +257,18 @@ class TaxaMaskAgentPanel(QWidget):
         self.prompt_retry_timer = QTimer(self)
         self.prompt_retry_timer.setSingleShot(True)
         self.prompt_retry_timer.timeout.connect(self._flush_pending_context_prompt)
+
+    def _load_fallback_mark(self):
+        mark_path = Path(__file__).resolve().parents[1] / "assets" / "brand" / "taxamask_mark.png"
+        if not mark_path.exists():
+            self.fallback_mark.setVisible(False)
+            return
+        pixmap = QPixmap(str(mark_path))
+        if pixmap.isNull():
+            self.fallback_mark.setVisible(False)
+            return
+        self.fallback_mark.setPixmap(pixmap.scaled(280, 280, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        self.fallback_mark.setMinimumHeight(280)
 
     def _configure_web_profile(self):
         if self.web_view is None or QWebEngineProfile is None:
@@ -405,19 +423,26 @@ class TaxaMaskAgentPanel(QWidget):
                 border-radius: 16px;
             }
             QWidget#taxamaskAgentFallback {
-                background: #11161A;
-                border: 1px solid #303A42;
+                background: #252B30;
+                border: 1px solid #46535C;
                 border-radius: 12px;
             }
             QLabel#taxamaskAgentFallbackLogo {
                 color: #E7F6F2;
-                font-size: 56px;
+                font-family: "Copperplate Gothic Bold", "Cambria", "Georgia", "Times New Roman", "Microsoft YaHei UI";
+                font-size: 52px;
                 font-weight: 800;
                 letter-spacing: 0px;
+                padding: 0 0 4px 0;
+            }
+            QLabel#taxamaskAgentFallbackMark {
+                padding: 0;
+                margin: 0;
             }
             QLabel#taxamaskAgentFallbackDetail {
                 color: #8EA0A8;
                 font-size: 12px;
+                padding: 2px 20px;
             }
             QStackedWidget#taxamaskAgentStack {
                 background: transparent;

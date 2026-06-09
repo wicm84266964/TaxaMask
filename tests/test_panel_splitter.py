@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
 from AntSleap.core.panel_splitter import PanelSplitSettings, detect_panel_crops
 
@@ -38,6 +38,23 @@ class PanelSplitterTests(unittest.TestCase):
         image = Image.new("RGB", (300, 220), (130, 125, 112))
 
         self.assertEqual(detect_panel_crops(image), [])
+
+    def test_detects_off_white_noisy_gutters_from_scanned_pdf_plate(self):
+        image = Image.new("RGB", (520, 260), (221, 219, 205))
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((0, 0, 239, 260), fill=(118, 92, 70))
+        draw.rectangle((281, 0, 520, 260), fill=(188, 194, 184))
+        for y in range(0, 260, 17):
+            draw.point((260, y), fill=(198, 196, 184))
+            draw.point((265, min(259, y + 4)), fill=(205, 203, 190))
+
+        crops = detect_panel_crops(image)
+
+        boxes = [item["box"] for item in crops]
+        self.assertEqual(len(boxes), 2)
+        self.assertBoxAlmostEqual(boxes[0], [0, 0, 240, 260])
+        self.assertBoxAlmostEqual(boxes[1], [281, 0, 520, 260])
+        self.assertTrue(all(item["source"] == "white_separator_panel_split" for item in crops))
 
     def test_detects_butt_joined_plate_panels_without_white_gutters(self):
         image = Image.new("RGB", (600, 460), (255, 255, 255))
@@ -80,6 +97,43 @@ class PanelSplitterTests(unittest.TestCase):
         strict = detect_panel_crops(image, PanelSplitSettings(seam_strength=120.0))
 
         self.assertEqual(strict, [])
+
+    def test_default_does_not_force_equal_grid_from_panel_labels(self):
+        image = Image.new("RGB", (660, 520), (236, 238, 229))
+        draw = ImageDraw.Draw(image)
+        try:
+            font = ImageFont.truetype("arial.ttf", 42)
+        except Exception:
+            font = ImageFont.load_default(size=42)
+        draw.rectangle((0, 0, 659, 299), fill=(150, 176, 150))
+        draw.rectangle((0, 310, 324, 519), fill=(140, 168, 145))
+        draw.rectangle((336, 310, 659, 519), fill=(170, 196, 162))
+        draw.rectangle((0, 300, 659, 309), fill=(248, 248, 241))
+        draw.rectangle((325, 310, 335, 519), fill=(248, 248, 241))
+        draw.text((18, 16), "133", fill=(20, 20, 20), font=font)
+        draw.text((18, 322), "134", fill=(20, 20, 20), font=font)
+        draw.text((354, 322), "135", fill=(20, 20, 20), font=font)
+
+        crops = detect_panel_crops(image)
+
+        boxes = [item["box"] for item in crops]
+        self.assertEqual(len(boxes), 3)
+        self.assertTrue(all(item["source"] == "white_separator_panel_split" for item in crops))
+        self.assertBoxAlmostEqual(boxes[0], [0, 0, 660, 300], tolerance=2)
+        self.assertBoxAlmostEqual(boxes[1], [0, 310, 325, 520], tolerance=2)
+        self.assertBoxAlmostEqual(boxes[2], [336, 310, 660, 520], tolerance=2)
+
+    def test_default_ignores_labels_when_no_real_panel_boundaries_exist(self):
+        image = Image.new("RGB", (520, 420), (152, 168, 145))
+        draw = ImageDraw.Draw(image)
+        try:
+            font = ImageFont.truetype("arial.ttf", 34)
+        except Exception:
+            font = ImageFont.load_default(size=34)
+        for text, pos in zip(("A", "B", "C", "D"), [(12, 10), (272, 10), (12, 220), (272, 220)]):
+            draw.text(pos, text, fill=(255, 255, 255), font=font)
+
+        self.assertEqual(detect_panel_crops(image, PanelSplitSettings(seam_strength=160.0)), [])
 
 
 if __name__ == "__main__":

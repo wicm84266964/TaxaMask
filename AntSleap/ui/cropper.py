@@ -1,7 +1,7 @@
-from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, 
-                               QListWidget, QScrollArea, QWidget, QLineEdit, QFileDialog, QMessageBox, QSplitter, QGroupBox)
+from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+                               QListWidget, QScrollArea, QWidget, QLineEdit, QFileDialog, QMessageBox, QSplitter, QGroupBox, QProgressDialog)
 from PySide6.QtGui import QPixmap, QPainter, QPen, QColor, QImage
-from PySide6.QtCore import Qt, QRectF, QPointF, Signal
+from PySide6.QtCore import Qt, QRectF, QPointF, QThread, Signal
 import os
 from PIL import Image
 
@@ -40,6 +40,10 @@ CROPPER_TRANSLATIONS = {
         "Please load an image before auto splitting panels.": "请先加载图片，再自动切分拼图。",
         "No panel separators were detected.": "未检测到可用的拼图分隔线。",
         "Created {0} panel crop boxes.": "已生成 {0} 个拼图裁剪框。",
+        "Splitting Panels": "正在切分拼图",
+        "Detecting panel separators...": "正在检测拼图分隔线...",
+        "Auto splitting is already running.": "自动切分仍在运行。",
+        "Failed to split panels:\n{0}": "自动切分失败：\n{0}",
         "Success": "成功",
         "Created {0} images.": "已生成 {0} 张图片。",
         "Error": "错误",
@@ -53,6 +57,21 @@ def translate_cropper_text(text, lang="en"):
     if lang == "zh":
         return CROPPER_TRANSLATIONS["zh"].get(text, text)
     return text
+
+
+class PanelSplitThread(QThread):
+    result_signal = Signal(object)
+    error_signal = Signal(str)
+
+    def __init__(self, image_path, parent=None):
+        super().__init__(parent)
+        self.image_path = image_path
+
+    def run(self):
+        try:
+            self.result_signal.emit(detect_panel_crops(self.image_path))
+        except Exception as exc:
+            self.error_signal.emit(str(exc))
 
 class CropCanvas(QWidget):
     crop_added = Signal(QRectF)
@@ -160,6 +179,8 @@ class CropCanvas(QWidget):
             self.update()
 
 class ImageCropper(QDialog):
+    ASYNC_AUTO_SPLIT_PIXELS = 1_000_000
+
     def __init__(self, initial_image=None, parent=None, lang="en"):
         super().__init__(parent)
         self.lang = lang
@@ -168,6 +189,8 @@ class ImageCropper(QDialog):
         self.generated_files = [] # List of abs paths
         self.generated_crops = [] # List of crop metadata dicts
         self.crop_sources = []
+        self.panel_split_thread = None
+        self.panel_split_progress = None
         
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -285,12 +308,75 @@ class ImageCropper(QDialog):
         if not self.current_image_path:
             QMessageBox.warning(self, translate_cropper_text("Empty", self.lang), translate_cropper_text("Please load an image before auto splitting panels.", self.lang))
             return
+        if self.panel_split_thread is not None and self.panel_split_thread.isRunning():
+            QMessageBox.information(self, translate_cropper_text("Splitting Panels", self.lang), translate_cropper_text("Auto splitting is already running.", self.lang))
+            return
+        if self._should_auto_split_in_background(self.current_image_path):
+            self._start_auto_split_thread(self.current_image_path)
+            return
 
         try:
             detections = detect_panel_crops(self.current_image_path)
         except Exception as exc:
-            QMessageBox.critical(self, translate_cropper_text("Error", self.lang), translate_cropper_text("Failed to save crops:\n{0}", self.lang).format(exc))
+            QMessageBox.critical(self, translate_cropper_text("Error", self.lang), translate_cropper_text("Failed to split panels:\n{0}", self.lang).format(exc))
             return
+        self._apply_panel_split_detections(detections)
+
+    def _should_auto_split_in_background(self, image_path):
+        try:
+            with Image.open(image_path) as img:
+                return int(img.width) * int(img.height) >= self.ASYNC_AUTO_SPLIT_PIXELS
+        except Exception:
+            return True
+
+    def _start_auto_split_thread(self, image_path):
+        self._set_panel_split_controls_enabled(False)
+        self.panel_split_progress = QProgressDialog(
+            translate_cropper_text("Detecting panel separators...", self.lang),
+            "",
+            0,
+            0,
+            self,
+        )
+        self.panel_split_progress.setWindowTitle(translate_cropper_text("Splitting Panels", self.lang))
+        self.panel_split_progress.setWindowModality(Qt.WindowModal)
+        self.panel_split_progress.setCancelButton(None)
+        self.panel_split_progress.setMinimumDuration(0)
+        self.panel_split_progress.show()
+
+        thread = PanelSplitThread(image_path, self)
+        thread.result_signal.connect(lambda detections, source_path=image_path: self._handle_panel_split_result(source_path, detections))
+        thread.error_signal.connect(self._handle_panel_split_error)
+        thread.finished.connect(self._finish_panel_split_thread)
+        self.panel_split_thread = thread
+        thread.start()
+
+    def _handle_panel_split_result(self, source_path, detections):
+        if os.path.normcase(os.path.abspath(str(source_path))) != os.path.normcase(os.path.abspath(str(self.current_image_path or ""))):
+            return
+        self._apply_panel_split_detections(detections)
+
+    def _handle_panel_split_error(self, message):
+        QMessageBox.critical(self, translate_cropper_text("Error", self.lang), translate_cropper_text("Failed to split panels:\n{0}", self.lang).format(message))
+
+    def _finish_panel_split_thread(self):
+        if self.panel_split_progress is not None:
+            self.panel_split_progress.close()
+            self.panel_split_progress = None
+        self._set_panel_split_controls_enabled(True)
+        if self.panel_split_thread is not None:
+            self.panel_split_thread.deleteLater()
+            self.panel_split_thread = None
+
+    def _set_panel_split_controls_enabled(self, enabled):
+        self.btn_load.setEnabled(bool(enabled))
+        self.btn_auto_split.setEnabled(bool(enabled))
+        self.btn_delete_selected.setEnabled(bool(enabled))
+        self.btn_clear_crops.setEnabled(bool(enabled))
+        self.btn_undo.setEnabled(bool(enabled))
+        self.btn_save.setEnabled(bool(enabled))
+
+    def _apply_panel_split_detections(self, detections):
         if not detections:
             QMessageBox.information(self, translate_cropper_text("Empty", self.lang), translate_cropper_text("No panel separators were detected.", self.lang))
             return
@@ -310,6 +396,13 @@ class ImageCropper(QDialog):
             translate_cropper_text("Success", self.lang),
             translate_cropper_text("Created {0} panel crop boxes.", self.lang).format(len(detections)),
         )
+
+    def closeEvent(self, event):
+        if self.panel_split_thread is not None and self.panel_split_thread.isRunning():
+            QMessageBox.information(self, translate_cropper_text("Splitting Panels", self.lang), translate_cropper_text("Auto splitting is already running.", self.lang))
+            event.ignore()
+            return
+        super().closeEvent(event)
 
     def undo_crop(self):
         self.canvas.remove_last()

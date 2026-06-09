@@ -37,7 +37,7 @@ except ModuleNotFoundError as exc:
     else:
         raise
 else:
-    from PIL import Image
+    from PIL import Image, ImageDraw, ImageFont
 
     import AntSleap.main as main_module
     import AntSleap.ui.pdf_processing_widget as pdf_widget_module
@@ -365,7 +365,8 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(window.btn_stop_ant_code.text(), "Stop Ant-Code")
             self.assertIsNone(window.agent_panel.findChild(main_module.QWidget, "taxamaskAgentInlineStatus"))
             self.assertIsNone(window.agent_panel.findChild(main_module.QWidget, "taxamaskStartAntCodeButton"))
-            self.assertEqual(window.agent_panel.fallback_logo.text(), "TAXAMASK")
+            self.assertEqual(window.agent_panel.fallback_logo.text(), "TaxaMask")
+            self.assertIsNotNone(window.agent_panel.fallback_mark.pixmap())
             self.assertFalse(window.agent_panel.fallback_detail.isVisible())
             menu_texts = [
                 action.text()
@@ -495,7 +496,8 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(env["LAB_AGENT_PACKAGE_ROOT"], window.agent_panel.ant_code_root)
             self.assertEqual(env["LAB_AGENT_CONFIG"], window.agent_panel.ant_code_config_path)
             self.assertIsNotNone(window.agent_panel.findChild(main_module.QWidget, "taxamaskAgentStack"))
-            self.assertEqual(window.agent_panel.fallback_logo.text(), "TAXAMASK")
+            self.assertEqual(window.agent_panel.fallback_logo.text(), "TaxaMask")
+            self.assertIsNotNone(window.agent_panel.fallback_mark.pixmap())
             self.assertFalse(window.agent_panel.fallback_detail.isVisible())
             self.assertFalse(window.agent_panel.is_running())
         finally:
@@ -1061,6 +1063,9 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertIsNotNone(scope_combo)
             scope_values = {scope_combo.itemData(index) for index in range(scope_combo.count())}
             self.assertEqual(scope_values, {"all_images", "image_group"})
+            group_combo = dialog.findChild(main_module.QComboBox, "modelSettingsVlmImageGroupCombo")
+            self.assertIsNotNone(group_combo)
+            self.assertGreaterEqual(group_combo.findData("hard_candidates"), 0)
             profile_combo = dialog.findChild(main_module.QComboBox, "modelSettingsVlmPromptProfileCombo")
             self.assertIsNotNone(profile_combo)
             self.assertTrue(has_ancestor(profile_combo, inference_content))
@@ -1381,9 +1386,104 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(window.project.get_locator_scope(), ["Object"])
             self.assertEqual(window.active_project_kind, "image")
             self.assertEqual(window.tabs.currentWidget(), window.workbench_widget)
+            self.assertTrue(self._wait_until(lambda: preload_events == ["preload"]))
             self.assertEqual(preload_events, ["preload"])
             self.assertIsNone(window.sam_worker)
             self.assertIsNone(window.sam_thread)
+        finally:
+            window.deleteLater()
+
+    def test_continue_last_large_project_opens_with_collapsed_image_groups(self):
+        window = self._make_window()
+        try:
+            image_paths = [str(self.project_dir / f"large_plate_{index:04d}.png") for index in range(1200)]
+            labels = {
+                image_path: {
+                    "parts": {},
+                    "boxes": {},
+                    "auto_boxes": {},
+                    "descriptions": {},
+                    "status": "unlabeled",
+                    "genus": "Unknown",
+                }
+                for image_path in image_paths
+            }
+            project_path = self.project_dir / "large_continue_project.json"
+            project_payload = {
+                "name": "large_continue_project",
+                "project_template": PROJECT_TEMPLATE_GENERIC,
+                "taxonomy": ["Object"],
+                "locator_scope": ["Object"],
+                "images": image_paths,
+                "labels": labels,
+                "image_provenance": {},
+            }
+            project_path.write_text(json.dumps(project_payload), encoding="utf-8")
+            window.config.set("last_project_path", str(project_path))
+
+            window.open_last_project()
+
+            self.assertEqual(window.active_project_kind, "image")
+            self.assertEqual(window.tabs.currentWidget(), window.workbench_widget)
+            self.assertTrue(window.image_list_group_collapsed.get("original"))
+            self.assertIsNone(window.current_image)
+            self.assertEqual(window.file_list.count(), 1)
+            header = window.file_list.item(0)
+            self.assertEqual(header.data(main_module.Qt.UserRole + 1), "original")
+            self.assertIn("1200", header.text())
+            self.assertIsNone(window.file_list.currentItem())
+            self.assertEqual(window.engine.ensure_locator_loaded_calls, 0)
+            self.assertIsNone(window.sam_worker)
+            self.assertIsNone(window.sam_thread)
+        finally:
+            window.deleteLater()
+
+    def test_open_small_project_after_large_project_restores_expanded_image_list(self):
+        window = self._make_window()
+        try:
+            large_paths = [str(self.project_dir / f"large_plate_{index:04d}.png") for index in range(600)]
+            large_path = self.project_dir / "large_project.json"
+            large_path.write_text(
+                json.dumps(
+                    {
+                        "name": "large_project",
+                        "project_template": PROJECT_TEMPLATE_GENERIC,
+                        "taxonomy": ["Object"],
+                        "locator_scope": ["Object"],
+                        "images": large_paths,
+                        "labels": {path: {"parts": {}, "status": "unlabeled"} for path in large_paths},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            window.open_project_path(str(large_path))
+            self.assertTrue(window.image_list_group_collapsed.get("original"))
+            self.assertEqual(window.file_list.count(), 1)
+
+            preload_events = []
+            window.ensure_sam_preloaded = lambda: preload_events.append("preload")
+            small_paths = [str(self.project_dir / f"small_plate_{index}.png") for index in range(2)]
+            small_path = self.project_dir / "small_project.json"
+            small_path.write_text(
+                json.dumps(
+                    {
+                        "name": "small_project",
+                        "project_template": PROJECT_TEMPLATE_GENERIC,
+                        "taxonomy": ["Object"],
+                        "locator_scope": ["Object"],
+                        "images": small_paths,
+                        "labels": {path: {"parts": {}, "status": "unlabeled"} for path in small_paths},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            window.open_project_path(str(small_path))
+
+            self.assertFalse(window.image_list_group_collapsed.get("original"))
+            self.assertEqual(window.file_list.count(), 2)
+            self.assertEqual(window.current_image, small_paths[0])
+            self.assertTrue(self._wait_until(lambda: preload_events == ["preload"]))
         finally:
             window.deleteLater()
 
@@ -1638,6 +1738,7 @@ class GuiSmokeTests(unittest.TestCase):
             window.current_image = image_key
             window.canvas.resize(360, 240)
             window.canvas.load_image(str(image_path))
+            window.refresh_file_list()
             window.vlm_preannotation_total_images = 1
             window.vlm_preannotation_completed_images = 0
             window.vlm_preannotation_total_steps = 6
@@ -1739,7 +1840,7 @@ class GuiSmokeTests(unittest.TestCase):
         finally:
             window.deleteLater()
 
-    def test_vlm_result_reloads_workbench_after_file_list_refresh_blocks_selection_signal(self):
+    def test_vlm_result_updates_workbench_without_file_list_rebuild(self):
         window = self._make_window()
         try:
             project_dir = self.project_dir / "blocked_selection_project"
@@ -1752,6 +1853,7 @@ class GuiSmokeTests(unittest.TestCase):
             window.current_image = image_key
             window.canvas.resize(360, 240)
             window.canvas.load_image(str(image_path))
+            window.refresh_file_list()
             window.vlm_preannotation_total_images = 1
             window.vlm_preannotation_completed_images = 0
             window.vlm_preannotation_total_steps = 6
@@ -1761,14 +1863,6 @@ class GuiSmokeTests(unittest.TestCase):
             window.vlm_preannotation_records = []
             window.vlm_preannotation_saved_total = 0
 
-            original_refresh_file_list = window.refresh_file_list
-
-            def refresh_and_clear_canvas_without_selection_signal():
-                original_refresh_file_list()
-                window.canvas.set_polygons({})
-                window.canvas.set_boxes({}, {})
-
-            window.refresh_file_list = refresh_and_clear_canvas_without_selection_signal
             window.engine.predict_base_sam_polygon = lambda *_args, **_kwargs: [
                 [20, 20],
                 [80, 20],
@@ -1776,21 +1870,23 @@ class GuiSmokeTests(unittest.TestCase):
                 [20, 60],
             ]
 
-            window._on_vlm_preannotation_image_result(
-                {
-                    "status": "passed",
-                    "image_path": str(image_path),
-                    "candidates": [
-                        {
-                            "part": "Head",
-                            "box_xyxy": [20.0, 20.0, 80.0, 60.0],
-                            "confidence": 0.8,
-                            "reason": "visible head",
-                        }
-                    ],
-                    "report_path": str(project_dir / "vlm_report.json"),
-                }
-            )
+            with patch.object(window, "refresh_file_list", wraps=window.refresh_file_list) as full_refresh:
+                window._on_vlm_preannotation_image_result(
+                    {
+                        "status": "passed",
+                        "image_path": str(image_path),
+                        "candidates": [
+                            {
+                                "part": "Head",
+                                "box_xyxy": [20.0, 20.0, 80.0, 60.0],
+                                "confidence": 0.8,
+                                "reason": "visible head",
+                            }
+                        ],
+                        "report_path": str(project_dir / "vlm_report.json"),
+                    }
+                )
+                full_refresh.assert_not_called()
 
             self.assertEqual(window.canvas.auto_boxes["Head"], [20.0, 20.0, 80.0, 60.0])
             self.assertEqual(len(window.canvas.polygons["Head"]), 4)
@@ -1934,6 +2030,233 @@ class GuiSmokeTests(unittest.TestCase):
                     str(image_path.resolve()),
                 )
             )
+        finally:
+            window.deleteLater()
+
+    def test_bulk_image_import_uses_background_progress_thread(self):
+        window = self._make_window()
+        try:
+            project_dir = self.project_dir / "bulk_import_project"
+            project_dir.mkdir(parents=True, exist_ok=True)
+            window.project.create_project("review", str(project_dir), template_id=PROJECT_TEMPLATE_GENERIC)
+            image_paths = []
+            for index in range(main_module.BACKGROUND_IMAGE_IMPORT_THRESHOLD):
+                image_path = project_dir / f"specimen_{index:03d}.png"
+                Image.new("RGB", (16, 16), color=(index, 90, 120)).save(image_path)
+                image_paths.append(str(image_path))
+
+            starts = []
+
+            class FakeImportThread:
+                def __init__(self, project, paths):
+                    self.project = project
+                    self.paths = list(paths)
+                    self.progress_signal = SmokeSignal()
+                    self.success_signal = SmokeSignal()
+                    self.error_signal = SmokeSignal()
+                    self.finished_signal = SmokeSignal()
+                    self.deleted = False
+                    starts.append(self)
+
+                def isRunning(self):
+                    return False
+
+                def start(self):
+                    added = self.project.add_images(
+                        self.paths,
+                        progress_callback=lambda done, total, label: self.progress_signal.emit(done, total, label),
+                    )
+                    self.success_signal.emit(added, len(self.paths))
+                    self.finished_signal.emit()
+
+                def deleteLater(self):
+                    self.deleted = True
+
+            with patch.object(main_module, "ImageImportThread", FakeImportThread):
+                started = window._start_image_import(image_paths)
+
+            self.assertTrue(started)
+            self.assertEqual(len(starts), 1)
+            self.assertEqual(starts[0].paths, image_paths)
+            self.assertTrue(starts[0].deleted)
+            self.assertIsNone(window.image_import_thread)
+            self.assertIsNone(window.image_import_progress_dialog)
+            self.assertEqual(len(window.project.project_data["images"]), len(image_paths))
+            self.assertEqual(window.label_project_images.text(), f"PROJECT IMAGES (0/{len(image_paths)})")
+        finally:
+            window.deleteLater()
+
+    def test_external_batch_inference_uses_background_thread_and_single_save(self):
+        window = self._make_window()
+        try:
+            project_dir = self.project_dir / "external_batch_project"
+            project_dir.mkdir(parents=True, exist_ok=True)
+            window.project.create_project("review", str(project_dir), template_id=PROJECT_TEMPLATE_GENERIC)
+            window.project.project_data["taxonomy"] = ["Head"]
+            image_paths = []
+            for index in range(3):
+                image_path = project_dir / f"specimen_{index:03d}.png"
+                Image.new("RGB", (16, 16), color=(index, 90, 120)).save(image_path)
+                image_paths.append(str(image_path))
+            window.project.add_images(image_paths, save=False)
+            window.model_backend = main_module.EXTERNAL_BACKEND_ID
+
+            starts = []
+            saved_before = window.project.current_project_path
+            save_calls = []
+            original_save = window.project.save_project
+
+            def counted_save():
+                save_calls.append("save")
+                return original_save()
+
+            window.project.save_project = counted_save
+
+            class FakeExternalBatchThread:
+                def __init__(self, project, backend_config, paths, model_manifest="", lang="en"):
+                    self.project = project
+                    self.backend_config = dict(backend_config)
+                    self.paths = list(paths)
+                    self.model_manifest = model_manifest
+                    self.lang = lang
+                    self.log_signal = SmokeSignal()
+                    self.progress_signal = SmokeSignal()
+                    self.result_signal = SmokeSignal()
+                    self.error_signal = SmokeSignal()
+                    self.finished_signal = SmokeSignal()
+                    self.deleted = False
+                    self._running = False
+                    starts.append(self)
+
+                def isRunning(self):
+                    return self._running
+
+                def start(self):
+                    self._running = True
+                    for index, path in enumerate(self.paths, start=1):
+                        self.progress_signal.emit(index - 1, len(self.paths), path)
+                        self.result_signal.emit(
+                            path,
+                            {
+                                "payload": {
+                                    "polygons": {"Head": [[1, 1], [8, 1], [8, 8]]},
+                                    "auto_boxes": {"Head": [1, 1, 8, 8]},
+                                }
+                            },
+                        )
+                        self.progress_signal.emit(index, len(self.paths), path)
+                    self._running = False
+                    self.finished_signal.emit()
+
+                def deleteLater(self):
+                    self.deleted = True
+
+            with patch.object(main_module, "_runtime_parent_backend", lambda *_args, **_kwargs: main_module.EXTERNAL_BACKEND_ID), \
+                 patch.object(main_module, "themed_yes_no_question", lambda *args, **kwargs: main_module.QMessageBox.Yes), \
+                 patch.object(main_module, "ExternalBatchInferenceThread", FakeExternalBatchThread):
+                window.run_batch_inference()
+
+            self.assertEqual(window.project.current_project_path, saved_before)
+            self.assertEqual(len(starts), 1)
+            self.assertEqual(starts[0].paths, image_paths)
+            self.assertTrue(starts[0].deleted)
+            self.assertIsNone(window.external_batch_inference_thread)
+            self.assertIsNone(window.external_batch_inference_progress_dialog)
+            self.assertEqual(save_calls, ["save"])
+            for image_path in image_paths:
+                self.assertIn("Head", window.project.get_labels(image_path))
+                self.assertEqual(window.project.project_data["labels"][image_path]["descriptions"]["Head"], "Auto-Annotated")
+        finally:
+            window.deleteLater()
+
+    def test_remove_selected_images_uses_batch_project_remove(self):
+        window = self._make_window()
+        try:
+            project_dir = self.project_dir / "batch_remove_project"
+            project_dir.mkdir(parents=True, exist_ok=True)
+            window.project.create_project("review", str(project_dir), template_id=PROJECT_TEMPLATE_GENERIC)
+            image_paths = []
+            for index in range(4):
+                image_path = project_dir / f"candidate_{index:03d}.png"
+                Image.new("RGB", (16, 16), color=(index, 90, 120)).save(image_path)
+                image_paths.append(str(image_path))
+            window.project.add_images(image_paths, save=False)
+            window.current_image = image_paths[0]
+            window.refresh_file_list()
+
+            for index in range(window.file_list.count()):
+                item = window.file_list.item(index)
+                path = item.data(main_module.Qt.UserRole)
+                if path in image_paths[:3]:
+                    item.setSelected(True)
+
+            save_calls = []
+            original_save = window.project.save_project
+
+            def counted_save():
+                save_calls.append("save")
+                return original_save()
+
+            window.project.save_project = counted_save
+
+            with patch.object(main_module, "themed_yes_no_question", lambda *args, **kwargs: main_module.QMessageBox.Yes):
+                window.remove_selected_images()
+
+            self.assertEqual(save_calls, [])
+            self.assertTrue(window.project_save_pending)
+            self.assertEqual(window.project.project_data["images"], [image_paths[3]])
+            self.assertNotIn(image_paths[0], window.project.project_data["labels"])
+            self.assertEqual(window.current_image, image_paths[3])
+        finally:
+            window.deleteLater()
+
+    def test_external_training_uses_background_thread(self):
+        window = self._make_window()
+        try:
+            project_dir = self.project_dir / "external_training_project"
+            project_dir.mkdir(parents=True, exist_ok=True)
+            window.project.create_project("review", str(project_dir), template_id=PROJECT_TEMPLATE_GENERIC)
+            starts = []
+
+            class FakeExternalTrainingThread:
+                def __init__(self, project, backend_config):
+                    self.project = project
+                    self.backend_config = dict(backend_config)
+                    self.log_signal = SmokeSignal()
+                    self.success_signal = SmokeSignal()
+                    self.error_signal = SmokeSignal()
+                    self.finished_signal = SmokeSignal()
+                    self.deleted = False
+                    self._running = False
+                    starts.append(self)
+
+                def isRunning(self):
+                    return self._running
+
+                def start(self):
+                    self._running = True
+                    self.log_signal.emit("External backend training started.")
+                    self.success_signal.emit(
+                        {
+                            "contract_json": str(project_dir / "external_runs" / "contract.json"),
+                            "model_manifest": str(project_dir / "external_runs" / "model_manifest.json"),
+                        }
+                    )
+                    self._running = False
+                    self.finished_signal.emit()
+
+                def deleteLater(self):
+                    self.deleted = True
+
+            with patch.object(main_module, "ExternalTrainingThread", FakeExternalTrainingThread):
+                window.run_external_training()
+
+            self.assertEqual(len(starts), 1)
+            self.assertTrue(starts[0].deleted)
+            self.assertIsNone(window.external_training_thread)
+            self.assertTrue(window.btn_train.isEnabled())
+            self.assertFalse(window.btn_stop_training.isEnabled())
+            self.assertEqual(window.progress.value(), 100)
         finally:
             window.deleteLater()
 
@@ -2326,7 +2649,7 @@ class GuiSmokeTests(unittest.TestCase):
             window.refresh_file_list()
             list_texts = [window.file_list.item(index).text().strip() for index in range(window.file_list.count())]
             self.assertFalse(any("Manual Split Needed" in text for text in list_texts))
-            self.assertTrue(any("Split Crops" in text for text in list_texts))
+            self.assertTrue(any("Hard-joined Candidates" in text for text in list_texts))
         finally:
             window.deleteLater()
 
@@ -2481,6 +2804,127 @@ class GuiSmokeTests(unittest.TestCase):
         finally:
             window.deleteLater()
 
+    def test_labeled_images_sort_to_top_within_custom_image_group(self):
+        window = self._make_window()
+        try:
+            image_a = self.project_dir / "review_unlabeled_a.png"
+            image_b = self.project_dir / "review_labeled_b.png"
+            image_c = self.project_dir / "review_unlabeled_c.png"
+            image_a.write_bytes(b"a")
+            image_b.write_bytes(b"b")
+            image_c.write_bytes(b"c")
+            window.project.add_images([str(image_a), str(image_b), str(image_c)])
+            window.project.project_data["image_groups"] = {
+                "custom_groups": [{"id": "review_ready", "name": "Review Ready"}]
+            }
+            window.move_images_to_group([str(image_a), str(image_b), str(image_c)], "review_ready")
+            window.project.update_label(
+                str(image_b),
+                "Head",
+                [[1, 1], [4, 1], [4, 4]],
+                "reviewed",
+                save=False,
+            )
+
+            groups = window._project_image_groups()
+
+            self.assertEqual(
+                [Path(path).name for path in groups["review_ready"]],
+                [image_b.name, image_a.name, image_c.name],
+            )
+        finally:
+            window.deleteLater()
+
+    def test_empty_custom_image_group_is_removed_from_move_targets(self):
+        window = self._make_window()
+        try:
+            image_a = self.project_dir / "review_a.png"
+            image_b = self.project_dir / "review_b.png"
+            image_a.write_bytes(b"a")
+            image_b.write_bytes(b"b")
+            window.project.add_images([str(image_a), str(image_b)])
+            window.project.project_data["image_groups"] = {
+                "custom_groups": [{"id": "review_ready", "name": "Review Ready"}]
+            }
+            window.project.project_data["vlm_preannotation"] = {
+                "target_parts": [],
+                "processing_scope": "image_group",
+                "image_group": "review_ready",
+            }
+
+            window.move_images_to_group([str(image_b)], "review_ready")
+            self.assertIn("review_ready", {group_id for group_id, _label in window._image_group_move_target_definitions()})
+
+            window.move_images_to_group([str(image_b)], "original")
+
+            self.assertEqual(window._custom_image_group_definitions(), [])
+            self.assertEqual(window.project.project_data["image_groups"]["custom_groups"], [])
+            self.assertNotIn("review_ready", {group_id for group_id, _label in window._image_group_move_target_definitions()})
+            self.assertEqual(window.project.get_vlm_preannotation_settings()["image_group"], "split")
+        finally:
+            window.deleteLater()
+
+    def test_file_list_context_menu_shows_new_group_at_top_level_only(self):
+        window = self._make_window()
+        try:
+            image_a = self.project_dir / "menu_a.png"
+            image_b = self.project_dir / "menu_b.png"
+            Image.new("RGB", (16, 16), color=(120, 80, 40)).save(image_a)
+            Image.new("RGB", (16, 16), color=(40, 120, 80)).save(image_b)
+            window.project.add_images([str(image_a), str(image_b)])
+            window.project.project_data["image_groups"] = {
+                "custom_groups": [
+                    {"id": "filled_group", "name": "Filled Group"},
+                    {"id": "empty_group", "name": "Empty Group"},
+                ]
+            }
+            window.move_images_to_group([str(image_b)], "filled_group")
+            window.refresh_file_list()
+            for index in range(window.file_list.count()):
+                item = window.file_list.item(index)
+                if item.data(main_module.Qt.UserRole) and _same_path(item.data(main_module.Qt.UserRole), image_a):
+                    window.file_list.setCurrentItem(item)
+                    break
+
+            captured_menus = []
+
+            class FakeMenu:
+                def __init__(self, *args, **kwargs):
+                    self.title = ""
+                    self.entries = []
+                    captured_menus.append(self)
+
+                def addAction(self, text, *args, **kwargs):
+                    self.entries.append(("action", str(text), None))
+                    return None
+
+                def addSeparator(self):
+                    self.entries.append(("separator", "", None))
+                    return None
+
+                def addMenu(self, text):
+                    menu = FakeMenu()
+                    menu.title = str(text)
+                    self.entries.append(("menu", str(text), menu))
+                    return menu
+
+                def exec(self, *args, **kwargs):
+                    return None
+
+            with patch.object(main_module, "QMenu", FakeMenu):
+                window.show_file_list_context_menu(window.file_list.rect().center())
+
+            root_menu = captured_menus[0]
+            top_level_actions = [text for kind, text, _menu in root_menu.entries if kind == "action"]
+            self.assertIn("New Image Group", top_level_actions)
+            move_menu = next(menu for kind, text, menu in root_menu.entries if kind == "menu" and text == "Move to Image Group")
+            move_actions = [text for kind, text, _menu in move_menu.entries if kind == "action"]
+            self.assertNotIn("New Image Group", move_actions)
+            self.assertIn("Filled Group", move_actions)
+            self.assertNotIn("Empty Group", move_actions)
+        finally:
+            window.deleteLater()
+
     def test_legacy_panel_crop_filename_is_grouped_as_split_crop(self):
         window = self._make_window()
         try:
@@ -2503,7 +2947,7 @@ class GuiSmokeTests(unittest.TestCase):
         finally:
             window.deleteLater()
 
-    def test_batch_panel_split_adds_white_separator_crops_and_skips_hard_seams(self):
+    def test_batch_panel_split_adds_white_and_hard_seam_candidate_crops(self):
         window = self._make_window()
         try:
             parent_image = self.project_dir / "paper__accepted_000008__figure.jpg"
@@ -2547,34 +2991,93 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertTrue(_same_path(images[1], hard_seam_image))
             self.assertTrue(_same_path(images[2], existing_crop))
             generated_paths = images[3:]
-            self.assertGreaterEqual(len(generated_paths), 1)
-            for generated in generated_paths:
+            self.assertGreaterEqual(len(generated_paths), 3)
+            white_generated = [
+                generated
+                for generated in generated_paths
+                if Path(generated).name.startswith("paper__accepted_000008__figure__panel_")
+            ]
+            hard_generated = [
+                generated
+                for generated in generated_paths
+                if Path(generated).name.startswith("paper__accepted_000009__figure__panel_")
+            ]
+            self.assertGreaterEqual(len(white_generated), 1)
+            self.assertEqual(len(hard_generated), 2)
+            for generated in white_generated:
                 self.assertTrue(Path(generated).name.startswith("paper__accepted_000008__figure__panel_"))
                 provenance = window.project.get_image_provenance(generated)
                 self.assertEqual(provenance["source_type"], "pdf_candidate_crop")
                 self.assertEqual(provenance["derived_from"]["crop_source"], "white_separator_panel_split")
                 self.assertTrue(window._is_split_crop_image(generated))
                 self.assertFalse(window._needs_manual_panel_split(generated))
+            for generated in hard_generated:
+                provenance = window.project.get_image_provenance(generated)
+                self.assertEqual(provenance["source_type"], "image_crop")
+                self.assertEqual(provenance["derived_from"]["crop_source"], "hard_seam_panel_split")
+                self.assertTrue(window._is_split_crop_image(generated))
+                self.assertFalse(window._needs_manual_panel_split(generated))
             hard_review = window.project.get_image_provenance(str(hard_seam_image))["panel_split_review"]
-            self.assertEqual(hard_review["status"], "manual_required")
-            self.assertEqual(hard_review["reason"], "hard_seam_panel_split")
+            self.assertEqual(hard_review["status"], "candidate_split")
+            self.assertEqual(hard_review["reason"], "hard_seam_panel_split_candidate")
+
+            groups = window._project_image_groups()
+            self.assertEqual({Path(path).name for path in groups["hard_candidates"]}, {Path(path).name for path in hard_generated})
+            self.assertFalse(any(Path(path).name in {Path(item).name for item in hard_generated} for path in groups["split"]))
 
             list_texts = [window.file_list.item(index).text().strip() for index in range(window.file_list.count())]
             original_index = next(index for index, text in enumerate(list_texts) if "Original Images" in text)
             split_index = next(index for index, text in enumerate(list_texts) if "Split Crops" in text)
-            manual_index = next(index for index, text in enumerate(list_texts) if "Manual Split Needed" in text)
+            hard_index = next(index for index, text in enumerate(list_texts) if "Hard-joined Candidates" in text)
             self.assertLess(original_index, split_index)
-            for generated in generated_paths:
-                self.assertLess(list_texts.index(parent_image.name), list_texts.index(Path(generated).name))
-                self.assertLess(list_texts.index(Path(generated).name), manual_index)
-            self.assertLess(split_index, manual_index)
-            self.assertGreater(list_texts.index(hard_seam_image.name), manual_index)
+            self.assertLess(split_index, hard_index)
+            for generated in white_generated:
+                self.assertGreater(list_texts.index(Path(generated).name), split_index)
+                self.assertLess(list_texts.index(Path(generated).name), hard_index)
+            for generated in hard_generated:
+                self.assertGreater(list_texts.index(Path(generated).name), hard_index)
+            self.assertFalse(any("Manual Split Needed" in text for text in list_texts))
+        finally:
+            window.deleteLater()
 
-            manual_header = window.file_list.item(manual_index)
-            window._handle_image_list_item_clicked(manual_header)
-            collapsed_texts = [window.file_list.item(index).text().strip() for index in range(window.file_list.count())]
-            self.assertTrue(any(text.startswith("▸") and "Manual Split Needed" in text for text in collapsed_texts))
-            self.assertNotIn(hard_seam_image.name, collapsed_texts)
+    def test_batch_panel_split_does_not_force_equal_grid_from_labels(self):
+        window = self._make_window()
+        try:
+            source_image = self.project_dir / "letter_guided_plate.jpg"
+            image = Image.new("RGB", (520, 420), (152, 168, 145))
+            draw = ImageDraw.Draw(image)
+            try:
+                font = ImageFont.truetype("arial.ttf", 34)
+            except Exception:
+                font = ImageFont.load_default(size=34)
+            fills = [
+                (126, 104, 78),
+                (185, 172, 132),
+                (92, 118, 96),
+                (164, 150, 112),
+            ]
+            for row in range(2):
+                for col in range(2):
+                    x0 = col * 260
+                    y0 = row * 210
+                    draw.rectangle((x0, y0, x0 + 259, y0 + 209), fill=fills[row * 2 + col])
+                    draw.ellipse((x0 + 80, y0 + 55, x0 + 205, y0 + 160), fill=(80 + row * 30, 68 + col * 28, 48))
+            for letter, pos in zip("ABCD", [(12, 10), (272, 10), (12, 220), (272, 220)]):
+                draw.text(pos, letter, fill=(255, 255, 255), font=font)
+            image.save(source_image)
+            window.project.add_images([str(source_image)])
+
+            with patch.object(main_module, "themed_yes_no_question", lambda *args, **kwargs: main_module.QMessageBox.Yes):
+                with patch.object(main_module.QMessageBox, "information", lambda *args, **kwargs: None):
+                    window.batch_split_panel_images()
+
+            generated_paths = list(window.project.project_data["images"])[1:]
+            self.assertEqual(generated_paths, [])
+            source_review = window.project.get_image_provenance(str(source_image))["panel_split_review"]
+            self.assertEqual(source_review["status"], "skipped")
+            self.assertEqual(source_review["reason"], "no_split_detected")
+            groups = window._project_image_groups()
+            self.assertEqual(groups["hard_candidates"], [])
         finally:
             window.deleteLater()
 

@@ -65,6 +65,7 @@ class ProjectManager:
                 "target_parts": [],
                 "processing_scope": "image_group",
                 "image_group": DEFAULT_VLM_IMAGE_GROUP,
+                "concurrency": 1,
                 "prompt_profile_id": DEFAULT_VLM_PROMPT_PROFILE_ID,
                 "prompt_profile": sanitize_vlm_prompt_profile({}),
             },
@@ -182,7 +183,7 @@ class ProjectManager:
     def _sanitize_image_groups(self, image_groups):
         if not isinstance(image_groups, dict):
             image_groups = {}
-        builtin_ids = {"original", "split", "manual_done", "manual"}
+        builtin_ids = {"original", "split", "hard_candidates", "manual_done", "manual"}
         seen = set()
         custom_groups = []
         raw_groups = image_groups.get("custom_groups", [])
@@ -233,10 +234,16 @@ class ProjectManager:
         }
         if image_group not in VLM_IMAGE_GROUPS and image_group not in custom_group_ids:
             image_group = DEFAULT_VLM_IMAGE_GROUP
+        try:
+            concurrency = int(settings.get("concurrency", 1))
+        except Exception:
+            concurrency = 1
+        concurrency = max(1, min(8, concurrency))
         return {
             "target_parts": target_parts,
             "processing_scope": processing_scope,
             "image_group": image_group,
+            "concurrency": concurrency,
             "prompt_profile_id": str(
                 settings.get("prompt_profile_id")
                 or (settings.get("prompt_profile") if isinstance(settings.get("prompt_profile"), dict) else {}).get("profile_id")
@@ -521,7 +528,12 @@ class ProjectManager:
             absolute = self._to_absolute(path)
         except Exception:
             absolute = path
-        return os.path.normcase(os.path.normpath(os.path.abspath(str(absolute))))
+        return self._absolute_path_identity(absolute)
+
+    def _absolute_path_identity(self, path):
+        if not path:
+            return ""
+        return os.path.normcase(os.path.normpath(os.path.abspath(str(path))))
 
     def _registered_image_key_for_path(self, path):
         target = self._path_identity(path)
@@ -579,6 +591,7 @@ class ProjectManager:
                 "target_parts": [],
                 "processing_scope": "image_group",
                 "image_group": DEFAULT_VLM_IMAGE_GROUP,
+                "concurrency": 1,
                 "prompt_profile_id": DEFAULT_VLM_PROMPT_PROFILE_ID,
                 "prompt_profile": sanitize_vlm_prompt_profile({}),
             },
@@ -651,20 +664,22 @@ class ProjectManager:
         self.project_data["taxon_label"] = str(loaded_data.get("taxon_label", "Taxon") or "Taxon").strip() or "Taxon"
 
         image_keys_seen = set()
+        image_key_by_identity = {}
 
         # Handle Images
         for img_rel in loaded_data.get("images", []):
             img_abs = self._to_absolute(img_rel)
-            identity = self._path_identity(img_abs)
+            identity = self._absolute_path_identity(img_abs)
             if not identity or identity in image_keys_seen:
                 continue
             image_keys_seen.add(identity)
             self.project_data["images"].append(img_abs)
+            image_key_by_identity[identity] = img_abs
             
         # Handle Labels
         for img_rel, label_data in loaded_data.get("labels", {}).items():
             img_abs = self._to_absolute(img_rel)
-            project_key = self._registered_image_key_for_path(img_abs) or img_abs
+            project_key = image_key_by_identity.get(self._absolute_path_identity(img_abs), img_abs)
             existing = self.project_data["labels"].get(project_key)
             if existing:
                 self.project_data["labels"][project_key] = self._merge_loaded_label_entry(existing, label_data)
@@ -674,7 +689,7 @@ class ProjectManager:
         # Handle Scales
         for img_rel, scale_val in loaded_data.get("scales", {}).items():
             img_abs = self._to_absolute(img_rel)
-            project_key = self._registered_image_key_for_path(img_abs) or img_abs
+            project_key = image_key_by_identity.get(self._absolute_path_identity(img_abs), img_abs)
             self.project_data["scales"][project_key] = scale_val
 
         # Handle per-image provenance for agent-imported PDF candidates.
@@ -682,7 +697,7 @@ class ProjectManager:
         for img_rel, provenance in loaded_data.get("image_provenance", {}).items():
             img_abs = self._to_absolute(img_rel)
             if isinstance(provenance, dict):
-                project_key = self._registered_image_key_for_path(img_abs) or img_abs
+                project_key = image_key_by_identity.get(self._absolute_path_identity(img_abs), img_abs)
                 existing = self.project_data["image_provenance"].get(project_key, {})
                 if isinstance(existing, dict):
                     merged = dict(existing)
@@ -731,30 +746,82 @@ class ProjectManager:
             with open(self.current_project_path, 'w', encoding='utf-8') as f:
                 json.dump(data_to_save, f, indent=4, ensure_ascii=False)
 
-    def add_images(self, image_paths):
-        for img in image_paths:
-            abs_img = os.path.abspath(img)
-            if abs_img not in self.project_data["images"]:
-                self.project_data["images"].append(abs_img)
-                self.project_data["labels"][abs_img] = self._default_label_entry()
-        self.save_project()
+    def add_images(self, image_paths, progress_callback=None, save=True):
+        paths = list(image_paths or [])
+        total = len(paths)
+        if progress_callback:
+            progress_callback(0, total, "")
 
-    def remove_image(self, image_path):
+        images = self.project_data.setdefault("images", [])
+        labels = self.project_data.setdefault("labels", {})
+        existing = {
+            os.path.normcase(os.path.normpath(os.path.abspath(str(path))))
+            for path in images
+            if path
+        }
+        added = 0
+        for index, img in enumerate(paths, start=1):
+            abs_img = os.path.abspath(str(img))
+            identity = os.path.normcase(os.path.normpath(abs_img))
+            if identity not in existing:
+                images.append(abs_img)
+                labels.setdefault(abs_img, self._default_label_entry())
+                existing.add(identity)
+                added += 1
+            if progress_callback:
+                progress_callback(index, total, abs_img)
+
+        if save:
+            self.save_project()
+        return added
+
+    def remove_image(self, image_path, save=True):
         """Removes an image and its labels from the project."""
-        abs_path = self._to_absolute(image_path)
-        if abs_path in self.project_data["images"]:
-            self.project_data["images"].remove(abs_path)
-        
-        if abs_path in self.project_data["labels"]:
-            del self.project_data["labels"][abs_path]
-            
-        if abs_path in self.project_data["scales"]:
-            del self.project_data["scales"][abs_path]
+        removed = self.remove_images([image_path], save=save)
+        return bool(removed)
 
-        if abs_path in self.project_data.get("image_provenance", {}):
-            del self.project_data["image_provenance"][abs_path]
-            
-        self.save_project()
+    def remove_images(self, image_paths, progress_callback=None, save=True):
+        """Removes images and related project metadata, saving only once for batches."""
+        paths = [path for path in (image_paths or []) if path]
+        total = len(paths)
+        if progress_callback:
+            progress_callback(0, total, "")
+        if not paths:
+            if save:
+                self.save_project()
+            return 0
+
+        remove_identities = {self._path_identity(path) for path in paths}
+        remove_identities.discard("")
+
+        def should_remove(path):
+            return self._path_identity(path) in remove_identities
+
+        old_images = list(self.project_data.get("images", []))
+        kept_images = [path for path in old_images if not should_remove(path)]
+        removed_count = len(old_images) - len(kept_images)
+        self.project_data["images"] = kept_images
+
+        for key in ("labels", "scales", "image_provenance"):
+            mapping = self.project_data.get(key)
+            if not isinstance(mapping, dict):
+                continue
+            for stored_path in list(mapping.keys()):
+                if should_remove(stored_path):
+                    del mapping[stored_path]
+
+        for group in self.project_data.get("image_groups", {}).get("custom_groups", []):
+            if not isinstance(group, dict) or not isinstance(group.get("images"), list):
+                continue
+            group["images"] = [path for path in group.get("images", []) if not should_remove(path)]
+
+        if progress_callback:
+            for index, path in enumerate(paths, start=1):
+                progress_callback(index, total, str(path))
+
+        if save:
+            self.save_project()
+        return removed_count
 
     def set_image_provenance(self, image_path, provenance, save=True):
         abs_path = self._to_absolute(image_path)
@@ -821,9 +888,10 @@ class ProjectManager:
             return ""
         return str(descriptions.get(clean_part, "") or "")
 
-    def set_scale(self, image_path, pixels_per_mm):
+    def set_scale(self, image_path, pixels_per_mm, save=True):
         self.project_data["scales"][image_path] = pixels_per_mm
-        self.save_project()
+        if save:
+            self.save_project()
 
     def get_scale(self, image_path):
         return self.project_data.get("scales", {}).get(image_path)
@@ -1857,10 +1925,10 @@ class ProjectManager:
             if save:
                 self.save_project()
 
-    def set_genus(self, image_path, genus):
-        self.set_taxon(image_path, genus)
+    def set_genus(self, image_path, genus, save=True):
+        self.set_taxon(image_path, genus, save=save)
 
-    def set_taxon(self, image_path, taxon, taxon_rank=None, taxon_metadata=None):
+    def set_taxon(self, image_path, taxon, taxon_rank=None, taxon_metadata=None, save=True):
         if image_path in self.project_data["labels"]:
             entry = self._normalize_label_taxon_fields(self.project_data["labels"][image_path])
             clean_taxon = str(taxon or "Unknown").strip() or "Unknown"
@@ -1870,7 +1938,8 @@ class ProjectManager:
                 entry["taxon_rank"] = str(taxon_rank or "").strip()
             if isinstance(taxon_metadata, dict):
                 entry["taxon_metadata"] = dict(taxon_metadata)
-            self.save_project()
+            if save:
+                self.save_project()
 
     def get_labels(self, image_path):
         return self.project_data["labels"].get(image_path, {}).get("parts", {})
@@ -1897,6 +1966,135 @@ class ProjectManager:
             return True
         return False
 
+    def _rename_label_part_key(self, entry, old_part, new_part):
+        if not isinstance(entry, dict):
+            return
+        for key in (
+            "parts",
+            "boxes",
+            "auto_boxes",
+            "auto_box_meta",
+            "descriptions",
+            "description_sources",
+            "shrink_loose_boxes",
+            "trajectories",
+        ):
+            bucket = entry.get(key)
+            if isinstance(bucket, dict) and old_part in bucket:
+                bucket[new_part] = bucket.pop(old_part)
+        trajectories = entry.get("trajectories", {})
+        if isinstance(trajectories, dict):
+            for payload in trajectories.values():
+                if not isinstance(payload, dict):
+                    continue
+                parent_context = payload.get("parent_context", {})
+                if isinstance(parent_context, dict) and parent_context.get("parent_part") == old_part:
+                    parent_context["parent_part"] = new_part
+
+    def _rename_part_in_routes(self, old_part, new_part):
+        raw_manifest = self.project_data.get("cascade_routes", {})
+        manifest = raw_manifest if isinstance(raw_manifest, dict) else {}
+        updated_routes = []
+        raw_routes = manifest.get("routes", [])
+        if not isinstance(raw_routes, list):
+            raw_routes = []
+        for route in raw_routes:
+            if not isinstance(route, dict):
+                continue
+            route_payload = dict(route)
+            if route_payload.get("parent") == old_part:
+                route_payload["parent"] = new_part
+            if route_payload.get("child") == old_part:
+                route_payload["child"] = new_part
+            if route_payload.get("expert_part") == old_part:
+                route_payload["expert_part"] = new_part
+                filename = route_payload.get("expert_filename")
+                if filename:
+                    route_payload["expert_id"] = f"{new_part}/{filename}"
+            appointed = route_payload.get("appointed_expert")
+            if isinstance(appointed, dict) and appointed.get("expert_part") == old_part:
+                appointed = dict(appointed)
+                appointed["expert_part"] = new_part
+                filename = appointed.get("expert_filename")
+                if filename:
+                    appointed["expert_id"] = f"{new_part}/{filename}"
+                route_payload["appointed_expert"] = appointed
+            candidates = []
+            for candidate in route_payload.get("expert_candidates", []) or []:
+                if not isinstance(candidate, dict):
+                    continue
+                candidate_payload = dict(candidate)
+                if candidate_payload.get("expert_part") == old_part:
+                    candidate_payload["expert_part"] = new_part
+                    filename = candidate_payload.get("expert_filename")
+                    if filename:
+                        candidate_payload["expert_id"] = f"{new_part}/{filename}"
+                candidates.append(candidate_payload)
+            route_payload["expert_candidates"] = candidates
+            updated_routes.append(route_payload)
+        self.project_data["cascade_routes"] = self._sanitize_cascade_routes(
+            {
+                "version": manifest.get("version", PROJECT_ROUTE_MANIFEST_VERSION),
+                "routes": updated_routes,
+            }
+        )
+
+    def rename_taxonomy_part(self, old_part_name, new_part_name, save=True):
+        """Renames a taxonomy part and migrates labels, drafts, boxes, and routes."""
+        old_part = str(old_part_name or "").strip()
+        new_part = str(new_part_name or "").strip()
+        taxonomy = list(self.project_data.get("taxonomy", []))
+        if (
+            not old_part
+            or not new_part
+            or old_part == new_part
+            or old_part not in taxonomy
+            or new_part in taxonomy
+            or not is_safe_part_name(new_part)
+        ):
+            return False
+
+        raw_parent_map = self.project_data.get("blink_context_roi_parents", {})
+        raw_parent_map = dict(raw_parent_map) if isinstance(raw_parent_map, dict) else {}
+
+        self.project_data["taxonomy"] = [new_part if part == old_part else part for part in taxonomy]
+        self.project_data["locator_scope"] = [
+            new_part if part == old_part else part
+            for part in self.project_data.get("locator_scope", [])
+        ]
+
+        ratios = dict(self.project_data.get("parent_box_aspect_ratios", {}))
+        if old_part in ratios and new_part not in ratios:
+            ratios[new_part] = ratios.pop(old_part)
+        else:
+            ratios.pop(old_part, None)
+        self.project_data["parent_box_aspect_ratios"] = self._sanitize_parent_box_aspect_ratios(ratios)
+
+        settings = dict(self.project_data.get("vlm_preannotation", {}))
+        settings["target_parts"] = [
+            new_part if part == old_part else part
+            for part in settings.get("target_parts", [])
+        ]
+        self.project_data["vlm_preannotation"] = self._sanitize_vlm_preannotation_settings(settings)
+
+        renamed_parent_map = {}
+        for target_part, parent_part in raw_parent_map.items():
+            target = new_part if target_part == old_part else target_part
+            parent = new_part if parent_part == old_part else parent_part
+            if target != parent:
+                renamed_parent_map[target] = parent
+        self.project_data["blink_context_roi_parents"] = self._sanitize_blink_context_roi_parents(renamed_parent_map)
+
+        for entry in self.project_data.get("labels", {}).values():
+            self._rename_label_part_key(entry, old_part, new_part)
+
+        self._rename_part_in_routes(old_part, new_part)
+        self._sync_active_model_profile_from_project_fields()
+
+        if save:
+            self.save_project()
+        return True
+
     def remove_taxonomy_part(self, part_name):
         """Removes a part from taxonomy and deletes all associated labels."""
         if part_name in self.project_data["taxonomy"]:
@@ -1909,7 +2107,7 @@ class ProjectManager:
             
             # Remove labels for this part in all images
             for img_path in self.project_data["labels"]:
-                self.delete_label(img_path, part_name)
+                self.delete_label(img_path, part_name, save=False)
 
             parent_map = self.get_blink_context_roi_parents()
             self.project_data["blink_context_roi_parents"] = {
@@ -1935,10 +2133,20 @@ class ProjectManager:
             return True
         return False
 
-    def remove_auto_labels(self):
-        """Removes all labels marked as 'Auto-Annotated'."""
+    def remove_auto_labels_for_images(self, image_paths, save=True):
+        """Removes labels marked as 'Auto-Annotated' for the selected images."""
         removed_count = 0
-        for img_path in self.project_data["labels"]:
+        candidate_paths = list(image_paths or [])
+        if not candidate_paths:
+            return 0
+        path_identities = {self._path_identity(path) for path in candidate_paths if path}
+        path_identities.discard("")
+        label_keys = [
+            img_path
+            for img_path in list(self.project_data.get("labels", {}).keys())
+            if self._path_identity(img_path) in path_identities
+        ]
+        for img_path in label_keys:
             parts_to_remove = []
             labels = self.project_data["labels"][img_path]
             
@@ -1962,8 +2170,13 @@ class ProjectManager:
             if not labels["parts"]:
                 labels["status"] = "unlabeled"
                 
-        self.save_project()
+        if save:
+            self.save_project()
         return removed_count
+
+    def remove_auto_labels(self, save=True):
+        """Removes all labels marked as 'Auto-Annotated'."""
+        return self.remove_auto_labels_for_images(self.project_data.get("labels", {}).keys(), save=save)
 
     def verify_image_labels(self, image_path, save=True):
         """Removes 'Auto-Annotated' only from labels with a saved polygon."""

@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 import copy
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -85,12 +86,33 @@ class DummyThread:
         return True
 
 
-class DummySamWorker:
+class DummyVlmPreannotationThread(DummyThread):
+    instances = []
+
     def __init__(self, *args, **kwargs):
+        super().__init__()
+        type(self).instances.append(self)
+        self.args = args
+        self.kwargs = kwargs
+        self.log_signal = DummySignal()
+        self.image_result_signal = DummySignal()
+        self.progress_signal = DummySignal()
+        self.error_signal = DummySignal()
+        self.finished_signal = DummySignal()
+
+
+class DummySamWorker:
+    last_instance = None
+
+    def __init__(self, *args, **kwargs):
+        type(self).last_instance = self
         self.model = None
+        self.predict_point_calls = []
+        self.predict_box_calls = []
         self.mask_generated = DummySignal()
         self.model_loaded = DummySignal()
         self.model_load_error = DummySignal()
+        self.prompt_failed = DummySignal()
 
     def moveToThread(self, thread):
         self.thread = thread
@@ -107,6 +129,12 @@ class DummySamWorker:
 
     def set_epsilon(self, epsilon):
         self.poly_epsilon = epsilon
+
+    def predict_point(self, image_path, x, y):
+        self.predict_point_calls.append((image_path, x, y))
+
+    def predict_box(self, image_path, x1, y1, x2, y2):
+        self.predict_box_calls.append((image_path, x1, y1, x2, y2))
 
 
 class DummyCascadeManager:
@@ -277,6 +305,7 @@ class DummyProjectManager:
                 "parts": {},
                 "boxes": {},
                 "auto_boxes": {},
+                "auto_box_meta": {},
                 "descriptions": {},
                 "description_sources": {},
                 "status": "unlabeled",
@@ -487,16 +516,17 @@ class DummyProjectManager:
     def get_description_source(self, image_path, part_name):
         return dict(self.project_data["labels"].get(image_path, {}).get("description_sources", {}).get(part_name, {}))
 
-    def set_genus(self, image_path, genus_name):
-        self.set_taxon(image_path, genus_name)
+    def set_genus(self, image_path, genus_name, save=True):
+        self.set_taxon(image_path, genus_name, save=save)
         return None
 
-    def set_taxon(self, image_path, taxon_name):
+    def set_taxon(self, image_path, taxon_name, save=True):
         entry = self._ensure_label_entry(image_path)
         clean_taxon = str(taxon_name or "Unknown").strip() or "Unknown"
         entry["taxon"] = clean_taxon
         entry["genus"] = clean_taxon
-        self.save_project()
+        if save:
+            self.save_project()
         return None
 
     def update_label(self, image_path, part_name, points, description_text=None, box=None, auto_box=None, save=True):
@@ -516,6 +546,41 @@ class DummyProjectManager:
             self.save_project()
         return None
 
+    def update_auto_box(self, image_path, part_name, box, description_text=None, source_meta=None, save=True):
+        entry = self._ensure_label_entry(image_path)
+        entry.setdefault("auto_boxes", {})[part_name] = [float(v) for v in box]
+        if description_text:
+            entry.setdefault("descriptions", {})[part_name] = description_text
+        if source_meta:
+            entry.setdefault("auto_box_meta", {})[part_name] = dict(source_meta)
+        if save:
+            self.save_project()
+        return True
+
+    def remove_auto_labels_for_images(self, image_paths, save=True):
+        removed = 0
+        for image_path in image_paths or []:
+            entry = self.project_data.get("labels", {}).get(image_path)
+            if not isinstance(entry, dict):
+                continue
+            descriptions = entry.get("descriptions", {}) if isinstance(entry.get("descriptions", {}), dict) else {}
+            parts_to_remove = [part for part, desc in list(descriptions.items()) if desc == "Auto-Annotated"]
+            for part in parts_to_remove:
+                entry.get("parts", {}).pop(part, None)
+                entry.get("descriptions", {}).pop(part, None)
+                entry.get("description_sources", {}).pop(part, None)
+                entry.get("auto_boxes", {}).pop(part, None)
+                entry.get("auto_box_meta", {}).pop(part, None)
+                removed += 1
+            if not entry.get("parts"):
+                entry["status"] = "unlabeled"
+        if save:
+            self.save_project()
+        return removed
+
+    def remove_auto_labels(self, save=True):
+        return self.remove_auto_labels_for_images(self.project_data.get("labels", {}).keys(), save=save)
+
     def delete_label(self, image_path, part_name, save=True):
         entry = self.project_data["labels"].get(image_path)
         if entry is None:
@@ -530,6 +595,28 @@ class DummyProjectManager:
         if save:
             self.save_project()
         return None
+
+    def remove_image(self, image_path, save=True):
+        return bool(self.remove_images([image_path], save=save))
+
+    def remove_images(self, image_paths, progress_callback=None, save=True):
+        paths = [str(path) for path in (image_paths or []) if path]
+        total = len(paths)
+        if progress_callback:
+            progress_callback(0, total, "")
+        remove_set = set(paths)
+        old_images = list(self.project_data.get("images", []))
+        self.project_data["images"] = [path for path in old_images if path not in remove_set]
+        removed = len(old_images) - len(self.project_data["images"])
+        for path in paths:
+            self.project_data.get("labels", {}).pop(path, None)
+            self.project_data.get("image_provenance", {}).pop(path, None)
+        if progress_callback:
+            for index, path in enumerate(paths, start=1):
+                progress_callback(index, total, path)
+        if save:
+            self.save_project()
+        return removed
 
     def update_trajectory(self, image_path, part_name, trajectory, parent_context=None, save=True):
         entry = self._ensure_label_entry(image_path)
@@ -715,6 +802,31 @@ class DummyProjectManager:
             for route in self.project_data.get("cascade_routes", {}).get("routes", [])
             if route.get("parent") != part_name and route.get("child") != part_name
         ]
+        if save:
+            self.save_project()
+        return True
+
+    def rename_taxonomy_part(self, old_part_name, new_part_name, save=True):
+        old_part = str(old_part_name or "").strip()
+        new_part = str(new_part_name or "").strip()
+        taxonomy = self.project_data.get("taxonomy", [])
+        if not old_part or not new_part or old_part not in taxonomy or new_part in taxonomy:
+            return False
+        self.project_data["taxonomy"] = [new_part if part == old_part else part for part in taxonomy]
+        self.project_data["locator_scope"] = [
+            new_part if part == old_part else part
+            for part in self.project_data.get("locator_scope", [])
+        ]
+        parent_map = self.project_data.get("blink_context_roi_parents", {})
+        self.project_data["blink_context_roi_parents"] = {
+            (new_part if target == old_part else target): (new_part if parent == old_part else parent)
+            for target, parent in parent_map.items()
+        }
+        for entry in self.project_data.get("labels", {}).values():
+            for key in ("parts", "boxes", "auto_boxes", "auto_box_meta", "descriptions", "shrink_loose_boxes", "trajectories"):
+                bucket = entry.get(key)
+                if isinstance(bucket, dict) and old_part in bucket:
+                    bucket[new_part] = bucket.pop(old_part)
         if save:
             self.save_project()
         return True
@@ -1193,6 +1305,47 @@ class UiPolishScopeTests(unittest.TestCase):
         finally:
             window.deleteLater()
 
+    def test_image_group_header_collapse_reuses_large_project_group_cache(self):
+        window = self.make_main_window()
+        try:
+            image_paths = []
+            labels = {}
+            for index in range(1200):
+                image_path = str(Path(self.temp_dir.name) / f"plate_{index:04d}.png")
+                image_paths.append(image_path)
+                labels[image_path] = {"parts": {}, "boxes": {}, "auto_boxes": {}, "descriptions": {}, "status": "unlabeled", "genus": "Unknown"}
+            crop_path = str(Path(self.temp_dir.name) / "plate_0000__panel_001.jpg")
+            image_paths.append(crop_path)
+            labels[crop_path] = {"parts": {}, "boxes": {}, "auto_boxes": {}, "descriptions": {}, "status": "unlabeled", "genus": "Unknown"}
+            self.project_manager.project_data["images"] = image_paths
+            self.project_manager.project_data["labels"] = labels
+            self.project_manager.set_image_provenance(
+                crop_path,
+                {"source_type": "image_crop", "derived_from": {"image_path": image_paths[0], "crop_index": 1}},
+                save=False,
+            )
+
+            window.refresh_file_list()
+            cached_state = window._image_list_state_cache
+            self.assertIsInstance(cached_state, dict)
+            self.assertEqual(cached_state["total_count"], len(image_paths))
+
+            original_header = None
+            for index in range(window.file_list.count()):
+                item = window.file_list.item(index)
+                if item.data(main_module.Qt.UserRole + 1) == "original":
+                    original_header = item
+                    break
+            self.assertIsNotNone(original_header)
+
+            with patch.object(window, "_build_image_list_state", side_effect=AssertionError("collapse should reuse cache")):
+                window._handle_image_list_item_clicked(original_header)
+
+            self.assertTrue(window.image_list_group_collapsed.get("original"))
+            self.assertIs(window._image_list_state_cache, cached_state)
+        finally:
+            window.deleteLater()
+
     def test_literature_description_append_reveals_editable_target_box(self):
         window = self.make_main_window()
         try:
@@ -1506,7 +1659,7 @@ class UiPolishScopeTests(unittest.TestCase):
         finally:
             window.deleteLater()
 
-    def test_parent_annotation_box_uses_configured_aspect_ratio(self):
+    def test_parent_box_ratio_lock_defaults_off_and_can_affect_sam_and_roi_boxes(self):
         window = self.make_main_window()
         try:
             self.project_manager.project_data["taxonomy"] = ["Head", "Mandible"]
@@ -1514,6 +1667,15 @@ class UiPolishScopeTests(unittest.TestCase):
             self.project_manager.project_data["parent_box_aspect_ratios"] = {"Head": 1.0}
             window.refresh_route_table()
             window._select_part_in_tree("Head")
+            window.radio_box.setChecked(True)
+            window.on_tool_changed()
+
+            self.assertEqual(window.canvas.mode, "BOX_PROMPT")
+            self.assertFalse(window.check_lock_parent_box_ratio.isChecked())
+            self.assertIsNone(window.canvas.annotation_box_aspect_ratio)
+            window.check_lock_parent_box_ratio.setChecked(True)
+            self.assertEqual(window.canvas.annotation_box_aspect_ratio, 1.0)
+
             window.radio_annotation_box.setChecked(True)
             window.on_tool_changed()
 
@@ -1523,6 +1685,19 @@ class UiPolishScopeTests(unittest.TestCase):
             self.assertIsNone(window.canvas.annotation_box_aspect_ratio)
         finally:
             window.deleteLater()
+
+    def test_locked_annotation_box_ratio_keeps_drag_point_inside_box(self):
+        canvas = main_module.AnnotationCanvas()
+        canvas.set_mode("BOX_PROMPT")
+        canvas.set_annotation_box_aspect_ratio(2.0)
+
+        rect = canvas._box_rect_for_current_mode(QPointF(10, 10), QPointF(20, 40))
+
+        self.assertLessEqual(rect.left(), 20)
+        self.assertGreaterEqual(rect.right(), 20)
+        self.assertLessEqual(rect.top(), 40)
+        self.assertGreaterEqual(rect.bottom(), 40)
+        self.assertAlmostEqual(rect.width() / rect.height(), 2.0)
 
     def test_loose_shrink_box_tool_is_child_only(self):
         window = self.make_main_window()
@@ -2338,7 +2513,9 @@ class UiPolishScopeTests(unittest.TestCase):
             self.assertEqual(self.project_manager.project_data["labels"][image_b].get("trajectories", {}), {})
             self.assertIn("No Blink shrink trajectory datasets", dataset_tree.topLevelItem(0).text(0))
             self.assertIsNotNone(dialog.spin_blink_auto_shrink_steps)
+            self.assertIsInstance(dialog.spin_blink_auto_shrink_steps, main_module.NoWheelSpinBox)
             self.assertEqual(dialog.spin_blink_auto_shrink_steps.value(), 20)
+            self.assertIsInstance(dialog.spin_vlm_concurrency, main_module.NoWheelSpinBox)
             self.assertIsNotNone(dialog.combo_blink_training_strategy)
             strategy_index = dialog.combo_blink_training_strategy.findData("two_stage_full_then_inside")
             self.assertGreaterEqual(strategy_index, 0)
@@ -2369,6 +2546,30 @@ class UiPolishScopeTests(unittest.TestCase):
             except Exception:
                 pass
             window.deleteLater()
+
+    def test_settings_numeric_controls_ignore_mouse_wheel(self):
+        class DummyWheelEvent:
+            def __init__(self):
+                self.ignored = False
+
+            def ignore(self):
+                self.ignored = True
+
+        spin = main_module.NoWheelSpinBox()
+        spin.setRange(1, 100)
+        spin.setValue(12)
+        spin_event = DummyWheelEvent()
+        spin.wheelEvent(spin_event)
+        self.assertTrue(spin_event.ignored)
+        self.assertEqual(spin.value(), 12)
+
+        slider = main_module.NoWheelSlider(main_module.Qt.Horizontal)
+        slider.setRange(0, 100)
+        slider.setValue(42)
+        slider_event = DummyWheelEvent()
+        slider.wheelEvent(slider_event)
+        self.assertTrue(slider_event.ignored)
+        self.assertEqual(slider.value(), 42)
 
     def test_route_panel_can_delete_selected_child_expert_file(self):
         expert_dir = self.weights_dir / "experts" / "Mandible"
@@ -2474,10 +2675,44 @@ class UiPolishScopeTests(unittest.TestCase):
             self.assertEqual(dialog.get_values()["locator_scope"], ["Leaf", "Fruit"])
             ratio_group = dialog.findChild(QWidget, "modelSettingsParentBoxRatioPanel")
             self.assertIsNotNone(ratio_group)
-            ratio_edits = dialog.parent_box_ratio_inputs
-            self.assertEqual(ratio_edits["Leaf"].text(), "1.2")
-            ratio_edits["Leaf"].setText("1.4")
+            ratio_width, ratio_height = dialog.parent_box_ratio_inputs["Leaf"]
+            self.assertEqual(ratio_width.text(), "6")
+            self.assertEqual(ratio_height.text(), "5")
+            flower_width, flower_height = dialog.parent_box_ratio_inputs["Flower"]
+            self.assertEqual(flower_width.text(), "3")
+            self.assertEqual(flower_height.text(), "2")
+            ratio_width.setText("7")
+            ratio_height.setText("5")
             self.assertEqual(dialog.get_values()["parent_box_aspect_ratios"]["Leaf"], 1.4)
+        finally:
+            dialog.deleteLater()
+
+    def test_model_settings_parent_box_ratio_rejects_partial_width_height(self):
+        dialog = main_module.ModelSettingsDialog(
+            {
+                "epochs": 5,
+                "batch": 2,
+                "lr": 1e-4,
+                "wd": 1e-4,
+                "conf": 0.1,
+                "adapt": 0.4,
+                "pad": 0.4,
+                "noise_floor": 0.15,
+                "poly_epsilon": 2.0,
+                "taxonomy": ["Leaf"],
+                "locator_scope": ["Leaf"],
+                "parent_box_aspect_ratios": {},
+            },
+            lang="en",
+        )
+        try:
+            ratio_width, ratio_height = dialog.parent_box_ratio_inputs["Leaf"]
+            ratio_width.setText("4")
+            ratio_height.setText("")
+            self.assertIn("Leaf", "\n".join(dialog._parent_box_aspect_ratio_errors()))
+            ratio_height.setText("3")
+            self.assertEqual(dialog._parent_box_aspect_ratio_errors(), [])
+            self.assertAlmostEqual(dialog.get_values()["parent_box_aspect_ratios"]["Leaf"], 4 / 3)
         finally:
             dialog.deleteLater()
 
@@ -2540,6 +2775,113 @@ class UiPolishScopeTests(unittest.TestCase):
             self.assertEqual(args, ())
             self.assertEqual(kwargs["project_route_manifest"]["routes"][0]["child"], "Mandible")
             self.assertIn("model_profile_context", kwargs)
+        finally:
+            window.deleteLater()
+
+    def test_parent_prediction_can_replace_unconfirmed_vlm_draft_but_keeps_confirmed_label(self):
+        image_path = Path(self.temp_dir.name) / "specimen.png"
+        image = QImage(240, 180, QImage.Format_RGB32)
+        image.fill(0xFFB0B0B0)
+        self.assertTrue(image.save(str(image_path)))
+
+        image_key = str(image_path)
+        window = self.make_main_window()
+        try:
+            self.project_manager.project_data["taxonomy"] = ["Head"]
+            self.project_manager.project_data["images"] = [image_key]
+            self.project_manager.project_data["labels"] = {
+                image_key: {
+                    "parts": {"Head": [[10.0, 10.0], [20.0, 10.0], [20.0, 20.0]]},
+                    "boxes": {},
+                    "auto_boxes": {"Head": [10.0, 10.0, 20.0, 20.0]},
+                    "auto_box_meta": {"Head": {"source": "vlm_first_mile", "review_status": "draft"}},
+                    "descriptions": {"Head": "Auto-Annotated"},
+                    "status": "labeled",
+                    "genus": "Unknown",
+                }
+            }
+            prediction = {
+                "polygons": {"Head": [[30.0, 30.0], [60.0, 30.0], [60.0, 60.0]]},
+                "auto_boxes": {"Head": [30.0, 30.0, 60.0, 60.0]},
+            }
+
+            saved, total = window._apply_prediction_to_project(image_key, prediction, only_new=True, save=False)
+
+            labels = self.project_manager.project_data["labels"][image_key]
+            self.assertEqual((saved, total), (1, 1))
+            self.assertEqual(labels["parts"]["Head"], prediction["polygons"]["Head"])
+            self.assertEqual(labels["auto_boxes"]["Head"], prediction["auto_boxes"]["Head"])
+
+            labels["descriptions"].pop("Head", None)
+            labels["auto_box_meta"]["Head"]["review_status"] = "confirmed"
+            confirmed_points = [[40.0, 40.0], [50.0, 40.0], [50.0, 50.0]]
+            labels["parts"]["Head"] = confirmed_points
+            saved, total = window._apply_prediction_to_project(
+                image_key,
+                {
+                    "polygons": {"Head": [[70.0, 70.0], [80.0, 70.0], [80.0, 80.0]]},
+                    "auto_boxes": {"Head": [70.0, 70.0, 80.0, 80.0]},
+                },
+                only_new=True,
+                save=False,
+            )
+
+            self.assertEqual((saved, total), (0, 1))
+            self.assertEqual(labels["parts"]["Head"], confirmed_points)
+        finally:
+            window.deleteLater()
+
+    def test_vlm_preannotation_can_replace_unconfirmed_draft_but_keeps_confirmed_label(self):
+        image_path = Path(self.temp_dir.name) / "specimen.png"
+        image = QImage(240, 180, QImage.Format_RGB32)
+        image.fill(0xFFB0B0B0)
+        self.assertTrue(image.save(str(image_path)))
+
+        image_key = str(image_path)
+        window = self.make_main_window()
+        try:
+            self.project_manager.project_data["taxonomy"] = ["Head"]
+            self.project_manager.project_data["images"] = [image_key]
+            self.project_manager.project_data["labels"] = {
+                image_key: {
+                    "parts": {"Head": [[10.0, 10.0], [20.0, 10.0], [20.0, 20.0]]},
+                    "boxes": {},
+                    "auto_boxes": {"Head": [10.0, 10.0, 20.0, 20.0]},
+                    "auto_box_meta": {"Head": {"source": "vlm_first_mile", "review_status": "draft"}},
+                    "descriptions": {"Head": "Auto-Annotated"},
+                    "status": "labeled",
+                    "genus": "Unknown",
+                }
+            }
+
+            ok, mode = window._apply_vlm_candidate(
+                image_key,
+                image,
+                {"part": "Head", "box_xyxy": [30.0, 30.0, 60.0, 60.0], "confidence": 0.9},
+                {"report_path": "rerun.json"},
+            )
+
+            labels = self.project_manager.project_data["labels"][image_key]
+            self.assertTrue(ok)
+            self.assertEqual(mode, "polygon")
+            self.assertEqual(labels["parts"]["Head"], [[30.0, 30.0], [60.0, 30.0], [60.0, 60.0], [30.0, 60.0]])
+            self.assertEqual(labels["auto_boxes"]["Head"], [30.0, 30.0, 60.0, 60.0])
+            self.assertEqual(labels["auto_box_meta"]["Head"]["review_status"], "draft")
+
+            labels["descriptions"].pop("Head", None)
+            labels["auto_box_meta"]["Head"]["review_status"] = "confirmed"
+            confirmed_points = [[40.0, 40.0], [50.0, 40.0], [50.0, 50.0]]
+            labels["parts"]["Head"] = confirmed_points
+            ok, mode = window._apply_vlm_candidate(
+                image_key,
+                image,
+                {"part": "Head", "box_xyxy": [70.0, 70.0, 90.0, 90.0], "confidence": 0.95},
+                {"report_path": "rerun_confirmed.json"},
+            )
+
+            self.assertFalse(ok)
+            self.assertEqual(mode, "already_labeled")
+            self.assertEqual(labels["parts"]["Head"], confirmed_points)
         finally:
             window.deleteLater()
 
@@ -2852,6 +3194,312 @@ class UiPolishScopeTests(unittest.TestCase):
             window.hide()
             window.deleteLater()
 
+    def test_main_window_sam_box_request_is_queued_without_direct_worker_call(self):
+        image_path = Path(self.temp_dir.name) / "specimen.png"
+        image = QImage(240, 180, QImage.Format_RGB32)
+        image.fill(0xFFB0B0B0)
+        self.assertTrue(image.save(str(image_path)))
+
+        image_key = str(image_path)
+        window = self.make_main_window()
+        try:
+            self.project_manager.project_data["images"] = [image_key]
+            self.project_manager.project_data["labels"] = {
+                image_key: {
+                    "parts": {},
+                    "boxes": {},
+                    "auto_boxes": {},
+                    "descriptions": {},
+                    "status": "unlabeled",
+                    "genus": "Unknown",
+                }
+            }
+            window.show()
+            self.app.processEvents()
+            window.refresh_file_list()
+            window.file_list.setCurrentItem(window.file_list.item(0))
+            self.app.processEvents()
+            window.part_list.setCurrentItem(window.part_list.topLevelItem(0))
+            window.init_sam()
+            self.app.processEvents()
+
+            worker = DummySamWorker.last_instance
+            self.assertIsNotNone(worker)
+            self.assertEqual(worker.predict_box_calls, [])
+
+            with patch.object(worker, "predict_box", wraps=worker.predict_box) as direct_predict:
+                window.on_magic_box_completed(10.0, 12.0, 80.0, 90.0)
+                self.assertTrue(window.sam_busy)
+                direct_predict.assert_not_called()
+                self.assertEqual(worker.predict_box_calls, [])
+                self.app.processEvents()
+                self.assertEqual(
+                    worker.predict_box_calls,
+                    [(image_key, 10.0, 12.0, 80.0, 90.0)],
+                )
+        finally:
+            window.hide()
+            window.deleteLater()
+
+    def test_main_window_polygon_edit_updates_image_list_without_full_rebuild(self):
+        image_path = Path(self.temp_dir.name) / "specimen.png"
+        image = QImage(240, 180, QImage.Format_RGB32)
+        image.fill(0xFFB0B0B0)
+        self.assertTrue(image.save(str(image_path)))
+
+        image_key = str(image_path)
+        window = self.make_main_window()
+        try:
+            self.project_manager.project_data["images"] = [image_key]
+            self.project_manager.project_data["labels"] = {
+                image_key: {
+                    "parts": {},
+                    "boxes": {},
+                    "auto_boxes": {},
+                    "descriptions": {},
+                    "status": "unlabeled",
+                    "genus": "Unknown",
+                }
+            }
+            window.show()
+            self.app.processEvents()
+            window.refresh_file_list()
+            window.file_list.setCurrentItem(window.file_list.item(0))
+            self.app.processEvents()
+
+            with patch.object(window, "refresh_file_list", wraps=window.refresh_file_list) as full_refresh:
+                window.on_polygon_completed("Head", [[24.0, 24.0], [80.0, 24.0], [52.0, 70.0]])
+                self.app.processEvents()
+                full_refresh.assert_not_called()
+
+            self.assertEqual(window.label_project_images.text(), "PROJECT IMAGES (1/1)")
+            color = window.file_list.item(0).foreground().color()
+            self.assertEqual(color, QColor("#8FBC8F"))
+        finally:
+            window.hide()
+            window.deleteLater()
+
+    def test_main_window_remove_selected_images_defers_save_and_removes_visible_rows(self):
+        image_paths = []
+        for index in range(3):
+            image_path = Path(self.temp_dir.name) / f"specimen_{index}.png"
+            image = QImage(120, 90, QImage.Format_RGB32)
+            image.fill(0xFFB0B0B0)
+            self.assertTrue(image.save(str(image_path)))
+            image_paths.append(str(image_path))
+
+        window = self.make_main_window()
+        try:
+            self.project_manager.project_data["images"] = list(image_paths)
+            self.project_manager.project_data["labels"] = {
+                image_paths[0]: {
+                    "parts": {"Head": [[10.0, 10.0], [40.0, 10.0], [24.0, 30.0]]},
+                    "boxes": {},
+                    "auto_boxes": {},
+                    "descriptions": {},
+                    "status": "labeled",
+                    "genus": "Unknown",
+                },
+                image_paths[1]: {
+                    "parts": {},
+                    "boxes": {},
+                    "auto_boxes": {},
+                    "descriptions": {},
+                    "status": "unlabeled",
+                    "genus": "Unknown",
+                },
+                image_paths[2]: {
+                    "parts": {},
+                    "boxes": {},
+                    "auto_boxes": {},
+                    "descriptions": {},
+                    "status": "unlabeled",
+                    "genus": "Unknown",
+                },
+            }
+
+            window.show()
+            self.app.processEvents()
+            window.refresh_file_list()
+            for row in range(window.file_list.count()):
+                item = window.file_list.item(row)
+                if item.data(main_module.Qt.UserRole) == image_paths[0]:
+                    item.setSelected(True)
+                    window.file_list.setCurrentItem(item)
+                    break
+            self.app.processEvents()
+
+            baseline_save_calls = self.project_manager.save_calls
+            with patch.object(main_module, "themed_yes_no_question", lambda *args, **kwargs: main_module.QMessageBox.Yes), \
+                 patch.object(window, "refresh_file_list", wraps=window.refresh_file_list) as full_refresh:
+                window.remove_selected_images()
+                self.app.processEvents()
+
+            self.assertEqual(self.project_manager.save_calls, baseline_save_calls)
+            self.assertTrue(window.project_save_pending)
+            full_refresh.assert_not_called()
+            self.assertEqual(self.project_manager.project_data["images"], image_paths[1:])
+            self.assertNotIn(image_paths[0], self.project_manager.project_data["labels"])
+            self.assertEqual(window.current_image, image_paths[1])
+            self.assertEqual(window.label_project_images.text(), "PROJECT IMAGES (0/2)")
+            visible_paths = [
+                window.file_list.item(row).data(main_module.Qt.UserRole)
+                for row in range(window.file_list.count())
+                if window.file_list.item(row).data(main_module.Qt.UserRole)
+            ]
+            self.assertEqual(visible_paths, image_paths[1:])
+        finally:
+            window.hide()
+            window.deleteLater()
+
+    def test_main_window_remove_current_middle_image_selects_next_visible_image(self):
+        image_paths = []
+        for index in range(4):
+            image_path = Path(self.temp_dir.name) / f"specimen_{index}.png"
+            image = QImage(120, 90, QImage.Format_RGB32)
+            image.fill(0xFFB0B0B0)
+            self.assertTrue(image.save(str(image_path)))
+            image_paths.append(str(image_path))
+
+        window = self.make_main_window()
+        try:
+            self.project_manager.project_data["images"] = list(image_paths)
+            self.project_manager.project_data["labels"] = {
+                path: {
+                    "parts": {},
+                    "boxes": {},
+                    "auto_boxes": {},
+                    "descriptions": {},
+                    "status": "unlabeled",
+                    "genus": "Unknown",
+                }
+                for path in image_paths
+            }
+
+            window.show()
+            self.app.processEvents()
+            window.refresh_file_list()
+            window.file_list.clearSelection()
+            for row in range(window.file_list.count()):
+                item = window.file_list.item(row)
+                if item.data(main_module.Qt.UserRole) == image_paths[1]:
+                    item.setSelected(True)
+                    window.file_list.setCurrentItem(item)
+                    break
+            self.app.processEvents()
+
+            with patch.object(main_module, "themed_yes_no_question", lambda *args, **kwargs: main_module.QMessageBox.Yes):
+                window.remove_selected_images()
+                self.app.processEvents()
+
+            self.assertEqual(window.current_image, image_paths[2])
+            self.assertEqual(window.file_list.currentItem().data(main_module.Qt.UserRole), image_paths[2])
+            visible_paths = [
+                window.file_list.item(row).data(main_module.Qt.UserRole)
+                for row in range(window.file_list.count())
+                if window.file_list.item(row).data(main_module.Qt.UserRole)
+            ]
+            self.assertEqual(visible_paths, [image_paths[0], image_paths[2], image_paths[3]])
+        finally:
+            window.hide()
+            window.deleteLater()
+
+    def test_main_window_remove_current_last_image_selects_previous_visible_image(self):
+        image_paths = []
+        for index in range(3):
+            image_path = Path(self.temp_dir.name) / f"specimen_tail_{index}.png"
+            image = QImage(120, 90, QImage.Format_RGB32)
+            image.fill(0xFFB0B0B0)
+            self.assertTrue(image.save(str(image_path)))
+            image_paths.append(str(image_path))
+
+        window = self.make_main_window()
+        try:
+            self.project_manager.project_data["images"] = list(image_paths)
+            self.project_manager.project_data["labels"] = {
+                path: {
+                    "parts": {},
+                    "boxes": {},
+                    "auto_boxes": {},
+                    "descriptions": {},
+                    "status": "unlabeled",
+                    "genus": "Unknown",
+                }
+                for path in image_paths
+            }
+
+            window.show()
+            self.app.processEvents()
+            window.refresh_file_list()
+            window.file_list.clearSelection()
+            for row in range(window.file_list.count()):
+                item = window.file_list.item(row)
+                if item.data(main_module.Qt.UserRole) == image_paths[2]:
+                    item.setSelected(True)
+                    window.file_list.setCurrentItem(item)
+                    break
+            self.app.processEvents()
+
+            with patch.object(main_module, "themed_yes_no_question", lambda *args, **kwargs: main_module.QMessageBox.Yes):
+                window.remove_selected_images()
+                self.app.processEvents()
+
+            self.assertEqual(window.current_image, image_paths[1])
+            self.assertEqual(window.file_list.currentItem().data(main_module.Qt.UserRole), image_paths[1])
+            visible_paths = [
+                window.file_list.item(row).data(main_module.Qt.UserRole)
+                for row in range(window.file_list.count())
+                if window.file_list.item(row).data(main_module.Qt.UserRole)
+            ]
+            self.assertEqual(visible_paths, image_paths[:2])
+        finally:
+            window.hide()
+            window.deleteLater()
+
+    def test_main_window_move_images_to_group_defers_save(self):
+        image_paths = []
+        for index in range(2):
+            image_path = Path(self.temp_dir.name) / f"specimen_{index}.png"
+            image = QImage(120, 90, QImage.Format_RGB32)
+            image.fill(0xFFB0B0B0)
+            self.assertTrue(image.save(str(image_path)))
+            image_paths.append(str(image_path))
+
+        window = self.make_main_window()
+        try:
+            self.project_manager.project_data["images"] = list(image_paths)
+            self.project_manager.project_data["labels"] = {
+                path: {
+                    "parts": {},
+                    "boxes": {},
+                    "auto_boxes": {},
+                    "descriptions": {},
+                    "status": "unlabeled",
+                    "genus": "Unknown",
+                }
+                for path in image_paths
+            }
+            self.project_manager.project_data["image_groups"] = {
+                "custom_groups": [{"id": "review_batch", "name": "Review batch"}]
+            }
+
+            window.show()
+            self.app.processEvents()
+            window.refresh_file_list()
+            self.app.processEvents()
+
+            baseline_save_calls = self.project_manager.save_calls
+            window.move_images_to_group([image_paths[0]], "review_batch")
+            self.app.processEvents()
+
+            self.assertEqual(self.project_manager.save_calls, baseline_save_calls)
+            self.assertTrue(window.project_save_pending)
+            provenance = self.project_manager.project_data["image_provenance"][image_paths[0]]
+            self.assertEqual(provenance["manual_image_group"], "review_batch")
+        finally:
+            window.hide()
+            window.deleteLater()
+
     def test_main_window_manual_polygon_edit_clears_auto_annotated_blocker(self):
         image_path = Path(self.temp_dir.name) / "specimen.png"
         image = QImage(240, 180, QImage.Format_RGB32)
@@ -2943,6 +3591,199 @@ class UiPolishScopeTests(unittest.TestCase):
             window.hide()
             window.deleteLater()
 
+    def test_main_window_accept_current_ai_drafts_updates_list_without_full_rebuild(self):
+        image_path = Path(self.temp_dir.name) / "specimen.png"
+        image = QImage(240, 180, QImage.Format_RGB32)
+        image.fill(0xFFB0B0B0)
+        self.assertTrue(image.save(str(image_path)))
+
+        image_key = str(image_path)
+        window = self.make_main_window()
+        try:
+            self.project_manager.project_data["images"] = [image_key]
+            self.project_manager.project_data["labels"] = {
+                image_key: {
+                    "parts": {"Head": [[20.0, 20.0], [60.0, 20.0], [40.0, 55.0]]},
+                    "boxes": {},
+                    "auto_boxes": {"Head": [20.0, 20.0, 80.0, 68.0]},
+                    "auto_box_meta": {"Head": {"source": "vlm_first_mile", "review_status": "draft"}},
+                    "descriptions": {"Head": "Auto-Annotated"},
+                    "status": "labeled",
+                    "genus": "Unknown",
+                }
+            }
+
+            window.show()
+            self.app.processEvents()
+            window.refresh_file_list()
+            window.file_list.setCurrentItem(window.file_list.item(0))
+            self.app.processEvents()
+
+            baseline_save_calls = self.project_manager.save_calls
+            with patch.object(
+                main_module,
+                "themed_yes_no_question",
+                return_value=main_module.QMessageBox.Yes,
+            ), patch.object(window, "refresh_file_list", wraps=window.refresh_file_list) as full_refresh:
+                window.accept_current_image_ai_drafts()
+                self.app.processEvents()
+
+            full_refresh.assert_not_called()
+            self.assertEqual(self.project_manager.save_calls, baseline_save_calls)
+            self.assertTrue(window.project_save_pending)
+            self.assertEqual(window.label_project_images.text(), "PROJECT IMAGES (1/1)")
+            self.assertEqual(window.file_list.item(0).foreground().color(), QColor("#8FBC8F"))
+        finally:
+            window.hide()
+            window.deleteLater()
+
+    def test_vlm_stop_clears_remaining_queue_and_finishes_cancelled_run(self):
+        image_paths = []
+        for index in range(3):
+            image_path = Path(self.temp_dir.name) / f"vlm_stop_{index}.png"
+            image = QImage(120, 90, QImage.Format_RGB32)
+            image.fill(0xFFB0B0B0)
+            self.assertTrue(image.save(str(image_path)))
+            image_paths.append(str(image_path))
+
+        window = self.make_main_window()
+        try:
+            window.vlm_preannotation_run_active = True
+            window.vlm_preannotation_queue = image_paths[1:]
+            window.vlm_preannotation_records = [
+                {
+                    "status": "passed",
+                    "image_path": image_paths[0],
+                    "candidates": [{"part": "Head"}],
+                    "rejected": [],
+                }
+            ]
+            window.vlm_preannotation_saved_total = 1
+            window.vlm_preannotation_run_id = "stop_test"
+            window.vlm_preannotation_artifacts_dir = str(Path(self.temp_dir.name) / "vlm_preannotation")
+            window.vlm_preannotation_target_parts = ["Head"]
+            window.vlm_preannotation_total_steps = 18
+            window.vlm_preannotation_completed_steps = 6
+            window.vlm_preannotation_total_images = 3
+            window.vlm_preannotation_completed_images = 1
+            window.vlm_preannotation_prompt_profile = main_module.default_vlm_prompt_profile()
+            window.vlm_preannotation_concurrency = 1
+
+            with patch.object(
+                main_module,
+                "themed_yes_no_question",
+                return_value=main_module.QMessageBox.Yes,
+            ) as confirm:
+                stopped = window.request_stop_vlm_preannotation(confirm=True)
+
+            self.assertTrue(stopped)
+            confirm.assert_called_once()
+            self.assertEqual(window.vlm_preannotation_queue, [])
+            self.assertTrue(window.vlm_preannotation_cancel_requested)
+            self.assertEqual(window.vlm_preannotation_cancelled_queued_images, 2)
+
+            with patch.object(window, "_start_next_vlm_preannotation_image") as start_next:
+                window._on_vlm_preannotation_finished()
+
+            start_next.assert_not_called()
+            self.assertFalse(window.vlm_preannotation_run_active)
+            report_path = Path(window.vlm_preannotation_artifacts_dir) / "vlm_preannotation_summary_stop_test.json"
+            self.assertTrue(report_path.exists())
+            with report_path.open("r", encoding="utf-8") as handle:
+                summary = json.load(handle)
+            self.assertEqual(summary["status"], "cancelled")
+            self.assertEqual(summary["cancelled_queued_image_count"], 2)
+            self.assertEqual(summary["saved_box_count"], 1)
+            self.assertEqual(summary["concurrency"], 1)
+        finally:
+            window.hide()
+            window.deleteLater()
+
+    def test_vlm_preannotation_starts_workers_up_to_configured_concurrency(self):
+        image_paths = []
+        for index in range(4):
+            image_path = Path(self.temp_dir.name) / f"vlm_parallel_{index}.png"
+            image = QImage(120, 90, QImage.Format_RGB32)
+            image.fill(0xFFB0B0B0)
+            self.assertTrue(image.save(str(image_path)))
+            image_paths.append(str(image_path))
+
+        window = self.make_main_window()
+        try:
+            window.vlm_preannotation_run_active = True
+            window.vlm_preannotation_cancel_requested = False
+            window.vlm_preannotation_queue = list(image_paths)
+            window.vlm_preannotation_threads = []
+            window.vlm_preannotation_concurrency = 2
+            window.vlm_preannotation_records = []
+            window.vlm_preannotation_saved_total = 0
+            window.vlm_preannotation_run_id = "parallel_test"
+            window.vlm_preannotation_artifacts_dir = str(Path(self.temp_dir.name) / "vlm_preannotation")
+            window.vlm_preannotation_target_parts = ["Head"]
+            window.vlm_preannotation_total_steps = 24
+            window.vlm_preannotation_completed_steps = 0
+            window.vlm_preannotation_total_images = 4
+            window.vlm_preannotation_completed_images = 0
+            window.vlm_preannotation_prompt_profile = main_module.default_vlm_prompt_profile()
+
+            DummyVlmPreannotationThread.instances = []
+            with patch.object(main_module, "VlmPreannotationThread", DummyVlmPreannotationThread):
+                window._start_vlm_preannotation_workers()
+
+            self.assertEqual(len(window.vlm_preannotation_threads), 2)
+            self.assertEqual(len(DummyVlmPreannotationThread.instances), 2)
+            self.assertEqual(len(window.vlm_preannotation_queue), 2)
+            self.assertTrue(all(thread.isRunning() for thread in window.vlm_preannotation_threads))
+        finally:
+            for thread in getattr(window, "vlm_preannotation_threads", []) or []:
+                thread.quit()
+            window.vlm_preannotation_threads = []
+            window.vlm_preannotation_thread = None
+            window.hide()
+            window.deleteLater()
+
+    def test_main_window_verify_current_image_defers_save_and_updates_list(self):
+        image_path = Path(self.temp_dir.name) / "specimen.png"
+        image = QImage(240, 180, QImage.Format_RGB32)
+        image.fill(0xFFB0B0B0)
+        self.assertTrue(image.save(str(image_path)))
+
+        image_key = str(image_path)
+        window = self.make_main_window()
+        try:
+            self.project_manager.project_data["images"] = [image_key]
+            self.project_manager.project_data["labels"] = {
+                image_key: {
+                    "parts": {"Head": [[20.0, 20.0], [60.0, 20.0], [40.0, 55.0]]},
+                    "boxes": {},
+                    "auto_boxes": {"Head": [20.0, 20.0, 80.0, 68.0]},
+                    "auto_box_meta": {"Head": {"source": "vlm_first_mile", "review_status": "draft"}},
+                    "descriptions": {"Head": "Auto-Annotated"},
+                    "status": "labeled",
+                    "genus": "Unknown",
+                }
+            }
+
+            window.show()
+            self.app.processEvents()
+            window.refresh_file_list()
+            window.file_list.setCurrentItem(window.file_list.item(0))
+            self.app.processEvents()
+
+            baseline_save_calls = self.project_manager.save_calls
+            with patch.object(window, "refresh_file_list", wraps=window.refresh_file_list) as full_refresh:
+                window.verify_current_image()
+                self.app.processEvents()
+
+            full_refresh.assert_not_called()
+            self.assertEqual(self.project_manager.save_calls, baseline_save_calls)
+            self.assertTrue(window.project_save_pending)
+            self.assertNotIn("Head", self.project_manager.project_data["labels"][image_key]["descriptions"])
+            self.assertEqual(window.file_list.item(0).foreground().color(), QColor("#8FBC8F"))
+        finally:
+            window.hide()
+            window.deleteLater()
+
     def test_main_window_accept_batch_ai_drafts_confirms_project_auto_drafts(self):
         first_image = Path(self.temp_dir.name) / "split_a.png"
         second_image = Path(self.temp_dir.name) / "split_b.png"
@@ -3008,7 +3849,65 @@ class UiPolishScopeTests(unittest.TestCase):
             window.hide()
             window.deleteLater()
 
-    def test_main_window_image_switch_flushes_pending_polygon_edit(self):
+    def test_clear_ai_labels_can_target_selected_image_group(self):
+        original_image = Path(self.temp_dir.name) / "original.png"
+        split_image = Path(self.temp_dir.name) / "source__panel_001.png"
+        for path in (original_image, split_image):
+            image = QImage(160, 120, QImage.Format_RGB32)
+            image.fill(0xFFB0B0B0)
+            self.assertTrue(image.save(str(path)))
+
+        original_key = str(original_image)
+        split_key = str(split_image)
+        window = self.make_main_window()
+        try:
+            self.project_manager.project_data["images"] = [original_key, split_key]
+            self.project_manager.project_data["labels"] = {
+                original_key: {
+                    "parts": {"Head": [[10.0, 10.0], [30.0, 10.0], [30.0, 30.0]]},
+                    "boxes": {},
+                    "auto_boxes": {"Head": [10.0, 10.0, 30.0, 30.0]},
+                    "auto_box_meta": {"Head": {"source": "vlm_first_mile", "review_status": "draft"}},
+                    "descriptions": {"Head": "Auto-Annotated"},
+                    "status": "labeled",
+                    "genus": "Unknown",
+                },
+                split_key: {
+                    "parts": {"Head": [[40.0, 40.0], [80.0, 40.0], [80.0, 80.0]]},
+                    "boxes": {},
+                    "auto_boxes": {"Head": [40.0, 40.0, 80.0, 80.0]},
+                    "auto_box_meta": {"Head": {"source": "vlm_first_mile", "review_status": "draft"}},
+                    "descriptions": {"Head": "Auto-Annotated"},
+                    "status": "labeled",
+                    "genus": "Unknown",
+                },
+            }
+
+            window.show()
+            self.app.processEvents()
+            window.refresh_file_list()
+
+            with patch.object(
+                window,
+                "_choose_clear_ai_scope",
+                return_value={"paths": [split_key], "label": "Split Crops", "count": 1},
+            ), patch.object(
+                main_module,
+                "themed_yes_no_question",
+                return_value=main_module.QMessageBox.Yes,
+            ):
+                window.clear_ai_labels()
+
+            self.assertIn("Head", self.project_manager.project_data["labels"][original_key]["parts"])
+            self.assertEqual(self.project_manager.project_data["labels"][original_key]["descriptions"]["Head"], "Auto-Annotated")
+            self.assertNotIn("Head", self.project_manager.project_data["labels"][split_key]["parts"])
+            self.assertNotIn("Head", self.project_manager.project_data["labels"][split_key]["descriptions"])
+            self.assertTrue(window.project_save_pending)
+        finally:
+            window.hide()
+            window.deleteLater()
+
+    def test_main_window_image_switch_keeps_pending_polygon_edit_async(self):
         first_image = Path(self.temp_dir.name) / "specimen_a.png"
         second_image = Path(self.temp_dir.name) / "specimen_b.png"
         for path, color in ((first_image, 0xFFB0B0B0), (second_image, 0xFF90A0D0)):
@@ -3056,9 +3955,136 @@ class UiPolishScopeTests(unittest.TestCase):
             window.file_list.setCurrentItem(window.file_list.item(1))
             self.app.processEvents()
 
+            self.assertEqual(self.project_manager.save_calls, baseline_save_calls)
+            self.assertTrue(window.project_save_pending)
+            self.assertEqual(window.current_image, second_key)
+
+            self.assertFalse(window._flush_pending_project_save())
+            self.assertEqual(self.project_manager.save_calls, baseline_save_calls)
+            self.assertTrue(window.project_save_pending)
+            self.assertTrue(window.project_save_timer.isActive())
+
+            window._flush_pending_project_save(force=True)
             self.assertEqual(self.project_manager.save_calls, baseline_save_calls + 1)
             self.assertFalse(window.project_save_pending)
+        finally:
+            window.hide()
+            window.deleteLater()
+
+    def test_main_window_image_switch_does_not_save_taxon_combo_update(self):
+        first_image = Path(self.temp_dir.name) / "specimen_a.png"
+        second_image = Path(self.temp_dir.name) / "specimen_b.png"
+        for path, color in ((first_image, 0xFFB0B0B0), (second_image, 0xFF90A0D0)):
+            image = QImage(240, 180, QImage.Format_RGB32)
+            image.fill(color)
+            self.assertTrue(image.save(str(path)))
+
+        first_key = str(first_image)
+        second_key = str(second_image)
+        window = self.make_main_window()
+        try:
+            self.project_manager.project_data["images"] = [first_key, second_key]
+            self.project_manager.project_data["labels"] = {
+                first_key: {
+                    "parts": {},
+                    "boxes": {},
+                    "auto_boxes": {},
+                    "descriptions": {},
+                    "status": "unlabeled",
+                    "genus": "Formica",
+                    "taxon": "Formica",
+                },
+                second_key: {
+                    "parts": {},
+                    "boxes": {},
+                    "auto_boxes": {},
+                    "descriptions": {},
+                    "status": "unlabeled",
+                    "genus": "Camponotus",
+                    "taxon": "Camponotus",
+                },
+            }
+
+            window.show()
+            self.app.processEvents()
+            window.refresh_file_list()
+            window.file_list.setCurrentItem(window.file_list.item(0))
+            self.app.processEvents()
+
+            baseline_save_calls = self.project_manager.save_calls
+            window.file_list.setCurrentItem(window.file_list.item(1))
+            self.app.processEvents()
+
             self.assertEqual(window.current_image, second_key)
+            self.assertEqual(window.genus_combo.currentText(), "Camponotus")
+            self.assertEqual(self.project_manager.save_calls, baseline_save_calls)
+            self.assertFalse(window.project_save_pending)
+        finally:
+            window.hide()
+            window.deleteLater()
+
+    def test_main_window_vlm_image_result_updates_list_without_full_rebuild(self):
+        image_path = Path(self.temp_dir.name) / "specimen.png"
+        image = QImage(240, 180, QImage.Format_RGB32)
+        image.fill(0xFFB0B0B0)
+        self.assertTrue(image.save(str(image_path)))
+
+        image_key = str(image_path)
+        window = self.make_main_window()
+        try:
+            self.project_manager.project_data["images"] = [image_key]
+            self.project_manager.project_data["labels"] = {
+                image_key: {
+                    "parts": {},
+                    "boxes": {},
+                    "auto_boxes": {},
+                    "descriptions": {},
+                    "status": "unlabeled",
+                    "genus": "Unknown",
+                }
+            }
+            window.vlm_preannotation_records = []
+            window.vlm_preannotation_saved_total = 0
+            window.vlm_preannotation_run_id = "test_run"
+            window.vlm_preannotation_target_parts = ["Head"]
+            window.vlm_preannotation_total_images = 1
+            window.vlm_preannotation_completed_images = 0
+            window.vlm_preannotation_total_steps = 6
+            window.vlm_preannotation_completed_steps = 0
+
+            window.show()
+            self.app.processEvents()
+            window.refresh_file_list()
+            window.file_list.setCurrentItem(window.file_list.item(0))
+            self.app.processEvents()
+
+            result = {
+                "status": "passed",
+                "image_path": image_key,
+                "target_parts": ["Head"],
+                "candidates": [
+                    {
+                        "part": "Head",
+                        "box_xyxy": [10.0, 12.0, 80.0, 90.0],
+                        "confidence": 0.95,
+                        "reason": "test",
+                    }
+                ],
+                "report_path": "report.json",
+            }
+
+            baseline_save_calls = self.project_manager.save_calls
+            with patch.object(window, "refresh_file_list", wraps=window.refresh_file_list) as full_refresh:
+                window._on_vlm_preannotation_image_result(result)
+                self.app.processEvents()
+
+            full_refresh.assert_not_called()
+            self.assertEqual(self.project_manager.save_calls, baseline_save_calls)
+            self.assertTrue(window.project_save_pending)
+            self.assertEqual(window.vlm_preannotation_saved_total, 1)
+            self.assertIn("Head", self.project_manager.project_data["labels"][image_key]["parts"])
+            self.assertEqual(window.label_project_images.text(), "PROJECT IMAGES (1/1)")
+            self.assertEqual(window.file_list.item(0).foreground().color(), QColor("#8FBC8F"))
         finally:
             window.hide()
             window.deleteLater()

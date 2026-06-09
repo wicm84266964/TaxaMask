@@ -13,6 +13,7 @@ Primary rule source:
 
 Core product stance:
 - Keep the visible product name as TaxaMask.
+- Current public milestone: TaxaMask open-source official release v1.0 (2026-06-09).
 - `AntSleap` remains the internal Python package name and is historically intentional.
 - TaxaMask started from ant taxonomy image/PDF annotation, then expanded toward STL rendered morphology views and TIF volume segmentation.
 - The first stable domain remains ant taxonomy and morphology. Do not overclaim broad multi-taxon support unless the user asks.
@@ -28,11 +29,14 @@ Ant-Code embedding boundary:
 
 UI structure to remember:
 - Start center is now the Agent center. The embedded Ant-Code middle workspace is the main area.
-- The right rail contains stacked workflow cards for `2D/STL Morphology` and `TIF Volume`.
+- The right rail contains recent/open/settings controls followed by `PDF evidence workflow`, `2D/STL Morphology`, and `TIF Volume`.
 - Labeling, Blink, and TIF workbenches should stay focused on annotation. They expose lightweight `Start Center` / `Ask Agent` entries instead of full chat panels.
 - Labeling Workbench uses `Parent-part annotation` and `Child-part annotation` sections for parent boxes, child structures, route-appointed child experts, and literature trait alignment.
 - 2D/STL model behavior is now organized through project-saved `model_profiles`: active profile controls parent backend, child default backend, locator scope, parent box ratios, VLM targets, and inference defaults.
-- VLM first-mile preannotation now sends a grid-free VLM input image and asks for current-input pixel boxes, then maps coordinates back to the original image. It writes reviewable `auto_boxes` plus optional SAM draft polygons. Project load canonicalizes image, label, scale, and provenance keys to the same absolute image identity so relative/absolute path drift does not hide VLM drafts from the active canvas. Do not reintroduce writeback paths that create unregistered image keys.
+- Large 2D/STL projects open lightly: collapsed image groups, no automatic first-image load, and no startup Locator/SAM preload for 500+ image projects. Image deletion, taxonomy-part deletion, and batch prediction paths should save once per batch and preserve the user's review position where possible.
+- `Lock parent box ratio` is off by default. When enabled, it affects parent-role `Annotation Box` and parent-role `Box Prompt (SAM)`; child boxes and shrink loose boxes stay free-ratio.
+- VLM first-mile preannotation uses adaptive light-grid input and asks for grid boxes, while pixel-box parsing remains a legacy fallback. It writes reviewable `auto_boxes` plus optional SAM draft polygons. Batch VLM has a stop button and project-configurable API concurrency defaulting to 1. Reruns replace unconfirmed AI drafts but preserve manual/confirmed labels. Project load canonicalizes image, label, scale, and provenance keys to the same absolute image identity so relative/absolute path drift does not hide VLM drafts from the active canvas. Do not reintroduce writeback paths that create unregistered image keys.
+- `Clear AI Labels` should support all-project or image-group scope and report affected counts before destructive confirmation. Structure rename should migrate labels, VLM targets, parent ratios, routes, Blink context, and trajectories rather than deleting/recreating a part.
 - When returning from a workbench to the Agent center, pass context such as `source_workbench`, `project_type`, `project_path`, active specimen/image/part/material, and recent logs.
 
 Main code map:
@@ -41,7 +45,7 @@ Main code map:
 - `AntSleap/ui/tif_workbench.py`: dedicated TIF volume workbench, slice UI, material controls, TIF backend buttons.
 - `AntSleap/ui/blink_lab.py`: Blink refinement workbench and route expert training UI.
 - `AntSleap/core/project.py`: legacy/current 2D morphology project manager.
-- `AntSleap/core/vlm_preannotation.py`: VLM first-mile grid-free input image, pixel-box prompt, API call, parser, raw response/report artifacts.
+- `AntSleap/core/vlm_preannotation.py`: VLM first-mile adaptive light-grid input, grid-box prompt/parser, API call, legacy pixel-box fallback, raw response/report artifacts.
 - `AntSleap/core/model_profiles.py`: 2D/STL model profile schema, defaults, sanitation, and old-project migration helpers.
 - `AntSleap/core/cascade_routes.py`: parent -> child route manifest sanitation, explicit `expert_backend`, manifest, input-size, and backend-param fields.
 - `AntSleap/core/blink_expert_manifest.py`: ViT-B/heatmap Blink expert manifest read/write helpers.

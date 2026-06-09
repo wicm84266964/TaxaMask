@@ -3,7 +3,7 @@ import torch
 import numpy as np
 import cv2
 import os
-from PySide6.QtCore import QObject, Signal, QThread
+from PySide6.QtCore import QObject, Signal, QThread, Slot
 
 from .runtime_device import resolve_torch_device
 
@@ -14,6 +14,7 @@ class SAMWorker(QObject):
     model_loaded = Signal()
     mask_generated = Signal(list, list) # Returns list of polygon points, AND optional box [x1, y1, x2, y2]
     model_load_error = Signal(str) # New Signal
+    prompt_failed = Signal(str)
     
     def __init__(self, model_type="sam_b.pt", poly_epsilon=2.0, device="auto"):
         super().__init__()
@@ -38,17 +39,44 @@ class SAMWorker(QObject):
             # Explicitly move to device (if API supports it, otherwise pass to predict)
             # Ultralytics models usually support .to(device)
             # self.model.to(device) 
-            
-            # Warmup (optional)
-            # self.model.predict(source=np.zeros((100,100,3), dtype=np.uint8), verbose=False, device=device)
+            self.device = device
+            self._warmup_model(device)
             
             print("SAM Model Loaded.")
             self.model_loaded.emit()
-            self.device = device
         except Exception as e:
             error_msg = f"Error loading SAM: {e}"
             print(error_msg)
             self.model_load_error.emit(error_msg)
+
+    def _warmup_model(self, device):
+        """
+        Runs one tiny prompt in the worker thread so the first user-drawn SAM
+        box does not pay predictor/device initialization cost on demand.
+        """
+        if not self.model:
+            return
+        try:
+            dummy = np.zeros((64, 64, 3), dtype=np.uint8)
+            self.model.predict(
+                dummy,
+                bboxes=[[8, 8, 56, 56]],
+                verbose=False,
+                device=device,
+                imgsz=1024,
+            )
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+                predictor = getattr(self.model, "predictor", None)
+                reset_image = getattr(predictor, "reset_image", None)
+                if callable(reset_image):
+                    reset_image()
+                elif predictor is not None and hasattr(predictor, "features"):
+                    predictor.features = None
+                torch.cuda.empty_cache()
+            print("SAM Worker: Warmup complete.")
+        except Exception as exc:
+            print(f"SAM Worker: Warmup skipped: {exc}")
 
     def load_decoder_weights(self, weights_path):
         """
@@ -74,28 +102,38 @@ class SAMWorker(QObject):
         """
         self.load_model() # Re-runs the init load sequence
 
+    @Slot(str, float, float)
     def predict_point(self, image_path, x, y):
         """
         Run SAM inference with a single point prompt.
         """
-        if not self.model: return
-        
-        # Ultralytics SAM API
-        # points=[[x, y]], labels=[1] (1 for foreground)
-        results = self.model.predict(image_path, points=[[x, y]], labels=[1], verbose=False, device=self.device)
-        
-        self._process_results(results, click_point=(x, y))
+        if not self.model:
+            self.prompt_failed.emit("SAM model is not loaded.")
+            return
+        try:
+            # Ultralytics SAM API
+            # points=[[x, y]], labels=[1] (1 for foreground)
+            results = self.model.predict(image_path, points=[[x, y]], labels=[1], verbose=False, device=self.device)
+            if not self._process_results(results, click_point=(x, y)):
+                self.prompt_failed.emit("SAM returned no usable mask.")
+        except Exception as e:
+            self.prompt_failed.emit(f"SAM point prompt failed: {e}")
 
+    @Slot(str, float, float, float, float)
     def predict_box(self, image_path, x1, y1, x2, y2):
         """
         Run SAM inference with a bounding box prompt.
         """
-        if not self.model: return
-        
-        # Ultralytics SAM API uses bboxes=[[x1, y1, x2, y2]]
-        results = self.model.predict(image_path, bboxes=[[x1, y1, x2, y2]], verbose=False, device=self.device)
-        
-        self._process_results(results, prompt_box=[x1, y1, x2, y2])
+        if not self.model:
+            self.prompt_failed.emit("SAM model is not loaded.")
+            return
+        try:
+            # Ultralytics SAM API uses bboxes=[[x1, y1, x2, y2]]
+            results = self.model.predict(image_path, bboxes=[[x1, y1, x2, y2]], verbose=False, device=self.device)
+            if not self._process_results(results, prompt_box=[x1, y1, x2, y2]):
+                self.prompt_failed.emit("SAM returned no usable mask.")
+        except Exception as e:
+            self.prompt_failed.emit(f"SAM box prompt failed: {e}")
 
     def _process_results(self, results, prompt_box=None, click_point=None):
         if results and results[0].masks:
@@ -201,3 +239,5 @@ class SAMWorker(QObject):
                     poly_list = [[float(p[0][0]), float(p[0][1])] for p in approx]
                         
                     self.mask_generated.emit(poly_list, prompt_box if prompt_box else [])
+                    return True
+        return False

@@ -46,9 +46,12 @@ Treat this TaxaMask protocol as always active, not as an optional skill:
 
 ## Current Program State
 
+- Current public milestone: **TaxaMask open-source official release v1.0**.
 - Startup defaults to TaxaMask Agent Center.
 - The start center main area embeds Ant-Code Dashboard through `AntSleap/ui/taxamask_agent_panel.py`.
-- The start center right rail contains stacked workflow cards for `2D/STL Morphology` and `TIF Volume`, plus continue/open/general settings controls.
+- The start center right rail contains recent/open/general settings controls followed by `PDF evidence workflow`, `2D/STL Morphology`, and `TIF Volume` cards. PDF evidence should remain visible near the top because it is often the first screening/review step before candidate import.
+- Normal Windows launch uses `启动TaxaMask.bat`, which discovers a usable Python environment instead of assuming a maintainer-specific Conda path. `TAXAMASK_PYTHON_EXE` can point to a custom `python.exe`.
+- If TaxaMask GUI cannot start after local source edits, use `启动AntCode修复面板.bat`. It starts the vendored Ant-Code browser Dashboard without importing the PySide6 GUI and sets `LAB_AGENT_SKIP_PROJECT_CONFIG=1` so broken project-local Ant-Code config JSON does not block repair. Model/API settings may need to be reconfirmed inside that recovery Dashboard.
 - Workbenches expose lightweight `Start Center` / `Ask Agent` entries. Do not place full chat panes inside annotation workspaces by default.
 - `Settings` is split into:
   - `General Settings`: language, theme, startup behavior, autosave, default internal runtime device
@@ -57,14 +60,32 @@ Treat this TaxaMask protocol as always active, not as an optional skill:
 - Locator and SAM are lazy-loaded:
   - startup Agent Center does not load Locator/SAM
   - TIF workflow does not load Locator/SAM
-  - entering/opening/importing 2D/STL workflow preloads Locator/SAM
+  - entering/importing ordinary 2D/STL workflow preloads Locator/SAM
+  - opening or continuing a very large 2D/STL project first collapses image groups and defers Locator/SAM preload until annotation/training is requested
   - returning to Agent Center keeps already loaded 2D/STL models alive
 - PDF evidence is a first-class Agent skill route through `.lab-agent/skills/taxamask-pdf-evidence/SKILL.md`. PDF outputs are literature evidence and candidate images; they must remain reviewable and must not become 2D/STL training truth or TIF `manual_truth` automatically.
 - Current default PDF figure review uses the broad ant taxonomy profile `multimodal_configs/蚂蚁分类学图版宽松复核_示例.json`: accept single-ant-taxon morphology plates, useful views, and local diagnostic structures; reject multi-species or multi-taxon comparison figures. Other taxa should adapt copied figure profiles in the same way.
 - Current default PDF part-description extraction uses `part_description_configs/蚂蚁分类学部位描述抽取_示例.json`: structure PDF text into `taxon -> part -> description` records with file/page/block provenance. It is a Text LLM profile, not a multimodal image reviewer, and other taxa should adapt copied part-description profiles rather than editing runtime/API secrets into profiles.
 - PDF extraction databases and artifacts default to `TaxaMask_outputs/`; accepted images, needs-review images, raw extracted figures, review batches, raw LLM responses, and text-description tables are separate evidence artifacts.
+- The 2D/STL workbench imports large image batches through a background image-import thread with an `Image Import Progress` dialog. This applies to `+ Add Images`, cropper outputs, and batch panel-split crops; PDF-derived provenance/crop provenance should remain intact after import completes.
+- Batch panel splitting separates ordinary `Split Crops` from `Hard-joined Candidates`. Default auto-splitting must not infer equal-size panel grids from letter/number labels alone because real taxonomy plates often contain unequal rectangular panels. Current hard-joined candidates come from `crop_source=hard_seam_panel_split`; `label_guided_panel_split` and `letter_label_panel_split` remain legacy-compatible source strings. All hard-joined candidates must be reviewed and must not be treated as confirmed training truth automatically.
+- Image-list custom groups are review buckets. `New Image Group` belongs at the top level of the image context menu; `Move to Image Group` lists move targets only. When a custom group becomes empty after moving/clearing images, remove it from project config and avoid leaving stale VLM group selections.
+- Large 2D/STL projects have specific responsiveness safeguards:
+  - opening/continuing projects with 500+ images starts with collapsed image groups, no automatic first-image load, and no startup model preload
+  - project JSON loading builds a one-time image identity index so labels/scales/provenance do not repeatedly scan the full image list
+  - left image-list group collapse/expand reuses cached grouping state
+  - selected-image removal uses `ProjectManager.remove_images(...)` and saves once
+  - taxonomy part removal cleans all images in memory and saves once
+  - built-in and external `Batch (All)` prediction writebacks save and refresh once per batch
+  - external parent-backend batch prediction uses `ExternalBatchInferenceThread` with a progress dialog instead of running all external predict calls in the GUI call stack
+  - external parent-backend training uses `ExternalTrainingThread`; generic external-script cancellation is not promised unless the backend contract/script supports it
 - The Labeling Workbench can look up PDF-derived literature traits for the current image/taxon/part and fill or append to the part description box, but this text evidence is not an automatic training label.
 - VLM first-mile preannotation is a 2D/STL draft-generation path. Keep VLM writeback tied to registered project image keys; relative/absolute image path drift must not create hidden shadow labels that the active canvas cannot show.
+- VLM batch preannotation has a stop button and a project-configurable API concurrency setting that defaults to 1. Reruns may replace unconfirmed AI drafts, but must preserve manual and confirmed labels.
+- `Clear AI Labels` should offer all-project and image-group scopes with affected counts before destructive confirmation.
+- `Rename Structure` should migrate existing labels, descriptions, VLM targets, parent ratios, routes, Blink context, and trajectories rather than deleting/recreating the part.
+- `Lock parent box ratio` is off by default. Enable it only when fixed-ratio parent ROI boxes are needed for child-part training; when enabled it affects parent-role `Annotation Box` and parent-role `Box Prompt (SAM)`.
+- Settings controls that can change high-impact run behavior should avoid accidental mouse-wheel edits.
 
 ## Data Safety Rules
 

@@ -45,6 +45,12 @@ from .style import (
     themed_yes_no_question,
 )
 
+
+class NoWheelComboBox(QComboBox):
+    def wheelEvent(self, event):
+        event.ignore()
+
+
 def _load_pdf_processor_dependencies():
     try:
         module = importlib.import_module("core.pdf_processor")
@@ -830,13 +836,13 @@ class DatabaseViewerDialog(QDialog):
         self.search_edit = QLineEdit()
         self.search_edit.returnPressed.connect(self.apply_filters)
         self.status_label = QLabel(self.tr("Status:"))
-        self.status_combo = QComboBox()
+        self.status_combo = NoWheelComboBox()
         self.status_combo.addItem(self.tr("All"), "")
         self.status_combo.addItem(self.tr("Accepted only"), "accepted")
         self.status_combo.addItem(self.tr("Needs review"), "needs_review")
         self.status_combo.addItem(self.tr("Rejected"), "rejected")
         self.human_filter_label = QLabel(self.tr("Human:"))
-        self.human_filter_combo = QComboBox()
+        self.human_filter_combo = NoWheelComboBox()
         for label, value in [
             (self.tr("Any"), ""),
             (self.tr("Unreviewed"), "__unreviewed__"),
@@ -847,12 +853,12 @@ class DatabaseViewerDialog(QDialog):
         ]:
             self.human_filter_combo.addItem(label, value)
         self.vlm_filter_label = QLabel(self.tr("VLM:"))
-        self.vlm_filter_combo = QComboBox()
+        self.vlm_filter_combo = NoWheelComboBox()
         self.vlm_filter_combo.addItem(self.tr("Any"), "")
         self.vlm_filter_combo.addItem(self.tr("Real"), "real")
         self.vlm_filter_combo.addItem(self.tr("Mock/none"), "mock_none")
         self.sort_label = QLabel(self.tr("Sort:"))
-        self.sort_combo = QComboBox()
+        self.sort_combo = NoWheelComboBox()
         self.sort_combo.addItem(self.tr("Newest first"), "newest")
         self.sort_combo.addItem(self.tr("Oldest first"), "oldest")
         self.sort_combo.addItem(self.tr("Score high-low"), "score_desc")
@@ -3589,7 +3595,7 @@ class PdfProcessingWidget(QWidget):
         self.edit_base_url.setPlaceholderText(self.tr("https://api.siliconflow.cn/v1"))
         
         self.edit_model = QLineEdit("gpt-5.4")
-        self.combo_api_protocol = QComboBox()
+        self.combo_api_protocol = NoWheelComboBox()
         self.combo_api_protocol.addItem(self.tr("Auto (Recommended)"), "auto")
         self.combo_api_protocol.addItem(self.tr("Chat Completions"), "chat_completions")
         self.combo_api_protocol.addItem(self.tr("Responses API"), "responses")
@@ -3637,11 +3643,11 @@ class PdfProcessingWidget(QWidget):
         self.edit_mllm_base_url = QLineEdit()
         self.edit_mllm_base_url.setPlaceholderText(self.tr("https://api.siliconflow.cn/v1"))
         self.edit_mllm_model = QLineEdit("Qwen/Qwen3-VL-32B-Instruct")
-        self.combo_mllm_api_protocol = QComboBox()
+        self.combo_mllm_api_protocol = NoWheelComboBox()
         self.combo_mllm_api_protocol.addItem(self.tr("Auto (Recommended)"), "auto")
         self.combo_mllm_api_protocol.addItem(self.tr("Chat Completions"), "chat_completions")
         self.combo_mllm_api_protocol.addItem(self.tr("Responses API"), "responses")
-        self.combo_mllm_image_detail = QComboBox()
+        self.combo_mllm_image_detail = NoWheelComboBox()
         self.combo_mllm_image_detail.addItem("Auto", "auto")
         self.combo_mllm_image_detail.addItem("Low", "low")
         self.combo_mllm_image_detail.addItem("High", "high")
@@ -3707,7 +3713,7 @@ class PdfProcessingWidget(QWidget):
         self.lbl_select_profile = QLabel()
         adv_layout.addWidget(self.lbl_select_profile)
         
-        self.combo_profiles = QComboBox()
+        self.combo_profiles = NoWheelComboBox()
         self.combo_profiles.setMinimumWidth(200)
         self.combo_profiles.currentIndexChanged.connect(self.on_profile_changed)
         adv_layout.addWidget(self.combo_profiles)
@@ -3730,7 +3736,7 @@ class PdfProcessingWidget(QWidget):
         self.lbl_select_figure_profile = QLabel()
         figure_profile_layout.addWidget(self.lbl_select_figure_profile)
 
-        self.combo_figure_profiles = QComboBox()
+        self.combo_figure_profiles = NoWheelComboBox()
         self.combo_figure_profiles.setMinimumWidth(240)
         self.combo_figure_profiles.currentIndexChanged.connect(self.on_figure_profile_changed)
         figure_profile_layout.addWidget(self.combo_figure_profiles)
@@ -3753,7 +3759,7 @@ class PdfProcessingWidget(QWidget):
         self.lbl_select_part_description_profile = QLabel()
         part_description_profile_layout.addWidget(self.lbl_select_part_description_profile)
 
-        self.combo_part_description_profiles = QComboBox()
+        self.combo_part_description_profiles = NoWheelComboBox()
         self.combo_part_description_profiles.setMinimumWidth(240)
         self.combo_part_description_profiles.currentIndexChanged.connect(self.on_part_description_profile_changed)
         part_description_profile_layout.addWidget(self.combo_part_description_profiles)
@@ -3825,7 +3831,7 @@ class PdfProcessingWidget(QWidget):
 
         mode_layout = QHBoxLayout()
         self.lbl_screening_mode = QLabel()
-        self.combo_mode = QComboBox()
+        self.combo_mode = NoWheelComboBox()
         self.combo_mode.addItem(self.tr("V2 (CSV Full LLM)"), "v2")
         self.combo_mode.setMinimumWidth(180)
         self.combo_mode.currentIndexChanged.connect(self.on_mode_changed)

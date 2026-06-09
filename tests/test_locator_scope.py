@@ -363,6 +363,90 @@ class LocatorScopeTests(unittest.TestCase):
         self.assertTrue(removed)
         self.assertIsNone(pm.get_cascade_route("Head", "Mandible"))
 
+    def test_rename_taxonomy_part_migrates_labels_drafts_and_routes(self):
+        pm = ProjectManager()
+        pm.add_taxonomy_part("Mandible")
+        pm.set_locator_scope(["Head", "Mandible"], save=False)
+        image_path = "/tmp/specimen.png"
+        pm.project_data["images"] = [image_path]
+        pm.project_data["labels"][image_path] = {
+            "parts": {"Mandible": [[1, 1], [8, 1], [8, 8]]},
+            "boxes": {"Mandible": [1, 1, 8, 8]},
+            "auto_boxes": {"Mandible": [1, 1, 8, 8]},
+            "auto_box_meta": {"Mandible": {"source": "vlm_first_mile", "review_status": "draft"}},
+            "descriptions": {"Mandible": "Auto-Annotated"},
+            "shrink_loose_boxes": {"Mandible": [0, 0, 10, 10]},
+            "trajectories": {
+                "Mandible": {
+                    "frames": [],
+                    "parent_context": {"parent_part": "Head"},
+                }
+            },
+            "status": "labeled",
+            "genus": "Unknown",
+        }
+        pm.project_data["vlm_preannotation"] = {
+            "target_parts": ["Mandible"],
+            "processing_scope": "image_group",
+            "image_group": "split",
+        }
+        pm.remember_blink_context_parent("Mandible", "Head", save=False)
+        pm.set_parent_box_aspect_ratio("Mandible", 1.5, save=False)
+        pm.register_cascade_route_candidate("Head", "Mandible", save=False)
+        pm.appoint_cascade_route_expert("Head", "Mandible", expert_id="Mandible/expert_v20260501_090000.pth", save=False)
+
+        renamed = pm.rename_taxonomy_part("Mandible", "Mandible complex", save=False)
+
+        self.assertTrue(renamed)
+        self.assertIn("Mandible complex", pm.project_data["taxonomy"])
+        self.assertNotIn("Mandible", pm.project_data["taxonomy"])
+        self.assertEqual(pm.get_locator_scope(), ["Head", "Mandible complex"])
+        labels = pm.project_data["labels"][image_path]
+        for key in ("parts", "boxes", "auto_boxes", "auto_box_meta", "descriptions", "shrink_loose_boxes", "trajectories"):
+            self.assertIn("Mandible complex", labels[key])
+            self.assertNotIn("Mandible", labels[key])
+        self.assertEqual(pm.get_vlm_preannotation_settings()["target_parts"], ["Mandible complex"])
+        self.assertEqual(pm.get_blink_context_parent("Mandible complex"), "Head")
+        self.assertEqual(pm.get_parent_box_aspect_ratios()["Mandible complex"], 1.5)
+        self.assertIsNotNone(pm.get_cascade_route("Head", "Mandible complex"))
+        self.assertIsNone(pm.get_cascade_route("Head", "Mandible"))
+
+    def test_vlm_preannotation_concurrency_defaults_and_sanitizes(self):
+        pm = ProjectManager()
+
+        self.assertEqual(pm.get_vlm_preannotation_settings()["concurrency"], 1)
+
+        settings = pm.set_vlm_preannotation_settings({"concurrency": 4}, save=False)
+        self.assertEqual(settings["concurrency"], 4)
+
+        settings = pm.set_vlm_preannotation_settings({"concurrency": 99}, save=False)
+        self.assertEqual(settings["concurrency"], 8)
+
+        settings = pm.set_vlm_preannotation_settings({"concurrency": "bad"}, save=False)
+        self.assertEqual(settings["concurrency"], 1)
+
+    def test_remove_auto_labels_for_images_keeps_other_images(self):
+        pm = ProjectManager()
+        first_image = "/tmp/specimen_a.png"
+        second_image = "/tmp/specimen_b.png"
+        pm.project_data["images"] = [first_image, second_image]
+        for image_path in (first_image, second_image):
+            pm.project_data["labels"][image_path] = {
+                "parts": {"Head": [[1, 1], [5, 1], [5, 5]]},
+                "boxes": {},
+                "auto_boxes": {"Head": [1, 1, 5, 5]},
+                "auto_box_meta": {"Head": {"source": "vlm_first_mile", "review_status": "draft"}},
+                "descriptions": {"Head": "Auto-Annotated"},
+                "status": "labeled",
+                "genus": "Unknown",
+            }
+
+        removed = pm.remove_auto_labels_for_images([second_image], save=False)
+
+        self.assertEqual(removed, 1)
+        self.assertIn("Head", pm.project_data["labels"][first_image]["parts"])
+        self.assertNotIn("Head", pm.project_data["labels"][second_image]["parts"])
+
     def test_blink_context_parent_does_not_leak_between_projects(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             pm_one = ProjectManager()

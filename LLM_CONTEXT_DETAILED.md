@@ -1,12 +1,227 @@
 # TAXAMASK / FORMICA-FLOW SYSTEM TECHNICAL MANUAL (Deep Dive)
 
 > **Target Audience**: Expert LLM Assistants, Senior Developers
-> **Version**: v3.34 / TaxaMask v3.0 official milestone (June 6, 2026, full workflow validation + dataset export progress)
+> **Version**: v1.0 / TaxaMask open-source official release (June 9, 2026, large-project annotation + VLM safety + documentation sync)
 > **Purpose**: Up-to-date architectural, workflow, and governance context for implementation and maintenance.
 
 ---
 
-## 0) v3.34 / TaxaMask v3.0 Official Milestone (2026-06-06)
+## 0) v1.0 Open-Source Official Release State (2026-06-09)
+
+### 0.0 Release status
+- The public milestone name is now **TaxaMask open-source official release v1.0**.
+- `README.md`, `CITATION.cff`, `CHANGELOG_zh.md`, `TaxaMask使用手册.md`, this handoff, `.lab-agent/memory.md`, and the TaxaMask workflow skill are synced to v1.0 behavior.
+- Historical `v3.x` entries in the changelog and older sections below remain internal development history and should not be retroactively rewritten.
+- Most validated daily route remains ant 2D/STL morphology plus PDF evidence. TIF volume support remains experimental.
+
+### 0.1 Large 2D/STL annotation behavior
+- Large 2D/STL projects open with lightweight safeguards:
+  - image groups collapsed at first display for 500+ image projects
+  - no automatic first-image load
+  - no startup Locator/SAM preload until annotation/training requires it
+- Left image-list group collapse/expand reuses cached grouping state.
+- Removing images uses `ProjectManager.remove_images(...)`, cleans related labels/scales/provenance/groups in memory, saves once, and keeps the user's review position rather than jumping back to the first image after a single-image delete.
+- Removing a taxonomy part cleans per-image data in memory and saves once.
+- Built-in and external `Batch (All)` prediction paths save/refresh once per batch instead of per image/part.
+
+### 0.2 SAM and parent-ratio behavior
+- `Lock parent box ratio` is off by default in the Labeling Workbench.
+- When enabled, the stored parent box ratio affects parent-role `Annotation Box` and parent-role `Box Prompt (SAM)` constraints.
+- Child boxes and shrink loose boxes remain free-ratio.
+- The locked-ratio drag interaction is expected to keep the dragged point inside the drawn box, so users do not need to drag to the screen edge to obtain the desired box size.
+- First SAM use can still pay a model/worker warmup cost; the current pass focuses on reducing repeated UI stalls during switching, delayed save, and follow-up SAM interactions.
+
+### 0.3 VLM draft generation and safety
+- VLM first-mile preannotation currently uses adaptive light-grid input and expects `bbox_grid_xyxy`, while retaining pixel-box parsing as legacy fallback.
+- Batch VLM preannotation has a progress dialog with a stop button.
+- Closing the VLM progress dialog while a run is active asks to stop the run rather than silently allowing a thousands-image job to continue.
+- Stop behavior:
+  - no new image requests are dispatched
+  - already active requests are allowed to finish
+  - remaining queue is cleared
+  - the run writes a cancelled summary
+- VLM API concurrency is project-configurable in `2D/STL Model Settings -> Inference`, default `1`, sanitized/clamped to a conservative range. Raise it only when the API provider allows parallel requests.
+- Rerunning VLM or parent auto-annotation replaces unconfirmed AI drafts but preserves manual and confirmed labels. Mixed images with one manual label and other unconfirmed AI labels should only regenerate replaceable AI portions.
+
+### 0.4 AI label clearing and structure rename
+- `Clear AI Labels` now opens a scope picker:
+  - all project images
+  - one selected image-list group
+- It reports affected image/label counts before destructive confirmation.
+- Project API: `ProjectManager.remove_auto_labels_for_images(...)`.
+- Structure labels can be renamed from the right-side `Structures` panel.
+- `ProjectManager.rename_taxonomy_part(...)` migrates project references including taxonomy, labels, descriptions, auto boxes/meta, shrink boxes, trajectories, VLM targets, parent ratios, Blink parent context, and cascade routes.
+- Rename should reject collisions rather than merging two existing structures.
+
+### 0.5 Settings safety
+- High-risk settings controls ignore wheel events unless the user explicitly edits them through ordinary interactions.
+- Current no-wheel controls include core model/settings combo boxes, VLM concurrency, Blink auto-shrink steps, validation report percent slider, and PDF processing configuration combos.
+- This prevents accidental changes while users scroll through long settings panels before large training, VLM, or export runs.
+
+## 0) v3.36 Large 2D/STL Project Responsiveness Pass (2026-06-07)
+
+### 0.0 Current status
+- 2D/STL image registration no longer always runs synchronously on the GUI thread.
+- `ProjectManager.add_images(...)` now accepts `progress_callback(done, total, label)` and returns the number of newly registered images while remaining backward-compatible with old callers.
+- `ProjectManager.remove_images(...)` batches image removal and related metadata cleanup:
+  - image list entries
+  - labels
+  - scales
+  - PDF/crop provenance
+  - any legacy custom-group `images` references
+- `ProjectManager.remove_image(...)` remains as a compatibility wrapper around the batch method.
+- Removing a taxonomy part no longer calls `delete_label(..., save=True)` for every image. It defers per-image label cleanup and saves the project once after route/profile cleanup.
+- `MainWindow._start_image_import(...)` centralizes user-facing image imports:
+  - left-panel `+ Add Images`
+  - cropper `Save & Add to Project`
+  - batch panel splitting when generated crops are appended to the project
+- Imports of 20 or more images use `ImageImportThread` plus an `Image Import Progress` dialog. Smaller imports stay synchronous for immediate feel.
+- The progress dialog has no cancel button in this pass. Project JSON writes and provenance updates are safer if import completion semantics stay simple and auditable.
+- Left image-list grouping now scales better for thousands of images:
+  - `refresh_file_list(...)` builds an image-list state cache for group definitions, labeled images, split-crop identities, and counts
+  - group header collapse/expand uses `reuse_group_cache=True` rather than recomputing all groups
+  - `setUpdatesEnabled(False)` is used while rebuilding the `QListWidget` to reduce repaint churn
+  - `_project_image_groups(...)` now builds a one-pass crop/source identity index instead of calling the older per-image full-list scan path
+- Custom image groups behave as active review buckets rather than permanent empty folders:
+  - `New Image Group` appears at the top level of the image-list context menu
+  - `Move to Image Group` only lists existing move targets
+  - when the last image leaves a custom group, the empty custom group is removed from project config, move targets, collapsed-state cache, and VLM group selection fallback
+- Batch panel splitting now uses a more tolerant built-in splitter:
+  - near-white separators are combined with adaptive light-background detection, so off-white, grayish, or yellowed PDF gutters are less likely to be missed
+  - default splitting no longer derives equal-size panel grids from alphabetic or numeric panel labels alone; real plates often contain unequal rectangular panels, so label-only grid inference is unsafe
+  - hard scene-change seams can still produce `hard_seam_panel_split` candidate crops when there is boundary evidence; uncertain hard-joined plates are skipped for manual cropping instead of being force-split
+  - hard-joined crops are candidates for review, not verified training truth; current provenance keeps `crop_source=hard_seam_panel_split`, while `label_guided_panel_split` and `letter_label_panel_split` remain legacy compatible source strings
+  - hard-joined candidate crops are grouped under `Hard-joined Candidates` / `hard_candidates`, separate from ordinary `Split Crops`
+- Opening or continuing a very large 2D/STL project uses a lightweight first screen:
+  - threshold: `LARGE_PROJECT_OPEN_LIGHTWEIGHT_THRESHOLD = 500`
+  - image groups are initially collapsed
+  - no first image is auto-selected or loaded
+  - startup Locator/SAM preload is skipped; models load when annotation/training requests them
+- `ProjectManager.load_project(...)` builds a one-time image identity index while loading `images`, then uses it to merge `labels`, `scales`, and `image_provenance`. This avoids repeatedly scanning the full image list for every label/provenance key in thousand-image projects while preserving relative/absolute path shadow-key merging.
+- `MainWindow.remove_selected_images()` now calls the batch project removal API rather than looping one selected item at a time.
+- Prediction writeback no longer saves once per predicted part:
+  - `_apply_prediction_to_project(..., save=False)` is used by batch paths
+  - built-in batch inference saves and refreshes the file list once when the inference thread finishes
+  - external parent-backend batch inference now uses `ExternalBatchInferenceThread`, reports progress, applies results on the GUI thread, then saves and refreshes once at completion
+- External parent-backend training now uses `ExternalTrainingThread` instead of running `ExternalBackendRunner.run_prepare_and_train()` in the GUI call stack. The training controls and `_is_parent_training_running()` treat this as parent training, so child expert training is blocked while the external parent job is active.
+- Closing TaxaMask is blocked while image import, external batch inference, or external parent-backend training is running, so project JSON writes and external run artifacts are not interrupted mid-operation.
+
+### 0.1 Research workflow consequence
+- Large batches copied from PDF `accepted_figures/` or other evidence folders can be added to a 2D/STL project without making the whole UI appear frozen.
+- Clicking `Continue last project` for a thousand-image 2D/STL project should now land in the workbench with group headers visible quickly rather than creating every image row, loading the first image, and preloading models in the same call chain.
+- The left image list refreshes once after the batch finishes, instead of repeatedly during the import loop.
+- Collapsing `Original Images` or another image-list group is now a display operation, not a full provenance regrouping pass. This matters for PDF evidence projects with thousands of imported/cropped figures.
+- Selecting hundreds of rejected PDF candidates and using `Remove Image` should not write the entire project JSON hundreds of times. It removes the project-side records in one batch and leaves original disk files untouched.
+- Deleting a structure label such as a temporary candidate part still remains a high-risk whole-project action, but the cost is now one project save rather than one save per image.
+- Built-in and external `Batch (All)` predictions are still AI draft generation paths. The responsiveness changes only reduce UI blocking and repeated disk writes; they do not promote predictions to training truth.
+- External parent-backend batch prediction no longer runs all external `predict` commands inside the GUI call stack. The external scripts still run one image at a time, but the GUI stays responsive and shows progress while results arrive.
+- External parent-backend training can still take a long time, depending entirely on the user-provided script, but the TaxaMask GUI should no longer appear dead while that script runs. There is still no generic stop button for arbitrary external scripts; safe cancellation would need backend contract support.
+- Crop provenance remains intact: crop records are applied after successful registration, so PDF-derived crops still trace back to source image/PDF evidence where available.
+- PDF candidates remain evidence/candidate images only. Background import changes responsiveness, not trust semantics; imported images still need human review before becoming training labels.
+- Closing TaxaMask while image import, external batch inference, or external parent-backend training is running is blocked with a plain message so the project JSON/external run directory is not interrupted mid-write.
+
+### 0.2 Validation used for this pass
+- `C:\Users\admin\anaconda3\envs\antsleap\python.exe -m py_compile AntSleap\main.py AntSleap\core\project.py`
+- `tests.test_generic_taxonomy_workflow.GenericTaxonomyWorkflowTests.test_add_images_reports_progress_and_skips_duplicates`
+- `tests.test_generic_taxonomy_workflow.GenericTaxonomyWorkflowTests.test_remove_images_saves_once_and_clears_related_metadata`
+- `tests.test_generic_taxonomy_workflow.GenericTaxonomyWorkflowTests.test_remove_taxonomy_part_saves_once_for_large_projects`
+- `tests.test_gui_smoke.GuiSmokeTests.test_bulk_image_import_uses_background_progress_thread`
+- `tests.test_gui_smoke.GuiSmokeTests.test_remove_selected_images_uses_batch_project_remove`
+- `tests.test_gui_smoke.GuiSmokeTests.test_external_batch_inference_uses_background_thread_and_single_save`
+- `tests.test_gui_smoke.GuiSmokeTests.test_external_training_uses_background_thread`
+- `tests.test_ui_polish_scope.UiPolishScopeTests.test_workbench_training_buttons_are_mutually_exclusive`
+- VLM draft trust-semantics checks:
+  - `test_batch_ai_draft_verification_skips_box_only_drafts`
+  - `test_verify_keeps_box_only_drafts_unreviewed`
+  - `test_ai_draft_summary_distinguishes_polygon_and_box_only`
+- Neighbor GUI smoke checks:
+  - `test_continue_last_large_project_opens_with_collapsed_image_groups`
+  - `test_refresh_file_list_restores_selection_with_project_relative_path`
+  - `test_batch_panel_split_adds_white_and_hard_seam_candidate_crops`
+  - `test_start_center_workflow_buttons_switch_visible_tabs`
+- Additional image-list grouping checks:
+  - `test_image_group_header_collapse_reuses_large_project_group_cache`
+  - `test_image_group_header_collapse_does_not_load_image_during_startup`
+  - split/manual/custom image group smoke tests in `tests.test_gui_smoke`
+
+---
+
+## 0) v3.35 Portable Launch + Ant-Code Recovery Dashboard (2026-06-07)
+
+### 0.0 Current status
+- This pass adds a delivery safety net around user-side TaxaMask customization:
+  - normal Windows startup is no longer tied to the maintainer workstation path
+  - a standalone Ant-Code recovery launcher can open a browser Dashboard even when the TaxaMask PySide6 GUI cannot import or start
+  - the recovery launcher can bypass broken project-local Ant-Code config JSON so it remains usable for repair
+- This section supersedes older notes that described `启动TaxaMask.bat` as directly calling the maintainer's `antsleap` Conda environment.
+
+### 0.1 Normal Windows launcher
+- Root script: `启动TaxaMask.bat`.
+- It searches for Python in this order:
+  - `TAXAMASK_PYTHON_EXE` if explicitly set
+  - local `.venv`, `venv`, or `env`
+  - active `CONDA_PREFIX`
+  - common user/system `miniconda3` / `anaconda3` `envs\antsleap` locations
+  - `python.exe`, `python`, or `py.exe` on PATH
+- It checks `import PySide6` before launching `AntSleap\main.py`.
+- If PySide6 is missing, it stops with a plain message and points the user to:
+  - install dependencies in the selected environment
+  - set `TAXAMASK_PYTHON_EXE`
+  - run `启动AntCode修复面板.bat` if the GUI was broken by source-code edits
+- It still sets the Qt WebEngine CPU compositing flag before launching the GUI.
+
+### 0.2 Recovery launcher
+- Root script: `启动AntCode修复面板.bat`.
+- It intentionally does not import TaxaMask Python code and does not require PySide6.
+- It starts the vendored Ant-Code browser Dashboard with:
+  - `node vendor\ant-code\src\cli\dashboard.js --project <repo root> --port <port>`
+- Node resolution:
+  - `TAXAMASK_NODE_EXE`
+  - `vendor\ant-code\node.exe`
+  - repo-root `node.exe`
+  - common Windows Node install locations
+  - `node.exe` / `node` on PATH
+- Requires Node.js 20 or newer.
+- Default port is `7410`; `TAXAMASK_ANTCODE_PORT` overrides it. Ant-Code itself will try the next available port if the requested one is busy.
+- The command opens the full Ant-Code Dashboard in the browser and keeps the batch window alive as the server process. Closing the window stops the local Dashboard server.
+
+### 0.3 Config-bypass behavior for repair
+- `vendor/ant-code/src/config/load-config.js` now recognizes `LAB_AGENT_SKIP_PROJECT_CONFIG=1`.
+- When enabled, Ant-Code skips project-local config files:
+  - `lab-agent.config.json`
+  - `.lab-agent/config.json`
+- The recovery launcher sets this flag so a damaged local config file cannot prevent the repair Dashboard from opening.
+- Tradeoff:
+  - the Dashboard falls back to bundled/default config and environment variables
+  - model/API settings from `.lab-agent/config.json` may need to be confirmed again inside the Dashboard
+  - this is acceptable for recovery because opening the repair surface is more important than preserving a possibly corrupted local model profile
+- Normal embedded Agent startup inside TaxaMask does not use this skip flag.
+
+### 0.4 Start Center polish in this pass
+- Right rail order now places `PDF evidence workflow` immediately after the recent-project/quick panel and before `2D/STL` and `TIF`.
+- Rationale:
+  - PDF evidence is often the first screening/review step before importing candidates into a 2D/STL project
+  - it should not be hidden at the bottom of the rail
+- Inactive Agent fallback branding is a clean font-based `TaxaMask` wordmark. No custom painted bitmap/vector mark is currently used, and no default descriptive tagline is shown. Only actionable runtime detail such as URL, WebEngine availability, JSON warning, or startup error appears below it.
+
+### 0.5 Validation used for this pass
+- Batch launchers:
+  - confirmed both `.bat` scripts use CRLF line endings
+  - `启动TaxaMask.bat` with base Python lacking PySide6 exits with the intended friendly environment message
+  - `启动AntCode修复面板.bat` launched Dashboard on a test port; `/api/status` returned OK; `/api/shutdown` closed it cleanly
+- Ant-Code:
+  - `node --check vendor\ant-code\src\config\load-config.js`
+  - `node --test vendor\ant-code\tests\unit\config.test.js` passed 31 tests, including the new broken-project-config skip case
+- TaxaMask:
+  - `C:\Users\admin\anaconda3\envs\antsleap\python.exe -m py_compile AntSleap\main.py AntSleap\ui\taxamask_agent_panel.py`
+  - selected start-center GUI smoke tests passed:
+    - `test_start_center_workflow_buttons_switch_visible_tabs`
+    - `test_start_center_recent_project_uses_short_display_and_full_tooltip`
+    - `test_start_center_entry_is_navigation_only`
+
+---
+
+## 0) Historical v3.34 / TaxaMask v3.0 Official Milestone (2026-06-06)
 
 ### 0.0 Current milestone status
 - User completed an end-to-end field test pass across the major current workflows:
@@ -16,8 +231,8 @@
   - parent-part and child-part/Blink training controls
   - TIF/STL critical viewing and handoff paths
   - 2D/STL dataset export
-- The current stable research milestone is named **TaxaMask v3.0 official research workflow release**.
-- This v3.0 label refers to the public TaxaMask workflow milestone. Older AntSleap/Formica-Flow `v3.x` entries in the historical changelog are preserved as internal development history and should not be retroactively rewritten.
+- At that time, the stable research milestone was named **TaxaMask v3.0 official research workflow release**.
+- This v3.0 label is now historical internal milestone context. The current public release name is recorded in the v1.0 section above.
 - Most validated route for daily research remains ant 2D/STL morphology plus PDF evidence. TIF volume support remains experimental but usable for small validation passes.
 
 ### 0.1 Dataset export current behavior
@@ -690,7 +905,7 @@
 - `ProjectManager` persists:
   - `vlm_preannotation.target_parts`
   - `vlm_preannotation.processing_scope` (`all_images` or `image_group` for batch)
-  - `vlm_preannotation.image_group` (`split`, `original`, or `manual`)
+  - `vlm_preannotation.image_group` (`split`, `hard_candidates`, `original`, or `manual`)
 - VLM target parts are independent from main locator parts (`locator_scope`).
 - Processing scope:
   - `current_image`
@@ -972,7 +1187,8 @@
 - `MainWindow` no longer starts SAM with a startup `QTimer`.
 - Startup Agent Center does not load Locator or SAM.
 - TIF workflow does not load Locator or SAM.
-- Entering/opening/importing 2D/STL workflow calls `ensure_2d_stl_models_preloaded()`, which preloads Locator plus SAM/TrainableSAM.
+- Entering/importing ordinary 2D/STL workflow calls `ensure_2d_stl_models_preloaded()`, which preloads Locator plus SAM/TrainableSAM.
+- Opening/continuing very large 2D/STL projects skips startup model preload and relies on the same ensure methods when annotation or training is requested.
 - Returning to the start center keeps already loaded models alive.
 - Application close should stop the SAM worker thread cleanly.
 - `refresh_model_list()` scans available files but does not apply/load Locator/SAM while active mode is `start` or `tif`.

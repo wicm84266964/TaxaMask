@@ -1,0 +1,60 @@
+{
+  "appName": "taxamask-agent",
+  "skills": {
+    "enabled": true,
+    "includeProjectDefaults": false,
+    "includeEnvironmentPaths": false,
+    "paths": []
+  },
+  "agents": {
+    "includeProjectProfiles": false,
+    "profiles": []
+  },
+  "taxamaskPermissions": {
+    "adapterRoots": [
+      "external_backends",
+      "external_backend_adapters",
+      "model_backends",
+      ".tmp_validation/external_backends"
+    ],
+    "adapterExtensions": [
+      ".py",
+      ".js",
+      ".mjs",
+      ".cjs",
+      ".json",
+      ".yaml",
+      ".yml",
+      ".toml",
+      ".md",
+      ".txt",
+      ".ps1",
+      ".sh",
+      ".bat",
+      ".cmd"
+    ]
+  },
+  "hooks": {
+    "enabled": true,
+    "events": {
+      "tool.before": [
+        {
+          "name": "taxamask-source-readonly",
+          "type": "builtin",
+          "builtin": "denyTaxaMaskSourceWrites",
+          "blocking": true,
+          "managed": true,
+          "when": {
+            "tools": [
+              "write_file",
+              "edit_file",
+              "powershell",
+              "bash",
+              "mcp_call"
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

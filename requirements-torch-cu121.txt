@@ -1,0 +1,4 @@
+# Install CUDA 12.1 PyTorch before requirements.txt for NVIDIA GPU workstations.
+--index-url https://download.pytorch.org/whl/cu121
+torch>=2.0.0
+torchvision>=0.15.0

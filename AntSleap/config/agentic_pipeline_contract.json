@@ -1,0 +1,329 @@
+{
+  "schema_version": "taxamask-agentic-pipeline-contract-v1",
+  "purpose": "Machine-readable contract for letting a code agent orchestrate TaxaMask from literature input to multimodal dataset output.",
+  "assumptions": {
+    "locator_quality": "production_ready",
+    "auto_annotation_quality": "production_ready",
+    "human_annotation_intervention": "not_required_for_normal_cases",
+    "agent_role": "orchestrator_and_auditor",
+    "preferred_execution_mode": "headless_tools_first"
+  },
+  "readiness_summary": {
+    "overall_feasibility": "high_with_adapter_layer",
+    "estimated_readiness": 0.86,
+    "main_blocker": "The remaining high-risk work is production validation of model-backed batch auto-annotation and final audit report generation.",
+    "recommended_next_step": "Run the contract on a small real PDF folder, then enable model inference with explicit approval and inspect the final dataset/provenance audit."
+  },
+  "required_inputs": [
+    {
+      "id": "pdf_source_dir",
+      "kind": "directory",
+      "default": "",
+      "description": "Folder containing source PDFs for literature screening and figure extraction."
+    },
+    {
+      "id": "project",
+      "kind": "file",
+      "default": "json_projects/samples/taxamask_minimal_sample.json",
+      "description": "Project JSON used by governance and dataset export stages."
+    },
+    {
+      "id": "db",
+      "kind": "file",
+      "default": "taxamask_literature.db",
+      "description": "SQLite database produced by PDF extraction."
+    },
+    {
+      "id": "policy",
+      "kind": "file",
+      "default": "AntSleap/config/view_policy_core2.json",
+      "description": "Governance policy for routing, sampling, redline gates, and acceptance checks."
+    },
+    {
+      "id": "screener_config",
+      "kind": "file",
+      "default": "screener_configs/蚂蚁新种筛选_V2示例.json",
+      "description": "PDF screening logic profile. The default is the ant taxonomy example; replace it with a generic, plant, or project-specific V2 profile for other taxa."
+    },
+    {
+      "id": "figure_profile",
+      "kind": "file",
+      "default": "multimodal_configs/蚂蚁分类学图版宽松复核_示例.json",
+      "description": "Figure extraction and multimodal review profile. The default is the broad ant taxonomy figure example; replace it to define evidence rules for other taxa or figure types."
+    },
+    {
+      "id": "part_description_profile",
+      "kind": "file",
+      "default": "part_description_configs/蚂蚁分类学部位描述抽取_示例.json",
+      "description": "Pure-text taxon part-description extraction profile. It defines the part buckets and prompt used to structure PDF text into taxon -> part -> description records."
+    },
+    {
+      "id": "output_dir",
+      "kind": "directory",
+      "default": "artifacts/agentic_pipeline",
+      "description": "Output artifact root for agent-driven runs."
+    }
+  ],
+  "stages": [
+    {
+      "id": "stage_00_preflight",
+      "title": "Preflight and run plan",
+      "autonomy_level": "ready",
+      "execution_type": "agent_internal",
+      "required_inputs": [
+        "project",
+        "db",
+        "policy"
+      ],
+      "outputs": [
+        "{output_dir}/agentic_run_plan.json"
+      ],
+      "gates": [
+        "All configured files exist or are explicitly marked as deferred.",
+        "The agent records a run id, input paths, assumptions, and blocked stages before touching data."
+      ],
+      "agent_notes": "This stage is implemented by tools/agentic/run_agentic_pipeline.py in dry-run mode."
+    },
+    {
+      "id": "stage_10_literature_screening",
+      "title": "PDF screening",
+      "autonomy_level": "ready",
+      "execution_type": "command",
+      "command": [
+        "{python}",
+        "tools/agentic/screen_pdfs.py",
+        "--pdf-source-dir",
+        "{pdf_source_dir}",
+        "--out",
+        "{output_dir}/literature_screening",
+        "--config",
+        "{screener_config}",
+        "--run-index",
+        "{output_dir}/literature_screening/run_index.json"
+      ],
+      "required_inputs": [
+        "pdf_source_dir",
+        "screener_config"
+      ],
+      "outputs": [
+        "{output_dir}/literature_screening/master_queue.csv",
+        "{output_dir}/literature_screening/core_results/final_new_species_reports"
+      ],
+      "gates": [
+        "Resume state is valid for the current PDF manifest.",
+        "LLM responses are saved as raw evidence.",
+        "Uncertain or unreadable PDFs are preserved as review artifacts rather than silently dropped."
+      ],
+      "agent_notes": "A headless CLI wrapper now exists. Headless automation should pass the same PDF screening logic profile that the Qt PDF Processing page exposes through Select Logic Profile."
+    },
+    {
+      "id": "stage_20_figure_extraction",
+      "title": "Figure extraction and multimodal review",
+      "autonomy_level": "ready",
+      "execution_type": "command",
+      "command": [
+        "{python}",
+        "tools/agentic/extract_figures.py",
+        "--pdf-source-dir",
+        "{pdf_source_dir}",
+        "--db",
+        "{db}",
+        "--figure-profile",
+        "{figure_profile}",
+        "--part-description-profile",
+        "{part_description_profile}",
+        "--save-images",
+        "--run-index",
+        "{output_dir}/figure_extraction_run_index.json"
+      ],
+      "required_inputs": [
+        "pdf_source_dir",
+        "figure_profile",
+        "part_description_profile"
+      ],
+      "outputs": [
+        "{db}",
+        "{db_artifacts_dir}/figure_images",
+        "{db_artifacts_dir}/review_batches"
+      ],
+      "gates": [
+        "Real multimodal validator is configured or the run is explicitly marked as mock/default review.",
+        "Each accepted figure has page, figure index, image path, caption evidence, and review status.",
+        "Figures lacking reliable profile-defined evidence remain candidates, not trusted training samples."
+      ],
+      "agent_notes": "A headless CLI wrapper now exists. Real production runs should pass the same Figure Extraction / Review Profile used in the Qt PDF Processing page, plus a multimodal config or an explicit disable flag for multimodal validation."
+    },
+    {
+      "id": "stage_30_candidate_bridge_and_routing",
+      "title": "Candidate bridge, sampling, and routing",
+      "autonomy_level": "ready",
+      "execution_type": "command",
+      "command": [
+        "{python}",
+        "tools/governance/run_core2_pipeline.py",
+        "--project",
+        "{project}",
+        "--db",
+        "{db}",
+        "--policy",
+        "{policy}",
+        "--out",
+        "{output_dir}/core2_orchestrated"
+      ],
+      "required_inputs": [
+        "project",
+        "db",
+        "policy"
+      ],
+      "outputs": [
+        "{output_dir}/core2_orchestrated/run_index.json",
+        "{output_dir}/core2_orchestrated/pdf_candidates_raw.json",
+        "{output_dir}/core2_orchestrated/acceptance_summary.json",
+        "{output_dir}/core2_orchestrated/routing_decisions.json"
+      ],
+      "gates": [
+        "Acceptance suite passes.",
+        "Candidate IDs are deduplicated.",
+        "Ambiguous routing is not promoted to Core-2 automatically."
+      ],
+      "agent_notes": "This is already the strongest automation island in the repo."
+    },
+    {
+      "id": "stage_40_agentic_import_to_project",
+      "title": "Import routed figures into project",
+      "autonomy_level": "ready",
+      "execution_type": "command",
+      "command": [
+        "{python}",
+        "tools/agentic/import_candidates_to_project.py",
+        "--project",
+        "{project}",
+        "--out",
+        "{output_dir}/project_agentic_import.json",
+        "--routing",
+        "{output_dir}/core2_orchestrated/routing_decisions.json",
+        "--candidates",
+        "{output_dir}/core2_orchestrated/pdf_candidates_raw.json",
+        "--db",
+        "{db}",
+        "--status",
+        "needs_review",
+        "--manifest",
+        "{output_dir}/import_manifest.json"
+      ],
+      "required_inputs": [
+        "project",
+        "db"
+      ],
+      "required_artifacts": [
+        "{output_dir}/core2_orchestrated/routing_decisions.json",
+        "{output_dir}/core2_orchestrated/pdf_candidates_raw.json"
+      ],
+      "outputs": [
+        "{output_dir}/project_agentic_import.json",
+        "{output_dir}/import_manifest.json"
+      ],
+      "gates": [
+        "Every imported image keeps source PDF, page, figure index, candidate id, and review status provenance.",
+        "Duplicate source figures are skipped idempotently.",
+        "Project taxonomy and locator scope are not silently expanded."
+      ],
+      "agent_notes": "A headless import adapter now exists and writes image_provenance into the output project."
+    },
+    {
+      "id": "stage_50_batch_auto_annotation",
+      "title": "Batch locator and segmentation",
+      "autonomy_level": "ready_model_gated",
+      "execution_type": "command",
+      "command": [
+        "{python}",
+        "tools/agentic/auto_annotate_project.py",
+        "--project",
+        "{output_dir}/project_agentic_import.json",
+        "--out",
+        "{output_dir}/project_auto_annotated.json",
+        "--run-engine",
+        "--only-new",
+        "--report",
+        "{output_dir}/auto_annotation_report.json"
+      ],
+      "required_inputs": [
+        "project"
+      ],
+      "required_artifacts": [
+        "{output_dir}/project_agentic_import.json"
+      ],
+      "outputs": [
+        "{output_dir}/project_auto_annotated.json",
+        "{output_dir}/auto_annotation_predictions.json"
+      ],
+      "gates": [
+        "Prediction metadata records model weights and cascade route manifest.",
+        "Invalid boxes, empty masks, and out-of-bounds polygons are rejected before project writeback.",
+        "A deterministic report is emitted even when all models are assumed strong."
+      ],
+      "agent_notes": "A headless CLI now exists. Production use with --run-engine initializes model weights; tests can use --predictions to exercise writeback without GPU/model setup."
+    },
+    {
+      "id": "stage_60_multimodal_dataset_export",
+      "title": "Multimodal dataset export",
+      "autonomy_level": "ready",
+      "execution_type": "command",
+      "command": [
+        "{python}",
+        "tools/agentic/export_multimodal_dataset.py",
+        "--project",
+        "{output_dir}/project_agentic_import.json",
+        "--out",
+        "{output_dir}/multimodal_dataset",
+        "--summary",
+        "{output_dir}/multimodal_dataset/export_summary.json",
+        "--run-id",
+        "agentic_pipeline"
+      ],
+      "required_inputs": [
+        "project"
+      ],
+      "required_artifacts": [
+        "{output_dir}/project_agentic_import.json"
+      ],
+      "outputs": [
+        "{output_dir}/multimodal_dataset/multimodal_dataset.jsonl",
+        "{output_dir}/multimodal_dataset/images_global",
+        "{output_dir}/multimodal_dataset/crops"
+      ],
+      "gates": [
+        "JSONL schema version and provenance fields are present.",
+        "All referenced image files exist.",
+        "Each sample has global image, local crop, text, label, segmentation, bbox, source lineage, and model provenance."
+      ],
+      "agent_notes": "A headless CLI wrapper now exists. The next improvement is adding source lineage and model provenance fields to each JSONL row."
+    },
+    {
+      "id": "stage_70_final_audit",
+      "title": "Final audit package",
+      "autonomy_level": "ready_after_adapters",
+      "execution_type": "agent_internal",
+      "required_inputs": [
+        "output_dir"
+      ],
+      "outputs": [
+        "{output_dir}/agentic_final_report.md",
+        "{output_dir}/agentic_final_report.json"
+      ],
+      "gates": [
+        "All required artifacts are present.",
+        "Blocked/deferred stages are explicit.",
+        "The report separates trusted training data from candidates and diagnostics."
+      ],
+      "agent_notes": "This should be generated by the code agent after executing or dry-running the contract."
+    }
+  ],
+  "non_negotiable_controls": [
+    "Do not let the agent operate the Qt GUI as the primary automation path.",
+    "All stages must be idempotent or write into run-scoped output directories.",
+    "Every accepted sample needs source provenance from PDF to project image to exported dataset row.",
+    "Mock/default multimodal review must never be silently treated as trusted acceptance.",
+    "A failed redline or acceptance gate blocks promotion, even if locator and annotation models are assumed excellent."
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "schema_version": "taxamask-api-runtime-settings-v2",
+  "text_llm": {
+    "base_url": "https://api.example.com/v1",
+    "model": "example-text-model",
+    "api_protocol": "auto",
+    "remember_api_key": false,
+    "api_key": ""
+  },
+  "multimodal_llm": {
+    "use_same_as_text": true,
+    "base_url": "",
+    "model": "example-vision-model",
+    "api_protocol": "auto",
+    "image_detail": "auto",
+    "remember_api_key": false,
+    "api_key": ""
+  }
+}

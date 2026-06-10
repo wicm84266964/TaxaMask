@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+message: "If TaxaMask helps your research, please cite this software release."
+title: "TaxaMask: a taxonomy-oriented mask annotation and multimodal dataset workbench"
+version: "1.0.0"
+date-released: "2026-06-09"
+type: software
+license: AGPL-3.0-only
+repository-code: "https://github.com/wicm84266964/TaxaMask"
+abstract: "TaxaMask is a research workbench for taxonomy and morphology workflows, connecting literature trait-description processing, specimen image annotation, AI-assisted drafts, human review, model training, dataset export, and an embedded Agent Center. It was originally developed for ant taxonomy; profile-based adaptation to other taxa should be validated on small batches before broader use."
+keywords:
+  - taxonomy
+  - mask annotation
+  - biological image segmentation
+  - taxonomic literature
+  - literature trait descriptions
+  - agent-assisted workflow
+  - multimodal dataset
+  - biodiversity informatics
+  - ant taxonomy
+authors:
+  - family-names: "Lin"
+    given-names: "Bojian"
+    affiliation: "Red Imported Fire Ant Research Center, College of Plant Protection, South China Agricultural University"

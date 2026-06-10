@@ -1,0 +1,24 @@
+{
+    "name": "TaxaMask_Ant_Morphology_Template",
+    "taxonomy": [
+        "Head",
+        "Mesosoma",
+        "Gaster",
+        "Mandible",
+        "Eye"
+    ],
+    "locator_scope": [
+        "Head",
+        "Mesosoma",
+        "Gaster"
+    ],
+    "blink_context_roi_parents": {},
+    "cascade_routes": {
+        "version": "project-v2",
+        "routes": []
+    },
+    "images": [],
+    "labels": {},
+    "scales": {},
+    "image_provenance": {}
+}

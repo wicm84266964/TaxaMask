@@ -1,0 +1,19 @@
+{
+  "schema_version": "v2",
+  "required_fields": [
+    "sample_id",
+    "view",
+    "source_type",
+    "source_ref",
+    "ingestion_run_id",
+    "label_timestamp",
+    "qa_status",
+    "routing_tier"
+  ],
+  "view_enum": [
+    "lateral",
+    "dorsal",
+    "head_frontal",
+    "unknown"
+  ]
+}

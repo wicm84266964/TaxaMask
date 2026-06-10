@@ -1,0 +1,79 @@
+{
+  "schema_version": "taxamask-part-description-profile-v1",
+  "profile_name": "通用分类学部位描述抽取_模板",
+  "profile_description": "用于复制后改写的通用分类学纯文本部位描述抽取模板。",
+  "target_taxon": {
+    "display_name": "目标类群",
+    "scientific_scope": "TARGET_TAXON",
+    "tested_status": "template"
+  },
+  "part_schema": [
+    {
+      "key": "overall_morphology",
+      "label": "整体形态",
+      "aliases": ["body", "habit", "habitus", "overall", "size", "shape"]
+    },
+    {
+      "key": "diagnostic_structure",
+      "label": "诊断结构",
+      "aliases": ["diagnostic", "character", "structure", "morphology"]
+    },
+    {
+      "key": "surface_texture",
+      "label": "表面结构/纹饰",
+      "aliases": ["surface", "texture", "sculpture", "punctate", "striate", "reticulate"]
+    },
+    {
+      "key": "color",
+      "label": "颜色",
+      "aliases": ["color", "colour", "pigment", "brown", "black", "yellow", "red"]
+    },
+    {
+      "key": "measurements",
+      "label": "测量值",
+      "aliases": ["measurement", "measurements", "length", "width", "height", "diameter", "ratio"]
+    },
+    {
+      "key": "life_stage_or_sex",
+      "label": "性别/阶段差异",
+      "aliases": ["male", "female", "juvenile", "adult", "larva", "stage", "sex"]
+    },
+    {
+      "key": "other_part",
+      "label": "其他部位",
+      "aliases": ["part", "organ", "segment", "appendage"]
+    }
+  ],
+  "block_role_values": [
+    "morphological_description",
+    "diagnosis",
+    "measurements",
+    "material_examined",
+    "type_material",
+    "distribution",
+    "biology",
+    "etymology",
+    "remarks",
+    "figure_caption",
+    "identification_key",
+    "references",
+    "title_or_metadata",
+    "unprocessed",
+    "other"
+  ],
+  "extraction_settings": {
+    "max_input_chars": 600000,
+    "max_output_tokens": 12000,
+    "timeout": 240,
+    "max_retries": 2,
+    "persist_unlabeled_blocks": true
+  },
+  "prompt": {
+    "system_prompt": "你是严谨的分类学文本结构化助手。只根据输入的 PDF 原文文本块工作，只输出 JSON。",
+    "user_instructions": "从全文文本块中提取“分类单元 -> 具体部位/结构 -> 文中描述”。仅保留原文明确描述的形态、诊断、测量、颜色、表面结构和阶段差异。不要根据图片或常识补充。材料、分布、参考文献、生态行为等不属于部位描述的内容不要写入 taxon_part_descriptions，但可以在 text_block_labels 中标记。每条记录必须引用真实存在的 source_block_refs。"
+  },
+  "mock_fallback": {
+    "measurement_terms": ["measurements", " length ", " width ", " ratio "],
+    "reference_terms": ["references", "literature cited"]
+  }
+}

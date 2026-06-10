@@ -1,0 +1,95 @@
+# Python cache and local environments
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.venv/
+venv/
+env/
+anaconda3/
+node_modules/
+dist/
+build/
+coverage/
+
+# Local agent/editor state
+.sisyphus/
+.opencode/
+.lab-agent/
+AGENTS.md
+!ANTCODE.md
+.tmp_validation/
+tmp_*/
+.vscode/
+.idea/
+*.swp
+*.bak
+
+# User-specific runtime config and secrets
+user_config.json
+screener_configs/api_runtime_settings.json
+*.env
+.env
+
+# Local project files and databases
+*.db
+*.sqlite
+*.sqlite3
+*.json
+AntSleap/specimens/
+!AntSleap/config/*.json
+!json_projects/templates/*.json
+!json_projects/samples/*.json
+!screener_configs/*.json
+!screener_configs/*.example.json
+!multimodal_configs/*.json
+!part_description_configs/*.json
+!vendor/ant-code/package.json
+!vendor/ant-code/package-lock.json
+!vendor/ant-code/npm-shrinkwrap.json
+!vendor/ant-code/tsconfig.json
+!vendor/ant-code/config/*template.json
+screener_configs/api_runtime_settings.json
+
+# Large model weights and training outputs
+*.pth
+*.pt
+*.ckpt
+*.onnx
+*.h5
+*.pkl
+*.joblib
+*.safetensors
+AntSleap/weights/
+AntSleap/experiments/
+AntSleap/*_artifacts/
+
+# Generated run outputs
+artifacts/
+TaxaMask_outputs/
+external_runs/
+external_blink_runs/
+AntSleap/vlm_preannotation/
+*.log
+training_report.png
+
+# Internal planning and handoff notes
+docs/designs/*
+!docs/designs/
+docs/discussions/
+docs/handoffs/
+docs/concepts/
+docs/manual_images/
+docs/agentic_orchestration_assessment.md
+docs/core2_governance_runbook.md
+docs/generate_manual_screenshots.py
+docs/跨物种适配严格审查报告.md
+CHANGELOG_zh.md
+paper_planning/
+
+# Bundled local binaries
+external_tools/
+
+# OS files
+.DS_Store
+Thumbs.db

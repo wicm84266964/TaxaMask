@@ -1,0 +1,107 @@
+{
+  "appName": "lab-agent",
+  "modelAlias": "example-coding-model",
+  "models": [
+    {
+      "id": "example-coding-model",
+      "label": "Example Coding Model",
+      "description": "Placeholder coding model exposed by a local or OpenAI-compatible gateway.",
+      "thinking": false,
+      "contextTokens": 200000
+    },
+    {
+      "id": "example-reasoning-model",
+      "label": "Example Reasoning Model",
+      "description": "Placeholder model with provider-exposed reasoning deltas when available.",
+      "thinking": true,
+      "contextTokens": 200000
+    },
+    {
+      "id": "example-fast-model",
+      "label": "Example Fast Model",
+      "description": "Placeholder lower-latency model for lighter work.",
+      "thinking": false,
+      "contextTokens": 200000
+    }
+  ],
+  "networkMode": "lab-only",
+  "allowedHosts": [
+    "gateway.example.invalid"
+  ],
+  "lab": {
+    "gatewayUrl": "https://gateway.example.invalid/v1/chat",
+    "gatewayHealthUrl": "https://gateway.example.invalid/health",
+    "gatewayProtocol": "lab-agent-gateway"
+  },
+  "transcript": {
+    "enabled": false,
+    "retentionDays": 0,
+    "includeToolOutput": "policy",
+    "encryption": "off"
+  },
+  "security": {
+    "sensitivity": "high"
+  },
+  "context": {
+    "maxMessages": 100000,
+    "maxBytes": 800000,
+    "maxTokens": 200000,
+    "keepRecentMessages": 6,
+    "summaryBytes": 65536
+  },
+  "limits": {
+    "maxToolRounds": null
+  },
+  "agents": {
+    "maxRounds": null,
+    "delegationGuard": {
+      "enabled": true,
+      "mode": "remind",
+      "softThreshold": 2,
+      "strongThreshold": 4
+    },
+    "backgroundWakeup": {
+      "enabled": true,
+      "defaultForModelAgentRun": false,
+      "maxConcurrentBackground": 3,
+      "defaultWaitFor": "all",
+      "autoQueueParentPrompt": true,
+      "maxWakeSummaryBytes": 12000
+    },
+    "reviewGate": {
+      "enabled": true,
+      "mode": "remind",
+      "todoThreshold": 4,
+      "requireForWrites": false,
+      "requireForHighRisk": false
+    },
+    "budgets": {
+      "defaults": {
+        "maxDurationMs": 1200000,
+        "maxOutputBytes": 192000
+      },
+      "web-researcher": {
+        "maxDurationMs": 900000,
+        "maxOutputBytes": 160000,
+        "maxPermissionDenials": 6,
+        "maxConsecutiveFailures": 6
+      },
+      "junior.deep": {
+        "maxDurationMs": 1800000
+      },
+      "code-worker.deep": {
+        "maxDurationMs": 1800000
+      }
+    },
+    "profiles": []
+  },
+  "mcp": {
+    "servers": []
+  },
+  "skills": {
+    "enabled": true,
+    "paths": [
+      "config/skills"
+    ]
+  }
+}

@@ -1,0 +1,163 @@
+{
+  "appName": "lab-agent",
+  "modelAlias": "example-coding-model",
+  "models": [
+    {
+      "id": "example-coding-model",
+      "label": "Example Coding Model",
+      "description": "Placeholder coding model exposed by a local or OpenAI-compatible gateway.",
+      "thinking": false,
+      "contextTokens": 200000
+    },
+    {
+      "id": "example-reasoning-model",
+      "label": "Example Reasoning Model",
+      "description": "Placeholder model with provider-exposed reasoning deltas when available.",
+      "thinking": true,
+      "contextTokens": 200000
+    },
+    {
+      "id": "example-fast-model",
+      "label": "Example Fast Model",
+      "description": "Placeholder lower-latency model for lighter work.",
+      "thinking": false,
+      "contextTokens": 200000
+    }
+  ],
+  "networkMode": "lab-only",
+  "allowedHosts": [
+    "gateway.example.invalid"
+  ],
+  "lab": {
+    "gatewayUrl": "https://gateway.example.invalid/v1/chat",
+    "gatewayHealthUrl": "https://gateway.example.invalid/health",
+    "gatewayProtocol": "lab-agent-gateway"
+  },
+  "transcript": {
+    "enabled": true,
+    "retentionDays": 30,
+    "includeToolOutput": "policy",
+    "encryption": "optional"
+  },
+  "security": {
+    "sensitivity": "standard"
+  },
+  "context": {
+    "maxMessages": 100000,
+    "maxBytes": 800000,
+    "maxTokens": 200000,
+    "keepRecentMessages": 8,
+    "summaryBytes": 65536
+  },
+  "limits": {
+    "maxToolRounds": null
+  },
+  "agents": {
+    "maxRounds": null,
+    "delegationGuard": {
+      "enabled": true,
+      "mode": "remind",
+      "softThreshold": 3,
+      "strongThreshold": 5
+    },
+    "backgroundWakeup": {
+      "enabled": true,
+      "defaultForModelAgentRun": false,
+      "maxConcurrentBackground": 3,
+      "defaultWaitFor": "all",
+      "autoQueueParentPrompt": true,
+      "maxWakeSummaryBytes": 12000
+    },
+    "reviewGate": {
+      "enabled": true,
+      "mode": "remind",
+      "todoThreshold": 4,
+      "requireForWrites": false,
+      "requireForHighRisk": false
+    },
+    "budgets": {
+      "defaults": {
+        "maxDurationMs": 1800000,
+        "maxOutputBytes": 320000
+      },
+      "web-researcher": {
+        "maxDurationMs": 1200000,
+        "maxOutputBytes": 256000,
+        "maxPermissionDenials": 6,
+        "maxConsecutiveFailures": 6
+      },
+      "junior.deep": {
+        "maxDurationMs": 2700000
+      },
+      "code-worker.deep": {
+        "maxDurationMs": 2700000
+      }
+    },
+    "profiles": []
+  },
+  "mcp": {
+    "servers": [
+      {
+        "name": "filesystem",
+        "description": "常用本地文件系统 MCP；需要 Node/npm 环境和实验室显式启用。",
+        "enabled": false,
+        "transport": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-filesystem",
+          "."
+        ],
+        "toolRisks": {
+          "read_file": "read",
+          "list_directory": "read",
+          "search_files": "read",
+          "write_file": "write",
+          "edit_file": "write"
+        }
+      },
+      {
+        "name": "memory",
+        "description": "常用本地知识图谱/记忆 MCP；默认关闭，避免演示环境自动拉包。",
+        "enabled": false,
+        "transport": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-memory"
+        ],
+        "toolRisks": {
+          "read_graph": "read",
+          "search_nodes": "read",
+          "create_entities": "write",
+          "create_relations": "write",
+          "add_observations": "write"
+        }
+      },
+      {
+        "name": "playwright",
+        "description": "浏览器自动化 MCP；仅在需要本地网页/前端验收时手动启用。",
+        "enabled": false,
+        "transport": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@playwright/mcp@latest"
+        ],
+        "toolRisks": {
+          "browser_navigate": "network",
+          "browser_click": "mcp",
+          "browser_type": "mcp",
+          "browser_snapshot": "read",
+          "browser_take_screenshot": "read"
+        }
+      }
+    ]
+  },
+  "skills": {
+    "enabled": true,
+    "paths": [
+      "config/skills"
+    ]
+  }
+}

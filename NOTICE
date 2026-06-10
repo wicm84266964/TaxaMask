@@ -1,0 +1,39 @@
+TaxaMask Notice
+
+TaxaMask is a taxonomy and morphology research workbench for literature
+trait-description processing, reviewable image annotation, model-assisted
+drafts, and multimodal dataset production.
+
+Project origin:
+
+TaxaMask was originally developed for ant taxonomy research. The internal Python
+package name `AntSleap` is retained for runtime compatibility and as a tribute
+to SLEAP, the animal pose-estimation project that inspired the original
+development direction. The external project and user-facing name is TaxaMask.
+
+Use and citation:
+
+If TaxaMask contributes to a publication, preprint, dataset, benchmark, or
+public research output, please cite the repository release and DOI when
+available. See CITATION.cff for the current preferred citation metadata.
+
+Scope of included materials:
+
+- Source code is licensed under the GNU Affero General Public License v3.0 in LICENSE.
+- User documentation, tutorials, profile guides, and explanatory materials are
+  provided under the same repository license unless a file states otherwise.
+- Model weights, local user projects, API keys, databases, and generated
+  artifacts are not part of the public source release unless explicitly added in
+  a future release.
+
+TaxaMask name and attribution:
+
+The TaxaMask name should not be used to imply official endorsement of a modified
+version, hosted service, commercial product, or derivative work without written
+permission.
+
+Commercial use:
+
+Commercial use is permitted under AGPLv3. Modified versions and network services
+must comply with AGPLv3 source-disclosure requirements and must preserve copyright
+and attribution notices.

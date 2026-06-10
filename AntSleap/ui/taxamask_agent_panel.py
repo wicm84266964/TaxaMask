@@ -112,8 +112,15 @@ class TaxaMaskAgentPanel(QWidget):
         self.workspace_dir = os.path.abspath(str(workspace_dir or Path(__file__).resolve().parents[2]))
         self.ant_code_root = os.path.abspath(str(ant_code_root or os.environ.get("TAXAMASK_ANT_CODE_ROOT") or self._default_ant_code_root()))
         self.ant_code_config_path = os.path.abspath(str(os.environ.get("TAXAMASK_ANT_CODE_CONFIG") or self._default_ant_code_config_path()))
+        self._ant_code_runtime_preference = self._read_ant_code_runtime_preference()
+        self.ant_code_runtime = self._resolve_ant_code_runtime()
+        self.wsl_distribution = self._resolve_wsl_distribution()
+        self.wsl_executable = self._resolve_wsl_executable()
         self.node_executable = self._resolve_node_executable()
         self.ant_code_dashboard_entry = self._resolve_ant_code_dashboard_entry()
+        if self._should_auto_promote_to_wsl():
+            self.ant_code_runtime = "wsl"
+            self.node_executable = self._resolve_node_executable()
         self.process = None
         self.dashboard_url = ""
         self.port = None
@@ -132,6 +139,8 @@ class TaxaMaskAgentPanel(QWidget):
         self._web_profile_storage_dir = ""
         self._json_health_error = ""
         self._json_health_warning = ""
+        self._dashboard_log_path = ""
+        self._dashboard_log_handle = None
         self.setObjectName("taxamaskAgentPanel")
         self.setMinimumWidth(640)
         self.setMaximumWidth(16777215)
@@ -148,15 +157,81 @@ class TaxaMaskAgentPanel(QWidget):
         repo_root = Path(__file__).resolve().parents[2]
         return repo_root / "AntSleap" / "config" / "taxamask_ant_code.config.json"
 
+    def _read_ant_code_runtime_preference(self):
+        value = os.environ.get("TAXAMASK_ANTCODE_RUNTIME", "auto").strip().lower()
+        if value in {"wsl", "wsl2", "ubuntu"}:
+            return "wsl"
+        if value in {"native", "local", "windows"}:
+            return "native"
+        return "auto"
+
+    def _resolve_ant_code_runtime(self):
+        if sys.platform != "win32":
+            return "native"
+        if self._ant_code_runtime_preference == "wsl":
+            return "wsl"
+        if self._ant_code_runtime_preference == "native":
+            return "native"
+        if os.environ.get("TAXAMASK_WSL_DISTRO"):
+            return "wsl"
+        return "native"
+
+    def _resolve_wsl_distribution(self):
+        return os.environ.get("TAXAMASK_WSL_DISTRO", "").strip()
+
+    def _resolve_wsl_executable(self):
+        if sys.platform != "win32":
+            return None
+        env_path = os.environ.get("TAXAMASK_WSL_EXE", "").strip()
+        if env_path and Path(env_path).expanduser().exists():
+            return str(Path(env_path).expanduser().resolve())
+        found = shutil.which("wsl.exe") or shutil.which("wsl")
+        if found:
+            return found
+        system_wsl = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "wsl.exe"
+        if system_wsl.exists():
+            return str(system_wsl)
+        return None
+
     def _resolve_node_executable(self):
+        if self.ant_code_runtime == "wsl":
+            return os.environ.get("TAXAMASK_WSL_NODE_EXE", "").strip() or "node"
         env_path = os.environ.get("TAXAMASK_NODE_EXE")
         if env_path and Path(env_path).expanduser().exists():
             return str(Path(env_path).expanduser().resolve())
+        for candidate in self._node_executable_candidates():
+            if candidate.exists():
+                return str(candidate.resolve())
         for command in ("node.exe", "node"):
             found = shutil.which(command)
             if found:
                 return found
         return None
+
+    def _node_executable_candidates(self):
+        names = ("node.exe", "node") if sys.platform == "win32" else ("node",)
+        roots = [
+            Path(self.ant_code_root),
+            Path(self.workspace_dir),
+        ]
+        if sys.platform != "win32":
+            home = Path.home()
+            roots.extend([
+                home / ".local",
+                home / ".nvm" / "versions" / "node",
+                home / "miniconda3" / "envs" / "taxamask",
+                home / "anaconda3" / "envs" / "taxamask",
+                home / "miniforge3" / "envs" / "taxamask",
+                home / "mambaforge" / "envs" / "taxamask",
+                home / ".conda" / "envs" / "taxamask",
+            ])
+        for root in roots:
+            for name in names:
+                yield root / "bin" / name
+                yield root / name
+        if sys.platform != "win32":
+            for candidate in sorted((Path.home() / ".nvm" / "versions" / "node").glob("*/bin/node"), reverse=True):
+                yield candidate
 
     def _resolve_ant_code_dashboard_entry(self):
         for candidate in (
@@ -167,7 +242,21 @@ class TaxaMaskAgentPanel(QWidget):
                 return str(candidate.resolve())
         return None
 
+    def _should_auto_promote_to_wsl(self):
+        return bool(
+            sys.platform == "win32"
+            and self._ant_code_runtime_preference == "auto"
+            and not self.node_executable
+            and self.wsl_executable
+        )
+
     def _can_use_source_dashboard(self):
+        if self.ant_code_runtime == "wsl":
+            return bool(
+                self.wsl_executable
+                and self.ant_code_dashboard_entry
+                and Path(self.ant_code_dashboard_entry).exists()
+            )
         return bool(
             self.node_executable
             and Path(self.node_executable).exists()
@@ -181,11 +270,13 @@ class TaxaMaskAgentPanel(QWidget):
                 "Ant-Code source dashboard is unavailable. Ensure Node.js is installed and "
                 "vendor/ant-code/src/cli/index.js exists."
             )
+        if self.ant_code_runtime == "wsl":
+            return self._wsl_dashboard_command()
         command = [
             self.node_executable,
             self.ant_code_dashboard_entry,
         ]
-        if Path(self.ant_code_dashboard_entry).name == "index.js":
+        if self._dashboard_entry_uses_index(self.ant_code_dashboard_entry):
             command.append("dashboard")
         command.extend([
             "--project",
@@ -196,8 +287,179 @@ class TaxaMaskAgentPanel(QWidget):
         ])
         return command
 
+    def _dashboard_entry_uses_index(self, entry_path):
+        name = str(entry_path or "").replace("\\", "/").rstrip("/").split("/")[-1]
+        return name == "index.js"
+
+    def _wsl_dashboard_command(self):
+        workspace_dir = self._wsl_workspace_dir()
+        ant_code_root = self._wsl_ant_code_root_path()
+        config_path = self._wsl_config_path()
+        dashboard_entry = self._wsl_dashboard_entry_path()
+        command = [self.wsl_executable]
+        if self.wsl_distribution:
+            command.extend(["-d", self.wsl_distribution])
+        inner = [
+            "env",
+            f"LAB_AGENT_PACKAGE_ROOT={ant_code_root}",
+            f"LAB_AGENT_CONFIG={config_path}",
+            self.node_executable or "node",
+            dashboard_entry,
+        ]
+        if self._dashboard_entry_uses_index(dashboard_entry):
+            inner.append("dashboard")
+        inner.extend([
+            "--project",
+            workspace_dir,
+            "--port",
+            str(self.port),
+            "--no-open",
+        ])
+        command.extend([
+            "--exec",
+            "/bin/bash",
+            "-lc",
+            self._wsl_dashboard_shell_source(),
+            "taxamask-antcode",
+            workspace_dir,
+        ])
+        command.extend(inner)
+        return command
+
+    def _wsl_dashboard_shell_source(self):
+        return r"""
+set -e
+workspace="$1"
+shift
+if [ -s "$HOME/.nvm/nvm.sh" ]; then
+  . "$HOME/.nvm/nvm.sh"
+fi
+for dir in \
+  "$HOME/.local/bin" \
+  "$HOME/miniconda3/envs/taxamask/bin" \
+  "$HOME/anaconda3/envs/taxamask/bin" \
+  "$HOME/miniforge3/envs/taxamask/bin" \
+  "$HOME/mambaforge/envs/taxamask/bin" \
+  "$HOME/.conda/envs/taxamask/bin"; do
+  if [ -d "$dir" ]; then
+    PATH="$dir:$PATH"
+  fi
+done
+export PATH
+if ! command -v node >/dev/null 2>&1; then
+  node_command="${4:-node}"
+  if [ -n "$node_command" ] && [ "$node_command" != "${node_command#*/}" ] && [ -x "$node_command" ]; then
+    :
+  else
+    echo "Cannot find Linux Node.js in WSL. Install Node.js 20+ in Ubuntu, or set TAXAMASK_WSL_NODE_EXE." >&2
+    exit 127
+  fi
+fi
+node_check="${4:-node}"
+if [ "$node_check" = "${node_check#*/}" ]; then
+  node_check="$(command -v "$node_check" 2>/dev/null || true)"
+fi
+if [ -z "$node_check" ] || ! "$node_check" -e "const major=Number(process.versions.node.split('.')[0]); process.exit(major>=20?0:1)" >/dev/null 2>&1; then
+  echo "Node.js 20 or newer is required in WSL." >&2
+  exit 127
+fi
+if [ ! -d "$workspace/vendor/ant-code/node_modules" ]; then
+  echo "Ant-Code dependencies are missing in WSL. Run: cd \"$workspace/vendor/ant-code\" && npm ci" >&2
+  exit 126
+fi
+cd "$workspace"
+exec "$@"
+""".strip()
+
+    def _wsl_workspace_dir(self):
+        return self._wsl_path(self.workspace_dir, "TAXAMASK_WSL_PROJECT_DIR")
+
+    def _wsl_ant_code_root_path(self):
+        override = os.environ.get("TAXAMASK_WSL_ANT_CODE_ROOT", "").strip()
+        if override:
+            return override
+        project_override = os.environ.get("TAXAMASK_WSL_PROJECT_DIR", "").strip()
+        if project_override:
+            return project_override.rstrip("/") + "/vendor/ant-code"
+        return self._wsl_path(self.ant_code_root)
+
+    def _wsl_config_path(self):
+        override = os.environ.get("TAXAMASK_WSL_ANT_CODE_CONFIG", "").strip()
+        if override:
+            return override
+        project_override = os.environ.get("TAXAMASK_WSL_PROJECT_DIR", "").strip()
+        if project_override:
+            return project_override.rstrip("/") + "/AntSleap/config/taxamask_ant_code.config.json"
+        return self._wsl_path(self.ant_code_config_path)
+
+    def _wsl_dashboard_entry_path(self):
+        override = os.environ.get("TAXAMASK_WSL_DASHBOARD_ENTRY", "").strip()
+        if override:
+            return override
+        ant_root = self._wsl_ant_code_root_path()
+        if ant_root:
+            return ant_root.rstrip("/") + "/src/cli/dashboard.js"
+        return self._wsl_path(self.ant_code_dashboard_entry)
+
+    def _wsl_path(self, value, env_override=None):
+        if env_override:
+            override = os.environ.get(env_override, "").strip()
+            if override:
+                return override
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if text.startswith("/"):
+            return text
+        if sys.platform != "win32":
+            return text
+        converted = self._wslpath(text)
+        return converted or self._fallback_windows_to_wsl_path(text)
+
+    def _wslpath(self, value):
+        if not self.wsl_executable:
+            return ""
+        command = [self.wsl_executable]
+        if self.wsl_distribution:
+            command.extend(["-d", self.wsl_distribution])
+        command.extend(["--exec", "wslpath", "-a", str(value)])
+        try:
+            result = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
+                check=False,
+                creationflags=self._creation_flags(),
+            )
+        except Exception:
+            return ""
+        if result.returncode != 0:
+            return ""
+        return str(result.stdout or "").strip()
+
+    def _fallback_windows_to_wsl_path(self, value):
+        text = str(value or "").replace("\\", "/")
+        lowered = text.lower()
+        for prefix in ("//wsl.localhost/", "//wsl$/"):
+            if lowered.startswith(prefix):
+                remainder = text[len(prefix):]
+                parts = remainder.split("/", 1)
+                return "/" + parts[1] if len(parts) > 1 else "/"
+        if len(text) >= 2 and text[1] == ":" and text[0].isalpha():
+            drive = text[0].lower()
+            rest = text[2:].lstrip("/")
+            return f"/mnt/{drive}/{rest}" if rest else f"/mnt/{drive}"
+        return text
+
     def _dashboard_environment(self):
         env = os.environ.copy()
+        if self.ant_code_runtime == "wsl":
+            env["TAXAMASK_ANTCODE_RUNTIME_EFFECTIVE"] = "wsl"
+            return env
         ant_root = Path(self.ant_code_root)
         if ant_root.exists():
             env["LAB_AGENT_PACKAGE_ROOT"] = str(ant_root)
@@ -492,15 +754,17 @@ class TaxaMaskAgentPanel(QWidget):
                 raise RuntimeError(self._json_health_error)
             env = self._dashboard_environment()
             command = self._dashboard_command()
+            self._open_dashboard_log()
             self.process = subprocess.Popen(
                 command,
                 cwd=self.workspace_dir,
                 env=env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=self._dashboard_log_handle or subprocess.DEVNULL,
+                stderr=self._dashboard_log_handle or subprocess.DEVNULL,
                 creationflags=self._creation_flags(),
             )
         except Exception as exc:
+            self._close_dashboard_log()
             self.process = None
             self.dashboard_url = ""
             self._preflight_error = str(exc)
@@ -512,6 +776,64 @@ class TaxaMaskAgentPanel(QWidget):
         self._update_fallback()
         self.health_timer.start()
 
+    def _open_dashboard_log(self):
+        self._close_dashboard_log(remove=True)
+        try:
+            handle = tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                errors="replace",
+                prefix="taxamask_antcode_",
+                suffix=".log",
+                delete=False,
+            )
+        except Exception:
+            self._dashboard_log_path = ""
+            self._dashboard_log_handle = None
+            return
+        self._dashboard_log_path = handle.name
+        self._dashboard_log_handle = handle
+
+    def _close_dashboard_log(self, remove=False):
+        handle = self._dashboard_log_handle
+        self._dashboard_log_handle = None
+        if handle is not None:
+            try:
+                handle.close()
+            except Exception:
+                pass
+        if remove and self._dashboard_log_path:
+            try:
+                Path(self._dashboard_log_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+            self._dashboard_log_path = ""
+
+    def _dashboard_log_tail(self, max_chars=1200):
+        handle = self._dashboard_log_handle
+        if handle is not None:
+            try:
+                handle.flush()
+            except Exception:
+                pass
+        path = self._dashboard_log_path
+        if not path:
+            return ""
+        try:
+            text = Path(path).read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return ""
+        text = text.strip()
+        if not text:
+            return ""
+        return text[-int(max_chars):]
+
+    def _dashboard_exit_error(self):
+        detail = self._dashboard_log_tail()
+        if not detail:
+            return at("Ant-Code process exited.", self.lang)
+        return f"{at('Ant-Code process exited.', self.lang)} {detail}"
+
     def _creation_flags(self):
         if sys.platform != "win32":
             return 0
@@ -520,7 +842,9 @@ class TaxaMaskAgentPanel(QWidget):
     def _poll_dashboard_ready(self):
         if not self.is_running():
             self.health_timer.stop()
-            self._update_status_label(at("Ant-Code process exited.", self.lang))
+            self._preflight_error = self._dashboard_exit_error()
+            self._update_status_label(at("Unable to start Ant-Code: {0}", self.lang).format(self._preflight_error))
+            self._close_dashboard_log()
             self._update_fallback()
             return
         if self._health_checks_remaining <= 0:
@@ -540,6 +864,7 @@ class TaxaMaskAgentPanel(QWidget):
             return
 
     def _on_dashboard_ready(self):
+        self._close_dashboard_log()
         self._update_status_label(at("Ant-Code Dashboard is ready.", self.lang))
         self._prepare_dashboard_load(reset=True)
 
@@ -1382,6 +1707,7 @@ class TaxaMaskAgentPanel(QWidget):
             except Exception:
                 pass
         self.process = None
+        self._close_dashboard_log(remove=True)
         self._cleanup_owned_dashboard_processes()
         self.dashboard_url = ""
         self._update_status_label(at("Ant-Code Dashboard is not running.", self.lang))
@@ -1502,6 +1828,7 @@ class TaxaMaskAgentPanel(QWidget):
         super().closeEvent(event)
 
     def _cleanup_web_profile_storage(self):
+        self._close_dashboard_log(remove=True)
         path = self._web_profile_storage_dir
         self._web_profile_storage_dir = ""
         if not path:

@@ -69,7 +69,28 @@ If the PySide6 GUI cannot start after source changes, launch the bundled dashboa
 node vendor/ant-code/src/cli/dashboard.js --project . --port 7410
 ```
 
-On Windows, `启动AntCode修复面板.bat` provides the same recovery route with additional Node.js discovery.
+On Windows, `启动AntCode修复面板.bat` provides the same recovery route with additional Node.js discovery. On Ubuntu/Linux or from a WSL shell, use:
+
+```bash
+bash ./启动TaxaMask.sh
+bash ./启动AntCode修复面板.sh
+```
+
+When the TaxaMask GUI itself is a Windows Python process but Ant-Code was installed in WSL Ubuntu, enable the WSL runtime bridge before starting the GUI:
+
+```bash
+# Run once inside Ubuntu / WSL
+cd /mnt/c/path/to/TaxaMask/vendor/ant-code
+npm ci
+```
+
+```bat
+set TAXAMASK_ANTCODE_RUNTIME=wsl
+set TAXAMASK_WSL_DISTRO=Ubuntu
+启动TaxaMask.bat
+```
+
+`TAXAMASK_WSL_DISTRO` is optional when the default WSL distribution is the right one. Set `TAXAMASK_WSL_PROJECT_DIR`, `TAXAMASK_WSL_ANT_CODE_ROOT`, or `TAXAMASK_WSL_ANT_CODE_CONFIG` only when the automatic `wslpath` conversion does not point at the Linux-side checkout that contains `vendor/ant-code/node_modules`.
 
 ## Poppler for PDF Processing
 

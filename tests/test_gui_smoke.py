@@ -498,6 +498,50 @@ class GuiSmokeTests(unittest.TestCase):
         finally:
             panel.deleteLater()
 
+    def test_agent_panel_can_launch_dashboard_through_wsl(self):
+        with patch.dict(
+            os.environ,
+            {
+                "TAXAMASK_ANTCODE_RUNTIME": "wsl",
+                "TAXAMASK_WSL_DISTRO": "Ubuntu",
+            },
+            clear=False,
+        ), patch("AntSleap.ui.taxamask_agent_panel.sys.platform", "win32"), \
+             patch("AntSleap.ui.taxamask_agent_panel.shutil.which", return_value=r"C:\Windows\System32\wsl.exe"):
+            panel = main_module.TaxaMaskAgentPanel("en", workspace_dir=str(PROJECT_ROOT))
+        try:
+            panel.port = 7410
+            panel.ant_code_dashboard_entry = str(PROJECT_ROOT / "vendor" / "ant-code" / "src" / "cli" / "dashboard.js")
+            with patch.object(panel, "_wslpath", side_effect=lambda value: "/mnt/c/" + str(value)[3:].replace("\\", "/")):
+                command = panel._dashboard_command()
+
+            self.assertEqual(command[:4], [r"C:\Windows\System32\wsl.exe", "-d", "Ubuntu", "--exec"])
+            wsl_project = "/mnt/c/" + str(PROJECT_ROOT)[3:].replace("\\", "/")
+            self.assertIn(f"LAB_AGENT_PACKAGE_ROOT={wsl_project}/vendor/ant-code", command)
+            self.assertIn(f"LAB_AGENT_CONFIG={wsl_project}/AntSleap/config/taxamask_ant_code.config.json", command)
+            self.assertIn(f"{wsl_project}/vendor/ant-code/src/cli/dashboard.js", command)
+            project_index = command.index("--project")
+            self.assertEqual(command[project_index + 1], wsl_project)
+        finally:
+            panel.deleteLater()
+
+    def test_agent_panel_windows_path_fallback_converts_to_wsl_mount(self):
+        with patch.dict(os.environ, {"TAXAMASK_ANTCODE_RUNTIME": "wsl"}, clear=False), \
+             patch("AntSleap.ui.taxamask_agent_panel.sys.platform", "win32"), \
+             patch("AntSleap.ui.taxamask_agent_panel.shutil.which", return_value=r"C:\Windows\System32\wsl.exe"):
+            panel = main_module.TaxaMaskAgentPanel("en", workspace_dir=r"D:\lab data\TaxaMask")
+        try:
+            self.assertEqual(
+                panel._fallback_windows_to_wsl_path(r"D:\lab data\TaxaMask"),
+                "/mnt/d/lab data/TaxaMask",
+            )
+            self.assertEqual(
+                panel._fallback_windows_to_wsl_path(r"\\wsl.localhost\Ubuntu\home\lab\TaxaMask"),
+                "/home/lab/TaxaMask",
+            )
+        finally:
+            panel.deleteLater()
+
     def test_agent_panel_preflights_before_loading_webview(self):
         window = self._make_window()
         try:

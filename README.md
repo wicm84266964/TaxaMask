@@ -159,13 +159,41 @@ On Windows, `启动TaxaMask.bat` searches for a local `.venv`, an active Conda e
 set TAXAMASK_PYTHON_EXE=C:\path\to\python.exe
 ```
 
+Ubuntu/Linux or WSL terminal users can use the shell launcher:
+
+```bash
+bash ./启动TaxaMask.sh
+```
+
 If the GUI cannot start after local source-code changes, the bundled Ant-Code dashboard can still be launched without importing the PySide6 GUI:
 
 ```bash
 node vendor/ant-code/src/cli/dashboard.js --project . --port 7410
 ```
 
-On Windows, `启动AntCode修复面板.bat` runs the same recovery route with extra Node.js discovery. Both options require Node.js 20 or newer and the `vendor/ant-code` dependencies installed with `npm ci`.
+On Windows, `启动AntCode修复面板.bat` runs the same recovery route with extra Node.js discovery. Ubuntu/Linux or WSL terminal users can run:
+
+```bash
+bash ./启动AntCode修复面板.sh
+```
+
+All of these options require Node.js 20 or newer and the `vendor/ant-code` dependencies installed with `npm ci`.
+
+If the TaxaMask GUI is launched by Windows Python but Ant-Code / Node dependencies are installed inside WSL Ubuntu, start the GUI with the WSL runtime bridge enabled:
+
+```bash
+# Run once inside Ubuntu / WSL
+cd /mnt/c/path/to/TaxaMask/vendor/ant-code
+npm ci
+```
+
+```bat
+set TAXAMASK_ANTCODE_RUNTIME=wsl
+set TAXAMASK_WSL_DISTRO=Ubuntu
+启动TaxaMask.bat
+```
+
+If your distribution is not named `Ubuntu`, use the name shown by `wsl -l -v`. For unusual mount layouts, set `TAXAMASK_WSL_PROJECT_DIR=/home/.../TaxaMask` as an explicit Linux-side project path.
 
 ## Repository Layout
 

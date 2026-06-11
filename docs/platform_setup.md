@@ -76,6 +76,8 @@ bash ./启动TaxaMask.sh
 bash ./启动AntCode修复面板.sh
 ```
 
+On Ubuntu/WSL, the Agent Center defaults to browser mode and does not import Qt WebEngine. This is intentional: some WSLg and Linux EGL/OpenGL stacks can crash Qt WebEngine before the dashboard loads. Set `TAXAMASK_ANTCODE_BROWSER_MODE=0` only on systems where embedded Qt WebEngine has been validated. In browser mode, TaxaMask's "Ask Agent" buttons open the browser and copy the current workbench context to the clipboard so it can be pasted into the Ant-Code prompt before sending.
+
 When the TaxaMask GUI itself is a Windows Python process but Ant-Code was installed in WSL Ubuntu, enable the WSL runtime bridge before starting the GUI:
 
 ```bash

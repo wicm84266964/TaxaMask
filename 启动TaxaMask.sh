@@ -76,10 +76,16 @@ if [[ -z "$PYTHON_EXE" ]]; then
   exit 1
 fi
 
-export __NV_PRIME_RENDER_OFFLOAD="${__NV_PRIME_RENDER_OFFLOAD:-1}"
-export __GLX_VENDOR_LIBRARY_NAME="${__GLX_VENDOR_LIBRARY_NAME:-nvidia}"
+export QT_OPENGL="${QT_OPENGL:-software}"
+export QT_QUICK_BACKEND="${QT_QUICK_BACKEND:-software}"
+export LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE:-1}"
+export TAXAMASK_ANTCODE_BROWSER_MODE="${TAXAMASK_ANTCODE_BROWSER_MODE:-1}"
+export __NV_PRIME_RENDER_OFFLOAD="${__NV_PRIME_RENDER_OFFLOAD:-0}"
 if [[ " ${QTWEBENGINE_CHROMIUM_FLAGS:-} " != *" --disable-gpu-compositing "* ]]; then
   export QTWEBENGINE_CHROMIUM_FLAGS="${QTWEBENGINE_CHROMIUM_FLAGS:-} --disable-gpu-compositing"
+fi
+if [[ " ${QTWEBENGINE_CHROMIUM_FLAGS:-} " != *" --disable-gpu "* ]]; then
+  export QTWEBENGINE_CHROMIUM_FLAGS="${QTWEBENGINE_CHROMIUM_FLAGS:-} --disable-gpu"
 fi
 
 echo "Starting TaxaMask with:"

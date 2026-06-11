@@ -157,6 +157,8 @@ bash ./启动AntCode修复面板.sh
 
 这些方式都需要 Node.js 20 或更高版本，并且需要先在 `vendor/ant-code` 中执行过 `npm ci`。
 
+Ubuntu/WSL 下 TaxaMask 会默认用外部浏览器打开 Ant-Code Dashboard，而不是内嵌 Qt WebEngine；这是为了避开部分 Linux/WSLg EGL/OpenGL 驱动导致的段错误。如果你确认本机 Qt WebEngine 稳定，可以设置 `TAXAMASK_ANTCODE_BROWSER_MODE=0` 恢复内嵌模式。在浏览器模式中，TaxaMask 的“询问 Agent”按钮会打开浏览器并把当前工作台上下文复制到剪贴板，请粘贴到浏览器里的 Ant-Code 输入框后再发送。
+
 如果 TaxaMask GUI 是由 Windows Python 启动，但 Ant-Code / Node 依赖安装在 WSL Ubuntu 里，请先让 GUI 使用 WSL 启动内嵌 Agent：
 
 ```bash

@@ -7,7 +7,7 @@ import sys
 from typing import Final, TypedDict
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFontDatabase
+from PySide6.QtGui import QColor, QFontDatabase, QPalette
 from PySide6.QtWidgets import QApplication, QDialogButtonBox, QMessageBox, QPushButton, QWidget
 
 BUTTON_ROLE_COMMIT: Final[str] = "commit"
@@ -400,10 +400,22 @@ QMainWindow, QDialog {
 }
 
 QWidget {
+    background-color: %BG%;
     font-family: "Cambria", "Microsoft YaHei UI", "Microsoft YaHei", "Source Han Serif SC", "Noto Serif CJK SC", "Songti SC", "SimSun", sans-serif;
     font-size: 11pt;
     color: %TEXT%;
     outline: none;
+}
+
+QFrame {
+    background-color: transparent;
+    color: %TEXT%;
+}
+
+QAbstractScrollArea, QAbstractItemView {
+    background-color: %SURFACE%;
+    color: %TEXT%;
+    border: 1px solid %BORDER%;
 }
 
 QWidget#workbenchCenterPanel,
@@ -450,6 +462,19 @@ QMenu::item {
 QMenu::item:selected {
     background-color: %SELECTION%;
     color: %ACCENT%;
+}
+
+QToolTip {
+    background-color: %SURFACE_ALT%;
+    color: %TEXT%;
+    border: 1px solid %BORDER_STRONG%;
+    padding: 4px 6px;
+}
+
+QStatusBar {
+    background-color: %SURFACE%;
+    color: %TEXT_SOFT%;
+    border-top: 1px solid %BORDER%;
 }
 
 QLabel {
@@ -875,6 +900,26 @@ def get_theme_stylesheet(theme: str = "dark") -> str:
     return res
 
 
+def build_theme_palette(theme: str = "dark") -> QPalette:
+    c = get_theme_config(theme)
+    palette = QPalette()
+    palette.setColor(QPalette.ColorRole.Window, QColor(c["bg_main"]))
+    palette.setColor(QPalette.ColorRole.WindowText, QColor(c["text_main"]))
+    palette.setColor(QPalette.ColorRole.Base, QColor(c["bg_surface"]))
+    palette.setColor(QPalette.ColorRole.AlternateBase, QColor(c["bg_surface_alt"]))
+    palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(c["bg_surface_alt"]))
+    palette.setColor(QPalette.ColorRole.ToolTipText, QColor(c["text_main"]))
+    palette.setColor(QPalette.ColorRole.Text, QColor(c["text_main"]))
+    palette.setColor(QPalette.ColorRole.Button, QColor(c["bg_surface"]))
+    palette.setColor(QPalette.ColorRole.ButtonText, QColor(c["text_main"]))
+    palette.setColor(QPalette.ColorRole.BrightText, QColor("#FFFFFF"))
+    palette.setColor(QPalette.ColorRole.Link, QColor(c["accent"]))
+    palette.setColor(QPalette.ColorRole.Highlight, QColor(c["selection"]))
+    palette.setColor(QPalette.ColorRole.HighlightedText, QColor(c["text_main"]))
+    palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(c["text_dim"]))
+    return palette
+
+
 SCI_THEME = get_theme_stylesheet("dark")
 LIGHT_THEME = get_theme_stylesheet("light")
 
@@ -886,6 +931,7 @@ def apply_theme_to_app(theme: str = "dark") -> None:
         return
 
     app.setProperty("activeTheme", theme)
+    app.setPalette(build_theme_palette(theme))
     app.setStyleSheet(get_theme_stylesheet(theme))
 
     for widget in app.allWidgets():

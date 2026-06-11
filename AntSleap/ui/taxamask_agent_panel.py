@@ -8,13 +8,26 @@ import tempfile
 from pathlib import Path
 
 
+def _is_wsl_runtime():
+    if os.environ.get("WSL_DISTRO_NAME"):
+        return True
+    try:
+        with open("/proc/version", "r", encoding="utf-8", errors="ignore") as handle:
+            return "microsoft" in handle.read().lower()
+    except OSError:
+        return False
+
+
 def _ensure_qtwebengine_cpu_compositing():
-    flag = "--disable-gpu-compositing"
-    current = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
-    flags = current.split()
-    if flag not in flags:
-        flags.append(flag)
-        os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(flags)
+    flags_to_append = ["--disable-gpu-compositing"]
+    if sys.platform == "linux" or _is_wsl_runtime():
+        flags_to_append.append("--disable-gpu")
+    for flag in flags_to_append:
+        current = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
+        flags = current.split()
+        if flag not in flags:
+            flags.append(flag)
+            os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(flags)
 
 
 _ensure_qtwebengine_cpu_compositing()
@@ -22,6 +35,7 @@ _ensure_qtwebengine_cpu_compositing()
 from PySide6.QtCore import Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
+    QApplication,
     QLabel,
     QSizePolicy,
     QStackedWidget,
@@ -29,14 +43,32 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-try:
-    from PySide6.QtWebEngineWidgets import QWebEngineView
-except Exception:  # pragma: no cover - depends on local Qt installation
-    QWebEngineView = None
 
-try:
-    from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineScript
-except Exception:  # pragma: no cover - depends on local Qt installation
+def _env_requests_browser_mode():
+    value = os.environ.get("TAXAMASK_ANTCODE_BROWSER_MODE", "").strip().lower()
+    return value in {"1", "true", "yes", "on", "browser", "external"}
+
+
+def _should_import_qtwebengine():
+    if _env_requests_browser_mode() or _is_wsl_runtime():
+        return False
+    return True
+
+
+if _should_import_qtwebengine():
+    try:
+        from PySide6.QtWebEngineWidgets import QWebEngineView
+    except Exception:  # pragma: no cover - depends on local Qt installation
+        QWebEngineView = None
+
+    try:
+        from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineScript
+    except Exception:  # pragma: no cover - depends on local Qt installation
+        QWebEnginePage = None
+        QWebEngineProfile = None
+        QWebEngineScript = None
+else:
+    QWebEngineView = None
     QWebEnginePage = None
     QWebEngineProfile = None
     QWebEngineScript = None
@@ -56,6 +88,7 @@ AGENT_TRANSLATIONS = {
         "Ant-Code process exited.": "Ant-Code 进程已退出。",
         "Unable to start Ant-Code: {0}": "无法启动 Ant-Code：{0}",
         "Workspace permission is the default for this embedded TaxaMask agent.": "TaxaMask 内嵌 Agent 默认使用工作区权限。",
+        "Agent context copied to clipboard. Paste it into the browser prompt.": "Agent 上下文已复制到剪贴板，请粘贴到浏览器里的 Ant-Code 输入框。",
         "Ant-Code executable": "Ant-Code 可执行文件",
         "not found": "未找到",
         "Project": "项目",
@@ -141,6 +174,9 @@ class TaxaMaskAgentPanel(QWidget):
         self._json_health_warning = ""
         self._dashboard_log_path = ""
         self._dashboard_log_handle = None
+        self._browser_context_copied = False
+        self.browser_mode = self._resolve_browser_mode()
+        self._browser_opened_for_url = ""
         self.setObjectName("taxamaskAgentPanel")
         self.setMinimumWidth(640)
         self.setMaximumWidth(16777215)
@@ -148,6 +184,14 @@ class TaxaMaskAgentPanel(QWidget):
         self._build_ui()
         self._apply_style()
         self.set_language(lang)
+
+    def _resolve_browser_mode(self):
+        value = os.environ.get("TAXAMASK_ANTCODE_BROWSER_MODE", "").strip().lower()
+        if value in {"0", "false", "no", "off", "embed"}:
+            return False
+        if value in {"1", "true", "yes", "on", "browser", "external"}:
+            return True
+        return sys.platform == "linux" or _is_wsl_runtime()
 
     def _default_ant_code_root(self):
         repo_root = Path(__file__).resolve().parents[2]
@@ -498,7 +542,7 @@ exec "$@"
         fallback_layout.addWidget(self.fallback_detail)
         fallback_layout.addStretch(1)
         self.stack.addWidget(self.fallback)
-        self.web_view = QWebEngineView() if QWebEngineView is not None else None
+        self.web_view = None if self.browser_mode else (QWebEngineView() if QWebEngineView is not None else None)
         if self.web_view is not None:
             self.web_view.setObjectName("taxamaskAntCodeWebView")
             if TaxaMaskAgentWebPage is not None:
@@ -866,6 +910,8 @@ exec "$@"
     def _on_dashboard_ready(self):
         self._close_dashboard_log()
         self._update_status_label(at("Ant-Code Dashboard is ready.", self.lang))
+        if self.browser_mode:
+            self.open_dashboard_in_browser()
         self._prepare_dashboard_load(reset=True)
 
     def _prepare_dashboard_load(self, reset=False):
@@ -877,6 +923,10 @@ exec "$@"
             return
         if not self.is_running():
             self._update_status_label(at("Ant-Code process exited.", self.lang))
+            self._update_fallback()
+            return
+        if self.browser_mode:
+            self.stack.setCurrentWidget(self.fallback)
             self._update_fallback()
             return
         if self._preflight_dashboard(report_error=False):
@@ -1476,8 +1526,19 @@ exec "$@"
         if not prompt:
             self._pending_context_prompt = ""
             self._pending_prompt_attempts = 0
+            self._browser_context_copied = False
             return
         self._pending_context_prompt = prompt
+        if self.browser_mode:
+            self._browser_context_copied = self._copy_context_prompt_to_clipboard(prompt)
+            if self._browser_context_copied:
+                self._pending_context_prompt = ""
+                self._pending_prompt_attempts = 0
+                self._update_status_label(at("Agent context copied to clipboard. Paste it into the browser prompt.", self.lang))
+            if self.is_running() and self.dashboard_url:
+                self.open_dashboard_in_browser()
+            self._update_fallback()
+            return
         if not self.is_running() or self.web_view is None:
             return
         escaped = prompt.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
@@ -1508,6 +1569,16 @@ exec "$@"
             """,
             lambda ok: self._queue_prompt_if_not_inserted(prompt, ok),
         )
+
+    def _copy_context_prompt_to_clipboard(self, prompt):
+        try:
+            app = QApplication.instance()
+            if app is None:
+                return False
+            app.clipboard().setText(str(prompt or ""))
+            return True
+        except Exception:
+            return False
 
     def _queue_prompt_if_not_inserted(self, prompt, ok):
         if ok:
@@ -1683,11 +1754,45 @@ exec "$@"
         if not self.dashboard_url:
             return
         try:
+            if self._browser_opened_for_url == self.dashboard_url:
+                return
+            self._browser_opened_for_url = self.dashboard_url
+            if self._open_dashboard_with_platform_browser():
+                return
             import webbrowser
 
             webbrowser.open(self.dashboard_url)
         except Exception:
             return
+
+    def _open_dashboard_with_platform_browser(self):
+        if not self.dashboard_url:
+            return False
+        commands = []
+        if _is_wsl_runtime():
+            commands.extend([
+                ["wslview", self.dashboard_url],
+                ["powershell.exe", "-NoProfile", "-Command", f"Start-Process '{self.dashboard_url}'"],
+                ["cmd.exe", "/c", "start", "", self.dashboard_url],
+            ])
+        elif sys.platform == "linux":
+            commands.append(["xdg-open", self.dashboard_url])
+        elif sys.platform == "darwin":
+            commands.append(["open", self.dashboard_url])
+        for command in commands:
+            if shutil.which(command[0]) is None:
+                continue
+            try:
+                subprocess.Popen(
+                    command,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=self._creation_flags(),
+                )
+                return True
+            except Exception:
+                continue
+        return False
 
     def stop_dashboard(self):
         self.health_timer.stop()
@@ -1847,7 +1952,11 @@ exec "$@"
 
     def _update_fallback(self):
         lines = []
-        if QWebEngineView is None:
+        if self.browser_mode:
+            lines.append("Browser mode is active for this Linux/WSL session. If the dashboard did not open automatically, open the URL below.")
+            if self._browser_context_copied:
+                lines.append(at("Agent context copied to clipboard. Paste it into the browser prompt.", self.lang))
+        elif QWebEngineView is None:
             lines.append(at("Qt WebEngine is unavailable in this environment. Start Ant-Code and open it in a browser.", self.lang))
         if self.dashboard_url:
             lines.append(self.dashboard_url)

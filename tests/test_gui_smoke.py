@@ -542,6 +542,60 @@ class GuiSmokeTests(unittest.TestCase):
         finally:
             panel.deleteLater()
 
+    def test_agent_panel_uses_browser_mode_on_linux(self):
+        with patch.dict(os.environ, {}, clear=True), \
+             patch("AntSleap.ui.taxamask_agent_panel.sys.platform", "linux"):
+            panel = main_module.TaxaMaskAgentPanel("en", workspace_dir=str(PROJECT_ROOT))
+        try:
+            self.assertTrue(panel.browser_mode)
+            self.assertIsNone(panel.web_view)
+            self.assertIn("Browser mode is active", panel.fallback_detail.text())
+        finally:
+            panel.deleteLater()
+
+    def test_agent_panel_ready_opens_browser_in_browser_mode(self):
+        panel = main_module.TaxaMaskAgentPanel("en", workspace_dir=str(PROJECT_ROOT))
+        try:
+            opened = []
+            panel.browser_mode = True
+            panel.dashboard_url = "http://127.0.0.1:7410"
+            panel._prepare_dashboard_load = lambda reset=False: None
+            panel._open_dashboard_with_platform_browser = lambda: opened.append(panel.dashboard_url) or True
+
+            panel._on_dashboard_ready()
+
+            self.assertEqual(opened, ["http://127.0.0.1:7410"])
+        finally:
+            panel.deleteLater()
+
+    def test_agent_panel_browser_mode_copies_context_to_clipboard(self):
+        panel = main_module.TaxaMaskAgentPanel("en", workspace_dir=str(PROJECT_ROOT))
+        try:
+            opened = []
+            panel.browser_mode = True
+            panel.dashboard_url = "http://127.0.0.1:7410"
+            panel.process = type("Process", (), {"poll": lambda self: None})()
+            panel.open_dashboard_in_browser = lambda: opened.append(panel.dashboard_url)
+
+            panel.set_context(
+                {
+                    "source_workbench": "Image workbench",
+                    "active_image_path": "sample.png",
+                    "suggested_agent_action": "Help inspect this image.",
+                },
+                announce=True,
+            )
+
+            copied = QApplication.clipboard().text()
+            self.assertIn("Image workbench", copied)
+            self.assertIn("sample.png", copied)
+            self.assertEqual(opened, ["http://127.0.0.1:7410"])
+            self.assertEqual(panel._pending_context_prompt, "")
+            self.assertIn("clipboard", panel.status_text())
+            self.assertIn("clipboard", panel.fallback_detail.text())
+        finally:
+            panel.deleteLater()
+
     def test_agent_panel_preflights_before_loading_webview(self):
         window = self._make_window()
         try:

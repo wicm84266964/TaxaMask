@@ -8,6 +8,12 @@ The embedded **Agent Center** is a core part of the design. Instead of asking re
 
 Ant morphology is the most validated reference route in the current public release. Other taxa with morphology annotation needs can be adapted by copying and validating profiles on small batches before scaling up.
 
+## Visual Overview
+
+![TaxaMask workflow overview](docs/assets/readme/figure_1_taxamask_workflow.png)
+
+TaxaMask keeps literature evidence, specimen images, model drafts, human review, training exports, and model feedback in one traceable project loop. The Agent Center sits above the workflow as a natural-language guide for status inspection, model configuration, error triage, profile adaptation, and training planning.
+
 ## Core Ideas
 
 - **Candidate material is separated from training truth.** Figures extracted from PDFs, VLM drafts, and model predictions are never treated as confirmed training labels automatically. Human review remains part of the workflow boundary.
@@ -63,6 +69,20 @@ The public v1.0 release focuses on these routes:
 - `Blink / Child-Part Refinement`: train or call route-specific child-part experts from parent-region context.
 - `VLM Drafts`: generate reviewable first-mile boxes and optional SAM draft polygons for selected structures.
 - `External Backends`: connect custom parent or child models through documented JSON contracts.
+
+![TaxaMask public interface overview](docs/assets/readme/figure_2_taxamask_ui_overview.png)
+
+The public interface centers on four practical entry points: Agent Center for local workflow help, PDF extraction setup for literature evidence, candidate review for screening imported material, and the Labeling Workbench for reviewable morphology annotation.
+
+## Review Loop
+
+![Human-in-the-loop annotation cycle in TaxaMask](docs/assets/readme/figure_3_human_in_the_loop_cycle.png)
+
+TaxaMask treats VLM boxes, SAM masks, locator predictions, and external backend outputs as draft material until a researcher reviews them. This keeps AI assistance useful without allowing generated candidates to silently become ground-truth labels.
+
+![Ant morphology reference workflow](docs/assets/readme/figure_4_ant_morphology_case.png)
+
+Ant morphology is the best-validated reference route in the current release. Parent-region drafts, child-part candidates, human-reviewed masks, and exported training records remain connected through project provenance; other taxa can adapt the same pattern through validated profiles and backend contracts.
 
 ## License
 

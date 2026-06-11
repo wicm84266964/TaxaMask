@@ -68,6 +68,8 @@ The public v1.0 release focuses on these routes:
 
 TaxaMask source code is licensed under the GNU Affero General Public License v3.0. Commercial use is allowed under the license, but modified versions and network services must comply with AGPLv3 source-disclosure obligations. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
+The bundled Ant-Code Agent Center under `vendor/ant-code/` is first-party TaxaMask source code. The directory name is retained for runtime layout compatibility; it should not be interpreted as a third-party dependency or excluded from attribution for the TaxaMask project.
+
 If TaxaMask helps your research, please cite the repository or release. See [CITATION.cff](CITATION.cff).
 
 ## Platform Support
@@ -209,7 +211,7 @@ multimodal_configs/         Figure extraction / review profiles
 part_description_configs/   PDF literature trait-description extraction profiles
 json_projects/templates/    Clean project templates
 docs/contracts/             External backend contracts
-vendor/ant-code/            Embedded Agent Center runtime
+vendor/ant-code/            First-party Ant-Code Agent Center runtime
 tests/                      Unit and workflow tests
 TaxaMask使用手册.md           Chinese public user manual
 README_zh.md                Chinese public README

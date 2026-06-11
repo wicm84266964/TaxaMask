@@ -1,15 +1,15 @@
-# Vendored Ant-Code Runtime
+# Ant-Code Agent Center Runtime
 
-This directory contains the Ant-Code runtime embedded by TaxaMask for the local agent panel and dashboard workflow.
+This directory contains the first-party Ant-Code Agent Center runtime embedded by TaxaMask for the local agent panel and dashboard workflow.
 
-The vendored copy is not the primary public product in this repository. It is included so TaxaMask can launch its local assistant features from source without requiring a separate Ant-Code checkout.
+Ant-Code is part of the TaxaMask source release, not a third-party dependency. The `vendor/ant-code` directory name is retained for runtime layout compatibility and to keep the Node dashboard package isolated from the Python workbench.
 
 ## What Is Included
 
 - `src/`: local agent runtime, dashboard server, permission checks, session store, and tool adapters.
 - `config/`: reusable configuration templates and generic built-in skills.
 - `scripts/`: utility scripts needed for syntax checks, local diagnostics, and optional dashboard asset rebuilds.
-- `package.json`, `package-lock.json`, and `npm-shrinkwrap.json`: the locked Node.js dependency graph used by the vendored runtime.
+- `package.json`, `package-lock.json`, and `npm-shrinkwrap.json`: the locked Node.js dependency graph used by the Agent Center runtime.
 
 Historical planning notes, handoff documents, upstream release evidence, and old test fixtures are intentionally not part of the TaxaMask public source release.
 

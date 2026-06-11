@@ -20,6 +20,10 @@ available. See CITATION.cff for the current preferred citation metadata.
 Scope of included materials:
 
 - Source code is licensed under the GNU Affero General Public License v3.0 in LICENSE.
+- The bundled Ant-Code Agent Center under `vendor/ant-code/` is first-party
+  TaxaMask source code. The directory name is retained for runtime/package
+  layout compatibility and should not be interpreted as third-party vendored
+  code or excluded from TaxaMask attribution.
 - User documentation, tutorials, profile guides, and explanatory materials are
   provided under the same repository license unless a file states otherwise.
 - Model weights, local user projects, API keys, databases, and generated

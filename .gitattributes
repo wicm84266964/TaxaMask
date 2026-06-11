@@ -1,0 +1,4 @@
+# Ant-Code is first-party TaxaMask Agent Center source. The directory name is
+# kept for runtime/package layout compatibility, but GitHub Linguist should not
+# treat it as third-party vendored code in repository language statistics.
+vendor/ant-code/** -linguist-vendored

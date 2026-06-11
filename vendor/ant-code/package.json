@@ -1,7 +1,7 @@
 {
   "name": "@ant-code/cli",
   "version": "3.0.0",
-  "description": "Vendored Ant-Code runtime embedded by TaxaMask.",
+  "description": "First-party Ant-Code Agent Center runtime embedded by TaxaMask.",
   "type": "module",
   "private": true,
   "bin": {

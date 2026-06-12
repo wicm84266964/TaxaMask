@@ -266,9 +266,9 @@ TaxaMask使用手册.md           中文公开使用手册
 
 ## 引用
 
-在 DOI 或论文发布前，可以引用 GitHub 仓库和 release 版本：
+如果 TaxaMask 帮助了你的研究，请引用软件发布版本：
 
 ```text
 TaxaMask: a taxonomy-oriented mask annotation and multimodal dataset workbench.
-GitHub repository, version v1.0.0.
+Zenodo DOI (all versions): https://doi.org/10.5281/zenodo.20619867
 ```

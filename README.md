@@ -290,9 +290,9 @@ External backend predictions are review candidates. They should not be treated a
 
 ## Citation
 
-Until a DOI or paper is available, cite the GitHub repository and release version:
+If TaxaMask helps your research, please cite the software release:
 
 ```text
 TaxaMask: a taxonomy-oriented mask annotation and multimodal dataset workbench.
-GitHub repository, version v1.0.0.
+Zenodo DOI (all versions): https://doi.org/10.5281/zenodo.20619867
 ```

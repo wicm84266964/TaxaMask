@@ -6,6 +6,7 @@ date-released: "2026-06-09"
 type: software
 license: AGPL-3.0-only
 repository-code: "https://github.com/wicm84266964/TaxaMask"
+doi: "10.5281/zenodo.20619867"
 abstract: "TaxaMask is a research workbench for taxonomy and morphology workflows, connecting literature trait-description processing, specimen image annotation, AI-assisted drafts, human review, model training, dataset export, and an embedded Agent Center. It was originally developed for ant taxonomy; profile-based adaptation to other taxa should be validated on small batches before broader use."
 keywords:
   - taxonomy

@@ -167,6 +167,16 @@ PDF processing can use PyMuPDF directly, but some fallback image-extraction path
 
 TaxaMask can start without API keys. The Agent Center dashboard can open without a model key, but model-backed chat, VLM drafts, and external model routes require a local model gateway or API settings configured on the user's machine. Do not commit real keys, private gateway URLs, or runtime settings.
 
+## Update
+
+If you already cloned the repository, update to the latest source fixes with:
+
+```bash
+git pull --ff-only origin main
+```
+
+After an update, rerun `pip install -r requirements.txt` or `npm ci` inside `vendor/ant-code` only when the dependency files have changed.
+
 ## Run
 
 From an activated environment:

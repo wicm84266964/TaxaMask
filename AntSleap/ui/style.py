@@ -400,7 +400,6 @@ QMainWindow, QDialog {
 }
 
 QWidget {
-    background-color: %BG%;
     font-family: "Cambria", "Microsoft YaHei UI", "Microsoft YaHei", "Source Han Serif SC", "Noto Serif CJK SC", "Songti SC", "SimSun", sans-serif;
     font-size: 11pt;
     color: %TEXT%;

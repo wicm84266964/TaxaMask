@@ -235,6 +235,13 @@ TIF_TRANSLATIONS = {
         "dtype": "dtype",
         "spacing Z/Y/X": "spacing Z/Y/X",
         "modality": "成像类型",
+        "Source TIF": "原始 TIF",
+        "Working volume": "工作体数据",
+        "Working edit": "当前编辑层",
+        "Manual truth": "人工真值层",
+        "Latest model draft": "最新模型草稿",
+        "Show debug paths": "显示调试路径",
+        "Import report": "导入报告",
         "TIF data import": "TIF 数据导入",
         "Please create or open a TIF project first.": "请先新建或打开一个 TIF 项目。",
         "Please create or open a TIF volume project first.": "请先新建或打开一个 TIF 体数据项目。",
@@ -862,6 +869,11 @@ class TifWorkbenchWidget(QWidget):
         self.metadata_label = QLabel("")
         self.metadata_label.setObjectName("tifMetadataText")
         self.metadata_label.setWordWrap(True)
+        self.metadata_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.show_debug_paths_check = QCheckBox("Show debug paths")
+        self.show_debug_paths_check.setObjectName("tifShowDebugPathsCheck")
+        self.show_debug_paths_check.setChecked(False)
+        self.show_debug_paths_check.toggled.connect(self._on_show_debug_paths_toggled)
         self.material_table = QTableWidget(0, 4)
         self.material_table.setObjectName("tifMaterialTable")
         self.material_table.setMinimumHeight(150)
@@ -1094,6 +1106,7 @@ class TifWorkbenchWidget(QWidget):
         self.btn_redo.setText(tt("Redo", self.lang))
         self.btn_save_edit.setText(tt("Save working edit", self.lang))
         self.auto_save_check.setText(tt("Auto-save edit", self.lang))
+        self.show_debug_paths_check.setText(tt("Show debug paths", self.lang))
         self.btn_promote.setText(tt("Accept as manual truth", self.lang))
         self.btn_copy_draft.setText(tt("Copy model draft to working edit", self.lang))
         self.btn_add_material.setText(tt("Add material", self.lang))
@@ -1882,6 +1895,12 @@ class TifWorkbenchWidget(QWidget):
         import_layout.addLayout(import_button_row)
         inspector_layout.addWidget(import_section)
 
+        status_section, status_layout = self._make_section("Specimen status", "tifStatusSection")
+        status_layout.addWidget(self.status_label)
+        status_layout.addWidget(self.show_debug_paths_check)
+        status_layout.addWidget(self.metadata_label)
+        inspector_layout.addWidget(status_section)
+
         self.slice_display_section, slice_display_layout = self._make_section("Slice display", "tifSliceDisplaySection")
         slice_controls = QGridLayout()
         slice_controls.setHorizontalSpacing(10)
@@ -2631,6 +2650,23 @@ class TifWorkbenchWidget(QWidget):
         self.edit_volume = load_volume_sidecar(edit_abs, mmap_mode="c")
         return self.edit_volume is not None
 
+    def _format_tif_path_line(self, label, path_value):
+        path_text = str(path_value or "").strip()
+        if not path_text:
+            return f"{tt(label, self.lang)}: -"
+        try:
+            absolute = self.project.to_absolute(path_text)
+        except Exception:
+            absolute = path_text
+        if absolute and os.path.normpath(absolute) != os.path.normpath(path_text):
+            return f"{tt(label, self.lang)}: {path_text}\n  {absolute}"
+        return f"{tt(label, self.lang)}: {path_text}"
+
+    def _on_show_debug_paths_toggled(self, checked=False):
+        specimen = self.project.get_specimen(self.current_specimen_id, default=None) if self.current_specimen_id else None
+        if specimen is not None:
+            self._update_status_labels(specimen)
+
     def _update_status_labels(self, specimen):
         readiness = self.project.evaluate_train_ready(specimen.get("specimen_id"))
         self.status_label.setText(
@@ -2639,12 +2675,28 @@ class TifWorkbenchWidget(QWidget):
             f"{tt('Reasons', self.lang)}: {', '.join(readiness['reasons']) if readiness['reasons'] else '-'}"
         )
         working = specimen.get("working_volume") or {}
-        self.metadata_label.setText(
-            f"{tt('Shape Z/Y/X', self.lang)}: {working.get('shape_zyx', [])}\n"
-            f"{tt('dtype', self.lang)}: {working.get('dtype', '')}\n"
-            f"{tt('spacing Z/Y/X', self.lang)}: {working.get('spacing_zyx', [])} {working.get('spacing_unit', '')}\n"
-            f"{tt('modality', self.lang)}: {specimen.get('modality', 'unknown')}"
-        )
+        labels = specimen.get("labels") or {}
+        model_drafts = labels.get("model_drafts") or []
+        latest_draft = model_drafts[-1] if model_drafts else {}
+        source = specimen.get("source") or {}
+        path_lines = [
+            self._format_tif_path_line("Source TIF", source.get("raw_tif") or (specimen.get("provenance") or {}).get("source_file", "")),
+            self._format_tif_path_line("Working volume", working.get("path", "")),
+            self._format_tif_path_line("Working edit", (labels.get("working_edit") or {}).get("path", "")),
+            self._format_tif_path_line("Manual truth", (labels.get("manual_truth") or {}).get("path", "")),
+            self._format_tif_path_line("Latest model draft", latest_draft.get("path", "")),
+            self._format_tif_path_line("Material map", specimen.get("material_map", "")),
+            self._format_tif_path_line("Import report", working.get("import_report", "")),
+        ]
+        metadata_lines = [
+            f"{tt('Shape Z/Y/X', self.lang)}: {working.get('shape_zyx', [])}",
+            f"{tt('dtype', self.lang)}: {working.get('dtype', '')}",
+            f"{tt('spacing Z/Y/X', self.lang)}: {working.get('spacing_zyx', [])} {working.get('spacing_unit', '')}",
+            f"{tt('modality', self.lang)}: {specimen.get('modality', 'unknown')}",
+        ]
+        if self.show_debug_paths_check.isChecked():
+            metadata_lines.extend(["", *path_lines])
+        self.metadata_label.setText("\n".join(metadata_lines))
 
     def render_current_slice(self):
         if self.image_volume is None:

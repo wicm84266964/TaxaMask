@@ -267,11 +267,8 @@
     "enabled": true,
     "paths": [
       "config/skills",
-      "C:\\saveproject\\LBJ-workspace\\skill\\ant-render-exporter\\skills",
-      "C:\\saveproject\\LBJ-workspace\\skill\\antscan-data-crawl\\skills",
-      "C:\\saveproject\\LBJ-workspace\\skill\\paper_distill_skill_bundle_v6_zh\\skills",
-      "C:\\saveproject\\LBJ-workspace\\skill\\taxonomy-ai-intel\\skills",
-      "C:\\saveproject\\LBJ-workspace\\skill\\unsloth-studio-finetune-portable"
+      "skills/paper_distill_skill_bundle_v6_zh/skills",
+      "skills/unsloth-studio-finetune-portable"
     ]
   }
 }

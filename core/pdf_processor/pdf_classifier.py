@@ -909,11 +909,7 @@ class LLMScreenPDFClassifier:
         """使用大语言模型复查新种报道文献，带重试机制"""
         if not self.client:
             return False, "跳过LLM复查（未启用）"
-        
-        # 特殊测试用例：如果文件名包含"test_new_species"，则返回True
-        if "test_new_species" in filename:
-            return True, "判断：是\n理由：这是一个测试用例，用于验证LLM判断为'是'时的功能。"
-        
+
         max_retries = 3
         retry_delay = 1  # 初始重试延迟（秒）
         

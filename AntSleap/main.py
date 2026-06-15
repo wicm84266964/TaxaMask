@@ -644,12 +644,12 @@ TRANSLATIONS = {
         "Continue last project automatically": "自动继续上次项目",
         "Project Autosave Interval (seconds):": "项目自动保存间隔（秒）：",
         "Default Runtime Device:": "默认计算设备：",
-        "Runtime device here is the default for built-in 2D/STL models and other internal Torch tasks. TIF external backends use the Python executable and commands configured in TIF settings.": "这里的计算设备是内置 2D/STL 模型和其他内部 Torch 任务的默认值。TIF 外部后端使用 TIF 设置中的 Python 解释器和命令。",
+        "Runtime device here is the default for built-in 2D/STL models and other internal Torch tasks.": "这里的计算设备是内置 2D/STL 模型和其他内部 Torch 任务的默认值。",
         "Only the audited dark theme is currently enabled.": "当前只启用已经检查过的深色主题。",
         "Autosave interval must be a positive number.": "自动保存间隔必须是正数。",
         "General settings updated.": "通用设置已更新。",
         "2D/STL Morphology Model Settings": "2D/STL 形态学模型设置",
-        "2D/STL morphology settings control rendered STL views and ordinary morphology images. TIF volume training is configured separately.": "2D/STL 形态学设置控制 STL 渲染视角图和普通形态图片。TIF 体数据训练在单独的 TIF 设置中配置。",
+        "2D/STL morphology settings control rendered STL views and ordinary morphology images.": "2D/STL 形态学设置控制 STL 渲染视角图和普通形态图片。",
         "TIF Volume Training Settings": "TIF 体数据训练设置",
         "TIF Backend Defaults": "TIF 后端默认配置",
         "Controls the default external backend used by TIF Volume Workbench. The workbench can still edit the same defaults while you are inside a project.": "这里控制 TIF 体数据工作台默认使用的外部后端。在进入具体项目后，工作台内也可以编辑同一套默认配置。",
@@ -1587,6 +1587,12 @@ LARGE_PROJECT_OPEN_LIGHTWEIGHT_THRESHOLD = 500
 BRAND_ASSETS_DIR = os.path.join(PACKAGE_DIR, "assets", "brand")
 APP_ICON_PATH = os.path.join(BRAND_ASSETS_DIR, "taxamask_app_icon_white.ico")
 APP_ICON_FALLBACK_PATH = os.path.join(BRAND_ASSETS_DIR, "taxamask_app_icon_white.png")
+EXPERIMENTAL_TIF_WORKFLOW_ENV = "TAXAMASK_ENABLE_TIF_WORKFLOW"
+
+
+def _env_flag_enabled(name):
+    value = str(os.environ.get(name, "") or "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
 
 
 class NoWheelComboBox(QComboBox):
@@ -3177,7 +3183,7 @@ class ModelSettingsDialog(QDialog):
 
         workflow_note = QLabel(
             tr(
-                "2D/STL morphology settings control rendered STL views and ordinary morphology images. TIF volume training is configured separately.",
+                "2D/STL morphology settings control rendered STL views and ordinary morphology images.",
                 lang,
             )
         )
@@ -5333,7 +5339,7 @@ class GeneralSettingsDialog(QDialog):
 
         runtime_note = QLabel(
             tr(
-                "Runtime device here is the default for built-in 2D/STL models and other internal Torch tasks. TIF external backends use the Python executable and commands configured in TIF settings.",
+                "Runtime device here is the default for built-in 2D/STL models and other internal Torch tasks.",
                 lang,
             )
         )
@@ -6144,6 +6150,7 @@ class MainWindow(QMainWindow):
         self.current_theme = normalize_theme(self.config.get("theme", "dark"))
         if self.config.get("theme", "dark") != self.current_theme:
             self.config.set("theme", self.current_theme)
+        self.tif_workflow_enabled = _env_flag_enabled(EXPERIMENTAL_TIF_WORKFLOW_ENV)
         self.project = ProjectManager()
         self.project.set_known_relocated_roots(self.config.get("known_relocated_roots", []))
         self.tif_project = TifProjectManager()
@@ -6780,6 +6787,19 @@ class MainWindow(QMainWindow):
         self.change_theme(self.current_theme)
         self.apply_startup_window_geometry()
 
+    def _is_tif_workflow_enabled(self):
+        return bool(getattr(self, "tif_workflow_enabled", False))
+
+    def _show_tif_workflow_unavailable(self):
+        QMessageBox.information(
+            self,
+            tr("TIF Volume Workbench", self.current_lang),
+            (
+                "The experimental TIF workflow is hidden in the public build. "
+                f"Set {EXPERIMENTAL_TIF_WORKFLOW_ENV}=1 before starting TaxaMask to enable it for local development."
+            ),
+        )
+
     def _apply_window_icon(self):
         for icon_path in (APP_ICON_PATH, APP_ICON_FALLBACK_PATH):
             if icon_path and os.path.exists(icon_path):
@@ -6906,15 +6926,17 @@ class MainWindow(QMainWindow):
             "Create 2D/STL project",
             self.new_project,
         )
-        self.start_tif_card = self._build_workflow_card(
-            "startTifWorkflowCard",
-            "TIF volume annotation",
-            "Annotate continuous slice volumes with material IDs, export train-ready volumes, and call TIF segmentation backends.",
-            "Enter TIF workflow",
-            self.enter_tif_workflow,
-            "Create TIF project",
-            self.new_tif_project,
-        )
+        self.start_tif_card = None
+        if self._is_tif_workflow_enabled():
+            self.start_tif_card = self._build_workflow_card(
+                "startTifWorkflowCard",
+                "TIF volume annotation",
+                "Annotate continuous slice volumes with material IDs, export train-ready volumes, and call TIF segmentation backends.",
+                "Enter TIF workflow",
+                self.enter_tif_workflow,
+                "Create TIF project",
+                self.new_tif_project,
+            )
         self.start_pdf_card = self._build_workflow_card(
             "startPdfEvidenceCard",
             "PDF evidence workflow",
@@ -6926,7 +6948,8 @@ class MainWindow(QMainWindow):
         )
         rail_layout.addWidget(self.start_pdf_card)
         rail_layout.addWidget(self.start_image_card)
-        rail_layout.addWidget(self.start_tif_card)
+        if self.start_tif_card is not None:
+            rail_layout.addWidget(self.start_tif_card)
         rail_layout.addStretch(1)
         workflow_rail_scroll.setWidget(workflow_rail)
         outer_layout.addWidget(workflow_rail_scroll, 0)
@@ -7010,14 +7033,18 @@ class MainWindow(QMainWindow):
         self.start_console_images_label, self.start_console_images_value = self._build_project_console_row(
             grid, 2, "startConsoleImagesValue"
         )
-        self.start_console_tif_label, self.start_console_tif_value = self._build_project_console_row(
-            grid, 3, "startConsoleTifValue"
-        )
+        if self._is_tif_workflow_enabled():
+            self.start_console_tif_label, self.start_console_tif_value = self._build_project_console_row(
+                grid, 3, "startConsoleTifValue"
+            )
+        else:
+            self.start_console_tif_label = None
+            self.start_console_tif_value = None
         self.start_console_pdf_label, self.start_console_pdf_value = self._build_project_console_row(
-            grid, 4, "startConsolePdfValue"
+            grid, 4 if self._is_tif_workflow_enabled() else 3, "startConsolePdfValue"
         )
         self.start_console_agent_label, self.start_console_agent_value = self._build_project_console_row(
-            grid, 5, "startConsoleAgentValue"
+            grid, 5 if self._is_tif_workflow_enabled() else 4, "startConsoleAgentValue"
         )
         grid.setColumnStretch(1, 1)
         body_layout.addLayout(grid)
@@ -7171,14 +7198,19 @@ class MainWindow(QMainWindow):
         self.start_console_workflow_label.setText(tr("Current workflow", self.current_lang))
         self.start_console_project_label.setText(tr("Current project", self.current_lang))
         self.start_console_images_label.setText(tr("2D/STL images", self.current_lang))
-        self.start_console_tif_label.setText(tr("TIF specimens", self.current_lang))
+        if self._is_tif_workflow_enabled() and self.start_console_tif_label is not None:
+            self.start_console_tif_label.setText(tr("TIF specimens", self.current_lang))
         self.start_console_pdf_label.setText(tr("PDF evidence", self.current_lang))
         self.start_console_agent_label.setText("Ant-Code")
 
         self.start_console_workflow_value.setText(self._agent_current_workflow_label())
         project_summary, project_detail = self._start_console_project_summary()
         image_summary, image_detail = self._start_console_image_summary()
-        tif_summary, tif_detail = self._start_console_tif_summary()
+        tif_summary, tif_detail = (
+            self._start_console_tif_summary()
+            if self._is_tif_workflow_enabled()
+            else ("", "")
+        )
         pdf_summary, pdf_detail = self._start_console_pdf_summary()
         agent_summary = self._start_console_agent_status()
         summary = self._start_console_collapsed_summary(project_summary, agent_summary)
@@ -7186,13 +7218,15 @@ class MainWindow(QMainWindow):
         self.start_console_summary.setToolTip(f"{project_summary}\n{agent_summary}".strip())
         self.start_console_project_value.setText(project_summary)
         self.start_console_images_value.setText(image_summary)
-        self.start_console_tif_value.setText(tif_summary)
+        if self._is_tif_workflow_enabled() and self.start_console_tif_value is not None:
+            self.start_console_tif_value.setText(tif_summary)
         self.start_console_pdf_value.setText(pdf_summary)
         self.start_console_agent_value.setText(agent_summary)
         self.start_console_workflow_value.setToolTip(self._agent_current_workflow_label())
         self.start_console_project_value.setToolTip(project_detail)
         self.start_console_images_value.setToolTip(image_detail)
-        self.start_console_tif_value.setToolTip(tif_detail)
+        if self._is_tif_workflow_enabled() and self.start_console_tif_value is not None:
+            self.start_console_tif_value.setToolTip(tif_detail)
         self.start_console_pdf_value.setToolTip(pdf_detail)
         self.start_console_agent_value.setToolTip(agent_summary)
         self.start_console_stl_note.setText(
@@ -7614,12 +7648,18 @@ class MainWindow(QMainWindow):
 
     def _open_workflow_from_agent(self, workflow):
         if workflow == "tif":
+            if not self._is_tif_workflow_enabled():
+                self._show_tif_workflow_unavailable()
+                return
             self.enter_tif_workflow()
             return
         self.enter_image_workflow()
 
     def _open_model_settings_from_agent(self, workflow):
         if workflow == "tif":
+            if not self._is_tif_workflow_enabled():
+                self._show_tif_workflow_unavailable()
+                return
             self.open_tif_model_settings()
             return
         self.open_stl_model_settings()
@@ -7632,6 +7672,9 @@ class MainWindow(QMainWindow):
         self.log(tr("Opened 2D/STL workflow.", self.current_lang))
 
     def enter_tif_workflow(self):
+        if not self._is_tif_workflow_enabled():
+            self._show_tif_workflow_unavailable()
+            return
         self.active_project_kind = "tif"
         self._refresh_project_bound_views()
         self.tabs.setCurrentWidget(self.tif_workbench)
@@ -7680,8 +7723,9 @@ class MainWindow(QMainWindow):
             self.config.get("last_project_path", ""),
             getattr(self, "active_project_entry_path", ""),
             getattr(self.project, "current_project_path", ""),
-            getattr(self.tif_project, "current_project_path", ""),
         ]
+        if self._is_tif_workflow_enabled():
+            candidates.append(getattr(self.tif_project, "current_project_path", ""))
         for candidate in candidates:
             if not candidate:
                 continue
@@ -7711,6 +7755,9 @@ class MainWindow(QMainWindow):
     def open_last_project(self):
         last_project = self.config.get("last_project_path", "")
         if not last_project or not os.path.exists(last_project):
+            return
+        if self._is_tif_project_file(last_project) and not self._is_tif_workflow_enabled():
+            self._show_tif_workflow_unavailable()
             return
         self.open_project_path(last_project)
 
@@ -8571,7 +8618,8 @@ class MainWindow(QMainWindow):
         file_menu = menubar.addMenu(tr("File", self.current_lang))
         file_menu.addAction(tr("Start Center", self.current_lang), self._show_start_center)
         file_menu.addAction(tr("New Project", self.current_lang), self.new_project)
-        file_menu.addAction(tr("New TIF Volume Project", self.current_lang), self.new_tif_project)
+        if self._is_tif_workflow_enabled():
+            file_menu.addAction(tr("New TIF Volume Project", self.current_lang), self.new_tif_project)
         file_menu.addAction(tr("Open Project", self.current_lang), self.open_project)
         file_menu.addAction(tr("Save Project", self.current_lang), lambda: self._flush_pending_project_save(force=True))
         file_menu.addAction(tr("Import STL Rendered Views to Labeling Workbench", self.current_lang), self.import_stl_rendered_views_action)
@@ -8580,14 +8628,16 @@ class MainWindow(QMainWindow):
         file_menu.addAction(tr("Export Dataset", self.current_lang), self.export_dataset)
         workflow_menu = menubar.addMenu(tr("Workflow", self.current_lang))
         workflow_menu.addAction(tr("2D/STL Morphology Workflow", self.current_lang), self.enter_image_workflow)
-        workflow_menu.addAction(tr("TIF Volume Workflow", self.current_lang), self.enter_tif_workflow)
         workflow_menu.addAction(tr("Create 2D/STL project", self.current_lang), self.new_project)
-        workflow_menu.addAction(tr("Create TIF project", self.current_lang), self.new_tif_project)
+        if self._is_tif_workflow_enabled():
+            workflow_menu.addAction(tr("TIF Volume Workflow", self.current_lang), self.enter_tif_workflow)
+            workflow_menu.addAction(tr("Create TIF project", self.current_lang), self.new_tif_project)
         workflow_menu.addAction(tr("Import STL Rendered Views to Labeling Workbench", self.current_lang), self.import_stl_rendered_views_action)
         settings_menu = menubar.addMenu(tr("Settings", self.current_lang))
         settings_menu.addAction(tr("General Settings", self.current_lang), self.open_general_settings)
         settings_menu.addAction(tr("2D/STL Model Settings", self.current_lang), self.open_stl_model_settings)
-        settings_menu.addAction(tr("TIF Volume Model Settings", self.current_lang), self.open_tif_model_settings)
+        if self._is_tif_workflow_enabled():
+            settings_menu.addAction(tr("TIF Volume Model Settings", self.current_lang), self.open_tif_model_settings)
 
     def new_project(self):
         d = QFileDialog.getExistingDirectory(
@@ -8612,6 +8662,9 @@ class MainWindow(QMainWindow):
                 self.canvas.load_image("") 
 
     def new_tif_project(self):
+        if not self._is_tif_workflow_enabled():
+            self._show_tif_workflow_unavailable()
+            return
         d = QFileDialog.getExistingDirectory(
             self,
             tr("New TIF Project Directory", self.current_lang),
@@ -8811,6 +8864,9 @@ class MainWindow(QMainWindow):
         f = os.path.abspath(str(path))
         self._flush_pending_project_save(defer_for_navigation=False)
         if self._is_tif_project_file(f):
+            if not self._is_tif_workflow_enabled():
+                self._show_tif_workflow_unavailable()
+                return
             self.tif_project.load_project(f)
             self.active_project_kind = "tif"
             self.active_project_source_kind = "tif"
@@ -10027,6 +10083,9 @@ class MainWindow(QMainWindow):
         self.open_stl_model_settings()
 
     def open_tif_model_settings(self):
+        if not self._is_tif_workflow_enabled():
+            self._show_tif_workflow_unavailable()
+            return
         current_config = self.config.get("tif_backend", DEFAULT_TIF_BACKEND_CONFIG)
         dlg = TifModelSettingsDialog(current_config, self.current_lang, self)
         dlg.agent_requested.connect(self.open_agent_from_context)

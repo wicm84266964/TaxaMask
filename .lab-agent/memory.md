@@ -2,7 +2,7 @@
 
 ## TaxaMask embedded Ant-Code operating memory
 
-This workspace is the TaxaMask repository at `C:\saveproject\LBJ-workspace\Formica-Flow-Latest`. When Ant-Code is launched from TaxaMask, it is embedded in the TaxaMask start center and should treat this repository as its default working area.
+This workspace is the current TaxaMask repository root. When Ant-Code is launched from TaxaMask, it is embedded in the TaxaMask start center and should treat this repository as its default working area.
 
 Primary rule source:
 - `ANTCODE.md` is the highest-priority always-on project rule for the embedded TaxaMask Agent. It mirrors the core TaxaMask workflow protocol into the initial prompt.
@@ -24,7 +24,7 @@ Ant-Code embedding boundary:
   `node vendor/ant-code/src/cli/dashboard.js --project <TaxaMask repo root> --port <free local port> --no-open`.
 - The old distributed executable is not a launch fallback. Process cleanup still recognizes old `ant-code.exe dashboard` commands only to remove historical orphan dashboard processes for this TaxaMask project.
 - The embedded view defaults to workspace trust for this TaxaMask repository. Most local TaxaMask edits should not require repeated confirmation, but destructive actions, deleting data, changing external tools, or touching files outside this repo still need explicit user intent.
-- Normal embedded Agent integration work belongs in this repo, especially `vendor/ant-code` and `AntSleap/ui/taxamask_agent_panel.py`. Do not modify the external `C:\saveproject\LBJ-workspace\lab-agent` tree unless the user explicitly asks to work on that separate copy.
+- Normal embedded Agent integration work belongs in this repo, especially `vendor/ant-code` and `AntSleap/ui/taxamask_agent_panel.py`. Do not modify any separate external Ant-Code checkout unless the user explicitly asks to work on that separate copy.
 - Current vendored Ant-Code includes dashboard full-context resume support, larger compaction summaries, OpenAI-compatible tool-call history repair, safer trust-store writes, and token/credential redaction that preserves useful file paths.
 
 UI structure to remember:
@@ -87,8 +87,7 @@ Training/backend rules:
 - Parent-model training should update the active profile with saved Locator/SAM weight filenames. 2D/STL exports write `model_profile_summary.json` so downstream review can audit the active parent/child backend scheme.
 - TIF uses `tif_backend` and the `ant3d_tif_backend_contract_v1` contract. It may target nnU-Net, MONAI, or custom scripts, but should not be hardwired to one model family.
 - TIF prediction import must not overwrite `manual_truth` by default. Import predictions as `model_draft` or another reviewable candidate layer unless the user explicitly asks for a reviewed promotion path.
-- Use the user-provided conda environment for validation when needed:
-  `C:\Users\admin\anaconda3\envs\antsleap\python.exe`.
+- Use the active Python environment for validation when needed. The recommended Conda environment name for public setup is `taxamask`; legacy local setups may still use `antsleap`.
 
 Research safety defaults:
 - Do not write back to original AMIRA source files in first-stage workflows.
@@ -101,11 +100,11 @@ Research safety defaults:
 
 Common validation commands:
 - Compile check:
-  `C:\Users\admin\anaconda3\envs\antsleap\python.exe -m py_compile AntSleap\main.py AntSleap\ui\taxamask_agent_panel.py`
+  `python -m py_compile AntSleap\main.py AntSleap\ui\taxamask_agent_panel.py`
 - Focused UI checks:
-  `C:\Users\admin\anaconda3\envs\antsleap\python.exe -m unittest tests.test_gui_smoke tests.test_tif_workbench tests.test_ui_polish_scope`
+  `python -m unittest tests.test_gui_smoke tests.test_tif_workbench tests.test_ui_polish_scope`
 - Model profile/Blink backend checks:
-  `C:\Users\admin\anaconda3\envs\antsleap\python.exe -m unittest tests.test_model_profiles tests.test_blink_expert_manifest tests.test_blink_route_backends tests.test_blink_heatmap_dataset tests.test_external_blink_backend tests.test_macro_micro_pipeline`
+  `python -m unittest tests.test_model_profiles tests.test_blink_expert_manifest tests.test_blink_route_backends tests.test_blink_heatmap_dataset tests.test_external_blink_backend tests.test_macro_micro_pipeline`
 - Broader checks should be chosen based on touched modules. Do not run GPU-heavy training/inference unless the user says the GPU is free.
 
 How to answer the user:

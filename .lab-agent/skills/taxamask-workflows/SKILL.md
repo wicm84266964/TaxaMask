@@ -58,7 +58,7 @@ Choose the route before editing or advising:
 - TIF is currently experimental. Its 3D preview should use the offscreen GPU renderer by default, not an embedded `QOpenGLWidget`, so it can coexist more safely with the embedded Ant-Code WebEngine. Known old black-screen logs include `QQuickWidget ... no QRhi`; treat regressions as graphics-backend isolation issues.
 - Do not run GPU-heavy training/inference unless the user says the GPU is available.
 - Use `.tmp_validation/` for disposable checks and clean it before finishing.
-- Do not modify `C:\saveproject\LBJ-workspace\lab-agent` source unless the user explicitly asks to work on Ant-Code itself.
+- Do not modify a separate external Ant-Code checkout unless the user explicitly asks to work on Ant-Code itself.
 
 ## Settings Map
 

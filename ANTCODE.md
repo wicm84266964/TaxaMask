@@ -9,8 +9,8 @@ This file is the highest-priority project rule for Ant-Code when it is launched 
 - Internal Python package: `AntSleap`. Do not rename it unless the user explicitly requests a rename.
 - `AntSleap` is intentionally named as a tribute to the `SLEAP` project that inspired the original idea; do not treat the package name as accidental legacy clutter.
 - TaxaMask is rooted in ant taxonomy and morphology. Ant support is the stable first domain; broader taxon support is possible but should not be overclaimed.
-- Default workspace is this repository: `C:\saveproject\LBJ-workspace\Formica-Flow-Latest`.
-- TaxaMask embeds the vendored Ant-Code source under `vendor/ant-code`. Do not modify the external `C:\saveproject\LBJ-workspace\lab-agent` source unless the user explicitly asks to work on that separate copy.
+- Default workspace is the current TaxaMask repository root.
+- TaxaMask embeds the vendored Ant-Code source under `vendor/ant-code`. Do not modify any separate external Ant-Code checkout unless the user explicitly asks to work on that separate copy.
 
 ## User Collaboration
 

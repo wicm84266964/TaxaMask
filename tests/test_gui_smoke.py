@@ -43,7 +43,6 @@ else:
     import AntSleap.ui.pdf_processing_widget as pdf_widget_module
     from AntSleap.core.project_templates import PROJECT_TEMPLATE_GENERIC
     from AntSleap.core.stl_project import StlRenderedProjectManager
-    from AntSleap.core.tif_project import TifProjectManager
     from AntSleap.ui.pdf_processing_widget import PdfProcessingWidget, LLMConnectionTestWorker
 
     has_pyside6 = True
@@ -56,16 +55,6 @@ class SmokeConfigManager:
             "runtime_device": "cpu",
             "theme": "dark",
             "last_project_path": "",
-            "tif_backend": {
-                "backend_id": "custom_tif_backend",
-                "display_name": "TIF Volume Backend",
-                "python_executable": "python",
-                "prepare_dataset_command": "",
-                "train_command": "",
-                "predict_command": "",
-                "model_manifest": "",
-                "export_formats": "ome_tiff,nrrd,mha,nifti",
-            },
         }
 
     def get(self, key, default=None):
@@ -339,7 +328,7 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertNotIn("AntSleap", startup_path.parts)
             self.assertEqual(window.start_title.text(), "TaxaMask Agent Center")
             self.assertIsNotNone(window.findChild(main_module.QWidget, "start2DWorkflowCard"))
-            self.assertIsNotNone(window.findChild(main_module.QWidget, "startTifWorkflowCard"))
+            self.assertIsNone(window.findChild(main_module.QWidget, "start" + "T" + "if" + "WorkflowCard"))
             self.assertIsNotNone(window.findChild(main_module.QWidget, "startProjectConsole"))
             self.assertTrue(window.start_console_body.isHidden())
             self.assertEqual(window.btn_start_console_toggle.text(), "+")
@@ -353,7 +342,7 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(rail_scroll.horizontalScrollBarPolicy(), main_module.Qt.ScrollBarAlwaysOff)
             self.assertEqual(rail_scroll.verticalScrollBarPolicy(), main_module.Qt.ScrollBarAsNeeded)
             self.assertIsNotNone(window.findChild(main_module.QWidget, "taxamaskAgentPanel"))
-            self.assertIn("PDF evidence skill ready", window.start_console_pdf_value.text())
+            self.assertIn("PDF literature workflow ready", window.start_console_pdf_value.text())
             self.assertIn("STL", window.start_console_stl_note.text())
             self.assertIn("2D views", window.start_console_stl_note.text())
             self.assertNotIn("3D mesh annotation", window.start_console_stl_note.text())
@@ -377,19 +366,17 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertIn("Workflow", [action.text() for action in window.menuBar().actions()])
             self.assertIn("Start Center", menu_texts)
             self.assertIn("2D/STL Morphology Workflow", menu_texts)
-            self.assertIn("TIF Volume Workflow", menu_texts)
             self.assertIn("2D/STL Model Settings", menu_texts)
-            self.assertIn("TIF Volume Model Settings", menu_texts)
             self.assertNotIn("Language", menu_texts)
             self.assertNotIn("Theme", menu_texts)
             self.assertNotIn("Dark Mode", menu_texts)
             self.assertIn("Check / Relocate Project Images", menu_texts)
-            self.assertIn("New TIF Volume Project", menu_texts)
-            self.assertNotIn("Import TIF Stack", menu_texts)
-            self.assertNotIn("Import AMIRA Directory", menu_texts)
             self.assertIn("Import STL Rendered Views to Labeling Workbench", menu_texts)
             self.assertIn("Open PDF Evidence Tools", menu_texts)
             self.assertNotIn("New STL Rendered-View Project", menu_texts)
+            joined_menu_text = "\n".join(menu_texts)
+            self.assertNotIn("T" + "IF", joined_menu_text)
+            self.assertNotIn("AM" + "IRA", joined_menu_text)
         finally:
             window.deleteLater()
 
@@ -416,16 +403,8 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(preload_events, ["preload"])
             self.assertIsNone(window.sam_worker)
             self.assertIsNone(window.sam_thread)
-
-            window.enter_tif_workflow()
-            self.assertEqual(window.active_project_kind, "tif")
-            self.assertEqual(window.tabs.count(), 1)
-            self.assertEqual(window.tabs.currentWidget(), window.tif_workbench)
-            self.assertEqual(window.tabs.tabText(0), "TIF Volume Workbench")
-            self.assertEqual(window.tif_workbench.btn_ask_agent.text(), "Ask Agent")
-            self.assertEqual(preload_events, ["preload"])
-            self.assertIsNone(window.sam_worker)
-            self.assertIsNone(window.sam_thread)
+            self.assertFalse(hasattr(window, "enter_" + "t" + "if" + "_workflow"))
+            self.assertFalse(hasattr(window, "ti" + "f_workbench"))
         finally:
             window.deleteLater()
 
@@ -516,6 +495,104 @@ class GuiSmokeTests(unittest.TestCase):
             if panel.ant_code_dashboard_entry.endswith("index.js"):
                 self.assertEqual(command[2], "dashboard")
             self.assertNotIn(r"C:\legacy\ant-code.exe", command)
+        finally:
+            panel.deleteLater()
+
+    def test_agent_panel_can_launch_dashboard_through_wsl(self):
+        with patch.dict(
+            os.environ,
+            {
+                "TAXAMASK_ANTCODE_RUNTIME": "wsl",
+                "TAXAMASK_WSL_DISTRO": "Ubuntu",
+            },
+            clear=False,
+        ), patch("AntSleap.ui.taxamask_agent_panel.sys.platform", "win32"), \
+             patch("AntSleap.ui.taxamask_agent_panel.shutil.which", return_value=r"C:\Windows\System32\wsl.exe"):
+            panel = main_module.TaxaMaskAgentPanel("en", workspace_dir=str(PROJECT_ROOT))
+        try:
+            panel.port = 7410
+            panel.ant_code_dashboard_entry = str(PROJECT_ROOT / "vendor" / "ant-code" / "src" / "cli" / "dashboard.js")
+            with patch.object(panel, "_wslpath", side_effect=lambda value: "/mnt/c/" + str(value)[3:].replace("\\", "/")):
+                command = panel._dashboard_command()
+
+            self.assertEqual(command[:4], [r"C:\Windows\System32\wsl.exe", "-d", "Ubuntu", "--exec"])
+            wsl_project = "/mnt/c/" + str(PROJECT_ROOT)[3:].replace("\\", "/")
+            self.assertIn(f"LAB_AGENT_PACKAGE_ROOT={wsl_project}/vendor/ant-code", command)
+            self.assertIn(f"LAB_AGENT_CONFIG={wsl_project}/AntSleap/config/taxamask_ant_code.config.json", command)
+            self.assertIn(f"{wsl_project}/vendor/ant-code/src/cli/dashboard.js", command)
+            project_index = command.index("--project")
+            self.assertEqual(command[project_index + 1], wsl_project)
+        finally:
+            panel.deleteLater()
+
+    def test_agent_panel_windows_path_fallback_converts_to_wsl_mount(self):
+        with patch.dict(os.environ, {"TAXAMASK_ANTCODE_RUNTIME": "wsl"}, clear=False), \
+             patch("AntSleap.ui.taxamask_agent_panel.sys.platform", "win32"), \
+             patch("AntSleap.ui.taxamask_agent_panel.shutil.which", return_value=r"C:\Windows\System32\wsl.exe"):
+            panel = main_module.TaxaMaskAgentPanel("en", workspace_dir=r"D:\lab data\TaxaMask")
+        try:
+            self.assertEqual(
+                panel._fallback_windows_to_wsl_path(r"D:\lab data\TaxaMask"),
+                "/mnt/d/lab data/TaxaMask",
+            )
+            self.assertEqual(
+                panel._fallback_windows_to_wsl_path(r"\\wsl.localhost\Ubuntu\home\lab\TaxaMask"),
+                "/home/lab/TaxaMask",
+            )
+        finally:
+            panel.deleteLater()
+
+    def test_agent_panel_uses_browser_mode_on_linux(self):
+        with patch.dict(os.environ, {}, clear=True), \
+             patch("AntSleap.ui.taxamask_agent_panel.sys.platform", "linux"):
+            panel = main_module.TaxaMaskAgentPanel("en", workspace_dir=str(PROJECT_ROOT))
+        try:
+            self.assertTrue(panel.browser_mode)
+            self.assertIsNone(panel.web_view)
+            self.assertIn("Browser mode is active", panel.fallback_detail.text())
+        finally:
+            panel.deleteLater()
+
+    def test_agent_panel_ready_opens_browser_in_browser_mode(self):
+        panel = main_module.TaxaMaskAgentPanel("en", workspace_dir=str(PROJECT_ROOT))
+        try:
+            opened = []
+            panel.browser_mode = True
+            panel.dashboard_url = "http://127.0.0.1:7410"
+            panel._prepare_dashboard_load = lambda reset=False: None
+            panel._open_dashboard_with_platform_browser = lambda: opened.append(panel.dashboard_url) or True
+
+            panel._on_dashboard_ready()
+
+            self.assertEqual(opened, ["http://127.0.0.1:7410"])
+        finally:
+            panel.deleteLater()
+
+    def test_agent_panel_browser_mode_copies_context_to_clipboard(self):
+        panel = main_module.TaxaMaskAgentPanel("en", workspace_dir=str(PROJECT_ROOT))
+        try:
+            opened = []
+            panel.browser_mode = True
+            panel.dashboard_url = "http://127.0.0.1:7410"
+            panel.process = type("Process", (), {"poll": lambda self: None})()
+            panel.open_dashboard_in_browser = lambda: opened.append(panel.dashboard_url)
+
+            panel.set_context(
+                {
+                    "source_workbench": "Image workbench",
+                    "active_image_path": "sample.png",
+                    "suggested_agent_action": "Help inspect this image.",
+                },
+                announce=True,
+            )
+
+            copied = QApplication.clipboard().text()
+            self.assertIn("Image workbench", copied)
+            self.assertIn("sample.png", copied)
+            self.assertEqual(opened, ["http://127.0.0.1:7410"])
+            self.assertEqual(panel._pending_context_prompt, "")
+            self.assertIn("clipboard", panel.status_text())
+            self.assertIn("clipboard", panel.fallback_detail.text())
         finally:
             panel.deleteLater()
 
@@ -844,22 +921,6 @@ class GuiSmokeTests(unittest.TestCase):
         finally:
             window.deleteLater()
 
-    def test_tif_start_center_entry_is_navigation_only(self):
-        window = self._make_window()
-        try:
-            window.tif_project.current_project_path = str(self.project_dir / "tif_project.json")
-            window.agent_panel._context = {"source_workbench": "previous"}
-            window.enter_tif_workflow()
-            window.tif_workbench.current_specimen_id = "ANT_001"
-            window.tif_workbench.log("missing manual_truth")
-            window.return_to_start_center_with_context()
-
-            self.assertEqual(window.active_project_kind, "start")
-            self.assertEqual(window.tabs.currentWidget(), window.start_center_widget)
-            self.assertEqual(window.agent_panel._context, {"source_workbench": "previous"})
-        finally:
-            window.deleteLater()
-
     def test_ask_agent_carries_compact_context_only(self):
         window = self._make_window()
         try:
@@ -878,62 +939,6 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertIn("MainWindow._collect_image_workbench_agent_context", context["source_code_refs"])
             self.assertIn("[truncated]", context["recent_log_excerpt"])
             self.assertLess(len(str(context)), 5000)
-        finally:
-            window.deleteLater()
-
-    def test_tif_ask_agent_compact_context_keeps_volume_and_reslice_fields(self):
-        window = self._make_window()
-        try:
-            compact = window._compact_agent_context(
-                {
-                    "source_workbench": "tif_volume",
-                    "project_type": "tif_volume",
-                    "active_specimen_id": "ANT_001",
-                    "display_mode": "volume",
-                    "active_slice_axis": "y",
-                    "active_slice_position": "3/120",
-                    "active_volume_shape_zyx": "300/800/900",
-                    "active_volume_spacing_zyx": "2.0/0.5/0.5",
-                    "volume_renderer": "gpu",
-                    "volume_renderer_label": "GPU ray march [RTX 3090]",
-                    "volume_texture_target_dim": "2048",
-                    "volume_ray_samples": "2048",
-                    "volume_clarity_mode": "on",
-                    "volume_inside_depth": "65%",
-                    "volume_front_cut": "30%",
-                    "volume_yaw_pitch": "yaw=12.0, pitch=18.0",
-                    "tif_next_requirement": "brain_orientation_reslice",
-                    "tif_requirement_doc": "docs/ant3d_workbench/TIF脑部统一朝向重切片需求_zh.md",
-                }
-            )
-
-            self.assertEqual(compact["diagnostic_route"], "tif_volume_workbench_context")
-            self.assertEqual(compact["display_mode"], "volume")
-            self.assertEqual(compact["active_slice_axis"], "y")
-            self.assertEqual(compact["volume_renderer"], "gpu")
-            self.assertEqual(compact["volume_clarity_mode"], "on")
-            self.assertIn("brain_orientation_reslice", compact["tif_next_requirement"])
-            self.assertIn("TIF脑部统一朝向重切片需求_zh.md", compact["tif_requirement_doc"])
-            self.assertIn("GPU preview", compact["diagnostic_focus"])
-        finally:
-            window.deleteLater()
-
-    def test_tif_ask_agent_prepares_volume_view_before_agent_center(self):
-        window = self._make_window()
-        try:
-            events = []
-            window.active_project_kind = "tif"
-            window._apply_project_mode_tabs()
-            window.tabs.setCurrentWidget(window.tif_workbench)
-            window.tif_workbench.prepare_for_agent_panel = lambda: events.append("prepare")
-            window.agent_panel.is_running = lambda: False
-            window.agent_panel.start_dashboard = lambda: events.append("start")
-
-            window.open_agent_from_context({"source_workbench": "tif_volume", "project_type": "tif_volume"})
-
-            self.assertEqual(events, ["prepare", "start"])
-            self.assertEqual(window.active_project_kind, "start")
-            self.assertEqual(window.tabs.currentWidget(), window.start_center_widget)
         finally:
             window.deleteLater()
 
@@ -978,9 +983,9 @@ class GuiSmokeTests(unittest.TestCase):
             window.change_language("zh")
             self.assertEqual(window.current_lang, "zh")
             self.assertIn("TaxaMask Workbench", window.windowTitle())
-            self.assertEqual(window.tif_workbench.btn_import_tif.text(), "导入 TIF stack")
             self.assertEqual(window.start_title.text(), "TaxaMask Agent 中心")
             self.assertEqual(window.btn_start_ant_code.text(), "启动 Ant-Code")
+            self.assertEqual(window.btn_general_settings.text(), "通用设置")
 
             dialog = main_module.ModelSettingsDialog(
                 {
@@ -1192,36 +1197,6 @@ class GuiSmokeTests(unittest.TestCase):
         finally:
             dialog.deleteLater()
 
-    def test_tif_model_settings_match_volume_backend_contract(self):
-        dialog = main_module.TifModelSettingsDialog(
-            {
-                "backend_id": "tif_unet",
-                "display_name": "TIF U-Net",
-                "python_executable": "C:/Users/admin/anaconda3/envs/antsleap/python.exe",
-                "export_formats": "nrrd,mha",
-                "prepare_dataset_command": "{python} prepare.py --contract {contract_json}",
-                "train_command": "{python} train.py --contract {contract_json}",
-                "predict_command": "",
-                "model_manifest": "{run_dir}/outputs/model_manifest.json",
-            },
-            lang="zh",
-        )
-        try:
-            self.assertEqual(dialog.windowTitle(), "TIF 体数据训练设置")
-            safety_panel = dialog.findChild(main_module.QWidget, "tifModelSettingsSafetyPanel")
-            self.assertIsNotNone(safety_panel)
-            self.assertIsNotNone(dialog.findChild(main_module.QPushButton, "tifModelSettingsAskAgentButton"))
-            self.assertEqual(dialog._validation_errors(), [])
-            values = dialog.get_values()
-            self.assertEqual(values["backend_id"], "tif_unet")
-            self.assertEqual(values["export_formats"], "nrrd,mha")
-            self.assertIn("{contract_json}", values["train_command"])
-
-            dialog.export_formats_edit.setText("nrrd,bad_format")
-            self.assertIn("不支持的 TIF 导出格式", "\n".join(dialog._validation_errors()))
-        finally:
-            dialog.deleteLater()
-
     def test_settings_ask_agent_context_is_compact_and_command_safe(self):
         window = self._make_window()
         try:
@@ -1317,58 +1292,6 @@ class GuiSmokeTests(unittest.TestCase):
             finally:
                 model_dialog.deleteLater()
 
-            tif_dialog = main_module.TifModelSettingsDialog(
-                {
-                    "backend_id": "nnunet",
-                    "display_name": "nnU-Net",
-                    "python_executable": "python",
-                    "export_formats": "nrrd,mha",
-                    "prepare_dataset_command": "python prepare.py --contract {contract_json} --large-config secret",
-                    "train_command": "",
-                    "predict_command": "python predict.py --contract {contract}",
-                    "model_manifest": "",
-                },
-                lang="en",
-                parent=window,
-            )
-            try:
-                context = tif_dialog.get_agent_context()
-                self.assertEqual(context["settings_scope"], "tif_volume_backend")
-                self.assertEqual(context["backend_id"], "nnunet")
-                self.assertEqual(context["predict_command_has_contract"], "yes")
-                self.assertNotIn("large-config", str(context))
-                self.assertNotIn("predict.py", str(context))
-                compact = window._compact_agent_context(context)
-                self.assertEqual(compact["diagnostic_route"], "tif_volume_backend_settings")
-                self.assertIn("TIF后端契约", compact["source_code_refs"])
-                self.assertIn("model_draft", compact["safety_notes"])
-            finally:
-                tif_dialog.deleteLater()
-        finally:
-            window.deleteLater()
-
-    def test_tif_model_settings_save_syncs_workbench_defaults(self):
-        window = self._make_window()
-        try:
-            dialog = main_module.TifModelSettingsDialog(window.config.get("tif_backend", {}), lang="en", parent=window)
-            try:
-                dialog.backend_id_edit.setText("volume_backend")
-                dialog.display_name_edit.setText("Volume Backend")
-                dialog.python_edit.setText("C:/Python/python.exe")
-                dialog.export_formats_edit.setText("nrrd,mha")
-                dialog.prepare_command_edit.setPlainText("{python} prepare.py --contract {contract}")
-                dialog.train_command_edit.setPlainText("")
-                dialog.predict_command_edit.setPlainText("")
-                backend_config = dialog.get_values()
-            finally:
-                dialog.deleteLater()
-
-            window.config.set("tif_backend", dict(backend_config))
-            window.tif_workbench.set_config_manager(window.config)
-
-            self.assertEqual(window.config.values["tif_backend"]["backend_id"], "volume_backend")
-            self.assertEqual(window.tif_workbench.backend_id_edit.text(), "volume_backend")
-            self.assertEqual(window.tif_workbench.backend_formats_edit.text(), "nrrd,mha")
         finally:
             window.deleteLater()
 
@@ -1493,32 +1416,25 @@ class GuiSmokeTests(unittest.TestCase):
             preload_events = []
             window.ensure_2d_stl_models_preloaded = lambda: preload_events.append("preload")
             image_root = self.project_dir / "TaxaMask_outputs" / "2d_stl_projects"
-            tif_root = self.project_dir / "TaxaMask_outputs" / "tif_projects"
             created_image_dir = image_root / "review_run"
-            created_tif_dir = tif_root / "volume_run"
             calls = []
 
             def fake_get_existing_directory(_parent, title, start_dir=""):
                 calls.append((title, Path(start_dir)))
-                if "TIF" in title:
-                    created_tif_dir.mkdir(parents=True, exist_ok=True)
-                    return str(created_tif_dir)
                 created_image_dir.mkdir(parents=True, exist_ok=True)
                 return str(created_image_dir)
 
             with patch.object(main_module.QFileDialog, "getExistingDirectory", fake_get_existing_directory), \
-                 patch.object(main_module.QInputDialog, "getText", side_effect=[("review", True), ("volume", True)]), \
+                 patch.object(main_module.QInputDialog, "getText", return_value=("review", True)), \
                  patch.object(window, "_choose_project_template", return_value={"template_id": PROJECT_TEMPLATE_GENERIC}):
                 window.new_project()
-                window.new_tif_project()
 
             self.assertEqual(calls[0][1], image_root)
-            self.assertEqual(calls[1][1], tif_root)
+            self.assertEqual(len(calls), 1)
             self.assertEqual(Path(window.project.current_project_path), created_image_dir / "review.json")
-            self.assertEqual(Path(window.tif_project.current_project_path), created_tif_dir / "project.json")
             self.assertTrue((created_image_dir / "review.json").exists())
-            self.assertTrue((created_tif_dir / "project.json").exists())
             self.assertEqual(preload_events, ["preload"])
+            self.assertFalse(hasattr(window, "new_ti" + "f_project"))
         finally:
             window.deleteLater()
 
@@ -2257,68 +2173,6 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertTrue(window.btn_train.isEnabled())
             self.assertFalse(window.btn_stop_training.isEnabled())
             self.assertEqual(window.progress.value(), 100)
-        finally:
-            window.deleteLater()
-
-    def test_tif_project_open_path_switches_to_tif_workbench(self):
-        window = self._make_window()
-        try:
-            preload_events = []
-            window.ensure_sam_preloaded = lambda: preload_events.append("preload")
-            tif_project = TifProjectManager()
-            tif_path = tif_project.create_project("tif_smoke", self.project_dir / "tif_smoke")
-
-            self.assertTrue(window._is_tif_project_file(tif_path))
-            window.tif_project.load_project(tif_path)
-            window.active_project_kind = "tif"
-            window._refresh_project_bound_views()
-
-            self.assertEqual(window.tabs.count(), 1)
-            self.assertEqual(window.tabs.currentWidget(), window.tif_workbench)
-            self.assertEqual(window.tabs.tabText(0), "TIF Volume Workbench")
-            self.assertEqual(window.tif_project.project_data["project_type"], "tif_volume")
-            self.assertEqual(preload_events, [])
-            self.assertIsNone(window.sam_worker)
-            self.assertIsNone(window.sam_thread)
-        finally:
-            window.deleteLater()
-
-    def test_tif_project_open_path_does_not_preload_sam(self):
-        window = self._make_window()
-        try:
-            preload_events = []
-            window.ensure_sam_preloaded = lambda: preload_events.append("preload")
-            tif_project = TifProjectManager()
-            tif_path = tif_project.create_project("tif_open_smoke", self.project_dir / "tif_open_smoke")
-
-            window.open_project_path(tif_path)
-
-            self.assertEqual(window.active_project_kind, "tif")
-            self.assertEqual(window.tabs.currentWidget(), window.tif_workbench)
-            self.assertEqual(preload_events, [])
-            self.assertIsNone(window.sam_worker)
-            self.assertIsNone(window.sam_thread)
-        finally:
-            window.deleteLater()
-
-    def test_tif_training_export_defaults_to_project_exports(self):
-        window = self._make_window()
-        try:
-            tif_project = TifProjectManager()
-            tif_path = tif_project.create_project("tif_export_defaults", self.project_dir / "tif_export_defaults")
-            window.open_project_path(tif_path)
-            expected = self.project_dir / "tif_export_defaults" / "exports" / "train_ready"
-            captured = []
-
-            def fake_get_existing_directory(_parent, _title, start_dir=""):
-                captured.append(Path(start_dir))
-                return ""
-
-            with patch.object(main_module.QFileDialog, "getExistingDirectory", fake_get_existing_directory):
-                window.tif_workbench.export_training_dataset()
-
-            self.assertEqual(captured, [expected])
-            self.assertTrue(expected.exists())
         finally:
             window.deleteLater()
 

@@ -2,6 +2,8 @@
 
 TaxaMask is currently maintained as research software. Contributions are welcome when they improve reproducibility, documentation clarity, taxonomic adaptability, or workflow reliability.
 
+TaxaMask is licensed under AGPLv3. Contributions should be compatible with AGPLv3 and must not introduce code or assets that cannot be redistributed under the public repository license.
+
 ## Good Contribution Areas
 
 - Bug reports with clear reproduction steps.
@@ -16,6 +18,7 @@ TaxaMask is currently maintained as research software. Contributions are welcome
 Please make sure that:
 
 - No API keys, local project JSON files, databases, model weights, or generated run artifacts are included.
+- No private machine paths, private gateway URLs, user sessions, local Agent memory, or unreleased datasets are included.
 - New profile files do not contain private paths or unreleased data.
 - New taxa or model workflows are described with their validation scope.
 - Code changes include focused tests when they affect workflow behavior.

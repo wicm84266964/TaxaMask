@@ -12,6 +12,27 @@ TaxaMask is currently a source-based research application. The first compatibili
 
 ## Install Order
 
+Install prerequisites first:
+
+- Git, or the ability to download and extract the GitHub ZIP archive.
+- Conda or another Python environment manager.
+- Python 3.12 for the recommended public source setup.
+- Node.js 20 or newer with npm for the embedded Agent Center / Ant-Code dashboard.
+
+Clone the source repository and enter it before installing dependencies:
+
+```bash
+git clone https://github.com/wicm84266964/TaxaMask.git
+cd TaxaMask
+```
+
+Create and activate the recommended Python environment:
+
+```bash
+conda create -n taxamask python=3.12
+conda activate taxamask
+```
+
 Always install a hardware-appropriate PyTorch build before installing the base requirements:
 
 ```bash
@@ -29,6 +50,49 @@ pip install -r requirements.txt
 Linux CUDA users should check the official PyTorch install command for the installed NVIDIA driver and CUDA runtime. The CUDA 12.1 file is an example, not a promise that every CUDA workstation should use that exact wheel.
 
 macOS users should not install the CUDA requirements file. Use a CPU-compatible PyTorch installation for this first compatibility target. Advanced users may experiment with their own PyTorch/SAM stack, but MPS acceleration is not a supported TaxaMask runtime device yet.
+
+Install the bundled Agent Center dependencies after cloning:
+
+```bash
+cd vendor/ant-code
+npm ci
+cd ../..
+```
+
+The source release does not include `node_modules`. Without this step, the main Python GUI may still open, but the embedded Agent Center, browser dashboard, and `启动AntCode修复面板.bat` recovery panel cannot be expected to work.
+
+TaxaMask can launch without API keys, and the Agent Center dashboard can open before a model is configured. Model-backed Agent Center chat, VLM drafts, and external model routes require local gateway or API settings supplied by the user environment. Do not commit real keys, private gateway URLs, or runtime settings.
+
+If the PySide6 GUI cannot start after source changes, launch the bundled dashboard directly from the repository root:
+
+```bash
+node vendor/ant-code/src/cli/dashboard.js --project . --port 7410
+```
+
+On Windows, `启动AntCode修复面板.bat` provides the same recovery route with additional Node.js discovery. On Ubuntu/Linux or from a WSL shell, use:
+
+```bash
+bash ./启动TaxaMask.sh
+bash ./启动AntCode修复面板.sh
+```
+
+On Ubuntu/WSL, the Agent Center defaults to browser mode and does not import Qt WebEngine. This is intentional: some WSLg and Linux EGL/OpenGL stacks can crash Qt WebEngine before the dashboard loads. Set `TAXAMASK_ANTCODE_BROWSER_MODE=0` only on systems where embedded Qt WebEngine has been validated. In browser mode, TaxaMask's "Ask Agent" buttons open the browser and copy the current workbench context to the clipboard so it can be pasted into the Ant-Code prompt before sending.
+
+When the TaxaMask GUI itself is a Windows Python process but Ant-Code was installed in WSL Ubuntu, enable the WSL runtime bridge before starting the GUI:
+
+```bash
+# Run once inside Ubuntu / WSL
+cd /mnt/c/path/to/TaxaMask/vendor/ant-code
+npm ci
+```
+
+```bat
+set TAXAMASK_ANTCODE_RUNTIME=wsl
+set TAXAMASK_WSL_DISTRO=Ubuntu
+启动TaxaMask.bat
+```
+
+`TAXAMASK_WSL_DISTRO` is optional when the default WSL distribution is the right one. Set `TAXAMASK_WSL_PROJECT_DIR`, `TAXAMASK_WSL_ANT_CODE_ROOT`, or `TAXAMASK_WSL_ANT_CODE_CONFIG` only when the automatic `wslpath` conversion does not point at the Linux-side checkout that contains `vendor/ant-code/node_modules`.
 
 ## Poppler for PDF Processing
 
@@ -108,4 +172,4 @@ The repository smoke workflow is intentionally lightweight. It verifies that the
 | macOS CPU | CPU install, config path, GUI smoke where PySide6 system libraries allow it, project open/save | Treat as a light source trial: inspect projects, annotate small batches, avoid large training expectations. |
 | macOS MPS | Not a first-pass target | Do not treat MPS as supported until SAM, torchvision, Ultralytics, and training paths are validated on real Mac hardware. |
 
-For local maintainer validation on this Windows workstation, the conda environment named `antsleap` is only a test environment name. It is not a public installation recommendation.
+For local maintainer validation, the suggested conda environment name is `taxamask`. It is only a convenient environment label, not a requirement baked into the program.

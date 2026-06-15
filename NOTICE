@@ -1,7 +1,8 @@
 TaxaMask Notice
 
-TaxaMask is a taxonomy-oriented mask annotation, literature figure extraction,
-and multimodal dataset production workbench.
+TaxaMask is a taxonomy and morphology research workbench for literature
+trait-description processing, reviewable image annotation, model-assisted
+drafts, and multimodal dataset production.
 
 Project origin:
 
@@ -10,7 +11,7 @@ package name `AntSleap` is retained for runtime compatibility and as a tribute
 to SLEAP, the animal pose-estimation project that inspired the original
 development direction. The external project and user-facing name is TaxaMask.
 
-Research use and citation:
+Use and citation:
 
 If TaxaMask contributes to a publication, preprint, dataset, benchmark, or
 public research output, please cite the repository release and DOI when
@@ -18,10 +19,13 @@ available. See CITATION.cff for the current preferred citation metadata.
 
 Scope of included materials:
 
-- Source code is licensed under the TaxaMask Research Use License in LICENSE.
-- User documentation, tutorials, screenshots, profile guides, and explanatory
-  materials are provided for academic and research reuse with attribution unless
-  a file states otherwise.
+- Source code is licensed under the GNU Affero General Public License v3.0 in LICENSE.
+- The bundled Ant-Code Agent Center under `vendor/ant-code/` is first-party
+  TaxaMask source code. The directory name is retained for runtime/package
+  layout compatibility and should not be interpreted as third-party vendored
+  code or excluded from TaxaMask attribution.
+- User documentation, tutorials, profile guides, and explanatory materials are
+  provided under the same repository license unless a file states otherwise.
 - Model weights, local user projects, API keys, databases, and generated
   artifacts are not part of the public source release unless explicitly added in
   a future release.
@@ -34,5 +38,6 @@ permission.
 
 Commercial use:
 
-Commercial use is not granted by the repository license. Please contact the
-copyright holder for separate commercial permission.
+Commercial use is permitted under AGPLv3. Modified versions and network services
+must comply with AGPLv3 source-disclosure requirements and must preserve copyright
+and attribution notices.

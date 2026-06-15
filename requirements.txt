@@ -1,4 +1,4 @@
-# Core requirements for TaxaMask / Formica-Flow.
+# Core requirements for TaxaMask.
 #
 # This file intentionally keeps PyTorch generic. For a fresh environment, install
 # one of the CPU/CUDA PyTorch variants first, then install this file:
@@ -35,3 +35,7 @@ easyocr>=1.7.1
 openai>=1.12.0
 anthropic>=0.18.0
 requests>=2.31.0
+
+# --- Lightweight web helpers used by optional dashboards/recovery panels ---
+blinker>=1.5.0,<2
+click>=7.0,<9

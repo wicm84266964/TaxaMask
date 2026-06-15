@@ -8,13 +8,26 @@ import tempfile
 from pathlib import Path
 
 
+def _is_wsl_runtime():
+    if os.environ.get("WSL_DISTRO_NAME"):
+        return True
+    try:
+        with open("/proc/version", "r", encoding="utf-8", errors="ignore") as handle:
+            return "microsoft" in handle.read().lower()
+    except OSError:
+        return False
+
+
 def _ensure_qtwebengine_cpu_compositing():
-    flag = "--disable-gpu-compositing"
-    current = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
-    flags = current.split()
-    if flag not in flags:
-        flags.append(flag)
-        os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(flags)
+    flags_to_append = ["--disable-gpu-compositing"]
+    if sys.platform == "linux" or _is_wsl_runtime():
+        flags_to_append.append("--disable-gpu")
+    for flag in flags_to_append:
+        current = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
+        flags = current.split()
+        if flag not in flags:
+            flags.append(flag)
+            os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(flags)
 
 
 _ensure_qtwebengine_cpu_compositing()
@@ -22,6 +35,7 @@ _ensure_qtwebengine_cpu_compositing()
 from PySide6.QtCore import Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
+    QApplication,
     QLabel,
     QSizePolicy,
     QStackedWidget,
@@ -29,14 +43,32 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-try:
-    from PySide6.QtWebEngineWidgets import QWebEngineView
-except Exception:  # pragma: no cover - depends on local Qt installation
-    QWebEngineView = None
 
-try:
-    from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineScript
-except Exception:  # pragma: no cover - depends on local Qt installation
+def _env_requests_browser_mode():
+    value = os.environ.get("TAXAMASK_ANTCODE_BROWSER_MODE", "").strip().lower()
+    return value in {"1", "true", "yes", "on", "browser", "external"}
+
+
+def _should_import_qtwebengine():
+    if _env_requests_browser_mode() or _is_wsl_runtime():
+        return False
+    return True
+
+
+if _should_import_qtwebengine():
+    try:
+        from PySide6.QtWebEngineWidgets import QWebEngineView
+    except Exception:  # pragma: no cover - depends on local Qt installation
+        QWebEngineView = None
+
+    try:
+        from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineScript
+    except Exception:  # pragma: no cover - depends on local Qt installation
+        QWebEnginePage = None
+        QWebEngineProfile = None
+        QWebEngineScript = None
+else:
+    QWebEngineView = None
     QWebEnginePage = None
     QWebEngineProfile = None
     QWebEngineScript = None
@@ -56,6 +88,7 @@ AGENT_TRANSLATIONS = {
         "Ant-Code process exited.": "Ant-Code 进程已退出。",
         "Unable to start Ant-Code: {0}": "无法启动 Ant-Code：{0}",
         "Workspace permission is the default for this embedded TaxaMask agent.": "TaxaMask 内嵌 Agent 默认使用工作区权限。",
+        "Agent context copied to clipboard. Paste it into the browser prompt.": "Agent 上下文已复制到剪贴板，请粘贴到浏览器里的 Ant-Code 输入框。",
         "Ant-Code executable": "Ant-Code 可执行文件",
         "not found": "未找到",
         "Project": "项目",
@@ -112,8 +145,15 @@ class TaxaMaskAgentPanel(QWidget):
         self.workspace_dir = os.path.abspath(str(workspace_dir or Path(__file__).resolve().parents[2]))
         self.ant_code_root = os.path.abspath(str(ant_code_root or os.environ.get("TAXAMASK_ANT_CODE_ROOT") or self._default_ant_code_root()))
         self.ant_code_config_path = os.path.abspath(str(os.environ.get("TAXAMASK_ANT_CODE_CONFIG") or self._default_ant_code_config_path()))
+        self._ant_code_runtime_preference = self._read_ant_code_runtime_preference()
+        self.ant_code_runtime = self._resolve_ant_code_runtime()
+        self.wsl_distribution = self._resolve_wsl_distribution()
+        self.wsl_executable = self._resolve_wsl_executable()
         self.node_executable = self._resolve_node_executable()
         self.ant_code_dashboard_entry = self._resolve_ant_code_dashboard_entry()
+        if self._should_auto_promote_to_wsl():
+            self.ant_code_runtime = "wsl"
+            self.node_executable = self._resolve_node_executable()
         self.process = None
         self.dashboard_url = ""
         self.port = None
@@ -132,6 +172,11 @@ class TaxaMaskAgentPanel(QWidget):
         self._web_profile_storage_dir = ""
         self._json_health_error = ""
         self._json_health_warning = ""
+        self._dashboard_log_path = ""
+        self._dashboard_log_handle = None
+        self._browser_context_copied = False
+        self.browser_mode = self._resolve_browser_mode()
+        self._browser_opened_for_url = ""
         self.setObjectName("taxamaskAgentPanel")
         self.setMinimumWidth(640)
         self.setMaximumWidth(16777215)
@@ -140,27 +185,102 @@ class TaxaMaskAgentPanel(QWidget):
         self._apply_style()
         self.set_language(lang)
 
+    def _resolve_browser_mode(self):
+        value = os.environ.get("TAXAMASK_ANTCODE_BROWSER_MODE", "").strip().lower()
+        if value in {"0", "false", "no", "off", "embed"}:
+            return False
+        if value in {"1", "true", "yes", "on", "browser", "external"}:
+            return True
+        return sys.platform == "linux" or _is_wsl_runtime()
+
     def _default_ant_code_root(self):
         repo_root = Path(__file__).resolve().parents[2]
-        candidate = repo_root / "vendor" / "ant-code"
-        if candidate.exists():
-            return candidate
-        candidate = repo_root.parent / "lab-agent"
-        return candidate
+        return repo_root / "vendor" / "ant-code"
 
     def _default_ant_code_config_path(self):
         repo_root = Path(__file__).resolve().parents[2]
         return repo_root / "AntSleap" / "config" / "taxamask_ant_code.config.json"
 
+    def _read_ant_code_runtime_preference(self):
+        value = os.environ.get("TAXAMASK_ANTCODE_RUNTIME", "auto").strip().lower()
+        if value in {"wsl", "wsl2", "ubuntu"}:
+            return "wsl"
+        if value in {"native", "local", "windows"}:
+            return "native"
+        return "auto"
+
+    def _resolve_ant_code_runtime(self):
+        if sys.platform != "win32":
+            return "native"
+        if self._ant_code_runtime_preference == "wsl":
+            return "wsl"
+        if self._ant_code_runtime_preference == "native":
+            return "native"
+        if os.environ.get("TAXAMASK_WSL_DISTRO"):
+            return "wsl"
+        return "native"
+
+    def _resolve_wsl_distribution(self):
+        return os.environ.get("TAXAMASK_WSL_DISTRO", "").strip()
+
+    def _resolve_wsl_executable(self):
+        if sys.platform != "win32":
+            return None
+        env_path = os.environ.get("TAXAMASK_WSL_EXE", "").strip()
+        if env_path and Path(env_path).expanduser().exists():
+            return str(Path(env_path).expanduser().resolve())
+        found = shutil.which("wsl.exe") or shutil.which("wsl")
+        if found:
+            return found
+        system_wsl = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "wsl.exe"
+        if system_wsl.exists():
+            return str(system_wsl)
+        return None
+
     def _resolve_node_executable(self):
+        if self.ant_code_runtime == "wsl":
+            return os.environ.get("TAXAMASK_WSL_NODE_EXE", "").strip() or "node"
         env_path = os.environ.get("TAXAMASK_NODE_EXE")
         if env_path and Path(env_path).expanduser().exists():
             return str(Path(env_path).expanduser().resolve())
+        for candidate in self._node_executable_candidates():
+            if candidate.exists():
+                return str(candidate.resolve())
         for command in ("node.exe", "node"):
             found = shutil.which(command)
             if found:
                 return found
         return None
+
+    def _node_executable_candidates(self):
+        names = ("node.exe", "node") if sys.platform == "win32" else ("node",)
+        roots = [
+            Path(self.ant_code_root),
+            Path(self.workspace_dir),
+        ]
+        home = None
+        if sys.platform != "win32":
+            try:
+                home = Path.home()
+            except RuntimeError:
+                home = None
+            if home is not None:
+                roots.extend([
+                    home / ".local",
+                    home / ".nvm" / "versions" / "node",
+                    home / "miniconda3" / "envs" / "taxamask",
+                    home / "anaconda3" / "envs" / "taxamask",
+                    home / "miniforge3" / "envs" / "taxamask",
+                    home / "mambaforge" / "envs" / "taxamask",
+                    home / ".conda" / "envs" / "taxamask",
+                ])
+        for root in roots:
+            for name in names:
+                yield root / "bin" / name
+                yield root / name
+        if sys.platform != "win32" and home is not None:
+            for candidate in sorted((home / ".nvm" / "versions" / "node").glob("*/bin/node"), reverse=True):
+                yield candidate
 
     def _resolve_ant_code_dashboard_entry(self):
         for candidate in (
@@ -171,7 +291,21 @@ class TaxaMaskAgentPanel(QWidget):
                 return str(candidate.resolve())
         return None
 
+    def _should_auto_promote_to_wsl(self):
+        return bool(
+            sys.platform == "win32"
+            and self._ant_code_runtime_preference == "auto"
+            and not self.node_executable
+            and self.wsl_executable
+        )
+
     def _can_use_source_dashboard(self):
+        if self.ant_code_runtime == "wsl":
+            return bool(
+                self.wsl_executable
+                and self.ant_code_dashboard_entry
+                and Path(self.ant_code_dashboard_entry).exists()
+            )
         return bool(
             self.node_executable
             and Path(self.node_executable).exists()
@@ -185,11 +319,13 @@ class TaxaMaskAgentPanel(QWidget):
                 "Ant-Code source dashboard is unavailable. Ensure Node.js is installed and "
                 "vendor/ant-code/src/cli/index.js exists."
             )
+        if self.ant_code_runtime == "wsl":
+            return self._wsl_dashboard_command()
         command = [
             self.node_executable,
             self.ant_code_dashboard_entry,
         ]
-        if Path(self.ant_code_dashboard_entry).name == "index.js":
+        if self._dashboard_entry_uses_index(self.ant_code_dashboard_entry):
             command.append("dashboard")
         command.extend([
             "--project",
@@ -200,8 +336,179 @@ class TaxaMaskAgentPanel(QWidget):
         ])
         return command
 
+    def _dashboard_entry_uses_index(self, entry_path):
+        name = str(entry_path or "").replace("\\", "/").rstrip("/").split("/")[-1]
+        return name == "index.js"
+
+    def _wsl_dashboard_command(self):
+        workspace_dir = self._wsl_workspace_dir()
+        ant_code_root = self._wsl_ant_code_root_path()
+        config_path = self._wsl_config_path()
+        dashboard_entry = self._wsl_dashboard_entry_path()
+        command = [self.wsl_executable]
+        if self.wsl_distribution:
+            command.extend(["-d", self.wsl_distribution])
+        inner = [
+            "env",
+            f"LAB_AGENT_PACKAGE_ROOT={ant_code_root}",
+            f"LAB_AGENT_CONFIG={config_path}",
+            self.node_executable or "node",
+            dashboard_entry,
+        ]
+        if self._dashboard_entry_uses_index(dashboard_entry):
+            inner.append("dashboard")
+        inner.extend([
+            "--project",
+            workspace_dir,
+            "--port",
+            str(self.port),
+            "--no-open",
+        ])
+        command.extend([
+            "--exec",
+            "/bin/bash",
+            "-lc",
+            self._wsl_dashboard_shell_source(),
+            "taxamask-antcode",
+            workspace_dir,
+        ])
+        command.extend(inner)
+        return command
+
+    def _wsl_dashboard_shell_source(self):
+        return r"""
+set -e
+workspace="$1"
+shift
+if [ -s "$HOME/.nvm/nvm.sh" ]; then
+  . "$HOME/.nvm/nvm.sh"
+fi
+for dir in \
+  "$HOME/.local/bin" \
+  "$HOME/miniconda3/envs/taxamask/bin" \
+  "$HOME/anaconda3/envs/taxamask/bin" \
+  "$HOME/miniforge3/envs/taxamask/bin" \
+  "$HOME/mambaforge/envs/taxamask/bin" \
+  "$HOME/.conda/envs/taxamask/bin"; do
+  if [ -d "$dir" ]; then
+    PATH="$dir:$PATH"
+  fi
+done
+export PATH
+if ! command -v node >/dev/null 2>&1; then
+  node_command="${4:-node}"
+  if [ -n "$node_command" ] && [ "$node_command" != "${node_command#*/}" ] && [ -x "$node_command" ]; then
+    :
+  else
+    echo "Cannot find Linux Node.js in WSL. Install Node.js 20+ in Ubuntu, or set TAXAMASK_WSL_NODE_EXE." >&2
+    exit 127
+  fi
+fi
+node_check="${4:-node}"
+if [ "$node_check" = "${node_check#*/}" ]; then
+  node_check="$(command -v "$node_check" 2>/dev/null || true)"
+fi
+if [ -z "$node_check" ] || ! "$node_check" -e "const major=Number(process.versions.node.split('.')[0]); process.exit(major>=20?0:1)" >/dev/null 2>&1; then
+  echo "Node.js 20 or newer is required in WSL." >&2
+  exit 127
+fi
+if [ ! -d "$workspace/vendor/ant-code/node_modules" ]; then
+  echo "Ant-Code dependencies are missing in WSL. Run: cd \"$workspace/vendor/ant-code\" && npm ci" >&2
+  exit 126
+fi
+cd "$workspace"
+exec "$@"
+""".strip()
+
+    def _wsl_workspace_dir(self):
+        return self._wsl_path(self.workspace_dir, "TAXAMASK_WSL_PROJECT_DIR")
+
+    def _wsl_ant_code_root_path(self):
+        override = os.environ.get("TAXAMASK_WSL_ANT_CODE_ROOT", "").strip()
+        if override:
+            return override
+        project_override = os.environ.get("TAXAMASK_WSL_PROJECT_DIR", "").strip()
+        if project_override:
+            return project_override.rstrip("/") + "/vendor/ant-code"
+        return self._wsl_path(self.ant_code_root)
+
+    def _wsl_config_path(self):
+        override = os.environ.get("TAXAMASK_WSL_ANT_CODE_CONFIG", "").strip()
+        if override:
+            return override
+        project_override = os.environ.get("TAXAMASK_WSL_PROJECT_DIR", "").strip()
+        if project_override:
+            return project_override.rstrip("/") + "/AntSleap/config/taxamask_ant_code.config.json"
+        return self._wsl_path(self.ant_code_config_path)
+
+    def _wsl_dashboard_entry_path(self):
+        override = os.environ.get("TAXAMASK_WSL_DASHBOARD_ENTRY", "").strip()
+        if override:
+            return override
+        ant_root = self._wsl_ant_code_root_path()
+        if ant_root:
+            return ant_root.rstrip("/") + "/src/cli/dashboard.js"
+        return self._wsl_path(self.ant_code_dashboard_entry)
+
+    def _wsl_path(self, value, env_override=None):
+        if env_override:
+            override = os.environ.get(env_override, "").strip()
+            if override:
+                return override
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if text.startswith("/"):
+            return text
+        if sys.platform != "win32":
+            return text
+        converted = self._wslpath(text)
+        return converted or self._fallback_windows_to_wsl_path(text)
+
+    def _wslpath(self, value):
+        if not self.wsl_executable:
+            return ""
+        command = [self.wsl_executable]
+        if self.wsl_distribution:
+            command.extend(["-d", self.wsl_distribution])
+        command.extend(["--exec", "wslpath", "-a", str(value)])
+        try:
+            result = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
+                check=False,
+                creationflags=self._creation_flags(),
+            )
+        except Exception:
+            return ""
+        if result.returncode != 0:
+            return ""
+        return str(result.stdout or "").strip()
+
+    def _fallback_windows_to_wsl_path(self, value):
+        text = str(value or "").replace("\\", "/")
+        lowered = text.lower()
+        for prefix in ("//wsl.localhost/", "//wsl$/"):
+            if lowered.startswith(prefix):
+                remainder = text[len(prefix):]
+                parts = remainder.split("/", 1)
+                return "/" + parts[1] if len(parts) > 1 else "/"
+        if len(text) >= 2 and text[1] == ":" and text[0].isalpha():
+            drive = text[0].lower()
+            rest = text[2:].lstrip("/")
+            return f"/mnt/{drive}/{rest}" if rest else f"/mnt/{drive}"
+        return text
+
     def _dashboard_environment(self):
         env = os.environ.copy()
+        if self.ant_code_runtime == "wsl":
+            env["TAXAMASK_ANTCODE_RUNTIME_EFFECTIVE"] = "wsl"
+            return env
         ant_root = Path(self.ant_code_root)
         if ant_root.exists():
             env["LAB_AGENT_PACKAGE_ROOT"] = str(ant_root)
@@ -240,7 +547,7 @@ class TaxaMaskAgentPanel(QWidget):
         fallback_layout.addWidget(self.fallback_detail)
         fallback_layout.addStretch(1)
         self.stack.addWidget(self.fallback)
-        self.web_view = QWebEngineView() if QWebEngineView is not None else None
+        self.web_view = None if self.browser_mode else (QWebEngineView() if QWebEngineView is not None else None)
         if self.web_view is not None:
             self.web_view.setObjectName("taxamaskAntCodeWebView")
             if TaxaMaskAgentWebPage is not None:
@@ -496,15 +803,17 @@ class TaxaMaskAgentPanel(QWidget):
                 raise RuntimeError(self._json_health_error)
             env = self._dashboard_environment()
             command = self._dashboard_command()
+            self._open_dashboard_log()
             self.process = subprocess.Popen(
                 command,
                 cwd=self.workspace_dir,
                 env=env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=self._dashboard_log_handle or subprocess.DEVNULL,
+                stderr=self._dashboard_log_handle or subprocess.DEVNULL,
                 creationflags=self._creation_flags(),
             )
         except Exception as exc:
+            self._close_dashboard_log()
             self.process = None
             self.dashboard_url = ""
             self._preflight_error = str(exc)
@@ -516,6 +825,64 @@ class TaxaMaskAgentPanel(QWidget):
         self._update_fallback()
         self.health_timer.start()
 
+    def _open_dashboard_log(self):
+        self._close_dashboard_log(remove=True)
+        try:
+            handle = tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                errors="replace",
+                prefix="taxamask_antcode_",
+                suffix=".log",
+                delete=False,
+            )
+        except Exception:
+            self._dashboard_log_path = ""
+            self._dashboard_log_handle = None
+            return
+        self._dashboard_log_path = handle.name
+        self._dashboard_log_handle = handle
+
+    def _close_dashboard_log(self, remove=False):
+        handle = self._dashboard_log_handle
+        self._dashboard_log_handle = None
+        if handle is not None:
+            try:
+                handle.close()
+            except Exception:
+                pass
+        if remove and self._dashboard_log_path:
+            try:
+                Path(self._dashboard_log_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+            self._dashboard_log_path = ""
+
+    def _dashboard_log_tail(self, max_chars=1200):
+        handle = self._dashboard_log_handle
+        if handle is not None:
+            try:
+                handle.flush()
+            except Exception:
+                pass
+        path = self._dashboard_log_path
+        if not path:
+            return ""
+        try:
+            text = Path(path).read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return ""
+        text = text.strip()
+        if not text:
+            return ""
+        return text[-int(max_chars):]
+
+    def _dashboard_exit_error(self):
+        detail = self._dashboard_log_tail()
+        if not detail:
+            return at("Ant-Code process exited.", self.lang)
+        return f"{at('Ant-Code process exited.', self.lang)} {detail}"
+
     def _creation_flags(self):
         if sys.platform != "win32":
             return 0
@@ -524,7 +891,9 @@ class TaxaMaskAgentPanel(QWidget):
     def _poll_dashboard_ready(self):
         if not self.is_running():
             self.health_timer.stop()
-            self._update_status_label(at("Ant-Code process exited.", self.lang))
+            self._preflight_error = self._dashboard_exit_error()
+            self._update_status_label(at("Unable to start Ant-Code: {0}", self.lang).format(self._preflight_error))
+            self._close_dashboard_log()
             self._update_fallback()
             return
         if self._health_checks_remaining <= 0:
@@ -544,7 +913,10 @@ class TaxaMaskAgentPanel(QWidget):
             return
 
     def _on_dashboard_ready(self):
+        self._close_dashboard_log()
         self._update_status_label(at("Ant-Code Dashboard is ready.", self.lang))
+        if self.browser_mode:
+            self.open_dashboard_in_browser(start_if_needed=False)
         self._prepare_dashboard_load(reset=True)
 
     def _prepare_dashboard_load(self, reset=False):
@@ -556,6 +928,10 @@ class TaxaMaskAgentPanel(QWidget):
             return
         if not self.is_running():
             self._update_status_label(at("Ant-Code process exited.", self.lang))
+            self._update_fallback()
+            return
+        if self.browser_mode:
+            self.stack.setCurrentWidget(self.fallback)
             self._update_fallback()
             return
         if self._preflight_dashboard(report_error=False):
@@ -577,31 +953,237 @@ class TaxaMaskAgentPanel(QWidget):
             self._update_fallback()
             return
         self.stack.setCurrentWidget(self.web_view)
-        cache_key = f"taxamask_embed=1&reload={self._load_retries}"
+        cache_key = f"taxamask_embed=1&taxamask_lang={self.lang}&reload={self._load_retries}"
         self.web_view.load(QUrl(f"{self.dashboard_url}/?{cache_key}"))
 
     def _web_post_load_source(self):
-        return r"""
+        if self.lang == "zh":
+            texts = {
+                "htmlLang": "zh-CN",
+                "localLabel": "TaxaMask Agent · 源码只读保护已启用",
+                "subtitle": "Ant-Code native",
+                "emptyTitle": "我会在当前 TaxaMask 仓库中协助排查",
+                "emptyCopy": "可以读源码和排查配置；外部模型适配和 TaxaMask 源码开发会分别请求确认。",
+                "promptPlaceholder": "把遇到的问题、配置目标或标注流程疑问发给 TaxaMask Agent",
+                "trustTitle": "信任此工作区？",
+                "trustButton": "信任并继续",
+                "trustProcess": "当前为高敏模式，本次确认只授权当前 Dashboard 进程。",
+                "trustPersist": "确认后会记录这个工作区，下次从同一路径启动可继续使用。",
+                "modeDescriptions": {
+                    "plan": "写入和命令需确认",
+                    "workspace": "工作区常规操作自动同意",
+                    "fullAccess": "本机工具和网络自动同意",
+                },
+                "modeLabels": {
+                    "plan": "计划确认",
+                    "workspace": "工作区权限",
+                    "fullAccess": "完全访问",
+                },
+                "textMap": {
+                    "空闲": "空闲",
+                    "发送": "发送",
+                    "待信任": "待信任",
+                    "运行中": "运行中",
+                    "关闭": "关闭",
+                    "清空上下文": "清空上下文",
+                    "压缩上下文": "压缩上下文",
+                },
+                "translatePatterns": False,
+            }
+        else:
+            texts = {
+                "htmlLang": "en",
+                "localLabel": "TaxaMask Agent · source-read guard enabled",
+                "subtitle": "Ant-Code native",
+                "emptyTitle": "I can help inspect this TaxaMask workspace",
+                "emptyCopy": "I can read source files and check configuration. External model adaptation and source-code changes will ask for confirmation when needed.",
+                "promptPlaceholder": "Ask TaxaMask Agent about an error, model setup, annotation workflow, or project state",
+                "trustTitle": "Trust this workspace?",
+                "trustButton": "Trust and continue",
+                "trustProcess": "High-sensitivity mode is active. This confirmation only trusts the current Dashboard process.",
+                "trustPersist": "After confirmation, this workspace path is remembered for future launches.",
+                "modeDescriptions": {
+                    "plan": "Confirm writes and commands",
+                    "workspace": "Auto-approve regular workspace operations",
+                    "fullAccess": "Auto-approve local tools and network access",
+                },
+                "modeLabels": {
+                    "plan": "Plan confirm",
+                    "workspace": "Workspace",
+                    "fullAccess": "Full access",
+                },
+                "textMap": {
+                    "空闲": "Idle",
+                    "发送": "Send",
+                    "待信任": "Trust required",
+                    "运行中": "Running",
+                    "关闭": "Close",
+                    "清空上下文": "Clear context",
+                    "压缩上下文": "Compact context",
+                    "切换模型": "Switch model",
+                    "编辑当前": "Edit current",
+                    "添加模型": "Add model",
+                    "切换时同步子智能体默认模型": "Also sync default sub-agent models when switching",
+                    "没有已注册模型": "No registered models",
+                    "当前": "Current",
+                    "编辑": "Edit",
+                    "删除": "Delete",
+                    "确认删除": "Confirm delete",
+                    "删除中": "Deleting",
+                    "文本": "Text",
+                    "上下文": "context",
+                    "本地配置": "Local configuration",
+                    "编辑模型网关": "Edit model gateway",
+                    "添加模型网关": "Add model gateway",
+                    "关闭模型配置": "Close model configuration",
+                    "模型 ID": "Model ID",
+                    "上下文窗口": "Context window",
+                    "保存后切换到这个模型": "Switch to this model after saving",
+                    "保存后同步子智能体": "Sync sub-agents after saving",
+                    "配置会写入 .lab-agent/config.json；该目录默认不进 Git。Key 不会在这里回显。": "Configuration is written to .lab-agent/config.json. This directory is ignored by Git by default. Keys are not displayed here.",
+                    "取消": "Cancel",
+                    "保存中": "Saving",
+                    "保存并使用": "Save and use",
+                    "未配置网关": "Gateway not configured",
+                    "Key 已配置": "Key configured",
+                    "未配置 Key": "Key missing",
+                    "无 Key": "No key",
+                    "视觉": "Vision",
+                    "子智能体": "Sub-agent",
+                    "编辑这个模型配置": "Edit this model configuration",
+                    "删除这个已注册模型": "Delete this registered model",
+                    "再次点击确认删除": "Click again to confirm deletion",
+                    "再次点击确认删除；这是当前网关最后一个模型，会清空当前网关配置。": "Click again to confirm deletion. This is the last model for the current gateway, so the current gateway configuration will be cleared.",
+                    "再次点击确认删除；如删除当前模型，会自动切到同一网关的下一个模型。": "Click again to confirm deletion. If the current model is deleted, TaxaMask will switch to another model on the same gateway.",
+                },
+                "translatePatterns": True,
+            }
+        return """
             (() => {
+              const taxamaskText = __TAXAMASK_TEXT__;
+              const translateTextValue = (value) => {
+                const original = String(value ?? '');
+                const trimmed = original.trim();
+                if (!trimmed) return original;
+                if (taxamaskText.textMap && Object.prototype.hasOwnProperty.call(taxamaskText.textMap, trimmed)) {
+                  return taxamaskText.textMap[trimmed];
+                }
+                if (!taxamaskText.translatePatterns) return original;
+                let translated = trimmed
+                  .replaceAll('Key 已配置', 'Key configured')
+                  .replaceAll('未配置 Key', 'Key missing')
+                  .replaceAll('未配置网关', 'Gateway not configured')
+                  .replaceAll('无 Key', 'No key');
+                let match = translated.match(/^模型\\s+(.+)$/);
+                if (match) return `Model ${match[1]}`;
+                match = translated.match(/^上下文\\s+(.+)$/);
+                if (match) return `Context ${match[1]}`;
+                match = translated.match(/^(\\d+)\\s+模型$/);
+                if (match) return `${match[1]} models`;
+                match = translated.match(/^([0-9.]+[kKmM]?)\\s+上下文$/);
+                if (match) return `${match[1]} context`;
+                match = translated.match(/^子智能体\\s+(.+)$/);
+                if (match) return `Sub-agent ${match[1]}`;
+                return translated;
+              };
+              const setTranslatedText = (node) => {
+                if (!node) return;
+                const translated = translateTextValue(node.textContent);
+                if (translated !== node.textContent.trim()) node.textContent = translated;
+              };
+              const translateDirectTextNodes = (node) => {
+                if (!node) return;
+                node.childNodes.forEach((child) => {
+                  if (child.nodeType !== Node.TEXT_NODE) return;
+                  const raw = child.nodeValue || '';
+                  const translated = translateTextValue(raw);
+                  if (translated !== raw.trim()) child.nodeValue = raw.replace(raw.trim(), translated);
+                });
+              };
+              const translateAttributes = (node) => {
+                if (!node || !node.getAttribute) return;
+                ['title', 'aria-label'].forEach((attr) => {
+                  const raw = node.getAttribute(attr);
+                  if (!raw) return;
+                  const translated = translateTextValue(raw);
+                  if (translated !== raw.trim()) node.setAttribute(attr, translated);
+                });
+              };
               const applyTaxaMaskDefaults = () => {
+                document.documentElement.lang = taxamaskText.htmlLang || 'en';
                 const workspaceButton = document.querySelector('#permission-mode button[data-mode="workspace"]');
                 if (workspaceButton && !workspaceButton.classList.contains('active')) {
                   workspaceButton.click();
                 }
                 const localLabel = document.querySelector('.workspace-local span:last-child');
-                if (localLabel) localLabel.textContent = 'TaxaMask Agent · 源码只读保护已启用';
+                if (localLabel) localLabel.textContent = taxamaskText.localLabel;
                 const brand = document.querySelector('.brand-name');
                 if (brand) brand.textContent = 'TaxaMask Agent';
                 const subtitle = document.querySelector('.brand-subtitle');
-                if (subtitle) subtitle.textContent = 'Ant-Code native';
+                if (subtitle) subtitle.textContent = taxamaskText.subtitle;
                 const emptyKicker = document.querySelector('.empty-kicker');
                 if (emptyKicker) emptyKicker.textContent = 'TaxaMask Agent';
                 const emptyTitle = document.querySelector('.empty-title');
-                if (emptyTitle) emptyTitle.textContent = '我会在当前 TaxaMask 仓库中协助排查';
+                if (emptyTitle) emptyTitle.textContent = taxamaskText.emptyTitle;
                 const emptyCopy = document.querySelector('.empty-copy');
-                if (emptyCopy) emptyCopy.textContent = '可以读源码和排查配置；外部模型适配和 TaxaMask 源码开发会分别请求确认。';
+                if (emptyCopy) emptyCopy.textContent = taxamaskText.emptyCopy;
                 const prompt = document.querySelector('#prompt-input');
-                if (prompt) prompt.placeholder = '把遇到的问题、配置目标或标注流程疑问发给 TaxaMask Agent';
+                if (prompt) prompt.placeholder = taxamaskText.promptPlaceholder;
+                document.querySelectorAll('#permission-mode button[data-mode]').forEach((button) => {
+                  const label = taxamaskText.modeLabels && taxamaskText.modeLabels[button.dataset.mode];
+                  if (label) button.textContent = label;
+                });
+                const activeMode = document.querySelector('#permission-mode button.active')?.dataset?.mode || 'workspace';
+                const modeDescription = document.querySelector('#mode-description');
+                if (modeDescription && taxamaskText.modeDescriptions && taxamaskText.modeDescriptions[activeMode]) {
+                  modeDescription.textContent = taxamaskText.modeDescriptions[activeMode];
+                }
+                const mapText = (node) => {
+                  if (!node || !taxamaskText.textMap) return;
+                  const current = node.textContent.trim();
+                  if (Object.prototype.hasOwnProperty.call(taxamaskText.textMap, current)) {
+                    node.textContent = taxamaskText.textMap[current];
+                  }
+                };
+                ['#run-status', '#send-button', '#header-shutdown-button', '#context-clear', '#context-compact'].forEach((selector) => {
+                  mapText(document.querySelector(selector));
+                });
+                const dynamicTextSelectors = [
+                  '#model-status .model-status-main',
+                  '#model-status .model-status-tag',
+                  '#context-status',
+                  '.model-panel-title',
+                  '.model-panel-subtitle',
+                  '.model-panel-empty',
+                  '.model-manage-button',
+                  '.model-agent-sync span',
+                  '.gateway-profile-meta',
+                  '.model-option-current',
+                  '.model-option-agent',
+                  '.model-option-tags span',
+                  '.model-edit-button',
+                  '.model-delete-button',
+                  '.model-delete-confirm-copy',
+                  '.model-config-kicker',
+                  '#model-config-title',
+                  '.model-config-grid label > span',
+                  '.model-config-note',
+                  '.model-config-actions button'
+                ].join(',');
+                document.querySelectorAll(dynamicTextSelectors).forEach(setTranslatedText);
+                document.querySelectorAll('.model-config-toggles label').forEach(translateDirectTextNodes);
+                document.querySelectorAll('[title], [aria-label]').forEach(translateAttributes);
+                const trustTitle = document.querySelector('.trust-title');
+                if (trustTitle) trustTitle.textContent = taxamaskText.trustTitle;
+                const trustButton = document.querySelector('#trust-panel button[data-action="trust"]');
+                if (trustButton && !trustButton.disabled) trustButton.textContent = taxamaskText.trustButton;
+                const trustCopies = document.querySelectorAll('.trust-copy');
+                if (trustCopies.length > 1) {
+                  const raw = trustCopies[1].textContent || '';
+                  trustCopies[1].textContent = raw.includes('高敏') || raw.toLowerCase().includes('high-sensitivity')
+                    ? taxamaskText.trustProcess
+                    : taxamaskText.trustPersist;
+                }
               };
               const trustPending = () => {
                 const send = document.querySelector('#send-button');
@@ -610,7 +1192,7 @@ class TaxaMaskAgentPanel(QWidget):
                 const panelVisible = trustPanel
                   && !trustPanel.classList.contains('hidden')
                   && trustPanel.textContent.trim().length > 0;
-                return sendText === '待信任' || Boolean(panelVisible);
+                return ['待信任', 'Trust required'].includes(sendText) || Boolean(panelVisible);
               };
               const postTrust = async () => {
                 try {
@@ -659,9 +1241,27 @@ class TaxaMaskAgentPanel(QWidget):
                 }
               };
               const trustTimer = window.setInterval(() => { void reconcileTrust(); }, 250);
+              document.querySelector('#permission-mode')?.addEventListener('click', () => window.setTimeout(applyTaxaMaskDefaults, 0));
+              let taxamaskMutationPending = false;
+              const scheduleTaxaMaskDefaults = () => {
+                if (taxamaskMutationPending) return;
+                taxamaskMutationPending = true;
+                window.requestAnimationFrame(() => {
+                  taxamaskMutationPending = false;
+                  applyTaxaMaskDefaults();
+                });
+              };
+              if (document.body && window.MutationObserver) {
+                new MutationObserver(scheduleTaxaMaskDefaults).observe(document.body, {
+                  childList: true,
+                  subtree: true,
+                  characterData: true,
+                });
+              }
+              document.addEventListener('click', () => window.setTimeout(applyTaxaMaskDefaults, 0), true);
               void reconcileTrust();
             })();
-            """
+            """.replace("__TAXAMASK_TEXT__", json.dumps(texts, ensure_ascii=False))
 
     def _on_web_load_finished(self, ok):
         if self.web_view is None:
@@ -692,7 +1292,9 @@ class TaxaMaskAgentPanel(QWidget):
               const panelVisible = trustPanel
                 && !trustPanel.classList.contains('hidden')
                 && trustPanel.textContent.trim().length > 0;
-              return Boolean(send && transcript && project && project !== '加载中' && sendText !== '待信任' && !panelVisible);
+              const loadingProject = ['加载中', 'Loading'].includes(project);
+              const trustSendText = ['待信任', 'Trust required'].includes(sendText);
+              return Boolean(send && transcript && project && !loadingProject && !trustSendText && !panelVisible);
             })();
             """,
             self._handle_embedded_page_ready,
@@ -883,7 +1485,7 @@ class TaxaMaskAgentPanel(QWidget):
     def _dashboard_context_json_paths(self):
         seen = set()
         yield from self._normalized_json_paths((self._project_display,), seen)
-        for key in ("project_path", "review_project_path", "tif_project_path", "stl_project_path"):
+        for key in ("project_path", "review_project_path", "stl_project_path"):
             yield from self._normalized_json_paths((self._context.get(key),), seen)
 
     def _dashboard_workspace_json_paths(self):
@@ -929,8 +1531,19 @@ class TaxaMaskAgentPanel(QWidget):
         if not prompt:
             self._pending_context_prompt = ""
             self._pending_prompt_attempts = 0
+            self._browser_context_copied = False
             return
         self._pending_context_prompt = prompt
+        if self.browser_mode:
+            self._browser_context_copied = self._copy_context_prompt_to_clipboard(prompt)
+            if self._browser_context_copied:
+                self._pending_context_prompt = ""
+                self._pending_prompt_attempts = 0
+                self._update_status_label(at("Agent context copied to clipboard. Paste it into the browser prompt.", self.lang))
+            if self.is_running() and self.dashboard_url:
+                self.open_dashboard_in_browser()
+            self._update_fallback()
+            return
         if not self.is_running() or self.web_view is None:
             return
         escaped = prompt.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
@@ -946,7 +1559,9 @@ class TaxaMaskAgentPanel(QWidget):
                 const panelVisible = trustPanel
                   && !trustPanel.classList.contains('hidden')
                   && trustPanel.textContent.trim().length > 0;
-                return Boolean(send && transcript && project && project !== '加载中' && sendText !== '待信任' && !panelVisible);
+                const loadingProject = ['加载中', 'Loading'].includes(project);
+                const trustSendText = ['待信任', 'Trust required'].includes(sendText);
+                return Boolean(send && transcript && project && !loadingProject && !trustSendText && !panelVisible);
               }};
               if (!pageReadyForTaxaMaskPrompt()) return false;
               const input = document.querySelector('#prompt-input');
@@ -959,6 +1574,16 @@ class TaxaMaskAgentPanel(QWidget):
             """,
             lambda ok: self._queue_prompt_if_not_inserted(prompt, ok),
         )
+
+    def _copy_context_prompt_to_clipboard(self, prompt):
+        try:
+            app = QApplication.instance()
+            if app is None:
+                return False
+            app.clipboard().setText(str(prompt or ""))
+            return True
+        except Exception:
+            return False
 
     def _queue_prompt_if_not_inserted(self, prompt, ok):
         if ok:
@@ -988,10 +1613,7 @@ class TaxaMaskAgentPanel(QWidget):
     def _context_prompt(self, context):
         if not context:
             return ""
-        lines = [
-            "这是从 TaxaMask 工作台带回来的现场上下文，请先理解现场，不要立即执行高风险动作。",
-        ]
-        mapping = [
+        zh_mapping = [
             ("source_workbench", "来源工作台"),
             ("project_type", "项目类型"),
             ("project_path", "项目路径"),
@@ -1025,7 +1647,7 @@ class TaxaMaskAgentPanel(QWidget):
             ("project_autosave_interval_sec", "项目自动保存间隔秒数"),
             ("runtime_device", "运行设备"),
             ("model_backend", "2D/STL 模型后端"),
-            ("backend_id", "TIF 后端 ID"),
+            ("backend_id", "后端 ID"),
             ("display_name", "后端显示名称"),
             ("python_executable", "Python 解释器"),
             ("export_formats", "导出格式"),
@@ -1054,23 +1676,128 @@ class TaxaMaskAgentPanel(QWidget):
             ("context_policy", "上下文策略"),
             ("recent_log_excerpt", "最近日志"),
         ]
+        en_mapping = [
+            ("source_workbench", "Source workbench"),
+            ("project_type", "Project type"),
+            ("project_path", "Project path"),
+            ("active_specimen_id", "Active specimen"),
+            ("active_image_path", "Active image"),
+            ("active_label_role", "Active label layer"),
+            ("selected_part", "Selected structure"),
+            ("selected_material_id", "Selected material"),
+            ("screener_profile", "PDF screening profile"),
+            ("figure_profile", "PDF figure-extraction profile"),
+            ("screening_mode", "PDF screening mode"),
+            ("text_llm_key_configured", "Text LLM key configured"),
+            ("text_llm_base_url_configured", "Text LLM base URL configured"),
+            ("text_llm_model", "Text LLM model"),
+            ("text_llm_api_protocol", "Text LLM API protocol"),
+            ("multimodal_llm_uses_text_provider", "Multimodal LLM reuses text provider"),
+            ("multimodal_llm_key_configured", "Multimodal LLM key configured"),
+            ("multimodal_llm_base_url_configured", "Multimodal LLM base URL configured"),
+            ("multimodal_llm_model", "Multimodal LLM model"),
+            ("multimodal_llm_api_protocol", "Multimodal LLM API protocol"),
+            ("pdf_source_dir", "PDF source directory"),
+            ("screening_output_dir", "PDF screening output directory"),
+            ("extract_input_dir", "PDF extraction input directory"),
+            ("extract_db_path", "PDF extraction database"),
+            ("multimodal_enabled", "Multimodal review enabled"),
+            ("settings_scope", "Settings scope"),
+            ("settings_question_focus", "Question focus"),
+            ("language", "Language"),
+            ("theme", "Theme"),
+            ("startup_behavior", "Startup behavior"),
+            ("project_autosave_interval_sec", "Project autosave interval seconds"),
+            ("runtime_device", "Runtime device"),
+            ("model_backend", "2D/STL model backend"),
+            ("backend_id", "Backend ID"),
+            ("display_name", "Display name"),
+            ("python_executable", "Python executable"),
+            ("export_formats", "Export formats"),
+            ("external_backend_id", "External backend ID"),
+            ("external_display_name", "External display name"),
+            ("external_python", "External backend Python"),
+            ("prepare_command_present", "Prepare command present"),
+            ("train_command_present", "Train command present"),
+            ("predict_command_present", "Predict command present"),
+            ("prepare_command_has_contract", "Prepare command includes contract"),
+            ("train_command_has_contract", "Train command includes contract"),
+            ("predict_command_has_contract", "Predict command includes contract"),
+            ("model_manifest_present", "Model manifest present"),
+            ("locator_scope_count", "Locator structure count"),
+            ("parent_box_ratio_count", "Parent box ratio count"),
+            ("validation_errors", "Current validation hints"),
+            ("diagnostic_route", "Diagnostic route"),
+            ("diagnostic_focus", "Diagnostic focus"),
+            ("health_check_summary", "Lightweight health check"),
+            ("llm_context_refs", "Suggested LLM context references"),
+            ("source_code_refs", "Relevant source/contract references"),
+            ("artifact_hints", "Suggested artifacts to inspect"),
+            ("safety_notes", "Safety boundaries"),
+            ("suggested_agent_action", "Suggested next step"),
+            ("agent_route_source", "Route table source"),
+            ("context_policy", "Context policy"),
+            ("recent_log_excerpt", "Recent log excerpt"),
+        ]
+        if self.lang == "zh":
+            lines = ["这是从 TaxaMask 工作台带回来的现场上下文，请先理解现场，不要立即执行高风险动作。"]
+            mapping = zh_mapping
+        else:
+            lines = [
+                "This is live context from the TaxaMask workbench. Understand the current research state first; do not take high-risk actions immediately."
+            ]
+            mapping = en_mapping
         for key, label in mapping:
             value = context.get(key)
             if value:
                 lines.append(f"{label}: {value}")
         return "\n".join(lines)
 
-    def open_dashboard_in_browser(self):
-        if not self.is_running():
+    def open_dashboard_in_browser(self, start_if_needed=True):
+        if start_if_needed and not self.is_running():
             self.start_dashboard()
         if not self.dashboard_url:
             return
         try:
+            if self._browser_opened_for_url == self.dashboard_url:
+                return
+            self._browser_opened_for_url = self.dashboard_url
+            if self._open_dashboard_with_platform_browser():
+                return
             import webbrowser
 
             webbrowser.open(self.dashboard_url)
         except Exception:
             return
+
+    def _open_dashboard_with_platform_browser(self):
+        if not self.dashboard_url:
+            return False
+        commands = []
+        if _is_wsl_runtime():
+            commands.extend([
+                ["wslview", self.dashboard_url],
+                ["powershell.exe", "-NoProfile", "-Command", f"Start-Process '{self.dashboard_url}'"],
+                ["cmd.exe", "/c", "start", "", self.dashboard_url],
+            ])
+        elif sys.platform == "linux":
+            commands.append(["xdg-open", self.dashboard_url])
+        elif sys.platform == "darwin":
+            commands.append(["open", self.dashboard_url])
+        for command in commands:
+            if shutil.which(command[0]) is None:
+                continue
+            try:
+                subprocess.Popen(
+                    command,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=self._creation_flags(),
+                )
+                return True
+            except Exception:
+                continue
+        return False
 
     def stop_dashboard(self):
         self.health_timer.stop()
@@ -1090,6 +1817,7 @@ class TaxaMaskAgentPanel(QWidget):
             except Exception:
                 pass
         self.process = None
+        self._close_dashboard_log(remove=True)
         self._cleanup_owned_dashboard_processes()
         self.dashboard_url = ""
         self._update_status_label(at("Ant-Code Dashboard is not running.", self.lang))
@@ -1210,6 +1938,7 @@ class TaxaMaskAgentPanel(QWidget):
         super().closeEvent(event)
 
     def _cleanup_web_profile_storage(self):
+        self._close_dashboard_log(remove=True)
         path = self._web_profile_storage_dir
         self._web_profile_storage_dir = ""
         if not path:
@@ -1228,7 +1957,11 @@ class TaxaMaskAgentPanel(QWidget):
 
     def _update_fallback(self):
         lines = []
-        if QWebEngineView is None:
+        if self.browser_mode:
+            lines.append("Browser mode is active for this Linux/WSL session. If the dashboard did not open automatically, open the URL below.")
+            if self._browser_context_copied:
+                lines.append(at("Agent context copied to clipboard. Paste it into the browser prompt.", self.lang))
+        elif QWebEngineView is None:
             lines.append(at("Qt WebEngine is unavailable in this environment. Start Ant-Code and open it in a browser.", self.lang))
         if self.dashboard_url:
             lines.append(self.dashboard_url)

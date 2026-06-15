@@ -45,7 +45,7 @@ else:
     from AntSleap.ui.blink_lab import BlinkExpertTrainingReportDialog, BlinkLabWidget
     from AntSleap.ui.cropper import ImageCropper
     from AntSleap.ui.pdf_processing_widget import PdfProcessingWidget
-    from AntSleap.ui.style import SCI_THEME
+    from AntSleap.ui.style import SCI_THEME, build_theme_palette
 
     has_pyside6 = True
 
@@ -864,8 +864,16 @@ class UiPolishScopeTests(unittest.TestCase):
             "QTreeWidget, QTreeView",
             "QScrollArea#workbenchInspectorScroll",
             "QWidget#workbenchInspectorPanel",
+            "QAbstractScrollArea, QAbstractItemView",
+            "QStatusBar",
         ):
             self.assertIn(selector, SCI_THEME)
+
+    def test_dark_theme_palette_covers_linux_native_backgrounds(self):
+        palette = build_theme_palette("dark")
+        self.assertEqual(palette.window().color().name().upper(), "#17191D")
+        self.assertEqual(palette.base().color().name().upper(), "#1E2126")
+        self.assertEqual(palette.button().color().name().upper(), "#1E2126")
 
     def test_scientific_theme_strengthens_generic_checked_indicators_without_touching_chip_radios(self):
         self.assertIn("QRadioButton::indicator:checked", SCI_THEME)

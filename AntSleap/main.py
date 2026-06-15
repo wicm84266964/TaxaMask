@@ -1,5 +1,39 @@
 import sys
 import os
+
+
+def _is_wsl_runtime():
+    if os.environ.get("WSL_DISTRO_NAME"):
+        return True
+    try:
+        with open("/proc/version", "r", encoding="utf-8", errors="ignore") as handle:
+            return "microsoft" in handle.read().lower()
+    except OSError:
+        return False
+
+
+def _append_env_flag(name, flag):
+    current = os.environ.get(name, "")
+    flags = current.split()
+    if flag not in flags:
+        flags.append(flag)
+        os.environ[name] = " ".join(flags)
+
+
+def _prepare_qt_runtime_environment():
+    # These must be set before importing cv2/PySide6. WSLg and some Linux
+    # desktops can segfault while Qt WebEngine probes EGL/GPU acceleration.
+    _append_env_flag("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu-compositing")
+    linux_runtime = sys.platform == "linux" or _is_wsl_runtime()
+    if linux_runtime:
+        _append_env_flag("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu")
+        os.environ.setdefault("QT_OPENGL", "software")
+        os.environ.setdefault("QT_QUICK_BACKEND", "software")
+        os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
+        os.environ.setdefault("TAXAMASK_ANTCODE_BROWSER_MODE", "1")
+
+
+_prepare_qt_runtime_environment()
 import csv
 import json
 import re
@@ -16,12 +50,8 @@ os.environ["ULTRALYTICS_QUIET"] = "True"
 
 
 def _ensure_qtwebengine_cpu_compositing():
-    flag = "--disable-gpu-compositing"
-    current = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
-    flags = current.split()
-    if flag not in flags:
-        flags.append(flag)
-        os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(flags)
+    _append_env_flag("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu")
+    _append_env_flag("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu-compositing")
 
 
 _ensure_qtwebengine_cpu_compositing()
@@ -71,6 +101,7 @@ try:
         apply_theme_button_style,
         apply_semantic_button_style,
         apply_surface_role,
+        build_theme_palette,
         get_theme_config,
         get_theme_stylesheet,
         normalize_theme,
@@ -172,6 +203,7 @@ except ImportError:
         apply_theme_button_style,
         apply_semantic_button_style,
         apply_surface_role,
+        build_theme_palette,
         get_theme_config,
         get_theme_stylesheet,
         normalize_theme,
@@ -10119,6 +10151,7 @@ class MainWindow(QMainWindow):
         app = QApplication.instance()
         if isinstance(app, QApplication):
             app.setProperty("activeTheme", theme)
+            app.setPalette(build_theme_palette(theme))
         self.setStyleSheet(get_theme_stylesheet(theme))
 
         for widget in [self.pdf_widget, self.blink_lab, self.canvas]:

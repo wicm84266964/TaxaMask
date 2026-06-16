@@ -1,88 +1,83 @@
 # TaxaMask
 
-**TaxaMask** is an open-source workbench for taxonomy and morphology research. It organizes literature trait descriptions, specimen image annotation, AI pre-annotation, human review, model training, and dataset export into one traceable research workflow.
+[![DOI](https://zenodo.org/badge/1264598942.svg)](https://doi.org/10.5281/zenodo.20619867)
 
-TaxaMask comes from real ant taxonomy work: researchers often move back and forth between specimen images, morphological characters, taxonomic papers, species descriptions, figure captions, manual masks, and machine-learning training data. TaxaMask connects those scattered steps into composable workflow entry points, so researchers can start from VLM drafts or coarse model predictions, review them manually, and gradually build reliable training material for more stable fine-grained annotation.
+**TaxaMask** is an open-source desktop workbench for traceable biological morphology annotation and AI training dataset construction.
 
-The embedded **Agent Center** is a core part of the design. Instead of asking researchers to read a long software manual before they can work, TaxaMask lets users ask a local agent about project state, model configuration, error messages, PDF screening, training plans, and workflow adaptation in natural language. TaxaMask does not define one fixed taxonomy workflow; researchers can shape the workflow with the agent around their own taxon, image material, literature trait descriptions, annotation targets, and available models.
+TaxaMask connects taxonomic literature, specimen images, AI drafts, human-reviewed labels, model training, and dataset export in one provenance-aware project loop. It was developed from ant morphology research and is designed for morphology-focused taxonomy projects that need reliable annotation records, reusable training data, and clear links between source material and exported datasets.
 
-Ant morphology is the most validated reference route in the current public release. Other taxa with morphology annotation needs can be adapted by copying and validating profiles on small batches before scaling up.
+TaxaMask also includes an embedded **Agent Center**. Researchers can use natural language to inspect project state, understand errors, adjust profiles, configure model backends, and modify project code after confirmation. This lets each lab reshape TaxaMask around its own taxa, image sources, annotation targets, and local model setup.
 
 ## Visual Overview
 
 ![TaxaMask workflow overview](docs/assets/readme/figure_1_taxamask_workflow.png)
 
-TaxaMask keeps literature evidence, specimen images, model drafts, human review, training exports, and model feedback in one traceable project loop. The Agent Center sits above the workflow as a natural-language guide for status inspection, model configuration, error triage, profile adaptation, and training planning.
+TaxaMask keeps source materials, candidate images, AI drafts, human-confirmed labels, exported datasets, and model feedback connected through project records. Researchers can move from literature screening and image extraction to annotation, review, training, prediction checking, and dataset export while preserving provenance.
 
-## Core Ideas
+## Two Main Threads
 
-- **Candidate material is separated from training truth.** Figures extracted from PDFs, VLM drafts, and model predictions are never treated as confirmed training labels automatically. Human review remains part of the workflow boundary.
-- **Agent Center is built into the workbench.** Researchers can use natural language to inspect state, configure model backends, triage errors, plan PDF screening or training, and adapt TaxaMask to their own research habits.
-- **Profiles adapt the workflow without binding it to one taxon.** Ant morphology is the strongest reference workflow, while PDF screening rules, figure review rules, part labels, and model backends can be copied and tuned for other morphology-focused projects.
+### 1. Traceable Morphology Annotation and Training Data
 
-## Who It Is For
+TaxaMask organizes taxonomic material by state: source materials, candidate materials, AI drafts, human-confirmed labels, and exported datasets are recorded as separate layers in the project. PDF figures, captions, literature trait descriptions, specimen images, STL-rendered views, VLM boxes, SAM masks, model predictions, and human masks can enter the same review chain without being merged automatically into training truth.
 
-TaxaMask is intended for researchers who need to connect literature trait descriptions, morphology images, and machine-learning training data, including:
-
-- Ant, Formicidae, insect, and other morphology-focused taxonomy projects.
-- Species descriptions, taxonomic revisions, plate organization, and morphology review.
-- Mask annotation for heads, mesosoma, gaster, appendages, and other specimen structures.
-- Extracting figures, captions, and literature trait descriptions from existing or newly screened PDF papers.
-- Preparing traceable, human-reviewed datasets for SAM, YOLO, COCO, or multimodal models.
-- Iterating from VLM pre-annotation to human review, model training, prediction review, and dataset export.
-
-## Keywords
-
-Taxonomic image annotation, morphological mask segmentation, VLM pre-annotation, AI-assisted annotation, human-in-the-loop review, automated fine-grained annotation, agent-assisted taxonomy workflow, literature trait descriptions, ant taxonomy, Formicidae, insect taxonomy, species description, taxonomic revision, PDF literature screening, figure extraction, caption extraction, training dataset generation, SAM-assisted annotation, COCO export, YOLO export, biodiversity informatics.
-
-## What TaxaMask Does
-
-TaxaMask connects the daily research loop around specimens, literature, annotations, and training data:
+This thread focuses on where morphology training data comes from, how it has been processed, and which labels have been confirmed by a researcher. TaxaMask supports:
 
 ```text
 Agent Center -> PDF literature processing or 2D/STL morphology work
 -> candidate review -> annotation / model drafts -> human confirmation -> dataset export
 ```
 
-Main capabilities:
-
-- Embedded TaxaMask Agent Center powered by the bundled Ant-Code dashboard for workflow guidance, error triage, configuration checks, and guarded source or model-adapter changes.
 - PDF literature screening with editable taxonomy profiles.
 - Figure and caption extraction with accepted and needs-review output folders.
-- Pure-text PDF literature trait-description extraction into provenance-backed `taxon -> part -> description` records.
+- Literature trait-description extraction into provenance-backed `taxon -> part -> description` records.
 - 2D morphology annotation with parent-part and child-part work areas.
-- STL-derived rendered views treated as reviewable 2D morphology images, with source provenance preserved.
-- SAM-assisted annotation and VLM first-mile draft boxes for human review.
+- STL-derived rendered views treated as reviewable 2D morphology images.
+- VLM first-mile draft boxes and optional SAM-assisted draft masks.
+- Human review loops for AI drafts and external model predictions.
 - Route-specific child-part experts through Blink, heatmap Blink, or external Blink backends.
 - Built-in and external model backend contracts for parent-part and child-part workflows.
-- Dataset export to multimodal JSONL, COCO, and YOLO-style formats, including a model-profile summary for audit.
+- Dataset export to multimodal JSONL, COCO, and YOLO-style formats.
 
-TaxaMask does not include model weights, private datasets, local projects, API keys, run outputs, or user runtime configuration.
+### 2. Agent-Assisted Project Modification
 
-## Current Public Scope
+TaxaMask includes an embedded Agent Center. It can read project records, profiles, runtime logs, backend contracts, and relevant source-code context, then turn natural-language requests into concrete changes for the researcher to confirm. Researchers can use it to inspect project state, understand errors, adjust profiles, configure model backends, and modify adapters, launchers, or related source files after confirmation.
 
-The public v1.0 release focuses on these routes:
+This thread focuses on how different labs can reshape TaxaMask around their own projects. Researchers can ask for help with questions and changes such as:
 
-- `TaxaMask Agent Center`: embedded natural-language agent workbench for workflow definition, project-state inspection, model configuration, error triage, profile adaptation, and external-model planning.
-- `PDF Evidence`: screen PDFs, extract figures, captions, and literature trait descriptions, then import reviewed candidate images into 2D projects.
-- `2D/STL Morphology`: annotate ordinary images and STL-derived rendered 2D views in the Labeling Workbench.
-- `Blink / Child-Part Refinement`: train or call route-specific child-part experts from parent-region context.
-- `VLM Drafts`: generate reviewable first-mile boxes and optional SAM draft polygons for selected structures.
-- `External Backends`: connect custom parent or child models through documented JSON contracts.
+- What is the current project state?
+- Which profile or model backend is being used?
+- Why did a PDF screening, VLM draft, or training step fail?
+- How should a new taxon, body-part vocabulary, or local model route be configured?
+- Which profile, adapter, launcher, or source file needs to change for this project?
+- Can TaxaMask add or adjust a workflow entry point for this lab's annotation route?
+
+Scientific decisions and final code changes stay under researcher control. TaxaMask does not include model weights, private datasets, local projects, API keys, run outputs, or user runtime configuration.
 
 ![TaxaMask public interface overview](docs/assets/readme/figure_2_taxamask_ui_overview.png)
 
 The public interface centers on four practical entry points: Agent Center for local workflow help, PDF extraction setup for literature evidence, candidate review for screening imported material, and the Labeling Workbench for reviewable morphology annotation.
 
-## Review Loop
+Recovery note: source-code changes can break the GUI before the embedded Agent Center can open again. In that case, use the standalone Ant-Code recovery panel: run `启动AntCode修复面板.bat` on Windows, or `bash ./启动AntCode修复面板.sh` on Ubuntu/Linux/WSL, then continue debugging and editing from the browser-based dashboard. The dashboard can also load the Ant-Code chat history for the current project.
+
+## Intended Use
+
+TaxaMask is intended for researchers who need to connect biological morphology, taxonomic literature, specimen images, and AI-assisted annotation. It is especially relevant to species descriptions, taxonomic revisions, figure-plate organization, morphology mask annotation, and small research teams that need traceable links between source materials, annotation decisions, model drafts, and exported training data.
+
+## Review Loop and Reference Route
 
 ![Human-in-the-loop annotation cycle in TaxaMask](docs/assets/readme/figure_3_human_in_the_loop_cycle.png)
 
-TaxaMask treats VLM boxes, SAM masks, locator predictions, and external backend outputs as draft material until a researcher reviews them. This keeps AI assistance useful without allowing generated candidates to silently become ground-truth labels.
+TaxaMask treats VLM boxes, SAM masks, locator predictions, and external backend outputs as draft material until a researcher reviews them. This keeps AI assistance useful while keeping generated candidates separate from ground-truth labels.
 
 ![Ant morphology reference workflow](docs/assets/readme/figure_4_ant_morphology_case.png)
 
-Ant morphology is the best-validated reference route in the current release. Parent-region drafts, child-part candidates, human-reviewed masks, and exported training records remain connected through project provenance; other taxa can adapt the same pattern through validated profiles and backend contracts.
+The current public release is most extensively validated on ant morphology workflows. In the reference case, TaxaMask was used to organize literature screening, image extraction, VLM first-mile pre-annotation, human review, parent-part annotation, training, prediction review, and dataset export.
+
+Other taxa can use the same workflow pattern by adapting profiles, reviewing small batches first, and validating model behavior before scaling up.
+
+## Keywords
+
+Biological morphology annotation, taxonomic image annotation, traceable workflow, dataset provenance, AI-assisted annotation, human-in-the-loop review, VLM pre-annotation, SAM-assisted annotation, morphology segmentation, taxonomic literature, species description, figure extraction, caption extraction, training dataset construction, agent-assisted workflow, source-code assisted customization, customizable annotation workflow, biodiversity informatics, ant taxonomy, Formicidae.
 
 ## License
 
@@ -197,21 +192,21 @@ Ubuntu/Linux or WSL terminal users can use the shell launcher:
 bash ./启动TaxaMask.sh
 ```
 
-If the GUI cannot start after local source-code changes, the bundled Ant-Code dashboard can still be launched without importing the PySide6 GUI:
+If local source-code changes prevent the GUI from starting, launch the bundled Ant-Code dashboard without importing the PySide6 GUI:
 
 ```bash
 node vendor/ant-code/src/cli/dashboard.js --project . --port 7410
 ```
 
-On Windows, `启动AntCode修复面板.bat` runs the same recovery route with extra Node.js discovery. Ubuntu/Linux or WSL terminal users can run:
+On Windows, `启动AntCode修复面板.bat` runs this recovery route with extra Node.js discovery. Ubuntu/Linux or WSL terminal users can run:
 
 ```bash
 bash ./启动AntCode修复面板.sh
 ```
 
-All of these options require Node.js 20 or newer and the `vendor/ant-code` dependencies installed with `npm ci`.
+The browser-based dashboard can continue code review, edits, and debugging when the TaxaMask GUI cannot import. It can also load Ant-Code chat history for the current project. All of these options require Node.js 20 or newer and the `vendor/ant-code` dependencies installed with `npm ci`.
 
-On Ubuntu/WSL, TaxaMask opens the Ant-Code Dashboard in an external browser by default instead of embedding Qt WebEngine. This avoids crashes seen on some Linux/WSLg EGL/OpenGL driver stacks. If your local Qt WebEngine is known to be stable, set `TAXAMASK_ANTCODE_BROWSER_MODE=0` to restore embedded mode. In browser mode, TaxaMask's "Ask Agent" buttons open the browser and copy the current workbench context to the clipboard so it can be pasted into the Ant-Code prompt before sending.
+On Ubuntu/WSL, TaxaMask opens the Ant-Code dashboard in an external browser by default instead of embedding Qt WebEngine. This avoids crashes seen on some Linux/WSLg EGL/OpenGL driver stacks. If your local Qt WebEngine is known to be stable, set `TAXAMASK_ANTCODE_BROWSER_MODE=0` to restore embedded mode. In browser mode, TaxaMask's "Ask Agent" buttons open the browser and copy the current workbench context to the clipboard so it can be pasted into the Ant-Code prompt before sending.
 
 If the TaxaMask GUI is launched by Windows Python but Ant-Code / Node dependencies are installed inside WSL Ubuntu, start the GUI with the WSL runtime bridge enabled:
 

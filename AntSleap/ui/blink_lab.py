@@ -114,6 +114,7 @@ BLINK_TRANSLATIONS = {
         "Error": "误差",
         "{0}% ({1} images)": "{0}%（{1} 张图）",
         "Validation samples: {0}": "验证样本：{0}",
+        "Training scope: {0} ({1} images)": "训练范围：{0}（{1} 张图片）",
         "Report folder: {0}": "报告文件夹：{0}",
         "Model: {0}": "模型：{0}",
         "Green box = trajectory target / golden box": "绿色框 = 轨迹目标 / 真值框",
@@ -332,6 +333,8 @@ class BlinkTrainingThread(QThread):
         heatmap_params=None,
         training_strategy=DEFAULT_BLINK_TRAINING_STRATEGY,
         device="auto",
+        allowed_image_paths=None,
+        training_scope=None,
     ):
         super().__init__()
         self.project_path = project_path
@@ -346,6 +349,8 @@ class BlinkTrainingThread(QThread):
         self.heatmap_params = dict(heatmap_params or {})
         self.training_strategy = sanitize_blink_training_strategy(training_strategy)
         self.device = device
+        self.allowed_image_paths = [str(path) for path in (allowed_image_paths or []) if str(path or "").strip()]
+        self.training_scope = dict(training_scope or {})
 
     def run(self):
         try:
@@ -367,6 +372,8 @@ class BlinkTrainingThread(QThread):
                     center_loss_weight=self.heatmap_params.get("center_loss_weight", 1.0),
                     training_strategy=self.training_strategy,
                     device=self.device,
+                    allowed_image_paths=self.allowed_image_paths,
+                    training_scope=self.training_scope,
                 )
             else:
                 try:
@@ -383,6 +390,8 @@ class BlinkTrainingThread(QThread):
                     input_size=self.input_size,
                     training_strategy=self.training_strategy,
                     device=self.device,
+                    allowed_image_paths=self.allowed_image_paths,
+                    training_scope=self.training_scope,
                 )
             save_path = trainer.train(
                 epochs=self.epochs,
@@ -435,6 +444,15 @@ class BlinkExpertTrainingReportDialog(QDialog):
             summary_text.insert(6, f"Trajectory sequences: {summary.get('trajectory_sequence_count')}")
         if summary.get("expanded_training_sample_count") is not None:
             summary_text.insert(7, f"Expanded training samples: {summary.get('expanded_training_sample_count')}")
+        training_scope = summary.get("training_scope") if isinstance(summary.get("training_scope"), dict) else {}
+        if training_scope:
+            summary_text.insert(
+                6,
+                translate_blink_text("Training scope: {0} ({1} images)", lang).format(
+                    training_scope.get("label", "All Images"),
+                    training_scope.get("image_count", 0),
+                ),
+            )
         summary_box = QTextEdit()
         summary_box.setReadOnly(True)
         summary_box.setPlainText("\n".join(str(line) for line in summary_text))
@@ -2334,7 +2352,7 @@ class BlinkLabWidget(QWidget):
         self.lbl_status.setText(self.tr("Saved {0} trajectory frames for {1}.").format(steps, part))
         print(f"[Data Factory] Stored {steps} training frames for {part}.")
 
-    def train_expert_model(self):
+    def train_expert_model(self, allowed_image_paths=None, training_scope=None):
         """
         阶段三核心：利用积攒的轨迹数据，训练轻量级微观专家。
         """
@@ -2377,6 +2395,8 @@ class BlinkLabWidget(QWidget):
             heatmap_params=self.default_heatmap_params,
             training_strategy=self.default_training_strategy,
             device=self.runtime_device,
+            allowed_image_paths=allowed_image_paths,
+            training_scope=training_scope,
         )
         self.training_thread.result_signal.connect(self._on_training_result)
         self.training_thread.report_signal.connect(self._on_training_report)

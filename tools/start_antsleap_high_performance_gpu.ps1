@@ -3,6 +3,9 @@ $ErrorActionPreference = "Stop"
 $env:QT_OPENGL = "desktop"
 $env:__NV_PRIME_RENDER_OFFLOAD = "1"
 $env:__GLX_VENDOR_LIBRARY_NAME = "nvidia"
+if (-not $env:TAXAMASK_ENABLE_TIF_WORKFLOW) {
+    $env:TAXAMASK_ENABLE_TIF_WORKFLOW = "1"
+}
 
 $repo = Resolve-Path (Join-Path $PSScriptRoot "..")
 $main = Join-Path $repo "AntSleap\main.py"

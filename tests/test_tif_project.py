@@ -6,6 +6,13 @@ from unittest.mock import patch
 import numpy as np
 
 from AntSleap.core.tif_materials import read_material_map
+from AntSleap.core.tif_part_extraction import (
+    add_rectangular_keyframe,
+    build_preview_mask_from_contours,
+    crop_volume_to_part,
+    read_contours_json,
+    validate_contours_for_interpolation,
+)
 from AntSleap.core.tif_project import TIF_PROJECT_SCHEMA_VERSION, TIF_PROJECT_TYPE, TifProjectManager
 from AntSleap.core.tif_volume_io import (
     VOLUME_SIDECAR_FORMAT,
@@ -284,6 +291,234 @@ class TifProjectTests(unittest.TestCase):
 
             self.assertIsNone(manager.get_specimen("01-0101-18", default=None))
             self.assertFalse((project_root / "specimens" / "01-0101-18").exists())
+
+    def test_old_tif_project_load_adds_empty_parts_list(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "old_project"
+            manager = TifProjectManager()
+            project_json = manager.create_project("old_project", project_root)
+            manager.add_specimen("01-0101-old", save=True)
+            payload_path = Path(project_json)
+            payload = payload_path.read_text(encoding="utf-8")
+            payload = payload.replace(',\n      "parts": []', "")
+            payload_path.write_text(payload, encoding="utf-8")
+
+            reloaded = TifProjectManager()
+            reloaded.load_project(project_json)
+
+            self.assertEqual(reloaded.get_specimen("01-0101-old")["parts"], [])
+            self.assertEqual(reloaded.get_specimen("01-0101-old")["part_rois"], [])
+
+    def test_part_roi_drafts_round_trip_and_cancel_without_touching_parts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "roi_project"
+            manager = TifProjectManager()
+            project_json = manager.create_project("roi_project", project_root)
+            manager.create_specimen_scaffold("01-0101-roi")
+            roi = manager.add_part_roi(
+                "01-0101-roi",
+                "head_roi",
+                display_name="Head ROI",
+                bbox_zyx=[[1, 3], [2, 5], [1, 4]],
+            )
+
+            reloaded = TifProjectManager()
+            reloaded.load_project(project_json)
+            loaded = reloaded.get_part_roi("01-0101-roi", "head_roi")
+
+            self.assertEqual(roi["status"], "draft")
+            self.assertEqual(loaded["bbox_zyx"], [[1, 3], [2, 5], [1, 4]])
+            self.assertEqual(len(reloaded.list_part_rois("01-0101-roi")), 1)
+
+            reloaded.discard_part_roi("01-0101-roi", "head_roi")
+
+            self.assertEqual(reloaded.list_part_rois("01-0101-roi"), [])
+            self.assertEqual(len(reloaded.list_part_rois("01-0101-roi", include_cancelled=True)), 1)
+
+    def test_part_records_round_trip_and_discard_only_removes_part_storage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "parts_project"
+            manager = TifProjectManager()
+            project_json = manager.create_project("parts_project", project_root)
+            manager.create_specimen_scaffold("01-0101-parts")
+            image_rel = "specimens/01-0101-parts/working/image.ome.zarr"
+            image_meta = write_volume_sidecar(project_root / image_rel, np.arange(3 * 4 * 5, dtype=np.uint8).reshape((3, 4, 5)), role="working_image")
+            manager.register_working_volume("01-0101-parts", image_rel, image_meta["shape_zyx"], image_meta["dtype"], save=False)
+            part_dir = manager.part_dir("01-0101-parts", "Head")
+            part_image_rel = f"{part_dir}/image.ome.zarr"
+            part_mask_rel = f"{part_dir}/mask.ome.zarr"
+            part_image_meta = write_volume_sidecar(project_root / part_image_rel, np.ones((1, 2, 3), dtype=np.uint8), role="part_image")
+            part_mask_meta = write_volume_sidecar(project_root / part_mask_rel, np.zeros((1, 2, 3), dtype=np.uint16), role="part_mask")
+            part = manager.add_part(
+                "01-0101-parts",
+                "Head",
+                display_name="Head",
+                image={"path": part_image_rel, **part_image_meta},
+                mask={"path": part_mask_rel, **part_mask_meta},
+                parent_bbox_zyx=[[0, 1], [1, 3], [1, 4]],
+                contours_path=f"{part_dir}/contours.json",
+                extraction_path=f"{part_dir}/extraction.json",
+                status="roi_confirmed",
+            )
+            manager.update_part_view_settings("01-0101-parts", "Head", {"volume_tint": "white", "volume_tint_custom": "#f0f4f2"})
+
+            reloaded = TifProjectManager()
+            reloaded.load_project(project_json)
+            loaded_part = reloaded.get_part("01-0101-parts", "Head")
+
+            self.assertEqual(part["part_id"], "Head")
+            self.assertEqual(loaded_part["display_name"], "Head")
+            self.assertEqual(loaded_part["image"]["shape_zyx"], [1, 2, 3])
+            self.assertEqual(loaded_part["parent_bbox_zyx"], [[0, 1], [1, 3], [1, 4]])
+            self.assertEqual(loaded_part["view_settings"]["volume_tint"], "white")
+            self.assertEqual(loaded_part["view_settings"]["volume_tint_custom"], "#f0f4f2")
+            self.assertTrue((project_root / image_rel / "array.npy").exists())
+
+            result = reloaded.discard_part("01-0101-parts", "Head")
+
+            self.assertTrue(result["removed_part"])
+            self.assertTrue(result["removed_storage"])
+            self.assertFalse((project_root / part_dir).exists())
+            self.assertTrue((project_root / image_rel / "array.npy").exists())
+            self.assertEqual(reloaded.list_parts("01-0101-parts"), [])
+
+    def test_part_ids_reject_duplicates_and_storage_collisions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = TifProjectManager()
+            manager.create_project("part_collision", Path(tmp) / "part_collision")
+            manager.create_specimen_scaffold("01-0101-collision")
+            manager.add_part("01-0101-collision", "Head", save=False)
+
+            with self.assertRaisesRegex(ValueError, "duplicate_part_id"):
+                manager.add_part("01-0101-collision", "Head", save=False)
+
+            with self.assertRaisesRegex(ValueError, "duplicate_part_id"):
+                manager.add_part("01-0101-collision", "Head?", save=False)
+
+    def test_crop_volume_to_part_writes_local_image_mask_and_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "crop_part"
+            manager = TifProjectManager()
+            manager.create_project("crop_part", project_root)
+            manager.create_specimen_scaffold("01-0101-crop")
+            image = np.arange(4 * 5 * 6, dtype=np.uint8).reshape((4, 5, 6))
+            image_rel = "specimens/01-0101-crop/working/image.ome.zarr"
+            image_meta = write_volume_sidecar(project_root / image_rel, image, role="working_image")
+            manager.register_working_volume(
+                "01-0101-crop",
+                image_rel,
+                image_meta["shape_zyx"],
+                image_meta["dtype"],
+                spacing_zyx=[2.0, 1.0, 1.0],
+                save=False,
+            )
+            manager.save_project()
+
+            part = crop_volume_to_part(manager, "01-0101-crop", "head", [[1, 3], [1, 4], [2, 6]], display_name="Head")
+
+            cropped = load_volume_sidecar(project_root / part["image"]["path"])
+            mask = load_volume_sidecar(project_root / part["mask"]["path"])
+            np.testing.assert_array_equal(cropped, image[1:3, 1:4, 2:6])
+            self.assertEqual(mask.shape, cropped.shape)
+            self.assertEqual(int(mask.sum()), 0)
+            self.assertTrue((project_root / part["contours_path"]).exists())
+            self.assertTrue((project_root / part["extraction_path"]).exists())
+            self.assertEqual(part["parent_bbox_zyx"], [[1, 3], [1, 4], [2, 6]])
+
+    def test_rectangular_keyframes_generate_preview_mask_between_slices(self):
+        contours = {"axis": "z", "keyframes": []}
+        contours = add_rectangular_keyframe(contours, 0, [[1, 4], [1, 4]])
+        contours = add_rectangular_keyframe(contours, 2, [[2, 5], [2, 5]])
+
+        mask = build_preview_mask_from_contours(contours, (3, 6, 6))
+
+        self.assertEqual(mask.shape, (3, 6, 6))
+        self.assertGreater(int(mask[1].sum()), 0)
+        self.assertGreater(int(mask.sum()), int(mask[0].sum()))
+
+    def test_preview_mask_only_fills_between_first_and_last_keyframes(self):
+        contours = {"axis": "z", "keyframes": []}
+        contours = add_rectangular_keyframe(contours, 1, [[1, 4], [1, 4]])
+        contours = add_rectangular_keyframe(contours, 3, [[2, 5], [2, 5]])
+
+        mask = build_preview_mask_from_contours(contours, (5, 6, 6))
+
+        self.assertEqual(int(mask[0].sum()), 0)
+        self.assertGreater(int(mask[1].sum()), 0)
+        self.assertGreater(int(mask[2].sum()), 0)
+        self.assertGreater(int(mask[3].sum()), 0)
+        self.assertEqual(int(mask[4].sum()), 0)
+
+    def test_contours_json_damage_and_invalid_keyframes_do_not_crash_validation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            contours_path = Path(tmp) / "contours.json"
+            contours_path.write_text("{bad json", encoding="utf-8")
+
+            contours = read_contours_json(contours_path)
+            report = validate_contours_for_interpolation(
+                {"axis": "z", "keyframes": ["bad", {"slice_index": "bad", "polygon": [[1, 1], [2, 1], [2, 2]]}]},
+                (3, 4, 4),
+            )
+
+            self.assertEqual(contours["keyframes"], [])
+            self.assertFalse(report["ok"])
+            self.assertIn("invalid_slice_index", {item["code"] for item in report["warnings"]})
+            self.assertIn("no_key_slices", {item["code"] for item in report["errors"]})
+
+    def test_single_keyframe_preview_fills_only_the_key_slice(self):
+        contours = {"axis": "z", "keyframes": []}
+        contours = add_rectangular_keyframe(contours, 2, [[1, 4], [1, 4]])
+
+        report = validate_contours_for_interpolation(contours, (5, 6, 6))
+        mask = build_preview_mask_from_contours(contours, (5, 6, 6))
+
+        self.assertTrue(report["ok"])
+        self.assertIn("single_key_slice", {item["code"] for item in report["warnings"]})
+        self.assertEqual(int(mask[0].sum()), 0)
+        self.assertEqual(int(mask[1].sum()), 0)
+        self.assertGreater(int(mask[2].sum()), 0)
+        self.assertEqual(int(mask[3].sum()), 0)
+        self.assertEqual(int(mask[4].sum()), 0)
+
+    def test_crop_volume_to_part_validates_duplicate_before_touching_storage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "duplicate_part"
+            manager = TifProjectManager()
+            manager.create_project("duplicate_part", project_root)
+            manager.create_specimen_scaffold("01-0101-dup")
+            image = np.arange(3 * 4 * 5, dtype=np.uint8).reshape((3, 4, 5))
+            image_rel = "specimens/01-0101-dup/working/image.ome.zarr"
+            image_meta = write_volume_sidecar(project_root / image_rel, image, role="working_image")
+            manager.register_working_volume("01-0101-dup", image_rel, image_meta["shape_zyx"], image_meta["dtype"], save=False)
+            manager.save_project()
+            first = crop_volume_to_part(manager, "01-0101-dup", "head", [[0, 1], [0, 2], [0, 2]])
+            marker = project_root / manager.part_dir("01-0101-dup", first["part_id"]) / "keep.txt"
+            marker.write_text("do-not-touch", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "duplicate_part_id"):
+                crop_volume_to_part(manager, "01-0101-dup", "head", [[1, 3], [1, 4], [1, 5]])
+
+            self.assertEqual(marker.read_text(encoding="utf-8"), "do-not-touch")
+
+    def test_crop_volume_to_part_refuses_non_empty_orphan_part_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "orphan_part"
+            manager = TifProjectManager()
+            manager.create_project("orphan_part", project_root)
+            manager.create_specimen_scaffold("01-0101-orphan")
+            image = np.arange(2 * 3 * 4, dtype=np.uint8).reshape((2, 3, 4))
+            image_rel = "specimens/01-0101-orphan/working/image.ome.zarr"
+            image_meta = write_volume_sidecar(project_root / image_rel, image, role="working_image")
+            manager.register_working_volume("01-0101-orphan", image_rel, image_meta["shape_zyx"], image_meta["dtype"], save=False)
+            manager.save_project()
+            orphan_dir = project_root / manager.part_dir("01-0101-orphan", "head")
+            orphan_dir.mkdir(parents=True)
+            (orphan_dir / "leftover.txt").write_text("old local data", encoding="utf-8")
+
+            with self.assertRaisesRegex(FileExistsError, "part_storage_dir_not_empty"):
+                crop_volume_to_part(manager, "01-0101-orphan", "head", [[0, 1], [0, 2], [0, 2]])
+
+            self.assertEqual(manager.list_parts("01-0101-orphan"), [])
 
 
 if __name__ == "__main__":

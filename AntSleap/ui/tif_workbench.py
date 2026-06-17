@@ -2,8 +2,8 @@ import math
 import os
 
 import numpy as np
-from PySide6.QtCore import QObject, QRectF, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPixmap, QShortcut
+from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QThread, QTimer, Signal
+from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QPixmap, QPolygonF, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
     QColorDialog,
@@ -18,8 +18,6 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
-    QListWidget,
-    QListWidgetItem,
     QMessageBox,
     QProgressDialog,
     QPushButton,
@@ -29,9 +27,12 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QSplitter,
     QStackedWidget,
+    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -41,6 +42,19 @@ try:
     from AntSleap.core.tif_backend import DEFAULT_TIF_BACKEND_CONFIG, TifBackendRunner, sanitize_tif_backend_config
     from AntSleap.core.tif_export import export_tif_training_dataset
     from AntSleap.core.tif_materials import next_material_id, read_material_map, remove_material, upsert_material, write_material_map
+    from AntSleap.core.tif_part_extraction import (
+        add_rectangular_keyframe,
+        add_polygon_keyframe,
+        build_preview_mask_from_contours,
+        crop_volume_to_part,
+        delete_keyframe,
+        export_part_package,
+        neighboring_keyframe_indices,
+        read_contours_json,
+        validate_contours_for_interpolation,
+        write_contours_json,
+        write_part_mask,
+    )
     from AntSleap.core.tif_prediction_import import default_prediction_id_for_tif, import_external_prediction_tif
     from AntSleap.core.tif_project import TifProjectManager
     from AntSleap.core.tif_stack_import import import_tif_stack
@@ -50,6 +64,7 @@ try:
         GPU_VOLUME_MAX_TEXTURE_DIM,
         TifGpuVolumeCanvas,
         TifGpuVolumeOffscreenWidget,
+        build_volume_transfer_lut,
         gpu_volume_canvas_available,
         gpu_volume_offscreen_available,
         gpu_volume_unavailable_reason,
@@ -62,6 +77,19 @@ except ModuleNotFoundError as exc:
     from core.tif_backend import DEFAULT_TIF_BACKEND_CONFIG, TifBackendRunner, sanitize_tif_backend_config
     from core.tif_export import export_tif_training_dataset
     from core.tif_materials import next_material_id, read_material_map, remove_material, upsert_material, write_material_map
+    from core.tif_part_extraction import (
+        add_rectangular_keyframe,
+        add_polygon_keyframe,
+        build_preview_mask_from_contours,
+        crop_volume_to_part,
+        delete_keyframe,
+        export_part_package,
+        neighboring_keyframe_indices,
+        read_contours_json,
+        validate_contours_for_interpolation,
+        write_contours_json,
+        write_part_mask,
+    )
     from core.tif_prediction_import import default_prediction_id_for_tif, import_external_prediction_tif
     from core.tif_project import TifProjectManager
     from core.tif_stack_import import import_tif_stack
@@ -71,6 +99,7 @@ except ModuleNotFoundError as exc:
         GPU_VOLUME_MAX_TEXTURE_DIM,
         TifGpuVolumeCanvas,
         TifGpuVolumeOffscreenWidget,
+        build_volume_transfer_lut,
         gpu_volume_canvas_available,
         gpu_volume_offscreen_available,
         gpu_volume_unavailable_reason,
@@ -91,6 +120,10 @@ TIF_TRANSLATIONS = {
         "Specimens": "Specimen",
         "Volume slices": "体数据切片",
         "Volume controls": "体数据控制",
+        "Current object": "当前对象",
+        "Display": "显示",
+        "Annotation": "标注",
+        "Train/export": "训练/导出",
         "Slice display": "切片显示",
         "3D rendering": "三维体渲染",
         "Annotation tools": "标注工具",
@@ -114,7 +147,19 @@ TIF_TRANSLATIONS = {
         "ROI scale": "ROI 倍率",
         "Inside depth": "视点深度",
         "Front cut": "近端剖切",
+        "Mask display": "Mask 显示",
+        "Image only": "仅图像",
+        "Mask boundary": "Mask 边界",
+        "Masked image": "只看 Mask 内图像",
+        "Mask opacity": "Mask 透明度",
         "Transfer function": "密度映射",
+        "Density opacity": "密度透明度",
+        "Detail enhancement": "细节增强",
+        "Tone curve": "明暗曲线",
+        "Surface refine": "表面精修",
+        "Clip plane": "任意剖切面",
+        "Clip depth": "剖切深度",
+        "View aligned": "按当前视角",
         "Drag preview": "拖动预览",
         "Still high quality": "静止高清",
         "VRAM": "显存",
@@ -127,6 +172,10 @@ TIF_TRANSLATIONS = {
         "CPU fallback": "CPU 回退",
         "GPU renderer unavailable. Using CPU fallback.": "GPU 渲染器不可用，正在使用 CPU 回退。",
         "GPU renderer failed. Using CPU fallback: {0}": "GPU 渲染器失败，正在使用 CPU 回退：{0}",
+        "GPU fallback active": "GPU 回退中",
+        "bottleneck: texture upload": "瓶颈：纹理上传",
+        "bottleneck: ray rendering": "瓶颈：光线渲染",
+        "large GPU texture": "大体积 GPU 纹理",
         "GPU failed": "GPU 失败",
         "Reset 3D view": "重置 3D 视角",
         "drag rotate / wheel zoom": "左键旋转 / 右键平移 / 滚轮缩放",
@@ -151,6 +200,14 @@ TIF_TRANSLATIONS = {
         "When zoomed in and still, renders the 3D view at a higher offscreen pixel density before scaling it back, improving small-part inspection at the cost of more GPU readback work.": "静止且放大观察时，先用更高离屏像素密度渲染三维体，再缩回当前显示区域。它能改善小部位观察，但会增加 GPU 读回和显示成本。",
         "Controls the offscreen supersampling factor used by ROI high detail. Higher values make still zoomed views smoother but heavier.": "控制 ROI 高清的离屏超采样倍数。数值越高，静止放大视图越平滑，但负载也更重。",
         "Sharp still rendering keeps more source intensity detail and uses crisper sampling. It may upload more data and can look grainier while revealing fine internal structures.": "静止高清时尽量保留原始灰度层次，并使用更锐利的采样。它会上传更多数据，画面可能更有颗粒感，但更容易看清细小内部结构。",
+        "Controls how strongly dense voxels accumulate in 3D. Lower values make internal layers less blocked; higher values make weak structures more visible.": "控制三维渲染中密度累积的强弱。调低会减少遮挡，更容易看内部层次；调高会让弱信号更明显，但画面可能更厚。",
+        "Enhances fine boundaries while the view is still. It is a display-only aid for checking internal layers and part edges.": "静止观察时增强细小边界。它只是显示辅助，用于检查内部层次和部位边缘，不修改原始数据。",
+        "Adjusts display gamma for 3D rendering. Lower values brighten faint structures; higher values keep dense regions calmer.": "调整三维渲染的显示曲线。调低会提亮弱结构，调高会让高密度区域更克制。",
+        "Refines first surface hits in Surface mode while still. It improves contour stability without affecting Composite rendering.": "静止且使用表面边界模式时精修首次命中位置，让轮廓更稳定；不影响透明累积模式。",
+        "Enables a view-aligned GPU clipping plane. It only cuts the display, not the saved TIF, mask, or training data.": "启用按当前视角对齐的 GPU 剖切面。它只切开屏幕显示，不会修改已保存的 TIF、Mask 或训练数据。",
+        "Moves the clipping plane through the current 3D view. Use it to peel away outer tissue and inspect inside structures.": "沿当前三维视角移动剖切面。可用于剥开外层组织观察内部结构。",
+        "Shows accepted or preview part masks in the 3D view. Boundary is best for checking extraction edges; masked image hides voxels outside the mask.": "在三维视图中显示已接受或预览中的部位 Mask。边界模式适合检查切除轮廓，只看 Mask 内图像会隐藏 Mask 外体素。",
+        "Controls how strongly mask boundaries are blended into the 3D inspection view.": "控制 Mask 边界叠加到三维观察视图中的强度。",
         "Moves the camera into the volume. Use it to enter the specimen and inspect internal structures; keep it at 0 for outer shape review.": "移动观察点。0 在样本外看整体，100 接近样本中心，100 以上继续进入更深内部；它不切掉体数据，只改变你站在哪里看。",
         "Cuts away the front part of the current view. Use it to remove blocking outer tissue and inspect deeper structures; keep it at 0 for the full outline.": "从当前视角靠近屏幕的一侧切掉一段体数据。它不移动观察点，只移除挡在眼前的近端外层；看完整外轮廓时保持为 0。",
         "Restores the external default view and clears inside depth and front cut.": "恢复外部默认视角，并清空视点深度和近端剖切。",
@@ -193,6 +250,86 @@ TIF_TRANSLATIONS = {
         "Edit material": "编辑 material",
         "Delete material": "删除 material",
         "Data import": "数据导入",
+        "Part extraction": "部位提取",
+        "1. Locate part": "1. 定位部位",
+        "2. Build part mask": "2. 生成部位 mask",
+        "3. Output and manage": "3. 输出与管理",
+        "Full volume": "整只体数据",
+        "Part volume": "部位体数据",
+        "Part": "部位",
+        "Parent specimen": "父标本",
+        "Current view": "当前视图",
+        "Parent bbox Z/Y/X": "父体 bbox Z/Y/X",
+        "Part image": "部位图像",
+        "Part mask": "部位 mask",
+        "Contours": "轮廓文件",
+        "Extraction": "提取记录",
+        "Parent working volume": "父工作体数据",
+        "Use center ROI": "使用中心 ROI",
+        "Draw ROI": "手动框选 ROI",
+        "Save ROI draft": "保存 ROI 草稿",
+        "Confirm ROI": "确认 ROI",
+        "Cancel ROI": "取消 ROI",
+        "ROI ID:": "ROI 编号：",
+        "Create part": "新建部位",
+        "Part ID:": "部位编号：",
+        "Display name:": "显示名称：",
+        "z0,z1,y0,y1,x0,x1": "z0,z1,y0,y1,x0,x1",
+        "Add rectangular key slice": "添加矩形关键切片",
+        "Draw contour": "手绘轮廓",
+        "Delete key slice": "删除当前关键切片",
+        "Previous key slice": "上一关键切片",
+        "Next key slice": "下一关键切片",
+        "Preview auto fill": "预览自动填充",
+        "Accept part mask": "接受部位 mask",
+        "Clear preview": "清除预览",
+        "Export part package": "导出部位包",
+        "Delete part volume": "删除部位体数据",
+        "Delete part volume?": "删除部位体数据？",
+        "Delete part volume {0}? This removes the cropped image, mask, contours, and extraction files, but keeps the parent TIF volume.": "确认删除部位体数据 {0} 吗？这会删除裁剪图像、mask、轮廓和提取记录，但不会删除父级 TIF 体数据。",
+        "Deleted part volume {0}.": "已删除部位体数据 {0}。",
+        "Switch to Full volume before creating a part.": "请先切回整只体数据，再新建部位。",
+        "Switch to Full volume before saving ROI draft.": "请先切回整只体数据，再保存 ROI 草稿。",
+        "Switch to Full volume before confirming ROI.": "请先切回整只体数据，再确认 ROI。",
+        "Switch to Full volume before drawing ROI.": "请先切回整只体数据，再手动框选 ROI。",
+        "Drag on the current slice to update the ROI bbox.": "请在当前切片上拖拽矩形，用来更新 ROI bbox。",
+        "ROI bbox updated: {0}": "ROI bbox 已更新：{0}",
+        "Saved ROI draft {0}.": "已保存 ROI 草稿 {0}。",
+        "Loaded ROI draft {0} for editing.": "已载入 ROI 草稿 {0}，可继续编辑。",
+        "Confirmed ROI and created part {0}.": "已确认 ROI 并创建部位 {0}。",
+        "Cancelled ROI draft {0}.": "已取消 ROI 草稿 {0}。",
+        "This ROI is linked to a created part and cannot be cancelled here.": "这个 ROI 已关联到已创建部位，不能在这里取消。",
+        "Select a part volume before editing part masks.": "请先选择一个部位体数据，再编辑部位 mask。",
+        "Select a part volume before previewing masks.": "请先选择一个部位体数据，再预览 mask。",
+        "Key-slice mask preview currently uses Z slices.": "当前关键切片 mask 预览先使用 Z 轴切片。",
+        "Switch to part volume before drawing contours.": "请先选择部位体数据，再手绘轮廓。",
+        "Contour drawing currently uses Z slices.": "当前手绘轮廓先使用 Z 轴切片。",
+        "Drag on the current part slice to draw a closed contour.": "请在当前部位切片上拖拽，画出一个闭合轮廓。",
+        "Contour saved at Z {0}.": "已在 Z={0} 保存轮廓。",
+        "Contour needs at least 3 points.": "轮廓至少需要 3 个点。",
+        "Deleted contour at Z {0}.": "已删除 Z={0} 的轮廓。",
+        "No contour exists at Z {0}.": "Z={0} 没有可删除的轮廓。",
+        "No previous key slice.": "没有上一张关键切片。",
+        "No next key slice.": "没有下一张关键切片。",
+        "Part mask preview quality: {0}": "部位 mask 预览质量：{0}",
+        "Quality check passed": "质量检查通过",
+        "Review warnings": "有提示，请复核",
+        "Exported part package.\nManifest: {0}": "已导出部位包。\nManifest：{0}",
+        "Exported part package.\nFolder: {0}\nManifest: {1}": "已导出部位包。\n文件夹：{0}\nManifest：{1}",
+        "Select a part volume before exporting a part package.": "请先选择一个部位体数据，再导出部位包。",
+        "Created part {0} from bbox {1}.": "已按 bbox {1} 新建部位 {0}。",
+        "Added rectangular key slice at Z {0}.": "已在 Z={0} 添加矩形关键切片。",
+        "Preview mask generated from {0} key slice(s).": "已根据 {0} 个关键切片生成预览 mask。",
+        "Accepted part mask.": "已接受部位 mask。",
+        "Part volume is read-only here. Use part mask preview controls for extraction masks.": "当前部位体数据在这里按只读观察处理。请用部位 mask 预览控件生成提取 mask。",
+        "Part volumes are not promoted to full-volume manual truth in this version.": "当前版本不会把部位体数据提升为整只体数据的人工真值。",
+        "Part volumes do not use model draft handoff in this version.": "当前版本部位体数据不走模型草稿交接。",
+        "Part volumes inherit the parent specimen material map. Switch to Full volume to edit materials.": "部位体数据继承父标本 material 表。需要编辑 material 时请切回整只体数据。",
+        "Render color": "渲染颜色",
+        "Amber": "琥珀黄",
+        "Cyan": "青蓝",
+        "White": "灰白",
+        "Custom": "自定义",
         "Import TIF stack": "导入 TIF stack",
         "Import AMIRA directory": "导入 AMIRA 目录",
         "Start Center": "启动中心",
@@ -375,6 +512,25 @@ class WheelSafeSpinBox(QSpinBox):
         event.ignore()
 
 
+class TifSpecimenTree(QTreeWidget):
+    """Tree widget with a tiny QListWidget-like surface for older tests/helpers."""
+
+    def count(self):
+        return self.topLevelItemCount()
+
+    def item(self, row):
+        return self.topLevelItem(row)
+
+    def addItem(self, item):
+        self.addTopLevelItem(item)
+
+    def setCurrentRow(self, row):
+        item = self.topLevelItem(row)
+        if item is not None:
+            child = item.child(0)
+            self.setCurrentItem(child or item)
+
+
 class TifSliceCanvas(QLabel):
     ZOOM_STEPS = (1.0, 1.25, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 16.0)
 
@@ -393,6 +549,9 @@ class TifSliceCanvas(QLabel):
         self._pan_y = 0.0
         self._panning = False
         self._last_pan_pos = None
+        self._roi_drag_start = None
+        self._roi_drag_current = None
+        self._contour_drag_points = []
         self.workbench = None
 
     def set_slice_pixmap(self, pixmap, reset_view=False):
@@ -458,9 +617,126 @@ class TifSliceCanvas(QLabel):
         composed.fill(QColor("#07090A"))
         painter = QPainter(composed)
         painter.drawPixmap(int(round(x)), int(round(y)), zoomed)
+        self._draw_roi_overlays(painter)
+        self._draw_contour_overlays(painter)
         self._draw_status_overlay(painter)
         painter.end()
         self.setPixmap(composed)
+
+    def _image_rect_to_widget_rect(self, image_rect):
+        if self._pixmap is None or self._pixmap.isNull() or self._draw_rect.isNull():
+            return QRectF()
+        x0, y0, x1, y1 = [float(value) for value in image_rect]
+        width = max(1.0, float(self._pixmap.width()))
+        height = max(1.0, float(self._pixmap.height()))
+        left = self._draw_rect.x() + (x0 / width) * self._draw_rect.width()
+        right = self._draw_rect.x() + (x1 / width) * self._draw_rect.width()
+        top = self._draw_rect.y() + (y0 / height) * self._draw_rect.height()
+        bottom = self._draw_rect.y() + (y1 / height) * self._draw_rect.height()
+        return QRectF(min(left, right), min(top, bottom), abs(right - left), abs(bottom - top))
+
+    def _draw_roi_overlays(self, painter):
+        if self.workbench is None:
+            return
+        rects = []
+        if callable(getattr(self.workbench, "current_roi_overlay_rects", None)):
+            rects = self.workbench.current_roi_overlay_rects()
+        painter.save()
+        for entry in rects:
+            if isinstance(entry, dict):
+                image_rect = entry.get("rect", [])
+                color = QColor(str(entry.get("color", "#FFD34D")))
+                fill = QColor(color)
+                fill.setAlpha(34)
+            else:
+                image_rect = entry
+                color = QColor("#FFD34D")
+                fill = QColor(255, 211, 77, 34)
+            rect = self._image_rect_to_widget_rect(image_rect)
+            if rect.isNull() or rect.width() <= 0 or rect.height() <= 0:
+                continue
+            painter.fillRect(rect, fill)
+            pen = QPen(color)
+            pen.setWidth(2)
+            painter.setPen(pen)
+            painter.drawRect(rect)
+        if self._roi_drag_start is not None and self._roi_drag_current is not None:
+            start = self._roi_drag_start
+            current = self._roi_drag_current
+            rect = QRectF(
+                min(start.x(), current.x()),
+                min(start.y(), current.y()),
+                abs(current.x() - start.x()),
+                abs(current.y() - start.y()),
+            )
+            if rect.width() > 1 and rect.height() > 1:
+                painter.fillRect(rect, QColor(103, 168, 184, 36))
+                pen = QPen(QColor("#67A8B8"))
+                pen.setWidth(2)
+                painter.setPen(pen)
+                painter.drawRect(rect)
+        painter.restore()
+
+    def _image_point_to_widget_point(self, point):
+        if self._pixmap is None or self._pixmap.isNull() or self._draw_rect.isNull():
+            return None
+        px, py = [float(value) for value in point]
+        width = max(1.0, float(self._pixmap.width()))
+        height = max(1.0, float(self._pixmap.height()))
+        return (
+            self._draw_rect.x() + (px / width) * self._draw_rect.width(),
+            self._draw_rect.y() + (py / height) * self._draw_rect.height(),
+        )
+
+    def _draw_polyline(self, painter, points, color, closed=False, fill_alpha=0):
+        if len(points) < 2:
+            return
+        widget_points = [self._image_point_to_widget_point(point) for point in points]
+        widget_points = [point for point in widget_points if point is not None]
+        if len(widget_points) < 2:
+            return
+        painter.save()
+        polygon = None
+        if closed and fill_alpha > 0 and len(widget_points) >= 3:
+            polygon = QPolygonF([QPointF(float(x), float(y)) for x, y in widget_points])
+            fill = QColor(color)
+            fill.setAlpha(fill_alpha)
+            painter.setBrush(fill)
+        else:
+            painter.setBrush(Qt.NoBrush)
+        pen = QPen(QColor(color))
+        pen.setWidth(2)
+        painter.setPen(pen)
+        if polygon is not None:
+            painter.drawPolygon(polygon)
+        for first, second in zip(widget_points, widget_points[1:]):
+            painter.drawLine(int(round(first[0])), int(round(first[1])), int(round(second[0])), int(round(second[1])))
+        if closed and len(widget_points) >= 3:
+            painter.drawLine(
+                int(round(widget_points[-1][0])),
+                int(round(widget_points[-1][1])),
+                int(round(widget_points[0][0])),
+                int(round(widget_points[0][1])),
+            )
+        painter.restore()
+
+    def _draw_contour_overlays(self, painter):
+        if self.workbench is None:
+            return
+        contours = []
+        if callable(getattr(self.workbench, "current_contour_overlay_polygons", None)):
+            contours = self.workbench.current_contour_overlay_polygons()
+        for contour in contours:
+            if isinstance(contour, dict):
+                self._draw_polyline(
+                    painter,
+                    contour.get("polygon", []),
+                    str(contour.get("color", "#FF8C42")),
+                    closed=True,
+                    fill_alpha=int(contour.get("fill_alpha", 24)),
+                )
+        if self._contour_drag_points:
+            self._draw_polyline(painter, self._contour_drag_points, "#FF8C42", closed=False, fill_alpha=0)
 
     def _draw_status_overlay(self, painter):
         if self.workbench is None:
@@ -530,6 +806,28 @@ class TifSliceCanvas(QLabel):
 
     def mousePressEvent(self, event):
         self.setFocus(Qt.MouseFocusReason)
+        if (
+            self.workbench is not None
+            and event.button() == Qt.LeftButton
+            and callable(getattr(self.workbench, "is_part_roi_draw_mode", None))
+            and self.workbench.is_part_roi_draw_mode()
+        ):
+            self._roi_drag_start = event.position()
+            self._roi_drag_current = event.position()
+            self._refresh_scaled_pixmap()
+            event.accept()
+            return
+        if (
+            self.workbench is not None
+            and event.button() == Qt.LeftButton
+            and callable(getattr(self.workbench, "is_part_contour_draw_mode", None))
+            and self.workbench.is_part_contour_draw_mode()
+        ):
+            pixel = self.widget_to_image_pixel(event.position().x(), event.position().y())
+            self._contour_drag_points = [list(pixel)] if pixel is not None else []
+            self._refresh_scaled_pixmap()
+            event.accept()
+            return
         if event.button() == Qt.RightButton and self.zoom_factor() > 1.0:
             self._panning = True
             self._last_pan_pos = event.position()
@@ -542,6 +840,19 @@ class TifSliceCanvas(QLabel):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        if self._roi_drag_start is not None and event.buttons() & Qt.LeftButton:
+            self._roi_drag_current = event.position()
+            self._refresh_scaled_pixmap()
+            event.accept()
+            return
+        if self._contour_drag_points and event.buttons() & Qt.LeftButton:
+            pixel = self.widget_to_image_pixel(event.position().x(), event.position().y())
+            if pixel is not None:
+                if not self._contour_drag_points or self._contour_drag_points[-1] != list(pixel):
+                    self._contour_drag_points.append(list(pixel))
+                    self._refresh_scaled_pixmap()
+            event.accept()
+            return
         if self._panning and event.buttons() & Qt.RightButton and self._last_pan_pos is not None:
             current = event.position()
             self._pan_x += current.x() - self._last_pan_pos.x()
@@ -557,12 +868,38 @@ class TifSliceCanvas(QLabel):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self._roi_drag_start is not None:
+            start = self._roi_drag_start
+            end = event.position()
+            self._roi_drag_start = None
+            self._roi_drag_current = None
+            if self.workbench is not None:
+                self.workbench.finish_part_roi_drag(start.x(), start.y(), end.x(), end.y())
+            self._refresh_scaled_pixmap()
+            event.accept()
+            return
+        if event.button() == Qt.LeftButton and self._contour_drag_points:
+            points = list(self._contour_drag_points)
+            self._contour_drag_points = []
+            if self.workbench is not None:
+                self.workbench.finish_part_contour_drag(points)
+            self._refresh_scaled_pixmap()
+            event.accept()
+            return
         if event.button() == Qt.RightButton and self._panning:
             self._panning = False
             self._last_pan_pos = None
             event.accept()
             return
         super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if self.workbench is not None and event.button() == Qt.LeftButton:
+            if callable(getattr(self.workbench, "open_roi_at_widget_position", None)):
+                if self.workbench.open_roi_at_widget_position(event.position().x(), event.position().y()):
+                    event.accept()
+                    return
+        super().mouseDoubleClickEvent(event)
 
 
 class TifVolumeCanvas(QLabel):
@@ -733,6 +1070,13 @@ class TifWorkbenchWidget(QWidget):
         config = self.config_manager.get("tif_backend", DEFAULT_TIF_BACKEND_CONFIG) if self.config_manager is not None else DEFAULT_TIF_BACKEND_CONFIG
         self.backend_config = sanitize_tif_backend_config(config)
         self.current_specimen_id = ""
+        self.current_volume_scope = "full"
+        self.current_part_id = ""
+        self.current_part = None
+        self.part_preview_mask = None
+        self.part_roi_draw_mode = False
+        self.part_contour_draw_mode = False
+        self.active_part_roi_id = ""
         self.image_volume = None
         self.label_volume = None
         self.material_map = {}
@@ -767,11 +1111,14 @@ class TifWorkbenchWidget(QWidget):
         self._volume_zoom = 1.0
         self._volume_pan_x = 0.0
         self._volume_pan_y = 0.0
+        self._volume_mask_preview_cache = {}
+        self._volume_masked_preview_cache = {}
         self._volume_clarity_mode = False
 
-        self.specimen_list = QListWidget()
+        self.specimen_list = TifSpecimenTree()
         self.specimen_list.setObjectName("tifSpecimenList")
-        self.specimen_list.currentItemChanged.connect(self._on_specimen_selected)
+        self.specimen_list.setHeaderHidden(True)
+        self.specimen_list.currentItemChanged.connect(self._on_specimen_tree_selected)
 
         self.canvas = TifSliceCanvas()
         self.canvas.workbench = self
@@ -855,20 +1202,67 @@ class TifWorkbenchWidget(QWidget):
         self.volume_clip_slider.setRange(0, 92)
         self.volume_clip_slider.setValue(0)
         self.volume_clip_slider.valueChanged.connect(self.render_volume_preview)
+        self.volume_tint_combo = WheelSafeComboBox()
+        self.volume_tint_combo.setObjectName("tifVolumeTintCombo")
+        self._populate_volume_tint_combo()
+        self.volume_tint_combo.currentIndexChanged.connect(self._on_volume_tint_changed)
+        self.btn_volume_custom_color = QPushButton("Choose color")
+        self.btn_volume_custom_color.setObjectName("tifVolumeCustomColorButton")
+        self.btn_volume_custom_color.clicked.connect(self.choose_volume_custom_color)
+        self.volume_transfer_opacity_slider = WheelSafeSlider(Qt.Horizontal)
+        self.volume_transfer_opacity_slider.setObjectName("tifVolumeTransferOpacitySlider")
+        self.volume_transfer_opacity_slider.setRange(25, 140)
+        self.volume_transfer_opacity_slider.setValue(100)
+        self.volume_transfer_opacity_slider.valueChanged.connect(self._on_volume_transfer_opacity_changed)
+        self.volume_enhancement_slider = WheelSafeSlider(Qt.Horizontal)
+        self.volume_enhancement_slider.setObjectName("tifVolumeEnhancementSlider")
+        self.volume_enhancement_slider.setRange(0, 100)
+        self.volume_enhancement_slider.setValue(35)
+        self.volume_enhancement_slider.valueChanged.connect(self._on_volume_display_enhancement_changed)
+        self.volume_tone_slider = WheelSafeSlider(Qt.Horizontal)
+        self.volume_tone_slider.setObjectName("tifVolumeToneSlider")
+        self.volume_tone_slider.setRange(70, 130)
+        self.volume_tone_slider.setValue(100)
+        self.volume_tone_slider.valueChanged.connect(self._on_volume_display_enhancement_changed)
+        self.volume_surface_refine_check = QCheckBox("Surface refine")
+        self.volume_surface_refine_check.setObjectName("tifVolumeSurfaceRefineCheck")
+        self.volume_surface_refine_check.setChecked(True)
+        self.volume_surface_refine_check.toggled.connect(self._on_volume_display_enhancement_changed)
+        self.volume_clip_plane_check = QCheckBox("Clip plane")
+        self.volume_clip_plane_check.setObjectName("tifVolumeClipPlaneCheck")
+        self.volume_clip_plane_check.setChecked(False)
+        self.volume_clip_plane_check.toggled.connect(self._on_volume_clip_plane_changed)
+        self.volume_clip_plane_depth_slider = WheelSafeSlider(Qt.Horizontal)
+        self.volume_clip_plane_depth_slider.setObjectName("tifVolumeClipPlaneDepthSlider")
+        self.volume_clip_plane_depth_slider.setRange(0, 100)
+        self.volume_clip_plane_depth_slider.setValue(50)
+        self.volume_clip_plane_depth_slider.valueChanged.connect(self.render_volume_preview)
+        self.volume_mask_combo = WheelSafeComboBox()
+        self.volume_mask_combo.setObjectName("tifVolumeMaskCombo")
+        self._populate_volume_mask_combo()
+        self.volume_mask_combo.currentIndexChanged.connect(self._on_volume_mask_changed)
+        self.volume_mask_opacity_slider = WheelSafeSlider(Qt.Horizontal)
+        self.volume_mask_opacity_slider.setObjectName("tifVolumeMaskOpacitySlider")
+        self.volume_mask_opacity_slider.setRange(0, 100)
+        self.volume_mask_opacity_slider.setValue(45)
+        self.volume_mask_opacity_slider.valueChanged.connect(self.render_volume_preview)
         self.btn_reset_volume_view = QPushButton("Reset 3D view")
         self.btn_reset_volume_view.setObjectName("tifResetVolumeViewButton")
         self.btn_reset_volume_view.clicked.connect(self.reset_volume_view)
         self.volume_render_status_label = QLabel("")
         self.volume_render_status_label.setObjectName("tifVolumeRenderStatus")
         self.volume_render_status_label.setWordWrap(True)
+        self.volume_render_status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.volume_render_status_label.setVisible(False)
 
         self.status_label = QLabel("")
         self.status_label.setObjectName("tifStatusText")
         self.status_label.setWordWrap(True)
+        self.status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.metadata_label = QLabel("")
         self.metadata_label.setObjectName("tifMetadataText")
         self.metadata_label.setWordWrap(True)
+        self.metadata_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.metadata_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.show_debug_paths_check = QCheckBox("Show debug paths")
         self.show_debug_paths_check.setObjectName("tifShowDebugPathsCheck")
@@ -914,6 +1308,60 @@ class TifWorkbenchWidget(QWidget):
         self.btn_import_amira = QPushButton("Import AMIRA directory")
         self.btn_import_amira.setObjectName("tifImportAmiraButton")
         self.btn_import_amira.clicked.connect(self.import_amira_directory_dialog)
+        self.part_bbox_edit = QLineEdit()
+        self.part_bbox_edit.setObjectName("tifPartBboxEdit")
+        self.part_bbox_edit.setPlaceholderText("z0,z1,y0,y1,x0,x1")
+        self.part_bbox_edit.textChanged.connect(self.render_current_slice)
+        self.btn_part_default_bbox = QPushButton("Use center ROI")
+        self.btn_part_default_bbox.setObjectName("tifPartDefaultBboxButton")
+        self.btn_part_default_bbox.clicked.connect(self.fill_default_part_bbox)
+        self.btn_part_draw_roi = QPushButton("Draw ROI")
+        self.btn_part_draw_roi.setObjectName("tifPartDrawRoiButton")
+        self.btn_part_draw_roi.setCheckable(True)
+        self.btn_part_draw_roi.toggled.connect(self.set_part_roi_draw_mode)
+        self.btn_save_part_roi = QPushButton("Save ROI draft")
+        self.btn_save_part_roi.setObjectName("tifSavePartRoiButton")
+        self.btn_save_part_roi.clicked.connect(self.save_part_roi_draft)
+        self.btn_confirm_part_roi = QPushButton("Confirm ROI")
+        self.btn_confirm_part_roi.setObjectName("tifConfirmPartRoiButton")
+        self.btn_confirm_part_roi.clicked.connect(self.confirm_part_roi_to_part)
+        self.btn_cancel_part_roi = QPushButton("Cancel ROI")
+        self.btn_cancel_part_roi.setObjectName("tifCancelPartRoiButton")
+        self.btn_cancel_part_roi.clicked.connect(self.cancel_part_roi_draft)
+        self.btn_create_part = QPushButton("Create part")
+        self.btn_create_part.setObjectName("tifCreatePartButton")
+        self.btn_create_part.clicked.connect(self.create_part_from_bbox_dialog)
+        self.btn_add_rect_keyframe = QPushButton("Add rectangular key slice")
+        self.btn_add_rect_keyframe.setObjectName("tifAddRectKeyframeButton")
+        self.btn_add_rect_keyframe.clicked.connect(self.add_current_rect_keyframe)
+        self.btn_draw_part_contour = QPushButton("Draw contour")
+        self.btn_draw_part_contour.setObjectName("tifDrawPartContourButton")
+        self.btn_draw_part_contour.setCheckable(True)
+        self.btn_draw_part_contour.toggled.connect(self.set_part_contour_draw_mode)
+        self.btn_delete_part_contour = QPushButton("Delete key slice")
+        self.btn_delete_part_contour.setObjectName("tifDeletePartContourButton")
+        self.btn_delete_part_contour.clicked.connect(self.delete_current_part_keyframe)
+        self.btn_prev_key_slice = QPushButton("Previous key slice")
+        self.btn_prev_key_slice.setObjectName("tifPrevPartKeySliceButton")
+        self.btn_prev_key_slice.clicked.connect(lambda: self.jump_part_keyframe("previous"))
+        self.btn_next_key_slice = QPushButton("Next key slice")
+        self.btn_next_key_slice.setObjectName("tifNextPartKeySliceButton")
+        self.btn_next_key_slice.clicked.connect(lambda: self.jump_part_keyframe("next"))
+        self.btn_preview_part_mask = QPushButton("Preview auto fill")
+        self.btn_preview_part_mask.setObjectName("tifPreviewPartMaskButton")
+        self.btn_preview_part_mask.clicked.connect(self.preview_part_mask_from_keyframes)
+        self.btn_accept_part_mask = QPushButton("Accept part mask")
+        self.btn_accept_part_mask.setObjectName("tifAcceptPartMaskButton")
+        self.btn_accept_part_mask.clicked.connect(self.accept_part_mask_preview)
+        self.btn_clear_part_preview = QPushButton("Clear preview")
+        self.btn_clear_part_preview.setObjectName("tifClearPartPreviewButton")
+        self.btn_clear_part_preview.clicked.connect(self.clear_part_mask_preview)
+        self.btn_export_part_package = QPushButton("Export part package")
+        self.btn_export_part_package.setObjectName("tifExportPartPackageButton")
+        self.btn_export_part_package.clicked.connect(self.export_current_part_package)
+        self.btn_delete_part_volume = QPushButton("Delete part volume")
+        self.btn_delete_part_volume.setObjectName("tifDeletePartVolumeButton")
+        self.btn_delete_part_volume.clicked.connect(self.delete_current_part_volume)
         self.btn_export_training = QPushButton("Export train-ready volumes")
         self.btn_export_training.setObjectName("tifExportTrainingButton")
         self.btn_export_training.clicked.connect(self.export_training_dataset)
@@ -950,6 +1398,7 @@ class TifWorkbenchWidget(QWidget):
         self.training_status_label = QLabel("")
         self.training_status_label.setObjectName("tifTrainingStatusText")
         self.training_status_label.setWordWrap(True)
+        self.training_status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.log_console = QTextEdit()
         self.log_console.setObjectName("tifLogConsole")
         self.log_console.setReadOnly(True)
@@ -993,6 +1442,10 @@ class TifWorkbenchWidget(QWidget):
             self.btn_import_prediction,
             self.btn_import_external_prediction_tif,
             self.btn_promote,
+            self.btn_create_part,
+            self.btn_preview_part_mask,
+            self.btn_accept_part_mask,
+            self.btn_export_part_package,
         ]
         secondary_buttons = [
             self.btn_start_center,
@@ -1001,16 +1454,29 @@ class TifWorkbenchWidget(QWidget):
             self.btn_redo,
             self.btn_save_edit,
             self.btn_reset_volume_view,
+            self.btn_volume_custom_color,
             self.btn_copy_draft,
             self.btn_add_material,
             self.btn_edit_material,
             self.btn_save_backend,
+            self.btn_part_default_bbox,
+            self.btn_part_draw_roi,
+            self.btn_save_part_roi,
+            self.btn_add_rect_keyframe,
+            self.btn_draw_part_contour,
+            self.btn_prev_key_slice,
+            self.btn_next_key_slice,
+            self.btn_clear_part_preview,
         ]
         for button in primary_buttons:
             self._style_button(button, "primary", full_width=True)
         for button in secondary_buttons:
             self._style_button(button, "secondary", full_width=True)
         self._style_button(self.btn_delete_material, "danger", full_width=True)
+        self._style_button(self.btn_confirm_part_roi, "primary", full_width=True)
+        self._style_button(self.btn_cancel_part_roi, "danger", full_width=True)
+        self._style_button(self.btn_delete_part_contour, "danger", full_width=True)
+        self._style_button(self.btn_delete_part_volume, "danger", full_width=True)
 
     def _populate_label_role_combo(self):
         current = self.label_role_combo.currentData() if self.label_role_combo.count() else "manual_truth"
@@ -1058,6 +1524,99 @@ class TifWorkbenchWidget(QWidget):
         self.volume_projection_combo.setCurrentIndex(index if index >= 0 else 0)
         self.volume_projection_combo.blockSignals(False)
 
+    def _populate_volume_tint_combo(self):
+        current = self._active_volume_view_settings().get("volume_tint", "amber")
+        self.volume_tint_combo.blockSignals(True)
+        self.volume_tint_combo.clear()
+        for mode, label in (
+            ("amber", "Amber"),
+            ("cyan", "Cyan"),
+            ("white", "White"),
+            ("custom", "Custom"),
+        ):
+            self.volume_tint_combo.addItem(tt(label, self.lang), mode)
+        index = self.volume_tint_combo.findData(current)
+        self.volume_tint_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.volume_tint_combo.blockSignals(False)
+
+    def _apply_volume_transfer_opacity_setting(self):
+        if not hasattr(self, "volume_transfer_opacity_slider"):
+            return
+        settings = self._active_volume_view_settings()
+        value = settings.get("volume_transfer_opacity", 100)
+        try:
+            value = int(round(float(value)))
+        except (TypeError, ValueError):
+            value = 100
+        value = max(self.volume_transfer_opacity_slider.minimum(), min(self.volume_transfer_opacity_slider.maximum(), value))
+        self.volume_transfer_opacity_slider.blockSignals(True)
+        self.volume_transfer_opacity_slider.setValue(value)
+        self.volume_transfer_opacity_slider.blockSignals(False)
+
+    def _populate_volume_mask_combo(self):
+        current = self.volume_mask_combo.currentData() if self.volume_mask_combo.count() else self._default_volume_mask_mode()
+        self.volume_mask_combo.blockSignals(True)
+        self.volume_mask_combo.clear()
+        for mode, label in (
+            ("image_only", "Image only"),
+            ("mask_boundary", "Mask boundary"),
+            ("masked_image", "Masked image"),
+        ):
+            self.volume_mask_combo.addItem(tt(label, self.lang), mode)
+        index = self.volume_mask_combo.findData(current)
+        self.volume_mask_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.volume_mask_combo.blockSignals(False)
+
+    def _set_volume_mask_mode(self, mode):
+        if not hasattr(self, "volume_mask_combo"):
+            return False
+        mode = mode if mode in {"image_only", "mask_boundary", "masked_image"} else "image_only"
+        index = self.volume_mask_combo.findData(mode)
+        if index < 0 or index == self.volume_mask_combo.currentIndex():
+            return False
+        self.volume_mask_combo.blockSignals(True)
+        self.volume_mask_combo.setCurrentIndex(index)
+        self.volume_mask_combo.blockSignals(False)
+        return True
+
+    def _default_volume_mask_mode(self):
+        configured = (self._active_volume_view_settings() or {}).get("volume_mask_mode", "")
+        if configured in {"image_only", "mask_boundary", "masked_image"}:
+            if configured == "image_only" or self._active_part_mask_has_voxels():
+                return configured
+        if self.current_volume_scope == "part" and self._active_part_mask_has_voxels():
+            return "masked_image"
+        return "image_only"
+
+    def _apply_default_volume_mask_mode(self):
+        if self._set_volume_mask_mode(self._default_volume_mask_mode()):
+            self._clear_volume_preview_cache()
+
+    def _project_view_settings(self):
+        return self.project.project_data.setdefault("view_settings", {})
+
+    def _active_volume_view_settings(self):
+        if self.current_volume_scope == "part" and isinstance(self.current_part, dict):
+            part_settings = self.current_part.setdefault("view_settings", {})
+            parent_settings = self._project_view_settings()
+            for key in ("volume_tint", "volume_tint_custom", "volume_transfer_opacity"):
+                if key not in part_settings and key in parent_settings:
+                    part_settings[key] = parent_settings[key]
+            return part_settings
+        return self._project_view_settings()
+
+    def _save_active_volume_view_settings(self):
+        if self.current_volume_scope == "part" and self.current_specimen_id and self.current_part_id:
+            settings = dict((self.current_part or {}).get("view_settings") or {})
+            try:
+                self.current_part = self.project.update_part_view_settings(self.current_specimen_id, self.current_part_id, settings)
+            except Exception:
+                if self.project.current_project_path:
+                    self.project.save_project()
+            return
+        if self.project.current_project_path:
+            self.project.save_project()
+
     def change_language(self, lang):
         self.lang = lang
         self._update_texts()
@@ -1072,6 +1631,12 @@ class TifWorkbenchWidget(QWidget):
         self._populate_label_role_combo()
         self._populate_display_mode_combo()
         self._populate_volume_projection_combo()
+        self._populate_volume_tint_combo()
+        self._apply_volume_transfer_opacity_setting()
+        self._populate_volume_mask_combo()
+        if hasattr(self, "task_tabs"):
+            for index, label in enumerate(("Part", "Display", "Annotation", "Train/export")):
+                self.task_tabs.setTabText(index, tt(label, self.lang))
         if self.image_volume is None:
             if self.specimen_list.count():
                 self.canvas.setText(tt("Working volume missing", self.lang))
@@ -1087,6 +1652,15 @@ class TifWorkbenchWidget(QWidget):
         self.brightness_label.setText(tt("Brightness", self.lang))
         self.contrast_label.setText(tt("Contrast", self.lang))
         self.volume_projection_label.setText(tt("Render mode", self.lang))
+        self.volume_tint_label.setText(tt("Transfer function", self.lang))
+        self.volume_transfer_opacity_label.setText(tt("Density opacity", self.lang))
+        self.volume_enhancement_label.setText(tt("Detail enhancement", self.lang))
+        self.volume_tone_label.setText(tt("Tone curve", self.lang))
+        self.volume_surface_refine_check.setText(tt("Surface refine", self.lang))
+        self.volume_clip_plane_check.setText(tt("Clip plane", self.lang))
+        self.volume_clip_plane_depth_label.setText(tt("Clip depth", self.lang))
+        self.volume_mask_label.setText(tt("Mask display", self.lang))
+        self.volume_mask_opacity_label.setText(tt("Mask opacity", self.lang))
         self.volume_cutoff_label.setText(tt("Density cutoff", self.lang))
         self.volume_quality_label.setText(tt("Render quality", self.lang))
         self.volume_sample_label.setText(tt("Ray samples", self.lang))
@@ -1095,6 +1669,7 @@ class TifWorkbenchWidget(QWidget):
         self.volume_roi_scale_label.setText(tt("ROI scale", self.lang))
         self.volume_inside_label.setText(tt("Inside depth", self.lang))
         self.volume_clip_label.setText(tt("Front cut", self.lang))
+        self.btn_volume_custom_color.setText(tt("Choose color", self.lang))
         self.btn_reset_volume_view.setText(tt("Reset 3D view", self.lang))
         self._update_volume_control_tooltips()
         if self.display_mode == "volume":
@@ -1102,6 +1677,23 @@ class TifWorkbenchWidget(QWidget):
         self.brush_size_label.setText(tt("Brush size", self.lang))
         self.btn_import_tif.setText(tt("Import TIF stack", self.lang))
         self.btn_import_amira.setText(tt("Import AMIRA directory", self.lang))
+        self.part_bbox_edit.setPlaceholderText(tt("z0,z1,y0,y1,x0,x1", self.lang))
+        self.btn_part_default_bbox.setText(tt("Use center ROI", self.lang))
+        self.btn_part_draw_roi.setText(tt("Draw ROI", self.lang))
+        self.btn_save_part_roi.setText(tt("Save ROI draft", self.lang))
+        self.btn_confirm_part_roi.setText(tt("Confirm ROI", self.lang))
+        self.btn_cancel_part_roi.setText(tt("Cancel ROI", self.lang))
+        self.btn_create_part.setText(tt("Create part", self.lang))
+        self.btn_add_rect_keyframe.setText(tt("Add rectangular key slice", self.lang))
+        self.btn_draw_part_contour.setText(tt("Draw contour", self.lang))
+        self.btn_delete_part_contour.setText(tt("Delete key slice", self.lang))
+        self.btn_prev_key_slice.setText(tt("Previous key slice", self.lang))
+        self.btn_next_key_slice.setText(tt("Next key slice", self.lang))
+        self.btn_preview_part_mask.setText(tt("Preview auto fill", self.lang))
+        self.btn_accept_part_mask.setText(tt("Accept part mask", self.lang))
+        self.btn_clear_part_preview.setText(tt("Clear preview", self.lang))
+        self.btn_export_part_package.setText(tt("Export part package", self.lang))
+        self.btn_delete_part_volume.setText(tt("Delete part volume", self.lang))
         self.btn_undo.setText(tt("Undo", self.lang))
         self.btn_redo.setText(tt("Redo", self.lang))
         self.btn_save_edit.setText(tt("Save working edit", self.lang))
@@ -1160,6 +1752,36 @@ class TifWorkbenchWidget(QWidget):
                 "Sharp still rendering keeps more source intensity detail and uses crisper sampling. It may upload more data and can look grainier while revealing fine internal structures.",
             ),
             (
+                self.volume_transfer_opacity_label,
+                self.volume_transfer_opacity_slider,
+                "Controls how strongly dense voxels accumulate in 3D. Lower values make internal layers less blocked; higher values make weak structures more visible.",
+            ),
+            (
+                self.volume_enhancement_label,
+                self.volume_enhancement_slider,
+                "Enhances fine boundaries while the view is still. It is a display-only aid for checking internal layers and part edges.",
+            ),
+            (
+                self.volume_tone_label,
+                self.volume_tone_slider,
+                "Adjusts display gamma for 3D rendering. Lower values brighten faint structures; higher values keep dense regions calmer.",
+            ),
+            (
+                self.volume_surface_refine_check,
+                self.volume_surface_refine_check,
+                "Refines first surface hits in Surface mode while still. It improves contour stability without affecting Composite rendering.",
+            ),
+            (
+                self.volume_clip_plane_check,
+                self.volume_clip_plane_check,
+                "Enables a view-aligned GPU clipping plane. It only cuts the display, not the saved TIF, mask, or training data.",
+            ),
+            (
+                self.volume_clip_plane_depth_label,
+                self.volume_clip_plane_depth_slider,
+                "Moves the clipping plane through the current 3D view. Use it to peel away outer tissue and inspect inside structures.",
+            ),
+            (
                 self.volume_roi_detail_check,
                 self.volume_roi_detail_check,
                 "When zoomed in and still, renders the 3D view at a higher offscreen pixel density before scaling it back, improving small-part inspection at the cost of more GPU readback work.",
@@ -1178,6 +1800,16 @@ class TifWorkbenchWidget(QWidget):
                 self.volume_clip_label,
                 self.volume_clip_slider,
                 "Cuts away the front part of the current view. Use it to remove blocking outer tissue and inspect deeper structures; keep it at 0 for the full outline.",
+            ),
+            (
+                self.volume_mask_label,
+                self.volume_mask_combo,
+                "Shows accepted or preview part masks in the 3D view. Boundary is best for checking extraction edges; masked image hides voxels outside the mask.",
+            ),
+            (
+                self.volume_mask_opacity_label,
+                self.volume_mask_opacity_slider,
+                "Controls how strongly mask boundaries are blended into the 3D inspection view.",
             ),
         )
         for label, slider, text in pairs:
@@ -1208,7 +1840,7 @@ class TifWorkbenchWidget(QWidget):
 
         readiness_text = ""
         readiness_reasons = ""
-        if self.current_specimen_id:
+        if self.current_specimen_id and self.current_volume_scope != "part":
             try:
                 readiness = self.project.evaluate_train_ready(self.current_specimen_id)
             except Exception:
@@ -1227,12 +1859,16 @@ class TifWorkbenchWidget(QWidget):
         volume_status = ""
         if self.image_volume is not None:
             volume_status = self.volume_canvas_overlay_text()
+        volume_perf = self.volume_performance_report() if self.image_volume is not None else {}
 
         return {
             "source_workbench": "tif_volume",
             "project_type": "tif_volume",
             "project_path": getattr(self.project, "current_project_path", "") or "",
             "active_specimen_id": self.current_specimen_id,
+            "active_volume_scope": self.current_volume_scope,
+            "active_part_id": self.current_part_id,
+            "active_part_parent_bbox_zyx": str((self.current_part or {}).get("parent_bbox_zyx", "")),
             "active_label_role": active_label_role,
             "selected_material_id": material_id,
             "display_mode": self.display_mode,
@@ -1247,10 +1883,17 @@ class TifWorkbenchWidget(QWidget):
             "volume_renderer_label": self._volume_renderer_label(),
             "volume_render_mode": self._volume_render_mode,
             "volume_projection_mode": self._volume_projection_mode(),
+            "volume_mask_mode": self._volume_mask_mode(),
             "volume_density_cutoff": f"{int(self.volume_cutoff_slider.value())}%",
+            "volume_density_opacity": f"{int(self.volume_transfer_opacity_slider.value())}%",
             "volume_texture_target_dim": str(self._active_volume_target_dim()),
             "volume_ray_samples": str(self._active_volume_sample_count()),
             "volume_clarity_mode": clarity,
+            "volume_detail_enhancement": f"{int(self.volume_enhancement_slider.value())}%",
+            "volume_tone_curve": f"{int(self.volume_tone_slider.value())}%",
+            "volume_surface_refine": "on" if self.volume_surface_refine_check.isChecked() else "off",
+            "volume_clip_plane": "on" if self.volume_clip_plane_check.isChecked() else "off",
+            "volume_clip_plane_depth": f"{int(self.volume_clip_plane_depth_slider.value())}%",
             "volume_roi_high_detail": "on" if self.volume_roi_detail_check.isChecked() else "off",
             "volume_roi_scale": f"{self._active_volume_roi_scale():.1f}x",
             "volume_inside_depth": f"{int(self.volume_inside_slider.value())}%",
@@ -1260,6 +1903,10 @@ class TifWorkbenchWidget(QWidget):
             "volume_yaw_pitch": f"yaw={float(self._volume_yaw):.1f}, pitch={float(self._volume_pitch):.1f}",
             "volume_gpu_warning": self._volume_renderer_warning,
             "volume_status_overlay": volume_status,
+            "volume_performance_diagnosis": str(volume_perf.get("diagnosis", "")),
+            "volume_uploaded_gb": f"{float(volume_perf.get('uploaded_gb', 0.0)):.2f}",
+            "volume_upload_ms": f"{float(volume_perf.get('upload_ms', 0.0)):.0f}",
+            "volume_draw_ms": f"{float(volume_perf.get('draw_ms', 0.0)):.1f}",
             "tif_next_requirement": "brain_orientation_reslice: standardize ant brain/head volumes by dorsal head-top axis upward, fix anterior-posterior axis, crop brain-only volume, and export resampled image/label volumes for AI training or internal-structure analysis.",
             "tif_requirement_doc": "docs/ant3d_workbench/TIF脑部统一朝向重切片需求_zh.md",
             "recent_log_excerpt": recent_log,
@@ -1322,9 +1969,14 @@ class TifWorkbenchWidget(QWidget):
         self._configure_slice_slider_for_axis(self.slice_axis, preserve_position=True)
         self._reset_canvas_view_on_next_render = True
         if self.slice_axis != "z":
+            self.part_contour_draw_mode = False
+            self.btn_draw_part_contour.blockSignals(True)
+            self.btn_draw_part_contour.setChecked(False)
+            self.btn_draw_part_contour.blockSignals(False)
             message = tt("Side-angle slices are read-only in this version. Use Z axial view for label editing.", self.lang)
             self.training_status_label.setText(message)
             self.log(message)
+        self._set_scope_controls_enabled()
         self.render_current_slice()
 
     def on_display_mode_changed(self):
@@ -1338,13 +1990,30 @@ class TifWorkbenchWidget(QWidget):
             self.volume_render_status_label.setVisible(self.display_mode == "volume")
         self._sync_mode_sections()
         is_volume = self.display_mode == "volume"
+        if is_volume:
+            self.part_roi_draw_mode = False
+            self.part_contour_draw_mode = False
+            self.btn_part_draw_roi.blockSignals(True)
+            self.btn_part_draw_roi.setChecked(False)
+            self.btn_part_draw_roi.blockSignals(False)
+            self.btn_draw_part_contour.blockSignals(True)
+            self.btn_draw_part_contour.setChecked(False)
+            self.btn_draw_part_contour.blockSignals(False)
         volume_mode_controls = (
             self.volume_sample_label,
             self.volume_sample_slider,
             self.volume_clarity_check,
+            self.volume_enhancement_label,
+            self.volume_enhancement_slider,
+            self.volume_tone_label,
+            self.volume_tone_slider,
+            self.volume_surface_refine_check,
             self.volume_roi_detail_check,
             self.volume_roi_scale_label,
             self.volume_roi_scale_slider,
+            self.volume_clip_plane_check,
+            self.volume_clip_plane_depth_label,
+            self.volume_clip_plane_depth_slider,
             self.volume_inside_label,
             self.volume_inside_slider,
             self.volume_clip_label,
@@ -1359,9 +2028,17 @@ class TifWorkbenchWidget(QWidget):
             self.volume_sample_label,
             self.volume_sample_slider,
             self.volume_clarity_check,
+            self.volume_enhancement_label,
+            self.volume_enhancement_slider,
+            self.volume_tone_label,
+            self.volume_tone_slider,
+            self.volume_surface_refine_check,
             self.volume_roi_detail_check,
             self.volume_roi_scale_label,
             self.volume_roi_scale_slider,
+            self.volume_clip_plane_check,
+            self.volume_clip_plane_depth_label,
+            self.volume_clip_plane_depth_slider,
             self.volume_inside_label,
             self.volume_inside_slider,
             self.volume_clip_label,
@@ -1373,18 +2050,39 @@ class TifWorkbenchWidget(QWidget):
             message = self._volume_renderer_status_message()
             self.training_status_label.setText(message)
             self.log(message)
+            self._apply_default_volume_mask_mode()
+            self._set_scope_controls_enabled()
             self.render_volume_preview()
         else:
+            self._set_scope_controls_enabled()
             self.render_current_slice()
 
     def _sync_mode_sections(self):
         is_volume = self.display_mode == "volume"
+        is_part = self.current_volume_scope == "part"
+        is_full = not is_part
         if hasattr(self, "slice_display_section"):
             self.slice_display_section.setVisible(not is_volume)
         if hasattr(self, "annotation_section"):
-            self.annotation_section.setVisible(not is_volume)
+            self.annotation_section.setVisible(not is_volume and is_full)
         if hasattr(self, "volume_render_section"):
             self.volume_render_section.setVisible(is_volume)
+        if hasattr(self, "part_locate_section"):
+            self.part_locate_section.setVisible(is_full and not is_volume)
+        if hasattr(self, "part_mask_section"):
+            self.part_mask_section.setVisible(is_part and not is_volume)
+        if hasattr(self, "part_output_section"):
+            self.part_output_section.setVisible(is_part)
+        if hasattr(self, "task_tabs"):
+            target = self.display_task_page if is_volume else self.part_task_page
+            if self.task_tabs.currentWidget() is not target:
+                self.task_tabs.setCurrentWidget(target)
+
+    def _safe_contour_slice_index(self, keyframe, default=None):
+        try:
+            return int((keyframe or {}).get("slice_index", default))
+        except (TypeError, ValueError, OverflowError):
+            return default
 
     def _connect_volume_canvas_signals(self, canvas):
         if hasattr(canvas, "render_failed"):
@@ -1526,11 +2224,7 @@ class TifWorkbenchWidget(QWidget):
         return True
 
     def _select_specimen_after_import(self, specimen_id):
-        for row in range(self.specimen_list.count()):
-            item = self.specimen_list.item(row)
-            if item and item.data(Qt.UserRole) == specimen_id:
-                self.specimen_list.setCurrentRow(row)
-                break
+        self._select_volume_tree_item(specimen_id, "full")
 
     def _set_tif_import_controls_enabled(self, enabled):
         for button in (self.btn_import_tif, self.btn_import_amira):
@@ -1657,6 +2351,732 @@ class TifWorkbenchWidget(QWidget):
         message = tt("Imported AMIRA directory for specimen {0}. Report: {1}", self.lang).format(specimen_id, report_path)
         self.training_status_label.setText(message)
         self.log(message)
+
+    def _default_part_bbox(self):
+        if self.image_volume is None:
+            return []
+        shape = [int(value) for value in self.image_volume.shape]
+        bbox = []
+        for size in shape:
+            span = max(1, int(round(size * 0.45)))
+            start = max(0, int((size - span) // 2))
+            end = min(size, start + span)
+            bbox.append([start, end])
+        return bbox
+
+    def _bbox_text(self, bbox):
+        if not bbox or len(bbox) != 3:
+            return ""
+        return ",".join(str(int(value)) for pair in bbox for value in pair)
+
+    def fill_default_part_bbox(self):
+        bbox = self._default_part_bbox()
+        if bbox:
+            self.part_bbox_edit.setText(self._bbox_text(bbox))
+            self.active_part_roi_id = ""
+            self.render_current_slice()
+
+    def _parse_part_bbox_text(self):
+        text = self.part_bbox_edit.text().strip()
+        if not text:
+            bbox = self._default_part_bbox()
+            if bbox:
+                self.part_bbox_edit.setText(self._bbox_text(bbox))
+            return bbox
+        chunks = [chunk.strip() for chunk in text.replace(";", ",").split(",") if chunk.strip()]
+        if len(chunks) != 6:
+            raise ValueError("bbox_must_be_z0_z1_y0_y1_x0_x1")
+        values = [int(chunk) for chunk in chunks]
+        return [[values[0], values[1]], [values[2], values[3]], [values[4], values[5]]]
+
+    def is_part_roi_draw_mode(self):
+        return bool(
+            self.part_roi_draw_mode
+            and self.current_volume_scope == "full"
+            and self.display_mode == "slice"
+            and self.image_volume is not None
+        )
+
+    def set_part_roi_draw_mode(self, checked):
+        self.part_roi_draw_mode = bool(checked)
+        if self.part_roi_draw_mode:
+            self.part_contour_draw_mode = False
+            self.btn_draw_part_contour.blockSignals(True)
+            self.btn_draw_part_contour.setChecked(False)
+            self.btn_draw_part_contour.blockSignals(False)
+            if self.current_volume_scope != "full" or self.image_volume is None:
+                self.part_roi_draw_mode = False
+                self.btn_part_draw_roi.blockSignals(True)
+                self.btn_part_draw_roi.setChecked(False)
+                self.btn_part_draw_roi.blockSignals(False)
+                QMessageBox.information(self, tt("Part extraction", self.lang), tt("Switch to Full volume before drawing ROI.", self.lang))
+                return
+            message = tt("Drag on the current slice to update the ROI bbox.", self.lang)
+            self.training_status_label.setText(message)
+            self.log(message)
+        self.render_current_slice()
+
+    def is_part_contour_draw_mode(self):
+        return bool(
+            self.part_contour_draw_mode
+            and self.current_volume_scope == "part"
+            and self.display_mode == "slice"
+            and self.image_volume is not None
+            and self._current_slice_axis() == "z"
+        )
+
+    def set_part_contour_draw_mode(self, checked):
+        self.part_contour_draw_mode = bool(checked)
+        if self.part_contour_draw_mode:
+            self.part_roi_draw_mode = False
+            self.btn_part_draw_roi.blockSignals(True)
+            self.btn_part_draw_roi.setChecked(False)
+            self.btn_part_draw_roi.blockSignals(False)
+            if self.current_volume_scope != "part" or self.image_volume is None:
+                self.part_contour_draw_mode = False
+                self.btn_draw_part_contour.blockSignals(True)
+                self.btn_draw_part_contour.setChecked(False)
+                self.btn_draw_part_contour.blockSignals(False)
+                QMessageBox.information(self, tt("Part extraction", self.lang), tt("Switch to part volume before drawing contours.", self.lang))
+                return
+            if self.display_mode != "slice" or self._current_slice_axis() != "z":
+                self.part_contour_draw_mode = False
+                self.btn_draw_part_contour.blockSignals(True)
+                self.btn_draw_part_contour.setChecked(False)
+                self.btn_draw_part_contour.blockSignals(False)
+                QMessageBox.information(self, tt("Part extraction", self.lang), tt("Contour drawing currently uses Z slices.", self.lang))
+                return
+            message = tt("Drag on the current part slice to draw a closed contour.", self.lang)
+            self.training_status_label.setText(message)
+            self.log(message)
+        self.render_current_slice()
+
+    def current_roi_overlay_rects(self):
+        if self.current_volume_scope != "full" or self.image_volume is None:
+            return []
+        overlays = []
+        try:
+            bbox = self._parse_part_bbox_text()
+        except Exception:
+            bbox = []
+        if bbox and len(bbox) == 3:
+            current_rect = self._bbox_projection_for_current_slice(bbox)
+            if current_rect:
+                overlays.append({"rect": current_rect, "color": "#FFD34D", "kind": "current"})
+        specimen = self.project.get_specimen(self.current_specimen_id, default=None) if self.current_specimen_id else None
+        for roi in (specimen or {}).get("part_rois", []) or []:
+            if (roi or {}).get("status") == "cancelled":
+                continue
+            rect = self._bbox_projection_for_current_slice((roi or {}).get("bbox_zyx", []))
+            if rect:
+                color = "#42D9C8" if (roi or {}).get("status") in {"draft", "confirmed"} else "#7EE787"
+                overlays.append({"rect": rect, "color": color, "kind": "roi", "roi_id": (roi or {}).get("roi_id", "")})
+        for part in (specimen or {}).get("parts", []) or []:
+            rect = self._bbox_projection_for_current_slice((part or {}).get("parent_bbox_zyx", []))
+            if rect:
+                overlays.append({"rect": rect, "color": "#7EE787", "kind": "part", "part_id": (part or {}).get("part_id", "")})
+        return overlays
+
+    def _bbox_projection_for_current_slice(self, bbox):
+        if not bbox or len(bbox) != 3:
+            return None
+        axis, index = self._active_slice_position()
+        z_range, y_range, x_range = bbox
+        if axis == "z":
+            if not (int(z_range[0]) <= int(index) < int(z_range[1])):
+                return None
+            return [x_range[0], y_range[0], x_range[1], y_range[1]]
+        if axis == "y":
+            if not (int(y_range[0]) <= int(index) < int(y_range[1])):
+                return None
+            return [x_range[0], z_range[0], x_range[1], z_range[1]]
+        if axis == "x":
+            if not (int(x_range[0]) <= int(index) < int(x_range[1])):
+                return None
+            return [y_range[0], z_range[0], y_range[1], z_range[1]]
+        return None
+
+    def finish_part_roi_drag(self, start_x, start_y, end_x, end_y):
+        if not self.is_part_roi_draw_mode() or self.image_volume is None:
+            return
+        axis = self._current_slice_axis()
+        start_pixel = self.canvas.widget_to_image_pixel(start_x, start_y)
+        end_pixel = self.canvas.widget_to_image_pixel(end_x, end_y)
+        if start_pixel is None or end_pixel is None:
+            return
+        x0 = min(int(start_pixel[0]), int(end_pixel[0]))
+        x1 = max(int(start_pixel[0]), int(end_pixel[0])) + 1
+        y0 = min(int(start_pixel[1]), int(end_pixel[1]))
+        y1 = max(int(start_pixel[1]), int(end_pixel[1])) + 1
+        if x1 - x0 < 2 or y1 - y0 < 2:
+            return
+        try:
+            bbox = self._parse_part_bbox_text()
+        except Exception:
+            bbox = self._default_part_bbox()
+        if not bbox:
+            return
+        slice_index = int(self.slice_slider.value())
+        if axis == "z":
+            bbox[0] = self._expanded_axis_range(bbox[0], slice_index, int(self.image_volume.shape[0]))
+            bbox[1] = [y0, y1]
+            bbox[2] = [x0, x1]
+        elif axis == "y":
+            bbox[0] = [y0, y1]
+            bbox[1] = self._expanded_axis_range(bbox[1], slice_index, int(self.image_volume.shape[1]))
+            bbox[2] = [x0, x1]
+        elif axis == "x":
+            bbox[0] = [y0, y1]
+            bbox[1] = [x0, x1]
+            bbox[2] = self._expanded_axis_range(bbox[2], slice_index, int(self.image_volume.shape[2]))
+        bbox = self._clip_bbox_to_shape(bbox, self.image_volume.shape)
+        self.part_bbox_edit.setText(self._bbox_text(bbox))
+        message = tt("ROI bbox updated: {0}", self.lang).format(self.part_bbox_edit.text())
+        self.training_status_label.setText(message)
+        self.log(message)
+        self.render_current_slice()
+
+    def open_roi_at_widget_position(self, x, y):
+        if self.current_volume_scope != "full" or self.image_volume is None:
+            return False
+        pixel = self.canvas.widget_to_image_pixel(x, y)
+        if pixel is None:
+            return False
+        px, py = pixel
+        overlays = list(reversed(self.current_roi_overlay_rects()))
+        for overlay in overlays:
+            if not isinstance(overlay, dict):
+                continue
+            rect = overlay.get("rect", [])
+            if len(rect) != 4:
+                continue
+            x0, y0, x1, y1 = [int(value) for value in rect]
+            if not (min(x0, x1) <= px <= max(x0, x1) and min(y0, y1) <= py <= max(y0, y1)):
+                continue
+            if overlay.get("kind") == "part" and overlay.get("part_id"):
+                self._select_volume_tree_item(self.current_specimen_id, "part", overlay.get("part_id", ""))
+                return True
+            if overlay.get("kind") == "roi" and overlay.get("roi_id"):
+                roi = self.project.get_part_roi(self.current_specimen_id, overlay.get("roi_id", ""), default=None)
+                if roi is not None:
+                    self.active_part_roi_id = roi.get("roi_id", "")
+                    self.part_bbox_edit.setText(self._bbox_text(roi.get("bbox_zyx", [])))
+                    message = tt("Loaded ROI draft {0} for editing.", self.lang).format(roi.get("display_name") or roi.get("roi_id"))
+                    self.training_status_label.setText(message)
+                    self.log(message)
+                    self.render_current_slice()
+                    return True
+        return False
+
+    def _expanded_axis_range(self, existing_range, index, size):
+        try:
+            start, end = int(existing_range[0]), int(existing_range[1])
+        except Exception:
+            start, end = index, index + 1
+        if end <= start:
+            start, end = index, index + 1
+        return [max(0, min(start, index)), min(int(size), max(end, index + 1))]
+
+    def _default_roi_id(self):
+        existing = len(self.project.list_part_rois(self.current_specimen_id, include_cancelled=True)) if self.current_specimen_id else 0
+        return f"roi_{existing + 1}"
+
+    def save_part_roi_draft(self):
+        if self.current_volume_scope != "full" or not self.current_specimen_id or self.image_volume is None:
+            QMessageBox.information(self, tt("Part extraction", self.lang), tt("Switch to Full volume before saving ROI draft.", self.lang))
+            return None
+        try:
+            bbox = self._clip_bbox_to_shape(self._parse_part_bbox_text(), self.image_volume.shape)
+        except Exception as exc:
+            QMessageBox.warning(self, tt("Part extraction", self.lang), str(exc))
+            return None
+        if self.active_part_roi_id:
+            roi = self.project.update_part_roi(self.current_specimen_id, self.active_part_roi_id, bbox_zyx=bbox, status="draft")
+        else:
+            roi_id, ok = QInputDialog.getText(
+                self,
+                tt("Save ROI draft", self.lang),
+                tt("ROI ID:", self.lang),
+                text=self._default_roi_id(),
+            )
+            if not ok or not str(roi_id).strip():
+                return None
+            display_name, ok = QInputDialog.getText(
+                self,
+                tt("Save ROI draft", self.lang),
+                tt("Display name:", self.lang),
+                text=str(roi_id).strip(),
+            )
+            if not ok:
+                return None
+            try:
+                roi = self.project.add_part_roi(
+                    self.current_specimen_id,
+                    roi_id,
+                    display_name=display_name or roi_id,
+                    bbox_zyx=bbox,
+                    status="draft",
+                )
+            except Exception as exc:
+                QMessageBox.warning(self, tt("Part extraction", self.lang), str(exc))
+                return None
+        self.active_part_roi_id = roi.get("roi_id", "")
+        self.part_bbox_edit.setText(self._bbox_text(roi.get("bbox_zyx", [])))
+        message = tt("Saved ROI draft {0}.", self.lang).format(roi.get("display_name") or roi.get("roi_id"))
+        self.training_status_label.setText(message)
+        self.log(message)
+        self.render_current_slice()
+        return roi
+
+    def confirm_part_roi_to_part(self):
+        if self.current_volume_scope != "full" or not self.current_specimen_id or self.image_volume is None:
+            QMessageBox.information(self, tt("Part extraction", self.lang), tt("Switch to Full volume before confirming ROI.", self.lang))
+            return
+        roi = self.project.get_part_roi(self.current_specimen_id, self.active_part_roi_id, default=None) if self.active_part_roi_id else None
+        if roi is None:
+            roi = self.save_part_roi_draft()
+        if roi is None:
+            return
+        part_id, ok = QInputDialog.getText(
+            self,
+            tt("Confirm ROI", self.lang),
+            tt("Part ID:", self.lang),
+            text=str(roi.get("roi_id", "")).replace("_roi", "") or f"part_{len(self.project.list_parts(self.current_specimen_id)) + 1}",
+        )
+        if not ok or not str(part_id).strip():
+            return
+        display_name, ok = QInputDialog.getText(
+            self,
+            tt("Confirm ROI", self.lang),
+            tt("Display name:", self.lang),
+            text=str(roi.get("display_name") or part_id),
+        )
+        if not ok:
+            return
+        try:
+            part = crop_volume_to_part(self.project, self.current_specimen_id, part_id, roi.get("bbox_zyx", []), display_name=display_name or part_id)
+            self.project.update_part_roi(
+                self.current_specimen_id,
+                roi.get("roi_id", ""),
+                status="part_created",
+                linked_part_id=part.get("part_id", ""),
+                save=True,
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, tt("Part extraction", self.lang), str(exc))
+            return
+        self.active_part_roi_id = ""
+        self.refresh_project()
+        self._select_volume_tree_item(self.current_specimen_id, "part", part.get("part_id", ""))
+        message = tt("Confirmed ROI and created part {0}.", self.lang).format(part.get("display_name") or part.get("part_id"))
+        self.training_status_label.setText(message)
+        self.log(message)
+
+    def _ensure_roi_for_created_part(self, part, bbox, display_name=""):
+        if not isinstance(part, dict):
+            return None
+        part_id = part.get("part_id", "")
+        if self.active_part_roi_id:
+            try:
+                return self.project.update_part_roi(
+                    self.current_specimen_id,
+                    self.active_part_roi_id,
+                    bbox_zyx=bbox,
+                    status="part_created",
+                    linked_part_id=part_id,
+                    display_name=display_name or part.get("display_name") or part_id,
+                    save=True,
+                )
+            except Exception:
+                pass
+        roi_id = f"{part_id}_roi"
+        try:
+            return self.project.add_part_roi(
+                self.current_specimen_id,
+                roi_id,
+                display_name=display_name or part.get("display_name") or roi_id,
+                bbox_zyx=bbox,
+                status="part_created",
+                linked_part_id=part_id,
+                save=True,
+            )
+        except ValueError:
+            return None
+
+    def cancel_part_roi_draft(self):
+        if not self.active_part_roi_id:
+            self.part_bbox_edit.clear()
+            self.render_current_slice()
+            return
+        roi = self.project.get_part_roi(self.current_specimen_id, self.active_part_roi_id, default=None)
+        if roi is not None and roi.get("linked_part_id"):
+            QMessageBox.information(self, tt("Part extraction", self.lang), tt("This ROI is linked to a created part and cannot be cancelled here.", self.lang))
+            return
+        self.project.discard_part_roi(self.current_specimen_id, self.active_part_roi_id)
+        message = tt("Cancelled ROI draft {0}.", self.lang).format(self.active_part_roi_id)
+        self.active_part_roi_id = ""
+        self.part_bbox_edit.clear()
+        self.training_status_label.setText(message)
+        self.log(message)
+        self.render_current_slice()
+
+    def delete_current_part_volume(self):
+        if self.current_volume_scope != "part" or not self.current_specimen_id or not self.current_part_id:
+            QMessageBox.information(self, tt("Part extraction", self.lang), tt("Select a part volume before exporting a part package.", self.lang))
+            return
+        part = self.project.get_part(self.current_specimen_id, self.current_part_id, default=None)
+        if part is None:
+            return
+        display_name = part.get("display_name") or part.get("part_id") or self.current_part_id
+        response = QMessageBox.question(
+            self,
+            tt("Delete part volume?", self.lang),
+            tt(
+                "Delete part volume {0}? This removes the cropped image, mask, contours, and extraction files, but keeps the parent TIF volume.",
+                self.lang,
+            ).format(display_name),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if response != QMessageBox.Yes:
+            return
+        try:
+            self.image_volume = None
+            self.label_volume = None
+            self.edit_volume = None
+            self.part_preview_mask = None
+            self._clear_volume_preview_cache()
+            import gc
+
+            gc.collect()
+            result = self.project.discard_part(self.current_specimen_id, self.current_part_id, remove_storage=True, save=False)
+            specimen = self.project.get_specimen(self.current_specimen_id, default=None)
+            if specimen is not None:
+                for roi in specimen.get("part_rois", []) or []:
+                    if str(roi.get("linked_part_id", "")) == str(self.current_part_id):
+                        self.project.update_part_roi(
+                            self.current_specimen_id,
+                            roi.get("roi_id", ""),
+                            status="cancelled",
+                            linked_part_id="",
+                            save=False,
+                        )
+            self.project.save_project()
+        except Exception as exc:
+            QMessageBox.warning(self, tt("Part extraction", self.lang), str(exc))
+            return
+        self.part_preview_mask = None
+        self.current_part = None
+        deleted_part_id = self.current_part_id
+        self.current_part_id = ""
+        self.current_volume_scope = "full"
+        self._clear_volume_preview_cache()
+        self.refresh_project()
+        self._select_volume_tree_item(self.current_specimen_id, "full", "")
+        message = tt("Deleted part volume {0}.", self.lang).format(display_name)
+        if not result.get("removed_storage"):
+            message = f"{message} Storage was already missing."
+        self.training_status_label.setText(message)
+        self.log(f"{message} part_id={deleted_part_id}")
+
+    def _clip_bbox_to_shape(self, bbox, shape):
+        clean = []
+        for axis, pair in enumerate(bbox):
+            size = int(shape[axis])
+            start = max(0, min(size, int(pair[0])))
+            end = max(0, min(size, int(pair[1])))
+            if end < start:
+                start, end = end, start
+            if end == start:
+                end = min(size, start + 1)
+                start = max(0, end - 1)
+            clean.append([start, end])
+        return clean
+
+    def create_part_from_bbox_dialog(self):
+        if self.current_volume_scope != "full" or not self.current_specimen_id or self.image_volume is None:
+            QMessageBox.information(self, tt("Part extraction", self.lang), tt("Switch to Full volume before creating a part.", self.lang))
+            return
+        part_id, ok = QInputDialog.getText(
+            self,
+            tt("Create part", self.lang),
+            tt("Part ID:", self.lang),
+            text=f"part_{len(self.project.list_parts(self.current_specimen_id)) + 1}",
+        )
+        if not ok or not str(part_id).strip():
+            return
+        display_name, ok = QInputDialog.getText(
+            self,
+            tt("Create part", self.lang),
+            tt("Display name:", self.lang),
+            text=str(part_id).strip(),
+        )
+        if not ok:
+            return
+        try:
+            bbox = self._clip_bbox_to_shape(self._parse_part_bbox_text(), self.image_volume.shape)
+            part = crop_volume_to_part(self.project, self.current_specimen_id, part_id, bbox, display_name=display_name or part_id)
+            self._ensure_roi_for_created_part(part, bbox, display_name=display_name or part_id)
+        except Exception as exc:
+            QMessageBox.warning(self, tt("Part extraction", self.lang), str(exc))
+            return
+        self.active_part_roi_id = ""
+        self.refresh_project()
+        self._select_volume_tree_item(self.current_specimen_id, "part", part.get("part_id", ""))
+        message = tt("Created part {0} from bbox {1}.", self.lang).format(part.get("display_name") or part.get("part_id"), part.get("parent_bbox_zyx"))
+        self.training_status_label.setText(message)
+        self.log(message)
+
+    def _current_part_contours_path(self):
+        part = self.project.get_part(self.current_specimen_id, self.current_part_id, default=None)
+        if part is None:
+            return ""
+        return self.project.to_absolute(part.get("contours_path", ""))
+
+    def _current_part_contours(self):
+        contours_path = self._current_part_contours_path()
+        if not contours_path:
+            return {}, ""
+        return read_contours_json(contours_path), contours_path
+
+    def _format_contour_quality_report(self, report):
+        if not isinstance(report, dict):
+            return ""
+        problems = []
+        for item in report.get("errors", []) or []:
+            problems.append(str(item.get("message") or item.get("code") or "error"))
+        for item in report.get("warnings", []) or []:
+            problems.append(str(item.get("message") or item.get("code") or "warning"))
+        if not problems:
+            return tt("Quality check passed", self.lang)
+        return f"{tt('Review warnings', self.lang)}: " + " | ".join(problems[:4])
+
+    def _dedupe_contour_points(self, points):
+        clean = []
+        width = int(self.image_volume.shape[2]) if self.image_volume is not None else 0
+        height = int(self.image_volume.shape[1]) if self.image_volume is not None else 0
+        for point in points or []:
+            if not isinstance(point, (list, tuple)) or len(point) < 2:
+                continue
+            px = int(round(float(point[0])))
+            py = int(round(float(point[1])))
+            if width > 0:
+                px = max(0, min(width - 1, px))
+            if height > 0:
+                py = max(0, min(height - 1, py))
+            next_point = [px, py]
+            if not clean or clean[-1] != next_point:
+                clean.append(next_point)
+        if len(clean) > 2 and clean[0] == clean[-1]:
+            clean.pop()
+        return clean
+
+    def current_contour_overlay_polygons(self):
+        if self.current_volume_scope != "part" or self.image_volume is None:
+            return []
+        axis, slice_index = self._active_slice_position()
+        contours_path = self._current_part_contours_path()
+        if not contours_path:
+            return []
+        contours = read_contours_json(contours_path)
+        overlays = []
+        for keyframe in contours.get("keyframes", []) or []:
+            if not isinstance(keyframe, dict):
+                continue
+            if str(keyframe.get("axis", "z")) != axis:
+                continue
+            if self._safe_contour_slice_index(keyframe, None) != int(slice_index):
+                continue
+            polygon = keyframe.get("polygon") or []
+            clean_polygon = self._dedupe_contour_points(polygon)
+            if len(clean_polygon) >= 3:
+                overlays.append({"polygon": clean_polygon, "color": "#FF8C42", "fill_alpha": 30})
+        return overlays
+
+    def finish_part_contour_drag(self, points):
+        if not self.is_part_contour_draw_mode() or self.image_volume is None:
+            return
+        polygon = self._dedupe_contour_points(points)
+        if len(polygon) < 3:
+            message = tt("Contour needs at least 3 points.", self.lang)
+            self.training_status_label.setText(message)
+            self.log(message)
+            return
+        contours, contours_path = self._current_part_contours()
+        if not contours_path:
+            return
+        slice_index = int(self.slice_slider.value())
+        try:
+            contours = add_polygon_keyframe(
+                contours,
+                slice_index,
+                polygon,
+                axis="z",
+                author="taxamask_ui_freehand",
+                source="manual_freehand",
+            )
+            write_contours_json(contours_path, contours)
+            part = self.project.update_part_status(self.current_specimen_id, self.current_part_id, "draft")
+        except Exception as exc:
+            QMessageBox.warning(self, tt("Part extraction", self.lang), str(exc))
+            return
+        self.current_part = part
+        self.part_preview_mask = None
+        self._update_status_labels(self.project.get_specimen(self.current_specimen_id), part=part)
+        self.render_current_slice()
+        message = tt("Contour saved at Z {0}.", self.lang).format(slice_index)
+        self.training_status_label.setText(message)
+        self.log(message)
+
+    def delete_current_part_keyframe(self):
+        if self.current_volume_scope != "part" or self.image_volume is None:
+            QMessageBox.information(self, tt("Part extraction", self.lang), tt("Select a part volume before editing part masks.", self.lang))
+            return
+        if self._current_slice_axis() != "z":
+            QMessageBox.information(self, tt("Part extraction", self.lang), tt("Contour drawing currently uses Z slices.", self.lang))
+            return
+        contours, contours_path = self._current_part_contours()
+        if not contours_path:
+            return
+        slice_index = int(self.slice_slider.value())
+        contours, deleted = delete_keyframe(contours, slice_index, axis="z")
+        if not deleted:
+            message = tt("No contour exists at Z {0}.", self.lang).format(slice_index)
+            self.training_status_label.setText(message)
+            self.log(message)
+            return
+        write_contours_json(contours_path, contours)
+        part = self.project.update_part_status(self.current_specimen_id, self.current_part_id, "draft")
+        self.current_part = part
+        self.part_preview_mask = None
+        self._update_status_labels(self.project.get_specimen(self.current_specimen_id), part=part)
+        self.render_current_slice()
+        message = tt("Deleted contour at Z {0}.", self.lang).format(slice_index)
+        self.training_status_label.setText(message)
+        self.log(message)
+
+    def jump_part_keyframe(self, direction):
+        if self.current_volume_scope != "part" or self.image_volume is None:
+            return
+        if self._current_slice_axis() != "z":
+            QMessageBox.information(self, tt("Part extraction", self.lang), tt("Contour drawing currently uses Z slices.", self.lang))
+            return
+        contours, _contours_path = self._current_part_contours()
+        neighbors = neighboring_keyframe_indices(contours, int(self.slice_slider.value()), axis="z")
+        target = neighbors.get("previous" if direction == "previous" else "next")
+        if target is None:
+            message = tt("No previous key slice." if direction == "previous" else "No next key slice.", self.lang)
+            self.training_status_label.setText(message)
+            self.log(message)
+            return
+        self.slice_slider.setValue(int(target))
+        self.render_current_slice()
+
+    def _part_keyframe_bbox_yx(self):
+        if self.image_volume is None:
+            return []
+        height = int(self.image_volume.shape[1])
+        width = int(self.image_volume.shape[2])
+        y_margin = max(0, int(round(height * 0.18)))
+        x_margin = max(0, int(round(width * 0.18)))
+        return [[y_margin, max(y_margin + 1, height - y_margin)], [x_margin, max(x_margin + 1, width - x_margin)]]
+
+    def add_current_rect_keyframe(self):
+        if self.current_volume_scope != "part" or self.image_volume is None:
+            QMessageBox.information(self, tt("Part extraction", self.lang), tt("Select a part volume before editing part masks.", self.lang))
+            return
+        if self._current_slice_axis() != "z":
+            QMessageBox.information(self, tt("Part extraction", self.lang), tt("Key-slice mask preview currently uses Z slices.", self.lang))
+            return
+        contours_path = self._current_part_contours_path()
+        if not contours_path:
+            return
+        contours = read_contours_json(contours_path)
+        contours = add_rectangular_keyframe(
+            contours,
+            int(self.slice_slider.value()),
+            self._part_keyframe_bbox_yx(),
+            author="taxamask_ui_rect",
+        )
+        write_contours_json(contours_path, contours)
+        part = self.project.update_part_status(self.current_specimen_id, self.current_part_id, "draft")
+        self.current_part = part
+        self.part_preview_mask = None
+        self._clear_volume_preview_cache()
+        self._update_status_labels(self.project.get_specimen(self.current_specimen_id), part=part)
+        self.render_current_slice()
+        message = tt("Added rectangular key slice at Z {0}.", self.lang).format(int(self.slice_slider.value()))
+        self.training_status_label.setText(message)
+        self.log(message)
+
+    def preview_part_mask_from_keyframes(self):
+        if self.current_volume_scope != "part" or self.image_volume is None:
+            QMessageBox.information(self, tt("Part extraction", self.lang), tt("Select a part volume before previewing masks.", self.lang))
+            return
+        contours_path = self._current_part_contours_path()
+        contours = read_contours_json(contours_path)
+        report = validate_contours_for_interpolation(contours, self.image_volume.shape, axis="z")
+        if not report.get("ok"):
+            QMessageBox.warning(self, tt("Part extraction", self.lang), self._format_contour_quality_report(report))
+            return
+        try:
+            self.part_preview_mask = build_preview_mask_from_contours(contours, self.image_volume.shape)
+        except Exception as exc:
+            QMessageBox.warning(self, tt("Part extraction", self.lang), str(exc))
+            return
+        part = self.project.update_part_status(self.current_specimen_id, self.current_part_id, "mask_preview")
+        self.current_part = part
+        self._update_status_labels(self.project.get_specimen(self.current_specimen_id), part=part)
+        self.render_current_slice()
+        quality = self._format_contour_quality_report(report)
+        message = (
+            tt("Preview mask generated from {0} key slice(s).", self.lang).format(len(contours.get("keyframes", [])))
+            + "\n"
+            + tt("Part mask preview quality: {0}", self.lang).format(quality)
+        )
+        self.training_status_label.setText(message)
+        self.log(message)
+
+    def accept_part_mask_preview(self):
+        if self.current_volume_scope != "part" or self.part_preview_mask is None:
+            return
+        part = self.project.get_part(self.current_specimen_id, self.current_part_id, default=None)
+        if part is None:
+            return
+        try:
+            metadata = write_part_mask(self.project, part, self.part_preview_mask)
+            part["mask"].update(
+                {
+                    "shape_zyx": metadata.get("shape_zyx", []),
+                    "dtype": metadata.get("dtype", ""),
+                    "spacing_zyx": metadata.get("spacing_zyx", []),
+                    "spacing_unit": metadata.get("spacing_unit", "micrometer"),
+                    "orientation": metadata.get("orientation", "unknown"),
+                }
+            )
+            part = self.project.update_part_status(self.current_specimen_id, self.current_part_id, "reviewed")
+            self.project.save_project()
+        except Exception as exc:
+            QMessageBox.warning(self, tt("Part extraction", self.lang), str(exc))
+            return
+        self.part_preview_mask = None
+        self._clear_volume_preview_cache()
+        self.current_part = part
+        self._reload_label_volume()
+        self._update_status_labels(self.project.get_specimen(self.current_specimen_id), part=part)
+        self.render_current_slice()
+        message = tt("Accepted part mask.", self.lang)
+        self.training_status_label.setText(message)
+        self.log(message)
+
+    def clear_part_mask_preview(self):
+        self.part_preview_mask = None
+        self._clear_volume_preview_cache()
+        part = self.project.get_part(self.current_specimen_id, self.current_part_id, default=None)
+        if part is not None:
+            self.current_part = part
+            self._update_status_labels(self.project.get_specimen(self.current_specimen_id), part=part)
+        self.render_current_slice()
 
     def import_external_prediction_tif_dialog(self):
         if not self._ensure_tif_project_open():
@@ -1817,6 +3237,19 @@ class TifWorkbenchWidget(QWidget):
         self._section_title_labels[object_name] = (title, title_label)
         return section, layout
 
+    def _make_task_page(self, object_name):
+        scroll = QScrollArea()
+        scroll.setObjectName("tifInspectorScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        body = QWidget()
+        body.setObjectName(object_name)
+        layout = QVBoxLayout(body)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+        scroll.setWidget(body)
+        return scroll, layout
+
     def _build_layout(self):
         self._field_labels = {}
         root = QVBoxLayout(self)
@@ -1876,30 +3309,71 @@ class TifWorkbenchWidget(QWidget):
         right.setMinimumWidth(360)
         right.setMaximumWidth(520)
 
-        right_scroll = QScrollArea()
-        right_scroll.setObjectName("tifInspectorScroll")
-        right_scroll.setWidgetResizable(True)
-        right_scroll.setFrameShape(QFrame.NoFrame)
-        inspector_body = QWidget()
-        inspector_body.setObjectName("tifInspectorBody")
-        inspector_layout = QVBoxLayout(inspector_body)
-        inspector_layout.setContentsMargins(0, 0, 0, 0)
-        inspector_layout.setSpacing(10)
-        right_layout.addWidget(right_scroll, 1)
-        right_scroll.setWidget(inspector_body)
+        self.task_tabs = QTabWidget()
+        self.task_tabs.setObjectName("tifTaskTabs")
+        right_layout.addWidget(self.task_tabs, 1)
+
+        self.part_task_page, self.part_task_layout = self._make_task_page("tifPartTaskPage")
+        self.display_task_page, self.display_task_layout = self._make_task_page("tifDisplayTaskPage")
+        self.annotation_task_page, self.annotation_task_layout = self._make_task_page("tifAnnotationTaskPage")
+        self.training_task_page, self.training_task_layout = self._make_task_page("tifTrainingTaskPage")
+        self.task_tabs.addTab(self.part_task_page, tt("Part", self.lang))
+        self.task_tabs.addTab(self.display_task_page, tt("Display", self.lang))
+        self.task_tabs.addTab(self.annotation_task_page, tt("Annotation", self.lang))
+        self.task_tabs.addTab(self.training_task_page, tt("Train/export", self.lang))
 
         import_section, import_layout = self._make_section("Data import", "tifImportSection")
         import_button_row = QHBoxLayout()
         import_button_row.addWidget(self.btn_import_tif)
         import_button_row.addWidget(self.btn_import_amira)
         import_layout.addLayout(import_button_row)
-        inspector_layout.addWidget(import_section)
+        self.part_task_layout.addWidget(import_section)
 
-        status_section, status_layout = self._make_section("Specimen status", "tifStatusSection")
+        status_section, status_layout = self._make_section("Current object", "tifStatusSection")
         status_layout.addWidget(self.status_label)
         status_layout.addWidget(self.show_debug_paths_check)
         status_layout.addWidget(self.metadata_label)
-        inspector_layout.addWidget(status_section)
+        self.part_task_layout.addWidget(status_section)
+
+        self.part_locate_section, part_locate_layout = self._make_section("1. Locate part", "tifPartLocateSection")
+        part_locate_layout.addWidget(self.part_bbox_edit)
+        part_bbox_row = QHBoxLayout()
+        part_bbox_row.addWidget(self.btn_part_default_bbox)
+        part_bbox_row.addWidget(self.btn_part_draw_roi)
+        part_locate_layout.addLayout(part_bbox_row)
+        part_draft_row = QHBoxLayout()
+        part_draft_row.addWidget(self.btn_save_part_roi)
+        part_draft_row.addWidget(self.btn_confirm_part_roi)
+        part_locate_layout.addLayout(part_draft_row)
+        part_action_row = QHBoxLayout()
+        part_action_row.addWidget(self.btn_create_part)
+        part_action_row.addWidget(self.btn_cancel_part_roi)
+        part_locate_layout.addLayout(part_action_row)
+        self.part_task_layout.addWidget(self.part_locate_section)
+
+        self.part_mask_section, part_mask_layout = self._make_section("2. Build part mask", "tifPartMaskSection")
+        part_key_row = QHBoxLayout()
+        part_key_row.addWidget(self.btn_add_rect_keyframe)
+        part_key_row.addWidget(self.btn_draw_part_contour)
+        part_mask_layout.addLayout(part_key_row)
+        part_key_nav_row = QHBoxLayout()
+        part_key_nav_row.addWidget(self.btn_prev_key_slice)
+        part_key_nav_row.addWidget(self.btn_next_key_slice)
+        part_mask_layout.addLayout(part_key_nav_row)
+        part_key_action_row = QHBoxLayout()
+        part_key_action_row.addWidget(self.btn_delete_part_contour)
+        part_key_action_row.addWidget(self.btn_preview_part_mask)
+        part_mask_layout.addLayout(part_key_action_row)
+        part_mask_row = QHBoxLayout()
+        part_mask_row.addWidget(self.btn_accept_part_mask)
+        part_mask_row.addWidget(self.btn_clear_part_preview)
+        part_mask_layout.addLayout(part_mask_row)
+        self.part_task_layout.addWidget(self.part_mask_section)
+
+        self.part_output_section, part_output_layout = self._make_section("3. Output and manage", "tifPartOutputSection")
+        part_output_layout.addWidget(self.btn_export_part_package)
+        part_output_layout.addWidget(self.btn_delete_part_volume)
+        self.part_task_layout.addWidget(self.part_output_section)
 
         self.slice_display_section, slice_display_layout = self._make_section("Slice display", "tifSliceDisplaySection")
         slice_controls = QGridLayout()
@@ -1916,38 +3390,64 @@ class TifWorkbenchWidget(QWidget):
         slice_controls.addWidget(self.contrast_label, 2, 0)
         slice_controls.addWidget(self.contrast_slider, 2, 1)
         slice_display_layout.addLayout(slice_controls)
-        inspector_layout.addWidget(self.slice_display_section)
+        self.display_task_layout.addWidget(self.slice_display_section)
 
         self.volume_render_section, volume_render_layout = self._make_section("3D rendering", "tifVolumeRenderSection")
         volume_controls = QGridLayout()
         volume_controls.setHorizontalSpacing(10)
         volume_controls.setVerticalSpacing(8)
         self.volume_projection_label = QLabel("Render mode")
+        self.volume_tint_label = QLabel("Transfer function")
+        self.volume_enhancement_label = QLabel("Detail enhancement")
+        self.volume_tone_label = QLabel("Tone curve")
+        self.volume_mask_label = QLabel("Mask display")
+        self.volume_mask_opacity_label = QLabel("Mask opacity")
         self.volume_cutoff_label = QLabel("Density cutoff")
         self.volume_quality_label = QLabel("Render quality")
         self.volume_sample_label = QLabel("Ray samples")
         self.volume_roi_scale_label = QLabel("ROI scale")
+        self.volume_clip_plane_depth_label = QLabel("Clip depth")
         self.volume_inside_label = QLabel("Inside depth")
         self.volume_clip_label = QLabel("Front cut")
         volume_controls.addWidget(self.volume_projection_label, 0, 0)
         volume_controls.addWidget(self.volume_projection_combo, 0, 1)
-        volume_controls.addWidget(self.volume_cutoff_label, 1, 0)
-        volume_controls.addWidget(self.volume_cutoff_slider, 1, 1)
-        volume_controls.addWidget(self.volume_quality_label, 2, 0)
-        volume_controls.addWidget(self.volume_quality_slider, 2, 1)
-        volume_controls.addWidget(self.volume_sample_label, 3, 0)
-        volume_controls.addWidget(self.volume_sample_slider, 3, 1)
-        volume_controls.addWidget(self.volume_clarity_check, 4, 0, 1, 2)
-        volume_controls.addWidget(self.volume_roi_detail_check, 5, 0, 1, 2)
-        volume_controls.addWidget(self.volume_roi_scale_label, 6, 0)
-        volume_controls.addWidget(self.volume_roi_scale_slider, 6, 1)
-        volume_controls.addWidget(self.volume_inside_label, 7, 0)
-        volume_controls.addWidget(self.volume_inside_slider, 7, 1)
-        volume_controls.addWidget(self.volume_clip_label, 8, 0)
-        volume_controls.addWidget(self.volume_clip_slider, 8, 1)
+        volume_controls.addWidget(self.volume_tint_label, 1, 0)
+        color_row = QHBoxLayout()
+        color_row.addWidget(self.volume_tint_combo, 1)
+        color_row.addWidget(self.btn_volume_custom_color)
+        volume_controls.addLayout(color_row, 1, 1)
+        self.volume_transfer_opacity_label = QLabel("Density opacity")
+        volume_controls.addWidget(self.volume_transfer_opacity_label, 2, 0)
+        volume_controls.addWidget(self.volume_transfer_opacity_slider, 2, 1)
+        volume_controls.addWidget(self.volume_enhancement_label, 3, 0)
+        volume_controls.addWidget(self.volume_enhancement_slider, 3, 1)
+        volume_controls.addWidget(self.volume_tone_label, 4, 0)
+        volume_controls.addWidget(self.volume_tone_slider, 4, 1)
+        volume_controls.addWidget(self.volume_mask_label, 5, 0)
+        volume_controls.addWidget(self.volume_mask_combo, 5, 1)
+        volume_controls.addWidget(self.volume_mask_opacity_label, 6, 0)
+        volume_controls.addWidget(self.volume_mask_opacity_slider, 6, 1)
+        volume_controls.addWidget(self.volume_cutoff_label, 7, 0)
+        volume_controls.addWidget(self.volume_cutoff_slider, 7, 1)
+        volume_controls.addWidget(self.volume_quality_label, 8, 0)
+        volume_controls.addWidget(self.volume_quality_slider, 8, 1)
+        volume_controls.addWidget(self.volume_sample_label, 9, 0)
+        volume_controls.addWidget(self.volume_sample_slider, 9, 1)
+        volume_controls.addWidget(self.volume_clarity_check, 10, 0, 1, 2)
+        volume_controls.addWidget(self.volume_surface_refine_check, 11, 0, 1, 2)
+        volume_controls.addWidget(self.volume_roi_detail_check, 12, 0, 1, 2)
+        volume_controls.addWidget(self.volume_roi_scale_label, 13, 0)
+        volume_controls.addWidget(self.volume_roi_scale_slider, 13, 1)
+        volume_controls.addWidget(self.volume_clip_plane_check, 14, 0, 1, 2)
+        volume_controls.addWidget(self.volume_clip_plane_depth_label, 15, 0)
+        volume_controls.addWidget(self.volume_clip_plane_depth_slider, 15, 1)
+        volume_controls.addWidget(self.volume_inside_label, 16, 0)
+        volume_controls.addWidget(self.volume_inside_slider, 16, 1)
+        volume_controls.addWidget(self.volume_clip_label, 17, 0)
+        volume_controls.addWidget(self.volume_clip_slider, 17, 1)
         volume_render_layout.addLayout(volume_controls)
         volume_render_layout.addWidget(self.btn_reset_volume_view)
-        inspector_layout.addWidget(self.volume_render_section)
+        self.display_task_layout.addWidget(self.volume_render_section)
 
         self.annotation_section, annotation_layout = self._make_section("Annotation tools", "tifAnnotationSection")
         controls = QGridLayout()
@@ -1968,7 +3468,7 @@ class TifWorkbenchWidget(QWidget):
         annotation_layout.addWidget(self.btn_save_edit)
         annotation_layout.addWidget(self.btn_promote)
         annotation_layout.addWidget(self.btn_copy_draft)
-        inspector_layout.addWidget(self.annotation_section)
+        self.annotation_task_layout.addWidget(self.annotation_section)
 
         material_section, material_layout = self._make_section("Material map", "tifMaterialSection")
         material_button_row = QHBoxLayout()
@@ -1977,7 +3477,7 @@ class TifWorkbenchWidget(QWidget):
         material_button_row.addWidget(self.btn_delete_material)
         material_layout.addLayout(material_button_row)
         material_layout.addWidget(self.material_table)
-        inspector_layout.addWidget(material_section)
+        self.annotation_task_layout.addWidget(material_section)
 
         training_section, training_layout = self._make_section("Model training", "tifTrainingSection")
         training_layout.addWidget(self.btn_export_training)
@@ -1988,7 +3488,7 @@ class TifWorkbenchWidget(QWidget):
         training_layout.addLayout(backend_button_row)
         training_layout.addWidget(self.btn_import_external_prediction_tif)
         training_layout.addWidget(self.training_status_label)
-        inspector_layout.addWidget(training_section)
+        self.training_task_layout.addWidget(training_section)
 
         backend_section, backend_layout = self._make_section("Model configuration", "tifBackendSection")
         backend_form = QFormLayout()
@@ -2012,12 +3512,15 @@ class TifWorkbenchWidget(QWidget):
         backend_form.addRow(self.backend_manifest_label, self.backend_manifest_edit)
         backend_layout.addLayout(backend_form)
         backend_layout.addWidget(self.btn_save_backend)
-        inspector_layout.addWidget(backend_section)
+        self.training_task_layout.addWidget(backend_section)
 
         log_section, log_layout = self._make_section("Workbench log", "tifLogSection")
         log_layout.addWidget(self.log_console)
-        inspector_layout.addWidget(log_section)
-        inspector_layout.addStretch(1)
+        self.training_task_layout.addWidget(log_section)
+        self.part_task_layout.addStretch(1)
+        self.display_task_layout.addStretch(1)
+        self.annotation_task_layout.addStretch(1)
+        self.training_task_layout.addStretch(1)
         splitter.addWidget(right)
 
         splitter.setSizes([230, 900, 420])
@@ -2042,6 +3545,7 @@ class TifWorkbenchWidget(QWidget):
                 border: none;
             }
             QFrame#tifImportSection,
+            QFrame#tifPartExtractionSection,
             QFrame#tifSliceDisplaySection,
             QFrame#tifVolumeRenderSection,
             QFrame#tifAnnotationSection,
@@ -2103,7 +3607,7 @@ class TifWorkbenchWidget(QWidget):
                 border: 1px solid #2B363B;
                 border-radius: 12px;
             }
-            QListWidget#tifSpecimenList,
+            QTreeWidget#tifSpecimenList,
             QTableWidget#tifMaterialTable {
                 background: #111619;
                 alternate-background-color: #171D20;
@@ -2114,7 +3618,7 @@ class TifWorkbenchWidget(QWidget):
                 selection-color: #F4FAFC;
             }
             QTableWidget#tifMaterialTable::item,
-            QListWidget#tifSpecimenList::item {
+            QTreeWidget#tifSpecimenList::item {
                 min-height: 24px;
                 padding: 4px;
                 border: none;
@@ -2276,6 +3780,10 @@ class TifWorkbenchWidget(QWidget):
         if hasattr(self, "volume_still_timer"):
             self.volume_still_timer.stop()
         self.working_edit_dirty = False
+        self.current_volume_scope = "full"
+        self.current_part_id = ""
+        self.current_part = None
+        self.part_preview_mask = None
         self.undo_stack = []
         self.redo_stack = []
         self.canvas.clear()
@@ -2350,22 +3858,39 @@ class TifWorkbenchWidget(QWidget):
 
     def refresh_project(self):
         previous_id = self.current_specimen_id
+        previous_scope = self.current_volume_scope
+        previous_part_id = self.current_part_id
+        self.specimen_list.blockSignals(True)
         self.specimen_list.clear()
         for specimen in self.project.project_data.get("specimens", []):
-            item = QListWidgetItem(self._format_specimen_label(specimen))
-            item.setData(Qt.UserRole, specimen.get("specimen_id", ""))
-            self.specimen_list.addItem(item)
+            specimen_id = specimen.get("specimen_id", "")
+            parent = QTreeWidgetItem([self._format_specimen_label(specimen)])
+            parent.setData(0, Qt.UserRole, {"scope": "full", "specimen_id": specimen_id, "part_id": ""})
+            parent.setExpanded(True)
+
+            full_item = QTreeWidgetItem([tt("Full volume", self.lang)])
+            full_item.setData(0, Qt.UserRole, {"scope": "full", "specimen_id": specimen_id, "part_id": ""})
+            parent.addChild(full_item)
+
+            for part in specimen.get("parts", []) or []:
+                label = self._format_part_label(part)
+                part_item = QTreeWidgetItem([label])
+                part_item.setData(
+                    0,
+                    Qt.UserRole,
+                    {"scope": "part", "specimen_id": specimen_id, "part_id": part.get("part_id", "")},
+                )
+                parent.addChild(part_item)
+            self.specimen_list.addTopLevelItem(parent)
+        self.specimen_list.blockSignals(False)
         if self.specimen_list.count():
-            target_row = 0
-            if previous_id:
-                for row in range(self.specimen_list.count()):
-                    item = self.specimen_list.item(row)
-                    if item and item.data(Qt.UserRole) == previous_id:
-                        target_row = row
-                        break
-            self.specimen_list.setCurrentRow(target_row)
+            if not self._select_volume_tree_item(previous_id, previous_scope, previous_part_id):
+                self._select_volume_tree_item("", "full", "")
         else:
             self.current_specimen_id = ""
+            self.current_volume_scope = "full"
+            self.current_part_id = ""
+            self.current_part = None
             self.canvas.setText(tt("No specimens in this TIF project", self.lang))
             self.status_label.setText("")
             self.metadata_label.setText("")
@@ -2375,7 +3900,50 @@ class TifWorkbenchWidget(QWidget):
         train = tt("train-ready", self.lang) if specimen.get("train_ready") else tt("not train-ready", self.lang)
         return f"{specimen.get('display_name') or specimen.get('specimen_id')} ({status}, {train})"
 
-    def _on_specimen_selected(self, current, previous=None):
+    def _format_part_label(self, part):
+        status = str((part or {}).get("status", "draft") or "draft")
+        name = str((part or {}).get("display_name") or (part or {}).get("part_id") or tt("Part volume", self.lang))
+        return f"{name} ({status})"
+
+    def _tree_item_payload(self, item):
+        payload = item.data(0, Qt.UserRole) if item is not None else {}
+        if isinstance(payload, dict):
+            return {
+                "scope": payload.get("scope", "full"),
+                "specimen_id": payload.get("specimen_id", ""),
+                "part_id": payload.get("part_id", ""),
+            }
+        return {"scope": "full", "specimen_id": str(payload or ""), "part_id": ""}
+
+    def _select_volume_tree_item(self, specimen_id="", scope="full", part_id=""):
+        target_specimen = str(specimen_id or "").strip()
+        target_scope = "part" if scope == "part" else "full"
+        target_part = str(part_id or "").strip()
+        fallback = None
+        for row in range(self.specimen_list.topLevelItemCount()):
+            parent = self.specimen_list.topLevelItem(row)
+            if parent is None:
+                continue
+            parent_payload = self._tree_item_payload(parent)
+            if fallback is None:
+                fallback = parent.child(0) or parent
+            if target_specimen and parent_payload.get("specimen_id") != target_specimen:
+                continue
+            if target_scope == "full":
+                self.specimen_list.setCurrentItem(parent.child(0) or parent)
+                return True
+            for child_index in range(parent.childCount()):
+                child = parent.child(child_index)
+                payload = self._tree_item_payload(child)
+                if payload.get("scope") == "part" and payload.get("part_id") == target_part:
+                    self.specimen_list.setCurrentItem(child)
+                    return True
+        if fallback is not None and not target_specimen:
+            self.specimen_list.setCurrentItem(fallback)
+            return True
+        return False
+
+    def _on_specimen_tree_selected(self, current, previous=None):
         if current is None:
             return
         if self._loading_specimen:
@@ -2388,8 +3956,12 @@ class TifWorkbenchWidget(QWidget):
                 finally:
                     self._loading_specimen = False
                 return
-        specimen_id = current.data(Qt.UserRole)
-        self.load_specimen(specimen_id)
+        payload = self._tree_item_payload(current)
+        specimen_id = payload.get("specimen_id", "")
+        if payload.get("scope") == "part":
+            self.load_part(specimen_id, payload.get("part_id", ""))
+        else:
+            self.load_specimen(specimen_id)
 
     def load_specimen(self, specimen_id):
         if specimen_id != self.current_specimen_id and self.working_edit_dirty:
@@ -2402,6 +3974,19 @@ class TifWorkbenchWidget(QWidget):
         try:
             self.auto_save_timer.stop()
             self.current_specimen_id = specimen_id
+            self.current_volume_scope = "full"
+            self.current_part_id = ""
+            self.current_part = None
+            self.part_preview_mask = None
+            self.active_part_roi_id = ""
+            self.part_roi_draw_mode = False
+            self.part_contour_draw_mode = False
+            self.btn_part_draw_roi.blockSignals(True)
+            self.btn_part_draw_roi.setChecked(False)
+            self.btn_part_draw_roi.blockSignals(False)
+            self.btn_draw_part_contour.blockSignals(True)
+            self.btn_draw_part_contour.setChecked(False)
+            self.btn_draw_part_contour.blockSignals(False)
             self.image_volume = None
             self.label_volume = None
             self.edit_volume = None
@@ -2435,9 +4020,85 @@ class TifWorkbenchWidget(QWidget):
                     for item in self.material_map.get("materials", [])
                 }
             self._populate_material_table()
+            self._populate_volume_tint_combo()
+            self._apply_volume_transfer_opacity_setting()
+            self._populate_volume_mask_combo()
             self._reload_label_volume()
             self._load_edit_volume()
             self._update_status_labels(specimen)
+            self._apply_default_volume_mask_mode()
+            self._sync_mode_sections()
+            self.render_current_slice()
+            if self.display_mode == "volume":
+                self.render_volume_preview()
+        finally:
+            self._loading_specimen = False
+
+    def load_part(self, specimen_id, part_id):
+        if self.working_edit_dirty:
+            if not self._confirm_discard_or_save_working_edit():
+                return
+        specimen = self.project.get_specimen(specimen_id, default=None)
+        part = self.project.get_part(specimen_id, part_id, default=None)
+        if specimen is None or part is None:
+            return
+        self._loading_specimen = True
+        try:
+            self.auto_save_timer.stop()
+            self.current_specimen_id = specimen_id
+            self.current_volume_scope = "part"
+            self.current_part_id = part.get("part_id", "")
+            self.current_part = part
+            self.active_part_roi_id = ""
+            self.part_roi_draw_mode = False
+            self.part_contour_draw_mode = False
+            self.btn_part_draw_roi.blockSignals(True)
+            self.btn_part_draw_roi.setChecked(False)
+            self.btn_part_draw_roi.blockSignals(False)
+            self.btn_draw_part_contour.blockSignals(True)
+            self.btn_draw_part_contour.setChecked(False)
+            self.btn_draw_part_contour.blockSignals(False)
+            self.image_volume = None
+            self.label_volume = None
+            self.edit_volume = None
+            self.working_edit_dirty = False
+            self._dirty_edit_slices = set()
+            self.material_map = {}
+            self.material_colors = {}
+            self.part_preview_mask = None
+            self._clear_volume_preview_cache()
+            self.undo_stack = []
+            self.redo_stack = []
+
+            image_path = self.project.to_absolute((part.get("image") or {}).get("path", ""))
+            if image_path and volume_sidecar_exists(image_path):
+                self.image_volume = load_volume_sidecar(image_path, mmap_mode="r")
+                self._slice_positions = {
+                    "z": max(0, min(int(self.slice_slider.value()), int(self.image_volume.shape[0]) - 1)),
+                    "y": max(0, int(self.image_volume.shape[1]) // 2),
+                    "x": max(0, int(self.image_volume.shape[2]) // 2),
+                }
+                self._configure_slice_slider_for_axis(self._current_slice_axis(), preserve_position=True)
+                self._reset_canvas_view_on_next_render = True
+            else:
+                self.slice_slider.setRange(0, 0)
+                self.canvas.reset_view()
+
+            material_path = self.project.to_absolute(specimen.get("material_map", ""))
+            if material_path and os.path.exists(material_path):
+                self.material_map = read_material_map(material_path)
+                self.material_colors = {
+                    int(item["id"]): QColor(str(item.get("color", "#000000")))
+                    for item in self.material_map.get("materials", [])
+                }
+            self._populate_material_table()
+            self._populate_volume_tint_combo()
+            self._apply_volume_transfer_opacity_setting()
+            self._reload_label_volume()
+            self._load_edit_volume()
+            self._update_status_labels(specimen, part=part)
+            self._apply_default_volume_mask_mode()
+            self._sync_mode_sections()
             self.render_current_slice()
             if self.display_mode == "volume":
                 self.render_volume_preview()
@@ -2478,6 +4139,8 @@ class TifWorkbenchWidget(QWidget):
         return None
 
     def _material_map_path(self):
+        if self.current_volume_scope == "part":
+            return ""
         specimen = self.project.get_specimen(self.current_specimen_id, default=None)
         if specimen is None:
             return ""
@@ -2495,11 +4158,15 @@ class TifWorkbenchWidget(QWidget):
         specimen = self.project.get_specimen(self.current_specimen_id, default=None)
         if specimen is not None:
             self._update_status_labels(specimen)
-        self._populate_material_table()
+            self._populate_material_table()
+            self._populate_volume_tint_combo()
         self.render_current_slice()
 
     def add_material(self):
         if not self.current_specimen_id:
+            return
+        if self.current_volume_scope == "part":
+            QMessageBox.information(self, tt("Material map", self.lang), tt("Part volumes inherit the parent specimen material map. Switch to Full volume to edit materials.", self.lang))
             return
         dialog = MaterialEditorDialog(next_id=next_material_id(self.material_map), parent=self, lang=self.lang)
         if dialog.exec() != QDialog.Accepted:
@@ -2511,6 +4178,9 @@ class TifWorkbenchWidget(QWidget):
             QMessageBox.warning(self, tt("Material map", self.lang), str(exc))
 
     def edit_selected_material(self):
+        if self.current_volume_scope == "part":
+            QMessageBox.information(self, tt("Material map", self.lang), tt("Part volumes inherit the parent specimen material map. Switch to Full volume to edit materials.", self.lang))
+            return
         material = self._selected_material()
         if material is None:
             return
@@ -2524,6 +4194,9 @@ class TifWorkbenchWidget(QWidget):
             QMessageBox.warning(self, tt("Material map", self.lang), str(exc))
 
     def delete_selected_material(self):
+        if self.current_volume_scope == "part":
+            QMessageBox.information(self, tt("Material map", self.lang), tt("Part volumes inherit the parent specimen material map. Switch to Full volume to edit materials.", self.lang))
+            return
         material = self._selected_material()
         if material is None:
             return
@@ -2589,9 +4262,16 @@ class TifWorkbenchWidget(QWidget):
             self.current_material_id = 0
 
     def _reload_label_volume(self):
-        specimen = self.project.get_specimen(self.current_specimen_id, default=None)
         self.label_volume = None
         self._update_label_role_help()
+        if self.current_volume_scope == "part":
+            part = self.project.get_part(self.current_specimen_id, self.current_part_id, default=None)
+            mask_path = self.project.to_absolute(((part or {}).get("mask") or {}).get("path", ""))
+            if mask_path and volume_sidecar_exists(mask_path):
+                self.label_volume = load_volume_sidecar(mask_path, mmap_mode="r")
+            self.render_current_slice()
+            return
+        specimen = self.project.get_specimen(self.current_specimen_id, default=None)
         if specimen is None:
             return
         role = self.label_role_combo.currentData()
@@ -2608,6 +4288,9 @@ class TifWorkbenchWidget(QWidget):
         self.render_current_slice()
 
     def _load_edit_volume(self):
+        if self.current_volume_scope == "part":
+            self.edit_volume = None
+            return
         specimen = self.project.get_specimen(self.current_specimen_id, default=None)
         self.edit_volume = None
         if specimen is None:
@@ -2617,6 +4300,8 @@ class TifWorkbenchWidget(QWidget):
             self.edit_volume = load_volume_sidecar(edit_path, mmap_mode="c")
 
     def _ensure_working_edit_volume(self):
+        if self.current_volume_scope == "part":
+            return False
         specimen = self.project.get_specimen(self.current_specimen_id, default=None)
         if specimen is None:
             return False
@@ -2665,15 +4350,66 @@ class TifWorkbenchWidget(QWidget):
     def _on_show_debug_paths_toggled(self, checked=False):
         specimen = self.project.get_specimen(self.current_specimen_id, default=None) if self.current_specimen_id else None
         if specimen is not None:
-            self._update_status_labels(specimen)
+            self._update_status_labels(specimen, part=self.current_part if self.current_volume_scope == "part" else None)
 
-    def _update_status_labels(self, specimen):
+    def _set_scope_controls_enabled(self):
+        is_part = self.current_volume_scope == "part"
+        has_image = self.image_volume is not None
+        for widget in (
+            self.label_role_combo,
+            self.brush_size_slider,
+            self.btn_undo,
+            self.btn_redo,
+            self.btn_save_edit,
+            self.btn_promote,
+            self.btn_copy_draft,
+            self.btn_export_training,
+            self.btn_prepare_dataset,
+            self.btn_train_backend,
+            self.btn_import_prediction,
+            self.btn_import_external_prediction_tif,
+        ):
+            widget.setEnabled(not is_part)
+        self.auto_save_check.setEnabled(not is_part)
+        self.btn_add_material.setEnabled(not is_part)
+        self.btn_edit_material.setEnabled(not is_part)
+        self.btn_delete_material.setEnabled(not is_part)
+        self.part_bbox_edit.setEnabled(not is_part and has_image)
+        self.btn_part_default_bbox.setEnabled(not is_part and has_image)
+        self.btn_part_draw_roi.setEnabled(not is_part and has_image and self.display_mode == "slice")
+        self.btn_save_part_roi.setEnabled(not is_part and has_image)
+        self.btn_confirm_part_roi.setEnabled(not is_part and has_image)
+        self.btn_cancel_part_roi.setEnabled(not is_part)
+        self.btn_create_part.setEnabled(not is_part and has_image)
+        self.btn_add_rect_keyframe.setEnabled(is_part and has_image)
+        contour_enabled = is_part and has_image and self.display_mode == "slice" and self._current_slice_axis() == "z"
+        self.btn_draw_part_contour.setEnabled(contour_enabled)
+        self.btn_delete_part_contour.setEnabled(contour_enabled)
+        self.btn_prev_key_slice.setEnabled(contour_enabled)
+        self.btn_next_key_slice.setEnabled(contour_enabled)
+        self.btn_preview_part_mask.setEnabled(is_part and has_image)
+        self.btn_accept_part_mask.setEnabled(is_part and self.part_preview_mask is not None)
+        self.btn_clear_part_preview.setEnabled(is_part and self.part_preview_mask is not None)
+        self.btn_export_part_package.setEnabled(is_part and has_image)
+        self.btn_delete_part_volume.setEnabled(is_part and self.current_part is not None)
+
+    def _update_status_labels(self, specimen, part=None):
+        self._set_scope_controls_enabled()
         readiness = self.project.evaluate_train_ready(specimen.get("specimen_id"))
-        self.status_label.setText(
-            f"{tt('Status', self.lang)}: {specimen.get('review_status', 'not_started')}\n"
-            f"{tt('Train-ready', self.lang)}: {tt('yes', self.lang) if readiness['train_ready'] else tt('no', self.lang)}\n"
-            f"{tt('Reasons', self.lang)}: {', '.join(readiness['reasons']) if readiness['reasons'] else '-'}"
-        )
+        if part is not None:
+            self.status_label.setText(
+                f"{tt('Current view', self.lang)}: {tt('Part volume', self.lang)}\n"
+                f"{tt('Part', self.lang)}: {part.get('display_name') or part.get('part_id')}\n"
+                f"{tt('Status', self.lang)}: {part.get('status', 'draft')}\n"
+                f"{tt('Parent specimen', self.lang)}: {specimen.get('display_name') or specimen.get('specimen_id')}"
+            )
+        else:
+            self.status_label.setText(
+                f"{tt('Current view', self.lang)}: {tt('Full volume', self.lang)}\n"
+                f"{tt('Status', self.lang)}: {specimen.get('review_status', 'not_started')}\n"
+                f"{tt('Train-ready', self.lang)}: {tt('yes', self.lang) if readiness['train_ready'] else tt('no', self.lang)}\n"
+                f"{tt('Reasons', self.lang)}: {', '.join(readiness['reasons']) if readiness['reasons'] else '-'}"
+            )
         working = specimen.get("working_volume") or {}
         labels = specimen.get("labels") or {}
         model_drafts = labels.get("model_drafts") or []
@@ -2688,12 +4424,30 @@ class TifWorkbenchWidget(QWidget):
             self._format_tif_path_line("Material map", specimen.get("material_map", "")),
             self._format_tif_path_line("Import report", working.get("import_report", "")),
         ]
-        metadata_lines = [
-            f"{tt('Shape Z/Y/X', self.lang)}: {working.get('shape_zyx', [])}",
-            f"{tt('dtype', self.lang)}: {working.get('dtype', '')}",
-            f"{tt('spacing Z/Y/X', self.lang)}: {working.get('spacing_zyx', [])} {working.get('spacing_unit', '')}",
-            f"{tt('modality', self.lang)}: {specimen.get('modality', 'unknown')}",
-        ]
+        if part is not None:
+            part_image = part.get("image") or {}
+            part_mask = part.get("mask") or {}
+            path_lines = [
+                self._format_tif_path_line("Part image", part_image.get("path", "")),
+                self._format_tif_path_line("Part mask", part_mask.get("path", "")),
+                self._format_tif_path_line("Contours", part.get("contours_path", "")),
+                self._format_tif_path_line("Extraction", part.get("extraction_path", "")),
+                self._format_tif_path_line("Parent working volume", working.get("path", "")),
+            ]
+            metadata_lines = [
+                f"{tt('Shape Z/Y/X', self.lang)}: {part_image.get('shape_zyx', [])}",
+                f"{tt('dtype', self.lang)}: {part_image.get('dtype', '')}",
+                f"{tt('spacing Z/Y/X', self.lang)}: {part_image.get('spacing_zyx', [])} {part_image.get('spacing_unit', '')}",
+                f"{tt('Parent bbox Z/Y/X', self.lang)}: {part.get('parent_bbox_zyx', [])}",
+                f"{tt('modality', self.lang)}: {specimen.get('modality', 'unknown')}",
+            ]
+        else:
+            metadata_lines = [
+                f"{tt('Shape Z/Y/X', self.lang)}: {working.get('shape_zyx', [])}",
+                f"{tt('dtype', self.lang)}: {working.get('dtype', '')}",
+                f"{tt('spacing Z/Y/X', self.lang)}: {working.get('spacing_zyx', [])} {working.get('spacing_unit', '')}",
+                f"{tt('modality', self.lang)}: {specimen.get('modality', 'unknown')}",
+            ]
         if self.show_debug_paths_check.isChecked():
             metadata_lines.extend(["", *path_lines])
         self.metadata_label.setText("\n".join(metadata_lines))
@@ -2714,6 +4468,8 @@ class TifWorkbenchWidget(QWidget):
             label_slice = self._extract_axis_slice(self.label_volume, axis, slice_index)
         if self.label_role_combo.currentData() == "working_edit" and self.edit_volume is not None and self.edit_volume.shape == self.image_volume.shape:
             label_slice = self._extract_axis_slice(self.edit_volume, axis, slice_index)
+        if self.current_volume_scope == "part" and self.part_preview_mask is not None and self.part_preview_mask.shape == self.image_volume.shape:
+            label_slice = self._extract_axis_slice(self.part_preview_mask, axis, slice_index)
         pixmap = self._render_slice_pixmap(image_slice, label_slice)
         reset_view = bool(getattr(self, "_reset_canvas_view_on_next_render", False))
         self._reset_canvas_view_on_next_render = False
@@ -2747,21 +4503,32 @@ class TifWorkbenchWidget(QWidget):
         if self.image_volume is None:
             return ""
         stats_text = self._volume_stats_text()
-        return (
-            f"{tt('Volume view', self.lang)} | "
-            f"{self._volume_renderer_label()} | "
-            f"{self._volume_mode_label()} | "
-            f"{tt('Mode', self.lang)} {self._volume_projection_label()} | "
-            f"{tt('Texture', self.lang)} {self._active_volume_target_dim()} | "
-            f"{tt('Samples', self.lang)} {self._active_volume_sample_count()} | "
-            f"{tt('ROI', self.lang)} {self._active_volume_roi_scale():.1f}x | "
-            f"{tt('Inside', self.lang)} {int(self.volume_inside_slider.value())}% | "
-            f"{tt('Cut', self.lang)} {int(self.volume_clip_slider.value())}% | "
-            f"{tt('Zoom', self.lang)} {int(round(self._volume_zoom * 100))}%"
-            f" | {tt('Pan X', self.lang)} {int(round(self._volume_pan_x * 100))}%"
-            f" | {tt('Pan Y', self.lang)} {int(round(self._volume_pan_y * 100))}%"
-            + (f" | {stats_text}" if stats_text else "")
+        parts = [
+            tt("Volume view", self.lang),
+            self._volume_renderer_label(),
+            self._volume_mode_label(),
+            f"{tt('Mode', self.lang)} {self._volume_projection_label()}",
+            f"{tt('Transfer function', self.lang)} {self._volume_transfer_label()}",
+            f"{tt('Mask display', self.lang)} {self._volume_mask_label_text()}",
+            f"{tt('Detail enhancement', self.lang)} {int(self.volume_enhancement_slider.value())}%",
+            f"{tt('Texture', self.lang)} {self._active_volume_target_dim()}",
+            f"{tt('Samples', self.lang)} {self._active_volume_sample_count()}",
+            f"{tt('ROI', self.lang)} {self._active_volume_roi_scale():.1f}x",
+        ]
+        if self.volume_clip_plane_check.isChecked():
+            parts.append(f"{tt('Clip plane', self.lang)} {int(self.volume_clip_plane_depth_slider.value())}%")
+        parts.extend(
+            [
+                f"{tt('Inside', self.lang)} {int(self.volume_inside_slider.value())}%",
+                f"{tt('Cut', self.lang)} {int(self.volume_clip_slider.value())}%",
+                f"{tt('Zoom', self.lang)} {int(round(self._volume_zoom * 100))}%",
+                f"{tt('Pan X', self.lang)} {int(round(self._volume_pan_x * 100))}%",
+                f"{tt('Pan Y', self.lang)} {int(round(self._volume_pan_y * 100))}%",
+            ]
         )
+        if stats_text:
+            parts.append(stats_text)
+        return " | ".join(parts)
 
     def _volume_mode_label(self):
         return tt("Drag preview", self.lang) if self._volume_render_mode == "drag" else tt("Still high quality", self.lang)
@@ -2782,6 +4549,65 @@ class TifWorkbenchWidget(QWidget):
             "surface": "Surface",
         }
         return tt(labels.get(self._volume_projection_mode(), "Composite"), self.lang)
+
+    def _volume_mask_mode(self):
+        if hasattr(self, "volume_mask_combo"):
+            mode = self.volume_mask_combo.currentData()
+            if mode in {"image_only", "mask_boundary", "masked_image"}:
+                return mode
+        return "image_only"
+
+    def _volume_mask_label_text(self):
+        labels = {
+            "image_only": "Image only",
+            "mask_boundary": "Mask boundary",
+            "masked_image": "Masked image",
+        }
+        return tt(labels.get(self._volume_mask_mode(), "Image only"), self.lang)
+
+    def _volume_transfer_label(self):
+        labels = {
+            "amber": "Amber",
+            "cyan": "Cyan",
+            "white": "White",
+            "custom": "Custom",
+        }
+        return tt(labels.get(self._volume_transfer_preset(), "Amber"), self.lang)
+
+    def _volume_transfer_opacity(self, mode=None):
+        value = 100
+        if hasattr(self, "volume_transfer_opacity_slider"):
+            value = int(self.volume_transfer_opacity_slider.value())
+        render_mode = "drag" if mode == "drag" else self._volume_render_mode
+        base = 0.72 if self._volume_clarity_mode and render_mode == "still" else (1.0 if render_mode == "still" else 0.82)
+        return max(0.05, min(1.4, base * (float(value) / 100.0)))
+
+    def _volume_detail_enhancement(self, mode=None):
+        if mode == "drag":
+            return 0.0
+        value = int(self.volume_enhancement_slider.value()) if hasattr(self, "volume_enhancement_slider") else 0
+        return max(0.0, min(1.0, float(value) / 100.0))
+
+    def _volume_tone_gamma(self):
+        value = int(self.volume_tone_slider.value()) if hasattr(self, "volume_tone_slider") else 100
+        return max(0.65, min(1.35, float(value) / 100.0))
+
+    def _volume_clip_plane_normal(self):
+        try:
+            yaw = math.radians(float(self._volume_yaw))
+            pitch = math.radians(float(self._volume_pitch))
+            cy, sy = math.cos(yaw), math.sin(yaw)
+            cp, sp = math.cos(pitch), math.sin(pitch)
+            rot_yaw = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]], dtype=np.float32)
+            rot_pitch = np.array([[1.0, 0.0, 0.0], [0.0, cp, -sp], [0.0, sp, cp]], dtype=np.float32)
+            direction = (rot_yaw @ rot_pitch).T @ np.asarray((0.0, 0.0, 1.0), dtype=np.float32)
+            length = float(np.linalg.norm(direction))
+            if not np.isfinite(length) or length <= 1e-6:
+                return (0.0, 0.0, 1.0)
+            direction = direction / length
+            return tuple(float(value) for value in direction)
+        except Exception:
+            return (0.0, 0.0, 1.0)
 
     def _active_volume_roi_scale(self):
         if self._volume_canvas_renderer != "gpu" or self._volume_render_mode != "still":
@@ -2815,6 +4641,31 @@ class TifWorkbenchWidget(QWidget):
         projection = str(stats.get("projection_mode") or "")
         if projection:
             parts.append(f"{tt('Mode', self.lang)} {self._volume_projection_label()}")
+        transfer = str(stats.get("transfer_preset") or "")
+        if transfer:
+            parts.append(f"{tt('Transfer function', self.lang)} {tt(transfer.capitalize(), self.lang)}")
+        transfer_opacity = stats.get("transfer_opacity")
+        if transfer_opacity is not None:
+            try:
+                parts.append(f"{tt('Density opacity', self.lang)} {int(round(float(transfer_opacity) * 100))}%")
+            except (TypeError, ValueError):
+                pass
+        mask_mode = str(stats.get("mask_mode") or "")
+        if mask_mode and mask_mode != "image_only":
+            parts.append(f"{tt('Mask display', self.lang)} {self._volume_mask_label_text()}")
+        enhancement = stats.get("enhancement")
+        if enhancement is not None:
+            try:
+                value = int(round(float(enhancement) * 100))
+                if value > 0:
+                    parts.append(f"{tt('Detail enhancement', self.lang)} {value}%")
+            except (TypeError, ValueError):
+                pass
+        if stats.get("clip_plane_enabled"):
+            try:
+                parts.append(f"{tt('Clip plane', self.lang)} {int(round(float(stats.get('clip_plane_depth') or 0.0) * 100))}%")
+            except (TypeError, ValueError):
+                parts.append(tt("Clip plane", self.lang))
         supersample = float(stats.get("supersample_scale") or 1.0)
         if supersample > 1.01:
             parts.append(f"{tt('ROI', self.lang)} {supersample:.1f}x")
@@ -2827,7 +4678,53 @@ class TifWorkbenchWidget(QWidget):
             parts.append(f"{tt('Upload', self.lang)} {upload_ms:.0f} ms")
         if draw_ms > 0:
             parts.append(f"{tt('Draw', self.lang)} {draw_ms:.1f} ms")
+        diagnosis = self._volume_performance_diagnosis(stats)
+        if diagnosis:
+            parts.append(diagnosis)
         return " | ".join(parts)
+
+    def _volume_performance_diagnosis(self, stats=None):
+        stats = dict(stats or getattr(self, "_volume_last_stats", {}) or {})
+        if self._volume_canvas_renderer != "gpu":
+            if self._volume_renderer_warning:
+                return tt("GPU fallback active", self.lang)
+            return ""
+        byte_count = int(stats.get("bytes") or 0)
+        upload_ms = float(stats.get("upload_ms") or 0.0)
+        draw_ms = float(stats.get("draw_ms") or 0.0)
+        if upload_ms >= 1200.0:
+            return tt("bottleneck: texture upload", self.lang)
+        if draw_ms >= 90.0:
+            return tt("bottleneck: ray rendering", self.lang)
+        if byte_count >= int(1.5 * 1024 * 1024 * 1024):
+            return tt("large GPU texture", self.lang)
+        return ""
+
+    def volume_performance_report(self):
+        stats = dict(getattr(self, "_volume_last_stats", {}) or {})
+        source_shape, spacing_zyx = self._volume_source_geometry()
+        report = {
+            "renderer": self._volume_canvas_renderer,
+            "renderer_label": self._volume_renderer_label(),
+            "source_shape_zyx": tuple(int(value) for value in source_shape) if len(source_shape) == 3 else (),
+            "spacing_zyx": tuple(float(value) for value in spacing_zyx) if len(spacing_zyx) == 3 else (),
+            "preview_shape_zyx": tuple(int(value) for value in stats.get("shape_zyx") or ()),
+            "dtype": str(stats.get("dtype") or ""),
+            "uploaded_bytes": int(stats.get("bytes") or 0),
+            "upload_ms": float(stats.get("upload_ms") or 0.0),
+            "draw_ms": float(stats.get("draw_ms") or 0.0),
+            "samples": int(stats.get("steps") or self._active_volume_sample_count()),
+            "render_mode": self._volume_render_mode,
+            "projection_mode": self._volume_projection_mode(),
+            "roi_scale": float(self._active_volume_roi_scale()),
+            "clip_plane_enabled": bool(self.volume_clip_plane_check.isChecked()),
+            "diagnosis": self._volume_performance_diagnosis(stats),
+        }
+        if report["uploaded_bytes"] > 0:
+            report["uploaded_gb"] = report["uploaded_bytes"] / (1024.0 ** 3)
+        else:
+            report["uploaded_gb"] = 0.0
+        return report
 
     def _update_volume_render_status_label(self, text=None):
         if not hasattr(self, "volume_render_status_label"):
@@ -2885,19 +4782,8 @@ class TifWorkbenchWidget(QWidget):
             return
         self._handling_gpu_volume_failure = True
         warning = str(reason or "unknown")
-        old_canvas = self.volume_canvas
         try:
-            self._volume_canvas_renderer = "cpu"
-            self._volume_renderer_warning = warning
-            self.volume_canvas = TifVolumeCanvas()
-            self.volume_canvas.workbench = self
-            self.volume_canvas.setProperty("tifVolumeRenderer", "cpu")
-            self.view_stack.addWidget(self.volume_canvas)
-            index = self.view_stack.indexOf(old_canvas)
-            self.view_stack.setCurrentWidget(self.volume_canvas)
-            if index >= 0:
-                self.view_stack.removeWidget(old_canvas)
-            old_canvas.deleteLater()
+            self._switch_volume_canvas_to_cpu(warning)
             message = tt("GPU renderer failed. Using CPU fallback: {0}", self.lang).format(warning)
             self.training_status_label.setText(message)
             self._update_volume_render_status_label(
@@ -2907,6 +4793,43 @@ class TifWorkbenchWidget(QWidget):
         finally:
             self._handling_gpu_volume_failure = False
         self.schedule_volume_preview_render()
+
+    def _switch_volume_canvas_to_cpu(self, warning=""):
+        old_canvas = getattr(self, "volume_canvas", None)
+        if old_canvas is not None and not hasattr(old_canvas, "set_volume_pixmap"):
+            if hasattr(old_canvas, "release_gl_resources"):
+                try:
+                    old_canvas.release_gl_resources()
+                except Exception:
+                    pass
+            self.volume_canvas = TifVolumeCanvas()
+            self.volume_canvas.workbench = self
+            renderer_property = "cpu-mask-fallback" if str(warning or "").startswith("Mask inspection") else "cpu"
+            self.volume_canvas.setProperty("tifVolumeRenderer", renderer_property)
+            if hasattr(self, "view_stack"):
+                self.view_stack.addWidget(self.volume_canvas)
+                index = self.view_stack.indexOf(old_canvas)
+                if self.display_mode == "volume":
+                    self.view_stack.setCurrentWidget(self.volume_canvas)
+                if index >= 0:
+                    self.view_stack.removeWidget(old_canvas)
+            old_canvas.hide()
+            old_canvas.setParent(None)
+            old_canvas.deleteLater()
+        self._volume_canvas_renderer = "cpu"
+        if warning and not str(warning).startswith("Mask inspection"):
+            self._volume_renderer_warning = str(warning)
+        self._volume_last_stats = {}
+
+    def _try_restore_gpu_volume_canvas(self):
+        if self._volume_canvas_renderer == "gpu" or self._volume_renderer_warning:
+            return False
+        if not getattr(self, "_volume_canvas_created", False):
+            return False
+        if str(getattr(self.volume_canvas, "property", lambda _key: "")("tifVolumeRenderer") or "") != "cpu-mask-fallback":
+            return False
+        self._ensure_volume_canvas(force_gpu=True)
+        return self._volume_canvas_renderer == "gpu"
 
     def _on_gpu_volume_stats_changed(self):
         if hasattr(self.volume_canvas, "render_stats"):
@@ -2929,7 +4852,75 @@ class TifWorkbenchWidget(QWidget):
         self._clear_volume_preview_cache()
         self.render_volume_preview()
 
+    def _on_volume_display_enhancement_changed(self, *_args):
+        self.render_volume_preview()
+
+    def _on_volume_clip_plane_changed(self, *_args):
+        self.render_volume_preview()
+
     def _on_volume_projection_changed(self):
+        self.render_volume_preview()
+
+    def _volume_tint_rgb(self):
+        settings = self._active_volume_view_settings()
+        mode = self.volume_tint_combo.currentData() if hasattr(self, "volume_tint_combo") else settings.get("volume_tint", "amber")
+        if mode == "cyan":
+            color = QColor("#61D9FF")
+        elif mode == "white":
+            color = QColor("#F0F4F2")
+        elif mode == "custom":
+            color = QColor(str(settings.get("volume_tint_custom", "#FFD34D")))
+            if not color.isValid():
+                color = QColor("#FFD34D")
+        else:
+            color = QColor("#FFD34D")
+        return np.asarray([color.redF(), color.greenF(), color.blueF()], dtype=np.float32)
+
+    def _volume_transfer_preset(self):
+        settings = self._active_volume_view_settings()
+        mode = self.volume_tint_combo.currentData() if hasattr(self, "volume_tint_combo") else settings.get("volume_tint", "amber")
+        mode = str(mode or "amber").lower()
+        return mode if mode in {"amber", "cyan", "white", "custom"} else "amber"
+
+    def _volume_transfer_lut(self):
+        return build_volume_transfer_lut(
+            self._volume_transfer_preset(),
+            tuple(float(value) for value in self._volume_tint_rgb()),
+            cutoff=0.0,
+            opacity=self._volume_transfer_opacity(),
+            clarity=self._volume_clarity_mode and self._volume_render_mode == "still",
+        )
+
+    def _on_volume_tint_changed(self):
+        settings = self._active_volume_view_settings()
+        settings["volume_tint"] = self.volume_tint_combo.currentData() or "amber"
+        self._save_active_volume_view_settings()
+        self.render_volume_preview()
+
+    def _on_volume_transfer_opacity_changed(self):
+        settings = self._active_volume_view_settings()
+        settings["volume_transfer_opacity"] = int(self.volume_transfer_opacity_slider.value())
+        self._save_active_volume_view_settings()
+        self.render_volume_preview()
+
+    def _on_volume_mask_changed(self):
+        settings = self._active_volume_view_settings()
+        settings["volume_mask_mode"] = self._volume_mask_mode()
+        self._save_active_volume_view_settings()
+        self._clear_volume_mask_caches()
+        self.render_volume_preview()
+
+    def choose_volume_custom_color(self):
+        settings = self._active_volume_view_settings()
+        color = QColorDialog.getColor(QColor(str(settings.get("volume_tint_custom", "#FFD34D"))), self, tt("Choose color", self.lang))
+        if not color.isValid():
+            return
+        settings["volume_tint"] = "custom"
+        settings["volume_tint_custom"] = color.name()
+        index = self.volume_tint_combo.findData("custom")
+        if index >= 0:
+            self.volume_tint_combo.setCurrentIndex(index)
+        self._save_active_volume_view_settings()
         self.render_volume_preview()
 
     def rotate_volume_preview(self, dx, dy):
@@ -2970,6 +4961,14 @@ class TifWorkbenchWidget(QWidget):
             self.volume_clip_slider.blockSignals(True)
             self.volume_clip_slider.setValue(0)
             self.volume_clip_slider.blockSignals(False)
+        if hasattr(self, "volume_clip_plane_check"):
+            self.volume_clip_plane_check.blockSignals(True)
+            self.volume_clip_plane_check.setChecked(False)
+            self.volume_clip_plane_check.blockSignals(False)
+        if hasattr(self, "volume_clip_plane_depth_slider"):
+            self.volume_clip_plane_depth_slider.blockSignals(True)
+            self.volume_clip_plane_depth_slider.setValue(50)
+            self.volume_clip_plane_depth_slider.blockSignals(False)
         self.render_volume_preview()
 
     def _refresh_volume_preview(self):
@@ -2978,10 +4977,15 @@ class TifWorkbenchWidget(QWidget):
 
     def _clear_volume_preview_cache(self):
         self._volume_preview_cache = {}
+        self._clear_volume_mask_caches()
         self._volume_preview = None
         self._volume_preview_source_shape = ()
         self._volume_last_stats = {}
         self._volume_render_mode = "still"
+
+    def _clear_volume_mask_caches(self):
+        self._volume_mask_preview_cache = {}
+        self._volume_masked_preview_cache = {}
 
     def _volume_drag_target_dim(self):
         requested = self._volume_texture_target_dim()
@@ -2991,7 +4995,15 @@ class TifWorkbenchWidget(QWidget):
 
     def _active_volume_target_dim(self, mode=None):
         mode = mode or self._volume_render_mode
-        return self._volume_drag_target_dim() if mode == "drag" else self._volume_texture_target_dim()
+        if mode == "drag":
+            return self._volume_drag_target_dim()
+        requested = self._volume_texture_target_dim()
+        if self.current_volume_scope == "part" and self.image_volume is not None:
+            shape = tuple(int(value) for value in getattr(self.image_volume, "shape", ()) or ())
+            voxel_count = int(np.prod(shape)) if len(shape) == 3 else 0
+            if voxel_count > 0 and voxel_count <= 64_000_000:
+                requested = max(requested, min(max(shape), 1536))
+        return requested
 
     def _ensure_volume_preview(self, mode=None):
         if self.image_volume is None:
@@ -3009,13 +5021,92 @@ class TifWorkbenchWidget(QWidget):
 
         factors = [max(1, int(math.ceil(size / float(max_dim)))) for size in shape]
         source = self.image_volume[:: factors[0], :: factors[1], :: factors[2]]
-        preview = self._normalize_volume_preview(source, preserve_source=self._volume_clarity_mode and mode == "still")
+        preserve_source = mode == "still" and (self._volume_clarity_mode or self.current_volume_scope == "part")
+        preview = self._normalize_volume_preview(source, preserve_source=preserve_source)
         if preview is None:
             return None
         self._volume_preview_cache[cache_key] = preview
         self._volume_preview = preview
         self._volume_preview_source_shape = cache_key
         return preview
+
+    def _active_part_mask_volume(self):
+        if self.current_volume_scope != "part" or self.image_volume is None:
+            return None
+        if self.part_preview_mask is not None and self.part_preview_mask.shape == self.image_volume.shape:
+            return self.part_preview_mask
+        if self.label_volume is not None and self.label_volume.shape == self.image_volume.shape:
+            return self.label_volume
+        return None
+
+    def _active_part_mask_has_voxels(self):
+        mask = self._active_part_mask_volume()
+        if mask is None:
+            return False
+        try:
+            shape = tuple(int(value) for value in getattr(mask, "shape", ()) or ())
+            if len(shape) < 3:
+                return bool(np.any(np.asarray(mask) > 0))
+            plane_values = max(1, int(np.prod(shape[1:])))
+            z_chunk = max(1, min(int(shape[0]), int((16 * 1024 * 1024) / plane_values)))
+            for z0 in range(0, int(shape[0]), z_chunk):
+                z1 = min(int(shape[0]), z0 + z_chunk)
+                if np.any(np.asarray(mask[z0:z1]) > 0):
+                    return True
+            return False
+        except Exception:
+            return False
+
+    def _ensure_volume_mask_preview(self, mode=None):
+        mask = self._active_part_mask_volume()
+        if mask is None:
+            return None
+        shape = tuple(int(value) for value in getattr(mask, "shape", ()) or ())
+        mode = "drag" if mode == "drag" else "still"
+        max_dim = self._active_volume_target_dim(mode)
+        cache_key = (shape, str(np.dtype(getattr(mask, "dtype", np.uint16))), max_dim, id(mask))
+        cached = self._volume_mask_preview_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        factors = [max(1, int(math.ceil(size / float(max_dim)))) for size in shape]
+        preview = (np.asarray(mask[:: factors[0], :: factors[1], :: factors[2]]) > 0).astype(np.uint8)
+        preview = np.ascontiguousarray(preview)
+        self._volume_mask_preview_cache[cache_key] = preview
+        return preview
+
+    def _masked_volume_preview(self, preview, mask_preview):
+        if mask_preview is None or tuple(mask_preview.shape) != tuple(preview.shape):
+            return preview
+        cache_key = (
+            id(preview),
+            id(mask_preview),
+            tuple(int(value) for value in preview.shape),
+            str(np.dtype(getattr(preview, "dtype", np.uint8))),
+        )
+        cached = self._volume_masked_preview_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        mask_values = np.asarray(mask_preview) > 0
+        masked = np.ascontiguousarray(np.where(mask_values, preview, np.zeros_like(preview)))
+        self._volume_masked_preview_cache[cache_key] = masked
+        return masked
+
+    def _mask_boundary_preview(self, mask_preview):
+        mask = np.asarray(mask_preview, dtype=bool)
+        if mask.size == 0:
+            return np.zeros_like(mask, dtype=bool)
+        eroded = mask.copy()
+        for axis in range(3):
+            before = np.roll(mask, 1, axis=axis)
+            after = np.roll(mask, -1, axis=axis)
+            index_first = [slice(None)] * 3
+            index_last = [slice(None)] * 3
+            index_first[axis] = 0
+            index_last[axis] = -1
+            before[tuple(index_first)] = False
+            after[tuple(index_last)] = False
+            eroded &= before & after
+        return mask & ~eroded
 
     def _normalize_volume_preview(self, source, preserve_source=False):
         if source is None:
@@ -3078,47 +5169,81 @@ class TifWorkbenchWidget(QWidget):
             return max(256, min(GPU_VOLUME_MAX_TEXTURE_DIM, requested))
         return max(32, min(128, requested))
 
-    def _sync_gpu_volume_canvas(self, preview):
+    def _volume_render_state(self, mode=None):
+        mode = "drag" if mode == "drag" else "still"
+        samples = int(self.volume_sample_slider.value())
+        if mode == "drag":
+            samples = max(256, min(samples, 768))
+        return {
+            "cutoff_percent": self.volume_cutoff_slider.value(),
+            "yaw": self._volume_yaw,
+            "pitch": self._volume_pitch,
+            "zoom": self._volume_zoom,
+            "render_quality": self._active_volume_target_dim(mode),
+            "sample_steps": samples,
+            "inside_depth": float(self.volume_inside_slider.value()) / 100.0,
+            "front_clip": float(self.volume_clip_slider.value()) / 100.0,
+            "render_mode": mode,
+            "pan_x": self._volume_pan_x,
+            "pan_y": self._volume_pan_y,
+            "clarity_mode": self._volume_clarity_mode,
+            "projection_mode": self._volume_projection_mode(),
+            "supersample_scale": self._active_volume_roi_scale(),
+            "tint_rgb": tuple(float(value) for value in self._volume_tint_rgb()),
+            "transfer_preset": self._volume_transfer_preset(),
+            "transfer_opacity": self._volume_transfer_opacity(mode),
+            "mask_mode": self._volume_mask_mode(),
+            "mask_opacity": max(0.0, min(1.0, float(self.volume_mask_opacity_slider.value()) / 100.0)),
+            "enhancement": self._volume_detail_enhancement(mode),
+            "tone_gamma": self._volume_tone_gamma(),
+            "surface_refine": bool(self.volume_surface_refine_check.isChecked()),
+            "clip_plane_enabled": bool(self.volume_clip_plane_check.isChecked()),
+            "clip_plane_depth": float(self.volume_clip_plane_depth_slider.value()) / 100.0,
+            "clip_plane_normal": self._volume_clip_plane_normal(),
+        }
+
+    def _sync_gpu_volume_canvas(self, preview, mask_preview=None, mask_mode=None):
         if self._volume_canvas_renderer != "gpu" or not hasattr(self.volume_canvas, "set_volume_data"):
             return False
+        mask_mode = mask_mode if mask_mode in {"mask_boundary", "masked_image"} else "image_only"
+        if mask_mode != "image_only" and not hasattr(self.volume_canvas, "set_mask_data"):
+            return False
         source_shape, spacing_zyx = self._volume_source_geometry()
-        self.volume_canvas.set_volume_data(preview, source_shape=source_shape, spacing_zyx=spacing_zyx)
-        if hasattr(self.volume_canvas, "set_render_state"):
-            mode = "drag" if self._volume_render_mode == "drag" else "still"
-            samples = int(self.volume_sample_slider.value())
-            if mode == "drag":
-                samples = max(256, min(samples, 768))
-            self.volume_canvas.set_render_state(
-                self.volume_cutoff_slider.value(),
-                self._volume_yaw,
-                self._volume_pitch,
-                self._volume_zoom,
-                self._active_volume_target_dim(mode),
-                samples,
-                float(self.volume_inside_slider.value()) / 100.0,
-                float(self.volume_clip_slider.value()) / 100.0,
-                mode,
-                self._volume_pan_x,
-                self._volume_pan_y,
-                self._volume_clarity_mode,
-                self._volume_projection_mode(),
-                self._active_volume_roi_scale(),
+        mode = "drag" if self._volume_render_mode == "drag" else "still"
+        state = self._volume_render_state(mode)
+        state["mask_mode"] = mask_mode
+        if hasattr(self.volume_canvas, "set_volume_render_inputs"):
+            self.volume_canvas.set_volume_render_inputs(
+                preview,
+                mask=mask_preview if mask_mode != "image_only" else None,
+                render_state=state,
+                source_shape=source_shape,
+                spacing_zyx=spacing_zyx,
             )
+            return True
+        self.volume_canvas.set_volume_data(preview, source_shape=source_shape, spacing_zyx=spacing_zyx)
+        if hasattr(self.volume_canvas, "set_mask_data"):
+            self.volume_canvas.set_mask_data(mask_preview if mask_mode != "image_only" else None)
+        if hasattr(self.volume_canvas, "set_render_state"):
+            self.volume_canvas.set_render_state(**state)
         return True
 
     def _volume_source_geometry(self):
         shape = tuple(int(value) for value in getattr(self.image_volume, "shape", ()) or ())
         spacing = ()
-        specimen = self.project.get_specimen(self.current_specimen_id, default=None) if self.current_specimen_id else None
-        working = (specimen or {}).get("working_volume") or {}
-        record_shape = working.get("shape_zyx") or []
+        if self.current_volume_scope == "part":
+            record = ((self.current_part or {}).get("image") or {})
+        else:
+            specimen = self.project.get_specimen(self.current_specimen_id, default=None) if self.current_specimen_id else None
+            record = (specimen or {}).get("working_volume") or {}
+        record_shape = record.get("shape_zyx") or []
         try:
             record_shape = tuple(int(value) for value in record_shape)
         except (TypeError, ValueError):
             record_shape = ()
         if len(record_shape) == 3 and min(record_shape) > 0:
             shape = record_shape
-        record_spacing = working.get("spacing_zyx") or []
+        record_spacing = record.get("spacing_zyx") or []
         try:
             record_spacing = tuple(float(value) for value in record_spacing)
         except (TypeError, ValueError):
@@ -3157,33 +5282,48 @@ class TifWorkbenchWidget(QWidget):
             self.volume_canvas.setText(tt("No TIF volume loaded", self.lang))
             self._update_volume_render_status_label(tt("No TIF volume loaded", self.lang))
             return
-        if self._sync_gpu_volume_canvas(preview):
+        mask_mode = self._volume_mask_mode()
+        mask_preview = self._ensure_volume_mask_preview(self._volume_render_mode) if mask_mode != "image_only" else None
+        if mask_preview is None and mask_mode != "image_only":
+            mask_mode = "image_only"
+        self._try_restore_gpu_volume_canvas()
+        if self._sync_gpu_volume_canvas(preview, mask_preview=mask_preview, mask_mode=mask_mode):
             self._update_volume_render_status_label()
             return
-        pixmap = self._render_volume_preview_pixmap(preview)
+        if mask_mode != "image_only" and not hasattr(self.volume_canvas, "set_volume_pixmap"):
+            self._switch_volume_canvas_to_cpu("Mask inspection uses CPU fallback.")
+        pixmap = self._render_volume_preview_pixmap(preview, mask_preview=mask_preview, mask_mode=mask_mode)
         self.volume_canvas.set_volume_pixmap(pixmap)
         self._update_volume_render_status_label()
 
-    def _render_volume_preview_pixmap(self, preview):
+    def _render_volume_preview_pixmap(self, preview, mask_preview=None, mask_mode="image_only"):
         max_value = float(np.iinfo(preview.dtype).max) if np.issubdtype(preview.dtype, np.integer) else 1.0
         projection_mode = self._volume_projection_mode()
         cutoff = float(self.volume_cutoff_slider.value()) / 100.0
+        mask_mode = mask_mode if mask_mode in {"mask_boundary", "masked_image"} else "image_only"
+        mask_values = None
+        if mask_preview is not None and tuple(mask_preview.shape) == tuple(preview.shape):
+            mask_values = np.asarray(mask_preview) > 0
+        render_source = preview
+        if mask_mode == "masked_image" and mask_values is not None:
+            render_source = np.where(mask_values, preview, np.zeros_like(preview))
         if projection_mode == "minip":
             threshold = int(round(cutoff * max_value))
-            points = np.argwhere((preview > 0) & (preview <= max(1, threshold)))
+            points = np.argwhere((render_source > 0) & (render_source <= max(1, threshold)))
         elif projection_mode == "average":
             threshold = int(round(max(0.0, cutoff * 0.65) * max_value))
-            points = np.argwhere(preview > threshold)
+            points = np.argwhere(render_source > threshold)
         else:
             threshold = int(round(cutoff * max_value / (1.25 if projection_mode == "surface" else 1.0)))
-            points = np.argwhere(preview > threshold)
+            points = np.argwhere(render_source > threshold)
         if points.size == 0:
-            points = np.argwhere(preview > 0)
+            points = np.argwhere(render_source > 0)
         if points.size == 0:
-            center_slice = np.asarray(preview[int(preview.shape[0] // 2)], dtype=np.uint8)
+            center_slice = np.asarray(render_source[int(render_source.shape[0] // 2)], dtype=np.uint8)
             return self._render_slice_pixmap(center_slice)
 
-        values = preview[points[:, 0], points[:, 1], points[:, 2]].astype(np.float32)
+        point_indices = points.copy()
+        values = render_source[points[:, 0], points[:, 1], points[:, 2]].astype(np.float32)
         if projection_mode == "minip":
             values = max_value - values
         if max_value > 255.0:
@@ -3213,6 +5353,7 @@ class TifWorkbenchWidget(QWidget):
             if np.any(keep):
                 rotated = rotated[keep]
                 values = values[keep]
+                point_indices = point_indices[keep]
             else:
                 pixmap = QPixmap(360, 360)
                 pixmap.fill(QColor("#07090A"))
@@ -3234,11 +5375,24 @@ class TifWorkbenchWidget(QWidget):
         py = py[inside]
         depth = rotated[:, 2][inside]
         values = values[inside]
+        point_indices = point_indices[inside]
 
         image = np.zeros((out_size, out_size, 3), dtype=np.uint8)
         shade = 0.65 + 0.35 * np.clip((depth - depth.min()) / max(1e-6, depth.max() - depth.min()), 0.0, 1.0)
-        intensity = np.clip(values * shade, 0, 255)
-        color = np.clip(np.stack([intensity * 0.85, intensity, intensity * 1.05], axis=1), 0, 255).astype(np.uint8)
+        lut = self._volume_transfer_lut()[0]
+        lut_index = np.clip(np.round(values), 0, lut.shape[0] - 1).astype(np.int32)
+        opacity = lut[lut_index, 3].astype(np.float32) / 255.0
+        color_float = lut[lut_index, :3].astype(np.float32) * shade[:, None] * (0.38 + 0.62 * opacity[:, None])
+        color = np.clip(color_float, 0, 255).astype(np.uint8)
+        if mask_mode == "mask_boundary" and mask_values is not None:
+            boundary = self._mask_boundary_preview(mask_values)
+            boundary_values = boundary[point_indices[:, 0], point_indices[:, 1], point_indices[:, 2]]
+            if np.any(boundary_values):
+                opacity = max(0.0, min(1.0, float(self.volume_mask_opacity_slider.value()) / 100.0))
+                mask_color = np.asarray([255, 142, 66], dtype=np.float32)
+                color_float = color.astype(np.float32)
+                color_float[boundary_values] = (1.0 - opacity) * color_float[boundary_values] + opacity * mask_color
+                color = np.clip(color_float, 0, 255).astype(np.uint8)
         flat_index = py * out_size + px
         flat = image.reshape((-1, 3))
         for channel in range(3):
@@ -3257,6 +5411,11 @@ class TifWorkbenchWidget(QWidget):
 
     def paint_at_widget_position(self, x, y, erase=False):
         if self.image_volume is None:
+            return
+        if self.current_volume_scope == "part":
+            message = tt("Part volume is read-only here. Use part mask preview controls for extraction masks.", self.lang)
+            self.training_status_label.setText(message)
+            self.log(message)
             return
         if self.display_mode == "volume":
             message = tt("3D volume preview is read-only. Switch to Slice review for label editing.", self.lang)
@@ -3339,6 +5498,8 @@ class TifWorkbenchWidget(QWidget):
     def save_working_edit(self, show_message=True, reason="manual"):
         if self._saving_working_edit:
             return True
+        if self.current_volume_scope == "part":
+            return False
         specimen = self.project.get_specimen(self.current_specimen_id, default=None)
         if specimen is None or self.edit_volume is None:
             return False
@@ -3383,6 +5544,9 @@ class TifWorkbenchWidget(QWidget):
     def promote_working_edit(self):
         if not self.current_specimen_id:
             return
+        if self.current_volume_scope == "part":
+            QMessageBox.information(self, tt("Accept working edit", self.lang), tt("Part volumes are not promoted to full-volume manual truth in this version.", self.lang))
+            return
         if not self.save_working_edit(show_message=False):
             return
         reply = QMessageBox.question(
@@ -3402,6 +5566,9 @@ class TifWorkbenchWidget(QWidget):
 
     def copy_latest_model_draft_to_working_edit(self):
         if not self.current_specimen_id:
+            return
+        if self.current_volume_scope == "part":
+            QMessageBox.information(self, tt("TIF backend", self.lang), tt("Part volumes do not use model draft handoff in this version.", self.lang))
             return
         specimen = self.project.get_specimen(self.current_specimen_id, default=None)
         drafts = ((specimen or {}).get("labels") or {}).get("model_drafts") or []
@@ -3462,6 +5629,31 @@ class TifWorkbenchWidget(QWidget):
             tt("TIF training handoff", self.lang),
             message,
         )
+
+    def export_current_part_package(self):
+        if self.current_volume_scope != "part" or not self.current_specimen_id or not self.current_part_id:
+            QMessageBox.information(self, tt("Part extraction", self.lang), tt("Select a part volume before exporting a part package.", self.lang))
+            return
+        default_dir = os.path.join(self.project.project_dir, "exports", "parts")
+        os.makedirs(default_dir, exist_ok=True)
+        output_dir = QFileDialog.getExistingDirectory(self, tt("Export part package", self.lang), default_dir)
+        if not output_dir:
+            return
+        try:
+            result = export_part_package(self.project, self.current_specimen_id, self.current_part_id, output_dir)
+        except Exception as exc:
+            QMessageBox.warning(self, tt("Part extraction", self.lang), str(exc))
+            return
+        manifest_path = result.get("manifest_path", "")
+        package_dir = result.get("package_dir", "") or os.path.dirname(manifest_path)
+        package_name = os.path.basename(os.path.normpath(package_dir)) if package_dir else "-"
+        manifest_name = os.path.basename(manifest_path) if manifest_path else "-"
+        message = tt("Exported part package.\nFolder: {0}\nManifest: {1}", self.lang).format(package_name, manifest_name)
+        full_message = tt("Exported part package.\nFolder: {0}\nManifest: {1}", self.lang).format(package_dir or "-", manifest_path or "-")
+        self.training_status_label.setText(message)
+        self.training_status_label.setToolTip(full_message)
+        self.log(full_message)
+        QMessageBox.information(self, tt("Part extraction", self.lang), message)
 
     def _render_slice_pixmap(self, image_slice, label_slice=None):
         gray = self._normalize_image(image_slice)

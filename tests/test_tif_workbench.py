@@ -25,6 +25,9 @@ except ModuleNotFoundError as exc:
     else:
         raise
 else:
+    from PySide6.QtWidgets import QTreeWidget
+
+    from AntSleap.core.tif_part_extraction import add_polygon_keyframe, crop_volume_to_part, read_contours_json, write_contours_json
     from AntSleap.core.tif_materials import upsert_material
     from AntSleap.core.tif_project import TifProjectManager
     from AntSleap.core.tif_volume_io import write_volume_sidecar
@@ -67,6 +70,9 @@ class FakeKeyEvent:
 
     def accept(self):
         self.accepted = True
+
+    def ignore(self):
+        self.ignored = True
 
 
 class FakeMouseEvent:
@@ -186,6 +192,557 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertIsNotNone(widget.canvas.pixmap())
                 self.assertIn("Train-ready: yes", widget.status_label.text())
                 self.assertIn("Shape Z/Y/X", widget.metadata_label.text())
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_specimen_tree_loads_full_and_part_volumes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = TifProjectManager()
+            manager.create_project("part_viewer", root / "part_viewer")
+            manager.create_specimen_scaffold(
+                "01-0101-part",
+                material_map={
+                    "materials": [
+                        {"id": 0, "name": "background", "display_name": "Background", "trainable": False},
+                        {"id": 2, "name": "brain", "display_name": "Brain", "color": "#ff0000", "trainable": True},
+                    ]
+                },
+            )
+            image = np.arange(4 * 6 * 8, dtype=np.uint8).reshape((4, 6, 8))
+            image_rel = "specimens/01-0101-part/working/image.ome.zarr"
+            image_meta = write_volume_sidecar(root / "part_viewer" / image_rel, image, role="working_image")
+            manager.register_working_volume("01-0101-part", image_rel, image_meta["shape_zyx"], image_meta["dtype"], save=False)
+            manager.save_project()
+            crop_volume_to_part(manager, "01-0101-part", "head", [[1, 3], [2, 6], [1, 5]], display_name="Head")
+
+            widget = TifWorkbenchWidget(manager, "en")
+            try:
+                self.assertIsInstance(widget.specimen_list, QTreeWidget)
+                self.assertEqual(widget.specimen_list.count(), 1)
+                root_item = widget.specimen_list.topLevelItem(0)
+                self.assertEqual(root_item.childCount(), 2)
+
+                widget._select_volume_tree_item("01-0101-part", "part", "head")
+
+                self.assertEqual(widget.current_volume_scope, "part")
+                self.assertEqual(widget.current_part_id, "head")
+                self.assertEqual(tuple(widget.image_volume.shape), (2, 4, 4))
+                self.assertIn("Part volume", widget.status_label.text())
+                self.assertIn("Parent bbox", widget.metadata_label.text())
+
+                widget._select_volume_tree_item("01-0101-part", "full", "")
+                self.assertEqual(widget.current_volume_scope, "full")
+                self.assertEqual(tuple(widget.image_volume.shape), (4, 6, 8))
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_part_bbox_input_draws_roi_overlay_on_current_slice(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=4)
+            try:
+                widget.part_bbox_edit.setText("1,3,2,6,1,5")
+                widget.slice_slider.setValue(1)
+                rects = widget.current_roi_overlay_rects()
+
+                self.assertEqual(rects[0]["rect"], [1, 2, 5, 6])
+                self.assertEqual(rects[0]["kind"], "current")
+
+                widget.slice_slider.setValue(0)
+                self.assertEqual(widget.current_roi_overlay_rects(), [])
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_dragging_roi_updates_bbox_for_current_axis(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=4)
+            try:
+                widget.part_bbox_edit.setText("1,3,1,7,1,7")
+                widget.slice_slider.setValue(2)
+                widget.btn_part_draw_roi.setChecked(True)
+                widget.canvas.resize(480, 360)
+                widget.render_current_slice()
+                start = widget.canvas._image_rect_to_widget_rect([2, 2, 3, 3]).center()
+                end = widget.canvas._image_rect_to_widget_rect([5, 5, 6, 6]).center()
+
+                widget.canvas.mousePressEvent(FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, start.x(), start.y()))
+                widget.canvas.mouseMoveEvent(FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, end.x(), end.y()))
+                widget.canvas.mouseReleaseEvent(FakeMouseEvent(Qt.LeftButton, Qt.NoButton, end.x(), end.y()))
+
+                self.assertEqual(widget.part_bbox_edit.text(), "1,3,2,6,2,6")
+                self.assertIn("ROI bbox updated", widget.training_status_label.text())
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_dragging_loaded_roi_draft_updates_original_draft(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=4)
+            try:
+                widget.project.add_part_roi(
+                    widget.current_specimen_id,
+                    "head_roi",
+                    display_name="Head ROI",
+                    bbox_zyx=[[1, 3], [1, 7], [1, 7]],
+                )
+                widget.active_part_roi_id = "head_roi"
+                widget.part_bbox_edit.setText("1,3,1,7,1,7")
+                widget.slice_slider.setValue(2)
+                widget.btn_part_draw_roi.setChecked(True)
+                widget.canvas.resize(480, 360)
+                widget.render_current_slice()
+                start = widget.canvas._image_rect_to_widget_rect([2, 2, 3, 3]).center()
+                end = widget.canvas._image_rect_to_widget_rect([5, 5, 6, 6]).center()
+
+                widget.canvas.mousePressEvent(FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, start.x(), start.y()))
+                widget.canvas.mouseMoveEvent(FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, end.x(), end.y()))
+                widget.canvas.mouseReleaseEvent(FakeMouseEvent(Qt.LeftButton, Qt.NoButton, end.x(), end.y()))
+                roi = widget.save_part_roi_draft()
+
+                self.assertEqual(widget.active_part_roi_id, "head_roi")
+                self.assertEqual(roi["bbox_zyx"], [[1, 3], [2, 6], [2, 6]])
+                self.assertEqual(len(widget.project.list_part_rois(widget.current_specimen_id)), 1)
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_roi_draft_saves_without_writing_part_until_confirmed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=4)
+            try:
+                widget.part_bbox_edit.setText("1,3,2,6,1,5")
+                module_path = "AntSleap.ui.tif_workbench.QInputDialog.getText"
+                with patch(module_path, side_effect=[("head_roi", True), ("Head ROI", True)]):
+                    roi = widget.save_part_roi_draft()
+
+                self.assertIsNotNone(roi)
+                self.assertEqual(roi["status"], "draft")
+                self.assertEqual(widget.project.list_parts(widget.current_specimen_id), [])
+                self.assertEqual(widget.active_part_roi_id, "head_roi")
+                widget.slice_slider.setValue(1)
+                self.assertTrue(widget.current_roi_overlay_rects())
+
+                with patch(module_path, side_effect=[("head", True), ("Head", True)]):
+                    widget.confirm_part_roi_to_part()
+
+                part = widget.project.get_part("01-0101-21", "head")
+                roi = widget.project.get_part_roi("01-0101-21", "head_roi")
+                self.assertIsNotNone(part)
+                self.assertEqual(roi["status"], "part_created")
+                self.assertEqual(roi["linked_part_id"], "head")
+                self.assertEqual(widget.current_volume_scope, "part")
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_double_click_created_part_roi_opens_part_volume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            widget = self._make_volume_widget(root, z_count=4)
+            try:
+                part = crop_volume_to_part(widget.project, "01-0101-21", "head", [[1, 3], [2, 6], [1, 5]], display_name="Head")
+                widget.project.add_part_roi(
+                    "01-0101-21",
+                    "head_roi",
+                    display_name="Head ROI",
+                    bbox_zyx=part["parent_bbox_zyx"],
+                    status="part_created",
+                    linked_part_id="head",
+                )
+                widget.refresh_project()
+                widget._select_volume_tree_item("01-0101-21", "full", "")
+                widget.slice_slider.setValue(1)
+                widget.render_current_slice()
+                point = widget.canvas._image_rect_to_widget_rect([1, 2, 5, 6]).center()
+
+                self.assertTrue(widget.open_roi_at_widget_position(point.x(), point.y()))
+
+                self.assertEqual(widget.current_volume_scope, "part")
+                self.assertEqual(widget.current_part_id, "head")
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_delete_current_part_volume_removes_part_storage_and_returns_to_parent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            widget = self._make_volume_widget(root, z_count=4)
+            try:
+                part = crop_volume_to_part(widget.project, "01-0101-21", "head", [[1, 3], [2, 6], [1, 5]], display_name="Head")
+                widget.project.add_part_roi(
+                    "01-0101-21",
+                    "head_roi",
+                    display_name="Head ROI",
+                    bbox_zyx=part["parent_bbox_zyx"],
+                    status="part_created",
+                    linked_part_id="head",
+                )
+                part_dir = root / "viewer" / widget.project.part_dir("01-0101-21", "head")
+                widget.refresh_project()
+                widget._select_volume_tree_item("01-0101-21", "part", "head")
+                self.assertTrue(part_dir.exists())
+                self.assertTrue(widget.btn_delete_part_volume.isEnabled())
+
+                with patch("AntSleap.ui.tif_workbench.QMessageBox.question", return_value=QMessageBox.Yes):
+                    widget.delete_current_part_volume()
+
+                self.assertFalse(part_dir.exists())
+                self.assertIsNone(widget.project.get_part("01-0101-21", "head", default=None))
+                self.assertEqual(widget.current_volume_scope, "full")
+                self.assertEqual(widget.current_part_id, "")
+                roi = widget.project.get_part_roi("01-0101-21", "head_roi", default=None)
+                self.assertEqual(roi["status"], "cancelled")
+                self.assertEqual(roi["linked_part_id"], "")
+                self.assertIn("Deleted part volume Head", widget.training_status_label.text())
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_part_freehand_contour_saves_overlay_and_deletes_key_slice(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+            try:
+                crop_volume_to_part(widget.project, "01-0101-21", "head", [[1, 4], [1, 7], [1, 7]], display_name="Head")
+                widget.refresh_project()
+                widget._select_volume_tree_item("01-0101-21", "part", "head")
+                widget.slice_slider.setValue(1)
+                widget.btn_draw_part_contour.setChecked(True)
+                widget.canvas.resize(480, 360)
+                widget.render_current_slice()
+
+                pixels = ([2, 2], [5, 2], [5, 5], [2, 5], [2, 3])
+                points = [widget.canvas._image_point_to_widget_point(pixel) for pixel in pixels]
+                widget.canvas.mousePressEvent(FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, points[0][0], points[0][1]))
+                for point in points[1:]:
+                    widget.canvas.mouseMoveEvent(FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, point[0], point[1]))
+                widget.canvas.mouseReleaseEvent(FakeMouseEvent(Qt.LeftButton, Qt.NoButton, points[-1][0], points[-1][1]))
+
+                contours_path = widget.project.to_absolute(widget.project.get_part("01-0101-21", "head")["contours_path"])
+                contours = read_contours_json(contours_path)
+                self.assertEqual(len(contours["keyframes"]), 1)
+                self.assertEqual(contours["keyframes"][0]["slice_index"], 1)
+                self.assertEqual(contours["keyframes"][0]["source"], "manual_freehand")
+                self.assertGreaterEqual(len(contours["keyframes"][0]["polygon"]), 3)
+                self.assertTrue(widget.current_contour_overlay_polygons())
+
+                widget.delete_current_part_keyframe()
+                contours = read_contours_json(contours_path)
+                self.assertEqual(contours["keyframes"], [])
+                self.assertFalse(widget.current_contour_overlay_polygons())
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_part_key_slice_navigation_jumps_between_saved_contours(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=6)
+            try:
+                crop_volume_to_part(widget.project, "01-0101-21", "head", [[0, 5], [1, 7], [1, 7]], display_name="Head")
+                widget.refresh_project()
+                widget._select_volume_tree_item("01-0101-21", "part", "head")
+                part = widget.project.get_part("01-0101-21", "head")
+                contours_path = widget.project.to_absolute(part["contours_path"])
+                contours = read_contours_json(contours_path)
+                polygon = [[1, 1], [4, 1], [4, 4], [1, 4]]
+                contours = add_polygon_keyframe(contours, 0, polygon, axis="z", source="manual_freehand")
+                contours = add_polygon_keyframe(contours, 3, polygon, axis="z", source="manual_freehand")
+                write_contours_json(contours_path, contours)
+
+                widget.slice_slider.setValue(1)
+                widget.jump_part_keyframe("next")
+                self.assertEqual(widget.slice_slider.value(), 3)
+                self.assertTrue(widget.current_contour_overlay_polygons())
+
+                widget.jump_part_keyframe("previous")
+                self.assertEqual(widget.slice_slider.value(), 0)
+                widget.jump_part_keyframe("previous")
+                self.assertIn("No previous key slice", widget.training_status_label.text())
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_dirty_contours_do_not_break_slice_overlay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+            try:
+                crop_volume_to_part(widget.project, "01-0101-21", "head", [[0, 5], [1, 7], [1, 7]], display_name="Head")
+                widget.refresh_project()
+                widget._select_volume_tree_item("01-0101-21", "part", "head")
+                part = widget.project.get_part("01-0101-21", "head")
+                contours_path = Path(widget.project.to_absolute(part["contours_path"]))
+                contours_path.write_text(
+                    '{"axis":"z","keyframes":["bad",{"slice_index":"bad","polygon":[[1,1],[2,1],[2,2]]},{"slice_index":1,"polygon":[[1,1],[4,1],[4,4],[1,4]]}]}',
+                    encoding="utf-8",
+                )
+                widget.slice_slider.setValue(1)
+
+                overlays = widget.current_contour_overlay_polygons()
+
+                self.assertEqual(len(overlays), 1)
+                self.assertEqual(overlays[0]["polygon"], [[1, 1], [4, 1], [4, 4], [1, 4]])
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_part_mask_preview_reports_quality_and_3d_mask_modes_render(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=6)
+            try:
+                crop_volume_to_part(widget.project, "01-0101-21", "head", [[0, 5], [1, 7], [1, 7]], display_name="Head")
+                widget.refresh_project()
+                widget._select_volume_tree_item("01-0101-21", "part", "head")
+                part = widget.project.get_part("01-0101-21", "head")
+                contours_path = widget.project.to_absolute(part["contours_path"])
+                polygon_a = [[1, 1], [4, 1], [4, 4], [1, 4]]
+                polygon_b = [[2, 2], [5, 2], [5, 5], [2, 5]]
+                contours = read_contours_json(contours_path)
+                contours = add_polygon_keyframe(contours, 0, polygon_a, axis="z", source="manual_freehand")
+                contours = add_polygon_keyframe(contours, 4, polygon_b, axis="z", source="manual_freehand")
+                write_contours_json(contours_path, contours)
+
+                widget.preview_part_mask_from_keyframes()
+
+                self.assertIsNotNone(widget.part_preview_mask)
+                self.assertIn("Part mask preview quality", widget.training_status_label.text())
+                self.assertGreater(int(widget.part_preview_mask.sum()), 0)
+
+                mode_index = widget.display_mode_combo.findData("volume")
+                widget.display_mode_combo.setCurrentIndex(mode_index)
+                boundary_index = widget.volume_mask_combo.findData("mask_boundary")
+                widget.volume_mask_combo.setCurrentIndex(boundary_index)
+                widget.render_volume_preview()
+                self.assertIn("Mask display Mask boundary", widget.volume_canvas_overlay_text())
+                if isinstance(widget.volume_canvas, TifVolumeCanvas):
+                    self.assertIsNotNone(widget.volume_canvas.pixmap())
+
+                masked_index = widget.volume_mask_combo.findData("masked_image")
+                widget.volume_mask_combo.setCurrentIndex(masked_index)
+                widget.render_volume_preview()
+                self.assertIn("Masked image", widget.volume_canvas_overlay_text())
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_part_volume_3d_defaults_to_masked_image_after_mask_is_accepted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+            try:
+                crop_volume_to_part(widget.project, "01-0101-21", "head", [[0, 4], [1, 7], [1, 7]], display_name="Head")
+                widget.refresh_project()
+                widget._select_volume_tree_item("01-0101-21", "part", "head")
+                self.assertEqual(widget.volume_mask_combo.currentData(), "image_only")
+
+                part = widget.project.get_part("01-0101-21", "head")
+                contours_path = widget.project.to_absolute(part["contours_path"])
+                contours = read_contours_json(contours_path)
+                contours = add_polygon_keyframe(contours, 0, [[1, 1], [4, 1], [4, 4], [1, 4]], axis="z", source="manual_freehand")
+                contours = add_polygon_keyframe(contours, 3, [[2, 2], [5, 2], [5, 5], [2, 5]], axis="z", source="manual_freehand")
+                write_contours_json(contours_path, contours)
+                widget.preview_part_mask_from_keyframes()
+                widget.accept_part_mask_preview()
+
+                mode_index = widget.display_mode_combo.findData("volume")
+                widget.display_mode_combo.setCurrentIndex(mode_index)
+
+                self.assertEqual(widget.volume_mask_combo.currentData(), "masked_image")
+                self.assertIn("Masked image", widget.volume_canvas_overlay_text())
+
+                image_index = widget.volume_mask_combo.findData("image_only")
+                widget.volume_mask_combo.setCurrentIndex(image_index)
+                widget.display_mode_combo.setCurrentIndex(widget.display_mode_combo.findData("slice"))
+                widget.display_mode_combo.setCurrentIndex(mode_index)
+
+                self.assertEqual(widget.volume_mask_combo.currentData(), "image_only")
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_task_tabs_follow_tif_workflow_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+            try:
+                self.assertIs(widget.task_tabs.currentWidget(), widget.part_task_page)
+                self.assertFalse(widget.part_locate_section.isHidden())
+                self.assertTrue(widget.part_mask_section.isHidden())
+                self.assertTrue(widget.part_output_section.isHidden())
+
+                mode_index = widget.display_mode_combo.findData("volume")
+                widget.display_mode_combo.setCurrentIndex(mode_index)
+                self.assertIs(widget.task_tabs.currentWidget(), widget.display_task_page)
+                self.assertTrue(widget.part_locate_section.isHidden())
+
+                slice_index = widget.display_mode_combo.findData("slice")
+                widget.display_mode_combo.setCurrentIndex(slice_index)
+                self.assertIs(widget.task_tabs.currentWidget(), widget.part_task_page)
+                self.assertFalse(widget.part_locate_section.isHidden())
+
+                crop_volume_to_part(widget.project, "01-0101-21", "head", [[0, 4], [1, 7], [1, 7]], display_name="Head")
+                widget.refresh_project()
+                widget._select_volume_tree_item("01-0101-21", "part", "head")
+                self.assertIs(widget.task_tabs.currentWidget(), widget.part_task_page)
+                self.assertTrue(widget.annotation_section.isHidden())
+                self.assertTrue(widget.part_locate_section.isHidden())
+                self.assertFalse(widget.part_mask_section.isHidden())
+                self.assertFalse(widget.part_output_section.isHidden())
+
+                widget.display_mode_combo.setCurrentIndex(mode_index)
+                self.assertIs(widget.task_tabs.currentWidget(), widget.display_task_page)
+                self.assertTrue(widget.part_mask_section.isHidden())
+                self.assertFalse(widget.part_output_section.isHidden())
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_part_mask_buttons_refresh_when_returning_to_slice_z_view(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+            try:
+                crop_volume_to_part(widget.project, "01-0101-21", "head", [[0, 5], [1, 7], [1, 7]], display_name="Head")
+                widget.refresh_project()
+                widget._select_volume_tree_item("01-0101-21", "part", "head")
+                self.assertTrue(widget.btn_draw_part_contour.isEnabled())
+                self.assertTrue(widget.btn_preview_part_mask.isEnabled())
+
+                mode_index = widget.display_mode_combo.findData("volume")
+                widget.display_mode_combo.setCurrentIndex(mode_index)
+                self.assertFalse(widget.btn_draw_part_contour.isEnabled())
+
+                slice_index = widget.display_mode_combo.findData("slice")
+                widget.display_mode_combo.setCurrentIndex(slice_index)
+                y_index = widget.slice_axis_combo.findData("y")
+                widget.slice_axis_combo.setCurrentIndex(y_index)
+                self.assertFalse(widget.btn_draw_part_contour.isEnabled())
+
+                z_index = widget.slice_axis_combo.findData("z")
+                widget.slice_axis_combo.setCurrentIndex(z_index)
+                self.assertTrue(widget.btn_draw_part_contour.isEnabled())
+                self.assertTrue(widget.btn_preview_part_mask.isEnabled())
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_rectangular_keyframe_clears_stale_preview_mask(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+            try:
+                crop_volume_to_part(widget.project, "01-0101-21", "head", [[0, 5], [1, 7], [1, 7]], display_name="Head")
+                widget.refresh_project()
+                widget._select_volume_tree_item("01-0101-21", "part", "head")
+                widget.part_preview_mask = np.ones(tuple(widget.image_volume.shape), dtype=np.uint16)
+
+                widget.add_current_rect_keyframe()
+
+                self.assertIsNone(widget.part_preview_mask)
+                self.assertEqual(widget.project.get_part("01-0101-21", "head")["status"], "draft")
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_part_volume_color_can_override_parent_render_color(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=4)
+            try:
+                cyan_index = widget.volume_tint_combo.findData("cyan")
+                widget.volume_tint_combo.setCurrentIndex(cyan_index)
+                self.assertEqual(widget.project.project_data["view_settings"]["volume_tint"], "cyan")
+
+                crop_volume_to_part(widget.project, "01-0101-21", "head", [[1, 3], [1, 7], [1, 7]], display_name="Head")
+                widget.refresh_project()
+                widget._select_volume_tree_item("01-0101-21", "part", "head")
+                self.assertEqual(widget.volume_tint_combo.currentData(), "cyan")
+
+                white_index = widget.volume_tint_combo.findData("white")
+                widget.volume_tint_combo.setCurrentIndex(white_index)
+
+                part = widget.project.get_part("01-0101-21", "head")
+                self.assertEqual(part["view_settings"]["volume_tint"], "white")
+                self.assertEqual(widget.project.project_data["view_settings"]["volume_tint"], "cyan")
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_part_volume_color_override_survives_project_reload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            widget = self._make_volume_widget(root, z_count=4)
+            project_json = widget.project.current_project_path
+            try:
+                crop_volume_to_part(widget.project, "01-0101-21", "head", [[1, 3], [1, 7], [1, 7]], display_name="Head")
+                widget.refresh_project()
+                widget._select_volume_tree_item("01-0101-21", "part", "head")
+                white_index = widget.volume_tint_combo.findData("white")
+                widget.volume_tint_combo.setCurrentIndex(white_index)
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+            reloaded = TifProjectManager()
+            reloaded.load_project(project_json)
+            self.assertEqual(reloaded.get_part("01-0101-21", "head")["view_settings"]["volume_tint"], "white")
+
+    def test_part_extraction_flow_reopens_with_mask_contours_and_extraction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            widget = self._make_volume_widget(root, z_count=5)
+            project_json = widget.project.current_project_path
+            try:
+                crop_volume_to_part(widget.project, "01-0101-21", "head", [[0, 4], [1, 7], [1, 7]], display_name="Head")
+                widget.refresh_project()
+                widget._select_volume_tree_item("01-0101-21", "part", "head")
+                part = widget.project.get_part("01-0101-21", "head")
+                contours_path = widget.project.to_absolute(part["contours_path"])
+                polygon_a = [[1, 1], [4, 1], [4, 4], [1, 4]]
+                polygon_b = [[2, 2], [5, 2], [5, 5], [2, 5]]
+                contours = read_contours_json(contours_path)
+                contours = add_polygon_keyframe(contours, 0, polygon_a, axis="z", source="manual_freehand")
+                contours = add_polygon_keyframe(contours, 3, polygon_b, axis="z", source="manual_freehand")
+                write_contours_json(contours_path, contours)
+
+                widget.preview_part_mask_from_keyframes()
+                self.assertIsNotNone(widget.part_preview_mask)
+                widget.accept_part_mask_preview()
+                self.assertIn("Accepted part mask", widget.training_status_label.text())
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+            reloaded = TifProjectManager()
+            reloaded.load_project(project_json)
+            reloaded_widget = TifWorkbenchWidget(reloaded, "en")
+            try:
+                reloaded_widget._select_volume_tree_item("01-0101-21", "part", "head")
+                self.assertEqual(reloaded_widget.current_volume_scope, "part")
+                self.assertIsNotNone(reloaded_widget.image_volume)
+                self.assertIsNotNone(reloaded_widget.label_volume)
+                self.assertEqual(tuple(reloaded_widget.image_volume.shape), tuple(reloaded_widget.label_volume.shape))
+                part = reloaded_widget.project.get_part("01-0101-21", "head")
+                self.assertTrue(Path(reloaded_widget.project.to_absolute(part["contours_path"])).exists())
+                self.assertTrue(Path(reloaded_widget.project.to_absolute(part["extraction_path"])).exists())
+                self.assertTrue(reloaded_widget.current_contour_overlay_polygons())
+            finally:
+                reloaded_widget.close_project()
+                reloaded_widget.deleteLater()
+
+    def test_part_package_export_status_does_not_expand_sidebar_with_full_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            widget = self._make_volume_widget(root, z_count=4)
+            export_dir = root / "very" / "deep" / "external" / "part" / "archive" / "folder"
+            try:
+                crop_volume_to_part(widget.project, "01-0101-21", "head", [[0, 3], [1, 7], [1, 7]], display_name="Head")
+                widget.refresh_project()
+                widget._select_volume_tree_item("01-0101-21", "part", "head")
+                with patch("AntSleap.ui.tif_workbench.QFileDialog.getExistingDirectory", return_value=str(export_dir)):
+                    with patch_message_boxes():
+                        widget.export_current_part_package()
+                text = widget.training_status_label.text()
+                self.assertIn("part_manifest.json", text)
+                self.assertNotIn(str(export_dir), text)
+                self.assertIn(str(export_dir), widget.training_status_label.toolTip())
+                self.assertTrue((export_dir / "01-0101-21_head" / "part_manifest.json").exists())
             finally:
                 widget.close_project()
                 widget.deleteLater()
@@ -378,10 +935,18 @@ class TifWorkbenchTests(unittest.TestCase):
             self.assertEqual(widget.backend_formats_edit.text(), "ome_tiff,nrrd,mha,nifti")
             self.assertEqual(widget.training_status_label.objectName(), "tifTrainingStatusText")
             self.assertEqual(widget.log_console.objectName(), "tifLogConsole")
-            inspector_body = widget.findChild(QWidget, "tifInspectorBody")
-            self.assertIsNotNone(inspector_body)
-            self.assertIs(inspector_body, widget.log_console.parentWidget().parentWidget())
-            self.assertIsNone(widget.findChild(QWidget, "tifStatusSection"))
+            task_tabs = widget.findChild(QWidget, "tifTaskTabs")
+            self.assertIsNotNone(task_tabs)
+            self.assertEqual(widget.task_tabs.count(), 4)
+            self.assertEqual(widget.task_tabs.tabText(0), "Part")
+            self.assertEqual(widget.task_tabs.tabText(1), "Display")
+            self.assertEqual(widget.task_tabs.tabText(2), "Annotation")
+            self.assertEqual(widget.task_tabs.tabText(3), "Train/export")
+            self.assertIs(widget.log_console.parentWidget().parentWidget(), widget.training_task_page.widget())
+            self.assertIsNotNone(widget.findChild(QWidget, "tifStatusSection"))
+            self.assertIsNotNone(widget.findChild(QWidget, "tifPartLocateSection"))
+            self.assertIsNotNone(widget.findChild(QWidget, "tifPartMaskSection"))
+            self.assertIsNotNone(widget.findChild(QWidget, "tifPartOutputSection"))
             self.assertEqual(widget.btn_import_tif.property("tifRole"), "primary")
             self.assertEqual(widget.btn_train_backend.property("tifRole"), "primary")
             self.assertEqual(widget.btn_save_backend.property("tifRole"), "secondary")
@@ -438,6 +1003,202 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertIsInstance(widget.volume_canvas, TifVolumeCanvas)
                 self.assertIsNot(widget.volume_canvas, fake_canvas)
                 self.assertEqual(fake_canvas.release_calls, 1)
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_3d_mask_mode_falls_back_from_gpu_canvas_to_cpu_pixmap_canvas(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+
+            class FakeGpuLabel(QLabel):
+                def __init__(self):
+                    super().__init__()
+                    self.release_calls = 0
+
+                def set_volume_data(self, *args, **kwargs):
+                    return None
+
+                def release_gl_resources(self):
+                    self.release_calls += 1
+
+            fake_canvas = FakeGpuLabel()
+            try:
+                crop_volume_to_part(widget.project, "01-0101-21", "head", [[0, 5], [1, 7], [1, 7]], display_name="Head")
+                widget.refresh_project()
+                widget._select_volume_tree_item("01-0101-21", "part", "head")
+                widget.part_preview_mask = np.ones(tuple(widget.image_volume.shape), dtype=np.uint16)
+                widget.display_mode = "volume"
+                widget.view_stack.addWidget(fake_canvas)
+                widget.volume_canvas = fake_canvas
+                widget._volume_canvas_renderer = "gpu"
+                widget._volume_canvas_created = True
+                boundary_index = widget.volume_mask_combo.findData("mask_boundary")
+                widget.volume_mask_combo.setCurrentIndex(boundary_index)
+
+                widget.render_volume_preview()
+
+                self.assertEqual(fake_canvas.release_calls, 1)
+                self.assertEqual(widget._volume_canvas_renderer, "cpu")
+                self.assertIsInstance(widget.volume_canvas, TifVolumeCanvas)
+                self.assertIsNotNone(widget.volume_canvas.pixmap())
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+                fake_canvas.deleteLater()
+
+    def test_masked_image_mode_uses_gpu_canvas_when_available(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+
+            class FakeGpuLabel(QLabel):
+                def __init__(self):
+                    super().__init__()
+                    self.release_calls = 0
+                    self.uploads = []
+                    self.mask_upload = None
+                    self.render_state_args = None
+                    self.render_state_kwargs = None
+
+                def set_volume_data(self, volume, *args, **kwargs):
+                    self.uploads.append(np.asarray(volume).copy())
+
+                def set_mask_data(self, mask):
+                    self.mask_upload = None if mask is None else np.asarray(mask).copy()
+
+                def set_render_state(self, *args, **kwargs):
+                    self.render_state_args = args
+                    self.render_state_kwargs = kwargs
+                    return None
+
+                def release_gl_resources(self):
+                    self.release_calls += 1
+
+            fake_canvas = FakeGpuLabel()
+            try:
+                crop_volume_to_part(widget.project, "01-0101-21", "head", [[0, 5], [1, 7], [1, 7]], display_name="Head")
+                widget.refresh_project()
+                widget._select_volume_tree_item("01-0101-21", "part", "head")
+                mask = np.zeros(tuple(widget.image_volume.shape), dtype=np.uint16)
+                mask[:, 1:4, 1:4] = 1
+                widget.part_preview_mask = mask
+                widget.display_mode = "volume"
+                widget.view_stack.addWidget(fake_canvas)
+                widget.volume_canvas = fake_canvas
+                widget._volume_canvas_renderer = "gpu"
+                widget._volume_canvas_created = True
+                masked_index = widget.volume_mask_combo.findData("masked_image")
+                widget.volume_mask_combo.setCurrentIndex(masked_index)
+
+                widget.render_volume_preview()
+
+                self.assertEqual(fake_canvas.release_calls, 0)
+                self.assertEqual(widget._volume_canvas_renderer, "gpu")
+                self.assertGreaterEqual(len(fake_canvas.uploads), 1)
+                uploaded = fake_canvas.uploads[-1]
+                self.assertEqual(tuple(uploaded.shape), tuple(widget._ensure_volume_preview("still").shape))
+                self.assertGreater(int(uploaded[:, 1:4, 1:4].sum()), 0)
+                outside = uploaded.copy()
+                outside[:, 1:4, 1:4] = 0
+                self.assertGreater(int(outside.sum()), 0)
+                self.assertIsNotNone(fake_canvas.mask_upload)
+                self.assertGreater(int(fake_canvas.mask_upload[:, 1:4, 1:4].sum()), 0)
+                mask_outside = fake_canvas.mask_upload.copy()
+                mask_outside[:, 1:4, 1:4] = 0
+                self.assertEqual(int(mask_outside.sum()), 0)
+                self.assertIsNotNone(fake_canvas.render_state_kwargs)
+                self.assertEqual(fake_canvas.render_state_kwargs["transfer_preset"], widget._volume_transfer_preset())
+                self.assertEqual(fake_canvas.render_state_kwargs["mask_mode"], "masked_image")
+                self.assertEqual(fake_canvas.render_state_kwargs["render_mode"], "still")
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+                fake_canvas.deleteLater()
+
+    def test_mask_boundary_mode_uses_gpu_canvas_when_mask_texture_is_available(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+
+            class FakeGpuLabel(QLabel):
+                def __init__(self):
+                    super().__init__()
+                    self.release_calls = 0
+                    self.uploads = []
+                    self.mask_upload = None
+                    self.render_state_kwargs = None
+
+                def set_volume_data(self, volume, *args, **kwargs):
+                    self.uploads.append(np.asarray(volume).copy())
+
+                def set_mask_data(self, mask):
+                    self.mask_upload = None if mask is None else np.asarray(mask).copy()
+
+                def set_render_state(self, *args, **kwargs):
+                    self.render_state_kwargs = dict(kwargs)
+
+                def release_gl_resources(self):
+                    self.release_calls += 1
+
+            fake_canvas = FakeGpuLabel()
+            try:
+                crop_volume_to_part(widget.project, "01-0101-21", "head", [[0, 5], [1, 7], [1, 7]], display_name="Head")
+                widget.refresh_project()
+                widget._select_volume_tree_item("01-0101-21", "part", "head")
+                mask = np.zeros(tuple(widget.image_volume.shape), dtype=np.uint16)
+                mask[:, 1:4, 1:4] = 1
+                widget.part_preview_mask = mask
+                widget.display_mode = "volume"
+                widget.view_stack.addWidget(fake_canvas)
+                widget.volume_canvas = fake_canvas
+                widget._volume_canvas_renderer = "gpu"
+                widget._volume_canvas_created = True
+                boundary_index = widget.volume_mask_combo.findData("mask_boundary")
+                widget.volume_mask_combo.setCurrentIndex(boundary_index)
+
+                widget.render_volume_preview()
+
+                self.assertEqual(fake_canvas.release_calls, 0)
+                self.assertEqual(widget._volume_canvas_renderer, "gpu")
+                self.assertGreaterEqual(len(fake_canvas.uploads), 1)
+                self.assertIsNotNone(fake_canvas.mask_upload)
+                self.assertEqual(fake_canvas.render_state_kwargs["mask_mode"], "mask_boundary")
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+                fake_canvas.deleteLater()
+
+    def test_image_only_mode_restores_gpu_after_temporary_mask_cpu_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+            try:
+                crop_volume_to_part(widget.project, "01-0101-21", "head", [[0, 5], [1, 7], [1, 7]], display_name="Head")
+                widget.refresh_project()
+                widget._select_volume_tree_item("01-0101-21", "part", "head")
+                widget.part_preview_mask = np.ones(tuple(widget.image_volume.shape), dtype=np.uint16)
+                widget.display_mode = "volume"
+                widget._volume_canvas_created = True
+                widget._volume_canvas_renderer = "cpu"
+                widget.volume_canvas.setProperty("tifVolumeRenderer", "cpu-mask-fallback")
+                class FakeRestoredGpuCanvas(TifVolumeCanvas):
+                    def set_volume_data(self, *args, **kwargs):
+                        return None
+
+                gpu_canvas = FakeRestoredGpuCanvas()
+                gpu_canvas.setProperty("tifVolumeRenderer", "gpu-offscreen")
+                calls = []
+
+                def fake_factory(parent=None):
+                    calls.append(parent)
+                    return gpu_canvas, "gpu", ""
+
+                image_index = widget.volume_mask_combo.findData("image_only")
+                widget.volume_mask_combo.setCurrentIndex(image_index)
+                with patch("AntSleap.ui.tif_workbench.create_tif_volume_canvas", fake_factory):
+                    widget.render_volume_preview()
+
+                self.assertEqual(widget._volume_canvas_renderer, "gpu")
+                self.assertIs(widget.volume_canvas, gpu_canvas)
+                self.assertEqual(len(calls), 1)
             finally:
                 widget.close_project()
                 widget.deleteLater()
@@ -901,6 +1662,179 @@ class TifWorkbenchTests(unittest.TestCase):
             widget.close_project()
             widget.deleteLater()
 
+    def test_part_volume_still_preview_preserves_uint16_detail_by_default(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "zh")
+        try:
+            widget._volume_canvas_renderer = "gpu"
+            widget.current_volume_scope = "part"
+            widget.image_volume = np.array([[[0, 32768], [49152, 65535]]], dtype=np.uint16)
+            preview = widget._ensure_volume_preview("still")
+            self.assertEqual(preview.dtype, np.uint16)
+            np.testing.assert_array_equal(preview, widget.image_volume)
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+
+    def test_transfer_function_change_keeps_volume_texture_cache(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+
+        class FakeGpuLabel(QLabel):
+            def __init__(self):
+                super().__init__()
+                self.upload_ids = []
+                self.render_state_kwargs = []
+
+            def set_volume_data(self, volume, *args, **kwargs):
+                self.upload_ids.append(id(volume))
+
+            def set_render_state(self, *args, **kwargs):
+                self.render_state_kwargs.append(dict(kwargs))
+
+        fake_canvas = FakeGpuLabel()
+        try:
+            widget._volume_canvas_renderer = "gpu"
+            widget._volume_canvas_created = True
+            widget.view_stack.addWidget(fake_canvas)
+            widget.volume_canvas = fake_canvas
+            widget.display_mode = "volume"
+            widget.image_volume = np.zeros((8, 96, 96), dtype=np.uint8)
+            widget.image_volume[:, 24:72, 24:72] = 180
+
+            widget.render_volume_preview()
+            before_cache_items = [(key, id(value)) for key, value in widget._volume_preview_cache.items()]
+            before_upload = fake_canvas.upload_ids[-1]
+            cyan_index = widget.volume_tint_combo.findData("cyan")
+            widget.volume_tint_combo.setCurrentIndex(cyan_index)
+
+            after_cache_items = [(key, id(value)) for key, value in widget._volume_preview_cache.items()]
+            self.assertEqual(before_cache_items, after_cache_items)
+            self.assertEqual(fake_canvas.upload_ids[-1], before_upload)
+            self.assertEqual(fake_canvas.render_state_kwargs[-1]["transfer_preset"], "cyan")
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+            fake_canvas.deleteLater()
+
+    def test_transfer_opacity_change_keeps_volume_texture_cache(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+
+        class FakeGpuLabel(QLabel):
+            def __init__(self):
+                super().__init__()
+                self.upload_ids = []
+                self.render_state_kwargs = []
+
+            def set_volume_data(self, volume, *args, **kwargs):
+                self.upload_ids.append(id(volume))
+
+            def set_mask_data(self, mask):
+                return None
+
+            def set_render_state(self, *args, **kwargs):
+                self.render_state_kwargs.append(dict(kwargs))
+
+        fake_canvas = FakeGpuLabel()
+        try:
+            widget._volume_canvas_renderer = "gpu"
+            widget._volume_canvas_created = True
+            widget.view_stack.addWidget(fake_canvas)
+            widget.volume_canvas = fake_canvas
+            widget.display_mode = "volume"
+            widget.image_volume = np.zeros((8, 96, 96), dtype=np.uint8)
+            widget.image_volume[:, 24:72, 24:72] = 180
+
+            widget.render_volume_preview()
+            before_cache_items = [(key, id(value)) for key, value in widget._volume_preview_cache.items()]
+            before_upload = fake_canvas.upload_ids[-1]
+            widget.volume_transfer_opacity_slider.setValue(65)
+
+            after_cache_items = [(key, id(value)) for key, value in widget._volume_preview_cache.items()]
+            self.assertEqual(before_cache_items, after_cache_items)
+            self.assertEqual(fake_canvas.upload_ids[-1], before_upload)
+            self.assertAlmostEqual(fake_canvas.render_state_kwargs[-1]["transfer_opacity"], 0.65)
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+            fake_canvas.deleteLater()
+
+    def test_volume_enhancement_and_clip_plane_are_passed_to_gpu_state(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+
+        class FakeGpuLabel(QLabel):
+            def __init__(self):
+                super().__init__()
+                self.render_state_kwargs = []
+
+            def set_volume_data(self, *args, **kwargs):
+                return None
+
+            def set_mask_data(self, mask):
+                return None
+
+            def set_render_state(self, *args, **kwargs):
+                self.render_state_kwargs.append(dict(kwargs))
+
+        fake_canvas = FakeGpuLabel()
+        try:
+            widget._volume_canvas_renderer = "gpu"
+            widget._volume_canvas_created = True
+            widget.view_stack.addWidget(fake_canvas)
+            widget.volume_canvas = fake_canvas
+            widget.display_mode = "volume"
+            widget.image_volume = np.zeros((8, 96, 96), dtype=np.uint8)
+            widget.image_volume[:, 24:72, 24:72] = 180
+            widget._volume_yaw = 35.0
+            widget._volume_pitch = -15.0
+
+            widget.volume_enhancement_slider.setValue(80)
+            widget.volume_tone_slider.setValue(90)
+            widget.volume_surface_refine_check.setChecked(True)
+            widget.volume_clip_plane_check.setChecked(True)
+            widget.volume_clip_plane_depth_slider.setValue(62)
+            widget.render_volume_preview()
+
+            state = fake_canvas.render_state_kwargs[-1]
+            self.assertAlmostEqual(state["enhancement"], 0.8)
+            self.assertAlmostEqual(state["tone_gamma"], 0.9)
+            self.assertTrue(state["surface_refine"])
+            self.assertTrue(state["clip_plane_enabled"])
+            self.assertAlmostEqual(state["clip_plane_depth"], 0.62)
+            self.assertEqual(len(state["clip_plane_normal"]), 3)
+            self.assertIn("Clip plane 62%", widget.volume_canvas_overlay_text())
+            self.assertIn("Detail enhancement 80%", widget.volume_canvas_overlay_text())
+
+            widget._volume_render_mode = "drag"
+            widget.render_volume_preview()
+            self.assertEqual(fake_canvas.render_state_kwargs[-1]["enhancement"], 0.0)
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+            fake_canvas.deleteLater()
+
+    def test_masked_volume_preview_is_cached_for_interaction_reuse(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "zh")
+        try:
+            preview = np.arange(2 * 5 * 5, dtype=np.uint8).reshape((2, 5, 5))
+            mask = np.zeros_like(preview, dtype=np.uint8)
+            mask[:, 1:4, 1:4] = 1
+
+            first = widget._masked_volume_preview(preview, mask)
+            second = widget._masked_volume_preview(preview, mask)
+
+            self.assertIs(first, second)
+            self.assertEqual(len(widget._volume_masked_preview_cache), 1)
+            outside = first.copy()
+            outside[:, 1:4, 1:4] = 0
+            self.assertEqual(int(outside.sum()), 0)
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+
     def test_volume_preview_is_read_only_for_label_safety(self):
         with tempfile.TemporaryDirectory() as tmp:
             widget = self._make_volume_widget(Path(tmp), z_count=3)
@@ -948,6 +1882,9 @@ class TifWorkbenchTests(unittest.TestCase):
             self.assertIn("模型训练", section_titles)
             self.assertIn("模型配置", section_titles)
             self.assertIn("工作台日志", section_titles)
+            self.assertIn("1. 定位部位", section_titles)
+            self.assertIn("2. 生成部位 mask", section_titles)
+            self.assertIn("3. 输出与管理", section_titles)
             self.assertEqual(widget.label_role_combo.itemText(widget.label_role_combo.findData("manual_truth")), "人工真值")
             self.assertIn("只读基准层", widget.label_role_help_label.text())
         finally:

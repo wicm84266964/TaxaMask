@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 
 from AntSleap.core.tif_export import export_monai_dataset, export_nnunet_dataset, export_tif_training_dataset
+from AntSleap.core.tif_part_extraction import crop_volume_to_part, export_part_package
 from AntSleap.core.tif_project import TifProjectManager
 from AntSleap.core.tif_volume_io import read_volume_metadata, write_volume_sidecar
 
@@ -107,6 +108,52 @@ class TifExportTests(unittest.TestCase):
             self.assertEqual(monai["exported_count"], 1)
             self.assertTrue((root / "monai" / "monai_datalist.json").exists())
             self.assertTrue((root / "monai" / "monai_manifest.json").exists())
+
+    def test_part_package_export_keeps_part_artifacts_separate_from_training(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = TifProjectManager()
+            project_root = root / "project"
+            manager.create_project("part_export", project_root)
+            manager.create_specimen_scaffold("01-0101-part")
+            image_rel = "specimens/01-0101-part/working/image.ome.zarr"
+            image_meta = write_volume_sidecar(project_root / image_rel, np.arange(4 * 5 * 6, dtype=np.uint8).reshape((4, 5, 6)), role="working_image")
+            manager.register_working_volume("01-0101-part", image_rel, image_meta["shape_zyx"], image_meta["dtype"], save=False)
+            manager.save_project()
+            crop_volume_to_part(manager, "01-0101-part", "head", [[1, 3], [1, 4], [2, 5]], display_name="Head")
+
+            result = export_part_package(manager, "01-0101-part", "head", root / "parts_export")
+
+            package_dir = Path(result["package_dir"])
+            self.assertTrue((package_dir / "image.ome.zarr").exists())
+            self.assertTrue((package_dir / "mask.ome.zarr").exists())
+            self.assertTrue((package_dir / "contours.json").exists())
+            self.assertTrue((package_dir / "extraction.json").exists())
+            self.assertTrue((package_dir / "part_manifest.json").exists())
+            self.assertEqual(result["manifest"]["part_id"], "head")
+            self.assertEqual(result["manifest"]["parent_bbox_zyx"], [[1, 3], [1, 4], [2, 5]])
+
+    def test_part_package_export_creates_new_folder_instead_of_overwriting_existing_package(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = TifProjectManager()
+            project_root = root / "project"
+            manager.create_project("part_export_versioned", project_root)
+            manager.create_specimen_scaffold("01-0101-part")
+            image_rel = "specimens/01-0101-part/working/image.ome.zarr"
+            image_meta = write_volume_sidecar(project_root / image_rel, np.arange(4 * 5 * 6, dtype=np.uint8).reshape((4, 5, 6)), role="working_image")
+            manager.register_working_volume("01-0101-part", image_rel, image_meta["shape_zyx"], image_meta["dtype"], save=False)
+            manager.save_project()
+            crop_volume_to_part(manager, "01-0101-part", "head", [[1, 3], [1, 4], [2, 5]], display_name="Head")
+
+            first = export_part_package(manager, "01-0101-part", "head", root / "parts_export")
+            sentinel = Path(first["package_dir"]) / "review_note.txt"
+            sentinel.write_text("keep this review note", encoding="utf-8")
+            second = export_part_package(manager, "01-0101-part", "head", root / "parts_export")
+
+            self.assertNotEqual(first["package_dir"], second["package_dir"])
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep this review note")
+            self.assertTrue((Path(second["package_dir"]) / "part_manifest.json").exists())
 
 
 if __name__ == "__main__":

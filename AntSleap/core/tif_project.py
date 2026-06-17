@@ -11,6 +11,8 @@ TIF_PROJECT_SCHEMA_VERSION = "ant3d_tif_project_v1"
 TIF_PROJECT_TYPE = "tif_volume"
 DEFAULT_TIF_PROJECT_FILENAME = "project.json"
 TIF_REVIEW_STATUSES = {"not_started", "in_progress", "fully_annotated", "reviewed", "train_ready"}
+TIF_PART_STATUSES = {"draft", "roi_confirmed", "mask_preview", "reviewed"}
+TIF_PART_ROI_STATUSES = {"draft", "confirmed", "part_created", "cancelled"}
 
 
 def _now_iso():
@@ -26,6 +28,24 @@ def _safe_path_fragment(value):
     return clean
 
 
+def _safe_part_id(value):
+    text = str(value or "").strip()
+    clean = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in text)
+    clean = clean.strip("_")
+    if not clean or clean in {".", ".."} or not clean.strip("."):
+        return "part"
+    return clean
+
+
+def _safe_roi_id(value):
+    text = str(value or "").strip()
+    clean = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in text)
+    clean = clean.strip("_")
+    if not clean or clean in {".", ".."} or not clean.strip("."):
+        return "roi"
+    return clean
+
+
 def _default_project_data(name="Untitled TIF Project", project_id=None):
     now = _now_iso()
     return {
@@ -38,6 +58,7 @@ def _default_project_data(name="Untitled TIF Project", project_id=None):
         "specimens": [],
         "models": [],
         "runs": [],
+        "view_settings": {},
     }
 
 
@@ -71,11 +92,16 @@ class TifProjectManager:
         specimens = payload.get("specimens", [])
         if not isinstance(specimens, list):
             raise ValueError("tif_project_specimens_not_list")
+        self.current_project_path = os.path.abspath(path)
         payload.setdefault("models", [])
         payload.setdefault("runs", [])
+        payload.setdefault("view_settings", {})
         payload.setdefault("updated_at", payload.get("created_at", _now_iso()))
+        for specimen in specimens:
+            if isinstance(specimen, dict):
+                specimen["parts"] = self._normalize_parts(specimen)
+                specimen["part_rois"] = self._normalize_part_rois(specimen)
         self.project_data = payload
-        self.current_project_path = os.path.abspath(path)
         return self.project_data
 
     def save_project(self):
@@ -107,6 +133,9 @@ class TifProjectManager:
 
     def specimen_dir(self, specimen_id):
         return os.path.join("specimens", _safe_path_fragment(specimen_id))
+
+    def part_dir(self, specimen_id, part_id):
+        return os.path.join(self.specimen_dir(specimen_id), "parts", _safe_part_id(part_id)).replace("\\", "/")
 
     def create_specimen_scaffold(self, specimen_id, material_map=None, modality="unknown", metadata_ref="", display_name=""):
         clean_id = self._validate_new_specimen_id(specimen_id, require_storage_available=True)
@@ -161,6 +190,8 @@ class TifProjectManager:
             "review_status": review_status,
             "train_ready": bool(train_ready),
             "provenance": dict(provenance or {}),
+            "parts": [],
+            "part_rois": [],
         }
         self.project_data.setdefault("specimens", []).append(specimen)
         if save:
@@ -343,6 +374,206 @@ class TifProjectManager:
                 ready.append(specimen)
         return ready
 
+    def add_part(
+        self,
+        specimen_id,
+        part_id,
+        display_name="",
+        image=None,
+        mask=None,
+        parent_bbox_zyx=None,
+        source=None,
+        contours_path="",
+        extraction_path="",
+        status="draft",
+        metadata=None,
+        save=True,
+    ):
+        specimen = self._require_specimen(specimen_id)
+        clean_id = self._validate_new_part_id(specimen, part_id)
+        if status not in TIF_PART_STATUSES:
+            status = "draft"
+        now = _now_iso()
+        part = {
+            "part_id": clean_id,
+            "display_name": str(display_name or clean_id),
+            "status": status,
+            "image": self._normalize_volume_record(image),
+            "mask": self._normalize_volume_record(mask),
+            "contours_path": self.to_relative(contours_path),
+            "extraction_path": self.to_relative(extraction_path),
+            "parent_bbox_zyx": self._normalize_bbox_zyx(parent_bbox_zyx),
+            "source": dict(source or {"parent_specimen_id": specimen.get("specimen_id"), "parent_volume_role": "working_volume"}),
+            "created_at": now,
+            "updated_at": now,
+            "metadata": dict(metadata or {}),
+            "view_settings": {},
+        }
+        specimen.setdefault("parts", []).append(part)
+        if save:
+            self.save_project()
+        return part
+
+    def get_part(self, specimen_id, part_id, default=None):
+        specimen = self.get_specimen(specimen_id, default=None)
+        if specimen is None:
+            return default
+        wanted = str(part_id or "").strip()
+        wanted_safe = _safe_part_id(wanted)
+        for part in specimen.get("parts", []) or []:
+            current = str((part or {}).get("part_id", "") or "").strip()
+            if current == wanted or current == wanted_safe:
+                return part
+        return default
+
+    def list_parts(self, specimen_id):
+        specimen = self._require_specimen(specimen_id)
+        return list(specimen.get("parts", []) or [])
+
+    def add_part_roi(
+        self,
+        specimen_id,
+        roi_id,
+        display_name="",
+        bbox_zyx=None,
+        status="draft",
+        linked_part_id="",
+        metadata=None,
+        save=True,
+    ):
+        specimen = self._require_specimen(specimen_id)
+        clean_id = self._validate_new_roi_id(specimen, roi_id)
+        if status not in TIF_PART_ROI_STATUSES:
+            status = "draft"
+        now = _now_iso()
+        roi = {
+            "roi_id": clean_id,
+            "display_name": str(display_name or clean_id),
+            "status": status,
+            "bbox_zyx": self._normalize_bbox_zyx(bbox_zyx),
+            "linked_part_id": str(linked_part_id or ""),
+            "created_at": now,
+            "updated_at": now,
+            "metadata": dict(metadata or {}),
+        }
+        specimen.setdefault("part_rois", []).append(roi)
+        if save:
+            self.save_project()
+        return roi
+
+    def get_part_roi(self, specimen_id, roi_id, default=None):
+        specimen = self.get_specimen(specimen_id, default=None)
+        if specimen is None:
+            return default
+        wanted = str(roi_id or "").strip()
+        wanted_safe = _safe_roi_id(wanted)
+        for roi in specimen.get("part_rois", []) or []:
+            current = str((roi or {}).get("roi_id", "") or "").strip()
+            if current == wanted or current == wanted_safe:
+                return roi
+        return default
+
+    def list_part_rois(self, specimen_id, include_cancelled=False):
+        specimen = self._require_specimen(specimen_id)
+        rois = list(specimen.get("part_rois", []) or [])
+        if include_cancelled:
+            return rois
+        return [roi for roi in rois if (roi or {}).get("status") != "cancelled"]
+
+    def update_part_roi(self, specimen_id, roi_id, bbox_zyx=None, status=None, display_name=None, linked_part_id=None, metadata=None, save=True):
+        if status is not None and status not in TIF_PART_ROI_STATUSES:
+            raise ValueError(f"invalid_tif_part_roi_status:{status}")
+        roi = self.get_part_roi(specimen_id, roi_id, default=None)
+        if roi is None:
+            raise KeyError(f"unknown_part_roi_id:{specimen_id}:{roi_id}")
+        if bbox_zyx is not None:
+            roi["bbox_zyx"] = self._normalize_bbox_zyx(bbox_zyx)
+        if status is not None:
+            roi["status"] = status
+        if display_name is not None:
+            roi["display_name"] = str(display_name or roi.get("roi_id", ""))
+        if linked_part_id is not None:
+            roi["linked_part_id"] = str(linked_part_id or "")
+        if isinstance(metadata, dict):
+            roi.setdefault("metadata", {}).update(metadata)
+        roi["updated_at"] = _now_iso()
+        if save:
+            self.save_project()
+        return roi
+
+    def discard_part_roi(self, specimen_id, roi_id, save=True):
+        specimen = self._require_specimen(specimen_id)
+        roi = self.get_part_roi(specimen_id, roi_id, default=None)
+        if roi is None:
+            return {"removed_roi": False}
+        roi["status"] = "cancelled"
+        roi["updated_at"] = _now_iso()
+        if save:
+            self.save_project()
+        return {"removed_roi": True}
+
+    def update_part_status(self, specimen_id, part_id, status, save=True):
+        if status not in TIF_PART_STATUSES:
+            raise ValueError(f"invalid_tif_part_status:{status}")
+        part = self.get_part(specimen_id, part_id, default=None)
+        if part is None:
+            raise KeyError(f"unknown_part_id:{specimen_id}:{part_id}")
+        part["status"] = status
+        part["updated_at"] = _now_iso()
+        if save:
+            self.save_project()
+        return part
+
+    def update_part_view_settings(self, specimen_id, part_id, settings, save=True):
+        part = self.get_part(specimen_id, part_id, default=None)
+        if part is None:
+            raise KeyError(f"unknown_part_id:{specimen_id}:{part_id}")
+        clean = {}
+        if isinstance(settings, dict):
+            for key, value in settings.items():
+                if value is None:
+                    continue
+                clean[str(key)] = value
+        part.setdefault("view_settings", {}).update(clean)
+        part["updated_at"] = _now_iso()
+        if save:
+            self.save_project()
+        return part
+
+    def discard_part(self, specimen_id, part_id, remove_storage=True, save=True):
+        specimen = self._require_specimen(specimen_id)
+        wanted = str(part_id or "").strip()
+        wanted_safe = _safe_part_id(wanted)
+        parts = specimen.setdefault("parts", [])
+        removed_part = None
+        kept = []
+        for part in parts:
+            current = str((part or {}).get("part_id", "") or "").strip()
+            if removed_part is None and current in {wanted, wanted_safe}:
+                removed_part = part
+            else:
+                kept.append(part)
+        specimen["parts"] = kept
+
+        removed_storage = False
+        if remove_storage and removed_part is not None:
+            part_root = os.path.abspath(self.to_absolute(self.part_dir(specimen_id, removed_part.get("part_id", ""))))
+            parts_root = os.path.abspath(self.to_absolute(os.path.join(self.specimen_dir(specimen_id), "parts")))
+            try:
+                is_safe_storage = (
+                    os.path.commonpath([parts_root, part_root]) == parts_root
+                    and os.path.normcase(part_root) != os.path.normcase(parts_root)
+                )
+            except ValueError:
+                is_safe_storage = False
+            if is_safe_storage and os.path.exists(part_root):
+                shutil.rmtree(part_root)
+                removed_storage = True
+
+        if save and (removed_part is not None or removed_storage):
+            self.save_project()
+        return {"removed_part": removed_part is not None, "removed_storage": removed_storage}
+
     def _require_specimen(self, specimen_id):
         specimen = self.get_specimen(specimen_id, default=None)
         if specimen is None:
@@ -402,6 +633,36 @@ class TifProjectManager:
                 raise FileExistsError(f"specimen_storage_path_exists:{self.specimen_dir(clean_id)}")
         return clean_id
 
+    def _validate_new_part_id(self, specimen, part_id):
+        clean_id = _safe_part_id(part_id)
+        used_ids = {
+            str((part or {}).get("part_id", "") or "").strip().lower()
+            for part in specimen.get("parts", []) or []
+        }
+        if clean_id.lower() in used_ids:
+            raise ValueError(f"duplicate_part_id:{clean_id}")
+
+        new_dir = os.path.normcase(os.path.normpath(self.part_dir(specimen.get("specimen_id", ""), clean_id))).lower()
+        for part in specimen.get("parts", []) or []:
+            existing_id = str((part or {}).get("part_id", "") or "").strip()
+            if not existing_id:
+                continue
+            existing_dir = os.path.normcase(os.path.normpath(self.part_dir(specimen.get("specimen_id", ""), existing_id))).lower()
+            if existing_dir == new_dir:
+                raise ValueError(f"part_storage_path_collision:{clean_id}:{existing_id}:{new_dir}")
+        return clean_id
+
+    def _validate_new_roi_id(self, specimen, roi_id):
+        clean_id = _safe_roi_id(roi_id)
+        used_ids = {
+            str((roi or {}).get("roi_id", "") or "").strip().lower()
+            for roi in specimen.get("part_rois", []) or []
+            if (roi or {}).get("status") != "cancelled"
+        }
+        if clean_id.lower() in used_ids:
+            raise ValueError(f"duplicate_part_roi_id:{clean_id}")
+        return clean_id
+
     def _normalize_volume_record(self, record):
         if not isinstance(record, dict):
             return {
@@ -430,6 +691,107 @@ class TifProjectManager:
             "working_edit": self._normalize_volume_record(source.get("working_edit")),
             "model_drafts": list(source.get("model_drafts", [])) if isinstance(source.get("model_drafts", []), list) else [],
         }
+
+    def _normalize_parts(self, specimen):
+        source = specimen.get("parts", [])
+        if not isinstance(source, list):
+            return []
+        clean_parts = []
+        used_ids = set()
+        used_dirs = set()
+        for index, record in enumerate(source):
+            part = self._normalize_part_record(record, fallback_id=f"part_{index + 1}")
+            base_id = _safe_part_id(part.get("part_id") or f"part_{index + 1}")
+            candidate = base_id
+            suffix = 2
+            while True:
+                key = candidate.lower()
+                storage = os.path.normcase(os.path.normpath(self.part_dir(specimen.get("specimen_id", ""), candidate))).lower()
+                if key not in used_ids and storage not in used_dirs:
+                    break
+                candidate = f"{base_id}_{suffix}"
+                suffix += 1
+            part["part_id"] = candidate
+            used_ids.add(candidate.lower())
+            used_dirs.add(os.path.normcase(os.path.normpath(self.part_dir(specimen.get("specimen_id", ""), candidate))).lower())
+            clean_parts.append(part)
+        return clean_parts
+
+    def _normalize_part_rois(self, specimen):
+        source = specimen.get("part_rois", [])
+        if not isinstance(source, list):
+            return []
+        clean_rois = []
+        used_ids = set()
+        for index, record in enumerate(source):
+            roi = self._normalize_part_roi_record(record, fallback_id=f"roi_{index + 1}")
+            base_id = _safe_roi_id(roi.get("roi_id") or f"roi_{index + 1}")
+            candidate = base_id
+            suffix = 2
+            while candidate.lower() in used_ids:
+                candidate = f"{base_id}_{suffix}"
+                suffix += 1
+            roi["roi_id"] = candidate
+            used_ids.add(candidate.lower())
+            clean_rois.append(roi)
+        return clean_rois
+
+    def _normalize_part_roi_record(self, record, fallback_id="roi"):
+        source = record if isinstance(record, dict) else {}
+        status = str(source.get("status", "draft") or "draft")
+        if status not in TIF_PART_ROI_STATUSES:
+            status = "draft"
+        roi_id = _safe_roi_id(source.get("roi_id") or source.get("id") or fallback_id)
+        created_at = str(source.get("created_at") or _now_iso())
+        return {
+            "roi_id": roi_id,
+            "display_name": str(source.get("display_name") or source.get("name") or roi_id),
+            "status": status,
+            "bbox_zyx": self._normalize_bbox_zyx(source.get("bbox_zyx")),
+            "linked_part_id": str(source.get("linked_part_id", "") or ""),
+            "created_at": created_at,
+            "updated_at": str(source.get("updated_at") or created_at),
+            "metadata": dict(source.get("metadata") or {}),
+            "view_settings": dict(source.get("view_settings") or {}),
+        }
+
+    def _normalize_part_record(self, record, fallback_id="part"):
+        source = record if isinstance(record, dict) else {}
+        status = str(source.get("status", "draft") or "draft")
+        if status not in TIF_PART_STATUSES:
+            status = "draft"
+        part_id = _safe_part_id(source.get("part_id") or source.get("id") or fallback_id)
+        created_at = str(source.get("created_at") or _now_iso())
+        return {
+            "part_id": part_id,
+            "display_name": str(source.get("display_name") or source.get("name") or part_id),
+            "status": status,
+            "image": self._normalize_volume_record(source.get("image")),
+            "mask": self._normalize_volume_record(source.get("mask")),
+            "contours_path": self.to_relative(source.get("contours_path", "")),
+            "extraction_path": self.to_relative(source.get("extraction_path", "")),
+            "parent_bbox_zyx": self._normalize_bbox_zyx(source.get("parent_bbox_zyx")),
+            "source": dict(source.get("source") or {}),
+            "created_at": created_at,
+            "updated_at": str(source.get("updated_at") or created_at),
+            "metadata": dict(source.get("metadata") or {}),
+            "view_settings": dict(source.get("view_settings") or {}),
+        }
+
+    def _normalize_bbox_zyx(self, bbox):
+        if not isinstance(bbox, (list, tuple)) or len(bbox) != 3:
+            return []
+        clean = []
+        try:
+            for pair in bbox:
+                if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+                    return []
+                start = int(pair[0])
+                end = int(pair[1])
+                clean.append([start, end])
+        except (TypeError, ValueError):
+            return []
+        return clean
 
     def _volume_payload(self, path, shape_zyx, dtype, spacing_zyx=None, spacing_unit="micrometer", orientation="unknown", fmt=VOLUME_SIDECAR_FORMAT):
         shape = [int(value) for value in (shape_zyx or [])]

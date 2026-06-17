@@ -40,6 +40,7 @@ class BlinkTrajectoryDataset(Dataset):
         blink_prob=0.5,
         training_strategy=BLINK_STRATEGY_TRIVIEW_RANDOM,
         stage_view_mode=None,
+        allowed_image_paths=None,
     ):
         """
         :param project_json_path: project.json 的路径
@@ -54,9 +55,29 @@ class BlinkTrajectoryDataset(Dataset):
         self.blink_prob = blink_prob
         self.training_strategy = sanitize_blink_training_strategy(training_strategy)
         self.stage_view_mode = str(stage_view_mode or "").strip().lower()
+        self.allowed_image_paths = self._normalize_allowed_image_paths(allowed_image_paths)
         self.samples = []
         
         self._load_data()
+
+    def _normalize_allowed_image_paths(self, image_paths):
+        if not image_paths:
+            return None
+        allowed = set()
+        for image_path in image_paths:
+            text = str(image_path or "").strip()
+            if not text:
+                continue
+            allowed.add(os.path.normcase(os.path.normpath(text)))
+            allowed.add(os.path.normcase(os.path.abspath(os.path.normpath(text))))
+        return allowed or None
+
+    def _is_allowed_image_path(self, rel_img_path, abs_img_path):
+        if not self.allowed_image_paths:
+            return True
+        rel_key = os.path.normcase(os.path.normpath(str(rel_img_path or "")))
+        abs_key = os.path.normcase(os.path.abspath(os.path.normpath(str(abs_img_path or ""))))
+        return rel_key in self.allowed_image_paths or abs_key in self.allowed_image_paths
 
     def _safe_box(self, box, width, height):
         if not isinstance(box, (list, tuple)) or len(box) != 4:
@@ -97,6 +118,8 @@ class BlinkTrajectoryDataset(Dataset):
                     continue
                 # 原始大图的绝对路径
                 abs_img_path = os.path.normpath(os.path.join(proj_dir, rel_img_path))
+                if not self._is_allowed_image_path(rel_img_path, abs_img_path):
+                    continue
                 
                 # 记录这整个轨迹序列作为一组样本
                 # 我们可以在 __getitem__ 中随机抽取轨迹中的某一帧

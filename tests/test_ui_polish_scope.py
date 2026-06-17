@@ -42,6 +42,8 @@ except ModuleNotFoundError as exc:
         raise
 else:
     import AntSleap.main as main_module
+    from AntSleap.core.blink_dataset import BlinkTrajectoryDataset
+    from AntSleap.core.blink_heatmap_dataset import BlinkHeatmapDataset
     from AntSleap.ui.blink_lab import BlinkExpertTrainingReportDialog, BlinkLabWidget
     from AntSleap.ui.cropper import ImageCropper
     from AntSleap.ui.pdf_processing_widget import PdfProcessingWidget
@@ -2144,9 +2146,13 @@ class UiPolishScopeTests(unittest.TestCase):
         window = self.make_main_window()
         try:
             image_path = str(Path(self.temp_dir.name) / "specimen.png")
+            other_image_path = str(Path(self.temp_dir.name) / "other_specimen.png")
             self.project_manager.project_data["taxonomy"] = ["Head", "Mandible"]
             self.project_manager.project_data["locator_scope"] = ["Head"]
-            self.project_manager.project_data["images"] = [image_path]
+            self.project_manager.project_data["images"] = [image_path, other_image_path]
+            self.project_manager.project_data["image_groups"] = {
+                "custom_groups": [{"id": "pilot_group", "name": "Pilot group"}]
+            }
             self.project_manager.project_data["labels"] = {
                 image_path: {
                     "parts": {"Mandible": [[24, 24], [38, 24], [38, 38], [24, 38]]},
@@ -2157,7 +2163,12 @@ class UiPolishScopeTests(unittest.TestCase):
                     "genus": "Unknown",
                 }
             }
+            self.project_manager.set_image_provenance(image_path, {"manual_image_group": "pilot_group"}, save=False)
             self.project_manager.project_data["blink_context_roi_parents"] = {"Mandible": "Head"}
+            window.refresh_file_list()
+            group_index = window.combo_training_scope.findData("pilot_group")
+            self.assertGreaterEqual(group_index, 0)
+            window.combo_training_scope.setCurrentIndex(group_index)
             window.refresh_route_table()
             window.current_image = image_path
             window._select_part_in_tree("Mandible")
@@ -2166,6 +2177,11 @@ class UiPolishScopeTests(unittest.TestCase):
                 window.train_current_blink_expert()
 
             train.assert_called_once()
+            _, train_kwargs = train.call_args
+            self.assertEqual(train_kwargs["allowed_image_paths"], [image_path])
+            self.assertEqual(train_kwargs["training_scope"]["scope_id"], "pilot_group")
+            self.assertEqual(train_kwargs["training_scope"]["label"], "Pilot group")
+            self.assertEqual(train_kwargs["training_scope"]["image_count"], 1)
             self.assertEqual(window.blink_lab.session_target_part, "Mandible")
             self.assertEqual(window.blink_lab.current_image_path, image_path)
             self.assertEqual(window.blink_lab.active_session["focus_roi"]["part"], "Head")
@@ -2173,6 +2189,55 @@ class UiPolishScopeTests(unittest.TestCase):
             self.assertEqual(window.blink_lab.training_route_context["child_part"], "Mandible")
         finally:
             window.deleteLater()
+
+    def test_child_expert_datasets_filter_trajectories_by_training_scope_images(self):
+        image_paths = []
+        for index in range(2):
+            image_path = Path(self.temp_dir.name) / f"child_scope_{index}.png"
+            image = QImage(96, 72, QImage.Format_RGB32)
+            image.fill(0xFFB0B0B0)
+            self.assertTrue(image.save(str(image_path)))
+            image_paths.append(str(image_path))
+
+        self.project_manager.project_data["labels"] = {
+            path: {
+                "trajectories": {
+                    "Mandible": {
+                        "frames": [
+                            {"box": [10.0, 10.0, 40.0, 36.0]},
+                            {"box": [12.0, 12.0, 34.0, 30.0]},
+                        ],
+                        "parent_context": {
+                            "parent_part": "Head",
+                            "parent_box": [4.0, 4.0, 80.0, 62.0],
+                        },
+                    }
+                }
+            }
+            for path in image_paths
+        }
+        project_path = Path(self.project_manager.current_project_path)
+        project_path.write_text(json.dumps(self.project_manager.project_data), encoding="utf-8")
+
+        vit_dataset = BlinkTrajectoryDataset(
+            str(project_path),
+            part_name="Mandible",
+            parent_part="Head",
+            target_size=(224, 224),
+            allowed_image_paths=[image_paths[0]],
+        )
+        heatmap_dataset = BlinkHeatmapDataset(
+            str(project_path),
+            child_part="Mandible",
+            parent_part="Head",
+            input_size=224,
+            allowed_image_paths=[image_paths[0]],
+        )
+
+        self.assertEqual(len(vit_dataset.samples), 1)
+        self.assertEqual(vit_dataset.samples[0]["image_path"], os.path.normpath(image_paths[0]))
+        self.assertEqual(heatmap_dataset.sequence_count, 1)
+        self.assertEqual(heatmap_dataset.samples[0]["image_path"], os.path.normpath(image_paths[0]))
 
     def test_workbench_shared_training_progress_tracks_child_expert_thread(self):
         class FakeBlinkTrainingThread:
@@ -2209,7 +2274,7 @@ class UiPolishScopeTests(unittest.TestCase):
             window._select_part_in_tree("Mandible")
             fake_thread = FakeBlinkTrainingThread()
 
-            def start_fake_training():
+            def start_fake_training(*_args, **_kwargs):
                 window.blink_lab.training_thread = fake_thread
 
             with patch.object(window.blink_lab, "train_expert_model", side_effect=start_fake_training):
@@ -2643,6 +2708,68 @@ class UiPolishScopeTests(unittest.TestCase):
         finally:
             window.deleteLater()
 
+    def test_route_panel_can_edit_selected_child_expert_note(self):
+        expert_dir = self.weights_dir / "experts" / "Mandible"
+        expert_dir.mkdir(parents=True, exist_ok=True)
+        expert_path = expert_dir / "expert_v20260501_090000.pth"
+        expert_path.write_bytes(b"expert")
+
+        window = self.make_main_window()
+        try:
+            self.project_manager.project_data["taxonomy"] = ["Head", "Mandible"]
+            self.project_manager.project_data["cascade_routes"] = {
+                "version": "project-v2",
+                "routes": [
+                    {
+                        "parent": "Head",
+                        "child": "Mandible",
+                        "enabled": True,
+                        "appointed_expert": {},
+                        "expert_candidates": [
+                            {
+                                "expert_id": "Mandible/expert_v20260501_090000.pth",
+                                "expert_part": "Mandible",
+                                "expert_filename": "expert_v20260501_090000.pth",
+                            }
+                        ],
+                    }
+                ],
+            }
+
+            route_panel = window.route_settings_panel
+            route_panel.refresh_route_table()
+            route_item = route_panel._find_route_item("Head", "Mandible")
+            self.assertIsNotNone(route_item)
+            expert_item = route_item.child(0)
+            route_panel.route_tree.setCurrentItem(expert_item)
+            route_panel.update_action_buttons()
+
+            self.assertTrue(route_panel.btn_edit_expert_note.isEnabled())
+            with patch.object(
+                main_module.QInputDialog,
+                "getText",
+                return_value=("small-head validation run", True),
+            ):
+                route_panel.edit_selected_expert_note()
+
+            notes_path = self.weights_dir / "experts" / "expert_notes.json"
+            self.assertTrue(notes_path.exists())
+            with notes_path.open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            self.assertEqual(
+                payload["notes"]["Mandible/expert_v20260501_090000.pth"],
+                "small-head validation run",
+            )
+            refreshed_expert = route_panel._find_expert_item(
+                "Head",
+                "Mandible",
+                "Mandible/expert_v20260501_090000.pth",
+            )
+            self.assertIsNotNone(refreshed_expert)
+            self.assertIn("small-head validation run", refreshed_expert.text(4))
+        finally:
+            window.deleteLater()
+
     def test_model_settings_exposes_locator_scope_selection(self):
         dialog = main_module.ModelSettingsDialog(
             {
@@ -2967,6 +3094,8 @@ class UiPolishScopeTests(unittest.TestCase):
         try:
             self.assertEqual(window.btn_del_locator.text(), "Del")
             self.assertEqual(window.btn_del_segmenter.text(), "Del")
+            self.assertEqual(window.btn_note_locator.text(), "Note")
+            self.assertEqual(window.btn_note_segmenter.text(), "Note")
             self.assertEqual(
                 window.btn_del_locator.toolTip(),
                 "Delete the selected locator model file from disk.",
@@ -3003,6 +3132,71 @@ class UiPolishScopeTests(unittest.TestCase):
         try:
             self.assertEqual(window.combo_locator.currentData(), "__no_locator__")
             self.assertFalse(window.btn_del_locator.isEnabled())
+        finally:
+            window.deleteLater()
+
+    def test_main_window_parent_model_notes_are_editable_and_cleanup_on_delete(self):
+        locator_timestamp = "20260105_1105"
+        segmenter_timestamp = "20260105_1115"
+        torch.save(
+            {"state_dict": {}, "meta": {"locator_size": [640, 384]}},
+            self.weights_dir / f"locator_{locator_timestamp}.pth",
+        )
+        (self.weights_dir / f"sam_decoder_lora_{segmenter_timestamp}.pth").write_bytes(b"segmenter")
+
+        window = self.make_main_window()
+        try:
+            self.assertTrue(window.btn_note_locator.isEnabled())
+            with patch.object(
+                main_module.QInputDialog,
+                "getText",
+                return_value=("quick Head pilot", True),
+            ):
+                window.edit_locator_model_note()
+
+            locator_index = window.combo_locator.findData(locator_timestamp)
+            self.assertGreaterEqual(locator_index, 0)
+            self.assertEqual(
+                window.combo_locator.itemText(locator_index),
+                f"quick Head pilot ({locator_timestamp} [exact 640x384])",
+            )
+
+            segmenter_index = window.combo_segmenter.findData(segmenter_timestamp)
+            self.assertGreaterEqual(segmenter_index, 0)
+            window.combo_segmenter.setCurrentIndex(segmenter_index)
+            self.assertTrue(window.btn_note_segmenter.isEnabled())
+            with patch.object(
+                main_module.QInputDialog,
+                "getText",
+                return_value=("SAM LoRA trial", True),
+            ):
+                window.edit_segmenter_model_note()
+
+            segmenter_index = window.combo_segmenter.findData(segmenter_timestamp)
+            self.assertGreaterEqual(segmenter_index, 0)
+            self.assertEqual(
+                window.combo_segmenter.itemText(segmenter_index),
+                f"SAM LoRA trial ({segmenter_timestamp})",
+            )
+
+            notes_path = self.weights_dir / "parent_model_notes.json"
+            self.assertTrue(notes_path.exists())
+            with notes_path.open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            self.assertEqual(payload["notes"][f"locator_{locator_timestamp}.pth"], "quick Head pilot")
+            self.assertEqual(payload["notes"][f"sam_decoder_lora_{segmenter_timestamp}.pth"], "SAM LoRA trial")
+
+            window.combo_locator.setCurrentIndex(locator_index)
+            with patch.object(
+                main_module,
+                "themed_yes_no_question",
+                return_value=main_module.QMessageBox.Yes,
+            ):
+                window.delete_locator_model()
+            with notes_path.open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            self.assertNotIn(f"locator_{locator_timestamp}.pth", payload["notes"])
+            self.assertIn(f"sam_decoder_lora_{segmenter_timestamp}.pth", payload["notes"])
         finally:
             window.deleteLater()
 
@@ -3050,6 +3244,7 @@ class UiPolishScopeTests(unittest.TestCase):
             self.assertEqual(layout.columnStretch(1), 1)
             self.assertEqual(window.lbl_locator.x(), window.lbl_segmenter.x())
             self.assertEqual(window.combo_locator.x(), window.combo_segmenter.x())
+            self.assertEqual(window.btn_note_locator.x(), window.btn_note_segmenter.x())
             self.assertEqual(window.btn_del_locator.x(), window.btn_del_segmenter.x())
             self.assertEqual(window.combo_locator.width(), window.combo_segmenter.width())
         finally:
@@ -3504,6 +3699,82 @@ class UiPolishScopeTests(unittest.TestCase):
             self.assertTrue(window.project_save_pending)
             provenance = self.project_manager.project_data["image_provenance"][image_paths[0]]
             self.assertEqual(provenance["manual_image_group"], "review_batch")
+        finally:
+            window.hide()
+            window.deleteLater()
+
+    def test_main_window_training_scope_limits_parent_training_preflight_to_selected_group(self):
+        image_paths = []
+        for index in range(3):
+            image_path = Path(self.temp_dir.name) / f"train_scope_{index}.png"
+            image = QImage(120, 90, QImage.Format_RGB32)
+            image.fill(0xFFB0B0B0)
+            self.assertTrue(image.save(str(image_path)))
+            image_paths.append(str(image_path))
+
+        window = self.make_main_window()
+        try:
+            self.project_manager.project_data["taxonomy"] = ["Head", "Mandible"]
+            self.project_manager.project_data["locator_scope"] = ["Head"]
+            self.engine.current_num_classes = 1
+            self.project_manager.project_data["images"] = list(image_paths)
+            self.project_manager.project_data["image_groups"] = {
+                "custom_groups": [{"id": "quick_check", "name": "Quick check"}]
+            }
+            self.project_manager.project_data["labels"] = {
+                path: {
+                    "parts": {"Head": [[10.0, 10.0], [45.0, 10.0], [24.0, 45.0]]},
+                    "boxes": {"Head": [8.0, 8.0, 48.0, 48.0]},
+                    "auto_boxes": {},
+                    "descriptions": {},
+                    "status": "labeled",
+                    "genus": "Unknown",
+                }
+                for path in image_paths
+            }
+            self.project_manager.set_image_provenance(
+                image_paths[0],
+                {"manual_image_group": "quick_check"},
+                save=False,
+            )
+            self.project_manager.set_image_provenance(
+                image_paths[1],
+                {"manual_image_group": "quick_check"},
+                save=False,
+            )
+
+            window.show()
+            self.app.processEvents()
+            window.refresh_file_list()
+            self.app.processEvents()
+
+            group_index = window.combo_training_scope.findData("quick_check")
+            self.assertGreaterEqual(group_index, 0)
+            window.combo_training_scope.setCurrentIndex(group_index)
+
+            launched = {}
+
+            def fake_launch(preflight, tax, locator_scope, train_segmenter=True, training_scope=None):
+                launched["preflight"] = dict(preflight)
+                launched["tax"] = list(tax)
+                launched["locator_scope"] = list(locator_scope)
+                launched["training_scope"] = dict(training_scope or {})
+
+            with patch.object(window, "_show_structured_training_preflight", return_value=True), \
+                 patch.object(window, "_confirm_legacy_locator_selection_if_needed", return_value=True), \
+                 patch.object(window, "ensure_locator_preloaded"), \
+                 patch.object(window, "ensure_sam_preloaded"), \
+                 patch.object(window, "_launch_training_with_preflight", side_effect=fake_launch):
+                window.run_training()
+
+            self.assertEqual(launched["training_scope"]["scope_id"], "quick_check")
+            self.assertEqual(launched["training_scope"]["images"], image_paths[:2])
+            self.assertEqual(launched["preflight"]["training_scope_id"], "quick_check")
+            self.assertEqual(launched["preflight"]["training_scope_label"], "Quick check")
+            self.assertEqual(launched["preflight"]["training_scope_image_count"], 2)
+            preflight_paths = {sample[0] for sample in launched["preflight"]["locator_samples"]}
+            self.assertEqual(preflight_paths, set(image_paths[:2]))
+            self.assertNotIn(image_paths[2], preflight_paths)
         finally:
             window.hide()
             window.deleteLater()

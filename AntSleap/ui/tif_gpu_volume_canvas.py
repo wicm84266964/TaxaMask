@@ -13,12 +13,18 @@ import numpy as np
 
 GPU_VOLUME_MAX_TEXTURE_DIM = 4096
 GPU_VOLUME_MAX_RAY_STEPS = 4096
+GPU_VOLUME_TRANSFER_LUT_SIZE = 256
 GPU_VOLUME_RENDER_MODES = {
     "composite": 0,
     "mip": 1,
     "minip": 2,
     "average": 3,
     "surface": 4,
+}
+GPU_VOLUME_MASK_MODES = {
+    "image_only": 0,
+    "mask_boundary": 1,
+    "masked_image": 2,
 }
 
 try:
@@ -66,6 +72,8 @@ _FRAGMENT_SHADER = """
 varying vec2 v_uv;
 
 uniform sampler3D u_volume;
+uniform sampler3D u_mask;
+uniform sampler2D u_transfer_lut;
 uniform mat3 u_inv_rotation;
 uniform vec3 u_shape_scale;
 uniform vec2 u_viewport;
@@ -78,9 +86,17 @@ uniform float u_step_size;
 uniform float u_opacity;
 uniform float u_gradient_weight;
 uniform float u_clarity;
+uniform float u_mask_opacity;
+uniform float u_enhancement;
+uniform float u_tone_gamma;
+uniform vec3 u_clip_plane_normal;
+uniform float u_clip_plane_depth;
 uniform vec3 u_texel_step;
 uniform int u_steps;
 uniform int u_projection_mode;
+uniform int u_mask_mode;
+uniform int u_clip_plane_enabled;
+uniform int u_surface_refine;
 
 const int MAX_RAY_STEPS = __MAX_RAY_STEPS__;
 
@@ -106,6 +122,69 @@ vec2 intersect_box(vec3 ray_origin, vec3 ray_direction, vec3 half_size)
     float near_hit = max(max(tmin.x, tmin.y), tmin.z);
     float far_hit = min(min(tmax.x, tmax.y), tmax.z);
     return vec2(near_hit, far_hit);
+}
+
+vec4 transfer_sample(float density)
+{
+    return texture2D(u_transfer_lut, vec2(clamp(density, 0.0, 1.0), 0.5));
+}
+
+float volume_sample(vec3 texcoord)
+{
+    return texture3D(u_volume, clamp(texcoord, vec3(0.0), vec3(1.0))).r;
+}
+
+float mask_sample(vec3 texcoord)
+{
+    return texture3D(u_mask, clamp(texcoord, vec3(0.0), vec3(1.0))).r;
+}
+
+vec3 central_gradient(vec3 texcoord, vec3 texel_step)
+{
+    float vx = volume_sample(texcoord + vec3(texel_step.x, 0.0, 0.0)) -
+               volume_sample(texcoord - vec3(texel_step.x, 0.0, 0.0));
+    float vy = volume_sample(texcoord + vec3(0.0, texel_step.y, 0.0)) -
+               volume_sample(texcoord - vec3(0.0, texel_step.y, 0.0));
+    float vz = volume_sample(texcoord + vec3(0.0, 0.0, texel_step.z)) -
+               volume_sample(texcoord - vec3(0.0, 0.0, texel_step.z));
+    return vec3(vx, vy, vz);
+}
+
+vec3 tetra_gradient(vec3 texcoord, vec3 texel_step)
+{
+    vec2 k = vec2(1.0, -1.0);
+    vec3 grad = k.xyy * volume_sample(texcoord + k.xyy * texel_step) +
+                k.yyx * volume_sample(texcoord + k.yyx * texel_step) +
+                k.yxy * volume_sample(texcoord + k.yxy * texel_step) +
+                k.xxx * volume_sample(texcoord + k.xxx * texel_step);
+    return grad * 0.5;
+}
+
+bool clip_plane_discards(vec3 point)
+{
+    if (u_clip_plane_enabled == 0) {
+        return false;
+    }
+    vec3 normal = normalize(u_clip_plane_normal + vec3(0.000001, 0.0, 0.0));
+    float radius = length(u_shape_scale) * 0.5;
+    float offset = radius * (1.0 - 2.0 * clamp(u_clip_plane_depth, 0.0, 1.0));
+    return dot(point, normal) > offset;
+}
+
+float mask_boundary_sample(vec3 texcoord, vec3 texel_step)
+{
+    float center = mask_sample(texcoord);
+    if (center <= 0.5) {
+        return 0.0;
+    }
+    float neighbor_min = 1.0;
+    neighbor_min = min(neighbor_min, mask_sample(texcoord + vec3(texel_step.x, 0.0, 0.0)));
+    neighbor_min = min(neighbor_min, mask_sample(texcoord - vec3(texel_step.x, 0.0, 0.0)));
+    neighbor_min = min(neighbor_min, mask_sample(texcoord + vec3(0.0, texel_step.y, 0.0)));
+    neighbor_min = min(neighbor_min, mask_sample(texcoord - vec3(0.0, texel_step.y, 0.0)));
+    neighbor_min = min(neighbor_min, mask_sample(texcoord + vec3(0.0, 0.0, texel_step.z)));
+    neighbor_min = min(neighbor_min, mask_sample(texcoord - vec3(0.0, 0.0, texel_step.z)));
+    return 1.0 - step(0.5, neighbor_min);
 }
 
 void main()
@@ -151,17 +230,36 @@ void main()
     float got_min = 0.0;
     float average_density = 0.0;
     float average_count = 0.0;
+    float projected_boundary = 0.0;
     vec3 texel_step = max(u_texel_step, vec3(0.0005));
     vec3 light_dir = normalize(vec3(0.45, 0.58, 0.68));
     vec3 view_dir = normalize(-ray_direction);
+    vec3 boundary_color = vec3(1.0, 0.56, 0.26);
 
     for (int i = 0; i < MAX_RAY_STEPS; ++i) {
         if (i >= u_steps || t > hit.y) {
             break;
         }
         vec3 point = ray_origin + ray_direction * t;
+        if (clip_plane_discards(point)) {
+            t += u_step_size;
+            continue;
+        }
         vec3 texcoord = point / u_shape_scale + 0.5;
-        float sample_value = texture3D(u_volume, texcoord).r;
+        float sample_value = volume_sample(texcoord);
+        float mask_value = 1.0;
+        float mask_boundary = 0.0;
+        if (u_mask_mode > 0) {
+            mask_value = mask_sample(texcoord);
+            if (u_mask_mode == 2 && mask_value <= 0.5) {
+                t += u_step_size;
+                continue;
+            }
+            if (u_mask_mode == 1) {
+                mask_boundary = mask_boundary_sample(texcoord, texel_step);
+                projected_boundary = max(projected_boundary, mask_boundary);
+            }
+        }
         float density = clamp((sample_value - u_cutoff) / max(1.0 - u_cutoff, 0.001), 0.0, 1.0);
         if (u_projection_mode == 1) {
             if (density > mip_density) {
@@ -185,35 +283,56 @@ void main()
             t += u_step_size;
             continue;
         }
-        if (density > 0.001) {
-            float vx = texture3D(u_volume, texcoord + vec3(texel_step.x, 0.0, 0.0)).r -
-                       texture3D(u_volume, texcoord - vec3(texel_step.x, 0.0, 0.0)).r;
-            float vy = texture3D(u_volume, texcoord + vec3(0.0, texel_step.y, 0.0)).r -
-                       texture3D(u_volume, texcoord - vec3(0.0, texel_step.y, 0.0)).r;
-            float vz = texture3D(u_volume, texcoord + vec3(0.0, 0.0, texel_step.z)).r -
-                       texture3D(u_volume, texcoord - vec3(0.0, 0.0, texel_step.z)).r;
-            vec3 grad = vec3(vx, vy, vz);
-            float grad_mag = clamp(length(grad) * 6.5, 0.0, 1.0);
+        if (density > 0.001 || mask_boundary > 0.0) {
+            float detail = clamp(u_enhancement, 0.0, 1.0);
+            vec3 grad = mix(central_gradient(texcoord, texel_step), tetra_gradient(texcoord, texel_step * 1.15), detail);
+            float grad_mag = clamp(length(grad) * mix(6.5, 8.8, detail), 0.0, 1.0);
+            float detail_edge = smoothstep(0.10, 0.48, grad_mag) * detail;
             vec3 normal = normalize(grad + vec3(0.0001));
             float diffuse = max(dot(normal, light_dir), 0.0);
             float rim = pow(1.0 - max(dot(normal, view_dir), 0.0), 2.0);
             float spec = pow(max(dot(reflect(-light_dir, normal), view_dir), 0.0), 24.0);
 
-            float soft_tissue = smoothstep(0.02, 0.36, density);
-            float dense_tissue = smoothstep(0.34, 0.92, density);
-            vec3 low_color = vec3(0.15, 0.45, 0.78);
-            vec3 mid_color = vec3(0.62, 0.88, 0.95);
-            vec3 high_color = vec3(1.0, 0.86, 0.54);
-            vec3 transfer_color = mix(low_color, mid_color, soft_tissue);
-            transfer_color = mix(transfer_color, high_color, dense_tissue);
+            vec4 transfer = transfer_sample(max(density, mask_boundary * 0.35));
+            if (transfer.a <= 0.001) {
+                t += u_step_size;
+                continue;
+            }
+            vec3 transfer_color = transfer.rgb;
+            if (u_mask_mode == 1 && mask_boundary > 0.0) {
+                transfer_color = mix(transfer_color, boundary_color, clamp(u_mask_opacity, 0.0, 1.0) * mask_boundary);
+            }
 
             float surface = smoothstep(0.05, 0.35, grad_mag) * u_gradient_weight;
+            surface = max(surface, detail_edge * 0.36);
+            surface = max(surface, mask_boundary * clamp(u_mask_opacity, 0.0, 1.0) * 0.55);
             if (u_projection_mode == 4) {
                 if (density > 0.035 || surface > 0.08) {
-                    float surface_alpha = clamp(max(density, surface), 0.0, 1.0);
+                    float surface_alpha = clamp(max(density, surface) * transfer.a, 0.0, 1.0);
                     vec3 shaded_surface = transfer_color * (0.44 + 0.50 * diffuse) + transfer_color * rim * 0.22 + vec3(spec * 0.46);
+                    float hit_t = t;
+                    if (u_surface_refine > 0 && detail > 0.0) {
+                        float low_t = max(ray_start, t - u_step_size);
+                        float high_t = t;
+                        for (int b = 0; b < 5; ++b) {
+                            float mid_t = (low_t + high_t) * 0.5;
+                            vec3 mid_point = ray_origin + ray_direction * mid_t;
+                            if (clip_plane_discards(mid_point)) {
+                                low_t = mid_t;
+                            } else {
+                                vec3 mid_texcoord = mid_point / u_shape_scale + 0.5;
+                                float mid_density = clamp((volume_sample(mid_texcoord) - u_cutoff) / max(1.0 - u_cutoff, 0.001), 0.0, 1.0);
+                                if (mid_density > 0.035) {
+                                    high_t = mid_t;
+                                } else {
+                                    low_t = mid_t;
+                                }
+                            }
+                        }
+                        hit_t = high_t;
+                    }
                     accum = vec4(shaded_surface * (0.80 + 0.20 * surface_alpha), surface_alpha);
-                    first_depth = 1.0 - float(i) / max(float(u_steps), 1.0);
+                    first_depth = 1.0 - clamp((hit_t - ray_start) / max(ray_end - ray_start, 0.0001), 0.0, 1.0);
                     got_first_hit = 1.0;
                     break;
                 }
@@ -222,10 +341,12 @@ void main()
             }
             float normal_opacity = pow(density, 1.22) * 18.0 + surface * pow(density, 0.55) * 24.0;
             float clarity_opacity = pow(density, 1.55) * 9.0 + surface * pow(density, 0.70) * 14.0;
-            float opacity_density = mix(normal_opacity, clarity_opacity, clamp(u_clarity, 0.0, 1.0));
+            float opacity_density = mix(normal_opacity, clarity_opacity, clamp(u_clarity, 0.0, 1.0)) + detail_edge * 4.5;
             float alpha = 1.0 - exp(-opacity_density * u_opacity * u_step_size);
+            alpha *= transfer.a;
             alpha = clamp(alpha, 0.0, mix(0.82, 0.46, clamp(u_clarity, 0.0, 1.0)));
             vec3 shaded = transfer_color * (0.50 + 0.42 * diffuse) + transfer_color * rim * mix(0.14, 0.22, u_clarity) + vec3(spec * mix(0.28, 0.42, u_clarity));
+            shaded = mix(shaded, shaded * (1.0 + 0.22 * detail_edge) + vec3(0.055 * detail_edge), detail);
 
             if (got_first_hit < 0.5 && alpha > 0.002) {
                 first_depth = 1.0 - float(i) / max(float(u_steps), 1.0);
@@ -241,38 +362,36 @@ void main()
     }
 
     if (u_projection_mode == 1) {
-        if (mip_density <= 0.001) {
+        if (mip_density <= 0.001 && projected_boundary <= 0.0) {
             gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
             return;
         }
-        vec3 low_color = vec3(0.12, 0.36, 0.78);
-        vec3 mid_color = vec3(0.56, 0.88, 0.96);
-        vec3 high_color = vec3(1.0, 0.78, 0.36);
-        vec3 color = mix(low_color, mid_color, smoothstep(0.02, 0.52, mip_density));
-        color = mix(color, high_color, smoothstep(0.45, 1.0, mip_density));
+        vec3 color = transfer_sample(max(mip_density, projected_boundary * 0.35)).rgb;
         color *= 0.72 + 0.28 * mip_depth;
-        gl_FragColor = vec4(pow(clamp(color, 0.0, 1.0), vec3(0.82)), 1.0);
+        color = mix(color, boundary_color, clamp(u_mask_opacity, 0.0, 1.0) * projected_boundary);
+        gl_FragColor = vec4(pow(clamp(color, 0.0, 1.0), vec3(0.82 * max(0.55, u_tone_gamma))), 1.0);
         return;
     }
     if (u_projection_mode == 2) {
-        if (got_min < 0.5) {
+        if (got_min < 0.5 && projected_boundary <= 0.0) {
             gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
             return;
         }
-        float inverse_value = 1.0 - clamp(min_value, 0.0, 1.0);
-        vec3 color = vec3(inverse_value * 0.72, inverse_value * 0.88, inverse_value);
-        gl_FragColor = vec4(pow(clamp(color, 0.0, 1.0), vec3(0.80)), 1.0);
+        float inverse_value = got_min > 0.5 ? 1.0 - clamp(min_value, 0.0, 1.0) : projected_boundary * 0.35;
+        vec3 color = transfer_sample(inverse_value).rgb;
+        color = mix(color, boundary_color, clamp(u_mask_opacity, 0.0, 1.0) * projected_boundary);
+        gl_FragColor = vec4(pow(clamp(color, 0.0, 1.0), vec3(0.80 * max(0.55, u_tone_gamma))), 1.0);
         return;
     }
     if (u_projection_mode == 3) {
         float average_value = average_density / max(average_count, 1.0);
-        if (average_value <= 0.001) {
+        if (average_value <= 0.001 && projected_boundary <= 0.0) {
             gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
             return;
         }
-        vec3 color = mix(vec3(0.10, 0.30, 0.68), vec3(0.70, 0.94, 0.96), smoothstep(0.015, 0.34, average_value));
-        color = mix(color, vec3(1.0, 0.86, 0.50), smoothstep(0.30, 0.72, average_value));
-        gl_FragColor = vec4(pow(clamp(color, 0.0, 1.0), vec3(0.86)), 1.0);
+        vec3 color = transfer_sample(max(average_value, projected_boundary * 0.35)).rgb;
+        color = mix(color, boundary_color, clamp(u_mask_opacity, 0.0, 1.0) * projected_boundary);
+        gl_FragColor = vec4(pow(clamp(color, 0.0, 1.0), vec3(0.86 * max(0.55, u_tone_gamma))), 1.0);
         return;
     }
 
@@ -282,7 +401,8 @@ void main()
     }
     vec3 color = accum.rgb / max(accum.a, 0.001);
     color *= 0.78 + 0.22 * first_depth;
-    color = pow(clamp(color, 0.0, 1.0), vec3(0.86));
+    color = mix(color, boundary_color, clamp(u_mask_opacity, 0.0, 1.0) * projected_boundary * 0.35);
+    color = pow(clamp(color, 0.0, 1.0), vec3(0.86 * max(0.55, u_tone_gamma)));
     gl_FragColor = vec4(color, 1.0);
 }
 """.replace("__MAX_RAY_STEPS__", str(GPU_VOLUME_MAX_RAY_STEPS))
@@ -352,6 +472,75 @@ def _compact_renderer_text(value):
     if len(text) > 42:
         return text[:39].rstrip() + "..."
     return text
+
+
+def _coerce_rgb(rgb, fallback=(1.0, 0.83, 0.30)):
+    try:
+        values = tuple(float(value) for value in rgb)
+    except (TypeError, ValueError):
+        values = tuple(float(value) for value in fallback)
+    if len(values) != 3:
+        values = tuple(float(value) for value in fallback)
+    return tuple(max(0.0, min(1.0, value)) for value in values)
+
+
+def build_volume_transfer_lut(
+    preset="amber",
+    tint_rgb=(1.0, 0.83, 0.30),
+    cutoff=0.0,
+    opacity=1.0,
+    clarity=False,
+    size=GPU_VOLUME_TRANSFER_LUT_SIZE,
+):
+    """Build TaxaMask's RGBA transfer function LUT for read-only volume display."""
+    size = max(16, int(size))
+    density = np.linspace(0.0, 1.0, size, dtype=np.float32)
+    preset = str(preset or "amber").lower()
+    tint = np.asarray(_coerce_rgb(tint_rgb), dtype=np.float32)
+    if preset == "cyan":
+        low = np.asarray((0.05, 0.28, 0.46), dtype=np.float32)
+        mid = np.asarray((0.30, 0.88, 0.96), dtype=np.float32)
+        high = np.asarray((0.84, 1.0, 0.96), dtype=np.float32)
+    elif preset == "white":
+        low = np.asarray((0.10, 0.12, 0.13), dtype=np.float32)
+        mid = np.asarray((0.64, 0.68, 0.66), dtype=np.float32)
+        high = np.asarray((1.0, 0.98, 0.88), dtype=np.float32)
+    elif preset == "custom":
+        low = np.clip(tint * 0.18, 0.0, 1.0)
+        mid = np.clip(tint * 0.72 + np.asarray((0.08, 0.10, 0.12), dtype=np.float32), 0.0, 1.0)
+        high = np.clip(tint * 1.08 + np.asarray((0.12, 0.10, 0.04), dtype=np.float32), 0.0, 1.0)
+    else:
+        low = np.asarray((0.13, 0.09, 0.04), dtype=np.float32)
+        mid = np.asarray((0.86, 0.54, 0.14), dtype=np.float32)
+        high = np.asarray((1.0, 0.88, 0.42), dtype=np.float32)
+        preset = "amber"
+
+    soft = np.clip((density - 0.02) / max(0.34, 1e-6), 0.0, 1.0)
+    soft = soft * soft * (3.0 - 2.0 * soft)
+    dense = np.clip((density - 0.32) / max(0.68, 1e-6), 0.0, 1.0)
+    dense = dense * dense * (3.0 - 2.0 * dense)
+    rgb = low[None, :] * (1.0 - soft[:, None]) + mid[None, :] * soft[:, None]
+    rgb = rgb * (1.0 - dense[:, None]) + high[None, :] * dense[:, None]
+    if preset != "custom":
+        rgb = np.clip(rgb * (0.84 + 0.28 * tint[None, :]), 0.0, 1.0)
+
+    threshold = max(0.0, min(0.98, float(cutoff)))
+    span = max(1.0 - threshold, 0.001)
+    visible = np.clip((density - threshold) / span, 0.0, 1.0)
+    edge = visible * visible * (3.0 - 2.0 * visible)
+    if bool(clarity):
+        alpha = np.clip(np.power(edge, 0.70) * 0.72, 0.0, 1.0)
+        rgb = np.clip(rgb * (0.94 + 0.20 * density[:, None]), 0.0, 1.0)
+    else:
+        alpha = np.clip(np.power(edge, 0.92) * 0.86, 0.0, 1.0)
+    alpha *= max(0.0, min(1.4, float(opacity)))
+    alpha = np.clip(alpha, 0.0, 1.0)
+    alpha[density <= threshold] = 0.0
+
+    lut = np.empty((1, size, 4), dtype=np.uint8)
+    lut[0, :, :3] = np.clip(rgb * 255.0, 0.0, 255.0).astype(np.uint8)
+    lut[0, :, 3] = np.clip(alpha * 255.0, 0.0, 255.0).astype(np.uint8)
+    return np.ascontiguousarray(lut)
 
 
 def volume_shape_scale(shape_zyx, spacing_zyx=None):
@@ -457,6 +646,13 @@ class _GpuVolumeRenderCore:
         self._program = None
         self._quad_vbo = None
         self._texture_id = None
+        self._mask_texture_id = None
+        self._mask_data = None
+        self._mask_shape = ()
+        self._mask_upload_needed = False
+        self._transfer_lut_texture_id = None
+        self._transfer_lut_data = build_volume_transfer_lut()
+        self._transfer_lut_upload_needed = True
         self._cutoff = 0.35
         self._yaw = -35.0
         self._pitch = 20.0
@@ -469,7 +665,16 @@ class _GpuVolumeRenderCore:
         self._inside_depth = 0.0
         self._front_clip = 0.0
         self._projection_mode = "composite"
+        self._mask_mode = "image_only"
+        self._mask_opacity = 0.45
+        self._enhancement = 0.0
+        self._tone_gamma = 1.0
+        self._surface_refine = False
+        self._clip_plane_enabled = False
+        self._clip_plane_depth = 0.0
+        self._clip_plane_normal = (0.0, 0.0, 1.0)
         self._supersample_scale = 1.0
+        self._tint_rgb = (1.0, 0.83, 0.30)
         self._renderer_label = ""
         self._renderer_details = ""
         self._uploaded_shape = ()
@@ -479,6 +684,8 @@ class _GpuVolumeRenderCore:
         self._last_steps = 0
         self._render_mode = "still"
         self._uploaded_dtype = ""
+        self._transfer_preset = "amber"
+        self._transfer_opacity = 1.0
 
     def _store_volume_data(self, volume, source_shape=None, spacing_zyx=None):
         if volume is None:
@@ -509,6 +716,28 @@ class _GpuVolumeRenderCore:
         self._source_spacing = next_spacing
         return True
 
+    def _store_mask_data(self, mask):
+        if mask is None:
+            if self._mask_data is not None or self._mask_texture_id:
+                self._delete_mask_texture()
+            self._mask_data = None
+            self._mask_shape = ()
+            self._mask_upload_needed = False
+            return False
+        source = np.asarray(mask)
+        if source.ndim != 3 or min(source.shape) <= 0:
+            self._delete_mask_texture()
+            self._mask_data = None
+            self._mask_shape = ()
+            self._mask_upload_needed = False
+            return False
+        array = np.ascontiguousarray((source > 0).astype(np.uint8) * 255)
+        if self._mask_data is None or self._mask_data.shape != array.shape or not np.array_equal(self._mask_data, array):
+            self._mask_data = array
+            self._mask_shape = tuple(int(value) for value in array.shape)
+            self._mask_upload_needed = True
+        return True
+
     def clear_volume(self):
         self._volume_data = None
         self._volume_shape = ()
@@ -516,7 +745,11 @@ class _GpuVolumeRenderCore:
         self._source_spacing = ()
         self._upload_needed = False
         self._delete_volume_texture()
+        self._delete_mask_texture()
         self._texture_id = None
+        self._mask_data = None
+        self._mask_shape = ()
+        self._mask_upload_needed = False
         self._uploaded_shape = ()
         self._uploaded_bytes = 0
         self._last_upload_ms = 0.0
@@ -530,6 +763,21 @@ class _GpuVolumeRenderCore:
                 GL.glDeleteTextures([int(self._texture_id)])
             except Exception:
                 pass
+        if self._initialized and self._transfer_lut_texture_id:
+            try:
+                GL.glDeleteTextures([int(self._transfer_lut_texture_id)])
+            except Exception:
+                pass
+            self._transfer_lut_texture_id = None
+            self._transfer_lut_upload_needed = True
+
+    def _delete_mask_texture(self):
+        if self._initialized and self._mask_texture_id:
+            try:
+                GL.glDeleteTextures([int(self._mask_texture_id)])
+            except Exception:
+                pass
+        self._mask_texture_id = None
 
     def has_volume(self):
         return self._volume_data is not None and not self._failed
@@ -549,7 +797,18 @@ class _GpuVolumeRenderCore:
         pan_y=0.0,
         clarity_mode=False,
         projection_mode="composite",
+        mask_mode="image_only",
+        mask_opacity=0.45,
         supersample_scale=1.0,
+        tint_rgb=(1.0, 0.83, 0.30),
+        transfer_preset="amber",
+        transfer_opacity=None,
+        enhancement=0.0,
+        tone_gamma=1.0,
+        surface_refine=False,
+        clip_plane_enabled=False,
+        clip_plane_depth=0.0,
+        clip_plane_normal=(0.0, 0.0, 1.0),
     ):
         self._cutoff = max(0.0, min(0.98, float(cutoff_percent) / 100.0))
         self._yaw = float(yaw)
@@ -565,7 +824,53 @@ class _GpuVolumeRenderCore:
         self._clarity_mode = bool(clarity_mode)
         projection_mode = str(projection_mode or "composite").lower()
         self._projection_mode = projection_mode if projection_mode in GPU_VOLUME_RENDER_MODES else "composite"
+        mask_mode = str(mask_mode or "image_only").lower()
+        if self._mask_data is None:
+            mask_mode = "image_only"
+        self._mask_mode = mask_mode if mask_mode in GPU_VOLUME_MASK_MODES else "image_only"
+        self._mask_opacity = max(0.0, min(1.0, float(mask_opacity)))
+        self._enhancement = max(0.0, min(1.0, float(enhancement))) if self._render_mode == "still" else 0.0
+        self._tone_gamma = max(0.65, min(1.35, float(tone_gamma)))
+        self._surface_refine = bool(surface_refine) and self._render_mode == "still"
+        self._clip_plane_enabled = bool(clip_plane_enabled)
+        self._clip_plane_depth = max(0.0, min(1.0, float(clip_plane_depth)))
+        try:
+            normal = tuple(float(value) for value in clip_plane_normal)
+        except (TypeError, ValueError):
+            normal = (0.0, 0.0, 1.0)
+        if len(normal) != 3:
+            normal = (0.0, 0.0, 1.0)
+        length = math.sqrt(sum(value * value for value in normal))
+        if length <= 1e-6:
+            normal = (0.0, 0.0, 1.0)
+            length = 1.0
+        self._clip_plane_normal = tuple(float(value) / length for value in normal)
         self._supersample_scale = max(1.0, min(4.0, float(supersample_scale)))
+        try:
+            tint = tuple(float(value) for value in tint_rgb)
+        except (TypeError, ValueError):
+            tint = (1.0, 0.83, 0.30)
+        if len(tint) != 3:
+            tint = (1.0, 0.83, 0.30)
+        self._tint_rgb = tuple(max(0.0, min(1.0, value)) for value in tint)
+        self._transfer_preset = str(transfer_preset or "amber").lower()
+        if self._transfer_preset not in {"amber", "cyan", "white", "custom"}:
+            self._transfer_preset = "amber"
+        if transfer_opacity is None:
+            next_opacity = 0.72 if self._clarity_mode and self._render_mode == "still" else (1.0 if self._render_mode == "still" else 0.82)
+        else:
+            next_opacity = max(0.0, min(1.4, float(transfer_opacity)))
+        next_lut = build_volume_transfer_lut(
+            self._transfer_preset,
+            self._tint_rgb,
+            cutoff=0.0,
+            opacity=next_opacity,
+            clarity=self._clarity_mode and self._render_mode == "still",
+        )
+        if self._transfer_lut_data is None or not np.array_equal(self._transfer_lut_data, next_lut):
+            self._transfer_lut_data = next_lut
+            self._transfer_lut_upload_needed = True
+        self._transfer_opacity = float(next_opacity)
 
     def render_stats(self):
         return {
@@ -578,7 +883,19 @@ class _GpuVolumeRenderCore:
             "dtype": self._uploaded_dtype,
             "clarity": bool(self._clarity_mode),
             "projection_mode": self._projection_mode,
+            "mask_mode": self._mask_mode,
+            "mask_shape_zyx": tuple(int(value) for value in self._mask_shape),
+            "enhancement": float(getattr(self, "_enhancement", 0.0)),
+            "tone_gamma": float(getattr(self, "_tone_gamma", 1.0)),
+            "surface_refine": bool(getattr(self, "_surface_refine", False)),
+            "clip_plane_enabled": bool(getattr(self, "_clip_plane_enabled", False)),
+            "clip_plane_depth": float(getattr(self, "_clip_plane_depth", 0.0)),
+            "clip_plane_normal": tuple(float(value) for value in getattr(self, "_clip_plane_normal", (0.0, 0.0, 1.0))),
             "supersample_scale": float(self._supersample_scale),
+            "tint_rgb": tuple(float(value) for value in getattr(self, "_tint_rgb", (1.0, 0.83, 0.30))),
+            "transfer_preset": getattr(self, "_transfer_preset", "amber"),
+            "transfer_opacity": float(getattr(self, "_transfer_opacity", 1.0)),
+            "transfer_lut": tuple(int(value) for value in getattr(self, "_transfer_lut_data", np.zeros((1, 0, 4), dtype=np.uint8)).shape),
         }
 
     def renderer_label(self):
@@ -602,6 +919,8 @@ class _GpuVolumeRenderCore:
         GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
         self._initialized = True
         self._upload_volume_if_needed()
+        self._upload_mask_if_needed()
+        self._upload_transfer_lut_if_needed()
 
     def _update_renderer_label(self):
         vendor = _decode_gl_string(GL.glGetString(GL.GL_VENDOR))
@@ -651,9 +970,70 @@ class _GpuVolumeRenderCore:
         GL.glBindTexture(GL.GL_TEXTURE_3D, 0)
         self._upload_needed = False
 
+    def _upload_mask_if_needed(self):
+        if not self._mask_upload_needed or self._mask_data is None:
+            return
+        depth, height, width = self._mask_shape
+        if not self._mask_texture_id:
+            self._mask_texture_id = GL.glGenTextures(1)
+        GL.glActiveTexture(GL.GL_TEXTURE2)
+        GL.glBindTexture(GL.GL_TEXTURE_3D, self._mask_texture_id)
+        GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_NEAREST)
+        GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_NEAREST)
+        GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_S, GL.GL_CLAMP_TO_EDGE)
+        GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
+        GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_R, GL.GL_CLAMP_TO_EDGE)
+        GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
+        GL.glTexImage3D(
+            GL.GL_TEXTURE_3D,
+            0,
+            GL.GL_LUMINANCE,
+            int(width),
+            int(height),
+            int(depth),
+            0,
+            GL.GL_LUMINANCE,
+            GL.GL_UNSIGNED_BYTE,
+            self._mask_data,
+        )
+        GL.glBindTexture(GL.GL_TEXTURE_3D, 0)
+        GL.glActiveTexture(GL.GL_TEXTURE0)
+        self._mask_upload_needed = False
+
+    def _upload_transfer_lut_if_needed(self):
+        if not self._transfer_lut_upload_needed or self._transfer_lut_data is None:
+            return
+        if not self._transfer_lut_texture_id:
+            self._transfer_lut_texture_id = GL.glGenTextures(1)
+        lut = np.ascontiguousarray(self._transfer_lut_data, dtype=np.uint8)
+        height, width = int(lut.shape[0]), int(lut.shape[1])
+        GL.glActiveTexture(GL.GL_TEXTURE1)
+        GL.glBindTexture(GL.GL_TEXTURE_2D, self._transfer_lut_texture_id)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_LINEAR)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_S, GL.GL_CLAMP_TO_EDGE)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
+        GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
+        GL.glTexImage2D(
+            GL.GL_TEXTURE_2D,
+            0,
+            GL.GL_RGBA,
+            width,
+            height,
+            0,
+            GL.GL_RGBA,
+            GL.GL_UNSIGNED_BYTE,
+            lut,
+        )
+        GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
+        GL.glActiveTexture(GL.GL_TEXTURE0)
+        self._transfer_lut_upload_needed = False
+
     def _draw_volume(self, viewport_width, viewport_height):
         if not self._program or not self._quad_vbo or not self._texture_id:
             return
+        self._upload_mask_if_needed()
+        self._upload_transfer_lut_if_needed()
         GL.glUseProgram(self._program)
         GL.glActiveTexture(GL.GL_TEXTURE0)
         GL.glBindTexture(GL.GL_TEXTURE_3D, self._texture_id)
@@ -661,14 +1041,30 @@ class _GpuVolumeRenderCore:
         GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MIN_FILTER, texture_filter)
         GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MAG_FILTER, texture_filter)
         self._set_uniform_int("u_volume", 0)
+        GL.glActiveTexture(GL.GL_TEXTURE1)
+        GL.glBindTexture(GL.GL_TEXTURE_2D, self._transfer_lut_texture_id)
+        self._set_uniform_int("u_transfer_lut", 1)
+        GL.glActiveTexture(GL.GL_TEXTURE2)
+        mask_mode = self._mask_mode if self._mask_texture_id and self._mask_data is not None else "image_only"
+        GL.glBindTexture(GL.GL_TEXTURE_3D, self._mask_texture_id or self._texture_id)
+        self._set_uniform_int("u_mask", 2)
+        GL.glActiveTexture(GL.GL_TEXTURE0)
         self._set_uniform_float("u_cutoff", self._cutoff)
         self._set_uniform_float("u_zoom", self._zoom)
         self._set_uniform_vec2("u_pan", self._pan_x, self._pan_y)
         self._set_uniform_float("u_front_clip", self._front_clip)
         self._set_uniform_int("u_projection_mode", GPU_VOLUME_RENDER_MODES.get(self._projection_mode, 0))
+        self._set_uniform_int("u_mask_mode", GPU_VOLUME_MASK_MODES.get(mask_mode, 0))
+        self._set_uniform_float("u_mask_opacity", self._mask_opacity)
         clarity = 1.0 if self._clarity_mode and self._render_mode == "still" else 0.0
         self._set_uniform_float("u_clarity", clarity)
-        self._set_uniform_float("u_opacity", 0.72 if clarity > 0.0 else (1.0 if self._render_mode == "still" else 0.82))
+        self._set_uniform_float("u_enhancement", self._enhancement)
+        self._set_uniform_float("u_tone_gamma", self._tone_gamma)
+        self._set_uniform_int("u_surface_refine", 1 if self._surface_refine else 0)
+        self._set_uniform_int("u_clip_plane_enabled", 1 if self._clip_plane_enabled else 0)
+        self._set_uniform_float("u_clip_plane_depth", self._clip_plane_depth)
+        self._set_uniform_vec3("u_clip_plane_normal", *self._clip_plane_normal)
+        self._set_uniform_float("u_opacity", 1.0)
         self._set_uniform_float("u_gradient_weight", 1.35 if clarity > 0.0 else (1.0 if self._render_mode == "still" else 0.72))
         steps = max(256, min(GPU_VOLUME_MAX_RAY_STEPS, int(self._sample_steps)))
         self._last_steps = int(steps)
@@ -697,6 +1093,11 @@ class _GpuVolumeRenderCore:
         GL.glDisableVertexAttribArray(attr)
         GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
         GL.glBindTexture(GL.GL_TEXTURE_3D, 0)
+        GL.glActiveTexture(GL.GL_TEXTURE1)
+        GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
+        GL.glActiveTexture(GL.GL_TEXTURE2)
+        GL.glBindTexture(GL.GL_TEXTURE_3D, 0)
+        GL.glActiveTexture(GL.GL_TEXTURE0)
         GL.glUseProgram(0)
 
     def _set_uniform_float(self, name, value):
@@ -725,6 +1126,12 @@ class _GpuVolumeRenderCore:
         if self._texture_id:
             GL.glDeleteTextures([int(self._texture_id)])
             self._texture_id = None
+        if self._mask_texture_id:
+            GL.glDeleteTextures([int(self._mask_texture_id)])
+            self._mask_texture_id = None
+        if self._transfer_lut_texture_id:
+            GL.glDeleteTextures([int(self._transfer_lut_texture_id)])
+            self._transfer_lut_texture_id = None
         if self._quad_vbo:
             GL.glDeleteBuffers(1, [int(self._quad_vbo)])
             self._quad_vbo = None
@@ -732,6 +1139,7 @@ class _GpuVolumeRenderCore:
             GL.glDeleteProgram(self._program)
             self._program = None
         GL.glBindTexture(GL.GL_TEXTURE_3D, 0)
+        GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
         GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
         GL.glUseProgram(0)
         GL.glFinish()
@@ -780,6 +1188,9 @@ if gpu_volume_offscreen_available():
 
         def set_volume_data(self, volume, source_shape=None, spacing_zyx=None):
             return self._store_volume_data(volume, source_shape=source_shape, spacing_zyx=spacing_zyx)
+
+        def set_mask_data(self, mask):
+            return self._store_mask_data(mask)
 
         def render_image(self, width, height):
             display_width = max(1, int(width))
@@ -853,6 +1264,12 @@ if gpu_volume_offscreen_available():
                 self._source_spacing = ()
                 self._upload_needed = False
                 self._texture_id = None
+                self._mask_texture_id = None
+                self._mask_data = None
+                self._mask_shape = ()
+                self._mask_upload_needed = False
+                self._transfer_lut_texture_id = None
+                self._transfer_lut_upload_needed = True
                 self._uploaded_shape = ()
                 self._uploaded_bytes = 0
                 self._last_upload_ms = 0.0
@@ -890,6 +1307,8 @@ if gpu_volume_offscreen_available():
             self._last_drag_pos = None
             self._empty_text = "No TIF volume loaded"
             self._failed = False
+            self._batch_update_depth = 0
+            self._batch_render_pending = False
             self._last_renderer_info = ""
             self.setObjectName("tifVolumeCanvas")
             self.setAlignment(Qt.AlignCenter)
@@ -923,16 +1342,36 @@ if gpu_volume_offscreen_available():
             try:
                 self._renderer.set_volume_data(volume, source_shape=source_shape, spacing_zyx=spacing_zyx)
                 self._emit_renderer_info()
-                self._render_to_label()
+                self._request_render_to_label()
             except Exception as exc:
                 self._mark_failed(f"GPU offscreen texture upload failed: {exc}")
+
+        def set_mask_data(self, mask):
+            try:
+                self._renderer.set_mask_data(mask)
+                self._request_render_to_label()
+            except Exception as exc:
+                self._mark_failed(f"GPU offscreen mask upload failed: {exc}")
 
         def set_render_state(self, *args, **kwargs):
             try:
                 self._renderer.set_render_state(*args, **kwargs)
-                self._render_to_label()
+                self._request_render_to_label()
             except Exception as exc:
                 self._mark_failed(f"GPU offscreen render failed: {exc}")
+
+        def set_volume_render_inputs(self, volume, mask=None, render_state=None, source_shape=None, spacing_zyx=None):
+            self._batch_update_depth += 1
+            try:
+                self.set_volume_data(volume, source_shape=source_shape, spacing_zyx=spacing_zyx)
+                self.set_mask_data(mask)
+                if render_state is not None:
+                    self.set_render_state(**dict(render_state))
+            finally:
+                self._batch_update_depth = max(0, self._batch_update_depth - 1)
+            if self._batch_render_pending:
+                self._batch_render_pending = False
+                self._render_to_label()
 
         def render_stats(self):
             return self._renderer.render_stats()
@@ -945,6 +1384,12 @@ if gpu_volume_offscreen_available():
             if details and details != self._last_renderer_info:
                 self._last_renderer_info = details
                 self.render_info_changed.emit(details)
+
+        def _request_render_to_label(self):
+            if self._batch_update_depth > 0:
+                self._batch_render_pending = True
+                return
+            self._render_to_label()
 
         def _render_to_label(self):
             if self._failed or not self._renderer.has_volume():
@@ -1064,6 +1509,13 @@ if gpu_volume_canvas_available():
             self._program = None
             self._quad_vbo = None
             self._texture_id = None
+            self._mask_texture_id = None
+            self._mask_data = None
+            self._mask_shape = ()
+            self._mask_upload_needed = False
+            self._transfer_lut_texture_id = None
+            self._transfer_lut_data = build_volume_transfer_lut()
+            self._transfer_lut_upload_needed = True
             self._mouse_mode = ""
             self._last_drag_pos = None
             self._cutoff = 0.35
@@ -1077,6 +1529,15 @@ if gpu_volume_canvas_available():
             self._sample_steps = 768
             self._inside_depth = 0.0
             self._front_clip = 0.0
+            self._projection_mode = "composite"
+            self._mask_mode = "image_only"
+            self._mask_opacity = 0.45
+            self._enhancement = 0.0
+            self._tone_gamma = 1.0
+            self._surface_refine = False
+            self._clip_plane_enabled = False
+            self._clip_plane_depth = 0.0
+            self._clip_plane_normal = (0.0, 0.0, 1.0)
             self._renderer_label = ""
             self._uploaded_shape = ()
             self._uploaded_bytes = 0
@@ -1085,6 +1546,8 @@ if gpu_volume_canvas_available():
             self._last_steps = 0
             self._render_mode = "still"
             self._uploaded_dtype = ""
+            self._transfer_preset = "amber"
+            self._transfer_opacity = 1.0
 
         def setText(self, text):
             self._empty_text = str(text or "")
@@ -1099,14 +1562,25 @@ if gpu_volume_canvas_available():
             self._source_shape = ()
             self._source_spacing = ()
             self._upload_needed = False
-            if self._initialized and self._texture_id:
+            if self._initialized and (self._texture_id or self._mask_texture_id or self._transfer_lut_texture_id):
                 try:
                     self.makeCurrent()
-                    GL.glDeleteTextures([int(self._texture_id)])
+                    if self._texture_id:
+                        GL.glDeleteTextures([int(self._texture_id)])
+                    if self._mask_texture_id:
+                        GL.glDeleteTextures([int(self._mask_texture_id)])
+                        self._mask_texture_id = None
+                    if self._transfer_lut_texture_id:
+                        GL.glDeleteTextures([int(self._transfer_lut_texture_id)])
+                        self._transfer_lut_texture_id = None
+                        self._transfer_lut_upload_needed = True
                     self.doneCurrent()
                 except Exception:
                     pass
             self._texture_id = None
+            self._mask_data = None
+            self._mask_shape = ()
+            self._mask_upload_needed = False
             self._uploaded_shape = ()
             self._uploaded_bytes = 0
             self._last_upload_ms = 0.0
@@ -1114,6 +1588,16 @@ if gpu_volume_canvas_available():
             self._last_steps = 0
             self._uploaded_dtype = ""
             self.update()
+
+        def _delete_mask_texture(self):
+            if self._initialized and self._mask_texture_id:
+                try:
+                    self.makeCurrent()
+                    GL.glDeleteTextures([int(self._mask_texture_id)])
+                    self.doneCurrent()
+                except Exception:
+                    pass
+            self._mask_texture_id = None
 
         def has_volume(self):
             return self._volume_data is not None and not self._failed
@@ -1155,6 +1639,37 @@ if gpu_volume_canvas_available():
                     self._mark_failed(f"GPU texture upload failed: {exc}")
             self.update()
 
+        def set_mask_data(self, mask):
+            if mask is None:
+                self._delete_mask_texture()
+                self._mask_data = None
+                self._mask_shape = ()
+                self._mask_upload_needed = False
+                self.update()
+                return
+            source = np.asarray(mask)
+            if source.ndim != 3 or min(source.shape) <= 0:
+                self._delete_mask_texture()
+                self._mask_data = None
+                self._mask_shape = ()
+                self._mask_upload_needed = False
+                self.update()
+                return
+            array = np.ascontiguousarray((source > 0).astype(np.uint8) * 255)
+            if self._mask_data is None or self._mask_data.shape != array.shape or not np.array_equal(self._mask_data, array):
+                self._mask_data = array
+                self._mask_shape = tuple(int(value) for value in array.shape)
+                self._mask_upload_needed = True
+            if self._initialized and not self._failed:
+                try:
+                    self.makeCurrent()
+                    self._upload_mask_if_needed()
+                    self.doneCurrent()
+                except Exception as exc:
+                    self.doneCurrent()
+                    self._mark_failed(f"GPU mask upload failed: {exc}")
+            self.update()
+
         def set_render_state(
             self,
             cutoff_percent,
@@ -1169,6 +1684,19 @@ if gpu_volume_canvas_available():
             pan_x=0.0,
             pan_y=0.0,
             clarity_mode=False,
+            projection_mode="composite",
+            mask_mode="image_only",
+            mask_opacity=0.45,
+            supersample_scale=1.0,
+            tint_rgb=(1.0, 0.83, 0.30),
+            transfer_preset="amber",
+            transfer_opacity=None,
+            enhancement=0.0,
+            tone_gamma=1.0,
+            surface_refine=False,
+            clip_plane_enabled=False,
+            clip_plane_depth=0.0,
+            clip_plane_normal=(0.0, 0.0, 1.0),
         ):
             self._cutoff = max(0.0, min(0.98, float(cutoff_percent) / 100.0))
             self._yaw = float(yaw)
@@ -1182,6 +1710,55 @@ if gpu_volume_canvas_available():
             self._pan_x = max(-2.0, min(2.0, float(pan_x)))
             self._pan_y = max(-2.0, min(2.0, float(pan_y)))
             self._clarity_mode = bool(clarity_mode)
+            projection_mode = str(projection_mode or "composite").lower()
+            self._projection_mode = projection_mode if projection_mode in GPU_VOLUME_RENDER_MODES else "composite"
+            mask_mode = str(mask_mode or "image_only").lower()
+            if self._mask_data is None:
+                mask_mode = "image_only"
+            self._mask_mode = mask_mode if mask_mode in GPU_VOLUME_MASK_MODES else "image_only"
+            self._mask_opacity = max(0.0, min(1.0, float(mask_opacity)))
+            self._enhancement = max(0.0, min(1.0, float(enhancement))) if self._render_mode == "still" else 0.0
+            self._tone_gamma = max(0.65, min(1.35, float(tone_gamma)))
+            self._surface_refine = bool(surface_refine) and self._render_mode == "still"
+            self._clip_plane_enabled = bool(clip_plane_enabled)
+            self._clip_plane_depth = max(0.0, min(1.0, float(clip_plane_depth)))
+            try:
+                normal = tuple(float(value) for value in clip_plane_normal)
+            except (TypeError, ValueError):
+                normal = (0.0, 0.0, 1.0)
+            if len(normal) != 3:
+                normal = (0.0, 0.0, 1.0)
+            length = math.sqrt(sum(value * value for value in normal))
+            if length <= 1e-6:
+                normal = (0.0, 0.0, 1.0)
+                length = 1.0
+            self._clip_plane_normal = tuple(float(value) / length for value in normal)
+            self._supersample_scale = max(1.0, min(4.0, float(supersample_scale)))
+            try:
+                tint = tuple(float(value) for value in tint_rgb)
+            except (TypeError, ValueError):
+                tint = (1.0, 0.83, 0.30)
+            if len(tint) != 3:
+                tint = (1.0, 0.83, 0.30)
+            self._tint_rgb = tuple(max(0.0, min(1.0, value)) for value in tint)
+            self._transfer_preset = str(transfer_preset or "amber").lower()
+            if self._transfer_preset not in {"amber", "cyan", "white", "custom"}:
+                self._transfer_preset = "amber"
+            if transfer_opacity is None:
+                next_opacity = 0.72 if self._clarity_mode and self._render_mode == "still" else (1.0 if self._render_mode == "still" else 0.82)
+            else:
+                next_opacity = max(0.0, min(1.4, float(transfer_opacity)))
+            next_lut = build_volume_transfer_lut(
+                self._transfer_preset,
+                self._tint_rgb,
+                cutoff=0.0,
+                opacity=next_opacity,
+                clarity=self._clarity_mode and self._render_mode == "still",
+            )
+            if self._transfer_lut_data is None or not np.array_equal(self._transfer_lut_data, next_lut):
+                self._transfer_lut_data = next_lut
+                self._transfer_lut_upload_needed = True
+            self._transfer_opacity = float(next_opacity)
             self.update()
 
         def render_stats(self):
@@ -1194,6 +1771,20 @@ if gpu_volume_canvas_available():
                 "steps": int(self._last_steps),
                 "dtype": self._uploaded_dtype,
                 "clarity": bool(self._clarity_mode),
+                "projection_mode": getattr(self, "_projection_mode", "composite"),
+                "mask_mode": getattr(self, "_mask_mode", "image_only"),
+                "mask_shape_zyx": tuple(int(value) for value in getattr(self, "_mask_shape", ())),
+                "enhancement": float(getattr(self, "_enhancement", 0.0)),
+                "tone_gamma": float(getattr(self, "_tone_gamma", 1.0)),
+                "surface_refine": bool(getattr(self, "_surface_refine", False)),
+                "clip_plane_enabled": bool(getattr(self, "_clip_plane_enabled", False)),
+                "clip_plane_depth": float(getattr(self, "_clip_plane_depth", 0.0)),
+                "clip_plane_normal": tuple(float(value) for value in getattr(self, "_clip_plane_normal", (0.0, 0.0, 1.0))),
+                "supersample_scale": float(getattr(self, "_supersample_scale", 1.0)),
+                "tint_rgb": tuple(float(value) for value in getattr(self, "_tint_rgb", (1.0, 0.83, 0.30))),
+                "transfer_preset": getattr(self, "_transfer_preset", "amber"),
+                "transfer_opacity": float(getattr(self, "_transfer_opacity", 1.0)),
+                "transfer_lut": tuple(int(value) for value in getattr(self, "_transfer_lut_data", np.zeros((1, 0, 4), dtype=np.uint8)).shape),
             }
 
         def initializeGL(self):
@@ -1209,6 +1800,8 @@ if gpu_volume_canvas_available():
                 GL.glBufferData(GL.GL_ARRAY_BUFFER, vertices.nbytes, vertices, GL.GL_STATIC_DRAW)
                 GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
                 self._upload_volume_if_needed()
+                self._upload_mask_if_needed()
+                self._upload_transfer_lut_if_needed()
             except Exception as exc:
                 self._mark_failed(f"GPU renderer initialization failed: {exc}")
 
@@ -1284,9 +1877,70 @@ if gpu_volume_canvas_available():
             self._upload_needed = False
             QTimer.singleShot(0, self.render_stats_changed.emit)
 
+        def _upload_mask_if_needed(self):
+            if not self._mask_upload_needed or self._mask_data is None:
+                return
+            depth, height, width = self._mask_shape
+            if not self._mask_texture_id:
+                self._mask_texture_id = GL.glGenTextures(1)
+            GL.glActiveTexture(GL.GL_TEXTURE2)
+            GL.glBindTexture(GL.GL_TEXTURE_3D, self._mask_texture_id)
+            GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_NEAREST)
+            GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_NEAREST)
+            GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_S, GL.GL_CLAMP_TO_EDGE)
+            GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
+            GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_R, GL.GL_CLAMP_TO_EDGE)
+            GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
+            GL.glTexImage3D(
+                GL.GL_TEXTURE_3D,
+                0,
+                GL.GL_LUMINANCE,
+                int(width),
+                int(height),
+                int(depth),
+                0,
+                GL.GL_LUMINANCE,
+                GL.GL_UNSIGNED_BYTE,
+                self._mask_data,
+            )
+            GL.glBindTexture(GL.GL_TEXTURE_3D, 0)
+            GL.glActiveTexture(GL.GL_TEXTURE0)
+            self._mask_upload_needed = False
+
+        def _upload_transfer_lut_if_needed(self):
+            if not self._transfer_lut_upload_needed or self._transfer_lut_data is None:
+                return
+            if not self._transfer_lut_texture_id:
+                self._transfer_lut_texture_id = GL.glGenTextures(1)
+            lut = np.ascontiguousarray(self._transfer_lut_data, dtype=np.uint8)
+            height, width = int(lut.shape[0]), int(lut.shape[1])
+            GL.glActiveTexture(GL.GL_TEXTURE1)
+            GL.glBindTexture(GL.GL_TEXTURE_2D, self._transfer_lut_texture_id)
+            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR)
+            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_LINEAR)
+            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_S, GL.GL_CLAMP_TO_EDGE)
+            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
+            GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
+            GL.glTexImage2D(
+                GL.GL_TEXTURE_2D,
+                0,
+                GL.GL_RGBA,
+                width,
+                height,
+                0,
+                GL.GL_RGBA,
+                GL.GL_UNSIGNED_BYTE,
+                lut,
+            )
+            GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
+            GL.glActiveTexture(GL.GL_TEXTURE0)
+            self._transfer_lut_upload_needed = False
+
         def _draw_volume(self):
             if not self._program or not self._quad_vbo or not self._texture_id:
                 return
+            self._upload_mask_if_needed()
+            self._upload_transfer_lut_if_needed()
             GL.glUseProgram(self._program)
             GL.glActiveTexture(GL.GL_TEXTURE0)
             GL.glBindTexture(GL.GL_TEXTURE_3D, self._texture_id)
@@ -1294,13 +1948,30 @@ if gpu_volume_canvas_available():
             GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MIN_FILTER, texture_filter)
             GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MAG_FILTER, texture_filter)
             self._set_uniform_int("u_volume", 0)
+            GL.glActiveTexture(GL.GL_TEXTURE1)
+            GL.glBindTexture(GL.GL_TEXTURE_2D, self._transfer_lut_texture_id)
+            self._set_uniform_int("u_transfer_lut", 1)
+            GL.glActiveTexture(GL.GL_TEXTURE2)
+            mask_mode = self._mask_mode if self._mask_texture_id and self._mask_data is not None else "image_only"
+            GL.glBindTexture(GL.GL_TEXTURE_3D, self._mask_texture_id or self._texture_id)
+            self._set_uniform_int("u_mask", 2)
+            GL.glActiveTexture(GL.GL_TEXTURE0)
             self._set_uniform_float("u_cutoff", self._cutoff)
             self._set_uniform_float("u_zoom", self._zoom)
             self._set_uniform_vec2("u_pan", self._pan_x, self._pan_y)
             self._set_uniform_float("u_front_clip", self._front_clip)
+            self._set_uniform_int("u_projection_mode", GPU_VOLUME_RENDER_MODES.get(getattr(self, "_projection_mode", "composite"), 0))
+            self._set_uniform_int("u_mask_mode", GPU_VOLUME_MASK_MODES.get(mask_mode, 0))
+            self._set_uniform_float("u_mask_opacity", self._mask_opacity)
             clarity = 1.0 if self._clarity_mode and self._render_mode == "still" else 0.0
             self._set_uniform_float("u_clarity", clarity)
-            self._set_uniform_float("u_opacity", 0.72 if clarity > 0.0 else (1.0 if self._render_mode == "still" else 0.82))
+            self._set_uniform_float("u_enhancement", self._enhancement)
+            self._set_uniform_float("u_tone_gamma", self._tone_gamma)
+            self._set_uniform_int("u_surface_refine", 1 if self._surface_refine else 0)
+            self._set_uniform_int("u_clip_plane_enabled", 1 if self._clip_plane_enabled else 0)
+            self._set_uniform_float("u_clip_plane_depth", self._clip_plane_depth)
+            self._set_uniform_vec3("u_clip_plane_normal", *self._clip_plane_normal)
+            self._set_uniform_float("u_opacity", 1.0)
             self._set_uniform_float("u_gradient_weight", 1.35 if clarity > 0.0 else (1.0 if self._render_mode == "still" else 0.72))
             steps = max(256, min(GPU_VOLUME_MAX_RAY_STEPS, int(self._sample_steps)))
             self._last_steps = int(steps)
@@ -1329,6 +2000,11 @@ if gpu_volume_canvas_available():
             GL.glDisableVertexAttribArray(attr)
             GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
             GL.glBindTexture(GL.GL_TEXTURE_3D, 0)
+            GL.glActiveTexture(GL.GL_TEXTURE1)
+            GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
+            GL.glActiveTexture(GL.GL_TEXTURE2)
+            GL.glBindTexture(GL.GL_TEXTURE_3D, 0)
+            GL.glActiveTexture(GL.GL_TEXTURE0)
             GL.glUseProgram(0)
             QTimer.singleShot(0, self.render_stats_changed.emit)
 
@@ -1418,6 +2094,12 @@ if gpu_volume_canvas_available():
                 if self._texture_id:
                     GL.glDeleteTextures([int(self._texture_id)])
                     self._texture_id = None
+                if self._mask_texture_id:
+                    GL.glDeleteTextures([int(self._mask_texture_id)])
+                    self._mask_texture_id = None
+                if self._transfer_lut_texture_id:
+                    GL.glDeleteTextures([int(self._transfer_lut_texture_id)])
+                    self._transfer_lut_texture_id = None
                 if self._quad_vbo:
                     GL.glDeleteBuffers(1, [int(self._quad_vbo)])
                     self._quad_vbo = None
@@ -1425,6 +2107,7 @@ if gpu_volume_canvas_available():
                     GL.glDeleteProgram(self._program)
                     self._program = None
                 GL.glBindTexture(GL.GL_TEXTURE_3D, 0)
+                GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
                 GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
                 GL.glUseProgram(0)
                 GL.glFinish()
@@ -1451,6 +2134,10 @@ __all__ = [
     "TifGpuVolumeOffscreenWidget",
     "GPU_VOLUME_MAX_TEXTURE_DIM",
     "GPU_VOLUME_MAX_RAY_STEPS",
+    "GPU_VOLUME_TRANSFER_LUT_SIZE",
+    "GPU_VOLUME_MASK_MODES",
+    "GPU_VOLUME_RENDER_MODES",
+    "build_volume_transfer_lut",
     "gpu_volume_canvas_available",
     "gpu_volume_offscreen_available",
     "gpu_volume_unavailable_reason",

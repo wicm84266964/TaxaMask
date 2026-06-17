@@ -59,6 +59,7 @@ set "PATH=%PYTHON_DIR%;%PYTHON_DIR%Library\mingw-w64\bin;%PYTHON_DIR%Library\usr
 set "__NV_PRIME_RENDER_OFFLOAD=1"
 set "__GLX_VENDOR_LIBRARY_NAME=nvidia"
 set "QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu-compositing"
+if not defined TAXAMASK_ENABLE_TIF_WORKFLOW set "TAXAMASK_ENABLE_TIF_WORKFLOW=1"
 
 echo Starting TaxaMask with:
 echo %PYTHON_EXE%

@@ -60,6 +60,29 @@ class TifGpuVolumeCanvasImportTests(unittest.TestCase):
         self.assertEqual(gpu_canvas.GPU_VOLUME_MAX_RAY_STEPS, 4096)
         self.assertIn("MAX_RAY_STEPS = 4096", gpu_canvas._FRAGMENT_SHADER)
         self.assertIn("u_clarity", gpu_canvas._FRAGMENT_SHADER)
+        self.assertIn("u_transfer_lut", gpu_canvas._FRAGMENT_SHADER)
+        self.assertIn("uniform sampler3D u_mask", gpu_canvas._FRAGMENT_SHADER)
+        self.assertIn("uniform int u_mask_mode", gpu_canvas._FRAGMENT_SHADER)
+        self.assertIn("mask_boundary_sample", gpu_canvas._FRAGMENT_SHADER)
+        self.assertIn("u_enhancement", gpu_canvas._FRAGMENT_SHADER)
+        self.assertIn("tetra_gradient", gpu_canvas._FRAGMENT_SHADER)
+        self.assertIn("u_clip_plane_enabled", gpu_canvas._FRAGMENT_SHADER)
+        self.assertIn("clip_plane_discards", gpu_canvas._FRAGMENT_SHADER)
+        self.assertIn("u_surface_refine", gpu_canvas._FRAGMENT_SHADER)
+        self.assertEqual(gpu_canvas.GPU_VOLUME_MASK_MODES["image_only"], 0)
+        self.assertEqual(gpu_canvas.GPU_VOLUME_MASK_MODES["mask_boundary"], 1)
+        self.assertEqual(gpu_canvas.GPU_VOLUME_MASK_MODES["masked_image"], 2)
+
+    def test_transfer_lut_presets_are_distinct_and_alpha_ramps_up(self):
+        amber = gpu_canvas.build_volume_transfer_lut("amber", (1.0, 0.83, 0.30), opacity=1.0)
+        cyan = gpu_canvas.build_volume_transfer_lut("cyan", (0.3, 0.9, 1.0), opacity=1.0)
+        custom = gpu_canvas.build_volume_transfer_lut("custom", (0.9, 0.2, 0.2), opacity=0.5)
+
+        self.assertEqual(amber.shape, (1, gpu_canvas.GPU_VOLUME_TRANSFER_LUT_SIZE, 4))
+        self.assertEqual(str(amber.dtype), "uint8")
+        self.assertGreater(int(amber[0, -1, 3]), int(amber[0, 4, 3]))
+        self.assertFalse((amber[0, 180, :3] == cyan[0, 180, :3]).all())
+        self.assertLess(int(custom[0, -1, 3]), int(amber[0, -1, 3]))
 
 
 if __name__ == "__main__":

@@ -61,6 +61,123 @@ REPO_ROOT = os.path.dirname(PACKAGE_DIR)
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
+_RUNTIME_LOG_FILE = None
+_RUNTIME_LOG_PATH = ""
+
+
+def _runtime_log_enabled():
+    return str(os.environ.get("TAXAMASK_RUNTIME_LOG", "1")).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _runtime_log_timestamp():
+    import time as _time
+
+    return _time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _runtime_log_filename_timestamp():
+    import time as _time
+
+    return _time.strftime("%Y%m%d_%H%M%S")
+
+
+def _runtime_log_prune(log_dir):
+    try:
+        keep = int(os.environ.get("TAXAMASK_RUNTIME_LOG_KEEP", "20") or 20)
+    except Exception:
+        keep = 20
+    keep = max(1, keep)
+    try:
+        entries = [
+            os.path.join(log_dir, name)
+            for name in os.listdir(log_dir)
+            if name.startswith("taxamask_runtime_") and name.endswith(".log")
+        ]
+        entries.sort(key=lambda path: os.path.getmtime(path), reverse=True)
+        for old_path in entries[keep:]:
+            try:
+                os.remove(old_path)
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
+def _setup_runtime_logging():
+    global _RUNTIME_LOG_FILE, _RUNTIME_LOG_PATH
+    if _RUNTIME_LOG_FILE is not None or not _runtime_log_enabled():
+        return _RUNTIME_LOG_PATH
+    try:
+        log_dir = os.path.join(REPO_ROOT, "TaxaMask_outputs", "runtime_logs")
+        os.makedirs(log_dir, exist_ok=True)
+        _runtime_log_prune(log_dir)
+        filename = f"taxamask_runtime_{_runtime_log_filename_timestamp()}_{os.getpid()}.log"
+        _RUNTIME_LOG_PATH = os.path.join(log_dir, filename)
+        _RUNTIME_LOG_FILE = open(_RUNTIME_LOG_PATH, "a", encoding="utf-8", buffering=1)
+        try:
+            import faulthandler
+
+            faulthandler.enable(file=_RUNTIME_LOG_FILE, all_threads=True)
+        except Exception:
+            pass
+        runtime_log_event("startup", python=sys.executable, cwd=os.getcwd(), pid=os.getpid())
+        _runtime_log_prune(log_dir)
+    except Exception:
+        _RUNTIME_LOG_FILE = None
+        _RUNTIME_LOG_PATH = ""
+    return _RUNTIME_LOG_PATH
+
+
+def _runtime_log_value(value, limit=500):
+    text = str(value)
+    text = text.replace("\r", "\\r").replace("\n", "\\n")
+    if len(text) > limit:
+        text = text[:limit] + "...<truncated>"
+    return text
+
+
+def runtime_log_event(event, **fields):
+    handle = _RUNTIME_LOG_FILE
+    if handle is None:
+        return
+    try:
+        parts = [f"[{_runtime_log_timestamp()}]", _runtime_log_value(event, 80)]
+        for key in sorted(fields):
+            value = fields.get(key)
+            if value is None:
+                continue
+            parts.append(f"{key}={_runtime_log_value(value)}")
+        handle.write(" ".join(parts) + "\n")
+        handle.flush()
+    except Exception:
+        pass
+
+
+def runtime_log_exception(event, exc_type, exc_value, exc_tb):
+    handle = _RUNTIME_LOG_FILE
+    if handle is None:
+        return
+    try:
+        import traceback
+
+        runtime_log_event(event, error=repr(exc_value))
+        handle.write("".join(traceback.format_exception(exc_type, exc_value, exc_tb)))
+        if not str(exc_value).endswith("\n"):
+            handle.write("\n")
+        handle.flush()
+    except Exception:
+        pass
+
+
+if __name__ == "__main__":
+    _setup_runtime_logging()
+
+    def _early_runtime_excepthook(exc_type, exc_value, exc_tb):
+        runtime_log_exception("uncaught_exception", exc_type, exc_value, exc_tb)
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+    sys.excepthook = _early_runtime_excepthook
+
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QListWidget, QPushButton, QLabel, QFileDialog, QTextEdit,
@@ -124,6 +241,11 @@ try:
         merge_expert_candidates,
     )
     from AntSleap.core.expert_notes import format_expert_display_name, load_expert_notes, set_expert_note
+    from AntSleap.core.parent_model_notes import (
+        format_parent_model_display_name,
+        load_parent_model_notes,
+        set_parent_model_note,
+    )
     from AntSleap.core.model_profiles import (
         CHILD_BACKEND_EXTERNAL,
         CHILD_BACKEND_HEATMAP,
@@ -220,6 +342,11 @@ except ImportError:
         merge_expert_candidates,
     )
     from core.expert_notes import format_expert_display_name, load_expert_notes, set_expert_note
+    from core.parent_model_notes import (
+        format_parent_model_display_name,
+        load_parent_model_notes,
+        set_parent_model_note,
+    )
     from core.model_profiles import (
         CHILD_BACKEND_EXTERNAL,
         CHILD_BACKEND_HEATMAP,
@@ -647,6 +774,14 @@ TRANSLATIONS = {
         "Could not read the current image.": "无法读取当前图片。",
         "Current Image": "当前图片",
         "Train Models": "训练模型",
+        "Training Scope:": "训练范围：",
+        "All Images": "全部图片",
+        "All Images ({0})": "全部图片（{0}）",
+        "{0} ({1})": "{0}（{1}）",
+        "Training scope: {0} ({1} image(s))": "训练范围：{0}（{1} 张图片）",
+        "Selected training scope is empty. Choose another image group or add images to this group first.": "当前训练范围没有图片。请换一个图像标签，或先把图片加入这个标签。",
+        "Parent-part image-group training is available for the built-in Locator/SAM backend. Custom parent extensions still receive the full project contract.": "父部位按图像标签训练目前用于内置 Locator/SAM 后端。自定义父部位拓展仍会收到完整项目契约。",
+        "Choose All Images to run this custom parent extension, or switch the active profile to Built-in Locator + SAM for image-group training.": "如需运行自定义父部位拓展，请选择“全部图片”；如需按图像标签训练，请把当前模型方案切回“内置 Locator + SAM”。",
         "LOGS": "日志",
         "Export Dataset": "导出数据集",
         "Export Multimodal Dataset": "导出多模态数据",
@@ -1167,9 +1302,17 @@ TRANSLATIONS = {
         "Locator:": "定位器：",
         "Segmenter:": "分割器：",
         "Del": "删除",
+        "Note": "备注",
         "Delete": "删除",
         "No Locators Found": "未找到定位器",
         "Base SAM (Original)": "基础 SAM（原始）",
+        "Edit Locator Note": "编辑定位器备注",
+        "Edit Segmenter Note": "编辑分割器备注",
+        "Model display note:": "模型显示备注：",
+        "Edit the selected locator model display note.": "编辑当前选中定位器模型的显示备注。",
+        "Edit the selected segmenter model display note.": "编辑当前选中分割器模型的显示备注。",
+        "Updated model note for {0}: {1}": "已更新模型备注 {0}：{1}",
+        "Cleared model note for {0}.": "已清空模型备注 {0}。",
         "Delete the selected locator model file from disk.": "从磁盘删除当前选中的定位器模型文件。",
         "Delete the selected segmenter model file from disk.": "从磁盘删除当前选中的分割器模型文件。",
         "Delete Model": "删除模型",
@@ -1291,6 +1434,8 @@ SECTION_TRANSLATIONS = {
         "val coverage: {0}": "验证覆盖：{0}",
         "Locator eligible images: {0}": "可用于 Locator 训练的图片：{0}",
         "SAM/parts eligible images: {0}": "可用于 SAM/部位训练的图片：{0}",
+        "Training scope: {0}": "训练范围：{0}",
+        "All Images": "全部图片",
         "Selected locator size: {0}": "选定的 Locator 尺寸：{0}",
         "Eligible locator native sizes: {0}": "符合条件的 Locator 原始尺寸：{0}",
         "Mixed native resolutions: {0}": "存在混合原生分辨率：{0}",
@@ -1316,9 +1461,14 @@ SECTION_TRANSLATIONS = {
         "Validation samples:": "验证样本：",
         "Project Routes": "项目路由",
         "Project Route Management": "项目路由管理",
-        "Manage Blink-discovered or manually appointed project routes here. Deleting a route removes only this project record; reopening Blink later with the same parent/child context can register a candidate again.": "可在这里管理由 Blink 发现或手动指定的项目 route。删除 route 只会移除当前项目中的这条记录；如果之后在相同父/子部位上下文下再次打开 Blink，仍可重新登记为候选 route。",
+        "Manage parent-child expert routes in the current 2D workflow here. Deleting a route removes only this project record; training or appointing an expert later can register a candidate again.": "可在当前 2D 工作流里管理父部位到子部位专家的路线。删除路线只会移除当前项目中的这条记录；之后训练或指定专家时仍可重新登记候选专家。",
         "Project routes below control which parent -> child expert links are available.": "下方项目中的 route 决定哪些 parent -> child expert 链路可以实际使用。",
         "Delete Route": "删除路由",
+        "Edit Expert Note": "编辑专家备注",
+        "Expert display note:": "专家显示备注：",
+        "Select an expert row to edit its display note.": "请选择一个专家模型行来编辑显示备注。",
+        "Updated expert note for {0}: {1}": "已更新专家备注 {0}：{1}",
+        "Cleared expert note for {0}.": "已清空专家备注 {0}。",
         "Delete Expert File": "删除专家文件",
         "Delete the selected project route only.": "只删除当前选中的项目路由。",
         "Delete the selected expert model file from disk.": "从磁盘删除当前选中的专家模型文件。",
@@ -2030,6 +2180,9 @@ class TrainingPreflightDialog(QDialog):
         selected_locator_size = format_size_pair(self.preflight.get("selected_locator_size"))
         locator_size_summary = str(self.preflight.get("locator_size_summary", "none") or "none")
         overview_lines = [
+            self._ui("Training scope: {0}").format(
+                f"{self.preflight.get('training_scope_label', self._ui('All Images'))} ({int(self.preflight.get('training_scope_image_count', 0) or 0)})"
+            ),
             self._ui("Locator eligible images: {0}").format(int(self.preflight.get('locator_image_count', 0))),
             self._ui("SAM/parts eligible images: {0}").format(int(self.preflight.get('parts_image_count', 0))),
             self._ui("Selected locator size: {0}").format(selected_locator_size),
@@ -2243,6 +2396,15 @@ class TrainingReportDialog(QDialog):
     def _build_summary_text(self):
         lines = []
         if self.report_summary:
+            context = self.report_summary.get("training_context") if isinstance(self.report_summary.get("training_context"), dict) else {}
+            training_scope = context.get("training_scope") if isinstance(context.get("training_scope"), dict) else {}
+            if training_scope:
+                lines.append(
+                    tr("Training scope: {0} ({1} image(s))", self.lang).format(
+                        training_scope.get("label", self._ui("All Images")),
+                        training_scope.get("image_count", 0),
+                    )
+                )
             lines.append(self._ui("Validation count: {0}").format(self.report_summary.get('validation_count', 0)))
             lines.append(self._ui("Preview count: {0}").format(self.report_summary.get('validation_preview_count', 0)))
             provenance_counts = self.report_summary.get("validation_provenance_counts", {}) or {}
@@ -2560,6 +2722,11 @@ class RouteManagementPanel(QWidget):
         apply_semantic_button_style(self.btn_delete_route, BUTTON_ROLE_DESTRUCTIVE)
         button_row.addWidget(self.btn_delete_route)
 
+        self.btn_edit_expert_note = QPushButton()
+        self.btn_edit_expert_note.clicked.connect(self.edit_selected_expert_note)
+        apply_semantic_button_style(self.btn_edit_expert_note, BUTTON_ROLE_NEUTRAL)
+        button_row.addWidget(self.btn_edit_expert_note)
+
         self.btn_delete_expert_file = QPushButton()
         self.btn_delete_expert_file.clicked.connect(self.delete_selected_expert_file)
         apply_semantic_button_style(self.btn_delete_expert_file, BUTTON_ROLE_DESTRUCTIVE)
@@ -2577,19 +2744,22 @@ class RouteManagementPanel(QWidget):
         apply_theme_button_style(self.btn_appoint_route_expert, BUTTON_ROLE_COMMIT, "", theme)
         apply_theme_button_style(self.btn_toggle_route, BUTTON_ROLE_NEUTRAL, "", theme)
         apply_theme_button_style(self.btn_delete_route, BUTTON_ROLE_DESTRUCTIVE, "", theme)
+        apply_theme_button_style(self.btn_edit_expert_note, BUTTON_ROLE_NEUTRAL, "", theme)
         apply_theme_button_style(self.btn_delete_expert_file, BUTTON_ROLE_DESTRUCTIVE, "", theme)
 
     def retranslate_ui(self):
         self.header_label.setText(self._ui("Project Routes"))
         self.note_label.setText(
             self._ui(
-                "Manage Blink-discovered or manually appointed project routes here. Deleting a route removes only this project record; reopening Blink later with the same parent/child context can register a candidate again."
+                "Manage parent-child expert routes in the current 2D workflow here. Deleting a route removes only this project record; training or appointing an expert later can register a candidate again."
             )
         )
         self.btn_refresh_routes.setText(self._tr("Refresh"))
         self.btn_appoint_route_expert.setText(self._tr("Appoint Expert"))
         self.btn_delete_route.setText(self._ui("Delete Route"))
         self.btn_delete_route.setToolTip(self._ui("Delete the selected project route only."))
+        self.btn_edit_expert_note.setText(self._ui("Edit Expert Note"))
+        self.btn_edit_expert_note.setToolTip(self._ui("Select an expert row to edit its display note."))
         self.btn_delete_expert_file.setText(self._ui("Delete Expert File"))
         self.btn_delete_expert_file.setToolTip(self._ui("Select an available expert file to delete the model file from disk."))
         self.route_tree.setHeaderLabels([
@@ -2951,6 +3121,8 @@ class RouteManagementPanel(QWidget):
         )
         self.btn_appoint_route_expert.setEnabled(selected_kind == "expert" and bool(self._selected_expert_entry()))
         self.btn_delete_route.setEnabled((selected_kind == "route" and bool(route)) or can_delete_missing_history)
+        can_edit_expert_note = selected_kind == "expert" and bool(expert) and bool(str(expert.get("expert_id") or "").strip())
+        self.btn_edit_expert_note.setEnabled(can_edit_expert_note)
         can_delete_expert_file = selected_kind == "expert" and bool(self._selected_existing_expert_file())
         self.btn_delete_expert_file.setEnabled(can_delete_expert_file)
         if can_delete_expert_file:
@@ -2961,6 +3133,40 @@ class RouteManagementPanel(QWidget):
         self.btn_toggle_route.setText(
             self._tr("Disable Route") if route and route.get("enabled") else self._tr("Enable Route")
         )
+
+    def edit_selected_expert_note(self):
+        payload = self._selected_node_payload() or {}
+        if str(payload.get("kind") or "") != "expert":
+            return
+        route = self._selected_route_entry()
+        expert = self._selected_expert_entry()
+        if not route or not expert:
+            return
+        expert_id = str(expert.get("expert_id") or "").strip()
+        if not expert_id:
+            return
+        weights_dir = getattr(getattr(self.owner, "engine", None), "weights_dir", "")
+        current_note = self._expert_notes().get(expert_id, "")
+        note, ok = QInputDialog.getText(
+            self,
+            self._ui("Edit Expert Note"),
+            self._ui("Expert display note:"),
+            QLineEdit.Normal,
+            current_note,
+        )
+        if not ok:
+            return
+        clean_note = set_expert_note(weights_dir, expert_id, note)
+        parent_part = route.get("parent")
+        child_part = route.get("child")
+        self.refresh_route_table()
+        refreshed_item = self._find_expert_item(parent_part, child_part, expert_id)
+        if refreshed_item is not None:
+            self.route_tree.setCurrentItem(refreshed_item)
+        if clean_note:
+            self.owner.log(self._ui("Updated expert note for {0}: {1}").format(expert_id, clean_note))
+        else:
+            self.owner.log(self._ui("Cleared expert note for {0}.").format(expert_id))
 
     def appoint_selected_route_expert(self):
         payload = self._selected_node_payload() or {}
@@ -5961,6 +6167,7 @@ class MainWindow(QMainWindow):
         self.project_save_navigation_idle_ms = max(1200, min(5000, self.project_autosave_delay_ms))
         self.project_last_image_switch_at = 0.0
         self.project_save_pending = False
+        self.project_save_context = {}
         self.project_save_timer = QTimer(self)
         self.project_save_timer.setSingleShot(True)
         self.project_save_timer.timeout.connect(self._flush_pending_project_save)
@@ -6301,7 +6508,12 @@ class MainWindow(QMainWindow):
         self.btn_del_locator.setEnabled(False)
         self.btn_del_locator.clicked.connect(self.delete_locator_model)
         apply_semantic_button_style(self.btn_del_locator, BUTTON_ROLE_DESTRUCTIVE)
-        models_form.addWidget(self.btn_del_locator, 0, 2)
+        self.btn_note_locator = QPushButton("Note")
+        self.btn_note_locator.setEnabled(False)
+        self.btn_note_locator.clicked.connect(self.edit_locator_model_note)
+        apply_semantic_button_style(self.btn_note_locator, BUTTON_ROLE_NEUTRAL)
+        models_form.addWidget(self.btn_note_locator, 0, 2)
+        models_form.addWidget(self.btn_del_locator, 0, 3)
         
         # Segmenter Selection
         self.lbl_segmenter = QLabel("Segmenter:")
@@ -6316,7 +6528,12 @@ class MainWindow(QMainWindow):
         self.btn_del_segmenter.setEnabled(False)
         self.btn_del_segmenter.clicked.connect(self.delete_segmenter_model)
         apply_semantic_button_style(self.btn_del_segmenter, BUTTON_ROLE_DESTRUCTIVE)
-        models_form.addWidget(self.btn_del_segmenter, 1, 2)
+        self.btn_note_segmenter = QPushButton("Note")
+        self.btn_note_segmenter.setEnabled(False)
+        self.btn_note_segmenter.clicked.connect(self.edit_segmenter_model_note)
+        apply_semantic_button_style(self.btn_note_segmenter, BUTTON_ROLE_NEUTRAL)
+        models_form.addWidget(self.btn_note_segmenter, 1, 2)
+        models_form.addWidget(self.btn_del_segmenter, 1, 3)
         
         parent_annotation_layout.addWidget(self.ai_model_panel)
 
@@ -6352,6 +6569,17 @@ class MainWindow(QMainWindow):
             )
         )
         ai_action_layout.addWidget(self.chk_train_locator_only)
+        train_scope_row = QHBoxLayout()
+        train_scope_row.setContentsMargins(0, 0, 0, 0)
+        train_scope_row.setSpacing(8)
+        self.lbl_training_scope = QLabel()
+        self.lbl_training_scope.setObjectName("mutedLabel")
+        train_scope_row.addWidget(self.lbl_training_scope)
+        self.combo_training_scope = NoWheelComboBox()
+        self.combo_training_scope.setObjectName("workbenchTrainingScopeCombo")
+        self.combo_training_scope.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        train_scope_row.addWidget(self.combo_training_scope, 1)
+        ai_action_layout.addLayout(train_scope_row)
 
         train_buttons_layout = QHBoxLayout()
         self.btn_train = QPushButton()
@@ -7479,8 +7707,10 @@ class MainWindow(QMainWindow):
         self._shutdown_background_workers()
         return super().destroy(destroyWindow, destroySubWindows)
 
-    def _schedule_project_save(self):
+    def _schedule_project_save(self, reason="pending_change", **context):
         self.project_save_pending = True
+        if context:
+            self.project_save_context = {"reason": reason, **context}
         self.project_save_timer.start(self.project_autosave_delay_ms)
 
     def _defer_project_save_for_active_navigation(self):
@@ -7495,6 +7725,7 @@ class MainWindow(QMainWindow):
 
         if not self.project.current_project_path:
             self.project_save_pending = False
+            self.project_save_context = {}
             return False
 
         if not force and not self.project_save_pending:
@@ -7510,8 +7741,32 @@ class MainWindow(QMainWindow):
                 self.project_save_timer.start(remaining_ms)
                 return False
 
-        self.project.save_project()
+        context = getattr(self, "project_save_context", {}) or {}
+        try:
+            self.project.save_project()
+        except Exception:
+            runtime_log_exception(
+                "project_save_failed",
+                *sys.exc_info(),
+            )
+            runtime_log_event(
+                "project_save_failed_context",
+                project=getattr(self.project, "current_project_path", ""),
+                image_count=len(self.project.project_data.get("images", []) or []),
+                label_count=len(self.project.project_data.get("labels", {}) or {}),
+                **context,
+            )
+            raise
+        if context:
+            runtime_log_event(
+                "project_save_ok",
+                project=getattr(self.project, "current_project_path", ""),
+                image_count=len(self.project.project_data.get("images", []) or []),
+                label_count=len(self.project.project_data.get("labels", {}) or {}),
+                **context,
+            )
         self.project_save_pending = False
+        self.project_save_context = {}
         return True
 
     def refresh_model_list(self):
@@ -7526,6 +7781,7 @@ class MainWindow(QMainWindow):
             return
             
         import glob
+        parent_model_notes = load_parent_model_notes(self.engine.weights_dir)
         # 1. Populate Locators
         loc_files = glob.glob(os.path.join(self.engine.weights_dir, "locator_*.pth"))
         # Format: "20260105_1105"
@@ -7533,7 +7789,7 @@ class MainWindow(QMainWindow):
         
         if loc_timestamps:
             for ts in loc_timestamps:
-                self.combo_locator.addItem(self._build_locator_combo_label(ts), ts)
+                self.combo_locator.addItem(self._build_locator_combo_label(ts, parent_model_notes), ts)
             locator_index = self.combo_locator.findData(current_locator)
             if locator_index < 0:
                 locator_index = 0
@@ -7549,7 +7805,7 @@ class MainWindow(QMainWindow):
         
         if seg_timestamps:
             for ts in seg_timestamps:
-                self.combo_segmenter.addItem(ts, ts)
+                self.combo_segmenter.addItem(self._build_segmenter_combo_label(ts, parent_model_notes), ts)
             
         # Default to Base SAM (Index 0) for safety/compatibility, or latest if user prefers?
         # User strategy: "配合原始的sam模型，先达到一个很好的效果". So default to Base SAM.
@@ -7576,42 +7832,64 @@ class MainWindow(QMainWindow):
             return ""
         return str(self.combo_locator.currentText() or "").strip()
 
-    def _build_locator_combo_label(self, timestamp):
+    def _parent_model_filename(self, model_kind, timestamp):
+        ts = str(timestamp or "").strip()
+        if not ts:
+            return ""
+        if model_kind == "locator":
+            return f"locator_{ts}.pth"
+        if model_kind == "segmenter":
+            return f"sam_decoder_lora_{ts}.pth"
+        return ""
+
+    def _build_locator_combo_label(self, timestamp, parent_model_notes=None):
         ts = str(timestamp or "").strip()
         if not ts:
             return ts
+        filename = self._parent_model_filename("locator", ts)
+        notes = parent_model_notes if isinstance(parent_model_notes, dict) else load_parent_model_notes(getattr(self.engine, "weights_dir", ""))
+        note = notes.get(filename, "")
 
         path = self._locator_model_path(ts)
         if not path or not os.path.exists(path):
-            return ts
+            return format_parent_model_display_name(filename or ts, note)
 
+        state_label = ""
         try:
             saved_state = torch.load(path, map_location="cpu")
         except Exception:
-            return ts
-
-        checkpoint_meta = {}
-        if isinstance(saved_state, dict) and isinstance(saved_state.get("meta"), dict):
-            checkpoint_meta = saved_state.get("meta") or {}
-
-        saved_resolution = checkpoint_meta.get("locator_size")
-        legacy_resolution = checkpoint_meta.get("locator_resolution")
-        if saved_resolution is None and legacy_resolution is not None:
-            try:
-                legacy_side = max(1, int(legacy_resolution))
-            except Exception:
-                legacy_side = 512
-            saved_resolution = [legacy_side, legacy_side]
-
-        if saved_resolution is None:
-            state_label = "legacy-512"
+            pass
         else:
-            try:
-                size_pair = (max(1, int(saved_resolution[0])), max(1, int(saved_resolution[1])))
-            except Exception:
-                size_pair = (512, 512)
-            state_label = f"exact {format_size_pair(size_pair)}"
-        return f"{ts} [{state_label}]"
+            checkpoint_meta = {}
+            if isinstance(saved_state, dict) and isinstance(saved_state.get("meta"), dict):
+                checkpoint_meta = saved_state.get("meta") or {}
+
+            saved_resolution = checkpoint_meta.get("locator_size")
+            legacy_resolution = checkpoint_meta.get("locator_resolution")
+            if saved_resolution is None and legacy_resolution is not None:
+                try:
+                    legacy_side = max(1, int(legacy_resolution))
+                except Exception:
+                    legacy_side = 512
+                saved_resolution = [legacy_side, legacy_side]
+
+            if saved_resolution is None:
+                state_label = "legacy-512"
+            else:
+                try:
+                    size_pair = (max(1, int(saved_resolution[0])), max(1, int(saved_resolution[1])))
+                except Exception:
+                    size_pair = (512, 512)
+                state_label = f"exact {format_size_pair(size_pair)}"
+        return format_parent_model_display_name(filename, note, details=state_label)
+
+    def _build_segmenter_combo_label(self, timestamp, parent_model_notes=None):
+        ts = str(timestamp or "").strip()
+        if not ts:
+            return ts
+        filename = self._parent_model_filename("segmenter", ts)
+        notes = parent_model_notes if isinstance(parent_model_notes, dict) else load_parent_model_notes(getattr(self.engine, "weights_dir", ""))
+        return format_parent_model_display_name(filename, notes.get(filename, ""))
 
     def _selected_segmenter_timestamp(self):
         item_data = self.combo_segmenter.currentData() if self.combo_segmenter.count() else None
@@ -7963,7 +8241,7 @@ class MainWindow(QMainWindow):
         self.child_training_cancel_requested = False
         self._refresh_blink_refine_state()
 
-    def _launch_training_with_preflight(self, preflight, tax, locator_scope, train_segmenter=True):
+    def _launch_training_with_preflight(self, preflight, tax, locator_scope, train_segmenter=True, training_scope=None):
         if self._is_child_training_running():
             self.log(tr("Child-part expert training is running. Wait for it to finish before training parent models.", self.current_lang))
             QMessageBox.information(
@@ -7973,11 +8251,40 @@ class MainWindow(QMainWindow):
             )
             return
         active_preflight = dict(preflight or {})
+        active_training_scope = dict(training_scope or {})
+        scope_label = str(
+            active_training_scope.get("label")
+            or active_preflight.get("training_scope_label")
+            or tr("All Images", self.current_lang)
+        )
+        scope_id = str(
+            active_training_scope.get("scope_id")
+            or active_preflight.get("training_scope_id")
+            or "__all__"
+        )
+        try:
+            scope_image_count = int(
+                active_preflight.get(
+                    "training_scope_image_count",
+                    len(active_training_scope.get("images", []) or []),
+                )
+                or 0
+            )
+        except Exception:
+            scope_image_count = 0
+        active_preflight["training_scope_id"] = scope_id
+        active_preflight["training_scope_label"] = scope_label
+        active_preflight["training_scope_image_count"] = scope_image_count
         self.pending_training_preflight = {
             "preflight": active_preflight,
             "taxonomy": list(tax or []),
             "locator_scope": list(locator_scope or []),
             "train_segmenter": bool(train_segmenter),
+            "training_scope": {
+                "scope_id": scope_id,
+                "label": scope_label,
+                "image_count": scope_image_count,
+            },
         }
         self.training_retry_requested = False
         self.parent_training_failed = False
@@ -8001,6 +8308,11 @@ class MainWindow(QMainWindow):
                 "locator_scope": list(locator_scope or []),
                 "train_segmenter": bool(train_segmenter),
                 "locator_resolution": list(self.engine.locator_resolution),
+                "training_scope": {
+                    "scope_id": scope_id,
+                    "label": scope_label,
+                    "image_count": scope_image_count,
+                },
             },
         )
         self.trainer.log_signal.connect(self.log)
@@ -8074,6 +8386,7 @@ class MainWindow(QMainWindow):
                         self.pending_training_preflight.get("taxonomy", []),
                         self.pending_training_preflight.get("locator_scope", []),
                         self.pending_training_preflight.get("train_segmenter", True),
+                        self.pending_training_preflight.get("training_scope", {}),
                     ),
                 )
                 return
@@ -8116,11 +8429,55 @@ class MainWindow(QMainWindow):
     def update_model_delete_button_states(self, *_):
         locator_ts = self._selected_locator_timestamp()
         locator_path = self._locator_model_path(locator_ts)
-        self.btn_del_locator.setEnabled(bool(locator_path and os.path.exists(locator_path)))
+        can_edit_locator = bool(locator_path and os.path.exists(locator_path))
+        self.btn_del_locator.setEnabled(can_edit_locator)
+        self.btn_note_locator.setEnabled(can_edit_locator)
 
         segmenter_ts = self._selected_segmenter_timestamp()
         segmenter_path = self._segmenter_model_path(segmenter_ts)
-        self.btn_del_segmenter.setEnabled(bool(segmenter_path and os.path.exists(segmenter_path)))
+        can_edit_segmenter = bool(segmenter_path and os.path.exists(segmenter_path))
+        self.btn_del_segmenter.setEnabled(can_edit_segmenter)
+        self.btn_note_segmenter.setEnabled(can_edit_segmenter)
+
+    def _edit_parent_model_note(self, model_kind):
+        if model_kind == "locator":
+            ts = self._selected_locator_timestamp()
+            path = self._locator_model_path(ts)
+            title = tr("Edit Locator Note", self.current_lang)
+        elif model_kind == "segmenter":
+            ts = self._selected_segmenter_timestamp()
+            path = self._segmenter_model_path(ts)
+            title = tr("Edit Segmenter Note", self.current_lang)
+        else:
+            return
+        filename = self._parent_model_filename(model_kind, ts)
+        if not ts or not filename or not path or not os.path.exists(path):
+            self.update_model_delete_button_states()
+            return
+
+        notes = load_parent_model_notes(self.engine.weights_dir)
+        current_note = notes.get(filename, "")
+        note, ok = QInputDialog.getText(
+            self,
+            title,
+            tr("Model display note:", self.current_lang),
+            QLineEdit.Normal,
+            current_note,
+        )
+        if not ok:
+            return
+        clean_note = set_parent_model_note(self.engine.weights_dir, filename, note)
+        self.refresh_model_list()
+        if clean_note:
+            self.log(tr("Updated model note for {0}: {1}", self.current_lang).format(filename, clean_note))
+        else:
+            self.log(tr("Cleared model note for {0}.", self.current_lang).format(filename))
+
+    def edit_locator_model_note(self):
+        self._edit_parent_model_note("locator")
+
+    def edit_segmenter_model_note(self):
+        self._edit_parent_model_note("segmenter")
 
     def on_locator_changed(self, index):
         if getattr(self, "active_project_kind", "start") != "image" or getattr(self.engine, "locator", None) is None:
@@ -8176,6 +8533,7 @@ class MainWindow(QMainWindow):
                 p = self._locator_model_path(ts)
                 if os.path.exists(p):
                     os.remove(p)
+                    set_parent_model_note(self.engine.weights_dir, self._parent_model_filename("locator", ts), "")
                     self.log(f"Deleted locator: {ts}")
                     self.refresh_model_list()
                 else:
@@ -8206,6 +8564,7 @@ class MainWindow(QMainWindow):
                 p = self._segmenter_model_path(ts)
                 if os.path.exists(p):
                     os.remove(p)
+                    set_parent_model_note(self.engine.weights_dir, self._parent_model_filename("segmenter", ts), "")
                     self.log(f"Deleted segmenter: {ts}")
                     self.refresh_model_list()
                 else:
@@ -8370,6 +8729,7 @@ class MainWindow(QMainWindow):
 
     def open_project_path(self, path):
         f = os.path.abspath(str(path))
+        runtime_log_event("open_project_begin", path=f)
         self._flush_pending_project_save(defer_for_navigation=False)
         if self._is_stl_project_file(f):
             self.stl_project.load_project(f)
@@ -8398,6 +8758,14 @@ class MainWindow(QMainWindow):
             self.engine.cascade_manager.project_manager = self.project
         self._sync_blink_lab_model_profile_defaults()
         self._preload_2d_stl_models_after_open()
+        runtime_log_event(
+            "open_project_ok",
+            path=f,
+            active_kind=getattr(self, "active_project_kind", ""),
+            source_kind=getattr(self, "active_project_source_kind", ""),
+            image_count=len(self.project.project_data.get("images", []) or []),
+            label_count=len(self.project.project_data.get("labels", {}) or {}),
+        )
         self.canvas.load_image("")
 
     def _format_relocation_preview(self, matches, limit=8):
@@ -9183,6 +9551,9 @@ class MainWindow(QMainWindow):
                 self.current_lang,
             )
         )
+        if hasattr(self, "lbl_training_scope"):
+            self.lbl_training_scope.setText(tr("Training Scope:", self.current_lang))
+        self._refresh_training_scope_combo()
         self.btn_train.setText(tr("Train Models", self.current_lang))
         self.btn_stop_training.setText(tr("Stop Training", self.current_lang))
         self.btn_clear_ai.setText(tr("Clear AI Labels", self.current_lang))
@@ -9246,8 +9617,12 @@ class MainWindow(QMainWindow):
         self.lbl_segmenter.setText(tr("Segmenter:", self.current_lang))
         self.btn_del_locator.setText(tr("Del", self.current_lang))
         self.btn_del_locator.setToolTip(tr("Delete the selected locator model file from disk.", self.current_lang))
+        self.btn_note_locator.setText(tr("Note", self.current_lang))
+        self.btn_note_locator.setToolTip(tr("Edit the selected locator model display note.", self.current_lang))
         self.btn_del_segmenter.setText(tr("Del", self.current_lang))
         self.btn_del_segmenter.setToolTip(tr("Delete the selected segmenter model file from disk.", self.current_lang))
+        self.btn_note_segmenter.setText(tr("Note", self.current_lang))
+        self.btn_note_segmenter.setToolTip(tr("Edit the selected segmenter model display note.", self.current_lang))
         for index in range(self.tabs.count()):
             widget = self.tabs.widget(index)
             if widget is self.workbench_widget:
@@ -9656,8 +10031,12 @@ class MainWindow(QMainWindow):
             apply_theme_button_style(self.btn_del_part, BUTTON_ROLE_DESTRUCTIVE, "font-weight: bold;", self.current_theme)
         if hasattr(self, "btn_del_locator"):
             apply_theme_button_style(self.btn_del_locator, BUTTON_ROLE_DESTRUCTIVE, "", self.current_theme)
+        if hasattr(self, "btn_note_locator"):
+            apply_theme_button_style(self.btn_note_locator, BUTTON_ROLE_NEUTRAL, "", self.current_theme)
         if hasattr(self, "btn_del_segmenter"):
             apply_theme_button_style(self.btn_del_segmenter, BUTTON_ROLE_DESTRUCTIVE, "", self.current_theme)
+        if hasattr(self, "btn_note_segmenter"):
+            apply_theme_button_style(self.btn_note_segmenter, BUTTON_ROLE_NEUTRAL, "", self.current_theme)
         if hasattr(self, "btn_predict"):
             apply_theme_button_style(self.btn_predict, BUTTON_ROLE_RUN, "padding: 5px;", self.current_theme)
         if hasattr(self, "btn_batch"):
@@ -9955,6 +10334,74 @@ class MainWindow(QMainWindow):
 
     def _all_image_group_definitions(self):
         return self._builtin_image_group_definitions() + self._custom_image_group_definitions()
+
+    def _training_scope_group_definitions(self, all_images=None):
+        images = [path for path in (all_images if all_images is not None else self.project.project_data.get("images", [])) if path]
+        state = getattr(self, "_image_list_state_cache", None)
+        if isinstance(state, dict):
+            try:
+                state_total = int(state.get("total_count", -1))
+            except Exception:
+                state_total = -1
+            group_definitions = list(state.get("group_definitions", []) or [])
+            if state_total == len(images) and group_definitions:
+                return group_definitions
+
+        image_groups = self._project_image_groups(images=images)
+        group_definitions = []
+        for group_key, label in self._builtin_image_group_definitions():
+            group_definitions.append((group_key, label, image_groups.get(group_key, []), group_key == "split"))
+        for group_key, label in self._custom_image_group_definitions():
+            group_definitions.append((group_key, label, image_groups.get(group_key, []), False))
+        return group_definitions
+
+    def _populate_training_scope_combo(self, selected_scope=None):
+        if not hasattr(self, "combo_training_scope"):
+            return
+        current = str(selected_scope or self.combo_training_scope.currentData() or "__all__")
+        all_images = [path for path in self.project.project_data.get("images", []) if path]
+        group_definitions = self._training_scope_group_definitions(all_images)
+        self.combo_training_scope.blockSignals(True)
+        self.combo_training_scope.clear()
+        self.combo_training_scope.addItem(
+            tr("All Images ({0})", self.current_lang).format(len(all_images)),
+            "__all__",
+        )
+        for group_id, label, group_images, _is_split_group in group_definitions:
+            group_images = list(group_images or [])
+            if group_images:
+                self.combo_training_scope.addItem(
+                    tr("{0} ({1})", self.current_lang).format(label, len(group_images)),
+                    group_id,
+                )
+        index = self.combo_training_scope.findData(current)
+        if index < 0:
+            index = self.combo_training_scope.findData("__all__")
+        self.combo_training_scope.setCurrentIndex(index if index >= 0 else 0)
+        self.combo_training_scope.blockSignals(False)
+
+    def _refresh_training_scope_combo(self):
+        selected = "__all__"
+        if hasattr(self, "combo_training_scope"):
+            selected = str(self.combo_training_scope.currentData() or selected)
+        self._populate_training_scope_combo(selected)
+
+    def _selected_training_scope_payload(self):
+        all_images = [path for path in self.project.project_data.get("images", []) if path]
+        scope_id = "__all__"
+        if hasattr(self, "combo_training_scope"):
+            scope_id = str(self.combo_training_scope.currentData() or "__all__")
+        if scope_id == "__all__":
+            label = tr("All Images", self.current_lang)
+            return {"scope_id": "__all__", "label": label, "images": all_images}
+
+        group_images = []
+        for group_id, _label, images, _is_split_group in self._training_scope_group_definitions(all_images):
+            if str(group_id) == scope_id:
+                group_images = list(images or [])
+                break
+        label = self._image_group_display_name(scope_id) or scope_id
+        return {"scope_id": scope_id, "label": label, "images": group_images}
 
     def _populate_vlm_image_group_combo(self, selected_group=None):
         if not hasattr(self, "combo_vlm_image_group"):
@@ -10451,7 +10898,20 @@ class MainWindow(QMainWindow):
             else:
                 for path in paths:
                     self.project.remove_image(path, save=False)
-            self._schedule_project_save()
+            runtime_log_event(
+                "remove_images",
+                count=len(paths),
+                removed_current=was_current_removed,
+                previous_current=os.path.basename(str(previous_current_image or "")),
+                replacement=os.path.basename(str(replacement_image or "")),
+                project=getattr(self.project, "current_project_path", ""),
+                remaining_images=len(self.project.project_data.get("images", []) or []),
+            )
+            self._schedule_project_save(
+                reason="remove_images",
+                changed_count=len(paths),
+                removed_current=was_current_removed,
+            )
             current_still_registered = bool(
                 self.current_image
                 and any(
@@ -10560,6 +11020,7 @@ class MainWindow(QMainWindow):
             # Update the header label on the left side
             header_base = tr("PROJECT IMAGES", self.current_lang)
             self.label_project_images.setText(f"{header_base} ({labeled_count}/{total_count})")
+            self._refresh_training_scope_combo()
         finally:
             self.file_list.setUpdatesEnabled(True)
             self.file_list.blockSignals(False)
@@ -10628,6 +11089,7 @@ class MainWindow(QMainWindow):
         self.label_project_images.setText(
             f"{header_base} ({int(state.get('labeled_count', 0) or 0)}/{int(state.get('total_count', 0) or 0)})"
         )
+        self._refresh_training_scope_combo()
         return target_item is not None
 
     def _refresh_image_list_status_or_rebuild(self, image_path=None):
@@ -11896,6 +12358,23 @@ class MainWindow(QMainWindow):
             return
         child_part = context.get("child_part")
         parent_part = context.get("parent_part")
+        scope_payload = self._selected_training_scope_payload()
+        scope_images = list(scope_payload.get("images", []) or [])
+        scope_label = str(scope_payload.get("label") or tr("All Images", self.current_lang))
+        scope_id = str(scope_payload.get("scope_id") or "__all__")
+        if not scope_images:
+            self._warn_blink_context(
+                tr(
+                    "Selected training scope is empty. Choose another image group or add images to this group first.",
+                    self.current_lang,
+                )
+            )
+            return
+        child_training_scope = {
+            "scope_id": scope_id,
+            "label": scope_label,
+            "image_count": len(scope_images),
+        }
         self.child_training_failed = False
         self.child_training_cancel_requested = False
         self.btn_train.setEnabled(False)
@@ -11917,7 +12396,10 @@ class MainWindow(QMainWindow):
             },
         }
         self.blink_lab.training_route_context = self.blink_lab._route_context_for_training(parent_part, child_part)
-        self.blink_lab.train_expert_model()
+        self.blink_lab.train_expert_model(
+            allowed_image_paths=scope_images,
+            training_scope=child_training_scope,
+        )
         self._connect_child_training_progress()
         if getattr(self.blink_lab, "training_thread", None) is None:
             self.btn_train.setEnabled(True)
@@ -11929,6 +12411,7 @@ class MainWindow(QMainWindow):
                 self.btn_blink_stop_training.setEnabled(True)
         self._refresh_blink_refine_state()
         self.log(tr("Started Blink expert training for {0} -> {1}.", self.current_lang).format(parent_part, child_part))
+        self.log(tr("Training scope: {0} ({1} image(s))", self.current_lang).format(scope_label, len(scope_images)))
 
     def stop_current_blink_expert_training(self):
         if not self._is_child_training_running():
@@ -12051,22 +12534,48 @@ class MainWindow(QMainWindow):
                 tr("Child-part expert training is running. Wait for it to finish before training parent models.", self.current_lang),
             )
             return
+        scope_payload = self._selected_training_scope_payload()
+        scope_id = str(scope_payload.get("scope_id", "__all__") or "__all__")
         if _runtime_parent_backend(self.project, self.model_backend) == EXTERNAL_BACKEND_ID:
+            if scope_id != "__all__":
+                QMessageBox.information(
+                    self,
+                    tr("Training", self.current_lang),
+                    tr(
+                        "Parent-part image-group training is available for the built-in Locator/SAM backend. Custom parent extensions still receive the full project contract.",
+                        self.current_lang,
+                    )
+                    + "\n\n"
+                    + tr(
+                        "Choose All Images to run this custom parent extension, or switch the active profile to Built-in Locator + SAM for image-group training.",
+                        self.current_lang,
+                    ),
+                )
+                return
             self.run_external_training()
             return
-        images = list(self.project.project_data.get("images", []))
+        images = list(scope_payload.get("images", []) or [])
         labels_by_image = dict(self.project.project_data.get("labels", {}))
         if not images:
-            QMessageBox.warning(self, tr("No Labels", self.current_lang), tr("Annotate first!", self.current_lang))
+            QMessageBox.warning(
+                self,
+                tr("No Labels", self.current_lang),
+                tr("Selected training scope is empty. Choose another image group or add images to this group first.", self.current_lang),
+            )
             return
         tax = self.project.project_data["taxonomy"]
         locator_scope = self.project.get_locator_scope()
         preflight = build_training_preflight(images, labels_by_image, tax, locator_scope)
+        scope_label = str(scope_payload.get("label", "") or tr("All Images", self.current_lang))
+        preflight["training_scope_id"] = scope_id
+        preflight["training_scope_label"] = scope_label
+        preflight["training_scope_image_count"] = len(images)
 
         if not preflight.get("locator_samples") and not preflight.get("parts_samples"):
             QMessageBox.warning(self, tr("No Labels", self.current_lang), tr("Annotate first!", self.current_lang))
             return
 
+        self.log(tr("Training scope: {0} ({1} image(s))", self.current_lang).format(scope_label, len(images)))
         self.log(tr("Training with Taxonomy ({0}): {1}", self.current_lang).format(len(tax), tax))
         self.log(tr("Training with Locator Scope ({0}): {1}", self.current_lang).format(len(locator_scope), locator_scope))
         self.log(describe_training_preflight(preflight))
@@ -12092,7 +12601,13 @@ class MainWindow(QMainWindow):
         if train_segmenter and preflight.get("parts_samples"):
             self.ensure_sam_preloaded()
 
-        self._launch_training_with_preflight(preflight, tax, locator_scope, train_segmenter=train_segmenter)
+        self._launch_training_with_preflight(
+            preflight,
+            tax,
+            locator_scope,
+            train_segmenter=train_segmenter,
+            training_scope=scope_payload,
+        )
 
     def _external_backend_runner(self):
         return ExternalBackendRunner(self.project, self._active_external_backend_config())
@@ -13877,6 +14392,7 @@ class MainWindow(QMainWindow):
 if __name__ == "__main__":
     def excepthook(t, v, tb):
         import traceback
+        runtime_log_exception("uncaught_exception", t, v, tb)
         err = "".join(traceback.format_exception(t, v, tb))
         print(f"CRITICAL ERROR:\n{err}")
         QMessageBox.critical(None, "Error", f"{v}")

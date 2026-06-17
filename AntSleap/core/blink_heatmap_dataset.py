@@ -51,6 +51,7 @@ class BlinkHeatmapDataset(Dataset):
         blink_prob=0.5,
         training_strategy=BLINK_STRATEGY_TRIVIEW_RANDOM,
         stage_view_mode=None,
+        allowed_image_paths=None,
     ):
         self.project_json_path = str(project_json_path or "")
         self.child_part = str(child_part or "").strip()
@@ -60,9 +61,29 @@ class BlinkHeatmapDataset(Dataset):
         self.blink_prob = max(0.0, min(1.0, float(blink_prob)))
         self.training_strategy = sanitize_blink_training_strategy(training_strategy)
         self.stage_view_mode = str(stage_view_mode or "").strip().lower()
+        self.allowed_image_paths = self._normalize_allowed_image_paths(allowed_image_paths)
         self.samples = []
         self._load_samples()
         self.sequence_count = len(self.samples)
+
+    def _normalize_allowed_image_paths(self, image_paths):
+        if not image_paths:
+            return None
+        allowed = set()
+        for image_path in image_paths:
+            text = str(image_path or "").strip()
+            if not text:
+                continue
+            allowed.add(os.path.normcase(os.path.normpath(text)))
+            allowed.add(os.path.normcase(os.path.abspath(os.path.normpath(text))))
+        return allowed or None
+
+    def _is_allowed_image_path(self, image_path, absolute_image):
+        if not self.allowed_image_paths:
+            return True
+        raw_key = os.path.normcase(os.path.normpath(str(image_path or "")))
+        abs_key = os.path.normcase(os.path.abspath(os.path.normpath(str(absolute_image or ""))))
+        return raw_key in self.allowed_image_paths or abs_key in self.allowed_image_paths
 
     def _load_samples(self):
         if not self.project_json_path or not os.path.exists(self.project_json_path):
@@ -106,6 +127,8 @@ class BlinkHeatmapDataset(Dataset):
             absolute_image = image_path
             if not os.path.isabs(str(absolute_image)):
                 absolute_image = os.path.join(project_dir, str(absolute_image))
+            if not self._is_allowed_image_path(image_path, absolute_image):
+                continue
             self.samples.append(
                 {
                     "image_path": os.path.normpath(absolute_image),

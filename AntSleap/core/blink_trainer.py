@@ -79,6 +79,8 @@ class BlinkExpertTrainer:
         weight_decay=1e-4,
         input_size=224,
         training_strategy=BLINK_STRATEGY_TRIVIEW_RANDOM,
+        allowed_image_paths=None,
+        training_scope=None,
     ):
         self.device = resolve_torch_device(device)
         self.part_name = str(part_name).strip()
@@ -90,6 +92,8 @@ class BlinkExpertTrainer:
         self.weight_decay = float(weight_decay)
         self.input_size = self._normalize_input_size(input_size)
         self.training_strategy = sanitize_blink_training_strategy(training_strategy)
+        self.allowed_image_paths = [str(path) for path in (allowed_image_paths or []) if str(path or "").strip()]
+        self.training_scope = dict(training_scope or {})
         self.history = {
             "loss": [],
             "loss_final": [],
@@ -303,6 +307,7 @@ class BlinkExpertTrainer:
             target_size=target_size,
             training_strategy=self.training_strategy,
             stage_view_mode=stage_view_mode,
+            allowed_image_paths=self.allowed_image_paths,
         )
 
     def _training_stages(self, epochs):
@@ -428,6 +433,8 @@ class BlinkExpertTrainer:
             "weight_decay": float(self.weight_decay),
             "training_strategy": self.training_strategy,
         }
+        if self.training_scope:
+            train_params["training_scope"] = dict(self.training_scope)
         manifest_path, manifest = write_blink_expert_manifest(
             save_path,
             expert_backend=BLINK_EXPERT_BACKEND_VIT_B,
@@ -628,6 +635,9 @@ class BlinkExpertTrainer:
             "learning_rate": float(self.learning_rate),
             "weight_decay": float(self.weight_decay),
             "training_strategy": self.training_strategy,
+            "training_scope": dict(self.training_scope),
+            "trajectory_sequence_count": int(getattr(dataset, "sequence_count", len(getattr(dataset, "samples", []) or [])) or 0),
+            "expanded_training_sample_count": int(len(dataset) if dataset is not None else 0),
             "validation_count": len(validation_rows),
             "validation_preview_count": min(8, len(validation_rows)),
             "validation_provenance_counts": {"blink_expert": len(validation_rows)},

@@ -112,6 +112,8 @@ class BlinkHeatmapTrainer:
         wh_loss_weight=1.0,
         center_loss_weight=1.0,
         training_strategy=BLINK_STRATEGY_TRIVIEW_RANDOM,
+        allowed_image_paths=None,
+        training_scope=None,
     ):
         self.device = resolve_torch_device(device)
         self.part_name = str(part_name or "").strip()
@@ -126,6 +128,8 @@ class BlinkHeatmapTrainer:
         self.wh_loss_weight = max(0.0, float(wh_loss_weight))
         self.center_loss_weight = max(0.0, float(center_loss_weight))
         self.training_strategy = sanitize_blink_training_strategy(training_strategy)
+        self.allowed_image_paths = [str(path) for path in (allowed_image_paths or []) if str(path or "").strip()]
+        self.training_scope = dict(training_scope or {})
         self.history = {
             "loss": [],
             "loss_final": [],
@@ -288,6 +292,7 @@ class BlinkHeatmapTrainer:
             heatmap_sigma=self.heatmap_sigma,
             training_strategy=self.training_strategy,
             stage_view_mode=stage_view_mode,
+            allowed_image_paths=self.allowed_image_paths,
         )
 
     def _training_stages(self, epochs):
@@ -395,6 +400,16 @@ class BlinkHeatmapTrainer:
         }
 
     def write_manifest(self, save_path, target_size, dataset):
+        train_params = {
+            "learning_rate": float(self.learning_rate),
+            "weight_decay": float(self.weight_decay),
+            "heatmap_sigma": float(self.heatmap_sigma),
+            "wh_loss_weight": float(self.wh_loss_weight),
+            "center_loss_weight": float(self.center_loss_weight),
+            "training_strategy": self.training_strategy,
+        }
+        if self.training_scope:
+            train_params["training_scope"] = dict(self.training_scope)
         manifest_path, manifest = write_blink_expert_manifest(
             save_path,
             expert_backend=BLINK_EXPERT_BACKEND_HEATMAP,
@@ -404,14 +419,7 @@ class BlinkHeatmapTrainer:
             project_json=self.project_path,
             trajectory_count=int(getattr(dataset, "sequence_count", len(dataset) if dataset is not None else 0) or 0),
             output_schema=HEATMAP_BLINK_OUTPUT_SCHEMA,
-            train_params={
-                "learning_rate": float(self.learning_rate),
-                "weight_decay": float(self.weight_decay),
-                "heatmap_sigma": float(self.heatmap_sigma),
-                "wh_loss_weight": float(self.wh_loss_weight),
-                "center_loss_weight": float(self.center_loss_weight),
-                "training_strategy": self.training_strategy,
-            },
+            train_params=train_params,
         )
         return manifest_path, manifest
 
@@ -584,6 +592,7 @@ class BlinkHeatmapTrainer:
             "learning_rate": float(self.learning_rate),
             "weight_decay": float(self.weight_decay),
             "training_strategy": self.training_strategy,
+            "training_scope": dict(self.training_scope),
             "trajectory_sequence_count": int(getattr(dataset, "sequence_count", 0) or 0),
             "expanded_training_sample_count": int(len(dataset) if dataset is not None else 0),
             "validation_count": len(validation_rows),

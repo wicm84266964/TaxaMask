@@ -1,10 +1,10 @@
-# TaxaMask
+# 🧬 TaxaMask — Morphological Body Part Segmentation, Mask Annotation & Taxonomy Dataset Builder
 
 [![DOI](https://zenodo.org/badge/1264598942.svg)](https://doi.org/10.5281/zenodo.20619867)
 
-**TaxaMask** is an open-source desktop workbench for traceable biological morphology annotation and AI training dataset construction.
+**TaxaMask** is an open-source desktop workbench for AI-assisted mask annotation of organismal body parts, taxonomic trait labeling, and multimodal training dataset generation (COCO / JSONL / YOLO).
 
-TaxaMask connects taxonomic literature, specimen images, AI drafts, human-reviewed labels, model training, and dataset export in one provenance-aware project loop. It was developed from ant morphology research and is designed for morphology-focused taxonomy projects that need reliable annotation records, reusable training data, and clear links between source material and exported datasets.
+Originating from real-world ant taxonomy research and designed for morphology-based taxonomic groups beyond ants, TaxaMask connects taxonomic literature, specimen images, AI-assisted mask annotation, human review, model training, and dataset export in one traceable pipeline. It supports Segment Anything (SAM) draft masks, Vision-Language Model (VLM) first-mile proposals, parent/child body-part annotation, and provenance-aware dataset export for computer-vision and multimodal fine-tuning workflows.
 
 TaxaMask also includes an embedded **Agent Center**. Researchers can use natural language to inspect project state, understand errors, adjust profiles, configure model backends, and modify project code after confirmation. This lets each lab reshape TaxaMask around its own taxa, image sources, annotation targets, and local model setup.
 
@@ -59,9 +59,9 @@ The public interface centers on four practical entry points: Agent Center for lo
 
 Recovery note: source-code changes can break the GUI before the embedded Agent Center can open again. In that case, use the standalone Ant-Code recovery panel: run `启动AntCode修复面板.bat` on Windows, or `bash ./启动AntCode修复面板.sh` on Ubuntu/Linux/WSL, then continue debugging and editing from the browser-based dashboard. The dashboard can also load the Ant-Code chat history for the current project.
 
-## Intended Use
+## Scope
 
-TaxaMask is intended for researchers who need to connect biological morphology, taxonomic literature, specimen images, and AI-assisted annotation. It is especially relevant to species descriptions, taxonomic revisions, figure-plate organization, morphology mask annotation, and small research teams that need traceable links between source materials, annotation decisions, model drafts, and exported training data.
+TaxaMask is built for morphology-based taxonomy projects that need to connect biological structures, taxonomic literature, specimen images, AI drafts, human review, and exported training data. The current public release is most extensively validated on ant morphology, while the profile system is meant to be adapted to other taxa and body-part vocabularies.
 
 ## Review Loop and Reference Route
 
@@ -77,7 +77,7 @@ Other taxa can use the same workflow pattern by adapting profiles, reviewing sma
 
 ## Keywords
 
-Biological morphology annotation, taxonomic image annotation, traceable workflow, dataset provenance, AI-assisted annotation, human-in-the-loop review, VLM pre-annotation, SAM-assisted annotation, morphology segmentation, taxonomic literature, species description, figure extraction, caption extraction, training dataset construction, agent-assisted workflow, source-code assisted customization, customizable annotation workflow, biodiversity informatics, ant taxonomy, Formicidae.
+Organism body part segmentation, biological morphology annotation, taxonomic image annotation, mask annotation, instance segmentation, Segment Anything, SAM-assisted annotation, Vision-Language Model, VLM pre-annotation, deep learning, computer vision, multimodal dataset, COCO dataset, JSONL dataset, YOLO format, fine-tuning, traceable workflow, dataset provenance, AI-assisted annotation, human-in-the-loop review, morphology segmentation, taxonomic literature, species description, taxonomic key, figure extraction, caption extraction, training dataset construction, agent-assisted workflow, source-code assisted customization, biodiversity informatics, phenomics, biological imaging, specimen digitization, insect morphology, ant taxonomy, Formicidae.
 
 ## License
 
@@ -282,6 +282,19 @@ External backend predictions are review candidates. They should not be treated a
 - [Figure extraction and multimodal profile guide](docs/图文提取与多模态profile适配说明.md)
 - [Parent backend contract](docs/contracts/external_backend_contract_v1.md)
 - [Child Blink backend contract](docs/contracts/external_blink_backend_contract_v1.md)
+
+## Who Should Use TaxaMask?
+
+TaxaMask is intended for researchers and research groups who need to:
+
+- Annotate organismal body parts with masks for morphology, taxonomy, biodiversity, or phenomics projects.
+- Build human-reviewed segmentation datasets from specimen images, taxonomic plates, or rendered morphology views.
+- Link taxonomic trait descriptions, figure captions, specimen images, AI drafts, and final labels in one auditable project.
+- Use SAM or VLM outputs as reviewable drafts rather than unverified ground truth.
+- Export multimodal JSONL, COCO, or YOLO-style datasets for computer-vision, VLM, or custom fine-tuning workflows.
+- Adapt the same workflow to a new taxon, body-part vocabulary, local model backend, or lab-specific annotation route.
+
+Currently best-validated on ant morphology (Formicidae), but the profile system is designed for any morphology-based taxonomic group.
 
 ## Citation
 

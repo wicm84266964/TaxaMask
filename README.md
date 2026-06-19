@@ -63,6 +63,12 @@ Recovery note: source-code changes can break the GUI before the embedded Agent C
 
 TaxaMask is built for morphology-based taxonomy projects that need to connect biological structures, taxonomic literature, specimen images, AI drafts, human review, and exported training data. The current public release is most extensively validated on ant morphology, while the profile system is meant to be adapted to other taxa and body-part vocabularies.
 
+## Body-Part Vocabulary
+
+TaxaMask uses editable profiles so a project can bridge general organism terms, insect and arthropod body-part names, and taxon-specific labels. In insect or ant workflows, searchable body-part terms may include head, thorax or mesosoma, abdomen or gaster, antennae, mandibles, legs, wings, appendages, and other fine-grained specimen structures. These labels can be organized as parent and child parts for mask segmentation, instance segmentation, taxonomic trait labeling, human-reviewed SAM or VLM drafts, and COCO / JSONL / YOLO dataset export.
+
+TaxaMask is centered on masks, body-part labels, and traceable training data. Keypoint or landmark workflows should be treated as profile-specific extensions rather than the default export contract.
+
 ## Review Loop and Reference Route
 
 ![Human-in-the-loop annotation cycle in TaxaMask](docs/assets/readme/figure_3_human_in_the_loop_cycle.png)
@@ -77,7 +83,7 @@ Other taxa can use the same workflow pattern by adapting profiles, reviewing sma
 
 ## Keywords
 
-Organism body part segmentation, biological morphology annotation, taxonomic image annotation, mask annotation, instance segmentation, Segment Anything, SAM-assisted annotation, Vision-Language Model, VLM pre-annotation, deep learning, computer vision, multimodal dataset, COCO dataset, JSONL dataset, YOLO format, fine-tuning, traceable workflow, dataset provenance, AI-assisted annotation, human-in-the-loop review, morphology segmentation, taxonomic literature, species description, taxonomic key, figure extraction, caption extraction, training dataset construction, agent-assisted workflow, source-code assisted customization, biodiversity informatics, phenomics, biological imaging, specimen digitization, insect morphology, ant taxonomy, Formicidae.
+Organism body part segmentation, insect body parts, arthropod morphology, head, thorax, abdomen, antennae, mandibles, legs, wings, appendages, biological morphology annotation, taxonomic image annotation, specimen image segmentation, automatic mask annotation drafts, mask annotation, instance segmentation, Segment Anything, SAM-assisted annotation, Vision-Language Model, VLM pre-annotation, deep learning, computer vision, fine-grained classification datasets, multimodal dataset, COCO dataset, JSONL dataset, YOLO format, fine-tuning, traceable workflow, dataset provenance, AI-assisted annotation, human-in-the-loop review, morphology segmentation, taxonomic literature, species description, taxonomic key, figure extraction, caption extraction, training dataset construction, agent-assisted workflow, source-code assisted customization, biodiversity informatics, phenomics, biological imaging, specimen digitization, insect morphology, ant morphology, ant taxonomy, Formicidae.
 
 ## License
 

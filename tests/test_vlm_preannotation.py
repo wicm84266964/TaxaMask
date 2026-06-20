@@ -653,9 +653,94 @@ class VlmPreannotationTests(unittest.TestCase):
         labels = next(iter(payload["labels"].values()))
         self.assertEqual(labels.get("parts", {}), {})
         self.assertEqual(labels["auto_boxes"]["Head"], [10.0, 12.0, 50.0, 44.0])
+        self.assertEqual(labels["auto_box_meta"]["Head"]["source"], "vlm_first_mile")
+        self.assertEqual(labels["auto_box_meta"]["Head"]["review_status"], "draft")
         self.assertNotIn("boxes", labels)
         summary = json.loads(report.read_text(encoding="utf-8"))
         self.assertEqual(summary["saved_box_count"], 1)
+
+    def test_cli_prediction_fixture_does_not_replace_model_prediction_box(self):
+        tmp = PROJECT_ROOT / "artifacts" / "test_cases" / "vlm_preannotation_model_priority"
+        tmp.mkdir(parents=True, exist_ok=True)
+        image_path = tmp / "specimen.png"
+        Image.new("RGB", (120, 80), color=(140, 150, 160)).save(image_path)
+
+        project_path = tmp / "project.json"
+        project_path.write_text(
+            json.dumps(
+                {
+                    "name": "demo",
+                    "taxonomy": ["Head"],
+                    "locator_scope": ["Head"],
+                    "vlm_preannotation": {
+                        "target_parts": ["Head"],
+                        "processing_scope": "current_image",
+                    },
+                    "images": [str(image_path)],
+                    "labels": {
+                        str(image_path): {
+                            "parts": {"Head": [[10, 10], [20, 10], [20, 20]]},
+                            "auto_boxes": {"Head": [10, 10, 20, 20]},
+                            "auto_box_meta": {"Head": {"source": "model_prediction", "review_status": "draft"}},
+                            "descriptions": {"Head": "Auto-Annotated"},
+                            "status": "labeled",
+                            "genus": "Formica",
+                        }
+                    },
+                    "scales": {},
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        predictions_path = tmp / "predictions.json"
+        predictions_path.write_text(
+            json.dumps(
+                {
+                    "images": {
+                        str(image_path): {
+                            "detections": [
+                                {
+                                    "part": "Head",
+                                    "bbox_xyxy": [30, 30, 70, 60],
+                                    "confidence": 0.9,
+                                }
+                            ]
+                        }
+                    }
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        out_project = tmp / "project_vlm.json"
+        report = tmp / "vlm_report.json"
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(PROJECT_ROOT / "tools" / "agentic" / "vlm_preannotate_project.py"),
+                "--project",
+                str(project_path),
+                "--out",
+                str(out_project),
+                "--prediction-json",
+                str(predictions_path),
+                "--report",
+                str(report),
+            ],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        payload = json.loads(out_project.read_text(encoding="utf-8"))
+        labels = next(iter(payload["labels"].values()))
+        self.assertEqual(labels["auto_boxes"]["Head"], [10, 10, 20, 20])
+        self.assertEqual(labels["auto_box_meta"]["Head"]["source"], "model_prediction")
+        summary = json.loads(report.read_text(encoding="utf-8"))
+        self.assertEqual(summary["saved_box_count"], 0)
 
     def test_cli_requires_explicit_or_saved_vlm_target_parts(self):
         tmp = PROJECT_ROOT / "artifacts" / "test_cases" / "vlm_preannotation_no_parts"

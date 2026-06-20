@@ -194,7 +194,14 @@ import torch
 from PIL import Image as PILImage
 
 try:
-    from AntSleap.core.project import ProjectManager
+    from AntSleap.core.project import (
+        AUTO_BOX_REVIEW_CONFIRMED,
+        AUTO_BOX_REVIEW_DRAFT,
+        AUTO_BOX_SOURCE_EXTERNAL_MODEL,
+        AUTO_BOX_SOURCE_MODEL,
+        AUTO_BOX_SOURCE_VLM,
+        ProjectManager,
+    )
     from AntSleap.core.database import MultiModalDB
     from AntSleap.core.engine import AntEngine
     from AntSleap.core.sam_helper import SAMWorker
@@ -295,7 +302,14 @@ try:
         resolve_literature_context,
     )
 except ImportError:
-    from core.project import ProjectManager
+    from core.project import (
+        AUTO_BOX_REVIEW_CONFIRMED,
+        AUTO_BOX_REVIEW_DRAFT,
+        AUTO_BOX_SOURCE_EXTERNAL_MODEL,
+        AUTO_BOX_SOURCE_MODEL,
+        AUTO_BOX_SOURCE_VLM,
+        ProjectManager,
+    )
     from core.database import MultiModalDB
     from core.engine import AntEngine
     from core.sam_helper import SAMWorker
@@ -8940,10 +8954,13 @@ class MainWindow(QMainWindow):
         box = _clean_box(manual.get(parent_part) if isinstance(manual, dict) else None)
         if box:
             return box, "manual"
-        auto = self.project.get_auto_boxes(self.current_image)
+        auto, vlm = self._auto_boxes_for_canvas(self.current_image)
         box = _clean_box(auto.get(parent_part) if isinstance(auto, dict) else None)
         if box:
             return box, "auto"
+        box = _clean_box(vlm.get(parent_part) if isinstance(vlm, dict) else None)
+        if box:
+            return box, "vlm"
         return None, "none"
 
     def _current_shrink_loose_boxes(self):
@@ -8952,13 +8969,44 @@ class MainWindow(QMainWindow):
         boxes = self.project.get_shrink_loose_boxes(self.current_image)
         return boxes if isinstance(boxes, dict) else {}
 
+    def _auto_boxes_for_canvas(self, image_path):
+        splitter = getattr(self.project, "split_auto_boxes_by_source", None)
+        if callable(splitter):
+            try:
+                model_boxes, vlm_boxes = splitter(image_path)
+                return model_boxes if isinstance(model_boxes, dict) else {}, vlm_boxes if isinstance(vlm_boxes, dict) else {}
+            except Exception:
+                pass
+        auto_boxes = self.project.get_auto_boxes(image_path)
+        if not isinstance(auto_boxes, dict):
+            return {}, {}
+        meta = {}
+        get_meta = getattr(self.project, "get_auto_box_meta", None)
+        if callable(get_meta):
+            try:
+                meta = get_meta(image_path)
+            except Exception:
+                meta = {}
+        meta = meta if isinstance(meta, dict) else {}
+        model_boxes = {}
+        vlm_boxes = {}
+        for part_name, box in auto_boxes.items():
+            part_meta = meta.get(part_name, {}) if isinstance(meta.get(part_name), dict) else {}
+            if part_meta.get("source") == AUTO_BOX_SOURCE_VLM:
+                vlm_boxes[part_name] = box
+            else:
+                model_boxes[part_name] = box
+        return model_boxes, vlm_boxes
+
     def _refresh_current_canvas_boxes(self):
         if not self.current_image:
             return
+        model_auto_boxes, vlm_auto_boxes = self._auto_boxes_for_canvas(self.current_image)
         self.canvas.set_boxes(
             self.project.get_boxes(self.current_image),
-            self.project.get_auto_boxes(self.current_image),
+            model_auto_boxes,
             self._current_shrink_loose_boxes(),
+            vlm=vlm_auto_boxes,
         )
 
     def _route_entry_for_context(self, parent_part, child_part):
@@ -11389,7 +11437,28 @@ class MainWindow(QMainWindow):
 
     def _collect_blink_roi_candidates(self, image_path, selected_part=None, preferred_roi_parts=None):
         manual_boxes = self.project.get_boxes(image_path)
-        auto_boxes = self.project.get_auto_boxes(image_path)
+        box_splitter = getattr(self, "_auto_boxes_for_canvas", None)
+        if callable(box_splitter):
+            auto_boxes, vlm_boxes = box_splitter(image_path)
+        else:
+            project_splitter = getattr(self.project, "split_auto_boxes_by_source", None)
+            if callable(project_splitter):
+                auto_boxes, vlm_boxes = project_splitter(image_path)
+            else:
+                auto_boxes = self.project.get_auto_boxes(image_path)
+                vlm_boxes = {}
+                get_meta = getattr(self.project, "get_auto_box_meta", None)
+                meta = get_meta(image_path) if callable(get_meta) else {}
+                meta = meta if isinstance(meta, dict) else {}
+                if isinstance(auto_boxes, dict):
+                    model_boxes = {}
+                    for part_name, box in auto_boxes.items():
+                        part_meta = meta.get(part_name, {}) if isinstance(meta.get(part_name), dict) else {}
+                        if part_meta.get("source") == AUTO_BOX_SOURCE_VLM:
+                            vlm_boxes[part_name] = box
+                        else:
+                            model_boxes[part_name] = box
+                    auto_boxes = model_boxes
         candidates = []
 
         def _append(boxes, source):
@@ -11419,6 +11488,7 @@ class MainWindow(QMainWindow):
 
         _append(manual_boxes, "manual")
         _append(auto_boxes, "auto")
+        _append(vlm_boxes, "vlm")
         return candidates
 
     def on_file_selected(self, curr, prev):
@@ -11447,12 +11517,12 @@ class MainWindow(QMainWindow):
             self.current_image = p
             labels = self.project.get_labels(p)
             manual_boxes = self.project.get_boxes(p)
-            auto_boxes = self.project.get_auto_boxes(p)
+            auto_boxes, vlm_boxes = self._auto_boxes_for_canvas(p)
             if not (same_image and has_loaded_pixmap):
                 self.canvas.load_image(p)
                 self.on_enhancement_changed()
             self.canvas.set_polygons(labels)
-            self.canvas.set_boxes(manual_boxes, auto_boxes, self._current_shrink_loose_boxes())
+            self.canvas.set_boxes(manual_boxes, auto_boxes, self._current_shrink_loose_boxes(), vlm=vlm_boxes)
             get_taxon = getattr(self.project, "get_taxon", self.project.get_genus)
             self.genus_combo.blockSignals(True)
             try:
@@ -11523,7 +11593,15 @@ class MainWindow(QMainWindow):
 
         labels = self.project.get_labels(self.current_image)
         manual_boxes = self.project.get_boxes(self.current_image)
-        auto_boxes = self.project.get_auto_boxes(self.current_image)
+        box_splitter = getattr(self, "_auto_boxes_for_canvas", None)
+        if callable(box_splitter):
+            auto_boxes, _vlm_boxes = box_splitter(self.current_image)
+        else:
+            project_splitter = getattr(self.project, "split_auto_boxes_by_source", None)
+            if callable(project_splitter):
+                auto_boxes, _vlm_boxes = project_splitter(self.current_image)
+            else:
+                auto_boxes = self.project.get_auto_boxes(self.current_image)
         started = self.blink_lab.start_session(session, labels, manual_boxes, auto_boxes)
         if not started:
             return
@@ -12918,13 +12996,57 @@ class MainWindow(QMainWindow):
             review_status = str(meta.get(part_name, {}).get("review_status") or "").strip()
         return review_status != "confirmed"
 
-    def _apply_prediction_to_project(self, image_path, payload, only_new=True, save=True):
+    def _auto_box_meta_for_part(self, image_path, part_name):
+        get_meta = getattr(self.project, "get_auto_box_meta", None)
+        meta = None
+        if callable(get_meta):
+            try:
+                meta = get_meta(image_path)
+            except Exception:
+                meta = None
+        if not isinstance(meta, dict):
+            entry = self.project.project_data.get("labels", {}).get(image_path, {})
+            meta = entry.get("auto_box_meta", {}) if isinstance(entry, dict) and isinstance(entry.get("auto_box_meta", {}), dict) else {}
+        part_meta = meta.get(part_name, {}) if isinstance(meta.get(part_name), dict) else {}
+        return dict(part_meta)
+
+    def _auto_box_source_for_part(self, image_path, part_name):
+        meta = self._auto_box_meta_for_part(image_path, part_name)
+        return str(meta.get("source") or AUTO_BOX_SOURCE_MODEL).strip() or AUTO_BOX_SOURCE_MODEL
+
+    def _auto_box_review_status_for_part(self, image_path, part_name):
+        meta = self._auto_box_meta_for_part(image_path, part_name)
+        return str(meta.get("review_status") or AUTO_BOX_REVIEW_DRAFT).strip() or AUTO_BOX_REVIEW_DRAFT
+
+    def _auto_annotation_source_meta(self, source=AUTO_BOX_SOURCE_MODEL):
+        return {
+            "source": source,
+            "review_status": AUTO_BOX_REVIEW_DRAFT,
+        }
+
+    def _can_replace_existing_auto_annotation(self, image_path, part_name, new_source):
+        existing_points = self.project.get_labels(image_path).get(part_name, [])
+        if existing_points and not self._is_unconfirmed_ai_draft(image_path, part_name):
+            return False
+        existing_auto_boxes = self.project.get_auto_boxes(image_path)
+        has_auto_box = isinstance(existing_auto_boxes, dict) and part_name in existing_auto_boxes
+        if not existing_points and not has_auto_box:
+            return True
+        existing_status = self._auto_box_review_status_for_part(image_path, part_name)
+        if existing_status == AUTO_BOX_REVIEW_CONFIRMED:
+            return False
+        existing_source = self._auto_box_source_for_part(image_path, part_name)
+        if new_source == AUTO_BOX_SOURCE_VLM:
+            return existing_source == AUTO_BOX_SOURCE_VLM
+        return True
+
+    def _apply_prediction_to_project(self, image_path, payload, only_new=True, save=True, source=AUTO_BOX_SOURCE_MODEL):
         polygons, auto_boxes = self._extract_prediction_payload(payload)
         existing_parts = set(self.project.get_labels(image_path).keys())
         saved_count = 0
 
         for part_name, points in polygons.items():
-            if only_new and part_name in existing_parts and not self._is_unconfirmed_ai_draft(image_path, part_name):
+            if only_new and not self._can_replace_existing_auto_annotation(image_path, part_name, source):
                 continue
 
             auto_box = auto_boxes.get(part_name)
@@ -12935,6 +13057,16 @@ class MainWindow(QMainWindow):
                     auto_box = [float(min(xs)), float(min(ys)), float(max(xs)), float(max(ys))]
 
             self.project.update_label(image_path, part_name, points, "Auto-Annotated", auto_box=auto_box, save=False)
+            if auto_box:
+                update_auto_box = getattr(self.project, "update_auto_box", None)
+                if callable(update_auto_box):
+                    update_auto_box(
+                        image_path,
+                        part_name,
+                        auto_box,
+                        source_meta=self._auto_annotation_source_meta(source),
+                        save=False,
+                    )
             existing_parts.add(part_name)
             saved_count += 1
 
@@ -13458,8 +13590,7 @@ class MainWindow(QMainWindow):
         if not part_name or not box:
             return False, "invalid_candidate"
 
-        existing_points = self.project.get_labels(image_path).get(part_name, [])
-        if existing_points and not self._is_unconfirmed_ai_draft(image_path, part_name):
+        if not self._can_replace_existing_auto_annotation(image_path, part_name, AUTO_BOX_SOURCE_VLM):
             return False, "already_labeled"
 
         polygon = None
@@ -13538,7 +13669,7 @@ class MainWindow(QMainWindow):
                     current_path,
                     self.project.get_labels(current_path),
                     self.project.get_boxes(current_path),
-                    self.project.get_auto_boxes(current_path),
+                    self._auto_boxes_for_canvas(current_path)[0],
                 )
             except Exception:
                 pass
@@ -13996,15 +14127,21 @@ class MainWindow(QMainWindow):
                 project_route_manifest=self._active_project_route_manifest(),
                 model_profile_context=self._active_model_profile_context(),
             )
-            count, total_detected = self._apply_prediction_to_project(self.current_image, ps, only_new=True, save=False)
+            count, total_detected = self._apply_prediction_to_project(
+                self.current_image,
+                ps,
+                only_new=True,
+                save=False,
+                source=AUTO_BOX_SOURCE_MODEL,
+            )
             if count:
                 self._schedule_project_save()
             
             labels = self.project.get_labels(self.current_image)
             manual_boxes = self.project.get_boxes(self.current_image)
-            auto_boxes = self.project.get_auto_boxes(self.current_image)
+            auto_boxes, vlm_boxes = self._auto_boxes_for_canvas(self.current_image)
             self.canvas.set_polygons(labels)
-            self.canvas.set_boxes(manual_boxes, auto_boxes, self._current_shrink_loose_boxes())
+            self.canvas.set_boxes(manual_boxes, auto_boxes, self._current_shrink_loose_boxes(), vlm=vlm_boxes)
             self._refresh_image_list_status_or_rebuild(self.current_image)
             self._refresh_blink_refine_state()
             self._log_route_usage_summary(ps, self.current_image)
@@ -14026,6 +14163,7 @@ class MainWindow(QMainWindow):
                 result.get("payload", {}),
                 only_new=True,
                 save=False,
+                source=AUTO_BOX_SOURCE_EXTERNAL_MODEL,
             )
             if count:
                 self._schedule_project_save()
@@ -14112,6 +14250,7 @@ class MainWindow(QMainWindow):
                 result.get("payload", {}),
                 only_new=True,
                 save=False,
+                source=AUTO_BOX_SOURCE_EXTERNAL_MODEL,
             )
             if saved:
                 self.external_batch_inference_saved_any = True
@@ -14198,7 +14337,13 @@ class MainWindow(QMainWindow):
             )
             self.inf_thread.log_signal.connect(self.log) # Fix: Connect log signal
             def on_batch_res(p, d):
-                saved, total = self._apply_prediction_to_project(p, d, only_new=True, save=False)
+                saved, total = self._apply_prediction_to_project(
+                    p,
+                    d,
+                    only_new=True,
+                    save=False,
+                    source=AUTO_BOX_SOURCE_MODEL,
+                )
                 self._log_route_usage_summary(
                     d,
                     p,

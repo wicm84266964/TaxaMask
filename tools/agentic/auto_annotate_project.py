@@ -13,7 +13,12 @@ ANTSLEAP_ROOT = os.path.join(REPO_ROOT, "AntSleap")
 if ANTSLEAP_ROOT not in sys.path:
     sys.path.insert(0, ANTSLEAP_ROOT)
 
-from core.project import ProjectManager  # noqa: E402
+from core.project import (  # noqa: E402
+    AUTO_BOX_REVIEW_CONFIRMED,
+    AUTO_BOX_REVIEW_DRAFT,
+    AUTO_BOX_SOURCE_MODEL,
+    ProjectManager,
+)
 
 
 def _load_json(path: str) -> Any:
@@ -116,6 +121,37 @@ def _clean_polygon(raw_points: Any, image_size: tuple[float, float] | None) -> l
     return clean if len(clean) >= 3 else None
 
 
+def _is_unconfirmed_ai_draft(manager: ProjectManager, image_path: str, part_name: str) -> bool:
+    labels_entry = manager.project_data.get("labels", {}).get(image_path, {})
+    if not isinstance(labels_entry, dict):
+        return False
+    descriptions = labels_entry.get("descriptions", {}) if isinstance(labels_entry.get("descriptions", {}), dict) else {}
+    if descriptions.get(part_name) != "Auto-Annotated":
+        return False
+    meta = labels_entry.get("auto_box_meta", {}) if isinstance(labels_entry.get("auto_box_meta", {}), dict) else {}
+    part_meta = meta.get(part_name, {}) if isinstance(meta.get(part_name), dict) else {}
+    return str(part_meta.get("review_status") or AUTO_BOX_REVIEW_DRAFT).strip() != AUTO_BOX_REVIEW_CONFIRMED
+
+
+def _can_model_replace(manager: ProjectManager, image_path: str, part_name: str, only_new: bool) -> bool:
+    labels_by_part = manager.get_labels(image_path)
+    has_label = part_name in labels_by_part
+    auto_boxes = manager.get_auto_boxes(image_path)
+    has_auto_box = isinstance(auto_boxes, dict) and part_name in auto_boxes
+    if not has_label and not has_auto_box:
+        return True
+    meta = manager.get_auto_box_meta(image_path)
+    part_meta = meta.get(part_name, {}) if isinstance(meta, dict) and isinstance(meta.get(part_name), dict) else {}
+    review_status = str(part_meta.get("review_status") or AUTO_BOX_REVIEW_DRAFT).strip()
+    if review_status == AUTO_BOX_REVIEW_CONFIRMED:
+        return False
+    if has_label and not _is_unconfirmed_ai_draft(manager, image_path, part_name):
+        return False
+    if not only_new:
+        return True
+    return has_label or has_auto_box
+
+
 def _apply_payload(
     manager: ProjectManager,
     image_path: str,
@@ -125,12 +161,18 @@ def _apply_payload(
 ) -> dict[str, Any]:
     polygons, auto_boxes = _extract_prediction_payload(payload)
     taxonomy = set(manager.project_data.get("taxonomy", []))
-    existing_parts = set(manager.get_labels(image_path).keys())
     image_size = _image_size(image_path)
 
     saved = 0
     rejected: list[dict[str, str]] = []
-    for part_name, raw_points in polygons.items():
+    part_names = list(polygons.keys())
+    if save_drafts_only:
+        for part_name in auto_boxes.keys():
+            if part_name not in polygons:
+                part_names.append(part_name)
+
+    for part_name in part_names:
+        raw_points = polygons.get(part_name)
         clean_part = str(part_name).strip()
         if not clean_part:
             rejected.append({"part": str(part_name), "reason": "empty_part"})
@@ -138,22 +180,32 @@ def _apply_payload(
         if taxonomy and clean_part not in taxonomy:
             rejected.append({"part": clean_part, "reason": "unknown_taxonomy"})
             continue
-        if only_new and clean_part in existing_parts:
+        if not _can_model_replace(manager, image_path, clean_part, only_new):
             rejected.append({"part": clean_part, "reason": "already_labeled"})
             continue
+        clean_box = _clean_box(auto_boxes.get(clean_part), image_size)
         clean_polygon = _clean_polygon(raw_points, image_size)
-        if clean_polygon is None:
+        if clean_polygon is None and not save_drafts_only:
             rejected.append({"part": clean_part, "reason": "invalid_polygon"})
             continue
-        clean_box = _clean_box(auto_boxes.get(clean_part), image_size)
         if clean_box is None:
+            if clean_polygon is None:
+                rejected.append({"part": clean_part, "reason": "invalid_box"})
+                continue
             xs = [point[0] for point in clean_polygon]
             ys = [point[1] for point in clean_polygon]
             clean_box = _clean_box([min(xs), min(ys), max(xs), max(ys)], image_size)
         if save_drafts_only:
             update_auto_box = getattr(manager, "update_auto_box", None)
             if callable(update_auto_box) and clean_box is not None:
-                update_auto_box(image_path, clean_part, clean_box, description_text="Auto-Annotated", save=False)
+                update_auto_box(
+                    image_path,
+                    clean_part,
+                    clean_box,
+                    description_text="Auto-Annotated",
+                    source_meta={"source": AUTO_BOX_SOURCE_MODEL, "review_status": AUTO_BOX_REVIEW_DRAFT},
+                    save=False,
+                )
             else:
                 manager.update_label(
                     image_path,
@@ -172,7 +224,15 @@ def _apply_payload(
                 auto_box=clean_box,
                 save=False,
             )
-        existing_parts.add(clean_part)
+            update_auto_box = getattr(manager, "update_auto_box", None)
+            if callable(update_auto_box) and clean_box is not None:
+                update_auto_box(
+                    image_path,
+                    clean_part,
+                    clean_box,
+                    source_meta={"source": AUTO_BOX_SOURCE_MODEL, "review_status": AUTO_BOX_REVIEW_DRAFT},
+                    save=False,
+                )
         saved += 1
     return {"image_path": image_path, "detected_count": len(polygons), "saved_count": saved, "rejected": rejected}
 

@@ -15,7 +15,12 @@ for path in (REPO_ROOT, ANTSLEAP_ROOT):
     if path not in sys.path:
         sys.path.insert(0, path)
 
-from core.project import ProjectManager  # noqa: E402
+from core.project import (  # noqa: E402
+    AUTO_BOX_REVIEW_CONFIRMED,
+    AUTO_BOX_REVIEW_DRAFT,
+    AUTO_BOX_SOURCE_VLM,
+    ProjectManager,
+)
 from core.vlm_preannotation import (  # noqa: E402
     load_vlm_api_config_from_runtime_settings,
     parse_vlm_response,
@@ -109,19 +114,50 @@ def _records_from_prediction_fixture(
     return records
 
 
+def _can_vlm_replace(manager: ProjectManager, image_path: str, part_name: str, only_new: bool) -> bool:
+    labels_by_part = manager.get_labels(image_path)
+    auto_boxes = manager.get_auto_boxes(image_path)
+    has_label = part_name in labels_by_part
+    has_auto_box = isinstance(auto_boxes, dict) and part_name in auto_boxes
+    if has_label:
+        labels = manager.project_data.get("labels", {}).get(image_path, {})
+        descriptions = labels.get("descriptions", {}) if isinstance(labels.get("descriptions", {}), dict) else {}
+        if descriptions.get(part_name) != "Auto-Annotated":
+            return False
+    if not has_auto_box:
+        return not has_label
+    meta = manager.get_auto_box_meta(image_path)
+    part_meta = meta.get(part_name, {}) if isinstance(meta, dict) and isinstance(meta.get(part_name), dict) else {}
+    if part_meta.get("source") != AUTO_BOX_SOURCE_VLM:
+        return False
+    review_status = str(part_meta.get("review_status") or AUTO_BOX_REVIEW_DRAFT).strip()
+    return review_status != AUTO_BOX_REVIEW_CONFIRMED
+
+
 def _apply_candidates(manager: ProjectManager, image_path: str, candidates: list[dict[str, Any]], only_new: bool) -> int:
-    existing_parts = set(manager.get_labels(image_path).keys())
     saved = 0
     for candidate in candidates:
         part_name = str(candidate.get("part", "") or "").strip()
         box = candidate.get("box_xyxy")
         if not part_name or not box:
             continue
-        if only_new and (part_name in existing_parts or part_name in manager.get_auto_boxes(image_path)):
+        if not _can_vlm_replace(manager, image_path, part_name, only_new):
             continue
         note = "Auto-Annotated"
+        source_meta = {
+            "source": AUTO_BOX_SOURCE_VLM,
+            "review_status": AUTO_BOX_REVIEW_DRAFT,
+            "confidence": float(candidate.get("confidence") or 0.0),
+        }
         if hasattr(manager, "update_auto_box"):
-            if manager.update_auto_box(image_path, part_name, box, description_text=note, save=False):
+            if manager.update_auto_box(
+                image_path,
+                part_name,
+                box,
+                description_text=note,
+                source_meta=source_meta,
+                save=False,
+            ):
                 saved += 1
         else:
             manager.update_label(image_path, part_name, [], note, auto_box=box, save=False)

@@ -44,6 +44,12 @@ DEFAULT_PARENT_BOX_ASPECT_RATIOS = {
     "Whole body": 16.0 / 9.0,
 }
 
+AUTO_BOX_SOURCE_VLM = "vlm_first_mile"
+AUTO_BOX_SOURCE_MODEL = "model_prediction"
+AUTO_BOX_SOURCE_EXTERNAL_MODEL = "external_model_prediction"
+AUTO_BOX_REVIEW_DRAFT = "draft"
+AUTO_BOX_REVIEW_CONFIRMED = "confirmed"
+
 
 class ProjectManager:
     def __init__(self):
@@ -1605,7 +1611,10 @@ class ProjectManager:
         if description_text:
             entry.setdefault("descriptions", {})[clean_part] = str(description_text)
         if source_meta:
-            entry.setdefault("auto_box_meta", {})[clean_part] = dict(source_meta)
+            clean_meta = dict(source_meta)
+            clean_meta.setdefault("source", AUTO_BOX_SOURCE_MODEL)
+            clean_meta.setdefault("review_status", AUTO_BOX_REVIEW_DRAFT)
+            entry.setdefault("auto_box_meta", {})[clean_part] = clean_meta
         if save:
             self.save_project()
         return True
@@ -1716,6 +1725,20 @@ class ProjectManager:
 
     def get_auto_box_meta(self, image_path):
         return self.project_data["labels"].get(image_path, {}).get("auto_box_meta", {})
+
+    def split_auto_boxes_by_source(self, image_path):
+        entry = self.project_data["labels"].get(image_path, {})
+        auto_boxes = entry.get("auto_boxes", {}) if isinstance(entry.get("auto_boxes", {}), dict) else {}
+        meta = entry.get("auto_box_meta", {}) if isinstance(entry.get("auto_box_meta", {}), dict) else {}
+        model_boxes = {}
+        vlm_boxes = {}
+        for part_name, box in auto_boxes.items():
+            part_meta = meta.get(part_name, {}) if isinstance(meta.get(part_name), dict) else {}
+            if part_meta.get("source") == AUTO_BOX_SOURCE_VLM:
+                vlm_boxes[part_name] = box
+            else:
+                model_boxes[part_name] = box
+        return model_boxes, vlm_boxes
 
     def get_locator_scope(self):
         locator_scope = self.project_data.get("locator_scope", [])

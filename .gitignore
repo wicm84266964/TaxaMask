@@ -93,6 +93,8 @@ private_docs/
 docs/ant3d_workbench/
 docs/designs/*
 !docs/designs/
+!docs/designs/2026-06-20_AntScan局部轴重切片合并设计稿.md
+!docs/designs/2026-06-20_AntScan局部轴重切片合并执行清单.md
 docs/discussions/
 docs/handoffs/
 docs/concepts/

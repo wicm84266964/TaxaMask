@@ -246,7 +246,7 @@ class UiLocalizationTests(unittest.TestCase):
             lang="zh",
             remembered_parent_map={"Mandible": "Head"},
         )
-        self.assertEqual(dialog.windowTitle(), "进入 Blink 工作台")
+        self.assertEqual(dialog.windowTitle(), "进入子部位专家会话")
         self.assertEqual(dialog.target_combo.currentText(), "上颚 (Mandible)")
         self.assertIn("手工框", dialog.roi_combo.currentText())
         self.assertIn("子部位", dialog.tip_label.text())

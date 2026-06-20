@@ -1027,7 +1027,7 @@ TRANSLATIONS = {
         "Default Blink Input Size:": "默认 Blink 输入尺寸：",
         "Auto-shrink Steps:": "自动收缩步数：",
         "Number of interpolation steps from the loose shrink start box to the final target box. 20 steps saves 21 trajectory frames including the starting frame.": "从宽松收缩起始框到最终目标框的插值步数。20 步会保存包含起始帧在内的 21 个轨迹帧。",
-        "These defaults are shown in Blink Workbench when the app starts or settings are saved. You can still adjust them for a single expert before training.": "这些默认值会在应用启动或保存设置后显示到 Blink 工作台。训练单个专家前仍可在 Blink 工作台临时调整。",
+        "These defaults are shown in Child Expert Session when the app starts or settings are saved. You can still adjust them for a single expert before training.": "这些默认值会在应用启动或保存设置后显示到子部位专家会话。训练单个专家前仍可在会话中临时调整。",
         "Parent Box Aspect Ratios:": "父级框长宽比：",
         "Used when the main labeling workbench draws parent context boxes. Enter each as width : height, for example 4 : 3. Child boxes and Blink shrink start boxes stay free-ratio.": "主标注工作台绘制父级上下文框时使用。请按宽 : 高输入，例如 4 : 3。子部位框和 Blink 收缩起始框保持自由比例。",
         "Width": "宽",
@@ -1156,8 +1156,8 @@ TRANSLATIONS = {
         "Clear Split Status": "清除切分状态",
         "Error": "错误",
         "Success": "成功",
-        "Open in Blink Workbench": "在 Blink 工作台中打开",
-        "Blink Workbench": "Blink 工作台",
+        "Open Child Expert Session": "打开子部位专家会话",
+        "Child Expert Session": "子部位专家会话",
         "Workbench child-part refinement": "工作台子部位精修",
         "Child-part annotation": "子部位标注",
         "Configure Route Expert": "配置路由专家",
@@ -1304,12 +1304,14 @@ TRANSLATIONS = {
         "Multimodal (Crops + JSONL)": "多模态（裁剪图 + JSONL）",
         "COCO (Standard)": "COCO（标准）",
         "YOLO (Segmentation)": "YOLO（分割）",
-        "Enter Blink Workbench": "进入 Blink 工作台",
+        "Enter Child Expert Session": "进入子部位专家会话",
         "Image: {0}": "图片：{0}",
         "Target Part:": "目标部位：",
         "Entry ROI:": "进入 ROI：",
         "Manual Box": "手工框",
         "Auto Box": "自动框",
+        "Model Prediction Box": "模型预测框",
+        "VLM Draft Box": "VLM 草稿框",
         "Target Part is the child part you want to refine. Entry ROI is the parent/context region Blink will zoom into. This project remembers the parent/context ROI you chose for each target part, and later Blink entries reuse that remembered context.": "目标部位是你要精修的子部位；进入 ROI 是 Blink 将放大的父级/上下文区域。这个项目会记住你为每个目标部位选择过的父级/上下文 ROI，之后再次进入 Blink 时会复用这份项目内记忆。",
         "Brightness:": "亮度：",
         "Contrast:": "对比度：",
@@ -1357,12 +1359,12 @@ TRANSLATIONS = {
         "Select Images": "选择图片",
         "Remove": "移除",
         "Remove {0} images?": "移除 {0} 张图片？",
-        "Blink Workbench Entry": "Blink 工作台入口",
+        "Child Expert Session Entry": "子部位专家会话入口",
         "Please select an image first.": "请先选择一张图片。",
         "Please select a target part first.": "请先选择目标部位。",
         "No entry ROI is available yet. Draw a manual box or generate an auto box in the workbench first.": "当前还没有可用的进入 ROI，请先在工作台中绘制手工框或生成自动框。",
-        "Failed to build a Blink session from the selected options.": "无法根据当前选择建立 Blink 会话。",
-        "Opened Blink session for {0} via {1} ({2}).": "已通过 {1}（{2}）为 {0} 打开 Blink 会话。",
+        "Failed to build a child expert session from the selected options.": "无法根据当前选择建立子部位专家会话。",
+        "Opened child expert session for {0} via {1} ({2}).": "已通过 {1}（{2}）为 {0} 打开子部位专家会话。",
         "mm:": "毫米：",
         "No Scale.": "未设置比例尺。",
         "Area: {0:.4f} mm2\nPeri: {1:.4f} mm": "面积：{0:.4f} mm²\n周长：{1:.4f} mm",
@@ -1379,7 +1381,7 @@ TRANSLATIONS = {
         "Starting Batch Inference with Taxonomy ({0}): {1}": "开始批量推理，分类体系（{0}）：{1}",
         "Batch saved {0}/{1} for {2}": "已为 {2} 保存 {0}/{1}",
         "Exported {0} samples.": "已导出 {0} 个样本。",
-        "Global labels updated from Blink Workbench.": "全局标签已从 Blink 工作台同步更新。",
+        "Global labels updated from Child Expert Session.": "全局标签已从子部位专家会话同步更新。",
         "Restored session: {0}": "已恢复会话：{0}",
         "System Initialized.": "系统已初始化。",
         "Syncing Engine Taxonomy ({0} -> {1})...": "正在同步引擎分类体系（{0} -> {1}）...",
@@ -3753,7 +3755,7 @@ class ModelSettingsDialog(QDialog):
         blink_layout.setSpacing(8)
         blink_note = QLabel(
             tr(
-                "These defaults are shown in Blink Workbench when the app starts or settings are saved. You can still adjust them for a single expert before training.",
+                "These defaults are shown in Child Expert Session when the app starts or settings are saved. You can still adjust them for a single expert before training.",
                 lang,
             )
         )
@@ -5666,7 +5668,7 @@ class BlinkEntryDialog(QDialog):
         self.lang = lang
         self.current_theme = getattr(parent, "current_theme", "dark")
         self.remembered_parent_map = dict(remembered_parent_map or {})
-        self.setWindowTitle(tr("Enter Blink Workbench", self.lang))
+        self.setWindowTitle(tr("Enter Child Expert Session", self.lang))
         self.setModal(True)
         self.resize(520, 220)
 
@@ -5688,7 +5690,13 @@ class BlinkEntryDialog(QDialog):
         roi_row.addWidget(QLabel(tr("Entry ROI:", self.lang)))
         self.roi_combo = NoWheelComboBox()
         for candidate in roi_candidates:
-            source_text = tr("Manual Box", self.lang) if candidate.get("source") == "manual" else tr("Auto Box", self.lang)
+            source = candidate.get("source")
+            if source == "manual":
+                source_text = tr("Manual Box", self.lang)
+            elif source == "vlm":
+                source_text = tr("VLM Draft Box", self.lang)
+            else:
+                source_text = tr("Model Prediction Box", self.lang)
             label = f"{tr(candidate.get('part', 'ROI'), self.lang)} ({source_text})"
             self.roi_combo.addItem(label, candidate)
         roi_row.addWidget(self.roi_combo)
@@ -9503,11 +9511,11 @@ class MainWindow(QMainWindow):
         self.log(tr("Removed {0} AI labels from {1}.", self.current_lang).format(c, scope_label))
 
     def on_global_labels_updated(self):
-        """Called when Blink Workbench applies changes back to the global project."""
+        """Called when the child expert session applies changes back to the global project."""
         if self.current_image:
             self.canvas.set_polygons(self.project.get_labels(self.current_image))
             self._refresh_current_canvas_boxes()
-        self.log(tr("Global labels updated from Blink Workbench.", self.current_lang))
+        self.log(tr("Global labels updated from Child Expert Session.", self.current_lang))
 
     def refresh_ui(self):
         if self.engine:
@@ -9611,7 +9619,7 @@ class MainWindow(QMainWindow):
             self.btn_training_results.setText(tr("Training Results", self.current_lang))
         if hasattr(self, "label_training_progress_status") and not self.active_training_label:
             self.label_training_progress_status.setText(tr("No training running.", self.current_lang))
-        self.btn_blink_entry.setText(tr("Open in Blink Workbench", self.current_lang))
+        self.btn_blink_entry.setText(tr("Open Child Expert Session", self.current_lang))
         self.btn_blink_entry.setVisible(False)
         if hasattr(self, "btn_literature_descriptions"):
             self.btn_literature_descriptions.setText(tr("Literature Traits", self.current_lang))
@@ -9676,7 +9684,7 @@ class MainWindow(QMainWindow):
             if widget is self.workbench_widget:
                 self.tabs.setTabText(index, tr("Labeling Workbench", self.current_lang))
             elif widget is self.blink_lab:
-                self.tabs.setTabText(index, tr("Blink Workbench", self.current_lang))
+                self.tabs.setTabText(index, tr("Child Expert Session", self.current_lang))
             elif widget is self.pdf_widget:
                 self.tabs.setTabText(index, tr("PDF Evidence Tools", self.current_lang))
             elif widget is self.start_center_widget:
@@ -11545,12 +11553,12 @@ class MainWindow(QMainWindow):
 
     def launch_blink_from_workbench(self):
         if not self.current_image:
-            QMessageBox.warning(self, tr("Blink Workbench Entry", self.current_lang), tr("Please select an image first.", self.current_lang))
+            QMessageBox.warning(self, tr("Child Expert Session Entry", self.current_lang), tr("Please select an image first.", self.current_lang))
             return
 
         selected_part = self._current_part_name()
         if not selected_part:
-            QMessageBox.warning(self, tr("Blink Workbench Entry", self.current_lang), tr("Please select a target part first.", self.current_lang))
+            QMessageBox.warning(self, tr("Child Expert Session Entry", self.current_lang), tr("Please select a target part first.", self.current_lang))
             return
 
         taxonomy = list(self.project.project_data.get("taxonomy", []))
@@ -11565,7 +11573,7 @@ class MainWindow(QMainWindow):
         if not roi_candidates:
             QMessageBox.information(
                 self,
-                tr("Blink Workbench Entry", self.current_lang),
+                tr("Child Expert Session Entry", self.current_lang),
                 tr("No entry ROI is available yet. Draw a manual box or generate an auto box in the workbench first.", self.current_lang),
             )
             return
@@ -11586,8 +11594,8 @@ class MainWindow(QMainWindow):
         if not session:
             QMessageBox.warning(
                 self,
-                tr("Blink Workbench Entry", self.current_lang),
-                tr("Failed to build a Blink session from the selected options.", self.current_lang),
+                tr("Child Expert Session Entry", self.current_lang),
+                tr("Failed to build a child expert session from the selected options.", self.current_lang),
             )
             return
 
@@ -11629,7 +11637,7 @@ class MainWindow(QMainWindow):
         focus_label = focus_roi.get("part", "ROI")
         focus_source = focus_roi.get("source", "manual")
         self.log(
-            tr("Opened Blink session for {0} via {1} ({2}).", self.current_lang).format(
+            tr("Opened child expert session for {0} via {1} ({2}).", self.current_lang).format(
                 session.get('target_part'), focus_label, focus_source
             )
         )

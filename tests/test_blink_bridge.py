@@ -87,6 +87,23 @@ class DummyProjectManager:
     def get_auto_boxes(self, image_path):
         return self.project_data["labels"].get(image_path, {}).get("auto_boxes", {})
 
+    def get_auto_box_meta(self, image_path):
+        return self.project_data["labels"].get(image_path, {}).get("auto_box_meta", {})
+
+    def split_auto_boxes_by_source(self, image_path):
+        entry = self.project_data["labels"].get(image_path, {})
+        auto_boxes = entry.get("auto_boxes", {}) if isinstance(entry.get("auto_boxes", {}), dict) else {}
+        meta = entry.get("auto_box_meta", {}) if isinstance(entry.get("auto_box_meta", {}), dict) else {}
+        model_boxes = {}
+        vlm_boxes = {}
+        for part_name, box in auto_boxes.items():
+            part_meta = meta.get(part_name, {}) if isinstance(meta.get(part_name), dict) else {}
+            if part_meta.get("source") == "vlm_first_mile":
+                vlm_boxes[part_name] = box
+            else:
+                model_boxes[part_name] = box
+        return model_boxes, vlm_boxes
+
     def update_label(self, image_path, part_name, points, description_text=None, box=None, auto_box=None):
         label_entry = self.project_data["labels"].setdefault(
             image_path,
@@ -522,6 +539,69 @@ class BlinkBridgeTests(unittest.TestCase):
         self.assertEqual(fake_window.blink_lab.last_manual_boxes, self.pm.get_boxes(self.image_path))
         self.assertEqual(fake_window.blink_lab.last_auto_boxes, self.pm.get_auto_boxes(self.image_path))
 
+    def test_launch_blink_passes_only_model_auto_boxes_to_child_session(self):
+        class DummyItem:
+            def data(self, _role):
+                return "Mandible"
+
+            def text(self):
+                return "Mandible"
+
+        class DummyPartList:
+            def currentItem(self):
+                return DummyItem()
+
+        class DummyBlinkLab:
+            def __init__(self):
+                self.last_auto_boxes = None
+
+            def start_session(self, session, labels, manual_boxes, auto_boxes):
+                self.last_auto_boxes = auto_boxes
+                return True
+
+        class FakeDialog:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def exec(self):
+                return QDialog.DialogCode.Accepted
+
+            def get_session_spec(self, image_path):
+                return {
+                    "image_path": image_path,
+                    "target_part": "Mandible",
+                    "focus_roi": {"part": "Head", "source": "auto", "box": [10.0, 10.0, 80.0, 70.0]},
+                }
+
+        label_entry = self.pm.project_data["labels"][self.image_path]
+        label_entry.setdefault("auto_boxes", {})["Mandible"] = [5.0, 5.0, 15.0, 15.0]
+        label_entry.setdefault("auto_box_meta", {})["Eye"] = {"source": "model_prediction", "review_status": "draft"}
+        label_entry.setdefault("auto_box_meta", {})["Mandible"] = {"source": "vlm_first_mile", "review_status": "draft"}
+
+        fake_window = types.SimpleNamespace(
+            current_image=self.image_path,
+            current_lang="en",
+            part_list=DummyPartList(),
+            project=self.pm,
+            blink_lab=DummyBlinkLab(),
+            tabs=types.SimpleNamespace(setCurrentWidget=lambda *_args, **_kwargs: None),
+            log=lambda *_args, **_kwargs: None,
+        )
+        fake_window._current_part_name = lambda: "Mandible"
+        fake_window._collect_blink_roi_candidates = lambda image_path, selected_part, preferred_roi_parts=None: MainWindow._collect_blink_roi_candidates(
+            fake_window,
+            image_path,
+            selected_part,
+            preferred_roi_parts=preferred_roi_parts,
+        )
+        fake_window._auto_boxes_for_canvas = lambda image_path: self.pm.split_auto_boxes_by_source(image_path)
+
+        with patch.object(main_module, "BlinkEntryDialog", FakeDialog):
+            MainWindow.launch_blink_from_workbench(fake_window)
+
+        self.assertEqual(fake_window.blink_lab.last_auto_boxes, {"Eye": [54.0, 24.0, 66.0, 36.0]})
+        self.assertNotIn("Mandible", fake_window.blink_lab.last_auto_boxes)
+
     def test_launch_blink_clears_remembered_parent_when_target_roi_is_chosen(self):
         self.pm.remember_blink_context_parent("Mandible", "Head", save=False)
 
@@ -603,6 +683,25 @@ class BlinkBridgeTests(unittest.TestCase):
         self.assertNotIn("Eye", widget.canvas.polygons)
         self.assertIn("Head", widget.canvas.manual_boxes)
         self.assertEqual(tuple(widget.zoomed_img_np.shape[:2]), (800, 800))
+
+    def test_blink_session_filters_vlm_drafts_from_internal_auto_boxes(self):
+        label_entry = self.pm.project_data["labels"][self.image_path]
+        label_entry.setdefault("auto_boxes", {})["Mandible"] = [5.0, 5.0, 15.0, 15.0]
+        label_entry.setdefault("auto_box_meta", {})["Eye"] = {"source": "model_prediction", "review_status": "draft"}
+        label_entry.setdefault("auto_box_meta", {})["Mandible"] = {"source": "vlm_first_mile", "review_status": "draft"}
+
+        widget = BlinkLabWidget(self.engine, self.pm)
+        session = {
+            "image_path": self.image_path,
+            "target_part": "Mandible",
+            "focus_roi": {"part": "Head", "source": "manual", "box": [10.0, 10.0, 80.0, 70.0]},
+        }
+
+        started = widget.start_session(session)
+
+        self.assertTrue(started)
+        self.assertEqual(widget.raw_auto_boxes, {"Eye": [54.0, 24.0, 66.0, 36.0]})
+        self.assertNotIn("Mandible", widget.canvas.auto_boxes)
 
     def test_apply_to_global_only_writes_target_part(self):
         widget = BlinkLabWidget(self.engine, self.pm)
@@ -1011,13 +1110,26 @@ class BlinkBridgeTests(unittest.TestCase):
 
         self.assertEqual(
             set(trainer_kwargs),
-            {"project_path", "part_name", "parent_part", "learning_rate", "weight_decay", "input_size", "training_strategy", "device"},
+            {
+                "project_path",
+                "part_name",
+                "parent_part",
+                "learning_rate",
+                "weight_decay",
+                "input_size",
+                "training_strategy",
+                "device",
+                "allowed_image_paths",
+                "training_scope",
+            },
         )
         self.assertEqual(trainer_kwargs.get("learning_rate"), 0.002)
         self.assertEqual(trainer_kwargs.get("weight_decay"), 0.0003)
         self.assertEqual(trainer_kwargs.get("input_size"), 384)
         self.assertEqual(trainer_kwargs.get("training_strategy"), "triview_random")
         self.assertEqual(trainer_kwargs.get("device"), "cpu")
+        self.assertEqual(trainer_kwargs.get("allowed_image_paths"), [])
+        self.assertEqual(trainer_kwargs.get("training_scope"), {})
 
     def test_blink_training_thread_passes_selected_training_strategy(self):
         trainer_kwargs = {}

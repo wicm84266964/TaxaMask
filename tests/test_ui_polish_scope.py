@@ -538,6 +538,7 @@ class DummyProjectManager:
         if box:
             entry["boxes"][part_name] = [float(v) for v in box]
             entry["auto_boxes"].pop(part_name, None)
+            entry.get("auto_box_meta", {}).pop(part_name, None)
         if auto_box:
             entry["auto_boxes"][part_name] = [float(v) for v in auto_box]
         if description_text:
@@ -558,6 +559,20 @@ class DummyProjectManager:
         if save:
             self.save_project()
         return True
+
+    def split_auto_boxes_by_source(self, image_path):
+        entry = self.project_data["labels"].get(image_path, {})
+        auto_boxes = entry.get("auto_boxes", {}) if isinstance(entry.get("auto_boxes", {}), dict) else {}
+        meta = entry.get("auto_box_meta", {}) if isinstance(entry.get("auto_box_meta", {}), dict) else {}
+        model_boxes = {}
+        vlm_boxes = {}
+        for part_name, box in auto_boxes.items():
+            part_meta = meta.get(part_name, {}) if isinstance(meta.get(part_name), dict) else {}
+            if part_meta.get("source") == "vlm_first_mile":
+                vlm_boxes[part_name] = box
+            else:
+                model_boxes[part_name] = box
+        return model_boxes, vlm_boxes
 
     def remove_auto_labels_for_images(self, image_paths, save=True):
         removed = 0
@@ -2946,6 +2961,7 @@ class UiPolishScopeTests(unittest.TestCase):
             self.assertEqual((saved, total), (1, 1))
             self.assertEqual(labels["parts"]["Head"], prediction["polygons"]["Head"])
             self.assertEqual(labels["auto_boxes"]["Head"], prediction["auto_boxes"]["Head"])
+            self.assertEqual(labels["auto_box_meta"]["Head"]["source"], "model_prediction")
 
             labels["descriptions"].pop("Head", None)
             labels["auto_box_meta"]["Head"]["review_status"] = "confirmed"
@@ -2963,6 +2979,118 @@ class UiPolishScopeTests(unittest.TestCase):
 
             self.assertEqual((saved, total), (0, 1))
             self.assertEqual(labels["parts"]["Head"], confirmed_points)
+        finally:
+            window.deleteLater()
+
+    def test_vlm_does_not_replace_model_prediction_draft(self):
+        image_path = Path(self.temp_dir.name) / "specimen.png"
+        image = QImage(240, 180, QImage.Format_RGB32)
+        image.fill(0xFFB0B0B0)
+        self.assertTrue(image.save(str(image_path)))
+
+        image_key = str(image_path)
+        window = self.make_main_window()
+        try:
+            self.project_manager.project_data["taxonomy"] = ["Head"]
+            self.project_manager.project_data["images"] = [image_key]
+            self.project_manager.project_data["labels"] = {
+                image_key: {
+                    "parts": {"Head": [[30.0, 30.0], [60.0, 30.0], [60.0, 60.0]]},
+                    "boxes": {},
+                    "auto_boxes": {"Head": [30.0, 30.0, 60.0, 60.0]},
+                    "auto_box_meta": {"Head": {"source": "model_prediction", "review_status": "draft"}},
+                    "descriptions": {"Head": "Auto-Annotated"},
+                    "status": "labeled",
+                    "genus": "Unknown",
+                }
+            }
+
+            ok, mode = window._apply_vlm_candidate(
+                image_key,
+                image,
+                {"part": "Head", "box_xyxy": [70.0, 70.0, 90.0, 90.0], "confidence": 0.95},
+                {"report_path": "vlm_after_model.json"},
+            )
+
+            labels = self.project_manager.project_data["labels"][image_key]
+            self.assertFalse(ok)
+            self.assertEqual(mode, "already_labeled")
+            self.assertEqual(labels["auto_boxes"]["Head"], [30.0, 30.0, 60.0, 60.0])
+            self.assertEqual(labels["auto_box_meta"]["Head"]["source"], "model_prediction")
+        finally:
+            window.deleteLater()
+
+    def test_parent_prediction_can_replace_box_only_vlm_draft(self):
+        image_path = Path(self.temp_dir.name) / "specimen.png"
+        image = QImage(240, 180, QImage.Format_RGB32)
+        image.fill(0xFFB0B0B0)
+        self.assertTrue(image.save(str(image_path)))
+
+        image_key = str(image_path)
+        window = self.make_main_window()
+        try:
+            self.project_manager.project_data["taxonomy"] = ["Head"]
+            self.project_manager.project_data["images"] = [image_key]
+            self.project_manager.project_data["labels"] = {
+                image_key: {
+                    "parts": {},
+                    "boxes": {},
+                    "auto_boxes": {"Head": [10.0, 10.0, 40.0, 35.0]},
+                    "auto_box_meta": {"Head": {"source": "vlm_first_mile", "review_status": "draft"}},
+                    "descriptions": {"Head": "Auto-Annotated"},
+                    "status": "unlabeled",
+                    "genus": "Unknown",
+                }
+            }
+            prediction = {
+                "polygons": {"Head": [[20.0, 20.0], [70.0, 20.0], [70.0, 55.0], [20.0, 55.0]]},
+                "auto_boxes": {"Head": [20.0, 20.0, 70.0, 55.0]},
+            }
+
+            saved, total = window._apply_prediction_to_project(image_key, prediction, only_new=True, save=False)
+
+            labels = self.project_manager.project_data["labels"][image_key]
+            self.assertEqual((saved, total), (1, 1))
+            self.assertEqual(labels["parts"]["Head"], prediction["polygons"]["Head"])
+            self.assertEqual(labels["auto_boxes"]["Head"], prediction["auto_boxes"]["Head"])
+            self.assertEqual(labels["auto_box_meta"]["Head"]["source"], "model_prediction")
+        finally:
+            window.deleteLater()
+
+    def test_canvas_splits_vlm_and_model_auto_boxes(self):
+        image_path = Path(self.temp_dir.name) / "specimen.png"
+        image = QImage(240, 180, QImage.Format_RGB32)
+        image.fill(0xFFB0B0B0)
+        self.assertTrue(image.save(str(image_path)))
+
+        image_key = str(image_path)
+        window = self.make_main_window()
+        try:
+            self.project_manager.project_data["taxonomy"] = ["Head", "Mesosoma"]
+            self.project_manager.project_data["images"] = [image_key]
+            self.project_manager.project_data["labels"] = {
+                image_key: {
+                    "parts": {},
+                    "boxes": {},
+                    "auto_boxes": {
+                        "Head": [10.0, 10.0, 50.0, 50.0],
+                        "Mesosoma": [60.0, 60.0, 110.0, 110.0],
+                    },
+                    "auto_box_meta": {
+                        "Head": {"source": "vlm_first_mile", "review_status": "draft"},
+                        "Mesosoma": {"source": "model_prediction", "review_status": "draft"},
+                    },
+                    "descriptions": {},
+                    "status": "unlabeled",
+                    "genus": "Unknown",
+                }
+            }
+
+            window.current_image = image_key
+            window._refresh_current_canvas_boxes()
+
+            self.assertEqual(window.canvas.vlm_boxes, {"Head": [10.0, 10.0, 50.0, 50.0]})
+            self.assertEqual(window.canvas.auto_boxes, {"Mesosoma": [60.0, 60.0, 110.0, 110.0]})
         finally:
             window.deleteLater()
 

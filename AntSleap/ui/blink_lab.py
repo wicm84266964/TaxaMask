@@ -10,6 +10,7 @@ import csv
 from PySide6.QtCore import Qt, Signal, QPointF, QRectF, QThread, QTimer
 from PySide6.QtGui import QColor, QPainter, QBrush, QPen, QPainterPath, QPixmap
 try:
+    from AntSleap.core.project import AUTO_BOX_SOURCE_VLM
     from AntSleap.core.taxonomy_defaults import is_safe_part_name
     from AntSleap.core.cascade_routes import build_expert_id
     from AntSleap.core.expert_notes import format_expert_display_name, load_expert_notes, set_expert_note
@@ -25,6 +26,7 @@ try:
         sanitize_blink_training_strategy,
     )
 except ImportError:
+    from core.project import AUTO_BOX_SOURCE_VLM
     from core.taxonomy_defaults import is_safe_part_name
     from core.cascade_routes import build_expert_id
     from core.expert_notes import format_expert_display_name, load_expert_notes, set_expert_note
@@ -133,6 +135,7 @@ BLINK_TRANSLATIONS = {
         "Focus: Full Image": "焦点：整张图像",
         "Manual Box": "手工框",
         "Auto Box": "自动框",
+        "VLM Draft Box": "VLM 草稿框",
         "Session: {0} via {1} ({2})": "会话：{0}（通过 {1}，{2}）",
         "Error: Invalid Blink session.": "错误：无效的 Blink 会话。",
         "Blink session kept. Apply or discard edits before switching sessions.": "已保留当前 Blink 会话。请先应用或放弃编辑后再切换会话。",
@@ -855,6 +858,33 @@ class BlinkLabWidget(QWidget):
         self.init_ui()
         self.retranslate_ui()
 
+    def _model_auto_boxes(self, image_path, auto_boxes=None):
+        if auto_boxes is None:
+            splitter = getattr(self.pm, "split_auto_boxes_by_source", None)
+            if callable(splitter):
+                try:
+                    model_boxes, _vlm_boxes = splitter(image_path)
+                    return dict(model_boxes) if isinstance(model_boxes, dict) else {}
+                except Exception:
+                    pass
+            auto_boxes = self.pm.get_auto_boxes(image_path)
+        auto_boxes = auto_boxes if isinstance(auto_boxes, dict) else {}
+        get_meta = getattr(self.pm, "get_auto_box_meta", None)
+        meta = {}
+        if callable(get_meta):
+            try:
+                meta = get_meta(image_path)
+            except Exception:
+                meta = {}
+        meta = meta if isinstance(meta, dict) else {}
+        model_boxes = {}
+        for part_name, box in auto_boxes.items():
+            part_meta = meta.get(part_name, {}) if isinstance(meta.get(part_name), dict) else {}
+            if part_meta.get("source") == AUTO_BOX_SOURCE_VLM:
+                continue
+            model_boxes[part_name] = box
+        return model_boxes
+
     def _clamp_training_value(self, value, low, high, fallback):
         try:
             number = int(value)
@@ -1385,7 +1415,12 @@ class BlinkLabWidget(QWidget):
         focus_roi = self.active_session.get("focus_roi", {})
         focus_part = focus_roi.get("part", "ROI")
         source = focus_roi.get("source", "manual")
-        source_text = self.tr("Manual Box") if source == "manual" else self.tr("Auto Box")
+        if source == "manual":
+            source_text = self.tr("Manual Box")
+        elif source == "vlm":
+            source_text = self.tr("VLM Draft Box")
+        else:
+            source_text = self.tr("Auto Box")
         target_part = self.active_session.get("target_part", focus_part)
         return self.tr("Session: {0} via {1} ({2})").format(target_part, focus_part, source_text)
 
@@ -1415,7 +1450,7 @@ class BlinkLabWidget(QWidget):
 
         self.raw_labels = labels if labels is not None else self.pm.get_labels(image_path)
         self.raw_manual_boxes = manual_boxes if manual_boxes is not None else self.pm.get_boxes(image_path)
-        self.raw_auto_boxes = auto_boxes if auto_boxes is not None else self.pm.get_auto_boxes(image_path)
+        self.raw_auto_boxes = self._model_auto_boxes(image_path, auto_boxes)
         self.sync_data()
         self.lbl_status.setText(self._session_focus_status())
         return True
@@ -1436,14 +1471,14 @@ class BlinkLabWidget(QWidget):
         self.current_image_path = image_path
         self.raw_labels = labels or {}
         self.raw_manual_boxes = manual_boxes or {}
-        self.raw_auto_boxes = auto_boxes or {}
+        self.raw_auto_boxes = self._model_auto_boxes(image_path, auto_boxes)
         self.sync_data(preserve_view=same_image and has_loaded_pixmap)
         return True
 
     def set_data(self, labels, manual_boxes, auto_boxes, preserve_view=False):
         self.raw_labels = labels or {}
         self.raw_manual_boxes = manual_boxes or {}
-        self.raw_auto_boxes = auto_boxes or {}
+        self.raw_auto_boxes = self._model_auto_boxes(getattr(self, "current_image_path", None), auto_boxes)
         self.apply_zoom_focus(preserve_view=preserve_view)
 
     def apply_zoom_focus(self, preserve_view=False):
@@ -1620,7 +1655,7 @@ class BlinkLabWidget(QWidget):
             self.set_data(
                 self.pm.get_labels(image_path),
                 self.pm.get_boxes(image_path),
-                self.pm.get_auto_boxes(image_path),
+                self._model_auto_boxes(image_path),
                 preserve_view=preserve_view,
             )
             if self.has_active_session():

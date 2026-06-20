@@ -1548,8 +1548,8 @@ class GuiSmokeTests(unittest.TestCase):
 
             project_image_key = window.project.project_data["images"][0]
             self.assertEqual(window.project.get_auto_boxes(project_image_key)["Head"], [10.0, 12.0, 50.0, 44.0])
-            self.assertEqual(window.canvas.auto_boxes["Head"], [10.0, 12.0, 50.0, 44.0])
-            self.assertEqual(window.canvas.auto_boxes["Mesosoma"], [40.0, 18.0, 90.0, 55.0])
+            self.assertEqual(window.canvas.vlm_boxes["Head"], [10.0, 12.0, 50.0, 44.0])
+            self.assertEqual(window.canvas.vlm_boxes["Mesosoma"], [40.0, 18.0, 90.0, 55.0])
             self.assertGreaterEqual(len(refresh_calls), 1)
         finally:
             window.deleteLater()
@@ -1687,7 +1687,7 @@ class GuiSmokeTests(unittest.TestCase):
                 }
             )
 
-            self.assertEqual(window.canvas.auto_boxes["Head"], [20.0, 20.0, 80.0, 60.0])
+            self.assertEqual(window.canvas.vlm_boxes["Head"], [20.0, 20.0, 80.0, 60.0])
             self.assertEqual(len(window.canvas.polygons["Head"]), 4)
             pixmap = window.canvas.grab()
             image = pixmap.toImage()
@@ -1695,15 +1695,7 @@ class GuiSmokeTests(unittest.TestCase):
             for y in range(image.height()):
                 for x in range(image.width()):
                     color = image.pixelColor(x, y)
-                    if (
-                        color.green() > 180
-                        and color.red() < 120
-                        and color.blue() < 120
-                    ) or (
-                        color.red() > 220
-                        and 110 <= color.green() <= 210
-                        and color.blue() < 80
-                    ):
+                    if color.red() > 170 and color.blue() > 200 and 45 <= color.green() <= 140:
                         colored_pixels += 1
             self.assertGreater(colored_pixels, 20)
         finally:
@@ -1804,7 +1796,7 @@ class GuiSmokeTests(unittest.TestCase):
                 )
                 full_refresh.assert_not_called()
 
-            self.assertEqual(window.canvas.auto_boxes["Head"], [20.0, 20.0, 80.0, 60.0])
+            self.assertEqual(window.canvas.vlm_boxes["Head"], [20.0, 20.0, 80.0, 60.0])
             self.assertEqual(len(window.canvas.polygons["Head"]), 4)
         finally:
             window.deleteLater()
@@ -1822,20 +1814,26 @@ class GuiSmokeTests(unittest.TestCase):
             window.current_image = image_key
             window.canvas.resize(360, 240)
             window.canvas.load_image(str(image_path))
-            window.project.update_auto_box(image_key, "Head", [20, 20, 80, 60], save=False)
+            window.project.update_auto_box(
+                image_key,
+                "Head",
+                [20, 20, 80, 60],
+                source_meta={"source": "vlm_first_mile", "review_status": "draft"},
+                save=False,
+            )
 
             window._refresh_vlm_canvas_if_current(image_key)
 
-            self.assertEqual(window.canvas.auto_boxes["Head"], [20.0, 20.0, 80.0, 60.0])
+            self.assertEqual(window.canvas.vlm_boxes["Head"], [20.0, 20.0, 80.0, 60.0])
             pixmap = window.canvas.grab()
             image = pixmap.toImage()
-            orange_pixels = 0
+            vlm_pixels = 0
             for y in range(image.height()):
                 for x in range(image.width()):
                     color = image.pixelColor(x, y)
-                    if color.red() > 220 and 110 <= color.green() <= 210 and color.blue() < 80:
-                        orange_pixels += 1
-            self.assertGreater(orange_pixels, 20)
+                    if color.red() > 170 and color.blue() > 200 and 45 <= color.green() <= 140:
+                        vlm_pixels += 1
+            self.assertGreater(vlm_pixels, 20)
         finally:
             window.deleteLater()
 

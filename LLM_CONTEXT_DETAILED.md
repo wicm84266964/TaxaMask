@@ -1,7 +1,7 @@
 # TAXAMASK / FORMICA-FLOW SYSTEM TECHNICAL MANUAL (Deep Dive)
 
 > **Target Audience**: Expert LLM Assistants, Senior Developers
-> **Version**: v1.0 / TaxaMask open-source official release (June 9, 2026, large-project annotation + VLM safety + documentation sync)
+> **Version**: v1.0 / TaxaMask open-source official release (current handoff synced June 20, 2026: large-project annotation + VLM/model priority + child expert session naming)
 > **Purpose**: Up-to-date architectural, workflow, and governance context for implementation and maintenance.
 
 ---
@@ -13,6 +13,23 @@
 - `README.md`, `CITATION.cff`, `CHANGELOG_zh.md`, `TaxaMask使用手册.md`, this handoff, `.lab-agent/memory.md`, and the TaxaMask workflow skill are synced to v1.0 behavior.
 - Historical `v3.x` entries in the changelog and older sections below remain internal development history and should not be retroactively rewritten.
 - Most validated daily route remains ant 2D/STL morphology plus PDF evidence. TIF volume support remains experimental.
+
+### 0.0a Current implementation note for future agents (2026-06-20)
+- Treat this file as the current handoff/context document, not as a historical changelog. Older dated sections remain useful for origin/rationale, but the top current-state sections override stale wording below.
+- User-facing small-part workflow wording is **Child Expert Session / 子部位专家会话**, inside the main Labeling Workbench flow. Internal symbols/modules/tests may still use `blink` / `BlinkLabWidget` / `launch_blink_from_workbench` for historical compatibility.
+- Do not describe Blink as a separate daily workbench. The standalone Blink widget remains a compatibility/development fallback; normal 2D/STL work happens in the main Labeling Workbench and its child-part annotation controls.
+- Auto-box priority is now explicit across GUI and CLI:
+  - manual labels and confirmed AI drafts are highest priority and must not be overwritten by VLM or model prediction.
+  - trained/internal model and external model predictions are middle priority and may replace unconfirmed AI drafts, including VLM drafts.
+  - VLM first-mile preannotation is lowest priority and may only fill empty parts or refresh existing unconfirmed VLM drafts.
+- `auto_boxes` remains the project JSON storage map for compatibility, but source metadata controls interpretation:
+  - `auto_box_meta[part].source == "vlm_first_mile"` -> VLM draft box.
+  - `model_prediction` / `external_model_prediction` / missing legacy metadata -> model prediction box.
+  - `auto_box_meta[part].review_status == "confirmed"` protects the draft from later automatic overwrite.
+- Runtime display splits these boxes:
+  - `AnnotationCanvas.auto_boxes` = trained/internal/external model prediction boxes, drawn as orange model boxes.
+  - `AnnotationCanvas.vlm_boxes` = VLM draft boxes, drawn separately as magenta dotted VLM boxes.
+- Child Expert Session receives only model prediction auto boxes for its local canvas/sync state. A VLM draft can still be chosen as an entry ROI when the operator explicitly selects it, but it is labeled as `VLM Draft Box` and is not silently treated as a normal model auto box.
 
 ### 0.1 Large 2D/STL annotation behavior
 - Large 2D/STL projects open with lightweight safeguards:
@@ -41,7 +58,9 @@
   - remaining queue is cleared
   - the run writes a cancelled summary
 - VLM API concurrency is project-configurable in `2D/STL Model Settings -> Inference`, default `1`, sanitized/clamped to a conservative range. Raise it only when the API provider allows parallel requests.
-- Rerunning VLM or parent auto-annotation replaces unconfirmed AI drafts but preserves manual and confirmed labels. Mixed images with one manual label and other unconfirmed AI labels should only regenerate replaceable AI portions.
+- Rerunning parent/model auto-annotation may replace unconfirmed AI drafts, including VLM drafts, but preserves manual and confirmed labels.
+- Rerunning VLM preannotation may refresh only existing unconfirmed VLM drafts or fill empty parts. It must not replace trained/external model prediction boxes, manual labels, or confirmed labels.
+- Box-only VLM drafts are valid review artifacts but are not training-eligible until SAM/manual work creates a polygon and the operator confirms the draft.
 
 ### 0.4 AI label clearing and structure rename
 - `Clear AI Labels` now opens a scope picker:
@@ -349,7 +368,7 @@
 ### 0.1 VLM first-mile preannotation current behavior
 - `AntSleap/core/vlm_preannotation.py` now prepares an adaptive light-grid VLM input image named `*_vlm_input_grid_*.png`.
 - Prompt/schema prefer `bbox_grid_xyxy` on the actual per-image adaptive grid, plus `part`, `confidence`, and `reason`; pixel `bbox_xyxy` remains a compatibility fallback.
-- Returned grid boxes are mapped back to original image coordinates before writing `auto_boxes` and before sending the prompt box to SAM.
+- Returned grid boxes are mapped back to original image coordinates before writing source-tagged `auto_boxes` and before sending the prompt box to SAM.
 - Per-image reports include `coordinate_mapping` so the raw VLM grid box, grid size, original size, and final original-image box can be audited.
 - GUI progress uses `prepare -> vlm -> parse -> write -> sam -> report`.
 - Current workbench buttons are `VLM Pre-Label` / `VLM Batch Pre-Label` in English and `VLM预标注` / `VLM批量预标` in Chinese.
@@ -361,7 +380,8 @@
 - Research consequence:
   - This path treats MIMO/domestic VLM output as a coarse body-part box suggestion, not a fine landmark detector.
   - The adaptive light grid gives smaller VLMs a spatial anchor while avoiding the earlier dense-grid clutter; square images stay around 8x8, wide side-view images receive more columns and fewer rows, and tall images do the reverse.
-  - Outputs remain draft `auto_boxes` / optional SAM polygons and must be reviewed before training.
+  - Outputs remain VLM-source draft `auto_boxes` / optional SAM polygons and must be reviewed before training.
+  - The main canvas displays VLM-source boxes separately from model prediction boxes; VLM boxes are low-priority draft suggestions, not ordinary model predictions.
 
 ### 0.2 PDF review and screening current behavior
 - `core/pdf_processor/pdf_classifier.py` and V2 screener config templates now default `lines_per_pdf` to 50.
@@ -917,14 +937,17 @@
 - The PDF Evidence API key fields remain visible; advanced/custom details can stay collapsible, but API key entry must not be hidden from users who jump there from VLM.
 
 ### 0.2 Draft data semantics
-- VLM boxes are stored as orange `aibox` entries under `auto_boxes`.
-- Source/review metadata is stored under `auto_box_meta`.
-- SAM polygons generated from VLM boxes are saved with description `Auto-Annotated`.
+- VLM boxes are stored under project `auto_boxes` for compatibility, with source/review metadata under `auto_box_meta`.
+- Current source semantics:
+  - `source == "vlm_first_mile"` means low-priority VLM draft box.
+  - `source == "model_prediction"` / `external_model_prediction` / missing legacy source means model prediction box.
+- The main canvas separates these sources: model boxes use `canvas.auto_boxes`, while VLM drafts use `canvas.vlm_boxes`.
+- SAM polygons generated from VLM boxes are saved with description `Auto-Annotated` and remain drafts until operator confirmation.
 - Training preflight excludes unreviewed `Auto-Annotated` drafts.
 - Space verification and `Accept current image AI drafts` both call the same review boundary through `ProjectManager.verify_image_labels(...)`.
 - Review rules:
   - draft polygon + human confirmation -> training eligible
-  - pure `aibox` without polygon -> remains unconfirmed
+  - pure box draft without polygon -> remains unconfirmed
   - current-image one-click accept never applies across all imported images
   - manual SAM re-boxing wins over AI draft and removes stale AI box metadata for that part
 - `Clear AI Labels` removes AI draft labels and their AI box metadata.
@@ -1033,7 +1056,8 @@
 
 ### 0.2 2D/STL daily tab layout
 - `2D/STL Morphology` daily operation now shows the main `Labeling Workbench` only.
-- The old standalone `BlinkLabWidget` and `launch_blink_from_workbench(...)` remain in code as compatibility/development fallback, but the `Open in Blink Workbench` toolbar button is hidden and 2D/STL mode removes the Blink tab.
+- The old standalone `BlinkLabWidget` and internal `launch_blink_from_workbench(...)` path remain in code as compatibility/development fallback, but user-facing wording should be `Child Expert Session / 子部位专家会话`.
+- Do not present Blink as a separate daily workbench. 2D/STL mode removes the Blink tab, and child/parent refinement is anchored in the main `Labeling Workbench`.
 - The standalone fallback no longer advertises or handles Space as the Blink switch shortcut, preventing conflict with main-workbench Space verification.
 - Startup and TIF tab rules from v3.24 still apply:
   - startup/start mode shows only `Start Center`
@@ -1059,6 +1083,7 @@
 - Parent parts come from project `locator_scope`; non-locator-scope structures are treated as child candidates.
 - Child parent resolution priority is now explicit-only: project memory (`blink_context_roi_parents`), unique saved route parent, then the current part-tree parent derived from saved routes. It no longer falls back to an available parent box or a single locator-scope parent, because that made newly created structures look automatically bound under a parent.
 - Users can manually choose a parent context from the panel; this writes `child -> parent` memory and registers a candidate route with source `workbench_blink_refine`.
+- The compatibility child expert session entry is now labeled `Open Child Expert Session` / `Child Expert Session Entry`; ROI candidates distinguish `Manual Box`, `Model Prediction Box`, and `VLM Draft Box`.
 
 ### 0.4 Box semantics after the merge
 - `AnnotationCanvas` now has an `ANNOTATION_BOX` mode and emits `annotation_box_completed`.
@@ -2016,7 +2041,7 @@
   - current-image prediction application
   - current-image batch result arrival
 - Historical accepted standalone Blink interaction model:
-  - entering Blink from `Open in Blink Workbench` passes current labels/manual boxes/auto boxes explicitly into `start_session(...)`
+  - entering the compatibility child expert/Blink session passes current labels/manual boxes/model auto boxes explicitly into `start_session(...)`; VLM draft boxes are not silently treated as normal model auto boxes
   - later Blink refresh is operator-triggered via `Sync from Workbench`
   - formal return from Blink to the main project remains `APPLY TO GLOBAL`
 - v3.25 keeps this only for the standalone compatibility fallback. Normal 2D/STL small-part refinement now stays in the main Labeling Workbench.
@@ -2763,10 +2788,13 @@ The current system now makes an important distinction:
   - saved immediately when auto-shrink succeeds
   - now also stores `parent_context` (`parent_part`, `parent_box`, `source`) for macro→micro training semantics
 
-- **Formal annotation data** (`parts`, `boxes`, `auto_boxes`)
+- **Formal annotation and draft box data** (`parts`, `boxes`, `auto_boxes`, `auto_box_meta`)
   - updated directly by the main Labeling Workbench in normal v3.25 use
   - still updated by `APPLY TO GLOBAL` only in the standalone Blink compatibility fallback
-  - this is what the main workbench treats as the accepted project result
+  - `parts` plus confirmed review status are what the main workbench treats as training-eligible accepted project result
+  - `auto_boxes` is a shared compatibility storage map; always inspect `auto_box_meta[part].source` before deciding whether a box is a VLM draft or a model prediction
+  - missing legacy source metadata is treated as model prediction, not as VLM
+  - source-tagged VLM boxes are shown separately on the canvas and are the lowest-priority draft source
 
 This distinction matters operationally:
 - a sample can already contribute to Blink training after auto-shrink
@@ -3072,9 +3100,9 @@ This is intentional in current phase and documented as a known gap for future UI
 
 ---
 
-### 9.9 Current BLINK/Cascade Runtime Notes
+### 9.9 Current Child Expert / BLINK/Cascade Runtime Notes
 
-BLINK remains an active runtime path, but v3.25 moves the daily operator surface into the main Labeling Workbench:
+BLINK remains an active internal runtime path/name, but the user-facing current workflow is the Child Expert Session inside the main Labeling Workbench:
 - main-workbench parent-child refinement uses global image coordinates directly
 - standalone Blink coordinate mapping still provides global/local consistency for compatibility sessions
 - trajectory-based supervision remains the data backbone for Blink micro-expert training
@@ -3082,7 +3110,8 @@ BLINK remains an active runtime path, but v3.25 moves the daily operator surface
 
 Current boundary:
 - main-workbench parent-child refinement is the production-relevant daily behavior
-- explicit workbench→standalone-Blink entry and local refinement are compatibility/development fallback behavior
+- explicit workbench→standalone child expert/Blink local refinement is compatibility/development fallback behavior
+- if a user mentions "Blink workbench" in current UI, verify whether they mean the child expert session panel/path; do not assume a separate daily workbench exists
 - cascade gating and broader expert routing remain more experimental than the main-workbench annotation/trajectory model itself
 
 ---

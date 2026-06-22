@@ -811,9 +811,9 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget._select_volume_tree_item("01-0101-button", "part", "head")
 
                 self.assertTrue(widget.btn_local_axis_reslice.isEnabled())
-                self.assertEqual(widget.btn_local_axis_reslice.text(), "Local Axis Reslice")
+                self.assertEqual(widget.btn_local_axis_reslice.text(), "Open detail / MPR / export")
                 self.assertTrue(widget.btn_local_axis_queue.isEnabled())
-                self.assertEqual(widget.btn_local_axis_queue.text(), "Review Local Axis Queue")
+                self.assertEqual(widget.btn_local_axis_queue.text(), "Review proposals")
             finally:
                 widget.close_project()
                 widget.deleteLater()
@@ -1375,6 +1375,38 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.close_project()
                 widget.deleteLater()
 
+    def test_local_axis_volume_section_follows_part_3d_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+            try:
+                mode_index = widget.display_mode_combo.findData("volume")
+                widget.display_mode_combo.setCurrentIndex(mode_index)
+                self.assertTrue(widget.local_axis_volume_section.isHidden())
+
+                crop_volume_to_part(widget.project, "01-0101-21", "head", [[0, 4], [1, 7], [1, 7]], display_name="Head")
+                widget.refresh_project()
+                widget._select_volume_tree_item("01-0101-21", "part", "head")
+                widget.display_mode_combo.setCurrentIndex(mode_index)
+
+                self.assertIs(widget.task_tabs.currentWidget(), widget.display_task_page)
+                self.assertFalse(widget.local_axis_volume_section.isHidden())
+                self.assertIn("Source Z axis", widget.local_axis_summary_label.text())
+                self.assertIn("Draft output Z: none", widget.local_axis_summary_label.text())
+
+                draft = widget.copy_source_z_axis_to_local_axis_draft()
+
+                self.assertIsNotNone(draft)
+                self.assertIn("Draft output Z:", widget.local_axis_summary_label.text())
+                self.assertIn("Overlay: on", widget.local_axis_summary_label.text())
+                self.assertEqual(widget.btn_local_axis_reslice.text(), "Open detail / MPR / export")
+
+                slice_index = widget.display_mode_combo.findData("slice")
+                widget.display_mode_combo.setCurrentIndex(slice_index)
+                self.assertTrue(widget.local_axis_volume_section.isHidden())
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
     def test_local_axis_draft_is_scoped_to_current_part(self):
         with tempfile.TemporaryDirectory() as tmp:
             widget = self._make_volume_widget(Path(tmp), z_count=5)
@@ -1443,7 +1475,8 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.display_mode_combo.setCurrentIndex(mode_index)
                 self.assertIs(widget.task_tabs.currentWidget(), widget.display_task_page)
                 self.assertTrue(widget.part_mask_section.isHidden())
-                self.assertFalse(widget.part_output_section.isHidden())
+                self.assertTrue(widget.part_output_section.isHidden())
+                self.assertFalse(widget.local_axis_volume_section.isHidden())
             finally:
                 widget.close_project()
                 widget.deleteLater()

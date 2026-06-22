@@ -297,6 +297,7 @@ TIF_TRANSLATIONS = {
         "Accept part mask": "接受部位 mask",
         "Clear preview": "清除预览",
         "Local Axis Reslice": "局部轴重切片",
+        "Local Axis Reslice / part volume": "局部轴重切片 / 部位体数据",
         "Review Local Axis Queue": "复核局部轴队列",
         "Local Axis Models": "局部轴模型",
         "Export part package": "导出部位包",
@@ -333,6 +334,17 @@ TIF_TRANSLATIONS = {
         "Exported part package.\nManifest: {0}": "已导出部位包。\nManifest：{0}",
         "Exported part package.\nFolder: {0}\nManifest: {1}": "已导出部位包。\n文件夹：{0}\nManifest：{1}",
         "Define a part-local output axis and roll reference, then export a reviewable local reslice.": "定义部位内输出轴和 roll 参照点，然后导出可复核的局部重切片。",
+        "Work in the 3D part preview first. Source Z is locked; copy it to create an editable output Z draft, then use the detail dialog only for precise MPR picking, roll reference, preview, and export.": "优先在三维部位预览中工作。原始 Z 轴是锁定参考；先复制它生成可编辑输出 Z 草稿，再把详情弹窗作为精确 MPR 点选、roll 参照、预览和导出的辅助工具。",
+        "Local axis unavailable. Select a part volume.": "局部轴不可用。请先选择部位体数据。",
+        "Source Z axis: locked reference": "原始 Z 轴：锁定参考",
+        "Overlay: on": "叠加显示：开启",
+        "Overlay: off": "叠加显示：关闭",
+        "Draft output Z: none": "草稿输出 Z：无",
+        "Draft output Z: {0}": "草稿输出 Z：{0}",
+        "Saved reslice: none selected": "已保存重切片：未选中",
+        "Saved reslice: {0}": "已保存重切片：{0}",
+        "Open detail / MPR / export": "打开详情 / MPR / 导出",
+        "Review proposals": "复核建议项",
         "Copied source Z axis as editable output axis.": "已从原始 Z 轴复制可编辑输出轴。",
         "Select a part volume before opening Local Axis Reslice.": "请先选择一个部位体数据，再打开局部轴重切片。",
         "Local Axis model and proposal tools": "局部轴模型与建议项工具",
@@ -1337,6 +1349,7 @@ class TifWorkbenchWidget(QWidget):
         self.volume_local_axes_check.setObjectName("tifVolumeLocalAxesCheck")
         self.volume_local_axes_check.setChecked(False)
         self.volume_local_axes_check.toggled.connect(self.render_volume_preview)
+        self.volume_local_axes_check.toggled.connect(self._update_local_axis_summary)
         self.volume_clip_plane_depth_slider = WheelSafeSlider(Qt.Horizontal)
         self.volume_clip_plane_depth_slider.setObjectName("tifVolumeClipPlaneDepthSlider")
         self.volume_clip_plane_depth_slider.setRange(0, 100)
@@ -1359,6 +1372,10 @@ class TifWorkbenchWidget(QWidget):
         self.volume_render_status_label.setWordWrap(True)
         self.volume_render_status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.volume_render_status_label.setVisible(False)
+        self.local_axis_summary_label = QLabel("")
+        self.local_axis_summary_label.setObjectName("tifLocalAxisSummaryText")
+        self.local_axis_summary_label.setWordWrap(True)
+        self.local_axis_summary_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
 
         self.status_label = QLabel("")
         self.status_label.setObjectName("tifStatusText")
@@ -1461,7 +1478,7 @@ class TifWorkbenchWidget(QWidget):
         self.btn_clear_part_preview = QPushButton("Clear preview")
         self.btn_clear_part_preview.setObjectName("tifClearPartPreviewButton")
         self.btn_clear_part_preview.clicked.connect(self.clear_part_mask_preview)
-        self.btn_local_axis_reslice = QPushButton("Local Axis Reslice")
+        self.btn_local_axis_reslice = QPushButton("Open detail / MPR / export")
         self.btn_local_axis_reslice.setObjectName("tifLocalAxisResliceButton")
         self.btn_local_axis_reslice.clicked.connect(self.open_local_axis_reslice_dialog)
         self.btn_copy_source_z_axis = QPushButton("Copy source Z axis")
@@ -1815,9 +1832,16 @@ class TifWorkbenchWidget(QWidget):
         self.btn_accept_part_mask.setText(tt("Accept part mask", self.lang))
         self.btn_clear_part_preview.setText(tt("Clear preview", self.lang))
         self.btn_export_part_package.setText(tt("Export part package", self.lang))
-        self.btn_local_axis_reslice.setText(tt("Local Axis Reslice", self.lang))
+        if hasattr(self, "local_axis_volume_help_label"):
+            self.local_axis_volume_help_label.setText(
+                tt(
+                    "Work in the 3D part preview first. Source Z is locked; copy it to create an editable output Z draft, then use the detail dialog only for precise MPR picking, roll reference, preview, and export.",
+                    self.lang,
+                )
+            )
+        self.btn_local_axis_reslice.setText(tt("Open detail / MPR / export", self.lang))
         self.btn_copy_source_z_axis.setText(tt("Copy source Z axis", self.lang))
-        self.btn_local_axis_queue.setText(tt("Review Local Axis Queue", self.lang))
+        self.btn_local_axis_queue.setText(tt("Review proposals", self.lang))
         self.btn_local_axis_models.setText(tt("Local Axis Models", self.lang))
         self.btn_delete_part_volume.setText(tt("Delete part volume", self.lang))
         self.btn_undo.setText(tt("Undo", self.lang))
@@ -1849,6 +1873,7 @@ class TifWorkbenchWidget(QWidget):
         self.material_table.setHorizontalHeaderLabels(
             [tt("ID", self.lang), tt("Name", self.lang), tt("Train", self.lang), tt("Color", self.lang)]
         )
+        self._update_local_axis_summary()
 
     def _update_volume_control_tooltips(self):
         pairs = (
@@ -2198,6 +2223,8 @@ class TifWorkbenchWidget(QWidget):
             self.annotation_section.setVisible(not is_volume and is_full)
         if hasattr(self, "volume_render_section"):
             self.volume_render_section.setVisible(is_volume)
+        if hasattr(self, "local_axis_volume_section"):
+            self.local_axis_volume_section.setVisible(is_volume and is_part)
         if hasattr(self, "part_locate_section"):
             self.part_locate_section.setVisible(is_full and not is_volume)
         if hasattr(self, "part_mask_section"):
@@ -2208,6 +2235,7 @@ class TifWorkbenchWidget(QWidget):
             target = self.display_task_page if is_volume else self.part_task_page
             if self.task_tabs.currentWidget() is not target:
                 self.task_tabs.setCurrentWidget(target)
+        self._update_local_axis_summary()
 
     def _safe_contour_slice_index(self, keyframe, default=None):
         try:
@@ -3505,11 +3533,6 @@ class TifWorkbenchWidget(QWidget):
         self.part_task_layout.addWidget(self.part_mask_section)
 
         self.part_output_section, part_output_layout = self._make_section("3. Output and manage", "tifPartOutputSection")
-        part_axis_row = QHBoxLayout()
-        part_axis_row.addWidget(self.btn_copy_source_z_axis)
-        part_axis_row.addWidget(self.btn_local_axis_reslice)
-        part_output_layout.addLayout(part_axis_row)
-        part_output_layout.addWidget(self.btn_local_axis_queue)
         part_output_layout.addWidget(self.btn_export_part_package)
         part_output_layout.addWidget(self.btn_delete_part_volume)
         self.part_task_layout.addWidget(self.part_output_section)
@@ -3530,6 +3553,27 @@ class TifWorkbenchWidget(QWidget):
         slice_controls.addWidget(self.contrast_slider, 2, 1)
         slice_display_layout.addLayout(slice_controls)
         self.display_task_layout.addWidget(self.slice_display_section)
+
+        self.local_axis_volume_section, local_axis_volume_layout = self._make_section(
+            "Local Axis Reslice / part volume",
+            "tifLocalAxisVolumeSection",
+        )
+        self.local_axis_volume_help_label = QLabel(
+            tt(
+                "Work in the 3D part preview first. Source Z is locked; copy it to create an editable output Z draft, then use the detail dialog only for precise MPR picking, roll reference, preview, and export.",
+                self.lang,
+            )
+        )
+        self.local_axis_volume_help_label.setObjectName("tifLayerHelpText")
+        self.local_axis_volume_help_label.setWordWrap(True)
+        local_axis_volume_layout.addWidget(self.local_axis_volume_help_label)
+        local_axis_volume_layout.addWidget(self.local_axis_summary_label)
+        local_axis_volume_row = QHBoxLayout()
+        local_axis_volume_row.addWidget(self.btn_copy_source_z_axis)
+        local_axis_volume_row.addWidget(self.btn_local_axis_reslice)
+        local_axis_volume_layout.addLayout(local_axis_volume_row)
+        local_axis_volume_layout.addWidget(self.btn_local_axis_queue)
+        self.display_task_layout.addWidget(self.local_axis_volume_section)
 
         self.volume_render_section, volume_render_layout = self._make_section("3D rendering", "tifVolumeRenderSection")
         volume_controls = QGridLayout()
@@ -3689,6 +3733,7 @@ class TifWorkbenchWidget(QWidget):
             QFrame#tifPartExtractionSection,
             QFrame#tifSliceDisplaySection,
             QFrame#tifVolumeRenderSection,
+            QFrame#tifLocalAxisVolumeSection,
             QFrame#tifAnnotationSection,
             QFrame#tifMaterialSection,
             QFrame#tifTrainingSection,
@@ -3855,6 +3900,7 @@ class TifWorkbenchWidget(QWidget):
             }
             QLabel#tifStatusText,
             QLabel#tifMetadataText,
+            QLabel#tifLocalAxisSummaryText,
             QLabel#tifTrainingStatusText {
                 color: #AEBAC0;
                 border: none;
@@ -4590,6 +4636,7 @@ class TifWorkbenchWidget(QWidget):
         self.btn_local_axis_models.setEnabled(bool(self.project.project_data.get("specimens", [])))
         self.btn_export_part_package.setEnabled(is_part and has_image)
         self.btn_delete_part_volume.setEnabled(is_part and self.current_part is not None)
+        self._update_local_axis_summary()
 
     def _update_status_labels(self, specimen, part=None):
         self._set_scope_controls_enabled()
@@ -4802,6 +4849,43 @@ class TifWorkbenchWidget(QWidget):
         if str(draft.get("part_id", "")) != str(self.current_part_id or ""):
             return None
         return draft
+
+    def _format_local_axis_point_pair(self, axis):
+        if not isinstance(axis, dict):
+            return "-"
+        start = axis.get("start_zyx") or []
+        end = axis.get("end_zyx") or []
+        if not start or not end:
+            return "-"
+        return "{0} -> {1}".format(start, end)
+
+    def _update_local_axis_summary(self):
+        label = getattr(self, "local_axis_summary_label", None)
+        if label is None:
+            return
+        if self.current_volume_scope != "part" or not self.current_part_id or self.image_volume is None:
+            label.setText(tt("Local axis unavailable. Select a part volume.", self.lang))
+            return
+        lines = [
+            f"{tt('Part', self.lang)}: {self.current_part_id}",
+            tt("Source Z axis: locked reference", self.lang),
+            tt("Overlay: on" if self._local_axis_overlay_enabled() else "Overlay: off", self.lang),
+        ]
+        draft = self._current_local_axis_draft()
+        if draft is not None:
+            lines.append(
+                tt("Draft output Z: {0}", self.lang).format(
+                    self._format_local_axis_point_pair((draft.get("editable_axis") or {}))
+                )
+            )
+        else:
+            lines.append(tt("Draft output Z: none", self.lang))
+        reslice = self._current_part_reslice_record()
+        if isinstance(reslice, dict):
+            lines.append(tt("Saved reslice: {0}", self.lang).format(reslice.get("reslice_id", "")))
+        else:
+            lines.append(tt("Saved reslice: none selected", self.lang))
+        label.setText("\n".join(lines))
 
     def _project_zyx_to_volume_xy(self, point_zyx, shape_zyx, source_shape=None, spacing_zyx=None):
         if not point_zyx or len(point_zyx) != 3:

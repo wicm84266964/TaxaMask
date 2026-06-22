@@ -1052,6 +1052,48 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.close_project()
                 widget.deleteLater()
 
+    def test_copy_source_z_axis_creates_visible_local_axis_draft(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+            try:
+                crop_volume_to_part(widget.project, "01-0101-21", "head", [[0, 4], [1, 7], [1, 7]], display_name="Head")
+                widget.refresh_project()
+                widget._select_volume_tree_item("01-0101-21", "part", "head")
+
+                draft = widget.copy_source_z_axis_to_local_axis_draft()
+
+                self.assertIsNotNone(draft)
+                self.assertEqual(draft["part_id"], "head")
+                self.assertEqual(draft["editable_axis"]["role"], "editable_output_axis")
+                self.assertTrue(widget.volume_local_axes_check.isChecked())
+                overlays = widget._local_axis_volume_overlays()
+                self.assertEqual([item["label"] for item in overlays], ["source Z", "output Z"])
+                self.assertIn("Local axis draft", widget.metadata_label.text())
+                self.assertIn("Copied source Z axis", widget.training_status_label.text())
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_local_axis_draft_is_scoped_to_current_part(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+            try:
+                crop_volume_to_part(widget.project, "01-0101-21", "head", [[0, 4], [1, 7], [1, 7]], display_name="Head")
+                crop_volume_to_part(widget.project, "01-0101-21", "thorax", [[1, 5], [1, 7], [1, 7]], display_name="Thorax")
+                widget.refresh_project()
+                widget._select_volume_tree_item("01-0101-21", "part", "head")
+                self.assertIsNotNone(widget.copy_source_z_axis_to_local_axis_draft())
+
+                widget._select_volume_tree_item("01-0101-21", "part", "thorax")
+
+                self.assertIsNone(widget.local_axis_draft)
+                widget.volume_local_axes_check.setChecked(True)
+                overlays = widget._local_axis_volume_overlays()
+                self.assertEqual([item["label"] for item in overlays], ["source Z"])
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
     def test_task_tabs_follow_tif_workflow_context(self):
         with tempfile.TemporaryDirectory() as tmp:
             widget = self._make_volume_widget(Path(tmp), z_count=5)

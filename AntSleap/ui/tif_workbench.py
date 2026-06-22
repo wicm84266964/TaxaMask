@@ -59,6 +59,7 @@ try:
     from AntSleap.core.tif_project import TifProjectManager
     from AntSleap.core.tif_stack_import import import_tif_stack
     from AntSleap.core.tif_volume_io import create_empty_label_sidecar_like, flush_volume_array, load_volume_sidecar, volume_sidecar_exists
+    from AntSleap.core.tif_local_axis_reslice import create_editable_axis_from_source, source_z_axis_for_part
     from AntSleap.ui.tif_local_axis_model_panel import TifLocalAxisModelDialog
     from AntSleap.ui.tif_local_axis_reslice_page import TifLocalAxisResliceDialog
     from AntSleap.ui.tif_local_axis_review_queue import TifLocalAxisReviewQueueWidget
@@ -97,6 +98,7 @@ except ModuleNotFoundError as exc:
     from core.tif_project import TifProjectManager
     from core.tif_stack_import import import_tif_stack
     from core.tif_volume_io import create_empty_label_sidecar_like, flush_volume_array, load_volume_sidecar, volume_sidecar_exists
+    from core.tif_local_axis_reslice import create_editable_axis_from_source, source_z_axis_for_part
     from ui.tif_local_axis_model_panel import TifLocalAxisModelDialog
     from ui.tif_local_axis_reslice_page import TifLocalAxisResliceDialog
     from ui.tif_local_axis_review_queue import TifLocalAxisReviewQueueWidget
@@ -341,6 +343,7 @@ TIF_TRANSLATIONS = {
         "Origin z,y,x": "中心点 z,y,x",
         "Output axis start z,y,x": "输出轴起点 z,y,x",
         "Output axis end z,y,x": "输出轴终点 z,y,x",
+        "Local axis draft": "局部轴草稿",
         "Roll point A role": "Roll 点 A 角色",
         "Roll point A z,y,x": "Roll 点 A z,y,x",
         "Roll point B role": "Roll 点 B 角色",
@@ -1167,6 +1170,7 @@ class TifWorkbenchWidget(QWidget):
         self.current_part_id = ""
         self.current_part = None
         self.current_reslice_id = ""
+        self.local_axis_draft = None
         self.part_preview_mask = None
         self.part_roi_draw_mode = False
         self.part_contour_draw_mode = False
@@ -1460,6 +1464,9 @@ class TifWorkbenchWidget(QWidget):
         self.btn_local_axis_reslice = QPushButton("Local Axis Reslice")
         self.btn_local_axis_reslice.setObjectName("tifLocalAxisResliceButton")
         self.btn_local_axis_reslice.clicked.connect(self.open_local_axis_reslice_dialog)
+        self.btn_copy_source_z_axis = QPushButton("Copy source Z axis")
+        self.btn_copy_source_z_axis.setObjectName("tifCopySourceZAxisButton")
+        self.btn_copy_source_z_axis.clicked.connect(self.copy_source_z_axis_to_local_axis_draft)
         self.btn_local_axis_queue = QPushButton("Review Local Axis Queue")
         self.btn_local_axis_queue.setObjectName("tifLocalAxisQueueButton")
         self.btn_local_axis_queue.clicked.connect(self.open_local_axis_review_queue)
@@ -1569,6 +1576,7 @@ class TifWorkbenchWidget(QWidget):
             self.btn_reset_volume_view,
             self.btn_volume_custom_color,
             self.btn_copy_draft,
+            self.btn_copy_source_z_axis,
             self.btn_add_material,
             self.btn_edit_material,
             self.btn_save_backend,
@@ -1808,6 +1816,7 @@ class TifWorkbenchWidget(QWidget):
         self.btn_clear_part_preview.setText(tt("Clear preview", self.lang))
         self.btn_export_part_package.setText(tt("Export part package", self.lang))
         self.btn_local_axis_reslice.setText(tt("Local Axis Reslice", self.lang))
+        self.btn_copy_source_z_axis.setText(tt("Copy source Z axis", self.lang))
         self.btn_local_axis_queue.setText(tt("Review Local Axis Queue", self.lang))
         self.btn_local_axis_models.setText(tt("Local Axis Models", self.lang))
         self.btn_delete_part_volume.setText(tt("Delete part volume", self.lang))
@@ -3496,7 +3505,10 @@ class TifWorkbenchWidget(QWidget):
         self.part_task_layout.addWidget(self.part_mask_section)
 
         self.part_output_section, part_output_layout = self._make_section("3. Output and manage", "tifPartOutputSection")
-        part_output_layout.addWidget(self.btn_local_axis_reslice)
+        part_axis_row = QHBoxLayout()
+        part_axis_row.addWidget(self.btn_copy_source_z_axis)
+        part_axis_row.addWidget(self.btn_local_axis_reslice)
+        part_output_layout.addLayout(part_axis_row)
         part_output_layout.addWidget(self.btn_local_axis_queue)
         part_output_layout.addWidget(self.btn_export_part_package)
         part_output_layout.addWidget(self.btn_delete_part_volume)
@@ -3912,6 +3924,7 @@ class TifWorkbenchWidget(QWidget):
         self.current_volume_scope = "full"
         self.current_part_id = ""
         self.current_part = None
+        self.local_axis_draft = None
         self.part_preview_mask = None
         self.undo_stack = []
         self.redo_stack = []
@@ -4144,6 +4157,7 @@ class TifWorkbenchWidget(QWidget):
             self.current_part_id = ""
             self.current_part = None
             self.current_reslice_id = ""
+            self.local_axis_draft = None
             self.part_preview_mask = None
             self.active_part_roi_id = ""
             self.part_roi_draw_mode = False
@@ -4217,6 +4231,7 @@ class TifWorkbenchWidget(QWidget):
             self.current_part_id = part.get("part_id", "")
             self.current_part = part
             self.current_reslice_id = str(selected_reslice_id or "")
+            self._clear_local_axis_draft_if_part_changed(specimen_id, self.current_part_id)
             self.active_part_roi_id = ""
             self.part_roi_draw_mode = False
             self.part_contour_draw_mode = False
@@ -4558,6 +4573,7 @@ class TifWorkbenchWidget(QWidget):
         self.btn_preview_part_mask.setEnabled(is_part and has_image)
         self.btn_accept_part_mask.setEnabled(is_part and self.part_preview_mask is not None)
         self.btn_clear_part_preview.setEnabled(is_part and self.part_preview_mask is not None)
+        self.btn_copy_source_z_axis.setEnabled(is_part and has_image)
         self.btn_local_axis_reslice.setEnabled(is_part and has_image)
         self.btn_local_axis_queue.setEnabled(bool(self.project.project_data.get("specimens", [])))
         self.btn_local_axis_models.setEnabled(bool(self.project.project_data.get("specimens", [])))
@@ -4612,6 +4628,16 @@ class TifWorkbenchWidget(QWidget):
                 f"{tt('Parent bbox Z/Y/X', self.lang)}: {part.get('parent_bbox_zyx', [])}",
                 f"{tt('modality', self.lang)}: {specimen.get('modality', 'unknown')}",
             ]
+            draft = self._current_local_axis_draft()
+            if draft is not None:
+                metadata_lines.extend(
+                    [
+                        "",
+                        f"{tt('Local axis draft', self.lang)}: {draft.get('template_id', '')}",
+                        f"{tt('Output axis start z,y,x', self.lang)}: {(draft.get('editable_axis') or {}).get('start_zyx', [])}",
+                        f"{tt('Output axis end z,y,x', self.lang)}: {(draft.get('editable_axis') or {}).get('end_zyx', [])}",
+                    ]
+                )
             if self.current_reslice_id:
                 reslice = self.project.get_part_reslice(
                     specimen.get("specimen_id", ""),
@@ -4705,10 +4731,66 @@ class TifWorkbenchWidget(QWidget):
             and self.image_volume is not None
         )
 
+    def _clear_local_axis_draft_if_part_changed(self, specimen_id="", part_id=""):
+        draft = self.local_axis_draft if isinstance(self.local_axis_draft, dict) else None
+        if draft is None:
+            return
+        if str(draft.get("specimen_id", "")) != str(specimen_id or "") or str(draft.get("part_id", "")) != str(part_id or ""):
+            self.local_axis_draft = None
+
+    def _source_z_axis_for_current_part(self):
+        shape = tuple(int(value) for value in getattr(self.image_volume, "shape", ()) or ())
+        if len(shape) != 3 or min(shape) <= 0:
+            return {}
+        return source_z_axis_for_part(shape)
+
+    def copy_source_z_axis_to_local_axis_draft(self):
+        if self.current_volume_scope != "part" or not self.current_specimen_id or not self.current_part_id or self.image_volume is None:
+            QMessageBox.information(self, tt("Local Axis Reslice", self.lang), tt("Select a part volume before opening Local Axis Reslice.", self.lang))
+            return None
+        source_axis = self._source_z_axis_for_current_part()
+        if not source_axis:
+            return None
+        editable_axis = create_editable_axis_from_source(source_axis)
+        shape = tuple(int(value) for value in getattr(self.image_volume, "shape", ()) or ())
+        origin = [(float(value) - 1.0) / 2.0 for value in shape]
+        draft = {
+            "specimen_id": self.current_specimen_id,
+            "part_id": self.current_part_id,
+            "template_id": "head" if str(self.current_part_id).lower() == "head" else "generic",
+            "source_axis": source_axis,
+            "editable_axis": editable_axis,
+            "origin_zyx": origin,
+            "roll_reference": {},
+            "local_frame": None,
+            "dirty": True,
+        }
+        self.local_axis_draft = draft
+        if hasattr(self, "volume_local_axes_check"):
+            self.volume_local_axes_check.setChecked(True)
+        self.training_status_label.setText(tt("Copied source Z axis as editable output axis.", self.lang))
+        self.log(tt("Copied source Z axis as editable output axis.", self.lang))
+        specimen = self.project.get_specimen(self.current_specimen_id, default=None)
+        if specimen is not None:
+            self._update_status_labels(specimen, part=self.current_part)
+        if self.display_mode == "volume":
+            self.render_volume_preview()
+        return draft
+
     def _current_part_reslice_record(self):
         if not self.current_specimen_id or not self.current_part_id or not self.current_reslice_id:
             return None
         return self.project.get_part_reslice(self.current_specimen_id, self.current_part_id, self.current_reslice_id, default=None)
+
+    def _current_local_axis_draft(self):
+        draft = self.local_axis_draft if isinstance(self.local_axis_draft, dict) else None
+        if draft is None:
+            return None
+        if str(draft.get("specimen_id", "")) != str(self.current_specimen_id or ""):
+            return None
+        if str(draft.get("part_id", "")) != str(self.current_part_id or ""):
+            return None
+        return draft
 
     def _project_zyx_to_volume_xy(self, point_zyx, shape_zyx, source_shape=None, spacing_zyx=None):
         if not point_zyx or len(point_zyx) != 3:
@@ -4754,13 +4836,17 @@ class TifWorkbenchWidget(QWidget):
             if start_xy and end_xy:
                 overlays.append({"start_xy": start_xy, "end_xy": end_xy, "label": label, "color": color, "width": width})
 
-        source_z = {"start_zyx": [0.0, (shape[1] - 1) / 2.0, (shape[2] - 1) / 2.0], "end_zyx": [shape[0] - 1.0, (shape[1] - 1) / 2.0, (shape[2] - 1) / 2.0]}
+        source_z = self._source_z_axis_for_current_part()
         add_axis(source_z.get("start_zyx"), source_z.get("end_zyx"), tt("source Z", self.lang), "#6AA6FF", width=2)
 
-        reslice = self._current_part_reslice_record()
         editable = {}
-        if isinstance(reslice, dict):
-            editable = ((reslice.get("source") or {}).get("editable_axis") or {})
+        draft = self._current_local_axis_draft()
+        if isinstance(draft, dict):
+            editable = draft.get("editable_axis") or {}
+        else:
+            reslice = self._current_part_reslice_record()
+            if isinstance(reslice, dict):
+                editable = ((reslice.get("source") or {}).get("editable_axis") or {})
         if editable.get("start_zyx") and editable.get("end_zyx"):
             add_axis(editable.get("start_zyx"), editable.get("end_zyx"), tt("output Z", self.lang), "#FFB84D", width=3)
         return overlays

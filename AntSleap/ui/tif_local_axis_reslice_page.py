@@ -90,6 +90,9 @@ LOCAL_AXIS_TRANSLATIONS = {
         "Hard case": "困难样本",
         "Reviewer notes": "复核备注",
         "MPR point picking": "MPR 点选",
+        "Show compact MPR picker": "展开紧凑 MPR 点选器",
+        "Hide compact MPR picker": "折叠紧凑 MPR 点选器",
+        "Use the large MPR view for precise point picking. The compact picker stays folded by default so this detail dialog does not become the main axis workspace.": "请使用 MPR 大图进行精确点选。紧凑点选器默认折叠，避免详情弹窗重新变成主要定轴工作区。",
         "Plane": "平面",
         "Target": "目标点",
         "Slice": "切片",
@@ -470,6 +473,29 @@ class TifLocalAxisResliceDialog(QDialog):
     def _build_slice_picker_group(self):
         group = QGroupBox(tt("MPR point picking", self.lang))
         root = QVBoxLayout(group)
+        note = QLabel(
+            tt(
+                "Use the large MPR view for precise point picking. The compact picker stays folded by default so this detail dialog does not become the main axis workspace.",
+                self.lang,
+            )
+        )
+        note.setWordWrap(True)
+        root.addWidget(note)
+        self.btn_large_mpr = QPushButton(tt("Open large MPR view", self.lang))
+        self.btn_large_mpr.clicked.connect(self.open_large_mpr_view)
+        root.addWidget(self.btn_large_mpr)
+
+        self.compact_mpr_toggle = QToolButton()
+        self.compact_mpr_toggle.setText(tt("Show compact MPR picker", self.lang))
+        self.compact_mpr_toggle.setCheckable(True)
+        self.compact_mpr_toggle.setChecked(False)
+        self.compact_mpr_toggle.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        root.addWidget(self.compact_mpr_toggle)
+
+        self.compact_mpr_body = QWidget()
+        compact_layout = QVBoxLayout(self.compact_mpr_body)
+        compact_layout.setContentsMargins(0, 0, 0, 0)
+        compact_layout.setSpacing(8)
         controls = QHBoxLayout()
         self.picker_axis_combo = QComboBox()
         self.picker_axis_combo.addItem("Z", "z")
@@ -489,20 +515,17 @@ class TifLocalAxisResliceDialog(QDialog):
         controls.addWidget(self.picker_axis_combo)
         controls.addWidget(QLabel(tt("Target", self.lang)))
         controls.addWidget(self.picker_target_combo, 1)
-        self.btn_large_mpr = QPushButton(tt("Open large MPR view", self.lang))
-        self.btn_large_mpr.clicked.connect(self.open_large_mpr_view)
-        controls.addWidget(self.btn_large_mpr)
-        root.addLayout(controls)
+        compact_layout.addLayout(controls)
         slice_controls = QHBoxLayout()
         slice_controls.addWidget(QLabel(tt("Slice", self.lang)))
         slice_controls.addWidget(self.picker_slice_slider, 1)
         slice_controls.addWidget(self.picker_slice_label)
-        root.addLayout(slice_controls)
+        compact_layout.addLayout(slice_controls)
         self.slice_picker_label = LocalAxisSliceLabel()
         self.slice_picker_label.setText(tt("Part image unavailable", self.lang))
         self.slice_picker_label.setMinimumHeight(220)
         self.slice_picker_label.setMaximumHeight(260)
-        root.addWidget(self.slice_picker_label)
+        compact_layout.addWidget(self.slice_picker_label)
         help_label = QLabel(
             tt(
                 "Click the part slice to fill the selected point. Source Z is shown as a locked reference; the editable output axis and roll points are drawn from the fields above.",
@@ -510,7 +533,10 @@ class TifLocalAxisResliceDialog(QDialog):
             )
         )
         help_label.setWordWrap(True)
-        root.addWidget(help_label)
+        compact_layout.addWidget(help_label)
+        root.addWidget(self.compact_mpr_body)
+        self.compact_mpr_toggle.toggled.connect(self._toggle_compact_mpr_body)
+        self._toggle_compact_mpr_body(False)
         self.picker_axis_combo.currentIndexChanged.connect(self._configure_slice_picker)
         self.picker_slice_slider.valueChanged.connect(self._render_slice_picker)
         self.slice_picker_label.point_clicked.connect(self._set_picker_point)
@@ -668,12 +694,28 @@ class TifLocalAxisResliceDialog(QDialog):
         self.picker_slice_slider.blockSignals(False)
         self._schedule_slice_picker_render()
 
+    def _compact_mpr_visible(self):
+        body = getattr(self, "compact_mpr_body", None)
+        return bool(body is not None and body.isVisible())
+
+    def _toggle_compact_mpr_body(self, checked):
+        body = getattr(self, "compact_mpr_body", None)
+        if body is not None:
+            body.setVisible(bool(checked))
+        toggle = getattr(self, "compact_mpr_toggle", None)
+        if toggle is not None:
+            toggle.setText(tt("Hide compact MPR picker" if checked else "Show compact MPR picker", self.lang))
+        if checked:
+            self._schedule_slice_picker_render()
+
     def _enable_initial_picker_render(self):
         self._picker_render_enabled = True
         self._schedule_slice_picker_render()
 
     def _schedule_slice_picker_render(self):
         if not getattr(self, "_picker_render_enabled", False):
+            return
+        if not self._compact_mpr_visible():
             return
         if getattr(self, "_picker_render_pending", False):
             return

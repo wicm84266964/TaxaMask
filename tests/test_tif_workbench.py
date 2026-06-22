@@ -720,6 +720,8 @@ class TifWorkbenchTests(unittest.TestCase):
             picker = TifLocalAxisSlicePickerDialog(dialog)
             try:
                 self.assertEqual(dialog.btn_large_mpr.text(), "Open large MPR view")
+                self.assertEqual(dialog.compact_mpr_toggle.text(), "Show compact MPR picker")
+                self.assertTrue(dialog.compact_mpr_body.isHidden())
                 self.assertEqual(picker.windowTitle(), "Large MPR point picking")
                 self.assertEqual(picker.btn_fullscreen.text(), "Full screen")
 
@@ -730,6 +732,10 @@ class TifWorkbenchTests(unittest.TestCase):
 
                 self.assertEqual(dialog.origin_edit.text(), "0,1,2")
                 self.assertEqual(dialog.picker_target_combo.currentData(), "origin")
+
+                dialog.compact_mpr_toggle.setChecked(True)
+                self.assertFalse(dialog.compact_mpr_body.isHidden())
+                self.assertEqual(dialog.compact_mpr_toggle.text(), "Hide compact MPR picker")
             finally:
                 picker.deleteLater()
                 dialog.deleteLater()
@@ -1397,11 +1403,17 @@ class TifWorkbenchTests(unittest.TestCase):
 
                 self.assertIsNotNone(draft)
                 self.assertIn("Draft output Z:", widget.local_axis_summary_label.text())
-                self.assertIn("Overlay: on", widget.local_axis_summary_label.text())
+                self.assertIn("3D overlay: on", widget.local_axis_summary_label.text())
                 self.assertEqual(widget.btn_local_axis_reslice.text(), "Open detail / MPR / export")
 
                 slice_index = widget.display_mode_combo.findData("slice")
                 widget.display_mode_combo.setCurrentIndex(slice_index)
+                self.assertFalse(widget.local_axis_volume_section.isHidden())
+                self.assertIs(widget.task_tabs.currentWidget(), widget.part_task_page)
+                self.assertGreater(widget.part_task_layout.indexOf(widget.local_axis_volume_section), widget.part_task_layout.indexOf(widget.part_mask_section))
+                self.assertLess(widget.part_task_layout.indexOf(widget.local_axis_volume_section), widget.part_task_layout.indexOf(widget.part_output_section))
+
+                widget._select_volume_tree_item("01-0101-21", "full")
                 self.assertTrue(widget.local_axis_volume_section.isHidden())
             finally:
                 widget.close_project()
@@ -1477,6 +1489,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertTrue(widget.part_mask_section.isHidden())
                 self.assertTrue(widget.part_output_section.isHidden())
                 self.assertFalse(widget.local_axis_volume_section.isHidden())
+                self.assertEqual(widget.display_task_layout.indexOf(widget.local_axis_volume_section), 0)
             finally:
                 widget.close_project()
                 widget.deleteLater()

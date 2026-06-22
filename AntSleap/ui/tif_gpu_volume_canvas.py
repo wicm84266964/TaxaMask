@@ -29,7 +29,7 @@ GPU_VOLUME_MASK_MODES = {
 
 try:
     from PySide6.QtCore import Qt, QTimer, Signal
-    from PySide6.QtGui import QImage, QOffscreenSurface, QOpenGLContext, QPixmap, QSurfaceFormat
+    from PySide6.QtGui import QColor, QImage, QOffscreenSurface, QOpenGLContext, QPainter, QPen, QPixmap, QSurfaceFormat
     from PySide6.QtWidgets import QFrame, QLabel
     from PySide6.QtOpenGLWidgets import QOpenGLWidget
 except Exception as exc:  # pragma: no cover - exercised only on partial Qt installs
@@ -39,6 +39,9 @@ except Exception as exc:  # pragma: no cover - exercised only on partial Qt inst
     QOpenGLWidget = None
     QOffscreenSurface = None
     QOpenGLContext = None
+    QColor = None
+    QPainter = None
+    QPen = None
     QPixmap = None
     QSurfaceFormat = None
     _QT_OPENGL_IMPORT_ERROR = exc
@@ -1310,6 +1313,7 @@ if gpu_volume_offscreen_available():
             self._batch_update_depth = 0
             self._batch_render_pending = False
             self._last_renderer_info = ""
+            self._axis_overlays = []
             self.setObjectName("tifVolumeCanvas")
             self.setAlignment(Qt.AlignCenter)
             self.setMinimumSize(360, 280)
@@ -1331,9 +1335,14 @@ if gpu_volume_offscreen_available():
 
         def clear_volume(self):
             self._renderer.clear_volume()
+            self._axis_overlays = []
             super().clear()
             super().setText(self._empty_text)
             self.render_stats_changed.emit()
+
+        def set_axis_overlays(self, overlays):
+            self._axis_overlays = list(overlays or [])
+            self.update()
 
         def has_volume(self):
             return self._renderer.has_volume() and not self._failed
@@ -1402,6 +1411,37 @@ if gpu_volume_offscreen_available():
                 pixmap = pixmap.scaled(max(1, self.width()), max(1, self.height()), Qt.KeepAspectRatio, Qt.SmoothTransformation)
             self.setPixmap(pixmap)
             self.render_stats_changed.emit()
+
+        def paintEvent(self, event):
+            super().paintEvent(event)
+            if not self._axis_overlays or self.pixmap() is None or self.pixmap().isNull():
+                return
+            painter = QPainter(self)
+            try:
+                self._draw_axis_overlays(painter)
+            finally:
+                painter.end()
+
+        def _draw_axis_overlays(self, painter):
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            font = painter.font()
+            font.setPointSize(9)
+            painter.setFont(font)
+            for overlay in self._axis_overlays:
+                start = overlay.get("start_xy")
+                end = overlay.get("end_xy")
+                if not start or not end:
+                    continue
+                color = QColor(str(overlay.get("color") or "#FFB84D"))
+                painter.setPen(QPen(color, int(overlay.get("width", 2))))
+                x0, y0 = float(start[0]), float(start[1])
+                x1, y1 = float(end[0]), float(end[1])
+                painter.drawLine(int(round(x0)), int(round(y0)), int(round(x1)), int(round(y1)))
+                painter.drawEllipse(int(round(x0 - 4)), int(round(y0 - 4)), 8, 8)
+                painter.drawEllipse(int(round(x1 - 4)), int(round(y1 - 4)), 8, 8)
+                label = str(overlay.get("label") or "")
+                if label:
+                    painter.drawText(int(round(x1 + 6)), int(round(y1 - 6)), label)
 
         def resizeEvent(self, event):
             super().resizeEvent(event)

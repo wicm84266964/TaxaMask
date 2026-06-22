@@ -1,0 +1,322 @@
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+import numpy as np
+import tifffile
+
+from AntSleap.core.tif_local_axis_reslice import (
+    compute_local_frame,
+    create_editable_axis_from_source,
+    export_part_reslice,
+    reslice_volume,
+    source_z_axis_for_part,
+)
+from AntSleap.core.tif_local_axis_signal import analyze_source_z_signal, compute_source_z_signal
+from AntSleap.core.tif_part_extraction import crop_volume_to_part
+from AntSleap.core.tif_project import TifProjectManager
+from AntSleap.core.tif_volume_io import load_volume_sidecar, write_volume_sidecar
+
+
+class TifLocalAxisResliceTests(unittest.TestCase):
+    def test_source_z_axis_can_seed_editable_axis(self):
+        source = source_z_axis_for_part((5, 7, 9))
+        editable = create_editable_axis_from_source(source, "head_output_axis")
+
+        self.assertTrue(source["locked"])
+        self.assertFalse(editable["locked"])
+        self.assertEqual(source["start_zyx"], [0.0, 3.0, 4.0])
+        self.assertEqual(editable["end_zyx"], [4.0, 3.0, 4.0])
+        self.assertEqual(editable["source_axis_id"], "source_z_axis")
+
+    def test_compute_local_frame_uses_roll_reference_for_orientation(self):
+        frame = compute_local_frame(
+            [2.0, 2.0, 2.0],
+            [0.0, 2.0, 2.0],
+            [4.0, 2.0, 2.0],
+            roll_reference={
+                "pair_id": "left_eye_right_eye",
+                "point_a": {"role": "left_eye", "zyx": [2.0, 1.0, 1.0]},
+                "point_b": {"role": "right_eye", "zyx": [2.0, 3.0, 1.0]},
+            },
+            spacing_zyx=[1.0, 1.0, 1.0],
+        )
+
+        np.testing.assert_allclose(frame["z_axis"], [1.0, 0.0, 0.0])
+        self.assertGreater(float(np.dot(frame["x_axis"], [0.0, 1.0, 0.0])), 0.9)
+        self.assertEqual(frame["output_axis"], "z_axis")
+
+    def test_compute_local_frame_preserves_world_axes_with_anisotropic_spacing(self):
+        frame = compute_local_frame(
+            [2.0, 2.0, 2.0],
+            [0.0, 2.0, 2.0],
+            [4.0, 4.0, 2.0],
+            roll_reference={
+                "point_a": {"role": "roll_point_a", "zyx": [2.0, 2.0, 1.0]},
+                "point_b": {"role": "roll_point_b", "zyx": [2.0, 2.0, 3.0]},
+            },
+            spacing_zyx=[2.0, 1.0, 1.0],
+        )
+
+        spacing = np.array(frame["spacing_zyx"], dtype=np.float64)
+        x_world = np.array(frame["x_axis"]) * spacing
+        y_world = np.array(frame["y_axis"]) * spacing
+        z_world = np.array(frame["z_axis"]) * spacing
+        x_world = x_world / np.linalg.norm(x_world)
+        y_world = y_world / np.linalg.norm(y_world)
+        z_world = z_world / np.linalg.norm(z_world)
+        np.testing.assert_allclose(np.dot(x_world, z_world), 0.0, atol=1e-7)
+        np.testing.assert_allclose(np.dot(y_world, z_world), 0.0, atol=1e-7)
+        np.testing.assert_allclose(np.dot(x_world, y_world), 0.0, atol=1e-7)
+        expected_z_world = np.array([8.0, 2.0, 0.0], dtype=np.float64)
+        expected_z_world = expected_z_world / np.linalg.norm(expected_z_world)
+        np.testing.assert_allclose(z_world, expected_z_world, atol=1e-7)
+
+    def test_reslice_volume_identity_frame_preserves_volume(self):
+        volume = np.arange(3 * 4 * 5, dtype=np.uint16).reshape((3, 4, 5))
+        frame = {
+            "origin_zyx": [1.0, 1.5, 2.0],
+            "x_axis": [0.0, 0.0, 1.0],
+            "y_axis": [0.0, 1.0, 0.0],
+            "z_axis": [1.0, 0.0, 0.0],
+            "output_axis": "z_axis",
+            "spacing_zyx": [1.0, 1.0, 1.0],
+        }
+
+        resliced = reslice_volume(volume, frame, {"output_shape_zyx": list(volume.shape)}, interpolation="nearest")
+
+        np.testing.assert_array_equal(resliced, volume)
+
+    def test_export_part_reslice_writes_image_mask_metadata_and_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "local_axis_export"
+            manager = TifProjectManager()
+            project_json = manager.create_project("local_axis_export", project_root)
+            manager.create_specimen_scaffold("01-0101-export")
+            image = np.arange(5 * 6 * 7, dtype=np.uint16).reshape((5, 6, 7))
+            image_rel = "specimens/01-0101-export/working/image.ome.zarr"
+            image_meta = write_volume_sidecar(project_root / image_rel, image, role="working_image")
+            manager.register_working_volume("01-0101-export", image_rel, image_meta["shape_zyx"], image_meta["dtype"], save=False)
+            manager.save_project()
+            part = crop_volume_to_part(manager, "01-0101-export", "head", [[1, 5], [1, 5], [1, 6]], display_name="Head")
+            mask = load_volume_sidecar(project_root / part["mask"]["path"])
+            mask[1:3, 1:3, 1:3] = 1
+            write_volume_sidecar(project_root / part["mask"]["path"], mask, role="part_mask")
+            frame = compute_local_frame(
+                [1.5, 1.5, 2.0],
+                [0.0, 1.5, 2.0],
+                [3.0, 1.5, 2.0],
+                roll_reference={
+                    "point_a": {"role": "left_eye", "zyx": [1.5, 1.0, 1.0]},
+                    "point_b": {"role": "right_eye", "zyx": [1.5, 3.0, 1.0]},
+                },
+                spacing_zyx=[1.0, 1.0, 1.0],
+            )
+
+            result = export_part_reslice(
+                manager,
+                "01-0101-export",
+                "head",
+                {
+                    "reslice_id": "head_axis_001",
+                    "template_id": "head",
+                    "local_frame": frame,
+                    "reslice_params": {"output_shape_zyx": [4, 4, 5]},
+                    "training": {"human_confirmed": True, "usable_for_training": True},
+                },
+            )
+
+            self.assertTrue(Path(result["image_path"]).exists())
+            self.assertTrue(Path(result["mask_path"]).exists())
+            self.assertTrue(Path(result["metadata_path"]).exists())
+            exported_image = tifffile.imread(result["image_path"])
+            exported_mask = tifffile.imread(result["mask_path"])
+            self.assertEqual(exported_image.shape, (4, 4, 5))
+            self.assertEqual(exported_mask.shape, (4, 4, 5))
+            self.assertTrue(np.issubdtype(exported_mask.dtype, np.integer))
+            metadata = json.loads(Path(result["metadata_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(metadata["outputs"]["image_interpolation"], "linear")
+            self.assertEqual(metadata["outputs"]["mask_interpolation"], "nearest")
+            self.assertEqual(metadata["training"]["human_confirmed"], True)
+            self.assertEqual(manager.list_part_reslices("01-0101-export", "head")[0]["reslice_id"], "head_axis_001")
+
+            reloaded = TifProjectManager()
+            reloaded.load_project(project_json)
+            self.assertEqual(reloaded.list_part_reslices("01-0101-export", "head")[0]["metadata_path"], result["record"]["metadata_path"])
+
+    def test_duplicate_reslice_id_is_rejected_before_overwriting_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "duplicate_reslice"
+            manager = TifProjectManager()
+            manager.create_project("duplicate_reslice", project_root)
+            manager.create_specimen_scaffold("01-0101-duplicate")
+            image = np.arange(4 * 5 * 6, dtype=np.uint16).reshape((4, 5, 6))
+            image_rel = "specimens/01-0101-duplicate/working/image.ome.zarr"
+            image_meta = write_volume_sidecar(project_root / image_rel, image, role="working_image")
+            manager.register_working_volume("01-0101-duplicate", image_rel, image_meta["shape_zyx"], image_meta["dtype"], save=False)
+            manager.save_project()
+            crop_volume_to_part(manager, "01-0101-duplicate", "head", [[0, 4], [0, 5], [0, 6]], display_name="Head")
+            frame = compute_local_frame(
+                [1.5, 2.0, 2.5],
+                [0.0, 2.0, 2.5],
+                [3.0, 2.0, 2.5],
+                roll_reference={
+                    "point_a": {"role": "roll_point_a", "zyx": [1.5, 1.0, 2.5]},
+                    "point_b": {"role": "roll_point_b", "zyx": [1.5, 3.0, 2.5]},
+                },
+                spacing_zyx=[1.0, 1.0, 1.0],
+            )
+            first = export_part_reslice(
+                manager,
+                "01-0101-duplicate",
+                "head",
+                {"reslice_id": "axis_001", "template_id": "head", "local_frame": frame, "reslice_params": {"output_shape_zyx": [4, 5, 6]}},
+            )
+            first_image = Path(first["image_path"])
+            first_metadata = Path(first["metadata_path"])
+            image_bytes = first_image.read_bytes()
+            metadata_bytes = first_metadata.read_bytes()
+
+            with self.assertRaisesRegex(FileExistsError, "part_reslice_id_exists"):
+                export_part_reslice(
+                    manager,
+                    "01-0101-duplicate",
+                    "head",
+                    {"reslice_id": "axis_001", "template_id": "head", "local_frame": frame, "reslice_params": {"output_shape_zyx": [2, 2, 2]}},
+                )
+
+            self.assertEqual(first_image.read_bytes(), image_bytes)
+            self.assertEqual(first_metadata.read_bytes(), metadata_bytes)
+            self.assertEqual(len(manager.list_part_reslices("01-0101-duplicate", "head")), 1)
+
+    def test_allow_overwrite_updates_existing_reslice_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "overwrite_reslice"
+            manager = TifProjectManager()
+            manager.create_project("overwrite_reslice", project_root)
+            manager.create_specimen_scaffold("01-0101-overwrite")
+            image = np.arange(4 * 5 * 6, dtype=np.uint16).reshape((4, 5, 6))
+            image_rel = "specimens/01-0101-overwrite/working/image.ome.zarr"
+            image_meta = write_volume_sidecar(project_root / image_rel, image, role="working_image")
+            manager.register_working_volume("01-0101-overwrite", image_rel, image_meta["shape_zyx"], image_meta["dtype"], save=False)
+            manager.save_project()
+            crop_volume_to_part(manager, "01-0101-overwrite", "head", [[0, 4], [0, 5], [0, 6]], display_name="Head")
+            frame = compute_local_frame(
+                [1.5, 2.0, 2.5],
+                [0.0, 2.0, 2.5],
+                [3.0, 2.0, 2.5],
+                roll_reference={
+                    "point_a": {"role": "roll_point_a", "zyx": [1.5, 1.0, 2.5]},
+                    "point_b": {"role": "roll_point_b", "zyx": [1.5, 3.0, 2.5]},
+                },
+                spacing_zyx=[1.0, 1.0, 1.0],
+            )
+            export_part_reslice(
+                manager,
+                "01-0101-overwrite",
+                "head",
+                {"reslice_id": "axis_001", "template_id": "head", "local_frame": frame, "display_name": "First"},
+            )
+            second = export_part_reslice(
+                manager,
+                "01-0101-overwrite",
+                "head",
+                {
+                    "reslice_id": "axis_001",
+                    "template_id": "head",
+                    "local_frame": frame,
+                    "display_name": "Second",
+                    "allow_overwrite": True,
+                    "reslice_params": {"output_shape_zyx": [2, 2, 2]},
+                },
+            )
+
+            self.assertEqual(len(manager.list_part_reslices("01-0101-overwrite", "head")), 1)
+            self.assertEqual(second["record"]["display_name"], "Second")
+            self.assertEqual(tifffile.imread(second["image_path"]).shape, (2, 2, 2))
+
+    def test_export_fills_missing_frame_spacing_from_part_image_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "frame_spacing"
+            manager = TifProjectManager()
+            manager.create_project("frame_spacing", project_root)
+            manager.create_specimen_scaffold("01-0101-spacing")
+            image = np.arange(4 * 5 * 6, dtype=np.uint16).reshape((4, 5, 6))
+            image_rel = "specimens/01-0101-spacing/working/image.ome.zarr"
+            image_meta = write_volume_sidecar(project_root / image_rel, image, role="working_image", spacing_zyx=[2.0, 1.0, 1.0])
+            manager.register_working_volume(
+                "01-0101-spacing",
+                image_rel,
+                image_meta["shape_zyx"],
+                image_meta["dtype"],
+                spacing_zyx=image_meta["spacing_zyx"],
+                save=False,
+            )
+            manager.save_project()
+            crop_volume_to_part(manager, "01-0101-spacing", "head", [[0, 4], [0, 5], [0, 6]], display_name="Head")
+            frame = {
+                "origin_zyx": [1.5, 2.0, 2.5],
+                "x_axis": [0.0, 0.0, 1.0],
+                "y_axis": [0.0, 1.0, 0.0],
+                "z_axis": [1.0, 0.0, 0.0],
+                "output_axis": "z_axis",
+                "coordinate_space": "part_volume_voxel_zyx",
+                "roll_reference": {
+                    "point_a": {"role": "roll_point_a", "zyx": [1.5, 1.0, 2.5]},
+                    "point_b": {"role": "roll_point_b", "zyx": [1.5, 3.0, 2.5]},
+                },
+            }
+
+            result = export_part_reslice(
+                manager,
+                "01-0101-spacing",
+                "head",
+                {"reslice_id": "axis_001", "template_id": "head", "local_frame": frame},
+            )
+
+            self.assertEqual(result["record"]["local_frame"]["spacing_zyx"], [2.0, 1.0, 1.0])
+
+    def test_export_requires_roll_reference_pair_for_final_reslice(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "missing_roll"
+            manager = TifProjectManager()
+            manager.create_project("missing_roll", project_root)
+            manager.create_specimen_scaffold("01-0101-missing-roll")
+            image = np.arange(4 * 5 * 6, dtype=np.uint16).reshape((4, 5, 6))
+            image_rel = "specimens/01-0101-missing-roll/working/image.ome.zarr"
+            image_meta = write_volume_sidecar(project_root / image_rel, image, role="working_image")
+            manager.register_working_volume("01-0101-missing-roll", image_rel, image_meta["shape_zyx"], image_meta["dtype"], save=False)
+            manager.save_project()
+            crop_volume_to_part(manager, "01-0101-missing-roll", "head", [[0, 4], [0, 5], [0, 6]], display_name="Head")
+            frame = compute_local_frame(
+                [1.5, 2.0, 2.5],
+                [0.0, 2.0, 2.5],
+                [3.0, 2.0, 2.5],
+                spacing_zyx=[1.0, 1.0, 1.0],
+            )
+
+            with self.assertRaisesRegex(ValueError, "roll_reference"):
+                export_part_reslice(
+                    manager,
+                    "01-0101-missing-roll",
+                    "head",
+                    {"reslice_id": "axis_without_roll", "template_id": "head", "local_frame": frame},
+                )
+
+    def test_source_z_signal_is_navigation_diagnostic_only(self):
+        volume = np.zeros((6, 5, 5), dtype=np.uint8)
+        volume[2:4, 1:4, 1:4] = 20
+
+        signal = compute_source_z_signal(volume)
+        summary = analyze_source_z_signal(signal)
+
+        self.assertEqual(signal["role"], "navigation_diagnostic_only")
+        self.assertEqual(signal["axis"], "source_z")
+        self.assertIn("source_z_signal_is_auxiliary_navigation_only", summary["warnings"])
+        self.assertIn(summary["peak_slice"], {2, 3})
+        self.assertIn("not an anatomical direction decision", summary["message"])
+
+
+if __name__ == "__main__":
+    unittest.main()

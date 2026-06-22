@@ -55,6 +55,17 @@ DEFAULT_CONFIG = {
         "model_manifest": "",
         "export_formats": "ome_tiff,nrrd,mha,nifti",
     },
+    "tif_local_axis_backend": {
+        "backend_id": "external_local_axis",
+        "display_name": "Local Axis Backend",
+        "python_executable": "python",
+        "prepare_dataset_command": "",
+        "train_command": "",
+        "predict_command": "",
+        "predict_global_roi_command": "",
+        "predict_local_frame_command": "",
+        "model_manifest": "",
+    },
     
     # Inference Hyperparameters
     "inf_conf_thresh": 0.1,    # Minimum heatmap peak value (0.0 - 1.0)

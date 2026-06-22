@@ -520,6 +520,141 @@ class TifProjectTests(unittest.TestCase):
 
             self.assertEqual(manager.list_parts("01-0101-orphan"), [])
 
+    def test_local_axis_records_round_trip_under_specimen_and_part(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "local_axis_records"
+            manager = TifProjectManager()
+            project_json = manager.create_project("local_axis_records", project_root)
+            manager.create_specimen_scaffold("01-0101-local")
+            manager.add_part("01-0101-local", "head", parent_bbox_zyx=[[1, 5], [2, 6], [3, 7]], save=False)
+
+            global_proposal = manager.add_global_axis_proposal(
+                "01-0101-local",
+                {
+                    "global_proposal_id": "roi_001",
+                    "template_id": "head",
+                    "bbox_zyx": [1, 2, 3, 5, 6, 7],
+                    "center_zyx": [3.0, 4.0, 5.0],
+                    "confidence": 0.8,
+                    "status": "proposed",
+                },
+                save=False,
+            )
+            frame_proposal = manager.add_local_frame_proposal(
+                "01-0101-local",
+                "head",
+                {
+                    "frame_proposal_id": "frame_001",
+                    "template_id": "head",
+                    "origin_zyx": [2.0, 2.0, 2.0],
+                    "output_axis_start_zyx": [0.0, 2.0, 2.0],
+                    "output_axis_end_zyx": [4.0, 2.0, 2.0],
+                    "roll_reference": {
+                        "point_a": {"role": "left_eye", "zyx": [2.0, 1.0, 1.0]},
+                        "point_b": {"role": "right_eye", "zyx": [2.0, 3.0, 1.0]},
+                    },
+                    "confidence": 0.7,
+                },
+                save=False,
+            )
+            reslice = manager.add_part_reslice(
+                "01-0101-local",
+                "head",
+                {
+                    "reslice_id": "head_axis_001",
+                    "template_id": "head",
+                    "image_path": "specimens/01-0101-local/parts/head/reslices/head_axis_001/image.tif",
+                    "metadata_path": "specimens/01-0101-local/parts/head/reslices/head_axis_001/metadata.json",
+                    "local_frame": {
+                        "origin_zyx": [2.0, 2.0, 2.0],
+                        "x_axis": [0.0, 1.0, 0.0],
+                        "y_axis": [0.0, 0.0, 1.0],
+                        "z_axis": [1.0, 0.0, 0.0],
+                        "output_axis": "z_axis",
+                        "spacing_zyx": [2.0, 1.0, 1.0],
+                        "coordinate_space": "part_volume_voxel_zyx",
+                    },
+                    "training": {"human_confirmed": True, "usable_for_training": True},
+                },
+                save=False,
+            )
+            model = manager.register_local_axis_model(
+                {
+                    "model_id": "local_axis/head_frame_v1",
+                    "template_id": "head",
+                    "model_type": "local_frame",
+                    "backend_type": "external_local_axis",
+                    "model_manifest": "models/head_frame_v1/manifest.json",
+                },
+                save=False,
+            )
+            run = manager.add_local_axis_run(
+                {
+                    "run_id": "predict_001",
+                    "action": "predict_local_frame",
+                    "model_id": model["model_id"],
+                    "specimen_ids": ["01-0101-local"],
+                    "part_ids": ["head"],
+                    "result_status": "success",
+                },
+                save=True,
+            )
+
+            reloaded = TifProjectManager()
+            reloaded.load_project(project_json)
+
+            self.assertEqual(global_proposal["bbox_zyx"], [[1, 5], [2, 6], [3, 7]])
+            self.assertEqual(reloaded.list_global_axis_proposals("01-0101-local")[0]["global_proposal_id"], "roi_001")
+            self.assertEqual(frame_proposal["status"], "proposed")
+            self.assertEqual(reloaded.list_local_frame_proposals("01-0101-local", "head")[0]["frame_proposal_id"], "frame_001")
+            self.assertEqual(reslice["training"]["human_confirmed"], True)
+            reloaded_reslice = reloaded.list_part_reslices("01-0101-local", "head")[0]
+            self.assertEqual(reloaded_reslice["reslice_id"], "head_axis_001")
+            self.assertEqual(reloaded_reslice["local_frame"]["spacing_zyx"], [2.0, 1.0, 1.0])
+            self.assertEqual(reloaded_reslice["local_frame"]["coordinate_space"], "part_volume_voxel_zyx")
+            self.assertEqual(run["workflow"], "tif_local_axis")
+            self.assertEqual(reloaded.project_data["models"][0]["model_id"], "local_axis/head_frame_v1")
+            self.assertEqual(reloaded.project_data["runs"][0]["run_id"], "predict_001")
+            self.assertEqual(reloaded.list_local_axis_models()[0]["model_id"], "local_axis/head_frame_v1")
+            self.assertEqual(reloaded.get_local_axis_model("local_axis/head_frame_v1")["model_type"], "local_frame")
+            self.assertEqual(reloaded.list_local_axis_runs()[0]["run_id"], "predict_001")
+            self.assertEqual(reloaded.get_local_axis_run("predict_001")["action"], "predict_local_frame")
+
+    def test_non_local_axis_models_and_runs_survive_project_reload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "legacy_backend_records"
+            manager = TifProjectManager()
+            project_json = manager.create_project("legacy_backend_records", project_root)
+            manager.project_data["models"].append(
+                {
+                    "model_manifest": "runs/train/model_manifest.json",
+                    "backend_id": "nnunet_backend",
+                    "run_id": "train_001",
+                    "input_contract": {"image": "volume"},
+                    "output_contract": {"prediction": "mask"},
+                }
+            )
+            manager.project_data["runs"].append(
+                {
+                    "run_id": "train_001",
+                    "action": "train",
+                    "backend_id": "nnunet_backend",
+                    "run_dir": "runs/train/train_001",
+                    "result_status": "success",
+                }
+            )
+            manager.save_project()
+
+            reloaded = TifProjectManager()
+            reloaded.load_project(project_json)
+
+            self.assertNotIn("profile_scope", reloaded.project_data["models"][0])
+            self.assertEqual(reloaded.project_data["models"][0]["backend_id"], "nnunet_backend")
+            self.assertNotIn("workflow", reloaded.project_data["runs"][0])
+            self.assertEqual(reloaded.project_data["runs"][0]["action"], "train")
+            self.assertEqual(reloaded.list_local_axis_models(), [])
+            self.assertEqual(reloaded.list_local_axis_runs(), [])
+
 
 if __name__ == "__main__":
     unittest.main()

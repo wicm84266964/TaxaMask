@@ -59,6 +59,9 @@ try:
     from AntSleap.core.tif_project import TifProjectManager
     from AntSleap.core.tif_stack_import import import_tif_stack
     from AntSleap.core.tif_volume_io import create_empty_label_sidecar_like, flush_volume_array, load_volume_sidecar, volume_sidecar_exists
+    from AntSleap.ui.tif_local_axis_model_panel import TifLocalAxisModelDialog
+    from AntSleap.ui.tif_local_axis_reslice_page import TifLocalAxisResliceDialog
+    from AntSleap.ui.tif_local_axis_review_queue import TifLocalAxisReviewQueueWidget
     from AntSleap.ui.tif_gpu_volume_canvas import (
         GPU_VOLUME_MAX_RAY_STEPS,
         GPU_VOLUME_MAX_TEXTURE_DIM,
@@ -94,6 +97,9 @@ except ModuleNotFoundError as exc:
     from core.tif_project import TifProjectManager
     from core.tif_stack_import import import_tif_stack
     from core.tif_volume_io import create_empty_label_sidecar_like, flush_volume_array, load_volume_sidecar, volume_sidecar_exists
+    from ui.tif_local_axis_model_panel import TifLocalAxisModelDialog
+    from ui.tif_local_axis_reslice_page import TifLocalAxisResliceDialog
+    from ui.tif_local_axis_review_queue import TifLocalAxisReviewQueueWidget
     from ui.tif_gpu_volume_canvas import (
         GPU_VOLUME_MAX_RAY_STEPS,
         GPU_VOLUME_MAX_TEXTURE_DIM,
@@ -158,6 +164,9 @@ TIF_TRANSLATIONS = {
         "Tone curve": "明暗曲线",
         "Surface refine": "表面精修",
         "Clip plane": "任意剖切面",
+        "Show local axes": "显示局部轴",
+        "source Z": "原始 Z",
+        "output Z": "输出 Z",
         "Clip depth": "剖切深度",
         "View aligned": "按当前视角",
         "Drag preview": "拖动预览",
@@ -205,6 +214,7 @@ TIF_TRANSLATIONS = {
         "Adjusts display gamma for 3D rendering. Lower values brighten faint structures; higher values keep dense regions calmer.": "调整三维渲染的显示曲线。调低会提亮弱结构，调高会让高密度区域更克制。",
         "Refines first surface hits in Surface mode while still. It improves contour stability without affecting Composite rendering.": "静止且使用表面边界模式时精修首次命中位置，让轮廓更稳定；不影响透明累积模式。",
         "Enables a view-aligned GPU clipping plane. It only cuts the display, not the saved TIF, mask, or training data.": "启用按当前视角对齐的 GPU 剖切面。它只切开屏幕显示，不会修改已保存的 TIF、Mask 或训练数据。",
+        "Shows the locked source Z axis and the selected local output axis on the 3D part preview. This is display-only and does not edit data.": "在三维部位预览中显示锁定的原始 Z 轴和当前选中局部输出轴。这个开关只影响显示，不修改数据。",
         "Moves the clipping plane through the current 3D view. Use it to peel away outer tissue and inspect inside structures.": "沿当前三维视角移动剖切面。可用于剥开外层组织观察内部结构。",
         "Shows accepted or preview part masks in the 3D view. Boundary is best for checking extraction edges; masked image hides voxels outside the mask.": "在三维视图中显示已接受或预览中的部位 Mask。边界模式适合检查切除轮廓，只看 Mask 内图像会隐藏 Mask 外体素。",
         "Controls how strongly mask boundaries are blended into the 3D inspection view.": "控制 Mask 边界叠加到三维观察视图中的强度。",
@@ -257,6 +267,7 @@ TIF_TRANSLATIONS = {
         "Full volume": "整只体数据",
         "Part volume": "部位体数据",
         "Part": "部位",
+        "Reslices": "重切片",
         "Parent specimen": "父标本",
         "Current view": "当前视图",
         "Parent bbox Z/Y/X": "父体 bbox Z/Y/X",
@@ -283,6 +294,9 @@ TIF_TRANSLATIONS = {
         "Preview auto fill": "预览自动填充",
         "Accept part mask": "接受部位 mask",
         "Clear preview": "清除预览",
+        "Local Axis Reslice": "局部轴重切片",
+        "Review Local Axis Queue": "复核局部轴队列",
+        "Local Axis Models": "局部轴模型",
         "Export part package": "导出部位包",
         "Delete part volume": "删除部位体数据",
         "Delete part volume?": "删除部位体数据？",
@@ -316,6 +330,31 @@ TIF_TRANSLATIONS = {
         "Review warnings": "有提示，请复核",
         "Exported part package.\nManifest: {0}": "已导出部位包。\nManifest：{0}",
         "Exported part package.\nFolder: {0}\nManifest: {1}": "已导出部位包。\n文件夹：{0}\nManifest：{1}",
+        "Define a part-local output axis and roll reference, then export a reviewable local reslice.": "定义部位内输出轴和 roll 参照点，然后导出可复核的局部重切片。",
+        "Copied source Z axis as editable output axis.": "已从原始 Z 轴复制可编辑输出轴。",
+        "Select a part volume before opening Local Axis Reslice.": "请先选择一个部位体数据，再打开局部轴重切片。",
+        "Local Axis model and proposal tools": "局部轴模型与建议项工具",
+        "Copy source Z axis": "复制原始 Z 轴",
+        "Export reslice": "导出重切片",
+        "Reslice ID": "重切片编号",
+        "Template": "模板",
+        "Origin z,y,x": "中心点 z,y,x",
+        "Output axis start z,y,x": "输出轴起点 z,y,x",
+        "Output axis end z,y,x": "输出轴终点 z,y,x",
+        "Roll point A role": "Roll 点 A 角色",
+        "Roll point A z,y,x": "Roll 点 A z,y,x",
+        "Roll point B role": "Roll 点 B 角色",
+        "Roll point B z,y,x": "Roll 点 B z,y,x",
+        "Output shape z,y,x": "输出尺寸 z,y,x",
+        "Image": "图像",
+        "Metadata": "元数据",
+        "Output shape Z/Y/X": "输出尺寸 Z/Y/X",
+        "Human confirmed": "人工已确认",
+        "Usable for training": "可用于训练",
+        "Hard case flags": "困难样本标记",
+        "Source proposal": "来源建议项",
+        "Model version": "模型版本",
+        "Exported local axis reslice {0}.": "已导出局部轴重切片 {0}。",
         "Select a part volume before exporting a part package.": "请先选择一个部位体数据，再导出部位包。",
         "Created part {0} from bbox {1}.": "已按 bbox {1} 新建部位 {0}。",
         "Added rectangular key slice at Z {0}.": "已在 Z={0} 添加矩形关键切片。",
@@ -478,6 +517,27 @@ class MaterialEditorDialog(QDialog):
             "trainable": bool(self.trainable_check.isChecked() and material_id != 0),
             "source_name": display_name,
         }
+
+
+class TifPartNameDialog(QDialog):
+    def __init__(self, title, part_id="", display_name="", parent=None, lang="en", id_label="Part ID:"):
+        super().__init__(parent)
+        self.lang = lang
+        self.setWindowTitle(tt(title, self.lang))
+        layout = QFormLayout(self)
+        self.part_id_edit = QLineEdit(str(part_id or ""))
+        self.display_name_edit = QLineEdit(str(display_name or part_id or ""))
+        layout.addRow(tt(id_label, self.lang), self.part_id_edit)
+        layout.addRow(tt("Display name:", self.lang), self.display_name_edit)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addRow(buttons)
+
+    def values(self):
+        part_id = self.part_id_edit.text().strip()
+        display_name = self.display_name_edit.text().strip() or part_id
+        return part_id, display_name
 
 
 class WheelSafeComboBox(QComboBox):
@@ -914,6 +974,11 @@ class TifVolumeCanvas(QLabel):
         self.workbench = None
         self._mouse_mode = ""
         self._last_drag_pos = None
+        self._axis_overlays = []
+
+    def set_axis_overlays(self, overlays):
+        self._axis_overlays = list(overlays or [])
+        self.update()
 
     def set_volume_pixmap(self, pixmap):
         if pixmap is None or pixmap.isNull():
@@ -932,6 +997,7 @@ class TifVolumeCanvas(QLabel):
         y = int(round((composed.height() - scaled.height()) / 2.0))
         painter.drawPixmap(x, y, scaled)
         self._draw_status_overlay(painter)
+        self._draw_axis_overlays(painter)
         painter.end()
         self.setPixmap(composed)
 
@@ -956,6 +1022,31 @@ class TifVolumeCanvas(QLabel):
         painter.fillRect(rect, QColor(7, 9, 10, 190))
         painter.setPen(QColor("#DCE4E8"))
         painter.drawText(rect.adjusted(8, 4, -8, -4), Qt.AlignLeft | Qt.AlignVCenter, text)
+        painter.restore()
+
+    def _draw_axis_overlays(self, painter):
+        if not self._axis_overlays:
+            return
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        font = painter.font()
+        font.setPointSize(9)
+        painter.setFont(font)
+        for overlay in self._axis_overlays:
+            start = overlay.get("start_xy")
+            end = overlay.get("end_xy")
+            if not start or not end:
+                continue
+            color = QColor(str(overlay.get("color") or "#FFB84D"))
+            painter.setPen(QPen(color, int(overlay.get("width", 2))))
+            x0, y0 = float(start[0]), float(start[1])
+            x1, y1 = float(end[0]), float(end[1])
+            painter.drawLine(int(round(x0)), int(round(y0)), int(round(x1)), int(round(y1)))
+            painter.drawEllipse(int(round(x0 - 4)), int(round(y0 - 4)), 8, 8)
+            painter.drawEllipse(int(round(x1 - 4)), int(round(y1 - 4)), 8, 8)
+            label = str(overlay.get("label") or "")
+            if label:
+                painter.drawText(int(round(x1 + 6)), int(round(y1 - 6)), label)
         painter.restore()
 
     def mousePressEvent(self, event):
@@ -1073,6 +1164,7 @@ class TifWorkbenchWidget(QWidget):
         self.current_volume_scope = "full"
         self.current_part_id = ""
         self.current_part = None
+        self.current_reslice_id = ""
         self.part_preview_mask = None
         self.part_roi_draw_mode = False
         self.part_contour_draw_mode = False
@@ -1232,6 +1324,10 @@ class TifWorkbenchWidget(QWidget):
         self.volume_clip_plane_check.setObjectName("tifVolumeClipPlaneCheck")
         self.volume_clip_plane_check.setChecked(False)
         self.volume_clip_plane_check.toggled.connect(self._on_volume_clip_plane_changed)
+        self.volume_local_axes_check = QCheckBox("Show local axes")
+        self.volume_local_axes_check.setObjectName("tifVolumeLocalAxesCheck")
+        self.volume_local_axes_check.setChecked(False)
+        self.volume_local_axes_check.toggled.connect(self.render_volume_preview)
         self.volume_clip_plane_depth_slider = WheelSafeSlider(Qt.Horizontal)
         self.volume_clip_plane_depth_slider.setObjectName("tifVolumeClipPlaneDepthSlider")
         self.volume_clip_plane_depth_slider.setRange(0, 100)
@@ -1356,6 +1452,15 @@ class TifWorkbenchWidget(QWidget):
         self.btn_clear_part_preview = QPushButton("Clear preview")
         self.btn_clear_part_preview.setObjectName("tifClearPartPreviewButton")
         self.btn_clear_part_preview.clicked.connect(self.clear_part_mask_preview)
+        self.btn_local_axis_reslice = QPushButton("Local Axis Reslice")
+        self.btn_local_axis_reslice.setObjectName("tifLocalAxisResliceButton")
+        self.btn_local_axis_reslice.clicked.connect(self.open_local_axis_reslice_dialog)
+        self.btn_local_axis_queue = QPushButton("Review Local Axis Queue")
+        self.btn_local_axis_queue.setObjectName("tifLocalAxisQueueButton")
+        self.btn_local_axis_queue.clicked.connect(self.open_local_axis_review_queue)
+        self.btn_local_axis_models = QPushButton("Local Axis Models")
+        self.btn_local_axis_models.setObjectName("tifLocalAxisModelsButton")
+        self.btn_local_axis_models.clicked.connect(self.open_local_axis_model_dialog)
         self.btn_export_part_package = QPushButton("Export part package")
         self.btn_export_part_package.setObjectName("tifExportPartPackageButton")
         self.btn_export_part_package.clicked.connect(self.export_current_part_package)
@@ -1441,10 +1546,13 @@ class TifWorkbenchWidget(QWidget):
             self.btn_train_backend,
             self.btn_import_prediction,
             self.btn_import_external_prediction_tif,
+            self.btn_local_axis_models,
             self.btn_promote,
             self.btn_create_part,
             self.btn_preview_part_mask,
             self.btn_accept_part_mask,
+            self.btn_local_axis_reslice,
+            self.btn_local_axis_queue,
             self.btn_export_part_package,
         ]
         secondary_buttons = [
@@ -1658,6 +1766,7 @@ class TifWorkbenchWidget(QWidget):
         self.volume_tone_label.setText(tt("Tone curve", self.lang))
         self.volume_surface_refine_check.setText(tt("Surface refine", self.lang))
         self.volume_clip_plane_check.setText(tt("Clip plane", self.lang))
+        self.volume_local_axes_check.setText(tt("Show local axes", self.lang))
         self.volume_clip_plane_depth_label.setText(tt("Clip depth", self.lang))
         self.volume_mask_label.setText(tt("Mask display", self.lang))
         self.volume_mask_opacity_label.setText(tt("Mask opacity", self.lang))
@@ -1693,6 +1802,9 @@ class TifWorkbenchWidget(QWidget):
         self.btn_accept_part_mask.setText(tt("Accept part mask", self.lang))
         self.btn_clear_part_preview.setText(tt("Clear preview", self.lang))
         self.btn_export_part_package.setText(tt("Export part package", self.lang))
+        self.btn_local_axis_reslice.setText(tt("Local Axis Reslice", self.lang))
+        self.btn_local_axis_queue.setText(tt("Review Local Axis Queue", self.lang))
+        self.btn_local_axis_models.setText(tt("Local Axis Models", self.lang))
         self.btn_delete_part_volume.setText(tt("Delete part volume", self.lang))
         self.btn_undo.setText(tt("Undo", self.lang))
         self.btn_redo.setText(tt("Redo", self.lang))
@@ -1775,6 +1887,11 @@ class TifWorkbenchWidget(QWidget):
                 self.volume_clip_plane_check,
                 self.volume_clip_plane_check,
                 "Enables a view-aligned GPU clipping plane. It only cuts the display, not the saved TIF, mask, or training data.",
+            ),
+            (
+                self.volume_local_axes_check,
+                self.volume_local_axes_check,
+                "Shows the locked source Z axis and the selected local output axis on the 3D part preview. This is display-only and does not edit data.",
             ),
             (
                 self.volume_clip_plane_depth_label,
@@ -1907,8 +2024,8 @@ class TifWorkbenchWidget(QWidget):
             "volume_uploaded_gb": f"{float(volume_perf.get('uploaded_gb', 0.0)):.2f}",
             "volume_upload_ms": f"{float(volume_perf.get('upload_ms', 0.0)):.0f}",
             "volume_draw_ms": f"{float(volume_perf.get('draw_ms', 0.0)):.1f}",
-            "tif_next_requirement": "brain_orientation_reslice: standardize ant brain/head volumes by dorsal head-top axis upward, fix anterior-posterior axis, crop brain-only volume, and export resampled image/label volumes for AI training or internal-structure analysis.",
-            "tif_requirement_doc": "docs/ant3d_workbench/TIF脑部统一朝向重切片需求_zh.md",
+            "tif_next_requirement": "local_axis_reslice: define a part-local output axis plus roll reference, preview/export local resliced image and optional mask, and keep accepted records usable as training data.",
+            "tif_requirement_doc": "docs/designs/2026-06-20_AntScan局部轴重切片合并设计稿.md",
             "recent_log_excerpt": recent_log,
         }
 
@@ -2593,21 +2710,18 @@ class TifWorkbenchWidget(QWidget):
         if self.active_part_roi_id:
             roi = self.project.update_part_roi(self.current_specimen_id, self.active_part_roi_id, bbox_zyx=bbox, status="draft")
         else:
-            roi_id, ok = QInputDialog.getText(
-                self,
-                tt("Save ROI draft", self.lang),
-                tt("ROI ID:", self.lang),
-                text=self._default_roi_id(),
+            dialog = TifPartNameDialog(
+                "Save ROI draft",
+                part_id=self._default_roi_id(),
+                display_name=self._default_roi_id(),
+                parent=self,
+                lang=self.lang,
+                id_label="ROI ID:",
             )
-            if not ok or not str(roi_id).strip():
+            if dialog.exec() != QDialog.Accepted:
                 return None
-            display_name, ok = QInputDialog.getText(
-                self,
-                tt("Save ROI draft", self.lang),
-                tt("Display name:", self.lang),
-                text=str(roi_id).strip(),
-            )
-            if not ok:
+            roi_id, display_name = dialog.values()
+            if not str(roi_id).strip():
                 return None
             try:
                 roi = self.project.add_part_roi(
@@ -2633,35 +2747,44 @@ class TifWorkbenchWidget(QWidget):
             QMessageBox.information(self, tt("Part extraction", self.lang), tt("Switch to Full volume before confirming ROI.", self.lang))
             return
         roi = self.project.get_part_roi(self.current_specimen_id, self.active_part_roi_id, default=None) if self.active_part_roi_id else None
-        if roi is None:
-            roi = self.save_part_roi_draft()
-        if roi is None:
+        if roi is not None:
+            bbox = roi.get("bbox_zyx", [])
+            default_part_id = str(roi.get("roi_id", "")).replace("_roi", "") or f"part_{len(self.project.list_parts(self.current_specimen_id)) + 1}"
+            default_display_name = str(roi.get("display_name") or default_part_id)
+        else:
+            try:
+                bbox = self._clip_bbox_to_shape(self._parse_part_bbox_text(), self.image_volume.shape)
+            except Exception as exc:
+                QMessageBox.warning(self, tt("Part extraction", self.lang), str(exc))
+                return
+            default_part_id = f"part_{len(self.project.list_parts(self.current_specimen_id)) + 1}"
+            default_display_name = default_part_id
+        if not bbox:
             return
-        part_id, ok = QInputDialog.getText(
-            self,
-            tt("Confirm ROI", self.lang),
-            tt("Part ID:", self.lang),
-            text=str(roi.get("roi_id", "")).replace("_roi", "") or f"part_{len(self.project.list_parts(self.current_specimen_id)) + 1}",
+        dialog = TifPartNameDialog(
+            "Confirm ROI",
+            part_id=default_part_id,
+            display_name=default_display_name,
+            parent=self,
+            lang=self.lang,
         )
-        if not ok or not str(part_id).strip():
+        if dialog.exec() != QDialog.Accepted:
             return
-        display_name, ok = QInputDialog.getText(
-            self,
-            tt("Confirm ROI", self.lang),
-            tt("Display name:", self.lang),
-            text=str(roi.get("display_name") or part_id),
-        )
-        if not ok:
+        part_id, display_name = dialog.values()
+        if not part_id:
             return
         try:
-            part = crop_volume_to_part(self.project, self.current_specimen_id, part_id, roi.get("bbox_zyx", []), display_name=display_name or part_id)
-            self.project.update_part_roi(
-                self.current_specimen_id,
-                roi.get("roi_id", ""),
-                status="part_created",
-                linked_part_id=part.get("part_id", ""),
-                save=True,
-            )
+            part = crop_volume_to_part(self.project, self.current_specimen_id, part_id, bbox, display_name=display_name or part_id)
+            if roi is not None:
+                self.project.update_part_roi(
+                    self.current_specimen_id,
+                    roi.get("roi_id", ""),
+                    status="part_created",
+                    linked_part_id=part.get("part_id", ""),
+                    save=True,
+                )
+            else:
+                self._ensure_roi_for_created_part(part, bbox, display_name=display_name or part_id)
         except Exception as exc:
             QMessageBox.warning(self, tt("Part extraction", self.lang), str(exc))
             return
@@ -2797,21 +2920,18 @@ class TifWorkbenchWidget(QWidget):
         if self.current_volume_scope != "full" or not self.current_specimen_id or self.image_volume is None:
             QMessageBox.information(self, tt("Part extraction", self.lang), tt("Switch to Full volume before creating a part.", self.lang))
             return
-        part_id, ok = QInputDialog.getText(
-            self,
-            tt("Create part", self.lang),
-            tt("Part ID:", self.lang),
-            text=f"part_{len(self.project.list_parts(self.current_specimen_id)) + 1}",
+        default_part_id = f"part_{len(self.project.list_parts(self.current_specimen_id)) + 1}"
+        dialog = TifPartNameDialog(
+            "Create part",
+            part_id=default_part_id,
+            display_name=default_part_id,
+            parent=self,
+            lang=self.lang,
         )
-        if not ok or not str(part_id).strip():
+        if dialog.exec() != QDialog.Accepted:
             return
-        display_name, ok = QInputDialog.getText(
-            self,
-            tt("Create part", self.lang),
-            tt("Display name:", self.lang),
-            text=str(part_id).strip(),
-        )
-        if not ok:
+        part_id, display_name = dialog.values()
+        if not part_id:
             return
         try:
             bbox = self._clip_bbox_to_shape(self._parse_part_bbox_text(), self.image_volume.shape)
@@ -3371,6 +3491,8 @@ class TifWorkbenchWidget(QWidget):
         self.part_task_layout.addWidget(self.part_mask_section)
 
         self.part_output_section, part_output_layout = self._make_section("3. Output and manage", "tifPartOutputSection")
+        part_output_layout.addWidget(self.btn_local_axis_reslice)
+        part_output_layout.addWidget(self.btn_local_axis_queue)
         part_output_layout.addWidget(self.btn_export_part_package)
         part_output_layout.addWidget(self.btn_delete_part_volume)
         self.part_task_layout.addWidget(self.part_output_section)
@@ -3427,24 +3549,25 @@ class TifWorkbenchWidget(QWidget):
         volume_controls.addWidget(self.volume_mask_combo, 5, 1)
         volume_controls.addWidget(self.volume_mask_opacity_label, 6, 0)
         volume_controls.addWidget(self.volume_mask_opacity_slider, 6, 1)
-        volume_controls.addWidget(self.volume_cutoff_label, 7, 0)
-        volume_controls.addWidget(self.volume_cutoff_slider, 7, 1)
-        volume_controls.addWidget(self.volume_quality_label, 8, 0)
-        volume_controls.addWidget(self.volume_quality_slider, 8, 1)
-        volume_controls.addWidget(self.volume_sample_label, 9, 0)
-        volume_controls.addWidget(self.volume_sample_slider, 9, 1)
-        volume_controls.addWidget(self.volume_clarity_check, 10, 0, 1, 2)
-        volume_controls.addWidget(self.volume_surface_refine_check, 11, 0, 1, 2)
-        volume_controls.addWidget(self.volume_roi_detail_check, 12, 0, 1, 2)
-        volume_controls.addWidget(self.volume_roi_scale_label, 13, 0)
-        volume_controls.addWidget(self.volume_roi_scale_slider, 13, 1)
-        volume_controls.addWidget(self.volume_clip_plane_check, 14, 0, 1, 2)
-        volume_controls.addWidget(self.volume_clip_plane_depth_label, 15, 0)
-        volume_controls.addWidget(self.volume_clip_plane_depth_slider, 15, 1)
-        volume_controls.addWidget(self.volume_inside_label, 16, 0)
-        volume_controls.addWidget(self.volume_inside_slider, 16, 1)
-        volume_controls.addWidget(self.volume_clip_label, 17, 0)
-        volume_controls.addWidget(self.volume_clip_slider, 17, 1)
+        volume_controls.addWidget(self.volume_local_axes_check, 7, 0, 1, 2)
+        volume_controls.addWidget(self.volume_cutoff_label, 8, 0)
+        volume_controls.addWidget(self.volume_cutoff_slider, 8, 1)
+        volume_controls.addWidget(self.volume_quality_label, 9, 0)
+        volume_controls.addWidget(self.volume_quality_slider, 9, 1)
+        volume_controls.addWidget(self.volume_sample_label, 10, 0)
+        volume_controls.addWidget(self.volume_sample_slider, 10, 1)
+        volume_controls.addWidget(self.volume_clarity_check, 11, 0, 1, 2)
+        volume_controls.addWidget(self.volume_surface_refine_check, 12, 0, 1, 2)
+        volume_controls.addWidget(self.volume_roi_detail_check, 13, 0, 1, 2)
+        volume_controls.addWidget(self.volume_roi_scale_label, 14, 0)
+        volume_controls.addWidget(self.volume_roi_scale_slider, 14, 1)
+        volume_controls.addWidget(self.volume_clip_plane_check, 15, 0, 1, 2)
+        volume_controls.addWidget(self.volume_clip_plane_depth_label, 16, 0)
+        volume_controls.addWidget(self.volume_clip_plane_depth_slider, 16, 1)
+        volume_controls.addWidget(self.volume_inside_label, 17, 0)
+        volume_controls.addWidget(self.volume_inside_slider, 17, 1)
+        volume_controls.addWidget(self.volume_clip_label, 18, 0)
+        volume_controls.addWidget(self.volume_clip_slider, 18, 1)
         volume_render_layout.addLayout(volume_controls)
         volume_render_layout.addWidget(self.btn_reset_volume_view)
         self.display_task_layout.addWidget(self.volume_render_section)
@@ -3487,6 +3610,7 @@ class TifWorkbenchWidget(QWidget):
         backend_button_row.addWidget(self.btn_import_prediction)
         training_layout.addLayout(backend_button_row)
         training_layout.addWidget(self.btn_import_external_prediction_tif)
+        training_layout.addWidget(self.btn_local_axis_models)
         training_layout.addWidget(self.training_status_label)
         self.training_task_layout.addWidget(training_section)
 
@@ -3880,6 +4004,29 @@ class TifWorkbenchWidget(QWidget):
                     Qt.UserRole,
                     {"scope": "part", "specimen_id": specimen_id, "part_id": part.get("part_id", "")},
                 )
+                reslices = ((part.get("metadata") or {}).get("local_axis_reslices", []) or [])
+                if reslices:
+                    reslices_item = QTreeWidgetItem([tt("Reslices", self.lang)])
+                    reslices_item.setData(
+                        0,
+                        Qt.UserRole,
+                        {"scope": "part_reslices", "specimen_id": specimen_id, "part_id": part.get("part_id", "")},
+                    )
+                    part_item.addChild(reslices_item)
+                    for reslice in reslices:
+                        reslice_item = QTreeWidgetItem([self._format_reslice_label(reslice)])
+                        reslice_item.setData(
+                            0,
+                            Qt.UserRole,
+                            {
+                                "scope": "part_reslice",
+                                "specimen_id": specimen_id,
+                                "part_id": part.get("part_id", ""),
+                                "reslice_id": reslice.get("reslice_id", ""),
+                            },
+                        )
+                        reslices_item.addChild(reslice_item)
+                    part_item.setExpanded(True)
                 parent.addChild(part_item)
             self.specimen_list.addTopLevelItem(parent)
         self.specimen_list.blockSignals(False)
@@ -3891,6 +4038,7 @@ class TifWorkbenchWidget(QWidget):
             self.current_volume_scope = "full"
             self.current_part_id = ""
             self.current_part = None
+            self.current_reslice_id = ""
             self.canvas.setText(tt("No specimens in this TIF project", self.lang))
             self.status_label.setText("")
             self.metadata_label.setText("")
@@ -3905,6 +4053,11 @@ class TifWorkbenchWidget(QWidget):
         name = str((part or {}).get("display_name") or (part or {}).get("part_id") or tt("Part volume", self.lang))
         return f"{name} ({status})"
 
+    def _format_reslice_label(self, reslice):
+        name = str((reslice or {}).get("display_name") or (reslice or {}).get("reslice_id") or "reslice")
+        status = str((reslice or {}).get("status") or "exported")
+        return f"{name} ({status})"
+
     def _tree_item_payload(self, item):
         payload = item.data(0, Qt.UserRole) if item is not None else {}
         if isinstance(payload, dict):
@@ -3912,12 +4065,13 @@ class TifWorkbenchWidget(QWidget):
                 "scope": payload.get("scope", "full"),
                 "specimen_id": payload.get("specimen_id", ""),
                 "part_id": payload.get("part_id", ""),
+                "reslice_id": payload.get("reslice_id", ""),
             }
-        return {"scope": "full", "specimen_id": str(payload or ""), "part_id": ""}
+        return {"scope": "full", "specimen_id": str(payload or ""), "part_id": "", "reslice_id": ""}
 
     def _select_volume_tree_item(self, specimen_id="", scope="full", part_id=""):
         target_specimen = str(specimen_id or "").strip()
-        target_scope = "part" if scope == "part" else "full"
+        target_scope = "part_reslice" if scope == "part_reslice" else ("part" if scope in {"part", "part_reslices"} else "full")
         target_part = str(part_id or "").strip()
         fallback = None
         for row in range(self.specimen_list.topLevelItemCount()):
@@ -3936,6 +4090,13 @@ class TifWorkbenchWidget(QWidget):
                 child = parent.child(child_index)
                 payload = self._tree_item_payload(child)
                 if payload.get("scope") == "part" and payload.get("part_id") == target_part:
+                    if target_scope == "part_reslice":
+                        for group_index in range(child.childCount()):
+                            group = child.child(group_index)
+                            group_payload = self._tree_item_payload(group)
+                            if group_payload.get("scope") == "part_reslices" and group.childCount():
+                                self.specimen_list.setCurrentItem(group.child(0))
+                                return True
                     self.specimen_list.setCurrentItem(child)
                     return True
         if fallback is not None and not target_specimen:
@@ -3958,8 +4119,8 @@ class TifWorkbenchWidget(QWidget):
                 return
         payload = self._tree_item_payload(current)
         specimen_id = payload.get("specimen_id", "")
-        if payload.get("scope") == "part":
-            self.load_part(specimen_id, payload.get("part_id", ""))
+        if payload.get("scope") in {"part", "part_reslices", "part_reslice"}:
+            self.load_part(specimen_id, payload.get("part_id", ""), selected_reslice_id=payload.get("reslice_id", ""))
         else:
             self.load_specimen(specimen_id)
 
@@ -3977,6 +4138,7 @@ class TifWorkbenchWidget(QWidget):
             self.current_volume_scope = "full"
             self.current_part_id = ""
             self.current_part = None
+            self.current_reslice_id = ""
             self.part_preview_mask = None
             self.active_part_roi_id = ""
             self.part_roi_draw_mode = False
@@ -4034,7 +4196,7 @@ class TifWorkbenchWidget(QWidget):
         finally:
             self._loading_specimen = False
 
-    def load_part(self, specimen_id, part_id):
+    def load_part(self, specimen_id, part_id, selected_reslice_id=""):
         if self.working_edit_dirty:
             if not self._confirm_discard_or_save_working_edit():
                 return
@@ -4049,6 +4211,7 @@ class TifWorkbenchWidget(QWidget):
             self.current_volume_scope = "part"
             self.current_part_id = part.get("part_id", "")
             self.current_part = part
+            self.current_reslice_id = str(selected_reslice_id or "")
             self.active_part_roi_id = ""
             self.part_roi_draw_mode = False
             self.part_contour_draw_mode = False
@@ -4390,6 +4553,9 @@ class TifWorkbenchWidget(QWidget):
         self.btn_preview_part_mask.setEnabled(is_part and has_image)
         self.btn_accept_part_mask.setEnabled(is_part and self.part_preview_mask is not None)
         self.btn_clear_part_preview.setEnabled(is_part and self.part_preview_mask is not None)
+        self.btn_local_axis_reslice.setEnabled(is_part and has_image)
+        self.btn_local_axis_queue.setEnabled(bool(self.project.project_data.get("specimens", [])))
+        self.btn_local_axis_models.setEnabled(bool(self.project.project_data.get("specimens", [])))
         self.btn_export_part_package.setEnabled(is_part and has_image)
         self.btn_delete_part_volume.setEnabled(is_part and self.current_part is not None)
 
@@ -4441,6 +4607,33 @@ class TifWorkbenchWidget(QWidget):
                 f"{tt('Parent bbox Z/Y/X', self.lang)}: {part.get('parent_bbox_zyx', [])}",
                 f"{tt('modality', self.lang)}: {specimen.get('modality', 'unknown')}",
             ]
+            if self.current_reslice_id:
+                reslice = self.project.get_part_reslice(
+                    specimen.get("specimen_id", ""),
+                    part.get("part_id", ""),
+                    self.current_reslice_id,
+                    default=None,
+                )
+                if reslice is not None:
+                    training = reslice.get("training") or {}
+                    provenance = reslice.get("provenance") or {}
+                    metadata_lines.extend(
+                        [
+                            "",
+                            f"{tt('Reslice ID', self.lang)}: {reslice.get('reslice_id', '')}",
+                            f"{tt('Template', self.lang)}: {reslice.get('template_id', '')}",
+                            f"{tt('Status', self.lang)}: {reslice.get('status', '')}",
+                            f"{tt('Image', self.lang)}: {reslice.get('image_path', '')}",
+                            f"{tt('Mask', self.lang)}: {reslice.get('mask_path', '') or '-'}",
+                            f"{tt('Metadata', self.lang)}: {reslice.get('metadata_path', '')}",
+                            f"{tt('Output shape Z/Y/X', self.lang)}: {(reslice.get('reslice_params') or {}).get('output_shape_zyx', [])}",
+                            f"{tt('Human confirmed', self.lang)}: {bool(training.get('human_confirmed'))}",
+                            f"{tt('Usable for training', self.lang)}: {bool(training.get('usable_for_training', True))}",
+                            f"{tt('Hard case flags', self.lang)}: {', '.join(training.get('hard_case_flags', []) or []) or '-'}",
+                            f"{tt('Source proposal', self.lang)}: {provenance.get('source_proposal_id', '') or '-'}",
+                            f"{tt('Model version', self.lang)}: {provenance.get('source_model_version', '') or '-'}",
+                        ]
+                    )
         else:
             metadata_lines = [
                 f"{tt('Shape Z/Y/X', self.lang)}: {working.get('shape_zyx', [])}",
@@ -4498,6 +4691,74 @@ class TifWorkbenchWidget(QWidget):
             f"{tt('drag rotate / wheel zoom', self.lang)} | "
             f"{int(round(self._volume_zoom * 100))}%"
         )
+
+    def _local_axis_overlay_enabled(self):
+        return bool(
+            getattr(self, "volume_local_axes_check", None)
+            and self.volume_local_axes_check.isChecked()
+            and self.current_volume_scope == "part"
+            and self.image_volume is not None
+        )
+
+    def _current_part_reslice_record(self):
+        if not self.current_specimen_id or not self.current_part_id or not self.current_reslice_id:
+            return None
+        return self.project.get_part_reslice(self.current_specimen_id, self.current_part_id, self.current_reslice_id, default=None)
+
+    def _project_zyx_to_volume_xy(self, point_zyx, shape_zyx, source_shape=None, spacing_zyx=None):
+        if not point_zyx or len(point_zyx) != 3:
+            return None
+        shape = tuple(max(1, int(value)) for value in (shape_zyx or (1, 1, 1)))
+        if len(shape) != 3:
+            return None
+        z, y, x = [float(value) for value in point_zyx]
+        dims = np.array([max(1, shape[0] - 1), max(1, shape[1] - 1), max(1, shape[2] - 1)], dtype=np.float32)
+        coord = np.array([x / dims[2], y / dims[1], z / dims[0]], dtype=np.float32) - 0.5
+        x_scale, y_scale, z_scale = volume_shape_scale(source_shape or shape, spacing_zyx)
+        coord[0] *= x_scale
+        coord[1] *= y_scale
+        coord[2] *= z_scale
+
+        yaw = math.radians(float(self._volume_yaw))
+        pitch = math.radians(float(self._volume_pitch))
+        cy, sy = math.cos(yaw), math.sin(yaw)
+        cp, sp = math.cos(pitch), math.sin(pitch)
+        rot_yaw = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]], dtype=np.float32)
+        rot_pitch = np.array([[1.0, 0.0, 0.0], [0.0, cp, -sp], [0.0, sp, cp]], dtype=np.float32)
+        rotated = coord @ (rot_yaw @ rot_pitch).T
+
+        width = max(1.0, float(self.volume_canvas.width()) if hasattr(self, "volume_canvas") else 1.0)
+        height = max(1.0, float(self.volume_canvas.height()) if hasattr(self, "volume_canvas") else 1.0)
+        scale = (min(width, height) * 0.78) * float(self._volume_zoom)
+        center_x = width / 2.0 + float(self._volume_pan_x) * scale * 0.5
+        center_y = height / 2.0 - float(self._volume_pan_y) * scale * 0.5
+        return [float(rotated[0] * scale + center_x), float(-rotated[1] * scale + center_y)]
+
+    def _local_axis_volume_overlays(self):
+        if not self._local_axis_overlay_enabled():
+            return []
+        shape = tuple(int(value) for value in getattr(self.image_volume, "shape", ()) or ())
+        if len(shape) != 3:
+            return []
+        source_shape, spacing_zyx = self._volume_source_geometry()
+        overlays = []
+
+        def add_axis(start, end, label, color, width=2):
+            start_xy = self._project_zyx_to_volume_xy(start, shape, source_shape=source_shape, spacing_zyx=spacing_zyx)
+            end_xy = self._project_zyx_to_volume_xy(end, shape, source_shape=source_shape, spacing_zyx=spacing_zyx)
+            if start_xy and end_xy:
+                overlays.append({"start_xy": start_xy, "end_xy": end_xy, "label": label, "color": color, "width": width})
+
+        source_z = {"start_zyx": [0.0, (shape[1] - 1) / 2.0, (shape[2] - 1) / 2.0], "end_zyx": [shape[0] - 1.0, (shape[1] - 1) / 2.0, (shape[2] - 1) / 2.0]}
+        add_axis(source_z.get("start_zyx"), source_z.get("end_zyx"), tt("source Z", self.lang), "#6AA6FF", width=2)
+
+        reslice = self._current_part_reslice_record()
+        editable = {}
+        if isinstance(reslice, dict):
+            editable = ((reslice.get("source") or {}).get("editable_axis") or {})
+        if editable.get("start_zyx") and editable.get("end_zyx"):
+            add_axis(editable.get("start_zyx"), editable.get("end_zyx"), tt("output Z", self.lang), "#FFB84D", width=3)
+        return overlays
 
     def volume_canvas_overlay_text(self):
         if self.image_volume is None:
@@ -5212,6 +5473,8 @@ class TifWorkbenchWidget(QWidget):
         mode = "drag" if self._volume_render_mode == "drag" else "still"
         state = self._volume_render_state(mode)
         state["mask_mode"] = mask_mode
+        if hasattr(self.volume_canvas, "set_axis_overlays"):
+            self.volume_canvas.set_axis_overlays(self._local_axis_volume_overlays())
         if hasattr(self.volume_canvas, "set_volume_render_inputs"):
             self.volume_canvas.set_volume_render_inputs(
                 preview,
@@ -5272,12 +5535,16 @@ class TifWorkbenchWidget(QWidget):
         if self.display_mode == "volume":
             self._ensure_volume_canvas()
         if self.image_volume is None:
+            if hasattr(self.volume_canvas, "set_axis_overlays"):
+                self.volume_canvas.set_axis_overlays([])
             self.volume_canvas.clear()
             self.volume_canvas.setText(tt("No TIF volume loaded", self.lang))
             self._update_volume_render_status_label(tt("No TIF volume loaded", self.lang))
             return
         preview = self._ensure_volume_preview(self._volume_render_mode)
         if preview is None:
+            if hasattr(self.volume_canvas, "set_axis_overlays"):
+                self.volume_canvas.set_axis_overlays([])
             self.volume_canvas.clear()
             self.volume_canvas.setText(tt("No TIF volume loaded", self.lang))
             self._update_volume_render_status_label(tt("No TIF volume loaded", self.lang))
@@ -5293,6 +5560,8 @@ class TifWorkbenchWidget(QWidget):
         if mask_mode != "image_only" and not hasattr(self.volume_canvas, "set_volume_pixmap"):
             self._switch_volume_canvas_to_cpu("Mask inspection uses CPU fallback.")
         pixmap = self._render_volume_preview_pixmap(preview, mask_preview=mask_preview, mask_mode=mask_mode)
+        if hasattr(self.volume_canvas, "set_axis_overlays"):
+            self.volume_canvas.set_axis_overlays(self._local_axis_volume_overlays())
         self.volume_canvas.set_volume_pixmap(pixmap)
         self._update_volume_render_status_label()
 
@@ -5654,6 +5923,69 @@ class TifWorkbenchWidget(QWidget):
         self.training_status_label.setToolTip(full_message)
         self.log(full_message)
         QMessageBox.information(self, tt("Part extraction", self.lang), message)
+
+    def open_local_axis_reslice_dialog(self, specimen_id=None, part_id=None, proposal_id=""):
+        target_specimen_id = str(specimen_id or self.current_specimen_id or "")
+        target_part_id = str(part_id or self.current_part_id or "")
+        if not target_specimen_id or not target_part_id:
+            QMessageBox.information(self, tt("Local Axis Reslice", self.lang), tt("Select a part volume before opening Local Axis Reslice.", self.lang))
+            return None
+        try:
+            dialog = TifLocalAxisResliceDialog(
+                self.project,
+                target_specimen_id,
+                target_part_id,
+                proposal_id=proposal_id,
+                parent=self,
+                lang=self.lang,
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, tt("Local Axis Reslice", self.lang), str(exc))
+            return None
+        result = None
+        if dialog.exec() == QDialog.Accepted:
+            result = dialog.export_result
+            record = (result or {}).get("record", {}) if isinstance(result, dict) else {}
+            reslice_id = record.get("reslice_id", "")
+            message = tt("Exported local axis reslice {0}.", self.lang).format(reslice_id)
+            self.training_status_label.setText(message)
+            self.log(message)
+            self.refresh_project()
+            self._select_volume_tree_item(target_specimen_id, "part_reslice", target_part_id)
+        dialog.deleteLater()
+        return result
+
+    def open_local_axis_review_queue(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle(tt("Review Local Axis Queue", self.lang))
+        dialog.resize(980, 620)
+        layout = QVBoxLayout(dialog)
+        queue = TifLocalAxisReviewQueueWidget(self.project, parent=dialog, lang=self.lang)
+        queue.open_proposal_requested.connect(lambda specimen_id, part_id, proposal_id: self.open_local_axis_reslice_dialog(specimen_id, part_id, proposal_id))
+        layout.addWidget(queue)
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.exec()
+        self.refresh_project()
+        dialog.deleteLater()
+        return queue
+
+    def open_local_axis_model_dialog(self):
+        if not self._ensure_tif_project_open():
+            return None
+        dialog = TifLocalAxisModelDialog(
+            self.project,
+            parent=self,
+            lang=self.lang,
+            config_manager=self.config_manager,
+            specimen_id=self.current_specimen_id,
+            part_id=self.current_part_id if self.current_volume_scope == "part" else "",
+        )
+        dialog.exec()
+        self.refresh_project()
+        dialog.deleteLater()
+        return dialog
 
     def _render_slice_pixmap(self, image_slice, label_slice=None):
         gray = self._normalize_image(image_slice)

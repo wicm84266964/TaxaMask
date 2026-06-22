@@ -13,6 +13,7 @@ DEFAULT_TIF_PROJECT_FILENAME = "project.json"
 TIF_REVIEW_STATUSES = {"not_started", "in_progress", "fully_annotated", "reviewed", "train_ready"}
 TIF_PART_STATUSES = {"draft", "roi_confirmed", "mask_preview", "reviewed"}
 TIF_PART_ROI_STATUSES = {"draft", "confirmed", "part_created", "cancelled"}
+LOCAL_AXIS_PROPOSAL_STATUSES = {"proposed", "needs_review", "accepted", "rejected", "exported"}
 
 
 def _now_iso():
@@ -43,6 +44,15 @@ def _safe_roi_id(value):
     clean = clean.strip("_")
     if not clean or clean in {".", ".."} or not clean.strip("."):
         return "roi"
+    return clean
+
+
+def _safe_record_id(value, fallback="record"):
+    text = str(value or "").strip()
+    clean = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in text)
+    clean = clean.strip("_")
+    if not clean or clean in {".", ".."} or not clean.strip("."):
+        return str(fallback or "record")
     return clean
 
 
@@ -93,12 +103,21 @@ class TifProjectManager:
         if not isinstance(specimens, list):
             raise ValueError("tif_project_specimens_not_list")
         self.current_project_path = os.path.abspath(path)
-        payload.setdefault("models", [])
-        payload.setdefault("runs", [])
+        payload["models"] = [
+            self._normalize_model_record(item)
+            for item in (payload.get("models", []) if isinstance(payload.get("models", []), list) else [])
+            if isinstance(item, dict)
+        ]
+        payload["runs"] = [
+            self._normalize_run_record(item)
+            for item in (payload.get("runs", []) if isinstance(payload.get("runs", []), list) else [])
+            if isinstance(item, dict)
+        ]
         payload.setdefault("view_settings", {})
         payload.setdefault("updated_at", payload.get("created_at", _now_iso()))
         for specimen in specimens:
             if isinstance(specimen, dict):
+                specimen["metadata"] = self._normalize_specimen_metadata(specimen)
                 specimen["parts"] = self._normalize_parts(specimen)
                 specimen["part_rois"] = self._normalize_part_rois(specimen)
         self.project_data = payload
@@ -172,6 +191,7 @@ class TifProjectManager:
         review_status="not_started",
         train_ready=False,
         provenance=None,
+        metadata=None,
         save=True,
     ):
         clean_id = self._validate_new_specimen_id(specimen_id)
@@ -190,6 +210,7 @@ class TifProjectManager:
             "review_status": review_status,
             "train_ready": bool(train_ready),
             "provenance": dict(provenance or {}),
+            "metadata": dict(metadata or {}),
             "parts": [],
             "part_rois": [],
         }
@@ -540,6 +561,174 @@ class TifProjectManager:
             self.save_project()
         return part
 
+    def list_part_reslices(self, specimen_id, part_id):
+        part = self._require_part(specimen_id, part_id)
+        return list(part.setdefault("metadata", {}).setdefault("local_axis_reslices", []))
+
+    def get_part_reslice(self, specimen_id, part_id, reslice_id, default=None):
+        wanted = str(reslice_id or "").strip()
+        wanted_safe = _safe_record_id(wanted, fallback="reslice")
+        for record in self.list_part_reslices(specimen_id, part_id):
+            current = str((record or {}).get("reslice_id", "") or "").strip()
+            if current in {wanted, wanted_safe}:
+                return record
+        return default
+
+    def add_part_reslice(self, specimen_id, part_id, reslice_record, save=True):
+        part = self._require_part(specimen_id, part_id)
+        record = self._normalize_reslice_record(reslice_record, specimen_id, part_id)
+        records = part.setdefault("metadata", {}).setdefault("local_axis_reslices", [])
+        self._ensure_unique_record_id(records, "reslice_id", record["reslice_id"], "duplicate_part_reslice_id")
+        records.append(record)
+        part["updated_at"] = _now_iso()
+        if save:
+            self.save_project()
+        return record
+
+    def update_part_reslice(self, specimen_id, part_id, reslice_id, updates, save=True):
+        record = self.get_part_reslice(specimen_id, part_id, reslice_id, default=None)
+        if record is None:
+            raise KeyError(f"unknown_part_reslice_id:{specimen_id}:{part_id}:{reslice_id}")
+        if not isinstance(updates, dict):
+            return record
+        for key, value in updates.items():
+            if key in {"reslice_id", "specimen_id", "part_id", "created_at"}:
+                continue
+            record[str(key)] = value
+        record["updated_at"] = _now_iso()
+        part = self._require_part(specimen_id, part_id)
+        part["updated_at"] = _now_iso()
+        if save:
+            self.save_project()
+        return record
+
+    def list_global_axis_proposals(self, specimen_id, filters=None):
+        specimen = self._require_specimen(specimen_id)
+        records = list(specimen.setdefault("metadata", {}).setdefault("local_axis_global_proposals", []))
+        return self._filter_records(records, filters)
+
+    def get_global_axis_proposal(self, specimen_id, proposal_id, default=None):
+        wanted = str(proposal_id or "").strip()
+        wanted_safe = _safe_record_id(wanted, fallback="global_proposal")
+        for record in self.list_global_axis_proposals(specimen_id):
+            current = str((record or {}).get("global_proposal_id", "") or "").strip()
+            if current in {wanted, wanted_safe}:
+                return record
+        return default
+
+    def add_global_axis_proposal(self, specimen_id, proposal_record, save=True):
+        specimen = self._require_specimen(specimen_id)
+        record = self._normalize_global_axis_proposal(proposal_record, specimen_id)
+        records = specimen.setdefault("metadata", {}).setdefault("local_axis_global_proposals", [])
+        self._ensure_unique_record_id(records, "global_proposal_id", record["global_proposal_id"], "duplicate_global_axis_proposal_id")
+        records.append(record)
+        if save:
+            self.save_project()
+        return record
+
+    def update_global_axis_proposal(self, specimen_id, proposal_id, updates, save=True):
+        record = self.get_global_axis_proposal(specimen_id, proposal_id, default=None)
+        if record is None:
+            raise KeyError(f"unknown_global_axis_proposal_id:{specimen_id}:{proposal_id}")
+        if isinstance(updates, dict):
+            for key, value in updates.items():
+                if key in {"global_proposal_id", "specimen_id", "created_at"}:
+                    continue
+                record[str(key)] = value
+        record["updated_at"] = _now_iso()
+        if save:
+            self.save_project()
+        return record
+
+    def list_local_frame_proposals(self, specimen_id, part_id, filters=None):
+        part = self._require_part(specimen_id, part_id)
+        records = list(part.setdefault("metadata", {}).setdefault("local_axis_frame_proposals", []))
+        return self._filter_records(records, filters)
+
+    def get_local_frame_proposal(self, specimen_id, part_id, proposal_id, default=None):
+        wanted = str(proposal_id or "").strip()
+        wanted_safe = _safe_record_id(wanted, fallback="frame_proposal")
+        for record in self.list_local_frame_proposals(specimen_id, part_id):
+            current = str((record or {}).get("frame_proposal_id", "") or "").strip()
+            if current in {wanted, wanted_safe}:
+                return record
+        return default
+
+    def add_local_frame_proposal(self, specimen_id, part_id, proposal_record, save=True):
+        part = self._require_part(specimen_id, part_id)
+        record = self._normalize_local_frame_proposal(proposal_record, specimen_id, part_id)
+        records = part.setdefault("metadata", {}).setdefault("local_axis_frame_proposals", [])
+        self._ensure_unique_record_id(records, "frame_proposal_id", record["frame_proposal_id"], "duplicate_local_frame_proposal_id")
+        records.append(record)
+        part["updated_at"] = _now_iso()
+        if save:
+            self.save_project()
+        return record
+
+    def update_local_frame_proposal(self, specimen_id, part_id, proposal_id, updates, save=True):
+        record = self.get_local_frame_proposal(specimen_id, part_id, proposal_id, default=None)
+        if record is None:
+            raise KeyError(f"unknown_local_frame_proposal_id:{specimen_id}:{part_id}:{proposal_id}")
+        if isinstance(updates, dict):
+            for key, value in updates.items():
+                if key in {"frame_proposal_id", "specimen_id", "part_id", "created_at"}:
+                    continue
+                record[str(key)] = value
+        record["updated_at"] = _now_iso()
+        part = self._require_part(specimen_id, part_id)
+        part["updated_at"] = _now_iso()
+        if save:
+            self.save_project()
+        return record
+
+    def register_local_axis_model(self, model_record, save=True):
+        record = self._normalize_local_axis_model(model_record)
+        models = self.project_data.setdefault("models", [])
+        self._ensure_unique_record_id(models, "model_id", record["model_id"], "duplicate_local_axis_model_id")
+        models.append(record)
+        if save:
+            self.save_project()
+        return record
+
+    def list_local_axis_models(self, filters=None):
+        records = [
+            record
+            for record in self.project_data.get("models", []) or []
+            if isinstance(record, dict) and self._is_local_axis_model_record(record)
+        ]
+        return self._filter_records(records, filters)
+
+    def get_local_axis_model(self, model_id, default=None):
+        wanted = str(model_id or "").strip()
+        for record in self.list_local_axis_models():
+            if str(record.get("model_id", "") or "").strip() == wanted:
+                return record
+        return default
+
+    def add_local_axis_run(self, run_record, save=True):
+        record = self._normalize_local_axis_run(run_record)
+        runs = self.project_data.setdefault("runs", [])
+        self._ensure_unique_record_id(runs, "run_id", record["run_id"], "duplicate_local_axis_run_id")
+        runs.append(record)
+        if save:
+            self.save_project()
+        return record
+
+    def list_local_axis_runs(self, filters=None):
+        records = [
+            record
+            for record in self.project_data.get("runs", []) or []
+            if isinstance(record, dict) and self._is_local_axis_run_record(record)
+        ]
+        return self._filter_records(records, filters)
+
+    def get_local_axis_run(self, run_id, default=None):
+        wanted = str(run_id or "").strip()
+        for record in self.list_local_axis_runs():
+            if str(record.get("run_id", "") or "").strip() == wanted:
+                return record
+        return default
+
     def discard_part(self, specimen_id, part_id, remove_storage=True, save=True):
         specimen = self._require_specimen(specimen_id)
         wanted = str(part_id or "").strip()
@@ -579,6 +768,12 @@ class TifProjectManager:
         if specimen is None:
             raise KeyError(f"unknown_specimen_id:{specimen_id}")
         return specimen
+
+    def _require_part(self, specimen_id, part_id):
+        part = self.get_part(specimen_id, part_id, default=None)
+        if part is None:
+            raise KeyError(f"unknown_part_id:{specimen_id}:{part_id}")
+        return part
 
     def discard_specimen_scaffold(self, specimen_id, save=True):
         clean_id = str(specimen_id or "").strip()
@@ -700,7 +895,7 @@ class TifProjectManager:
         used_ids = set()
         used_dirs = set()
         for index, record in enumerate(source):
-            part = self._normalize_part_record(record, fallback_id=f"part_{index + 1}")
+            part = self._normalize_part_record(record, fallback_id=f"part_{index + 1}", specimen_id=specimen.get("specimen_id", ""))
             base_id = _safe_part_id(part.get("part_id") or f"part_{index + 1}")
             candidate = base_id
             suffix = 2
@@ -755,13 +950,24 @@ class TifProjectManager:
             "view_settings": dict(source.get("view_settings") or {}),
         }
 
-    def _normalize_part_record(self, record, fallback_id="part"):
+    def _normalize_part_record(self, record, fallback_id="part", specimen_id=""):
         source = record if isinstance(record, dict) else {}
         status = str(source.get("status", "draft") or "draft")
         if status not in TIF_PART_STATUSES:
             status = "draft"
         part_id = _safe_part_id(source.get("part_id") or source.get("id") or fallback_id)
         created_at = str(source.get("created_at") or _now_iso())
+        metadata = dict(source.get("metadata") or {})
+        metadata["local_axis_reslices"] = [
+            self._normalize_reslice_record(item, item.get("specimen_id") or specimen_id, part_id)
+            for item in metadata.get("local_axis_reslices", []) or []
+            if isinstance(item, dict)
+        ]
+        metadata["local_axis_frame_proposals"] = [
+            self._normalize_local_frame_proposal(item, item.get("specimen_id") or specimen_id, part_id)
+            for item in metadata.get("local_axis_frame_proposals", []) or []
+            if isinstance(item, dict)
+        ]
         return {
             "part_id": part_id,
             "display_name": str(source.get("display_name") or source.get("name") or part_id),
@@ -774,12 +980,23 @@ class TifProjectManager:
             "source": dict(source.get("source") or {}),
             "created_at": created_at,
             "updated_at": str(source.get("updated_at") or created_at),
-            "metadata": dict(source.get("metadata") or {}),
+            "metadata": metadata,
             "view_settings": dict(source.get("view_settings") or {}),
         }
 
     def _normalize_bbox_zyx(self, bbox):
-        if not isinstance(bbox, (list, tuple)) or len(bbox) != 3:
+        if not isinstance(bbox, (list, tuple)):
+            return []
+        if len(bbox) == 6:
+            try:
+                return [
+                    [int(bbox[0]), int(bbox[3])],
+                    [int(bbox[1]), int(bbox[4])],
+                    [int(bbox[2]), int(bbox[5])],
+                ]
+            except (TypeError, ValueError):
+                return []
+        if len(bbox) != 3:
             return []
         clean = []
         try:
@@ -827,3 +1044,256 @@ class TifProjectManager:
             except Exception:
                 return []
         return []
+
+    def _normalize_specimen_metadata(self, specimen):
+        source = (specimen or {}).get("metadata") if isinstance(specimen, dict) else {}
+        metadata = dict(source or {})
+        specimen_id = str((specimen or {}).get("specimen_id", "") or "")
+        metadata["local_axis_global_proposals"] = [
+            self._normalize_global_axis_proposal(item, specimen_id)
+            for item in metadata.get("local_axis_global_proposals", []) or []
+            if isinstance(item, dict)
+        ]
+        return metadata
+
+    def _normalize_status(self, status, default="proposed"):
+        clean = str(status or default).strip()
+        return clean if clean in LOCAL_AXIS_PROPOSAL_STATUSES else default
+
+    def _normalize_list(self, values, cast=str):
+        if not isinstance(values, (list, tuple)):
+            return []
+        clean = []
+        for value in values:
+            try:
+                clean.append(cast(value))
+            except (TypeError, ValueError):
+                continue
+        return clean
+
+    def _normalize_point_zyx(self, values):
+        if not isinstance(values, (list, tuple)) or len(values) != 3:
+            return []
+        try:
+            return [float(values[0]), float(values[1]), float(values[2])]
+        except (TypeError, ValueError):
+            return []
+
+    def _normalize_axis_vector(self, values):
+        return self._normalize_point_zyx(values)
+
+    def _normalize_spacing_zyx(self, values):
+        spacing = self._normalize_point_zyx(values)
+        if len(spacing) != 3 or any(float(value) <= 0 for value in spacing):
+            return []
+        return spacing
+
+    def _normalize_local_frame(self, frame):
+        source = frame if isinstance(frame, dict) else {}
+        clean = {
+            "origin_zyx": self._normalize_point_zyx(source.get("origin_zyx") or source.get("origin")),
+            "x_axis": self._normalize_axis_vector(source.get("x_axis")),
+            "y_axis": self._normalize_axis_vector(source.get("y_axis")),
+            "z_axis": self._normalize_axis_vector(source.get("z_axis")),
+            "output_axis": str(source.get("output_axis") or "z_axis"),
+            "coordinate_space": str(source.get("coordinate_space") or "part_volume_voxel_zyx"),
+        }
+        spacing = self._normalize_spacing_zyx(source.get("spacing_zyx"))
+        if spacing:
+            clean["spacing_zyx"] = spacing
+        if isinstance(source.get("roll_reference"), dict):
+            clean["roll_reference"] = dict(source.get("roll_reference"))
+        return clean
+
+    def _normalize_reslice_record(self, record, specimen_id, part_id):
+        source = record if isinstance(record, dict) else {}
+        now = _now_iso()
+        created_at = str(source.get("created_at") or now)
+        reslice_id = _safe_record_id(source.get("reslice_id") or source.get("id") or f"reslice_{datetime.now().strftime('%Y%m%d_%H%M%S')}", fallback="reslice")
+        return {
+            "reslice_id": reslice_id,
+            "specimen_id": str(source.get("specimen_id") or specimen_id or ""),
+            "part_id": str(source.get("part_id") or part_id or ""),
+            "display_name": str(source.get("display_name") or reslice_id),
+            "template_id": str(source.get("template_id") or ""),
+            "status": str(source.get("status") or "exported"),
+            "image_path": self.to_relative(source.get("image_path", "")),
+            "mask_path": self.to_relative(source.get("mask_path", "")),
+            "metadata_path": self.to_relative(source.get("metadata_path", "")),
+            "preview_path": self.to_relative(source.get("preview_path", "")),
+            "local_frame": self._normalize_local_frame(source.get("local_frame")),
+            "reslice_params": dict(source.get("reslice_params") or {}),
+            "source": dict(source.get("source") or {}),
+            "training": dict(source.get("training") or {}),
+            "provenance": dict(source.get("provenance") or {}),
+            "created_at": created_at,
+            "updated_at": str(source.get("updated_at") or created_at),
+        }
+
+    def _normalize_global_axis_proposal(self, record, specimen_id):
+        source = record if isinstance(record, dict) else {}
+        now = _now_iso()
+        created_at = str(source.get("created_at") or now)
+        proposal_id = _safe_record_id(source.get("global_proposal_id") or source.get("proposal_id") or source.get("id") or f"global_proposal_{datetime.now().strftime('%Y%m%d_%H%M%S')}", fallback="global_proposal")
+        return {
+            "global_proposal_id": proposal_id,
+            "specimen_id": str(source.get("specimen_id") or specimen_id or ""),
+            "template_id": str(source.get("template_id") or ""),
+            "coordinate_space": str(source.get("coordinate_space") or "full_volume_voxel_zyx"),
+            "bbox_zyx": self._normalize_bbox_zyx(source.get("bbox_zyx")),
+            "center_zyx": self._normalize_point_zyx(source.get("center_zyx")),
+            "confidence": float(source.get("confidence", 0.0) or 0.0),
+            "model_id": str(source.get("model_id") or ""),
+            "model_version": str(source.get("model_version") or ""),
+            "status": self._normalize_status(source.get("status")),
+            "hard_case_flags": self._normalize_list(source.get("hard_case_flags"), str),
+            "reviewer_notes": str(source.get("reviewer_notes") or ""),
+            "provenance": dict(source.get("provenance") or {}),
+            "created_at": created_at,
+            "updated_at": str(source.get("updated_at") or created_at),
+        }
+
+    def _normalize_local_frame_proposal(self, record, specimen_id, part_id):
+        source = record if isinstance(record, dict) else {}
+        now = _now_iso()
+        created_at = str(source.get("created_at") or now)
+        proposal_id = _safe_record_id(source.get("frame_proposal_id") or source.get("proposal_id") or source.get("id") or f"frame_proposal_{datetime.now().strftime('%Y%m%d_%H%M%S')}", fallback="frame_proposal")
+        return {
+            "frame_proposal_id": proposal_id,
+            "specimen_id": str(source.get("specimen_id") or specimen_id or ""),
+            "part_id": str(source.get("part_id") or part_id or ""),
+            "template_id": str(source.get("template_id") or ""),
+            "coordinate_space": str(source.get("coordinate_space") or "part_volume_voxel_zyx"),
+            "origin_zyx": self._normalize_point_zyx(source.get("origin_zyx")),
+            "output_axis_start_zyx": self._normalize_point_zyx(source.get("output_axis_start_zyx")),
+            "output_axis_end_zyx": self._normalize_point_zyx(source.get("output_axis_end_zyx")),
+            "roll_reference": dict(source.get("roll_reference") or {}),
+            "local_frame": self._normalize_local_frame(source.get("local_frame")),
+            "confidence": float(source.get("confidence", 0.0) or 0.0),
+            "landmark_scores": dict(source.get("landmark_scores") or {}),
+            "missing_landmarks": self._normalize_list(source.get("missing_landmarks"), str),
+            "model_id": str(source.get("model_id") or ""),
+            "model_version": str(source.get("model_version") or ""),
+            "status": self._normalize_status(source.get("status")),
+            "hard_case_flags": self._normalize_list(source.get("hard_case_flags"), str),
+            "reviewer_notes": str(source.get("reviewer_notes") or ""),
+            "provenance": dict(source.get("provenance") or {}),
+            "created_at": created_at,
+            "updated_at": str(source.get("updated_at") or created_at),
+        }
+
+    def _normalize_local_axis_model(self, record):
+        source = record if isinstance(record, dict) else {}
+        now = _now_iso()
+        created_at = str(source.get("created_at") or now)
+        model_id = str(source.get("model_id") or "").strip()
+        if not model_id:
+            model_id = _safe_record_id(f"local_axis_model_{datetime.now().strftime('%Y%m%d_%H%M%S')}", fallback="local_axis_model")
+        return {
+            "model_id": model_id,
+            "model_version": str(source.get("model_version") or ""),
+            "profile_scope": str(source.get("profile_scope") or "tif_local_axis"),
+            "template_id": str(source.get("template_id") or ""),
+            "model_type": str(source.get("model_type") or "local_frame"),
+            "backend_type": str(source.get("backend_type") or ""),
+            "backend_id": str(source.get("backend_id") or ""),
+            "input_contract": dict(source.get("input_contract") or {}),
+            "output_contract": dict(source.get("output_contract") or {}),
+            "model_path": self.to_relative(source.get("model_path", "")),
+            "model_manifest": self.to_relative(source.get("model_manifest", "")),
+            "training_manifest_path": self.to_relative(source.get("training_manifest_path", "")),
+            "notes": str(source.get("notes") or ""),
+            "created_at": created_at,
+            "updated_at": str(source.get("updated_at") or created_at),
+        }
+
+    def _is_local_axis_model_record(self, record):
+        source = record if isinstance(record, dict) else {}
+        if source.get("profile_scope") == "tif_local_axis":
+            return True
+        if source.get("backend_type") == "external_local_axis":
+            return True
+        if source.get("model_type") in {"local_frame", "global_roi", "global_roi_and_local_frame"}:
+            return True
+        return False
+
+    def _normalize_model_record(self, record):
+        source = record if isinstance(record, dict) else {}
+        if self._is_local_axis_model_record(source):
+            return self._normalize_local_axis_model(source)
+        clean = dict(source)
+        for key in ("model_path", "model_manifest", "training_manifest_path"):
+            if key in clean:
+                clean[key] = self.to_relative(clean.get(key, ""))
+        return clean
+
+    def _normalize_local_axis_run(self, record):
+        source = record if isinstance(record, dict) else {}
+        now = _now_iso()
+        created_at = str(source.get("created_at") or now)
+        run_id = _safe_record_id(source.get("run_id") or f"local_axis_run_{datetime.now().strftime('%Y%m%d_%H%M%S')}", fallback="local_axis_run")
+        clean = {
+            "run_id": run_id,
+            "workflow": str(source.get("workflow") or "tif_local_axis"),
+            "action": str(source.get("action") or source.get("run_type") or ""),
+            "backend_id": str(source.get("backend_id") or ""),
+            "model_id": str(source.get("model_id") or ""),
+            "template_id": str(source.get("template_id") or ""),
+            "specimen_ids": self._normalize_list(source.get("specimen_ids"), str),
+            "part_ids": self._normalize_list(source.get("part_ids"), str),
+            "run_dir": self.to_relative(source.get("run_dir", "")),
+            "contract_json": self.to_relative(source.get("contract_json", "")),
+            "result_json": self.to_relative(source.get("result_json", "")),
+            "result_status": str(source.get("result_status") or source.get("status") or ""),
+            "metrics": dict(source.get("metrics") or {}),
+            "warnings": list(source.get("warnings", []) or []) if isinstance(source.get("warnings", []), list) else [],
+            "errors": list(source.get("errors", []) or []) if isinstance(source.get("errors", []), list) else [],
+            "created_at": created_at,
+            "updated_at": str(source.get("updated_at") or created_at),
+        }
+        return clean
+
+    def _is_local_axis_run_record(self, record):
+        source = record if isinstance(record, dict) else {}
+        if source.get("workflow") == "tif_local_axis":
+            return True
+        if source.get("model_family") == "local_axis":
+            return True
+        if source.get("action") in {"predict_global_roi", "predict_local_frame"}:
+            return True
+        return False
+
+    def _normalize_run_record(self, record):
+        source = record if isinstance(record, dict) else {}
+        if self._is_local_axis_run_record(source):
+            return self._normalize_local_axis_run(source)
+        clean = dict(source)
+        for key in ("run_dir", "contract_json", "result_json"):
+            if key in clean:
+                clean[key] = self.to_relative(clean.get(key, ""))
+        return clean
+
+    def _ensure_unique_record_id(self, records, key, value, error_prefix):
+        wanted = str(value or "").strip()
+        for record in records or []:
+            if str((record or {}).get(key, "") or "").strip() == wanted:
+                raise ValueError(f"{error_prefix}:{wanted}")
+
+    def _filter_records(self, records, filters=None):
+        if not isinstance(filters, dict) or not filters:
+            return records
+        result = []
+        for record in records:
+            keep = True
+            for key, expected in filters.items():
+                value = (record or {}).get(key)
+                if isinstance(expected, (list, tuple, set)):
+                    if value not in expected:
+                        keep = False
+                        break
+                elif value != expected:
+                    keep = False
+                    break
+            if keep:
+                result.append(record)
+        return result

@@ -66,6 +66,43 @@ class TifLocalAxisBatchTests(unittest.TestCase):
             self.assertEqual(rows[0]["proposal_id"], "frame_001")
             self.assertEqual(rows[0]["kind"], "local_frame_proposal")
 
+    def test_queue_lists_no_part_part_ready_and_failed_rows_without_duplicate_legacy_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = make_project_with_frame_proposal(root)
+            manager.create_specimen_scaffold("01-0101-no-part")
+            manager.create_specimen_scaffold("01-0101-ready")
+            ready_image = np.zeros((3, 4, 5), dtype=np.uint8)
+            ready_rel = "specimens/01-0101-ready/working/image.ome.zarr"
+            ready_meta = write_volume_sidecar(root / "batch_project" / ready_rel, ready_image, role="working_image")
+            manager.register_working_volume("01-0101-ready", ready_rel, ready_meta["shape_zyx"], ready_meta["dtype"], save=False)
+            manager.save_project()
+            crop_volume_to_part(manager, "01-0101-ready", "head", [[0, 3], [0, 4], [0, 5]], display_name="Head")
+            part = manager.get_part("01-0101-ready", "head")
+            part.setdefault("metadata", {}).setdefault("local_axis_batch_failures", []).append(
+                {
+                    "failure_id": "failed_frame_002",
+                    "proposal_id": "frame_002",
+                    "template_id": "head",
+                    "reason": "ValueError",
+                    "detail": "bad roll reference",
+                }
+            )
+            manager.save_project()
+
+            all_rows = list_local_axis_queue(manager, {"status": "all"})
+            no_part_rows = list_local_axis_queue(manager, {"status": "no_part"})
+            part_ready_rows = list_local_axis_queue(manager, {"status": "part_ready"})
+            no_proposal_rows = list_local_axis_queue(manager, {"status": "no_proposal"})
+            failed_rows = list_local_axis_queue(manager, {"status": "failed"})
+
+            self.assertEqual([row["specimen_id"] for row in no_part_rows], ["01-0101-no-part"])
+            self.assertEqual([row["specimen_id"] for row in part_ready_rows], ["01-0101-ready"])
+            self.assertEqual([row["status"] for row in no_proposal_rows], ["no_proposal"])
+            self.assertEqual([row["status"] for row in all_rows if row["specimen_id"] == "01-0101-ready" and row["kind"] == "part"], ["part_ready"])
+            self.assertEqual(failed_rows[0]["status"], "failed")
+            self.assertEqual(failed_rows[0]["failure_reason"], "ValueError")
+
     def test_queue_filters_by_model_version_hard_flag_and_confidence(self):
         with tempfile.TemporaryDirectory() as tmp:
             manager = make_project_with_frame_proposal(Path(tmp))
@@ -116,6 +153,59 @@ class TifLocalAxisBatchTests(unittest.TestCase):
             self.assertEqual(manager.get_local_frame_proposal("01-0101-batch", "head", "frame_001")["status"], "exported")
             self.assertEqual(manager.list_part_reslices("01-0101-batch", "head")[0]["reslice_id"], "frame_001_reslice")
             self.assertEqual(manager.list_local_axis_runs()[-1]["action"], "batch_reslice_export")
+
+    def test_batch_export_records_failures_and_keeps_exporting_other_accepted_items(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = make_project_with_frame_proposal(root)
+            manager.create_specimen_scaffold("01-0101-good")
+            image = np.arange(5 * 6 * 7, dtype=np.uint16).reshape((5, 6, 7))
+            image_rel = "specimens/01-0101-good/working/image.ome.zarr"
+            image_meta = write_volume_sidecar(root / "batch_project" / image_rel, image, role="working_image")
+            manager.register_working_volume("01-0101-good", image_rel, image_meta["shape_zyx"], image_meta["dtype"], save=False)
+            manager.save_project()
+            crop_volume_to_part(manager, "01-0101-good", "head", [[1, 5], [1, 5], [1, 6]], display_name="Head")
+            manager.add_local_frame_proposal(
+                "01-0101-good",
+                "head",
+                {
+                    "frame_proposal_id": "frame_good",
+                    "template_id": "head",
+                    "origin_zyx": [1.5, 1.5, 2.0],
+                    "output_axis_start_zyx": [0.0, 1.5, 2.0],
+                    "output_axis_end_zyx": [3.0, 1.5, 2.0],
+                    "roll_reference": {
+                        "point_a": {"role": "left_eye", "zyx": [1.5, 1.0, 1.0]},
+                        "point_b": {"role": "right_eye", "zyx": [1.5, 3.0, 1.0]},
+                    },
+                    "status": "accepted",
+                },
+                save=False,
+            )
+            accept_local_frame_proposal(manager, "01-0101-batch", "head", "frame_001")
+            bad = manager.get_local_frame_proposal("01-0101-batch", "head", "frame_001")
+            bad["roll_reference"] = {
+                "point_a": {"role": "left_eye", "zyx": [1.5, 1.0, 1.0]},
+                "point_b": {"role": "right_eye", "zyx": [1.5, 1.0, 1.0]},
+            }
+            manager.save_project()
+
+            result = batch_export_accepted_reslices(manager, reslice_params={"output_shape_zyx": [4, 4, 5]})
+
+            self.assertEqual(len(result["exported"]), 1)
+            self.assertEqual(len(result["skipped"]), 1)
+            self.assertEqual(result["run"]["result_status"], "partial_success")
+            self.assertEqual(manager.get_local_frame_proposal("01-0101-good", "head", "frame_good")["status"], "exported")
+            self.assertEqual(manager.get_local_frame_proposal("01-0101-batch", "head", "frame_001")["status"], "accepted")
+            failed_rows = list_local_axis_queue(manager, {"status": "failed"})
+            self.assertEqual(len(failed_rows), 1)
+            self.assertEqual(failed_rows[0]["proposal_id"], "frame_001")
+            self.assertIn("roll_reference", failed_rows[0]["failure_detail"])
+
+            reloaded = TifProjectManager()
+            reloaded.load_project(root / "batch_project" / "project.json")
+            reloaded_failures = list_local_axis_queue(reloaded, {"status": "failed"})
+            self.assertEqual(reloaded_failures[0]["proposal_id"], "frame_001")
 
     def test_batch_export_recomputes_proposal_frame_with_part_spacing(self):
         with tempfile.TemporaryDirectory() as tmp:

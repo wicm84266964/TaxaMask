@@ -31,6 +31,24 @@
   - `AnnotationCanvas.vlm_boxes` = VLM draft boxes, drawn separately as magenta dotted VLM boxes.
 - Child Expert Session receives only model prediction auto boxes for its local canvas/sync state. A VLM draft can still be chosen as an entry ROI when the operator explicitly selects it, but it is labeled as `VLM Draft Box` and is not silently treated as a normal model auto box.
 
+### 0.0b Current TIF Local Axis Reslice state (2026-06-22)
+- TIF Local Axis Reslice / 局部轴重切片 is implemented as a generic part-volume workflow, not as Brain Reslice. `head` remains the first practical template, but core fields use generic names such as source axis, editable output axis, roll reference point pair, and local frame.
+- Formal reslice exports are stored under the selected part:
+  - `specimens/<specimen>/parts/<part>/reslices/<reslice_id>/image.tif`
+  - optional `mask.tif` when a part mask exists
+  - `metadata.json`
+  - project record in `part.metadata.local_axis_reslices[]`
+- Each exported reslice now writes a standard `training_sample` both in `metadata.json` and the project reslice record. It records specimen / part / template, part image path / shape / spacing, mask availability, parent bbox, source axis, initial editable axis, final editable axis, origin, roll reference point pair, local frame, reslice params, outputs, human confirmation, `usable_for_training`, timestamps, software version, notes, and provenance. This is the current bridge from manual operation to future AI training data.
+- `export_local_axis_training_manifest(...)` now prefers the saved `training_sample`, so Local Axis train/prepare-dataset backends consume the same data contract instead of reconstructing loose fields later.
+- Local Axis AI backend integration is model-agnostic but safety-constrained:
+  - backend outputs may import `global_roi_proposals` and `local_frame_proposals`
+  - backend outputs must not directly modify project JSON, manual truth, or final reslice outputs
+  - imported proposal JSON values of `accepted` or `exported` are downgraded to `needs_review`
+  - missing roll reference point pairs mark local frame proposals as `needs_review`
+  - accepted proposals are the only source allowed for batch formal reslice export
+- Local Axis review queue now supports large-batch states: `no_part`, `part_ready`, `proposed`, `needs_review`, `accepted`, `exported`, `failed`, plus legacy-compatible `no_proposal`. Batch export records per-proposal failures in `part.metadata.local_axis_batch_failures[]` and continues exporting other accepted items.
+- Recent validation covered compile checks, Local Axis unit tests, project reload tests, training manifest export, accepted-only batch export, failure persistence, and PySide6 offscreen smoke tests for the reslice dialog/model panel/review queue. Real AntScan visual interaction still needs manual validation, especially 3D drag smoothness and axis readability on real volumes.
+
 ### 0.1 Large 2D/STL annotation behavior
 - Large 2D/STL projects open with lightweight safeguards:
   - image groups collapsed at first display for 500+ image projects

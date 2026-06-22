@@ -4,7 +4,19 @@ from .tif_local_axis_reslice import compute_local_frame, export_part_reslice
 from .tif_project import TifProjectManager
 
 
-LOCAL_AXIS_QUEUE_STATUSES = {"all", "no_proposal", "proposed", "needs_review", "accepted", "exported", "rejected", "hard_cases"}
+LOCAL_AXIS_QUEUE_STATUSES = {
+    "all",
+    "no_part",
+    "part_ready",
+    "no_proposal",
+    "proposed",
+    "needs_review",
+    "accepted",
+    "exported",
+    "rejected",
+    "failed",
+    "hard_cases",
+}
 
 
 def _now_stamp():
@@ -41,14 +53,32 @@ def list_local_axis_queue(project_manager, filters=None):
     rows = []
     for specimen in project_manager.project_data.get("specimens", []) or []:
         specimen_id = specimen.get("specimen_id", "")
-        for part in specimen.get("parts", []) or []:
+        parts = list(specimen.get("parts", []) or [])
+        if not parts and status_filter in {"all", "no_part"}:
+            row = {
+                "specimen_id": specimen_id,
+                "part_id": "",
+                "template_id": template_filter or "",
+                "kind": "specimen",
+                "proposal_id": "",
+                "status": "no_part",
+                "confidence": 0.0,
+                "hard_case_flags": [],
+                "model_id": "",
+                "model_version": "",
+            }
+            if _queue_row_matches(row, status_filter, model_version_filter, hard_case_flag_filter):
+                rows.append(row)
+        for part in parts:
             part_id = part.get("part_id", "")
             metadata = part.get("metadata") or {}
             proposals = list(metadata.get("local_axis_frame_proposals", []) or [])
             reslices = list(metadata.get("local_axis_reslices", []) or [])
+            failures = list(metadata.get("local_axis_batch_failures", []) or [])
             if template_filter:
                 proposals = [item for item in proposals if item.get("template_id") == template_filter]
                 reslices = [item for item in reslices if item.get("template_id") == template_filter]
+                failures = [item for item in failures if item.get("template_id") == template_filter]
             if proposals:
                 for proposal in proposals:
                     status = proposal.get("status") or "proposed"
@@ -67,14 +97,14 @@ def list_local_axis_queue(project_manager, filters=None):
                     }
                     if _queue_row_matches(row, status_filter, model_version_filter, hard_case_flag_filter):
                         rows.append(row)
-            elif status_filter in {"all", "no_proposal"}:
+            elif status_filter in {"all", "part_ready", "no_proposal"}:
                 row = {
                     "specimen_id": specimen_id,
                     "part_id": part_id,
                     "template_id": template_filter or "",
                     "kind": "part",
                     "proposal_id": "",
-                    "status": "no_proposal",
+                    "status": "part_ready",
                     "confidence": 0.0,
                     "hard_case_flags": [],
                     "model_id": "",
@@ -82,6 +112,11 @@ def list_local_axis_queue(project_manager, filters=None):
                 }
                 if _queue_row_matches(row, status_filter, model_version_filter, hard_case_flag_filter):
                     rows.append(row)
+                if status_filter == "no_proposal":
+                    legacy_row = dict(row)
+                    legacy_row["status"] = "no_proposal"
+                    if _queue_row_matches(legacy_row, status_filter, model_version_filter, hard_case_flag_filter):
+                        rows.append(legacy_row)
             if include_reslices and status_filter in {"all", "exported"}:
                 for reslice in reslices:
                     row = {
@@ -96,6 +131,25 @@ def list_local_axis_queue(project_manager, filters=None):
                         "hard_case_flags": [],
                         "model_id": "",
                         "model_version": "",
+                    }
+                    if _queue_row_matches(row, status_filter, model_version_filter, hard_case_flag_filter):
+                        rows.append(row)
+            if status_filter in {"all", "failed"}:
+                for failure in failures:
+                    row = {
+                        "specimen_id": specimen_id,
+                        "part_id": part_id,
+                        "template_id": failure.get("template_id", ""),
+                        "kind": "batch_failure",
+                        "proposal_id": failure.get("proposal_id", ""),
+                        "failure_id": failure.get("failure_id", ""),
+                        "status": "failed",
+                        "confidence": 0.0,
+                        "hard_case_flags": [],
+                        "model_id": failure.get("model_id", ""),
+                        "model_version": failure.get("model_version", ""),
+                        "failure_reason": failure.get("reason", ""),
+                        "failure_detail": failure.get("detail", ""),
                     }
                     if _queue_row_matches(row, status_filter, model_version_filter, hard_case_flag_filter):
                         rows.append(row)
@@ -216,10 +270,28 @@ def proposal_to_reslice_payload(frame_proposal, reslice_id=None, display_name=No
     training_payload = {"human_confirmed": True, "usable_for_training": True, "source": "AI proposed + human reviewed"}
     if isinstance(training, dict):
         training_payload.update(training)
+    source_axis = proposal.get("source_axis") if isinstance(proposal.get("source_axis"), dict) else {}
+    editable_axis = {}
+    if source_axis:
+        editable_axis = {
+            "axis_id": "local_output_z_axis",
+            "role": "editable_output_axis",
+            "locked": False,
+            "coordinate_space": source_axis.get("coordinate_space", "part_volume_voxel_zyx"),
+            "start_zyx": list(proposal.get("output_axis_start_zyx") or []),
+            "end_zyx": list(proposal.get("output_axis_end_zyx") or []),
+            "source_axis_id": source_axis.get("axis_id", "source_z_axis"),
+            "source": "local_frame_proposal",
+            "source_proposal_id": proposal.get("frame_proposal_id", ""),
+        }
     return {
         "reslice_id": reslice_id or f"{proposal.get('frame_proposal_id')}_reslice",
         "display_name": display_name or proposal.get("frame_proposal_id") or "local_axis_reslice",
         "template_id": proposal.get("template_id", ""),
+        "source_axis": source_axis,
+        "initial_editable_axis": editable_axis,
+        "editable_axis": editable_axis,
+        "final_editable_axis": editable_axis,
         "local_frame": local_frame,
         "roll_reference": proposal.get("roll_reference") or local_frame.get("roll_reference") or {},
         "reslice_params": dict(reslice_params or {}),
@@ -230,6 +302,25 @@ def proposal_to_reslice_payload(frame_proposal, reslice_id=None, display_name=No
             "source_model_version": proposal.get("model_version", ""),
         },
     }
+
+
+def _record_batch_failure(project_manager, specimen_id, part_id, proposal, exc):
+    part = project_manager.get_part(specimen_id, part_id, default=None)
+    if part is None:
+        return None
+    proposal_id = str((proposal or {}).get("frame_proposal_id") or "")
+    failure = {
+        "failure_id": f"failed_{proposal_id or 'proposal'}_{_now_stamp()}",
+        "proposal_id": proposal_id,
+        "template_id": str((proposal or {}).get("template_id") or ""),
+        "reason": type(exc).__name__,
+        "detail": str(exc),
+        "model_id": str((proposal or {}).get("model_id") or ""),
+        "model_version": str((proposal or {}).get("model_version") or ""),
+        "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
+    part.setdefault("metadata", {}).setdefault("local_axis_batch_failures", []).append(failure)
+    return failure
 
 
 def batch_export_accepted_reslices(project_manager, proposal_ids=None, reslice_params=None):
@@ -259,7 +350,8 @@ def batch_export_accepted_reslices(project_manager, proposal_ids=None, reslice_p
                     touched_parts.add(part_id)
                     project_manager.update_local_frame_proposal(specimen_id, part_id, proposal_id, {"status": "exported"}, save=False)
                 except Exception as exc:
-                    skipped.append({"proposal_id": proposal_id, "reason": type(exc).__name__, "detail": str(exc)})
+                    failure = _record_batch_failure(project_manager, specimen_id, part_id, proposal, exc)
+                    skipped.append({"proposal_id": proposal_id, "reason": type(exc).__name__, "detail": str(exc), "failure": failure or {}})
     run = project_manager.add_local_axis_run(
         {
             "run_id": f"batch_reslice_export_{_now_stamp()}",

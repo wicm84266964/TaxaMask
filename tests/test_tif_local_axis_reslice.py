@@ -113,6 +113,11 @@ class TifLocalAxisResliceTests(unittest.TestCase):
                 },
                 spacing_zyx=[1.0, 1.0, 1.0],
             )
+            source_axis = source_z_axis_for_part((4, 4, 5))
+            initial_axis = create_editable_axis_from_source(source_axis)
+            final_axis = dict(initial_axis)
+            final_axis["start_zyx"] = [0.0, 1.5, 2.0]
+            final_axis["end_zyx"] = [3.0, 1.5, 2.0]
 
             result = export_part_reslice(
                 manager,
@@ -121,9 +126,18 @@ class TifLocalAxisResliceTests(unittest.TestCase):
                 {
                     "reslice_id": "head_axis_001",
                     "template_id": "head",
+                    "source_axis": source_axis,
+                    "initial_editable_axis": initial_axis,
+                    "editable_axis": final_axis,
+                    "final_editable_axis": final_axis,
                     "local_frame": frame,
                     "reslice_params": {"output_shape_zyx": [4, 4, 5]},
-                    "training": {"human_confirmed": True, "usable_for_training": True},
+                    "training": {
+                        "human_confirmed": True,
+                        "usable_for_training": True,
+                        "source": "human_manual_local_axis",
+                        "reviewer_notes": "clear left/right eye roll points",
+                    },
                 },
             )
 
@@ -136,14 +150,45 @@ class TifLocalAxisResliceTests(unittest.TestCase):
             self.assertEqual(exported_mask.shape, (4, 4, 5))
             self.assertTrue(np.issubdtype(exported_mask.dtype, np.integer))
             metadata = json.loads(Path(result["metadata_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(metadata["source"]["part_image_shape_zyx"], [4, 4, 5])
+            self.assertEqual(metadata["source"]["part_image_dtype"], "uint16")
+            self.assertEqual(metadata["source"]["part_spacing_zyx"], [1.0, 1.0, 1.0])
+            self.assertTrue(metadata["source"]["part_mask_available"])
+            self.assertEqual(metadata["source"]["source_axis"]["role"], "source_direction_reference")
+            self.assertEqual(metadata["source"]["initial_editable_axis"]["start_zyx"], [0.0, 1.5, 2.0])
+            self.assertEqual(metadata["source"]["final_editable_axis"]["end_zyx"], [3.0, 1.5, 2.0])
             self.assertEqual(metadata["outputs"]["image_interpolation"], "linear")
             self.assertEqual(metadata["outputs"]["mask_interpolation"], "nearest")
             self.assertEqual(metadata["training"]["human_confirmed"], True)
-            self.assertEqual(manager.list_part_reslices("01-0101-export", "head")[0]["reslice_id"], "head_axis_001")
+            self.assertEqual(metadata["training_sample"]["schema_version"], "taxamask_tif_local_axis_training_sample_v1")
+            self.assertEqual(metadata["training_sample"]["specimen_id"], "01-0101-export")
+            self.assertEqual(metadata["training_sample"]["part_id"], "head")
+            self.assertEqual(metadata["training_sample"]["template_id"], "head")
+            self.assertEqual(metadata["training_sample"]["part_image"]["shape_zyx"], [4, 4, 5])
+            self.assertTrue(metadata["training_sample"]["part_mask"]["available"])
+            self.assertEqual(metadata["training_sample"]["source_axis"]["axis_id"], "source_z_axis")
+            self.assertEqual(metadata["training_sample"]["initial_editable_axis"]["axis_id"], "local_output_z_axis")
+            self.assertEqual(metadata["training_sample"]["final_editable_axis"]["end_zyx"], [3.0, 1.5, 2.0])
+            self.assertEqual(metadata["training_sample"]["origin_zyx"], frame["origin_zyx"])
+            self.assertEqual(metadata["training_sample"]["roll_reference_point_pair"]["point_a"]["role"], "left_eye")
+            self.assertEqual(metadata["training_sample"]["local_frame"]["output_axis"], "z_axis")
+            self.assertEqual(metadata["training_sample"]["reslice_params"]["output_shape_zyx"], [4, 4, 5])
+            self.assertEqual(metadata["training_sample"]["outputs"]["image_path"], metadata["outputs"]["image_path"])
+            self.assertTrue(metadata["training_sample"]["human_confirmed"])
+            self.assertTrue(metadata["training_sample"]["usable_for_training"])
+            self.assertEqual(metadata["training_sample"]["operator_notes"], "clear left/right eye roll points")
+            self.assertTrue(metadata["training_sample"]["created_at"])
+            self.assertTrue(metadata["training_sample"]["updated_at"])
+            self.assertTrue(metadata["training_sample"]["software_version"])
+            record = manager.list_part_reslices("01-0101-export", "head")[0]
+            self.assertEqual(record["reslice_id"], "head_axis_001")
+            self.assertEqual(record["training_sample"]["sample_id"], "01-0101-export:head:head_axis_001")
 
             reloaded = TifProjectManager()
             reloaded.load_project(project_json)
-            self.assertEqual(reloaded.list_part_reslices("01-0101-export", "head")[0]["metadata_path"], result["record"]["metadata_path"])
+            reloaded_record = reloaded.list_part_reslices("01-0101-export", "head")[0]
+            self.assertEqual(reloaded_record["metadata_path"], result["record"]["metadata_path"])
+            self.assertEqual(reloaded_record["training_sample"]["final_editable_axis"]["end_zyx"], [3.0, 1.5, 2.0])
 
     def test_duplicate_reslice_id_is_rejected_before_overwriting_files(self):
         with tempfile.TemporaryDirectory() as tmp:

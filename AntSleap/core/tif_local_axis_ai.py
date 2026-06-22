@@ -4,6 +4,7 @@ import subprocess
 from datetime import datetime
 
 from .tif_project import TifProjectManager
+from .tif_local_axis_reslice import source_z_axis_for_part
 
 
 LOCAL_AXIS_BACKEND_CONTRACT_SCHEMA_VERSION = "taxamask_tif_local_axis_backend_contract_v1"
@@ -93,6 +94,31 @@ def _normalize_status(status):
     return clean if clean in {"proposed", "needs_review", "accepted", "rejected", "exported"} else "proposed"
 
 
+def _reviewable_import_status(status, needs_review=False):
+    clean = _normalize_status(status)
+    if clean in {"accepted", "exported"}:
+        return "needs_review"
+    if needs_review and clean == "proposed":
+        return "needs_review"
+    return clean
+
+
+def _roll_reference_complete(roll_reference):
+    if not isinstance(roll_reference, dict):
+        return False
+    point_a = roll_reference.get("point_a") if isinstance(roll_reference.get("point_a"), dict) else {}
+    point_b = roll_reference.get("point_b") if isinstance(roll_reference.get("point_b"), dict) else {}
+    return bool(_normalize_point_zyx(point_a.get("zyx")) and _normalize_point_zyx(point_b.get("zyx")))
+
+
+def _missing_landmarks(values, required=None):
+    clean = list(values or []) if isinstance(values, list) else []
+    for item in required or []:
+        if item not in clean:
+            clean.append(item)
+    return clean
+
+
 def sanitize_local_axis_backend_config(config):
     clean = dict(DEFAULT_LOCAL_AXIS_BACKEND_CONFIG)
     if isinstance(config, dict):
@@ -126,8 +152,10 @@ def normalize_global_proposal(payload):
         "confidence": float(source.get("confidence", 0.0) or 0.0),
         "model_id": str(source.get("model_id") or ""),
         "model_version": str(source.get("model_version") or ""),
-        "status": _normalize_status(source.get("status")),
+        "status": _reviewable_import_status(source.get("status")),
         "hard_case_flags": list(source.get("hard_case_flags", []) or []) if isinstance(source.get("hard_case_flags", []), list) else [],
+        "input_data": dict(source.get("input_data") or source.get("inputs") or {}),
+        "failure_reason": str(source.get("failure_reason") or source.get("error") or ""),
         "reviewer_notes": str(source.get("reviewer_notes") or ""),
         "provenance": dict(source.get("provenance") or {}),
         "created_at": str(source.get("created_at") or _now_iso()),
@@ -147,6 +175,11 @@ def normalize_frame_proposal(payload):
     if not specimen_id or not part_id:
         raise ValueError("local_frame_proposal_requires_specimen_id_and_part_id")
     proposal_id = _safe_id(source.get("frame_proposal_id") or source.get("proposal_id") or source.get("id") or f"frame_proposal_{_now_stamp()}", "frame_proposal")
+    roll_reference = dict(source.get("roll_reference") or {})
+    missing_landmarks = list(source.get("missing_landmarks", []) or []) if isinstance(source.get("missing_landmarks", []), list) else []
+    roll_missing = not _roll_reference_complete(roll_reference)
+    if roll_missing:
+        missing_landmarks = _missing_landmarks(missing_landmarks, ["roll_reference_point_pair"])
     return {
         "frame_proposal_id": proposal_id,
         "specimen_id": specimen_id,
@@ -156,15 +189,18 @@ def normalize_frame_proposal(payload):
         "origin_zyx": origin,
         "output_axis_start_zyx": start,
         "output_axis_end_zyx": end,
-        "roll_reference": dict(source.get("roll_reference") or {}),
+        "roll_reference": roll_reference,
         "local_frame": dict(source.get("local_frame") or {}),
+        "source_axis": dict(source.get("source_axis") or {}),
         "confidence": float(source.get("confidence", 0.0) or 0.0),
         "landmark_scores": dict(source.get("landmark_scores") or {}),
-        "missing_landmarks": list(source.get("missing_landmarks", []) or []) if isinstance(source.get("missing_landmarks", []), list) else [],
+        "missing_landmarks": missing_landmarks,
         "model_id": str(source.get("model_id") or ""),
         "model_version": str(source.get("model_version") or ""),
-        "status": _normalize_status(source.get("status")),
+        "status": _reviewable_import_status(source.get("status"), needs_review=roll_missing),
         "hard_case_flags": list(source.get("hard_case_flags", []) or []) if isinstance(source.get("hard_case_flags", []), list) else [],
+        "input_data": dict(source.get("input_data") or source.get("inputs") or {}),
+        "failure_reason": str(source.get("failure_reason") or source.get("error") or ""),
         "reviewer_notes": str(source.get("reviewer_notes") or ""),
         "provenance": dict(source.get("provenance") or {}),
         "created_at": str(source.get("created_at") or _now_iso()),
@@ -179,7 +215,20 @@ def _proposal_list_from_payload(payload, expected_schema_version=None):
             raise ValueError(f"invalid_local_axis_proposal_schema:{schema_version}")
         proposals = payload.get("proposals")
         if isinstance(proposals, list):
-            return proposals
+            defaults = {
+                key: payload.get(key)
+                for key in ("template_id", "model_id", "model_version")
+                if payload.get(key) is not None
+            }
+            merged = []
+            for item in proposals:
+                if isinstance(item, dict):
+                    clean = dict(defaults)
+                    clean.update(item)
+                    merged.append(clean)
+                else:
+                    merged.append(item)
+            return merged
     if isinstance(payload, list):
         return payload
     raise ValueError("proposal_json_must_have_proposals_list")
@@ -265,39 +314,82 @@ def export_local_axis_training_manifest(project_manager, output_dir, filters=Non
             part_id = part.get("part_id", "")
             for reslice in (part.get("metadata") or {}).get("local_axis_reslices", []) or []:
                 training = reslice.get("training") or {}
+                training_sample = dict(reslice.get("training_sample") or {})
+                human_confirmed = bool(training_sample.get("human_confirmed", training.get("human_confirmed")))
+                usable_for_training = bool(training_sample.get("usable_for_training", training.get("usable_for_training", True)))
                 if template_filter and reslice.get("template_id") != template_filter:
                     continue
                 if not include_unconfirmed:
-                    if not bool(training.get("human_confirmed")) or not bool(training.get("usable_for_training", True)):
+                    if not human_confirmed or not usable_for_training:
                         continue
-                sample = {
-                    "sample_id": f"{specimen_id}:{part_id}:{reslice.get('reslice_id', '')}",
-                    "specimen_id": specimen_id,
-                    "part_id": part_id,
-                    "reslice_id": reslice.get("reslice_id", ""),
-                    "template_id": reslice.get("template_id", ""),
-                    "full_volume": {
+                if training_sample:
+                    sample = dict(training_sample)
+                    sample.setdefault("sample_id", f"{specimen_id}:{part_id}:{reslice.get('reslice_id', '')}")
+                    sample["specimen_id"] = specimen_id
+                    sample["part_id"] = part_id
+                    sample.setdefault("reslice_id", reslice.get("reslice_id", ""))
+                    sample.setdefault("template_id", reslice.get("template_id", ""))
+                    sample["human_confirmed"] = human_confirmed
+                    sample["usable_for_training"] = usable_for_training
+                    sample["training"] = dict(training)
+                    sample.setdefault(
+                        "hard_case_flags",
+                        list(training.get("hard_case_flags", []) or []) if isinstance(training.get("hard_case_flags", []), list) else [],
+                    )
+                    sample.setdefault("source", reslice.get("source", {}))
+                    sample["full_volume"] = {
                         "path": project_manager.to_absolute(full_volume.get("path", "")),
                         "shape_zyx": full_volume.get("shape_zyx", []),
                         "spacing_zyx": full_volume.get("spacing_zyx") or [1.0, 1.0, 1.0],
-                    },
-                    "part_image": {
-                        "path": project_manager.to_absolute((part.get("image") or {}).get("path", "")),
-                        "shape_zyx": (part.get("image") or {}).get("shape_zyx", []),
-                        "spacing_zyx": (part.get("image") or {}).get("spacing_zyx") or full_volume.get("spacing_zyx") or [1.0, 1.0, 1.0],
-                    },
-                    "part_mask": {
-                        "path": project_manager.to_absolute((part.get("mask") or {}).get("path", "")) if (part.get("mask") or {}).get("path") else "",
-                        "available": bool((part.get("mask") or {}).get("path")),
-                    },
-                    "parent_bbox_zyx": part.get("parent_bbox_zyx", []),
-                    "local_frame": reslice.get("local_frame", {}),
-                    "reslice_params": reslice.get("reslice_params", {}),
-                    "training": dict(training),
-                    "hard_case_flags": list(training.get("hard_case_flags", []) or []) if isinstance(training.get("hard_case_flags", []), list) else [],
-                    "source": reslice.get("source", {}),
-                    "metadata_path": project_manager.to_absolute(reslice.get("metadata_path", "")) if reslice.get("metadata_path") else "",
-                }
+                    }
+                    part_image = dict(sample.get("part_image") or {})
+                    part_image_path = part_image.get("path") or (part.get("image") or {}).get("path", "")
+                    part_image["path"] = project_manager.to_absolute(part_image_path) if part_image_path else ""
+                    part_image.setdefault("shape_zyx", (part.get("image") or {}).get("shape_zyx", []))
+                    part_image.setdefault("spacing_zyx", (part.get("image") or {}).get("spacing_zyx") or full_volume.get("spacing_zyx") or [1.0, 1.0, 1.0])
+                    sample["part_image"] = part_image
+                    part_mask = dict(sample.get("part_mask") or {})
+                    part_mask_path = part_mask.get("path") or (part.get("mask") or {}).get("path", "")
+                    part_mask["path"] = project_manager.to_absolute(part_mask_path) if part_mask_path else ""
+                    part_mask.setdefault("available", bool((part.get("mask") or {}).get("path")))
+                    sample["part_mask"] = part_mask
+                    outputs = dict(sample.get("outputs") or {})
+                    for key in ("image_path", "mask_path"):
+                        if outputs.get(key):
+                            outputs[key] = project_manager.to_absolute(outputs[key])
+                    sample["outputs"] = outputs
+                    sample["metadata_path"] = project_manager.to_absolute(reslice.get("metadata_path", "")) if reslice.get("metadata_path") else ""
+                else:
+                    sample = {
+                        "sample_id": f"{specimen_id}:{part_id}:{reslice.get('reslice_id', '')}",
+                        "specimen_id": specimen_id,
+                        "part_id": part_id,
+                        "reslice_id": reslice.get("reslice_id", ""),
+                        "template_id": reslice.get("template_id", ""),
+                        "full_volume": {
+                            "path": project_manager.to_absolute(full_volume.get("path", "")),
+                            "shape_zyx": full_volume.get("shape_zyx", []),
+                            "spacing_zyx": full_volume.get("spacing_zyx") or [1.0, 1.0, 1.0],
+                        },
+                        "part_image": {
+                            "path": project_manager.to_absolute((part.get("image") or {}).get("path", "")),
+                            "shape_zyx": (part.get("image") or {}).get("shape_zyx", []),
+                            "spacing_zyx": (part.get("image") or {}).get("spacing_zyx") or full_volume.get("spacing_zyx") or [1.0, 1.0, 1.0],
+                        },
+                        "part_mask": {
+                            "path": project_manager.to_absolute((part.get("mask") or {}).get("path", "")) if (part.get("mask") or {}).get("path") else "",
+                            "available": bool((part.get("mask") or {}).get("path")),
+                        },
+                        "parent_bbox_zyx": part.get("parent_bbox_zyx", []),
+                        "local_frame": reslice.get("local_frame", {}),
+                        "reslice_params": reslice.get("reslice_params", {}),
+                        "training": dict(training),
+                        "human_confirmed": human_confirmed,
+                        "usable_for_training": usable_for_training,
+                        "hard_case_flags": list(training.get("hard_case_flags", []) or []) if isinstance(training.get("hard_case_flags", []), list) else [],
+                        "source": reslice.get("source", {}),
+                        "metadata_path": project_manager.to_absolute(reslice.get("metadata_path", "")) if reslice.get("metadata_path") else "",
+                    }
                 samples.append(sample)
 
     manifest = {
@@ -381,7 +473,7 @@ class TifLocalAxisBackendRunner:
     def run_action(self, action, specimen_ids=None, part_ids_by_specimen=None, template_id="", dataset_dir="", model_manifest=""):
         run_id, run_dir = self.create_run_dir(action)
         contract = self.build_contract(action, specimen_ids, part_ids_by_specimen, template_id, run_id, run_dir, dataset_dir, model_manifest)
-        if action == "prepare_dataset":
+        if action in {"prepare_dataset", "train"}:
             export = export_local_axis_training_manifest(self.project_manager, contract["dataset_dir"], {"template_id": template_id} if template_id else {})
             contract["training_manifest"] = export["manifest_path"]
             contract["training_sample_count"] = export["sample_count"]
@@ -515,6 +607,7 @@ class TifLocalAxisBackendRunner:
                 "dtype": image.get("dtype", ""),
                 "spacing_zyx": image.get("spacing_zyx") or [1.0, 1.0, 1.0],
             },
+            "source_axis": source_z_axis_for_part(image.get("shape_zyx") or [1, 1, 1]),
             "part_mask": {
                 "path": self.project_manager.to_absolute(mask.get("path", "")) if mask.get("path") else "",
                 "format": mask.get("format", ""),

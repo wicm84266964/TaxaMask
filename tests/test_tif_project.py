@@ -575,6 +575,24 @@ class TifProjectTests(unittest.TestCase):
                         "coordinate_space": "part_volume_voxel_zyx",
                     },
                     "training": {"human_confirmed": True, "usable_for_training": True},
+                    "training_sample": {
+                        "schema_version": "taxamask_tif_local_axis_training_sample_v1",
+                        "sample_id": "01-0101-local:head:head_axis_001",
+                        "specimen_id": "01-0101-local",
+                        "part_id": "head",
+                        "reslice_id": "head_axis_001",
+                        "template_id": "head",
+                        "source_axis": {"axis_id": "source_z_axis", "locked": True},
+                        "initial_editable_axis": {"axis_id": "local_output_z_axis", "start_zyx": [0.0, 2.0, 2.0]},
+                        "final_editable_axis": {"axis_id": "local_output_z_axis", "end_zyx": [4.0, 2.0, 2.0]},
+                        "origin_zyx": [2.0, 2.0, 2.0],
+                        "roll_reference_point_pair": {
+                            "point_a": {"role": "left_eye", "zyx": [2.0, 1.0, 1.0]},
+                            "point_b": {"role": "right_eye", "zyx": [2.0, 3.0, 1.0]},
+                        },
+                        "human_confirmed": True,
+                        "usable_for_training": True,
+                    },
                 },
                 save=False,
             )
@@ -612,6 +630,8 @@ class TifProjectTests(unittest.TestCase):
             self.assertEqual(reloaded_reslice["reslice_id"], "head_axis_001")
             self.assertEqual(reloaded_reslice["local_frame"]["spacing_zyx"], [2.0, 1.0, 1.0])
             self.assertEqual(reloaded_reslice["local_frame"]["coordinate_space"], "part_volume_voxel_zyx")
+            self.assertEqual(reloaded_reslice["training_sample"]["sample_id"], "01-0101-local:head:head_axis_001")
+            self.assertEqual(reloaded_reslice["training_sample"]["final_editable_axis"]["end_zyx"], [4.0, 2.0, 2.0])
             self.assertEqual(run["workflow"], "tif_local_axis")
             self.assertEqual(reloaded.project_data["models"][0]["model_id"], "local_axis/head_frame_v1")
             self.assertEqual(reloaded.project_data["runs"][0]["run_id"], "predict_001")

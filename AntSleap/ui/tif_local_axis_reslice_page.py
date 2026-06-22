@@ -363,6 +363,7 @@ class TifLocalAxisResliceDialog(QDialog):
             self.spacing_zyx = [1.0, 1.0, 1.0]
         self.source_axis = source_z_axis_for_part(self.part_shape)
         self.editable_axis = create_editable_axis_from_source(self.source_axis)
+        self.initial_editable_axis = dict(self.editable_axis)
         self.initial_draft = dict(initial_draft or {}) if isinstance(initial_draft, dict) else {}
         self.proposals = self.project.list_local_frame_proposals(self.specimen_id, self.part_id)
 
@@ -754,6 +755,7 @@ class TifLocalAxisResliceDialog(QDialog):
 
     def copy_source_axis(self):
         self.editable_axis = create_editable_axis_from_source(self.source_axis)
+        self.initial_editable_axis = dict(self.editable_axis)
         self.axis_start_edit.setText(self._format_point(self.source_axis.get("start_zyx")))
         self.axis_end_edit.setText(self._format_point(self.source_axis.get("end_zyx")))
         self.preview_status_label.setText(tt("Copied source Z axis as editable output axis.", self.lang))
@@ -772,6 +774,7 @@ class TifLocalAxisResliceDialog(QDialog):
             self.source_axis = dict(source_axis)
         if isinstance(editable_axis, dict):
             self.editable_axis = dict(editable_axis)
+            self.initial_editable_axis = dict(editable_axis)
             if editable_axis.get("start_zyx"):
                 self.axis_start_edit.setText(self._format_point(editable_axis.get("start_zyx")))
             if editable_axis.get("end_zyx"):
@@ -801,6 +804,13 @@ class TifLocalAxisResliceDialog(QDialog):
         self.origin_edit.setText(self._format_point(proposal.get("origin_zyx")))
         self.axis_start_edit.setText(self._format_point(proposal.get("output_axis_start_zyx")))
         self.axis_end_edit.setText(self._format_point(proposal.get("output_axis_end_zyx")))
+        proposal_axis = create_editable_axis_from_source(self.source_axis)
+        proposal_axis["start_zyx"] = list(proposal.get("output_axis_start_zyx") or [])
+        proposal_axis["end_zyx"] = list(proposal.get("output_axis_end_zyx") or [])
+        proposal_axis["source"] = "local_frame_proposal"
+        proposal_axis["source_proposal_id"] = proposal.get("frame_proposal_id", "")
+        self.editable_axis = dict(proposal_axis)
+        self.initial_editable_axis = dict(proposal_axis)
         roll = proposal.get("roll_reference") or {}
         point_a = roll.get("point_a") if isinstance(roll.get("point_a"), dict) else {}
         point_b = roll.get("point_b") if isinstance(roll.get("point_b"), dict) else {}
@@ -871,6 +881,7 @@ class TifLocalAxisResliceDialog(QDialog):
         editable_axis = dict(self.editable_axis)
         editable_axis["start_zyx"] = axis_start
         editable_axis["end_zyx"] = axis_end
+        initial_editable_axis = dict(getattr(self, "initial_editable_axis", {}) or self.editable_axis)
         proposal = self._selected_proposal()
         hard_flags = ["hard_case"] if self.hard_case_check.isChecked() else []
         training_source = "human_manual_local_axis"
@@ -889,7 +900,9 @@ class TifLocalAxisResliceDialog(QDialog):
             "display_name": self.reslice_id_edit.text().strip() or self._default_reslice_id(),
             "template_id": template_id,
             "source_axis": self.source_axis,
+            "initial_editable_axis": initial_editable_axis,
             "editable_axis": editable_axis,
+            "final_editable_axis": editable_axis,
             "local_frame": local_frame,
             "reslice_params": {
                 "output_shape_zyx": self._parse_shape(self.output_shape_edit.text()),
@@ -904,6 +917,7 @@ class TifLocalAxisResliceDialog(QDialog):
                 "hard_case_flags": hard_flags,
                 "reviewer_notes": self.reviewer_notes_edit.toPlainText().strip(),
             },
+            "operator_notes": self.reviewer_notes_edit.toPlainText().strip(),
             "provenance": provenance,
         }
 

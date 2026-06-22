@@ -968,6 +968,11 @@ class TifProjectManager:
             for item in metadata.get("local_axis_frame_proposals", []) or []
             if isinstance(item, dict)
         ]
+        metadata["local_axis_batch_failures"] = [
+            self._normalize_local_axis_batch_failure(item)
+            for item in metadata.get("local_axis_batch_failures", []) or []
+            if isinstance(item, dict)
+        ]
         return {
             "part_id": part_id,
             "display_name": str(source.get("display_name") or source.get("name") or part_id),
@@ -1125,7 +1130,25 @@ class TifProjectManager:
             "reslice_params": dict(source.get("reslice_params") or {}),
             "source": dict(source.get("source") or {}),
             "training": dict(source.get("training") or {}),
+            "training_sample": dict(source.get("training_sample") or {}),
             "provenance": dict(source.get("provenance") or {}),
+            "created_at": created_at,
+            "updated_at": str(source.get("updated_at") or created_at),
+        }
+
+    def _normalize_local_axis_batch_failure(self, record):
+        source = record if isinstance(record, dict) else {}
+        now = _now_iso()
+        created_at = str(source.get("created_at") or now)
+        failure_id = _safe_record_id(source.get("failure_id") or source.get("id") or f"failed_{datetime.now().strftime('%Y%m%d_%H%M%S')}", fallback="failed")
+        return {
+            "failure_id": failure_id,
+            "proposal_id": str(source.get("proposal_id") or ""),
+            "template_id": str(source.get("template_id") or ""),
+            "reason": str(source.get("reason") or ""),
+            "detail": str(source.get("detail") or ""),
+            "model_id": str(source.get("model_id") or ""),
+            "model_version": str(source.get("model_version") or ""),
             "created_at": created_at,
             "updated_at": str(source.get("updated_at") or created_at),
         }
@@ -1147,6 +1170,8 @@ class TifProjectManager:
             "model_version": str(source.get("model_version") or ""),
             "status": self._normalize_status(source.get("status")),
             "hard_case_flags": self._normalize_list(source.get("hard_case_flags"), str),
+            "input_data": dict(source.get("input_data") or {}),
+            "failure_reason": str(source.get("failure_reason") or ""),
             "reviewer_notes": str(source.get("reviewer_notes") or ""),
             "provenance": dict(source.get("provenance") or {}),
             "created_at": created_at,
@@ -1169,6 +1194,7 @@ class TifProjectManager:
             "output_axis_end_zyx": self._normalize_point_zyx(source.get("output_axis_end_zyx")),
             "roll_reference": dict(source.get("roll_reference") or {}),
             "local_frame": self._normalize_local_frame(source.get("local_frame")),
+            "source_axis": dict(source.get("source_axis") or {}),
             "confidence": float(source.get("confidence", 0.0) or 0.0),
             "landmark_scores": dict(source.get("landmark_scores") or {}),
             "missing_landmarks": self._normalize_list(source.get("missing_landmarks"), str),
@@ -1176,6 +1202,8 @@ class TifProjectManager:
             "model_version": str(source.get("model_version") or ""),
             "status": self._normalize_status(source.get("status")),
             "hard_case_flags": self._normalize_list(source.get("hard_case_flags"), str),
+            "input_data": dict(source.get("input_data") or {}),
+            "failure_reason": str(source.get("failure_reason") or ""),
             "reviewer_notes": str(source.get("reviewer_notes") or ""),
             "provenance": dict(source.get("provenance") or {}),
             "created_at": created_at,

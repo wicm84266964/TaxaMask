@@ -11,6 +11,8 @@ from .tif_volume_io import load_volume_sidecar, read_volume_metadata, volume_sid
 
 
 LOCAL_AXIS_RESLICE_SCHEMA_VERSION = "taxamask_local_axis_reslice_v1"
+LOCAL_AXIS_TRAINING_SAMPLE_SCHEMA_VERSION = "taxamask_tif_local_axis_training_sample_v1"
+LOCAL_AXIS_RESLICE_SOFTWARE_VERSION = "TaxaMask local_axis_reslice_v1"
 
 
 def _now_iso():
@@ -29,6 +31,19 @@ def _write_json(path, payload):
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
     return payload
+
+
+def _axis_payload(value):
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _shape_payload(values, fallback_shape):
+    source = values if isinstance(values, (list, tuple)) and len(values) == 3 else fallback_shape
+    return [int(value) for value in source]
+
+
+def _spacing_payload(values):
+    return [float(value) for value in _normalize_spacing(values).tolist()]
 
 
 def _normalize_spacing(spacing_zyx):
@@ -114,6 +129,23 @@ def create_editable_axis_from_source(source_axis, axis_id="local_output_z_axis")
         "end_zyx": list(source_axis.get("end_zyx") or []),
         "source_axis_id": source_axis.get("axis_id", "source_z_axis"),
     }
+
+
+def editable_axis_from_local_frame(local_frame, source_axis, part_shape_zyx, axis_id="local_output_z_axis"):
+    source = source_axis if isinstance(source_axis, dict) else source_z_axis_for_part(part_shape_zyx)
+    axis = create_editable_axis_from_source(source, axis_id=axis_id)
+    axis["derived_from"] = "local_frame"
+    try:
+        origin = _point((local_frame or {}).get("origin_zyx"), "origin_zyx")
+        z_axis = _unit((local_frame or {}).get("z_axis"), "z_axis")
+        start = _point(source.get("start_zyx"), "source_axis_start")
+        end = _point(source.get("end_zyx"), "source_axis_end")
+        half_extent = max(0.5, float(np.linalg.norm(end - start)) / 2.0)
+        axis["start_zyx"] = (origin - z_axis * half_extent).tolist()
+        axis["end_zyx"] = (origin + z_axis * half_extent).tolist()
+    except Exception:
+        axis["derived_from"] = "source_axis_default"
+    return axis
 
 
 def compute_local_frame(origin_zyx, output_axis_start_zyx, output_axis_end_zyx, roll_reference=None, spacing_zyx=None, output_axis="z_axis"):
@@ -310,14 +342,30 @@ def export_part_reslice(project_manager, specimen_id, part_id, reslice_payload):
         raise FileNotFoundError(image_path)
     image = load_volume_sidecar(image_path)
     image_meta = read_volume_metadata(image_path)
-    local_frame.setdefault("spacing_zyx", image_meta.get("spacing_zyx") or (part_image.get("spacing_zyx") or [1.0, 1.0, 1.0]))
+    part_image_shape = _shape_payload(image_meta.get("shape_zyx") or part_image.get("shape_zyx"), image.shape)
+    part_spacing = _spacing_payload(image_meta.get("spacing_zyx") or (part_image.get("spacing_zyx") or [1.0, 1.0, 1.0]))
+    part_image_dtype = str(image_meta.get("dtype") or part_image.get("dtype") or image.dtype)
+    mask_record = part.get("mask") or {}
+    mask_path = project_manager.to_absolute(mask_record.get("path", ""))
+    part_mask_available = bool(mask_record.get("path") and volume_sidecar_exists(mask_path))
+    part_mask_shape = []
+    part_mask_dtype = str(mask_record.get("dtype") or "")
+    if part_mask_available:
+        try:
+            mask_meta = read_volume_metadata(mask_path)
+            part_mask_shape = _shape_payload(mask_meta.get("shape_zyx") or mask_record.get("shape_zyx"), image.shape)
+            part_mask_dtype = str(mask_meta.get("dtype") or part_mask_dtype)
+        except Exception:
+            part_mask_shape = _shape_payload(mask_record.get("shape_zyx"), image.shape) if mask_record.get("shape_zyx") else []
+
+    local_frame.setdefault("spacing_zyx", part_spacing)
     roll_reference = validate_roll_reference_pair(_roll_reference_from_payload(payload, local_frame))
     local_frame["roll_reference"] = roll_reference
     validate_local_frame(local_frame)
 
     params = dict(payload.get("reslice_params") or {})
     params.setdefault("output_shape_zyx", list(image.shape))
-    params.setdefault("output_spacing_zyx", image_meta.get("spacing_zyx") or [1.0, 1.0, 1.0])
+    params.setdefault("output_spacing_zyx", part_spacing)
     image_interpolation = params.get("image_interpolation", "linear")
     image_resliced = reslice_volume(image, local_frame, params, interpolation=image_interpolation)
 
@@ -329,9 +377,7 @@ def export_part_reslice(project_manager, specimen_id, part_id, reslice_payload):
     mask_rel = ""
     mask_meta_payload = {}
     if bool(payload.get("export_mask", True)):
-        mask_record = part.get("mask") or {}
-        mask_path = project_manager.to_absolute(mask_record.get("path", ""))
-        if mask_record.get("path") and volume_sidecar_exists(mask_path):
+        if part_mask_available:
             mask = load_volume_sidecar(mask_path)
             mask_resliced = reslice_volume(mask, local_frame, params, interpolation="nearest")
             mask_rel = f"{reslice_root_rel}/mask.tif"
@@ -345,30 +391,100 @@ def export_part_reslice(project_manager, specimen_id, part_id, reslice_payload):
 
     metadata_rel = f"{reslice_root_rel}/metadata.json"
     metadata_abs = project_manager.to_absolute(metadata_rel)
+    created_at = _now_iso()
+    updated_at = created_at
+    template_id = str(payload.get("template_id") or "")
+    source_axis = _axis_payload(payload.get("source_axis")) or source_z_axis_for_part(image.shape)
+    initial_editable_axis = (
+        _axis_payload(payload.get("initial_editable_axis"))
+        or _axis_payload(payload.get("editable_axis"))
+        or create_editable_axis_from_source(source_axis)
+    )
+    final_editable_axis = (
+        _axis_payload(payload.get("final_editable_axis"))
+        or _axis_payload(payload.get("editable_axis"))
+        or editable_axis_from_local_frame(local_frame, source_axis, image.shape)
+    )
+    source_payload = {
+        "part_image_path": part_image.get("path", ""),
+        "part_image_shape_zyx": part_image_shape,
+        "part_image_dtype": part_image_dtype,
+        "part_spacing_zyx": part_spacing,
+        "part_spacing_unit": str(image_meta.get("spacing_unit") or part_image.get("spacing_unit") or "micrometer"),
+        "part_mask_path": mask_record.get("path", ""),
+        "part_mask_available": part_mask_available,
+        "parent_bbox_zyx": part.get("parent_bbox_zyx", []),
+        "source_axis": source_axis,
+        "initial_editable_axis": initial_editable_axis,
+        "final_editable_axis": final_editable_axis,
+        "editable_axis": final_editable_axis,
+    }
+    outputs_payload = {
+        "image_path": image_rel,
+        "image_dtype": str(image_resliced.dtype),
+        "image_shape_zyx": [int(value) for value in image_resliced.shape],
+        "image_interpolation": str(image_interpolation),
+        **mask_meta_payload,
+    }
+    training_payload = dict(payload.get("training") or {})
+    operator_notes = str(payload.get("operator_notes") or training_payload.get("reviewer_notes") or "")
+    human_confirmed = bool(training_payload.get("human_confirmed", False))
+    usable_for_training = bool(training_payload.get("usable_for_training", human_confirmed))
+    training_sample = {
+        "schema_version": LOCAL_AXIS_TRAINING_SAMPLE_SCHEMA_VERSION,
+        "sample_id": f"{specimen_id}:{part_id}:{reslice_id}",
+        "specimen_id": str(specimen_id or ""),
+        "part_id": str(part_id or ""),
+        "reslice_id": reslice_id,
+        "template_id": template_id,
+        "part_image": {
+            "path": part_image.get("path", ""),
+            "shape_zyx": part_image_shape,
+            "dtype": part_image_dtype,
+            "spacing_zyx": part_spacing,
+            "spacing_unit": source_payload["part_spacing_unit"],
+        },
+        "part_mask": {
+            "path": mask_record.get("path", ""),
+            "available": part_mask_available,
+            "shape_zyx": part_mask_shape,
+            "dtype": part_mask_dtype,
+        },
+        "parent_bbox_zyx": part.get("parent_bbox_zyx", []),
+        "source_axis": source_axis,
+        "initial_editable_axis": initial_editable_axis,
+        "final_editable_axis": final_editable_axis,
+        "origin_zyx": list(local_frame.get("origin_zyx") or []),
+        "roll_reference_point_pair": roll_reference,
+        "roll_reference": roll_reference,
+        "local_frame": local_frame,
+        "reslice_params": params,
+        "outputs": outputs_payload,
+        "human_confirmed": human_confirmed,
+        "usable_for_training": usable_for_training,
+        "training_source": str(training_payload.get("source") or ""),
+        "hard_case_flags": list(training_payload.get("hard_case_flags", []) or []) if isinstance(training_payload.get("hard_case_flags", []), list) else [],
+        "operator_notes": operator_notes,
+        "created_at": created_at,
+        "updated_at": updated_at,
+        "software_version": LOCAL_AXIS_RESLICE_SOFTWARE_VERSION,
+        "provenance": dict(payload.get("provenance") or {}),
+    }
     metadata = {
         "schema_version": LOCAL_AXIS_RESLICE_SCHEMA_VERSION,
         "reslice_id": reslice_id,
         "specimen_id": str(specimen_id or ""),
         "part_id": str(part_id or ""),
-        "template_id": str(payload.get("template_id") or ""),
-        "created_at": _now_iso(),
-        "source": {
-            "part_image_path": part_image.get("path", ""),
-            "part_mask_path": (part.get("mask") or {}).get("path", ""),
-            "parent_bbox_zyx": part.get("parent_bbox_zyx", []),
-            "source_axis": payload.get("source_axis") or source_z_axis_for_part(image.shape),
-            "editable_axis": dict(payload.get("editable_axis") or {}),
-        },
+        "template_id": template_id,
+        "created_at": created_at,
+        "updated_at": updated_at,
+        "software_version": LOCAL_AXIS_RESLICE_SOFTWARE_VERSION,
+        "source": source_payload,
         "local_frame": local_frame,
         "reslice_params": params,
-        "outputs": {
-            "image_path": image_rel,
-            "image_dtype": str(image_resliced.dtype),
-            "image_shape_zyx": [int(value) for value in image_resliced.shape],
-            "image_interpolation": str(image_interpolation),
-            **mask_meta_payload,
-        },
-        "training": dict(payload.get("training") or {}),
+        "outputs": outputs_payload,
+        "training": training_payload,
+        "training_sample": training_sample,
         "provenance": dict(payload.get("provenance") or {}),
     }
     _write_json(metadata_abs, metadata)
@@ -387,9 +503,10 @@ def export_part_reslice(project_manager, specimen_id, part_id, reslice_payload):
         "reslice_params": params,
         "source": metadata["source"],
         "training": metadata["training"],
+        "training_sample": metadata["training_sample"],
         "provenance": metadata["provenance"],
         "created_at": metadata["created_at"],
-        "updated_at": metadata["created_at"],
+        "updated_at": metadata["updated_at"],
     }
     if existing_record is not None and allow_overwrite:
         saved_record = project_manager.update_part_reslice(specimen_id, part_id, reslice_id, record, save=bool(payload.get("save", True)))

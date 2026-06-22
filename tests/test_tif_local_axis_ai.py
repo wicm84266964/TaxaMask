@@ -86,6 +86,9 @@ class TifLocalAxisAiTests(unittest.TestCase):
                         "template_id": "head",
                         "bbox_zyx": [1, 1, 1, 5, 5, 6],
                         "center_zyx": [3, 3, 3],
+                        "status": "accepted",
+                        "model_id": "external/head_roi",
+                        "input_data": {"volume_role": "working_volume"},
                     }
                 ],
                 local_frame_proposals=[
@@ -97,14 +100,21 @@ class TifLocalAxisAiTests(unittest.TestCase):
                         "origin_zyx": [1.5, 1.5, 2.0],
                         "output_axis_start_zyx": [0.0, 1.5, 2.0],
                         "output_axis_end_zyx": [3.0, 1.5, 2.0],
+                        "status": "accepted",
+                        "failure_reason": "",
                     }
                 ],
             )
 
             self.assertEqual(len(imported["global_roi_proposals"]), 1)
             self.assertEqual(len(imported["local_frame_proposals"]), 1)
-            self.assertEqual(manager.list_global_axis_proposals("01-0101-ai")[0]["status"], "proposed")
-            self.assertEqual(manager.list_local_frame_proposals("01-0101-ai", "head")[0]["frame_proposal_id"], "frame_001")
+            global_record = manager.list_global_axis_proposals("01-0101-ai")[0]
+            frame_record = manager.list_local_frame_proposals("01-0101-ai", "head")[0]
+            self.assertEqual(global_record["status"], "needs_review")
+            self.assertEqual(global_record["input_data"]["volume_role"], "working_volume")
+            self.assertEqual(frame_record["frame_proposal_id"], "frame_001")
+            self.assertEqual(frame_record["status"], "needs_review")
+            self.assertIn("roll_reference_point_pair", frame_record["missing_landmarks"])
 
     def test_proposal_file_loaders_reject_wrong_schema_version(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -132,6 +142,16 @@ class TifLocalAxisAiTests(unittest.TestCase):
             self.assertTrue(sample["training"]["human_confirmed"])
             self.assertTrue(sample["part_image"]["path"])
             self.assertEqual(sample["parent_bbox_zyx"], [[1, 5], [1, 5], [1, 6]])
+            self.assertEqual(sample["schema_version"], "taxamask_tif_local_axis_training_sample_v1")
+            self.assertTrue(sample["human_confirmed"])
+            self.assertTrue(sample["usable_for_training"])
+            self.assertEqual(sample["source_axis"]["role"], "source_direction_reference")
+            self.assertEqual(sample["final_editable_axis"]["role"], "editable_output_axis")
+            self.assertEqual(sample["origin_zyx"], [1.5, 1.5, 2.0])
+            self.assertEqual(sample["roll_reference_point_pair"]["point_a"]["role"], "left_eye")
+            self.assertEqual(sample["outputs"]["image_shape_zyx"], [4, 4, 5])
+            self.assertTrue(sample["outputs"]["image_path"].endswith("image.tif"))
+            self.assertTrue(sample["metadata_path"].endswith("metadata.json"))
 
     def test_backend_contract_contains_selected_specimen_parts_and_safety(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -142,8 +162,21 @@ class TifLocalAxisAiTests(unittest.TestCase):
             self.assertEqual(contract["schema_version"], LOCAL_AXIS_BACKEND_CONTRACT_SCHEMA_VERSION)
             self.assertTrue(contract["safety"]["output_is_reviewable_proposal"])
             self.assertTrue(contract["safety"]["do_not_write_project_json"])
+            self.assertTrue(contract["safety"]["do_not_create_final_reslice"])
             self.assertEqual(contract["specimens"][0]["parts"][0]["part_id"], "head")
             self.assertTrue(contract["specimens"][0]["parts"][0]["part_image"]["path"].endswith("image.ome.zarr"))
+            self.assertEqual(contract["specimens"][0]["parts"][0]["source_axis"]["role"], "source_direction_reference")
+
+    def test_train_contract_prepares_training_manifest_like_prepare_dataset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = make_local_axis_project(Path(tmp))
+            runner = TifLocalAxisBackendRunner(manager, {"backend_id": "mock_local_axis"}, runs_root=Path(tmp) / "runs")
+            run_id, run_dir = runner.create_run_dir("train")
+            contract = runner.build_contract("train", ["01-0101-ai"], {"01-0101-ai": ["head"]}, template_id="head", run_id=run_id, run_dir=run_dir)
+            export = export_local_axis_training_manifest(manager, contract["dataset_dir"], {"template_id": "head"})
+
+            self.assertEqual(export["sample_count"], 1)
+            self.assertTrue(export["manifest_path"].endswith("local_axis_training_manifest.json"))
 
     def test_backend_runner_imports_result_artifacts_as_project_proposals(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -181,7 +214,46 @@ class TifLocalAxisAiTests(unittest.TestCase):
             self.assertEqual(result["result"]["schema_version"], LOCAL_AXIS_BACKEND_RESULT_SCHEMA_VERSION)
             self.assertEqual(manager.list_global_axis_proposals("01-0101-ai")[0]["global_proposal_id"], "roi_from_backend")
             self.assertEqual(manager.list_local_frame_proposals("01-0101-ai", "head")[0]["frame_proposal_id"], "frame_from_backend")
+            self.assertEqual(manager.list_local_frame_proposals("01-0101-ai", "head")[0]["status"], "needs_review")
             self.assertEqual(manager.project_data["runs"][-1]["action"], "predict")
+
+    def test_backend_result_top_level_model_metadata_flows_to_proposals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = make_local_axis_project(root)
+            frame_path = root / "local_frame_proposals.json"
+            frame_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "taxamask_tif_local_axis_frame_proposals_v1",
+                        "template_id": "head",
+                        "model_id": "external/frame",
+                        "model_version": "v2",
+                        "proposals": [
+                            {
+                                "frame_proposal_id": "frame_with_defaults",
+                                "specimen_id": "01-0101-ai",
+                                "part_id": "head",
+                                "origin_zyx": [1.5, 1.5, 2.0],
+                                "output_axis_start_zyx": [0.0, 1.5, 2.0],
+                                "output_axis_end_zyx": [3.0, 1.5, 2.0],
+                                "roll_reference": {
+                                    "point_a": {"role": "left_eye", "zyx": [1.5, 1.0, 1.0]},
+                                    "point_b": {"role": "right_eye", "zyx": [1.5, 3.0, 1.0]},
+                                },
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            proposals = load_local_frame_proposals(frame_path)
+
+            self.assertEqual(proposals[0]["template_id"], "head")
+            self.assertEqual(proposals[0]["model_id"], "external/frame")
+            self.assertEqual(proposals[0]["model_version"], "v2")
+            self.assertEqual(proposals[0]["status"], "proposed")
 
     def test_register_model_manifest_stores_local_axis_model_profile(self):
         with tempfile.TemporaryDirectory() as tmp:

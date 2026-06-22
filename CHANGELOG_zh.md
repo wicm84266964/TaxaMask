@@ -4,6 +4,16 @@
 
 ## 📅 更新日志 (Update Log)
 
+### **[2026-06-22] 开发版阶段同步：AntScan 局部轴重切片训练素材、AI 建议项与批量复核**
+> **本次重点：把 AntScan Local Axis Reslice 从“能导出局部重切片”的验证闭环，推进为可追溯、可训练、可批量复核的第一版产品骨架。该路径仍属于 TIF 开发版实验功能，真实 AntScan 大数据集仍需后续人工验收。**
+
+- 局部轴重切片导出现在会同步写出标准训练素材记录 `training_sample`。记录包含标本、部位、模板、part image 路径/尺寸/spacing、mask 可用性、父体 bbox、source Z axis、initial/final editable output axis、origin、roll reference point pair、完整 local frame、重切片参数、输出文件、人工确认、是否可训练、时间、软件版本和备注。
+- `metadata.json` 与项目内 `part.metadata.local_axis_reslices[]` 保持同源记录，关闭重开项目后仍能追踪同一个 reslice 与训练样本。后续导出 Local Axis training manifest 时，会优先读取这份标准 `training_sample`，为未来训练全局 ROI / 局部坐标系模型保留稳定数据口径。
+- Local Axis AI 后端接入规则进一步收紧：外部后端只能导入 `global_roi_proposals` 与 `local_frame_proposals`，不能直接修改项目 JSON、manual truth 或最终重切片输出。即使外部 JSON 把 proposal 标成 `accepted` / `exported`，TaxaMask 也会降为 `needs_review`，避免 AI 跳过人工复核。
+- Local Axis train / prepare-dataset 共享训练 manifest 入口，模型清单与 proposal metadata 会保留模型版本、输入数据、置信度、失败原因和 provenance。当前仍不绑定具体模型结构，后续可参照 2D 路径补训练/推理后端。
+- 局部轴复核队列扩展到面向 2193 个 AntScan 个体的批量状态：`no_part`、`part_ready`、`proposed`、`needs_review`、`accepted`、`exported`、`failed`，并保留兼容用 `no_proposal`。批量导出只处理 accepted proposal；单个样本失败会记录到 part metadata，不会阻断其他 accepted 样本。
+- GUI 层补齐 Local Axis 模型面板和复核队列的基础稳定性，包括模型面板 `QComboBox` 导入修复、队列新状态筛选与失败项保留。验证覆盖局部轴导出、AI manifest、批量导出、项目重载和 PySide6 离屏烟测；真实 3D 拖动流畅性和轴交互仍需在实际 AntScan 数据上验收。
+
 ### **[2026-06-17] 开发版阶段同步：TIF 部位提取、分标签训练、轻量日志与模型备注**
 > **本次重点：把最近一轮尚未提交的开发版改动集中归档。当前开发版同时包含 TIF 体数据实验增强，以及已经同步到正式发布版的非 TIF 功能：轻量运行日志、按图片标签训练、父/子模型备注。TIF 路径仍按开发版实验功能处理，正式发布版暂不发布。**
 

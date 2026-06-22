@@ -14,6 +14,18 @@
 - 局部轴复核队列扩展到面向 2193 个 AntScan 个体的批量状态：`no_part`、`part_ready`、`proposed`、`needs_review`、`accepted`、`exported`、`failed`，并保留兼容用 `no_proposal`。批量导出只处理 accepted proposal；单个样本失败会记录到 part metadata，不会阻断其他 accepted 样本。
 - GUI 层补齐 Local Axis 模型面板和复核队列的基础稳定性，包括模型面板 `QComboBox` 导入修复、队列新状态筛选与失败项保留。验证覆盖局部轴导出、AI manifest、批量导出、项目重载和 PySide6 离屏烟测；真实 3D 拖动流畅性和轴交互仍需在实际 AntScan 数据上验收。
 
+#### **后续同日补充：TIF 局部轴 3D 工作区、剖切观察与重切片复核修复**
+
+- Local Axis Reslice UI 从旧详情页/MPR 弹窗路线收敛回 TIF 工作台右侧栏与 3D 部位预览。旧 `tif_local_axis_reslice_page.py` 已移除，用户不再通过单独详情页完成轴、roll reference 和导出操作；主操作区改为当前 part volume 的 3D 预览。
+- 左侧树继续采用 `part -> Reslices -> reslice item` 结构，但 reslice item 不再只是 metadata 记录。选中某个 reslice item 后，切片复核和 3D 预览会读取该 reslice 的 `image.tif`，如存在 `mask.tif` 也优先读取重切片 mask；选中普通 part 时仍读取原 part volume。这样修复了“导出成功但切片复核仍显示原 part 切片”的问题。
+- 3D 部位预览内新增更直接的局部轴交互：锁定显示 source Z axis，可从 source Z 复制 editable output Z axis，拖动输出轴两端，或拖动轴身整体移动。已保存 reslice 会优先显示自己的 output axis，避免未保存草稿与已保存结果混在一起。
+- roll reference A/B 点选移动到观察侧剖切面上完成，用于给本次局部坐标系提供切片平面内方向参照。当前 UI 文案已避免把模块写死为 brain/eye；脑部模板仍可把 A/B 解释为标本自身解剖左右的参照点，但底层继续使用通用 roll reference 命名。
+- 观察侧剖切面和快速近端裁剪语义重新梳理：观察侧剖切面用于内部结构检查和 roll reference 点选，快速近端裁剪只作为临时减少遮挡的显示辅助；二者都不会修改原始 TIFF、part volume、mask 或训练数据。
+- 3D 渲染交互做了本轮实测优化：透明累积、视点深度、快速近端裁剪和剖切深度拖动时使用更轻的交互预览；右键平移速度和放大后的平移范围放宽；“静止高清/清晰模式”收口为“局部结构检查”，更贴近放大观察局部边界的用途。
+- Local Axis 正式导出改为带进度窗口的后台线程，避免大 part 重切片写出时界面像卡死。导出期间会禁用局部轴相关按钮，防止重复点击生成半成品或重复记录；导出仍是追加 `reslices/<reslice_id>/`，不会删除原始 TIFF、原 part volume、原 mask 或 contours。
+- AI 方向在当前 UI 中降级为数据采集与 manifest 导出：不在第一版主工作台内暴露训练/预测/复核队列入口，不绑定具体模型候选。当前目标是先把人工确认的 part、axis、roll reference、local frame、reslice output 和 metadata 稳定记录下来，后续再参考 2D 路径补训练/推理链路。
+- 本轮补充测试覆盖：左侧树选中 reslice 后读取导出的 `image.tif` 而不是原 part image、导出进度窗口、导出后不删除原 part 数据、3D 内轴端点/轴身拖动、观察侧剖切深度方向、渲染交互降档、平移范围、局部结构检查和 GPU 画布轴/剖切绘制。验证通过 `tests.test_tif_workbench` 85 条、TIF GPU/Local Axis/Project/Batch 相关测试 62 条，以及 `compileall` 和 `git diff --check`。
+
 ### **[2026-06-17] 开发版阶段同步：TIF 部位提取、分标签训练、轻量日志与模型备注**
 > **本次重点：把最近一轮尚未提交的开发版改动集中归档。当前开发版同时包含 TIF 体数据实验增强，以及已经同步到正式发布版的非 TIF 功能：轻量运行日志、按图片标签训练、父/子模型备注。TIF 路径仍按开发版实验功能处理，正式发布版暂不发布。**
 

@@ -298,7 +298,8 @@ class TifLocalAxisModelPanel(QWidget):
         )
         for field, command in command_fields:
             if not validate_local_axis_backend_command(command):
-                raise ValueError(tt("Command must include {contract} or {contract_json}: {0}", self.lang).format(field))
+                message = tt("Command must include {contract} or {contract_json}: {0}", self.lang)
+                raise ValueError(message.replace("{0}", field))
 
     def save_backend_settings(self):
         config = self._backend_config_from_ui()

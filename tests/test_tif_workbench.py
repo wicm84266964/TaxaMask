@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
+import tifffile
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -31,12 +32,11 @@ else:
     from AntSleap.core.tif_part_extraction import add_polygon_keyframe, crop_volume_to_part, read_contours_json, write_contours_json
     from AntSleap.core.tif_materials import upsert_material
     from AntSleap.core.tif_project import TifProjectManager
-    from AntSleap.core.tif_volume_io import write_volume_sidecar
+    from AntSleap.core.tif_volume_io import load_volume_sidecar, write_volume_sidecar
     from AntSleap.core.tif_local_axis_reslice import compute_local_frame, export_part_reslice
-    from AntSleap.core.tif_local_axis_ai import LOCAL_AXIS_MODEL_MANIFEST_SCHEMA_VERSION
+    from AntSleap.core.tif_local_axis_ai import LOCAL_AXIS_MODEL_MANIFEST_SCHEMA_VERSION, export_local_axis_training_manifest
     from AntSleap.ui.tif_gpu_volume_canvas import gpu_volume_canvas_available, gpu_volume_offscreen_available, gpu_volume_unavailable_reason
     from AntSleap.ui.tif_local_axis_model_panel import TifLocalAxisModelPanel
-    from AntSleap.ui.tif_local_axis_reslice_page import TifLocalAxisResliceDialog, TifLocalAxisSlicePickerDialog
     from AntSleap.ui.tif_local_axis_review_queue import TifLocalAxisReviewQueueWidget
     from AntSleap.ui.tif_workbench import TifVolumeCanvas, TifWorkbenchWidget, create_tif_volume_canvas
 
@@ -117,6 +117,65 @@ class FakePartNameDialog:
 
     def values(self):
         return self._part_id, self._display_name
+
+
+class FakeProgressDialog:
+    instances = []
+
+    def __init__(self, label_text="", cancel_text="", minimum=0, maximum=100, parent=None):
+        self.label_text = label_text
+        self.cancel_text = cancel_text
+        self.minimum = minimum
+        self.maximum = maximum
+        self.value = minimum
+        self.parent = parent
+        self.window_title = ""
+        self.auto_close = None
+        self.auto_reset = None
+        self.minimum_duration = None
+        self.window_modality = None
+        self.shown = False
+        self.closed = False
+        self.deleted = False
+        self.cancel_button = object()
+        FakeProgressDialog.instances.append(self)
+
+    def setWindowTitle(self, title):
+        self.window_title = title
+
+    def setCancelButton(self, button):
+        self.cancel_button = button
+
+    def setAutoClose(self, enabled):
+        self.auto_close = bool(enabled)
+
+    def setAutoReset(self, enabled):
+        self.auto_reset = bool(enabled)
+
+    def setMinimumDuration(self, duration):
+        self.minimum_duration = int(duration)
+
+    def setWindowModality(self, modality):
+        self.window_modality = modality
+
+    def setRange(self, minimum, maximum):
+        self.minimum = int(minimum)
+        self.maximum = int(maximum)
+
+    def setValue(self, value):
+        self.value = int(value)
+
+    def setLabelText(self, text):
+        self.label_text = text
+
+    def show(self):
+        self.shown = True
+
+    def close(self):
+        self.closed = True
+
+    def deleteLater(self):
+        self.deleted = True
 
 
 class patch_message_boxes:
@@ -315,19 +374,22 @@ class TifWorkbenchTests(unittest.TestCase):
             crop_volume_to_part(manager, "01-0101-reslice", "head", [[1, 3], [2, 6], [1, 5]], display_name="Head")
             frame = compute_local_frame(
                 [0.5, 1.5, 1.5],
-                [0.0, 1.5, 1.5],
-                [1.0, 1.5, 1.5],
+                [0.5, 1.5, 0.0],
+                [0.5, 1.5, 3.0],
                 roll_reference={
-                    "point_a": {"role": "left_eye", "zyx": [0.5, 1.0, 1.0]},
-                    "point_b": {"role": "right_eye", "zyx": [0.5, 2.0, 1.0]},
+                    "point_a": {"role": "left_eye", "zyx": [0.0, 1.0, 1.5]},
+                    "point_b": {"role": "right_eye", "zyx": [1.0, 1.0, 1.5]},
                 },
             )
-            export_part_reslice(
+            export_result = export_part_reslice(
                 manager,
                 "01-0101-reslice",
                 "head",
                 {"reslice_id": "head_axis_001", "template_id": "head", "local_frame": frame},
             )
+            exported_image = tifffile.imread(export_result["image_path"])
+            part_image = load_volume_sidecar(root / "reslice_tree" / manager.get_part("01-0101-reslice", "head")["image"]["path"])
+            self.assertFalse(np.array_equal(exported_image, np.asarray(part_image)))
 
             widget = TifWorkbenchWidget(manager, "en")
             try:
@@ -345,254 +407,11 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertEqual(widget.current_part_id, "head")
                 self.assertEqual(widget.current_reslice_id, "head_axis_001")
                 self.assertEqual(tuple(widget.image_volume.shape), (2, 4, 4))
+                np.testing.assert_array_equal(np.asarray(widget.image_volume), exported_image)
+                self.assertFalse(np.array_equal(np.asarray(widget.image_volume), np.asarray(part_image)))
                 self.assertIn("Reslice ID: head_axis_001", widget.metadata_label.text())
+                self.assertIn("Image: specimens/01-0101-reslice/parts/head/reslices/head_axis_001/image.tif", widget.metadata_label.text())
                 self.assertIn("Metadata:", widget.metadata_label.text())
-            finally:
-                widget.close_project()
-                widget.deleteLater()
-
-    def test_local_axis_reslice_dialog_exports_and_refreshes_tree_data(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            manager = TifProjectManager()
-            manager.create_project("local_axis_dialog", root / "local_axis_dialog")
-            manager.create_specimen_scaffold(
-                "01-0101-dialog",
-                material_map={
-                    "materials": [
-                        {"id": 0, "name": "background", "display_name": "Background", "trainable": False},
-                        {"id": 2, "name": "brain", "display_name": "Brain", "color": "#ff0000", "trainable": True},
-                    ]
-                },
-            )
-            image = np.arange(4 * 6 * 8, dtype=np.uint8).reshape((4, 6, 8))
-            image_rel = "specimens/01-0101-dialog/working/image.ome.zarr"
-            image_meta = write_volume_sidecar(root / "local_axis_dialog" / image_rel, image, role="working_image")
-            manager.register_working_volume("01-0101-dialog", image_rel, image_meta["shape_zyx"], image_meta["dtype"], save=False)
-            manager.save_project()
-            crop_volume_to_part(manager, "01-0101-dialog", "head", [[1, 3], [2, 6], [1, 5]], display_name="Head")
-
-            dialog = TifLocalAxisResliceDialog(manager, "01-0101-dialog", "head", lang="en")
-            try:
-                dialog.reslice_id_edit.setText("head_axis_dialog")
-                dialog.roll_a_point_edit.setText("0.5,1,1")
-                dialog.roll_b_point_edit.setText("0.5,2,1")
-                payload = dialog.build_reslice_payload()
-
-                self.assertEqual(payload["reslice_id"], "head_axis_dialog")
-                self.assertEqual(payload["template_id"], "head")
-                self.assertEqual(payload["editable_axis"]["role"], "editable_output_axis")
-                self.assertEqual(payload["editable_axis"]["source_axis_id"], "source_z_axis")
-                self.assertEqual(dialog.roll_a_role_edit.text(), "roll_point_a")
-                self.assertEqual(dialog.roll_b_role_edit.text(), "roll_point_b")
-                self.assertTrue(payload["training"]["human_confirmed"])
-                dialog.picker_axis_combo.setCurrentIndex(dialog.picker_axis_combo.findData("z"))
-                dialog.picker_slice_slider.setValue(0)
-                dialog.picker_target_combo.setCurrentIndex(dialog.picker_target_combo.findData("origin"))
-                dialog._set_picker_point(2.0, 1.0)
-                self.assertEqual(dialog.origin_edit.text(), "0,1,2")
-                signal_result = dialog.compute_source_signal()
-                self.assertIsNotNone(signal_result)
-                self.assertIn("Auxiliary navigation only", dialog.source_signal_summary.text())
-                result = dialog.export_reslice()
-
-                self.assertIsNotNone(result)
-                self.assertEqual(manager.list_part_reslices("01-0101-dialog", "head")[0]["reslice_id"], "head_axis_dialog")
-            finally:
-                dialog.deleteLater()
-
-    def test_local_axis_dialog_loads_initial_workbench_draft(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            manager = TifProjectManager()
-            manager.create_project("local_axis_initial_draft", root / "local_axis_initial_draft")
-            manager.create_specimen_scaffold("01-0101-draft-dialog")
-            image = np.arange(4 * 6 * 8, dtype=np.uint8).reshape((4, 6, 8))
-            image_rel = "specimens/01-0101-draft-dialog/working/image.ome.zarr"
-            image_meta = write_volume_sidecar(root / "local_axis_initial_draft" / image_rel, image, role="working_image")
-            manager.register_working_volume("01-0101-draft-dialog", image_rel, image_meta["shape_zyx"], image_meta["dtype"], save=False)
-            manager.save_project()
-            crop_volume_to_part(manager, "01-0101-draft-dialog", "head", [[1, 3], [2, 6], [1, 5]], display_name="Head")
-            draft = {
-                "template_id": "head",
-                "source_axis": {"axis_id": "source_z_axis", "start_zyx": [0, 1.5, 1.5], "end_zyx": [1, 1.5, 1.5]},
-                "editable_axis": {"axis_id": "local_output_z_axis", "start_zyx": [0, 0.5, 1.0], "end_zyx": [1, 2.5, 3.0]},
-                "origin_zyx": [0.5, 2.0, 2.0],
-                "roll_reference": {
-                    "point_a": {"role": "left_eye", "zyx": [0.5, 1.0, 1.0]},
-                    "point_b": {"role": "right_eye", "zyx": [0.5, 2.0, 1.0]},
-                },
-            }
-
-            dialog = TifLocalAxisResliceDialog(manager, "01-0101-draft-dialog", "head", lang="en", initial_draft=draft)
-            try:
-                self.assertEqual(dialog.axis_start_edit.text(), "0,0.5,1")
-                self.assertEqual(dialog.axis_end_edit.text(), "1,2.5,3")
-                self.assertEqual(dialog.origin_edit.text(), "0.5,2,2")
-                self.assertEqual(dialog.roll_a_role_edit.text(), "left_eye")
-                self.assertEqual(dialog.roll_b_role_edit.text(), "right_eye")
-                self.assertIn("Loaded local axis draft", dialog.preview_status_label.text())
-            finally:
-                dialog.deleteLater()
-
-    def test_local_axis_dialog_ignores_initial_draft_for_other_part(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            manager = TifProjectManager()
-            manager.create_project("local_axis_wrong_draft", root / "local_axis_wrong_draft")
-            manager.create_specimen_scaffold("01-0101-wrong-draft")
-            image = np.arange(4 * 6 * 8, dtype=np.uint8).reshape((4, 6, 8))
-            image_rel = "specimens/01-0101-wrong-draft/working/image.ome.zarr"
-            image_meta = write_volume_sidecar(root / "local_axis_wrong_draft" / image_rel, image, role="working_image")
-            manager.register_working_volume("01-0101-wrong-draft", image_rel, image_meta["shape_zyx"], image_meta["dtype"], save=False)
-            manager.save_project()
-            crop_volume_to_part(manager, "01-0101-wrong-draft", "head", [[1, 3], [2, 6], [1, 5]], display_name="Head")
-            draft = {
-                "specimen_id": "01-0101-wrong-draft",
-                "part_id": "thorax",
-                "editable_axis": {"axis_id": "local_output_z_axis", "start_zyx": [0, 0, 0], "end_zyx": [1, 1, 1]},
-            }
-
-            dialog = TifLocalAxisResliceDialog(manager, "01-0101-wrong-draft", "head", lang="en", initial_draft=draft)
-            try:
-                self.assertNotEqual(dialog.axis_start_edit.text(), "0,0,0")
-                self.assertNotIn("Loaded local axis draft", dialog.preview_status_label.text())
-            finally:
-                dialog.deleteLater()
-
-    def test_local_axis_dialog_uses_explicit_proposal_over_initial_draft(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            manager = TifProjectManager()
-            manager.create_project("local_axis_proposal_over_draft", root / "local_axis_proposal_over_draft")
-            manager.create_specimen_scaffold("01-0101-proposal-draft")
-            image = np.arange(4 * 6 * 8, dtype=np.uint8).reshape((4, 6, 8))
-            image_rel = "specimens/01-0101-proposal-draft/working/image.ome.zarr"
-            image_meta = write_volume_sidecar(root / "local_axis_proposal_over_draft" / image_rel, image, role="working_image")
-            manager.register_working_volume("01-0101-proposal-draft", image_rel, image_meta["shape_zyx"], image_meta["dtype"], save=False)
-            manager.save_project()
-            crop_volume_to_part(manager, "01-0101-proposal-draft", "head", [[1, 3], [2, 6], [1, 5]], display_name="Head")
-            manager.add_local_frame_proposal(
-                "01-0101-proposal-draft",
-                "head",
-                {
-                    "frame_proposal_id": "frame_from_queue",
-                    "template_id": "head",
-                    "origin_zyx": [0.5, 1.5, 1.5],
-                    "output_axis_start_zyx": [0.0, 1.5, 1.5],
-                    "output_axis_end_zyx": [1.0, 1.5, 1.5],
-                    "roll_reference": {
-                        "point_a": {"role": "left_eye", "zyx": [0.5, 1.0, 1.0]},
-                        "point_b": {"role": "right_eye", "zyx": [0.5, 2.0, 1.0]},
-                    },
-                    "status": "accepted",
-                },
-            )
-            draft = {
-                "template_id": "head",
-                "editable_axis": {"axis_id": "local_output_z_axis", "start_zyx": [0, 0, 0], "end_zyx": [1, 1, 1]},
-                "origin_zyx": [0, 0, 0],
-                "roll_reference": {
-                    "point_a": {"role": "draft_a", "zyx": [0, 0, 0]},
-                    "point_b": {"role": "draft_b", "zyx": [1, 1, 1]},
-                },
-            }
-
-            dialog = TifLocalAxisResliceDialog(
-                manager,
-                "01-0101-proposal-draft",
-                "head",
-                proposal_id="frame_from_queue",
-                lang="en",
-                initial_draft=draft,
-            )
-            try:
-                self.assertEqual(dialog.axis_start_edit.text(), "0,1.5,1.5")
-                self.assertEqual(dialog.axis_end_edit.text(), "1,1.5,1.5")
-                self.assertEqual(dialog.origin_edit.text(), "0.5,1.5,1.5")
-                self.assertEqual(dialog.roll_a_role_edit.text(), "left_eye")
-                self.assertEqual(dialog.roll_b_role_edit.text(), "right_eye")
-                self.assertNotIn("Loaded local axis draft", dialog.preview_status_label.text())
-            finally:
-                dialog.deleteLater()
-
-    def test_open_local_axis_reslice_dialog_passes_and_clears_axis_draft_on_export(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            widget = self._make_volume_widget(Path(tmp), z_count=5)
-            try:
-                crop_volume_to_part(widget.project, "01-0101-21", "head", [[0, 4], [1, 7], [1, 7]], display_name="Head")
-                widget.refresh_project()
-                widget._select_volume_tree_item("01-0101-21", "part", "head")
-                draft = widget.copy_source_z_axis_to_local_axis_draft()
-                self.assertIsNotNone(draft)
-
-                captured = {}
-
-                class FakeLocalAxisDialog:
-                    def __init__(self, project, specimen_id, part_id, proposal_id="", parent=None, lang="en", initial_draft=None):
-                        captured["project"] = project
-                        captured["specimen_id"] = specimen_id
-                        captured["part_id"] = part_id
-                        captured["initial_draft"] = initial_draft
-                        self.export_result = {"record": {"reslice_id": "head_axis_saved"}}
-
-                    def exec(self):
-                        return QDialog.Accepted
-
-                    def deleteLater(self):
-                        return None
-
-                selected = {}
-
-                def fake_select(specimen_id="", scope="full", part_id="", reslice_id=""):
-                    selected.update({"specimen_id": specimen_id, "scope": scope, "part_id": part_id, "reslice_id": reslice_id})
-                    return True
-
-                with patch("AntSleap.ui.tif_workbench.TifLocalAxisResliceDialog", FakeLocalAxisDialog):
-                    with patch.object(widget, "refresh_project", return_value=None):
-                        with patch.object(widget, "_select_volume_tree_item", side_effect=fake_select):
-                            result = widget.open_local_axis_reslice_dialog()
-
-                self.assertEqual(result["record"]["reslice_id"], "head_axis_saved")
-                self.assertEqual(captured["specimen_id"], "01-0101-21")
-                self.assertEqual(captured["part_id"], "head")
-                self.assertIs(captured["initial_draft"], draft)
-                self.assertIsNone(widget.local_axis_draft)
-                self.assertEqual(selected, {"specimen_id": "01-0101-21", "scope": "part_reslice", "part_id": "head", "reslice_id": "head_axis_saved"})
-            finally:
-                widget.close_project()
-                widget.deleteLater()
-
-    def test_open_local_axis_reslice_dialog_does_not_pass_draft_for_explicit_proposal(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            widget = self._make_volume_widget(Path(tmp), z_count=5)
-            try:
-                crop_volume_to_part(widget.project, "01-0101-21", "head", [[0, 4], [1, 7], [1, 7]], display_name="Head")
-                widget.refresh_project()
-                widget._select_volume_tree_item("01-0101-21", "part", "head")
-                self.assertIsNotNone(widget.copy_source_z_axis_to_local_axis_draft())
-
-                captured = {}
-
-                class FakeLocalAxisDialog:
-                    def __init__(self, project, specimen_id, part_id, proposal_id="", parent=None, lang="en", initial_draft=None):
-                        captured["proposal_id"] = proposal_id
-                        captured["initial_draft"] = initial_draft
-                        self.export_result = None
-
-                    def exec(self):
-                        return QDialog.Rejected
-
-                    def deleteLater(self):
-                        return None
-
-                with patch("AntSleap.ui.tif_workbench.TifLocalAxisResliceDialog", FakeLocalAxisDialog):
-                    result = widget.open_local_axis_reslice_dialog(proposal_id="frame_from_queue")
-
-                self.assertIsNone(result)
-                self.assertEqual(captured["proposal_id"], "frame_from_queue")
-                self.assertIsNone(captured["initial_draft"])
-                self.assertIsNotNone(widget.local_axis_draft)
             finally:
                 widget.close_project()
                 widget.deleteLater()
@@ -611,7 +430,7 @@ class TifWorkbenchTests(unittest.TestCase):
                         "point_b": {"role": "right_eye", "zyx": [1.5, 4.0, 2.0]},
                     },
                 )
-                export_part_reslice(
+                second_result = export_part_reslice(
                     widget.project,
                     "01-0101-21",
                     "head",
@@ -650,6 +469,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertTrue(widget._select_volume_tree_item("01-0101-21", "part_reslice", "head", "head_axis_second"))
 
                 self.assertEqual(widget.current_reslice_id, "head_axis_second")
+                np.testing.assert_array_equal(np.asarray(widget.image_volume), tifffile.imread(second_result["image_path"]))
                 overlays = widget._local_axis_volume_overlays()
                 self.assertEqual([item["label"] for item in overlays], ["source Z", "output Z"])
                 self.assertIn("Reslice ID: head_axis_second", widget.metadata_label.text())
@@ -702,95 +522,6 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.close_project()
                 widget.deleteLater()
 
-    @unittest.skipUnless(has_pyside6, "PySide6 not available")
-    def test_local_axis_reslice_dialog_has_large_mpr_picker(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            manager = TifProjectManager()
-            manager.create_project("local_axis_large_mpr", root / "local_axis_large_mpr")
-            manager.create_specimen_scaffold("01-0101-large-mpr")
-            image = np.arange(4 * 6 * 8, dtype=np.uint8).reshape((4, 6, 8))
-            image_rel = "specimens/01-0101-large-mpr/working/image.ome.zarr"
-            image_meta = write_volume_sidecar(root / "local_axis_large_mpr" / image_rel, image, role="working_image")
-            manager.register_working_volume("01-0101-large-mpr", image_rel, image_meta["shape_zyx"], image_meta["dtype"], save=False)
-            manager.save_project()
-            crop_volume_to_part(manager, "01-0101-large-mpr", "head", [[1, 3], [2, 6], [1, 5]], display_name="Head")
-
-            dialog = TifLocalAxisResliceDialog(manager, "01-0101-large-mpr", "head", lang="en")
-            picker = TifLocalAxisSlicePickerDialog(dialog)
-            try:
-                self.assertEqual(dialog.btn_large_mpr.text(), "Open large MPR view")
-                self.assertEqual(dialog.compact_mpr_toggle.text(), "Show compact MPR picker")
-                self.assertTrue(dialog.compact_mpr_body.isHidden())
-                self.assertEqual(picker.windowTitle(), "Large MPR point picking")
-                self.assertEqual(picker.btn_fullscreen.text(), "Full screen")
-
-                picker.axis_combo.setCurrentIndex(picker.axis_combo.findData("z"))
-                picker.slice_slider.setValue(0)
-                picker.target_combo.setCurrentIndex(picker.target_combo.findData("origin"))
-                picker._set_point(2.0, 1.0)
-
-                self.assertEqual(dialog.origin_edit.text(), "0,1,2")
-                self.assertEqual(dialog.picker_target_combo.currentData(), "origin")
-
-                dialog.compact_mpr_toggle.setChecked(True)
-                self.assertFalse(dialog.compact_mpr_body.isHidden())
-                self.assertEqual(dialog.compact_mpr_toggle.text(), "Hide compact MPR picker")
-            finally:
-                picker.deleteLater()
-                dialog.deleteLater()
-
-    def test_local_axis_reslice_dialog_requires_accepted_proposal_before_export(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            manager = TifProjectManager()
-            manager.create_project("local_axis_dialog_proposal", root / "local_axis_dialog_proposal")
-            manager.create_specimen_scaffold("01-0101-proposal")
-            image = np.arange(4 * 6 * 8, dtype=np.uint8).reshape((4, 6, 8))
-            image_rel = "specimens/01-0101-proposal/working/image.ome.zarr"
-            image_meta = write_volume_sidecar(root / "local_axis_dialog_proposal" / image_rel, image, role="working_image")
-            manager.register_working_volume("01-0101-proposal", image_rel, image_meta["shape_zyx"], image_meta["dtype"], save=False)
-            manager.save_project()
-            crop_volume_to_part(manager, "01-0101-proposal", "head", [[1, 3], [2, 6], [1, 5]], display_name="Head")
-            manager.add_local_frame_proposal(
-                "01-0101-proposal",
-                "head",
-                {
-                    "frame_proposal_id": "frame_001",
-                    "template_id": "head",
-                    "origin_zyx": [0.5, 1.5, 1.5],
-                    "output_axis_start_zyx": [0.0, 1.5, 1.5],
-                    "output_axis_end_zyx": [1.0, 1.5, 1.5],
-                    "roll_reference": {
-                        "point_a": {"role": "left_eye", "zyx": [0.5, 1.0, 1.0]},
-                        "point_b": {"role": "right_eye", "zyx": [0.5, 2.0, 1.0]},
-                    },
-                    "confidence": 0.8,
-                    "status": "proposed",
-                },
-            )
-
-            dialog = TifLocalAxisResliceDialog(manager, "01-0101-proposal", "head", proposal_id="frame_001", lang="en")
-            try:
-                dialog.reslice_id_edit.setText("proposal_axis")
-                with patch.object(QMessageBox, "warning") as warning:
-                    self.assertIsNone(dialog.export_reslice())
-                    self.assertTrue(warning.called)
-                self.assertEqual(manager.list_part_reslices("01-0101-proposal", "head"), [])
-
-                dialog.update_selected_proposal_status("accepted")
-                result = dialog.export_reslice()
-
-                self.assertIsNotNone(result)
-                self.assertEqual(manager.list_part_reslices("01-0101-proposal", "head")[0]["reslice_id"], "proposal_axis")
-                self.assertEqual(
-                    manager.get_local_frame_proposal("01-0101-proposal", "head", "frame_001")["status"],
-                    "exported",
-                )
-                self.assertEqual(result["record"]["provenance"]["source_proposal_id"], "frame_001")
-            finally:
-                dialog.deleteLater()
-
     def test_local_axis_reslice_button_is_enabled_for_part_volume(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -817,9 +548,13 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget._select_volume_tree_item("01-0101-button", "part", "head")
 
                 self.assertTrue(widget.btn_local_axis_reslice.isEnabled())
-                self.assertEqual(widget.btn_local_axis_reslice.text(), "Open detail / MPR / export")
-                self.assertTrue(widget.btn_local_axis_queue.isEnabled())
-                self.assertEqual(widget.btn_local_axis_queue.text(), "Review proposals")
+                self.assertEqual(widget.btn_local_axis_reslice.text(), "Export confirmed reslice")
+                self.assertTrue(widget.btn_export_local_axis_training_manifest.isEnabled())
+                self.assertIsNone(widget.findChild(QWidget, "tifLocalAxisModelsButton"))
+                self.assertIsNone(widget.findChild(QWidget, "tifLocalAxisModelsInlineButton"))
+                self.assertIsNone(widget.findChild(QWidget, "tifPredictLocalAxisGlobalButton"))
+                self.assertIsNone(widget.findChild(QWidget, "tifPredictLocalAxisFrameButton"))
+                self.assertFalse(hasattr(widget, "open_local_axis_reslice_dialog"))
             finally:
                 widget.close_project()
                 widget.deleteLater()
@@ -1375,8 +1110,240 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertTrue(widget.volume_local_axes_check.isChecked())
                 overlays = widget._local_axis_volume_overlays()
                 self.assertEqual([item["label"] for item in overlays], ["source Z", "output Z"])
+                self.assertEqual(overlays[0]["label_anchor_xy"], overlays[0]["start_xy"])
+                self.assertEqual(overlays[1]["label_anchor_xy"], overlays[1]["end_xy"])
+                self.assertNotEqual(overlays[0]["label_offset_xy"], overlays[1]["label_offset_xy"])
                 self.assertIn("Local axis draft", widget.metadata_label.text())
-                self.assertIn("Copied source Z axis", widget.training_status_label.text())
+                self.assertIn("Copied source Z axis", widget.local_axis_status_label.text())
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_local_axis_output_endpoint_drag_updates_draft_in_3d_view(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+            try:
+                crop_volume_to_part(widget.project, "01-0101-21", "head", [[0, 4], [1, 7], [1, 7]], display_name="Head")
+                widget.refresh_project()
+                widget._select_volume_tree_item("01-0101-21", "part", "head")
+                widget.display_mode_combo.setCurrentIndex(widget.display_mode_combo.findData("volume"))
+                widget.volume_canvas.resize(480, 360)
+                draft = widget.copy_source_z_axis_to_local_axis_draft()
+                self.assertIsNotNone(draft)
+
+                overlays = widget._local_axis_volume_overlays()
+                output_overlay = [item for item in overlays if item["label"] == "output Z"][0]
+                end_xy = output_overlay["end_xy"]
+                old_yaw = widget._volume_yaw
+                old_end = list(draft["editable_axis"]["end_zyx"])
+
+                press = FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, end_xy[0], end_xy[1])
+                move = FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, end_xy[0] + 36, end_xy[1] - 18)
+                release = FakeMouseEvent(Qt.LeftButton, Qt.NoButton, end_xy[0] + 36, end_xy[1] - 18)
+                widget.volume_canvas.mousePressEvent(press)
+                widget.volume_canvas.mouseMoveEvent(move)
+                widget.volume_canvas.mouseReleaseEvent(release)
+
+                new_end = widget.local_axis_draft["editable_axis"]["end_zyx"]
+                self.assertTrue(press.accepted)
+                self.assertTrue(move.accepted)
+                self.assertTrue(release.accepted)
+                self.assertNotEqual(new_end, old_end)
+                self.assertEqual(widget._volume_yaw, old_yaw)
+                self.assertIn("Updated output axis", widget.local_axis_status_label.text())
+                self.assertIn("Draft output Z:", widget.local_axis_summary_label.text())
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_local_axis_output_body_drag_moves_whole_axis_in_3d_view(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+            try:
+                crop_volume_to_part(widget.project, "01-0101-21", "head", [[0, 4], [1, 7], [1, 7]], display_name="Head")
+                widget.refresh_project()
+                widget._select_volume_tree_item("01-0101-21", "part", "head")
+                widget.display_mode_combo.setCurrentIndex(widget.display_mode_combo.findData("volume"))
+                widget.volume_canvas.resize(480, 360)
+                draft = widget.copy_source_z_axis_to_local_axis_draft()
+                self.assertIsNotNone(draft)
+
+                overlays = widget._local_axis_volume_overlays()
+                output_overlay = [item for item in overlays if item["label"] == "output Z"][0]
+                start_xy = output_overlay["start_xy"]
+                end_xy = output_overlay["end_xy"]
+                body_xy = [(start_xy[0] + end_xy[0]) * 0.5, (start_xy[1] + end_xy[1]) * 0.5]
+                old_start = list(draft["editable_axis"]["start_zyx"])
+                old_end = list(draft["editable_axis"]["end_zyx"])
+                old_vector = np.asarray(old_end, dtype=np.float64) - np.asarray(old_start, dtype=np.float64)
+
+                press = FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, body_xy[0], body_xy[1])
+                move = FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, body_xy[0] + 30, body_xy[1] - 12)
+                release = FakeMouseEvent(Qt.LeftButton, Qt.NoButton, body_xy[0] + 30, body_xy[1] - 12)
+                widget.volume_canvas.mousePressEvent(press)
+                widget.volume_canvas.mouseMoveEvent(move)
+                widget.volume_canvas.mouseReleaseEvent(release)
+
+                new_start = widget.local_axis_draft["editable_axis"]["start_zyx"]
+                new_end = widget.local_axis_draft["editable_axis"]["end_zyx"]
+                new_vector = np.asarray(new_end, dtype=np.float64) - np.asarray(new_start, dtype=np.float64)
+                self.assertTrue(press.accepted)
+                self.assertTrue(move.accepted)
+                self.assertTrue(release.accepted)
+                self.assertNotEqual(new_start, old_start)
+                self.assertNotEqual(new_end, old_end)
+                np.testing.assert_allclose(new_vector, old_vector, atol=1e-6)
+                self.assertIn("Moved output axis body", widget.local_axis_status_label.text())
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_local_axis_roll_reference_uses_clip_plane_and_updates_frame(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+            try:
+                crop_volume_to_part(widget.project, "01-0101-21", "head", [[0, 4], [1, 7], [1, 7]], display_name="Head")
+                widget.refresh_project()
+                widget._select_volume_tree_item("01-0101-21", "part", "head")
+                widget.display_mode_combo.setCurrentIndex(widget.display_mode_combo.findData("volume"))
+                widget.volume_canvas.resize(480, 360)
+                draft = widget.copy_source_z_axis_to_local_axis_draft()
+                self.assertIsNotNone(draft)
+
+                self.assertFalse(widget.set_local_axis_pick_target("roll_a"))
+                self.assertIn("clip plane", widget.local_axis_status_label.text())
+
+                widget.volume_clip_plane_check.setChecked(True)
+                widget.volume_clip_plane_depth_slider.setValue(45)
+                self.assertTrue(widget.set_local_axis_pick_target("roll_a"))
+                left_click = FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, 205, 180)
+                widget.volume_canvas.mousePressEvent(left_click)
+                self.assertTrue(left_click.accepted)
+                self.assertIn("roll_reference_a", widget.local_axis_status_label.text())
+
+                self.assertTrue(widget.set_local_axis_pick_target("roll_b"))
+                right_click = FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, 275, 180)
+                widget.volume_canvas.mousePressEvent(right_click)
+                self.assertTrue(right_click.accepted)
+
+                roll = widget.local_axis_draft["roll_reference"]
+                self.assertEqual(roll["point_a"]["role"], "roll_reference_a")
+                self.assertEqual(roll["point_b"]["role"], "roll_reference_b")
+                self.assertIsNotNone(widget.local_axis_draft["local_frame"])
+                self.assertIn("Local frame x_axis", widget.local_axis_summary_label.text())
+                overlays = widget._local_axis_volume_overlays()
+                self.assertIn("roll_reference_a", [item.get("label") for item in overlays])
+                self.assertIn("roll_reference_b", [item.get("label") for item in overlays])
+                self.assertIn("Roll reference", [item.get("label") for item in overlays])
+
+                old_frame_z = list(widget.local_axis_draft["local_frame"]["z_axis"])
+                output_overlay = [item for item in overlays if item.get("label") == "output Z"][0]
+                end_xy = output_overlay["end_xy"]
+                widget.volume_canvas.mousePressEvent(FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, end_xy[0], end_xy[1]))
+                widget.volume_canvas.mouseMoveEvent(FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, end_xy[0] + 28, end_xy[1] - 14))
+                widget.volume_canvas.mouseReleaseEvent(FakeMouseEvent(Qt.LeftButton, Qt.NoButton, end_xy[0] + 28, end_xy[1] - 14))
+
+                self.assertNotEqual(widget.local_axis_draft["local_frame"]["z_axis"], old_frame_z)
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_local_axis_clip_plane_depth_advances_from_viewer_side(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+            try:
+                crop_volume_to_part(widget.project, "01-0101-21", "head", [[0, 4], [1, 7], [1, 7]], display_name="Head")
+                widget.refresh_project()
+                widget._select_volume_tree_item("01-0101-21", "part", "head")
+                widget.display_mode_combo.setCurrentIndex(widget.display_mode_combo.findData("volume"))
+                widget.volume_canvas.resize(480, 360)
+
+                widget.volume_clip_plane_depth_slider.setValue(0)
+                front_depth = widget._clip_plane_rotated_depth()
+                widget.volume_clip_plane_depth_slider.setValue(50)
+                middle_depth = widget._clip_plane_rotated_depth()
+                widget.volume_clip_plane_depth_slider.setValue(100)
+                back_depth = widget._clip_plane_rotated_depth()
+
+                self.assertGreater(front_depth, middle_depth)
+                self.assertGreater(middle_depth, back_depth)
+                self.assertGreater(front_depth, 0.0)
+                self.assertLess(back_depth, 0.0)
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_local_axis_sidebar_export_records_training_sample(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            widget = self._make_volume_widget(root, z_count=5)
+            try:
+                crop_volume_to_part(widget.project, "01-0101-21", "head", [[0, 4], [1, 7], [1, 7]], display_name="Head")
+                widget.refresh_project()
+                widget._select_volume_tree_item("01-0101-21", "part", "head")
+                widget.display_mode_combo.setCurrentIndex(widget.display_mode_combo.findData("volume"))
+                widget.volume_canvas.resize(480, 360)
+                draft = widget.copy_source_z_axis_to_local_axis_draft()
+                self.assertIsNotNone(draft)
+
+                widget.volume_clip_plane_check.setChecked(True)
+                widget.volume_clip_plane_depth_slider.setValue(45)
+                expected_origin = list(widget.local_axis_draft["origin_zyx"])
+                self.assertTrue(widget.set_local_axis_pick_target("roll_a"))
+                widget.volume_canvas.mousePressEvent(FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, 205, 180))
+                self.assertTrue(widget.set_local_axis_pick_target("roll_b"))
+                widget.volume_canvas.mousePressEvent(FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, 275, 180))
+                self.assertIsNotNone(widget.local_axis_draft["local_frame"])
+                self.assertEqual(widget.local_axis_draft["origin_zyx"], expected_origin)
+
+                original_part = dict(widget.project.get_part("01-0101-21", "head"))
+                original_part_image = dict(original_part.get("image") or {})
+                original_part_mask = dict(original_part.get("mask") or {})
+                original_part_contours = dict(original_part.get("contours") or {})
+                original_part_image_path = root / "viewer" / original_part_image["path"]
+                FakeProgressDialog.instances.clear()
+                with patch("AntSleap.ui.tif_workbench.QProgressDialog", FakeProgressDialog):
+                    result = widget.export_current_local_axis_reslice()
+
+                self.assertIsNotNone(result)
+                self.assertEqual(len(FakeProgressDialog.instances), 1)
+                progress = FakeProgressDialog.instances[0]
+                self.assertTrue(progress.shown)
+                self.assertTrue(progress.closed)
+                self.assertTrue(progress.deleted)
+                self.assertEqual(progress.cancel_button, None)
+                self.assertEqual(progress.window_title, "Local Axis Reslice")
+                self.assertIn("Finalizing Local Axis Reslice export", progress.label_text)
+                record = result["record"]
+                self.assertEqual(record["status"], "exported")
+                self.assertTrue(record["image_path"].endswith("image.tif"))
+                self.assertTrue(record["metadata_path"].endswith("metadata.json"))
+                self.assertTrue(record["training_sample"]["human_confirmed"])
+                self.assertTrue(record["training_sample"]["usable_for_training"])
+                self.assertEqual(record["training_sample"]["part_id"], "head")
+                self.assertEqual(record["training_sample"]["source_axis"]["role"], "source_direction_reference")
+                self.assertEqual(record["training_sample"]["final_editable_axis"]["role"], "editable_output_axis")
+                self.assertEqual(record["training_sample"]["roll_reference_point_pair"]["point_a"]["role"], "roll_reference_a")
+                self.assertEqual(record["training_sample"]["origin_zyx"], expected_origin)
+                self.assertEqual(record["training_sample"]["outputs"]["image_shape_zyx"], [4, 6, 6])
+                self.assertIsNone(widget.local_axis_draft)
+                self.assertEqual(widget.current_reslice_id, record["reslice_id"])
+                self.assertTrue(Path(result["metadata_path"]).exists())
+                self.assertTrue(Path(result["image_path"]).exists())
+                self.assertTrue(original_part_image_path.exists())
+                part_after_export = widget.project.get_part("01-0101-21", "head")
+                self.assertEqual(part_after_export["image"], original_part_image)
+                self.assertEqual(part_after_export.get("mask") or {}, original_part_mask)
+                self.assertEqual(part_after_export.get("contours") or {}, original_part_contours)
+                self.assertEqual(len(widget.project.list_part_reslices("01-0101-21", "head")), 1)
+
+                manifest_dir = root / "manifest"
+                manifest = export_local_axis_training_manifest(widget.project, manifest_dir, {"template_id": "head"})
+                self.assertEqual(manifest["sample_count"], 1)
+                sample = manifest["manifest"]["samples"][0]
+                self.assertEqual(sample["reslice_id"], record["reslice_id"])
+                self.assertTrue(sample["part_image"]["path"])
+                self.assertTrue(sample["outputs"]["image_path"].endswith("image.tif"))
             finally:
                 widget.close_project()
                 widget.deleteLater()
@@ -1404,7 +1371,10 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertIsNotNone(draft)
                 self.assertIn("Draft output Z:", widget.local_axis_summary_label.text())
                 self.assertIn("3D overlay: on", widget.local_axis_summary_label.text())
-                self.assertEqual(widget.btn_local_axis_reslice.text(), "Open detail / MPR / export")
+                self.assertEqual(widget.btn_local_axis_reslice.text(), "Export confirmed reslice")
+                self.assertIs(widget.volume_local_axes_check.parentWidget(), widget.local_axis_volume_section)
+                self.assertIs(widget.volume_clip_plane_check.parentWidget(), widget.local_axis_volume_section)
+                self.assertIs(widget.volume_clip_plane_depth_slider.parentWidget(), widget.local_axis_volume_section)
 
                 slice_index = widget.display_mode_combo.findData("slice")
                 widget.display_mode_combo.setCurrentIndex(slice_index)
@@ -1435,6 +1405,46 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.volume_local_axes_check.setChecked(True)
                 overlays = widget._local_axis_volume_overlays()
                 self.assertEqual([item["label"] for item in overlays], ["source Z"])
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_selected_saved_reslice_overrides_local_axis_draft_overlay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+            try:
+                crop_volume_to_part(widget.project, "01-0101-21", "head", [[0, 4], [1, 7], [1, 7]], display_name="Head")
+                widget.refresh_project()
+                widget._select_volume_tree_item("01-0101-21", "part", "head")
+                draft = widget.copy_source_z_axis_to_local_axis_draft()
+                self.assertIsNotNone(draft)
+                saved_axis = dict(draft["editable_axis"])
+                saved_axis["start_zyx"] = [0.0, 1.0, 1.0]
+                saved_axis["end_zyx"] = [0.0, 6.0, 6.0]
+                widget.project.add_part_reslice(
+                    "01-0101-21",
+                    "head",
+                    {
+                        "reslice_id": "saved_axis",
+                        "source": {"editable_axis": saved_axis},
+                        "local_frame": {
+                            "origin_zyx": [2.0, 3.0, 3.0],
+                            "x_axis": [1.0, 0.0, 0.0],
+                            "y_axis": [0.0, 1.0, 0.0],
+                            "z_axis": [0.0, 0.0, 1.0],
+                        },
+                    },
+                    save=False,
+                )
+
+                widget.load_part("01-0101-21", "head", selected_reslice_id="saved_axis")
+                widget.volume_local_axes_check.setChecked(True)
+                overlays = widget._local_axis_volume_overlays()
+
+                self.assertIsNone(widget.local_axis_draft)
+                self.assertEqual([item["label"] for item in overlays], ["source Z", "output Z"])
+                self.assertEqual(overlays[1]["start_xy"], widget._project_zyx_to_volume_xy(saved_axis["start_zyx"], widget.image_volume.shape))
+                self.assertIn("Selected saved reslice", widget.local_axis_status_label.text())
             finally:
                 widget.close_project()
                 widget.deleteLater()
@@ -1791,7 +1801,6 @@ class TifWorkbenchTests(unittest.TestCase):
             self.assertEqual(widget.btn_train_backend.text(), "Train backend")
             self.assertEqual(widget.btn_import_prediction.text(), "Import prediction")
             self.assertEqual(widget.btn_import_external_prediction_tif.text(), "Import external label TIF to draft")
-            self.assertEqual(widget.btn_local_axis_models.text(), "Local Axis Models")
             self.assertEqual(widget.auto_save_check.text(), "Auto-save edit")
             self.assertTrue(widget.auto_save_check.isChecked())
             self.assertEqual(widget.btn_start_center.text(), "Start Center")
@@ -1807,7 +1816,12 @@ class TifWorkbenchTests(unittest.TestCase):
             self.assertIsNotNone(widget.findChild(type(widget.btn_train_backend), "tifTrainBackendButton"))
             self.assertIsNotNone(widget.findChild(type(widget.btn_import_prediction), "tifImportPredictionButton"))
             self.assertIsNotNone(widget.findChild(type(widget.btn_import_external_prediction_tif), "tifImportExternalPredictionTifButton"))
-            self.assertIsNotNone(widget.findChild(type(widget.btn_local_axis_models), "tifLocalAxisModelsButton"))
+            self.assertIsNone(widget.findChild(QWidget, "tifLocalAxisModelsButton"))
+            self.assertIsNone(widget.findChild(QWidget, "tifLocalAxisModelsInlineButton"))
+            self.assertIsNone(widget.findChild(QWidget, "tifPrepareLocalAxisDatasetButton"))
+            self.assertIsNone(widget.findChild(QWidget, "tifTrainLocalAxisModelButton"))
+            self.assertIsNone(widget.findChild(QWidget, "tifPredictLocalAxisGlobalButton"))
+            self.assertIsNone(widget.findChild(QWidget, "tifPredictLocalAxisFrameButton"))
             self.assertIsNotNone(widget.findChild(type(widget.auto_save_check), "tifAutoSaveEditCheck"))
             self.assertIsNotNone(widget.findChild(type(widget.display_mode_combo), "tifDisplayModeCombo"))
             self.assertIsNotNone(widget.findChild(type(widget.volume_cutoff_slider), "tifVolumeCutoffSlider"))
@@ -1849,7 +1863,6 @@ class TifWorkbenchTests(unittest.TestCase):
             self.assertIsNotNone(widget.findChild(QWidget, "tifPartOutputSection"))
             self.assertEqual(widget.btn_import_tif.property("tifRole"), "primary")
             self.assertEqual(widget.btn_train_backend.property("tifRole"), "primary")
-            self.assertEqual(widget.btn_local_axis_models.property("tifRole"), "primary")
             self.assertEqual(widget.btn_save_backend.property("tifRole"), "secondary")
             self.assertEqual(widget.btn_delete_material.property("tifRole"), "danger")
             self.assertGreaterEqual(widget.btn_import_tif.minimumHeight(), 34)
@@ -2150,6 +2163,60 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.close_project()
                 widget.deleteLater()
 
+    def test_composite_drag_preview_uses_lighter_interaction_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+            try:
+                widget._volume_canvas_renderer = "gpu"
+                widget.volume_quality_slider.setValue(1024)
+                widget.volume_sample_slider.setValue(1536)
+                widget.volume_projection_combo.setCurrentIndex(widget.volume_projection_combo.findData("composite"))
+                widget._volume_render_mode = "drag"
+
+                self.assertEqual(widget._active_volume_target_dim("drag"), 384)
+                self.assertEqual(widget._active_volume_sample_count(), 384)
+                composite_state = widget._volume_render_state("drag")
+                self.assertEqual(composite_state["render_quality"], 384)
+                self.assertEqual(composite_state["sample_steps"], 384)
+                self.assertLess(composite_state["transfer_opacity"], 0.7)
+
+                widget.volume_projection_combo.setCurrentIndex(widget.volume_projection_combo.findData("mip"))
+                mip_state = widget._volume_render_state("drag")
+
+                self.assertEqual(widget._active_volume_target_dim("drag"), 640)
+                self.assertEqual(mip_state["sample_steps"], 768)
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_volume_depth_sliders_use_interaction_preview_while_dragging(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+            try:
+                widget.display_mode_combo.setCurrentIndex(widget.display_mode_combo.findData("volume"))
+                calls = []
+
+                def fake_request():
+                    calls.append(widget._volume_render_mode)
+
+                widget._request_volume_interaction_render = fake_request
+                for slider, value in (
+                    (widget.volume_inside_slider, 45),
+                    (widget.volume_clip_slider, 28),
+                    (widget.volume_clip_plane_depth_slider, 72),
+                ):
+                    widget._volume_render_mode = "still"
+                    slider.sliderPressed.emit()
+                    slider.setSliderDown(True)
+                    slider.setValue(value)
+                    slider.setSliderDown(False)
+                    slider.sliderReleased.emit()
+
+                self.assertEqual(calls, ["drag", "drag", "drag"])
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
     def test_right_panel_controls_ignore_mouse_wheel_changes(self):
         manager = TifProjectManager()
         widget = TifWorkbenchWidget(manager, "en")
@@ -2388,7 +2455,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget._finish_volume_interaction()
                 self.assertIn("RTX 3090", widget.volume_status_text())
                 self.assertIn("Volume view | GPU ray march [", widget.volume_canvas_overlay_text())
-                self.assertIn("Still high quality", widget.volume_canvas_overlay_text())
+                self.assertIn("Local detail check", widget.volume_canvas_overlay_text())
                 self.assertIn("Mode Surface", widget.volume_canvas_overlay_text())
                 self.assertIn("Texture 4096", widget.volume_canvas_overlay_text())
                 self.assertIn("Samples 4096", widget.volume_canvas_overlay_text())
@@ -2401,16 +2468,16 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertNotIn("render_quality", widget.volume_canvas_overlay_text())
                 widget.change_language("zh")
                 self.assertIn("体预览 | GPU 光线步进 [", widget.volume_canvas_overlay_text())
-                self.assertIn("静止高清", widget.volume_canvas_overlay_text())
+                self.assertIn("局部结构检查", widget.volume_canvas_overlay_text())
                 self.assertIn("模式 表面边界", widget.volume_canvas_overlay_text())
-                self.assertEqual(widget.volume_clarity_check.text(), "清晰模式")
+                self.assertEqual(widget.volume_clarity_check.text(), "局部结构检查")
                 self.assertEqual(widget.volume_roi_detail_check.text(), "ROI 高清")
                 self.assertIn("纹理 4096", widget.volume_canvas_overlay_text())
                 self.assertIn("采样 4096", widget.volume_canvas_overlay_text())
                 if widget._volume_canvas_renderer == "gpu":
                     self.assertIn("ROI 2.5x", widget.volume_canvas_overlay_text())
                 self.assertIn("视点 65%", widget.volume_canvas_overlay_text())
-                self.assertIn("近端切 30%", widget.volume_canvas_overlay_text())
+                self.assertIn("近端裁剪 30%", widget.volume_canvas_overlay_text())
                 self.assertIn("左键旋转", widget.volume_status_text())
                 self.assertIn("右键平移", widget.volume_status_text())
                 self.assertIn("横移 0%", widget.volume_canvas_overlay_text())
@@ -2438,6 +2505,22 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertIn("横移", widget.volume_canvas_overlay_text())
                 self.assertIn("纵移", widget.volume_canvas_overlay_text())
                 widget.volume_canvas.resize(480, 360)
+                widget._volume_pan_x = 0.0
+                widget._volume_pan_y = 0.0
+                widget._volume_zoom = 16.0
+                widget.pan_volume_preview(120, -90)
+                self.assertAlmostEqual(widget._volume_pan_x, 0.7, places=2)
+                self.assertAlmostEqual(widget._volume_pan_y, 0.7, places=2)
+                for _ in range(80):
+                    widget.pan_volume_preview(120, -90)
+                self.assertGreater(widget._volume_pan_x, 4.0)
+                self.assertGreater(widget._volume_pan_y, 4.0)
+                self.assertLessEqual(widget._volume_pan_x, widget._volume_pan_limit())
+                self.assertLessEqual(widget._volume_pan_y, widget._volume_pan_limit())
+                widget._volume_zoom = 1.0
+                widget._clamp_volume_pan()
+                self.assertLessEqual(widget._volume_pan_x, widget._volume_pan_limit())
+                self.assertLessEqual(widget._volume_pan_y, widget._volume_pan_limit())
                 press = FakeMouseEvent(Qt.RightButton, Qt.RightButton, 220, 170)
                 move = FakeMouseEvent(Qt.RightButton, Qt.RightButton, 260, 140)
                 release = FakeMouseEvent(Qt.RightButton, Qt.NoButton, 260, 140)
@@ -2523,6 +2606,19 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.close_project()
                 widget.deleteLater()
 
+    def test_cpu_volume_front_clip_discards_viewer_side_depths(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "zh")
+        try:
+            depths = np.asarray([-0.8, -0.2, 0.3, 0.9], dtype=np.float32)
+            keep = widget._viewer_side_front_clip_mask(depths, 0.5)
+
+            np.testing.assert_array_equal(keep, np.asarray([True, True, False, False]))
+            np.testing.assert_array_equal(widget._viewer_side_front_clip_mask(depths, 0.0), np.ones(depths.shape, dtype=bool))
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+
     def test_volume_preview_keeps_uint8_source_without_float_copy(self):
         manager = TifProjectManager()
         widget = TifWorkbenchWidget(manager, "zh")
@@ -2573,6 +2669,46 @@ class TifWorkbenchTests(unittest.TestCase):
             preview = widget._ensure_volume_preview("still")
             self.assertEqual(preview.dtype, np.uint16)
             np.testing.assert_array_equal(preview, widget.image_volume)
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+
+    def test_local_detail_check_keeps_roi_high_detail_supersample(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "zh")
+        try:
+            widget._volume_canvas_renderer = "gpu"
+            widget._volume_render_mode = "still"
+            widget.image_volume = np.zeros((4, 32, 32), dtype=np.uint8)
+            widget._volume_zoom = 3.0
+            widget.volume_roi_detail_check.setChecked(True)
+            widget.volume_roi_scale_slider.setValue(250)
+            self.assertEqual(widget._active_volume_roi_scale(), 2.5)
+
+            widget.volume_clarity_check.setChecked(True)
+
+            self.assertEqual(widget._active_volume_roi_scale(), 2.5)
+            self.assertIn("局部结构检查", widget.volume_canvas_overlay_text())
+            self.assertIn("ROI 2.5x", widget.volume_canvas_overlay_text())
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+
+    def test_part_local_detail_check_raises_still_texture_target(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "zh")
+        try:
+            widget._volume_canvas_renderer = "gpu"
+            widget.current_volume_scope = "part"
+            widget.image_volume = np.zeros((10, 2200, 2200), dtype=np.uint8)
+            widget.volume_quality_slider.setValue(1024)
+
+            self.assertEqual(widget._active_volume_target_dim("still"), 1536)
+
+            widget.volume_clarity_check.setChecked(True)
+
+            self.assertEqual(widget._active_volume_target_dim("still"), 2200)
+            self.assertEqual(widget._active_volume_target_dim("drag"), 384)
         finally:
             widget.close_project()
             widget.deleteLater()
@@ -2752,6 +2888,7 @@ class TifWorkbenchTests(unittest.TestCase):
             widget.volume_enhancement_slider.setValue(80)
             widget.volume_tone_slider.setValue(90)
             widget.volume_surface_refine_check.setChecked(True)
+            self.assertEqual(widget.volume_clip_plane_depth_slider.value(), 0)
             widget.volume_clip_plane_check.setChecked(True)
             widget.volume_clip_plane_depth_slider.setValue(62)
             widget.render_volume_preview()

@@ -50,8 +50,8 @@ class TifGpuVolumeCanvasImportTests(unittest.TestCase):
         self.assertEqual(gpu_canvas._compact_renderer_text(""), "")
         self.assertIn("u_camera_distance", gpu_canvas._FRAGMENT_SHADER)
         self.assertIn("u_front_clip", gpu_canvas._FRAGMENT_SHADER)
-        self.assertIn("clip_depth", gpu_canvas._FRAGMENT_SHADER)
-        self.assertIn("dot(near_point, view_axis)", gpu_canvas._FRAGMENT_SHADER)
+        self.assertIn("front_clip_start_t", gpu_canvas._FRAGMENT_SHADER)
+        self.assertNotIn("front_clip_discards", gpu_canvas._FRAGMENT_SHADER)
         self.assertIn("u_gradient_weight", gpu_canvas._FRAGMENT_SHADER)
         self.assertIn("u_texel_step", gpu_canvas._FRAGMENT_SHADER)
         self.assertIn("accum.rgb", gpu_canvas._FRAGMENT_SHADER)
@@ -68,10 +68,29 @@ class TifGpuVolumeCanvasImportTests(unittest.TestCase):
         self.assertIn("tetra_gradient", gpu_canvas._FRAGMENT_SHADER)
         self.assertIn("u_clip_plane_enabled", gpu_canvas._FRAGMENT_SHADER)
         self.assertIn("clip_plane_discards", gpu_canvas._FRAGMENT_SHADER)
+        self.assertIn("clip_plane_extent", gpu_canvas._FRAGMENT_SHADER)
+        self.assertIn("section_plane_color", gpu_canvas._FRAGMENT_SHADER)
+        self.assertIn("section_accum", gpu_canvas._FRAGMENT_SHADER)
+        self.assertIn("vec4 transfer = transfer_sample", gpu_canvas._FRAGMENT_SHADER)
+        self.assertIn("vec3 gray = vec3", gpu_canvas._FRAGMENT_SHADER)
+        self.assertIn("color += vec3(0.16, 0.18, 0.14) * edge", gpu_canvas._FRAGMENT_SHADER)
+        self.assertIn("section_accum.a * 0.96", gpu_canvas._FRAGMENT_SHADER)
         self.assertIn("u_surface_refine", gpu_canvas._FRAGMENT_SHADER)
         self.assertEqual(gpu_canvas.GPU_VOLUME_MASK_MODES["image_only"], 0)
         self.assertEqual(gpu_canvas.GPU_VOLUME_MASK_MODES["mask_boundary"], 1)
         self.assertEqual(gpu_canvas.GPU_VOLUME_MASK_MODES["masked_image"], 2)
+
+    def test_grayscale_volume_sampling_stays_linear_when_still_or_clipped(self):
+        self.assertEqual(gpu_canvas._texture_filter_name(True, "still"), "linear")
+        self.assertEqual(gpu_canvas._display_scaling_name(True, "still"), "smooth")
+        self.assertEqual(gpu_canvas._texture_filter_name(False, "still", True), "linear")
+        self.assertEqual(gpu_canvas._display_scaling_name(False, "still", True), "smooth")
+        self.assertEqual(gpu_canvas._texture_filter_name(True, "drag"), "linear")
+        self.assertEqual(gpu_canvas._display_scaling_name(False, "still"), "smooth")
+
+    def test_gpu_pan_limit_scales_with_zoom(self):
+        self.assertEqual(gpu_canvas.volume_pan_limit_for_zoom(1.0), 8.0)
+        self.assertEqual(gpu_canvas.volume_pan_limit_for_zoom(16.0), 36.0)
 
     def test_transfer_lut_presets_are_distinct_and_alpha_ramps_up(self):
         amber = gpu_canvas.build_volume_transfer_lut("amber", (1.0, 0.83, 0.30), opacity=1.0)

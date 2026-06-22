@@ -32,22 +32,40 @@
 - Child Expert Session receives only model prediction auto boxes for its local canvas/sync state. A VLM draft can still be chosen as an entry ROI when the operator explicitly selects it, but it is labeled as `VLM Draft Box` and is not silently treated as a normal model auto box.
 
 ### 0.0b Current TIF Local Axis Reslice state (2026-06-22)
-- TIF Local Axis Reslice / 局部轴重切片 is implemented as a generic part-volume workflow, not as Brain Reslice. `head` remains the first practical template, but core fields use generic names such as source axis, editable output axis, roll reference point pair, and local frame.
+- TIF Local Axis Reslice / 局部轴重切片 is implemented as a generic part-volume workflow, not as Brain Reslice. `head` remains the first practical template, but core fields and UI wording use generic concepts: locked source Z axis, editable output Z axis, roll reference point pair, local frame, and reslice output.
+- The current user-facing workflow is inside the TIF Workbench right sidebar and the existing 3D part-volume preview. The older dedicated Local Axis detail/MPR dialog has been removed. Do not resurrect `tif_local_axis_reslice_page.py` unless the user explicitly asks for a separate page again.
+- Main operator flow:
+  - create/select a part volume using existing ROI / key-slice / mask tools
+  - switch to the part 3D preview
+  - enable/show source/output axes
+  - copy locked source Z into an editable output Z draft
+  - drag output-axis endpoints or the axis body directly in the 3D preview
+  - enable the observation-side clip plane
+  - pick roll reference A/B on that clip plane
+  - export the confirmed reslice from the right sidebar
 - Formal reslice exports are stored under the selected part:
   - `specimens/<specimen>/parts/<part>/reslices/<reslice_id>/image.tif`
   - optional `mask.tif` when a part mask exists
   - `metadata.json`
   - project record in `part.metadata.local_axis_reslices[]`
-- Each exported reslice now writes a standard `training_sample` both in `metadata.json` and the project reslice record. It records specimen / part / template, part image path / shape / spacing, mask availability, parent bbox, source axis, initial editable axis, final editable axis, origin, roll reference point pair, local frame, reslice params, outputs, human confirmation, `usable_for_training`, timestamps, software version, notes, and provenance. This is the current bridge from manual operation to future AI training data.
-- `export_local_axis_training_manifest(...)` now prefers the saved `training_sample`, so Local Axis train/prepare-dataset backends consume the same data contract instead of reconstructing loose fields later.
-- Local Axis AI backend integration is model-agnostic but safety-constrained:
+- Selecting a plain part tree item loads the original part volume. Selecting `part -> Reslices -> reslice item` loads that reslice's `image.tif` for slice review and 3D preview, and loads `mask.tif` if available. This distinction is important: earlier UI builds showed reslice metadata but still displayed the original part image, which made real reslices look unchanged.
+- Local Axis export runs in a background worker with a modal progress dialog. It disables axis controls while exporting and appends a new `reslices/<reslice_id>/` output. It must not delete or overwrite the source TIFF, original part volume, part mask, contours, or extraction metadata unless the user explicitly uses a destructive part-delete command.
+- Each exported reslice writes a standard `training_sample` both in `metadata.json` and the project reslice record. It records specimen / part / template, part image path / shape / spacing, mask availability, parent bbox, source axis, initial editable axis, final editable axis, origin, roll reference point pair, local frame, reslice params, outputs, human confirmation, `usable_for_training`, timestamps, software version, notes, and provenance. This is the current bridge from manual operation to future AI training data.
+- `export_local_axis_training_manifest(...)` now prefers the saved `training_sample`, so future Local Axis train/prepare-dataset backends can consume the same data contract instead of reconstructing loose fields later.
+- Current AI stance after AntScan/PCA discussion: the UI no longer exposes Local Axis training, prediction, model panel, or review queue entrypoints as first-version daily controls. AI automation remains strategically important for thousands of AntScan specimens, but this pass only stabilizes data capture and manifest export. Future training/inference should follow the 2D backend-contract style and remain proposal/review based rather than directly modifying final outputs.
+- Historical/model-agnostic backend scaffolding still exists in core modules/tests for proposals and batch export, but it should be treated as backend plumbing, not the active first-version researcher workflow:
   - backend outputs may import `global_roi_proposals` and `local_frame_proposals`
   - backend outputs must not directly modify project JSON, manual truth, or final reslice outputs
   - imported proposal JSON values of `accepted` or `exported` are downgraded to `needs_review`
   - missing roll reference point pairs mark local frame proposals as `needs_review`
   - accepted proposals are the only source allowed for batch formal reslice export
-- Local Axis review queue now supports large-batch states: `no_part`, `part_ready`, `proposed`, `needs_review`, `accepted`, `exported`, `failed`, plus legacy-compatible `no_proposal`. Batch export records per-proposal failures in `part.metadata.local_axis_batch_failures[]` and continues exporting other accepted items.
-- Recent validation covered compile checks, Local Axis unit tests, project reload tests, training manifest export, accepted-only batch export, failure persistence, and PySide6 offscreen smoke tests for the reslice dialog/model panel/review queue. Real AntScan visual interaction still needs manual validation, especially 3D drag smoothness and axis readability on real volumes.
+- 3D preview notes:
+  - source Z and output Z overlays are drawn in the canvas with separated labels
+  - saved reslice overlays take precedence over unsaved local-axis drafts
+  - observation-side clip plane is a display/point-picking aid and does not mutate saved data
+  - "Local detail check" replaces the previous over-promising "clarity" wording; it improves local inspection but does not create new source detail beyond the loaded part texture
+  - composite rendering and depth/clip sliders use lighter interaction rendering while dragging to reduce UI stalls
+- Recent validation covered `tests.test_tif_workbench` (85 tests), TIF GPU/Local Axis/Project/Batch tests (62 tests), `compileall`, and `git diff --check`. Real AntScan visual validation is still expected for axis readability, roll reference usability, and whether the exported reslice orientation matches the researcher's intended anatomical convention.
 
 ### 0.1 Large 2D/STL annotation behavior
 - Large 2D/STL projects open with lightweight safeguards:

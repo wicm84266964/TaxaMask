@@ -1,8 +1,10 @@
 import math
 import os
+from datetime import datetime
 
 import numpy as np
-from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QThread, QTimer, Signal
+import tifffile
+from PySide6.QtCore import QEventLoop, QObject, QPointF, QRect, QRectF, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QPixmap, QPolygonF, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -59,10 +61,8 @@ try:
     from AntSleap.core.tif_project import TifProjectManager
     from AntSleap.core.tif_stack_import import import_tif_stack
     from AntSleap.core.tif_volume_io import create_empty_label_sidecar_like, flush_volume_array, load_volume_sidecar, volume_sidecar_exists
-    from AntSleap.core.tif_local_axis_reslice import create_editable_axis_from_source, source_z_axis_for_part
-    from AntSleap.ui.tif_local_axis_model_panel import TifLocalAxisModelDialog
-    from AntSleap.ui.tif_local_axis_reslice_page import TifLocalAxisResliceDialog
-    from AntSleap.ui.tif_local_axis_review_queue import TifLocalAxisReviewQueueWidget
+    from AntSleap.core.tif_local_axis_ai import export_local_axis_training_manifest
+    from AntSleap.core.tif_local_axis_reslice import compute_local_frame, create_editable_axis_from_source, export_part_reslice, source_z_axis_for_part
     from AntSleap.ui.tif_gpu_volume_canvas import (
         GPU_VOLUME_MAX_RAY_STEPS,
         GPU_VOLUME_MAX_TEXTURE_DIM,
@@ -72,6 +72,7 @@ try:
         gpu_volume_canvas_available,
         gpu_volume_offscreen_available,
         gpu_volume_unavailable_reason,
+        volume_pan_limit_for_zoom,
         volume_shape_scale,
     )
 except ModuleNotFoundError as exc:
@@ -98,10 +99,8 @@ except ModuleNotFoundError as exc:
     from core.tif_project import TifProjectManager
     from core.tif_stack_import import import_tif_stack
     from core.tif_volume_io import create_empty_label_sidecar_like, flush_volume_array, load_volume_sidecar, volume_sidecar_exists
-    from core.tif_local_axis_reslice import create_editable_axis_from_source, source_z_axis_for_part
-    from ui.tif_local_axis_model_panel import TifLocalAxisModelDialog
-    from ui.tif_local_axis_reslice_page import TifLocalAxisResliceDialog
-    from ui.tif_local_axis_review_queue import TifLocalAxisReviewQueueWidget
+    from core.tif_local_axis_ai import export_local_axis_training_manifest
+    from core.tif_local_axis_reslice import compute_local_frame, create_editable_axis_from_source, export_part_reslice, source_z_axis_for_part
     from ui.tif_gpu_volume_canvas import (
         GPU_VOLUME_MAX_RAY_STEPS,
         GPU_VOLUME_MAX_TEXTURE_DIM,
@@ -111,8 +110,14 @@ except ModuleNotFoundError as exc:
         gpu_volume_canvas_available,
         gpu_volume_offscreen_available,
         gpu_volume_unavailable_reason,
+        volume_pan_limit_for_zoom,
         volume_shape_scale,
     )
+
+
+TIF_VOLUME_CLARITY_PART_FULL_VOXEL_LIMIT = 128_000_000
+TIF_VOLUME_CLARITY_PART_HIGH_DIM = 3072
+TIF_VOLUME_CLARITY_PART_FULL_DIM = GPU_VOLUME_MAX_TEXTURE_DIM
 
 
 TIF_TRANSLATIONS = {
@@ -154,7 +159,7 @@ TIF_TRANSLATIONS = {
         "ROI high detail": "ROI 高清",
         "ROI scale": "ROI 倍率",
         "Inside depth": "视点深度",
-        "Front cut": "近端剖切",
+        "Front cut": "快速近端裁剪",
         "Mask display": "Mask 显示",
         "Image only": "仅图像",
         "Mask boundary": "Mask 边界",
@@ -163,13 +168,15 @@ TIF_TRANSLATIONS = {
         "Transfer function": "密度映射",
         "Density opacity": "密度透明度",
         "Detail enhancement": "细节增强",
+        "Local detail check": "局部结构检查",
         "Tone curve": "明暗曲线",
         "Surface refine": "表面精修",
-        "Clip plane": "任意剖切面",
+        "Clip plane": "观察侧剖切面",
         "Show local axes": "显示局部轴",
+        "Show source/output axes in 3D preview": "在三维预览显示原始/输出轴",
         "source Z": "原始 Z",
         "output Z": "输出 Z",
-        "Clip depth": "剖切深度",
+        "Clip depth": "切入深度",
         "View aligned": "按当前视角",
         "Drag preview": "拖动预览",
         "Still high quality": "静止高清",
@@ -178,6 +185,7 @@ TIF_TRANSLATIONS = {
         "Draw": "绘制",
         "actual": "实际",
         "GPU stats pending": "等待 GPU 统计",
+        "Sampling": "采样",
         "Renderer": "渲染器",
         "GPU ray march": "GPU 光线步进",
         "CPU fallback": "CPU 回退",
@@ -194,13 +202,17 @@ TIF_TRANSLATIONS = {
         "Texture": "纹理",
         "Samples": "采样",
         "Inside": "视点",
-        "Cut": "近端切",
+        "Cut": "近端裁剪",
         "Zoom": "缩放",
         "Pan X": "横移",
         "Pan Y": "纵移",
         "Clarity mode": "清晰模式",
         "Sharp": "清晰",
         "Smooth": "平滑",
+        "nearest": "最近邻",
+        "linear": "线性",
+        "smooth": "平滑",
+        "crisp": "清晰",
         "Data": "数据",
         "Mode": "模式",
         "ROI": "ROI",
@@ -208,21 +220,21 @@ TIF_TRANSLATIONS = {
         "Switches how values along the viewing ray are projected. MIP highlights bright structures, MinIP highlights dark gaps, Average shows density trend, and Surface emphasizes boundaries.": "切换视线方向上的体数据投影方式。最大强度适合看亮结构，最小强度适合看暗间隙，平均强度适合看整体密度，表面边界适合看轮廓。",
         "Controls the maximum edge length of the still GPU volume. Dragging uses a smaller temporary texture, then rebuilds this sharper texture when the view settles.": "控制静止高清时上传到 GPU 的体数据最大边长。拖动时会临时用较小纹理，停下后自动重建这个高清纹理；3090 可尝试 1024 到 2048。",
         "Controls the number of samples per screen pixel along the viewing ray. Higher values stabilize internal layers and fine lines, mainly increasing GPU compute load.": "控制每个屏幕像素沿视线取样次数。数值越高，内部层次和细线更稳定，但主要增加 GPU 计算负载；如果转动不卡，可继续调高。",
-        "When zoomed in and still, renders the 3D view at a higher offscreen pixel density before scaling it back, improving small-part inspection at the cost of more GPU readback work.": "静止且放大观察时，先用更高离屏像素密度渲染三维体，再缩回当前显示区域。它能改善小部位观察，但会增加 GPU 读回和显示成本。",
-        "Controls the offscreen supersampling factor used by ROI high detail. Higher values make still zoomed views smoother but heavier.": "控制 ROI 高清的离屏超采样倍数。数值越高，静止放大视图越平滑，但负载也更重。",
-        "Sharp still rendering keeps more source intensity detail and uses crisper sampling. It may upload more data and can look grainier while revealing fine internal structures.": "静止高清时尽量保留原始灰度层次，并使用更锐利的采样。它会上传更多数据，画面可能更有颗粒感，但更容易看清细小内部结构。",
+        "When zoomed in and still, renders the 3D view at a higher offscreen pixel density before scaling it back, improving small-part inspection at the cost of more GPU readback work.": "静止且放大观察时，先用更高离屏像素密度渲染三维体，再缩回当前显示区域。它主要改善抗锯齿和顺滑外观；精确看边界时优先用局部结构检查。",
+        "Controls the offscreen supersampling factor used by ROI high detail. Higher values make still zoomed views smoother but heavier.": "控制 ROI 高清的离屏超采样倍数。数值越高，静止放大视图越平滑，但可能让边界显得更软，负载也更重。",
+        "Sharp still rendering keeps more source intensity detail and uses crisper sampling. It may upload more data and can look grainier while revealing fine internal structures.": "局部结构检查会在静止时尽量提高部位体纹理，并保留线性采样和 ROI 高清，减少放大时的马赛克感。它可能上传更慢，但更适合判断局部结构边界。",
         "Controls how strongly dense voxels accumulate in 3D. Lower values make internal layers less blocked; higher values make weak structures more visible.": "控制三维渲染中密度累积的强弱。调低会减少遮挡，更容易看内部层次；调高会让弱信号更明显，但画面可能更厚。",
         "Enhances fine boundaries while the view is still. It is a display-only aid for checking internal layers and part edges.": "静止观察时增强细小边界。它只是显示辅助，用于检查内部层次和部位边缘，不修改原始数据。",
         "Adjusts display gamma for 3D rendering. Lower values brighten faint structures; higher values keep dense regions calmer.": "调整三维渲染的显示曲线。调低会提亮弱结构，调高会让高密度区域更克制。",
         "Refines first surface hits in Surface mode while still. It improves contour stability without affecting Composite rendering.": "静止且使用表面边界模式时精修首次命中位置，让轮廓更稳定；不影响透明累积模式。",
-        "Enables a view-aligned GPU clipping plane. It only cuts the display, not the saved TIF, mask, or training data.": "启用按当前视角对齐的 GPU 剖切面。它只切开屏幕显示，不会修改已保存的 TIF、Mask 或训练数据。",
+        "Enables a view-aligned GPU clipping plane. It only cuts the display, not the saved TIF, mask, or training data.": "启用观察侧 GPU 剖切面，并在剖切面上绘制清晰截面。它只切开屏幕显示，不会修改已保存的 TIF、Mask 或训练数据。",
         "Shows the locked source Z axis and the selected local output axis on the 3D part preview. This is display-only and does not edit data.": "在三维部位预览中显示锁定的原始 Z 轴和当前选中局部输出轴。这个开关只影响显示，不修改数据。",
-        "Moves the clipping plane through the current 3D view. Use it to peel away outer tissue and inspect inside structures.": "沿当前三维视角移动剖切面。可用于剥开外层组织观察内部结构。",
+        "Moves the clipping plane through the current 3D view. Use it to peel away outer tissue and inspect inside structures.": "从当前观察侧向体数据内部推进剖切面。切面会单独采样显示截面内容，用于观察内部结构。",
         "Shows accepted or preview part masks in the 3D view. Boundary is best for checking extraction edges; masked image hides voxels outside the mask.": "在三维视图中显示已接受或预览中的部位 Mask。边界模式适合检查切除轮廓，只看 Mask 内图像会隐藏 Mask 外体素。",
         "Controls how strongly mask boundaries are blended into the 3D inspection view.": "控制 Mask 边界叠加到三维观察视图中的强度。",
         "Moves the camera into the volume. Use it to enter the specimen and inspect internal structures; keep it at 0 for outer shape review.": "移动观察点。0 在样本外看整体，100 接近样本中心，100 以上继续进入更深内部；它不切掉体数据，只改变你站在哪里看。",
-        "Cuts away the front part of the current view. Use it to remove blocking outer tissue and inspect deeper structures; keep it at 0 for the full outline.": "从当前视角靠近屏幕的一侧切掉一段体数据。它不移动观察点，只移除挡在眼前的近端外层；看完整外轮廓时保持为 0。",
-        "Restores the external default view and clears inside depth and front cut.": "恢复外部默认视角，并清空视点深度和近端剖切。",
+        "Cuts away the front part of the current view. Use it to remove blocking outer tissue and inspect deeper structures; keep it at 0 for the full outline.": "快速跳过当前视角近端的一段体渲染采样。它不绘制清晰截面，只用于临时减少遮挡；正式观察内部结构优先使用观察侧剖切面。",
+        "Restores the external default view and clears inside depth and front cut.": "恢复外部默认视角，并清空视点深度和快速近端裁剪。",
         "3D preview uses a downsampled read-only volume. Use Slice review for precise label editing.": "3D 预览使用降采样只读体数据。精确标签修改请使用切片复核。",
         "3D volume preview is read-only. Switch to Slice review for label editing.": "3D 体预览为只读观察。需要修改标签时请切回切片复核。",
         "Slice": "切片",
@@ -298,8 +310,7 @@ TIF_TRANSLATIONS = {
         "Clear preview": "清除预览",
         "Local Axis Reslice": "局部轴重切片",
         "Local Axis Reslice / part volume": "局部轴重切片 / 部位体数据",
-        "Review Local Axis Queue": "复核局部轴队列",
-        "Local Axis Models": "局部轴模型",
+        "Local axis status: ready": "局部轴状态：就绪",
         "Export part package": "导出部位包",
         "Delete part volume": "删除部位体数据",
         "Delete part volume?": "删除部位体数据？",
@@ -334,7 +345,32 @@ TIF_TRANSLATIONS = {
         "Exported part package.\nManifest: {0}": "已导出部位包。\nManifest：{0}",
         "Exported part package.\nFolder: {0}\nManifest: {1}": "已导出部位包。\n文件夹：{0}\nManifest：{1}",
         "Define a part-local output axis and roll reference, then export a reviewable local reslice.": "定义部位内输出轴和 roll 参照点，然后导出可复核的局部重切片。",
-        "Work in the 3D part preview first. Source Z is locked; copy it to create an editable output Z draft, then use the detail dialog only for precise MPR picking, roll reference, preview, and export.": "优先在三维部位预览中工作。原始 Z 轴是锁定参考；先复制它生成可编辑输出 Z 草稿，再把详情弹窗作为精确 MPR 点选、roll 参照、预览和导出的辅助工具。",
+        "Work in the 3D part preview first. Source Z is locked; copy it to create an editable output Z draft, then confirm the roll reference on the observation-side clip plane before export.": "优先在三维部位预览中工作。原始 Z 轴是锁定参考；先复制它生成可编辑输出 Z 草稿，再在观察侧剖切面确认 roll 参照后导出。轴中心由输出轴两端自动计算。",
+        "Use the 3D part preview as the main workspace. Copy source Z, drag the output axis endpoints, then enable the observation-side clip plane and pick roll references on that plane.": "以三维部位预览作为主操作区。复制原始 Z，拖动输出轴头尾；打开观察侧剖切面后，直接在剖切面上点选 roll 参照。",
+        "Use the 3D part preview as the main workspace. Copy source Z, drag the output axis endpoints, then pick the roll reference points on the observation-side clip plane. Export here when the frame is confirmed.": "以三维部位预览作为主操作区。复制原始 Z，拖动输出轴头尾，再在观察侧剖切面上点选 roll 参照点。确认后直接在这里导出。",
+        "Composite drag preview is downshifted while rotating; still view keeps the selected quality.": "透明累积在拖动旋转时会临时降档；停止后仍按当前质量参数显示。",
+        "Selected saved reslice takes precedence over any unsaved local axis draft.": "当前选中的已保存重切片会优先于未保存局部轴草稿显示。",
+        "Dragging output axis {0}.": "正在拖动输出轴{0}端点。",
+        "Updated output axis {0}.": "已更新输出轴{0}端点。",
+        "Dragging output axis body.": "正在整体移动输出轴。",
+        "Moved output axis body.": "已整体移动输出轴。",
+        "Pick roll reference A": "点选 Roll 参照 A",
+        "Pick roll reference B": "点选 Roll 参照 B",
+        "Clear roll refs": "清除 Roll 参照",
+        "Clear axis draft": "清除轴草稿",
+        "Click the observation-side clip plane to set {0}.": "请在观察侧剖切面上点击，设置 {0}。",
+        "Turn on the observation-side clip plane before picking roll references.": "请先打开观察侧剖切面，再点选 roll 参照。",
+        "Turn on the observation-side clip plane before picking local-axis points.": "请先打开观察侧剖切面，再点选局部轴点。",
+        "Set {0}: {1}": "已设置 {0}: {1}",
+        "Cleared roll reference points.": "已清除 roll 参照点。",
+        "Cleared local axis draft.": "已清除局部轴草稿。",
+        "Roll reference": "Roll 参照",
+        "Local frame": "局部坐标系",
+        "x_axis": "x_axis",
+        "y_axis": "y_axis",
+        "z_axis": "z_axis",
+        "start": "起点",
+        "end": "终点",
         "Local axis unavailable. Select a part volume.": "局部轴不可用。请先选择部位体数据。",
         "Source Z axis: locked reference": "原始 Z 轴：锁定参考",
         "3D overlay: on": "三维叠加显示：开启",
@@ -343,16 +379,24 @@ TIF_TRANSLATIONS = {
         "Draft output Z: {0}": "草稿输出 Z：{0}",
         "Saved reslice: none selected": "已保存重切片：未选中",
         "Saved reslice: {0}": "已保存重切片：{0}",
-        "Open detail / MPR / export": "打开详情 / MPR / 导出",
-        "Review proposals": "复核建议项",
+        "Export confirmed reslice": "导出确认重切片",
         "Copied source Z axis as editable output axis.": "已从原始 Z 轴复制可编辑输出轴。",
-        "Select a part volume before opening Local Axis Reslice.": "请先选择一个部位体数据，再打开局部轴重切片。",
-        "Local Axis model and proposal tools": "局部轴模型与建议项工具",
+        "Select a part volume before editing Local Axis Reslice.": "请先选择一个部位体数据，再编辑局部轴重切片。",
+        "Select a part volume before exporting Local Axis Reslice.": "请先选择一个部位体数据，再导出局部轴重切片。",
+        "Copy source Z and set roll reference points before exporting.": "导出前请先复制原始 Z 轴，并设置完整 roll 参照点。",
+        "Local frame is not ready: {0}": "局部坐标系尚未就绪：{0}",
+        "Exporting confirmed Local Axis Reslice...": "正在导出已确认的局部轴重切片...",
+        "Preparing Local Axis Reslice export...": "正在准备局部轴重切片导出...",
+        "Finalizing Local Axis Reslice export...": "正在完成局部轴重切片导出...",
+        "Local Axis Reslice export is already running.": "局部轴重切片正在导出中。",
+        "Local Axis Reslice export did not return a result.": "局部轴重切片导出没有返回结果。",
+        "Local Axis data": "局部轴数据",
         "Copy source Z axis": "复制原始 Z 轴",
         "Export reslice": "导出重切片",
+        "Export Local Axis training manifest": "导出局部轴训练清单",
         "Reslice ID": "重切片编号",
         "Template": "模板",
-        "Origin z,y,x": "中心点 z,y,x",
+        "Origin z,y,x": "输出轴中点 z,y,x",
         "Output axis start z,y,x": "输出轴起点 z,y,x",
         "Output axis end z,y,x": "输出轴终点 z,y,x",
         "Local axis draft": "局部轴草稿",
@@ -366,10 +410,12 @@ TIF_TRANSLATIONS = {
         "Output shape Z/Y/X": "输出尺寸 Z/Y/X",
         "Human confirmed": "人工已确认",
         "Usable for training": "可用于训练",
+        "Record this export as trainable local-axis data": "将本次导出记录为可训练局部轴数据",
         "Hard case flags": "困难样本标记",
         "Source proposal": "来源建议项",
         "Model version": "模型版本",
         "Exported local axis reslice {0}.": "已导出局部轴重切片 {0}。",
+        "Exported Local Axis training manifest: {0} samples\n{1}": "已导出局部轴训练清单：{0} 条样本\n{1}",
         "Select a part volume before exporting a part package.": "请先选择一个部位体数据，再导出部位包。",
         "Created part {0} from bbox {1}.": "已按 bbox {1} 新建部位 {0}。",
         "Added rectangular key slice at Z {0}.": "已在 Z={0} 添加矩形关键切片。",
@@ -991,6 +1037,19 @@ class TifVolumeCanvas(QLabel):
         self._last_drag_pos = None
         self._axis_overlays = []
 
+    def _try_start_local_axis_endpoint_drag(self, event):
+        if self.workbench is None or event.button() != Qt.LeftButton:
+            return False
+        handler = getattr(self.workbench, "start_local_axis_endpoint_drag", None)
+        if not callable(handler):
+            return False
+        if not handler(event.position().x(), event.position().y()):
+            return False
+        self._mouse_mode = "local_axis_endpoint"
+        self._last_drag_pos = event.position()
+        event.accept()
+        return True
+
     def set_axis_overlays(self, overlays):
         self._axis_overlays = list(overlays or [])
         self.update()
@@ -1048,6 +1107,21 @@ class TifVolumeCanvas(QLabel):
         font.setPointSize(9)
         painter.setFont(font)
         for overlay in self._axis_overlays:
+            if overlay.get("kind") == "point":
+                point = overlay.get("point_xy")
+                if not point:
+                    continue
+                color = QColor(str(overlay.get("color") or "#FFFFFF"))
+                x, y = float(point[0]), float(point[1])
+                radius = int(overlay.get("radius", 5))
+                painter.setPen(QPen(color, 2))
+                painter.setBrush(QColor(7, 9, 10, 150))
+                painter.drawEllipse(int(round(x - radius)), int(round(y - radius)), radius * 2, radius * 2)
+                label = str(overlay.get("label") or "")
+                if label:
+                    dx, dy = overlay.get("label_offset_xy") or (8, -8)
+                    self._draw_axis_label(painter, label, x + float(dx), y + float(dy), color, str(overlay.get("label_position") or "right"))
+                continue
             start = overlay.get("start_xy")
             end = overlay.get("end_xy")
             if not start or not end:
@@ -1057,15 +1131,80 @@ class TifVolumeCanvas(QLabel):
             x0, y0 = float(start[0]), float(start[1])
             x1, y1 = float(end[0]), float(end[1])
             painter.drawLine(int(round(x0)), int(round(y0)), int(round(x1)), int(round(y1)))
-            painter.drawEllipse(int(round(x0 - 4)), int(round(y0 - 4)), 8, 8)
-            painter.drawEllipse(int(round(x1 - 4)), int(round(y1 - 4)), 8, 8)
+            role = str(overlay.get("role") or "")
+            handle_radius = 6 if role == "editable_output" else 3
+            if role == "editable_output":
+                painter.setBrush(QColor(7, 9, 10, 185))
+            else:
+                painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(
+                int(round(x0 - handle_radius)),
+                int(round(y0 - handle_radius)),
+                handle_radius * 2,
+                handle_radius * 2,
+            )
+            painter.drawEllipse(
+                int(round(x1 - handle_radius)),
+                int(round(y1 - handle_radius)),
+                handle_radius * 2,
+                handle_radius * 2,
+            )
             label = str(overlay.get("label") or "")
             if label:
-                painter.drawText(int(round(x1 + 6)), int(round(y1 - 6)), label)
+                anchor = overlay.get("label_anchor_xy") or end
+                dx, dy = overlay.get("label_offset_xy") or (8, -8)
+                self._draw_axis_label(
+                    painter,
+                    label,
+                    float(anchor[0]) + float(dx),
+                    float(anchor[1]) + float(dy),
+                    color,
+                    str(overlay.get("label_position") or "right"),
+                )
         painter.restore()
+
+    def _draw_axis_label(self, painter, text, x, y, color, position="right"):
+        metrics = painter.fontMetrics()
+        padding_x = 6
+        padding_y = 3
+        text_w = metrics.horizontalAdvance(text)
+        text_h = metrics.height()
+        rect_x = float(x)
+        rect_y = float(y) - text_h - padding_y
+        if str(position) == "left":
+            rect_x -= text_w + padding_x * 2
+        elif str(position) == "center":
+            rect_x -= (text_w + padding_x * 2) / 2.0
+        rect = QRect(
+            int(round(rect_x)),
+            int(round(rect_y)),
+            int(round(text_w + padding_x * 2)),
+            int(round(text_h + padding_y * 2)),
+        )
+        bounds = self.rect().adjusted(2, 2, -2, -2)
+        if rect.right() > bounds.right():
+            rect.moveRight(bounds.right())
+        if rect.left() < bounds.left():
+            rect.moveLeft(bounds.left())
+        if rect.top() < bounds.top():
+            rect.moveTop(bounds.top())
+        if rect.bottom() > bounds.bottom():
+            rect.moveBottom(bounds.bottom())
+        painter.fillRect(rect, QColor(7, 9, 10, 205))
+        painter.setPen(QPen(color, 1))
+        painter.drawRect(rect.adjusted(0, 0, -1, -1))
+        painter.setPen(QColor("#F4F7F9"))
+        painter.drawText(rect.adjusted(padding_x, padding_y, -padding_x, -padding_y), Qt.AlignLeft | Qt.AlignVCenter, text)
 
     def mousePressEvent(self, event):
         self.setFocus(Qt.MouseFocusReason)
+        if self.workbench is not None and event.button() == Qt.LeftButton:
+            picker = getattr(self.workbench, "pick_local_axis_roll_reference_at", None)
+            if callable(picker) and picker(event.position().x(), event.position().y()):
+                event.accept()
+                return
+        if self._try_start_local_axis_endpoint_drag(event):
+            return
         if self.workbench is not None and event.button() in (Qt.LeftButton, Qt.RightButton):
             self._mouse_mode = "rotate" if event.button() == Qt.LeftButton else "pan"
             self._last_drag_pos = event.position()
@@ -1077,6 +1216,7 @@ class TifVolumeCanvas(QLabel):
         buttons = event.buttons()
         active = (
             (self._mouse_mode == "rotate" and buttons & Qt.LeftButton)
+            or (self._mouse_mode == "local_axis_endpoint" and buttons & Qt.LeftButton)
             or (self._mouse_mode == "pan" and buttons & Qt.RightButton)
         )
         if self.workbench is not None and active and self._last_drag_pos is not None:
@@ -1084,7 +1224,9 @@ class TifVolumeCanvas(QLabel):
             dx = current.x() - self._last_drag_pos.x()
             dy = current.y() - self._last_drag_pos.y()
             self._last_drag_pos = current
-            if self._mouse_mode == "pan":
+            if self._mouse_mode == "local_axis_endpoint":
+                self.workbench.drag_local_axis_endpoint(current.x(), current.y())
+            elif self._mouse_mode == "pan":
                 self.workbench.pan_volume_preview(dx, dy)
             else:
                 self.workbench.rotate_volume_preview(dx, dy)
@@ -1094,6 +1236,8 @@ class TifVolumeCanvas(QLabel):
 
     def mouseReleaseEvent(self, event):
         if event.button() in (Qt.LeftButton, Qt.RightButton) and self._mouse_mode:
+            if self._mouse_mode == "local_axis_endpoint" and self.workbench is not None:
+                self.workbench.finish_local_axis_endpoint_drag()
             self._mouse_mode = ""
             self._last_drag_pos = None
             if self.workbench is not None:
@@ -1165,6 +1309,29 @@ class TifImportWorker(QObject):
         self.finished.emit(result)
 
 
+class TifLocalAxisResliceExportWorker(QObject):
+    progress = Signal(int, int, str)
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, project_manager, specimen_id, part_id, payload):
+        super().__init__()
+        self.project_manager = project_manager
+        self.specimen_id = specimen_id
+        self.part_id = part_id
+        self.payload = dict(payload or {})
+
+    def run(self):
+        try:
+            self.progress.emit(0, 0, "Preparing Local Axis Reslice export...")
+            result = export_part_reslice(self.project_manager, self.specimen_id, self.part_id, self.payload)
+            self.progress.emit(100, 100, "Finalizing Local Axis Reslice export...")
+        except Exception as exc:
+            self.failed.emit(str(exc))
+            return
+        self.finished.emit(result)
+
+
 class TifWorkbenchWidget(QWidget):
     start_center_requested = Signal()
     agent_requested = Signal(dict)
@@ -1183,6 +1350,9 @@ class TifWorkbenchWidget(QWidget):
         self.current_part = None
         self.current_reslice_id = ""
         self.local_axis_draft = None
+        self._local_axis_endpoint_drag = None
+        self._local_axis_pick_target = ""
+        self._local_axis_roll_pick_target = ""
         self.part_preview_mask = None
         self.part_roi_draw_mode = False
         self.part_contour_draw_mode = False
@@ -1201,6 +1371,9 @@ class TifWorkbenchWidget(QWidget):
         self._tif_import_worker = None
         self._tif_import_progress = None
         self._tif_import_specimen_id = ""
+        self._local_axis_reslice_export_thread = None
+        self._local_axis_reslice_export_worker = None
+        self._local_axis_reslice_export_progress = None
         self.undo_stack = []
         self.redo_stack = []
         self.slice_axis = "z"
@@ -1309,12 +1482,12 @@ class TifWorkbenchWidget(QWidget):
         self.volume_inside_slider.setObjectName("tifVolumeInsideSlider")
         self.volume_inside_slider.setRange(0, 160)
         self.volume_inside_slider.setValue(0)
-        self.volume_inside_slider.valueChanged.connect(self.render_volume_preview)
+        self._connect_volume_interaction_slider(self.volume_inside_slider)
         self.volume_clip_slider = WheelSafeSlider(Qt.Horizontal)
         self.volume_clip_slider.setObjectName("tifVolumeClipSlider")
         self.volume_clip_slider.setRange(0, 92)
         self.volume_clip_slider.setValue(0)
-        self.volume_clip_slider.valueChanged.connect(self.render_volume_preview)
+        self._connect_volume_interaction_slider(self.volume_clip_slider)
         self.volume_tint_combo = WheelSafeComboBox()
         self.volume_tint_combo.setObjectName("tifVolumeTintCombo")
         self._populate_volume_tint_combo()
@@ -1353,8 +1526,9 @@ class TifWorkbenchWidget(QWidget):
         self.volume_clip_plane_depth_slider = WheelSafeSlider(Qt.Horizontal)
         self.volume_clip_plane_depth_slider.setObjectName("tifVolumeClipPlaneDepthSlider")
         self.volume_clip_plane_depth_slider.setRange(0, 100)
-        self.volume_clip_plane_depth_slider.setValue(50)
-        self.volume_clip_plane_depth_slider.valueChanged.connect(self.render_volume_preview)
+        self.volume_clip_plane_depth_slider.setValue(0)
+        self._connect_volume_interaction_slider(self.volume_clip_plane_depth_slider)
+        self.volume_clip_plane_depth_label = QLabel("Clip depth")
         self.volume_mask_combo = WheelSafeComboBox()
         self.volume_mask_combo.setObjectName("tifVolumeMaskCombo")
         self._populate_volume_mask_combo()
@@ -1376,6 +1550,10 @@ class TifWorkbenchWidget(QWidget):
         self.local_axis_summary_label.setObjectName("tifLocalAxisSummaryText")
         self.local_axis_summary_label.setWordWrap(True)
         self.local_axis_summary_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.local_axis_status_label = QLabel("")
+        self.local_axis_status_label.setObjectName("tifLocalAxisStatusText")
+        self.local_axis_status_label.setWordWrap(True)
+        self.local_axis_status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
 
         self.status_label = QLabel("")
         self.status_label.setObjectName("tifStatusText")
@@ -1478,18 +1656,32 @@ class TifWorkbenchWidget(QWidget):
         self.btn_clear_part_preview = QPushButton("Clear preview")
         self.btn_clear_part_preview.setObjectName("tifClearPartPreviewButton")
         self.btn_clear_part_preview.clicked.connect(self.clear_part_mask_preview)
-        self.btn_local_axis_reslice = QPushButton("Open detail / MPR / export")
+        self.btn_local_axis_reslice = QPushButton("Export confirmed reslice")
         self.btn_local_axis_reslice.setObjectName("tifLocalAxisResliceButton")
-        self.btn_local_axis_reslice.clicked.connect(self.open_local_axis_reslice_dialog)
+        self.btn_local_axis_reslice.clicked.connect(self.export_current_local_axis_reslice)
         self.btn_copy_source_z_axis = QPushButton("Copy source Z axis")
         self.btn_copy_source_z_axis.setObjectName("tifCopySourceZAxisButton")
         self.btn_copy_source_z_axis.clicked.connect(self.copy_source_z_axis_to_local_axis_draft)
-        self.btn_local_axis_queue = QPushButton("Review Local Axis Queue")
-        self.btn_local_axis_queue.setObjectName("tifLocalAxisQueueButton")
-        self.btn_local_axis_queue.clicked.connect(self.open_local_axis_review_queue)
-        self.btn_local_axis_models = QPushButton("Local Axis Models")
-        self.btn_local_axis_models.setObjectName("tifLocalAxisModelsButton")
-        self.btn_local_axis_models.clicked.connect(self.open_local_axis_model_dialog)
+        self.btn_pick_roll_ref_a = QPushButton("Pick roll reference A")
+        self.btn_pick_roll_ref_a.setObjectName("tifPickRollReferenceAButton")
+        self.btn_pick_roll_ref_a.setCheckable(True)
+        self.btn_pick_roll_ref_a.clicked.connect(lambda checked=False: self.set_local_axis_pick_target("roll_a" if checked else ""))
+        self.btn_pick_roll_ref_b = QPushButton("Pick roll reference B")
+        self.btn_pick_roll_ref_b.setObjectName("tifPickRollReferenceBButton")
+        self.btn_pick_roll_ref_b.setCheckable(True)
+        self.btn_pick_roll_ref_b.clicked.connect(lambda checked=False: self.set_local_axis_pick_target("roll_b" if checked else ""))
+        self.btn_clear_roll_refs = QPushButton("Clear roll refs")
+        self.btn_clear_roll_refs.setObjectName("tifClearRollRefsButton")
+        self.btn_clear_roll_refs.clicked.connect(self.clear_local_axis_roll_references)
+        self.btn_clear_local_axis_draft = QPushButton("Clear axis draft")
+        self.btn_clear_local_axis_draft.setObjectName("tifClearLocalAxisDraftButton")
+        self.btn_clear_local_axis_draft.clicked.connect(self.clear_local_axis_draft)
+        self.local_axis_trainable_check = QCheckBox("Record this export as trainable local-axis data")
+        self.local_axis_trainable_check.setObjectName("tifLocalAxisTrainableCheck")
+        self.local_axis_trainable_check.setChecked(True)
+        self.btn_export_local_axis_training_manifest = QPushButton("Export Local Axis training manifest")
+        self.btn_export_local_axis_training_manifest.setObjectName("tifExportLocalAxisTrainingManifestButton")
+        self.btn_export_local_axis_training_manifest.clicked.connect(self.export_local_axis_training_manifest_dialog)
         self.btn_export_part_package = QPushButton("Export part package")
         self.btn_export_part_package.setObjectName("tifExportPartPackageButton")
         self.btn_export_part_package.clicked.connect(self.export_current_part_package)
@@ -1575,13 +1767,12 @@ class TifWorkbenchWidget(QWidget):
             self.btn_train_backend,
             self.btn_import_prediction,
             self.btn_import_external_prediction_tif,
-            self.btn_local_axis_models,
             self.btn_promote,
             self.btn_create_part,
             self.btn_preview_part_mask,
             self.btn_accept_part_mask,
             self.btn_local_axis_reslice,
-            self.btn_local_axis_queue,
+            self.btn_export_local_axis_training_manifest,
             self.btn_export_part_package,
         ]
         secondary_buttons = [
@@ -1594,6 +1785,10 @@ class TifWorkbenchWidget(QWidget):
             self.btn_volume_custom_color,
             self.btn_copy_draft,
             self.btn_copy_source_z_axis,
+            self.btn_pick_roll_ref_a,
+            self.btn_pick_roll_ref_b,
+            self.btn_clear_roll_refs,
+            self.btn_clear_local_axis_draft,
             self.btn_add_material,
             self.btn_edit_material,
             self.btn_save_backend,
@@ -1803,7 +1998,7 @@ class TifWorkbenchWidget(QWidget):
         self.volume_cutoff_label.setText(tt("Density cutoff", self.lang))
         self.volume_quality_label.setText(tt("Render quality", self.lang))
         self.volume_sample_label.setText(tt("Ray samples", self.lang))
-        self.volume_clarity_check.setText(tt("Clarity mode", self.lang))
+        self.volume_clarity_check.setText(tt("Local detail check", self.lang))
         self.volume_roi_detail_check.setText(tt("ROI high detail", self.lang))
         self.volume_roi_scale_label.setText(tt("ROI scale", self.lang))
         self.volume_inside_label.setText(tt("Inside depth", self.lang))
@@ -1835,14 +2030,21 @@ class TifWorkbenchWidget(QWidget):
         if hasattr(self, "local_axis_volume_help_label"):
             self.local_axis_volume_help_label.setText(
                 tt(
-                    "Work in the 3D part preview first. Source Z is locked; copy it to create an editable output Z draft, then use the detail dialog only for precise MPR picking, roll reference, preview, and export.",
+                    "Use the 3D part preview as the main workspace. Copy source Z, drag the output axis endpoints, then pick the roll reference points on the observation-side clip plane. Export here when the frame is confirmed.",
                     self.lang,
                 )
             )
-        self.btn_local_axis_reslice.setText(tt("Open detail / MPR / export", self.lang))
+        self.volume_local_axes_check.setText(tt("Show source/output axes in 3D preview", self.lang))
+        if hasattr(self, "local_axis_status_label") and not self.local_axis_status_label.text():
+            self.local_axis_status_label.setText(tt("Local axis status: ready", self.lang))
+        self.btn_local_axis_reslice.setText(tt("Export confirmed reslice", self.lang))
         self.btn_copy_source_z_axis.setText(tt("Copy source Z axis", self.lang))
-        self.btn_local_axis_queue.setText(tt("Review proposals", self.lang))
-        self.btn_local_axis_models.setText(tt("Local Axis Models", self.lang))
+        self.btn_pick_roll_ref_a.setText(tt("Pick roll reference A", self.lang))
+        self.btn_pick_roll_ref_b.setText(tt("Pick roll reference B", self.lang))
+        self.btn_clear_roll_refs.setText(tt("Clear roll refs", self.lang))
+        self.btn_clear_local_axis_draft.setText(tt("Clear axis draft", self.lang))
+        self.local_axis_trainable_check.setText(tt("Record this export as trainable local-axis data", self.lang))
+        self.btn_export_local_axis_training_manifest.setText(tt("Export Local Axis training manifest", self.lang))
         self.btn_delete_part_volume.setText(tt("Delete part volume", self.lang))
         self.btn_undo.setText(tt("Undo", self.lang))
         self.btn_redo.setText(tt("Redo", self.lang))
@@ -2063,6 +2265,9 @@ class TifWorkbenchWidget(QWidget):
             "volume_uploaded_gb": f"{float(volume_perf.get('uploaded_gb', 0.0)):.2f}",
             "volume_upload_ms": f"{float(volume_perf.get('upload_ms', 0.0)):.0f}",
             "volume_draw_ms": f"{float(volume_perf.get('draw_ms', 0.0)):.1f}",
+            "volume_uploaded_shape_zyx": triplet_text(volume_perf.get("preview_shape_zyx", ())),
+            "volume_texture_sampling": str((getattr(self, "_volume_last_stats", {}) or {}).get("texture_filter", "")),
+            "volume_display_scaling": str((getattr(self, "_volume_last_stats", {}) or {}).get("display_scaling", "")),
             "tif_next_requirement": "local_axis_reslice: define a part-local output axis plus roll reference, preview/export local resliced image and optional mask, and keep accepted records usable as training data.",
             "tif_requirement_doc": "docs/designs/2026-06-20_AntScan局部轴重切片合并设计稿.md",
             "recent_log_excerpt": recent_log,
@@ -2097,6 +2302,30 @@ class TifWorkbenchWidget(QWidget):
         if not hasattr(self, "log_console"):
             return
         self.log_console.append(f"[{_now_log_time()}] {message}")
+
+    def _set_local_axis_status(self, message, tooltip=""):
+        label = getattr(self, "local_axis_status_label", None)
+        if label is not None:
+            label.setText(str(message or ""))
+            label.setToolTip(str(tooltip or message or ""))
+
+    def _connect_volume_interaction_slider(self, slider):
+        slider.sliderPressed.connect(self._start_volume_interaction)
+        slider.valueChanged.connect(lambda _value, item=slider: self._on_volume_interaction_slider_changed(item))
+        slider.sliderReleased.connect(self.finish_volume_interaction_debounced)
+
+    def _on_volume_interaction_slider_changed(self, slider=None):
+        if self.display_mode != "volume":
+            return
+        if slider is not None and callable(getattr(slider, "isSliderDown", None)) and slider.isSliderDown():
+            self._start_volume_interaction()
+            self._request_volume_interaction_render()
+            return
+        if self._volume_render_mode == "drag":
+            self._request_volume_interaction_render()
+            self.finish_volume_interaction_debounced()
+            return
+        self.render_volume_preview()
 
     def canvas_status_text(self, zoom_factor):
         if self.image_volume is None:
@@ -2167,9 +2396,6 @@ class TifWorkbenchWidget(QWidget):
             self.volume_roi_detail_check,
             self.volume_roi_scale_label,
             self.volume_roi_scale_slider,
-            self.volume_clip_plane_check,
-            self.volume_clip_plane_depth_label,
-            self.volume_clip_plane_depth_slider,
             self.volume_inside_label,
             self.volume_inside_slider,
             self.volume_clip_label,
@@ -2192,9 +2418,6 @@ class TifWorkbenchWidget(QWidget):
             self.volume_roi_detail_check,
             self.volume_roi_scale_label,
             self.volume_roi_scale_slider,
-            self.volume_clip_plane_check,
-            self.volume_clip_plane_depth_label,
-            self.volume_clip_plane_depth_slider,
             self.volume_inside_label,
             self.volume_inside_slider,
             self.volume_clip_label,
@@ -2231,7 +2454,7 @@ class TifWorkbenchWidget(QWidget):
         if hasattr(self, "part_mask_section"):
             self.part_mask_section.setVisible(is_part and not is_volume)
         if hasattr(self, "part_output_section"):
-            self.part_output_section.setVisible(is_part)
+            self.part_output_section.setVisible(is_part and not is_volume)
         if hasattr(self, "task_tabs"):
             target = self.display_task_page if is_volume else self.part_task_page
             if self.task_tabs.currentWidget() is not target:
@@ -2407,6 +2630,21 @@ class TifWorkbenchWidget(QWidget):
         for button in (self.btn_import_tif, self.btn_import_amira):
             button.setEnabled(bool(enabled))
 
+    def _local_axis_reslice_export_running(self):
+        return self._local_axis_reslice_export_thread is not None
+
+    def _set_local_axis_reslice_export_controls_enabled(self, enabled):
+        enabled = bool(enabled)
+        for widget in (
+            self.btn_copy_source_z_axis,
+            self.btn_pick_roll_ref_a,
+            self.btn_pick_roll_ref_b,
+            self.btn_clear_roll_refs,
+            self.btn_clear_local_axis_draft,
+            self.btn_local_axis_reslice,
+        ):
+            widget.setEnabled(enabled)
+
     def _cleanup_tif_import_thread(self):
         self._set_tif_import_controls_enabled(True)
         if self._tif_import_progress is not None:
@@ -2445,6 +2683,29 @@ class TifWorkbenchWidget(QWidget):
         if thread is not None:
             thread.quit()
         QMessageBox.critical(self, tt("Import TIF Stack", self.lang), message)
+
+    def _cleanup_local_axis_reslice_export_thread(self):
+        if self._local_axis_reslice_export_progress is not None:
+            self._local_axis_reslice_export_progress.close()
+            self._local_axis_reslice_export_progress.deleteLater()
+        self._local_axis_reslice_export_progress = None
+        self._local_axis_reslice_export_worker = None
+        self._local_axis_reslice_export_thread = None
+        self._set_scope_controls_enabled()
+
+    def _on_local_axis_reslice_export_progress(self, current, total, message):
+        progress = self._local_axis_reslice_export_progress
+        if progress is None:
+            return
+        total = int(total or 0)
+        if total <= 0:
+            progress.setRange(0, 0)
+        else:
+            maximum = max(1, total)
+            value = max(0, min(maximum, int(current or 0)))
+            progress.setRange(0, maximum)
+            progress.setValue(value)
+        progress.setLabelText(tt(message, self.lang))
 
     def import_tif_stack_dialog(self):
         if not self._ensure_tif_project_open():
@@ -3556,19 +3817,40 @@ class TifWorkbenchWidget(QWidget):
         )
         self.local_axis_volume_help_label = QLabel(
             tt(
-                "Work in the 3D part preview first. Source Z is locked; copy it to create an editable output Z draft, then use the detail dialog only for precise MPR picking, roll reference, preview, and export.",
+                "Use the 3D part preview as the main workspace. Copy source Z, drag the output axis endpoints, then pick the roll reference points on the observation-side clip plane. Export here when the frame is confirmed.",
                 self.lang,
             )
         )
         self.local_axis_volume_help_label.setObjectName("tifLayerHelpText")
         self.local_axis_volume_help_label.setWordWrap(True)
         local_axis_volume_layout.addWidget(self.local_axis_volume_help_label)
+        local_axis_display_row = QHBoxLayout()
+        local_axis_display_row.addWidget(self.volume_local_axes_check)
+        local_axis_display_row.addStretch(1)
+        local_axis_volume_layout.addLayout(local_axis_display_row)
+        local_axis_volume_layout.addWidget(self.local_axis_status_label)
         local_axis_volume_layout.addWidget(self.local_axis_summary_label)
         local_axis_volume_row = QHBoxLayout()
         local_axis_volume_row.addWidget(self.btn_copy_source_z_axis)
         local_axis_volume_row.addWidget(self.btn_local_axis_reslice)
         local_axis_volume_layout.addLayout(local_axis_volume_row)
-        local_axis_volume_layout.addWidget(self.btn_local_axis_queue)
+        local_axis_roll_row = QHBoxLayout()
+        local_axis_roll_row.addWidget(self.btn_pick_roll_ref_a)
+        local_axis_roll_row.addWidget(self.btn_pick_roll_ref_b)
+        local_axis_roll_row.addWidget(self.btn_clear_roll_refs)
+        local_axis_volume_layout.addLayout(local_axis_roll_row)
+        local_axis_clip_row = QGridLayout()
+        local_axis_clip_row.setHorizontalSpacing(10)
+        local_axis_clip_row.setVerticalSpacing(6)
+        local_axis_clip_row.addWidget(self.volume_clip_plane_check, 0, 0, 1, 2)
+        local_axis_clip_row.addWidget(self.volume_clip_plane_depth_label, 1, 0)
+        local_axis_clip_row.addWidget(self.volume_clip_plane_depth_slider, 1, 1)
+        local_axis_volume_layout.addLayout(local_axis_clip_row)
+        local_axis_center_row = QHBoxLayout()
+        local_axis_center_row.addWidget(self.btn_clear_local_axis_draft)
+        local_axis_volume_layout.addLayout(local_axis_center_row)
+        local_axis_volume_layout.addWidget(self.local_axis_trainable_check)
+        local_axis_volume_layout.addWidget(self.btn_export_local_axis_training_manifest)
         self.part_task_layout.addWidget(self.local_axis_volume_section)
 
         self.part_output_section, part_output_layout = self._make_section("3. Output and manage", "tifPartOutputSection")
@@ -3607,7 +3889,6 @@ class TifWorkbenchWidget(QWidget):
         self.volume_quality_label = QLabel("Render quality")
         self.volume_sample_label = QLabel("Ray samples")
         self.volume_roi_scale_label = QLabel("ROI scale")
-        self.volume_clip_plane_depth_label = QLabel("Clip depth")
         self.volume_inside_label = QLabel("Inside depth")
         self.volume_clip_label = QLabel("Front cut")
         volume_controls.addWidget(self.volume_projection_label, 0, 0)
@@ -3628,25 +3909,21 @@ class TifWorkbenchWidget(QWidget):
         volume_controls.addWidget(self.volume_mask_combo, 5, 1)
         volume_controls.addWidget(self.volume_mask_opacity_label, 6, 0)
         volume_controls.addWidget(self.volume_mask_opacity_slider, 6, 1)
-        volume_controls.addWidget(self.volume_local_axes_check, 7, 0, 1, 2)
-        volume_controls.addWidget(self.volume_cutoff_label, 8, 0)
-        volume_controls.addWidget(self.volume_cutoff_slider, 8, 1)
-        volume_controls.addWidget(self.volume_quality_label, 9, 0)
-        volume_controls.addWidget(self.volume_quality_slider, 9, 1)
-        volume_controls.addWidget(self.volume_sample_label, 10, 0)
-        volume_controls.addWidget(self.volume_sample_slider, 10, 1)
-        volume_controls.addWidget(self.volume_clarity_check, 11, 0, 1, 2)
-        volume_controls.addWidget(self.volume_surface_refine_check, 12, 0, 1, 2)
-        volume_controls.addWidget(self.volume_roi_detail_check, 13, 0, 1, 2)
-        volume_controls.addWidget(self.volume_roi_scale_label, 14, 0)
-        volume_controls.addWidget(self.volume_roi_scale_slider, 14, 1)
-        volume_controls.addWidget(self.volume_clip_plane_check, 15, 0, 1, 2)
-        volume_controls.addWidget(self.volume_clip_plane_depth_label, 16, 0)
-        volume_controls.addWidget(self.volume_clip_plane_depth_slider, 16, 1)
-        volume_controls.addWidget(self.volume_inside_label, 17, 0)
-        volume_controls.addWidget(self.volume_inside_slider, 17, 1)
-        volume_controls.addWidget(self.volume_clip_label, 18, 0)
-        volume_controls.addWidget(self.volume_clip_slider, 18, 1)
+        volume_controls.addWidget(self.volume_cutoff_label, 7, 0)
+        volume_controls.addWidget(self.volume_cutoff_slider, 7, 1)
+        volume_controls.addWidget(self.volume_quality_label, 8, 0)
+        volume_controls.addWidget(self.volume_quality_slider, 8, 1)
+        volume_controls.addWidget(self.volume_sample_label, 9, 0)
+        volume_controls.addWidget(self.volume_sample_slider, 9, 1)
+        volume_controls.addWidget(self.volume_clarity_check, 10, 0, 1, 2)
+        volume_controls.addWidget(self.volume_surface_refine_check, 11, 0, 1, 2)
+        volume_controls.addWidget(self.volume_roi_detail_check, 12, 0, 1, 2)
+        volume_controls.addWidget(self.volume_roi_scale_label, 13, 0)
+        volume_controls.addWidget(self.volume_roi_scale_slider, 13, 1)
+        volume_controls.addWidget(self.volume_inside_label, 14, 0)
+        volume_controls.addWidget(self.volume_inside_slider, 14, 1)
+        volume_controls.addWidget(self.volume_clip_label, 15, 0)
+        volume_controls.addWidget(self.volume_clip_slider, 15, 1)
         volume_render_layout.addLayout(volume_controls)
         volume_render_layout.addWidget(self.btn_reset_volume_view)
         self.display_task_layout.addWidget(self.volume_render_section)
@@ -3689,7 +3966,6 @@ class TifWorkbenchWidget(QWidget):
         backend_button_row.addWidget(self.btn_import_prediction)
         training_layout.addLayout(backend_button_row)
         training_layout.addWidget(self.btn_import_external_prediction_tif)
-        training_layout.addWidget(self.btn_local_axis_models)
         training_layout.addWidget(self.training_status_label)
         self.training_task_layout.addWidget(training_section)
 
@@ -3802,6 +4078,14 @@ class TifWorkbenchWidget(QWidget):
                 background: #111619;
                 color: #B9C5CA;
                 border: 1px solid #2B363B;
+                border-radius: 8px;
+                padding: 5px 8px;
+                font-size: 11px;
+            }
+            QLabel#tifLocalAxisStatusText {
+                background: #151B1E;
+                color: #C9D4D8;
+                border: 1px solid #334047;
                 border-radius: 8px;
                 padding: 5px 8px;
                 font-size: 11px;
@@ -4307,6 +4591,11 @@ class TifWorkbenchWidget(QWidget):
             self.current_part = part
             self.current_reslice_id = str(selected_reslice_id or "")
             self._clear_local_axis_draft_if_part_changed(specimen_id, self.current_part_id)
+            if self.current_reslice_id and self.local_axis_draft is not None:
+                self.local_axis_draft = None
+                self._set_local_axis_status(tt("Selected saved reslice takes precedence over any unsaved local axis draft.", self.lang))
+            if self.current_reslice_id and hasattr(self, "volume_local_axes_check"):
+                self.volume_local_axes_check.setChecked(True)
             self.active_part_roi_id = ""
             self.part_roi_draw_mode = False
             self.part_contour_draw_mode = False
@@ -4328,9 +4617,19 @@ class TifWorkbenchWidget(QWidget):
             self.undo_stack = []
             self.redo_stack = []
 
-            image_path = self.project.to_absolute((part.get("image") or {}).get("path", ""))
-            if image_path and volume_sidecar_exists(image_path):
-                self.image_volume = load_volume_sidecar(image_path, mmap_mode="r")
+            reslice = self._current_part_reslice_record()
+            if isinstance(reslice, dict) and reslice.get("image_path"):
+                image_path = self.project.to_absolute(reslice.get("image_path", ""))
+                if image_path and os.path.exists(image_path):
+                    try:
+                        self.image_volume = tifffile.memmap(image_path)
+                    except Exception:
+                        self.image_volume = tifffile.imread(image_path)
+            else:
+                image_path = self.project.to_absolute((part.get("image") or {}).get("path", ""))
+                if image_path and volume_sidecar_exists(image_path):
+                    self.image_volume = load_volume_sidecar(image_path, mmap_mode="r")
+            if self.image_volume is not None:
                 self._slice_positions = {
                     "z": max(0, min(int(self.slice_slider.value()), int(self.image_volume.shape[0]) - 1)),
                     "y": max(0, int(self.image_volume.shape[1]) // 2),
@@ -4355,6 +4654,8 @@ class TifWorkbenchWidget(QWidget):
             self._reload_label_volume()
             self._load_edit_volume()
             self._update_status_labels(specimen, part=part)
+            if self.current_reslice_id:
+                self._set_local_axis_status(tt("Selected saved reslice takes precedence over any unsaved local axis draft.", self.lang))
             self._apply_default_volume_mask_mode()
             self._sync_mode_sections()
             self.render_current_slice()
@@ -4523,10 +4824,20 @@ class TifWorkbenchWidget(QWidget):
         self.label_volume = None
         self._update_label_role_help()
         if self.current_volume_scope == "part":
-            part = self.project.get_part(self.current_specimen_id, self.current_part_id, default=None)
-            mask_path = self.project.to_absolute(((part or {}).get("mask") or {}).get("path", ""))
-            if mask_path and volume_sidecar_exists(mask_path):
-                self.label_volume = load_volume_sidecar(mask_path, mmap_mode="r")
+            mask_path = ""
+            reslice = self._current_part_reslice_record()
+            if isinstance(reslice, dict) and reslice.get("mask_path"):
+                mask_path = self.project.to_absolute(reslice.get("mask_path", ""))
+                if mask_path and os.path.exists(mask_path):
+                    try:
+                        self.label_volume = tifffile.memmap(mask_path)
+                    except Exception:
+                        self.label_volume = tifffile.imread(mask_path)
+            else:
+                part = self.project.get_part(self.current_specimen_id, self.current_part_id, default=None)
+                mask_path = self.project.to_absolute(((part or {}).get("mask") or {}).get("path", ""))
+                if mask_path and volume_sidecar_exists(mask_path):
+                    self.label_volume = load_volume_sidecar(mask_path, mmap_mode="r")
             self.render_current_slice()
             return
         specimen = self.project.get_specimen(self.current_specimen_id, default=None)
@@ -4648,10 +4959,15 @@ class TifWorkbenchWidget(QWidget):
         self.btn_preview_part_mask.setEnabled(is_part and has_image)
         self.btn_accept_part_mask.setEnabled(is_part and self.part_preview_mask is not None)
         self.btn_clear_part_preview.setEnabled(is_part and self.part_preview_mask is not None)
-        self.btn_copy_source_z_axis.setEnabled(is_part and has_image)
-        self.btn_local_axis_reslice.setEnabled(is_part and has_image)
-        self.btn_local_axis_queue.setEnabled(bool(self.project.project_data.get("specimens", [])))
-        self.btn_local_axis_models.setEnabled(bool(self.project.project_data.get("specimens", [])))
+        local_axis_export_busy = self._local_axis_reslice_export_running()
+        self.btn_copy_source_z_axis.setEnabled(is_part and has_image and not local_axis_export_busy)
+        self.btn_pick_roll_ref_a.setEnabled(is_part and has_image and not local_axis_export_busy)
+        self.btn_pick_roll_ref_b.setEnabled(is_part and has_image and not local_axis_export_busy)
+        self.btn_clear_roll_refs.setEnabled(is_part and has_image and not local_axis_export_busy)
+        self.btn_clear_local_axis_draft.setEnabled(is_part and has_image and not local_axis_export_busy)
+        self.btn_local_axis_reslice.setEnabled(is_part and has_image and not local_axis_export_busy)
+        self.local_axis_trainable_check.setEnabled(is_part and has_image)
+        self.btn_export_local_axis_training_manifest.setEnabled(bool(self.project.project_data.get("specimens", [])))
         self.btn_export_part_package.setEnabled(is_part and has_image)
         self.btn_delete_part_volume.setEnabled(is_part and self.current_part is not None)
         self._update_local_axis_summary()
@@ -4822,30 +5138,34 @@ class TifWorkbenchWidget(QWidget):
 
     def copy_source_z_axis_to_local_axis_draft(self):
         if self.current_volume_scope != "part" or not self.current_specimen_id or not self.current_part_id or self.image_volume is None:
-            QMessageBox.information(self, tt("Local Axis Reslice", self.lang), tt("Select a part volume before opening Local Axis Reslice.", self.lang))
+            QMessageBox.information(self, tt("Local Axis Reslice", self.lang), tt("Select a part volume before editing Local Axis Reslice.", self.lang))
             return None
         source_axis = self._source_z_axis_for_current_part()
         if not source_axis:
             return None
         editable_axis = create_editable_axis_from_source(source_axis)
-        shape = tuple(int(value) for value in getattr(self.image_volume, "shape", ()) or ())
-        origin = [(float(value) - 1.0) / 2.0 for value in shape]
+        roll_reference = {}
+        if str(self.current_part_id or "").lower() == "head":
+            roll_reference["pair_id"] = "roll_reference_point_pair"
         draft = {
             "specimen_id": self.current_specimen_id,
             "part_id": self.current_part_id,
             "template_id": str(self.current_part_id or "generic"),
             "source_axis": source_axis,
+            "initial_editable_axis": dict(editable_axis),
             "editable_axis": editable_axis,
-            "origin_zyx": origin,
-            "roll_reference": {},
+            "origin_zyx": self._local_axis_origin_from_editable_axis(editable_axis),
+            "roll_reference": roll_reference,
             "local_frame": None,
             "dirty": True,
         }
+        self._refresh_local_axis_frame(draft)
         self.local_axis_draft = draft
         if hasattr(self, "volume_local_axes_check"):
             self.volume_local_axes_check.setChecked(True)
-        self.training_status_label.setText(tt("Copied source Z axis as editable output axis.", self.lang))
-        self.log(tt("Copied source Z axis as editable output axis.", self.lang))
+        message = tt("Copied source Z axis as editable output axis.", self.lang)
+        self._set_local_axis_status(message)
+        self.log(message)
         specimen = self.project.get_specimen(self.current_specimen_id, default=None)
         if specimen is not None:
             self._update_status_labels(specimen, part=self.current_part)
@@ -4877,6 +5197,87 @@ class TifWorkbenchWidget(QWidget):
             return "-"
         return "{0} -> {1}".format(start, end)
 
+    def _format_local_axis_vector(self, values):
+        if not values or len(values) != 3:
+            return "-"
+        return "[{0}]".format(", ".join(f"{float(value):.3f}" for value in values))
+
+    def _roll_reference_payload(self, draft=None):
+        draft = draft if isinstance(draft, dict) else self._current_local_axis_draft()
+        roll = (draft or {}).get("roll_reference") if isinstance((draft or {}).get("roll_reference"), dict) else {}
+        point_a = roll.get("point_a") if isinstance(roll.get("point_a"), dict) else {}
+        point_b = roll.get("point_b") if isinstance(roll.get("point_b"), dict) else {}
+        if not point_a.get("zyx") or not point_b.get("zyx"):
+            return None
+        return roll
+
+    def _local_axis_spacing_zyx(self):
+        _, spacing_zyx = self._volume_source_geometry()
+        return list(spacing_zyx or [1.0, 1.0, 1.0])
+
+    def _local_axis_origin_from_editable_axis(self, editable_axis):
+        axis = editable_axis if isinstance(editable_axis, dict) else {}
+        start = axis.get("start_zyx") or []
+        end = axis.get("end_zyx") or []
+        if len(start) == 3 and len(end) == 3:
+            try:
+                return [round((float(start[index]) + float(end[index])) * 0.5, 3) for index in range(3)]
+            except (TypeError, ValueError):
+                pass
+        shape = tuple(int(value) for value in getattr(self.image_volume, "shape", ()) or ())
+        return [(float(value) - 1.0) / 2.0 for value in shape] if len(shape) == 3 else []
+
+    def _set_local_axis_draft(self, draft, status_message=""):
+        if not isinstance(draft, dict):
+            self.local_axis_draft = None
+        else:
+            draft.setdefault("specimen_id", self.current_specimen_id)
+            draft.setdefault("part_id", self.current_part_id)
+            draft.setdefault("template_id", str(self.current_part_id or "generic"))
+            self._refresh_local_axis_frame(draft)
+            self.local_axis_draft = draft
+        if hasattr(self, "volume_local_axes_check"):
+            self.volume_local_axes_check.setChecked(True)
+        self._sync_local_axis_pick_buttons()
+        self._update_local_axis_summary()
+        specimen = self.project.get_specimen(self.current_specimen_id, default=None) if self.current_specimen_id else None
+        if specimen is not None:
+            self._update_status_labels(specimen, part=self.current_part if self.current_volume_scope == "part" else None)
+        if hasattr(self.volume_canvas, "set_axis_overlays"):
+            self.volume_canvas.set_axis_overlays(self._local_axis_volume_overlays())
+        if status_message:
+            self._set_local_axis_status(status_message)
+            self.log(status_message)
+        if self.display_mode == "volume":
+            self.render_volume_preview()
+        return self.local_axis_draft
+
+    def _refresh_local_axis_frame(self, draft=None):
+        draft = draft if isinstance(draft, dict) else self._current_local_axis_draft()
+        if not isinstance(draft, dict):
+            return None
+        editable = draft.get("editable_axis") or {}
+        draft["origin_zyx"] = self._local_axis_origin_from_editable_axis(editable)
+        roll = self._roll_reference_payload(draft)
+        if not roll:
+            draft["local_frame"] = None
+            return None
+        try:
+            frame = compute_local_frame(
+                draft.get("origin_zyx"),
+                editable.get("start_zyx"),
+                editable.get("end_zyx"),
+                roll_reference=roll,
+                spacing_zyx=self._local_axis_spacing_zyx(),
+            )
+        except Exception as exc:
+            draft["local_frame"] = None
+            draft["local_frame_error"] = str(exc)
+            return None
+        draft["local_frame"] = frame
+        draft.pop("local_frame_error", None)
+        return frame
+
     def _update_local_axis_summary(self):
         label = getattr(self, "local_axis_summary_label", None)
         if label is None:
@@ -4899,6 +5300,24 @@ class TifWorkbenchWidget(QWidget):
                     self._format_local_axis_point_pair((draft.get("editable_axis") or {}))
                 )
             )
+            roll = draft.get("roll_reference") if isinstance(draft.get("roll_reference"), dict) else {}
+            point_a = roll.get("point_a") if isinstance(roll.get("point_a"), dict) else {}
+            point_b = roll.get("point_b") if isinstance(roll.get("point_b"), dict) else {}
+            if point_a.get("zyx") or point_b.get("zyx"):
+                lines.append(
+                    f"{tt('Roll reference', self.lang)}: "
+                    f"{point_a.get('role', 'roll_point_a')}={point_a.get('zyx', '-')} | "
+                    f"{point_b.get('role', 'roll_point_b')}={point_b.get('zyx', '-')}"
+                )
+            frame = self._refresh_local_axis_frame(draft)
+            if isinstance(frame, dict):
+                lines.extend(
+                    [
+                        f"{tt('Local frame', self.lang)} {tt('x_axis', self.lang)}: {self._format_local_axis_vector(frame.get('x_axis'))}",
+                        f"{tt('Local frame', self.lang)} {tt('y_axis', self.lang)}: {self._format_local_axis_vector(frame.get('y_axis'))}",
+                        f"{tt('Local frame', self.lang)} {tt('z_axis', self.lang)}: {self._format_local_axis_vector(frame.get('z_axis'))}",
+                    ]
+                )
         else:
             lines.append(tt("Draft output Z: none", self.lang))
         reslice = self._current_part_reslice_record()
@@ -4933,9 +5352,357 @@ class TifWorkbenchWidget(QWidget):
         width = max(1.0, float(self.volume_canvas.width()) if hasattr(self, "volume_canvas") else 1.0)
         height = max(1.0, float(self.volume_canvas.height()) if hasattr(self, "volume_canvas") else 1.0)
         scale = (min(width, height) * 0.78) * float(self._volume_zoom)
-        center_x = width / 2.0 + float(self._volume_pan_x) * scale * 0.5
-        center_y = height / 2.0 - float(self._volume_pan_y) * scale * 0.5
+        pan_scale = height * 0.5
+        center_x = width / 2.0 + float(self._volume_pan_x) * pan_scale
+        center_y = height / 2.0 - float(self._volume_pan_y) * pan_scale
         return [float(rotated[0] * scale + center_x), float(-rotated[1] * scale + center_y)]
+
+    def _local_axis_projection_context(self):
+        shape = tuple(int(value) for value in getattr(self.image_volume, "shape", ()) or ())
+        if len(shape) != 3 or min(shape) <= 0:
+            return None
+        source_shape, spacing_zyx = self._volume_source_geometry()
+        x_scale, y_scale, z_scale = volume_shape_scale(source_shape or shape, spacing_zyx)
+        yaw = math.radians(float(self._volume_yaw))
+        pitch = math.radians(float(self._volume_pitch))
+        cy, sy = math.cos(yaw), math.sin(yaw)
+        cp, sp = math.cos(pitch), math.sin(pitch)
+        rot_yaw = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]], dtype=np.float64)
+        rot_pitch = np.array([[1.0, 0.0, 0.0], [0.0, cp, -sp], [0.0, sp, cp]], dtype=np.float64)
+        rotation = rot_yaw @ rot_pitch
+        width = max(1.0, float(self.volume_canvas.width()) if hasattr(self, "volume_canvas") else 1.0)
+        height = max(1.0, float(self.volume_canvas.height()) if hasattr(self, "volume_canvas") else 1.0)
+        scale = (min(width, height) * 0.78) * float(self._volume_zoom)
+        pan_scale = height * 0.5
+        return {
+            "shape": shape,
+            "dims": np.array([max(1, shape[0] - 1), max(1, shape[1] - 1), max(1, shape[2] - 1)], dtype=np.float64),
+            "shape_scale": np.array([x_scale, y_scale, z_scale], dtype=np.float64),
+            "rotation": rotation,
+            "scale": max(1e-6, scale),
+            "center_x": width / 2.0 + float(self._volume_pan_x) * pan_scale,
+            "center_y": height / 2.0 - float(self._volume_pan_y) * pan_scale,
+        }
+
+    def _local_axis_point_rotated_depth(self, point_zyx, context=None):
+        if not point_zyx or len(point_zyx) != 3:
+            return None
+        context = context or self._local_axis_projection_context()
+        if context is None:
+            return None
+        z, y, x = [float(value) for value in point_zyx]
+        dims = np.asarray(context["dims"], dtype=np.float64)
+        coord = np.array([x / dims[2], y / dims[1], z / dims[0]], dtype=np.float64) - 0.5
+        coord *= np.asarray(context["shape_scale"], dtype=np.float64)
+        rotated = coord @ np.asarray(context["rotation"], dtype=np.float64).T
+        return float(rotated[2])
+
+    def _volume_xy_to_zyx_at_depth(self, x, y, rotated_depth, context=None):
+        context = context or self._local_axis_projection_context()
+        if context is None:
+            return None
+        rotated = np.array(
+            [
+                (float(x) - float(context["center_x"])) / float(context["scale"]),
+                -(float(y) - float(context["center_y"])) / float(context["scale"]),
+                float(rotated_depth),
+            ],
+            dtype=np.float64,
+        )
+        coord = rotated @ np.asarray(context["rotation"], dtype=np.float64)
+        coord = coord / np.maximum(np.asarray(context["shape_scale"], dtype=np.float64), 1e-6)
+        normalized_xyz = coord + 0.5
+        dims = np.asarray(context["dims"], dtype=np.float64)
+        point = np.array(
+            [
+                normalized_xyz[2] * dims[0],
+                normalized_xyz[1] * dims[1],
+                normalized_xyz[0] * dims[2],
+            ],
+            dtype=np.float64,
+        )
+        shape = context["shape"]
+        upper = np.array([max(0, shape[0] - 1), max(0, shape[1] - 1), max(0, shape[2] - 1)], dtype=np.float64)
+        point = np.clip(point, np.zeros(3, dtype=np.float64), upper)
+        return [float(value) for value in point]
+
+    def _clip_plane_rotated_depth(self, context=None):
+        context = context or self._local_axis_projection_context()
+        if context is None:
+            return None
+        shape_scale = np.asarray(context["shape_scale"], dtype=np.float64)
+        half_size = shape_scale * 0.5
+        view_normal = np.asarray([0.0, 0.0, 1.0], dtype=np.float64)
+        extent = max(float(np.dot(np.abs(view_normal), half_size)), 0.0001)
+        depth = float(self.volume_clip_plane_depth_slider.value()) / 100.0 if hasattr(self, "volume_clip_plane_depth_slider") else 0.0
+        return float((1.0 - 2.0 * max(0.0, min(1.0, depth))) * extent)
+
+    def _volume_xy_to_zyx_on_clip_plane(self, x, y):
+        context = self._local_axis_projection_context()
+        depth = self._clip_plane_rotated_depth(context)
+        if depth is None:
+            return None
+        return self._volume_xy_to_zyx_at_depth(x, y, depth, context)
+
+    def _hit_local_axis_endpoint(self, x, y):
+        draft = self._current_local_axis_draft()
+        if not isinstance(draft, dict) or self.current_reslice_id:
+            return None
+        editable = draft.get("editable_axis") or {}
+        if editable.get("locked"):
+            return None
+        context = self._local_axis_projection_context()
+        if context is None:
+            return None
+        candidates = []
+        for endpoint_key in ("start_zyx", "end_zyx"):
+            point = editable.get(endpoint_key)
+            xy = self._project_zyx_to_volume_xy(point, context["shape"])
+            if xy is None:
+                continue
+            distance = math.hypot(float(x) - float(xy[0]), float(y) - float(xy[1]))
+            candidates.append((distance, endpoint_key, point, xy))
+        if not candidates:
+            return None
+        distance, endpoint_key, point, xy = min(candidates, key=lambda item: item[0])
+        hit_radius = max(10.0, min(22.0, 8.0 + float(self._volume_zoom) * 1.2))
+        if distance > hit_radius:
+            return None
+        return {
+            "endpoint_key": endpoint_key,
+            "start_mouse_xy": [float(x), float(y)],
+            "start_point_zyx": [float(value) for value in point],
+            "rotated_depth": self._local_axis_point_rotated_depth(point, context),
+            "context": context,
+            "hit_xy": xy,
+        }
+
+    def _hit_local_axis_body(self, x, y):
+        draft = self._current_local_axis_draft()
+        if not isinstance(draft, dict) or self.current_reslice_id:
+            return None
+        editable = draft.get("editable_axis") or {}
+        if editable.get("locked"):
+            return None
+        context = self._local_axis_projection_context()
+        if context is None:
+            return None
+        start = editable.get("start_zyx") or []
+        end = editable.get("end_zyx") or []
+        start_xy = self._project_zyx_to_volume_xy(start, context["shape"])
+        end_xy = self._project_zyx_to_volume_xy(end, context["shape"])
+        if not start_xy or not end_xy:
+            return None
+        segment = np.asarray(end_xy, dtype=np.float64) - np.asarray(start_xy, dtype=np.float64)
+        length_sq = float(np.dot(segment, segment))
+        if length_sq <= 1e-6:
+            return None
+        mouse = np.asarray([float(x), float(y)], dtype=np.float64)
+        start_arr = np.asarray(start_xy, dtype=np.float64)
+        fraction = max(0.0, min(1.0, float(np.dot(mouse - start_arr, segment) / length_sq)))
+        closest = start_arr + segment * fraction
+        distance = float(np.linalg.norm(mouse - closest))
+        hit_radius = max(8.0, min(18.0, 7.0 + float(self._volume_zoom) * 0.9))
+        if distance > hit_radius:
+            return None
+        start_depth = self._local_axis_point_rotated_depth(start, context)
+        end_depth = self._local_axis_point_rotated_depth(end, context)
+        if start_depth is None or end_depth is None:
+            return None
+        anchor_depth = start_depth + (end_depth - start_depth) * fraction
+        anchor_point = self._volume_xy_to_zyx_at_depth(x, y, anchor_depth, context)
+        if anchor_point is None:
+            return None
+        return {
+            "endpoint_key": "axis_body",
+            "start_mouse_xy": [float(x), float(y)],
+            "start_axis_start_zyx": [float(value) for value in start],
+            "start_axis_end_zyx": [float(value) for value in end],
+            "start_anchor_zyx": [float(value) for value in anchor_point],
+            "rotated_depth": float(anchor_depth),
+            "context": context,
+            "hit_xy": [float(closest[0]), float(closest[1])],
+        }
+
+    def start_local_axis_endpoint_drag(self, x, y):
+        if not self._local_axis_overlay_enabled():
+            return False
+        hit = self._hit_local_axis_endpoint(x, y)
+        if hit is None:
+            hit = self._hit_local_axis_body(x, y)
+        if hit is None or hit.get("rotated_depth") is None:
+            return False
+        self._local_axis_endpoint_drag = hit
+        self._start_volume_interaction()
+        if hit.get("endpoint_key") == "axis_body":
+            self._set_local_axis_status(tt("Dragging output axis body.", self.lang))
+        else:
+            endpoint_text = tt("start", self.lang) if hit.get("endpoint_key") == "start_zyx" else tt("end", self.lang)
+            self._set_local_axis_status(tt("Dragging output axis {0}.", self.lang).format(endpoint_text))
+        return True
+
+    def drag_local_axis_endpoint(self, x, y):
+        drag = self._local_axis_endpoint_drag if isinstance(self._local_axis_endpoint_drag, dict) else None
+        draft = self._current_local_axis_draft()
+        if drag is None or draft is None:
+            return False
+        point = self._volume_xy_to_zyx_at_depth(x, y, drag.get("rotated_depth"), drag.get("context"))
+        if point is None:
+            return False
+        editable = dict(draft.get("editable_axis") or {})
+        endpoint_key = str(drag.get("endpoint_key") or "")
+        if endpoint_key == "axis_body":
+            start_anchor = np.asarray(drag.get("start_anchor_zyx") or [], dtype=np.float64)
+            start_axis = np.asarray(drag.get("start_axis_start_zyx") or [], dtype=np.float64)
+            end_axis = np.asarray(drag.get("start_axis_end_zyx") or [], dtype=np.float64)
+            next_anchor = np.asarray(point, dtype=np.float64)
+            if start_anchor.size != 3 or start_axis.size != 3 or end_axis.size != 3:
+                return False
+            delta = next_anchor - start_anchor
+            shape = tuple(int(value) for value in getattr(self.image_volume, "shape", ()) or ())
+            if len(shape) != 3:
+                return False
+            upper = np.asarray([max(0, shape[0] - 1), max(0, shape[1] - 1), max(0, shape[2] - 1)], dtype=np.float64)
+            axis_min = np.minimum(start_axis, end_axis)
+            axis_max = np.maximum(start_axis, end_axis)
+            min_delta = -axis_min
+            max_delta = upper - axis_max
+            delta = np.minimum(np.maximum(delta, min_delta), max_delta)
+            editable["start_zyx"] = [round(float(value), 3) for value in start_axis + delta]
+            editable["end_zyx"] = [round(float(value), 3) for value in end_axis + delta]
+        elif endpoint_key in {"start_zyx", "end_zyx"}:
+            other_key = "end_zyx" if endpoint_key == "start_zyx" else "start_zyx"
+            other = editable.get(other_key) or []
+            if len(other) == 3 and float(np.linalg.norm(np.asarray(point, dtype=np.float64) - np.asarray(other, dtype=np.float64))) < 0.25:
+                return False
+            editable[endpoint_key] = [round(float(value), 3) for value in point]
+        else:
+            return False
+        draft["editable_axis"] = editable
+        draft["dirty"] = True
+        self._refresh_local_axis_frame(draft)
+        self.local_axis_draft = draft
+        self._update_local_axis_summary()
+        if hasattr(self.volume_canvas, "set_axis_overlays"):
+            self.volume_canvas.set_axis_overlays(self._local_axis_volume_overlays())
+        self._request_volume_interaction_render()
+        return True
+
+    def finish_local_axis_endpoint_drag(self):
+        drag = self._local_axis_endpoint_drag if isinstance(self._local_axis_endpoint_drag, dict) else None
+        self._local_axis_endpoint_drag = None
+        if drag is None:
+            return
+        if drag.get("endpoint_key") == "axis_body":
+            self._set_local_axis_status(tt("Moved output axis body.", self.lang))
+        else:
+            endpoint_text = tt("start", self.lang) if drag.get("endpoint_key") == "start_zyx" else tt("end", self.lang)
+            self._set_local_axis_status(tt("Updated output axis {0}.", self.lang).format(endpoint_text))
+        self._update_local_axis_summary()
+
+    def _sync_local_axis_roll_buttons(self):
+        target = str(getattr(self, "_local_axis_pick_target", "") or getattr(self, "_local_axis_roll_pick_target", "") or "")
+        if hasattr(self, "btn_pick_roll_ref_a"):
+            self.btn_pick_roll_ref_a.blockSignals(True)
+            self.btn_pick_roll_ref_a.setChecked(target == "roll_a")
+            self.btn_pick_roll_ref_a.blockSignals(False)
+        if hasattr(self, "btn_pick_roll_ref_b"):
+            self.btn_pick_roll_ref_b.blockSignals(True)
+            self.btn_pick_roll_ref_b.setChecked(target == "roll_b")
+            self.btn_pick_roll_ref_b.blockSignals(False)
+
+    def _sync_local_axis_pick_buttons(self):
+        return self._sync_local_axis_roll_buttons()
+
+    def set_local_axis_pick_target(self, target=""):
+        target = str(target or "")
+        legacy_map = {"left_eye": "roll_a", "right_eye": "roll_b"}
+        target = legacy_map.get(target, target)
+        if target not in {"", "roll_a", "roll_b"}:
+            target = ""
+        if target and not self._current_local_axis_draft():
+            if self.copy_source_z_axis_to_local_axis_draft() is None:
+                return False
+        if target and not (hasattr(self, "volume_clip_plane_check") and self.volume_clip_plane_check.isChecked()):
+            self._local_axis_pick_target = ""
+            self._local_axis_roll_pick_target = ""
+            self._sync_local_axis_pick_buttons()
+            self._set_local_axis_status(tt("Turn on the observation-side clip plane before picking local-axis points.", self.lang))
+            return False
+        self._local_axis_pick_target = target
+        self._local_axis_roll_pick_target = target if target in {"roll_a", "roll_b"} else ""
+        self._sync_local_axis_pick_buttons()
+        if target:
+            self._set_local_axis_status(tt("Click the observation-side clip plane to set {0}.", self.lang).format(target))
+        return bool(target)
+
+    def set_local_axis_roll_pick_target(self, target=""):
+        return self.set_local_axis_pick_target(target)
+
+    def pick_local_axis_roll_reference_at(self, x, y):
+        target = str(getattr(self, "_local_axis_pick_target", "") or getattr(self, "_local_axis_roll_pick_target", "") or "")
+        if target not in {"roll_a", "roll_b"}:
+            return False
+        draft = self._current_local_axis_draft()
+        if not isinstance(draft, dict):
+            return False
+        if not (hasattr(self, "volume_clip_plane_check") and self.volume_clip_plane_check.isChecked()):
+            self._set_local_axis_status(tt("Turn on the observation-side clip plane before picking local-axis points.", self.lang))
+            return False
+        point = self._volume_xy_to_zyx_on_clip_plane(x, y)
+        if point is None:
+            return False
+        roll = dict(draft.get("roll_reference") or {})
+        if not roll.get("pair_id"):
+            roll["pair_id"] = "roll_reference_point_pair"
+        key = "point_a" if target == "roll_a" else "point_b"
+        role = "roll_reference_a" if target == "roll_a" else "roll_reference_b"
+        roll[key] = {"role": role, "zyx": [round(float(value), 3) for value in point]}
+        draft["roll_reference"] = roll
+        draft["dirty"] = True
+        self._refresh_local_axis_frame(draft)
+        self.local_axis_draft = draft
+        self._local_axis_pick_target = ""
+        self._local_axis_roll_pick_target = ""
+        self._sync_local_axis_pick_buttons()
+        self._update_local_axis_summary()
+        if hasattr(self.volume_canvas, "set_axis_overlays"):
+            self.volume_canvas.set_axis_overlays(self._local_axis_volume_overlays())
+        self._set_local_axis_status(tt("Set {0}: {1}", self.lang).format(role, roll[key]["zyx"]))
+        self._request_volume_interaction_render()
+        return True
+
+    def clear_local_axis_roll_references(self):
+        draft = self._current_local_axis_draft()
+        if not isinstance(draft, dict):
+            return
+        roll = dict(draft.get("roll_reference") or {})
+        roll.pop("point_a", None)
+        roll.pop("point_b", None)
+        draft["roll_reference"] = roll
+        draft["local_frame"] = None
+        draft["dirty"] = True
+        self.local_axis_draft = draft
+        self._local_axis_pick_target = ""
+        self._local_axis_roll_pick_target = ""
+        self._sync_local_axis_pick_buttons()
+        self._update_local_axis_summary()
+        if hasattr(self.volume_canvas, "set_axis_overlays"):
+            self.volume_canvas.set_axis_overlays(self._local_axis_volume_overlays())
+        self._set_local_axis_status(tt("Cleared roll reference points.", self.lang))
+        self._request_volume_interaction_render()
+
+    def clear_local_axis_draft(self):
+        self.local_axis_draft = None
+        self._local_axis_pick_target = ""
+        self._local_axis_roll_pick_target = ""
+        self._sync_local_axis_pick_buttons()
+        self._update_local_axis_summary()
+        if hasattr(self.volume_canvas, "set_axis_overlays"):
+            self.volume_canvas.set_axis_overlays(self._local_axis_volume_overlays())
+        self._set_local_axis_status(tt("Cleared local axis draft.", self.lang))
+        if self.display_mode == "volume":
+            self.render_volume_preview()
 
     def _local_axis_volume_overlays(self):
         if not self._local_axis_overlay_enabled():
@@ -4946,25 +5713,94 @@ class TifWorkbenchWidget(QWidget):
         source_shape, spacing_zyx = self._volume_source_geometry()
         overlays = []
 
-        def add_axis(start, end, label, color, width=2):
+        def add_axis(start, end, label, color, width=2, label_anchor="end", label_offset=(8, -8), label_position="right", role="reference"):
             start_xy = self._project_zyx_to_volume_xy(start, shape, source_shape=source_shape, spacing_zyx=spacing_zyx)
             end_xy = self._project_zyx_to_volume_xy(end, shape, source_shape=source_shape, spacing_zyx=spacing_zyx)
             if start_xy and end_xy:
-                overlays.append({"start_xy": start_xy, "end_xy": end_xy, "label": label, "color": color, "width": width})
+                anchor_xy = start_xy if str(label_anchor) == "start" else end_xy
+                overlays.append(
+                    {
+                        "start_xy": start_xy,
+                        "end_xy": end_xy,
+                        "label": label,
+                        "color": color,
+                        "width": width,
+                        "label_anchor_xy": anchor_xy,
+                        "label_offset_xy": list(label_offset),
+                        "label_position": label_position,
+                        "role": role,
+                    }
+                )
 
         source_z = self._source_z_axis_for_current_part()
-        add_axis(source_z.get("start_zyx"), source_z.get("end_zyx"), tt("source Z", self.lang), "#6AA6FF", width=2)
+        add_axis(
+            source_z.get("start_zyx"),
+            source_z.get("end_zyx"),
+            tt("source Z", self.lang),
+            "#6AA6FF",
+            width=2,
+            label_anchor="start",
+            label_offset=(-10, 18),
+            label_position="left",
+            role="locked_reference",
+        )
 
         editable = {}
-        draft = self._current_local_axis_draft()
-        if isinstance(draft, dict):
-            editable = draft.get("editable_axis") or {}
+        reslice = self._current_part_reslice_record()
+        if isinstance(reslice, dict):
+            editable = ((reslice.get("source") or {}).get("editable_axis") or {})
         else:
-            reslice = self._current_part_reslice_record()
-            if isinstance(reslice, dict):
-                editable = ((reslice.get("source") or {}).get("editable_axis") or {})
+            draft = self._current_local_axis_draft()
+            if isinstance(draft, dict):
+                editable = draft.get("editable_axis") or {}
         if editable.get("start_zyx") and editable.get("end_zyx"):
-            add_axis(editable.get("start_zyx"), editable.get("end_zyx"), tt("output Z", self.lang), "#FFB84D", width=3)
+            add_axis(
+                editable.get("start_zyx"),
+                editable.get("end_zyx"),
+                tt("output Z", self.lang),
+                "#FFB84D",
+                width=3,
+                label_anchor="end",
+                label_offset=(10, -14),
+                label_position="right",
+                role="editable_output",
+            )
+        draft = self._current_local_axis_draft()
+        roll = (draft or {}).get("roll_reference") if isinstance(draft, dict) else {}
+        point_a = roll.get("point_a") if isinstance(roll, dict) and isinstance(roll.get("point_a"), dict) else {}
+        point_b = roll.get("point_b") if isinstance(roll, dict) and isinstance(roll.get("point_b"), dict) else {}
+        roll_a_xy = self._project_zyx_to_volume_xy(point_a.get("zyx"), shape, source_shape=source_shape, spacing_zyx=spacing_zyx) if point_a.get("zyx") else None
+        roll_b_xy = self._project_zyx_to_volume_xy(point_b.get("zyx"), shape, source_shape=source_shape, spacing_zyx=spacing_zyx) if point_b.get("zyx") else None
+        if roll_a_xy and roll_b_xy:
+            overlays.append(
+                {
+                    "start_xy": roll_a_xy,
+                    "end_xy": roll_b_xy,
+                    "label": tt("Roll reference", self.lang),
+                    "color": "#7CE3A1",
+                    "width": 2,
+                    "label_anchor_xy": roll_b_xy,
+                    "label_offset_xy": [10, 16],
+                    "label_position": "right",
+                }
+            )
+        for point, fallback_label, color, offset in (
+            (point_a, "roll_reference_a", "#7CE3A1", (-18, -12)),
+            (point_b, "roll_reference_b", "#66D9EF", (10, -12)),
+        ):
+            xy = self._project_zyx_to_volume_xy(point.get("zyx"), shape, source_shape=source_shape, spacing_zyx=spacing_zyx) if point.get("zyx") else None
+            if xy:
+                overlays.append(
+                    {
+                        "kind": "point",
+                        "point_xy": xy,
+                        "label": str(point.get("role") or fallback_label),
+                        "color": color,
+                        "radius": 5,
+                        "label_offset_xy": list(offset),
+                        "label_position": "right",
+                    }
+                )
         return overlays
 
     def volume_canvas_overlay_text(self):
@@ -4999,6 +5835,8 @@ class TifWorkbenchWidget(QWidget):
         return " | ".join(parts)
 
     def _volume_mode_label(self):
+        if self._volume_render_mode != "drag" and self._volume_clarity_mode:
+            return tt("Local detail check", self.lang)
         return tt("Drag preview", self.lang) if self._volume_render_mode == "drag" else tt("Still high quality", self.lang)
 
     def _volume_projection_mode(self):
@@ -5047,6 +5885,8 @@ class TifWorkbenchWidget(QWidget):
         if hasattr(self, "volume_transfer_opacity_slider"):
             value = int(self.volume_transfer_opacity_slider.value())
         render_mode = "drag" if mode == "drag" else self._volume_render_mode
+        if render_mode == "drag" and self._volume_projection_mode() == "composite":
+            return max(0.05, min(1.0, 0.55 * (float(value) / 100.0)))
         base = 0.72 if self._volume_clarity_mode and render_mode == "still" else (1.0 if render_mode == "still" else 0.82)
         return max(0.05, min(1.4, base * (float(value) / 100.0)))
 
@@ -5089,6 +5929,8 @@ class TifWorkbenchWidget(QWidget):
     def _active_volume_sample_count(self):
         samples = int(self.volume_sample_slider.value())
         if self._volume_render_mode == "drag" and self._volume_canvas_renderer == "gpu":
+            if self._volume_projection_mode() == "composite":
+                return max(192, min(samples, 384))
             return max(256, min(samples, 768))
         roi_scale = self._active_volume_roi_scale()
         if roi_scale > 1.0 and self._volume_canvas_renderer == "gpu":
@@ -5106,6 +5948,13 @@ class TifWorkbenchWidget(QWidget):
         dtype = str(stats.get("dtype") or "")
         if dtype:
             parts.append(f"{tt('Data', self.lang)} {dtype}")
+        texture_filter = str(stats.get("texture_filter") or "")
+        display_scaling = str(stats.get("display_scaling") or "")
+        if texture_filter:
+            sampling_text = tt(texture_filter, self.lang)
+            if display_scaling and display_scaling != texture_filter:
+                sampling_text = f"{sampling_text}/{tt(display_scaling, self.lang)}"
+            parts.append(f"{tt('Sampling', self.lang)} {sampling_text}")
         projection = str(stats.get("projection_mode") or "")
         if projection:
             parts.append(f"{tt('Mode', self.lang)} {self._volume_projection_label()}")
@@ -5406,16 +6255,26 @@ class TifWorkbenchWidget(QWidget):
         self._start_volume_interaction()
         width = max(1.0, float(self.volume_canvas.width()) if hasattr(self, "volume_canvas") else 1.0)
         height = max(1.0, float(self.volume_canvas.height()) if hasattr(self, "volume_canvas") else 1.0)
-        zoom = max(0.35, float(self._volume_zoom))
-        self._volume_pan_x = max(-2.0, min(2.0, self._volume_pan_x + (float(dx) / width) * 2.0 / zoom))
-        self._volume_pan_y = max(-2.0, min(2.0, self._volume_pan_y - (float(dy) / height) * 2.0 / zoom))
+        pan_speed = 2.8
+        self._volume_pan_x += (float(dx) / width) * pan_speed
+        self._volume_pan_y -= (float(dy) / height) * pan_speed
+        self._clamp_volume_pan()
         self._request_volume_interaction_render()
 
     def zoom_volume_preview(self, direction):
         self._start_volume_interaction()
         factor = 1.18 if int(direction) > 0 else 1.0 / 1.18
         self._volume_zoom = max(0.35, min(16.0, self._volume_zoom * factor))
+        self._clamp_volume_pan()
         self._request_volume_interaction_render()
+
+    def _volume_pan_limit(self):
+        return volume_pan_limit_for_zoom(getattr(self, "_volume_zoom", 1.0))
+
+    def _clamp_volume_pan(self):
+        limit = self._volume_pan_limit()
+        self._volume_pan_x = max(-limit, min(limit, float(self._volume_pan_x)))
+        self._volume_pan_y = max(-limit, min(limit, float(self._volume_pan_y)))
 
     def reset_volume_view(self):
         if hasattr(self, "volume_still_timer"):
@@ -5440,7 +6299,7 @@ class TifWorkbenchWidget(QWidget):
             self.volume_clip_plane_check.blockSignals(False)
         if hasattr(self, "volume_clip_plane_depth_slider"):
             self.volume_clip_plane_depth_slider.blockSignals(True)
-            self.volume_clip_plane_depth_slider.setValue(50)
+            self.volume_clip_plane_depth_slider.setValue(0)
             self.volume_clip_plane_depth_slider.blockSignals(False)
         self.render_volume_preview()
 
@@ -5465,6 +6324,8 @@ class TifWorkbenchWidget(QWidget):
         requested = self._volume_texture_target_dim()
         if self._volume_canvas_renderer != "gpu":
             return requested
+        if self._volume_projection_mode() == "composite":
+            return max(192, min(requested, 384))
         return max(256, min(requested, 640))
 
     def _active_volume_target_dim(self, mode=None):
@@ -5475,8 +6336,14 @@ class TifWorkbenchWidget(QWidget):
         if self.current_volume_scope == "part" and self.image_volume is not None:
             shape = tuple(int(value) for value in getattr(self.image_volume, "shape", ()) or ())
             voxel_count = int(np.prod(shape)) if len(shape) == 3 else 0
-            if voxel_count > 0 and voxel_count <= 64_000_000:
-                requested = max(requested, min(max(shape), 1536))
+            if voxel_count > 0:
+                if self._volume_clarity_mode:
+                    clarity_dim = TIF_VOLUME_CLARITY_PART_FULL_DIM
+                    if voxel_count > TIF_VOLUME_CLARITY_PART_FULL_VOXEL_LIMIT:
+                        clarity_dim = TIF_VOLUME_CLARITY_PART_HIGH_DIM
+                    requested = max(requested, min(max(shape), clarity_dim))
+                elif voxel_count <= 64_000_000:
+                    requested = max(requested, min(max(shape), 1536))
         return requested
 
     def _ensure_volume_preview(self, mode=None):
@@ -5486,7 +6353,8 @@ class TifWorkbenchWidget(QWidget):
         mode = "drag" if mode == "drag" else "still"
         max_dim = self._active_volume_target_dim(mode)
         source_dtype = str(np.dtype(getattr(self.image_volume, "dtype", np.uint8)))
-        cache_key = (shape, source_dtype, max_dim, bool(self._volume_clarity_mode and mode == "still"))
+        preserve_source = mode == "still" and (self._volume_clarity_mode or self.current_volume_scope == "part")
+        cache_key = (shape, source_dtype, max_dim, preserve_source)
         cached = self._volume_preview_cache.get(cache_key)
         if cached is not None:
             self._volume_preview = cached
@@ -5495,7 +6363,6 @@ class TifWorkbenchWidget(QWidget):
 
         factors = [max(1, int(math.ceil(size / float(max_dim)))) for size in shape]
         source = self.image_volume[:: factors[0], :: factors[1], :: factors[2]]
-        preserve_source = mode == "still" and (self._volume_clarity_mode or self.current_volume_scope == "part")
         preview = self._normalize_volume_preview(source, preserve_source=preserve_source)
         if preview is None:
             return None
@@ -5564,6 +6431,18 @@ class TifWorkbenchWidget(QWidget):
         masked = np.ascontiguousarray(np.where(mask_values, preview, np.zeros_like(preview)))
         self._volume_masked_preview_cache[cache_key] = masked
         return masked
+
+    def _viewer_side_front_clip_mask(self, rotated_depth, front_clip):
+        depth = np.asarray(rotated_depth)
+        if depth.size == 0:
+            return np.zeros(depth.shape, dtype=bool)
+        clip = max(0.0, min(0.92, float(front_clip)))
+        if clip <= 0.0:
+            return np.ones(depth.shape, dtype=bool)
+        back_depth = float(np.min(depth))
+        front_depth = float(np.max(depth))
+        keep_depth = front_depth - (front_depth - back_depth) * clip
+        return depth <= keep_depth
 
     def _mask_boundary_preview(self, mask_preview):
         mask = np.asarray(mask_preview, dtype=bool)
@@ -5647,7 +6526,10 @@ class TifWorkbenchWidget(QWidget):
         mode = "drag" if mode == "drag" else "still"
         samples = int(self.volume_sample_slider.value())
         if mode == "drag":
-            samples = max(256, min(samples, 768))
+            if self._volume_projection_mode() == "composite":
+                samples = max(192, min(samples, 384))
+            else:
+                samples = max(256, min(samples, 768))
         return {
             "cutoff_percent": self.volume_cutoff_slider.value(),
             "yaw": self._volume_yaw,
@@ -5872,10 +6754,7 @@ class TifWorkbenchWidget(QWidget):
         rotated = coords @ (rot_yaw @ rot_pitch).T
         front_clip = max(0.0, min(0.92, float(self.volume_clip_slider.value()) / 100.0))
         if front_clip > 0.0:
-            near_depth = float(np.min(rotated[:, 2]))
-            far_depth = float(np.max(rotated[:, 2]))
-            keep_depth = near_depth + (far_depth - near_depth) * front_clip
-            keep = rotated[:, 2] >= keep_depth
+            keep = self._viewer_side_front_clip_mask(rotated[:, 2], front_clip)
             if np.any(keep):
                 rotated = rotated[keep]
                 values = values[keep]
@@ -5887,8 +6766,9 @@ class TifWorkbenchWidget(QWidget):
 
         out_size = 360
         scale = (out_size * 0.78) * float(self._volume_zoom)
-        center_x = out_size / 2.0 + self._volume_pan_x * scale * 0.5
-        center_y = out_size / 2.0 - self._volume_pan_y * scale * 0.5
+        pan_scale = out_size * 0.5
+        center_x = out_size / 2.0 + self._volume_pan_x * pan_scale
+        center_y = out_size / 2.0 - self._volume_pan_y * pan_scale
         px = np.round(rotated[:, 0] * scale + center_x).astype(np.int32)
         py = np.round(-rotated[:, 1] * scale + center_y).astype(np.int32)
         inside = (px >= 0) & (px < out_size) & (py >= 0) & (py < out_size)
@@ -6181,77 +7061,175 @@ class TifWorkbenchWidget(QWidget):
         self.log(full_message)
         QMessageBox.information(self, tt("Part extraction", self.lang), message)
 
-    def open_local_axis_reslice_dialog(self, specimen_id=None, part_id=None, proposal_id=""):
-        target_specimen_id = str(specimen_id or self.current_specimen_id or "")
-        target_part_id = str(part_id or self.current_part_id or "")
-        if not target_specimen_id or not target_part_id:
-            QMessageBox.information(self, tt("Local Axis Reslice", self.lang), tt("Select a part volume before opening Local Axis Reslice.", self.lang))
+    def _default_local_axis_reslice_id(self):
+        part_id = str(self.current_part_id or "part").strip() or "part"
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return f"{part_id}_local_axis_{stamp}"
+
+    def _current_local_axis_reslice_payload(self):
+        if self.current_volume_scope != "part" or not self.current_specimen_id or not self.current_part_id or self.image_volume is None:
+            raise ValueError(tt("Select a part volume before exporting Local Axis Reslice.", self.lang))
+        draft = self._current_local_axis_draft()
+        if not isinstance(draft, dict):
+            raise ValueError(tt("Copy source Z and set roll reference points before exporting.", self.lang))
+        frame = self._refresh_local_axis_frame(draft)
+        if not isinstance(frame, dict):
+            raise ValueError(tt("Local frame is not ready: {0}", self.lang).format(draft.get("local_frame_error") or "missing roll reference"))
+        shape = [int(value) for value in getattr(self.image_volume, "shape", ())]
+        spacing = self._local_axis_spacing_zyx()
+        trainable = bool(getattr(self, "local_axis_trainable_check", None) and self.local_axis_trainable_check.isChecked())
+        source_proposal_id = str(draft.get("source_proposal_id") or ((draft.get("editable_axis") or {}).get("source_proposal_id") or ""))
+        training_source = "manual_confirmed"
+        if source_proposal_id:
+            training_source = "AI proposed + human confirmed"
+        return {
+            "reslice_id": self._default_local_axis_reslice_id(),
+            "display_name": f"{self.current_part_id} local axis",
+            "template_id": str(draft.get("template_id") or self.current_part_id or ""),
+            "source_axis": dict(draft.get("source_axis") or self._source_z_axis_for_current_part()),
+            "initial_editable_axis": dict(draft.get("initial_editable_axis") or draft.get("editable_axis") or {}),
+            "editable_axis": dict(draft.get("editable_axis") or {}),
+            "final_editable_axis": dict(draft.get("editable_axis") or {}),
+            "local_frame": frame,
+            "roll_reference": dict(frame.get("roll_reference") or draft.get("roll_reference") or {}),
+            "reslice_params": {
+                "output_shape_zyx": shape,
+                "output_spacing_zyx": spacing,
+                "image_interpolation": "linear",
+            },
+            "export_mask": True,
+            "training": {
+                "human_confirmed": True,
+                "usable_for_training": trainable,
+                "source": training_source,
+                "reviewer_notes": "Confirmed in TIF Local Axis 3D part preview.",
+            },
+            "provenance": {
+                "workflow": "tif_local_axis_right_sidebar",
+                "source_proposal_id": source_proposal_id,
+                "source_model_id": str(draft.get("source_model_id") or ""),
+                "source_model_version": str(draft.get("source_model_version") or ""),
+                "source_interaction": "3d_part_preview_clip_plane",
+            },
+        }
+
+    def export_current_local_axis_reslice(self):
+        source_specimen_id = self.current_specimen_id
+        source_part_id = self.current_part_id
+        if self._local_axis_reslice_export_running():
+            QMessageBox.information(
+                self,
+                tt("Local Axis Reslice", self.lang),
+                tt("Local Axis Reslice export is already running.", self.lang),
+            )
             return None
         try:
-            initial_draft = (
-                self._current_local_axis_draft()
-                if not proposal_id and target_specimen_id == self.current_specimen_id and target_part_id == self.current_part_id
-                else None
-            )
-            dialog = TifLocalAxisResliceDialog(
-                self.project,
-                target_specimen_id,
-                target_part_id,
-                proposal_id=proposal_id,
-                parent=self,
-                lang=self.lang,
-                initial_draft=initial_draft,
-            )
+            payload = self._current_local_axis_reslice_payload()
         except Exception as exc:
-            QMessageBox.warning(self, tt("Local Axis Reslice", self.lang), str(exc))
-            return None
-        result = None
-        if dialog.exec() == QDialog.Accepted:
-            result = dialog.export_result
-            record = (result or {}).get("record", {}) if isinstance(result, dict) else {}
-            reslice_id = record.get("reslice_id", "")
-            message = tt("Exported local axis reslice {0}.", self.lang).format(reslice_id)
-            self.training_status_label.setText(message)
+            message = str(exc)
+            self._set_local_axis_status(message)
             self.log(message)
-            draft = self._current_local_axis_draft()
-            if draft is not None and target_specimen_id == self.current_specimen_id and target_part_id == self.current_part_id:
-                self.local_axis_draft = None
-            self.refresh_project()
-            self._select_volume_tree_item(target_specimen_id, "part_reslice", target_part_id, reslice_id)
-        dialog.deleteLater()
+            QMessageBox.warning(self, tt("Local Axis Reslice", self.lang), message)
+            return None
+
+        progress = QProgressDialog(
+            tt("Exporting confirmed Local Axis Reslice...", self.lang),
+            "",
+            0,
+            0,
+            self,
+        )
+        progress.setWindowTitle(tt("Local Axis Reslice", self.lang))
+        progress.setCancelButton(None)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setMinimumDuration(0)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.show()
+
+        thread = QThread(self)
+        worker = TifLocalAxisResliceExportWorker(self.project, source_specimen_id, source_part_id, payload)
+        worker.moveToThread(thread)
+        self._local_axis_reslice_export_thread = thread
+        self._local_axis_reslice_export_worker = worker
+        self._local_axis_reslice_export_progress = progress
+        self._set_local_axis_reslice_export_controls_enabled(False)
+
+        result_holder = {}
+
+        def _on_finished(result):
+            result_holder["result"] = result
+            thread.quit()
+
+        def _on_failed(message):
+            result_holder["error"] = message
+            thread.quit()
+
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._on_local_axis_reslice_export_progress)
+        worker.finished.connect(_on_finished)
+        worker.failed.connect(_on_failed)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+
+        loop = QEventLoop()
+        thread.finished.connect(loop.quit)
+        thread.start()
+        loop.exec()
+        self._cleanup_local_axis_reslice_export_thread()
+
+        if result_holder.get("error"):
+            message = str(result_holder.get("error") or "")
+            self._set_local_axis_status(message)
+            self.log(message)
+            QMessageBox.warning(self, tt("Local Axis Reslice", self.lang), message)
+            return None
+
+        result = result_holder.get("result")
+        if not isinstance(result, dict):
+            message = tt("Local Axis Reslice export did not return a result.", self.lang)
+            self._set_local_axis_status(message)
+            self.log(message)
+            QMessageBox.warning(self, tt("Local Axis Reslice", self.lang), message)
+            return None
+
+        record = result.get("record", {})
+        reslice_id = record.get("reslice_id", "")
+        message = tt("Exported local axis reslice {0}.", self.lang).format(reslice_id)
+        self._set_local_axis_status(message)
+        self.training_status_label.setText(message)
+        self.log(message)
+        self.local_axis_draft = None
+        self._local_axis_pick_target = ""
+        self._local_axis_roll_pick_target = ""
+        self.refresh_project()
+        self._select_volume_tree_item(source_specimen_id, "part_reslice", source_part_id, reslice_id)
         return result
 
-    def open_local_axis_review_queue(self):
-        dialog = QDialog(self)
-        dialog.setWindowTitle(tt("Review Local Axis Queue", self.lang))
-        dialog.resize(980, 620)
-        layout = QVBoxLayout(dialog)
-        queue = TifLocalAxisReviewQueueWidget(self.project, parent=dialog, lang=self.lang)
-        queue.open_proposal_requested.connect(lambda specimen_id, part_id, proposal_id: self.open_local_axis_reslice_dialog(specimen_id, part_id, proposal_id))
-        layout.addWidget(queue)
-        buttons = QDialogButtonBox(QDialogButtonBox.Close)
-        buttons.rejected.connect(dialog.reject)
-        layout.addWidget(buttons)
-        dialog.exec()
-        self.refresh_project()
-        dialog.deleteLater()
-        return queue
-
-    def open_local_axis_model_dialog(self):
+    def export_local_axis_training_manifest_dialog(self):
         if not self._ensure_tif_project_open():
             return None
-        dialog = TifLocalAxisModelDialog(
-            self.project,
-            parent=self,
-            lang=self.lang,
-            config_manager=self.config_manager,
-            specimen_id=self.current_specimen_id,
-            part_id=self.current_part_id if self.current_volume_scope == "part" else "",
+        default_dir = os.path.join(self.project.project_dir, "exports", "local_axis_training")
+        os.makedirs(default_dir, exist_ok=True)
+        output_dir = QFileDialog.getExistingDirectory(self, tt("Export Local Axis training manifest", self.lang), default_dir)
+        if not output_dir:
+            return None
+        filters = {}
+        if self.current_volume_scope == "part" and self.current_part_id:
+            filters["template_id"] = self.current_part_id
+        try:
+            result = export_local_axis_training_manifest(self.project, output_dir, filters)
+        except Exception as exc:
+            QMessageBox.warning(self, tt("Local Axis data", self.lang), str(exc))
+            return None
+        message = tt("Exported Local Axis training manifest: {0} samples\n{1}", self.lang).format(
+            result.get("sample_count", 0),
+            result.get("manifest_path", ""),
         )
-        dialog.exec()
-        self.refresh_project()
-        dialog.deleteLater()
-        return dialog
+        self.training_status_label.setText(message)
+        self._set_local_axis_status(message)
+        self.log(message)
+        return result
 
     def _render_slice_pixmap(self, image_slice, label_slice=None):
         gray = self._normalize_image(image_slice)

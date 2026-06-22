@@ -28,7 +28,7 @@ GPU_VOLUME_MASK_MODES = {
 }
 
 try:
-    from PySide6.QtCore import Qt, QTimer, Signal
+    from PySide6.QtCore import QRect, Qt, QTimer, Signal
     from PySide6.QtGui import QColor, QImage, QOffscreenSurface, QOpenGLContext, QPainter, QPen, QPixmap, QSurfaceFormat
     from PySide6.QtWidgets import QFrame, QLabel
     from PySide6.QtOpenGLWidgets import QOpenGLWidget
@@ -100,6 +100,7 @@ uniform int u_projection_mode;
 uniform int u_mask_mode;
 uniform int u_clip_plane_enabled;
 uniform int u_surface_refine;
+uniform int u_fast_interaction;
 
 const int MAX_RAY_STEPS = __MAX_RAY_STEPS__;
 
@@ -163,14 +164,27 @@ vec3 tetra_gradient(vec3 texcoord, vec3 texel_step)
     return grad * 0.5;
 }
 
-bool clip_plane_discards(vec3 point)
+vec3 clip_plane_normal()
+{
+    return normalize(u_clip_plane_normal + vec3(0.000001, 0.0, 0.0));
+}
+
+float clip_plane_extent(vec3 normal, vec3 half_size)
+{
+    return max(dot(abs(normal), half_size), 0.0001);
+}
+
+float clip_plane_offset(vec3 normal, vec3 half_size)
+{
+    float extent = clip_plane_extent(normal, half_size);
+    return mix(extent, -extent, clamp(u_clip_plane_depth, 0.0, 1.0));
+}
+
+bool clip_plane_discards(vec3 point, vec3 normal, float offset)
 {
     if (u_clip_plane_enabled == 0) {
         return false;
     }
-    vec3 normal = normalize(u_clip_plane_normal + vec3(0.000001, 0.0, 0.0));
-    float radius = length(u_shape_scale) * 0.5;
-    float offset = radius * (1.0 - 2.0 * clamp(u_clip_plane_depth, 0.0, 1.0));
     return dot(point, normal) > offset;
 }
 
@@ -190,6 +204,40 @@ float mask_boundary_sample(vec3 texcoord, vec3 texel_step)
     return 1.0 - step(0.5, neighbor_min);
 }
 
+vec4 section_plane_color(vec3 texcoord, vec3 texel_step, float mask_value)
+{
+    float sample_value = volume_sample(texcoord);
+    if (sample_value <= 0.001) {
+        return vec4(0.0);
+    }
+    if (u_mask_mode == 2 && mask_value <= 0.5) {
+        return vec4(0.0);
+    }
+    float section_cutoff = clamp(u_cutoff * 0.28, 0.0, 0.72);
+    float density = clamp((sample_value - section_cutoff) / max(1.0 - section_cutoff, 0.001), 0.0, 1.0);
+    vec3 grad = central_gradient(texcoord, texel_step);
+    float edge = smoothstep(0.035, 0.26, length(grad) * 10.5);
+    vec4 transfer = transfer_sample(max(density, edge * 0.36));
+    vec3 normal = normalize(grad + vec3(0.0001));
+    vec3 light_dir = normalize(vec3(0.45, 0.58, 0.68));
+    float diffuse = max(dot(normal, light_dir), 0.0);
+    vec3 gray = vec3(pow(clamp(density, 0.0, 1.0), 0.82 * max(0.60, u_tone_gamma)));
+    vec3 color = mix(gray, transfer.rgb, 0.36) * (0.70 + 0.22 * diffuse + 0.24 * density);
+    color += vec3(0.16, 0.18, 0.14) * edge * mix(0.45, 0.75, clamp(u_clarity, 0.0, 1.0));
+    if (u_mask_mode == 1) {
+        float boundary = mask_boundary_sample(texcoord, texel_step);
+        color = mix(color, vec3(1.0, 0.56, 0.26), clamp(u_mask_opacity, 0.0, 1.0) * boundary);
+        edge = max(edge, boundary);
+    }
+    float alpha = clamp(0.78 + pow(density, 0.55) * 0.18 + edge * 0.20 + transfer.a * 0.08, 0.0, 0.98);
+    return vec4(clamp(color, 0.0, 1.0), alpha);
+}
+
+float front_clip_start_t(float ray_start, float ray_end)
+{
+    return mix(ray_start, ray_end, clamp(u_front_clip, 0.0, 0.92));
+}
+
 void main()
 {
     vec2 centered = v_uv * 2.0 - 1.0;
@@ -201,6 +249,8 @@ void main()
     vec3 ray_origin = u_inv_rotation * camera_origin;
     vec3 ray_direction = normalize(u_inv_rotation * camera_direction);
     vec3 half_size = u_shape_scale * 0.5;
+    vec3 plane_normal = clip_plane_normal();
+    float plane_offset = clip_plane_offset(plane_normal, half_size);
 
     vec2 hit = intersect_box(ray_origin, ray_direction, half_size);
     if (hit.x > hit.y || hit.y < 0.0) {
@@ -210,21 +260,9 @@ void main()
 
     float ray_start = max(hit.x, 0.0);
     float ray_end = hit.y;
-    float clip = clamp(u_front_clip, 0.0, 0.92);
-    float t = ray_start;
-    if (clip > 0.0) {
-        vec3 near_point = ray_origin + ray_direction * ray_start;
-        vec3 far_point = ray_origin + ray_direction * ray_end;
-        vec3 view_axis = normalize(ray_direction);
-        float near_depth = dot(near_point, view_axis);
-        float far_depth = dot(far_point, view_axis);
-        float clip_depth = mix(near_depth, far_depth, clip);
-        float denom = dot(ray_direction, view_axis);
-        if (abs(denom) > 0.000001) {
-            t = max(ray_start, min(ray_end, (clip_depth - dot(ray_origin, view_axis)) / denom));
-        }
-    }
+    float t = front_clip_start_t(ray_start, ray_end);
     vec4 accum = vec4(0.0);
+    vec4 section_accum = vec4(0.0);
     float first_depth = 0.0;
     float got_first_hit = 0.0;
     float mip_density = 0.0;
@@ -239,12 +277,38 @@ void main()
     vec3 view_dir = normalize(-ray_direction);
     vec3 boundary_color = vec3(1.0, 0.56, 0.26);
 
+    if (u_clip_plane_enabled > 0) {
+        float plane_denom = dot(ray_direction, plane_normal);
+        if (abs(plane_denom) > 0.000001) {
+            float plane_t = (plane_offset - dot(ray_origin, plane_normal)) / plane_denom;
+            if (plane_t >= t && plane_t <= ray_end) {
+                vec3 plane_point = ray_origin + ray_direction * plane_t;
+                vec3 plane_texcoord = plane_point / u_shape_scale + 0.5;
+                if (
+                    plane_texcoord.x >= 0.0 && plane_texcoord.x <= 1.0 &&
+                    plane_texcoord.y >= 0.0 && plane_texcoord.y <= 1.0 &&
+                    plane_texcoord.z >= 0.0 && plane_texcoord.z <= 1.0
+                ) {
+                    float plane_mask = 1.0;
+                    if (u_mask_mode > 0) {
+                        plane_mask = mask_sample(plane_texcoord);
+                    }
+                    vec4 section = section_plane_color(plane_texcoord, texel_step, plane_mask);
+                    if (section.a > 0.001) {
+                        section_accum = section;
+                    }
+                    t = max(t, plane_t + max(u_step_size * 0.75, 0.0005));
+                }
+            }
+        }
+    }
+
     for (int i = 0; i < MAX_RAY_STEPS; ++i) {
         if (i >= u_steps || t > hit.y) {
             break;
         }
         vec3 point = ray_origin + ray_direction * t;
-        if (clip_plane_discards(point)) {
+        if (clip_plane_discards(point, plane_normal, plane_offset)) {
             t += u_step_size;
             continue;
         }
@@ -287,15 +351,6 @@ void main()
             continue;
         }
         if (density > 0.001 || mask_boundary > 0.0) {
-            float detail = clamp(u_enhancement, 0.0, 1.0);
-            vec3 grad = mix(central_gradient(texcoord, texel_step), tetra_gradient(texcoord, texel_step * 1.15), detail);
-            float grad_mag = clamp(length(grad) * mix(6.5, 8.8, detail), 0.0, 1.0);
-            float detail_edge = smoothstep(0.10, 0.48, grad_mag) * detail;
-            vec3 normal = normalize(grad + vec3(0.0001));
-            float diffuse = max(dot(normal, light_dir), 0.0);
-            float rim = pow(1.0 - max(dot(normal, view_dir), 0.0), 2.0);
-            float spec = pow(max(dot(reflect(-light_dir, normal), view_dir), 0.0), 24.0);
-
             vec4 transfer = transfer_sample(max(density, mask_boundary * 0.35));
             if (transfer.a <= 0.001) {
                 t += u_step_size;
@@ -305,6 +360,30 @@ void main()
             if (u_mask_mode == 1 && mask_boundary > 0.0) {
                 transfer_color = mix(transfer_color, boundary_color, clamp(u_mask_opacity, 0.0, 1.0) * mask_boundary);
             }
+            if (u_fast_interaction > 0 && u_projection_mode == 0) {
+                float alpha = clamp(pow(density, 1.05) * transfer.a * u_opacity * 0.18, 0.0, 0.34);
+                if (got_first_hit < 0.5 && alpha > 0.002) {
+                    first_depth = 1.0 - float(i) / max(float(u_steps), 1.0);
+                    got_first_hit = 1.0;
+                }
+                vec3 shaded = transfer_color * (0.58 + 0.42 * density);
+                accum.rgb += (1.0 - accum.a) * shaded * alpha;
+                accum.a += (1.0 - accum.a) * alpha;
+                if (accum.a > 0.94) {
+                    break;
+                }
+                t += u_step_size;
+                continue;
+            }
+
+            float detail = clamp(u_enhancement, 0.0, 1.0);
+            vec3 grad = mix(central_gradient(texcoord, texel_step), tetra_gradient(texcoord, texel_step * 1.15), detail);
+            float grad_mag = clamp(length(grad) * mix(6.5, 8.8, detail), 0.0, 1.0);
+            float detail_edge = smoothstep(0.10, 0.48, grad_mag) * detail;
+            vec3 normal = normalize(grad + vec3(0.0001));
+            float diffuse = max(dot(normal, light_dir), 0.0);
+            float rim = pow(1.0 - max(dot(normal, view_dir), 0.0), 2.0);
+            float spec = pow(max(dot(reflect(-light_dir, normal), view_dir), 0.0), 24.0);
 
             float surface = smoothstep(0.05, 0.35, grad_mag) * u_gradient_weight;
             surface = max(surface, detail_edge * 0.36);
@@ -313,6 +392,14 @@ void main()
                 if (density > 0.035 || surface > 0.08) {
                     float surface_alpha = clamp(max(density, surface) * transfer.a, 0.0, 1.0);
                     vec3 shaded_surface = transfer_color * (0.44 + 0.50 * diffuse) + transfer_color * rim * 0.22 + vec3(spec * 0.46);
+                    if (u_clarity > 0.0) {
+                        surface_alpha = clamp(max(surface * 1.12, density * 0.92) * max(transfer.a, 0.38), 0.0, 1.0);
+                        shaded_surface = mix(
+                            shaded_surface,
+                            transfer_color * (0.36 + 0.58 * diffuse) + vec3(detail_edge * 0.22) + vec3(spec * 0.34),
+                            0.55
+                        );
+                    }
                     float hit_t = t;
                     if (u_surface_refine > 0 && detail > 0.0) {
                         float low_t = max(ray_start, t - u_step_size);
@@ -320,7 +407,7 @@ void main()
                         for (int b = 0; b < 5; ++b) {
                             float mid_t = (low_t + high_t) * 0.5;
                             vec3 mid_point = ray_origin + ray_direction * mid_t;
-                            if (clip_plane_discards(mid_point)) {
+                            if (clip_plane_discards(mid_point, plane_normal, plane_offset)) {
                                 low_t = mid_t;
                             } else {
                                 vec3 mid_texcoord = mid_point / u_shape_scale + 0.5;
@@ -366,45 +453,77 @@ void main()
 
     if (u_projection_mode == 1) {
         if (mip_density <= 0.001 && projected_boundary <= 0.0) {
+            if (section_accum.a > 0.001) {
+                vec3 section_color = pow(clamp(section_accum.rgb, 0.0, 1.0), vec3(0.78 * max(0.55, u_tone_gamma)));
+                gl_FragColor = vec4(section_color, 1.0);
+                return;
+            }
             gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
             return;
         }
         vec3 color = transfer_sample(max(mip_density, projected_boundary * 0.35)).rgb;
         color *= 0.72 + 0.28 * mip_depth;
         color = mix(color, boundary_color, clamp(u_mask_opacity, 0.0, 1.0) * projected_boundary);
+        if (section_accum.a > 0.001) {
+            color = mix(color * 0.62, section_accum.rgb, clamp(section_accum.a * 0.82, 0.0, 0.92));
+        }
         gl_FragColor = vec4(pow(clamp(color, 0.0, 1.0), vec3(0.82 * max(0.55, u_tone_gamma))), 1.0);
         return;
     }
     if (u_projection_mode == 2) {
         if (got_min < 0.5 && projected_boundary <= 0.0) {
+            if (section_accum.a > 0.001) {
+                vec3 section_color = pow(clamp(section_accum.rgb, 0.0, 1.0), vec3(0.78 * max(0.55, u_tone_gamma)));
+                gl_FragColor = vec4(section_color, 1.0);
+                return;
+            }
             gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
             return;
         }
         float inverse_value = got_min > 0.5 ? 1.0 - clamp(min_value, 0.0, 1.0) : projected_boundary * 0.35;
         vec3 color = transfer_sample(inverse_value).rgb;
         color = mix(color, boundary_color, clamp(u_mask_opacity, 0.0, 1.0) * projected_boundary);
+        if (section_accum.a > 0.001) {
+            color = mix(color * 0.62, section_accum.rgb, clamp(section_accum.a * 0.82, 0.0, 0.92));
+        }
         gl_FragColor = vec4(pow(clamp(color, 0.0, 1.0), vec3(0.80 * max(0.55, u_tone_gamma))), 1.0);
         return;
     }
     if (u_projection_mode == 3) {
         float average_value = average_density / max(average_count, 1.0);
         if (average_value <= 0.001 && projected_boundary <= 0.0) {
+            if (section_accum.a > 0.001) {
+                vec3 section_color = pow(clamp(section_accum.rgb, 0.0, 1.0), vec3(0.78 * max(0.55, u_tone_gamma)));
+                gl_FragColor = vec4(section_color, 1.0);
+                return;
+            }
             gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
             return;
         }
         vec3 color = transfer_sample(max(average_value, projected_boundary * 0.35)).rgb;
         color = mix(color, boundary_color, clamp(u_mask_opacity, 0.0, 1.0) * projected_boundary);
+        if (section_accum.a > 0.001) {
+            color = mix(color * 0.62, section_accum.rgb, clamp(section_accum.a * 0.82, 0.0, 0.92));
+        }
         gl_FragColor = vec4(pow(clamp(color, 0.0, 1.0), vec3(0.86 * max(0.55, u_tone_gamma))), 1.0);
         return;
     }
 
     if (accum.a <= 0.001) {
+        if (section_accum.a > 0.001) {
+            vec3 section_color = pow(clamp(section_accum.rgb, 0.0, 1.0), vec3(0.80 * max(0.55, u_tone_gamma)));
+            gl_FragColor = vec4(section_color, 1.0);
+            return;
+        }
         gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
         return;
     }
     vec3 color = accum.rgb / max(accum.a, 0.001);
     color *= 0.78 + 0.22 * first_depth;
     color = mix(color, boundary_color, clamp(u_mask_opacity, 0.0, 1.0) * projected_boundary * 0.35);
+    if (section_accum.a > 0.001) {
+        color = mix(color * 0.42, section_accum.rgb, clamp(section_accum.a * 0.96, 0.0, 0.98));
+    }
     color = pow(clamp(color, 0.0, 1.0), vec3(0.86 * max(0.55, u_tone_gamma)));
     gl_FragColor = vec4(color, 1.0);
 }
@@ -485,6 +604,23 @@ def _coerce_rgb(rgb, fallback=(1.0, 0.83, 0.30)):
     if len(values) != 3:
         values = tuple(float(value) for value in fallback)
     return tuple(max(0.0, min(1.0, value)) for value in values)
+
+
+def _crisp_sampling_enabled(clarity_mode, render_mode, clip_plane_enabled=False):
+    return False
+
+
+def _texture_filter_name(clarity_mode, render_mode, clip_plane_enabled=False):
+    return "nearest" if _crisp_sampling_enabled(clarity_mode, render_mode, clip_plane_enabled) else "linear"
+
+
+def _display_scaling_name(clarity_mode, render_mode, clip_plane_enabled=False):
+    return "nearest" if _crisp_sampling_enabled(clarity_mode, render_mode, clip_plane_enabled) else "smooth"
+
+
+def volume_pan_limit_for_zoom(zoom):
+    zoom = max(1.0, float(zoom))
+    return max(8.0, min(64.0, 4.0 + zoom * 2.0))
 
 
 def build_volume_transfer_lut(
@@ -676,6 +812,7 @@ class _GpuVolumeRenderCore:
         self._clip_plane_enabled = False
         self._clip_plane_depth = 0.0
         self._clip_plane_normal = (0.0, 0.0, 1.0)
+        self._fast_interaction = False
         self._supersample_scale = 1.0
         self._tint_rgb = (1.0, 0.83, 0.30)
         self._renderer_label = ""
@@ -818,15 +955,18 @@ class _GpuVolumeRenderCore:
         self._pitch = float(pitch)
         self._zoom = max(0.2, float(zoom))
         self._render_quality = max(128, min(GPU_VOLUME_MAX_TEXTURE_DIM, int(render_quality)))
-        self._sample_steps = max(256, min(GPU_VOLUME_MAX_RAY_STEPS, int(sample_steps)))
+        min_steps = 192 if str(render_mode) == "drag" and str(projection_mode or "").lower() == "composite" else 256
+        self._sample_steps = max(min_steps, min(GPU_VOLUME_MAX_RAY_STEPS, int(sample_steps)))
         self._inside_depth = max(0.0, min(1.6, float(inside_depth)))
         self._front_clip = max(0.0, min(0.92, float(front_clip)))
         self._render_mode = "drag" if str(render_mode) == "drag" else "still"
-        self._pan_x = max(-2.0, min(2.0, float(pan_x)))
-        self._pan_y = max(-2.0, min(2.0, float(pan_y)))
+        pan_limit = volume_pan_limit_for_zoom(self._zoom)
+        self._pan_x = max(-pan_limit, min(pan_limit, float(pan_x)))
+        self._pan_y = max(-pan_limit, min(pan_limit, float(pan_y)))
         self._clarity_mode = bool(clarity_mode)
         projection_mode = str(projection_mode or "composite").lower()
         self._projection_mode = projection_mode if projection_mode in GPU_VOLUME_RENDER_MODES else "composite"
+        self._fast_interaction = self._render_mode == "drag" and self._projection_mode == "composite"
         mask_mode = str(mask_mode or "image_only").lower()
         if self._mask_data is None:
             mask_mode = "image_only"
@@ -885,6 +1025,8 @@ class _GpuVolumeRenderCore:
             "steps": int(self._last_steps),
             "dtype": self._uploaded_dtype,
             "clarity": bool(self._clarity_mode),
+            "texture_filter": _texture_filter_name(self._clarity_mode, self._render_mode, self._clip_plane_enabled),
+            "display_scaling": _display_scaling_name(self._clarity_mode, self._render_mode, self._clip_plane_enabled),
             "projection_mode": self._projection_mode,
             "mask_mode": self._mask_mode,
             "mask_shape_zyx": tuple(int(value) for value in self._mask_shape),
@@ -940,7 +1082,7 @@ class _GpuVolumeRenderCore:
         if not self._texture_id:
             self._texture_id = GL.glGenTextures(1)
         GL.glBindTexture(GL.GL_TEXTURE_3D, self._texture_id)
-        texture_filter = GL.GL_NEAREST if self._clarity_mode and self._render_mode == "still" else GL.GL_LINEAR
+        texture_filter = GL.GL_NEAREST if _crisp_sampling_enabled(self._clarity_mode, self._render_mode, self._clip_plane_enabled) else GL.GL_LINEAR
         GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MIN_FILTER, texture_filter)
         GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MAG_FILTER, texture_filter)
         GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_S, GL.GL_CLAMP_TO_EDGE)
@@ -1040,7 +1182,7 @@ class _GpuVolumeRenderCore:
         GL.glUseProgram(self._program)
         GL.glActiveTexture(GL.GL_TEXTURE0)
         GL.glBindTexture(GL.GL_TEXTURE_3D, self._texture_id)
-        texture_filter = GL.GL_NEAREST if self._clarity_mode and self._render_mode == "still" else GL.GL_LINEAR
+        texture_filter = GL.GL_NEAREST if _crisp_sampling_enabled(self._clarity_mode, self._render_mode, self._clip_plane_enabled) else GL.GL_LINEAR
         GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MIN_FILTER, texture_filter)
         GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MAG_FILTER, texture_filter)
         self._set_uniform_int("u_volume", 0)
@@ -1064,12 +1206,14 @@ class _GpuVolumeRenderCore:
         self._set_uniform_float("u_enhancement", self._enhancement)
         self._set_uniform_float("u_tone_gamma", self._tone_gamma)
         self._set_uniform_int("u_surface_refine", 1 if self._surface_refine else 0)
+        self._set_uniform_int("u_fast_interaction", 1 if self._fast_interaction else 0)
         self._set_uniform_int("u_clip_plane_enabled", 1 if self._clip_plane_enabled else 0)
         self._set_uniform_float("u_clip_plane_depth", self._clip_plane_depth)
         self._set_uniform_vec3("u_clip_plane_normal", *self._clip_plane_normal)
         self._set_uniform_float("u_opacity", 1.0)
         self._set_uniform_float("u_gradient_weight", 1.35 if clarity > 0.0 else (1.0 if self._render_mode == "still" else 0.72))
-        steps = max(256, min(GPU_VOLUME_MAX_RAY_STEPS, int(self._sample_steps)))
+        min_steps = 192 if self._fast_interaction else 256
+        steps = max(min_steps, min(GPU_VOLUME_MAX_RAY_STEPS, int(self._sample_steps)))
         self._last_steps = int(steps)
         self._set_uniform_int("u_steps", steps)
         self._set_uniform_float("u_step_size", 1.58 / float(steps))
@@ -1323,6 +1467,19 @@ if gpu_volume_offscreen_available():
             self.setFrameShape(QFrame.NoFrame)
             self.setText(self._empty_text)
 
+        def _try_start_local_axis_endpoint_drag(self, event):
+            if self.workbench is None or event.button() != Qt.LeftButton:
+                return False
+            handler = getattr(self.workbench, "start_local_axis_endpoint_drag", None)
+            if not callable(handler):
+                return False
+            if not handler(event.position().x(), event.position().y()):
+                return False
+            self._mouse_mode = "local_axis_endpoint"
+            self._last_drag_pos = event.position()
+            event.accept()
+            return True
+
         def setText(self, text):
             self._empty_text = str(text or "")
             super().setText(self._empty_text)
@@ -1431,7 +1588,16 @@ if gpu_volume_offscreen_available():
                 return
             pixmap = QPixmap.fromImage(image)
             if pixmap.width() != max(1, self.width()) or pixmap.height() != max(1, self.height()):
-                pixmap = pixmap.scaled(max(1, self.width()), max(1, self.height()), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                transform = (
+                    Qt.FastTransformation
+                    if _crisp_sampling_enabled(
+                        self._renderer._clarity_mode,
+                        self._renderer._render_mode,
+                        self._renderer._clip_plane_enabled,
+                    )
+                    else Qt.SmoothTransformation
+                )
+                pixmap = pixmap.scaled(max(1, self.width()), max(1, self.height()), Qt.KeepAspectRatio, transform)
             self.setPixmap(pixmap)
             self.render_stats_changed.emit()
 
@@ -1451,6 +1617,21 @@ if gpu_volume_offscreen_available():
             font.setPointSize(9)
             painter.setFont(font)
             for overlay in self._axis_overlays:
+                if overlay.get("kind") == "point":
+                    point = overlay.get("point_xy")
+                    if not point:
+                        continue
+                    color = QColor(str(overlay.get("color") or "#FFFFFF"))
+                    x, y = float(point[0]), float(point[1])
+                    radius = int(overlay.get("radius", 5))
+                    painter.setPen(QPen(color, 2))
+                    painter.setBrush(QColor(7, 9, 10, 150))
+                    painter.drawEllipse(int(round(x - radius)), int(round(y - radius)), radius * 2, radius * 2)
+                    label = str(overlay.get("label") or "")
+                    if label:
+                        dx, dy = overlay.get("label_offset_xy") or (8, -8)
+                        self._draw_axis_label(painter, label, x + float(dx), y + float(dy), color, str(overlay.get("label_position") or "right"))
+                    continue
                 start = overlay.get("start_xy")
                 end = overlay.get("end_xy")
                 if not start or not end:
@@ -1460,11 +1641,69 @@ if gpu_volume_offscreen_available():
                 x0, y0 = float(start[0]), float(start[1])
                 x1, y1 = float(end[0]), float(end[1])
                 painter.drawLine(int(round(x0)), int(round(y0)), int(round(x1)), int(round(y1)))
-                painter.drawEllipse(int(round(x0 - 4)), int(round(y0 - 4)), 8, 8)
-                painter.drawEllipse(int(round(x1 - 4)), int(round(y1 - 4)), 8, 8)
+                role = str(overlay.get("role") or "")
+                handle_radius = 6 if role == "editable_output" else 3
+                if role == "editable_output":
+                    painter.setBrush(QColor(7, 9, 10, 185))
+                else:
+                    painter.setBrush(Qt.NoBrush)
+                painter.drawEllipse(
+                    int(round(x0 - handle_radius)),
+                    int(round(y0 - handle_radius)),
+                    handle_radius * 2,
+                    handle_radius * 2,
+                )
+                painter.drawEllipse(
+                    int(round(x1 - handle_radius)),
+                    int(round(y1 - handle_radius)),
+                    handle_radius * 2,
+                    handle_radius * 2,
+                )
                 label = str(overlay.get("label") or "")
                 if label:
-                    painter.drawText(int(round(x1 + 6)), int(round(y1 - 6)), label)
+                    anchor = overlay.get("label_anchor_xy") or end
+                    dx, dy = overlay.get("label_offset_xy") or (8, -8)
+                    self._draw_axis_label(
+                        painter,
+                        label,
+                        float(anchor[0]) + float(dx),
+                        float(anchor[1]) + float(dy),
+                        color,
+                        str(overlay.get("label_position") or "right"),
+                    )
+
+        def _draw_axis_label(self, painter, text, x, y, color, position="right"):
+            metrics = painter.fontMetrics()
+            padding_x = 6
+            padding_y = 3
+            text_w = metrics.horizontalAdvance(text)
+            text_h = metrics.height()
+            rect_x = float(x)
+            rect_y = float(y) - text_h - padding_y
+            if str(position) == "left":
+                rect_x -= text_w + padding_x * 2
+            elif str(position) == "center":
+                rect_x -= (text_w + padding_x * 2) / 2.0
+            rect = QRect(
+                int(round(rect_x)),
+                int(round(rect_y)),
+                int(round(text_w + padding_x * 2)),
+                int(round(text_h + padding_y * 2)),
+            )
+            bounds = self.rect().adjusted(2, 2, -2, -2)
+            if rect.right() > bounds.right():
+                rect.moveRight(bounds.right())
+            if rect.left() < bounds.left():
+                rect.moveLeft(bounds.left())
+            if rect.top() < bounds.top():
+                rect.moveTop(bounds.top())
+            if rect.bottom() > bounds.bottom():
+                rect.moveBottom(bounds.bottom())
+            painter.fillRect(rect, QColor(7, 9, 10, 205))
+            painter.setPen(QPen(color, 1))
+            painter.drawRect(rect.adjusted(0, 0, -1, -1))
+            painter.setPen(QColor("#F4F7F9"))
+            painter.drawText(rect.adjusted(padding_x, padding_y, -padding_x, -padding_y), Qt.AlignLeft | Qt.AlignVCenter, text)
 
         def resizeEvent(self, event):
             super().resizeEvent(event)
@@ -1481,6 +1720,13 @@ if gpu_volume_offscreen_available():
 
         def mousePressEvent(self, event):
             self.setFocus(Qt.MouseFocusReason)
+            if self.workbench is not None and event.button() == Qt.LeftButton:
+                picker = getattr(self.workbench, "pick_local_axis_roll_reference_at", None)
+                if callable(picker) and picker(event.position().x(), event.position().y()):
+                    event.accept()
+                    return
+            if self._try_start_local_axis_endpoint_drag(event):
+                return
             if self.workbench is not None and event.button() in (Qt.LeftButton, Qt.RightButton):
                 self._mouse_mode = "rotate" if event.button() == Qt.LeftButton else "pan"
                 self._last_drag_pos = event.position()
@@ -1492,6 +1738,7 @@ if gpu_volume_offscreen_available():
             buttons = event.buttons()
             active = (
                 (self._mouse_mode == "rotate" and buttons & Qt.LeftButton)
+                or (self._mouse_mode == "local_axis_endpoint" and buttons & Qt.LeftButton)
                 or (self._mouse_mode == "pan" and buttons & Qt.RightButton)
             )
             if self.workbench is not None and active and self._last_drag_pos is not None:
@@ -1499,7 +1746,9 @@ if gpu_volume_offscreen_available():
                 dx = current.x() - self._last_drag_pos.x()
                 dy = current.y() - self._last_drag_pos.y()
                 self._last_drag_pos = current
-                if self._mouse_mode == "pan":
+                if self._mouse_mode == "local_axis_endpoint":
+                    self.workbench.drag_local_axis_endpoint(current.x(), current.y())
+                elif self._mouse_mode == "pan":
                     self.workbench.pan_volume_preview(dx, dy)
                 else:
                     self.workbench.rotate_volume_preview(dx, dy)
@@ -1509,6 +1758,8 @@ if gpu_volume_offscreen_available():
 
         def mouseReleaseEvent(self, event):
             if event.button() in (Qt.LeftButton, Qt.RightButton) and self._mouse_mode:
+                if self._mouse_mode == "local_axis_endpoint" and self.workbench is not None:
+                    self.workbench.finish_local_axis_endpoint_drag()
                 self._mouse_mode = ""
                 self._last_drag_pos = None
                 if self.workbench is not None:
@@ -1603,6 +1854,7 @@ if gpu_volume_canvas_available():
             self._clip_plane_enabled = False
             self._clip_plane_depth = 0.0
             self._clip_plane_normal = (0.0, 0.0, 1.0)
+            self._fast_interaction = False
             self._renderer_label = ""
             self._uploaded_shape = ()
             self._uploaded_bytes = 0
@@ -1768,15 +2020,18 @@ if gpu_volume_canvas_available():
             self._pitch = float(pitch)
             self._zoom = max(0.2, float(zoom))
             self._render_quality = max(128, min(GPU_VOLUME_MAX_TEXTURE_DIM, int(render_quality)))
-            self._sample_steps = max(256, min(GPU_VOLUME_MAX_RAY_STEPS, int(sample_steps)))
+            min_steps = 192 if str(render_mode) == "drag" and str(projection_mode or "").lower() == "composite" else 256
+            self._sample_steps = max(min_steps, min(GPU_VOLUME_MAX_RAY_STEPS, int(sample_steps)))
             self._inside_depth = max(0.0, min(1.6, float(inside_depth)))
             self._front_clip = max(0.0, min(0.92, float(front_clip)))
             self._render_mode = "drag" if str(render_mode) == "drag" else "still"
-            self._pan_x = max(-2.0, min(2.0, float(pan_x)))
-            self._pan_y = max(-2.0, min(2.0, float(pan_y)))
+            pan_limit = volume_pan_limit_for_zoom(self._zoom)
+            self._pan_x = max(-pan_limit, min(pan_limit, float(pan_x)))
+            self._pan_y = max(-pan_limit, min(pan_limit, float(pan_y)))
             self._clarity_mode = bool(clarity_mode)
             projection_mode = str(projection_mode or "composite").lower()
             self._projection_mode = projection_mode if projection_mode in GPU_VOLUME_RENDER_MODES else "composite"
+            self._fast_interaction = self._render_mode == "drag" and self._projection_mode == "composite"
             mask_mode = str(mask_mode or "image_only").lower()
             if self._mask_data is None:
                 mask_mode = "image_only"
@@ -1836,6 +2091,8 @@ if gpu_volume_canvas_available():
                 "steps": int(self._last_steps),
                 "dtype": self._uploaded_dtype,
                 "clarity": bool(self._clarity_mode),
+                "texture_filter": _texture_filter_name(self._clarity_mode, self._render_mode, self._clip_plane_enabled),
+                "display_scaling": _display_scaling_name(self._clarity_mode, self._render_mode, self._clip_plane_enabled),
                 "projection_mode": getattr(self, "_projection_mode", "composite"),
                 "mask_mode": getattr(self, "_mask_mode", "image_only"),
                 "mask_shape_zyx": tuple(int(value) for value in getattr(self, "_mask_shape", ())),
@@ -1882,6 +2139,19 @@ if gpu_volume_canvas_available():
         def renderer_label(self):
             return self._renderer_label
 
+        def _try_start_local_axis_endpoint_drag(self, event):
+            if self.workbench is None or event.button() != Qt.LeftButton:
+                return False
+            handler = getattr(self.workbench, "start_local_axis_endpoint_drag", None)
+            if not callable(handler):
+                return False
+            if not handler(event.position().x(), event.position().y()):
+                return False
+            self._mouse_mode = "local_axis_endpoint"
+            self._last_drag_pos = event.position()
+            event.accept()
+            return True
+
         def resizeGL(self, width, height):
             GL.glViewport(0, 0, max(1, int(width)), max(1, int(height)))
 
@@ -1908,7 +2178,7 @@ if gpu_volume_canvas_available():
             if not self._texture_id:
                 self._texture_id = GL.glGenTextures(1)
             GL.glBindTexture(GL.GL_TEXTURE_3D, self._texture_id)
-            texture_filter = GL.GL_NEAREST if self._clarity_mode and self._render_mode == "still" else GL.GL_LINEAR
+            texture_filter = GL.GL_NEAREST if _crisp_sampling_enabled(self._clarity_mode, self._render_mode, self._clip_plane_enabled) else GL.GL_LINEAR
             GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MIN_FILTER, texture_filter)
             GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MAG_FILTER, texture_filter)
             GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_S, GL.GL_CLAMP_TO_EDGE)
@@ -2009,7 +2279,7 @@ if gpu_volume_canvas_available():
             GL.glUseProgram(self._program)
             GL.glActiveTexture(GL.GL_TEXTURE0)
             GL.glBindTexture(GL.GL_TEXTURE_3D, self._texture_id)
-            texture_filter = GL.GL_NEAREST if self._clarity_mode and self._render_mode == "still" else GL.GL_LINEAR
+            texture_filter = GL.GL_NEAREST if _crisp_sampling_enabled(self._clarity_mode, self._render_mode, self._clip_plane_enabled) else GL.GL_LINEAR
             GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MIN_FILTER, texture_filter)
             GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MAG_FILTER, texture_filter)
             self._set_uniform_int("u_volume", 0)
@@ -2033,12 +2303,14 @@ if gpu_volume_canvas_available():
             self._set_uniform_float("u_enhancement", self._enhancement)
             self._set_uniform_float("u_tone_gamma", self._tone_gamma)
             self._set_uniform_int("u_surface_refine", 1 if self._surface_refine else 0)
+            self._set_uniform_int("u_fast_interaction", 1 if self._fast_interaction else 0)
             self._set_uniform_int("u_clip_plane_enabled", 1 if self._clip_plane_enabled else 0)
             self._set_uniform_float("u_clip_plane_depth", self._clip_plane_depth)
             self._set_uniform_vec3("u_clip_plane_normal", *self._clip_plane_normal)
             self._set_uniform_float("u_opacity", 1.0)
             self._set_uniform_float("u_gradient_weight", 1.35 if clarity > 0.0 else (1.0 if self._render_mode == "still" else 0.72))
-            steps = max(256, min(GPU_VOLUME_MAX_RAY_STEPS, int(self._sample_steps)))
+            min_steps = 192 if self._fast_interaction else 256
+            steps = max(min_steps, min(GPU_VOLUME_MAX_RAY_STEPS, int(self._sample_steps)))
             self._last_steps = int(steps)
             self._set_uniform_int("u_steps", steps)
             self._set_uniform_float("u_step_size", 1.58 / float(steps))
@@ -2103,6 +2375,13 @@ if gpu_volume_canvas_available():
 
         def mousePressEvent(self, event):
             self.setFocus(Qt.MouseFocusReason)
+            if self.workbench is not None and event.button() == Qt.LeftButton:
+                picker = getattr(self.workbench, "pick_local_axis_roll_reference_at", None)
+                if callable(picker) and picker(event.position().x(), event.position().y()):
+                    event.accept()
+                    return
+            if self._try_start_local_axis_endpoint_drag(event):
+                return
             if self.workbench is not None and event.button() in (Qt.LeftButton, Qt.RightButton):
                 self._mouse_mode = "rotate" if event.button() == Qt.LeftButton else "pan"
                 self._last_drag_pos = event.position()
@@ -2114,6 +2393,7 @@ if gpu_volume_canvas_available():
             buttons = event.buttons()
             active = (
                 (self._mouse_mode == "rotate" and buttons & Qt.LeftButton)
+                or (self._mouse_mode == "local_axis_endpoint" and buttons & Qt.LeftButton)
                 or (self._mouse_mode == "pan" and buttons & Qt.RightButton)
             )
             if self.workbench is not None and active and self._last_drag_pos is not None:
@@ -2121,7 +2401,9 @@ if gpu_volume_canvas_available():
                 dx = current.x() - self._last_drag_pos.x()
                 dy = current.y() - self._last_drag_pos.y()
                 self._last_drag_pos = current
-                if self._mouse_mode == "pan":
+                if self._mouse_mode == "local_axis_endpoint":
+                    self.workbench.drag_local_axis_endpoint(current.x(), current.y())
+                elif self._mouse_mode == "pan":
                     self.workbench.pan_volume_preview(dx, dy)
                 else:
                     self.workbench.rotate_volume_preview(dx, dy)
@@ -2131,6 +2413,8 @@ if gpu_volume_canvas_available():
 
         def mouseReleaseEvent(self, event):
             if event.button() in (Qt.LeftButton, Qt.RightButton) and self._mouse_mode:
+                if self._mouse_mode == "local_axis_endpoint" and self.workbench is not None:
+                    self.workbench.finish_local_axis_endpoint_drag()
                 self._mouse_mode = ""
                 self._last_drag_pos = None
                 if self.workbench is not None:

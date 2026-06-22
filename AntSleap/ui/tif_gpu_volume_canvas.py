@@ -92,6 +92,7 @@ uniform float u_clarity;
 uniform float u_mask_opacity;
 uniform float u_enhancement;
 uniform float u_tone_gamma;
+uniform vec3 u_tint_rgb;
 uniform vec3 u_clip_plane_normal;
 uniform float u_clip_plane_depth;
 uniform vec3 u_texel_step;
@@ -216,20 +217,22 @@ vec4 section_plane_color(vec3 texcoord, vec3 texel_step, float mask_value)
     float section_cutoff = clamp(u_cutoff * 0.28, 0.0, 0.72);
     float density = clamp((sample_value - section_cutoff) / max(1.0 - section_cutoff, 0.001), 0.0, 1.0);
     vec3 grad = central_gradient(texcoord, texel_step);
-    float edge = smoothstep(0.035, 0.26, length(grad) * 10.5);
-    vec4 transfer = transfer_sample(max(density, edge * 0.36));
+    float edge = smoothstep(0.035, 0.25, length(grad) * 11.5);
+    float section_surface = max(edge, smoothstep(0.08, 0.46, density));
+    vec4 transfer = transfer_sample(max(density, edge * 0.42));
     vec3 normal = normalize(grad + vec3(0.0001));
     vec3 light_dir = normalize(vec3(0.45, 0.58, 0.68));
     float diffuse = max(dot(normal, light_dir), 0.0);
     vec3 gray = vec3(pow(clamp(density, 0.0, 1.0), 0.82 * max(0.60, u_tone_gamma)));
-    vec3 color = mix(gray, transfer.rgb, 0.36) * (0.70 + 0.22 * diffuse + 0.24 * density);
-    color += vec3(0.16, 0.18, 0.14) * edge * mix(0.45, 0.75, clamp(u_clarity, 0.0, 1.0));
+    vec3 tint = normalize(max(u_tint_rgb, vec3(0.001)));
+    vec3 color = mix(gray * tint * 0.72, transfer.rgb, 0.74) * (0.68 + 0.24 * diffuse + 0.22 * density);
+    color += transfer.rgb * edge * mix(0.18, 0.32, clamp(u_clarity, 0.0, 1.0));
     if (u_mask_mode == 1) {
         float boundary = mask_boundary_sample(texcoord, texel_step);
         color = mix(color, vec3(1.0, 0.56, 0.26), clamp(u_mask_opacity, 0.0, 1.0) * boundary);
         edge = max(edge, boundary);
     }
-    float alpha = clamp(0.78 + pow(density, 0.55) * 0.18 + edge * 0.20 + transfer.a * 0.08, 0.0, 0.98);
+    float alpha = clamp((0.42 + pow(density, 0.55) * 0.24 + edge * 0.28 + transfer.a * 0.08) * max(section_surface, 0.48), 0.0, 0.88);
     return vec4(clamp(color, 0.0, 1.0), alpha);
 }
 
@@ -454,7 +457,7 @@ void main()
     if (u_projection_mode == 1) {
         if (mip_density <= 0.001 && projected_boundary <= 0.0) {
             if (section_accum.a > 0.001) {
-                vec3 section_color = pow(clamp(section_accum.rgb, 0.0, 1.0), vec3(0.78 * max(0.55, u_tone_gamma)));
+                vec3 section_color = pow(clamp(section_accum.rgb * 0.88, 0.0, 1.0), vec3(0.78 * max(0.55, u_tone_gamma)));
                 gl_FragColor = vec4(section_color, 1.0);
                 return;
             }
@@ -465,7 +468,7 @@ void main()
         color *= 0.72 + 0.28 * mip_depth;
         color = mix(color, boundary_color, clamp(u_mask_opacity, 0.0, 1.0) * projected_boundary);
         if (section_accum.a > 0.001) {
-            color = mix(color * 0.62, section_accum.rgb, clamp(section_accum.a * 0.82, 0.0, 0.92));
+            color = mix(color * 0.72, section_accum.rgb, clamp(section_accum.a * 0.68, 0.0, 0.78));
         }
         gl_FragColor = vec4(pow(clamp(color, 0.0, 1.0), vec3(0.82 * max(0.55, u_tone_gamma))), 1.0);
         return;
@@ -473,7 +476,7 @@ void main()
     if (u_projection_mode == 2) {
         if (got_min < 0.5 && projected_boundary <= 0.0) {
             if (section_accum.a > 0.001) {
-                vec3 section_color = pow(clamp(section_accum.rgb, 0.0, 1.0), vec3(0.78 * max(0.55, u_tone_gamma)));
+                vec3 section_color = pow(clamp(section_accum.rgb * 0.88, 0.0, 1.0), vec3(0.78 * max(0.55, u_tone_gamma)));
                 gl_FragColor = vec4(section_color, 1.0);
                 return;
             }
@@ -484,7 +487,7 @@ void main()
         vec3 color = transfer_sample(inverse_value).rgb;
         color = mix(color, boundary_color, clamp(u_mask_opacity, 0.0, 1.0) * projected_boundary);
         if (section_accum.a > 0.001) {
-            color = mix(color * 0.62, section_accum.rgb, clamp(section_accum.a * 0.82, 0.0, 0.92));
+            color = mix(color * 0.72, section_accum.rgb, clamp(section_accum.a * 0.68, 0.0, 0.78));
         }
         gl_FragColor = vec4(pow(clamp(color, 0.0, 1.0), vec3(0.80 * max(0.55, u_tone_gamma))), 1.0);
         return;
@@ -493,7 +496,7 @@ void main()
         float average_value = average_density / max(average_count, 1.0);
         if (average_value <= 0.001 && projected_boundary <= 0.0) {
             if (section_accum.a > 0.001) {
-                vec3 section_color = pow(clamp(section_accum.rgb, 0.0, 1.0), vec3(0.78 * max(0.55, u_tone_gamma)));
+                vec3 section_color = pow(clamp(section_accum.rgb * 0.88, 0.0, 1.0), vec3(0.78 * max(0.55, u_tone_gamma)));
                 gl_FragColor = vec4(section_color, 1.0);
                 return;
             }
@@ -503,7 +506,7 @@ void main()
         vec3 color = transfer_sample(max(average_value, projected_boundary * 0.35)).rgb;
         color = mix(color, boundary_color, clamp(u_mask_opacity, 0.0, 1.0) * projected_boundary);
         if (section_accum.a > 0.001) {
-            color = mix(color * 0.62, section_accum.rgb, clamp(section_accum.a * 0.82, 0.0, 0.92));
+            color = mix(color * 0.72, section_accum.rgb, clamp(section_accum.a * 0.68, 0.0, 0.78));
         }
         gl_FragColor = vec4(pow(clamp(color, 0.0, 1.0), vec3(0.86 * max(0.55, u_tone_gamma))), 1.0);
         return;
@@ -511,7 +514,7 @@ void main()
 
     if (accum.a <= 0.001) {
         if (section_accum.a > 0.001) {
-            vec3 section_color = pow(clamp(section_accum.rgb, 0.0, 1.0), vec3(0.80 * max(0.55, u_tone_gamma)));
+            vec3 section_color = pow(clamp(section_accum.rgb * 0.88, 0.0, 1.0), vec3(0.80 * max(0.55, u_tone_gamma)));
             gl_FragColor = vec4(section_color, 1.0);
             return;
         }
@@ -522,7 +525,7 @@ void main()
     color *= 0.78 + 0.22 * first_depth;
     color = mix(color, boundary_color, clamp(u_mask_opacity, 0.0, 1.0) * projected_boundary * 0.35);
     if (section_accum.a > 0.001) {
-        color = mix(color * 0.42, section_accum.rgb, clamp(section_accum.a * 0.96, 0.0, 0.98));
+        color = mix(color * 0.56, section_accum.rgb, clamp(section_accum.a * 0.76, 0.0, 0.88));
     }
     color = pow(clamp(color, 0.0, 1.0), vec3(0.86 * max(0.55, u_tone_gamma)));
     gl_FragColor = vec4(color, 1.0);
@@ -1205,6 +1208,7 @@ class _GpuVolumeRenderCore:
         self._set_uniform_float("u_clarity", clarity)
         self._set_uniform_float("u_enhancement", self._enhancement)
         self._set_uniform_float("u_tone_gamma", self._tone_gamma)
+        self._set_uniform_vec3("u_tint_rgb", *self._tint_rgb)
         self._set_uniform_int("u_surface_refine", 1 if self._surface_refine else 0)
         self._set_uniform_int("u_fast_interaction", 1 if self._fast_interaction else 0)
         self._set_uniform_int("u_clip_plane_enabled", 1 if self._clip_plane_enabled else 0)
@@ -2302,6 +2306,7 @@ if gpu_volume_canvas_available():
             self._set_uniform_float("u_clarity", clarity)
             self._set_uniform_float("u_enhancement", self._enhancement)
             self._set_uniform_float("u_tone_gamma", self._tone_gamma)
+            self._set_uniform_vec3("u_tint_rgb", *self._tint_rgb)
             self._set_uniform_int("u_surface_refine", 1 if self._surface_refine else 0)
             self._set_uniform_int("u_fast_interaction", 1 if self._fast_interaction else 0)
             self._set_uniform_int("u_clip_plane_enabled", 1 if self._clip_plane_enabled else 0)

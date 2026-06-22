@@ -365,6 +365,26 @@ TIF_TRANSLATIONS = {
         "Cleared roll reference points.": "已清除 roll 参照点。",
         "Cleared local axis draft.": "已清除局部轴草稿。",
         "Roll reference": "Roll 参照",
+        "Roll reference: A/B not set": "Roll 参照：A/B 未设置",
+        "Roll reference: {0}": "Roll 参照：{0}",
+        "set": "已设置",
+        "not set": "未设置",
+        "Frame status: ready": "坐标系状态：已就绪",
+        "Frame status: waiting for roll reference": "坐标系状态：等待 Roll 参照",
+        "Show axis details": "显示轴参数",
+        "Axis/reference relation": "输出轴与参照点关系",
+        "Roll reference A": "Roll 参照 A",
+        "Roll reference B": "Roll 参照 B",
+        "Roll A projection on output Z": "Roll A 在输出 Z 上的位置",
+        "Roll B projection on output Z": "Roll B 在输出 Z 上的位置",
+        "A/B separation along output Z": "A/B 沿输出 Z 间距",
+        "A/B lateral distance to output Z": "A/B 到输出 Z 横向距离",
+        "A/B projected roll width": "A/B 投影 roll 宽度",
+        "A/B roll direction status": "A/B roll 方向状态",
+        "usable": "可用",
+        "needs two reference points": "需要两个参照点",
+        "parallel to output Z": "接近输出 Z，需重新点选",
+        "voxel": "体素",
         "Local frame": "局部坐标系",
         "x_axis": "x_axis",
         "y_axis": "y_axis",
@@ -1550,6 +1570,14 @@ class TifWorkbenchWidget(QWidget):
         self.local_axis_summary_label.setObjectName("tifLocalAxisSummaryText")
         self.local_axis_summary_label.setWordWrap(True)
         self.local_axis_summary_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.local_axis_details_check = QCheckBox("Show axis details")
+        self.local_axis_details_check.setObjectName("tifLocalAxisDetailsCheck")
+        self.local_axis_details_check.setChecked(False)
+        self.local_axis_details_check.toggled.connect(self._update_local_axis_summary)
+        self.local_axis_details_label = QLabel("")
+        self.local_axis_details_label.setObjectName("tifLocalAxisDetailsText")
+        self.local_axis_details_label.setWordWrap(True)
+        self.local_axis_details_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.local_axis_status_label = QLabel("")
         self.local_axis_status_label.setObjectName("tifLocalAxisStatusText")
         self.local_axis_status_label.setWordWrap(True)
@@ -2037,6 +2065,7 @@ class TifWorkbenchWidget(QWidget):
         self.volume_local_axes_check.setText(tt("Show source/output axes in 3D preview", self.lang))
         if hasattr(self, "local_axis_status_label") and not self.local_axis_status_label.text():
             self.local_axis_status_label.setText(tt("Local axis status: ready", self.lang))
+        self.local_axis_details_check.setText(tt("Show axis details", self.lang))
         self.btn_local_axis_reslice.setText(tt("Export confirmed reslice", self.lang))
         self.btn_copy_source_z_axis.setText(tt("Copy source Z axis", self.lang))
         self.btn_pick_roll_ref_a.setText(tt("Pick roll reference A", self.lang))
@@ -2396,6 +2425,9 @@ class TifWorkbenchWidget(QWidget):
             self.volume_roi_detail_check,
             self.volume_roi_scale_label,
             self.volume_roi_scale_slider,
+            self.volume_clip_plane_check,
+            self.volume_clip_plane_depth_label,
+            self.volume_clip_plane_depth_slider,
             self.volume_inside_label,
             self.volume_inside_slider,
             self.volume_clip_label,
@@ -2418,6 +2450,9 @@ class TifWorkbenchWidget(QWidget):
             self.volume_roi_detail_check,
             self.volume_roi_scale_label,
             self.volume_roi_scale_slider,
+            self.volume_clip_plane_check,
+            self.volume_clip_plane_depth_label,
+            self.volume_clip_plane_depth_slider,
             self.volume_inside_label,
             self.volume_inside_slider,
             self.volume_clip_label,
@@ -3830,6 +3865,8 @@ class TifWorkbenchWidget(QWidget):
         local_axis_volume_layout.addLayout(local_axis_display_row)
         local_axis_volume_layout.addWidget(self.local_axis_status_label)
         local_axis_volume_layout.addWidget(self.local_axis_summary_label)
+        local_axis_volume_layout.addWidget(self.local_axis_details_check)
+        local_axis_volume_layout.addWidget(self.local_axis_details_label)
         local_axis_volume_row = QHBoxLayout()
         local_axis_volume_row.addWidget(self.btn_copy_source_z_axis)
         local_axis_volume_row.addWidget(self.btn_local_axis_reslice)
@@ -3839,13 +3876,6 @@ class TifWorkbenchWidget(QWidget):
         local_axis_roll_row.addWidget(self.btn_pick_roll_ref_b)
         local_axis_roll_row.addWidget(self.btn_clear_roll_refs)
         local_axis_volume_layout.addLayout(local_axis_roll_row)
-        local_axis_clip_row = QGridLayout()
-        local_axis_clip_row.setHorizontalSpacing(10)
-        local_axis_clip_row.setVerticalSpacing(6)
-        local_axis_clip_row.addWidget(self.volume_clip_plane_check, 0, 0, 1, 2)
-        local_axis_clip_row.addWidget(self.volume_clip_plane_depth_label, 1, 0)
-        local_axis_clip_row.addWidget(self.volume_clip_plane_depth_slider, 1, 1)
-        local_axis_volume_layout.addLayout(local_axis_clip_row)
         local_axis_center_row = QHBoxLayout()
         local_axis_center_row.addWidget(self.btn_clear_local_axis_draft)
         local_axis_volume_layout.addLayout(local_axis_center_row)
@@ -3920,10 +3950,13 @@ class TifWorkbenchWidget(QWidget):
         volume_controls.addWidget(self.volume_roi_detail_check, 12, 0, 1, 2)
         volume_controls.addWidget(self.volume_roi_scale_label, 13, 0)
         volume_controls.addWidget(self.volume_roi_scale_slider, 13, 1)
-        volume_controls.addWidget(self.volume_inside_label, 14, 0)
-        volume_controls.addWidget(self.volume_inside_slider, 14, 1)
-        volume_controls.addWidget(self.volume_clip_label, 15, 0)
-        volume_controls.addWidget(self.volume_clip_slider, 15, 1)
+        volume_controls.addWidget(self.volume_clip_plane_check, 14, 0, 1, 2)
+        volume_controls.addWidget(self.volume_clip_plane_depth_label, 15, 0)
+        volume_controls.addWidget(self.volume_clip_plane_depth_slider, 15, 1)
+        volume_controls.addWidget(self.volume_inside_label, 16, 0)
+        volume_controls.addWidget(self.volume_inside_slider, 16, 1)
+        volume_controls.addWidget(self.volume_clip_label, 17, 0)
+        volume_controls.addWidget(self.volume_clip_slider, 17, 1)
         volume_render_layout.addLayout(volume_controls)
         volume_render_layout.addWidget(self.btn_reset_volume_view)
         self.display_task_layout.addWidget(self.volume_render_section)
@@ -5197,10 +5230,80 @@ class TifWorkbenchWidget(QWidget):
             return "-"
         return "{0} -> {1}".format(start, end)
 
+    def _format_local_axis_point(self, values):
+        if not values or len(values) != 3:
+            return "-"
+        return "[{0}]".format(", ".join(f"{float(value):.3f}" for value in values))
+
     def _format_local_axis_vector(self, values):
         if not values or len(values) != 3:
             return "-"
         return "[{0}]".format(", ".join(f"{float(value):.3f}" for value in values))
+
+    def _local_axis_relation_metrics(self, editable_axis, roll_reference):
+        editable = editable_axis if isinstance(editable_axis, dict) else {}
+        roll = roll_reference if isinstance(roll_reference, dict) else {}
+        point_a = roll.get("point_a") if isinstance(roll.get("point_a"), dict) else {}
+        point_b = roll.get("point_b") if isinstance(roll.get("point_b"), dict) else {}
+        try:
+            start = np.asarray(editable.get("start_zyx") or [], dtype=np.float64)
+            end = np.asarray(editable.get("end_zyx") or [], dtype=np.float64)
+            a = np.asarray(point_a.get("zyx") or [], dtype=np.float64)
+            b = np.asarray(point_b.get("zyx") or [], dtype=np.float64)
+        except (TypeError, ValueError):
+            return None
+        if start.size != 3 or end.size != 3 or a.size != 3 or b.size != 3:
+            return None
+        spacing = np.asarray(self._local_axis_spacing_zyx(), dtype=np.float64)
+        if spacing.size != 3 or np.any(spacing <= 0):
+            spacing = np.ones(3, dtype=np.float64)
+        start_w = start * spacing
+        end_w = end * spacing
+        a_w = a * spacing
+        b_w = b * spacing
+        axis_w = end_w - start_w
+        axis_len = float(np.linalg.norm(axis_w))
+        if axis_len <= 1e-8:
+            return None
+        axis_unit = axis_w / axis_len
+
+        def projection(point_w):
+            offset = point_w - start_w
+            along = float(np.dot(offset, axis_unit))
+            lateral_vec = offset - along * axis_unit
+            return along, float(np.linalg.norm(lateral_vec))
+
+        a_along, a_lateral = projection(a_w)
+        b_along, b_lateral = projection(b_w)
+        roll_vec = b_w - a_w
+        roll_projected = roll_vec - float(np.dot(roll_vec, axis_unit)) * axis_unit
+        roll_width = float(np.linalg.norm(roll_projected))
+        status = "usable" if roll_width > 1e-6 else "parallel to output Z"
+        return {
+            "a_along": a_along,
+            "b_along": b_along,
+            "a_lateral": a_lateral,
+            "b_lateral": b_lateral,
+            "z_separation": float(b_along - a_along),
+            "roll_width": roll_width,
+            "status": status,
+        }
+
+    def _format_local_axis_relation_metrics(self, editable_axis, roll_reference):
+        metrics = self._local_axis_relation_metrics(editable_axis, roll_reference)
+        if not metrics:
+            return [
+                f"{tt('Axis/reference relation', self.lang)}: {tt('needs two reference points', self.lang)}",
+            ]
+        unit = self._local_axis_spacing_unit()
+        return [
+            f"{tt('Axis/reference relation', self.lang)}: {tt(metrics['status'], self.lang)}",
+            f"{tt('Roll A projection on output Z', self.lang)}: {metrics['a_along']:.2f} {unit}",
+            f"{tt('Roll B projection on output Z', self.lang)}: {metrics['b_along']:.2f} {unit}",
+            f"{tt('A/B separation along output Z', self.lang)}: {metrics['z_separation']:.2f} {unit}",
+            f"{tt('A/B lateral distance to output Z', self.lang)}: A {metrics['a_lateral']:.2f} / B {metrics['b_lateral']:.2f} {unit}",
+            f"{tt('A/B projected roll width', self.lang)}: {metrics['roll_width']:.2f} {unit}",
+        ]
 
     def _roll_reference_payload(self, draft=None):
         draft = draft if isinstance(draft, dict) else self._current_local_axis_draft()
@@ -5214,6 +5317,14 @@ class TifWorkbenchWidget(QWidget):
     def _local_axis_spacing_zyx(self):
         _, spacing_zyx = self._volume_source_geometry()
         return list(spacing_zyx or [1.0, 1.0, 1.0])
+
+    def _local_axis_spacing_unit(self):
+        if self.current_volume_scope == "part":
+            record = ((self.current_part or {}).get("image") or {})
+        else:
+            specimen = self.project.get_specimen(self.current_specimen_id, default=None) if self.current_specimen_id else None
+            record = (specimen or {}).get("working_volume") or {}
+        return str((record or {}).get("spacing_unit") or tt("voxel", self.lang))
 
     def _local_axis_origin_from_editable_axis(self, editable_axis):
         axis = editable_axis if isinstance(editable_axis, dict) else {}
@@ -5282,8 +5393,15 @@ class TifWorkbenchWidget(QWidget):
         label = getattr(self, "local_axis_summary_label", None)
         if label is None:
             return
+        details_label = getattr(self, "local_axis_details_label", None)
+        details_check = getattr(self, "local_axis_details_check", None)
         if self.current_volume_scope != "part" or not self.current_part_id or self.image_volume is None:
             label.setText(tt("Local axis unavailable. Select a part volume.", self.lang))
+            if details_label is not None:
+                details_label.setText("")
+                details_label.setVisible(False)
+            if details_check is not None:
+                details_check.setVisible(False)
             return
         lines = [
             f"{tt('Part', self.lang)}: {self.current_part_id}",
@@ -5293,11 +5411,14 @@ class TifWorkbenchWidget(QWidget):
                 self.lang,
             ),
         ]
+        detail_lines = []
         draft = self._current_local_axis_draft()
+        frame = None
         if draft is not None:
+            editable = draft.get("editable_axis") or {}
             lines.append(
                 tt("Draft output Z: {0}", self.lang).format(
-                    self._format_local_axis_point_pair((draft.get("editable_axis") or {}))
+                    self._format_local_axis_point_pair(editable)
                 )
             )
             roll = draft.get("roll_reference") if isinstance(draft.get("roll_reference"), dict) else {}
@@ -5305,13 +5426,26 @@ class TifWorkbenchWidget(QWidget):
             point_b = roll.get("point_b") if isinstance(roll.get("point_b"), dict) else {}
             if point_a.get("zyx") or point_b.get("zyx"):
                 lines.append(
-                    f"{tt('Roll reference', self.lang)}: "
-                    f"{point_a.get('role', 'roll_point_a')}={point_a.get('zyx', '-')} | "
-                    f"{point_b.get('role', 'roll_point_b')}={point_b.get('zyx', '-')}"
+                    tt("Roll reference: {0}", self.lang).format(
+                        f"A={tt('set' if point_a.get('zyx') else 'not set', self.lang)} / "
+                        f"B={tt('set' if point_b.get('zyx') else 'not set', self.lang)}"
+                    )
                 )
+            else:
+                lines.append(tt("Roll reference: A/B not set", self.lang))
             frame = self._refresh_local_axis_frame(draft)
+            lines.append(tt("Frame status: ready" if isinstance(frame, dict) else "Frame status: waiting for roll reference", self.lang))
+            detail_lines.extend(
+                [
+                    f"{tt('Output axis start z,y,x', self.lang)}: {self._format_local_axis_point(editable.get('start_zyx'))}",
+                    f"{tt('Output axis end z,y,x', self.lang)}: {self._format_local_axis_point(editable.get('end_zyx'))}",
+                    f"{tt('Roll reference A', self.lang)}: {self._format_local_axis_point(point_a.get('zyx'))}",
+                    f"{tt('Roll reference B', self.lang)}: {self._format_local_axis_point(point_b.get('zyx'))}",
+                ]
+            )
+            detail_lines.extend(self._format_local_axis_relation_metrics(editable, roll))
             if isinstance(frame, dict):
-                lines.extend(
+                detail_lines.extend(
                     [
                         f"{tt('Local frame', self.lang)} {tt('x_axis', self.lang)}: {self._format_local_axis_vector(frame.get('x_axis'))}",
                         f"{tt('Local frame', self.lang)} {tt('y_axis', self.lang)}: {self._format_local_axis_vector(frame.get('y_axis'))}",
@@ -5320,12 +5454,45 @@ class TifWorkbenchWidget(QWidget):
                 )
         else:
             lines.append(tt("Draft output Z: none", self.lang))
+            lines.append(tt("Roll reference: A/B not set", self.lang))
         reslice = self._current_part_reslice_record()
         if isinstance(reslice, dict):
             lines.append(tt("Saved reslice: {0}", self.lang).format(reslice.get("reslice_id", "")))
+            saved_axis = ((reslice.get("source") or {}).get("editable_axis") or {})
+            saved_frame = reslice.get("local_frame") if isinstance(reslice.get("local_frame"), dict) else {}
+            detail_lines.extend(
+                [
+                    f"{tt('Reslice ID', self.lang)}: {reslice.get('reslice_id', '')}",
+                    f"{tt('Image', self.lang)}: {reslice.get('image_path', '')}",
+                    f"{tt('Metadata', self.lang)}: {reslice.get('metadata_path', '')}",
+                    f"{tt('Output axis start z,y,x', self.lang)}: {self._format_local_axis_point(saved_axis.get('start_zyx'))}",
+                    f"{tt('Output axis end z,y,x', self.lang)}: {self._format_local_axis_point(saved_axis.get('end_zyx'))}",
+                ]
+            )
+            saved_roll = (
+                saved_frame.get("roll_reference")
+                if isinstance(saved_frame.get("roll_reference"), dict)
+                else reslice.get("roll_reference")
+                if isinstance(reslice.get("roll_reference"), dict)
+                else {}
+            )
+            detail_lines.extend(self._format_local_axis_relation_metrics(saved_axis, saved_roll))
+            if saved_frame:
+                detail_lines.extend(
+                    [
+                        f"{tt('Local frame', self.lang)} {tt('x_axis', self.lang)}: {self._format_local_axis_vector(saved_frame.get('x_axis'))}",
+                        f"{tt('Local frame', self.lang)} {tt('y_axis', self.lang)}: {self._format_local_axis_vector(saved_frame.get('y_axis'))}",
+                        f"{tt('Local frame', self.lang)} {tt('z_axis', self.lang)}: {self._format_local_axis_vector(saved_frame.get('z_axis'))}",
+                    ]
+                )
         else:
             lines.append(tt("Saved reslice: none selected", self.lang))
         label.setText("\n".join(lines))
+        if details_label is not None:
+            details_label.setText("\n".join(detail_lines))
+            details_label.setVisible(bool(details_check and details_check.isChecked() and detail_lines))
+        if details_check is not None:
+            details_check.setVisible(bool(detail_lines))
 
     def _project_zyx_to_volume_xy(self, point_zyx, shape_zyx, source_shape=None, spacing_zyx=None):
         if not point_zyx or len(point_zyx) != 3:
@@ -5785,8 +5952,8 @@ class TifWorkbenchWidget(QWidget):
                 }
             )
         for point, fallback_label, color, offset in (
-            (point_a, "roll_reference_a", "#7CE3A1", (-18, -12)),
-            (point_b, "roll_reference_b", "#66D9EF", (10, -12)),
+            (point_a, "Roll reference A", "#7CE3A1", (-18, -12)),
+            (point_b, "Roll reference B", "#66D9EF", (10, -12)),
         ):
             xy = self._project_zyx_to_volume_xy(point.get("zyx"), shape, source_shape=source_shape, spacing_zyx=spacing_zyx) if point.get("zyx") else None
             if xy:
@@ -5794,7 +5961,7 @@ class TifWorkbenchWidget(QWidget):
                     {
                         "kind": "point",
                         "point_xy": xy,
-                        "label": str(point.get("role") or fallback_label),
+                        "label": tt(fallback_label, self.lang),
                         "color": color,
                         "radius": 5,
                         "label_offset_xy": list(offset),

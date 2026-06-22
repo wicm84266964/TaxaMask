@@ -26,6 +26,15 @@
 - AI 方向在当前 UI 中降级为数据采集与 manifest 导出：不在第一版主工作台内暴露训练/预测/复核队列入口，不绑定具体模型候选。当前目标是先把人工确认的 part、axis、roll reference、local frame、reslice output 和 metadata 稳定记录下来，后续再参考 2D 路径补训练/推理链路。
 - 本轮补充测试覆盖：左侧树选中 reslice 后读取导出的 `image.tif` 而不是原 part image、导出进度窗口、导出后不删除原 part 数据、3D 内轴端点/轴身拖动、观察侧剖切深度方向、渲染交互降档、平移范围、局部结构检查和 GPU 画布轴/剖切绘制。验证通过 `tests.test_tif_workbench` 85 条、TIF GPU/Local Axis/Project/Batch 相关测试 62 条，以及 `compileall` 和 `git diff --check`。
 
+#### **同日实测补充：局部轴右侧栏参数、通用 3D 剖切面与 GPU 回退修复**
+
+- Local Axis 详情页路线继续收敛：轴和参照点的可读参数放回 TIF 工作台右侧栏。默认只显示部位、source Z、output Z 草稿、roll reference 状态、坐标系状态和已保存 reslice；展开“显示轴参数”后再显示 output axis 起止点、Roll A/B 坐标、A/B 相对 output Z 的投影位置、沿轴间距、横向距离、投影 roll 宽度和完整 local frame，避免右侧栏长期堆满工程数值。
+- 3D 叠加显示继续使用通用术语：source Z 作为锁定参考，output Z 作为实际重切片推进轴，Roll reference A/B 作为方向标准化参照点。底层记录仍保留 `roll_reference_a/b`，界面不再把点选按钮写死为 brain/eye，也不再显示内部字段名。
+- 观察侧剖切面从 Local Axis 子面板移动到通用 `3D rendering` 面板。整只 TIFF 体数据和 part volume 都能使用同一个剖切面与剖切深度；Local Axis 的 Roll A/B 点选继续复用这条观察侧剖切面。该功能只影响屏幕预览和点选坐标，不会修改原始 TIFF、part volume、mask、contours 或训练样本。
+- GPU 剖切面视觉调回“清晰贴图式截面 + 当前体渲染配色”路线：剖面保留足够密度和边界细节，颜色跟随当前 transfer/tint，而不是灰白 CT 切片；同时继续融合在当前 3D 体预览中，避免视觉上像一个独立弹出的二维切片。
+- 修复一次实测发现的 GPU 回退问题：剖切面 shader 使用 `u_tint_rgb` 后补齐 uniform 声明，并在离屏 GPU 与嵌入式 GPU 两条渲染路径都传入 tint，避免 shader 编译失败导致整只体或部位体预览回退 CPU。测试新增断言覆盖该 uniform 声明和传值路径。
+- 用户已完成本轮界面实测并确认剖切面、GPU 体预览和局部轴交互方向有明显进步。验证通过 `tests.test_tif_workbench` 85 条、`tests.test_tif_gpu_volume_canvas` 9 条、Local Axis/Project/Batch 相关测试 53 条、`compileall` 和 `git diff --check`（仅 Windows 换行提示）。
+
 ### **[2026-06-17] 开发版阶段同步：TIF 部位提取、分标签训练、轻量日志与模型备注**
 > **本次重点：把最近一轮尚未提交的开发版改动集中归档。当前开发版同时包含 TIF 体数据实验增强，以及已经同步到正式发布版的非 TIF 功能：轻量运行日志、按图片标签训练、父/子模型备注。TIF 路径仍按开发版实验功能处理，正式发布版暂不发布。**
 

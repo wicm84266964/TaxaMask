@@ -40,7 +40,7 @@
   - enable/show source/output axes
   - copy locked source Z into an editable output Z draft
   - drag output-axis endpoints or the axis body directly in the 3D preview
-  - enable the observation-side clip plane
+  - enable the observation-side clip plane from the shared `3D rendering` controls
   - pick roll reference A/B on that clip plane
   - export the confirmed reslice from the right sidebar
 - Formal reslice exports are stored under the selected part:
@@ -61,11 +61,16 @@
   - accepted proposals are the only source allowed for batch formal reslice export
 - 3D preview notes:
   - source Z and output Z overlays are drawn in the canvas with separated labels
+  - output Z is the actual reslice advance axis; roll reference A/B standardize in-plane direction and are not a second slicing axis
   - saved reslice overlays take precedence over unsaved local-axis drafts
+  - Local Axis right-sidebar defaults to compact status; detailed output-axis coordinates, Roll A/B coordinates, relation metrics to output Z, and local frame vectors are hidden behind `Show axis details`
+  - observation-side clip plane is now a shared `3D rendering` control available for both full TIFF volume and part volume; Local Axis point picking reuses it
   - observation-side clip plane is a display/point-picking aid and does not mutate saved data
+  - the GPU clip-plane cross-section is intentionally "texture-like" for inspection detail, but it follows the active transfer/tint color scheme so it remains visually integrated with the 3D volume preview
+  - GPU shader tint support requires `u_tint_rgb` to be declared and supplied in both offscreen and embedded GPU render paths; missing this causes shader compile failure and CPU fallback
   - "Local detail check" replaces the previous over-promising "clarity" wording; it improves local inspection but does not create new source detail beyond the loaded part texture
   - composite rendering and depth/clip sliders use lighter interaction rendering while dragging to reduce UI stalls
-- Recent validation covered `tests.test_tif_workbench` (85 tests), TIF GPU/Local Axis/Project/Batch tests (62 tests), `compileall`, and `git diff --check`. Real AntScan visual validation is still expected for axis readability, roll reference usability, and whether the exported reslice orientation matches the researcher's intended anatomical convention.
+- Recent validation covered `tests.test_tif_workbench` (85 tests), `tests.test_tif_gpu_volume_canvas` (9 tests), Local Axis/Project/Batch tests (53 tests), `compileall`, and `git diff --check`. The user has visually confirmed the current TIF GPU preview / clip-plane / local-axis interaction pass as a significant improvement; further AntScan validation is still expected for batch-scale axis readability and anatomical consistency.
 
 ### 0.1 Large 2D/STL annotation behavior
 - Large 2D/STL projects open with lightweight safeguards:

@@ -1081,6 +1081,8 @@ class TifVolumeCanvas(QLabel):
         if event.button() in (Qt.LeftButton, Qt.RightButton) and self._mouse_mode:
             self._mouse_mode = ""
             self._last_drag_pos = None
+            if self.workbench is not None:
+                self.workbench.finish_volume_interaction_debounced()
             event.accept()
             return
         super().mouseReleaseEvent(event)
@@ -1197,6 +1199,9 @@ class TifWorkbenchWidget(QWidget):
         self._volume_renderer_warning = ""
         self._volume_gl_renderer_info = ""
         self._volume_render_scheduled = False
+        self._volume_interaction_render_scheduled = False
+        self._volume_interaction_render_pending = False
+        self._volume_interaction_render_interval_ms = 16
         self._handling_gpu_volume_failure = False
         self._volume_yaw = -35.0
         self._volume_pitch = 20.0
@@ -1519,7 +1524,7 @@ class TifWorkbenchWidget(QWidget):
         self.auto_save_timer.timeout.connect(lambda: self.save_working_edit(show_message=True, reason="auto_save"))
         self.volume_still_timer = QTimer(self)
         self.volume_still_timer.setSingleShot(True)
-        self.volume_still_timer.setInterval(520)
+        self.volume_still_timer.setInterval(220)
         self.volume_still_timer.timeout.connect(self._finish_volume_interaction)
 
         self._apply_button_roles()
@@ -5103,7 +5108,12 @@ class TifWorkbenchWidget(QWidget):
         if hasattr(self, "volume_still_timer"):
             self.volume_still_timer.start()
 
+    def finish_volume_interaction_debounced(self):
+        if hasattr(self, "volume_still_timer"):
+            self.volume_still_timer.start()
+
     def _finish_volume_interaction(self):
+        self._volume_interaction_render_pending = False
         if self._volume_render_mode != "still":
             self._volume_render_mode = "still"
             self.render_volume_preview()
@@ -5188,7 +5198,7 @@ class TifWorkbenchWidget(QWidget):
         self._start_volume_interaction()
         self._volume_yaw = (self._volume_yaw + float(dx) * 0.6) % 360.0
         self._volume_pitch = max(-85.0, min(85.0, self._volume_pitch + float(dy) * 0.45))
-        self.render_volume_preview()
+        self._request_volume_interaction_render()
 
     def pan_volume_preview(self, dx, dy):
         self._start_volume_interaction()
@@ -5197,13 +5207,13 @@ class TifWorkbenchWidget(QWidget):
         zoom = max(0.35, float(self._volume_zoom))
         self._volume_pan_x = max(-2.0, min(2.0, self._volume_pan_x + (float(dx) / width) * 2.0 / zoom))
         self._volume_pan_y = max(-2.0, min(2.0, self._volume_pan_y - (float(dy) / height) * 2.0 / zoom))
-        self.render_volume_preview()
+        self._request_volume_interaction_render()
 
     def zoom_volume_preview(self, direction):
         self._start_volume_interaction()
         factor = 1.18 if int(direction) > 0 else 1.0 / 1.18
         self._volume_zoom = max(0.35, min(16.0, self._volume_zoom * factor))
-        self.render_volume_preview()
+        self._request_volume_interaction_render()
 
     def reset_volume_view(self):
         if hasattr(self, "volume_still_timer"):
@@ -5243,6 +5253,7 @@ class TifWorkbenchWidget(QWidget):
         self._volume_preview_source_shape = ()
         self._volume_last_stats = {}
         self._volume_render_mode = "still"
+        self._volume_interaction_render_pending = False
 
     def _clear_volume_mask_caches(self):
         self._volume_mask_preview_cache = {}
@@ -5488,6 +5499,50 @@ class TifWorkbenchWidget(QWidget):
         if hasattr(self.volume_canvas, "set_mask_data"):
             self.volume_canvas.set_mask_data(mask_preview if mask_mode != "image_only" else None)
         if hasattr(self.volume_canvas, "set_render_state"):
+            self.volume_canvas.set_render_state(**state)
+        return True
+
+    def _request_volume_interaction_render(self):
+        if self.display_mode != "volume":
+            return
+        self._volume_interaction_render_pending = True
+        if self._volume_interaction_render_scheduled:
+            return
+        self._volume_interaction_render_scheduled = True
+
+        def run():
+            self._volume_interaction_render_scheduled = False
+            if not self._volume_interaction_render_pending:
+                return
+            self._volume_interaction_render_pending = False
+            self._render_volume_interaction_preview()
+
+        delay_ms = int(self._volume_interaction_render_interval_ms)
+        if self._volume_canvas_renderer != "gpu":
+            delay_ms = max(delay_ms, 80)
+        QTimer.singleShot(delay_ms, run)
+
+    def _render_volume_interaction_preview(self):
+        if self.display_mode != "volume" or self.image_volume is None:
+            return
+        if self._sync_gpu_volume_camera_only():
+            self._update_volume_render_status_label()
+            return
+        self.render_volume_preview()
+
+    def _sync_gpu_volume_camera_only(self):
+        if self._volume_canvas_renderer != "gpu" or not hasattr(self.volume_canvas, "set_render_state"):
+            return False
+        if not callable(getattr(self.volume_canvas, "has_volume", None)) or not self.volume_canvas.has_volume():
+            return False
+        mode = "drag" if self._volume_render_mode == "drag" else "still"
+        state = self._volume_render_state(mode)
+        state["mask_mode"] = self._volume_mask_mode()
+        if hasattr(self.volume_canvas, "set_axis_overlays"):
+            self.volume_canvas.set_axis_overlays(self._local_axis_volume_overlays())
+        if callable(getattr(self.volume_canvas, "set_interaction_render_state", None)):
+            self.volume_canvas.set_interaction_render_state(**state)
+        else:
             self.volume_canvas.set_render_state(**state)
         return True
 

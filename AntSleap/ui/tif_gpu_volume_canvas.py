@@ -1312,6 +1312,8 @@ if gpu_volume_offscreen_available():
             self._failed = False
             self._batch_update_depth = 0
             self._batch_render_pending = False
+            self._interaction_render_scheduled = False
+            self._interaction_render_delay_ms = 16
             self._last_renderer_info = ""
             self._axis_overlays = []
             self.setObjectName("tifVolumeCanvas")
@@ -1369,6 +1371,13 @@ if gpu_volume_offscreen_available():
             except Exception as exc:
                 self._mark_failed(f"GPU offscreen render failed: {exc}")
 
+        def set_interaction_render_state(self, *args, **kwargs):
+            try:
+                self._renderer.set_render_state(*args, **kwargs)
+                self._request_interaction_render_to_label()
+            except Exception as exc:
+                self._mark_failed(f"GPU offscreen interaction render failed: {exc}")
+
         def set_volume_render_inputs(self, volume, mask=None, render_state=None, source_shape=None, spacing_zyx=None):
             self._batch_update_depth += 1
             try:
@@ -1399,6 +1408,20 @@ if gpu_volume_offscreen_available():
                 self._batch_render_pending = True
                 return
             self._render_to_label()
+
+        def _request_interaction_render_to_label(self):
+            if self._batch_update_depth > 0:
+                self._batch_render_pending = True
+                return
+            if self._interaction_render_scheduled:
+                return
+            self._interaction_render_scheduled = True
+
+            def run():
+                self._interaction_render_scheduled = False
+                self._render_to_label()
+
+            QTimer.singleShot(int(self._interaction_render_delay_ms), run)
 
         def _render_to_label(self):
             if self._failed or not self._renderer.has_volume():
@@ -1488,6 +1511,8 @@ if gpu_volume_offscreen_available():
             if event.button() in (Qt.LeftButton, Qt.RightButton) and self._mouse_mode:
                 self._mouse_mode = ""
                 self._last_drag_pos = None
+                if self.workbench is not None:
+                    self.workbench.finish_volume_interaction_debounced()
                 event.accept()
                 return
             super().mouseReleaseEvent(event)
@@ -2108,6 +2133,8 @@ if gpu_volume_canvas_available():
             if event.button() in (Qt.LeftButton, Qt.RightButton) and self._mouse_mode:
                 self._mouse_mode = ""
                 self._last_drag_pos = None
+                if self.workbench is not None:
+                    self.workbench.finish_volume_interaction_debounced()
                 event.accept()
                 return
             super().mouseReleaseEvent(event)

@@ -2212,6 +2212,64 @@ class TifWorkbenchTests(unittest.TestCase):
             widget.deleteLater()
             fake_canvas.deleteLater()
 
+    def test_volume_drag_updates_gpu_camera_without_reuploading_texture(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+
+        class FakeGpuLabel(QLabel):
+            def __init__(self):
+                super().__init__()
+                self.upload_ids = []
+                self.mask_uploads = []
+                self.render_state_kwargs = []
+                self.interaction_state_kwargs = []
+                self._has_volume = False
+
+            def has_volume(self):
+                return self._has_volume
+
+            def set_volume_data(self, volume, *args, **kwargs):
+                self.upload_ids.append(id(volume))
+                self._has_volume = True
+
+            def set_mask_data(self, mask):
+                self.mask_uploads.append(None if mask is None else id(mask))
+
+            def set_render_state(self, *args, **kwargs):
+                self.render_state_kwargs.append(dict(kwargs))
+
+            def set_interaction_render_state(self, *args, **kwargs):
+                self.interaction_state_kwargs.append(dict(kwargs))
+
+        fake_canvas = FakeGpuLabel()
+        try:
+            widget._volume_canvas_renderer = "gpu"
+            widget._volume_canvas_created = True
+            widget.view_stack.addWidget(fake_canvas)
+            widget.volume_canvas = fake_canvas
+            widget.display_mode = "volume"
+            widget.image_volume = np.zeros((8, 96, 96), dtype=np.uint8)
+            widget.image_volume[:, 24:72, 24:72] = 180
+
+            widget.render_volume_preview()
+            self.assertEqual(len(fake_canvas.upload_ids), 1)
+            first_upload = fake_canvas.upload_ids[-1]
+
+            widget.rotate_volume_preview(20, -5)
+            widget._render_volume_interaction_preview()
+
+            self.assertEqual(fake_canvas.upload_ids, [first_upload])
+            self.assertTrue(fake_canvas.interaction_state_kwargs)
+            self.assertEqual(fake_canvas.interaction_state_kwargs[-1]["render_mode"], "drag")
+            self.assertLessEqual(fake_canvas.interaction_state_kwargs[-1]["sample_steps"], 768)
+            self.assertEqual(widget._volume_render_mode, "drag")
+            widget._finish_volume_interaction()
+            self.assertEqual(widget._volume_render_mode, "still")
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+            fake_canvas.deleteLater()
+
     def test_transfer_opacity_change_keeps_volume_texture_cache(self):
         manager = TifProjectManager()
         widget = TifWorkbenchWidget(manager, "en")

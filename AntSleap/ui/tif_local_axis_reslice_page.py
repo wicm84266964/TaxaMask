@@ -112,6 +112,7 @@ LOCAL_AXIS_TRANSLATIONS = {
         "Compute source Z signal": "计算原始 Z 信号",
         "Press Compute source Z signal when you need this optional diagnostic.": "需要这个可选诊断时，再点击“计算原始 Z 信号”。",
         "Copied source Z axis as editable output axis.": "已从原始 Z 轴复制可编辑输出轴。",
+        "Loaded local axis draft from 3D preview.": "已载入三维预览中的局部轴草稿。",
         "Local frame is valid.": "局部坐标系有效。",
         "Preview generated: {0}": "已生成预览：{0}",
         "Exported local axis reslice {0}.": "已导出局部轴重切片 {0}。",
@@ -335,7 +336,7 @@ class TifLocalAxisSlicePickerDialog(QDialog):
 
 
 class TifLocalAxisResliceDialog(QDialog):
-    def __init__(self, project_manager, specimen_id, part_id, proposal_id="", parent=None, lang="en"):
+    def __init__(self, project_manager, specimen_id, part_id, proposal_id="", parent=None, lang="en", initial_draft=None):
         super().__init__(parent)
         self.project = project_manager
         self.specimen_id = str(specimen_id or "")
@@ -359,6 +360,7 @@ class TifLocalAxisResliceDialog(QDialog):
             self.spacing_zyx = [1.0, 1.0, 1.0]
         self.source_axis = source_z_axis_for_part(self.part_shape)
         self.editable_axis = create_editable_axis_from_source(self.source_axis)
+        self.initial_draft = dict(initial_draft or {}) if isinstance(initial_draft, dict) else {}
         self.proposals = self.project.list_local_frame_proposals(self.specimen_id, self.part_id)
 
         self.setWindowTitle(tt("Local Axis Reslice", self.lang))
@@ -395,9 +397,12 @@ class TifLocalAxisResliceDialog(QDialog):
 
         self._update_validation_status()
         self._configure_slice_picker()
-        QTimer.singleShot(0, self._enable_initial_picker_render)
         if proposal_id:
             self._select_proposal(proposal_id)
+            self.load_selected_proposal()
+        else:
+            self._apply_initial_draft()
+        QTimer.singleShot(0, self._enable_initial_picker_render)
 
     def _build_part_group(self):
         group = QGroupBox(tt("Current part", self.lang))
@@ -710,6 +715,40 @@ class TifLocalAxisResliceDialog(QDialog):
         self.axis_start_edit.setText(self._format_point(self.source_axis.get("start_zyx")))
         self.axis_end_edit.setText(self._format_point(self.source_axis.get("end_zyx")))
         self.preview_status_label.setText(tt("Copied source Z axis as editable output axis.", self.lang))
+
+    def _apply_initial_draft(self):
+        draft = self.initial_draft if isinstance(self.initial_draft, dict) else {}
+        if not draft:
+            return
+        if draft.get("specimen_id") and str(draft.get("specimen_id")) != self.specimen_id:
+            return
+        if draft.get("part_id") and str(draft.get("part_id")) != self.part_id:
+            return
+        source_axis = draft.get("source_axis")
+        editable_axis = draft.get("editable_axis")
+        if isinstance(source_axis, dict) and source_axis.get("start_zyx") and source_axis.get("end_zyx"):
+            self.source_axis = dict(source_axis)
+        if isinstance(editable_axis, dict):
+            self.editable_axis = dict(editable_axis)
+            if editable_axis.get("start_zyx"):
+                self.axis_start_edit.setText(self._format_point(editable_axis.get("start_zyx")))
+            if editable_axis.get("end_zyx"):
+                self.axis_end_edit.setText(self._format_point(editable_axis.get("end_zyx")))
+        if draft.get("template_id"):
+            self.template_id_edit.setText(str(draft.get("template_id")))
+        if draft.get("origin_zyx"):
+            self.origin_edit.setText(self._format_point(draft.get("origin_zyx")))
+        roll = draft.get("roll_reference") if isinstance(draft.get("roll_reference"), dict) else {}
+        point_a = roll.get("point_a") if isinstance(roll.get("point_a"), dict) else {}
+        point_b = roll.get("point_b") if isinstance(roll.get("point_b"), dict) else {}
+        if point_a.get("zyx"):
+            self.roll_a_role_edit.setText(str(point_a.get("role") or "roll_point_a"))
+            self.roll_a_point_edit.setText(self._format_point(point_a.get("zyx")))
+        if point_b.get("zyx"):
+            self.roll_b_role_edit.setText(str(point_b.get("role") or "roll_point_b"))
+            self.roll_b_point_edit.setText(self._format_point(point_b.get("zyx")))
+        self.preview_status_label.setText(tt("Loaded local axis draft from 3D preview.", self.lang))
+        self._update_validation_status()
 
     def load_selected_proposal(self):
         proposal = self._selected_proposal()

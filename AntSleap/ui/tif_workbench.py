@@ -4087,10 +4087,11 @@ class TifWorkbenchWidget(QWidget):
             }
         return {"scope": "full", "specimen_id": str(payload or ""), "part_id": "", "reslice_id": ""}
 
-    def _select_volume_tree_item(self, specimen_id="", scope="full", part_id=""):
+    def _select_volume_tree_item(self, specimen_id="", scope="full", part_id="", reslice_id=""):
         target_specimen = str(specimen_id or "").strip()
         target_scope = "part_reslice" if scope == "part_reslice" else ("part" if scope in {"part", "part_reslices"} else "full")
         target_part = str(part_id or "").strip()
+        target_reslice = str(reslice_id or "").strip()
         fallback = None
         for row in range(self.specimen_list.topLevelItemCount()):
             parent = self.specimen_list.topLevelItem(row)
@@ -4113,8 +4114,18 @@ class TifWorkbenchWidget(QWidget):
                             group = child.child(group_index)
                             group_payload = self._tree_item_payload(group)
                             if group_payload.get("scope") == "part_reslices" and group.childCount():
+                                if target_reslice:
+                                    for reslice_index in range(group.childCount()):
+                                        reslice_item = group.child(reslice_index)
+                                        reslice_payload = self._tree_item_payload(reslice_item)
+                                        if reslice_payload.get("reslice_id") == target_reslice:
+                                            self.specimen_list.setCurrentItem(reslice_item)
+                                            return True
+                                    return False
                                 self.specimen_list.setCurrentItem(group.child(0))
                                 return True
+                        if target_reslice:
+                            return False
                     self.specimen_list.setCurrentItem(child)
                     return True
         if fallback is not None and not target_specimen:
@@ -4757,7 +4768,7 @@ class TifWorkbenchWidget(QWidget):
         draft = {
             "specimen_id": self.current_specimen_id,
             "part_id": self.current_part_id,
-            "template_id": "head" if str(self.current_part_id).lower() == "head" else "generic",
+            "template_id": str(self.current_part_id or "generic"),
             "source_axis": source_axis,
             "editable_axis": editable_axis,
             "origin_zyx": origin,
@@ -6072,6 +6083,11 @@ class TifWorkbenchWidget(QWidget):
             QMessageBox.information(self, tt("Local Axis Reslice", self.lang), tt("Select a part volume before opening Local Axis Reslice.", self.lang))
             return None
         try:
+            initial_draft = (
+                self._current_local_axis_draft()
+                if not proposal_id and target_specimen_id == self.current_specimen_id and target_part_id == self.current_part_id
+                else None
+            )
             dialog = TifLocalAxisResliceDialog(
                 self.project,
                 target_specimen_id,
@@ -6079,6 +6095,7 @@ class TifWorkbenchWidget(QWidget):
                 proposal_id=proposal_id,
                 parent=self,
                 lang=self.lang,
+                initial_draft=initial_draft,
             )
         except Exception as exc:
             QMessageBox.warning(self, tt("Local Axis Reslice", self.lang), str(exc))
@@ -6091,8 +6108,11 @@ class TifWorkbenchWidget(QWidget):
             message = tt("Exported local axis reslice {0}.", self.lang).format(reslice_id)
             self.training_status_label.setText(message)
             self.log(message)
+            draft = self._current_local_axis_draft()
+            if draft is not None and target_specimen_id == self.current_specimen_id and target_part_id == self.current_part_id:
+                self.local_axis_draft = None
             self.refresh_project()
-            self._select_volume_tree_item(target_specimen_id, "part_reslice", target_part_id)
+            self._select_volume_tree_item(target_specimen_id, "part_reslice", target_part_id, reslice_id)
         dialog.deleteLater()
         return result
 

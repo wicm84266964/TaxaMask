@@ -401,6 +401,307 @@ class TifWorkbenchTests(unittest.TestCase):
             finally:
                 dialog.deleteLater()
 
+    def test_local_axis_dialog_loads_initial_workbench_draft(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = TifProjectManager()
+            manager.create_project("local_axis_initial_draft", root / "local_axis_initial_draft")
+            manager.create_specimen_scaffold("01-0101-draft-dialog")
+            image = np.arange(4 * 6 * 8, dtype=np.uint8).reshape((4, 6, 8))
+            image_rel = "specimens/01-0101-draft-dialog/working/image.ome.zarr"
+            image_meta = write_volume_sidecar(root / "local_axis_initial_draft" / image_rel, image, role="working_image")
+            manager.register_working_volume("01-0101-draft-dialog", image_rel, image_meta["shape_zyx"], image_meta["dtype"], save=False)
+            manager.save_project()
+            crop_volume_to_part(manager, "01-0101-draft-dialog", "head", [[1, 3], [2, 6], [1, 5]], display_name="Head")
+            draft = {
+                "template_id": "head",
+                "source_axis": {"axis_id": "source_z_axis", "start_zyx": [0, 1.5, 1.5], "end_zyx": [1, 1.5, 1.5]},
+                "editable_axis": {"axis_id": "local_output_z_axis", "start_zyx": [0, 0.5, 1.0], "end_zyx": [1, 2.5, 3.0]},
+                "origin_zyx": [0.5, 2.0, 2.0],
+                "roll_reference": {
+                    "point_a": {"role": "left_eye", "zyx": [0.5, 1.0, 1.0]},
+                    "point_b": {"role": "right_eye", "zyx": [0.5, 2.0, 1.0]},
+                },
+            }
+
+            dialog = TifLocalAxisResliceDialog(manager, "01-0101-draft-dialog", "head", lang="en", initial_draft=draft)
+            try:
+                self.assertEqual(dialog.axis_start_edit.text(), "0,0.5,1")
+                self.assertEqual(dialog.axis_end_edit.text(), "1,2.5,3")
+                self.assertEqual(dialog.origin_edit.text(), "0.5,2,2")
+                self.assertEqual(dialog.roll_a_role_edit.text(), "left_eye")
+                self.assertEqual(dialog.roll_b_role_edit.text(), "right_eye")
+                self.assertIn("Loaded local axis draft", dialog.preview_status_label.text())
+            finally:
+                dialog.deleteLater()
+
+    def test_local_axis_dialog_ignores_initial_draft_for_other_part(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = TifProjectManager()
+            manager.create_project("local_axis_wrong_draft", root / "local_axis_wrong_draft")
+            manager.create_specimen_scaffold("01-0101-wrong-draft")
+            image = np.arange(4 * 6 * 8, dtype=np.uint8).reshape((4, 6, 8))
+            image_rel = "specimens/01-0101-wrong-draft/working/image.ome.zarr"
+            image_meta = write_volume_sidecar(root / "local_axis_wrong_draft" / image_rel, image, role="working_image")
+            manager.register_working_volume("01-0101-wrong-draft", image_rel, image_meta["shape_zyx"], image_meta["dtype"], save=False)
+            manager.save_project()
+            crop_volume_to_part(manager, "01-0101-wrong-draft", "head", [[1, 3], [2, 6], [1, 5]], display_name="Head")
+            draft = {
+                "specimen_id": "01-0101-wrong-draft",
+                "part_id": "thorax",
+                "editable_axis": {"axis_id": "local_output_z_axis", "start_zyx": [0, 0, 0], "end_zyx": [1, 1, 1]},
+            }
+
+            dialog = TifLocalAxisResliceDialog(manager, "01-0101-wrong-draft", "head", lang="en", initial_draft=draft)
+            try:
+                self.assertNotEqual(dialog.axis_start_edit.text(), "0,0,0")
+                self.assertNotIn("Loaded local axis draft", dialog.preview_status_label.text())
+            finally:
+                dialog.deleteLater()
+
+    def test_local_axis_dialog_uses_explicit_proposal_over_initial_draft(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = TifProjectManager()
+            manager.create_project("local_axis_proposal_over_draft", root / "local_axis_proposal_over_draft")
+            manager.create_specimen_scaffold("01-0101-proposal-draft")
+            image = np.arange(4 * 6 * 8, dtype=np.uint8).reshape((4, 6, 8))
+            image_rel = "specimens/01-0101-proposal-draft/working/image.ome.zarr"
+            image_meta = write_volume_sidecar(root / "local_axis_proposal_over_draft" / image_rel, image, role="working_image")
+            manager.register_working_volume("01-0101-proposal-draft", image_rel, image_meta["shape_zyx"], image_meta["dtype"], save=False)
+            manager.save_project()
+            crop_volume_to_part(manager, "01-0101-proposal-draft", "head", [[1, 3], [2, 6], [1, 5]], display_name="Head")
+            manager.add_local_frame_proposal(
+                "01-0101-proposal-draft",
+                "head",
+                {
+                    "frame_proposal_id": "frame_from_queue",
+                    "template_id": "head",
+                    "origin_zyx": [0.5, 1.5, 1.5],
+                    "output_axis_start_zyx": [0.0, 1.5, 1.5],
+                    "output_axis_end_zyx": [1.0, 1.5, 1.5],
+                    "roll_reference": {
+                        "point_a": {"role": "left_eye", "zyx": [0.5, 1.0, 1.0]},
+                        "point_b": {"role": "right_eye", "zyx": [0.5, 2.0, 1.0]},
+                    },
+                    "status": "accepted",
+                },
+            )
+            draft = {
+                "template_id": "head",
+                "editable_axis": {"axis_id": "local_output_z_axis", "start_zyx": [0, 0, 0], "end_zyx": [1, 1, 1]},
+                "origin_zyx": [0, 0, 0],
+                "roll_reference": {
+                    "point_a": {"role": "draft_a", "zyx": [0, 0, 0]},
+                    "point_b": {"role": "draft_b", "zyx": [1, 1, 1]},
+                },
+            }
+
+            dialog = TifLocalAxisResliceDialog(
+                manager,
+                "01-0101-proposal-draft",
+                "head",
+                proposal_id="frame_from_queue",
+                lang="en",
+                initial_draft=draft,
+            )
+            try:
+                self.assertEqual(dialog.axis_start_edit.text(), "0,1.5,1.5")
+                self.assertEqual(dialog.axis_end_edit.text(), "1,1.5,1.5")
+                self.assertEqual(dialog.origin_edit.text(), "0.5,1.5,1.5")
+                self.assertEqual(dialog.roll_a_role_edit.text(), "left_eye")
+                self.assertEqual(dialog.roll_b_role_edit.text(), "right_eye")
+                self.assertNotIn("Loaded local axis draft", dialog.preview_status_label.text())
+            finally:
+                dialog.deleteLater()
+
+    def test_open_local_axis_reslice_dialog_passes_and_clears_axis_draft_on_export(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+            try:
+                crop_volume_to_part(widget.project, "01-0101-21", "head", [[0, 4], [1, 7], [1, 7]], display_name="Head")
+                widget.refresh_project()
+                widget._select_volume_tree_item("01-0101-21", "part", "head")
+                draft = widget.copy_source_z_axis_to_local_axis_draft()
+                self.assertIsNotNone(draft)
+
+                captured = {}
+
+                class FakeLocalAxisDialog:
+                    def __init__(self, project, specimen_id, part_id, proposal_id="", parent=None, lang="en", initial_draft=None):
+                        captured["project"] = project
+                        captured["specimen_id"] = specimen_id
+                        captured["part_id"] = part_id
+                        captured["initial_draft"] = initial_draft
+                        self.export_result = {"record": {"reslice_id": "head_axis_saved"}}
+
+                    def exec(self):
+                        return QDialog.Accepted
+
+                    def deleteLater(self):
+                        return None
+
+                selected = {}
+
+                def fake_select(specimen_id="", scope="full", part_id="", reslice_id=""):
+                    selected.update({"specimen_id": specimen_id, "scope": scope, "part_id": part_id, "reslice_id": reslice_id})
+                    return True
+
+                with patch("AntSleap.ui.tif_workbench.TifLocalAxisResliceDialog", FakeLocalAxisDialog):
+                    with patch.object(widget, "refresh_project", return_value=None):
+                        with patch.object(widget, "_select_volume_tree_item", side_effect=fake_select):
+                            result = widget.open_local_axis_reslice_dialog()
+
+                self.assertEqual(result["record"]["reslice_id"], "head_axis_saved")
+                self.assertEqual(captured["specimen_id"], "01-0101-21")
+                self.assertEqual(captured["part_id"], "head")
+                self.assertIs(captured["initial_draft"], draft)
+                self.assertIsNone(widget.local_axis_draft)
+                self.assertEqual(selected, {"specimen_id": "01-0101-21", "scope": "part_reslice", "part_id": "head", "reslice_id": "head_axis_saved"})
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_open_local_axis_reslice_dialog_does_not_pass_draft_for_explicit_proposal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+            try:
+                crop_volume_to_part(widget.project, "01-0101-21", "head", [[0, 4], [1, 7], [1, 7]], display_name="Head")
+                widget.refresh_project()
+                widget._select_volume_tree_item("01-0101-21", "part", "head")
+                self.assertIsNotNone(widget.copy_source_z_axis_to_local_axis_draft())
+
+                captured = {}
+
+                class FakeLocalAxisDialog:
+                    def __init__(self, project, specimen_id, part_id, proposal_id="", parent=None, lang="en", initial_draft=None):
+                        captured["proposal_id"] = proposal_id
+                        captured["initial_draft"] = initial_draft
+                        self.export_result = None
+
+                    def exec(self):
+                        return QDialog.Rejected
+
+                    def deleteLater(self):
+                        return None
+
+                with patch("AntSleap.ui.tif_workbench.TifLocalAxisResliceDialog", FakeLocalAxisDialog):
+                    result = widget.open_local_axis_reslice_dialog(proposal_id="frame_from_queue")
+
+                self.assertIsNone(result)
+                self.assertEqual(captured["proposal_id"], "frame_from_queue")
+                self.assertIsNone(captured["initial_draft"])
+                self.assertIsNotNone(widget.local_axis_draft)
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_select_volume_tree_item_targets_specific_reslice(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+            try:
+                crop_volume_to_part(widget.project, "01-0101-21", "head", [[0, 4], [1, 7], [1, 7]], display_name="Head")
+                frame = compute_local_frame(
+                    [1.5, 3.0, 3.0],
+                    [0.0, 3.0, 3.0],
+                    [3.0, 3.0, 3.0],
+                    roll_reference={
+                        "point_a": {"role": "left_eye", "zyx": [1.5, 2.0, 2.0]},
+                        "point_b": {"role": "right_eye", "zyx": [1.5, 4.0, 2.0]},
+                    },
+                )
+                export_part_reslice(
+                    widget.project,
+                    "01-0101-21",
+                    "head",
+                    {
+                        "reslice_id": "head_axis_saved",
+                        "template_id": "head",
+                        "source_axis": {
+                            "axis_id": "source_z_axis",
+                            "role": "source_direction_reference",
+                            "start_zyx": [0.0, 3.0, 3.0],
+                            "end_zyx": [3.0, 3.0, 3.0],
+                            "locked": True,
+                        },
+                        "editable_axis": {
+                            "axis_id": "local_output_z_axis",
+                            "role": "editable_output_axis",
+                            "source_axis_id": "source_z_axis",
+                            "start_zyx": [0.0, 3.0, 3.0],
+                            "end_zyx": [3.0, 3.0, 3.0],
+                        },
+                        "local_frame": frame,
+                    },
+                )
+                export_part_reslice(
+                    widget.project,
+                    "01-0101-21",
+                    "head",
+                    {
+                        "reslice_id": "head_axis_second",
+                        "template_id": "head",
+                        "local_frame": frame,
+                    },
+                )
+
+                widget.refresh_project()
+                self.assertTrue(widget._select_volume_tree_item("01-0101-21", "part_reslice", "head", "head_axis_second"))
+
+                self.assertEqual(widget.current_reslice_id, "head_axis_second")
+                overlays = widget._local_axis_volume_overlays()
+                self.assertEqual([item["label"] for item in overlays], ["source Z", "output Z"])
+                self.assertIn("Reslice ID: head_axis_second", widget.metadata_label.text())
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_select_volume_tree_item_does_not_fallback_to_wrong_reslice(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+            try:
+                crop_volume_to_part(widget.project, "01-0101-21", "head", [[0, 4], [1, 7], [1, 7]], display_name="Head")
+                frame = compute_local_frame(
+                    [1.5, 3.0, 3.0],
+                    [0.0, 3.0, 3.0],
+                    [3.0, 3.0, 3.0],
+                    roll_reference={
+                        "point_a": {"role": "left_eye", "zyx": [1.5, 2.0, 2.0]},
+                        "point_b": {"role": "right_eye", "zyx": [1.5, 4.0, 2.0]},
+                    },
+                )
+                export_part_reslice(
+                    widget.project,
+                    "01-0101-21",
+                    "head",
+                    {"reslice_id": "head_axis_saved", "template_id": "head", "local_frame": frame},
+                )
+                widget.refresh_project()
+                widget._select_volume_tree_item("01-0101-21", "part", "head")
+
+                self.assertFalse(widget._select_volume_tree_item("01-0101-21", "part_reslice", "head", "missing_reslice"))
+                self.assertEqual(widget.current_volume_scope, "part")
+                self.assertEqual(widget.current_reslice_id, "")
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_select_volume_tree_item_reports_missing_reslice_group(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+            try:
+                crop_volume_to_part(widget.project, "01-0101-21", "head", [[0, 4], [1, 7], [1, 7]], display_name="Head")
+                widget.refresh_project()
+                widget._select_volume_tree_item("01-0101-21", "part", "head")
+
+                self.assertFalse(widget._select_volume_tree_item("01-0101-21", "part_reslice", "head", "not_created_yet"))
+                self.assertEqual(widget.current_volume_scope, "part")
+                self.assertEqual(widget.current_reslice_id, "")
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
     @unittest.skipUnless(has_pyside6, "PySide6 not available")
     def test_local_axis_reslice_dialog_has_large_mpr_picker(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1090,6 +1391,23 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.volume_local_axes_check.setChecked(True)
                 overlays = widget._local_axis_volume_overlays()
                 self.assertEqual([item["label"] for item in overlays], ["source Z"])
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_copy_source_z_axis_uses_current_part_id_as_template(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+            try:
+                crop_volume_to_part(widget.project, "01-0101-21", "leg_gland", [[0, 4], [1, 7], [1, 7]], display_name="Leg gland")
+                widget.refresh_project()
+                widget._select_volume_tree_item("01-0101-21", "part", "leg_gland")
+
+                draft = widget.copy_source_z_axis_to_local_axis_draft()
+
+                self.assertIsNotNone(draft)
+                self.assertEqual(draft["part_id"], "leg_gland")
+                self.assertEqual(draft["template_id"], "leg_gland")
             finally:
                 widget.close_project()
                 widget.deleteLater()

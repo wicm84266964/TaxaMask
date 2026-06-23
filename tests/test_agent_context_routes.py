@@ -69,8 +69,8 @@ class AgentContextRoutesTests(unittest.TestCase):
 
         self.assertEqual(context["diagnostic_route"], "tif_volume_workbench_context")
         self.assertIn("GPU preview", context["diagnostic_focus"])
-        self.assertIn("brain-orientation reslicing", context["diagnostic_focus"])
-        self.assertIn("TIF脑部统一朝向重切片需求_zh.md", context["llm_context_refs"])
+        self.assertIn("Local Axis Reslice", context["diagnostic_focus"])
+        self.assertIn("12. Local Axis Reslice", context["llm_context_refs"])
         self.assertIn("tif_gpu_volume_canvas.py", context["source_code_refs"])
         self.assertIn("nearest-neighbor", context["safety_notes"])
 

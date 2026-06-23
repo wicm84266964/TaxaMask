@@ -15,9 +15,9 @@ AGENT_CONTEXT_ROUTES = {
         "diagnostic_route": "general_settings_runtime",
         "diagnostic_focus": "Application language, startup behavior, autosave interval, and default runtime device.",
         "llm_context_refs": (
-            "LLM_CONTEXT_DETAILED.md -> 0.1 Start Center is now the Agent Center",
-            "LLM_CONTEXT_DETAILED.md -> 0.4 Settings split",
-            "LLM_CONTEXT_DETAILED.md -> 0.5 Locator and SAM lazy/preload behavior",
+            "LLM_CONTEXT_DETAILED.md -> 4. Launch And Runtime",
+            "LLM_CONTEXT_DETAILED.md -> 5. Agent Center",
+            "LLM_CONTEXT_DETAILED.md -> 6. 2D/STL Route",
         ),
         "source_code_refs": (
             "AntSleap/main.py -> GeneralSettingsDialog.get_agent_context",
@@ -34,10 +34,9 @@ AGENT_CONTEXT_ROUTES = {
         "diagnostic_route": "2d_stl_advanced_extensions",
         "diagnostic_focus": "Advanced Extensions for 2D/STL model profiles: parent model source, default child expert, custom parent/child extension contracts, and route expert compatibility.",
         "llm_context_refs": (
-            "LLM_CONTEXT_DETAILED.md -> 0.4 Settings split",
-            "LLM_CONTEXT_DETAILED.md -> 0.5 External script backend",
-            "LLM_CONTEXT_DETAILED.md -> Model profile / Blink backend switching notes",
-            "LLM_CONTEXT_DETAILED.md -> 9.2 Module B - Labeling Workbench & Runtime",
+            "LLM_CONTEXT_DETAILED.md -> 6. 2D/STL Route",
+            "LLM_CONTEXT_DETAILED.md -> 15. External Backend Contracts",
+            "LLM_CONTEXT_DETAILED.md -> 16. Ask Agent Routing",
         ),
         "source_code_refs": (
             "AntSleap/main.py -> ModelSettingsDialog.get_agent_context",
@@ -63,9 +62,9 @@ AGENT_CONTEXT_ROUTES = {
         "diagnostic_route": "tif_volume_backend_settings",
         "diagnostic_focus": "TIF backend defaults for export, training, prediction, model_draft import, and train-ready safety.",
         "llm_context_refs": (
-            "LLM_CONTEXT_DETAILED.md -> 0.4 Settings split",
-            "LLM_CONTEXT_DETAILED.md -> 0.3 Workflow split",
-            "LLM_CONTEXT_DETAILED.md -> 0.5 Independent TIF backend contract",
+            "LLM_CONTEXT_DETAILED.md -> 8. TIF/CT Project Model",
+            "LLM_CONTEXT_DETAILED.md -> 15. External Backend Contracts",
+            "LLM_CONTEXT_DETAILED.md -> 16. Ask Agent Routing",
         ),
         "source_code_refs": (
             "AntSleap/main.py -> TifModelSettingsDialog.get_agent_context",
@@ -85,9 +84,9 @@ AGENT_CONTEXT_ROUTES = {
         "diagnostic_route": "labeling_workbench_context",
         "diagnostic_focus": "Current 2D/STL annotation image, selected morphology part, recent workbench log, and integrated Blink parent-child refinement.",
         "llm_context_refs": (
-            "LLM_CONTEXT_DETAILED.md -> 0.1 Integrated parent-child refinement panel",
-            "LLM_CONTEXT_DETAILED.md -> 0.4 Main workbench Blink actions",
-            "LLM_CONTEXT_DETAILED.md -> 9.2 Module B - Labeling Workbench & Runtime",
+            "LLM_CONTEXT_DETAILED.md -> 6. 2D/STL Route",
+            "LLM_CONTEXT_DETAILED.md -> 15. External Backend Contracts",
+            "LLM_CONTEXT_DETAILED.md -> 16. Ask Agent Routing",
         ),
         "source_code_refs": (
             "AntSleap/main.py -> MainWindow._collect_image_workbench_agent_context",
@@ -107,9 +106,9 @@ AGENT_CONTEXT_ROUTES = {
         "diagnostic_route": "blink_refinement_context",
         "diagnostic_focus": "Standalone Blink fallback session, parent/context ROI, child target part, local dirty state, and expert training logs.",
         "llm_context_refs": (
-            "LLM_CONTEXT_DETAILED.md -> 9.2.5 Standalone Blink local session semantics",
-            "LLM_CONTEXT_DETAILED.md -> 9.2.6 Current data semantics: trajectory vs formal annotation",
-            "LLM_CONTEXT_DETAILED.md -> 9.9 Current BLINK/Cascade Runtime Notes",
+            "LLM_CONTEXT_DETAILED.md -> 6. 2D/STL Route",
+            "LLM_CONTEXT_DETAILED.md -> 15. External Backend Contracts",
+            "LLM_CONTEXT_DETAILED.md -> 16. Ask Agent Routing",
         ),
         "source_code_refs": (
             "AntSleap/ui/blink_lab.py -> BlinkLabWidget.get_agent_context",
@@ -127,13 +126,13 @@ AGENT_CONTEXT_ROUTES = {
     },
     "tif_volume": {
         "diagnostic_route": "tif_volume_workbench_context",
-        "diagnostic_focus": "Current TIF specimen, label role, material ID, sidecar volumes, slice/3D volume view state, GPU preview clarity, future brain-orientation reslicing, and train-ready/manual_truth safety.",
+        "diagnostic_focus": "Current TIF specimen, label role, material ID, sidecar volumes, slice/3D volume view state, GPU preview, Local Axis Reslice, and train-ready/manual_truth safety.",
         "llm_context_refs": (
-            "LLM_CONTEXT_DETAILED.md -> 0) v3.27 TIF GPU Volume Preview + Clarity Mode",
-            "LLM_CONTEXT_DETAILED.md -> 0.1 TIF label layers and train-ready safety",
-            "LLM_CONTEXT_DETAILED.md -> 0.4 TIF Volume Workbench UI",
-            "LLM_CONTEXT_DETAILED.md -> 0.5 Independent TIF backend contract",
-            "docs/ant3d_workbench/TIF脑部统一朝向重切片需求_zh.md",
+            "LLM_CONTEXT_DETAILED.md -> 8. TIF/CT Project Model",
+            "LLM_CONTEXT_DETAILED.md -> 9. TIF Workbench",
+            "LLM_CONTEXT_DETAILED.md -> 11. GPU Volume Preview",
+            "LLM_CONTEXT_DETAILED.md -> 12. Local Axis Reslice",
+            "LLM_CONTEXT_DETAILED.md -> 13. Local Axis Training Material Capture",
         ),
         "source_code_refs": (
             "AntSleap/ui/tif_workbench.py -> TifWorkbenchWidget.get_agent_context",
@@ -147,16 +146,16 @@ AGENT_CONTEXT_ROUTES = {
         "safety_notes": COMMON_SAFETY_NOTES
         + (
             "Do not write predictions or working_edit into manual_truth unless the researcher explicitly confirms that review is complete.",
-            "Future oblique/brain-standardized reslicing must preserve source provenance and use nearest-neighbor interpolation for label volumes.",
+            "Local Axis Reslice must preserve source provenance and use nearest-neighbor interpolation for label volumes.",
         ),
-        "suggested_agent_action": "Check display_mode, slice axis/position, volume renderer, shape/spacing, label role, and material ID before interpreting a missing overlay, GPU preview issue, training readiness issue, prediction import problem, or brain reslicing request.",
+        "suggested_agent_action": "Check display_mode, slice axis/position, volume renderer, shape/spacing, label role, material ID, selected part/reslice item, and Local Axis draft/output state before interpreting a missing overlay, GPU preview issue, training readiness issue, prediction import problem, or reslice request.",
     },
     "pdf_evidence": {
         "diagnostic_route": "pdf_evidence_context",
         "diagnostic_focus": "PDF evidence guided workflow. Handle one stage per reply: first check key/model readiness, then screening criteria, then figure-review criteria, then run/results.",
         "llm_context_refs": (
-            "LLM_CONTEXT_DETAILED.md -> 9.1 Module A - PDF Screening & Extraction",
-            "LLM_CONTEXT_DETAILED.md -> 4 Candidate Flow",
+            "LLM_CONTEXT_DETAILED.md -> 7. PDF Evidence Route",
+            "LLM_CONTEXT_DETAILED.md -> 5. Agent Center",
             ".lab-agent/skills/taxamask-pdf-evidence/SKILL.md",
         ),
         "source_code_refs": (

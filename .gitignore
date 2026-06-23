@@ -147,6 +147,7 @@ training_report.png
 
 # Internal planning and handoff notes
 private_docs/
+/CHANGELOG_zh.md
 /LLM_CONTEXT.md
 /开发版整理提交说明_*.md
 docs/ant3d_workbench/

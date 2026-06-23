@@ -42,7 +42,7 @@ Treat this TaxaMask protocol as always active, not as an optional skill:
    - PDF is evidence/provenance and Agent/headless workflow. PDF candidates are not training truth.
 3. For common TaxaMask tasks, consult `.lab-agent/skills/taxamask-workflows/SKILL.md` as the compact workflow card before loading the full manual.
 4. For PDF literature screening, figure/caption extraction, PDF evidence indexes, PDF-derived candidate images, or PDF processing failures, load `.lab-agent/skills/taxamask-pdf-evidence/SKILL.md` before planning commands or imports.
-5. Use `TaxaMask使用手册.md` for user-facing operation detail and `LLM_CONTEXT_DETAILED.md` for current architecture handoff.
+5. Use `TaxaMask使用手册.md` for user-facing operation detail and `LLM_CONTEXT_DETAILED.md` for current architecture handoff. Treat `LLM_CONTEXT_DETAILED.md` as current state, not as a changelog.
 
 ## Current Program State
 
@@ -124,12 +124,11 @@ Default to adapter/config changes first. Escalate to TaxaMask source development
 
 - Root documentation roles:
   - `README.md`: public GitHub landing/install/workflow entrypoint
-  - `CHANGELOG_zh.md`: single Chinese historical changelog
   - `LLM_CONTEXT_DETAILED.md`: current-state handoff/context document
   - `TaxaMask使用手册.md`: full Chinese user manual
-- Do not recreate `README_zh.md`, `LLM_CONTEXT.md`, or duplicate root context/readme files unless explicitly requested.
-- Do not update changelog/context after every tiny change. Sync them when the user requests it, at a coherent milestone, or when behavior changed enough that stale docs would mislead users or agents.
-- Append changelog entries under the appropriate date; do not rewrite older dated logs unless the user asks for a historical correction.
+- Do not publish private changelogs or development-process logs in the root public developer-preview branch.
+- Do not recreate `LLM_CONTEXT.md` or duplicate root context/readme files unless explicitly requested.
+- Do not update the manual/context after every tiny change. Sync them when the user requests it, at a coherent milestone, or when behavior changed enough that stale docs would mislead users or agents.
 - Keep `.lab-agent/memory.md` and `.lab-agent/skills/taxamask-workflows/SKILL.md` concise. They are context-saving entrypoints, not replacements for the full manual.
 
 ## Git And Artifact Hygiene

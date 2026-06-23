@@ -18,6 +18,7 @@ AGENT_CONTEXT_ROUTES = {
             "LLM_CONTEXT_DETAILED.md -> 4. Launch And Runtime",
             "LLM_CONTEXT_DETAILED.md -> 5. Agent Center",
             "LLM_CONTEXT_DETAILED.md -> 6. 2D/STL Route",
+            "TaxaMask使用手册.md -> 3. 首次启动：Agent Center、语言与界面总结构",
         ),
         "source_code_refs": (
             "AntSleap/main.py -> GeneralSettingsDialog.get_agent_context",
@@ -37,6 +38,7 @@ AGENT_CONTEXT_ROUTES = {
             "LLM_CONTEXT_DETAILED.md -> 6. 2D/STL Route",
             "LLM_CONTEXT_DETAILED.md -> 15. External Backend Contracts",
             "LLM_CONTEXT_DETAILED.md -> 16. Ask Agent Routing",
+            "TaxaMask使用手册.md -> 11. 模型设置、训练、推理与 AI 标注清理",
         ),
         "source_code_refs": (
             "AntSleap/main.py -> ModelSettingsDialog.get_agent_context",
@@ -65,6 +67,7 @@ AGENT_CONTEXT_ROUTES = {
             "LLM_CONTEXT_DETAILED.md -> 8. TIF/CT Project Model",
             "LLM_CONTEXT_DETAILED.md -> 15. External Backend Contracts",
             "LLM_CONTEXT_DETAILED.md -> 16. Ask Agent Routing",
+            "TaxaMask使用手册.md -> 10. TIF 体数据工作台：切片、部位体与局部轴重切片",
         ),
         "source_code_refs": (
             "AntSleap/main.py -> TifModelSettingsDialog.get_agent_context",
@@ -87,6 +90,7 @@ AGENT_CONTEXT_ROUTES = {
             "LLM_CONTEXT_DETAILED.md -> 6. 2D/STL Route",
             "LLM_CONTEXT_DETAILED.md -> 15. External Backend Contracts",
             "LLM_CONTEXT_DETAILED.md -> 16. Ask Agent Routing",
+            "TaxaMask使用手册.md -> 7. 2D/STL 标注工作台：从图片列表到正式标注",
         ),
         "source_code_refs": (
             "AntSleap/main.py -> MainWindow._collect_image_workbench_agent_context",
@@ -109,6 +113,7 @@ AGENT_CONTEXT_ROUTES = {
             "LLM_CONTEXT_DETAILED.md -> 6. 2D/STL Route",
             "LLM_CONTEXT_DETAILED.md -> 15. External Backend Contracts",
             "LLM_CONTEXT_DETAILED.md -> 16. Ask Agent Routing",
+            "TaxaMask使用手册.md -> 9. 主工作台内子部位标注：轨迹积累与专家训练",
         ),
         "source_code_refs": (
             "AntSleap/ui/blink_lab.py -> BlinkLabWidget.get_agent_context",
@@ -133,6 +138,7 @@ AGENT_CONTEXT_ROUTES = {
             "LLM_CONTEXT_DETAILED.md -> 11. GPU Volume Preview",
             "LLM_CONTEXT_DETAILED.md -> 12. Local Axis Reslice",
             "LLM_CONTEXT_DETAILED.md -> 13. Local Axis Training Material Capture",
+            "TaxaMask使用手册.md -> 10. TIF 体数据工作台：切片、部位体与局部轴重切片",
         ),
         "source_code_refs": (
             "AntSleap/ui/tif_workbench.py -> TifWorkbenchWidget.get_agent_context",
@@ -156,6 +162,7 @@ AGENT_CONTEXT_ROUTES = {
         "llm_context_refs": (
             "LLM_CONTEXT_DETAILED.md -> 7. PDF Evidence Route",
             "LLM_CONTEXT_DETAILED.md -> 5. Agent Center",
+            "TaxaMask使用手册.md -> 5. PDF 处理模块：从原始 PDF 到候选数据库",
             ".lab-agent/skills/taxamask-pdf-evidence/SKILL.md",
         ),
         "source_code_refs": (

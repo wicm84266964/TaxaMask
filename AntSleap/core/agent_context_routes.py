@@ -15,9 +15,9 @@ AGENT_CONTEXT_ROUTES = {
         "diagnostic_route": "general_settings_runtime",
         "diagnostic_focus": "Application language, startup behavior, autosave interval, and default runtime device.",
         "llm_context_refs": (
-            "LLM_CONTEXT_DETAILED.md -> Agent Center",
-            "LLM_CONTEXT_DETAILED.md -> Public Workflow Routes",
-            "TaxaMask使用手册.md -> Agent Center",
+            "LLM_CONTEXT_DETAILED.md -> 3. Agent Center Architecture",
+            "LLM_CONTEXT_DETAILED.md -> 2. Public Main Workflow Routes",
+            "TaxaMask使用手册.md -> 5. Agent Center",
         ),
         "source_code_refs": (
             "AntSleap/main.py -> GeneralSettingsDialog.get_agent_context",
@@ -34,9 +34,9 @@ AGENT_CONTEXT_ROUTES = {
         "diagnostic_route": "2d_stl_advanced_extensions",
         "diagnostic_focus": "Advanced Extensions for 2D/STL model profiles: parent model source, default child expert, custom parent/child extension contracts, and route expert compatibility.",
         "llm_context_refs": (
-            "LLM_CONTEXT_DETAILED.md -> External Backend Contracts",
-            "LLM_CONTEXT_DETAILED.md -> Blink And Child-Part Experts",
-            "TaxaMask使用手册.md -> 外部模型后端",
+            "LLM_CONTEXT_DETAILED.md -> 8. External Backend Contracts",
+            "LLM_CONTEXT_DETAILED.md -> 7. Child Expert Session / Blink Route",
+            "TaxaMask使用手册.md -> 12. 模型方案与外部后端",
         ),
         "source_code_refs": (
             "AntSleap/main.py -> ModelSettingsDialog.get_agent_context",
@@ -62,9 +62,9 @@ AGENT_CONTEXT_ROUTES = {
         "diagnostic_route": "labeling_workbench_context",
         "diagnostic_focus": "Current 2D/STL annotation image, selected morphology part, recent workbench log, and integrated Blink parent-child refinement.",
         "llm_context_refs": (
-            "LLM_CONTEXT_DETAILED.md -> 2D/STL Morphology",
-            "LLM_CONTEXT_DETAILED.md -> VLM And SAM Drafts",
-            "TaxaMask使用手册.md -> Labeling Workbench",
+            "LLM_CONTEXT_DETAILED.md -> 5. 2D / STL Morphology",
+            "LLM_CONTEXT_DETAILED.md -> 6. VLM And SAM Draft Semantics",
+            "TaxaMask使用手册.md -> 8. 2D / STL 标注工作台",
         ),
         "source_code_refs": (
             "AntSleap/main.py -> MainWindow._collect_image_workbench_agent_context",
@@ -84,8 +84,8 @@ AGENT_CONTEXT_ROUTES = {
         "diagnostic_route": "blink_refinement_context",
         "diagnostic_focus": "Standalone Blink fallback session, parent/context ROI, child target part, local dirty state, and expert training logs.",
         "llm_context_refs": (
-            "LLM_CONTEXT_DETAILED.md -> Blink And Child-Part Experts",
-            "TaxaMask使用手册.md -> Blink 子部位专家",
+            "LLM_CONTEXT_DETAILED.md -> 7. Child Expert Session / Blink Route",
+            "TaxaMask使用手册.md -> 11. Child Expert Session / Blink 路线",
         ),
         "source_code_refs": (
             "AntSleap/ui/blink_lab.py -> BlinkLabWidget.get_agent_context",
@@ -106,8 +106,8 @@ AGENT_CONTEXT_ROUTES = {
         "diagnostic_focus": "PDF literature-processing guided workflow. Handle one stage per reply: first check key/model readiness, then screening criteria, then figure-review criteria, then run/results.",
         "llm_context_refs": (
             "ANTCODE.md -> Public Workflow Routes",
-            "LLM_CONTEXT_DETAILED.md -> PDF Literature Processing",
-            "TaxaMask使用手册.md -> PDF 文献处理",
+            "LLM_CONTEXT_DETAILED.md -> 4. PDF Literature Evidence",
+            "TaxaMask使用手册.md -> 6. PDF 文献证据路线",
         ),
         "source_code_refs": (
             "AntSleap/ui/pdf_processing_widget.py",

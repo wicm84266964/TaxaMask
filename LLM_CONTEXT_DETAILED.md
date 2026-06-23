@@ -234,11 +234,10 @@ The model profile summary is important. It records which parent and child model 
 - `README_zh.md`: Chinese public landing page.
 - `TaxaMask使用手册.md`: Chinese researcher-facing main-branch user manual.
 - `LLM_CONTEXT_DETAILED.md`: public-safe main-branch Agent/LLM context.
-- `CHANGELOG_zh.md`: Chinese historical changelog.
 - `ANTCODE.md`: stable embedded Agent rules.
 - `docs/contracts/`: public model backend contracts.
 
-Do not recreate private design/handoff documents in main unless the user explicitly asks for private local docs. Do not publish local sessions, tasks, runtime settings, model weights, databases, run outputs, or project data.
+Do not recreate private design, changelog, or handoff documents in main unless the user explicitly asks for private local docs. Do not publish local sessions, tasks, runtime settings, model weights, databases, run outputs, or project data.
 
 ## 11. Main Branch Validation Hints
 

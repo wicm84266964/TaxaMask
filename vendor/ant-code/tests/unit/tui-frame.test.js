@@ -20,7 +20,7 @@ import { makeExitFrame, makePermissionFrame, makePromptFrame, makeStartupFrame, 
 
 test("stage 1 startup frame harness enforces compact terminal bounds", () => {
   const frame = makeStartupFrame({
-    cwd: "C:\\saveproject\\LBJ-workspace\\lab-agent",
+    cwd: "C:\\workspace\\lab-agent",
     trusted: true,
     session: {
       model: "claude-sonnet-4-5-20250929",
@@ -243,7 +243,7 @@ test("prompt layout falls back safely when width is missing", () => {
 
 test("stage 1 and 2 acceptance frames fit compact and wide resize targets", () => {
   const startup = makeStartupFrame({
-    cwd: "C:\\saveproject\\LBJ-workspace\\lab-agent",
+    cwd: "C:\\workspace\\lab-agent",
     trusted: false,
     session: {
       model: "claude-haiku-4-5-20251001",

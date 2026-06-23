@@ -8,9 +8,10 @@ paths:
   - ANTCODE.md
   - .lab-agent/memory.md
   - .lab-agent/skills/taxamask-pdf-evidence/SKILL.md
+  - README.md
   - TaxaMask使用手册.md
-  - LLM_CONTEXT_DETAILED.md
-  - docs/ant3d_workbench/
+  - docs/platform_setup.md
+  - docs/contracts/
 ---
 # TaxaMask Workflows
 
@@ -22,12 +23,11 @@ Use this skill as the compact operating map for TaxaMask. It is not merely an op
 2. Read `.lab-agent/memory.md` for current project memory and code map.
 3. Use this skill to choose the workflow route and safety boundary before answering or editing.
 4. Read deeper docs only when needed:
+   - public preview overview: `README.md`
    - user operation details: `TaxaMask使用手册.md`
-   - current architecture handoff: `LLM_CONTEXT_DETAILED.md`
-   - Agent integration: `docs/ant3d_workbench/TaxaMask_AntCode项目记忆与对接手册_zh.md`
-   - Agent/PDF skill design: `docs/ant3d_workbench/TaxaMask_Agent侧栏与PDF_Skill设计_zh.md`
    - PDF evidence operations: `.lab-agent/skills/taxamask-pdf-evidence/SKILL.md`
-   - TIF implementation contracts: `docs/ant3d_workbench/TIF项目结构实施设计_zh.md` and `docs/ant3d_workbench/TIF后端契约_v1_实施设计_zh.md`
+   - installation and platform notes: `docs/platform_setup.md`
+   - external backend contracts: `docs/contracts/`
 
 ## Current Product Shape
 

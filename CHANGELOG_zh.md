@@ -52,7 +52,7 @@
 - README / README_zh 进行了公开定位重写：从“固定功能清单”调整为“两条主线”叙述，即可追溯形态标注与训练数据构建、以及 Agent-assisted project modification / 智能体辅助项目改造；补充 DOI 徽章、恢复面板说明和 Agent Center 可在 GUI 无法启动时通过浏览器继续修复的边界。工作流总览图也同步更新。
 - 新增两个可迁移 skill 包作为开发资源：`skills/paper_distill_skill_bundle_v6_zh/` 用于将单篇 markdown 论文蒸馏为中文知识图谱、对话计划和训练对话；`skills/unsloth-studio-finetune-portable/` 记录 Windows 本机 Unsloth Studio / CLI 微调操作边界、Qwen3.5 双卡 Studio API 路线和可复用模板。当前 `skills/` 下存在运行导入后生成的 `__pycache__` 缓存，提交前应清理，不视为功能性源码变更。
 - 测试覆盖同步扩展：TIF 项目、TIF 工作台、TIF GPU 体渲染、TIF 部位 package 导出、父/子训练范围过滤、父模型备注和子专家备注均补了回归用例；其中 TIF 测试重点覆盖旧项目兼容、部位/ROI 往返、重复 ID 与孤立目录保护、轮廓插值预览、mask 预览缓存和部位导出不覆盖已有审阅包。
-- 本轮正式发布版同步边界已明确：`C:\saveproject\LBJ-workspace\TaxaMask` 只同步了轻量日志、按标签训练、父/子模型备注及对应测试；没有同步开发版 TIF 路径改动。开发版继续保留 TIF 实验功能和相关 README/启动脚本变化，后续是否进入正式版需单独决定。
+- 本轮正式发布版同步边界已明确：正式发布仓库只同步了轻量日志、按标签训练、父/子模型备注及对应测试；没有同步开发版 TIF 路径改动。开发版继续保留 TIF 实验功能和相关 README/启动脚本变化，后续是否进入正式版需单独决定。
 
 ### **[2026-06-09] TaxaMask 开源正式版 v1.0：大项目标注体验、VLM 安全控制与文档同步**
 > **本次重点：用户完成 7000 张图级别的 2D/STL 标注工作台实测后，将当前可公开发布状态定为 TaxaMask 开源正式版 v1.0。此次收口重点不是新增一个孤立功能，而是把大项目复核、VLM 预标注、SAM 框选、AI 草稿清理、结构标签维护和设置安全性整理成更适合真实研究批量操作的版本。**
@@ -72,7 +72,7 @@
 ### **[2026-06-07] 启动入口可搬迁、Ant-Code 修复面板与起始页入口整理**
 > **本次重点：把交付给用户后的“可启动、可恢复、可继续修”作为安全网补齐。即使用户通过内置 Ant-Code 自行修改 TaxaMask 后把 GUI 改到无法启动，也能通过独立浏览器版 Ant-Code Dashboard 回到项目里排查和修复。**
 
-- `启动TaxaMask.bat` 不再写死维护者机器上的 `C:\Users\admin\anaconda3` 路径。脚本现在会依次寻找本地 `.venv`、当前 Conda 环境、常见 `antsleap` Conda 环境和 PATH 上的 Python；如用户有自定义环境，可通过 `TAXAMASK_PYTHON_EXE` 指向具体 `python.exe`。
+- `启动TaxaMask.bat` 不再写死维护者机器上的 Conda 路径。脚本现在会依次寻找本地 `.venv`、当前 Conda 环境、常见 `antsleap` Conda 环境和 PATH 上的 Python；如用户有自定义环境，可通过 `TAXAMASK_PYTHON_EXE` 指向具体 `python.exe`。
 - `启动TaxaMask.bat` 启动前会检查所选 Python 是否能导入 `PySide6`。如果环境不完整，会直接提示用户切换或安装依赖，而不是让 GUI 抛出难懂的导入错误；同时提示可运行 `启动AntCode修复面板.bat` 作为源码修复入口。
 - 新增根目录 `启动AntCode修复面板.bat`。该脚本不导入 TaxaMask Python GUI、不依赖 PySide6，只使用 Node.js 启动内置 `vendor/ant-code` 的浏览器 Dashboard，面向“TaxaMask 被本地源码修改改坏后仍要继续修”的恢复场景。
 - `启动AntCode修复面板.bat` 默认绑定本机端口 `7410`，端口被占用时 Ant-Code 会向后寻找可用端口；如需指定端口，可设置 `TAXAMASK_ANTCODE_PORT`。如 Node 不在常见位置，可设置 `TAXAMASK_NODE_EXE`。
@@ -645,7 +645,7 @@
 - 对研究流程的意义是：PDF 里抽出的地图、曲线图、分布图或不标准形态图，可以进入项目等待复核，但不会污染训练数据。
 
 #### **5）使用旧测试 PDF 批次完成接入验证**
-- 测试 PDF 目录：`E:\test-project\LBJ-workspace\Formica-Flow-Latest\test-pdf`
+- 测试 PDF 目录使用本地测试工作区中的 `test-pdf` 文件夹。
 - `antsleap` 环境下验证结果：
   - agent 单元测试通过
   - PDF 筛选处理 8 个 PDF，其中 3 个 0 字节 PDF 被明确记录，5 个可读 PDF 成功提取文本
@@ -770,7 +770,7 @@
 - 这套脚本已经用于清理早期 `specimens` 目录以及 4K/8K 备份目录中的同名十视图素材；素材重名清理后，左侧列表里的批量删除行为已经恢复正常。
 
 ### **[2026-04-02] 正式版前端对齐 + 主题系统并入 + 前后端复核通过**
-> **本次重点：把前端测试分支中已经验证过的浅色 / 深色主题优化，正式并入 LBJ-workspace 这份更稳定的正式版，同时保留并复核它原有更成熟的 Blink / 项目状态 / 模型切换逻辑。**
+> **本次重点：把前端测试分支中已经验证过的浅色 / 深色主题优化，正式并入稳定开发线，同时保留并复核它原有更成熟的 Blink / 项目状态 / 模型切换逻辑。**
 
 #### **1）正式版现在不再只是旧的深色抛光，而是正式接入了新的双主题工作台体系**
 - `AntSleap/ui/style.py` 已升级为统一主题源，正式支持：

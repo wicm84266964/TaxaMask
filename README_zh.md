@@ -1,124 +1,152 @@
-# TaxaMask
+# TaxaMask 开发预览版
 
 [![DOI](https://zenodo.org/badge/1264598942.svg)](https://doi.org/10.5281/zenodo.20619867)
 
-**TaxaMask** 是一个面向生物形态标注与 AI 训练数据构建的开源桌面工作台。
+[English README](README.md)
 
-TaxaMask 将分类学文献、标本图像、AI 草稿、人工复核标签、模型训练和数据集导出连接在同一个可追溯项目循环中。项目起源于蚂蚁形态学研究，也面向更广泛的形态学分类场景，适合需要整理可靠标注记录、构建可复用训练数据，并保留源材料与导出数据关系的研究工作。
+**TaxaMask** 是一个面向生物形态标注、文献证据复核和 AI 训练数据构建的开源桌面工作台。
 
-TaxaMask 还内嵌 **Agent Center**。研究者可以用自然语言检查项目状态、理解报错信息、调整 profile、配置模型后端，并在确认后修改项目代码。这个设计让每个实验室都能围绕自己的类群、图像来源、标注目标和本地模型条件改造 TaxaMask。
+这个分支是 **developer preview / 开发预览版**。它保留 TaxaMask 已经较稳定的 2D 形态标注和 PDF 文献证据流程，同时加入新的 TIF/CT 三维内部结构路线，用于体数据复核、部位体提取和局部轴重切片。TIF/CT 路线目前主要用 AntScan 蚂蚁 CT 数据进行开发和验证；数据结构没有写死蚂蚁，但还不宣称已经完成广泛跨类群验证。
 
-## 图示概览
+## 这个预览版包含什么
 
-![TaxaMask 工作流概览](docs/assets/readme/figure_1_taxamask_workflow.png)
+TaxaMask 现在包含四条相互连接的研究路线：
 
-TaxaMask 通过项目记录连接源材料、候选图像、AI 草稿、人工确认标签、导出数据集和模型反馈。研究者可以从文献筛选、图像提取进入标注、复核、训练、预测检查和数据集导出，并持续保留材料来源与处理过程。
+```text
+PDF 文献证据
+  -> 图版 / caption 提取
+  -> 候选材料复核
+  -> 可追溯文献证据
 
-## 两条主线
+2D / STL 形态标注
+  -> 父部位和子部位标注
+  -> AI 草稿与人工复核
+  -> 训练数据集导出
 
-### 1. 可追溯形态标注与训练数据构建
+TIF / CT 内部结构
+  -> specimen 导入
+  -> 部位 ROI 与关键切片 mask
+  -> 部位体提取
+  -> 3D 预览与局部轴重切片导出
 
-TaxaMask 把分类学材料按状态组织起来：源材料、候选材料、AI 草稿、人工确认标签和导出数据集在项目中分层记录。PDF 图版、caption、文献性状描述、标本图像、STL 渲染视角图、VLM 框、SAM mask、模型预测和人工 mask 都能进入同一条复核链路，但不会自动混成训练真值。
+Agent Center
+  -> 工作流检查
+  -> 报错解释
+  -> profile 与后端配置辅助
+  -> 研究者确认后的代码修改
+```
 
-这条主线面向的是形态学训练数据从哪里来、经过哪些处理、哪些结果由人工确认。TaxaMask 支持：
+TaxaMask 的核心设计仍然是人工复核的形态学数据。AI 输出、导入预测和自动建议都先作为草稿材料保存，只有研究者接受后才适合作为训练真值或正式结果。
 
-- 使用可编辑分类学 profile 进行 PDF 文献筛选、图版提取和 caption 提取。
-- 将文献性状描述整理为带来源记录的 `taxon -> part -> description` 数据。
-- 在 2D 标注工作台中处理父部位和子部位标注。
-- 将 STL 渲染视角图作为可复核 2D 形态图像处理。
-- 使用 VLM 生成 first-mile 草稿框，并可结合 SAM 生成草稿 mask。
-- 对 AI 草稿和外部模型预测进行人工复核。
-- 支持 Blink、heatmap Blink 或外部 Blink 后端等路线特定的子部位专家。
-- 通过公开 JSON 契约连接父部位和子部位模型后端。
-- 导出 multimodal JSONL、COCO 和 YOLO 风格数据集。
+## TIF / CT 开发预览路线
 
-### 2. 智能体辅助的项目改造
+TIF 工作台是这个预览版中新加入和正在快速成熟的部分。它面向的是体数据形态学任务：原始扫描方向、标本体态和目标结构方向可能在不同样本之间差异很大，因此不能简单依赖原始 Z 轴或体信号自动定位。
 
-TaxaMask 内嵌 Agent Center。它可以读取项目记录、profile、运行日志、后端契约和相关源码上下文，把自然语言请求转化为可确认的改动方案。研究者可以用它检查项目状态、理解报错信息、调整 profile、配置模型后端，也可以在确认后修改适配器、启动脚本或相关源码。
+当前 TIF/CT 能力包括：
 
-这条主线面向的是不同实验室如何把 TaxaMask 改造成适合自己项目的工具。研究者可以围绕具体问题让 Agent Center 帮助改造项目，例如：
+- 将 TIFF stack 导入为 specimen。
+- 查看整只体数据和已经提取出的 part volume。
+- 绘制部位 ROI 和关键切片轮廓。
+- 在关键切片之间插值生成 mask。
+- 接受 part mask 并写入部位体记录。
+- GPU 三维体预览，支持裁切、截面检查和 mask 边界观察。
+- Z/Y/X 多方向切片浏览。
+- 对选中的 part volume 使用 Local Axis Reslice。
+- 将原始 TIFF Z 轴作为锁定的 source direction reference 显示。
+- 从 source Z-axis 复制可编辑的 output Z-axis。
+- 使用 roll reference point pair 记录方向标准化参照点。
+- 导出重切片后的灰度 `image.tif` 和 `metadata.json`。
+- 如果该 part 已有 mask，可额外导出 `mask.tif`。
+- 记录人工部位提取和局部轴确认过程，为后续模型训练准备数据材料。
 
-- 当前项目处于什么状态？
-- 正在使用哪个 profile 或模型后端？
-- PDF 筛选、VLM 草稿或训练步骤为什么失败？
-- 新类群、身体部位词表或本地模型路线应该如何配置？
-- 这个项目需要修改哪个 profile、适配器、启动脚本或源码文件？
-- 能否为当前实验室的标注路线增加或调整一个工作流入口？
+Local Axis Reslice 是通用模块，不是脑部专用模块。第一个验证模板是 head / brain oriented，但底层保存的是通用 local frame metadata，而不是 brain-only 字段。
 
-科学判断和最终代码改动仍由研究者确认。TaxaMask 不包含模型权重、私有数据集、本地项目、API key、运行输出或用户运行时配置。
+实现说明：TIF/CT 三维预览是 TaxaMask 为 PySide6 / PyOpenGL TIF 工作台编写的独立实现。它使用的是体数据可视化领域常见的 GPU 思路，例如 3D texture、transfer mapping、ray marching、clipping 和 section inspection。交互目标参考了 Drishti 等成熟科学体数据可视化工具的使用体验。
 
-![TaxaMask 公开界面概览](docs/assets/readme/figure_2_taxamask_ui_overview.png)
+## 局部轴重切片概念
 
-公开界面围绕四个实际入口组织：Agent Center 用于本地工作流辅助，PDF extraction setup 用于准备文献证据，candidate review 用于筛选导入材料，Labeling Workbench 用于可复核形态标注。
+重切片结果挂在 specimen 的某个 part 下，而不是修改原始 TIFF。
 
-恢复提示：源码改动可能导致 GUI 在启动阶段报错，使内嵌 Agent Center 无法打开。遇到这种情况时，可以使用独立的 Ant-Code 修复面板：Windows 运行 `启动AntCode修复面板.bat`，Ubuntu/Linux/WSL 运行 `bash ./启动AntCode修复面板.sh`，然后在浏览器 Dashboard 中继续让 Ant-Code 检查、修改和修复问题。浏览器 Dashboard 也可以读取当前项目中的 Ant-Code 历史聊天记录。
+```text
+specimen
+  -> parts
+     -> head
+        -> mask
+        -> contours
+        -> reslices
+           -> reslice item
+              -> image.tif
+              -> metadata.json
+              -> mask.tif, 如果存在 part mask
+```
 
-## 适合哪些研究场景
+原始 TIFF stack 始终不被修改。一次 reslice 会记录：
 
-TaxaMask 主要面向需要连接生物形态、分类学文献、标本图像和 AI 辅助标注的研究者，尤其适合新种描述、分类修订、图版整理、形态结构 mask 标注，以及需要追踪源材料、标注判断、模型草稿和训练数据导出关系的小型研究团队。
+- source volume 和 part volume 身份信息
+- source Z-axis reference
+- editable output Z-axis
+- local frame: origin, x axis, y axis, z axis
+- roll reference point pair
+- spacing 和 interpolation 设置
+- 导出路径和 provenance metadata
 
-## 人工复核循环
+灰度图像重切片使用 linear interpolation。mask / label 重切片使用 nearest-neighbor interpolation，避免标签值被插值污染。
 
-![TaxaMask 人机协同标注循环](docs/assets/readme/figure_3_human_in_the_loop_cycle.png)
+## Agent Center
 
-TaxaMask 把 VLM 框、SAM mask、定位器预测和外部后端输出都视为草稿材料，直到研究者完成复核。这样既能利用 AI 减少重复劳动，也能让生成结果和 ground-truth 标签保持清晰边界。
+TaxaMask 内嵌第一方 Ant-Code Agent Center，目录为 `vendor/ant-code/`。它用于检查项目状态、解释报错、查看 profile 和后端设置，并在研究者确认后辅助修改代码。
 
-## 验证参考路线
+模型凭据、私有网关和用户运行时设置属于本机配置，不包含在仓库中。内嵌运行时默认读取：
 
-![蚂蚁形态学参考工作流](docs/assets/readme/figure_4_ant_morphology_case.png)
+```text
+AntSleap/config/taxamask_ant_code.config.json
+```
 
-当前公开版本在蚂蚁形态学流程中验证最充分。在参考案例中，TaxaMask 用于组织文献筛选、图像提取、VLM first-mile 预标注、人工复核、父部位标注、模型训练、预测检查和数据集导出。
+没有 API key 时，TaxaMask GUI 仍应能够启动。模型聊天、VLM 草稿和外部模型路线需要用户在本机完成配置。
 
-其他类群可以沿用同样的流程结构，通过调整 profile、先复核小批量数据、验证模型行为，再逐步扩大使用范围。
+## 数据边界
 
-## 关键词
-
-生物形态标注、分类学图像标注、可追溯工作流、数据集来源记录、AI 辅助标注、人工复核、VLM 预标注、SAM 辅助标注、形态学分割、分类学文献、新种描述、图版提取、caption 提取、训练数据集构建、智能体辅助工作流、源码辅助改造、可定制标注流程、生物多样性信息学、蚂蚁分类学、蚁科。
-
-## 许可证
-
-TaxaMask 源码采用 GNU Affero General Public License v3.0。该协议允许商用，但修改版和网络服务需要遵守 AGPLv3 的源码公开义务，并保留来源和版权信息。详见 [LICENSE](LICENSE) 和 [NOTICE](NOTICE)。
-
-`vendor/ant-code/` 下内置的 Ant-Code Agent Center 是 TaxaMask 的一等原创源码组成部分。该目录名是为了运行时布局兼容而保留，不应被理解为第三方依赖，也不应从 TaxaMask 项目的署名范围中排除。
-
-如果 TaxaMask 帮助了你的研究，请引用仓库或发布版本。引用信息见 [CITATION.cff](CITATION.cff)。
-
-## 平台支持
-
-TaxaMask 当前以源码方式发布，目标是让研究者能从源码运行工作台、验证小项目，并在 Linux CUDA 工作站上处理较重的训练任务。
-
-- Windows 10/11 是目前验证最充分的桌面环境。
-- Linux 是实验室工作站、CUDA 训练和批处理的主要目标平台。
-- macOS 可以尝试轻量 CPU 复核和小规模标注，但 Apple Silicon 加速不是 v1.0 的验证目标。
-
-安装基础依赖前，请先安装与你机器匹配的 PyTorch 版本。
+TaxaMask 仓库只包含源码和公开工作流文档。私有 CT 数据、本地项目文件、导出结果、模型权重、运行时设置、API key 和内部规划笔记应保留在用户本机，并默认由 `.gitignore` 排除。
 
 ## 安装
 
+TaxaMask 以源码方式发布。
+
+当前验证目标：
+
+- Windows 10/11：主要桌面工作流。
+- Linux 工作站：CUDA 训练和批处理。
+- macOS：可尝试轻量 CPU 复核，但 Apple Silicon 加速不是当前验证目标。
+
 安装前准备：
 
-- Git，用于克隆源码；如果没有 Git，也可以从 GitHub 下载 ZIP。
+- Git，或从 GitHub 下载 ZIP。
 - Conda 或其他 Python 环境管理工具。
-- 推荐使用 Python 3.12，这是当前公开源码版主要验证的 Python 版本。
-- Node.js 20 或更高版本，并带有 npm，用于内嵌 Agent Center / Ant-Code dashboard。
+- Python 3.12。
+- Node.js 20 或更新版本，用于内嵌 Agent Center dashboard。
 
-先获取源码：
+安装公开稳定线时，可以克隆默认分支：
 
 ```bash
 git clone https://github.com/wicm84266964/TaxaMask.git
 cd TaxaMask
 ```
 
-如果没有安装 Git，也可以在 GitHub 页面下载 ZIP，解压后在 `TaxaMask` 文件夹中打开终端。
+安装这个 TIF/CT 开发预览版时，需要先在 GitHub 页面切换到 `codex/antscan-stl-tif-rearchitecture` 分支再下载 ZIP，或直接克隆这个预览分支：
 
-然后创建 Python 环境。推荐 Conda 环境名为 `taxamask`：
+```bash
+git clone --branch codex/antscan-stl-tif-rearchitecture --single-branch https://github.com/wicm84266964/TaxaMask.git
+cd TaxaMask
+```
+
+创建并激活 Python 环境：
 
 ```bash
 conda create -n taxamask python=3.12
 conda activate taxamask
 ```
 
-先安装适合你机器的 PyTorch。CPU 测试：
+先安装 PyTorch。CPU 测试：
 
 ```bash
 pip install -r requirements-torch-cpu.txt
@@ -136,7 +164,7 @@ pip install -r requirements-torch-cu121.txt
 pip install -r requirements.txt
 ```
 
-安装内嵌 Agent Center 的 Node 依赖：
+安装 Agent Center 依赖：
 
 ```bash
 cd vendor/ant-code
@@ -144,9 +172,7 @@ npm ci
 cd ../..
 ```
 
-这一步用于启动内嵌 Ant-Code dashboard 和修复面板。公开仓库不包含 `node_modules`，所以克隆后需要在本机安装一次。
-
-如果要使用 SAM 辅助标注，需要把 SAM checkpoint 放到：
+可选的 SAM 辅助 2D 标注需要将 SAM checkpoint 放到：
 
 ```text
 AntSleap/weights/sam_b.pt
@@ -154,119 +180,94 @@ AntSleap/weights/sam_b.pt
 
 模型权重不随仓库发布。
 
-PDF 处理可以直接使用 PyMuPDF，但部分备用图像提取路径会通过 `pdf2image` 依赖 Poppler。不同系统的 Poppler 安装方式见 [平台安装说明](docs/platform_setup.md)。
-
-TaxaMask 可以在没有 API key 的情况下启动。Agent Center dashboard 可以先打开；但模型聊天、VLM 草稿和外部模型路线需要用户在本机配置模型网关或 API 设置。不要把真实 key、私有网关地址或运行时配置提交到仓库。
-
-## 更新源码
-
-如果你已经克隆过仓库，可以用下面的命令获取最新源码修复：
-
-```bash
-git pull --ff-only origin main
-```
-
-更新后，只有在依赖文件发生变化时，才需要重新运行 `pip install -r requirements.txt`，或进入 `vendor/ant-code` 后重新运行 `npm ci`。
-
 ## 启动
 
-已激活环境时：
+在已激活环境中运行：
 
 ```bash
 python AntSleap/main.py
 ```
 
-Windows 用户可以双击 `启动TaxaMask.bat`。脚本会寻找本地 `.venv`、当前 Conda 环境、常见 `taxamask` Conda 环境和系统 Python。也可以显式指定：
+Windows 用户也可以运行：
 
 ```bat
-set TAXAMASK_PYTHON_EXE=C:\path\to\python.exe
+启动TaxaMask.bat
 ```
 
-Ubuntu/Linux 或 WSL 终端用户可以使用同名 shell 脚本：
+Linux 或 WSL 用户可以运行：
 
 ```bash
 bash ./启动TaxaMask.sh
 ```
 
-如果本地源码修改导致 GUI 无法启动，可以直接启动随仓库附带的 Ant-Code dashboard，不需要导入 PySide6 GUI：
+如果源码改动导致 GUI 无法启动，可以直接启动 Agent Center 修复面板：
 
 ```bash
 node vendor/ant-code/src/cli/dashboard.js --project . --port 7410
 ```
 
-Windows 用户也可以运行 `启动AntCode修复面板.bat`，它会额外自动寻找 Node.js。Ubuntu/Linux 或 WSL 终端用户可以运行：
+Windows 下也可以运行 `启动AntCode修复面板.bat`。
 
-```bash
-bash ./启动AntCode修复面板.sh
-```
+### TIF / CT 显卡注意事项
 
-浏览器 Dashboard 可以在 TaxaMask GUI 无法导入时继续进行代码检查、修改和排错，也可以读取当前项目中的 Ant-Code 历史聊天记录。这些方式都需要 Node.js 20 或更高版本，并且需要先在 `vendor/ant-code` 中执行过 `npm ci`。
-
-Ubuntu/WSL 下 TaxaMask 会默认用外部浏览器打开 Ant-Code Dashboard，而不是内嵌 Qt WebEngine；这是为了避开部分 Linux/WSLg EGL/OpenGL 驱动导致的段错误。如果你确认本机 Qt WebEngine 稳定，可以设置 `TAXAMASK_ANTCODE_BROWSER_MODE=0` 恢复内嵌模式。在浏览器模式中，TaxaMask 的“询问 Agent”按钮会打开浏览器并把当前工作台上下文复制到剪贴板，请粘贴到浏览器里的 Ant-Code 输入框后再发送。
-
-如果 TaxaMask GUI 是由 Windows Python 启动，但 Ant-Code / Node 依赖安装在 WSL Ubuntu 里，请先让 GUI 使用 WSL 启动内嵌 Agent：
-
-```bash
-# 在 Ubuntu / WSL 里执行一次
-cd /mnt/c/path/to/TaxaMask/vendor/ant-code
-npm ci
-```
-
-```bat
-set TAXAMASK_ANTCODE_RUNTIME=wsl
-set TAXAMASK_WSL_DISTRO=Ubuntu
-启动TaxaMask.bat
-```
-
-如果你的发行版名称不是 `Ubuntu`，把 `TAXAMASK_WSL_DISTRO` 改成 `wsl -l -v` 显示的名称。特殊路径无法自动转换时，可以额外设置 `TAXAMASK_WSL_PROJECT_DIR=/home/.../TaxaMask`。
-
-## 常见研究流程
-
-1. 从 TaxaMask Agent Center 开始。
-2. 用 PDF Evidence 筛选文献，提取图版、caption 和文献性状描述。
-3. 把人工复核后的候选图或普通形态图导入 2D 项目。
-4. 在 Labeling Workbench 中标注父部位和子部位。
-5. 把 VLM 或 SAM 输出当作草稿，不直接当作训练真值。
-6. 训练或连接父部位 / 子部位后端。
-7. 人工复核预测结果。
-8. 导出 multimodal JSONL、COCO 或 YOLO 风格数据集。
-
-## Profile 适配
-
-适配新类群时，建议复制模板再修改，不要直接覆盖示例文件：
-
-- PDF 筛选：`screener_configs/`
-- 图版提取与多模态复核：`multimodal_configs/`
-- PDF 文献性状描述抽取：`part_description_configs/`
-- 项目结构模板：`json_projects/templates/`
-
-先用小批量 PDF 和图片跑通，再扩大规模。不同类群的 profile 行为需要分别验证。
-
-## 外部模型契约
-
-- [父部位外部后端契约](docs/contracts/external_backend_contract_v1.md)
-- [子部位 Blink 外部后端契约](docs/contracts/external_blink_backend_contract_v1.md)
-
-外部后端的预测结果都是候选材料，必须经过研究者复核后，才适合进入训练真值或正式数据集。
+TIF/CT 体预览最好让 Python 解释器使用 NVIDIA 独显。在同时有核显和 NVIDIA 显卡的 Windows 机器上，请在 Windows 图形设置或 NVIDIA 控制面板中，把当前环境的 `python.exe` 设为高性能显卡。`启动TaxaMask.bat` 现在会优先寻找 `taxamask` Conda 环境，再兜底旧的 `antsleap` 环境；如果你曾经设置过 `TAXAMASK_PYTHON_EXE`，环境改名后也要同步改到新的 `python.exe`。打开 TIF 项目后，可以看体预览状态栏显示的 OpenGL renderer，用它确认当前是否真的在使用 NVIDIA 显卡，而不是核显或 CPU 回退。
 
 ## 目录结构
 
 ```text
-AntSleap/                  Python 包和 Qt 工作台
-core/pdf_processor/         PDF 筛选与图文提取逻辑
-tools/agentic/              Headless 工作流工具
-tools/governance/           数据治理和审计辅助工具
+AntSleap/                  Python package 和 Qt 工作台
+AntSleap/core/             Project、TIF、部位提取、导出和后端逻辑
+AntSleap/ui/               桌面 UI、2D 标注、PDF、TIF 和 Agent 面板
+core/pdf_processor/         PDF 筛选和提取逻辑
+tools/agentic/              Headless PDF、candidate、VLM 和导出工具
+tif_blink/                  TIF-local 模型路线实验和辅助代码
+tif_blink_nnunet/           面向 nnU-Net 的 TIF 辅助路线
 screener_configs/           PDF 筛选模板和示例
-multimodal_configs/         图版提取与多模态复核 profile
-part_description_configs/   PDF 文献性状描述抽取 profile
+multimodal_configs/         图文提取和复核 profiles
+part_description_configs/   文献性状描述提取 profiles
 json_projects/templates/    干净项目模板
-docs/contracts/             外部模型后端契约
-vendor/ant-code/            一等源码组成部分：Ant-Code Agent Center 运行时
+docs/contracts/             公开后端契约和 TIF local-axis 契约
+vendor/ant-code/            第一方 Agent Center runtime
 tests/                      单元测试和工作流测试
-TaxaMask使用手册.md           中文公开使用手册
+TaxaMask使用手册.md           中文使用手册
 ```
 
-内部包名 `AntSleap` 会继续保留，用于运行稳定性和历史兼容；公开项目名是 TaxaMask。
+内部包名 `AntSleap` 会继续保留，用于运行稳定性，也作为对最初启发本项目的 SLEAP 项目的致意。公开项目名是 TaxaMask。
+
+## 典型流程
+
+PDF 文献证据路线：
+
+1. 配置或改造 PDF screening profile。
+2. 提取图版、caption 和文献性状描述。
+3. 复核 accepted 与 needs-review 输出。
+4. 将有用候选材料导入 TaxaMask 项目。
+
+2D / STL 形态标注路线：
+
+1. 导入标本图像或 STL 渲染视角图。
+2. 标注父部位和子部位形态结构。
+3. 将 VLM、SAM 和模型预测都视为草稿。
+4. 人工确认标签。
+5. 导出训练数据集。
+
+TIF / CT 路线：
+
+1. 打开 AntScan 或其他 TIFF stack。
+2. 使用 ROI 和关键切片 mask 创建 specimen part。
+3. 提取 part volume。
+4. 在 3D 和多方向切片中复核该部位。
+5. 将 source Z-axis 复制成 editable local output axis。
+6. 设置 roll reference points 作为方向标准化参照。
+7. 导出重切片后的 part TIFF 和 metadata。
+
+## 外部后端契约
+
+- [父部位外部后端契约](docs/contracts/external_backend_contract_v1.md)
+- [子部位 Blink 外部后端契约](docs/contracts/external_blink_backend_contract_v1.md)
+- [TIF local-axis 后端契约](docs/contracts/tif_local_axis_backend_contract_v1.md)
+
+外部后端预测都是待复核候选结果。研究者确认前，不应把它们当作训练真值。
 
 ## 文档
 
@@ -274,14 +275,23 @@ TaxaMask使用手册.md           中文公开使用手册
 - [平台安装说明](docs/platform_setup.md)
 - [PDF 筛选 profile 适配说明](docs/PDF筛选profile适配说明.md)
 - [图文提取与多模态 profile 适配说明](docs/图文提取与多模态profile适配说明.md)
-- [父部位外部后端契约](docs/contracts/external_backend_contract_v1.md)
-- [子部位 Blink 外部后端契约](docs/contracts/external_blink_backend_contract_v1.md)
+- [外部后端契约](docs/contracts/)
+
+## 关键词
+
+生物形态标注、分类学图像标注、分类学文献证据、PDF 图版提取、caption 提取、AI 辅助标注、人工复核、训练数据集构建、COCO 导出、YOLO 导出、VLM 预标注、SAM 辅助标注、STL 形态复核、CT 形态学、TIFF stack、TIF 工作台、AntScan、三维体预览、GPU 体渲染、部位体提取、关键切片 mask 插值、局部轴重切片、形态分割、内部形态学、蚂蚁分类学、蚁科、生物多样性信息学、Agent Center
 
 ## 引用
 
 如果 TaxaMask 帮助了你的研究，请引用软件发布版本：
 
 ```text
-TaxaMask: a taxonomy-oriented mask annotation and multimodal dataset workbench.
+TaxaMask: a taxonomy-oriented morphology annotation, evidence review, and dataset workbench.
 Zenodo DOI (all versions): https://doi.org/10.5281/zenodo.20619867
 ```
+
+## 许可证
+
+TaxaMask 源码采用 GNU Affero General Public License v3.0。该协议允许商用，但修改版和网络服务需要遵守 AGPLv3 的源码公开义务。详见 [LICENSE](LICENSE) 和 [NOTICE](NOTICE)。
+
+`vendor/ant-code/` 下内置的 Ant-Code Agent Center 是 TaxaMask 的第一方源码组成部分。该目录名是为了运行时布局兼容而保留，不应被理解为第三方依赖，也不应从 TaxaMask 项目的署名范围中排除。

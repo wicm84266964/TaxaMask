@@ -9,7 +9,7 @@ Primary rule source:
 - Use this `.lab-agent/memory.md` as short operational memory after `ANTCODE.md`.
 - Use `.lab-agent/skills/taxamask-workflows/SKILL.md` as the always-relevant compact workflow card for Agent Center, 2D/STL, TIF, PDF evidence, settings, and training-readiness tasks.
 - Use `.lab-agent/skills/taxamask-pdf-evidence/SKILL.md` for PDF literature screening, figure/caption extraction, PDF evidence indexes, PDF-derived candidates, candidate import, and PDF failure triage.
-- For deeper architecture details, read `docs/ant3d_workbench/TaxaMask_AntCode项目记忆与对接手册_zh.md` before broad refactors.
+- For public workflow details, prefer `README.md`, `TaxaMask使用手册.md`, `docs/platform_setup.md`, and `docs/contracts/`. Internal design drafts are intentionally not part of the public source release.
 
 Core product stance:
 - Keep the visible product name as TaxaMask.
@@ -111,4 +111,4 @@ How to answer the user:
 - Default to Chinese.
 - Explain first in research workflow terms: what the program does, why it matters, and what operational tradeoff it creates.
 - When changing behavior or outputs, say where files appear and what each artifact is for.
-- For common TaxaMask tasks, consult this memory and the detailed Ant-Code integration guide before rereading the whole codebase.
+- For common TaxaMask tasks, consult this memory, the workflow skill, README, the user manual, and public contracts before rereading the whole codebase.

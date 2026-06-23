@@ -3,6 +3,10 @@ __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 .venv/
 venv/
 env/
@@ -17,6 +21,14 @@ anaconda3/
 !.lab-agent/skills/
 !.lab-agent/skills/**/
 !.lab-agent/skills/**/SKILL.md
+.lab-agent/config.json
+.lab-agent/sessions/
+.lab-agent/tasks/
+.lab-agent/task-groups/
+.lab-agent/worktrees/
+.lab-agent/plans/
+.lab-agent/runtime/
+.lab-agent/cache/
 AGENTS.md
 !ANTCODE.md
 .tmp_validation/
@@ -31,6 +43,13 @@ user_config.json
 screener_configs/api_runtime_settings.json
 *.env
 .env
+*.local
+*.secret
+*.secrets
+*credentials*
+*token*
+*api_key*
+*apikey*
 
 # Local project files and databases
 *.db
@@ -62,6 +81,18 @@ screener_configs/api_runtime_settings.json
 AntSleap/weights/
 AntSleap/experiments/
 AntSleap/*_artifacts/
+/weights/
+/models/
+/checkpoints/
+/runs/
+/run_outputs/
+/outputs/
+/output/
+/exports/
+/experiments/
+/lightning_logs/
+/wandb/
+/mlruns/
 skills/**/logs/
 skills/**/cache/
 skills/**/runtime/
@@ -74,10 +105,15 @@ TaxaMask_outputs/
 AntSleap/vlm_preannotation/
 *.log
 training_report.png
+*.tmp
+*.temp
+*.pid
 
 # Local research data and heavy geometry/volume files
 *.tif
 *.tiff
+*.ome.tif
+*.ome.tiff
 *.nrrd
 *.mha
 *.nii
@@ -87,15 +123,36 @@ training_report.png
 *.obj
 *.am
 *.amira
+*.zarr/
+*.ome.zarr/
+*.h5ad
+*.parquet
+*.feather
+*.loom
+*.zst
+*.zip
+*.7z
+*.rar
+*.tar
+*.tar.gz
+*.tgz
+*.pdf
+*.docx
+*.xlsx
+*.xls
+*.csv
+*.tsv
+!docs/assets/readme/**
+!docs/**/*.md
 
 # Internal planning and handoff notes
 private_docs/
+/LLM_CONTEXT.md
+/LLM_CONTEXT_DETAILED.md
+/开发版整理提交说明_*.md
 docs/ant3d_workbench/
 docs/designs/*
 !docs/designs/
-!docs/designs/2026-06-20_AntScan局部轴重切片合并设计稿.md
-!docs/designs/2026-06-20_AntScan局部轴重切片合并执行清单.md
-!docs/designs/2026-06-22_AntScan局部轴重切片第二轮修正执行清单.md
 docs/discussions/
 docs/handoffs/
 docs/concepts/
@@ -107,6 +164,24 @@ docs/跨物种适配严格审查报告.md
 
 # Bundled local binaries
 external_tools/
+
+# Internal Ant-Code development notes kept locally but not published
+vendor/ant-code/AGENT.md
+vendor/ant-code/BACKUP_MANIFEST.txt
+vendor/ant-code/LLM_ONBOARDING.md
+vendor/ant-code/PROJECT_CHANGELOG.zh-CN.md
+vendor/ant-code/config/lab-agent.deepseek-backup.json
+vendor/ant-code/docs/handoff/
+vendor/ant-code/docs/plans/
+vendor/ant-code/docs/phase-0/
+
+# Local packaged builds and release staging
+dist/
+build/
+release/
+release_staging/
+publish_staging/
+*.egg-info/
 
 # OS files
 .DS_Store

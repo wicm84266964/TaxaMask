@@ -1414,7 +1414,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.close_project()
                 widget.deleteLater()
 
-    def test_selected_saved_reslice_overrides_local_axis_draft_overlay(self):
+    def test_selected_saved_reslice_is_read_only_and_does_not_draw_part_space_overlay(self):
         with tempfile.TemporaryDirectory() as tmp:
             widget = self._make_volume_widget(Path(tmp), z_count=5)
             try:
@@ -1437,6 +1437,10 @@ class TifWorkbenchTests(unittest.TestCase):
                             "x_axis": [1.0, 0.0, 0.0],
                             "y_axis": [0.0, 1.0, 0.0],
                             "z_axis": [0.0, 0.0, 1.0],
+                            "roll_reference": {
+                                "point_a": {"role": "roll_reference_a", "zyx": [1.0, 2.0, 2.0]},
+                                "point_b": {"role": "roll_reference_b", "zyx": [1.0, 4.0, 4.0]},
+                            },
                         },
                     },
                     save=False,
@@ -1447,9 +1451,19 @@ class TifWorkbenchTests(unittest.TestCase):
                 overlays = widget._local_axis_volume_overlays()
 
                 self.assertIsNone(widget.local_axis_draft)
-                self.assertEqual([item["label"] for item in overlays], ["source Z", "output Z"])
-                self.assertEqual(overlays[1]["start_xy"], widget._project_zyx_to_volume_xy(saved_axis["start_zyx"], widget.image_volume.shape))
-                self.assertIn("Selected saved reslice", widget.local_axis_status_label.text())
+                self.assertEqual(overlays, [])
+                self.assertFalse(widget.btn_copy_source_z_axis.isEnabled())
+                self.assertFalse(widget.btn_local_axis_reslice.isEnabled())
+                self.assertFalse(widget.local_axis_trainable_check.isEnabled())
+                self.assertFalse(widget.btn_add_rect_keyframe.isEnabled())
+                self.assertFalse(widget.btn_preview_part_mask.isEnabled())
+                self.assertFalse(widget.btn_accept_part_mask.isEnabled())
+                self.assertFalse(widget.btn_export_part_package.isEnabled())
+                self.assertFalse(widget.btn_delete_part_volume.isEnabled())
+                self.assertFalse(widget._is_editable_part_volume())
+                with self.assertRaises(ValueError):
+                    widget._current_local_axis_reslice_payload()
+                self.assertIn("read-only", widget.local_axis_status_label.text())
             finally:
                 widget.close_project()
                 widget.deleteLater()

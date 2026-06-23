@@ -2,7 +2,7 @@
 
 This is the canonical Ant Code project rules file for this repository. `AGENT.md` is retained as a compatibility file for Codex-style tooling, but Ant Code should prefer this file when loading project rules.
 
-This repository is the active clean-room Ant Code implementation. Keep day-to-day development in this folder and keep large release archives outside the repo, for example under `C:\saveproject\ant-code项目备份`.
+This repository contains the first-party Ant-Code runtime embedded by TaxaMask. Keep large local release archives and machine-specific backups outside the source repository.
 
 ## Git Workflow
 
@@ -31,9 +31,7 @@ git status --short
 
 - Git is for precise file-level history and rollback.
 - Zip/folder backups are for physical safety and deadline handoff.
-- For major accepted versions, use both:
-  - a Git commit/tag in this repo
-  - a compressed copy under `C:\saveproject\ant-code项目备份`
+- For major accepted versions, use Git commits or tags. Keep any compressed backup copies outside the repository.
 
 ## Review Checklist
 
@@ -44,6 +42,5 @@ node .\src\cli\index.js tui
 ```
 
 - Confirm the global install points to this repo when testing the `ant-code` command.
-- Keep `PROJECT_CHANGELOG.zh-CN.md` updated for every meaningful stage or bug fix.
-- Keep `LLM_ONBOARDING.md` accurate when architecture, prompts, agents, MCP, skills, hooks, or permissions change.
+- Keep public README and deployment documentation accurate when architecture, prompts, agents, MCP, skills, hooks, or permissions change.
 - Treat `lab-agent.config.json` as local product configuration. It may contain model names, allowed hosts, MCP entries, and skill paths, but it must not contain secret tokens.

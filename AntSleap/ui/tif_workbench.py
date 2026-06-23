@@ -349,7 +349,7 @@ TIF_TRANSLATIONS = {
         "Use the 3D part preview as the main workspace. Copy source Z, drag the output axis endpoints, then enable the observation-side clip plane and pick roll references on that plane.": "以三维部位预览作为主操作区。复制原始 Z，拖动输出轴头尾；打开观察侧剖切面后，直接在剖切面上点选 roll 参照。",
         "Use the 3D part preview as the main workspace. Copy source Z, drag the output axis endpoints, then pick the roll reference points on the observation-side clip plane. Export here when the frame is confirmed.": "以三维部位预览作为主操作区。复制原始 Z，拖动输出轴头尾，再在观察侧剖切面上点选 roll 参照点。确认后直接在这里导出。",
         "Composite drag preview is downshifted while rotating; still view keeps the selected quality.": "透明累积在拖动旋转时会临时降档；停止后仍按当前质量参数显示。",
-        "Selected saved reslice takes precedence over any unsaved local axis draft.": "当前选中的已保存重切片会优先于未保存局部轴草稿显示。",
+        "Selected saved reslice is read-only. Return to the part volume to edit axes or export another reslice.": "当前选中的已保存重切片为只读复核状态。请回到部位体数据节点再编辑轴或导出新的重切片。",
         "Dragging output axis {0}.": "正在拖动输出轴{0}端点。",
         "Updated output axis {0}.": "已更新输出轴{0}端点。",
         "Dragging output axis body.": "正在整体移动输出轴。",
@@ -3200,7 +3200,7 @@ class TifWorkbenchWidget(QWidget):
         self.render_current_slice()
 
     def delete_current_part_volume(self):
-        if self.current_volume_scope != "part" or not self.current_specimen_id or not self.current_part_id:
+        if not self._is_editable_part_volume() or not self.current_specimen_id or not self.current_part_id:
             QMessageBox.information(self, tt("Part extraction", self.lang), tt("Select a part volume before exporting a part package.", self.lang))
             return
         part = self.project.get_part(self.current_specimen_id, self.current_part_id, default=None)
@@ -3370,7 +3370,7 @@ class TifWorkbenchWidget(QWidget):
         return overlays
 
     def finish_part_contour_drag(self, points):
-        if not self.is_part_contour_draw_mode() or self.image_volume is None:
+        if not self._is_editable_part_volume() or not self.is_part_contour_draw_mode() or self.image_volume is None:
             return
         polygon = self._dedupe_contour_points(points)
         if len(polygon) < 3:
@@ -3405,7 +3405,7 @@ class TifWorkbenchWidget(QWidget):
         self.log(message)
 
     def delete_current_part_keyframe(self):
-        if self.current_volume_scope != "part" or self.image_volume is None:
+        if not self._is_editable_part_volume() or self.image_volume is None:
             QMessageBox.information(self, tt("Part extraction", self.lang), tt("Select a part volume before editing part masks.", self.lang))
             return
         if self._current_slice_axis() != "z":
@@ -3432,7 +3432,7 @@ class TifWorkbenchWidget(QWidget):
         self.log(message)
 
     def jump_part_keyframe(self, direction):
-        if self.current_volume_scope != "part" or self.image_volume is None:
+        if not self._is_editable_part_volume() or self.image_volume is None:
             return
         if self._current_slice_axis() != "z":
             QMessageBox.information(self, tt("Part extraction", self.lang), tt("Contour drawing currently uses Z slices.", self.lang))
@@ -3458,7 +3458,7 @@ class TifWorkbenchWidget(QWidget):
         return [[y_margin, max(y_margin + 1, height - y_margin)], [x_margin, max(x_margin + 1, width - x_margin)]]
 
     def add_current_rect_keyframe(self):
-        if self.current_volume_scope != "part" or self.image_volume is None:
+        if not self._is_editable_part_volume() or self.image_volume is None:
             QMessageBox.information(self, tt("Part extraction", self.lang), tt("Select a part volume before editing part masks.", self.lang))
             return
         if self._current_slice_axis() != "z":
@@ -3486,7 +3486,7 @@ class TifWorkbenchWidget(QWidget):
         self.log(message)
 
     def preview_part_mask_from_keyframes(self):
-        if self.current_volume_scope != "part" or self.image_volume is None:
+        if not self._is_editable_part_volume() or self.image_volume is None:
             QMessageBox.information(self, tt("Part extraction", self.lang), tt("Select a part volume before previewing masks.", self.lang))
             return
         contours_path = self._current_part_contours_path()
@@ -3514,7 +3514,7 @@ class TifWorkbenchWidget(QWidget):
         self.log(message)
 
     def accept_part_mask_preview(self):
-        if self.current_volume_scope != "part" or self.part_preview_mask is None:
+        if not self._is_editable_part_volume() or self.part_preview_mask is None:
             return
         part = self.project.get_part(self.current_specimen_id, self.current_part_id, default=None)
         if part is None:
@@ -4626,7 +4626,7 @@ class TifWorkbenchWidget(QWidget):
             self._clear_local_axis_draft_if_part_changed(specimen_id, self.current_part_id)
             if self.current_reslice_id and self.local_axis_draft is not None:
                 self.local_axis_draft = None
-                self._set_local_axis_status(tt("Selected saved reslice takes precedence over any unsaved local axis draft.", self.lang))
+                self._set_local_axis_status(tt("Selected saved reslice is read-only. Return to the part volume to edit axes or export another reslice.", self.lang))
             if self.current_reslice_id and hasattr(self, "volume_local_axes_check"):
                 self.volume_local_axes_check.setChecked(True)
             self.active_part_roi_id = ""
@@ -4688,7 +4688,7 @@ class TifWorkbenchWidget(QWidget):
             self._load_edit_volume()
             self._update_status_labels(specimen, part=part)
             if self.current_reslice_id:
-                self._set_local_axis_status(tt("Selected saved reslice takes precedence over any unsaved local axis draft.", self.lang))
+                self._set_local_axis_status(tt("Selected saved reslice is read-only. Return to the part volume to edit axes or export another reslice.", self.lang))
             self._apply_default_volume_mask_mode()
             self._sync_mode_sections()
             self.render_current_slice()
@@ -4956,6 +4956,8 @@ class TifWorkbenchWidget(QWidget):
 
     def _set_scope_controls_enabled(self):
         is_part = self.current_volume_scope == "part"
+        is_saved_reslice = is_part and bool(self.current_reslice_id)
+        is_editable_part_volume = is_part and not is_saved_reslice
         has_image = self.image_volume is not None
         for widget in (
             self.label_role_combo,
@@ -4983,26 +4985,27 @@ class TifWorkbenchWidget(QWidget):
         self.btn_confirm_part_roi.setEnabled(not is_part and has_image)
         self.btn_cancel_part_roi.setEnabled(not is_part)
         self.btn_create_part.setEnabled(not is_part and has_image)
-        self.btn_add_rect_keyframe.setEnabled(is_part and has_image)
-        contour_enabled = is_part and has_image and self.display_mode == "slice" and self._current_slice_axis() == "z"
+        self.btn_add_rect_keyframe.setEnabled(is_editable_part_volume and has_image)
+        contour_enabled = is_editable_part_volume and has_image and self.display_mode == "slice" and self._current_slice_axis() == "z"
         self.btn_draw_part_contour.setEnabled(contour_enabled)
         self.btn_delete_part_contour.setEnabled(contour_enabled)
         self.btn_prev_key_slice.setEnabled(contour_enabled)
         self.btn_next_key_slice.setEnabled(contour_enabled)
-        self.btn_preview_part_mask.setEnabled(is_part and has_image)
-        self.btn_accept_part_mask.setEnabled(is_part and self.part_preview_mask is not None)
-        self.btn_clear_part_preview.setEnabled(is_part and self.part_preview_mask is not None)
+        self.btn_preview_part_mask.setEnabled(is_editable_part_volume and has_image)
+        self.btn_accept_part_mask.setEnabled(is_editable_part_volume and self.part_preview_mask is not None)
+        self.btn_clear_part_preview.setEnabled(is_editable_part_volume and self.part_preview_mask is not None)
         local_axis_export_busy = self._local_axis_reslice_export_running()
-        self.btn_copy_source_z_axis.setEnabled(is_part and has_image and not local_axis_export_busy)
-        self.btn_pick_roll_ref_a.setEnabled(is_part and has_image and not local_axis_export_busy)
-        self.btn_pick_roll_ref_b.setEnabled(is_part and has_image and not local_axis_export_busy)
-        self.btn_clear_roll_refs.setEnabled(is_part and has_image and not local_axis_export_busy)
-        self.btn_clear_local_axis_draft.setEnabled(is_part and has_image and not local_axis_export_busy)
-        self.btn_local_axis_reslice.setEnabled(is_part and has_image and not local_axis_export_busy)
-        self.local_axis_trainable_check.setEnabled(is_part and has_image)
+        local_axis_editable = is_editable_part_volume and has_image and not local_axis_export_busy
+        self.btn_copy_source_z_axis.setEnabled(local_axis_editable)
+        self.btn_pick_roll_ref_a.setEnabled(local_axis_editable)
+        self.btn_pick_roll_ref_b.setEnabled(local_axis_editable)
+        self.btn_clear_roll_refs.setEnabled(local_axis_editable)
+        self.btn_clear_local_axis_draft.setEnabled(local_axis_editable)
+        self.btn_local_axis_reslice.setEnabled(local_axis_editable)
+        self.local_axis_trainable_check.setEnabled(local_axis_editable)
         self.btn_export_local_axis_training_manifest.setEnabled(bool(self.project.project_data.get("specimens", [])))
-        self.btn_export_part_package.setEnabled(is_part and has_image)
-        self.btn_delete_part_volume.setEnabled(is_part and self.current_part is not None)
+        self.btn_export_part_package.setEnabled(is_editable_part_volume and has_image)
+        self.btn_delete_part_volume.setEnabled(is_editable_part_volume and self.current_part is not None)
         self._update_local_axis_summary()
 
     def _update_status_labels(self, specimen, part=None):
@@ -5153,8 +5156,12 @@ class TifWorkbenchWidget(QWidget):
             getattr(self, "volume_local_axes_check", None)
             and self.volume_local_axes_check.isChecked()
             and self.current_volume_scope == "part"
+            and not self.current_reslice_id
             and self.image_volume is not None
         )
+
+    def _is_editable_part_volume(self):
+        return bool(self.current_volume_scope == "part" and not self.current_reslice_id)
 
     def _clear_local_axis_draft_if_part_changed(self, specimen_id="", part_id=""):
         draft = self.local_axis_draft if isinstance(self.local_axis_draft, dict) else None
@@ -5170,7 +5177,7 @@ class TifWorkbenchWidget(QWidget):
         return source_z_axis_for_part(shape)
 
     def copy_source_z_axis_to_local_axis_draft(self):
-        if self.current_volume_scope != "part" or not self.current_specimen_id or not self.current_part_id or self.image_volume is None:
+        if self.current_volume_scope != "part" or self.current_reslice_id or not self.current_specimen_id or not self.current_part_id or self.image_volume is None:
             QMessageBox.information(self, tt("Local Axis Reslice", self.lang), tt("Select a part volume before editing Local Axis Reslice.", self.lang))
             return None
         source_axis = self._source_z_axis_for_current_part()
@@ -5913,13 +5920,9 @@ class TifWorkbenchWidget(QWidget):
         )
 
         editable = {}
-        reslice = self._current_part_reslice_record()
-        if isinstance(reslice, dict):
-            editable = ((reslice.get("source") or {}).get("editable_axis") or {})
-        else:
-            draft = self._current_local_axis_draft()
-            if isinstance(draft, dict):
-                editable = draft.get("editable_axis") or {}
+        draft = self._current_local_axis_draft()
+        if isinstance(draft, dict):
+            editable = draft.get("editable_axis") or {}
         if editable.get("start_zyx") and editable.get("end_zyx"):
             add_axis(
                 editable.get("start_zyx"),
@@ -5932,7 +5935,6 @@ class TifWorkbenchWidget(QWidget):
                 label_position="right",
                 role="editable_output",
             )
-        draft = self._current_local_axis_draft()
         roll = (draft or {}).get("roll_reference") if isinstance(draft, dict) else {}
         point_a = roll.get("point_a") if isinstance(roll, dict) and isinstance(roll.get("point_a"), dict) else {}
         point_b = roll.get("point_b") if isinstance(roll, dict) and isinstance(roll.get("point_b"), dict) else {}
@@ -7204,7 +7206,7 @@ class TifWorkbenchWidget(QWidget):
         )
 
     def export_current_part_package(self):
-        if self.current_volume_scope != "part" or not self.current_specimen_id or not self.current_part_id:
+        if not self._is_editable_part_volume() or not self.current_specimen_id or not self.current_part_id:
             QMessageBox.information(self, tt("Part extraction", self.lang), tt("Select a part volume before exporting a part package.", self.lang))
             return
         default_dir = os.path.join(self.project.project_dir, "exports", "parts")
@@ -7234,7 +7236,7 @@ class TifWorkbenchWidget(QWidget):
         return f"{part_id}_local_axis_{stamp}"
 
     def _current_local_axis_reslice_payload(self):
-        if self.current_volume_scope != "part" or not self.current_specimen_id or not self.current_part_id or self.image_volume is None:
+        if not self._is_editable_part_volume() or not self.current_specimen_id or not self.current_part_id or self.image_volume is None:
             raise ValueError(tt("Select a part volume before exporting Local Axis Reslice.", self.lang))
         draft = self._current_local_axis_draft()
         if not isinstance(draft, dict):

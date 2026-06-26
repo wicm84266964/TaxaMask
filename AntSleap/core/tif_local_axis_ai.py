@@ -3,6 +3,7 @@ import os
 import subprocess
 from datetime import datetime
 
+from .safe_io import atomic_write_json
 from .tif_project import TifProjectManager
 from .tif_local_axis_reslice import source_z_axis_for_part
 
@@ -45,9 +46,7 @@ def _safe_id(value, fallback="local_axis"):
 
 
 def _write_json(path, payload):
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2)
+    atomic_write_json(path, payload, indent=2, ensure_ascii=False)
     return payload
 
 

@@ -5,6 +5,7 @@ from datetime import datetime
 import numpy as np
 import tifffile
 
+from .safe_io import atomic_write_json
 from .tif_materials import write_material_map
 from .tif_project import TifProjectManager
 from .tif_volume_io import create_empty_label_sidecar_like, create_volume_sidecar_memmap
@@ -339,11 +340,7 @@ def import_tif_stack(
         }
         report_rel = os.path.join(specimen_root_rel, "working", "import_report.json").replace("\\", "/")
         report_abs = project_manager.to_absolute(report_rel)
-        os.makedirs(os.path.dirname(report_abs), exist_ok=True)
-        with open(report_abs, "w", encoding="utf-8") as handle:
-            import json
-
-            json.dump(report, handle, ensure_ascii=False, indent=2)
+        atomic_write_json(report_abs, report, indent=2, ensure_ascii=False)
         specimen["working_volume"]["import_report"] = report_rel
         _emit_progress(progress_callback, 100, 100, "Saving TIF project")
         project_manager.save_project()

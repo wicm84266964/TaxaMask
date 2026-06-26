@@ -6,6 +6,7 @@ import numpy as np
 import tifffile
 from scipy.ndimage import map_coordinates
 
+from .safe_io import atomic_write_json
 from .tif_project import TifProjectManager
 from .tif_volume_io import load_volume_sidecar, read_volume_metadata, volume_sidecar_exists
 
@@ -27,9 +28,7 @@ def _safe_id(value, fallback="reslice"):
 
 
 def _write_json(path, payload):
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2)
+    atomic_write_json(path, payload, indent=2, ensure_ascii=False)
     return payload
 
 

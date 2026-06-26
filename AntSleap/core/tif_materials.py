@@ -1,6 +1,8 @@
 import json
 import os
 
+from .safe_io import atomic_write_json
+
 
 TIF_MATERIAL_MAP_SCHEMA_VERSION = "ant3d_tif_material_map_v1"
 BACKGROUND_MATERIAL_ID = 0
@@ -159,9 +161,7 @@ def remove_material(material_map, material_id):
 
 def write_material_map(path, payload=None, source="manual"):
     clean = sanitize_material_map(payload, source=source)
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(clean, handle, ensure_ascii=False, indent=2)
+    atomic_write_json(path, clean, indent=2, ensure_ascii=False)
     return clean
 
 

@@ -501,7 +501,8 @@ class LocatorScopeTests(unittest.TestCase):
             self.assertIn("Head", pm.project_data["labels"][image_path]["parts"])
 
             on_disk_before_flush = json.loads(Path(pm.current_project_path).read_text(encoding="utf-8"))
-            self.assertEqual(on_disk_before_flush["labels"][rel_image_path]["parts"], {})
+            disk_label_before_flush = on_disk_before_flush["labels"].get(rel_image_path, {})
+            self.assertNotIn("Head", disk_label_before_flush.get("parts", {}))
 
             pm.save_project()
             on_disk_after_flush = json.loads(Path(pm.current_project_path).read_text(encoding="utf-8"))

@@ -5,6 +5,8 @@ from datetime import datetime
 
 import numpy as np
 
+from .safe_io import atomic_write_json, copytree_replace_safely, replace_directory_safely
+
 
 VOLUME_SIDECAR_SCHEMA_VERSION = "ant3d_volume_sidecar_v1"
 VOLUME_SIDECAR_FORMAT = "ant3d_volume_sidecar"
@@ -51,9 +53,7 @@ def _zarr_dtype(dtype):
 
 
 def _write_json(path, payload):
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2)
+    atomic_write_json(path, payload, indent=2, ensure_ascii=False)
 
 
 def _volume_metadata_payload(
@@ -96,17 +96,17 @@ def _volume_metadata_payload(
 
 
 def _write_volume_metadata(sidecar_path, metadata):
-    with open(metadata_path(sidecar_path), "w", encoding="utf-8") as handle:
-        json.dump(metadata, handle, ensure_ascii=False, indent=2)
+    atomic_write_json(metadata_path(sidecar_path), metadata, indent=2, ensure_ascii=False)
 
 
 def _write_ome_ngff_zarr(sidecar_path, volume, role, spacing_zyx, spacing_unit, chunk_shape_zyx=None):
     """Write a minimal OME-NGFF v0.4 Zarr v2 store beside the legacy npy copy."""
     path = os.path.abspath(str(sidecar_path))
     array_dir = os.path.join(path, OME_ZARR_ARRAY_PATH)
-    if os.path.exists(array_dir):
-        shutil.rmtree(array_dir)
-    os.makedirs(array_dir, exist_ok=True)
+    tmp_array_dir = f"{array_dir}.tmp_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
+    if os.path.exists(tmp_array_dir):
+        shutil.rmtree(tmp_array_dir)
+    os.makedirs(tmp_array_dir, exist_ok=True)
 
     shape = _shape_zyx(volume)
     chunks = [int(value) for value in (chunk_shape_zyx or _default_chunk_shape(shape))]
@@ -116,7 +116,7 @@ def _write_ome_ngff_zarr(sidecar_path, volume, role, spacing_zyx, spacing_unit, 
 
     _write_json(os.path.join(path, ".zgroup"), {"zarr_format": 2})
     _write_json(
-        os.path.join(array_dir, ".zarray"),
+        os.path.join(tmp_array_dir, ".zarray"),
         {
             "zarr_format": 2,
             "shape": shape,
@@ -176,8 +176,9 @@ def _write_ome_ngff_zarr(sidecar_path, volume, role, spacing_zyx, spacing_unit, 
                     ]
                 )
                 chunk_name = f"{z0 // chunks[0]}.{y0 // chunks[1]}.{x0 // chunks[2]}"
-                with open(os.path.join(array_dir, chunk_name), "wb") as handle:
+                with open(os.path.join(tmp_array_dir, chunk_name), "wb") as handle:
                     handle.write(chunk.tobytes(order="C"))
+    replace_directory_safely(tmp_array_dir, array_dir)
     return {
         "ome_ngff_version": OME_NGFF_VERSION,
         "zarr_format": 2,
@@ -210,7 +211,20 @@ def write_volume_sidecar(
     shape = _shape_zyx(volume)
     path = os.path.abspath(str(sidecar_path))
     os.makedirs(path, exist_ok=True)
-    np.save(array_path(path), volume, allow_pickle=False)
+    tmp_array_path = f"{array_path(path)}.tmp"
+    try:
+        with open(tmp_array_path, "wb") as handle:
+            np.save(handle, volume, allow_pickle=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_array_path, array_path(path))
+    except Exception:
+        try:
+            if os.path.exists(tmp_array_path):
+                os.remove(tmp_array_path)
+        except OSError:
+            pass
+        raise
 
     spacing = _normalize_spacing(spacing_zyx)
     ngff_metadata = {}
@@ -313,7 +327,20 @@ def save_volume_array(sidecar_path, array):
         if hasattr(array, "flush"):
             array.flush()
     else:
-        np.save(expected_path, volume, allow_pickle=False)
+        tmp_path = f"{expected_path}.tmp"
+        try:
+            with open(tmp_path, "wb") as handle:
+                np.save(handle, volume, allow_pickle=False)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_path, expected_path)
+        except Exception:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
+            raise
     metadata["dtype"] = str(volume.dtype)
     metadata["updated_at"] = _now_iso()
     if metadata.get("ome_ngff_complete"):
@@ -326,8 +353,7 @@ def save_volume_array(sidecar_path, array):
             chunk_shape_zyx=metadata.get("zarr_chunks_zyx"),
         )
         metadata.update(ngff_metadata)
-    with open(metadata_path(sidecar_path), "w", encoding="utf-8") as handle:
-        json.dump(metadata, handle, ensure_ascii=False, indent=2)
+    _write_volume_metadata(sidecar_path, metadata)
     return metadata
 
 
@@ -339,7 +365,21 @@ def flush_volume_array(sidecar_path, array, update_ome_zarr=False):
     if hasattr(array, "flush") and str(getattr(array, "mode", "")) != "c":
         array.flush()
     else:
-        np.save(array_path(sidecar_path), volume, allow_pickle=False)
+        target_path = array_path(sidecar_path)
+        tmp_path = f"{target_path}.tmp"
+        try:
+            with open(tmp_path, "wb") as handle:
+                np.save(handle, volume, allow_pickle=False)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_path, target_path)
+        except Exception:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
+            raise
     metadata["dtype"] = str(volume.dtype)
     metadata["updated_at"] = _now_iso()
     if update_ome_zarr and metadata.get("ome_ngff_complete"):
@@ -404,14 +444,11 @@ def copy_volume_sidecar(source_sidecar_path, target_sidecar_path, role=None):
         raise FileNotFoundError(source)
     if os.path.normcase(source) == os.path.normcase(target):
         raise ValueError(f"source_target_sidecar_same:{source}")
-    if os.path.exists(target):
-        shutil.rmtree(target)
-    shutil.copytree(source, target)
+    copytree_replace_safely(source, target)
     if role:
         metadata = read_volume_metadata(target)
         metadata["role"] = str(role)
         metadata["updated_at"] = _now_iso()
-        with open(metadata_path(target), "w", encoding="utf-8") as handle:
-            json.dump(metadata, handle, ensure_ascii=False, indent=2)
+        _write_volume_metadata(target, metadata)
         return metadata
     return read_volume_metadata(target)

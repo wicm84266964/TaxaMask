@@ -14,6 +14,7 @@ import hashlib
 import csv
 import json
 import logging
+import os
 import re
 import shutil
 import sqlite3
@@ -32,6 +33,29 @@ from .part_description_profile import (
     normalize_part_description_profile,
     profile_display_name as part_profile_display_name,
 )
+
+
+def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = target.with_name(f"{target.name}.tmp")
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        with open(tmp_path, "r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        if not isinstance(loaded, dict):
+            raise ValueError(f"json_root_not_object:{target}")
+        os.replace(tmp_path, target)
+    except Exception:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
+        raise
 
 
 class EnhancedPDFExtractionSystem:
@@ -388,6 +412,8 @@ class EnhancedPDFExtractionSystem:
     def _init_database(self) -> None:
         self.db_conn = sqlite3.connect(str(self.output_db_path))
         self.db_conn.execute("PRAGMA foreign_keys = ON")
+        self.db_conn.execute("PRAGMA journal_mode = WAL")
+        self.db_conn.execute("PRAGMA synchronous = NORMAL")
         cursor = self.db_conn.cursor()
 
         cursor.execute(
@@ -611,9 +637,9 @@ class EnhancedPDFExtractionSystem:
             if existing_result is not None:
                 return existing_result
 
-        self._delete_existing_pdf_records(str(pdf_path_obj))
-
         try:
+            self.db_conn.execute("BEGIN IMMEDIATE")
+            self._delete_existing_pdf_records(str(pdf_path_obj), commit=False)
             doc = fitz.open(str(pdf_path_obj))
             total_pages = len(doc)
             cursor.execute(
@@ -772,7 +798,7 @@ class EnhancedPDFExtractionSystem:
             "part_text_blocks": part_blocks,
         }
 
-    def _delete_existing_pdf_records(self, pdf_path: str) -> None:
+    def _delete_existing_pdf_records(self, pdf_path: str, commit: bool = True) -> None:
         if self.db_conn is None:
             return
         cursor = self.db_conn.cursor()
@@ -788,7 +814,8 @@ class EnhancedPDFExtractionSystem:
         cursor.execute("DELETE FROM figure_records WHERE pdf_file_id = ?", (pdf_file_id,))
         cursor.execute("DELETE FROM extraction_stats WHERE pdf_file_id = ?", (pdf_file_id,))
         cursor.execute("DELETE FROM pdf_files WHERE id = ?", (pdf_file_id,))
-        self.db_conn.commit()
+        if commit:
+            self.db_conn.commit()
 
     # ------------------------------------------------------------------
     # Text extraction and evidence assembly
@@ -1615,8 +1642,7 @@ class EnhancedPDFExtractionSystem:
                 for candidate in candidates
             ],
         }
-        with open(manifest_path, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        _atomic_write_json(manifest_path, payload)
         return str(manifest_path)
 
     def _save_batch_raw_response(self, batch_id: str, raw_response: str) -> str:

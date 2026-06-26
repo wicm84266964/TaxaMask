@@ -185,8 +185,38 @@ def _write_extract_result_payload(result_json_path: str, lines: List[str], issue
         "issue": issue,
         "extract_source": str(extract_source or "").strip() or "failed",
     }
-    with open(result_json_path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2)
+    _atomic_write_json_file(Path(result_json_path), payload)
+
+
+def _atomic_write_json_file(file_path: Path, payload: Dict[str, Any]) -> None:
+    file_path = Path(file_path)
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = file_path.with_name(f"{file_path.name}.tmp")
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        with open(tmp_path, "r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        if not isinstance(loaded, dict):
+            raise ValueError(f"json_root_not_object:{file_path}")
+        os.replace(tmp_path, file_path)
+        try:
+            dir_fd = os.open(str(file_path.parent), os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            pass
+    except Exception:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def _run_extract_lines_cli(pdf_path_text: str, num_lines: int, result_json_path: str) -> int:
@@ -1021,9 +1051,7 @@ class LLMScreenPDFClassifier:
         return f"run_{timestamp}_{suffix}"
 
     def _write_json_file(self, file_path: Path, payload: Dict[str, Any]) -> None:
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(file_path, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        _atomic_write_json_file(file_path, payload)
 
     def _save_batch_raw_response(self, batch_id: str, raw_response: str) -> str:
         raw_dir = self._get_v2_artifact_paths(self._get_active_output_folder())["batch_raw_responses"]

@@ -3,6 +3,7 @@
 import json
 import os
 import shutil
+import time
 from PIL import Image, ImageDraw
 
 from .taxonomy_defaults import (
@@ -49,6 +50,9 @@ AUTO_BOX_SOURCE_MODEL = "model_prediction"
 AUTO_BOX_SOURCE_EXTERNAL_MODEL = "external_model_prediction"
 AUTO_BOX_REVIEW_DRAFT = "draft"
 AUTO_BOX_REVIEW_CONFIRMED = "confirmed"
+PROJECT_BACKUP_LIMIT = 30
+PROJECT_BACKUP_MIN_INTERVAL_SECONDS = 300
+LABEL_JOURNAL_SCHEMA_VERSION = "taxamask-label-journal-v1"
 
 
 class ProjectManager:
@@ -85,6 +89,7 @@ class ProjectManager:
         }
         self.current_project_path = None
         self.known_relocated_roots = []
+        self._last_label_journal_fsync = 0.0
 
     def set_known_relocated_roots(self, root_mappings):
         clean_mappings = []
@@ -312,6 +317,208 @@ class ProjectManager:
             "taxon_metadata": {},
             "descriptions": {},
             "description_sources": {},
+        }
+
+    def _label_entry_has_saved_content(self, label_data):
+        if not isinstance(label_data, dict):
+            return False
+
+        for key in (
+            "parts",
+            "boxes",
+            "auto_boxes",
+            "auto_box_meta",
+            "descriptions",
+            "description_sources",
+            "shrink_loose_boxes",
+            "trajectories",
+        ):
+            value = label_data.get(key)
+            if value:
+                return True
+
+        if str(label_data.get("status", "unlabeled") or "unlabeled") != "unlabeled":
+            return True
+        if str(label_data.get("genus", "Unknown") or "Unknown") not in ("", "Unknown"):
+            return True
+        if str(label_data.get("taxon", "Unknown") or "Unknown") not in ("", "Unknown"):
+            return True
+        if str(label_data.get("taxon_rank", "") or ""):
+            return True
+        taxon_metadata = label_data.get("taxon_metadata", {})
+        if isinstance(taxon_metadata, dict) and taxon_metadata:
+            return True
+
+        known_default_keys = {
+            "parts",
+            "status",
+            "genus",
+            "taxon",
+            "taxon_rank",
+            "taxon_metadata",
+            "descriptions",
+            "description_sources",
+            "boxes",
+            "auto_boxes",
+            "auto_box_meta",
+            "shrink_loose_boxes",
+            "trajectories",
+        }
+        for key, value in label_data.items():
+            if key not in known_default_keys and value not in ({}, [], "", None):
+                return True
+        return False
+
+    def _project_sidecar_stem(self, project_path=None):
+        path = os.path.abspath(project_path or self.current_project_path or "")
+        name = os.path.basename(path)
+        stem, _ext = os.path.splitext(name)
+        return stem or "project"
+
+    def _project_backup_dir(self, project_path=None):
+        path = os.path.abspath(project_path or self.current_project_path or "")
+        if not path:
+            return ""
+        return os.path.join(os.path.dirname(path), f"{self._project_sidecar_stem(path)}.project_backups")
+
+    def _label_journal_path(self, project_path=None):
+        path = os.path.abspath(project_path or self.current_project_path or "")
+        if not path:
+            return ""
+        return os.path.join(os.path.dirname(path), f"{self._project_sidecar_stem(path)}.label_journal.jsonl")
+
+    def _json_timestamp(self):
+        return time.strftime("%Y-%m-%dT%H:%M:%S%z")
+
+    def _backup_current_project_file(self, project_path):
+        if not project_path or not os.path.exists(project_path):
+            return ""
+        try:
+            if os.path.getsize(project_path) <= 0:
+                return ""
+        except OSError:
+            return ""
+
+        backup_dir = self._project_backup_dir(project_path)
+        stem = self._project_sidecar_stem(project_path)
+        try:
+            os.makedirs(backup_dir, exist_ok=True)
+            existing = [
+                os.path.join(backup_dir, name)
+                for name in os.listdir(backup_dir)
+                if name.startswith(f"{stem}.") and name.endswith(".json.bak")
+            ]
+            if existing:
+                latest_mtime = max(os.path.getmtime(path) for path in existing if os.path.exists(path))
+                if time.time() - latest_mtime < PROJECT_BACKUP_MIN_INTERVAL_SECONDS:
+                    return ""
+
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            backup_path = os.path.join(backup_dir, f"{stem}.{timestamp}.json.bak")
+            tmp_backup_path = f"{backup_path}.tmp"
+            shutil.copy2(project_path, tmp_backup_path)
+            os.replace(tmp_backup_path, backup_path)
+
+            backups = sorted(
+                [
+                    os.path.join(backup_dir, name)
+                    for name in os.listdir(backup_dir)
+                    if name.startswith(f"{stem}.") and name.endswith(".json.bak")
+                ],
+                key=lambda item: os.path.getmtime(item),
+                reverse=True,
+            )
+            for old_backup in backups[PROJECT_BACKUP_LIMIT:]:
+                try:
+                    os.remove(old_backup)
+                except OSError:
+                    pass
+            return backup_path
+        except Exception as exc:
+            print(f"Project backup skipped: {exc}")
+            return ""
+
+    def _append_label_journal_entry(self, image_path, action):
+        journal_path = self._label_journal_path()
+        if not journal_path or not image_path:
+            return False
+        labels = self.project_data.get("labels", {})
+        label_entry = labels.get(image_path, self._default_label_entry())
+        try:
+            os.makedirs(os.path.dirname(journal_path), exist_ok=True)
+            record = {
+                "schema_version": LABEL_JOURNAL_SCHEMA_VERSION,
+                "timestamp": self._json_timestamp(),
+                "action": str(action or "label_update"),
+                "project": os.path.abspath(self.current_project_path) if self.current_project_path else "",
+                "image_path": self._to_relative(image_path),
+                "label": label_entry if isinstance(label_entry, dict) else self._default_label_entry(),
+            }
+            with open(journal_path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True))
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            self._last_label_journal_fsync = time.time()
+            return True
+        except Exception as exc:
+            print(f"Label journal write skipped: {exc}")
+            return False
+
+    def recover_labels_from_journal(self, journal_path=None, save=True):
+        path = journal_path or self._label_journal_path()
+        if not path or not os.path.exists(path):
+            return {
+                "recovered_images": 0,
+                "records_read": 0,
+                "records_skipped": 0,
+            }
+
+        latest_by_image = {}
+        records_read = 0
+        records_skipped = 0
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        records_skipped += 1
+                        continue
+                    if record.get("schema_version") != LABEL_JOURNAL_SCHEMA_VERSION:
+                        records_skipped += 1
+                        continue
+                    image_path = str(record.get("image_path") or "")
+                    label_entry = record.get("label")
+                    if not image_path or not isinstance(label_entry, dict):
+                        records_skipped += 1
+                        continue
+                    abs_path = self._to_absolute(image_path)
+                    latest_by_image[abs_path] = label_entry
+                    records_read += 1
+        except OSError:
+            return {
+                "recovered_images": 0,
+                "records_read": records_read,
+                "records_skipped": records_skipped,
+            }
+
+        labels = self.project_data.setdefault("labels", {})
+        for image_path, label_entry in latest_by_image.items():
+            labels[image_path] = self._normalize_label_taxon_fields(label_entry)
+            if image_path not in self.project_data.get("images", []):
+                self.project_data.setdefault("images", []).append(image_path)
+
+        if latest_by_image and save:
+            self.save_project()
+
+        return {
+            "recovered_images": len(latest_by_image),
+            "records_read": records_read,
+            "records_skipped": records_skipped,
         }
 
     def _normalize_label_taxon_fields(self, label_data):
@@ -613,10 +820,10 @@ class ProjectManager:
         self.known_relocated_roots = list(getattr(self, "known_relocated_roots", []))
 
     def load_project(self, path):
-        self.clear() # Ensure clean state
-        
         with open(path, 'r', encoding='utf-8') as f:
             loaded_data = json.load(f)
+
+        self.clear() # Ensure clean state
         
         self.current_project_path = os.path.abspath(path)
         
@@ -691,6 +898,9 @@ class ProjectManager:
                 self.project_data["labels"][project_key] = self._merge_loaded_label_entry(existing, label_data)
             else:
                 self.project_data["labels"][project_key] = self._normalize_label_taxon_fields(label_data)
+
+        for img_abs in self.project_data.get("images", []):
+            self.project_data["labels"].setdefault(img_abs, self._default_label_entry())
             
         # Handle Scales
         for img_rel, scale_val in loaded_data.get("scales", {}).items():
@@ -738,6 +948,8 @@ class ProjectManager:
                 data_to_save["images"].append(self._to_relative(img_abs))
                 
             for img_abs, label_data in self.project_data["labels"].items():
+                if not self._label_entry_has_saved_content(label_data):
+                    continue
                 rel_path = self._to_relative(img_abs)
                 data_to_save["labels"][rel_path] = label_data
                 
@@ -749,8 +961,33 @@ class ProjectManager:
                 rel_path = self._to_relative(img_abs)
                 data_to_save["image_provenance"][rel_path] = provenance
 
-            with open(self.current_project_path, 'w', encoding='utf-8') as f:
-                json.dump(data_to_save, f, indent=4, ensure_ascii=False)
+            project_path = os.path.abspath(self.current_project_path)
+            project_dir = os.path.dirname(project_path) or "."
+            tmp_path = f"{project_path}.tmp"
+            try:
+                with open(tmp_path, 'w', encoding='utf-8') as f:
+                    json.dump(data_to_save, f, indent=4, ensure_ascii=False)
+                    f.flush()
+                    os.fsync(f.fileno())
+                with open(tmp_path, 'r', encoding='utf-8') as f:
+                    json.load(f)
+                self._backup_current_project_file(project_path)
+                os.replace(tmp_path, project_path)
+            except Exception:
+                try:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+                except OSError:
+                    pass
+                raise
+            try:
+                dir_fd = os.open(project_dir, os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except OSError:
+                pass
 
     def add_images(self, image_paths, progress_callback=None, save=True):
         paths = list(image_paths or [])
@@ -851,6 +1088,7 @@ class ProjectManager:
             self.project_data["labels"][abs_path] = self._default_label_entry()
         entry = self._normalize_label_taxon_fields(self.project_data["labels"][abs_path])
         entry.setdefault("description_sources", {})[clean_part] = dict(source_meta or {})
+        self._append_label_journal_entry(abs_path, "set_description_source")
         if save:
             self.save_project()
 
@@ -882,6 +1120,7 @@ class ProjectManager:
                 entry.setdefault("description_sources", {})[clean_part] = dict(source_meta)
             elif clean_part in entry.get("description_sources", {}):
                 del entry["description_sources"][clean_part]
+        self._append_label_journal_entry(abs_path, "set_part_description")
         if save:
             self.save_project()
 
@@ -1530,6 +1769,7 @@ class ProjectManager:
             self.project_data["labels"][image_path] = self._default_label_entry()
         entry = self.project_data["labels"][image_path]
         entry.setdefault("shrink_loose_boxes", {})[clean_part] = clean_box
+        self._append_label_journal_entry(image_path, "update_shrink_loose_box")
         if save:
             self.save_project()
         return True
@@ -1591,6 +1831,7 @@ class ProjectManager:
         elif not auto_box and entry.get("descriptions", {}).get(part_name) == "Auto-Annotated":
             del entry["descriptions"][part_name]
             
+        self._append_label_journal_entry(image_path, "update_label")
         if save:
             self.save_project()
 
@@ -1615,6 +1856,7 @@ class ProjectManager:
             clean_meta.setdefault("source", AUTO_BOX_SOURCE_MODEL)
             clean_meta.setdefault("review_status", AUTO_BOX_REVIEW_DRAFT)
             entry.setdefault("auto_box_meta", {})[clean_part] = clean_meta
+        self._append_label_journal_entry(image_path, "update_auto_box")
         if save:
             self.save_project()
         return True
@@ -1629,6 +1871,7 @@ class ProjectManager:
             return False
         meta = entry.setdefault("auto_box_meta", {}).setdefault(clean_part, {})
         meta["review_status"] = clean_status
+        self._append_label_journal_entry(image_path, "set_auto_box_review_status")
         if save:
             self.save_project()
         return True
@@ -1714,6 +1957,7 @@ class ProjectManager:
             del entry["auto_box_meta"][clean_part]
             removed = True
         if save and removed:
+            self._append_label_journal_entry(image_path, "remove_auto_box")
             self.save_project()
         return removed
     
@@ -1825,6 +2069,7 @@ class ProjectManager:
             trajectory_payload["parent_context"] = clean_parent_context
 
         self.project_data["labels"][image_path]["trajectories"][part_name] = trajectory_payload
+        self._append_label_journal_entry(image_path, "update_trajectory")
         if save:
             self.save_project()
         
@@ -1888,7 +2133,8 @@ class ProjectManager:
         if not clean_child:
             return 0
         removed = 0
-        for entry in self.project_data.get("labels", {}).values():
+        changed_images = []
+        for image_path, entry in self.project_data.get("labels", {}).items():
             if not isinstance(entry, dict):
                 continue
             trajectories = entry.get("trajectories", {})
@@ -1903,9 +2149,12 @@ class ProjectManager:
                 continue
             del trajectories[clean_child]
             removed += 1
+            changed_images.append(image_path)
             if not trajectories:
                 entry.pop("trajectories", None)
         if removed and save:
+            for image_path in changed_images:
+                self._append_label_journal_entry(image_path, "delete_blink_trajectory_dataset")
             self.save_project()
         return removed
 
@@ -1945,6 +2194,7 @@ class ProjectManager:
             if "shrink_loose_boxes" in entry and part_name in entry["shrink_loose_boxes"]:
                 del entry["shrink_loose_boxes"][part_name]
             
+            self._append_label_journal_entry(image_path, "delete_label")
             if save:
                 self.save_project()
 
@@ -1961,6 +2211,7 @@ class ProjectManager:
                 entry["taxon_rank"] = str(taxon_rank or "").strip()
             if isinstance(taxon_metadata, dict):
                 entry["taxon_metadata"] = dict(taxon_metadata)
+            self._append_label_journal_entry(image_path, "set_taxon")
             if save:
                 self.save_project()
 
@@ -2192,6 +2443,8 @@ class ProjectManager:
                 
             if not labels["parts"]:
                 labels["status"] = "unlabeled"
+            if parts_to_remove:
+                self._append_label_journal_entry(img_path, "remove_auto_labels_for_images")
                 
         if save:
             self.save_project()
@@ -2216,6 +2469,7 @@ class ProjectManager:
                     count += 1
         
         if count > 0 and save:
+            self._append_label_journal_entry(image_path, "verify_image_labels")
             self.save_project()
         return count
 

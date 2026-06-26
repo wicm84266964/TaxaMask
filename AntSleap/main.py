@@ -507,6 +507,12 @@ class VlmPreannotationThread(QThread):
             self.progress_signal.emit(1, 1, str(step_name))
 
         try:
+            runtime_log_event(
+                "vlm_worker_run_begin",
+                image=os.path.basename(str(self.image_path)),
+                run_id=self.run_id,
+                target_count=len(self.target_parts),
+            )
             self.log_signal.emit(f"VLM first-mile preannotation started: {os.path.basename(self.image_path)}")
             result = run_vlm_preannotation(
                 self.image_path,
@@ -520,9 +526,17 @@ class VlmPreannotationThread(QThread):
                 run_id=self.run_id,
                 progress_callback=mark_step,
             )
+            runtime_log_event(
+                "vlm_worker_run_ok",
+                image=os.path.basename(str(self.image_path)),
+                run_id=self.run_id,
+                candidate_count=len(result.get("candidates", []) or []),
+                report=result.get("report_path", ""),
+            )
             self.image_result_signal.emit(result)
         except Exception as exc:
             message = str(exc)
+            runtime_log_exception("vlm_worker_run_failed", *sys.exc_info())
             report_match = re.search(r"report=([^;]+)$", message)
             raw_match = re.search(r"raw_response=([^;]+);", message)
             self.image_result_signal.emit(
@@ -539,6 +553,11 @@ class VlmPreannotationThread(QThread):
                 }
             )
         finally:
+            runtime_log_event(
+                "vlm_worker_run_end",
+                image=os.path.basename(str(self.image_path)),
+                run_id=self.run_id,
+            )
             self.finished_signal.emit()
 
 
@@ -11920,6 +11939,9 @@ class MainWindow(QMainWindow):
             and watched is getattr(self, "vlm_preannotation_progress_dialog", None)
             and getattr(self, "vlm_preannotation_run_active", False)
         ):
+            if hasattr(event, "spontaneous") and not event.spontaneous():
+                event.ignore()
+                return True
             if self.request_stop_vlm_preannotation(confirm=True):
                 event.ignore()
                 return True
@@ -14032,10 +14054,23 @@ class MainWindow(QMainWindow):
         self.vlm_preannotation_total_images = len(image_paths)
         self.vlm_preannotation_completed_images = 0
         self.vlm_preannotation_current_image = ""
+        self.vlm_preannotation_active_images = {}
+        self.vlm_preannotation_image_step_counts = {}
+        self.vlm_preannotation_completed_image_keys = set()
         self.vlm_preannotation_target_parts = list(target_parts)
         self.vlm_preannotation_artifacts_dir = self._vlm_preannotation_artifacts_dir()
         self.vlm_preannotation_api_config = dict(api_config)
         self.vlm_preannotation_prompt_profile = self._current_vlm_prompt_profile()
+        runtime_log_event(
+            "vlm_batch_begin",
+            project=getattr(self.project, "current_project_path", ""),
+            image_count=len(image_paths),
+            target_count=len(target_parts),
+            concurrency=vlm_concurrency,
+            scope=processing_scope,
+            run_id=self.vlm_preannotation_run_id,
+            artifacts_dir=self.vlm_preannotation_artifacts_dir,
+        )
         self._create_vlm_progress_dialog()
         self._set_vlm_progress_ui(0, "start")
         self.log(tr("VLM API concurrency: {0}. Increase this only if your provider allows parallel requests.", self.current_lang).format(self.vlm_preannotation_concurrency))
@@ -14121,11 +14156,17 @@ class MainWindow(QMainWindow):
         self.vlm_preannotation_queue = queue
         self.vlm_preannotation_current_image_steps_completed = 0
         self.vlm_preannotation_current_image = image_path
+        runtime_log_event(
+            "vlm_worker_starting",
+            image=os.path.basename(str(image_path)),
+            queued=len(queue),
+            run_id=getattr(self, "vlm_preannotation_run_id", ""),
+        )
         self._set_vlm_progress_ui(
             int(int(getattr(self, "vlm_preannotation_completed_steps", 0) or 0) / max(1, int(getattr(self, "vlm_preannotation_total_steps", 1) or 1)) * 100),
             "image",
         )
-        self.vlm_preannotation_thread = VlmPreannotationThread(
+        thread = VlmPreannotationThread(
             image_path,
             getattr(self, "vlm_preannotation_target_parts", []),
             getattr(self, "vlm_preannotation_artifacts_dir", self._vlm_preannotation_artifacts_dir()),
@@ -14136,13 +14177,28 @@ class MainWindow(QMainWindow):
             min_confidence=0.25,
             prompt_profile=getattr(self, "vlm_preannotation_prompt_profile", default_vlm_prompt_profile()),
         )
-        self.vlm_preannotation_thread.log_signal.connect(self.log)
-        self.vlm_preannotation_thread.image_result_signal.connect(self._on_vlm_preannotation_image_result)
-        self.vlm_preannotation_thread.progress_signal.connect(self._on_vlm_preannotation_thread_step)
-        self.vlm_preannotation_thread.error_signal.connect(self._on_vlm_preannotation_error)
-        self.vlm_preannotation_thread.finished_signal.connect(self._on_vlm_preannotation_finished)
-        self.vlm_preannotation_thread.start()
-        return self.vlm_preannotation_thread
+        self.vlm_preannotation_thread = thread
+        active_images = getattr(self, "vlm_preannotation_active_images", None)
+        if not isinstance(active_images, dict):
+            active_images = {}
+            self.vlm_preannotation_active_images = active_images
+        step_counts = getattr(self, "vlm_preannotation_image_step_counts", None)
+        if not isinstance(step_counts, dict):
+            step_counts = {}
+            self.vlm_preannotation_image_step_counts = step_counts
+        active_images[thread] = image_path
+        step_counts[self._vlm_progress_image_key(image_path)] = 0
+        thread.log_signal.connect(self.log)
+        thread.image_result_signal.connect(self._on_vlm_preannotation_image_result)
+        thread.progress_signal.connect(lambda completed, total, step_name, worker=thread: self._on_vlm_preannotation_thread_step(worker, completed, total, step_name))
+        thread.error_signal.connect(self._on_vlm_preannotation_error)
+        native_finished = getattr(thread, "finished", None)
+        if native_finished is not None and hasattr(native_finished, "connect"):
+            native_finished.connect(lambda worker=thread: self._on_vlm_preannotation_qthread_finished(worker))
+        else:
+            thread.finished_signal.connect(lambda worker=thread: self._on_vlm_preannotation_qthread_finished(worker))
+        thread.start()
+        return thread
 
     def _apply_vlm_candidate(self, image_path, image_rgb, candidate, result):
         part_name = str(candidate.get("part", "") or "").strip()
@@ -14237,20 +14293,27 @@ class MainWindow(QMainWindow):
 
     def _on_vlm_preannotation_image_result(self, result):
         image_path = str(result.get("image_path", "") or "")
+        runtime_log_event(
+            "vlm_image_result_begin",
+            image=os.path.basename(str(image_path)),
+            status=result.get("status", ""),
+            candidate_count=len(result.get("candidates", []) or []) if isinstance(result, dict) else 0,
+            run_id=getattr(self, "vlm_preannotation_run_id", ""),
+        )
         if not image_path or result.get("status") == "failed":
             self._log_vlm_part_coverage(result)
             self.log(tr("VLM first-mile preannotation failed: {0}", self.current_lang).format(result.get("error", "")))
-            self._complete_current_vlm_image_steps("failed")
+            self._complete_current_vlm_image_steps("failed", image_path=image_path)
             self.vlm_preannotation_records.append(result)
-            self._mark_current_vlm_image_done("failed")
+            self._mark_current_vlm_image_done("failed", image_path=image_path)
             return
         candidates = list(result.get("candidates", []) or []) if isinstance(result, dict) else []
         if not candidates:
             self._log_vlm_part_coverage(result)
             self.log(tr("VLM first-mile preannotation returned no usable boxes.", self.current_lang))
-            self._complete_current_vlm_image_steps("no_candidates")
+            self._complete_current_vlm_image_steps("no_candidates", image_path=image_path)
             self.vlm_preannotation_records.append(result)
-            self._mark_current_vlm_image_done("no_candidates")
+            self._mark_current_vlm_image_done("no_candidates", image_path=image_path)
             return
         try:
             project_image_path = self._project_image_key_for_path(image_path)
@@ -14280,7 +14343,11 @@ class MainWindow(QMainWindow):
                 else:
                     skipped += 1
             self.vlm_preannotation_saved_total = int(getattr(self, "vlm_preannotation_saved_total", 0)) + saved
-            self._schedule_project_save()
+            self._schedule_project_save(
+                reason="vlm_preannotation",
+                image=os.path.basename(str(project_image_path)),
+                saved_count=saved,
+            )
             self._refresh_vlm_canvas_if_current(project_image_path)
             self._refresh_image_list_status_or_rebuild(project_image_path)
             self._reload_current_image_for_workbench()
@@ -14291,10 +14358,10 @@ class MainWindow(QMainWindow):
             result["saved_box_only_count"] = box_only_count
             result["skipped_count"] = skipped
             self.vlm_preannotation_records.append(result)
-            self._advance_vlm_progress("write")
-            self._advance_vlm_progress("sam")
-            self._advance_vlm_progress("report")
-            self._mark_current_vlm_image_done("done")
+            self._advance_vlm_progress("write", image_path=image_path)
+            self._advance_vlm_progress("sam", image_path=image_path)
+            self._advance_vlm_progress("report", image_path=image_path)
+            self._mark_current_vlm_image_done("done", image_path=image_path)
             self._log_vlm_part_coverage(result)
             self.log(
                 tr(
@@ -14302,21 +14369,50 @@ class MainWindow(QMainWindow):
                     self.current_lang,
                 ).format(saved, polygon_count, box_only_count, skipped, report_path)
             )
+            runtime_log_event(
+                "vlm_image_result_saved",
+                image=os.path.basename(str(project_image_path)),
+                saved=saved,
+                polygon_count=polygon_count,
+                box_only_count=box_only_count,
+                skipped=skipped,
+                run_id=getattr(self, "vlm_preannotation_run_id", ""),
+            )
         except Exception as exc:
-            self._complete_current_vlm_image_steps("failed")
+            runtime_log_exception("vlm_image_result_apply_failed", *sys.exc_info())
+            self._complete_current_vlm_image_steps("failed", image_path=image_path)
             failed = dict(result)
             failed["status"] = "failed"
             failed["error"] = str(exc)
             self.vlm_preannotation_records.append(failed)
-            self._mark_current_vlm_image_done("failed")
+            self._mark_current_vlm_image_done("failed", image_path=image_path)
             self._on_vlm_preannotation_error(str(exc))
 
-    def _mark_current_vlm_image_done(self, step_name):
+    def _vlm_progress_image_key(self, image_path):
+        if not image_path:
+            return ""
+        try:
+            return os.path.normcase(os.path.normpath(os.path.abspath(str(image_path))))
+        except Exception:
+            return str(image_path)
+
+    def _mark_current_vlm_image_done(self, step_name, image_path=None):
+        image_key = self._vlm_progress_image_key(image_path)
+        completed_keys = getattr(self, "vlm_preannotation_completed_image_keys", set())
+        if not isinstance(completed_keys, set):
+            completed_keys = set(completed_keys or [])
+        if image_key and image_key in completed_keys:
+            return
+        if image_key:
+            completed_keys.add(image_key)
+        self.vlm_preannotation_completed_image_keys = completed_keys
         total_images = max(1, int(getattr(self, "vlm_preannotation_total_images", 1) or 1))
         self.vlm_preannotation_completed_images = min(
             total_images,
             int(getattr(self, "vlm_preannotation_completed_images", 0) or 0) + 1,
         )
+        if image_path:
+            self.vlm_preannotation_current_image = str(image_path)
         total_steps = max(1, int(getattr(self, "vlm_preannotation_total_steps", 1) or 1))
         completed_steps = int(getattr(self, "vlm_preannotation_completed_steps", 0) or 0)
         self._set_vlm_progress_ui(int(completed_steps / total_steps * 100), step_name)
@@ -14362,6 +14458,8 @@ class MainWindow(QMainWindow):
         layout.setSpacing(8)
         title_label = QLabel(tr("VLM Pre-Annotation Progress", self.current_lang))
         title_label.setWordWrap(True)
+        title_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        title_label.setMinimumHeight(title_label.fontMetrics().lineSpacing() + 6)
         notice_label = QLabel(
             tr(
                 "Active API request(s) may already have been sent, but no more queued images will be processed. This helps avoid unintended large API bills.",
@@ -14369,6 +14467,8 @@ class MainWindow(QMainWindow):
             )
         )
         notice_label.setWordWrap(True)
+        notice_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        notice_label.setMinimumHeight(notice_label.fontMetrics().lineSpacing() * 2 + 8)
         notice_label.setStyleSheet("color: #9CA3AF;")
         label = QLabel("")
         label.setWordWrap(True)
@@ -14403,22 +14503,44 @@ class MainWindow(QMainWindow):
         self.vlm_preannotation_stop_button = stop_button
         progress.show()
 
-    def _advance_vlm_progress(self, step_name):
+    def _advance_vlm_progress(self, step_name, image_path=None):
         total = max(1, int(getattr(self, "vlm_preannotation_total_steps", 1) or 1))
         completed = min(total, int(getattr(self, "vlm_preannotation_completed_steps", 0) or 0) + 1)
         self.vlm_preannotation_completed_steps = completed
-        current_completed = int(getattr(self, "vlm_preannotation_current_image_steps_completed", 0) or 0)
-        self.vlm_preannotation_current_image_steps_completed = min(6, current_completed + 1)
+        if image_path:
+            self.vlm_preannotation_current_image = str(image_path)
+            image_key = self._vlm_progress_image_key(image_path)
+            step_counts = getattr(self, "vlm_preannotation_image_step_counts", None)
+            if not isinstance(step_counts, dict):
+                step_counts = {}
+                self.vlm_preannotation_image_step_counts = step_counts
+            step_counts[image_key] = min(6, int(step_counts.get(image_key, 0) or 0) + 1)
+            self.vlm_preannotation_current_image_steps_completed = step_counts[image_key]
+        else:
+            current_completed = int(getattr(self, "vlm_preannotation_current_image_steps_completed", 0) or 0)
+            self.vlm_preannotation_current_image_steps_completed = min(6, current_completed + 1)
         self._set_vlm_progress_ui(int(completed / total * 100), step_name)
         self.log(tr("VLM batch progress: {0}/{1} steps ({2}).", self.current_lang).format(completed, total, step_name))
 
-    def _on_vlm_preannotation_thread_step(self, _completed, _total, step_name):
-        self._advance_vlm_progress(step_name)
+    def _on_vlm_preannotation_thread_step(self, worker_or_completed, completed_or_total=None, total_or_step_name=None, step_name=None):
+        worker = None
+        if step_name is None:
+            step_name = total_or_step_name
+        else:
+            worker = worker_or_completed
+        image_path = ""
+        if worker is not None:
+            active_images = getattr(self, "vlm_preannotation_active_images", {}) or {}
+            image_path = active_images.get(worker, "")
+        self._advance_vlm_progress(step_name, image_path=image_path)
 
-    def _complete_current_vlm_image_steps(self, step_name):
+    def _complete_current_vlm_image_steps(self, step_name, image_path=None):
         current_completed = int(getattr(self, "vlm_preannotation_current_image_steps_completed", 0) or 0)
+        if image_path:
+            step_counts = getattr(self, "vlm_preannotation_image_step_counts", {}) or {}
+            current_completed = int(step_counts.get(self._vlm_progress_image_key(image_path), current_completed) or 0)
         for _ in range(max(0, 6 - current_completed)):
-            self._advance_vlm_progress(step_name)
+            self._advance_vlm_progress(step_name, image_path=image_path)
 
     def _finish_vlm_preannotation_run(self):
         records = list(getattr(self, "vlm_preannotation_records", []) or [])
@@ -14427,6 +14549,8 @@ class MainWindow(QMainWindow):
         cancelled = bool(getattr(self, "vlm_preannotation_cancel_requested", False))
         cancelled_queued = int(getattr(self, "vlm_preannotation_cancelled_queued_images", 0) or 0)
         report_path = os.path.join(artifacts_dir, f"vlm_preannotation_summary_{run_id}.json")
+        if int(getattr(self, "vlm_preannotation_saved_total", 0) or 0) > 0:
+            self._flush_pending_project_save(defer_for_navigation=False)
         summary = {
             "schema_version": "taxamask-vlm-preannotation-gui-summary-v1",
             "run_id": run_id,
@@ -14447,6 +14571,16 @@ class MainWindow(QMainWindow):
         os.makedirs(artifacts_dir, exist_ok=True)
         with open(report_path, "w", encoding="utf-8") as handle:
             json.dump(summary, handle, ensure_ascii=False, indent=2)
+        runtime_log_event(
+            "vlm_batch_finish",
+            project=getattr(self.project, "current_project_path", ""),
+            report=report_path,
+            status=summary.get("status", ""),
+            image_count=summary.get("image_count", 0),
+            saved_box_count=summary.get("saved_box_count", 0),
+            cancelled_queued_image_count=cancelled_queued,
+            run_id=run_id,
+        )
         if cancelled:
             self.log(
                 tr(
@@ -14504,6 +14638,9 @@ class MainWindow(QMainWindow):
         self.vlm_preannotation_cancelled_queued_images = 0
         self.vlm_preannotation_threads = []
         self.vlm_preannotation_thread = None
+        self.vlm_preannotation_active_images = {}
+        self.vlm_preannotation_image_step_counts = {}
+        self.vlm_preannotation_completed_image_keys = set()
 
     def accept_current_image_ai_drafts(self):
         if not self.current_image:
@@ -14640,16 +14777,28 @@ class MainWindow(QMainWindow):
         self.log(tr("VLM first-mile preannotation failed: {0}", self.current_lang).format(message))
         QMessageBox.warning(self, tr("VLM Pre-Annotate", self.current_lang), str(message))
 
-    def _on_vlm_preannotation_finished(self):
+    def _on_vlm_preannotation_qthread_finished(self, worker=None):
         if not getattr(self, "vlm_preannotation_run_active", False):
             return
-        sender_thread = self.sender()
-        if sender_thread is not None:
+        worker = worker or self.sender()
+        worker_image = ""
+        active_images = getattr(self, "vlm_preannotation_active_images", None)
+        if isinstance(active_images, dict) and worker is not None:
+            worker_image = active_images.pop(worker, "")
+        if worker is not None:
             self.vlm_preannotation_threads = [
                 thread
                 for thread in (getattr(self, "vlm_preannotation_threads", []) or [])
-                if thread is not sender_thread
+                if thread is not worker
             ]
+        runtime_log_event(
+            "vlm_worker_finished",
+            image=os.path.basename(str(worker_image or "")),
+            active_count=len(getattr(self, "vlm_preannotation_threads", []) or []),
+            queued_count=len(getattr(self, "vlm_preannotation_queue", []) or []),
+            cancel_requested=bool(getattr(self, "vlm_preannotation_cancel_requested", False)),
+            run_id=getattr(self, "vlm_preannotation_run_id", ""),
+        )
         active = self._active_vlm_preannotation_threads()
         if getattr(self, "vlm_preannotation_cancel_requested", False):
             self.vlm_preannotation_queue = []
@@ -14661,6 +14810,9 @@ class MainWindow(QMainWindow):
             return
         if not active:
             self._finish_vlm_preannotation_run()
+
+    def _on_vlm_preannotation_finished(self):
+        self._on_vlm_preannotation_qthread_finished(self.sender())
 
     def run_prediction(self):
         if not self.current_image:

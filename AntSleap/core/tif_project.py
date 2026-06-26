@@ -3,6 +3,7 @@ import os
 import shutil
 from datetime import datetime
 
+from .safe_io import atomic_write_json, backup_file
 from .tif_materials import has_trainable_material, read_material_map, write_material_map
 from .tif_volume_io import VOLUME_SIDECAR_FORMAT, copy_volume_sidecar, read_volume_metadata, volume_sidecar_exists
 
@@ -10,6 +11,8 @@ from .tif_volume_io import VOLUME_SIDECAR_FORMAT, copy_volume_sidecar, read_volu
 TIF_PROJECT_SCHEMA_VERSION = "ant3d_tif_project_v1"
 TIF_PROJECT_TYPE = "tif_volume"
 DEFAULT_TIF_PROJECT_FILENAME = "project.json"
+TIF_PROJECT_BACKUP_LIMIT = 30
+TIF_PROJECT_BACKUP_MIN_INTERVAL_SECONDS = 300
 TIF_REVIEW_STATUSES = {"not_started", "in_progress", "fully_annotated", "reviewed", "train_ready"}
 TIF_PART_STATUSES = {"draft", "roi_confirmed", "mask_preview", "reviewed"}
 TIF_PART_ROI_STATUSES = {"draft", "confirmed", "part_created", "cancelled"}
@@ -127,9 +130,38 @@ class TifProjectManager:
         if not self.current_project_path:
             raise ValueError("tif_project_path_not_set")
         self.project_data["updated_at"] = _now_iso()
-        os.makedirs(os.path.dirname(os.path.abspath(self.current_project_path)), exist_ok=True)
-        with open(self.current_project_path, "w", encoding="utf-8") as handle:
-            json.dump(self.project_data, handle, ensure_ascii=False, indent=2)
+        project_path = os.path.abspath(self.current_project_path)
+        os.makedirs(os.path.dirname(project_path), exist_ok=True)
+        self._backup_current_project_file(project_path)
+        atomic_write_json(project_path, self.project_data, indent=2, ensure_ascii=False)
+
+    def _project_sidecar_stem(self, project_path=None):
+        path = os.path.abspath(project_path or self.current_project_path or "")
+        stem, _ext = os.path.splitext(os.path.basename(path))
+        return stem or "project"
+
+    def _project_backup_dir(self, project_path=None):
+        path = os.path.abspath(project_path or self.current_project_path or "")
+        if not path:
+            return ""
+        return os.path.join(os.path.dirname(path), f"{self._project_sidecar_stem(path)}.project_backups")
+
+    def _backup_current_project_file(self, project_path):
+        backup_dir = self._project_backup_dir(project_path)
+        if not backup_dir:
+            return ""
+        try:
+            return backup_file(
+                project_path,
+                backup_dir,
+                stem=self._project_sidecar_stem(project_path),
+                suffix=".json.bak",
+                limit=TIF_PROJECT_BACKUP_LIMIT,
+                min_interval_seconds=TIF_PROJECT_BACKUP_MIN_INTERVAL_SECONDS,
+            )
+        except Exception as exc:
+            print(f"TIF project backup skipped: {exc}")
+            return ""
 
     def to_relative(self, path):
         if not path:

@@ -5,6 +5,7 @@ from datetime import datetime
 
 import numpy as np
 
+from .safe_io import atomic_write_json, copytree_replace_safely
 from .tif_volume_io import flush_volume_array, load_volume_sidecar, write_volume_sidecar
 
 
@@ -157,9 +158,7 @@ def crop_volume_to_part(project_manager, specimen_id, part_id, bbox_zyx, display
 
 
 def write_json(path, payload):
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2)
+    atomic_write_json(path, payload, indent=2, ensure_ascii=False)
     return payload
 
 
@@ -555,9 +554,7 @@ def export_part_package(project_manager, specimen_id, part_id, output_dir):
         }[key]
         target = os.path.join(package_dir, target_name)
         if os.path.isdir(source):
-            if os.path.exists(target):
-                shutil.rmtree(target)
-            shutil.copytree(source, target)
+            copytree_replace_safely(source, target)
         else:
             shutil.copy2(source, target)
         artifacts[key] = target_name

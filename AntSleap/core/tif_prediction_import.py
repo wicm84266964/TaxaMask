@@ -6,6 +6,7 @@ from datetime import datetime
 import numpy as np
 import tifffile
 
+from .safe_io import atomic_write_json
 from .tif_project import TifProjectManager
 from .tif_volume_io import read_volume_metadata, volume_sidecar_exists, write_volume_sidecar
 
@@ -163,9 +164,7 @@ def import_external_prediction_tif(
             "warnings": [],
             "errors": [],
         }
-        os.makedirs(os.path.dirname(report_abs), exist_ok=True)
-        with open(report_abs, "w", encoding="utf-8") as handle:
-            json.dump(report, handle, ensure_ascii=False, indent=2)
+        atomic_write_json(report_abs, report, indent=2, ensure_ascii=False)
         draft["import_report"] = report_rel
         project_manager.save_project()
     except Exception:

@@ -7,6 +7,7 @@ from datetime import datetime
 import numpy as np
 import tifffile
 
+from .safe_io import atomic_write_json
 from .tif_project import TifProjectManager
 from .tif_volume_io import load_volume_sidecar, read_volume_metadata, volume_sidecar_exists
 
@@ -32,9 +33,7 @@ def _ensure_dir(path):
 
 
 def _write_json(path, payload):
-    _ensure_dir(os.path.dirname(os.path.abspath(path)))
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2)
+    atomic_write_json(path, payload, indent=2, ensure_ascii=False)
 
 
 def _dtype_to_nrrd_type(dtype):

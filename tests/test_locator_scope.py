@@ -476,7 +476,7 @@ class LocatorScopeTests(unittest.TestCase):
     def test_update_label_can_defer_disk_save(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             pm = ProjectManager()
-            pm.create_project("deferred_update", tmp_dir)
+            pm.create_project("deferred_update", tmp_dir, storage_backend="json")
 
             image_path = str(Path(tmp_dir) / "specimen.png")
             rel_image_path = Path(image_path).name
@@ -511,7 +511,7 @@ class LocatorScopeTests(unittest.TestCase):
     def test_delete_label_can_defer_disk_save(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             pm = ProjectManager()
-            pm.create_project("deferred_delete", tmp_dir)
+            pm.create_project("deferred_delete", tmp_dir, storage_backend="json")
 
             image_path = str(Path(tmp_dir) / "specimen.png")
             rel_image_path = Path(image_path).name

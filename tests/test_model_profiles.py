@@ -13,6 +13,7 @@ from AntSleap.core.model_profiles import (
     sanitize_model_profiles,
 )
 from AntSleap.core.project import MODEL_PROFILE_EXPORT_SUMMARY_SCHEMA_VERSION, ProjectManager
+from AntSleap.core.project_sqlite_maintenance import export_sqlite_project_to_legacy_json
 
 
 class ModelProfileTests(unittest.TestCase):
@@ -56,7 +57,9 @@ class ModelProfileTests(unittest.TestCase):
             pm = ProjectManager()
             pm.create_project("profile_demo", tmp_dir)
 
-            saved = json.loads(Path(pm.current_project_path).read_text(encoding="utf-8"))
+            export_path = Path(tmp_dir) / "profile_demo.legacy.json"
+            export_sqlite_project_to_legacy_json(pm.current_project_path, export_path)
+            saved = json.loads(export_path.read_text(encoding="utf-8"))
 
             self.assertIn("model_profiles", saved)
             self.assertEqual(saved["model_profiles"]["active_profile_id"], DEFAULT_MODEL_PROFILE_ID)

@@ -1304,8 +1304,9 @@ class GuiSmokeTests(unittest.TestCase):
             preload_events = []
             window.ensure_sam_preloaded = lambda: preload_events.append("preload")
             window.project.create_project("smoke_project", str(self.project_dir), template_id=PROJECT_TEMPLATE_GENERIC)
-            created_path = self.project_dir / "smoke_project.json"
+            created_path = self.project_dir / "smoke_project.sqlite_manifest.json"
             self.assertTrue(created_path.exists())
+            self.assertTrue((self.project_dir / "smoke_project.taxamask.sqlite").exists())
 
             window.open_project_path(str(created_path))
             self.assertEqual(window.project.project_data["name"], "smoke_project")
@@ -1362,6 +1363,39 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(window.project.current_storage_backend, "sqlite")
             self.assertTrue(manifest_path.exists())
             self.assertTrue(first_db_path.exists())
+        finally:
+            window.deleteLater()
+
+    def test_sqlite_project_maintenance_menu_actions_create_backup_and_legacy_export(self):
+        window = self._make_window()
+        try:
+            window.project.create_project("maintenance", str(self.project_dir), template_id=PROJECT_TEMPLATE_GENERIC)
+            window.active_project_kind = "image"
+            image_path = self.project_dir / "ant.png"
+            image_path.write_bytes(b"image")
+            window.project.add_images([str(image_path)], save=False)
+            window.project.update_label(
+                str(image_path),
+                "Object",
+                [[1, 1], [5, 1], [5, 5], [1, 5]],
+                save=False,
+            )
+
+            with patch.object(main_module.QMessageBox, "information", return_value=main_module.QMessageBox.Ok):
+                window.backup_current_sqlite_project()
+
+            backup_dir = self.project_dir / "project.sqlite_backups"
+            self.assertTrue(any(backup_dir.glob("maintenance.taxamask.*.sqlite_manifest.json")))
+
+            export_path = self.project_dir / "audit" / "maintenance.json"
+            with patch.object(main_module.QFileDialog, "getSaveFileName", return_value=(str(export_path), "JSON (*.json)")), \
+                 patch.object(main_module.QMessageBox, "information", return_value=main_module.QMessageBox.Ok):
+                window.export_current_project_legacy_json()
+
+            self.assertTrue(export_path.exists())
+            payload = json.loads(export_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["name"], "maintenance")
+            self.assertEqual(len(payload["images"]), 1)
         finally:
             window.deleteLater()
 
@@ -1530,10 +1564,11 @@ class GuiSmokeTests(unittest.TestCase):
 
             self.assertEqual(calls[0][1], image_root)
             self.assertEqual(len(calls), 1)
-            self.assertEqual(Path(window.project.current_project_path), created_image_dir / "review.json")
-            self.assertTrue((created_image_dir / "review.json").exists())
+            self.assertEqual(Path(window.project.current_project_path), created_image_dir / "review.sqlite_manifest.json")
+            self.assertTrue((created_image_dir / "review.sqlite_manifest.json").exists())
+            self.assertTrue((created_image_dir / "review.taxamask.sqlite").exists())
             self.assertEqual(preload_events, ["preload"])
-            self.assertFalse(hasattr(window, "new_ti" + "f_project"))
+            self.assertEqual(window.active_project_kind, "image")
         finally:
             window.deleteLater()
 

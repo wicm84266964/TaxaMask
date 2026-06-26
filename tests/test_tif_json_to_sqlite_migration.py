@@ -29,7 +29,7 @@ def _volume_record(path, shape=(2, 3, 4), dtype="uint8"):
 
 def _build_legacy_tif_project(project_root):
     manager = TifProjectManager()
-    project_json = manager.create_project("Legacy TIF ants", project_root)
+    project_json = manager.create_project("Legacy TIF ants", project_root, storage_backend="json")
     manager.create_specimen_scaffold(
         "01-0101-local",
         modality="micro_ct",

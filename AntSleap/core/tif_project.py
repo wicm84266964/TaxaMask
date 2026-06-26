@@ -4,7 +4,7 @@ import shutil
 from datetime import datetime
 
 from .safe_io import atomic_write_json, backup_file
-from .sqlite_storage import PROJECT_MANIFEST_SCHEMA_VERSION, SQLITE_BACKEND
+from .sqlite_storage import PROJECT_MANIFEST_SCHEMA_VERSION, SQLITE_BACKEND, write_project_manifest
 from .tif_materials import has_trainable_material, read_material_map, write_material_map
 from .tif_volume_io import VOLUME_SIDECAR_FORMAT, copy_volume_sidecar, read_volume_metadata, volume_sidecar_exists
 
@@ -92,9 +92,76 @@ class TifProjectManager:
             return os.getcwd()
         return os.path.dirname(os.path.abspath(self.current_project_path))
 
-    def create_project(self, name, project_dir, project_id=None):
+    def _remove_sqlite_artifacts(self, database_path):
+        base = os.path.abspath(str(database_path or ""))
+        for candidate in (base, f"{base}-wal", f"{base}-shm"):
+            try:
+                if os.path.exists(candidate):
+                    os.remove(candidate)
+            except OSError:
+                pass
+
+    def _default_sqlite_paths_for_new_project(self, project_dir):
+        directory = os.path.abspath(str(project_dir))
+        return (
+            os.path.join(directory, "project.tif_sqlite_manifest.json"),
+            os.path.join(directory, "project.taxamask_tif.sqlite"),
+        )
+
+    def _create_sqlite_project_storage(self, name, project_dir):
+        from .tif_sqlite_schema import create_tif_project_database
+
+        manifest_path, database_path = self._default_sqlite_paths_for_new_project(project_dir)
+        if os.path.exists(manifest_path):
+            raise FileExistsError(manifest_path)
+        if any(os.path.exists(candidate) for candidate in (database_path, f"{database_path}-wal", f"{database_path}-shm")):
+            raise FileExistsError(database_path)
+
+        conn = None
+        manifest_created = False
+        try:
+            conn = create_tif_project_database(database_path)
+            conn.close()
+            conn = None
+            write_project_manifest(
+                manifest_path,
+                TIF_PROJECT_TYPE,
+                self.project_data.get("name", name or "Untitled TIF Project"),
+                database_path,
+                extra={
+                    "tif_asset_root": ".",
+                    "created_as": "sqlite_default",
+                },
+            )
+            manifest_created = True
+            self.current_project_path = os.path.abspath(manifest_path)
+            self.current_database_path = os.path.abspath(database_path)
+            self.current_storage_backend = SQLITE_BACKEND
+            self.current_asset_root = os.path.abspath(str(project_dir))
+            self.save_project()
+            return self.current_project_path
+        except Exception:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            if manifest_created:
+                try:
+                    os.remove(manifest_path)
+                except OSError:
+                    pass
+            self._remove_sqlite_artifacts(database_path)
+            self.current_storage_backend = "json"
+            self.current_database_path = ""
+            self.current_asset_root = ""
+            raise
+
+    def create_project(self, name, project_dir, project_id=None, storage_backend=SQLITE_BACKEND):
         os.makedirs(project_dir, exist_ok=True)
         self.project_data = _default_project_data(name=name, project_id=project_id)
+        if storage_backend == SQLITE_BACKEND:
+            return self._create_sqlite_project_storage(name, project_dir)
         self.current_project_path = os.path.join(os.path.abspath(project_dir), DEFAULT_TIF_PROJECT_FILENAME)
         self.current_storage_backend = "json"
         self.current_database_path = ""
@@ -180,7 +247,78 @@ class TifProjectManager:
         project_path = os.path.abspath(self.current_project_path)
         os.makedirs(os.path.dirname(project_path), exist_ok=True)
         self._backup_current_project_file(project_path)
-        atomic_write_json(project_path, self.project_data, indent=2, ensure_ascii=False)
+        atomic_write_json(project_path, self.legacy_json_payload(project_path), indent=2, ensure_ascii=False)
+
+    def _relative_to_project_path(self, path, project_path):
+        text = str(path or "").strip()
+        if not text:
+            return ""
+        if os.path.isabs(text):
+            absolute = os.path.abspath(os.path.normpath(text))
+        else:
+            absolute = self.to_absolute(text)
+        try:
+            target_dir = os.path.dirname(os.path.abspath(project_path or self.current_project_path or "")) or "."
+            return os.path.relpath(absolute, target_dir).replace("\\", "/")
+        except ValueError:
+            return absolute
+
+    def _rebase_volume_record_paths(self, record, project_path):
+        if not isinstance(record, dict):
+            return record
+        for key in ("path", "metadata_path", "preview_path"):
+            if record.get(key):
+                record[key] = self._relative_to_project_path(record.get(key), project_path)
+        return record
+
+    def legacy_json_payload(self, project_path=None):
+        target_project_path = os.path.abspath(str(project_path or self.current_project_path or DEFAULT_TIF_PROJECT_FILENAME))
+        payload = json.loads(json.dumps(self.project_data, ensure_ascii=False))
+        for specimen in payload.get("specimens", []) if isinstance(payload.get("specimens"), list) else []:
+            if not isinstance(specimen, dict):
+                continue
+            for key in ("metadata_ref", "material_map"):
+                if specimen.get(key):
+                    specimen[key] = self._relative_to_project_path(specimen.get(key), target_project_path)
+            self._rebase_volume_record_paths(specimen.get("working_volume"), target_project_path)
+            labels = specimen.get("labels", {})
+            if isinstance(labels, dict):
+                for role in ("manual_truth", "working_edit"):
+                    self._rebase_volume_record_paths(labels.get(role), target_project_path)
+                for draft in labels.get("model_drafts", []) if isinstance(labels.get("model_drafts"), list) else []:
+                    self._rebase_volume_record_paths(draft, target_project_path)
+            for part in specimen.get("parts", []) if isinstance(specimen.get("parts"), list) else []:
+                if not isinstance(part, dict):
+                    continue
+                self._rebase_volume_record_paths(part.get("image"), target_project_path)
+                self._rebase_volume_record_paths(part.get("mask"), target_project_path)
+                for key in ("contours_path", "extraction_path"):
+                    if part.get(key):
+                        part[key] = self._relative_to_project_path(part.get(key), target_project_path)
+                metadata = part.get("metadata", {})
+                if isinstance(metadata, dict):
+                    for reslice in metadata.get("local_axis_reslices", []) if isinstance(metadata.get("local_axis_reslices"), list) else []:
+                        if not isinstance(reslice, dict):
+                            continue
+                        for key in ("image_path", "mask_path", "metadata_path", "preview_path"):
+                            if reslice.get(key):
+                                reslice[key] = self._relative_to_project_path(reslice.get(key), target_project_path)
+        for model in payload.get("models", []) if isinstance(payload.get("models"), list) else []:
+            if not isinstance(model, dict):
+                continue
+            for key in ("model_path", "model_manifest", "training_manifest_path"):
+                if model.get(key):
+                    model[key] = self._relative_to_project_path(model.get(key), target_project_path)
+        for run in payload.get("runs", []) if isinstance(payload.get("runs"), list) else []:
+            if not isinstance(run, dict):
+                continue
+            for key in ("run_dir", "contract_json", "result_json"):
+                if run.get(key):
+                    run[key] = self._relative_to_project_path(run.get(key), target_project_path)
+            for artifact in run.get("artifacts", []) if isinstance(run.get("artifacts"), list) else []:
+                if isinstance(artifact, dict) and artifact.get("path"):
+                    artifact["path"] = self._relative_to_project_path(artifact.get("path"), target_project_path)
+        return payload
 
     def _project_sidecar_stem(self, project_path=None):
         path = os.path.abspath(project_path or self.current_project_path or "")

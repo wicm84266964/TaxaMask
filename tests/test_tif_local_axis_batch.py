@@ -203,7 +203,7 @@ class TifLocalAxisBatchTests(unittest.TestCase):
             self.assertIn("roll_reference", failed_rows[0]["failure_detail"])
 
             reloaded = TifProjectManager()
-            reloaded.load_project(root / "batch_project" / "project.json")
+            reloaded.load_project(manager.current_project_path)
             reloaded_failures = list_local_axis_queue(reloaded, {"status": "failed"})
             self.assertEqual(reloaded_failures[0]["proposal_id"], "frame_001")
 

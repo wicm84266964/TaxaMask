@@ -30,7 +30,7 @@ class GenericTaxonomyWorkflowTests(unittest.TestCase):
                 "taxon": "Quercus",
                 "taxon_rank": "genus",
             }
-            manager.save_project()
+            manager.save_project(force=True)
 
             reloaded = ProjectManager()
             reloaded.load_project(manager.current_project_path)

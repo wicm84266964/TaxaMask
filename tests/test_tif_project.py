@@ -668,9 +668,9 @@ class TifProjectTests(unittest.TestCase):
             reloaded = TifProjectManager()
             reloaded.load_project(project_json)
 
-            self.assertNotIn("profile_scope", reloaded.project_data["models"][0])
+            self.assertEqual(reloaded.project_data["models"][0].get("profile_scope", ""), "")
             self.assertEqual(reloaded.project_data["models"][0]["backend_id"], "nnunet_backend")
-            self.assertNotIn("workflow", reloaded.project_data["runs"][0])
+            self.assertEqual(reloaded.project_data["runs"][0].get("workflow", ""), "")
             self.assertEqual(reloaded.project_data["runs"][0]["action"], "train")
             self.assertEqual(reloaded.list_local_axis_models(), [])
             self.assertEqual(reloaded.list_local_axis_runs(), [])

@@ -34,7 +34,7 @@ from .model_profiles import (
     set_active_model_profile as set_active_model_profile_id,
 )
 from .vlm_preannotation import DEFAULT_VLM_PROMPT_PROFILE_ID, sanitize_vlm_prompt_profile
-from .sqlite_storage import PROJECT_MANIFEST_SCHEMA_VERSION, SQLITE_BACKEND
+from .sqlite_storage import PROJECT_MANIFEST_SCHEMA_VERSION, SQLITE_BACKEND, write_project_manifest
 
 DEFAULT_CATEGORY_SUPERCATEGORY = "biological_structure"
 MULTIMODAL_SAMPLE_SCHEMA_VERSION = "taxamask-multimodal-sample-v1"
@@ -674,7 +674,72 @@ class ProjectManager:
                 self.save_project()
         return changed
 
-    def create_project(self, name, save_dir, template_id=None):
+    def _remove_sqlite_artifacts(self, database_path):
+        base = os.path.abspath(str(database_path or ""))
+        for candidate in (base, f"{base}-wal", f"{base}-shm"):
+            try:
+                if os.path.exists(candidate):
+                    os.remove(candidate)
+            except OSError:
+                pass
+
+    def _default_sqlite_paths_for_new_project(self, name, save_dir):
+        stem = str(name or "project").strip() or "project"
+        directory = os.path.abspath(str(save_dir))
+        return (
+            os.path.join(directory, f"{stem}.sqlite_manifest.json"),
+            os.path.join(directory, f"{stem}.taxamask.sqlite"),
+        )
+
+    def _create_sqlite_project_storage(self, name, save_dir):
+        from .project_sqlite_schema import create_2d_project_database
+
+        manifest_path, database_path = self._default_sqlite_paths_for_new_project(name, save_dir)
+        if os.path.exists(manifest_path):
+            raise FileExistsError(manifest_path)
+        if any(os.path.exists(candidate) for candidate in (database_path, f"{database_path}-wal", f"{database_path}-shm")):
+            raise FileExistsError(database_path)
+
+        conn = None
+        manifest_created = False
+        try:
+            conn = create_2d_project_database(database_path)
+            conn.close()
+            conn = None
+            write_project_manifest(
+                manifest_path,
+                "2d_image_annotation",
+                self.project_data.get("name", name or "Untitled"),
+                database_path,
+                extra={
+                    "project_asset_root": ".",
+                    "created_as": "sqlite_default",
+                },
+            )
+            manifest_created = True
+            self.current_project_path = os.path.abspath(manifest_path)
+            self.current_database_path = os.path.abspath(database_path)
+            self.current_storage_backend = SQLITE_BACKEND
+            self._sqlite_project_dirty = True
+            self.flush_sqlite_changes(project_dirty=True, integrity_check=True)
+            return self.current_project_path
+        except Exception:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            if manifest_created:
+                try:
+                    os.remove(manifest_path)
+                except OSError:
+                    pass
+            self._remove_sqlite_artifacts(database_path)
+            self.current_storage_backend = "json"
+            self.current_database_path = ""
+            raise
+
+    def create_project(self, name, save_dir, template_id=None, storage_backend=SQLITE_BACKEND):
         self.clear()
         os.makedirs(save_dir, exist_ok=True)
         template = get_project_template(template_id or PROJECT_TEMPLATE_ANT)
@@ -689,21 +754,31 @@ class ProjectManager:
         self.project_data["category_supercategory"] = template["category_supercategory"]
         self.project_data["taxon_label"] = template["taxon_label"]
         self.ensure_default_model_profile()
+        if storage_backend == SQLITE_BACKEND:
+            return self._create_sqlite_project_storage(name, save_dir)
+        self.current_storage_backend = "json"
+        self.current_database_path = ""
         self.current_project_path = os.path.join(save_dir, f"{name}.json")
         self.save_project()
+        return self.current_project_path
+
+    def _to_relative_for_project_path(self, abs_path, project_path):
+        if not abs_path:
+            return abs_path
+        try:
+            project_dir = os.path.dirname(os.path.abspath(project_path or self.current_project_path or ""))
+            normalized_path = str(abs_path)
+            if normalized_path and not os.path.isabs(normalized_path):
+                normalized_path = self._to_absolute(normalized_path)
+            return os.path.relpath(normalized_path, project_dir).replace("\\", "/")
+        except (ValueError, TypeError):
+            return abs_path
 
     def _to_relative(self, abs_path):
         """Convert absolute path to relative path based on project file location."""
         if not self.current_project_path:
             return abs_path
-        try:
-            project_dir = os.path.dirname(os.path.abspath(self.current_project_path))
-            normalized_path = str(abs_path)
-            if normalized_path and not os.path.isabs(normalized_path):
-                normalized_path = self._to_absolute(normalized_path)
-            return os.path.relpath(normalized_path, project_dir)
-        except (ValueError, TypeError):
-            return abs_path
+        return self._to_relative_for_project_path(abs_path, self.current_project_path)
 
     def _to_absolute(self, path):
         """Convert relative path to absolute path."""
@@ -907,6 +982,32 @@ class ProjectManager:
             self._sqlite_project_dirty = False
         return True
 
+    def _sqlite_force_deleted_image_paths(self):
+        if not self.is_sqlite_project() or not self.current_database_path:
+            return []
+        try:
+            import sqlite3
+
+            conn = sqlite3.connect(self.current_database_path)
+            try:
+                rows = conn.execute("SELECT path FROM images WHERE status != 'deleted'").fetchall()
+            finally:
+                conn.close()
+        except Exception:
+            return []
+        current_identities = {
+            self._path_identity(image_path)
+            for image_path in self.project_data.get("images", []) or []
+            if image_path
+        }
+        current_identities.discard("")
+        deleted = []
+        for row in rows:
+            stored_path = str(row[0] or "")
+            if stored_path and self._path_identity(stored_path) not in current_identities:
+                deleted.append(stored_path)
+        return deleted
+
     def _apply_loaded_project_data(self, loaded_data, project_path):
         self.clear() # Ensure clean state
 
@@ -1027,49 +1128,60 @@ class ProjectManager:
         self.current_storage_backend = "json"
         self.current_database_path = ""
 
-    def save_project(self):
+    def legacy_json_payload(self, project_path=None):
+        target_project_path = os.path.abspath(str(project_path or self.current_project_path or "project.json"))
+        self._sync_active_model_profile_from_project_fields()
+        data_to_save = {
+            "name": self.project_data["name"],
+            "taxonomy": self.project_data["taxonomy"],
+            "locator_scope": self.get_locator_scope(),
+            "project_template": self.project_data.get("project_template", ""),
+            "category_supercategory": self._category_supercategory(),
+            "taxon_label": self.project_data.get("taxon_label", "Taxon"),
+            "vlm_preannotation": self.get_vlm_preannotation_settings(),
+            "blink_context_roi_parents": self.get_blink_context_roi_parents(),
+            "parent_box_aspect_ratios": self.get_parent_box_aspect_ratios(),
+            "model_profiles": self.get_model_profiles(),
+            "cascade_routes": self.get_cascade_routes(),
+            "images": [],
+            "labels": {},
+            "scales": {},
+            "image_provenance": {},
+            "image_groups": self._sanitize_image_groups(self.project_data.get("image_groups", {})),
+        }
+
+        for img_abs in self.project_data["images"]:
+            data_to_save["images"].append(self._to_relative_for_project_path(img_abs, target_project_path))
+
+        for img_abs, label_data in self.project_data["labels"].items():
+            if not self._label_entry_has_saved_content(label_data):
+                continue
+            rel_path = self._to_relative_for_project_path(img_abs, target_project_path)
+            data_to_save["labels"][rel_path] = label_data
+
+        for img_abs, scale_val in self.project_data.get("scales", {}).items():
+            rel_path = self._to_relative_for_project_path(img_abs, target_project_path)
+            data_to_save["scales"][rel_path] = scale_val
+
+        for img_abs, provenance in self.project_data.get("image_provenance", {}).items():
+            rel_path = self._to_relative_for_project_path(img_abs, target_project_path)
+            data_to_save["image_provenance"][rel_path] = provenance
+
+        return data_to_save
+
+    def save_project(self, force=False):
         if getattr(self, "current_storage_backend", "json") == SQLITE_BACKEND:
+            if force:
+                return self.flush_sqlite_changes(
+                    image_paths=list(self.project_data.get("images", []) or []),
+                    deleted_image_paths=self._sqlite_force_deleted_image_paths(),
+                    project_dirty=True,
+                )
             return self.flush_sqlite_changes()
         if self.current_project_path:
-            self._sync_active_model_profile_from_project_fields()
-            data_to_save = {
-                "name": self.project_data["name"],
-                "taxonomy": self.project_data["taxonomy"],
-                "locator_scope": self.get_locator_scope(),
-                "project_template": self.project_data.get("project_template", ""),
-                "category_supercategory": self._category_supercategory(),
-                "taxon_label": self.project_data.get("taxon_label", "Taxon"),
-                "vlm_preannotation": self.get_vlm_preannotation_settings(),
-                "blink_context_roi_parents": self.get_blink_context_roi_parents(),
-                "parent_box_aspect_ratios": self.get_parent_box_aspect_ratios(),
-                "model_profiles": self.get_model_profiles(),
-                "cascade_routes": self.get_cascade_routes(),
-                "images": [],
-                "labels": {},
-                "scales": {},
-                "image_provenance": {},
-                "image_groups": self._sanitize_image_groups(self.project_data.get("image_groups", {})),
-            }
-            
-            for img_abs in self.project_data["images"]:
-                data_to_save["images"].append(self._to_relative(img_abs))
-                
-            for img_abs, label_data in self.project_data["labels"].items():
-                if not self._label_entry_has_saved_content(label_data):
-                    continue
-                rel_path = self._to_relative(img_abs)
-                data_to_save["labels"][rel_path] = label_data
-                
-            for img_abs, scale_val in self.project_data.get("scales", {}).items():
-                rel_path = self._to_relative(img_abs)
-                data_to_save["scales"][rel_path] = scale_val
-
-            for img_abs, provenance in self.project_data.get("image_provenance", {}).items():
-                rel_path = self._to_relative(img_abs)
-                data_to_save["image_provenance"][rel_path] = provenance
-
             project_path = os.path.abspath(self.current_project_path)
             project_dir = os.path.dirname(project_path) or "."
+            data_to_save = self.legacy_json_payload(project_path)
             tmp_path = f"{project_path}.tmp"
             try:
                 with open(tmp_path, 'w', encoding='utf-8') as f:

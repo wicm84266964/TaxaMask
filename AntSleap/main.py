@@ -298,6 +298,11 @@ try:
         sanitize_vlm_prompt_profile,
     )
     from AntSleap.core.project_sqlite_migration import default_sqlite_manifest_path, migrate_legacy_2d_json_to_sqlite
+    from AntSleap.core.project_sqlite_maintenance import (
+        backup_sqlite_project_manifest,
+        export_sqlite_project_to_legacy_json,
+        sqlite_project_migration_report_path,
+    )
     from AntSleap.core.project_sqlite_writer import finish_vlm_run, record_vlm_image_result
     from AntSleap.core.sqlite_storage import PROJECT_MANIFEST_SCHEMA_VERSION, SQLITE_BACKEND, read_project_manifest
     from AntSleap.core.tif_sqlite_migration import (
@@ -419,6 +424,11 @@ except ImportError:
         sanitize_vlm_prompt_profile,
     )
     from core.project_sqlite_migration import default_sqlite_manifest_path, migrate_legacy_2d_json_to_sqlite
+    from core.project_sqlite_maintenance import (
+        backup_sqlite_project_manifest,
+        export_sqlite_project_to_legacy_json,
+        sqlite_project_migration_report_path,
+    )
     from core.project_sqlite_writer import finish_vlm_run, record_vlm_image_result
     from core.sqlite_storage import PROJECT_MANIFEST_SCHEMA_VERSION, SQLITE_BACKEND, read_project_manifest
     from core.tif_sqlite_migration import (
@@ -1187,6 +1197,19 @@ TRANSLATIONS = {
         "Generic taxonomy mask project": "通用分类掩码项目",
         "Ant morphology (validated example)": "蚂蚁形态学（已验证示例）",
         "Save Project": "保存项目",
+        "Backup SQLite Project": "备份 SQLite 项目",
+        "Export Legacy JSON": "导出 legacy JSON",
+        "Open Migration Report": "打开迁移报告",
+        "The current project is not a SQLite-backed project.": "当前项目不是 SQLite 主存储项目。",
+        "SQLite project backup failed.\n\n{0}": "SQLite 项目备份失败。\n\n{0}",
+        "SQLite project backup was skipped because a recent backup already exists.": "已存在较新的 SQLite 备份，本次跳过。",
+        "SQLite project backup created. Manifest: {0}; database: {1}": "已创建 SQLite 项目备份。Manifest：{0}；数据库：{1}",
+        "SQLite backup created.\n\nOpen this manifest to inspect the backup:\n{0}": "SQLite 备份已创建。\n\n可打开这个 manifest 检查备份：\n{0}",
+        "Legacy JSON export failed.\n\n{0}": "legacy JSON 导出失败。\n\n{0}",
+        "Exported SQLite project to legacy JSON for audit. Path: {0}; stats: {1}": "已将 SQLite 项目导出为用于审计的 legacy JSON。路径：{0}；统计：{1}",
+        "Legacy JSON export created:\n{0}": "legacy JSON 导出已创建：\n{0}",
+        "No migration report is recorded for this project.": "这个项目没有记录迁移报告。",
+        "Migration report path:\n{0}": "迁移报告路径：\n{0}",
         "Import TIF Stack": "导入 TIF stack",
         "Import AMIRA Directory": "导入 AMIRA 目录",
         "Import STL Rendered Views to Labeling Workbench": "导入 STL 渲染视角图到标注工作台",
@@ -8209,7 +8232,7 @@ class MainWindow(QMainWindow):
 
         context = getattr(self, "project_save_context", {}) or {}
         try:
-            self.project.save_project()
+            self.project.save_project(force=force)
         except Exception:
             runtime_log_exception(
                 "project_save_failed",
@@ -8565,6 +8588,145 @@ class MainWindow(QMainWindow):
 
     def _is_legacy_2d_json_project_file(self, path):
         return self._is_legacy_2d_json_project_payload(self._read_project_probe_payload(path))
+
+    def _active_sqlite_project_manager(self):
+        if getattr(self, "active_project_kind", "image") == "tif":
+            manager = getattr(self, "tif_project", None)
+        else:
+            manager = getattr(self, "project", None)
+        if manager is None:
+            return None
+        is_sqlite = getattr(manager, "is_sqlite_project", None)
+        if not callable(is_sqlite) or not is_sqlite():
+            return None
+        return manager
+
+    def _flush_active_sqlite_project_before_maintenance(self):
+        manager = self._active_sqlite_project_manager()
+        if manager is None:
+            return None
+        if manager is getattr(self, "project", None):
+            self._flush_pending_project_save(force=True, defer_for_navigation=False)
+        else:
+            manager.save_project()
+        return manager
+
+    def _sqlite_maintenance_default_dir(self, manager):
+        database_path = str(getattr(manager, "current_database_path", "") or "")
+        if database_path:
+            return os.path.dirname(os.path.abspath(database_path)) or "."
+        project_path = str(getattr(manager, "current_project_path", "") or "")
+        return os.path.dirname(os.path.abspath(project_path)) if project_path else self._default_outputs_root()
+
+    def backup_current_sqlite_project(self):
+        manager = self._flush_active_sqlite_project_before_maintenance()
+        if manager is None:
+            QMessageBox.information(
+                self,
+                tr("Backup SQLite Project", self.current_lang),
+                tr("The current project is not a SQLite-backed project.", self.current_lang),
+            )
+            return
+        try:
+            result = backup_sqlite_project_manifest(
+                manager.current_project_path,
+                min_interval_seconds=0,
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                tr("Backup SQLite Project", self.current_lang),
+                tr("SQLite project backup failed.\n\n{0}", self.current_lang).format(str(exc)),
+            )
+            return
+        if not result.backup_manifest_path:
+            QMessageBox.information(
+                self,
+                tr("Backup SQLite Project", self.current_lang),
+                tr("SQLite project backup was skipped because a recent backup already exists.", self.current_lang),
+            )
+            return
+        self.log(
+            tr(
+                "SQLite project backup created. Manifest: {0}; database: {1}",
+                self.current_lang,
+            ).format(result.backup_manifest_path, result.backup_database_path)
+        )
+        QMessageBox.information(
+            self,
+            tr("Backup SQLite Project", self.current_lang),
+            tr(
+                "SQLite backup created.\n\nOpen this manifest to inspect the backup:\n{0}",
+                self.current_lang,
+            ).format(result.backup_manifest_path),
+        )
+
+    def export_current_project_legacy_json(self):
+        manager = self._flush_active_sqlite_project_before_maintenance()
+        if manager is None:
+            QMessageBox.information(
+                self,
+                tr("Export Legacy JSON", self.current_lang),
+                tr("The current project is not a SQLite-backed project.", self.current_lang),
+            )
+            return
+        default_dir = os.path.join(self._sqlite_maintenance_default_dir(manager), "legacy_json_exports")
+        os.makedirs(default_dir, exist_ok=True)
+        project_name = str(getattr(manager, "project_data", {}).get("name") or "project").strip() or "project"
+        safe_name = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in project_name).strip("_") or "project"
+        default_path = os.path.join(default_dir, f"{safe_name}.legacy_export_{time.strftime('%Y%m%d_%H%M%S')}.json")
+        output_path, _ = QFileDialog.getSaveFileName(
+            self,
+            tr("Export Legacy JSON", self.current_lang),
+            default_path,
+            tr("TaxaMask Projects (*.json);;All Files (*)", self.current_lang),
+        )
+        if not output_path:
+            return
+        try:
+            result = export_sqlite_project_to_legacy_json(manager.current_project_path, output_path)
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                tr("Export Legacy JSON", self.current_lang),
+                tr("Legacy JSON export failed.\n\n{0}", self.current_lang).format(str(exc)),
+            )
+            return
+        self.log(
+            tr(
+                "Exported SQLite project to legacy JSON for audit. Path: {0}; stats: {1}",
+                self.current_lang,
+            ).format(result.output_path, result.stats)
+        )
+        QMessageBox.information(
+            self,
+            tr("Export Legacy JSON", self.current_lang),
+            tr("Legacy JSON export created:\n{0}", self.current_lang).format(result.output_path),
+        )
+
+    def open_current_sqlite_migration_report(self):
+        manager = self._active_sqlite_project_manager()
+        if manager is None:
+            QMessageBox.information(
+                self,
+                tr("Open Migration Report", self.current_lang),
+                tr("The current project is not a SQLite-backed project.", self.current_lang),
+            )
+            return
+        report_path = sqlite_project_migration_report_path(manager.current_project_path)
+        if not report_path:
+            QMessageBox.information(
+                self,
+                tr("Open Migration Report", self.current_lang),
+                tr("No migration report is recorded for this project.", self.current_lang),
+            )
+            return
+        if not open_path(report_path):
+            QMessageBox.information(
+                self,
+                tr("Open Migration Report", self.current_lang),
+                tr("Migration report path:\n{0}", self.current_lang).format(report_path),
+            )
 
     def appoint_selected_route_expert(self):
         panel = getattr(self, "route_settings_panel", None)
@@ -9123,6 +9285,9 @@ class MainWindow(QMainWindow):
             file_menu.addAction(tr("New TIF Volume Project", self.current_lang), self.new_tif_project)
         file_menu.addAction(tr("Open Project", self.current_lang), self.open_project)
         file_menu.addAction(tr("Save Project", self.current_lang), lambda: self._flush_pending_project_save(force=True))
+        file_menu.addAction(tr("Backup SQLite Project", self.current_lang), self.backup_current_sqlite_project)
+        file_menu.addAction(tr("Export Legacy JSON", self.current_lang), self.export_current_project_legacy_json)
+        file_menu.addAction(tr("Open Migration Report", self.current_lang), self.open_current_sqlite_migration_report)
         file_menu.addAction(tr("Import STL Rendered Views to Labeling Workbench", self.current_lang), self.import_stl_rendered_views_action)
         file_menu.addAction(tr("Open PDF Evidence Tools", self.current_lang), self.open_pdf_evidence_tools)
         file_menu.addAction(tr("Check / Relocate Project Images", self.current_lang), self.check_relocate_project_images)

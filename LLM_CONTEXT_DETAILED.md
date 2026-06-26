@@ -2,7 +2,7 @@
 
 > Target: advanced LLM assistants and developers maintaining the developer preview branch.
 > Branch scope: `codex/antscan-stl-tif-rearchitecture`.
-> Last synchronized: 2026-06-23.
+> Last synchronized: 2026-06-27.
 
 This file is the current-state handoff document. It is not a changelog. Do not append dated development logs here. Keep it focused on the program state that an agent needs in order to diagnose, modify, and safely operate TaxaMask.
 
@@ -14,6 +14,8 @@ The developer preview branch contains two maintained routes:
 
 - 2D/STL morphology route: PDF evidence, specimen images, STL-rendered 2D views, VLM/SAM drafts, parent/child part annotation, Blink experts, external model backends, and COCO/YOLO/JSONL export.
 - TIF/CT route: continuous TIFF stack import, TIF specimen projects, material/label layers, part ROI and part volume extraction, GPU volume preview, Local Axis Reslice, and training-material capture for future local-axis automation.
+
+Branch release notes are kept under `docs/releases/`. The full 1.2.0 TIF developer-preview release is documented in `docs/releases/1.2.0-tif-preview.md`.
 
 The stable `main` branch keeps its own main-only documentation. Do not copy TIF/CT wording into main docs unless the user explicitly decides to promote that route.
 
@@ -104,6 +106,14 @@ Current researcher-facing route:
 6. Train or route internal/external models.
 7. Export reviewed datasets.
 
+Storage state:
+
+- New 2D projects are SQLite-backed by default.
+- The project entry file is `*.sqlite_manifest.json`; it points to the adjacent `*.taxamask.sqlite` database.
+- Opening an old 2D JSON project prompts for migration to SQLite, creates a migration report and legacy JSON backup, then opens the manifest.
+- Opening the same old JSON again should reuse the existing migrated manifest instead of rerunning migration.
+- If a user accidentally selects the SQLite database file itself, the GUI tries to locate the matching manifest and opens that entry file.
+
 Important semantics:
 
 - STL is handled as rendered 2D review images, not direct mesh painting.
@@ -142,6 +152,14 @@ Main source areas:
 
 The TIF project is independent from the 2D/STL project model.
 
+Storage state:
+
+- New TIF projects are SQLite-backed by default.
+- The TIF project entry file is `*.tif_sqlite_manifest.json`; it points to the adjacent `*.taxamask_tif.sqlite` database.
+- Old TIF JSON projects can migrate to SQLite with a progress dialog.
+- TIF sidecar volumes, labels, part volumes, masks, contours, and reslice outputs remain in normal project folders. The database stores project index records, paths, metadata, review state, and provenance.
+- If a user accidentally selects the TIF SQLite database file itself, the GUI tries to locate and open the matching manifest.
+
 Core records:
 
 - specimen records
@@ -154,7 +172,7 @@ Core records:
 - extraction metadata
 - Local Axis reslice records
 
-TIF project JSON remains lightweight. Large volumes live in project sidecar directories.
+Legacy TIF project JSON is now a migration source rather than the preferred active project store. Large volumes live in project sidecar directories.
 
 Plain TIFF stack import creates an image volume but not trusted training truth. AMIRA-style imports can provide label volumes, but label shape/material consistency must be checked before treating a specimen as train-ready.
 
@@ -169,7 +187,11 @@ The TIF workbench supports:
 - opening/importing TIF projects
 - specimen tree navigation
 - slice review across Z/Y/X axes
-- material map inspection/editing
+- material map inspection/editing with visible swatches and color picker support
+- explicit annotation tools: brush, eraser, picker, and pan
+- annotation cursor radius preview for brush/eraser/picker
+- save-status feedback for dirty working-edit slices
+- undo/redo and annotation shortcuts
 - ROI and key-slice contour workflow
 - part volume creation
 - mask preview and accepted part mask writing

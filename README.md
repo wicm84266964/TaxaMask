@@ -8,6 +8,12 @@
 
 This branch is a **developer preview**. It keeps the stable TaxaMask 2D morphology and PDF evidence workflows, and adds the newer TIF/CT 3D workflow for internal morphology review, part-volume extraction, and local-axis reslicing. The 3D route has been developed and tested mainly with AntScan ant CT data. Its data structures are not hard-coded to ants, but broad multi-taxon validation is not yet claimed.
 
+## Release 1.2.0 TIF Developer Preview
+
+This branch release is published as `v1.2.0-tif-preview`. It keeps the stable 2D SQLite project-storage upgrade from TaxaMask 1.2.0 and additionally includes the TIF/CT SQLite project index, TIF annotation-tool polish, and local-axis developer-preview workflow.
+
+The stable `v1.2.0` tag remains the 2D-focused release. See [docs/releases/1.2.0-tif-preview.md](docs/releases/1.2.0-tif-preview.md) for the full branch release notes.
+
 ## What This Preview Contains
 
 TaxaMask now has four connected research routes:

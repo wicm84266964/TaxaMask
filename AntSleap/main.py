@@ -304,7 +304,7 @@ try:
         sqlite_project_migration_report_path,
     )
     from AntSleap.core.project_sqlite_writer import finish_vlm_run, record_vlm_image_result
-    from AntSleap.core.sqlite_storage import PROJECT_MANIFEST_SCHEMA_VERSION, SQLITE_BACKEND, read_project_manifest
+    from AntSleap.core.sqlite_storage import PROJECT_MANIFEST_SCHEMA_VERSION, SQLITE_BACKEND, read_project_manifest, resolve_manifest_database_path
     from AntSleap.core.tif_sqlite_migration import (
         default_tif_sqlite_manifest_path,
         migrate_legacy_tif_json_to_sqlite,
@@ -430,7 +430,7 @@ except ImportError:
         sqlite_project_migration_report_path,
     )
     from core.project_sqlite_writer import finish_vlm_run, record_vlm_image_result
-    from core.sqlite_storage import PROJECT_MANIFEST_SCHEMA_VERSION, SQLITE_BACKEND, read_project_manifest
+    from core.sqlite_storage import PROJECT_MANIFEST_SCHEMA_VERSION, SQLITE_BACKEND, read_project_manifest, resolve_manifest_database_path
     from core.tif_sqlite_migration import (
         default_tif_sqlite_manifest_path,
         migrate_legacy_tif_json_to_sqlite,
@@ -1177,6 +1177,10 @@ TRANSLATIONS = {
         "Scale set to {:.2f} px/mm": "标尺已设定: {:.2f} px/mm",
         "Open Project": "打开项目",
         "TaxaMask Projects (*.json);;All Files (*)": "TaxaMask 项目 (*.json);;所有文件 (*)",
+        "TaxaMask Project Entry (*.sqlite_manifest.json *.tif_sqlite_manifest.json *.json);;SQLite Database (*.taxamask.sqlite *.taxamask_tif.sqlite);;All Files (*)": "TaxaMask 项目入口 (*.sqlite_manifest.json *.tif_sqlite_manifest.json *.json);;SQLite 数据库 (*.taxamask.sqlite *.taxamask_tif.sqlite);;所有文件 (*)",
+        "Selected a SQLite database file. Opening its project entry instead: {0}": "已选择 SQLite 数据库文件，改为打开对应的项目入口文件：{0}",
+        "Project entry file not found": "未找到项目入口文件",
+        "This is a SQLite database file, but TaxaMask could not find the matching project entry file. Please open the project entry file next to it instead:\n\n2D: *.sqlite_manifest.json\nTIF: *.tif_sqlite_manifest.json\n\nSelected database:\n{0}": "这是 SQLite 数据库文件，但 TaxaMask 没能找到对应的项目入口文件。请改为打开它旁边的项目入口文件：\n\n2D：*.sqlite_manifest.json\nTIF：*.tif_sqlite_manifest.json\n\n当前选择的数据库：\n{0}",
         "Migrate 2D Project to SQLite": "迁移 2D 项目到 SQLite",
         "Migrating 2D project to SQLite...": "正在迁移 2D 项目到 SQLite...",
         "This is an older 2D JSON project. TaxaMask now stores 2D projects in SQLite so large annotation projects are saved incrementally instead of rewriting one large JSON file.\n\nThe old JSON will not be overwritten. A SQLite database, a manifest file, a migration report, and a legacy JSON backup will be created next to the project.\n\nMigrate and open the SQLite project now?": "这是旧版 2D JSON 项目。TaxaMask 现在会把 2D 项目保存到 SQLite，这样大型标注项目可以增量保存，而不是反复重写一个很大的 JSON 文件。\n\n旧 JSON 不会被覆盖。程序会在项目旁边生成 SQLite 数据库、manifest 入口文件、迁移报告和旧 JSON 备份。\n\n现在迁移并打开 SQLite 项目吗？",
@@ -8610,6 +8614,50 @@ class MainWindow(QMainWindow):
     def _is_legacy_2d_json_project_file(self, path):
         return self._is_legacy_2d_json_project_payload(self._read_project_probe_payload(path))
 
+    def _candidate_manifest_paths_for_sqlite_database(self, path):
+        database_path = os.path.abspath(str(path))
+        directory = os.path.dirname(database_path) or "."
+        filename = os.path.basename(database_path)
+        candidates = []
+        suffixes = [
+            (".taxamask.sqlite", ".sqlite_manifest.json"),
+            (".taxamask_tif.sqlite", ".tif_sqlite_manifest.json"),
+        ]
+        for db_suffix, manifest_suffix in suffixes:
+            if filename.endswith(db_suffix):
+                candidates.append(os.path.join(directory, f"{filename[:-len(db_suffix)]}{manifest_suffix}"))
+        for name in os.listdir(directory) if os.path.isdir(directory) else []:
+            if name.endswith(".sqlite_manifest.json") or name.endswith(".tif_sqlite_manifest.json"):
+                candidates.append(os.path.join(directory, name))
+        seen = set()
+        unique = []
+        for candidate in candidates:
+            norm = os.path.normcase(os.path.normpath(os.path.abspath(str(candidate))))
+            if norm not in seen:
+                seen.add(norm)
+                unique.append(os.path.abspath(str(candidate)))
+        return unique
+
+    def _manifest_for_sqlite_database_file(self, path):
+        database_path = os.path.abspath(str(path))
+        database_norm = os.path.normcase(os.path.normpath(database_path))
+        for manifest_path in self._candidate_manifest_paths_for_sqlite_database(database_path):
+            if not os.path.exists(manifest_path):
+                continue
+            try:
+                payload = read_project_manifest(manifest_path)
+                resolved_db = resolve_manifest_database_path(manifest_path, payload)
+            except Exception:
+                continue
+            resolved_norm = os.path.normcase(os.path.normpath(os.path.abspath(resolved_db)))
+            if resolved_norm == database_norm:
+                return os.path.abspath(manifest_path)
+        return ""
+
+    def _is_project_sqlite_database_file(self, path):
+        filename = os.path.basename(str(path or ""))
+        return filename.endswith(".taxamask.sqlite") or filename.endswith(".taxamask_tif.sqlite")
+
     def _active_sqlite_project_manager(self):
         if getattr(self, "active_project_kind", "image") == "tif":
             manager = getattr(self, "tif_project", None)
@@ -9542,7 +9590,10 @@ class MainWindow(QMainWindow):
             self,
             tr("Open Project", self.current_lang),
             self._default_open_project_dir(),
-            tr("TaxaMask Projects (*.json);;All Files (*)", self.current_lang),
+            tr(
+                "TaxaMask Project Entry (*.sqlite_manifest.json *.tif_sqlite_manifest.json *.json);;SQLite Database (*.taxamask.sqlite *.taxamask_tif.sqlite);;All Files (*)",
+                self.current_lang,
+            ),
         )
         if f:
             self.open_project_path(f)
@@ -9707,6 +9758,27 @@ class MainWindow(QMainWindow):
         f = os.path.abspath(str(path))
         runtime_log_event("open_project_begin", path=f)
         self._flush_pending_project_save(defer_for_navigation=False)
+        if self._is_project_sqlite_database_file(f):
+            manifest_path = self._manifest_for_sqlite_database_file(f)
+            if not manifest_path:
+                QMessageBox.warning(
+                    self,
+                    tr("Project entry file not found", self.current_lang),
+                    tr(
+                        "This is a SQLite database file, but TaxaMask could not find the matching project entry file. Please open the project entry file next to it instead:\n\n2D: *.sqlite_manifest.json\nTIF: *.tif_sqlite_manifest.json\n\nSelected database:\n{0}",
+                        self.current_lang,
+                    ).format(f),
+                )
+                runtime_log_event("open_project_sqlite_database_without_manifest", path=f)
+                return
+            self.log(
+                tr(
+                    "Selected a SQLite database file. Opening its project entry instead: {0}",
+                    self.current_lang,
+                ).format(manifest_path)
+            )
+            runtime_log_event("open_project_sqlite_database_redirected", path=f, manifest=manifest_path)
+            f = manifest_path
         payload = self._read_project_probe_payload(f)
         if self._is_legacy_2d_json_project_payload(payload):
             existing_manifest = self._existing_sqlite_manifest_for_legacy_json(f)

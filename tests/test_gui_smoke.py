@@ -1383,6 +1383,26 @@ class GuiSmokeTests(unittest.TestCase):
         finally:
             window.deleteLater()
 
+    def test_open_2d_sqlite_database_redirects_to_project_entry_manifest(self):
+        window = self._make_window()
+        try:
+            legacy_path = self.project_dir / "legacy_project.json"
+            _write_json(legacy_path, _legacy_project_payload())
+
+            with patch.object(main_module, "themed_yes_no_question", return_value=main_module.QMessageBox.Yes):
+                window.open_project_path(str(legacy_path))
+
+            manifest_path = self.project_dir / "legacy_project.sqlite_manifest.json"
+            db_path = self.project_dir / "legacy_project.taxamask.sqlite"
+            window.open_project_path(str(db_path))
+
+            self.assertEqual(Path(window.project.current_project_path), manifest_path.resolve())
+            self.assertEqual(Path(window.project.current_database_path), db_path.resolve())
+            self.assertEqual(window.active_project_kind, "image")
+            self.assertEqual(window.config.get("last_project_path"), str(manifest_path.resolve()))
+        finally:
+            window.deleteLater()
+
     def test_sqlite_project_maintenance_menu_actions_create_backup_and_legacy_export(self):
         window = self._make_window()
         try:
@@ -1461,6 +1481,29 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(window.tif_project.current_storage_backend, "sqlite")
             self.assertTrue(manifest_path.exists())
             self.assertTrue(first_db_path.exists())
+        finally:
+            window.tif_workbench.close_project(prompt_unsaved=False)
+            window.deleteLater()
+            gc.collect()
+
+    def test_open_tif_sqlite_database_redirects_to_project_entry_manifest(self):
+        window = self._make_window()
+        try:
+            window.tif_workflow_enabled = True
+            legacy_root = self.project_dir / "legacy_tif"
+            legacy_path = _build_legacy_tif_project(legacy_root)
+
+            with patch.object(main_module, "themed_yes_no_question", return_value=main_module.QMessageBox.Yes):
+                window.open_project_path(str(legacy_path))
+
+            manifest_path = legacy_root / "project.tif_sqlite_manifest.json"
+            db_path = legacy_root / "project.taxamask_tif.sqlite"
+            window.open_project_path(str(db_path))
+
+            self.assertEqual(Path(window.tif_project.current_project_path), manifest_path.resolve())
+            self.assertEqual(Path(window.tif_project.current_database_path), db_path.resolve())
+            self.assertEqual(window.active_project_kind, "tif")
+            self.assertEqual(window.config.get("last_project_path"), str(manifest_path.resolve()))
         finally:
             window.tif_workbench.close_project(prompt_unsaved=False)
             window.deleteLater()

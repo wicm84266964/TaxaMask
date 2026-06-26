@@ -8,6 +8,12 @@
 
 这个分支是 **developer preview / 开发预览版**。它保留 TaxaMask 已经较稳定的 2D 形态标注和 PDF 文献证据流程，同时加入新的 TIF/CT 三维内部结构路线，用于体数据复核、部位体提取和局部轴重切片。TIF/CT 路线目前主要用 AntScan 蚂蚁 CT 数据进行开发和验证；数据结构没有写死蚂蚁，但还不宣称已经完成广泛跨类群验证。
 
+## 1.2.0 TIF 开发预览版发布
+
+这个分支发布为 `v1.2.0-tif-preview`。它包含 TaxaMask 1.2.0 稳定线中的 2D SQLite 项目存储升级，同时额外包含 TIF/CT SQLite 项目索引、TIF 标注工具成熟化和 Local Axis 开发预览工作流。
+
+稳定版 `v1.2.0` tag 仍然是 2D 路线为主的正式 release。这个分支的完整发布记录见 [docs/releases/1.2.0-tif-preview.md](docs/releases/1.2.0-tif-preview.md)。
+
 ## 这个预览版包含什么
 
 TaxaMask 现在包含四条相互连接的研究路线：

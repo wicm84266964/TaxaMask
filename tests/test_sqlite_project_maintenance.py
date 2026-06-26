@@ -17,6 +17,7 @@ from AntSleap.core.tif_project import TifProjectManager
 from AntSleap.core.tif_volume_io import VOLUME_SIDECAR_FORMAT, write_volume_sidecar
 from tests.test_2d_json_to_sqlite_migration import _legacy_project_payload, _write_json
 from AntSleap.core.project_sqlite_migration import migrate_legacy_2d_json_to_sqlite
+from AntSleap.core.project import LABEL_JOURNAL_SCHEMA_VERSION
 from tests.test_tif_json_to_sqlite_migration import _build_legacy_tif_project
 
 
@@ -56,6 +57,79 @@ class SQLiteProjectMaintenanceTests(unittest.TestCase):
             reloaded = ProjectManager()
             reloaded.load_project(manifest_path)
             self.assertIn(str(image_path.resolve()), reloaded.project_data["labels"])
+
+    def test_sqlite_2d_project_does_not_write_legacy_label_journal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image_path = root / "ant.png"
+            image_path.write_bytes(b"image")
+
+            manager = ProjectManager()
+            manager.create_project("journal_retired", root)
+            manager.add_images([str(image_path)], save=False)
+            manager.update_label(
+                str(image_path),
+                "Head",
+                [[1, 1], [5, 1], [4, 4]],
+                save=False,
+            )
+            manager.save_project()
+
+            self.assertFalse((root / "journal_retired.label_journal.jsonl").exists())
+
+    def test_loaded_legacy_2d_json_is_read_only_unless_explicit_compatibility_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_json = root / "legacy_project.json"
+            _write_json(source_json, _legacy_project_payload())
+            original_text = source_json.read_text(encoding="utf-8")
+
+            manager = ProjectManager()
+            manager.load_project(source_json)
+            image_path = manager.project_data["images"][0]
+            manager.update_label(
+                image_path,
+                "Eye",
+                [[1, 1], [5, 1], [4, 4]],
+                save=False,
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "legacy_json_project_is_read_only"):
+                manager.save_project()
+            self.assertEqual(source_json.read_text(encoding="utf-8"), original_text)
+
+    def test_legacy_label_journal_can_recover_into_sqlite_project(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image_path = root / "ant.png"
+            image_path.write_bytes(b"image")
+            journal_path = root / "old.label_journal.jsonl"
+            journal_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": LABEL_JOURNAL_SCHEMA_VERSION,
+                        "image_path": image_path.name,
+                        "label": {
+                            "parts": {"Head": [[1, 1], [5, 1], [4, 4]]},
+                            "status": "labeled",
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            manager = ProjectManager()
+            manifest_path = Path(manager.create_project("journal_recovery", root))
+
+            result = manager.recover_labels_from_journal(journal_path, save=True)
+
+            self.assertEqual(result["recovered_images"], 1)
+            reloaded = ProjectManager()
+            reloaded.load_project(manifest_path)
+            self.assertIn(str(image_path.resolve()), reloaded.project_data["images"])
+            self.assertIn("Head", reloaded.project_data["labels"][str(image_path.resolve())]["parts"])
 
     def test_sqlite_backup_manifest_can_be_opened(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -128,6 +202,20 @@ class SQLiteProjectMaintenanceTests(unittest.TestCase):
             reloaded.load_project(manifest_path)
             self.assertEqual(reloaded.project_data["name"], "tif_default")
             self.assertEqual(reloaded.current_asset_root, str(project_root.resolve()))
+
+    def test_loaded_legacy_tif_json_is_read_only_unless_explicit_compatibility_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            legacy_path = Path(_build_legacy_tif_project(root / "legacy_tif"))
+            original_text = legacy_path.read_text(encoding="utf-8")
+
+            manager = TifProjectManager()
+            manager.load_project(legacy_path)
+            manager.project_data["name"] = "changed in memory"
+
+            with self.assertRaisesRegex(RuntimeError, "legacy_tif_json_project_is_read_only"):
+                manager.save_project()
+            self.assertEqual(legacy_path.read_text(encoding="utf-8"), original_text)
 
     def test_migrated_tif_backup_preserves_asset_root(self):
         with tempfile.TemporaryDirectory() as tmp:

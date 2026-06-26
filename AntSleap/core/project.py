@@ -34,7 +34,7 @@ from .model_profiles import (
     set_active_model_profile as set_active_model_profile_id,
 )
 from .vlm_preannotation import DEFAULT_VLM_PROMPT_PROFILE_ID, sanitize_vlm_prompt_profile
-from .sqlite_storage import PROJECT_MANIFEST_SCHEMA_VERSION, SQLITE_BACKEND, write_project_manifest
+from .sqlite_storage import LEGACY_JSON_BACKEND, PROJECT_MANIFEST_SCHEMA_VERSION, SQLITE_BACKEND, write_project_manifest
 
 DEFAULT_CATEGORY_SUPERCATEGORY = "biological_structure"
 MULTIMODAL_SAMPLE_SCHEMA_VERSION = "taxamask-multimodal-sample-v1"
@@ -89,11 +89,12 @@ class ProjectManager:
             },
         }
         self.current_project_path = None
-        self.current_storage_backend = "json"
+        self.current_storage_backend = LEGACY_JSON_BACKEND
         self.current_database_path = ""
         self._sqlite_dirty_images = set()
         self._sqlite_deleted_images = set()
         self._sqlite_project_dirty = False
+        self._legacy_json_write_enabled = False
         self.known_relocated_roots = []
         self._last_label_journal_fsync = 0.0
 
@@ -446,6 +447,8 @@ class ProjectManager:
             return ""
 
     def _append_label_journal_entry(self, image_path, action):
+        if self.is_sqlite_project() or not getattr(self, "_legacy_json_write_enabled", False):
+            return False
         journal_path = self._label_journal_path()
         if not journal_path or not image_path:
             return False
@@ -520,6 +523,8 @@ class ProjectManager:
                 self.project_data.setdefault("images", []).append(image_path)
 
         if latest_by_image and save:
+            self._mark_sqlite_images_dirty(latest_by_image.keys())
+            self._mark_sqlite_project_dirty()
             self.save_project()
 
         return {
@@ -735,8 +740,9 @@ class ProjectManager:
                 except OSError:
                     pass
             self._remove_sqlite_artifacts(database_path)
-            self.current_storage_backend = "json"
+            self.current_storage_backend = LEGACY_JSON_BACKEND
             self.current_database_path = ""
+            self._legacy_json_write_enabled = False
             raise
 
     def create_project(self, name, save_dir, template_id=None, storage_backend=SQLITE_BACKEND):
@@ -756,8 +762,11 @@ class ProjectManager:
         self.ensure_default_model_profile()
         if storage_backend == SQLITE_BACKEND:
             return self._create_sqlite_project_storage(name, save_dir)
-        self.current_storage_backend = "json"
+        if storage_backend not in (LEGACY_JSON_BACKEND, "json"):
+            raise ValueError(f"unsupported_project_storage_backend:{storage_backend}")
+        self.current_storage_backend = LEGACY_JSON_BACKEND
         self.current_database_path = ""
+        self._legacy_json_write_enabled = True
         self.current_project_path = os.path.join(save_dir, f"{name}.json")
         self.save_project()
         return self.current_project_path
@@ -905,11 +914,12 @@ class ProjectManager:
             },
         }
         self.current_project_path = None
-        self.current_storage_backend = "json"
+        self.current_storage_backend = LEGACY_JSON_BACKEND
         self.current_database_path = ""
         self._sqlite_dirty_images = set()
         self._sqlite_deleted_images = set()
         self._sqlite_project_dirty = False
+        self._legacy_json_write_enabled = False
         self.known_relocated_roots = list(getattr(self, "known_relocated_roots", []))
 
     def _is_sqlite_manifest_payload(self, payload):
@@ -1122,11 +1132,46 @@ class ProjectManager:
             self._sqlite_dirty_images = set()
             self._sqlite_deleted_images = set()
             self._sqlite_project_dirty = False
+            self._legacy_json_write_enabled = False
             return
 
         self._apply_loaded_project_data(loaded_data, path)
-        self.current_storage_backend = "json"
+        self.current_storage_backend = LEGACY_JSON_BACKEND
         self.current_database_path = ""
+        self._legacy_json_write_enabled = False
+
+    def enable_legacy_json_writes_for_compatibility(self, enabled=True):
+        self._legacy_json_write_enabled = bool(enabled)
+
+    def _save_legacy_json_project(self):
+        project_path = os.path.abspath(self.current_project_path)
+        project_dir = os.path.dirname(project_path) or "."
+        data_to_save = self.legacy_json_payload(project_path)
+        tmp_path = f"{project_path}.tmp"
+        try:
+            with open(tmp_path, 'w', encoding='utf-8') as f:
+                json.dump(data_to_save, f, indent=4, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            with open(tmp_path, 'r', encoding='utf-8') as f:
+                json.load(f)
+            self._backup_current_project_file(project_path)
+            os.replace(tmp_path, project_path)
+        except Exception:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
+            raise
+        try:
+            dir_fd = os.open(project_dir, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            pass
 
     def legacy_json_payload(self, project_path=None):
         target_project_path = os.path.abspath(str(project_path or self.current_project_path or "project.json"))
@@ -1179,34 +1224,9 @@ class ProjectManager:
                 )
             return self.flush_sqlite_changes()
         if self.current_project_path:
-            project_path = os.path.abspath(self.current_project_path)
-            project_dir = os.path.dirname(project_path) or "."
-            data_to_save = self.legacy_json_payload(project_path)
-            tmp_path = f"{project_path}.tmp"
-            try:
-                with open(tmp_path, 'w', encoding='utf-8') as f:
-                    json.dump(data_to_save, f, indent=4, ensure_ascii=False)
-                    f.flush()
-                    os.fsync(f.fileno())
-                with open(tmp_path, 'r', encoding='utf-8') as f:
-                    json.load(f)
-                self._backup_current_project_file(project_path)
-                os.replace(tmp_path, project_path)
-            except Exception:
-                try:
-                    if os.path.exists(tmp_path):
-                        os.remove(tmp_path)
-                except OSError:
-                    pass
-                raise
-            try:
-                dir_fd = os.open(project_dir, os.O_RDONLY)
-                try:
-                    os.fsync(dir_fd)
-                finally:
-                    os.close(dir_fd)
-            except OSError:
-                pass
+            if not getattr(self, "_legacy_json_write_enabled", False):
+                raise RuntimeError("legacy_json_project_is_read_only; migrate to SQLite or export a legacy JSON copy")
+            return self._save_legacy_json_project()
 
     def add_images(self, image_paths, progress_callback=None, save=True):
         paths = list(image_paths or [])

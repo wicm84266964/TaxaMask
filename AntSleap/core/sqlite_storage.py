@@ -6,6 +6,7 @@ from .safe_io import atomic_write_json
 
 
 SQLITE_BACKEND = "sqlite"
+LEGACY_JSON_BACKEND = "legacy_json"
 PROJECT_MANIFEST_SCHEMA_VERSION = "taxamask-project-manifest-v1"
 SQLITE_BACKUP_LIMIT = 30
 SQLITE_BACKUP_MIN_INTERVAL_SECONDS = 300

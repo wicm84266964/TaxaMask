@@ -4,7 +4,7 @@ import shutil
 from datetime import datetime
 
 from .safe_io import atomic_write_json, backup_file
-from .sqlite_storage import PROJECT_MANIFEST_SCHEMA_VERSION, SQLITE_BACKEND, write_project_manifest
+from .sqlite_storage import LEGACY_JSON_BACKEND, PROJECT_MANIFEST_SCHEMA_VERSION, SQLITE_BACKEND, write_project_manifest
 from .tif_materials import has_trainable_material, read_material_map, write_material_map
 from .tif_volume_io import VOLUME_SIDECAR_FORMAT, copy_volume_sidecar, read_volume_metadata, volume_sidecar_exists
 
@@ -80,9 +80,10 @@ class TifProjectManager:
     def __init__(self):
         self.project_data = _default_project_data()
         self.current_project_path = None
-        self.current_storage_backend = "json"
+        self.current_storage_backend = LEGACY_JSON_BACKEND
         self.current_database_path = ""
         self.current_asset_root = ""
+        self._legacy_json_write_enabled = False
 
     @property
     def project_dir(self):
@@ -152,9 +153,10 @@ class TifProjectManager:
                 except OSError:
                     pass
             self._remove_sqlite_artifacts(database_path)
-            self.current_storage_backend = "json"
+            self.current_storage_backend = LEGACY_JSON_BACKEND
             self.current_database_path = ""
             self.current_asset_root = ""
+            self._legacy_json_write_enabled = False
             raise
 
     def create_project(self, name, project_dir, project_id=None, storage_backend=SQLITE_BACKEND):
@@ -162,10 +164,13 @@ class TifProjectManager:
         self.project_data = _default_project_data(name=name, project_id=project_id)
         if storage_backend == SQLITE_BACKEND:
             return self._create_sqlite_project_storage(name, project_dir)
+        if storage_backend not in (LEGACY_JSON_BACKEND, "json"):
+            raise ValueError(f"unsupported_tif_project_storage_backend:{storage_backend}")
         self.current_project_path = os.path.join(os.path.abspath(project_dir), DEFAULT_TIF_PROJECT_FILENAME)
-        self.current_storage_backend = "json"
+        self.current_storage_backend = LEGACY_JSON_BACKEND
         self.current_database_path = ""
         self.current_asset_root = ""
+        self._legacy_json_write_enabled = True
         self.save_project()
         return self.current_project_path
 
@@ -182,6 +187,7 @@ class TifProjectManager:
             self.project_data = self._normalize_loaded_project_data(loaded_sqlite["project_data"])
             self.current_storage_backend = SQLITE_BACKEND
             self.current_database_path = loaded_sqlite.get("database_path", "")
+            self._legacy_json_write_enabled = False
             manifest = loaded_sqlite.get("manifest", {}) if isinstance(loaded_sqlite.get("manifest"), dict) else {}
             asset_root = str(manifest.get("tif_asset_root") or "").strip()
             if asset_root:
@@ -192,9 +198,10 @@ class TifProjectManager:
             else:
                 self.current_asset_root = os.path.dirname(os.path.abspath(path))
             return self.project_data
-        self.current_storage_backend = "json"
+        self.current_storage_backend = LEGACY_JSON_BACKEND
         self.current_database_path = ""
         self.current_asset_root = ""
+        self._legacy_json_write_enabled = False
         if payload.get("schema_version") != TIF_PROJECT_SCHEMA_VERSION:
             raise ValueError(f"unsupported_tif_project_schema:{payload.get('schema_version')}")
         if payload.get("project_type") != TIF_PROJECT_TYPE:
@@ -212,6 +219,9 @@ class TifProjectManager:
 
     def is_sqlite_project(self):
         return getattr(self, "current_storage_backend", "json") == SQLITE_BACKEND
+
+    def enable_legacy_json_writes_for_compatibility(self, enabled=True):
+        self._legacy_json_write_enabled = bool(enabled)
 
     def _normalize_loaded_project_data(self, payload):
         specimens = payload.get("specimens", [])
@@ -244,6 +254,8 @@ class TifProjectManager:
             from .tif_sqlite_writer import flush_tif_project_changes
 
             return flush_tif_project_changes(self)
+        if not getattr(self, "_legacy_json_write_enabled", False):
+            raise RuntimeError("legacy_tif_json_project_is_read_only; migrate to SQLite or export a legacy JSON copy")
         project_path = os.path.abspath(self.current_project_path)
         os.makedirs(os.path.dirname(project_path), exist_ok=True)
         self._backup_current_project_file(project_path)

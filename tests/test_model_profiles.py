@@ -100,7 +100,7 @@ class ModelProfileTests(unittest.TestCase):
             self.assertEqual(profile["inference_params"]["vlm_preannotation"]["processing_scope"], "image_group")
             self.assertEqual(profile["inference_params"]["vlm_preannotation"]["image_group"], "split")
 
-    def test_project_preserves_custom_image_groups_and_vlm_group(self):
+    def test_legacy_project_preserves_custom_image_groups_and_vlm_group_without_overwrite(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             project_path = Path(tmp_dir) / "custom_groups.json"
             image_path = Path(tmp_dir) / "specimen.png"
@@ -132,14 +132,18 @@ class ModelProfileTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            original_text = project_path.read_text(encoding="utf-8")
 
             pm = ProjectManager()
             pm.load_project(str(project_path))
 
             self.assertEqual(pm.project_data["image_groups"]["custom_groups"][0]["id"], "review_ready")
             self.assertEqual(pm.get_vlm_preannotation_settings()["image_group"], "review_ready")
-            pm.save_project()
-            saved = json.loads(project_path.read_text(encoding="utf-8"))
+            with self.assertRaisesRegex(RuntimeError, "legacy_json_project_is_read_only"):
+                pm.save_project()
+            self.assertEqual(project_path.read_text(encoding="utf-8"), original_text)
+
+            saved = pm.legacy_json_payload(project_path)
             self.assertEqual(saved["image_groups"]["custom_groups"][0]["name"], "Review Ready")
             self.assertEqual(saved["vlm_preannotation"]["image_group"], "review_ready")
 

@@ -16,7 +16,7 @@ class GenericExportSchemaTests(unittest.TestCase):
         Image.new("RGB", (100, 80), color=(90, 140, 90)).save(image_path)
 
         manager = ProjectManager()
-        manager.current_project_path = str(work_dir / "project.json")
+        manager.create_project("generic_export_demo", work_dir, template_id=PROJECT_TEMPLATE_GENERIC)
         manager.project_data.update(
             {
                 "name": "generic_export_demo",
@@ -67,14 +67,14 @@ class GenericExportSchemaTests(unittest.TestCase):
             work_dir = Path(tmp)
             manager = self._build_project(work_dir)
             manager.project_data["category_supercategory"] = "plant_structure"
-            manager.save_project()
+            manager.save_project(force=True)
 
             reloaded = ProjectManager()
-            reloaded.load_project(str(work_dir / "project.json"))
+            reloaded.load_project(manager.current_project_path)
 
             self.assertEqual(reloaded.project_data["category_supercategory"], "plant_structure")
 
-    def test_legacy_genus_loads_as_taxon_and_new_taxon_is_saved(self):
+    def test_legacy_genus_loads_as_taxon_and_new_taxon_exports_without_overwriting_source(self):
         with tempfile.TemporaryDirectory() as tmp:
             work_dir = Path(tmp)
             image_path = work_dir / "specimen.png"
@@ -99,14 +99,19 @@ class GenericExportSchemaTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            original_text = project_path.read_text(encoding="utf-8")
 
             manager = ProjectManager()
             manager.load_project(str(project_path))
             loaded_image = manager.project_data["images"][0]
             self.assertEqual(manager.get_taxon(loaded_image), "Formica")
 
-            manager.set_taxon(loaded_image, "Quercus", taxon_rank="genus")
-            saved = json.loads(project_path.read_text(encoding="utf-8"))
+            manager.set_taxon(loaded_image, "Quercus", taxon_rank="genus", save=False)
+            with self.assertRaisesRegex(RuntimeError, "legacy_json_project_is_read_only"):
+                manager.save_project()
+            self.assertEqual(project_path.read_text(encoding="utf-8"), original_text)
+
+            saved = manager.legacy_json_payload(project_path)
             saved_label = saved["labels"]["specimen.png"]
             self.assertEqual(saved_label["taxon"], "Quercus")
             self.assertEqual(saved_label["genus"], "Quercus")
@@ -232,8 +237,7 @@ class GenericExportSchemaTests(unittest.TestCase):
             manager.create_project("external_demo", tmp, template_id=PROJECT_TEMPLATE_GENERIC)
             manager.project_data["taxonomy"] = ["Leaf"]
             manager.set_locator_scope(["Leaf"], save=False)
-            manager.current_project_path = str(work_dir / "external_demo.json")
-            manager.save_project()
+            manager.save_project(force=True)
 
             runner = ExternalBackendRunner(
                 manager,

@@ -21,6 +21,7 @@ from core.project import (  # noqa: E402
     AUTO_BOX_SOURCE_VLM,
     ProjectManager,
 )
+from core.safe_io import atomic_write_json  # noqa: E402
 from core.vlm_preannotation import (  # noqa: E402
     load_vlm_api_config_from_runtime_settings,
     parse_vlm_response,
@@ -29,11 +30,7 @@ from core.vlm_preannotation import (  # noqa: E402
 
 
 def _write_json(path: str, payload: dict[str, Any]) -> None:
-    parent = os.path.dirname(os.path.abspath(path))
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2)
+    atomic_write_json(path, payload, indent=2, ensure_ascii=False)
 
 
 def _load_json(path: str) -> Any:
@@ -198,7 +195,6 @@ def main() -> int:
 
     manager = ProjectManager()
     manager.load_project(project_path)
-    manager.current_project_path = out_project
     target_parts = _target_parts(manager, args.parts)
     if not target_parts:
         print("error=no_vlm_target_parts_configured", file=sys.stderr)
@@ -281,12 +277,12 @@ def main() -> int:
                 continue
             image_path = str(record.get("image_path", "") or "")
             if image_path and image_path not in project_images and os.path.exists(image_path):
-                manager.add_images([image_path])
+                manager.add_images([image_path], save=False)
                 project_images.add(image_path)
             saved = _apply_candidates(manager, image_path, list(record.get("candidates", []) or []), bool(args.only_new))
             record["saved_box_count"] = saved
             total_saved += saved
-        manager.save_project()
+        _write_json(out_project, manager.legacy_json_payload(out_project))
 
     report = {
         "schema_version": "taxamask-vlm-preannotation-project-report-v1",
@@ -303,8 +299,7 @@ def main() -> int:
     }
     _write_json(report_path, report)
     if args.dry_run:
-        manager.current_project_path = out_project
-        manager.save_project()
+        _write_json(out_project, manager.legacy_json_payload(out_project))
 
     print(f"image_count={report['image_count']}")
     print(f"candidate_count={report['candidate_count']}")

@@ -44,6 +44,7 @@ else:
     from AntSleap.core.project_templates import PROJECT_TEMPLATE_GENERIC
     from AntSleap.core.stl_project import StlRenderedProjectManager
     from AntSleap.ui.pdf_processing_widget import PdfProcessingWidget, LLMConnectionTestWorker
+    from tests.test_2d_json_to_sqlite_migration import _legacy_project_payload, _write_json
 
     has_pyside6 = True
 
@@ -1313,6 +1314,52 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(preload_events, ["preload"])
             self.assertIsNone(window.sam_worker)
             self.assertIsNone(window.sam_thread)
+        finally:
+            window.deleteLater()
+
+    def test_open_legacy_2d_json_migrates_to_sqlite_manifest(self):
+        window = self._make_window()
+        try:
+            preload_events = []
+            window.ensure_sam_preloaded = lambda: preload_events.append("preload")
+            legacy_path = self.project_dir / "legacy_project.json"
+            _write_json(legacy_path, _legacy_project_payload())
+
+            with patch.object(main_module, "themed_yes_no_question", return_value=main_module.QMessageBox.Yes):
+                window.open_project_path(str(legacy_path))
+
+            manifest_path = self.project_dir / "legacy_project.sqlite_manifest.json"
+            db_path = self.project_dir / "legacy_project.taxamask.sqlite"
+            report_dir = self.project_dir / "legacy_project.migration_reports"
+            self.assertTrue(manifest_path.exists())
+            self.assertTrue(db_path.exists())
+            self.assertTrue(any(report_dir.glob("*.json")))
+            self.assertEqual(window.project.current_storage_backend, "sqlite")
+            self.assertEqual(Path(window.project.current_project_path), manifest_path.resolve())
+            self.assertEqual(Path(window.project.current_database_path), db_path.resolve())
+            self.assertEqual(window.project.project_data["name"], "Legacy ants")
+            self.assertEqual(window.config.get("last_project_path"), str(manifest_path.resolve()))
+            self.assertTrue(self._wait_until(lambda: preload_events == ["preload"]))
+        finally:
+            window.deleteLater()
+
+    def test_open_already_migrated_legacy_json_uses_existing_manifest(self):
+        window = self._make_window()
+        try:
+            legacy_path = self.project_dir / "legacy_project.json"
+            _write_json(legacy_path, _legacy_project_payload())
+
+            with patch.object(main_module, "themed_yes_no_question", return_value=main_module.QMessageBox.Yes):
+                window.open_project_path(str(legacy_path))
+                manifest_path = Path(window.project.current_project_path)
+                first_db_path = Path(window.project.current_database_path)
+                window.open_project_path(str(legacy_path))
+
+            self.assertEqual(Path(window.project.current_project_path), manifest_path)
+            self.assertEqual(Path(window.project.current_database_path), first_db_path)
+            self.assertEqual(window.project.current_storage_backend, "sqlite")
+            self.assertTrue(manifest_path.exists())
+            self.assertTrue(first_db_path.exists())
         finally:
             window.deleteLater()
 

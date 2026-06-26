@@ -4,6 +4,7 @@ import shutil
 from datetime import datetime
 
 from .safe_io import atomic_write_json, backup_file
+from .sqlite_storage import PROJECT_MANIFEST_SCHEMA_VERSION, SQLITE_BACKEND
 from .tif_materials import has_trainable_material, read_material_map, write_material_map
 from .tif_volume_io import VOLUME_SIDECAR_FORMAT, copy_volume_sidecar, read_volume_metadata, volume_sidecar_exists
 
@@ -79,9 +80,14 @@ class TifProjectManager:
     def __init__(self):
         self.project_data = _default_project_data()
         self.current_project_path = None
+        self.current_storage_backend = "json"
+        self.current_database_path = ""
+        self.current_asset_root = ""
 
     @property
     def project_dir(self):
+        if self.current_asset_root:
+            return os.path.abspath(self.current_asset_root)
         if not self.current_project_path:
             return os.getcwd()
         return os.path.dirname(os.path.abspath(self.current_project_path))
@@ -90,6 +96,9 @@ class TifProjectManager:
         os.makedirs(project_dir, exist_ok=True)
         self.project_data = _default_project_data(name=name, project_id=project_id)
         self.current_project_path = os.path.join(os.path.abspath(project_dir), DEFAULT_TIF_PROJECT_FILENAME)
+        self.current_storage_backend = "json"
+        self.current_database_path = ""
+        self.current_asset_root = ""
         self.save_project()
         return self.current_project_path
 
@@ -98,14 +107,49 @@ class TifProjectManager:
             payload = json.load(handle)
         if not isinstance(payload, dict):
             raise ValueError("tif_project_json_not_object")
+        if self._is_sqlite_manifest_payload(payload):
+            from .tif_sqlite_loader import load_tif_sqlite_project_manifest
+
+            loaded_sqlite = load_tif_sqlite_project_manifest(path)
+            self.current_project_path = os.path.abspath(path)
+            self.project_data = self._normalize_loaded_project_data(loaded_sqlite["project_data"])
+            self.current_storage_backend = SQLITE_BACKEND
+            self.current_database_path = loaded_sqlite.get("database_path", "")
+            manifest = loaded_sqlite.get("manifest", {}) if isinstance(loaded_sqlite.get("manifest"), dict) else {}
+            asset_root = str(manifest.get("tif_asset_root") or "").strip()
+            if asset_root:
+                if os.path.isabs(asset_root):
+                    self.current_asset_root = os.path.normpath(asset_root)
+                else:
+                    self.current_asset_root = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(path)), asset_root))
+            else:
+                self.current_asset_root = os.path.dirname(os.path.abspath(path))
+            return self.project_data
+        self.current_storage_backend = "json"
+        self.current_database_path = ""
+        self.current_asset_root = ""
         if payload.get("schema_version") != TIF_PROJECT_SCHEMA_VERSION:
             raise ValueError(f"unsupported_tif_project_schema:{payload.get('schema_version')}")
         if payload.get("project_type") != TIF_PROJECT_TYPE:
             raise ValueError(f"not_tif_volume_project:{payload.get('project_type')}")
+        self.current_project_path = os.path.abspath(path)
+        self.project_data = self._normalize_loaded_project_data(payload)
+        return self.project_data
+
+    def _is_sqlite_manifest_payload(self, payload):
+        return (
+            isinstance(payload, dict)
+            and payload.get("schema_version") == PROJECT_MANIFEST_SCHEMA_VERSION
+            and payload.get("storage_backend") == SQLITE_BACKEND
+        )
+
+    def is_sqlite_project(self):
+        return getattr(self, "current_storage_backend", "json") == SQLITE_BACKEND
+
+    def _normalize_loaded_project_data(self, payload):
         specimens = payload.get("specimens", [])
         if not isinstance(specimens, list):
             raise ValueError("tif_project_specimens_not_list")
-        self.current_project_path = os.path.abspath(path)
         payload["models"] = [
             self._normalize_model_record(item)
             for item in (payload.get("models", []) if isinstance(payload.get("models", []), list) else [])
@@ -123,13 +167,16 @@ class TifProjectManager:
                 specimen["metadata"] = self._normalize_specimen_metadata(specimen)
                 specimen["parts"] = self._normalize_parts(specimen)
                 specimen["part_rois"] = self._normalize_part_rois(specimen)
-        self.project_data = payload
-        return self.project_data
+        return payload
 
     def save_project(self):
         if not self.current_project_path:
             raise ValueError("tif_project_path_not_set")
         self.project_data["updated_at"] = _now_iso()
+        if self.is_sqlite_project():
+            from .tif_sqlite_writer import flush_tif_project_changes
+
+            return flush_tif_project_changes(self)
         project_path = os.path.abspath(self.current_project_path)
         os.makedirs(os.path.dirname(project_path), exist_ok=True)
         self._backup_current_project_file(project_path)

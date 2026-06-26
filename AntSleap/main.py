@@ -300,6 +300,10 @@ try:
     from AntSleap.core.project_sqlite_migration import default_sqlite_manifest_path, migrate_legacy_2d_json_to_sqlite
     from AntSleap.core.project_sqlite_writer import finish_vlm_run, record_vlm_image_result
     from AntSleap.core.sqlite_storage import PROJECT_MANIFEST_SCHEMA_VERSION, SQLITE_BACKEND, read_project_manifest
+    from AntSleap.core.tif_sqlite_migration import (
+        default_tif_sqlite_manifest_path,
+        migrate_legacy_tif_json_to_sqlite,
+    )
     from AntSleap.core.literature_descriptions import (
         build_text_block_source,
         build_description_source,
@@ -417,6 +421,10 @@ except ImportError:
     from core.project_sqlite_migration import default_sqlite_manifest_path, migrate_legacy_2d_json_to_sqlite
     from core.project_sqlite_writer import finish_vlm_run, record_vlm_image_result
     from core.sqlite_storage import PROJECT_MANIFEST_SCHEMA_VERSION, SQLITE_BACKEND, read_project_manifest
+    from core.tif_sqlite_migration import (
+        default_tif_sqlite_manifest_path,
+        migrate_legacy_tif_json_to_sqlite,
+    )
     from core.literature_descriptions import (
         build_text_block_source,
         build_description_source,
@@ -1165,6 +1173,12 @@ TRANSLATIONS = {
         "A migrated SQLite version already exists for this old JSON project.\n\nOpen the existing SQLite manifest instead?\n\n{0}": "这个旧 JSON 项目旁边已经有迁移后的 SQLite 版本。\n\n改为打开现有 SQLite manifest 吗？\n\n{0}",
         "2D project migration failed. The old JSON was not modified.\n\n{0}": "2D 项目迁移失败。旧 JSON 未被修改。\n\n{0}",
         "Migrated legacy 2D JSON project to SQLite. Manifest: {0}; database: {1}; report: {2}": "已将旧版 2D JSON 项目迁移到 SQLite。Manifest：{0}；数据库：{1}；报告：{2}",
+        "Migrate TIF Project to SQLite": "迁移 TIF 项目到 SQLite",
+        "Migrating TIF project to SQLite...": "正在迁移 TIF 项目到 SQLite...",
+        "This is an older TIF JSON project. TaxaMask can now store the TIF project index in SQLite while keeping the large volume and label sidecar files on disk.\n\nThe old JSON will not be overwritten. The TIF volume sidecar files will not be moved. A SQLite database, a manifest file, a migration report, and a legacy JSON backup will be created next to the project.\n\nMigrate and open the SQLite project now?": "这是旧版 TIF JSON 项目。TaxaMask 现在可以把 TIF 项目索引保存到 SQLite，同时继续把大体数据和标签 sidecar 文件保留在磁盘上。\n\n旧 JSON 不会被覆盖，TIF 体数据 sidecar 文件也不会被移动。程序会在项目旁边生成 SQLite 数据库、manifest 入口文件、迁移报告和旧 JSON 备份。\n\n现在迁移并打开 SQLite 项目吗？",
+        "A migrated SQLite version already exists for this old TIF JSON project.\n\nOpen the existing SQLite manifest instead?\n\n{0}": "这个旧 TIF JSON 项目旁边已经有迁移后的 SQLite 版本。\n\n改为打开现有 SQLite manifest 吗？\n\n{0}",
+        "TIF project migration failed. The old JSON was not modified.\n\n{0}": "TIF 项目迁移失败。旧 JSON 未被修改。\n\n{0}",
+        "Migrated legacy TIF JSON project to SQLite. Manifest: {0}; database: {1}; report: {2}": "已将旧版 TIF JSON 项目索引迁移到 SQLite。Manifest：{0}；数据库：{1}；报告：{2}",
         "New Project": "新建项目",
         "New TIF Volume Project": "新建 TIF 体数据项目",
         "New TIF Project Directory": "新建 TIF 项目目录",
@@ -8492,6 +8506,8 @@ class MainWindow(QMainWindow):
                 payload = json.load(handle)
         except Exception:
             return False
+        if self._is_tif_sqlite_project_manifest_payload(payload):
+            return True
         return (
             isinstance(payload, dict)
             and payload.get("schema_version") == TIF_PROJECT_SCHEMA_VERSION
@@ -8524,6 +8540,12 @@ class MainWindow(QMainWindow):
             and payload.get("schema_version") == PROJECT_MANIFEST_SCHEMA_VERSION
             and payload.get("storage_backend") == SQLITE_BACKEND
         )
+
+    def _is_tif_sqlite_project_manifest_payload(self, payload):
+        return self._is_sqlite_project_manifest_payload(payload) and payload.get("project_type") == TIF_PROJECT_TYPE
+
+    def _is_2d_sqlite_project_manifest_payload(self, payload):
+        return self._is_sqlite_project_manifest_payload(payload) and payload.get("project_type") != TIF_PROJECT_TYPE
 
     def _is_legacy_2d_json_project_payload(self, payload):
         if not isinstance(payload, dict):
@@ -9374,6 +9396,43 @@ class MainWindow(QMainWindow):
         )
         return reply == QMessageBox.Yes
 
+    def _confirm_legacy_tif_json_migration(self, path):
+        message = tr(
+            "This is an older TIF JSON project. TaxaMask can now store the TIF project index in SQLite while keeping the large volume and label sidecar files on disk.\n\nThe old JSON will not be overwritten. The TIF volume sidecar files will not be moved. A SQLite database, a manifest file, a migration report, and a legacy JSON backup will be created next to the project.\n\nMigrate and open the SQLite project now?",
+            self.current_lang,
+        )
+        reply = themed_yes_no_question(
+            self,
+            tr("Migrate TIF Project to SQLite", self.current_lang),
+            f"{message}\n\n{path}",
+            confirm_role=BUTTON_ROLE_COMMIT,
+        )
+        return reply == QMessageBox.Yes
+
+    def _existing_tif_sqlite_manifest_for_legacy_json(self, path):
+        manifest_path = default_tif_sqlite_manifest_path(path)
+        if not os.path.exists(manifest_path):
+            return ""
+        try:
+            payload = read_project_manifest(manifest_path)
+        except Exception:
+            return ""
+        if payload.get("project_type") != TIF_PROJECT_TYPE:
+            return ""
+        return os.path.abspath(manifest_path)
+
+    def _confirm_open_existing_tif_sqlite_migration(self, manifest_path):
+        reply = themed_yes_no_question(
+            self,
+            tr("Migrate TIF Project to SQLite", self.current_lang),
+            tr(
+                "A migrated SQLite version already exists for this old TIF JSON project.\n\nOpen the existing SQLite manifest instead?\n\n{0}",
+                self.current_lang,
+            ).format(manifest_path),
+            confirm_role=BUTTON_ROLE_COMMIT,
+        )
+        return reply == QMessageBox.Yes
+
     def _migrate_legacy_2d_project_with_progress(self, path):
         progress = QProgressDialog(
             tr("Migrating 2D project to SQLite...", self.current_lang),
@@ -9409,6 +9468,48 @@ class MainWindow(QMainWindow):
 
         try:
             result = migrate_legacy_2d_json_to_sqlite(path, progress_callback=on_progress)
+        finally:
+            progress.close()
+            progress.deleteLater()
+            if app is not None:
+                app.processEvents()
+        return result
+
+    def _migrate_legacy_tif_project_with_progress(self, path):
+        progress = QProgressDialog(
+            tr("Migrating TIF project to SQLite...", self.current_lang),
+            "",
+            0,
+            100,
+            self,
+        )
+        progress.setWindowTitle(tr("Migrate TIF Project to SQLite", self.current_lang))
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setCancelButton(None)
+        self._prepare_progress_dialog(progress, width=560)
+        progress.show()
+        app = QApplication.instance()
+        if app is not None:
+            app.processEvents()
+
+        def on_progress(done, total, message):
+            total = max(0, int(total or 0))
+            done = max(0, int(done or 0))
+            if total > 0:
+                if progress.maximum() != total:
+                    progress.setRange(0, total)
+                progress.setValue(min(done, total))
+            else:
+                progress.setRange(0, 0)
+            progress.setLabelText(str(message or ""))
+            if app is not None:
+                app.processEvents()
+
+        try:
+            result = migrate_legacy_tif_json_to_sqlite(path, progress_callback=on_progress)
         finally:
             progress.close()
             progress.deleteLater()
@@ -9462,6 +9563,46 @@ class MainWindow(QMainWindow):
             if not self._is_tif_workflow_enabled():
                 self._show_tif_workflow_unavailable()
                 return
+            if (
+                isinstance(payload, dict)
+                and payload.get("schema_version") == TIF_PROJECT_SCHEMA_VERSION
+                and payload.get("project_type") == TIF_PROJECT_TYPE
+            ):
+                existing_manifest = self._existing_tif_sqlite_manifest_for_legacy_json(f)
+                if existing_manifest:
+                    if not self._confirm_open_existing_tif_sqlite_migration(existing_manifest):
+                        runtime_log_event("open_tif_existing_sqlite_manifest_cancelled", path=f, manifest=existing_manifest)
+                        return
+                    f = existing_manifest
+                else:
+                    if not self._confirm_legacy_tif_json_migration(f):
+                        runtime_log_event("open_tif_legacy_json_migration_cancelled", path=f)
+                        return
+                    try:
+                        migration_result = self._migrate_legacy_tif_project_with_progress(f)
+                    except Exception as exc:
+                        runtime_log_exception("open_tif_legacy_json_migration_failed", *sys.exc_info())
+                        QMessageBox.critical(
+                            self,
+                            tr("Migrate TIF Project to SQLite", self.current_lang),
+                            tr("TIF project migration failed. The old JSON was not modified.\n\n{0}", self.current_lang).format(str(exc)),
+                        )
+                        return
+                    f = os.path.abspath(str(migration_result.manifest_path))
+                    runtime_log_event(
+                        "open_tif_legacy_json_migrated",
+                        source=migration_result.source_json_path,
+                        manifest=f,
+                        database=migration_result.database_path,
+                        specimen_count=migration_result.stats.get("specimen_count", 0),
+                        part_count=migration_result.stats.get("part_count", 0),
+                    )
+                    self.log(
+                        tr(
+                            "Migrated legacy TIF JSON project to SQLite. Manifest: {0}; database: {1}; report: {2}",
+                            self.current_lang,
+                        ).format(f, migration_result.database_path, migration_result.report_path)
+                    )
             self.tif_project.load_project(f)
             self.active_project_kind = "tif"
             self.active_project_source_kind = "tif"

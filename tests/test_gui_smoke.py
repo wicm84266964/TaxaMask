@@ -10,6 +10,7 @@ import sqlite3
 import csv
 import time
 import unittest
+import gc
 from pathlib import Path
 from unittest.mock import patch
 
@@ -45,6 +46,7 @@ else:
     from AntSleap.core.stl_project import StlRenderedProjectManager
     from AntSleap.ui.pdf_processing_widget import PdfProcessingWidget, LLMConnectionTestWorker
     from tests.test_2d_json_to_sqlite_migration import _legacy_project_payload, _write_json
+    from tests.test_tif_json_to_sqlite_migration import _build_legacy_tif_project
 
     has_pyside6 = True
 
@@ -1362,6 +1364,56 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertTrue(first_db_path.exists())
         finally:
             window.deleteLater()
+
+    def test_open_legacy_tif_json_migrates_to_sqlite_manifest(self):
+        window = self._make_window()
+        try:
+            window.tif_workflow_enabled = True
+            legacy_root = self.project_dir / "legacy_tif"
+            legacy_path = _build_legacy_tif_project(legacy_root)
+
+            with patch.object(main_module, "themed_yes_no_question", return_value=main_module.QMessageBox.Yes):
+                window.open_project_path(str(legacy_path))
+
+            manifest_path = legacy_root / "project.tif_sqlite_manifest.json"
+            db_path = legacy_root / "project.taxamask_tif.sqlite"
+            report_dir = legacy_root / "project.tif_migration_reports"
+            self.assertTrue(manifest_path.exists())
+            self.assertTrue(db_path.exists())
+            self.assertTrue(any(report_dir.glob("*.json")))
+            self.assertEqual(window.tif_project.current_storage_backend, "sqlite")
+            self.assertEqual(Path(window.tif_project.current_project_path), manifest_path.resolve())
+            self.assertEqual(Path(window.tif_project.current_database_path), db_path.resolve())
+            self.assertEqual(window.tif_project.project_data["name"], "Legacy TIF ants")
+            self.assertEqual(window.active_project_kind, "tif")
+            self.assertEqual(window.config.get("last_project_path"), str(manifest_path.resolve()))
+        finally:
+            window.tif_workbench.close_project(prompt_unsaved=False)
+            window.deleteLater()
+            gc.collect()
+
+    def test_open_already_migrated_legacy_tif_json_uses_existing_manifest(self):
+        window = self._make_window()
+        try:
+            window.tif_workflow_enabled = True
+            legacy_root = self.project_dir / "legacy_tif"
+            legacy_path = _build_legacy_tif_project(legacy_root)
+
+            with patch.object(main_module, "themed_yes_no_question", return_value=main_module.QMessageBox.Yes):
+                window.open_project_path(str(legacy_path))
+                manifest_path = Path(window.tif_project.current_project_path)
+                first_db_path = Path(window.tif_project.current_database_path)
+                window.open_project_path(str(legacy_path))
+
+            self.assertEqual(Path(window.tif_project.current_project_path), manifest_path)
+            self.assertEqual(Path(window.tif_project.current_database_path), first_db_path)
+            self.assertEqual(window.tif_project.current_storage_backend, "sqlite")
+            self.assertTrue(manifest_path.exists())
+            self.assertTrue(first_db_path.exists())
+        finally:
+            window.tif_workbench.close_project(prompt_unsaved=False)
+            window.deleteLater()
+            gc.collect()
 
     def test_continue_last_large_project_opens_with_collapsed_image_groups(self):
         window = self._make_window()

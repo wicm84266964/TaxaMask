@@ -325,9 +325,10 @@ class GuiSmokeTests(unittest.TestCase):
             startup_path = Path(window.project.current_project_path)
             self.assertEqual(
                 startup_path,
-                self.project_dir / "TaxaMask_outputs" / "2d_stl_projects" / "_startup" / "TaxaMask_Project.json",
+                self.project_dir / "TaxaMask_outputs" / "2d_stl_projects" / "_startup" / "TaxaMask_Project.sqlite_manifest.json",
             )
             self.assertTrue(startup_path.exists())
+            self.assertTrue((startup_path.parent / "TaxaMask_Project.taxamask.sqlite").exists())
             self.assertNotIn("AntSleap", startup_path.parts)
             self.assertEqual(window.start_title.text(), "TaxaMask Agent Center")
             self.assertIsNotNone(window.findChild(main_module.QWidget, "start2DWorkflowCard"))
@@ -345,7 +346,7 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(rail_scroll.horizontalScrollBarPolicy(), main_module.Qt.ScrollBarAlwaysOff)
             self.assertEqual(rail_scroll.verticalScrollBarPolicy(), main_module.Qt.ScrollBarAsNeeded)
             self.assertIsNotNone(window.findChild(main_module.QWidget, "taxamaskAgentPanel"))
-            self.assertIn("PDF literature workflow ready", window.start_console_pdf_value.text())
+            self.assertIn("PDF evidence skill ready", window.start_console_pdf_value.text())
             self.assertIn("STL", window.start_console_stl_note.text())
             self.assertIn("2D views", window.start_console_stl_note.text())
             self.assertNotIn("3D mesh annotation", window.start_console_stl_note.text())
@@ -382,6 +383,22 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertNotIn("AM" + "IRA", joined_menu_text)
         finally:
             window.deleteLater()
+
+    def test_main_window_reuses_existing_startup_sqlite_project(self):
+        first = self._make_window()
+        startup_path = Path(first.project.current_project_path)
+        try:
+            self.assertTrue(startup_path.exists())
+            self.assertEqual(startup_path.name, "TaxaMask_Project.sqlite_manifest.json")
+        finally:
+            first.deleteLater()
+
+        second = self._make_window()
+        try:
+            self.assertEqual(Path(second.project.current_project_path), startup_path)
+            self.assertEqual(second.project.current_storage_backend, "sqlite")
+        finally:
+            second.deleteLater()
 
     def test_start_center_workflow_buttons_switch_visible_tabs(self):
         window = self._make_window()

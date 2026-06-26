@@ -7122,7 +7122,7 @@ class MainWindow(QMainWindow):
         if app is not None:
             app.installEventFilter(self)
 
-        self.project.create_project(DEFAULT_PROJECT_NAME, self._default_startup_project_dir(), template_id=DEFAULT_PROJECT_TEMPLATE_ID)
+        self._open_or_create_startup_project()
         self.active_project_entry_path = self.project.current_project_path or ""
         self.active_project_kind = "start"
         if self.config.get("startup_behavior", "start_center") == "continue_last" and self.config.get("last_project_path", ""):
@@ -8047,6 +8047,27 @@ class MainWindow(QMainWindow):
 
     def _default_startup_project_dir(self):
         return self._ensure_default_output_subdir(DEFAULT_2D_STL_PROJECTS_DIR_NAME, DEFAULT_STARTUP_PROJECT_DIR_NAME)
+
+    def _startup_project_manifest_path(self):
+        return os.path.join(self._default_startup_project_dir(), f"{DEFAULT_PROJECT_NAME}.sqlite_manifest.json")
+
+    def _startup_legacy_json_project_path(self):
+        return os.path.join(self._default_startup_project_dir(), f"{DEFAULT_PROJECT_NAME}.json")
+
+    def _open_or_create_startup_project(self):
+        manifest_path = self._startup_project_manifest_path()
+        legacy_json_path = self._startup_legacy_json_project_path()
+        if os.path.exists(manifest_path):
+            self.project.load_project(manifest_path)
+            return
+        if os.path.exists(legacy_json_path):
+            self.open_project_path(legacy_json_path)
+            return
+        self.project.create_project(
+            DEFAULT_PROJECT_NAME,
+            self._default_startup_project_dir(),
+            template_id=DEFAULT_PROJECT_TEMPLATE_ID,
+        )
 
     def _default_project_dialog_dir(self, project_kind):
         if str(project_kind or "").lower() == "tif":

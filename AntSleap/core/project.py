@@ -3,6 +3,7 @@
 import json
 import os
 import shutil
+import time
 from PIL import Image, ImageDraw
 
 from .taxonomy_defaults import (
@@ -33,6 +34,7 @@ from .model_profiles import (
     set_active_model_profile as set_active_model_profile_id,
 )
 from .vlm_preannotation import DEFAULT_VLM_PROMPT_PROFILE_ID, sanitize_vlm_prompt_profile
+from .sqlite_storage import LEGACY_JSON_BACKEND, PROJECT_MANIFEST_SCHEMA_VERSION, SQLITE_BACKEND, write_project_manifest
 
 DEFAULT_CATEGORY_SUPERCATEGORY = "biological_structure"
 MULTIMODAL_SAMPLE_SCHEMA_VERSION = "taxamask-multimodal-sample-v1"
@@ -49,6 +51,9 @@ AUTO_BOX_SOURCE_MODEL = "model_prediction"
 AUTO_BOX_SOURCE_EXTERNAL_MODEL = "external_model_prediction"
 AUTO_BOX_REVIEW_DRAFT = "draft"
 AUTO_BOX_REVIEW_CONFIRMED = "confirmed"
+PROJECT_BACKUP_LIMIT = 30
+PROJECT_BACKUP_MIN_INTERVAL_SECONDS = 300
+LABEL_JOURNAL_SCHEMA_VERSION = "taxamask-label-journal-v1"
 
 
 class ProjectManager:
@@ -84,7 +89,14 @@ class ProjectManager:
             },
         }
         self.current_project_path = None
+        self.current_storage_backend = LEGACY_JSON_BACKEND
+        self.current_database_path = ""
+        self._sqlite_dirty_images = set()
+        self._sqlite_deleted_images = set()
+        self._sqlite_project_dirty = False
+        self._legacy_json_write_enabled = False
         self.known_relocated_roots = []
+        self._last_label_journal_fsync = 0.0
 
     def set_known_relocated_roots(self, root_mappings):
         clean_mappings = []
@@ -267,6 +279,7 @@ class ProjectManager:
         clean_settings = self._sanitize_vlm_preannotation_settings(settings)
         self.project_data["vlm_preannotation"] = clean_settings
         self._sync_active_model_profile_from_project_fields()
+        self._mark_sqlite_project_dirty()
         if save:
             self.save_project()
         return clean_settings
@@ -312,6 +325,212 @@ class ProjectManager:
             "taxon_metadata": {},
             "descriptions": {},
             "description_sources": {},
+        }
+
+    def _label_entry_has_saved_content(self, label_data):
+        if not isinstance(label_data, dict):
+            return False
+
+        for key in (
+            "parts",
+            "boxes",
+            "auto_boxes",
+            "auto_box_meta",
+            "descriptions",
+            "description_sources",
+            "shrink_loose_boxes",
+            "trajectories",
+        ):
+            value = label_data.get(key)
+            if value:
+                return True
+
+        if str(label_data.get("status", "unlabeled") or "unlabeled") != "unlabeled":
+            return True
+        if str(label_data.get("genus", "Unknown") or "Unknown") not in ("", "Unknown"):
+            return True
+        if str(label_data.get("taxon", "Unknown") or "Unknown") not in ("", "Unknown"):
+            return True
+        if str(label_data.get("taxon_rank", "") or ""):
+            return True
+        taxon_metadata = label_data.get("taxon_metadata", {})
+        if isinstance(taxon_metadata, dict) and taxon_metadata:
+            return True
+
+        known_default_keys = {
+            "parts",
+            "status",
+            "genus",
+            "taxon",
+            "taxon_rank",
+            "taxon_metadata",
+            "descriptions",
+            "description_sources",
+            "boxes",
+            "auto_boxes",
+            "auto_box_meta",
+            "shrink_loose_boxes",
+            "trajectories",
+        }
+        for key, value in label_data.items():
+            if key not in known_default_keys and value not in ({}, [], "", None):
+                return True
+        return False
+
+    def _project_sidecar_stem(self, project_path=None):
+        path = os.path.abspath(project_path or self.current_project_path or "")
+        name = os.path.basename(path)
+        stem, _ext = os.path.splitext(name)
+        return stem or "project"
+
+    def _project_backup_dir(self, project_path=None):
+        path = os.path.abspath(project_path or self.current_project_path or "")
+        if not path:
+            return ""
+        return os.path.join(os.path.dirname(path), f"{self._project_sidecar_stem(path)}.project_backups")
+
+    def _label_journal_path(self, project_path=None):
+        path = os.path.abspath(project_path or self.current_project_path or "")
+        if not path:
+            return ""
+        return os.path.join(os.path.dirname(path), f"{self._project_sidecar_stem(path)}.label_journal.jsonl")
+
+    def _json_timestamp(self):
+        return time.strftime("%Y-%m-%dT%H:%M:%S%z")
+
+    def _backup_current_project_file(self, project_path):
+        if not project_path or not os.path.exists(project_path):
+            return ""
+        try:
+            if os.path.getsize(project_path) <= 0:
+                return ""
+        except OSError:
+            return ""
+
+        backup_dir = self._project_backup_dir(project_path)
+        stem = self._project_sidecar_stem(project_path)
+        try:
+            os.makedirs(backup_dir, exist_ok=True)
+            existing = [
+                os.path.join(backup_dir, name)
+                for name in os.listdir(backup_dir)
+                if name.startswith(f"{stem}.") and name.endswith(".json.bak")
+            ]
+            if existing:
+                latest_mtime = max(os.path.getmtime(path) for path in existing if os.path.exists(path))
+                if time.time() - latest_mtime < PROJECT_BACKUP_MIN_INTERVAL_SECONDS:
+                    return ""
+
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            backup_path = os.path.join(backup_dir, f"{stem}.{timestamp}.json.bak")
+            tmp_backup_path = f"{backup_path}.tmp"
+            shutil.copy2(project_path, tmp_backup_path)
+            os.replace(tmp_backup_path, backup_path)
+
+            backups = sorted(
+                [
+                    os.path.join(backup_dir, name)
+                    for name in os.listdir(backup_dir)
+                    if name.startswith(f"{stem}.") and name.endswith(".json.bak")
+                ],
+                key=lambda item: os.path.getmtime(item),
+                reverse=True,
+            )
+            for old_backup in backups[PROJECT_BACKUP_LIMIT:]:
+                try:
+                    os.remove(old_backup)
+                except OSError:
+                    pass
+            return backup_path
+        except Exception as exc:
+            print(f"Project backup skipped: {exc}")
+            return ""
+
+    def _append_label_journal_entry(self, image_path, action):
+        if self.is_sqlite_project() or not getattr(self, "_legacy_json_write_enabled", False):
+            return False
+        journal_path = self._label_journal_path()
+        if not journal_path or not image_path:
+            return False
+        labels = self.project_data.get("labels", {})
+        label_entry = labels.get(image_path, self._default_label_entry())
+        try:
+            os.makedirs(os.path.dirname(journal_path), exist_ok=True)
+            record = {
+                "schema_version": LABEL_JOURNAL_SCHEMA_VERSION,
+                "timestamp": self._json_timestamp(),
+                "action": str(action or "label_update"),
+                "project": os.path.abspath(self.current_project_path) if self.current_project_path else "",
+                "image_path": self._to_relative(image_path),
+                "label": label_entry if isinstance(label_entry, dict) else self._default_label_entry(),
+            }
+            with open(journal_path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True))
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            self._last_label_journal_fsync = time.time()
+            return True
+        except Exception as exc:
+            print(f"Label journal write skipped: {exc}")
+            return False
+
+    def recover_labels_from_journal(self, journal_path=None, save=True):
+        path = journal_path or self._label_journal_path()
+        if not path or not os.path.exists(path):
+            return {
+                "recovered_images": 0,
+                "records_read": 0,
+                "records_skipped": 0,
+            }
+
+        latest_by_image = {}
+        records_read = 0
+        records_skipped = 0
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        records_skipped += 1
+                        continue
+                    if record.get("schema_version") != LABEL_JOURNAL_SCHEMA_VERSION:
+                        records_skipped += 1
+                        continue
+                    image_path = str(record.get("image_path") or "")
+                    label_entry = record.get("label")
+                    if not image_path or not isinstance(label_entry, dict):
+                        records_skipped += 1
+                        continue
+                    abs_path = self._to_absolute(image_path)
+                    latest_by_image[abs_path] = label_entry
+                    records_read += 1
+        except OSError:
+            return {
+                "recovered_images": 0,
+                "records_read": records_read,
+                "records_skipped": records_skipped,
+            }
+
+        labels = self.project_data.setdefault("labels", {})
+        for image_path, label_entry in latest_by_image.items():
+            labels[image_path] = self._normalize_label_taxon_fields(label_entry)
+            if image_path not in self.project_data.get("images", []):
+                self.project_data.setdefault("images", []).append(image_path)
+
+        if latest_by_image and save:
+            self._mark_sqlite_images_dirty(latest_by_image.keys())
+            self._mark_sqlite_project_dirty()
+            self.save_project()
+
+        return {
+            "recovered_images": len(latest_by_image),
+            "records_read": records_read,
+            "records_skipped": records_skipped,
         }
 
     def _normalize_label_taxon_fields(self, label_data):
@@ -450,11 +669,83 @@ class ProjectManager:
                 remapped[path_map.get(normalized, image_path)] = value
             self.project_data[key] = remapped
 
-        if changed and save:
-            self.save_project()
+        if changed:
+            if self.is_sqlite_project():
+                for old_path in path_map.keys():
+                    self._mark_sqlite_image_deleted(old_path)
+                self._mark_sqlite_images_dirty(path_map.values())
+                self._mark_sqlite_project_dirty()
+            if save:
+                self.save_project()
         return changed
 
-    def create_project(self, name, save_dir, template_id=None):
+    def _remove_sqlite_artifacts(self, database_path):
+        base = os.path.abspath(str(database_path or ""))
+        for candidate in (base, f"{base}-wal", f"{base}-shm"):
+            try:
+                if os.path.exists(candidate):
+                    os.remove(candidate)
+            except OSError:
+                pass
+
+    def _default_sqlite_paths_for_new_project(self, name, save_dir):
+        stem = str(name or "project").strip() or "project"
+        directory = os.path.abspath(str(save_dir))
+        return (
+            os.path.join(directory, f"{stem}.sqlite_manifest.json"),
+            os.path.join(directory, f"{stem}.taxamask.sqlite"),
+        )
+
+    def _create_sqlite_project_storage(self, name, save_dir):
+        from .project_sqlite_schema import create_2d_project_database
+
+        manifest_path, database_path = self._default_sqlite_paths_for_new_project(name, save_dir)
+        if os.path.exists(manifest_path):
+            raise FileExistsError(manifest_path)
+        if any(os.path.exists(candidate) for candidate in (database_path, f"{database_path}-wal", f"{database_path}-shm")):
+            raise FileExistsError(database_path)
+
+        conn = None
+        manifest_created = False
+        try:
+            conn = create_2d_project_database(database_path)
+            conn.close()
+            conn = None
+            write_project_manifest(
+                manifest_path,
+                "2d_image_annotation",
+                self.project_data.get("name", name or "Untitled"),
+                database_path,
+                extra={
+                    "project_asset_root": ".",
+                    "created_as": "sqlite_default",
+                },
+            )
+            manifest_created = True
+            self.current_project_path = os.path.abspath(manifest_path)
+            self.current_database_path = os.path.abspath(database_path)
+            self.current_storage_backend = SQLITE_BACKEND
+            self._sqlite_project_dirty = True
+            self.flush_sqlite_changes(project_dirty=True, integrity_check=True)
+            return self.current_project_path
+        except Exception:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            if manifest_created:
+                try:
+                    os.remove(manifest_path)
+                except OSError:
+                    pass
+            self._remove_sqlite_artifacts(database_path)
+            self.current_storage_backend = LEGACY_JSON_BACKEND
+            self.current_database_path = ""
+            self._legacy_json_write_enabled = False
+            raise
+
+    def create_project(self, name, save_dir, template_id=None, storage_backend=SQLITE_BACKEND):
         self.clear()
         os.makedirs(save_dir, exist_ok=True)
         template = get_project_template(template_id or PROJECT_TEMPLATE_ANT)
@@ -469,21 +760,34 @@ class ProjectManager:
         self.project_data["category_supercategory"] = template["category_supercategory"]
         self.project_data["taxon_label"] = template["taxon_label"]
         self.ensure_default_model_profile()
+        if storage_backend == SQLITE_BACKEND:
+            return self._create_sqlite_project_storage(name, save_dir)
+        if storage_backend not in (LEGACY_JSON_BACKEND, "json"):
+            raise ValueError(f"unsupported_project_storage_backend:{storage_backend}")
+        self.current_storage_backend = LEGACY_JSON_BACKEND
+        self.current_database_path = ""
+        self._legacy_json_write_enabled = True
         self.current_project_path = os.path.join(save_dir, f"{name}.json")
         self.save_project()
+        return self.current_project_path
+
+    def _to_relative_for_project_path(self, abs_path, project_path):
+        if not abs_path:
+            return abs_path
+        try:
+            project_dir = os.path.dirname(os.path.abspath(project_path or self.current_project_path or ""))
+            normalized_path = str(abs_path)
+            if normalized_path and not os.path.isabs(normalized_path):
+                normalized_path = self._to_absolute(normalized_path)
+            return os.path.relpath(normalized_path, project_dir).replace("\\", "/")
+        except (ValueError, TypeError):
+            return abs_path
 
     def _to_relative(self, abs_path):
         """Convert absolute path to relative path based on project file location."""
         if not self.current_project_path:
             return abs_path
-        try:
-            project_dir = os.path.dirname(os.path.abspath(self.current_project_path))
-            normalized_path = str(abs_path)
-            if normalized_path and not os.path.isabs(normalized_path):
-                normalized_path = self._to_absolute(normalized_path)
-            return os.path.relpath(normalized_path, project_dir)
-        except (ValueError, TypeError):
-            return abs_path
+        return self._to_relative_for_project_path(abs_path, self.current_project_path)
 
     def _to_absolute(self, path):
         """Convert relative path to absolute path."""
@@ -610,16 +914,115 @@ class ProjectManager:
             },
         }
         self.current_project_path = None
+        self.current_storage_backend = LEGACY_JSON_BACKEND
+        self.current_database_path = ""
+        self._sqlite_dirty_images = set()
+        self._sqlite_deleted_images = set()
+        self._sqlite_project_dirty = False
+        self._legacy_json_write_enabled = False
         self.known_relocated_roots = list(getattr(self, "known_relocated_roots", []))
 
-    def load_project(self, path):
+    def _is_sqlite_manifest_payload(self, payload):
+        return (
+            isinstance(payload, dict)
+            and payload.get("schema_version") == PROJECT_MANIFEST_SCHEMA_VERSION
+            and payload.get("storage_backend") == SQLITE_BACKEND
+        )
+
+    def is_sqlite_project(self):
+        return getattr(self, "current_storage_backend", "json") == SQLITE_BACKEND
+
+    def _mark_sqlite_image_dirty(self, image_path):
+        if not self.is_sqlite_project() or not image_path:
+            return
+        self._sqlite_dirty_images.add(self._registered_image_key_for_path(image_path) or image_path)
+
+    def _mark_sqlite_images_dirty(self, image_paths):
+        for image_path in image_paths or []:
+            self._mark_sqlite_image_dirty(image_path)
+
+    def _mark_sqlite_image_deleted(self, image_path):
+        if not self.is_sqlite_project() or not image_path:
+            return
+        self._sqlite_deleted_images.add(image_path)
+
+    def _mark_sqlite_project_dirty(self):
+        if self.is_sqlite_project():
+            self._sqlite_project_dirty = True
+
+    def mark_sqlite_project_dirty(self):
+        self._mark_sqlite_project_dirty()
+
+    def mark_sqlite_images_dirty(self, image_paths):
+        self._mark_sqlite_images_dirty(image_paths)
+
+    def mark_sqlite_image_dirty(self, image_path):
+        self._mark_sqlite_image_dirty(image_path)
+
+    def flush_sqlite_changes(self, *, image_paths=None, deleted_image_paths=None, project_dirty=None, integrity_check=False):
+        if not self.is_sqlite_project():
+            return False
+        from .project_sqlite_writer import flush_project_changes
+
+        if image_paths is None:
+            image_paths = sorted(self._sqlite_dirty_images)
+        else:
+            image_paths = list(image_paths or [])
+        if deleted_image_paths is None:
+            deleted_image_paths = sorted(self._sqlite_deleted_images)
+        else:
+            deleted_image_paths = list(deleted_image_paths or [])
+        if project_dirty is None:
+            project_dirty = self._sqlite_project_dirty
+
+        if not image_paths and not deleted_image_paths and not project_dirty:
+            return False
+
+        flush_project_changes(
+            self,
+            image_paths=image_paths,
+            deleted_image_paths=deleted_image_paths,
+            integrity_check=integrity_check,
+        )
+        flushed_images = set(image_paths)
+        deleted_images = set(deleted_image_paths)
+        self._sqlite_dirty_images.difference_update(flushed_images)
+        self._sqlite_deleted_images.difference_update(deleted_images)
+        if project_dirty:
+            self._sqlite_project_dirty = False
+        return True
+
+    def _sqlite_force_deleted_image_paths(self):
+        if not self.is_sqlite_project() or not self.current_database_path:
+            return []
+        try:
+            import sqlite3
+
+            conn = sqlite3.connect(self.current_database_path)
+            try:
+                rows = conn.execute("SELECT path FROM images WHERE status != 'deleted'").fetchall()
+            finally:
+                conn.close()
+        except Exception:
+            return []
+        current_identities = {
+            self._path_identity(image_path)
+            for image_path in self.project_data.get("images", []) or []
+            if image_path
+        }
+        current_identities.discard("")
+        deleted = []
+        for row in rows:
+            stored_path = str(row[0] or "")
+            if stored_path and self._path_identity(stored_path) not in current_identities:
+                deleted.append(stored_path)
+        return deleted
+
+    def _apply_loaded_project_data(self, loaded_data, project_path):
         self.clear() # Ensure clean state
-        
-        with open(path, 'r', encoding='utf-8') as f:
-            loaded_data = json.load(f)
-        
-        self.current_project_path = os.path.abspath(path)
-        
+
+        self.current_project_path = os.path.abspath(project_path)
+
         # FIX: Strictly use loaded taxonomy if present.
         # This prevents the system from overriding custom empty taxonomies with defaults.
         if "taxonomy" in loaded_data:
@@ -660,7 +1063,7 @@ class ProjectManager:
         self.project_data["model_profiles"] = self._sanitize_model_profiles(
             loaded_data.get("model_profiles", {})
         )
-            
+
         self.project_data["name"] = loaded_data.get("name", "Untitled")
         self.project_data["project_template"] = str(loaded_data.get("project_template", "") or "")
         self.project_data["category_supercategory"] = (
@@ -681,7 +1084,7 @@ class ProjectManager:
             image_keys_seen.add(identity)
             self.project_data["images"].append(img_abs)
             image_key_by_identity[identity] = img_abs
-            
+
         # Handle Labels
         for img_rel, label_data in loaded_data.get("labels", {}).items():
             img_abs = self._to_absolute(img_rel)
@@ -691,7 +1094,10 @@ class ProjectManager:
                 self.project_data["labels"][project_key] = self._merge_loaded_label_entry(existing, label_data)
             else:
                 self.project_data["labels"][project_key] = self._normalize_label_taxon_fields(label_data)
-            
+
+        for img_abs in self.project_data.get("images", []):
+            self.project_data["labels"].setdefault(img_abs, self._default_label_entry())
+
         # Handle Scales
         for img_rel, scale_val in loaded_data.get("scales", {}).items():
             img_abs = self._to_absolute(img_rel)
@@ -712,45 +1118,115 @@ class ProjectManager:
                 else:
                     self.project_data["image_provenance"][project_key] = dict(provenance)
 
-    def save_project(self):
-        if self.current_project_path:
-            self._sync_active_model_profile_from_project_fields()
-            data_to_save = {
-                "name": self.project_data["name"],
-                "taxonomy": self.project_data["taxonomy"],
-                "locator_scope": self.get_locator_scope(),
-                "project_template": self.project_data.get("project_template", ""),
-                "category_supercategory": self._category_supercategory(),
-                "taxon_label": self.project_data.get("taxon_label", "Taxon"),
-                "vlm_preannotation": self.get_vlm_preannotation_settings(),
-                "blink_context_roi_parents": self.get_blink_context_roi_parents(),
-                "parent_box_aspect_ratios": self.get_parent_box_aspect_ratios(),
-                "model_profiles": self.get_model_profiles(),
-                "cascade_routes": self.get_cascade_routes(),
-                "images": [],
-                "labels": {},
-                "scales": {},
-                "image_provenance": {},
-                "image_groups": self._sanitize_image_groups(self.project_data.get("image_groups", {})),
-            }
-            
-            for img_abs in self.project_data["images"]:
-                data_to_save["images"].append(self._to_relative(img_abs))
-                
-            for img_abs, label_data in self.project_data["labels"].items():
-                rel_path = self._to_relative(img_abs)
-                data_to_save["labels"][rel_path] = label_data
-                
-            for img_abs, scale_val in self.project_data.get("scales", {}).items():
-                rel_path = self._to_relative(img_abs)
-                data_to_save["scales"][rel_path] = scale_val
+    def load_project(self, path):
+        with open(path, 'r', encoding='utf-8') as f:
+            loaded_data = json.load(f)
 
-            for img_abs, provenance in self.project_data.get("image_provenance", {}).items():
-                rel_path = self._to_relative(img_abs)
-                data_to_save["image_provenance"][rel_path] = provenance
+        if self._is_sqlite_manifest_payload(loaded_data):
+            from .project_sqlite_loader import load_2d_sqlite_project_manifest
 
-            with open(self.current_project_path, 'w', encoding='utf-8') as f:
+            loaded_sqlite = load_2d_sqlite_project_manifest(path)
+            self._apply_loaded_project_data(loaded_sqlite["project_data"], path)
+            self.current_storage_backend = SQLITE_BACKEND
+            self.current_database_path = loaded_sqlite.get("database_path", "")
+            self._sqlite_dirty_images = set()
+            self._sqlite_deleted_images = set()
+            self._sqlite_project_dirty = False
+            self._legacy_json_write_enabled = False
+            return
+
+        self._apply_loaded_project_data(loaded_data, path)
+        self.current_storage_backend = LEGACY_JSON_BACKEND
+        self.current_database_path = ""
+        self._legacy_json_write_enabled = False
+
+    def enable_legacy_json_writes_for_compatibility(self, enabled=True):
+        self._legacy_json_write_enabled = bool(enabled)
+
+    def _save_legacy_json_project(self):
+        project_path = os.path.abspath(self.current_project_path)
+        project_dir = os.path.dirname(project_path) or "."
+        data_to_save = self.legacy_json_payload(project_path)
+        tmp_path = f"{project_path}.tmp"
+        try:
+            with open(tmp_path, 'w', encoding='utf-8') as f:
                 json.dump(data_to_save, f, indent=4, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            with open(tmp_path, 'r', encoding='utf-8') as f:
+                json.load(f)
+            self._backup_current_project_file(project_path)
+            os.replace(tmp_path, project_path)
+        except Exception:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
+            raise
+        try:
+            dir_fd = os.open(project_dir, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            pass
+
+    def legacy_json_payload(self, project_path=None):
+        target_project_path = os.path.abspath(str(project_path or self.current_project_path or "project.json"))
+        self._sync_active_model_profile_from_project_fields()
+        data_to_save = {
+            "name": self.project_data["name"],
+            "taxonomy": self.project_data["taxonomy"],
+            "locator_scope": self.get_locator_scope(),
+            "project_template": self.project_data.get("project_template", ""),
+            "category_supercategory": self._category_supercategory(),
+            "taxon_label": self.project_data.get("taxon_label", "Taxon"),
+            "vlm_preannotation": self.get_vlm_preannotation_settings(),
+            "blink_context_roi_parents": self.get_blink_context_roi_parents(),
+            "parent_box_aspect_ratios": self.get_parent_box_aspect_ratios(),
+            "model_profiles": self.get_model_profiles(),
+            "cascade_routes": self.get_cascade_routes(),
+            "images": [],
+            "labels": {},
+            "scales": {},
+            "image_provenance": {},
+            "image_groups": self._sanitize_image_groups(self.project_data.get("image_groups", {})),
+        }
+
+        for img_abs in self.project_data["images"]:
+            data_to_save["images"].append(self._to_relative_for_project_path(img_abs, target_project_path))
+
+        for img_abs, label_data in self.project_data["labels"].items():
+            if not self._label_entry_has_saved_content(label_data):
+                continue
+            rel_path = self._to_relative_for_project_path(img_abs, target_project_path)
+            data_to_save["labels"][rel_path] = label_data
+
+        for img_abs, scale_val in self.project_data.get("scales", {}).items():
+            rel_path = self._to_relative_for_project_path(img_abs, target_project_path)
+            data_to_save["scales"][rel_path] = scale_val
+
+        for img_abs, provenance in self.project_data.get("image_provenance", {}).items():
+            rel_path = self._to_relative_for_project_path(img_abs, target_project_path)
+            data_to_save["image_provenance"][rel_path] = provenance
+
+        return data_to_save
+
+    def save_project(self, force=False):
+        if getattr(self, "current_storage_backend", "json") == SQLITE_BACKEND:
+            if force:
+                return self.flush_sqlite_changes(
+                    image_paths=list(self.project_data.get("images", []) or []),
+                    deleted_image_paths=self._sqlite_force_deleted_image_paths(),
+                    project_dirty=True,
+                )
+            return self.flush_sqlite_changes()
+        if self.current_project_path:
+            if not getattr(self, "_legacy_json_write_enabled", False):
+                raise RuntimeError("legacy_json_project_is_read_only; migrate to SQLite or export a legacy JSON copy")
+            return self._save_legacy_json_project()
 
     def add_images(self, image_paths, progress_callback=None, save=True):
         paths = list(image_paths or [])
@@ -772,6 +1248,7 @@ class ProjectManager:
             if identity not in existing:
                 images.append(abs_img)
                 labels.setdefault(abs_img, self._default_label_entry())
+                self._mark_sqlite_image_dirty(abs_img)
                 existing.add(identity)
                 added += 1
             if progress_callback:
@@ -807,6 +1284,9 @@ class ProjectManager:
         kept_images = [path for path in old_images if not should_remove(path)]
         removed_count = len(old_images) - len(kept_images)
         self.project_data["images"] = kept_images
+        for stored_path in old_images:
+            if should_remove(stored_path):
+                self._mark_sqlite_image_deleted(stored_path)
 
         for key in ("labels", "scales", "image_provenance"):
             mapping = self.project_data.get(key)
@@ -814,6 +1294,7 @@ class ProjectManager:
                 continue
             for stored_path in list(mapping.keys()):
                 if should_remove(stored_path):
+                    self._mark_sqlite_image_deleted(stored_path)
                     del mapping[stored_path]
 
         for group in self.project_data.get("image_groups", {}).get("custom_groups", []):
@@ -825,6 +1306,8 @@ class ProjectManager:
             for index, path in enumerate(paths, start=1):
                 progress_callback(index, total, str(path))
 
+        if removed_count:
+            self._mark_sqlite_project_dirty()
         if save:
             self.save_project()
         return removed_count
@@ -834,6 +1317,7 @@ class ProjectManager:
         if "image_provenance" not in self.project_data:
             self.project_data["image_provenance"] = {}
         self.project_data["image_provenance"][abs_path] = dict(provenance or {})
+        self._mark_sqlite_image_dirty(abs_path)
         if save:
             self.save_project()
 
@@ -851,6 +1335,8 @@ class ProjectManager:
             self.project_data["labels"][abs_path] = self._default_label_entry()
         entry = self._normalize_label_taxon_fields(self.project_data["labels"][abs_path])
         entry.setdefault("description_sources", {})[clean_part] = dict(source_meta or {})
+        self._append_label_journal_entry(abs_path, "set_description_source")
+        self._mark_sqlite_image_dirty(abs_path)
         if save:
             self.save_project()
 
@@ -882,6 +1368,8 @@ class ProjectManager:
                 entry.setdefault("description_sources", {})[clean_part] = dict(source_meta)
             elif clean_part in entry.get("description_sources", {}):
                 del entry["description_sources"][clean_part]
+        self._append_label_journal_entry(abs_path, "set_part_description")
+        self._mark_sqlite_image_dirty(abs_path)
         if save:
             self.save_project()
 
@@ -896,6 +1384,7 @@ class ProjectManager:
 
     def set_scale(self, image_path, pixels_per_mm, save=True):
         self.project_data["scales"][image_path] = pixels_per_mm
+        self._mark_sqlite_image_dirty(image_path)
         if save:
             self.save_project()
 
@@ -918,6 +1407,7 @@ class ProjectManager:
 
     def set_model_profiles(self, model_profiles, save=True):
         clean_profiles = self._sanitize_model_profiles(model_profiles)
+        self._mark_sqlite_project_dirty()
         if save:
             self.save_project()
         return clone_model_profiles(clean_profiles)
@@ -958,6 +1448,7 @@ class ProjectManager:
         self.project_data["vlm_preannotation"] = self._sanitize_vlm_preannotation_settings(
             inference_params.get("vlm_preannotation", {})
         )
+        self._mark_sqlite_project_dirty()
         if save:
             self.save_project()
         return active_profile
@@ -977,6 +1468,7 @@ class ProjectManager:
             updated_profile = clone_model_profiles(profile)
             break
         self.project_data["model_profiles"] = self._sanitize_model_profiles(profiles)
+        self._mark_sqlite_project_dirty()
         if save:
             self.save_project()
         return updated_profile or self.get_active_model_profile()
@@ -1171,6 +1663,7 @@ class ProjectManager:
                 "routes": routes,
             }
         )
+        self._mark_sqlite_project_dirty()
         if save:
             self.save_project()
         return clean_entry
@@ -1308,6 +1801,7 @@ class ProjectManager:
         self.project_data["cascade_routes"] = self._sanitize_cascade_routes(
             {"version": PROJECT_ROUTE_MANIFEST_VERSION, "routes": routes}
         )
+        self._mark_sqlite_project_dirty()
         if save:
             self.save_project()
         return True
@@ -1390,6 +1884,7 @@ class ProjectManager:
         self.project_data["cascade_routes"] = self._sanitize_cascade_routes(
             {"version": PROJECT_ROUTE_MANIFEST_VERSION, "routes": updated_routes}
         )
+        self._mark_sqlite_project_dirty()
         if save:
             self.save_project()
         return changed_count
@@ -1442,6 +1937,7 @@ class ProjectManager:
                 "routes": kept_routes,
             }
         )
+        self._mark_sqlite_project_dirty()
         if save:
             self.save_project()
         return removed_count
@@ -1468,6 +1964,7 @@ class ProjectManager:
 
         parent_map[clean_target] = clean_parent
         self.project_data["blink_context_roi_parents"] = parent_map
+        self._mark_sqlite_project_dirty()
         if save:
             self.save_project()
         return True
@@ -1483,6 +1980,7 @@ class ProjectManager:
 
         del parent_map[clean_target]
         self.project_data["blink_context_roi_parents"] = parent_map
+        self._mark_sqlite_project_dirty()
         if save:
             self.save_project()
         return True
@@ -1509,6 +2007,7 @@ class ProjectManager:
         ratios[clean_part] = clean_ratio
         self.project_data["parent_box_aspect_ratios"] = self._sanitize_parent_box_aspect_ratios(ratios)
         self._sync_active_model_profile_from_project_fields()
+        self._mark_sqlite_project_dirty()
         if save:
             self.save_project()
         return True
@@ -1530,6 +2029,8 @@ class ProjectManager:
             self.project_data["labels"][image_path] = self._default_label_entry()
         entry = self.project_data["labels"][image_path]
         entry.setdefault("shrink_loose_boxes", {})[clean_part] = clean_box
+        self._append_label_journal_entry(image_path, "update_shrink_loose_box")
+        self._mark_sqlite_image_dirty(image_path)
         if save:
             self.save_project()
         return True
@@ -1591,6 +2092,8 @@ class ProjectManager:
         elif not auto_box and entry.get("descriptions", {}).get(part_name) == "Auto-Annotated":
             del entry["descriptions"][part_name]
             
+        self._append_label_journal_entry(image_path, "update_label")
+        self._mark_sqlite_image_dirty(image_path)
         if save:
             self.save_project()
 
@@ -1615,6 +2118,8 @@ class ProjectManager:
             clean_meta.setdefault("source", AUTO_BOX_SOURCE_MODEL)
             clean_meta.setdefault("review_status", AUTO_BOX_REVIEW_DRAFT)
             entry.setdefault("auto_box_meta", {})[clean_part] = clean_meta
+        self._append_label_journal_entry(image_path, "update_auto_box")
+        self._mark_sqlite_image_dirty(image_path)
         if save:
             self.save_project()
         return True
@@ -1629,6 +2134,8 @@ class ProjectManager:
             return False
         meta = entry.setdefault("auto_box_meta", {}).setdefault(clean_part, {})
         meta["review_status"] = clean_status
+        self._append_label_journal_entry(image_path, "set_auto_box_review_status")
+        self._mark_sqlite_image_dirty(image_path)
         if save:
             self.save_project()
         return True
@@ -1695,6 +2202,7 @@ class ProjectManager:
                 accepted_count += count
                 accepted_images += 1
         if accepted_count:
+            self._mark_sqlite_images_dirty(image_paths)
             self.save_project()
         return {
             "accepted_count": accepted_count,
@@ -1713,6 +2221,9 @@ class ProjectManager:
         if clean_part in entry.get("auto_box_meta", {}):
             del entry["auto_box_meta"][clean_part]
             removed = True
+        if removed:
+            self._append_label_journal_entry(image_path, "remove_auto_box")
+            self._mark_sqlite_image_dirty(image_path)
         if save and removed:
             self.save_project()
         return removed
@@ -1751,6 +2262,7 @@ class ProjectManager:
         clean_scope = sanitize_locator_scope(locator_scope, self.project_data.get("taxonomy", []), fallback=DEFAULT_LOCATOR_SCOPE)
         self.project_data["locator_scope"] = clean_scope
         self._sync_active_model_profile_from_project_fields()
+        self._mark_sqlite_project_dirty()
         if save:
             self.save_project()
         return clean_scope
@@ -1825,6 +2337,8 @@ class ProjectManager:
             trajectory_payload["parent_context"] = clean_parent_context
 
         self.project_data["labels"][image_path]["trajectories"][part_name] = trajectory_payload
+        self._append_label_journal_entry(image_path, "update_trajectory")
+        self._mark_sqlite_image_dirty(image_path)
         if save:
             self.save_project()
         
@@ -1888,7 +2402,8 @@ class ProjectManager:
         if not clean_child:
             return 0
         removed = 0
-        for entry in self.project_data.get("labels", {}).values():
+        changed_images = []
+        for image_path, entry in self.project_data.get("labels", {}).items():
             if not isinstance(entry, dict):
                 continue
             trajectories = entry.get("trajectories", {})
@@ -1903,8 +2418,13 @@ class ProjectManager:
                 continue
             del trajectories[clean_child]
             removed += 1
+            changed_images.append(image_path)
             if not trajectories:
                 entry.pop("trajectories", None)
+        if removed:
+            for image_path in changed_images:
+                self._append_label_journal_entry(image_path, "delete_blink_trajectory_dataset")
+            self._mark_sqlite_images_dirty(changed_images)
         if removed and save:
             self.save_project()
         return removed
@@ -1945,6 +2465,8 @@ class ProjectManager:
             if "shrink_loose_boxes" in entry and part_name in entry["shrink_loose_boxes"]:
                 del entry["shrink_loose_boxes"][part_name]
             
+            self._append_label_journal_entry(image_path, "delete_label")
+            self._mark_sqlite_image_dirty(image_path)
             if save:
                 self.save_project()
 
@@ -1961,6 +2483,8 @@ class ProjectManager:
                 entry["taxon_rank"] = str(taxon_rank or "").strip()
             if isinstance(taxon_metadata, dict):
                 entry["taxon_metadata"] = dict(taxon_metadata)
+            self._append_label_journal_entry(image_path, "set_taxon")
+            self._mark_sqlite_image_dirty(image_path)
             if save:
                 self.save_project()
 
@@ -1985,6 +2509,7 @@ class ProjectManager:
         if is_safe_part_name(clean_name) and clean_name not in self.project_data["taxonomy"]:
             self.project_data["taxonomy"].append(clean_name)
             self._sync_active_model_profile_from_project_fields()
+            self._mark_sqlite_project_dirty()
             self.save_project() # FIX: Save immediately
             return True
         return False
@@ -2113,6 +2638,8 @@ class ProjectManager:
 
         self._rename_part_in_routes(old_part, new_part)
         self._sync_active_model_profile_from_project_fields()
+        self._mark_sqlite_project_dirty()
+        self._mark_sqlite_images_dirty(self.project_data.get("labels", {}).keys())
 
         if save:
             self.save_project()
@@ -2151,6 +2678,8 @@ class ProjectManager:
                 }
             )
             self._sync_active_model_profile_from_project_fields()
+            self._mark_sqlite_project_dirty()
+            self._mark_sqlite_images_dirty(self.project_data.get("labels", {}).keys())
             
             self.save_project() # FIX: Save immediately
             return True
@@ -2192,6 +2721,9 @@ class ProjectManager:
                 
             if not labels["parts"]:
                 labels["status"] = "unlabeled"
+            if parts_to_remove:
+                self._append_label_journal_entry(img_path, "remove_auto_labels_for_images")
+                self._mark_sqlite_image_dirty(img_path)
                 
         if save:
             self.save_project()
@@ -2215,6 +2747,9 @@ class ProjectManager:
                     self.set_auto_box_review_status(image_path, part, "confirmed", save=False)
                     count += 1
         
+        if count > 0:
+            self._append_label_journal_entry(image_path, "verify_image_labels")
+            self._mark_sqlite_image_dirty(image_path)
         if count > 0 and save:
             self.save_project()
         return count

@@ -322,9 +322,11 @@ class GuiSmokeTests(unittest.TestCase):
             startup_path = Path(window.project.current_project_path)
             self.assertEqual(
                 startup_path,
-                self.project_dir / "TaxaMask_outputs" / "2d_stl_projects" / "_startup" / "TaxaMask_Project.json",
+                self.project_dir / "TaxaMask_outputs" / "2d_stl_projects" / "_startup" / "TaxaMask_Project.sqlite_manifest.json",
             )
             self.assertTrue(startup_path.exists())
+            self.assertTrue(window.project.is_sqlite_project())
+            self.assertTrue((startup_path.parent / "TaxaMask_Project.taxamask.sqlite").exists())
             self.assertNotIn("AntSleap", startup_path.parts)
             self.assertEqual(window.start_title.text(), "TaxaMask Agent Center")
             self.assertIsNotNone(window.findChild(main_module.QWidget, "start2DWorkflowCard"))

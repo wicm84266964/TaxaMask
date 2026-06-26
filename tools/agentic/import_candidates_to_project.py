@@ -13,6 +13,7 @@ if ANTSLEAP_ROOT not in sys.path:
 
 from core.governance.candidate_bridge import export_pdf_candidates  # noqa: E402
 from core.project import ProjectManager  # noqa: E402
+from core.safe_io import atomic_write_json  # noqa: E402
 
 
 def _load_json(path: str) -> Any:
@@ -21,11 +22,21 @@ def _load_json(path: str) -> Any:
 
 
 def _write_json(path: str, payload: dict[str, Any]) -> None:
-    parent = os.path.dirname(os.path.abspath(path))
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2)
+    atomic_write_json(path, payload, indent=2, ensure_ascii=False)
+
+
+def _same_path(left: str, right: str) -> bool:
+    return os.path.normcase(os.path.normpath(os.path.abspath(left))) == os.path.normcase(os.path.normpath(os.path.abspath(right)))
+
+
+def _write_project_output(manager: ProjectManager, project_path: str, out_project: str) -> None:
+    if _same_path(project_path, out_project):
+        if manager.is_sqlite_project():
+            manager.save_project()
+            return
+        raise RuntimeError("refusing_to_overwrite_legacy_project_json; choose a distinct --out path or migrate to SQLite")
+    manager.current_project_path = out_project
+    _write_json(out_project, manager.legacy_json_payload(out_project))
 
 
 def _records_from_payload(payload: Any, key: str) -> list[dict[str, Any]]:
@@ -117,9 +128,9 @@ def _build_provenance(candidate: dict[str, Any], decision: dict[str, Any], db_pa
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Import routed PDF candidates into a TaxaMask project JSON.")
-    parser.add_argument("--project", required=True, help="Input project JSON.")
-    parser.add_argument("--out", required=True, help="Output project JSON.")
+    parser = argparse.ArgumentParser(description="Import routed PDF candidates into a TaxaMask 2D project.")
+    parser.add_argument("--project", required=True, help="Input project JSON or SQLite manifest.")
+    parser.add_argument("--out", required=True, help="Output legacy project JSON snapshot, or the same SQLite manifest for in-place database update.")
     parser.add_argument("--routing", required=True, help="Routing decisions JSON.")
     parser.add_argument("--candidates", default="", help="Candidate artifact JSON. If omitted, --db is used.")
     parser.add_argument("--db", default="", help="PDF extraction DB used when --candidates is omitted.")
@@ -143,7 +154,6 @@ def main() -> int:
 
     manager = ProjectManager()
     manager.load_project(project_path)
-    manager.current_project_path = out_project
 
     imported: list[dict[str, Any]] = []
     skipped: list[dict[str, str]] = []
@@ -160,7 +170,7 @@ def main() -> int:
             continue
 
         if image_path not in existing_images:
-            manager.add_images([image_path])
+            manager.add_images([image_path], save=False)
             existing_images.add(image_path)
         manager.project_data.setdefault("labels", {}).setdefault(
             image_path,
@@ -172,7 +182,7 @@ def main() -> int:
         manager.set_image_provenance(image_path, provenance, save=False)
         imported.append({"candidate_id": candidate_id, "image_path": image_path, "provenance": provenance})
 
-    manager.save_project()
+    _write_project_output(manager, project_path, out_project)
 
     manifest = {
         "schema_version": "taxamask-candidate-import-manifest-v1",

@@ -291,6 +291,14 @@ try:
         run_vlm_preannotation,
         sanitize_vlm_prompt_profile,
     )
+    from AntSleap.core.project_sqlite_migration import default_sqlite_manifest_path, migrate_legacy_2d_json_to_sqlite
+    from AntSleap.core.project_sqlite_maintenance import (
+        backup_sqlite_project_manifest,
+        export_sqlite_project_to_legacy_json,
+        sqlite_project_migration_report_path,
+    )
+    from AntSleap.core.project_sqlite_writer import finish_vlm_run, record_vlm_image_result
+    from AntSleap.core.sqlite_storage import PROJECT_MANIFEST_SCHEMA_VERSION, SQLITE_BACKEND, read_project_manifest
     from AntSleap.core.literature_descriptions import (
         build_text_block_source,
         build_description_source,
@@ -399,6 +407,14 @@ except ImportError:
         run_vlm_preannotation,
         sanitize_vlm_prompt_profile,
     )
+    from core.project_sqlite_migration import default_sqlite_manifest_path, migrate_legacy_2d_json_to_sqlite
+    from core.project_sqlite_maintenance import (
+        backup_sqlite_project_manifest,
+        export_sqlite_project_to_legacy_json,
+        sqlite_project_migration_report_path,
+    )
+    from core.project_sqlite_writer import finish_vlm_run, record_vlm_image_result
+    from core.sqlite_storage import PROJECT_MANIFEST_SCHEMA_VERSION, SQLITE_BACKEND, read_project_manifest
     from core.literature_descriptions import (
         build_text_block_source,
         build_description_source,
@@ -1099,12 +1115,32 @@ TRANSLATIONS = {
         "Perimeter:": "周长:",
         "Scale set to {:.2f} px/mm": "标尺已设定: {:.2f} px/mm",
         "Open Project": "打开项目",
+        "TaxaMask Projects (*.json);;All Files (*)": "TaxaMask 项目 (*.json);;所有文件 (*)",
+        "Migrate 2D Project to SQLite": "迁移 2D 项目到 SQLite",
+        "Migrating 2D project to SQLite...": "正在迁移 2D 项目到 SQLite...",
+        "This is an older 2D JSON project. TaxaMask now stores 2D projects in SQLite so large annotation projects are saved incrementally instead of rewriting one large JSON file.\n\nThe old JSON will not be overwritten. A SQLite database, a manifest file, a migration report, and a legacy JSON backup will be created next to the project.\n\nMigrate and open the SQLite project now?": "这是旧版 2D JSON 项目。TaxaMask 现在会把 2D 项目保存到 SQLite，这样大型标注项目可以增量保存，而不是反复重写一个很大的 JSON 文件。\n\n旧 JSON 不会被覆盖。程序会在项目旁边生成 SQLite 数据库、manifest 入口文件、迁移报告和旧 JSON 备份。\n\n现在迁移并打开 SQLite 项目吗？",
+        "A migrated SQLite version already exists for this old JSON project.\n\nOpen the existing SQLite manifest instead?\n\n{0}": "这个旧 JSON 项目旁边已经有迁移后的 SQLite 版本。\n\n改为打开现有 SQLite manifest 吗？\n\n{0}",
+        "2D project migration failed. The old JSON was not modified.\n\n{0}": "2D 项目迁移失败。旧 JSON 未被修改。\n\n{0}",
+        "Migrated legacy 2D JSON project to SQLite. Manifest: {0}; database: {1}; report: {2}": "已将旧版 2D JSON 项目迁移到 SQLite。Manifest：{0}；数据库：{1}；报告：{2}",
         "New Project": "新建项目",
         "Open STL Rendered-View Project": "打开 STL 渲染视图项目",
         "Project Template:": "项目模板：",
         "Generic taxonomy mask project": "通用分类掩码项目",
         "Ant morphology (validated example)": "蚂蚁形态学（已验证示例）",
         "Save Project": "保存项目",
+        "Backup SQLite Project": "备份 SQLite 项目",
+        "Export Legacy JSON": "导出 legacy JSON",
+        "Open Migration Report": "打开迁移报告",
+        "The current project is not a SQLite-backed project.": "当前项目不是 SQLite 主存储项目。",
+        "SQLite project backup failed.\n\n{0}": "SQLite 项目备份失败。\n\n{0}",
+        "SQLite project backup was skipped because a recent backup already exists.": "已存在较新的 SQLite 备份，本次跳过。",
+        "SQLite project backup created. Manifest: {0}; database: {1}": "已创建 SQLite 项目备份。Manifest：{0}；数据库：{1}",
+        "SQLite backup created.\n\nOpen this manifest to inspect the backup:\n{0}": "SQLite 备份已创建。\n\n可打开这个 manifest 检查备份：\n{0}",
+        "Legacy JSON export failed.\n\n{0}": "legacy JSON 导出失败。\n\n{0}",
+        "Exported SQLite project to legacy JSON for audit. Path: {0}; stats: {1}": "已将 SQLite 项目导出为用于审计的 legacy JSON。路径：{0}；统计：{1}",
+        "Legacy JSON export created:\n{0}": "legacy JSON 导出已创建：\n{0}",
+        "No migration report is recorded for this project.": "这个项目没有记录迁移报告。",
+        "Migration report path:\n{0}": "迁移报告路径：\n{0}",
         "Import STL Rendered Views to Labeling Workbench": "导入 STL 渲染视角图到标注工作台",
         "Specimen ID:": "Specimen 编号：",
         "Imported STL rendered views into the Labeling Workbench from {0}. Registered views: {1}, specimens: {2}, unparsed files: {3}.": "已从 {0} 将 STL 渲染视角图导入标注工作台。登记视角图：{1}，Specimen 数：{2}，未解析文件：{3}。",
@@ -6765,7 +6801,7 @@ class MainWindow(QMainWindow):
         if app is not None:
             app.installEventFilter(self)
 
-        self.project.create_project(DEFAULT_PROJECT_NAME, self._default_startup_project_dir(), template_id=DEFAULT_PROJECT_TEMPLATE_ID)
+        self._open_or_create_startup_project()
         self.active_project_entry_path = self.project.current_project_path or ""
         self.active_project_kind = "start"
         if self.config.get("startup_behavior", "start_center") == "continue_last" and self.config.get("last_project_path", ""):
@@ -7596,6 +7632,27 @@ class MainWindow(QMainWindow):
     def _default_startup_project_dir(self):
         return self._ensure_default_output_subdir(DEFAULT_2D_STL_PROJECTS_DIR_NAME, DEFAULT_STARTUP_PROJECT_DIR_NAME)
 
+    def _startup_project_manifest_path(self):
+        return os.path.join(self._default_startup_project_dir(), f"{DEFAULT_PROJECT_NAME}.sqlite_manifest.json")
+
+    def _startup_legacy_json_project_path(self):
+        return os.path.join(self._default_startup_project_dir(), f"{DEFAULT_PROJECT_NAME}.json")
+
+    def _open_or_create_startup_project(self):
+        manifest_path = self._startup_project_manifest_path()
+        legacy_json_path = self._startup_legacy_json_project_path()
+        if os.path.exists(manifest_path):
+            self.project.load_project(manifest_path)
+            return
+        if os.path.exists(legacy_json_path):
+            self.open_project_path(legacy_json_path)
+            return
+        self.project.create_project(
+            DEFAULT_PROJECT_NAME,
+            self._default_startup_project_dir(),
+            template_id=DEFAULT_PROJECT_TEMPLATE_ID,
+        )
+
     def _default_project_dialog_dir(self, project_kind):
         return self._default_2d_stl_projects_root()
 
@@ -7765,7 +7822,7 @@ class MainWindow(QMainWindow):
 
         context = getattr(self, "project_save_context", {}) or {}
         try:
-            self.project.save_project()
+            self.project.save_project(force=force)
         except Exception:
             runtime_log_exception(
                 "project_save_failed",
@@ -8052,6 +8109,176 @@ class MainWindow(QMainWindow):
             and payload.get("schema_version") == STL_PROJECT_SCHEMA_VERSION
             and payload.get("project_type") == STL_PROJECT_TYPE
         )
+
+    def _read_project_probe_payload(self, path):
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except Exception:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _is_sqlite_project_manifest_payload(self, payload):
+        return (
+            isinstance(payload, dict)
+            and payload.get("schema_version") == PROJECT_MANIFEST_SCHEMA_VERSION
+            and payload.get("storage_backend") == SQLITE_BACKEND
+        )
+
+    def _is_2d_sqlite_project_manifest_payload(self, payload):
+        return self._is_sqlite_project_manifest_payload(payload)
+
+    def _is_legacy_2d_json_project_payload(self, payload):
+        if not isinstance(payload, dict):
+            return False
+        if self._is_sqlite_project_manifest_payload(payload):
+            return False
+        if (
+            payload.get("schema_version") == STL_PROJECT_SCHEMA_VERSION
+            or payload.get("project_type") == STL_PROJECT_TYPE
+        ):
+            return False
+        project_keys = {"images", "labels", "taxonomy", "locator_scope", "project_template"}
+        return bool(project_keys.intersection(payload.keys())) and (
+            isinstance(payload.get("images", []), list)
+            or isinstance(payload.get("labels", {}), dict)
+        )
+
+    def _is_legacy_2d_json_project_file(self, path):
+        return self._is_legacy_2d_json_project_payload(self._read_project_probe_payload(path))
+
+    def _active_sqlite_project_manager(self):
+        manager = getattr(self, "project", None)
+        if manager is None:
+            return None
+        is_sqlite = getattr(manager, "is_sqlite_project", None)
+        if not callable(is_sqlite) or not is_sqlite():
+            return None
+        return manager
+
+    def _flush_active_sqlite_project_before_maintenance(self):
+        manager = self._active_sqlite_project_manager()
+        if manager is None:
+            return None
+        self._flush_pending_project_save(force=True, defer_for_navigation=False)
+        return manager
+
+    def _sqlite_maintenance_default_dir(self, manager):
+        database_path = str(getattr(manager, "current_database_path", "") or "")
+        if database_path:
+            return os.path.dirname(os.path.abspath(database_path)) or "."
+        project_path = str(getattr(manager, "current_project_path", "") or "")
+        return os.path.dirname(os.path.abspath(project_path)) if project_path else self._default_outputs_root()
+
+    def backup_current_sqlite_project(self):
+        manager = self._flush_active_sqlite_project_before_maintenance()
+        if manager is None:
+            QMessageBox.information(
+                self,
+                tr("Backup SQLite Project", self.current_lang),
+                tr("The current project is not a SQLite-backed project.", self.current_lang),
+            )
+            return
+        try:
+            result = backup_sqlite_project_manifest(
+                manager.current_project_path,
+                min_interval_seconds=0,
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                tr("Backup SQLite Project", self.current_lang),
+                tr("SQLite project backup failed.\n\n{0}", self.current_lang).format(str(exc)),
+            )
+            return
+        if not result.backup_manifest_path:
+            QMessageBox.information(
+                self,
+                tr("Backup SQLite Project", self.current_lang),
+                tr("SQLite project backup was skipped because a recent backup already exists.", self.current_lang),
+            )
+            return
+        self.log(
+            tr(
+                "SQLite project backup created. Manifest: {0}; database: {1}",
+                self.current_lang,
+            ).format(result.backup_manifest_path, result.backup_database_path)
+        )
+        QMessageBox.information(
+            self,
+            tr("Backup SQLite Project", self.current_lang),
+            tr(
+                "SQLite backup created.\n\nOpen this manifest to inspect the backup:\n{0}",
+                self.current_lang,
+            ).format(result.backup_manifest_path),
+        )
+
+    def export_current_project_legacy_json(self):
+        manager = self._flush_active_sqlite_project_before_maintenance()
+        if manager is None:
+            QMessageBox.information(
+                self,
+                tr("Export Legacy JSON", self.current_lang),
+                tr("The current project is not a SQLite-backed project.", self.current_lang),
+            )
+            return
+        default_dir = os.path.join(self._sqlite_maintenance_default_dir(manager), "legacy_json_exports")
+        os.makedirs(default_dir, exist_ok=True)
+        project_name = str(getattr(manager, "project_data", {}).get("name") or "project").strip() or "project"
+        safe_name = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in project_name).strip("_") or "project"
+        default_path = os.path.join(default_dir, f"{safe_name}.legacy_export_{time.strftime('%Y%m%d_%H%M%S')}.json")
+        output_path, _ = QFileDialog.getSaveFileName(
+            self,
+            tr("Export Legacy JSON", self.current_lang),
+            default_path,
+            tr("TaxaMask Projects (*.json);;All Files (*)", self.current_lang),
+        )
+        if not output_path:
+            return
+        try:
+            result = export_sqlite_project_to_legacy_json(manager.current_project_path, output_path)
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                tr("Export Legacy JSON", self.current_lang),
+                tr("Legacy JSON export failed.\n\n{0}", self.current_lang).format(str(exc)),
+            )
+            return
+        self.log(
+            tr(
+                "Exported SQLite project to legacy JSON for audit. Path: {0}; stats: {1}",
+                self.current_lang,
+            ).format(result.output_path, result.stats)
+        )
+        QMessageBox.information(
+            self,
+            tr("Export Legacy JSON", self.current_lang),
+            tr("Legacy JSON export created:\n{0}", self.current_lang).format(result.output_path),
+        )
+
+    def open_current_sqlite_migration_report(self):
+        manager = self._active_sqlite_project_manager()
+        if manager is None:
+            QMessageBox.information(
+                self,
+                tr("Open Migration Report", self.current_lang),
+                tr("The current project is not a SQLite-backed project.", self.current_lang),
+            )
+            return
+        report_path = sqlite_project_migration_report_path(manager.current_project_path)
+        if not report_path:
+            QMessageBox.information(
+                self,
+                tr("Open Migration Report", self.current_lang),
+                tr("No migration report is recorded for this project.", self.current_lang),
+            )
+            return
+        if not open_path(report_path):
+            QMessageBox.information(
+                self,
+                tr("Open Migration Report", self.current_lang),
+                tr("Migration report path:\n{0}", self.current_lang).format(report_path),
+            )
 
     def appoint_selected_route_expert(self):
         panel = getattr(self, "route_settings_panel", None)
@@ -8608,6 +8835,9 @@ class MainWindow(QMainWindow):
         file_menu.addAction(tr("New Project", self.current_lang), self.new_project)
         file_menu.addAction(tr("Open Project", self.current_lang), self.open_project)
         file_menu.addAction(tr("Save Project", self.current_lang), lambda: self._flush_pending_project_save(force=True))
+        file_menu.addAction(tr("Backup SQLite Project", self.current_lang), self.backup_current_sqlite_project)
+        file_menu.addAction(tr("Export Legacy JSON", self.current_lang), self.export_current_project_legacy_json)
+        file_menu.addAction(tr("Open Migration Report", self.current_lang), self.open_current_sqlite_migration_report)
         file_menu.addAction(tr("Import STL Rendered Views to Labeling Workbench", self.current_lang), self.import_stl_rendered_views_action)
         file_menu.addAction(tr("Open PDF Evidence Tools", self.current_lang), self.open_pdf_evidence_tools)
         file_menu.addAction(tr("Check / Relocate Project Images", self.current_lang), self.check_relocate_project_images)
@@ -8744,15 +8974,130 @@ class MainWindow(QMainWindow):
             self,
             tr("Open Project", self.current_lang),
             self._default_open_project_dir(),
-            "JSON (*.json)",
+            tr("TaxaMask Projects (*.json);;All Files (*)", self.current_lang),
         )
         if f:
             self.open_project_path(f)
+
+    def _confirm_legacy_2d_json_migration(self, path):
+        message = tr(
+            "This is an older 2D JSON project. TaxaMask now stores 2D projects in SQLite so large annotation projects are saved incrementally instead of rewriting one large JSON file.\n\nThe old JSON will not be overwritten. A SQLite database, a manifest file, a migration report, and a legacy JSON backup will be created next to the project.\n\nMigrate and open the SQLite project now?",
+            self.current_lang,
+        )
+        reply = themed_yes_no_question(
+            self,
+            tr("Migrate 2D Project to SQLite", self.current_lang),
+            f"{message}\n\n{path}",
+            confirm_role=BUTTON_ROLE_COMMIT,
+        )
+        return reply == QMessageBox.Yes
+
+    def _existing_sqlite_manifest_for_legacy_json(self, path):
+        manifest_path = default_sqlite_manifest_path(path)
+        if not os.path.exists(manifest_path):
+            return ""
+        try:
+            read_project_manifest(manifest_path)
+        except Exception:
+            return ""
+        return os.path.abspath(manifest_path)
+
+    def _confirm_open_existing_sqlite_migration(self, manifest_path):
+        reply = themed_yes_no_question(
+            self,
+            tr("Migrate 2D Project to SQLite", self.current_lang),
+            tr(
+                "A migrated SQLite version already exists for this old JSON project.\n\nOpen the existing SQLite manifest instead?\n\n{0}",
+                self.current_lang,
+            ).format(manifest_path),
+            confirm_role=BUTTON_ROLE_COMMIT,
+        )
+        return reply == QMessageBox.Yes
+
+    def _migrate_legacy_2d_project_with_progress(self, path):
+        progress = QProgressDialog(
+            tr("Migrating 2D project to SQLite...", self.current_lang),
+            "",
+            0,
+            100,
+            self,
+        )
+        progress.setWindowTitle(tr("Migrate 2D Project to SQLite", self.current_lang))
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setCancelButton(None)
+        self._prepare_progress_dialog(progress, width=560)
+        progress.show()
+        app = QApplication.instance()
+        if app is not None:
+            app.processEvents()
+
+        def on_progress(done, total, message):
+            total = max(0, int(total or 0))
+            done = max(0, int(done or 0))
+            if total > 0:
+                if progress.maximum() != total:
+                    progress.setRange(0, total)
+                progress.setValue(min(done, total))
+            else:
+                progress.setRange(0, 0)
+            progress.setLabelText(str(message or ""))
+            if app is not None:
+                app.processEvents()
+
+        try:
+            result = migrate_legacy_2d_json_to_sqlite(path, progress_callback=on_progress)
+        finally:
+            progress.close()
+            progress.deleteLater()
+            if app is not None:
+                app.processEvents()
+        return result
 
     def open_project_path(self, path):
         f = os.path.abspath(str(path))
         runtime_log_event("open_project_begin", path=f)
         self._flush_pending_project_save(defer_for_navigation=False)
+        payload = self._read_project_probe_payload(f)
+        if self._is_legacy_2d_json_project_payload(payload):
+            existing_manifest = self._existing_sqlite_manifest_for_legacy_json(f)
+            if existing_manifest:
+                if not self._confirm_open_existing_sqlite_migration(existing_manifest):
+                    runtime_log_event("open_project_existing_sqlite_manifest_cancelled", path=f, manifest=existing_manifest)
+                    return
+                f = existing_manifest
+                payload = self._read_project_probe_payload(f)
+            else:
+                if not self._confirm_legacy_2d_json_migration(f):
+                    runtime_log_event("open_project_legacy_json_migration_cancelled", path=f)
+                    return
+                try:
+                    migration_result = self._migrate_legacy_2d_project_with_progress(f)
+                except Exception as exc:
+                    runtime_log_exception("open_project_legacy_json_migration_failed", *sys.exc_info())
+                    QMessageBox.critical(
+                        self,
+                        tr("Migrate 2D Project to SQLite", self.current_lang),
+                        tr("2D project migration failed. The old JSON was not modified.\n\n{0}", self.current_lang).format(str(exc)),
+                    )
+                    return
+                f = os.path.abspath(str(migration_result.manifest_path))
+                runtime_log_event(
+                    "open_project_legacy_json_migrated",
+                    source=migration_result.source_json_path,
+                    manifest=f,
+                    database=migration_result.database_path,
+                    image_count=migration_result.stats.get("image_count", 0),
+                    label_count=migration_result.stats.get("label_count", 0),
+                )
+                self.log(
+                    tr(
+                        "Migrated legacy 2D JSON project to SQLite. Manifest: {0}; database: {1}; report: {2}",
+                        self.current_lang,
+                    ).format(f, migration_result.database_path, migration_result.report_path)
+                )
         if self._is_stl_project_file(f):
             self.stl_project.load_project(f)
             result = register_stl_rendered_views_for_2d_review(self.stl_project, self.project)
@@ -13302,6 +13647,40 @@ class MainWindow(QMainWindow):
             "report_path": str(result.get("report_path", "") or ""),
         }
 
+    def _record_sqlite_vlm_image_result(self, image_path, result, status, box_count=0, error_message=""):
+        is_sqlite = getattr(self.project, "is_sqlite_project", lambda: False)
+        if not callable(is_sqlite) or not is_sqlite():
+            return
+        run_id = str(getattr(self, "vlm_preannotation_run_id", "") or "")
+        if not run_id:
+            return
+        try:
+            record_vlm_image_result(
+                self.project,
+                run_id,
+                image_path,
+                status=status,
+                error_message=error_message or str((result or {}).get("error", "") or ""),
+                raw_response_ref=str((result or {}).get("report_path", "") or ""),
+                box_count=int(box_count or 0),
+            )
+        except Exception:
+            runtime_log_exception("sqlite_vlm_image_result_record_failed", *sys.exc_info())
+
+    def _finish_sqlite_vlm_run(self, run_id, summary):
+        is_sqlite = getattr(self.project, "is_sqlite_project", lambda: False)
+        if not callable(is_sqlite) or not is_sqlite():
+            return
+        try:
+            finish_vlm_run(
+                self.project,
+                run_id,
+                status=str((summary or {}).get("status") or "finished"),
+                summary=summary or {},
+            )
+        except Exception:
+            runtime_log_exception("sqlite_vlm_run_finish_failed", *sys.exc_info())
+
     def _vlm_image_paths_for_scope(self, scope):
         if scope == "all_images":
             return [path for path in self.project.project_data.get("images", []) if path]
@@ -13690,6 +14069,14 @@ class MainWindow(QMainWindow):
             self.log(tr("VLM first-mile preannotation failed: {0}", self.current_lang).format(result.get("error", "")))
             self._complete_current_vlm_image_steps("failed")
             self.vlm_preannotation_records.append(result)
+            if image_path:
+                self._record_sqlite_vlm_image_result(
+                    image_path,
+                    result,
+                    "failed",
+                    box_count=0,
+                    error_message=str(result.get("error", "") or ""),
+                )
             self._mark_current_vlm_image_done("failed")
             return
         candidates = list(result.get("candidates", []) or []) if isinstance(result, dict) else []
@@ -13698,6 +14085,7 @@ class MainWindow(QMainWindow):
             self.log(tr("VLM first-mile preannotation returned no usable boxes.", self.current_lang))
             self._complete_current_vlm_image_steps("no_candidates")
             self.vlm_preannotation_records.append(result)
+            self._record_sqlite_vlm_image_result(image_path, result, "no_candidates", box_count=0)
             self._mark_current_vlm_image_done("no_candidates")
             return
         try:
@@ -13728,7 +14116,15 @@ class MainWindow(QMainWindow):
                 else:
                     skipped += 1
             self.vlm_preannotation_saved_total = int(getattr(self, "vlm_preannotation_saved_total", 0)) + saved
-            self._schedule_project_save()
+            is_sqlite = getattr(self.project, "is_sqlite_project", lambda: False)
+            if callable(is_sqlite) and is_sqlite():
+                self.project.flush_sqlite_changes(image_paths=[project_image_path], project_dirty=True)
+            else:
+                self._schedule_project_save(
+                    reason="vlm_preannotation",
+                    image=os.path.basename(str(project_image_path)),
+                    saved_count=saved,
+                )
             self._refresh_vlm_canvas_if_current(project_image_path)
             self._refresh_image_list_status_or_rebuild(project_image_path)
             self._reload_current_image_for_workbench()
@@ -13739,6 +14135,7 @@ class MainWindow(QMainWindow):
             result["saved_box_only_count"] = box_only_count
             result["skipped_count"] = skipped
             self.vlm_preannotation_records.append(result)
+            self._record_sqlite_vlm_image_result(project_image_path, result, "done", box_count=saved)
             self._advance_vlm_progress("write")
             self._advance_vlm_progress("sam")
             self._advance_vlm_progress("report")
@@ -13756,6 +14153,7 @@ class MainWindow(QMainWindow):
             failed["status"] = "failed"
             failed["error"] = str(exc)
             self.vlm_preannotation_records.append(failed)
+            self._record_sqlite_vlm_image_result(image_path, failed, "failed", box_count=0, error_message=str(exc))
             self._mark_current_vlm_image_done("failed")
             self._on_vlm_preannotation_error(str(exc))
 
@@ -13892,6 +14290,7 @@ class MainWindow(QMainWindow):
             "rejected_count": sum(len(item.get("rejected", []) or []) for item in records),
             "records": records,
         }
+        self._finish_sqlite_vlm_run(run_id, summary)
         os.makedirs(artifacts_dir, exist_ok=True)
         with open(report_path, "w", encoding="utf-8") as handle:
             json.dump(summary, handle, ensure_ascii=False, indent=2)

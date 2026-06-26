@@ -99,7 +99,7 @@ TaxaMask is distributed as source-based research software.
 
 - Windows 10/11 is the primary validated desktop environment.
 - Linux is the main target for lab workstations, CUDA training, and batch processing.
-- macOS can be tried for lightweight CPU-oriented review, but Apple Silicon acceleration is not a validated v1.0 target.
+- macOS can be tried for lightweight CPU-oriented review, but Apple Silicon acceleration is not a validated public-release target.
 
 Install the PyTorch build that matches your machine before installing the base dependencies.
 
@@ -167,6 +167,8 @@ Weights are not included in the repository.
 PDF processing can use PyMuPDF directly, but some fallback image-extraction paths require Poppler through `pdf2image`. See [Platform setup](docs/platform_setup.md) for platform-specific Poppler notes.
 
 TaxaMask can start without API keys. The Agent Center dashboard can open without a model key, but model-backed chat, VLM drafts, and external model routes require a local model gateway or API settings configured on the user's machine. Do not commit real keys, private gateway URLs, or runtime settings.
+
+2D morphology projects created by TaxaMask 1.2.0 use a small SQLite manifest plus a `.taxamask.sqlite` database as the primary project record. This avoids repeatedly rewriting one very large JSON file during annotation, VLM pre-annotation, candidate import, and model-review workflows. Older 2D project JSON files can still be opened for migration or exported as legacy compatibility snapshots; treat those legacy JSON files as exchange/audit artifacts rather than the safest production storage for large projects.
 
 ## Update
 

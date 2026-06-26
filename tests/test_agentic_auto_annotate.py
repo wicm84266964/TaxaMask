@@ -236,6 +236,66 @@ class AgenticAutoAnnotateTests(unittest.TestCase):
         self.assertEqual(labels["auto_boxes"]["Head"], [10.0, 10.0, 40.0, 35.0])
         self.assertEqual(labels["auto_box_meta"]["Head"]["source"], "model_prediction")
 
+    def test_auto_annotate_cli_refuses_in_place_legacy_json_overwrite(self):
+        tmp = PROJECT_ROOT / "artifacts" / "test_cases" / "auto_annotate_in_place_guard"
+        tmp.mkdir(parents=True, exist_ok=True)
+        image_path = tmp / "specimen.png"
+        Image.new("RGB", (100, 80), color=(110, 120, 130)).save(image_path)
+
+        project_path = tmp / "project.json"
+        original_payload = {
+            "name": "demo",
+            "taxonomy": ["Head"],
+            "locator_scope": ["Head"],
+            "images": [str(image_path)],
+            "labels": {
+                str(image_path): {
+                    "parts": {},
+                    "status": "unlabeled",
+                    "genus": "Formica",
+                    "descriptions": {},
+                }
+            },
+            "scales": {},
+        }
+        project_path.write_text(json.dumps(original_payload, ensure_ascii=False), encoding="utf-8")
+        before = project_path.read_text(encoding="utf-8")
+
+        predictions_path = tmp / "predictions.json"
+        predictions_path.write_text(
+            json.dumps(
+                {
+                    "images": {
+                        str(image_path): {
+                            "polygons": {"Head": [[10, 10], [40, 10], [40, 35], [10, 35]]},
+                            "auto_boxes": {"Head": [10, 10, 40, 35]},
+                        }
+                    }
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(PROJECT_ROOT / "tools" / "agentic" / "auto_annotate_project.py"),
+                "--project",
+                str(project_path),
+                "--out",
+                str(project_path),
+                "--predictions",
+                str(predictions_path),
+            ],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("refusing_to_overwrite_legacy_project_json", result.stderr)
+        self.assertEqual(project_path.read_text(encoding="utf-8"), before)
+
 
 if __name__ == "__main__":
     unittest.main()

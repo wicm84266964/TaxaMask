@@ -19,6 +19,7 @@ from core.project import (  # noqa: E402
     AUTO_BOX_SOURCE_MODEL,
     ProjectManager,
 )
+from core.safe_io import atomic_write_json  # noqa: E402
 
 
 def _load_json(path: str) -> Any:
@@ -27,11 +28,21 @@ def _load_json(path: str) -> Any:
 
 
 def _write_json(path: str, payload: dict[str, Any]) -> None:
-    parent = os.path.dirname(os.path.abspath(path))
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2)
+    atomic_write_json(path, payload, indent=2, ensure_ascii=False)
+
+
+def _same_path(left: str, right: str) -> bool:
+    return os.path.normcase(os.path.normpath(os.path.abspath(left))) == os.path.normcase(os.path.normpath(os.path.abspath(right)))
+
+
+def _write_project_output(manager: ProjectManager, project_path: str, out_project: str) -> None:
+    if _same_path(project_path, out_project):
+        if manager.is_sqlite_project():
+            manager.save_project()
+            return
+        raise RuntimeError("refusing_to_overwrite_legacy_project_json; choose a distinct --out path or migrate to SQLite")
+    manager.current_project_path = out_project
+    _write_json(out_project, manager.legacy_json_payload(out_project))
 
 
 def _extract_prediction_payload(payload: Any) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -256,9 +267,9 @@ def _run_engine_predictions(manager: ProjectManager, confidence: float, only_new
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Apply batch auto-annotation predictions to a TaxaMask project JSON.")
-    parser.add_argument("--project", required=True, help="Input project JSON.")
-    parser.add_argument("--out", required=True, help="Output project JSON.")
+    parser = argparse.ArgumentParser(description="Apply batch auto-annotation predictions to a TaxaMask 2D project.")
+    parser.add_argument("--project", required=True, help="Input project JSON or SQLite manifest.")
+    parser.add_argument("--out", required=True, help="Output legacy project JSON snapshot, or the same SQLite manifest for in-place database update.")
     parser.add_argument("--predictions", default="", help="Prediction JSON. Omit only with --run-engine.")
     parser.add_argument("--run-engine", action="store_true", help="Run AntEngine.predict_full_pipeline for each project image.")
     parser.add_argument("--only-new", action="store_true", help="Do not overwrite already-labeled parts.")
@@ -275,7 +286,6 @@ def main() -> int:
 
     manager = ProjectManager()
     manager.load_project(project_path)
-    manager.current_project_path = out_project
 
     if args.run_engine:
         records = _run_engine_predictions(manager, float(args.confidence), only_new=bool(args.only_new), device=args.device)
@@ -294,10 +304,10 @@ def main() -> int:
             results.append({"image_path": raw_image_path, "detected_count": 0, "saved_count": 0, "rejected": [{"part": "", "reason": "image_not_found"}]})
             continue
         if image_path not in manager.project_data.get("images", []):
-            manager.add_images([image_path])
+            manager.add_images([image_path], save=False)
         results.append(_apply_payload(manager, image_path, record.get("payload"), bool(args.only_new), save_drafts_only=bool(args.draft_boxes_only)))
 
-    manager.save_project()
+    _write_project_output(manager, project_path, out_project)
     report = {
         "schema_version": "taxamask-auto-annotation-report-v1",
         "project_input": project_path,

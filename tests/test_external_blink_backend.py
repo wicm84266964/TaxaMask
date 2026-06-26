@@ -60,8 +60,7 @@ class ExternalBlinkBackendTests(unittest.TestCase):
             manager = ProjectManager()
             manager.create_project("external_blink_demo", tmp_dir)
             manager.add_taxonomy_part("Eye")
-            manager.current_project_path = str(work_dir / "project.json")
-            manager.save_project()
+            manager.save_project(force=True)
 
             runner = ExternalBlinkBackendRunner(
                 manager,
@@ -96,8 +95,7 @@ class ExternalBlinkBackendTests(unittest.TestCase):
             project = ProjectManager()
             project.create_project("external_blink_route", tmp_dir)
             project.add_taxonomy_part("Eye")
-            project.current_project_path = str(work_dir / "project.json")
-            project.save_project()
+            project.save_project(force=True)
 
             weights_dir = work_dir / "weights"
             manager = CascadingManager.__new__(CascadingManager)

@@ -129,7 +129,7 @@ For research work, CPU mode is best understood as an installation and small-proj
 
 ## Moving Projects Between Machines
 
-Project JSON files store image paths so labels, boxes, scales, and provenance stay attached to the right specimen image. When a project is moved from Windows to Linux/macOS, or when an image library is moved to another disk, use the GUI path-health tool before training:
+TaxaMask 1.2.0 stores new 2D morphology projects as a SQLite manifest plus a `.taxamask.sqlite` database. Image paths still live in the project record so labels, boxes, scales, and provenance stay attached to the right specimen image. Older legacy project JSON files may be opened for migration or exported as compatibility snapshots. When a project is moved from Windows to Linux/macOS, or when an image library is moved to another disk, use the GUI path-health tool before training:
 
 1. Open the project.
 2. Choose `File -> Check / Relocate Project Images`.

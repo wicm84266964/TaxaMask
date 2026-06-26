@@ -107,6 +107,8 @@ Key files:
 
 Main project data includes:
 
+- new 2D projects use SQLite manifest + `.taxamask.sqlite` database as the primary storage
+- legacy 2D JSON can be opened for migration or exported as compatibility snapshots; do not treat large legacy JSON as the safest production storage
 - image paths and groups
 - taxonomy / structures
 - labels and masks
@@ -126,6 +128,7 @@ Large-project behavior:
 - first image is not loaded automatically in large projects
 - Locator/SAM loading is deferred until the user requests annotation/training
 - batch prediction and delete operations should save efficiently and not repeatedly reload the first image
+- SQLite-backed 2D saves should flush changed project metadata/images instead of rewriting a large project JSON on every operation
 
 ## 6. VLM And SAM Draft Semantics
 

@@ -146,7 +146,7 @@ class LocatorScopeTests(unittest.TestCase):
                 ["Mandible/expert_v20260501_090000.pth"],
             )
 
-    def test_legacy_flat_route_migrates_to_project_v2_on_load_and_save(self):
+    def test_legacy_flat_route_migrates_to_project_v2_without_overwriting_source_json(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             project_path = Path(tmp_dir) / "legacy_routes.json"
             project_path.write_text(
@@ -178,6 +178,7 @@ class LocatorScopeTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            original_text = project_path.read_text(encoding="utf-8")
 
             pm = ProjectManager()
             pm.load_project(str(project_path))
@@ -191,8 +192,11 @@ class LocatorScopeTests(unittest.TestCase):
                 ["Mandible/expert_v20260501_090000.pth"],
             )
 
-            pm.save_project()
-            saved = json.loads(project_path.read_text(encoding="utf-8"))
+            with self.assertRaisesRegex(RuntimeError, "legacy_json_project_is_read_only"):
+                pm.save_project()
+            self.assertEqual(project_path.read_text(encoding="utf-8"), original_text)
+
+            saved = pm.legacy_json_payload(project_path)
             self.assertEqual(saved["cascade_routes"]["version"], "project-v2")
             saved_route = saved["cascade_routes"]["routes"][0]
             self.assertEqual(saved_route["appointed_expert"]["expert_id"], "Mandible/expert_v20260501_090000.pth")
@@ -476,7 +480,7 @@ class LocatorScopeTests(unittest.TestCase):
     def test_update_label_can_defer_disk_save(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             pm = ProjectManager()
-            pm.create_project("deferred_update", tmp_dir)
+            pm.create_project("deferred_update", tmp_dir, storage_backend="json")
 
             image_path = str(Path(tmp_dir) / "specimen.png")
             rel_image_path = Path(image_path).name
@@ -501,7 +505,8 @@ class LocatorScopeTests(unittest.TestCase):
             self.assertIn("Head", pm.project_data["labels"][image_path]["parts"])
 
             on_disk_before_flush = json.loads(Path(pm.current_project_path).read_text(encoding="utf-8"))
-            self.assertEqual(on_disk_before_flush["labels"][rel_image_path]["parts"], {})
+            disk_label_before_flush = on_disk_before_flush["labels"].get(rel_image_path, {})
+            self.assertNotIn("Head", disk_label_before_flush.get("parts", {}))
 
             pm.save_project()
             on_disk_after_flush = json.loads(Path(pm.current_project_path).read_text(encoding="utf-8"))
@@ -510,7 +515,7 @@ class LocatorScopeTests(unittest.TestCase):
     def test_delete_label_can_defer_disk_save(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             pm = ProjectManager()
-            pm.create_project("deferred_delete", tmp_dir)
+            pm.create_project("deferred_delete", tmp_dir, storage_backend="json")
 
             image_path = str(Path(tmp_dir) / "specimen.png")
             rel_image_path = Path(image_path).name

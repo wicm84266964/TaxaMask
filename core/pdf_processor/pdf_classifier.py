@@ -185,8 +185,38 @@ def _write_extract_result_payload(result_json_path: str, lines: List[str], issue
         "issue": issue,
         "extract_source": str(extract_source or "").strip() or "failed",
     }
-    with open(result_json_path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2)
+    _atomic_write_json_file(Path(result_json_path), payload)
+
+
+def _atomic_write_json_file(file_path: Path, payload: Dict[str, Any]) -> None:
+    file_path = Path(file_path)
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = file_path.with_name(f"{file_path.name}.tmp")
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        with open(tmp_path, "r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        if not isinstance(loaded, dict):
+            raise ValueError(f"json_root_not_object:{file_path}")
+        os.replace(tmp_path, file_path)
+        try:
+            dir_fd = os.open(str(file_path.parent), os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            pass
+    except Exception:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def _run_extract_lines_cli(pdf_path_text: str, num_lines: int, result_json_path: str) -> int:
@@ -421,6 +451,7 @@ class LLMScreenPDFClassifier:
         elif api_key and OpenAI is None:
             self.logger.warning("未检测到 openai SDK，LLM 筛选将降级为人工复核状态。")
         self.model = model.strip() if isinstance(model, str) else model
+        self.model = self._normalize_provider_model(self.model)
         self.logger.info(f"API protocol mode: {self.api_protocol}")
         self.logger.info(f"Resolved API base_url: {self.base_url}")
         self.logger.info(f"Resolved model: {self.model}")
@@ -908,11 +939,7 @@ class LLMScreenPDFClassifier:
         """使用大语言模型复查新种报道文献，带重试机制"""
         if not self.client:
             return False, "跳过LLM复查（未启用）"
-        
-        # 特殊测试用例：如果文件名包含"test_new_species"，则返回True
-        if "test_new_species" in filename:
-            return True, "判断：是\n理由：这是一个测试用例，用于验证LLM判断为'是'时的功能。"
-        
+
         max_retries = 3
         retry_delay = 1  # 初始重试延迟（秒）
         
@@ -1024,9 +1051,7 @@ class LLMScreenPDFClassifier:
         return f"run_{timestamp}_{suffix}"
 
     def _write_json_file(self, file_path: Path, payload: Dict[str, Any]) -> None:
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(file_path, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        _atomic_write_json_file(file_path, payload)
 
     def _save_batch_raw_response(self, batch_id: str, raw_response: str) -> str:
         raw_dir = self._get_v2_artifact_paths(self._get_active_output_folder())["batch_raw_responses"]
@@ -1718,10 +1743,32 @@ class LLMScreenPDFClassifier:
             return self.api_protocol
 
         model_text = str(self.model or "").strip().lower()
-        model_id = model_text.rsplit("/", 1)[-1]
-        if model_id.startswith("gpt-5"):
+        base_text = str(self.base_url or "").strip().lower()
+
+        if "gmn.chuangzuoli.com" in base_text and "gpt" in model_text:
             return "responses"
         return "chat_completions"
+
+    def _normalize_provider_model(self, raw_model: Any) -> Any:
+        if not isinstance(raw_model, str):
+            return raw_model
+
+        model_text = raw_model.strip()
+        if not model_text:
+            return model_text
+
+        base_text = str(self.base_url or "").lower()
+        if "gmn.chuangzuoli.com" not in base_text:
+            return model_text
+
+        normalized = model_text
+        if "/" in normalized:
+            prefix, suffix = normalized.split("/", 1)
+            if prefix.lower() == "gmn" and suffix:
+                normalized = suffix
+
+        normalized = normalized.lower()
+        return normalized
 
     def _extract_responses_text(self, response: Any) -> str:
         output_text = str(getattr(response, "output_text", "") or "").strip()
@@ -1857,12 +1904,25 @@ class LLMScreenPDFClassifier:
                         client = self.client
 
                 if protocol == "responses":
-                    result_text, finish_reason = self._call_responses_via_http(
-                        system_prompt=system_prompt,
-                        user_prompt=user_prompt,
-                        max_tokens=max_tokens,
-                        temperature=temperature,
-                    )
+                    if "gmn.chuangzuoli.com" in str(self.base_url or "").lower():
+                        result_text, finish_reason = self._call_responses_via_http(
+                            system_prompt=system_prompt,
+                            user_prompt=user_prompt,
+                            max_tokens=max_tokens,
+                            temperature=temperature,
+                        )
+                    else:
+                        response = client.responses.create(
+                            model=self.model,
+                            input=[
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": user_prompt},
+                            ],
+                            temperature=temperature,
+                            max_output_tokens=max_tokens,
+                        )
+                        result_text = self._extract_responses_text(response)
+                        finish_reason = self._extract_responses_finish_reason(response)
                 else:
                     response = client.chat.completions.create(
                         model=self.model,

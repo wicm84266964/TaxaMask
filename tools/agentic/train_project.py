@@ -17,14 +17,11 @@ if ANTSLEAP_ROOT not in sys.path:
 from core.dataset import TwoStageDataset  # noqa: E402
 from core.engine import AntEngine  # noqa: E402
 from core.project import ProjectManager  # noqa: E402
+from core.safe_io import atomic_write_json  # noqa: E402
 
 
 def _write_json(path: str, payload: dict[str, Any]) -> None:
-    parent = os.path.dirname(os.path.abspath(path))
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2)
+    atomic_write_json(path, payload, indent=2, ensure_ascii=False)
 
 
 def _collect_labeled_data(manager: ProjectManager) -> list[tuple[str, dict[str, Any]]]:
@@ -56,7 +53,7 @@ def _split_data(records: list[tuple[str, dict[str, Any]]], seed: int) -> tuple[l
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run a small headless TaxaMask training job.")
-    parser.add_argument("--project", required=True, help="Input project JSON.")
+    parser.add_argument("--project", required=True, help="Input project JSON or SQLite manifest.")
     parser.add_argument("--report", required=True, help="Output training report JSON.")
     parser.add_argument("--epochs", type=int, default=1, help="Epoch count.")
     parser.add_argument("--batch-size", type=int, default=2, help="Locator batch size.")

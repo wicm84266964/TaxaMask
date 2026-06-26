@@ -13,6 +13,7 @@ if ANTSLEAP_ROOT not in sys.path:
 
 from core.project import ProjectManager  # noqa: E402
 from core.project import MULTIMODAL_SAMPLE_SCHEMA_VERSION  # noqa: E402
+from core.safe_io import atomic_write_json  # noqa: E402
 
 
 def _ensure_parent(path: str) -> None:
@@ -22,9 +23,7 @@ def _ensure_parent(path: str) -> None:
 
 
 def _write_json(path: str, payload: dict[str, Any]) -> None:
-    _ensure_parent(path)
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2)
+    atomic_write_json(path, payload, indent=2, ensure_ascii=False)
 
 
 def _read_jsonl(path: str) -> list[dict[str, Any]]:
@@ -121,7 +120,7 @@ def _validate_export(output_dir: str) -> dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Export a TaxaMask project as a multimodal JSONL dataset.")
-    parser.add_argument("--project", required=True, help="Input TaxaMask project JSON.")
+    parser.add_argument("--project", required=True, help="Input TaxaMask project JSON or SQLite manifest.")
     parser.add_argument("--out", required=True, help="Output dataset directory.")
     parser.add_argument("--crop-size", type=int, default=512, help="Local crop size in pixels.")
     parser.add_argument("--global-size", type=int, default=1024, help="Max global image size in pixels.")

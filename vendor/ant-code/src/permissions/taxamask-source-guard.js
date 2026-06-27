@@ -1,4 +1,5 @@
 import path from "node:path";
+import { approvalKeyFor } from "./approval-keys.js";
 
 export const TAXAMASK_AUTH_NONE = "none";
 export const TAXAMASK_AUTH_ADAPTER = "taxamask.adapter";
@@ -340,6 +341,16 @@ function allowDecision(scope, target) {
 }
 
 function approvalDecision(scope, target, reason, title, message) {
+  const approvalKey = approvalKeyFor({
+    toolName: "write_file",
+    input: { path: target },
+    decision: {
+      sensitive: true,
+      outsideWorkspace: false,
+      targetPath: target,
+      resolvedPath: target
+    }
+  });
   return {
     blocked: true,
     requiresApproval: true,
@@ -347,7 +358,8 @@ function approvalDecision(scope, target, reason, title, message) {
     target,
     reason,
     title,
-    message
+    message,
+    approvalKey
   };
 }
 
@@ -437,3 +449,4 @@ function isFilesystemWriteMcpCall(input) {
   return server.includes("filesystem")
     && /^(write_file|edit_file|create_directory|move_file|delete_file)$/i.test(tool);
 }
+

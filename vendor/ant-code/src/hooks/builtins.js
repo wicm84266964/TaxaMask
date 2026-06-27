@@ -126,6 +126,7 @@ function denyTaxaMaskSourceWrites(context) {
         message: decision.message,
         target: decision.target,
         reason: decision.reason,
+        approvalKey: decision.approvalKey,
         taxamask: {
           scope: decision.scope,
           title: decision.title,
@@ -178,3 +179,5 @@ function safePathLabel(candidate) {
   const normalized = String(candidate ?? "").replace(/\\/g, "/");
   return path.basename(normalized) || normalized;
 }
+
+

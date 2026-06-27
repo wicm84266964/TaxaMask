@@ -13,8 +13,23 @@ import { loadSkills, readSkill, runSkill } from "../skills/registry.js";
 import { BUILT_IN_TOOLS } from "./definitions.js";
 import { documentIntakeTool } from "./document-tools.js";
 import { editFileTool, globTool, grepTool, listFilesTool, readFileTool, writeFileTool } from "./file-tools.js";
-import { gitDiffTool, gitStatusTool } from "./git-tools.js";
-import { bashTool, powershellTool } from "./shell-tools.js";
+import {
+  gitAddTool,
+  gitBranchListTool,
+  gitBranchTool,
+  gitCommitTool,
+  gitDiffTool,
+  gitLogTool,
+  gitShowTool,
+  gitStashListTool,
+  gitStashTool,
+  gitStatusTool,
+  gitTagListTool,
+  gitTagTool
+} from "./git-tools.js";
+import { rgCountTool, rgFilesTool, rgFilesWithMatchesTool, rgSearchTool } from "./rg-tools.js";
+import { tsDiagnosticsTool, tsFindDefinitionTool, tsFindReferencesTool, tsSymbolsTool } from "./semantic-tools.js";
+import { backgroundShellTool, bashTool, powershellTool } from "./shell-tools.js";
 import { networkHostsForWebTool, webFetchTool, webSearchTool } from "./web-tools.js";
 import { createWorkflowState, planUpdateTool, recordFileChange, recordValidation, todoReadTool, todoWriteTool } from "./workflow-tools.js";
 
@@ -23,19 +38,38 @@ const HANDLERS = Object.freeze({
   list_files: listFilesTool,
   glob: globTool,
   grep: grepTool,
+  rg_search: rgSearchTool,
+  rg_files: rgFilesTool,
+  rg_files_with_matches: rgFilesWithMatchesTool,
+  rg_count: rgCountTool,
+  ts_symbols: tsSymbolsTool,
+  ts_diagnostics: tsDiagnosticsTool,
+  ts_find_definition: tsFindDefinitionTool,
+  ts_find_references: tsFindReferencesTool,
   git_status: gitStatusTool,
   git_diff: gitDiffTool,
+  git_log: gitLogTool,
+  git_show: gitShowTool,
+  git_branch_list: gitBranchListTool,
+  git_stash_list: gitStashListTool,
+  git_tag_list: gitTagListTool,
+  git_add: gitAddTool,
+  git_commit: gitCommitTool,
+  git_branch: gitBranchTool,
+  git_stash: gitStashTool,
+  git_tag: gitTagTool,
   web_fetch: webFetchTool,
   web_search: webSearchTool,
   document_intake: documentIntakeTool,
   write_file: writeFileTool,
   edit_file: editFileTool,
   powershell: powershellTool,
-  bash: bashTool
+  bash: bashTool,
+  background_shell: backgroundShellTool
 });
 
 /**
- * @param {{ cwd: string; config?: Record<string, any>; env?: NodeJS.ProcessEnv; policy?: Record<string, any>; workflowState?: ReturnType<typeof createWorkflowState>; parentSessionId?: string; hooksTrusted?: boolean; allowedSkills?: string[]; allowedMcpServers?: string[]; signal?: AbortSignal; mcpRuntime?: { callTool: (serverName: string, toolName: string, args?: Record<string, any>, signal?: AbortSignal) => Promise<Record<string, any>> }; approve?: (request: { toolName: string; input: Record<string, any>; decision: Record<string, any>; definition: Record<string, any> }) => Promise<boolean>; askUser?: (input: Record<string, any>) => Promise<Record<string, any>>; onBackgroundAgentEvent?: (event: Record<string, any>) => void | Promise<void> }} options
+ * @param {{ cwd: string; config?: Record<string, any>; env?: NodeJS.ProcessEnv; policy?: Record<string, any>; workflowState?: ReturnType<typeof createWorkflowState>; parentSessionId?: string; backgroundParentSessionId?: string; hooksTrusted?: boolean; allowedSkills?: string[]; allowedMcpServers?: string[]; signal?: AbortSignal; mcpRuntime?: { callTool: (serverName: string, toolName: string, args?: Record<string, any>, signal?: AbortSignal) => Promise<Record<string, any>> }; approve?: (request: { toolName: string; input: Record<string, any>; decision: Record<string, any>; definition: Record<string, any> }) => Promise<boolean>; askUser?: (input: Record<string, any>) => Promise<Record<string, any>>; onBackgroundAgentEvent?: (event: Record<string, any>) => void | Promise<void>; onBackgroundTerminalEvent?: (event: Record<string, any>) => void | Promise<void> }} options
  */
 export function createToolRuntime(options) {
   const tools = new Map(BUILT_IN_TOOLS.map((tool) => [tool.name, tool]));
@@ -68,33 +102,12 @@ export function createToolRuntime(options) {
 
       const beforeHook = await emitToolHook(options, "tool.before", name, input, definition);
       if (beforeHook.blocked) {
-        const taxamaskPermissionScope = await resolveTaxaMaskHookApproval(options, name, input, definition, beforeHook);
-        if (taxamaskPermissionScope) {
-          const approvedBeforeHook = await emitToolHook(options, "tool.before", name, input, definition, null, {
-            taxamaskPermissionScope
-          });
-          if (!approvedBeforeHook.blocked) {
-            input = { ...input, taxamaskPermissionScope };
-          } else {
-            return {
-              ok: false,
-              blocked: true,
-              error: approvedBeforeHook.blockingError ?? { code: "HOOK_BLOCKED", message: "Tool blocked by hook" },
-              hook: summarizeHookBlock(approvedBeforeHook)
-            };
-          }
-        } else {
-          const decision = taxamaskApprovalDecision(beforeHook);
-          if (decision) {
-            await emitPermissionDeniedHook(options, name, input, definition, decision);
-          }
-          return {
-            ok: false,
-            blocked: true,
-            error: beforeHook.blockingError ?? { code: "HOOK_BLOCKED", message: "Tool blocked by hook" },
-            hook: summarizeHookBlock(beforeHook)
-          };
-        }
+        return {
+          ok: false,
+          blocked: true,
+          error: beforeHook.blockingError ?? { code: "HOOK_BLOCKED", message: "Tool blocked by hook" },
+          hook: summarizeHookBlock(beforeHook)
+        };
       }
       if (options.signal?.aborted) {
         return finishTool(options, name, input, definition, interruptedToolExecution(name, input, definition));
@@ -229,6 +242,16 @@ export function createToolRuntime(options) {
       if (!handler) {
         return finishTool(options, name, input, definition, { ok: false, error: { code: "TOOL_NOT_IMPLEMENTED", message: `${name} is scaffolded but not implemented yet` } });
       }
+      if ((name === "powershell" || name === "bash") && isKnownLongTerminalCommand(input.command)) {
+        return finishTool(options, name, input, definition, {
+          ok: false,
+          blocked: true,
+          error: {
+            code: "BACKGROUND_SHELL_REQUIRED",
+            message: "This discover command is a known long-running terminal task. Use background_shell with the same command, a stable taskId, and report the log paths instead of running it in the foreground shell."
+          }
+        });
+      }
 
       try {
         const result = await handler({
@@ -236,6 +259,12 @@ export function createToolRuntime(options) {
           cwd: options.cwd,
           config: options.config,
           env: options.env,
+          parentSessionId: name === "background_shell"
+            ? options.backgroundParentSessionId ?? options.parentSessionId
+            : options.parentSessionId,
+          onBackgroundTerminalEvent: name === "background_shell"
+            ? options.onBackgroundTerminalEvent
+            : undefined,
           signal: options.signal,
           policy: {
             ...(options.policy ?? {}),
@@ -243,6 +272,16 @@ export function createToolRuntime(options) {
             approvedOutsideWorkspace: approvedByUser && decision.outsideWorkspace === true
           }
         });
+        if (name === "background_shell" && result?.started === true) {
+          await notifyBackgroundTerminalEvent(options, {
+            type: "background_terminal_started",
+            taskId: result.taskId,
+            pid: result.pid,
+            stdoutPath: result.stdoutPath,
+            stderrPath: result.stderrPath,
+            command: result.command
+          });
+        }
         if (options.signal?.aborted || result?.interrupted === true) {
           recordToolEffect(workflowState, name, input, result);
           if (name === "write_file" || (name === "edit_file" && result.edited !== false)) {
@@ -578,7 +617,7 @@ function interruptedToolExecution(name, input, _definition = {}, result = null) 
   };
 }
 
-async function emitToolHook(options, event, name, input, definition, execution = null, extraPayload = {}) {
+async function emitToolHook(options, event, name, input, definition, execution = null) {
   return runHooks({
     config: options.config,
     cwd: options.cwd,
@@ -595,8 +634,7 @@ async function emitToolHook(options, event, name, input, definition, execution =
       blocked: execution?.blocked,
       decision: execution?.decision,
       error: execution?.error,
-      result: summarizeToolResultForHook(execution?.result),
-      ...extraPayload
+      result: summarizeToolResultForHook(execution?.result)
     }
   });
 }
@@ -617,43 +655,6 @@ async function emitPermissionDeniedHook(options, name, input, definition, decisi
       decision
     }
   });
-}
-
-async function resolveTaxaMaskHookApproval(options, name, input, definition, hookResult) {
-  const decision = taxamaskApprovalDecision(hookResult);
-  if (!decision || typeof options.approve !== "function") {
-    return null;
-  }
-  const approved = await options.approve({
-    toolName: name,
-    input,
-    definition,
-    decision
-  });
-  if (!approved) {
-    await emitPermissionDeniedHook(options, name, input, definition, decision);
-    return null;
-  }
-  return decision.taxamask.scope;
-}
-
-function taxamaskApprovalDecision(hookResult) {
-  const error = hookResult?.blockingError ?? hookResult?.results?.find((result) => result.blocked)?.error ?? {};
-  const taxamask = error?.taxamask ?? {};
-  const scope = typeof taxamask.scope === "string" ? taxamask.scope : "";
-  if (!taxamask.requiresApproval || !scope) {
-    return null;
-  }
-  return {
-    decision: "ask",
-    reason: error.reason ?? error.message ?? "TaxaMask guarded action requires confirmation",
-    targetPath: error.target,
-    taxamask: {
-      scope,
-      title: taxamask.title ?? "TaxaMask permission",
-      source: "hook"
-    }
-  };
 }
 
 async function emitFileChangedHook(options, name, input, result) {
@@ -783,7 +784,9 @@ async function runSkillSubagent(options, skill, message) {
     fullAccess: Boolean(options.policy?.fullAccess),
     workflowState: options.workflowState,
     approvalCallback: options.approve,
+    onBackgroundTerminalEvent: options.onBackgroundTerminalEvent,
     parentSessionId: options.parentSessionId,
+    backgroundParentSessionId: options.backgroundParentSessionId ?? options.parentSessionId,
     hooksTrusted: options.hooksTrusted,
     profileName,
     allowHiddenProfile: true,
@@ -866,7 +869,9 @@ async function runAgentTool(options, input, definition) {
     fullAccess: Boolean(options.policy?.fullAccess),
     workflowState: options.workflowState,
     approvalCallback: options.approve,
+    onBackgroundTerminalEvent: options.onBackgroundTerminalEvent,
     parentSessionId: options.parentSessionId,
+    backgroundParentSessionId: options.backgroundParentSessionId ?? options.parentSessionId,
     hooksTrusted: options.hooksTrusted,
     taskId: typeof input.taskId === "string" && input.taskId.trim() ? input.taskId.trim() : undefined,
     profileName: profile.name,
@@ -960,7 +965,9 @@ async function startBackgroundAgentTool(options, input, definition, profile, run
     fullAccess: Boolean(options.policy?.fullAccess),
     workflowState: options.workflowState,
     approvalCallback: options.approve,
+    onBackgroundTerminalEvent: options.onBackgroundTerminalEvent,
     parentSessionId: options.parentSessionId,
+    backgroundParentSessionId: options.backgroundParentSessionId ?? options.parentSessionId,
     groupId,
     hooksTrusted: options.hooksTrusted,
     taskId,
@@ -1140,6 +1147,17 @@ async function notifyBackgroundAgentEvent(options, event) {
     await options.onBackgroundAgentEvent(event);
   } catch {
     // UI notifications must not break background agent completion.
+  }
+}
+
+async function notifyBackgroundTerminalEvent(options, event) {
+  if (typeof options.onBackgroundTerminalEvent !== "function") {
+    return;
+  }
+  try {
+    await options.onBackgroundTerminalEvent(event);
+  } catch {
+    // UI notifications must not break tool execution.
   }
 }
 
@@ -1374,6 +1392,11 @@ function normalizeToolInput(name, input = {}) {
     }
   }
   return input;
+}
+
+function isKnownLongTerminalCommand(command) {
+  const text = String(command ?? "").toLowerCase();
+  return text.includes("antscan_downloader.cli") && /\bdiscover\b/.test(text);
 }
 
 function normalizeLooseHttpUrl(value) {

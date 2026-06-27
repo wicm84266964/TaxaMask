@@ -56,6 +56,151 @@ export const BUILT_IN_TOOLS = Object.freeze([
     }
   },
   {
+    name: "rg_search",
+    description: "Search workspace files with local ripgrep using regex, glob filters, context lines, and bounded structured results. Falls back only by explicit caller choice; the legacy grep tool remains unchanged.",
+    risk: "read",
+    supportsAbort: true,
+    inputSchema: {
+      type: "object",
+      required: ["pattern"],
+      properties: {
+        pattern: { type: "string" },
+        path: { type: "string" },
+        glob: { type: "array" },
+        ignoreCase: { type: "boolean" },
+        caseSensitive: { type: "boolean" },
+        fixedStrings: { type: "boolean" },
+        wordRegexp: { type: "boolean" },
+        multiline: { type: "boolean" },
+        hidden: { type: "boolean" },
+        noIgnore: { type: "boolean" },
+        beforeContext: { type: "number" },
+        afterContext: { type: "number" },
+        maxResults: { type: "number" },
+        timeoutMs: { type: "number" }
+      }
+    }
+  },
+  {
+    name: "rg_files",
+    description: "List workspace files with local ripgrep, honoring .gitignore by default and supporting glob filters.",
+    risk: "read",
+    supportsAbort: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string" },
+        glob: { type: "array" },
+        hidden: { type: "boolean" },
+        noIgnore: { type: "boolean" },
+        maxResults: { type: "number" },
+        timeoutMs: { type: "number" }
+      }
+    }
+  },
+  {
+    name: "rg_files_with_matches",
+    description: "Return only workspace file paths that match a ripgrep pattern.",
+    risk: "read",
+    supportsAbort: true,
+    inputSchema: {
+      type: "object",
+      required: ["pattern"],
+      properties: {
+        pattern: { type: "string" },
+        path: { type: "string" },
+        glob: { type: "array" },
+        ignoreCase: { type: "boolean" },
+        fixedStrings: { type: "boolean" },
+        hidden: { type: "boolean" },
+        noIgnore: { type: "boolean" },
+        maxResults: { type: "number" },
+        timeoutMs: { type: "number" }
+      }
+    }
+  },
+  {
+    name: "rg_count",
+    description: "Count ripgrep matches or matching files in the workspace without returning every match.",
+    risk: "read",
+    supportsAbort: true,
+    inputSchema: {
+      type: "object",
+      required: ["pattern"],
+      properties: {
+        pattern: { type: "string" },
+        path: { type: "string" },
+        mode: { type: "string", enum: ["matches", "files"] },
+        glob: { type: "array" },
+        ignoreCase: { type: "boolean" },
+        fixedStrings: { type: "boolean" },
+        hidden: { type: "boolean" },
+        noIgnore: { type: "boolean" },
+        timeoutMs: { type: "number" }
+      }
+    }
+  },
+  {
+    name: "ts_symbols",
+    description: "List TypeScript/JavaScript symbols for a workspace source file using the local TypeScript language service.",
+    risk: "read",
+    supportsAbort: false,
+    inputSchema: {
+      type: "object",
+      required: ["file"],
+      properties: {
+        file: { type: "string" },
+        maxResults: { type: "number" }
+      }
+    }
+  },
+  {
+    name: "ts_diagnostics",
+    description: "Return bounded TypeScript/JavaScript syntactic and semantic diagnostics for a file or workspace.",
+    risk: "read",
+    supportsAbort: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        file: { type: "string" },
+        maxResults: { type: "number" },
+        maxFiles: { type: "number" }
+      }
+    }
+  },
+  {
+    name: "ts_find_definition",
+    description: "Find the true TypeScript/JavaScript definition at a 1-based file line and column.",
+    risk: "read",
+    supportsAbort: false,
+    inputSchema: {
+      type: "object",
+      required: ["file", "line", "column"],
+      properties: {
+        file: { type: "string" },
+        line: { type: "number" },
+        column: { type: "number" },
+        maxResults: { type: "number" }
+      }
+    }
+  },
+  {
+    name: "ts_find_references",
+    description: "Find true TypeScript/JavaScript references at a 1-based file line and column.",
+    risk: "read",
+    supportsAbort: false,
+    inputSchema: {
+      type: "object",
+      required: ["file", "line", "column"],
+      properties: {
+        file: { type: "string" },
+        line: { type: "number" },
+        column: { type: "number" },
+        maxResults: { type: "number" }
+      }
+    }
+  },
+  {
     name: "git_status",
     description: "Show local git status without shell interpolation.",
     risk: "read",
@@ -77,6 +222,152 @@ export const BUILT_IN_TOOLS = Object.freeze([
       properties: {
         pathspecs: { type: "array" },
         stat: { type: "boolean" }
+      }
+    }
+  },
+  {
+    name: "git_log",
+    description: "Show bounded local git commit history without shell interpolation.",
+    risk: "read",
+    supportsAbort: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        maxCount: { type: "number" },
+        path: { type: "string" },
+        author: { type: "string" },
+        grep: { type: "string" },
+        since: { type: "string" }
+      }
+    }
+  },
+  {
+    name: "git_show",
+    description: "Show a bounded local git object, commit, tag, or file at a revision without shell interpolation.",
+    risk: "read",
+    supportsAbort: true,
+    inputSchema: {
+      type: "object",
+      required: ["revision"],
+      properties: {
+        revision: { type: "string" },
+        path: { type: "string" },
+        stat: { type: "boolean" },
+        maxBytes: { type: "number" }
+      }
+    }
+  },
+  {
+    name: "git_branch_list",
+    description: "List local and remote git branches with current/upstream metadata.",
+    risk: "read",
+    supportsAbort: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        all: { type: "boolean" },
+        maxCount: { type: "number" }
+      }
+    }
+  },
+  {
+    name: "git_stash_list",
+    description: "List local git stash entries without shell interpolation.",
+    risk: "read",
+    supportsAbort: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        maxCount: { type: "number" }
+      }
+    }
+  },
+  {
+    name: "git_tag_list",
+    description: "List local git tags without shell interpolation.",
+    risk: "read",
+    supportsAbort: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        pattern: { type: "string" },
+        maxCount: { type: "number" }
+      }
+    }
+  },
+  {
+    name: "git_add",
+    description: "Stage explicit workspace paths for git commit after write approval. Does not accept broad '.' staging.",
+    risk: "write",
+    supportsAbort: true,
+    inputSchema: {
+      type: "object",
+      required: ["paths"],
+      properties: {
+        paths: { type: "array" }
+      }
+    }
+  },
+  {
+    name: "git_commit",
+    description: "Create a git commit from already staged changes after write approval.",
+    risk: "write",
+    supportsAbort: true,
+    inputSchema: {
+      type: "object",
+      required: ["message"],
+      properties: {
+        message: { type: "string" },
+        body: { type: "string" }
+      }
+    }
+  },
+  {
+    name: "git_branch",
+    description: "Create, switch, or delete local git branches after write approval. Delete requires explicit force=true.",
+    risk: "write",
+    supportsAbort: true,
+    inputSchema: {
+      type: "object",
+      required: ["action", "name"],
+      properties: {
+        action: { type: "string", enum: ["create", "switch", "delete"] },
+        name: { type: "string" },
+        startPoint: { type: "string" },
+        force: { type: "boolean" }
+      }
+    }
+  },
+  {
+    name: "git_stash",
+    description: "Run explicit git stash actions after write approval. Supports push, apply, pop, drop, and show.",
+    risk: "write",
+    supportsAbort: true,
+    inputSchema: {
+      type: "object",
+      required: ["action"],
+      properties: {
+        action: { type: "string", enum: ["push", "apply", "pop", "drop", "show"] },
+        ref: { type: "string" },
+        message: { type: "string" },
+        includeUntracked: { type: "boolean" },
+        paths: { type: "array" }
+      }
+    }
+  },
+  {
+    name: "git_tag",
+    description: "Create or delete local git tags after write approval.",
+    risk: "write",
+    supportsAbort: true,
+    inputSchema: {
+      type: "object",
+      required: ["action", "name"],
+      properties: {
+        action: { type: "string", enum: ["create", "delete"] },
+        name: { type: "string" },
+        target: { type: "string" },
+        message: { type: "string" }
       }
     }
   },
@@ -136,6 +427,22 @@ export const BUILT_IN_TOOLS = Object.freeze([
       properties: {
         command: { type: "string" },
         timeoutMs: { type: "number" }
+      }
+    }
+  },
+  {
+    name: "background_shell",
+    description: "Start a long-running terminal command as a registered background task with stdout/stderr logs, then return immediately. Use for discover, crawls, downloads, renders, servers, or other long jobs the user should be able to monitor and cancel while continuing the conversation.",
+    risk: "execute",
+    supportsAbort: false,
+    inputSchema: {
+      type: "object",
+      required: ["command"],
+      properties: {
+        command: { type: "string" },
+        title: { type: "string" },
+        taskId: { type: "string" },
+        logDir: { type: "string" }
       }
     }
   },

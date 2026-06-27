@@ -99,6 +99,7 @@ export async function createSession(options) {
     messages: resumedMessages.slice(),
     transcriptMessages: resumedTranscriptMessages.slice(),
     transcriptArchive: normalizeTranscriptArchiveState(resumed?.transcriptArchive),
+    modelContextArchive: normalizeTranscriptArchiveState(resumed?.modelContextArchive),
     usage,
     lastProviderUsage: usage.last ?? null,
     title: resumed?.title ?? null,
@@ -226,8 +227,10 @@ export async function runSessionTurn(session, options) {
     approve: options.approvalCallback,
     askUser: options.userInputCallback,
     parentSessionId: session.id,
+    backgroundParentSessionId: session.id,
     hooksTrusted: options.hooksTrusted,
     onBackgroundAgentEvent: (event) => emitEvent(eventOptions, event),
+    onBackgroundTerminalEvent: (event) => emitEvent(eventOptions, event),
     policy: {
       networkMode: session.config.networkMode,
       allowedHosts: session.config.allowedHosts,
@@ -279,7 +282,7 @@ export async function runSessionTurn(session, options) {
   if (!gateway.configured) {
     finalOutput = [
       "Print mode is scaffolded.",
-      "Set LAB_MODEL_GATEWAY_URL to enable model turns through the lab gateway.",
+      "Set LAB_MODEL_GATEWAY_URL to enable model turns through the configured gateway.",
       `Received prompt bytes: ${Buffer.byteLength(options.prompt, "utf8")}`
     ].join("\n");
     await emitEvent(eventOptions, {
@@ -1745,10 +1748,12 @@ async function resolveResumeMetadata(options) {
 
   const restoredTranscriptMessages = restoreRecentTranscriptMessages(result.metadata.transcript?.messages);
   const transcriptArchive = normalizeTranscriptArchiveState(result.metadata.transcript?.archive);
+  const modelContextArchive = normalizeTranscriptArchiveState(result.metadata.transcript?.modelArchive);
   const persistedContextWindow = result.metadata.transcript?.contextWindow ?? null;
   const restoredContext = await restoreResumeContextMessages({
     store,
     archive: transcriptArchive,
+    modelArchive: modelContextArchive,
     metadataMessages: result.metadata.transcript?.contextMessages ?? result.metadata.transcript?.messages,
     context: options.config.context,
     allowArchive: options.preferFullContext === true || !hasPersistedCompaction(persistedContextWindow),
@@ -1783,6 +1788,7 @@ async function resolveResumeMetadata(options) {
     messages: restoredContextMessages,
     transcriptMessages: restoredTranscriptMessages,
     transcriptArchive,
+    modelContextArchive,
     contextWindow,
     fullContextRestored: restoredContext.fromArchive
   };
@@ -1855,6 +1861,7 @@ async function appendSessionMessages(session, data, fallbackText, options = {}) 
   const transcriptMessages = Array.isArray(options.transcriptMessages) ? options.transcriptMessages : turnMessages;
   session.messages.push(...turnMessages, assistantMessage);
   appendTranscriptMessages(session, [...transcriptMessages, assistantMessage]);
+  appendModelContextArchiveMessages(session, [...turnMessages, assistantMessage]);
 
   return compactSessionContextWithModel(session, {
     reason: "automatic",
@@ -1891,12 +1898,14 @@ async function persistSessionMetadata(store, metadata, output, status, session, 
   metadata.workflow = summarizeWorkflow(session.workflow);
   metadata.context = summarizeContextWindow(session);
   const transcriptArchive = await persistTranscriptArchive(store, session);
+  const modelArchive = await persistModelContextArchive(store, session);
   metadata.transcript = {
     version: 2,
     messages: persistableTranscriptMessages(transcriptMessagesForPersistence(session)),
     contextMessages: persistableContextMessages(limitResumeContextMessages(session.messages, session.config.context)),
     contextWindow: persistableContextWindow(session.contextWindow),
-    archive: persistableTranscriptArchive(transcriptArchive)
+    archive: persistableTranscriptArchive(transcriptArchive),
+    modelArchive: persistableTranscriptArchive(modelArchive)
   };
 
   const path = await store.writeMetadata(metadata);
@@ -2022,6 +2031,17 @@ async function persistTranscriptArchive(store, session) {
   return session.transcriptArchive;
 }
 
+async function persistModelContextArchive(store, session) {
+  session.modelContextArchive = normalizeTranscriptArchiveState(session.modelContextArchive);
+  const pending = session.modelContextArchive.pendingMessages;
+  const archive = await store.writeTranscriptChunks(session.id, pending, session.modelContextArchive, {
+    suffix: "model-context"
+  });
+  session.modelContextArchive = normalizeTranscriptArchiveState(archive);
+  session.modelContextArchive.pendingMessages = [];
+  return session.modelContextArchive;
+}
+
 function appendTranscriptMessages(session, messages) {
   if (!Array.isArray(messages) || messages.length === 0) {
     return;
@@ -2034,6 +2054,15 @@ function appendTranscriptMessages(session, messages) {
   session.transcriptMessages = limitTranscriptMemory(session.transcriptMessages);
   session.transcriptArchive = normalizeTranscriptArchiveState(session.transcriptArchive);
   session.transcriptArchive.pendingMessages.push(...persistableContextMessages(cloned));
+}
+
+function appendModelContextArchiveMessages(session, messages) {
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return;
+  }
+  const cloned = messages.map((message) => cloneTranscriptMessage(message));
+  session.modelContextArchive = normalizeTranscriptArchiveState(session.modelContextArchive);
+  session.modelContextArchive.pendingMessages.push(...persistableContextMessages(cloned));
 }
 
 function limitTranscriptMemory(messages) {
@@ -2239,12 +2268,69 @@ async function restoreResumeContextMessages(input) {
     return { messages: persisted, fromArchive: false };
   }
   const archived = await restoreArchivedContextMessages(input.store, input.archive, input.context);
+  const modelArchived = await restoreArchivedContextMessages(input.store, input.modelArchive, input.context);
+  const bestArchived = mergeModelArchiveIntoBase(archived, modelArchived, input.context);
   if (input.preferArchive === true && archived.length > 0) {
-    return { messages: archived, fromArchive: true };
+    return { messages: bestArchived.length > 0 ? bestArchived : archived, fromArchive: true };
   }
-  return archived.length > persisted.length
-    ? { messages: archived, fromArchive: true }
+  if (input.preferArchive === true && modelArchived.length > 0) {
+    return { messages: modelArchived, fromArchive: true };
+  }
+  const archiveCandidate = bestArchived.length > 0 ? bestArchived : archived.length > 0 ? archived : modelArchived;
+  return archiveCandidate.length > persisted.length
+    ? { messages: archiveCandidate, fromArchive: true }
     : { messages: persisted, fromArchive: false };
+}
+
+function mergeModelArchiveIntoBase(baseMessages, modelMessages, context = {}) {
+  const base = Array.isArray(baseMessages) ? baseMessages.filter(Boolean) : [];
+  const model = Array.isArray(modelMessages) ? modelMessages.filter(Boolean) : [];
+  if (model.length === 0) {
+    return base;
+  }
+  if (base.length === 0) {
+    return model;
+  }
+  const first = model[0];
+  if (first?.role === "user") {
+    const index = findLastMessageIndex(base, first);
+    if (index >= 0) {
+      return restorePersistedContextMessages(base.slice(0, index).concat(model), context);
+    }
+  }
+  const overlap = largestMessageOverlap(base, model);
+  return restorePersistedContextMessages(base.concat(model.slice(overlap)), context);
+}
+
+function findLastMessageIndex(messages, target) {
+  const key = stableMessageKey(target);
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (stableMessageKey(messages[index]) === key) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function largestMessageOverlap(left, right) {
+  const max = Math.min(left.length, right.length);
+  for (let size = max; size > 0; size -= 1) {
+    let same = true;
+    for (let offset = 0; offset < size; offset += 1) {
+      if (stableMessageKey(left[left.length - size + offset]) !== stableMessageKey(right[offset])) {
+        same = false;
+        break;
+      }
+    }
+    if (same) {
+      return size;
+    }
+  }
+  return 0;
+}
+
+function stableMessageKey(message) {
+  return JSON.stringify(message ?? null);
 }
 
 function clearPersistedContextSummary(contextWindow) {

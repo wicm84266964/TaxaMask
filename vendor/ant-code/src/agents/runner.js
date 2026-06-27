@@ -9,6 +9,8 @@ import { getToolDefinitions } from "../tools/definitions.js";
 import { serializeToolResult } from "../tools/result.js";
 import { createToolRuntime } from "../tools/runtime.js";
 import { estimatePromptPayload } from "../core/context-window.js";
+import { buildValidationMemory, formatValidationMemory } from "../core/validation-memory.js";
+import { suggestValidationCommands } from "../core/validation-suggestions.js";
 import { accumulateProviderUsage } from "../core/provider-usage.js";
 import { createBudgetTracker, checkBudget, recordBudgetToolResult, resolveAgentBudget, resolveAgentModel } from "./budget.js";
 import { buildContextPack, formatContextPack, hasWriteScope } from "./context-pack.js";
@@ -35,8 +37,10 @@ const TASK_HEARTBEAT_INTERVAL_MS = 10_000;
  *   fullAccess?: boolean;
  *   workflowState?: Parameters<typeof createToolRuntime>[0]["workflowState"];
  *   approvalCallback?: Parameters<typeof createToolRuntime>[0]["approve"];
+ *   onBackgroundTerminalEvent?: Parameters<typeof createToolRuntime>[0]["onBackgroundTerminalEvent"];
  *   signal?: AbortSignal;
  *   groupId?: string;
+ *   backgroundParentSessionId?: string;
  *   routeDecision?: Record<string, any>;
  *   contextPack?: Record<string, any>;
  *   writeScope?: unknown;
@@ -79,6 +83,11 @@ export async function runSubagent(options) {
     contextPack: options.contextPack,
     writeScope: options.writeScope,
     acceptance: options.acceptance,
+    validationMemory: await buildAgentValidationMemoryContext({
+      cwd: options.cwd,
+      profile,
+      workflowState: options.workflowState
+    }),
     cwd: options.cwd
   });
   const budget = resolveAgentBudget({
@@ -238,6 +247,18 @@ export async function runSubagent(options) {
   };
 }
 
+async function buildAgentValidationMemoryContext(options) {
+  if (options.profile?.name !== "reviewer" || !options.workflowState) {
+    return [];
+  }
+  const suggestions = await suggestValidationCommands(options.cwd);
+  const memory = buildValidationMemory({ workflow: options.workflowState, suggestions });
+  return [
+    formatValidationMemory(memory, { includeHistory: false, maxItems: 4 }),
+    "Reviewer instruction: use this as validation evidence only. Do not trigger verifier or run validation automatically; report missing, stale, or failed checks as review findings or residual risk."
+  ];
+}
+
 function startTaskHeartbeat(taskStore, taskId) {
   if (!taskStore || typeof taskStore.updateTask !== "function" || !taskId) {
     return () => {};
@@ -304,10 +325,12 @@ async function runModelSubagent(options) {
     workflowState: options.workflowState,
     approve: options.approvalCallback,
     parentSessionId: options.childSessionId,
+    backgroundParentSessionId: options.backgroundParentSessionId ?? options.parentSessionId ?? options.childSessionId,
     hooksTrusted: options.hooksTrusted,
     policy: createAgentPolicy(options),
     allowedSkills: options.profile.skills,
-    allowedMcpServers: options.profile.mcpServers
+    allowedMcpServers: options.profile.mcpServers,
+    onBackgroundTerminalEvent: options.onBackgroundTerminalEvent
   });
   const messages = [
     {

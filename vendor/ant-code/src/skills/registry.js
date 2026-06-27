@@ -219,20 +219,24 @@ export async function formatSkillDetail(options) {
  */
 function skillRoots(options) {
   const cwd = path.resolve(options.cwd);
+  const includeProjectDefaults = options.config?.skills?.includeProjectDefaults !== false;
+  const includeEnvironmentPaths = options.config?.skills?.includeEnvironmentPaths !== false;
   const configured = Array.isArray(options.config?.skills?.paths)
     ? options.config.skills.paths
     : [];
-  const envPaths = String(options.env?.LAB_AGENT_SKILL_PATHS ?? "")
-    .split(path.delimiter)
-    .map((item) => item.trim())
-    .filter(Boolean);
+  const envPaths = includeEnvironmentPaths
+    ? String(options.env?.LAB_AGENT_SKILL_PATHS ?? "")
+      .split(path.delimiter)
+      .map((item) => item.trim())
+      .filter(Boolean)
+    : [];
   const configuredRoots = configured.map((item) => path.resolve(cwd, String(item)));
   const envRoots = envPaths.map((item) => path.resolve(cwd, item));
   const configuredRootKeys = new Set(configuredRoots.map(rootKey));
   const envRootKeys = new Set(envRoots.map(rootKey));
 
   const roots = [
-    ...DEFAULT_PROJECT_SKILL_DIRS.map((item) => path.resolve(cwd, item)),
+    ...(includeProjectDefaults ? DEFAULT_PROJECT_SKILL_DIRS.map((item) => path.resolve(cwd, item)) : []),
     BUNDLED_SKILL_ROOT,
     ...configuredRoots,
     ...envRoots

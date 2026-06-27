@@ -45,15 +45,9 @@ export async function runDoctor(options) {
   checks.push(checkAllowedHosts(config));
   checks.push(checkTranscriptPolicy(config, env));
   checks.push(checkMcpPolicy(config));
-  checks.push(await checkPath(path.join(packageRoot, "docs", "provenance", "clean-room-provenance-policy.md"), "provenance policy"));
-  checks.push(await checkPath(path.join(packageRoot, "docs", "provenance", "modules"), "module provenance directory"));
-  checks.push(await checkPath(path.join(packageRoot, "docs", "audit", "clean-room-release-attestation.md"), "clean-room release attestation"));
-  checks.push(await checkPath(path.join(packageRoot, "docs", "audit", "mvp-release-audit.generated.md"), "release audit report"));
-  checks.push(await checkPath(path.join(packageRoot, "docs", "deployment", "local-installation.md"), "local installation guide"));
-  checks.push(await checkPath(path.join(packageRoot, "docs", "deployment", "model-adapter-gateway-readiness.md"), "model adapter readiness guide"));
-  checks.push(await checkPath(path.join(packageRoot, "docs", "deployment", "rc-acceptance-summary.md"), "rc acceptance summary"));
-  checks.push(await checkPath(path.join(packageRoot, "docs", "deployment", "release-candidate-package.md"), "release candidate package"));
-  checks.push(await checkPath(path.join(packageRoot, "docs", "deployment", "lab-user-quickstart.md"), "lab user quickstart"));
+  checks.push(await checkPath(path.join(packageRoot, "src", "cli", "index.js"), "cli entrypoint"));
+  checks.push(await checkPath(path.join(packageRoot, "src", "cli", "dashboard.js"), "dashboard entrypoint"));
+  checks.push(await checkPath(path.join(packageRoot, "src", "dashboard", "public", "index.html"), "dashboard web assets"));
 
   return {
     ok: checks.every((check) => check.status !== "error"),
@@ -192,7 +186,7 @@ function truncate(value, max) {
  */
 export function formatDoctorReport(report) {
   const lines = [
-    "Ant Code doctor",
+    "Ant Code runtime doctor",
     `cwd: ${report.cwd}`,
     `model: ${report.config.modelAlias}`,
     `network: ${report.config.networkMode}`,

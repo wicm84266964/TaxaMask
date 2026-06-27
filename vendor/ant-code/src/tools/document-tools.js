@@ -89,7 +89,7 @@ export function parseDocumentBuffer(buffer, ext) {
       supported: false,
       content: "",
       notes: [
-        "PDF binary parsing is not bundled in the clean-room core.",
+        "PDF binary parsing is not bundled in the local runtime core.",
         "Use the document-intake skill with MarkItDown installed, or convert the PDF to text/Markdown first."
       ]
     };

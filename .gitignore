@@ -167,13 +167,28 @@ external_tools/
 
 # Internal Ant-Code development notes kept locally but not published
 vendor/ant-code/AGENT.md
+vendor/ant-code/ANTCODE.md
 vendor/ant-code/BACKUP_MANIFEST.txt
 vendor/ant-code/LLM_ONBOARDING.md
 vendor/ant-code/PROJECT_CHANGELOG.zh-CN.md
+vendor/ant-code/lab-agent.config.json
 vendor/ant-code/config/lab-agent.deepseek-backup.json
+vendor/ant-code/docs/
 vendor/ant-code/docs/handoff/
 vendor/ant-code/docs/plans/
 vendor/ant-code/docs/phase-0/
+vendor/ant-code/tests/
+vendor/ant-code/scripts/audit-common.js
+vendor/ant-code/scripts/build-windows-exe.js
+vendor/ant-code/scripts/dependency-audit-common.js
+vendor/ant-code/scripts/generate-*.js
+vendor/ant-code/scripts/github-mcp-server.js
+vendor/ant-code/scripts/verify-dependency-policy.js
+vendor/ant-code/scripts/verify-forbidden-endpoints.js
+vendor/ant-code/scripts/verify-install.js
+vendor/ant-code/scripts/verify-provenance.js
+vendor/ant-code/scripts/verify-readiness-docs.js
+vendor/ant-code/scripts/verify-release-seal.js
 
 # Local packaged builds and release staging
 dist/

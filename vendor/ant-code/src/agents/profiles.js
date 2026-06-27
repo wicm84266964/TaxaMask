@@ -479,6 +479,9 @@ function normalizeBudget(value) {
 }
 
 function loadAgentMarkdownProfiles(config, options = {}) {
+  if (config?.agents?.includeProjectProfiles === false) {
+    return [];
+  }
   const cwd = options.cwd ?? inferCwd(config);
   const roots = [
     path.join(cwd, ".lab-agent", "agents"),

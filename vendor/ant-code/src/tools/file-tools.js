@@ -10,7 +10,7 @@ const SKIP_DIRS = new Set([".git", ".lab-agent", ".venv", "__pycache__", "node_m
 const BINARY_EXTENSIONS = new Set([
   ".7z", ".avi", ".bin", ".bmp", ".ckpt", ".db", ".dll", ".doc", ".docx", ".dylib", ".exe", ".gif", ".gz",
   ".ico", ".jpeg", ".jpg", ".mov", ".mp4", ".npy", ".npz", ".onnx", ".pdf", ".pkl", ".png", ".pt", ".pth",
-  ".pyc", ".rar", ".safetensors", ".so", ".sqlite", ".sqlite3", ".tar", ".tiff", ".webp", ".xls", ".xlsx",
+  ".pyc", ".rar", ".safetensors", ".so", ".sqlite", ".sqlite3", ".tar", ".webp", ".xls", ".xlsx",
   ".zip"
 ]);
 

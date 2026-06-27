@@ -355,7 +355,7 @@ function sourceApprovalMessage(target) {
   return [
     "TaxaMask source development permission is required.",
     `Target: ${safeLabel(target)}`,
-    "This can change the TaxaMask program itself, including 2D/STL, TIF, Agent Center, imports, or training behavior."
+    "This can change the TaxaMask program itself, including 2D/STL, Agent Center, imports, or training behavior."
   ].join(" ");
 }
 

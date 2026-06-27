@@ -1,24 +1,24 @@
 export const DEFAULT_MODEL_OPTIONS = Object.freeze([
   {
-    id: "claude-sonnet-4-5-20250929",
-    label: "Sonnet 4.5",
-    description: "Balanced coding model exposed by the local lab adapter.",
+    id: "example-coding-model",
+    label: "Example Coding Model",
+    description: "Placeholder coding model exposed by a local or OpenAI-compatible gateway.",
     thinking: false,
     modalities: ["text"],
     contextTokens: 200000
   },
   {
-    id: "claude-sonnet-4-5-20250929-thinking",
-    label: "Sonnet 4.5 Thinking",
-    description: "Adapter model with provider-exposed reasoning deltas when available.",
+    id: "example-reasoning-model",
+    label: "Example Reasoning Model",
+    description: "Placeholder model with provider-exposed reasoning deltas when available.",
     thinking: true,
     modalities: ["text"],
     contextTokens: 200000
   },
   {
-    id: "claude-haiku-4-5-20251001",
-    label: "Haiku 4.5",
-    description: "Lower-latency local adapter model for lighter work.",
+    id: "example-fast-model",
+    label: "Example Fast Model",
+    description: "Placeholder lower-latency model for lighter work.",
     thinking: false,
     modalities: ["text"],
     contextTokens: 200000

@@ -519,6 +519,12 @@ function validateConfig(config) {
     if (config.skills.paths !== undefined && !Array.isArray(config.skills.paths)) {
       throw new Error("Unsupported skills.paths: expected an array");
     }
+    if (config.skills.includeProjectDefaults !== undefined && typeof config.skills.includeProjectDefaults !== "boolean") {
+      throw new Error("Unsupported skills.includeProjectDefaults: expected boolean");
+    }
+    if (config.skills.includeEnvironmentPaths !== undefined && typeof config.skills.includeEnvironmentPaths !== "boolean") {
+      throw new Error("Unsupported skills.includeEnvironmentPaths: expected boolean");
+    }
   }
 
   if (config.agents !== undefined) {
@@ -583,6 +589,9 @@ function validateConfig(config) {
     }
     if (config.agents.profiles !== undefined && !Array.isArray(config.agents.profiles)) {
       throw new Error("Unsupported agents.profiles: expected an array");
+    }
+    if (config.agents.includeProjectProfiles !== undefined && typeof config.agents.includeProjectProfiles !== "boolean") {
+      throw new Error("Unsupported agents.includeProjectProfiles: expected boolean");
     }
   }
 

@@ -12,7 +12,7 @@ import { parseGatewayStream } from "./streaming.js";
 const DEFAULT_GATEWAY_MAX_RETRIES = 2;
 const BASE_RETRY_DELAY_MS = 350;
 const MAX_RETRY_DELAY_MS = 1500;
-const MIMO_RETRY_ERROR_PATTERN = /KVTransferError|WaitingForInput|Decode transfer failed|premature close|stream.*interrupted/i;
+const TRANSIENT_GATEWAY_RETRY_ERROR_PATTERN = /KVTransferError|WaitingForInput|Decode transfer failed|premature close|stream.*interrupted/i;
 
 /**
  * @param {import("../config/load-config.js").LabAgentConfig} config
@@ -354,30 +354,20 @@ function shouldRetryGatewayResponseError(error, options) {
   if (options.signal?.aborted || options.attempt >= options.maxAttempts) {
     return false;
   }
-  return error.code === "GATEWAY_STREAM_INTERRUPTED" || isMimoGatewayRetryable(error, options.config);
+  return error.code === "GATEWAY_STREAM_INTERRUPTED" || hasTransientGatewayRetrySignal(error);
 }
 
 /**
  * @param {Record<string, any>} error
  * @param {import("../config/load-config.js").LabAgentConfig} config
  */
-function isMimoGatewayRetryable(error, config) {
-  if (!isMimoModel(config)) {
-    return false;
-  }
+function hasTransientGatewayRetrySignal(error) {
   const text = [
     error?.message,
     error?.details?.body,
     error?.details?.responseReadStage
   ].filter(Boolean).join("\n");
-  return MIMO_RETRY_ERROR_PATTERN.test(text);
-}
-
-/**
- * @param {import("../config/load-config.js").LabAgentConfig} config
- */
-function isMimoModel(config) {
-  return /mimo/i.test(String(config?.modelAlias ?? ""));
+  return TRANSIENT_GATEWAY_RETRY_ERROR_PATTERN.test(text);
 }
 
 /**

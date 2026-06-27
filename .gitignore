@@ -15,12 +15,7 @@ anaconda3/
 # Local agent/editor state
 .sisyphus/
 .opencode/
-.lab-agent/*
-!.lab-agent/
-!.lab-agent/memory.md
-!.lab-agent/skills/
-!.lab-agent/skills/**/
-!.lab-agent/skills/**/SKILL.md
+.lab-agent/
 .lab-agent/config.json
 .lab-agent/sessions/
 .lab-agent/tasks/
@@ -143,7 +138,6 @@ training_report.png
 *.csv
 *.tsv
 !docs/assets/readme/**
-!docs/**/*.md
 
 # Internal planning and handoff notes
 private_docs/
@@ -151,16 +145,22 @@ private_docs/
 /LLM_CONTEXT.md
 /开发版整理提交说明_*.md
 docs/ant3d_workbench/
-docs/designs/*
-!docs/designs/
+docs/designs/
+docs/designs/**
 docs/discussions/
+docs/discussions/**
 docs/handoffs/
+docs/handoffs/**
 docs/concepts/
+docs/concepts/**
 docs/manual_images/
+docs/manual_images/**
 docs/agentic_orchestration_assessment.md
 docs/core2_governance_runbook.md
 docs/generate_manual_screenshots.py
 docs/跨物种适配严格审查报告.md
+paper_planning/
+paper_planning/**
 
 # Bundled local binaries
 external_tools/

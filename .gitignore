@@ -74,12 +74,17 @@ AntSleap/vlm_preannotation/
 training_report.png
 
 # Internal planning and handoff notes
-docs/designs/*
-!docs/designs/
+private_docs/
+docs/designs/
+docs/designs/**
 docs/discussions/
+docs/discussions/**
 docs/handoffs/
+docs/handoffs/**
 docs/concepts/
+docs/concepts/**
 docs/manual_images/
+docs/manual_images/**
 docs/agentic_orchestration_assessment.md
 docs/core2_governance_runbook.md
 docs/generate_manual_screenshots.py

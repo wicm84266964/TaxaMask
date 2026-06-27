@@ -147,23 +147,58 @@ TIF_TRANSLATIONS = {
         "Tool": "工具",
         "Brush": "画笔",
         "Eraser": "橡皮擦",
+        "Lasso fill": "套索填充",
+        "Rectangle fill": "矩形填充",
+        "Ellipse fill": "椭圆填充",
         "Picker": "取样",
         "Pan/view": "平移查看",
         "Brush (B): paint the selected material. Hold Ctrl for temporary erase.": "画笔（B）：绘制当前 material。按住 Ctrl 可临时擦除。",
         "Eraser (E): write background 0. Ctrl + left drag still works as temporary erase.": "橡皮擦（E）：写入背景 0。Ctrl + 左键拖动仍可临时擦除。",
+        "Lasso fill (L): draw a closed outline and fill it with the selected material.": "套索填充（L）：圈出闭合区域，并用当前 material 填充。",
+        "Rectangle fill (R): drag a box and fill it with the selected material.": "矩形填充（R）：拖出矩形，并用当前 material 填充。",
+        "Ellipse fill (O): drag an ellipse and fill it with the selected material.": "椭圆填充（O）：拖出椭圆，并用当前 material 填充。",
         "Picker (I): sample a label under the cursor and select that material.": "取样（I）：读取光标下的标签，并切换到对应 material。",
         "Pan/view: drag the zoomed slice without changing labels. Right drag also pans when zoomed.": "平移查看：拖动放大后的切片，不修改标签。放大后右键拖动也可平移。",
         "Tool set to Brush.": "已切换到画笔。",
         "Tool set to Eraser.": "已切换到橡皮擦。",
+        "Tool set to Lasso fill.": "已切换到套索填充。",
+        "Tool set to Rectangle fill.": "已切换到矩形填充。",
+        "Tool set to Ellipse fill.": "已切换到椭圆填充。",
         "Tool set to Picker.": "已切换到取样。",
         "Tool set to Pan/view. Labels will not be changed.": "已切换到平移查看。标签不会被修改。",
         "Pan/view mode is active. Labels were not changed.": "当前是平移查看模式，标签没有被修改。",
         "Creating working edit layer before painting...": "正在创建当前编辑层，然后再写入标注...",
+        "Creating working edit layer before filling...": "正在创建当前编辑层，然后再填充标注...",
+        "Lasso fill needs at least 3 points.": "套索填充至少需要 3 个点。",
+        "Lasso fill did not cover any pixels.": "套索填充没有覆盖任何像素。",
+        "Shape fill is too small. Drag a wider area before releasing.": "填充区域太小。请拖出更大的范围后再松开。",
+        "Filled material {0} on slice {1}: {2} pixel(s).": "已在第 {1} 张切片填充 material {0}：{2} 个像素。",
+        "Filled rectangle material {0} on slice {1}: {2} pixel(s).": "已在第 {1} 张切片矩形填充 material {0}：{2} 个像素。",
+        "Filled ellipse material {0} on slice {1}: {2} pixel(s).": "已在第 {1} 张切片椭圆填充 material {0}：{2} 个像素。",
+        "Large fill area: {0}% of slice.": "填充面积偏大：占当前切片 {0}%。",
+        "Fill touches the image edge.": "填充区域触及图像边缘。",
+        "Copy material to previous slice": "复制到上一张",
+        "Copy material to next slice": "复制到下一张",
+        "Clear current material": "清除当前 material",
+        "Copy current material mask to the previous slice for refinement.": "将当前 material 的 mask 复制到上一张切片，便于继续精修。",
+        "Copy current material mask to the next slice for refinement.": "将当前 material 的 mask 复制到下一张切片，便于继续精修。",
+        "Clear the selected material from the current slice. Other materials are kept.": "从当前切片清除选中的 material，不影响其他 material。",
+        "Confirm label edit": "确认标注修改",
+        "Copy material {0} from slice {1} to slice {2}? Existing pixels of this material on the target slice will be replaced.": "将 material {0} 从第 {1} 张复制到第 {2} 张？目标切片上已有的同 material 像素会被替换。",
+        "Clear material {0} from slice {1}?": "从第 {1} 张切片清除 material {0}？",
+        "No previous slice is available.": "没有上一张切片。",
+        "No next slice is available.": "没有下一张切片。",
+        "Background material 0 is not supported by this helper.": "这个辅助操作不支持 background material 0。",
+        "No pixels of material {0} on slice {1}.": "第 {1} 张切片没有 material {0} 的像素。",
+        "Copied material {0} from slice {1} to slice {2}: {3} changed pixel(s).": "已将 material {0} 从第 {1} 张复制到第 {2} 张：改变 {3} 个像素。",
+        "Cleared material {0} on slice {1}: {2} pixel(s).": "已清除第 {1} 张切片的 material {0}：{2} 个像素。",
+        "No label changes were needed on slice {0}.": "第 {0} 张切片无需修改。",
         "Save status": "保存状态",
         "Saved": "已保存",
         "Unsaved changes: {0} slice(s)": "未保存修改：{0} 张切片",
         "Auto-save pending: {0} slice(s)": "等待自动保存：{0} 张切片",
         "Saving working edit...": "正在保存当前编辑层...",
+        "Saving part mask...": "正在保存部位 mask...",
         "Save failed: {0}": "保存失败：{0}",
         "Auto-save writes working_edit about 1.2 seconds after edits.": "修改后约 1.2 秒写入 working_edit。",
         "Undo last stroke (Ctrl+Z)": "撤销上一笔（Ctrl+Z）",
@@ -301,18 +336,24 @@ TIF_TRANSLATIONS = {
         "No label layer is loaded to sample from.": "当前没有可取样的标签层。",
         "Material picker is available on Z slices only. Switch back to Z axial view before sampling labels.": "取样工具目前只开放在 Z 轴切片上。取样前请切回 Z 轴切片。",
         "Working edit layer is unavailable. Check the working volume path before editing labels.": "当前编辑层不可用。请检查 working volume 路径后再修改标签。",
+        "Part mask layer is unavailable. Check the part mask path before editing labels.": "部位 mask 图层不可用。请检查部位 mask 路径后再修改标签。",
         "Undo": "撤销",
         "Redo": "重做",
         "Save working edit": "保存当前编辑层",
         "Auto-save edit": "自动保存编辑层",
         "Working edit saved.": "当前编辑层已保存。",
         "Auto-saved working edit.": "已自动保存当前编辑层。",
+        "Part mask saved.": "部位 mask 已保存。",
+        "Auto-saved part mask.": "已自动保存部位 mask。",
         "Painted material {0} on slice {1}.": "已在第 {1} 张切片绘制 material {0}。",
         "Erased labels on slice {0}.": "已擦除第 {0} 张切片上的标签。",
         "Unsaved working edit": "未保存的当前编辑层",
+        "Unsaved part mask": "未保存的部位 mask",
         "Save changes to the current working_edit before continuing?": "继续前是否保存当前 working_edit 的修改？",
+        "Save changes to the current part mask before continuing?": "继续前是否保存当前部位 mask 的修改？",
         "Auto-save is on. Brush changes are saved shortly after editing.": "自动保存已开启。修改后会短延迟保存。",
         "Auto-save is off. Remember to save the current edit layer.": "自动保存已关闭。请记得手动保存当前编辑层。",
+        "Auto-save is off. Remember to save the current part mask.": "自动保存已关闭。请记得手动保存当前部位 mask。",
         "Accept as manual truth": "确认为人工真值",
         "Copy model draft to working edit": "复制模型草稿到当前编辑层",
         "Material map": "材料表",
@@ -488,6 +529,7 @@ TIF_TRANSLATIONS = {
         "Preview mask generated from {0} key slice(s).": "已根据 {0} 个关键切片生成预览 mask。",
         "Accepted part mask.": "已接受部位 mask。",
         "Part volume is read-only here. Use part mask preview controls for extraction masks.": "当前部位体数据在这里按只读观察处理。请用部位 mask 预览控件生成提取 mask。",
+        "Selected saved reslice is read-only. Return to the part volume to edit masks.": "当前选中的已保存重切片为只读复核状态。请回到部位体数据节点再编辑 mask。",
         "Part volumes are not promoted to full-volume manual truth in this version.": "当前版本不会把部位体数据提升为整只体数据的人工真值。",
         "Part volumes do not use model draft handoff in this version.": "当前版本部位体数据不走模型草稿交接。",
         "Part volumes inherit the parent specimen material map. Switch to Full volume to edit materials.": "部位体数据继承父标本 material 表。需要编辑 material 时请切回整只体数据。",
@@ -783,6 +825,12 @@ class TifSliceCanvas(QLabel):
         self._roi_drag_start = None
         self._roi_drag_current = None
         self._contour_drag_points = []
+        self._annotation_drag_active = False
+        self._annotation_drag_erase = False
+        self._lasso_drag_points = []
+        self._shape_drag_mode = ""
+        self._shape_drag_start = None
+        self._shape_drag_current = None
         self.workbench = None
 
     def set_slice_pixmap(self, pixmap, reset_view=False):
@@ -850,6 +898,8 @@ class TifSliceCanvas(QLabel):
         painter.drawPixmap(int(round(x)), int(round(y)), zoomed)
         self._draw_roi_overlays(painter)
         self._draw_contour_overlays(painter)
+        self._draw_lasso_preview(painter)
+        self._draw_shape_fill_preview(painter)
         self._draw_annotation_cursor_preview(painter)
         self._draw_status_overlay(painter)
         painter.end()
@@ -970,6 +1020,38 @@ class TifSliceCanvas(QLabel):
         if self._contour_drag_points:
             self._draw_polyline(painter, self._contour_drag_points, "#FF8C42", closed=False, fill_alpha=0)
 
+    def _draw_lasso_preview(self, painter):
+        if len(self._lasso_drag_points) < 2:
+            return
+        closed = len(self._lasso_drag_points) >= 3
+        self._draw_polyline(painter, self._lasso_drag_points, "#8ED2DE", closed=closed, fill_alpha=28 if closed else 0)
+
+    def _draw_shape_fill_preview(self, painter):
+        if not self._shape_drag_mode or self._shape_drag_start is None or self._shape_drag_current is None:
+            return
+        start = self._shape_drag_start
+        current = self._shape_drag_current
+        rect = QRectF(
+            min(start.x(), current.x()),
+            min(start.y(), current.y()),
+            abs(current.x() - start.x()),
+            abs(current.y() - start.y()),
+        )
+        if rect.width() <= 1 or rect.height() <= 1:
+            return
+        painter.save()
+        fill = QColor("#8ED2DE")
+        fill.setAlpha(34)
+        pen = QPen(QColor("#8ED2DE"))
+        pen.setWidth(2)
+        painter.setBrush(fill)
+        painter.setPen(pen)
+        if self._shape_drag_mode == "ellipse":
+            painter.drawEllipse(rect)
+        else:
+            painter.drawRect(rect)
+        painter.restore()
+
     def _draw_status_overlay(self, painter):
         if self.workbench is None:
             return
@@ -1016,6 +1098,8 @@ class TifSliceCanvas(QLabel):
         color = QColor("#8ED2DE")
         if mode == "eraser":
             color = QColor("#FFB3A6")
+        elif mode in {"lasso", "rectangle", "ellipse"}:
+            color = QColor("#8ED2DE")
         elif mode == "picker":
             color = QColor("#F6D365")
         if disabled:
@@ -1032,6 +1116,18 @@ class TifSliceCanvas(QLabel):
             painter.drawEllipse(rect)
             if mode == "eraser":
                 painter.drawLine(int(center[0] - radius_x * 0.55), int(center[1]), int(center[0] + radius_x * 0.55), int(center[1]))
+        elif mode == "lasso":
+            size = 7
+            painter.drawLine(int(center[0] - size), int(center[1]), int(center[0] + size), int(center[1]))
+            painter.drawLine(int(center[0]), int(center[1] - size), int(center[0]), int(center[1] + size))
+            painter.drawEllipse(QRectF(center[0] - size * 0.6, center[1] - size * 0.6, size * 1.2, size * 1.2))
+        elif mode in {"rectangle", "ellipse"}:
+            size = 9
+            rect = QRectF(center[0] - size, center[1] - size, size * 2.0, size * 2.0)
+            if mode == "ellipse":
+                painter.drawEllipse(rect)
+            else:
+                painter.drawRect(rect)
         elif mode == "picker":
             size = 8
             painter.drawLine(int(center[0] - size), int(center[1]), int(center[0] + size), int(center[1]))
@@ -1139,10 +1235,49 @@ class TifSliceCanvas(QLabel):
                 self.workbench.pick_material_at_widget_position(event.position().x(), event.position().y())
                 event.accept()
                 return
+            if mode == "lasso":
+                pixel = self.widget_to_image_pixel(event.position().x(), event.position().y())
+                if pixel is None:
+                    event.accept()
+                    return
+                block_reason = ""
+                if callable(getattr(self.workbench, "_editable_label_block_reason", None)):
+                    block_reason = self.workbench._editable_label_block_reason(require_working_edit=True)
+                if block_reason:
+                    self.workbench._set_operation_feedback(block_reason)
+                    event.accept()
+                    return
+                self._lasso_drag_points = [list(pixel)]
+                self._refresh_scaled_pixmap()
+                event.accept()
+                return
+            if mode in {"rectangle", "ellipse"}:
+                pixel = self.widget_to_image_pixel(event.position().x(), event.position().y())
+                if pixel is None:
+                    event.accept()
+                    return
+                block_reason = ""
+                if callable(getattr(self.workbench, "_editable_label_block_reason", None)):
+                    block_reason = self.workbench._editable_label_block_reason(require_working_edit=True)
+                if block_reason:
+                    self.workbench._set_operation_feedback(block_reason)
+                    event.accept()
+                    return
+                self._shape_drag_mode = mode
+                self._shape_drag_start = event.position()
+                self._shape_drag_current = event.position()
+                self._refresh_scaled_pixmap()
+                event.accept()
+                return
+            self._annotation_drag_active = True
+            self._annotation_drag_erase = bool(event.modifiers() & Qt.ControlModifier) or mode == "eraser"
+            if callable(getattr(self.workbench, "begin_annotation_stroke", None)):
+                self.workbench.begin_annotation_stroke()
             self.workbench.paint_at_widget_position(
                 event.position().x(),
                 event.position().y(),
-                erase=bool(event.modifiers() & Qt.ControlModifier) or mode == "eraser",
+                erase=self._annotation_drag_erase,
+                continue_stroke=True,
             )
             event.accept()
             return
@@ -1163,6 +1298,19 @@ class TifSliceCanvas(QLabel):
                     self._refresh_scaled_pixmap()
             event.accept()
             return
+        if self._lasso_drag_points and event.buttons() & Qt.LeftButton:
+            pixel = self.widget_to_image_pixel(event.position().x(), event.position().y())
+            if pixel is not None:
+                if self._lasso_drag_points[-1] != list(pixel):
+                    self._lasso_drag_points.append(list(pixel))
+                    self._refresh_scaled_pixmap()
+            event.accept()
+            return
+        if self._shape_drag_mode and self._shape_drag_start is not None and event.buttons() & Qt.LeftButton:
+            self._shape_drag_current = event.position()
+            self._refresh_scaled_pixmap()
+            event.accept()
+            return
         if self._panning and event.buttons() & (Qt.LeftButton | Qt.RightButton) and self._last_pan_pos is not None:
             current = event.position()
             self._pan_x += current.x() - self._last_pan_pos.x()
@@ -1176,10 +1324,14 @@ class TifSliceCanvas(QLabel):
             if mode in {"picker", "pan"}:
                 event.accept()
                 return
+            if mode in {"lasso", "rectangle", "ellipse"}:
+                event.accept()
+                return
             self.workbench.paint_at_widget_position(
                 event.position().x(),
                 event.position().y(),
-                erase=bool(event.modifiers() & Qt.ControlModifier) or mode == "eraser",
+                erase=self._annotation_drag_erase if self._annotation_drag_active else bool(event.modifiers() & Qt.ControlModifier) or mode == "eraser",
+                continue_stroke=self._annotation_drag_active,
             )
             event.accept()
             return
@@ -1207,6 +1359,33 @@ class TifSliceCanvas(QLabel):
             if self.workbench is not None:
                 self.workbench.finish_part_contour_drag(points)
             self._refresh_scaled_pixmap()
+            event.accept()
+            return
+        if event.button() == Qt.LeftButton and self._lasso_drag_points:
+            points = list(self._lasso_drag_points)
+            self._lasso_drag_points = []
+            if self.workbench is not None and callable(getattr(self.workbench, "finish_lasso_fill", None)):
+                self.workbench.finish_lasso_fill(points)
+            self._refresh_scaled_pixmap()
+            event.accept()
+            return
+        if event.button() == Qt.LeftButton and self._shape_drag_mode and self._shape_drag_start is not None:
+            mode = self._shape_drag_mode
+            start = self._shape_drag_start
+            end = event.position()
+            self._shape_drag_mode = ""
+            self._shape_drag_start = None
+            self._shape_drag_current = None
+            if self.workbench is not None and callable(getattr(self.workbench, "finish_shape_fill_drag", None)):
+                self.workbench.finish_shape_fill_drag(mode, start.x(), start.y(), end.x(), end.y())
+            self._refresh_scaled_pixmap()
+            event.accept()
+            return
+        if event.button() == Qt.LeftButton and self._annotation_drag_active:
+            if self.workbench is not None and callable(getattr(self.workbench, "finish_annotation_stroke", None)):
+                self.workbench.finish_annotation_stroke()
+            self._annotation_drag_active = False
+            self._annotation_drag_erase = False
             event.accept()
             return
         if event.button() in (Qt.LeftButton, Qt.RightButton) and self._panning:
@@ -1575,6 +1754,11 @@ class TifWorkbenchWidget(QWidget):
         self.edit_volume = None
         self.working_edit_dirty = False
         self._dirty_edit_slices = set()
+        self._annotation_stroke_active = False
+        self._annotation_stroke_undo_pushed = False
+        self._annotation_stroke_z_index = None
+        self._annotation_stroke_last_pixel = None
+        self._annotation_stroke_changed = False
         self._loading_specimen = False
         self._saving_working_edit = False
         self._tif_import_thread = None
@@ -1823,6 +2007,18 @@ class TifWorkbenchWidget(QWidget):
         self.btn_tool_eraser.setObjectName("tifToolEraserButton")
         self.btn_tool_eraser.setCheckable(True)
         self.btn_tool_eraser.clicked.connect(lambda checked=False: self.set_annotation_tool_mode("eraser"))
+        self.btn_tool_lasso = QPushButton("Lasso fill")
+        self.btn_tool_lasso.setObjectName("tifToolLassoButton")
+        self.btn_tool_lasso.setCheckable(True)
+        self.btn_tool_lasso.clicked.connect(lambda checked=False: self.set_annotation_tool_mode("lasso"))
+        self.btn_tool_rectangle = QPushButton("Rectangle fill")
+        self.btn_tool_rectangle.setObjectName("tifToolRectangleButton")
+        self.btn_tool_rectangle.setCheckable(True)
+        self.btn_tool_rectangle.clicked.connect(lambda checked=False: self.set_annotation_tool_mode("rectangle"))
+        self.btn_tool_ellipse = QPushButton("Ellipse fill")
+        self.btn_tool_ellipse.setObjectName("tifToolEllipseButton")
+        self.btn_tool_ellipse.setCheckable(True)
+        self.btn_tool_ellipse.clicked.connect(lambda checked=False: self.set_annotation_tool_mode("ellipse"))
         self.btn_tool_picker = QPushButton("Picker")
         self.btn_tool_picker.setObjectName("tifToolPickerButton")
         self.btn_tool_picker.setCheckable(True)
@@ -1858,6 +2054,15 @@ class TifWorkbenchWidget(QWidget):
         self.btn_promote.clicked.connect(self.promote_working_edit)
         self.btn_copy_draft = QPushButton("Copy model draft to working edit")
         self.btn_copy_draft.clicked.connect(self.copy_latest_model_draft_to_working_edit)
+        self.btn_copy_material_prev = QPushButton("Copy material to previous slice")
+        self.btn_copy_material_prev.setObjectName("tifCopyMaterialPrevButton")
+        self.btn_copy_material_prev.clicked.connect(lambda: self.copy_current_material_to_adjacent_slice(-1))
+        self.btn_copy_material_next = QPushButton("Copy material to next slice")
+        self.btn_copy_material_next.setObjectName("tifCopyMaterialNextButton")
+        self.btn_copy_material_next.clicked.connect(lambda: self.copy_current_material_to_adjacent_slice(1))
+        self.btn_clear_current_material = QPushButton("Clear current material")
+        self.btn_clear_current_material.setObjectName("tifClearCurrentMaterialButton")
+        self.btn_clear_current_material.clicked.connect(self.clear_current_material_on_slice)
         self.btn_import_tif = QPushButton("Import TIF stack")
         self.btn_import_tif.setObjectName("tifImportStackButton")
         self.btn_import_tif.clicked.connect(self.import_tif_stack_dialog)
@@ -2006,6 +2211,12 @@ class TifWorkbenchWidget(QWidget):
         self.shortcut_tool_brush.activated.connect(lambda: self.set_annotation_tool_mode("brush"))
         self.shortcut_tool_eraser = QShortcut(QKeySequence("E"), self)
         self.shortcut_tool_eraser.activated.connect(lambda: self.set_annotation_tool_mode("eraser"))
+        self.shortcut_tool_lasso = QShortcut(QKeySequence("L"), self)
+        self.shortcut_tool_lasso.activated.connect(lambda: self.set_annotation_tool_mode("lasso"))
+        self.shortcut_tool_rectangle = QShortcut(QKeySequence("R"), self)
+        self.shortcut_tool_rectangle.activated.connect(lambda: self.set_annotation_tool_mode("rectangle"))
+        self.shortcut_tool_ellipse = QShortcut(QKeySequence("O"), self)
+        self.shortcut_tool_ellipse.activated.connect(lambda: self.set_annotation_tool_mode("ellipse"))
         self.shortcut_tool_picker = QShortcut(QKeySequence("I"), self)
         self.shortcut_tool_picker.activated.connect(lambda: self.set_annotation_tool_mode("picker"))
         self.shortcut_brush_smaller = QShortcut(QKeySequence("["), self)
@@ -2066,8 +2277,14 @@ class TifWorkbenchWidget(QWidget):
             self.btn_save_edit,
             self.btn_tool_brush,
             self.btn_tool_eraser,
+            self.btn_tool_lasso,
+            self.btn_tool_rectangle,
+            self.btn_tool_ellipse,
             self.btn_tool_picker,
             self.btn_tool_pan,
+            self.btn_copy_material_prev,
+            self.btn_copy_material_next,
+            self.btn_clear_current_material,
             self.btn_reset_volume_view,
             self.btn_volume_custom_color,
             self.btn_copy_draft,
@@ -2302,10 +2519,16 @@ class TifWorkbenchWidget(QWidget):
         self.annotation_tool_label.setText(tt("Tool", self.lang))
         self.btn_tool_brush.setText(tt("Brush", self.lang))
         self.btn_tool_eraser.setText(tt("Eraser", self.lang))
+        self.btn_tool_lasso.setText(tt("Lasso fill", self.lang))
+        self.btn_tool_rectangle.setText(tt("Rectangle fill", self.lang))
+        self.btn_tool_ellipse.setText(tt("Ellipse fill", self.lang))
         self.btn_tool_picker.setText(tt("Picker", self.lang))
         self.btn_tool_pan.setText(tt("Pan/view", self.lang))
         self.btn_tool_brush.setToolTip(tt("Brush (B): paint the selected material. Hold Ctrl for temporary erase.", self.lang))
         self.btn_tool_eraser.setToolTip(tt("Eraser (E): write background 0. Ctrl + left drag still works as temporary erase.", self.lang))
+        self.btn_tool_lasso.setToolTip(tt("Lasso fill (L): draw a closed outline and fill it with the selected material.", self.lang))
+        self.btn_tool_rectangle.setToolTip(tt("Rectangle fill (R): drag a box and fill it with the selected material.", self.lang))
+        self.btn_tool_ellipse.setToolTip(tt("Ellipse fill (O): drag an ellipse and fill it with the selected material.", self.lang))
         self.btn_tool_picker.setToolTip(tt("Picker (I): sample a label under the cursor and select that material.", self.lang))
         self.btn_tool_pan.setToolTip(tt("Pan/view: drag the zoomed slice without changing labels. Right drag also pans when zoomed.", self.lang))
         self._sync_annotation_tool_buttons()
@@ -2314,6 +2537,12 @@ class TifWorkbenchWidget(QWidget):
         self.btn_undo.setToolTip(tt("Undo last stroke (Ctrl+Z)", self.lang))
         self.btn_redo.setToolTip(tt("Redo stroke (Ctrl+Y / Ctrl+Shift+Z)", self.lang))
         self.btn_save_edit.setToolTip(tt("Save current edit layer (Ctrl+S)", self.lang))
+        self.btn_copy_material_prev.setText(tt("Copy material to previous slice", self.lang))
+        self.btn_copy_material_next.setText(tt("Copy material to next slice", self.lang))
+        self.btn_clear_current_material.setText(tt("Clear current material", self.lang))
+        self.btn_copy_material_prev.setToolTip(tt("Copy current material mask to the previous slice for refinement.", self.lang))
+        self.btn_copy_material_next.setToolTip(tt("Copy current material mask to the next slice for refinement.", self.lang))
+        self.btn_clear_current_material.setToolTip(tt("Clear the selected material from the current slice. Other materials are kept.", self.lang))
         self.save_status_title_label.setText(tt("Save status", self.lang))
         self.auto_save_hint_label.setText(tt("Auto-save writes working_edit about 1.2 seconds after edits.", self.lang))
         self._update_save_status()
@@ -2905,9 +3134,6 @@ class TifWorkbenchWidget(QWidget):
     def _advanced_annotation_tool_specs(self):
         return {
             "bucket_fill": {"requires_design": True, "requires_undo_plan": True, "requires_risk_notice": True},
-            "lasso_polygon": {"requires_design": True, "requires_undo_plan": True, "requires_risk_notice": True},
-            "rectangle": {"requires_design": True, "requires_undo_plan": True, "requires_risk_notice": True},
-            "ellipse": {"requires_design": True, "requires_undo_plan": True, "requires_risk_notice": True},
             "slice_propagation": {"requires_design": True, "requires_undo_plan": True, "requires_risk_notice": True},
             "boundary_smoothing": {"requires_design": True, "requires_undo_plan": True, "requires_risk_notice": True},
         }
@@ -2916,12 +3142,18 @@ class TifWorkbenchWidget(QWidget):
         return {
             "brush": getattr(self, "btn_tool_brush", None),
             "eraser": getattr(self, "btn_tool_eraser", None),
+            "lasso": getattr(self, "btn_tool_lasso", None),
+            "rectangle": getattr(self, "btn_tool_rectangle", None),
+            "ellipse": getattr(self, "btn_tool_ellipse", None),
             "picker": getattr(self, "btn_tool_picker", None),
             "pan": getattr(self, "btn_tool_pan", None),
         }
 
+    def _annotation_tool_modes(self):
+        return {"brush", "eraser", "lasso", "rectangle", "ellipse", "picker", "pan"}
+
     def _sync_annotation_tool_buttons(self):
-        mode = self.annotation_tool_mode if self.annotation_tool_mode in {"brush", "eraser", "picker", "pan"} else "brush"
+        mode = self.annotation_tool_mode if self.annotation_tool_mode in self._annotation_tool_modes() else "brush"
         self.annotation_tool_mode = mode
         for tool_mode, button in self._annotation_tool_buttons().items():
             if button is None:
@@ -2935,7 +3167,7 @@ class TifWorkbenchWidget(QWidget):
 
     def set_annotation_tool_mode(self, mode, show_message=True):
         mode = str(mode or "brush")
-        if mode not in {"brush", "eraser", "picker", "pan"}:
+        if mode not in self._annotation_tool_modes():
             mode = "brush"
         changed = mode != self.annotation_tool_mode
         self.annotation_tool_mode = mode
@@ -2944,6 +3176,9 @@ class TifWorkbenchWidget(QWidget):
             messages = {
                 "brush": "Tool set to Brush.",
                 "eraser": "Tool set to Eraser.",
+                "lasso": "Tool set to Lasso fill.",
+                "rectangle": "Tool set to Rectangle fill.",
+                "ellipse": "Tool set to Ellipse fill.",
                 "picker": "Tool set to Picker.",
                 "pan": "Tool set to Pan/view. Labels will not be changed.",
             }
@@ -2952,9 +3187,9 @@ class TifWorkbenchWidget(QWidget):
 
     def _sync_undo_redo_buttons(self):
         if hasattr(self, "btn_undo"):
-            self.btn_undo.setEnabled(bool(self.undo_stack) and self.current_volume_scope != "part")
+            self.btn_undo.setEnabled(bool(self.undo_stack) and self._can_edit_current_label_volume())
         if hasattr(self, "btn_redo"):
-            self.btn_redo.setEnabled(bool(self.redo_stack) and self.current_volume_scope != "part")
+            self.btn_redo.setEnabled(bool(self.redo_stack) and self._can_edit_current_label_volume())
 
     def _dirty_slice_count(self):
         return len(getattr(self, "_dirty_edit_slices", set()) or set())
@@ -2964,7 +3199,7 @@ class TifWorkbenchWidget(QWidget):
             return
         count = self._dirty_slice_count()
         if state == "saving" or getattr(self, "_saving_working_edit", False):
-            text = tt("Saving working edit...", self.lang)
+            text = tt("Saving part mask...", self.lang) if self._is_editable_part_volume() else tt("Saving working edit...", self.lang)
         elif state == "failed":
             text = tt("Save failed: {0}", self.lang).format(detail)
         elif self.working_edit_dirty:
@@ -2994,15 +3229,15 @@ class TifWorkbenchWidget(QWidget):
         return target
 
     def annotation_cursor_preview(self, pixel=None):
-        mode = self.annotation_tool_mode if self.annotation_tool_mode in {"brush", "eraser", "picker", "pan"} else "brush"
+        mode = self.annotation_tool_mode if self.annotation_tool_mode in self._annotation_tool_modes() else "brush"
         block_reason = ""
-        if mode in {"brush", "eraser"}:
+        if mode in {"brush", "eraser", "lasso", "rectangle", "ellipse"}:
             block_reason = self._editable_label_block_reason(require_working_edit=True)
         elif mode == "picker":
             if self.image_volume is None:
                 block_reason = ""
-            elif self.current_volume_scope == "part":
-                block_reason = tt("Part volume is read-only here. Use part mask preview controls for extraction masks.", self.lang)
+            elif self.current_volume_scope == "part" and self.current_reslice_id:
+                block_reason = tt("Selected saved reslice is read-only. Return to the part volume to edit masks.", self.lang)
             elif self.display_mode == "volume":
                 block_reason = tt("3D volume preview is read-only. Switch to Slice review for label editing.", self.lang)
             elif self._current_slice_axis() != "z":
@@ -3017,7 +3252,12 @@ class TifWorkbenchWidget(QWidget):
         }
 
     def _on_auto_save_toggled(self, checked):
-        message = tt("Auto-save is on. Brush changes are saved shortly after editing.", self.lang) if checked else tt("Auto-save is off. Remember to save the current edit layer.", self.lang)
+        if checked:
+            message = tt("Auto-save is on. Brush changes are saved shortly after editing.", self.lang)
+        elif self._is_editable_part_volume():
+            message = tt("Auto-save is off. Remember to save the current part mask.", self.lang)
+        else:
+            message = tt("Auto-save is off. Remember to save the current edit layer.", self.lang)
         self._set_operation_feedback(message)
         if checked and self.working_edit_dirty:
             self.auto_save_timer.start()
@@ -3036,10 +3276,16 @@ class TifWorkbenchWidget(QWidget):
         self._update_save_status()
         if not self.working_edit_dirty:
             return True
+        title = tt("Unsaved part mask", self.lang) if self._is_editable_part_volume() else tt("Unsaved working edit", self.lang)
+        prompt = (
+            tt("Save changes to the current part mask before continuing?", self.lang)
+            if self._is_editable_part_volume()
+            else tt("Save changes to the current working_edit before continuing?", self.lang)
+        )
         reply = QMessageBox.question(
             self,
-            tt("Unsaved working edit", self.lang),
-            tt("Save changes to the current working_edit before continuing?", self.lang),
+            title,
+            prompt,
             QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
             QMessageBox.Save,
         )
@@ -4386,14 +4632,18 @@ class TifWorkbenchWidget(QWidget):
         controls.setHorizontalSpacing(10)
         controls.setVerticalSpacing(8)
         self.brush_size_label = QLabel("Brush size")
-        tool_row = QHBoxLayout()
-        tool_row.setSpacing(6)
-        tool_row.addWidget(self.btn_tool_brush)
-        tool_row.addWidget(self.btn_tool_eraser)
-        tool_row.addWidget(self.btn_tool_picker)
-        tool_row.addWidget(self.btn_tool_pan)
+        tool_grid = QGridLayout()
+        tool_grid.setHorizontalSpacing(6)
+        tool_grid.setVerticalSpacing(6)
+        tool_grid.addWidget(self.btn_tool_brush, 0, 0)
+        tool_grid.addWidget(self.btn_tool_eraser, 0, 1)
+        tool_grid.addWidget(self.btn_tool_lasso, 1, 0)
+        tool_grid.addWidget(self.btn_tool_rectangle, 1, 1)
+        tool_grid.addWidget(self.btn_tool_ellipse, 2, 0)
+        tool_grid.addWidget(self.btn_tool_picker, 2, 1)
+        tool_grid.addWidget(self.btn_tool_pan, 3, 0, 1, 2)
         controls.addWidget(self.annotation_tool_label, 0, 0)
-        controls.addLayout(tool_row, 0, 1)
+        controls.addLayout(tool_grid, 0, 1)
         controls.addWidget(self.label_layer_label, 1, 0)
         controls.addWidget(self.label_role_combo, 1, 1)
         controls.addWidget(self.brush_size_label, 2, 0)
@@ -4415,6 +4665,12 @@ class TifWorkbenchWidget(QWidget):
         auto_save_row.addWidget(self.auto_save_hint_label, 1)
         annotation_layout.addLayout(auto_save_row)
         annotation_layout.addWidget(self.btn_save_edit)
+        slice_helper_row = QHBoxLayout()
+        slice_helper_row.setSpacing(6)
+        slice_helper_row.addWidget(self.btn_copy_material_prev)
+        slice_helper_row.addWidget(self.btn_copy_material_next)
+        annotation_layout.addLayout(slice_helper_row)
+        annotation_layout.addWidget(self.btn_clear_current_material)
         annotation_layout.addWidget(self.btn_promote)
         annotation_layout.addWidget(self.btn_copy_draft)
         self.annotation_task_layout.addWidget(self.annotation_section)
@@ -5464,20 +5720,38 @@ class TifWorkbenchWidget(QWidget):
         self.render_current_slice()
 
     def _load_edit_volume(self):
+        self.edit_volume = None
         if self.current_volume_scope == "part":
-            self.edit_volume = None
+            if not self._is_editable_part_volume():
+                return
+            mask_path = self._current_part_mask_path()
+            if mask_path and volume_sidecar_exists(mask_path):
+                self.edit_volume = load_volume_sidecar(mask_path, mmap_mode="c")
             return
         specimen = self.project.get_specimen(self.current_specimen_id, default=None)
-        self.edit_volume = None
         if specimen is None:
             return
         edit_path = self.project.to_absolute(((specimen.get("labels") or {}).get("working_edit") or {}).get("path", ""))
         if edit_path and volume_sidecar_exists(edit_path):
             self.edit_volume = load_volume_sidecar(edit_path, mmap_mode="c")
 
+    def _current_part_mask_path(self):
+        if self.current_volume_scope != "part" or self.current_reslice_id:
+            return ""
+        part = self.project.get_part(self.current_specimen_id, self.current_part_id, default=None)
+        mask_path = self.project.to_absolute(((part or {}).get("mask") or {}).get("path", ""))
+        return mask_path if mask_path else ""
+
     def _ensure_working_edit_volume(self):
         if self.current_volume_scope == "part":
-            return False
+            if not self._is_editable_part_volume():
+                return False
+            mask_path = self._current_part_mask_path()
+            if not mask_path or not volume_sidecar_exists(mask_path):
+                return False
+            if self.edit_volume is None:
+                self.edit_volume = load_volume_sidecar(mask_path, mmap_mode="c")
+            return self.edit_volume is not None
         specimen = self.project.get_specimen(self.current_specimen_id, default=None)
         if specimen is None:
             return False
@@ -5533,16 +5807,28 @@ class TifWorkbenchWidget(QWidget):
         is_saved_reslice = is_part and bool(self.current_reslice_id)
         is_editable_part_volume = is_part and not is_saved_reslice
         has_image = self.image_volume is not None
+        label_editable = has_image and (not is_part or is_editable_part_volume)
+        full_volume_editable = has_image and not is_part
+        self.label_role_combo.setEnabled(full_volume_editable)
         for widget in (
-            self.label_role_combo,
             self.brush_size_slider,
-            self.btn_undo,
-            self.btn_redo,
             self.btn_save_edit,
             self.btn_tool_brush,
             self.btn_tool_eraser,
+            self.btn_tool_lasso,
+            self.btn_tool_rectangle,
+            self.btn_tool_ellipse,
+            self.btn_copy_material_prev,
+            self.btn_copy_material_next,
+            self.btn_clear_current_material,
+        ):
+            widget.setEnabled(label_editable)
+        for widget in (
             self.btn_tool_picker,
             self.btn_tool_pan,
+        ):
+            widget.setEnabled(has_image)
+        for widget in (
             self.btn_promote,
             self.btn_copy_draft,
             self.btn_export_training,
@@ -5551,11 +5837,11 @@ class TifWorkbenchWidget(QWidget):
             self.btn_import_prediction,
             self.btn_import_external_prediction_tif,
         ):
-            widget.setEnabled(not is_part)
-        self.auto_save_check.setEnabled(not is_part)
-        self.btn_add_material.setEnabled(not is_part)
-        self.btn_edit_material.setEnabled(not is_part)
-        self.btn_delete_material.setEnabled(not is_part)
+            widget.setEnabled(full_volume_editable)
+        self.auto_save_check.setEnabled(label_editable)
+        self.btn_add_material.setEnabled(full_volume_editable)
+        self.btn_edit_material.setEnabled(full_volume_editable)
+        self.btn_delete_material.setEnabled(full_volume_editable)
         self.part_bbox_edit.setEnabled(not is_part and has_image)
         self.btn_part_default_bbox.setEnabled(not is_part and has_image)
         self.btn_part_draw_roi.setEnabled(not is_part and has_image and self.display_mode == "slice")
@@ -5698,7 +5984,11 @@ class TifWorkbenchWidget(QWidget):
         label_slice = None
         if self.label_volume is not None and self.label_volume.shape == self.image_volume.shape:
             label_slice = self._extract_axis_slice(self.label_volume, axis, slice_index)
-        if self.label_role_combo.currentData() == "working_edit" and self.edit_volume is not None and self.edit_volume.shape == self.image_volume.shape:
+        if (
+            (self.current_volume_scope == "part" or self.label_role_combo.currentData() == "working_edit")
+            and self.edit_volume is not None
+            and self.edit_volume.shape == self.image_volume.shape
+        ):
             label_slice = self._extract_axis_slice(self.edit_volume, axis, slice_index)
         if self.current_volume_scope == "part" and self.part_preview_mask is not None and self.part_preview_mask.shape == self.image_volume.shape:
             label_slice = self._extract_axis_slice(self.part_preview_mask, axis, slice_index)
@@ -5730,6 +6020,19 @@ class TifWorkbenchWidget(QWidget):
             f"{tt('drag rotate / wheel zoom', self.lang)} | "
             f"{int(round(self._volume_zoom * 100))}%"
         )
+
+    def _can_edit_current_label_volume(self):
+        if self.image_volume is None:
+            return False
+        if self.display_mode == "volume":
+            return False
+        if self._current_slice_axis() != "z":
+            return False
+        if self._is_editable_part_volume():
+            return True
+        if self.current_volume_scope == "part" or not hasattr(self, "label_role_combo"):
+            return False
+        return self.label_role_combo.currentData() == "working_edit"
 
     def _local_axis_overlay_enabled(self):
         return bool(
@@ -7587,7 +7890,13 @@ class TifWorkbenchWidget(QWidget):
         if self.image_volume is None:
             return ""
         if self.current_volume_scope == "part":
-            return tt("Part volume is read-only here. Use part mask preview controls for extraction masks.", self.lang)
+            if self.current_reslice_id:
+                return tt("Selected saved reslice is read-only. Return to the part volume to edit masks.", self.lang)
+            if self.display_mode == "volume":
+                return tt("3D volume preview is read-only. Switch to Slice review for label editing.", self.lang)
+            if self._current_slice_axis() != "z":
+                return tt("Painting is available on Z slices only. Switch back to Z axial view before editing labels.", self.lang)
+            return ""
         if self.display_mode == "volume":
             return tt("3D volume preview is read-only. Switch to Slice review for label editing.", self.lang)
         if self._current_slice_axis() != "z":
@@ -7601,7 +7910,68 @@ class TifWorkbenchWidget(QWidget):
             return tt("Cannot paint on this label layer. Switch to Current edit first.", self.lang)
         return ""
 
-    def paint_at_widget_position(self, x, y, erase=False):
+    def _reset_annotation_stroke(self):
+        self._annotation_stroke_active = False
+        self._annotation_stroke_undo_pushed = False
+        self._annotation_stroke_z_index = None
+        self._annotation_stroke_last_pixel = None
+        self._annotation_stroke_changed = False
+
+    def begin_annotation_stroke(self):
+        self._annotation_stroke_active = True
+        self._annotation_stroke_undo_pushed = False
+        self._annotation_stroke_z_index = None
+        self._annotation_stroke_last_pixel = None
+        self._annotation_stroke_changed = False
+
+    def finish_annotation_stroke(self):
+        self._reset_annotation_stroke()
+
+    def _ensure_annotation_undo_for_slice(self, z_index):
+        if not self._annotation_stroke_active:
+            self._push_undo()
+            return
+        if self._annotation_stroke_undo_pushed and self._annotation_stroke_z_index == z_index:
+            return
+        self._push_undo()
+        self._annotation_stroke_undo_pushed = True
+        self._annotation_stroke_z_index = int(z_index)
+
+    def _paint_disc_on_slice(self, z_index, px, py, radius, value):
+        if self.edit_volume is None:
+            return False
+        height, width = self.edit_volume.shape[1], self.edit_volume.shape[2]
+        px = max(0, min(width - 1, int(px)))
+        py = max(0, min(height - 1, int(py)))
+        radius = max(1, int(radius))
+        y0 = max(0, py - radius)
+        y1 = min(height, py + radius + 1)
+        x0 = max(0, px - radius)
+        x1 = min(width, px + radius + 1)
+        if y0 >= y1 or x0 >= x1:
+            return False
+        yy, xx = np.ogrid[y0:y1, x0:x1]
+        mask = (xx - px) ** 2 + (yy - py) ** 2 <= radius ** 2
+        target = self.edit_volume[int(z_index), y0:y1, x0:x1]
+        before = target[mask].copy()
+        target[mask] = int(value)
+        return bool(np.any(before != int(value)))
+
+    def _paint_interpolated_stroke_on_slice(self, z_index, start_pixel, end_pixel, radius, value):
+        if start_pixel is None:
+            return self._paint_disc_on_slice(z_index, end_pixel[0], end_pixel[1], radius, value)
+        x0, y0 = [int(v) for v in start_pixel]
+        x1, y1 = [int(v) for v in end_pixel]
+        steps = max(abs(x1 - x0), abs(y1 - y0), 1)
+        changed = False
+        for step in range(steps + 1):
+            ratio = float(step) / float(steps)
+            px = int(round(x0 + (x1 - x0) * ratio))
+            py = int(round(y0 + (y1 - y0) * ratio))
+            changed = self._paint_disc_on_slice(z_index, px, py, radius, value) or changed
+        return changed
+
+    def paint_at_widget_position(self, x, y, erase=False, continue_stroke=False):
         if self.image_volume is None:
             return
         block_reason = self._editable_label_block_reason(require_working_edit=True)
@@ -7618,22 +7988,313 @@ class TifWorkbenchWidget(QWidget):
         pixel = self._widget_to_image_pixel(x, y, width, height)
         if pixel is None:
             return
-        px, py = pixel
         radius = max(1, int(self.brush_size_slider.value()))
-        self._push_undo()
-        yy, xx = np.ogrid[:height, :width]
-        mask = (xx - px) ** 2 + (yy - py) ** 2 <= radius ** 2
-        self.edit_volume[z_index][mask] = 0 if erase else int(self.current_material_id)
-        self._dirty_edit_slices.add(z_index)
-        self._mark_working_edit_dirty()
-        self.render_current_slice()
+        active_stroke = bool(continue_stroke and self._annotation_stroke_active)
+        if not active_stroke and continue_stroke:
+            self.begin_annotation_stroke()
+            active_stroke = True
+        previous_pixel = self._annotation_stroke_last_pixel if active_stroke else None
+        self._ensure_annotation_undo_for_slice(z_index)
+        value = 0 if erase else int(self.current_material_id)
+        changed = self._paint_interpolated_stroke_on_slice(z_index, previous_pixel, pixel, radius, value)
+        if active_stroke:
+            self._annotation_stroke_last_pixel = tuple(pixel)
+            self._annotation_stroke_changed = self._annotation_stroke_changed or changed
+        if changed:
+            self._dirty_edit_slices.add(z_index)
+            self._mark_working_edit_dirty()
+            self.render_current_slice()
         if erase:
             message = tt("Erased labels on slice {0}.", self.lang).format(z_index + 1)
         else:
             message = tt("Painted material {0} on slice {1}.", self.lang).format(self.current_material_id, z_index + 1)
         self._set_operation_feedback(message, log=False)
 
+    def _polygon_fill_mask(self, points, width, height):
+        if len(points) < 3 or width <= 0 or height <= 0:
+            return np.zeros((max(0, height), max(0, width)), dtype=bool)
+        polygon = []
+        for point in points:
+            if point is None or len(point) < 2:
+                continue
+            x = max(-1.0, min(float(width), float(point[0]) + 0.5))
+            y = max(-1.0, min(float(height), float(point[1]) + 0.5))
+            if not polygon or (polygon[-1][0] != x or polygon[-1][1] != y):
+                polygon.append((x, y))
+        if len(polygon) >= 2 and polygon[0] == polygon[-1]:
+            polygon.pop()
+        if len(polygon) < 3:
+            return np.zeros((height, width), dtype=bool)
+        mask = np.zeros((height, width), dtype=bool)
+        edges = list(zip(polygon, polygon[1:] + polygon[:1]))
+        for y in range(height):
+            scan_y = float(y) + 0.5
+            intersections = []
+            for (x0, y0), (x1, y1) in edges:
+                if y0 == y1:
+                    continue
+                if (y0 <= scan_y < y1) or (y1 <= scan_y < y0):
+                    ratio = (scan_y - y0) / (y1 - y0)
+                    intersections.append(x0 + ratio * (x1 - x0))
+            intersections.sort()
+            for left, right in zip(intersections[0::2], intersections[1::2]):
+                x_start = max(0, int(math.ceil(min(left, right) - 0.5)))
+                x_end = min(width - 1, int(math.floor(max(left, right) - 0.5)))
+                if x_start <= x_end:
+                    mask[y, x_start : x_end + 1] = True
+        return mask
+
+    def _rect_fill_mask(self, start_pixel, end_pixel, width, height):
+        mask = np.zeros((height, width), dtype=bool)
+        if start_pixel is None or end_pixel is None:
+            return mask
+        x0, y0 = [int(v) for v in start_pixel]
+        x1, y1 = [int(v) for v in end_pixel]
+        left = max(0, min(x0, x1))
+        right = min(width - 1, max(x0, x1))
+        top = max(0, min(y0, y1))
+        bottom = min(height - 1, max(y0, y1))
+        if right - left < 1 or bottom - top < 1:
+            return mask
+        mask[top : bottom + 1, left : right + 1] = True
+        return mask
+
+    def _ellipse_fill_mask(self, start_pixel, end_pixel, width, height):
+        mask = np.zeros((height, width), dtype=bool)
+        if start_pixel is None or end_pixel is None:
+            return mask
+        x0, y0 = [int(v) for v in start_pixel]
+        x1, y1 = [int(v) for v in end_pixel]
+        left = max(0, min(x0, x1))
+        right = min(width - 1, max(x0, x1))
+        top = max(0, min(y0, y1))
+        bottom = min(height - 1, max(y0, y1))
+        if right - left < 1 or bottom - top < 1:
+            return mask
+        cx = (left + right) / 2.0
+        cy = (top + bottom) / 2.0
+        rx = max(0.5, (right - left + 1) / 2.0)
+        ry = max(0.5, (bottom - top + 1) / 2.0)
+        yy, xx = np.ogrid[top : bottom + 1, left : right + 1]
+        local = ((xx - cx) / rx) ** 2 + ((yy - cy) / ry) ** 2 <= 1.0
+        mask[top : bottom + 1, left : right + 1] = local
+        return mask
+
+    def _fill_risk_suffix(self, mask):
+        if mask is None or mask.size == 0:
+            return ""
+        count = int(np.count_nonzero(mask))
+        if count <= 0:
+            return ""
+        total = max(1, int(mask.size))
+        warnings = []
+        percent = int(round((count / total) * 100.0))
+        if percent >= 35:
+            warnings.append(tt("Large fill area: {0}% of slice.", self.lang).format(percent))
+        if (
+            np.any(mask[0, :])
+            or np.any(mask[-1, :])
+            or np.any(mask[:, 0])
+            or np.any(mask[:, -1])
+        ):
+            warnings.append(tt("Fill touches the image edge.", self.lang))
+        return (" " + " ".join(warnings)) if warnings else ""
+
+    def _apply_mask_to_slice(self, z_index, mask, value, message_template, *, allow_noop=False):
+        if self.edit_volume is None:
+            return False
+        z_index = int(z_index)
+        if z_index < 0 or z_index >= int(self.edit_volume.shape[0]):
+            return False
+        if mask is None:
+            return False
+        mask = np.asarray(mask, dtype=bool)
+        height, width = self.edit_volume.shape[1], self.edit_volume.shape[2]
+        if mask.shape != (height, width):
+            return False
+        count = int(np.count_nonzero(mask))
+        if count <= 0:
+            self._set_operation_feedback(tt("Shape fill is too small. Drag a wider area before releasing.", self.lang))
+            return False
+        current_slice = self.edit_volume[z_index]
+        value = int(value)
+        changed_mask = mask & (current_slice != value)
+        changed_count = int(np.count_nonzero(changed_mask))
+        if changed_count <= 0:
+            if allow_noop:
+                message = tt("No label changes were needed on slice {0}.", self.lang).format(z_index + 1)
+                self._set_operation_feedback(message, log=False)
+                return True
+            message = tt(message_template, self.lang).format(value, z_index + 1, count) + self._fill_risk_suffix(mask)
+            self._set_operation_feedback(message, log=False)
+            return True
+        self._push_undo_for_slice(z_index)
+        current_slice[mask] = value
+        self._dirty_edit_slices.add(z_index)
+        self._mark_working_edit_dirty()
+        if self._current_slice_axis() == "z":
+            self.slice_slider.setValue(z_index)
+        self.render_current_slice()
+        message = tt(message_template, self.lang).format(value, z_index + 1, changed_count) + self._fill_risk_suffix(mask)
+        self._set_operation_feedback(message, log=False)
+        return True
+
+    def finish_lasso_fill(self, points):
+        if self.image_volume is None:
+            return False
+        block_reason = self._editable_label_block_reason(require_working_edit=True)
+        if block_reason:
+            self._set_operation_feedback(block_reason)
+            return False
+        if len(points or []) < 3:
+            self._set_operation_feedback(tt("Lasso fill needs at least 3 points.", self.lang))
+            return False
+        if self.edit_volume is None:
+            self._set_operation_feedback(tt("Creating working edit layer before filling...", self.lang))
+            if not self._ensure_working_edit_volume():
+                self._set_operation_feedback(tt("Working edit layer is unavailable. Check the working volume path before editing labels.", self.lang))
+                return False
+        z_index = int(self.slice_slider.value())
+        height, width = self.image_volume.shape[1], self.image_volume.shape[2]
+        mask = self._polygon_fill_mask(points, width, height)
+        if int(np.count_nonzero(mask)) <= 0:
+            self._set_operation_feedback(tt("Lasso fill did not cover any pixels.", self.lang))
+            return False
+        return self._apply_mask_to_slice(z_index, mask, int(self.current_material_id), "Filled material {0} on slice {1}: {2} pixel(s).")
+
+    def finish_shape_fill_drag(self, mode, start_x, start_y, end_x, end_y):
+        if self.image_volume is None:
+            return False
+        block_reason = self._editable_label_block_reason(require_working_edit=True)
+        if block_reason:
+            self._set_operation_feedback(block_reason)
+            return False
+        if self.edit_volume is None:
+            self._set_operation_feedback(tt("Creating working edit layer before filling...", self.lang))
+            if not self._ensure_working_edit_volume():
+                self._set_operation_feedback(tt("Working edit layer is unavailable. Check the working volume path before editing labels.", self.lang))
+                return False
+        z_index = int(self.slice_slider.value())
+        height, width = self.image_volume.shape[1], self.image_volume.shape[2]
+        start_pixel = self._widget_to_image_pixel(start_x, start_y, width, height)
+        end_pixel = self._widget_to_image_pixel(end_x, end_y, width, height)
+        if start_pixel is None or end_pixel is None:
+            return False
+        if mode == "ellipse":
+            mask = self._ellipse_fill_mask(start_pixel, end_pixel, width, height)
+            template = "Filled ellipse material {0} on slice {1}: {2} pixel(s)."
+        else:
+            mask = self._rect_fill_mask(start_pixel, end_pixel, width, height)
+            template = "Filled rectangle material {0} on slice {1}: {2} pixel(s)."
+        if int(np.count_nonzero(mask)) <= 0:
+            self._set_operation_feedback(tt("Shape fill is too small. Drag a wider area before releasing.", self.lang))
+            return False
+        return self._apply_mask_to_slice(z_index, mask, int(self.current_material_id), template)
+
+    def _ensure_editable_working_edit_for_helper(self):
+        if self.image_volume is None:
+            return False
+        block_reason = self._editable_label_block_reason(require_working_edit=True)
+        if block_reason:
+            self._set_operation_feedback(block_reason)
+            return False
+        if self.edit_volume is None:
+            self._set_operation_feedback(tt("Creating working edit layer before filling...", self.lang))
+            if not self._ensure_working_edit_volume():
+                self._set_operation_feedback(tt("Working edit layer is unavailable. Check the working volume path before editing labels.", self.lang))
+                return False
+        return True
+
+    def copy_current_material_to_adjacent_slice(self, delta):
+        if not self._ensure_editable_working_edit_for_helper():
+            return False
+        material_id = int(self.current_material_id)
+        if material_id == 0:
+            self._set_operation_feedback(tt("Background material 0 is not supported by this helper.", self.lang))
+            return False
+        source_z = int(self.slice_slider.value())
+        target_z = source_z + int(delta)
+        if target_z < 0:
+            self._set_operation_feedback(tt("No previous slice is available.", self.lang))
+            return False
+        if target_z >= int(self.edit_volume.shape[0]):
+            self._set_operation_feedback(tt("No next slice is available.", self.lang))
+            return False
+        source_mask = np.asarray(self.edit_volume[source_z] == material_id)
+        source_count = int(np.count_nonzero(source_mask))
+        if source_count <= 0:
+            self._set_operation_feedback(tt("No pixels of material {0} on slice {1}.", self.lang).format(material_id, source_z + 1))
+            return False
+        reply = QMessageBox.question(
+            self,
+            tt("Confirm label edit", self.lang),
+            tt("Copy material {0} from slice {1} to slice {2}? Existing pixels of this material on the target slice will be replaced.", self.lang).format(
+                material_id,
+                source_z + 1,
+                target_z + 1,
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return False
+        target_slice = self.edit_volume[target_z]
+        next_slice = np.asarray(target_slice).copy()
+        next_slice[next_slice == material_id] = 0
+        next_slice[source_mask] = material_id
+        changed = int(np.count_nonzero(next_slice != target_slice))
+        if changed <= 0:
+            self._set_operation_feedback(tt("No label changes were needed on slice {0}.", self.lang).format(target_z + 1), log=False)
+            return True
+        self._push_undo_for_slice(target_z)
+        self.edit_volume[target_z] = next_slice
+        self._dirty_edit_slices.add(target_z)
+        self._mark_working_edit_dirty()
+        self.slice_slider.setValue(target_z)
+        self.render_current_slice()
+        message = tt("Copied material {0} from slice {1} to slice {2}: {3} changed pixel(s).", self.lang).format(
+            material_id,
+            source_z + 1,
+            target_z + 1,
+            changed,
+        )
+        self._set_operation_feedback(message, log=False)
+        return True
+
+    def clear_current_material_on_slice(self):
+        if not self._ensure_editable_working_edit_for_helper():
+            return False
+        material_id = int(self.current_material_id)
+        if material_id == 0:
+            self._set_operation_feedback(tt("Background material 0 is not supported by this helper.", self.lang))
+            return False
+        z_index = int(self.slice_slider.value())
+        mask = np.asarray(self.edit_volume[z_index] == material_id)
+        count = int(np.count_nonzero(mask))
+        if count <= 0:
+            self._set_operation_feedback(tt("No pixels of material {0} on slice {1}.", self.lang).format(material_id, z_index + 1))
+            return False
+        reply = QMessageBox.question(
+            self,
+            tt("Confirm label edit", self.lang),
+            tt("Clear material {0} from slice {1}?", self.lang).format(material_id, z_index + 1),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return False
+        self._push_undo_for_slice(z_index)
+        self.edit_volume[z_index][mask] = 0
+        self._dirty_edit_slices.add(z_index)
+        self._mark_working_edit_dirty()
+        self.render_current_slice()
+        message = tt("Cleared material {0} on slice {1}: {2} pixel(s).", self.lang).format(material_id, z_index + 1, count)
+        self._set_operation_feedback(message, log=False)
+        return True
+
     def _sample_label_volume(self):
+        if self.current_volume_scope == "part" and self.edit_volume is not None and self.edit_volume.shape == self.image_volume.shape:
+            return self.edit_volume
         if self.label_role_combo.currentData() == "working_edit" and self.edit_volume is not None and self.edit_volume.shape == self.image_volume.shape:
             return self.edit_volume
         if self.label_volume is not None and self.label_volume.shape == self.image_volume.shape:
@@ -7645,8 +8306,8 @@ class TifWorkbenchWidget(QWidget):
     def pick_material_at_widget_position(self, x, y):
         if self.image_volume is None:
             return
-        if self.current_volume_scope == "part":
-            self._set_operation_feedback(tt("Part volume is read-only here. Use part mask preview controls for extraction masks.", self.lang))
+        if self.current_volume_scope == "part" and self.current_reslice_id:
+            self._set_operation_feedback(tt("Selected saved reslice is read-only. Return to the part volume to edit masks.", self.lang))
             return
         if self.display_mode == "volume":
             self._set_operation_feedback(tt("3D volume preview is read-only. Switch to Slice review for label editing.", self.lang))
@@ -7684,6 +8345,14 @@ class TifWorkbenchWidget(QWidget):
         if self._current_slice_axis() != "z":
             return
         z_index = int(self.slice_slider.value())
+        self._push_undo_for_slice(z_index)
+
+    def _push_undo_for_slice(self, z_index):
+        if self.edit_volume is None:
+            return
+        z_index = int(z_index)
+        if z_index < 0 or z_index >= int(self.edit_volume.shape[0]):
+            return
         self.undo_stack.append((z_index, self.edit_volume[z_index].copy()))
         if len(self.undo_stack) > 20:
             self.undo_stack.pop(0)
@@ -7724,7 +8393,7 @@ class TifWorkbenchWidget(QWidget):
         if self._saving_working_edit:
             return True
         if self.current_volume_scope == "part":
-            return False
+            return self._save_part_mask_edit(show_message=show_message, reason=reason)
         specimen = self.project.get_specimen(self.current_specimen_id, default=None)
         if specimen is None or self.edit_volume is None:
             return False
@@ -7768,6 +8437,57 @@ class TifWorkbenchWidget(QWidget):
             self._update_save_status()
         if show_message:
             message = tt("Auto-saved working edit.", self.lang) if reason == "auto_save" else tt("Working edit saved.", self.lang)
+            self._set_operation_feedback(message)
+        return True
+
+    def _save_part_mask_edit(self, show_message=True, reason="manual"):
+        if not self._is_editable_part_volume():
+            return False
+        specimen = self.project.get_specimen(self.current_specimen_id, default=None)
+        part = self.project.get_part(self.current_specimen_id, self.current_part_id, default=None)
+        if specimen is None or part is None or self.edit_volume is None:
+            return False
+        mask_path = self._current_part_mask_path()
+        if not mask_path:
+            return False
+        self._saving_working_edit = True
+        self.auto_save_timer.stop()
+        self._update_save_status(state="saving")
+        try:
+            target = load_volume_sidecar(mask_path, mmap_mode="r+")
+            if self._dirty_edit_slices:
+                for z_index in sorted(self._dirty_edit_slices):
+                    if 0 <= int(z_index) < int(target.shape[0]):
+                        target[int(z_index)] = self.edit_volume[int(z_index)]
+            metadata = flush_volume_array(mask_path, target)
+            mask_record = part.setdefault("mask", {})
+            mask_record["dtype"] = metadata["dtype"]
+            mask_record["shape_zyx"] = metadata["shape_zyx"]
+            mask_record["spacing_zyx"] = metadata.get("spacing_zyx", mask_record.get("spacing_zyx", [1.0, 1.0, 1.0]))
+            mask_record["spacing_unit"] = metadata.get("spacing_unit", mask_record.get("spacing_unit", "micrometer"))
+            mask_record["orientation"] = metadata.get("orientation", mask_record.get("orientation", "unknown"))
+            mask_record["format"] = metadata.get("format", mask_record.get("format", ""))
+            mask_record["status"] = "in_progress"
+            part["status"] = "mask_in_progress"
+            self.project.save_project()
+            self.working_edit_dirty = False
+            self._dirty_edit_slices = set()
+            self.edit_volume = load_volume_sidecar(mask_path, mmap_mode="c")
+            self.label_volume = load_volume_sidecar(mask_path, mmap_mode="r")
+            self._update_status_labels(specimen, part=part)
+            self._update_save_status()
+        except Exception as exc:
+            self.working_edit_dirty = True
+            message = tt("Save failed: {0}", self.lang).format(str(exc))
+            self._set_operation_feedback(message)
+            self._update_save_status(state="failed", detail=str(exc))
+            QMessageBox.warning(self, tt("Unsaved working edit", self.lang), str(exc))
+            return False
+        finally:
+            self._saving_working_edit = False
+            self._update_save_status()
+        if show_message:
+            message = tt("Auto-saved part mask.", self.lang) if reason == "auto_save" else tt("Part mask saved.", self.lang)
             self._set_operation_feedback(message)
         return True
 

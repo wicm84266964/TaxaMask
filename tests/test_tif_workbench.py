@@ -233,6 +233,11 @@ class TifWorkbenchTests(unittest.TestCase):
         widget.render_current_slice()
         return widget
 
+    def _canvas_xy_for_image_pixel(self, widget, x, y):
+        point = widget.canvas._image_point_to_widget_point([float(x) + 0.5, float(y) + 0.5])
+        self.assertIsNotNone(point)
+        return point
+
     def _make_local_axis_panel_project(self, root, project_name="local_axis_panel"):
         manager = TifProjectManager()
         project_root = root / project_name
@@ -3164,7 +3169,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.close_project(prompt_unsaved=False)
                 widget.deleteLater()
 
-    def test_visible_annotation_tools_paint_erase_pick_and_pan(self):
+    def test_visible_annotation_tools_paint_erase_lasso_pick_and_pan(self):
         with tempfile.TemporaryDirectory() as tmp:
             widget = self._make_volume_widget(Path(tmp), z_count=2)
             try:
@@ -3190,6 +3195,12 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.canvas.mousePressEvent(FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, x, y, modifiers=Qt.ControlModifier))
                 self.assertEqual(int(widget.edit_volume[0, 4, 4]), 0)
 
+                widget.set_annotation_tool_mode("lasso", show_message=False)
+                self.assertTrue(widget.findChild(QWidget, "tifToolLassoButton").isChecked())
+                widget.finish_lasso_fill([[1, 1], [5, 1], [5, 5], [1, 5]])
+                self.assertGreater(int(np.count_nonzero(widget.edit_volume[0] == 2)), 0)
+                self.assertIn("Filled material 2 on slice", widget.operation_status_label.text())
+
                 widget.edit_volume[0, 4, 4] = 2
                 widget.render_current_slice()
                 widget._set_current_material_id(0)
@@ -3204,6 +3215,273 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.canvas.mouseMoveEvent(FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, x + 20, y + 10))
                 np.testing.assert_array_equal(widget.edit_volume, before_pan)
                 self.assertIn("Labels were not changed", widget.operation_status_label.text())
+            finally:
+                widget.close_project(prompt_unsaved=False)
+                widget.deleteLater()
+
+    def test_brush_drag_interpolates_stroke_and_uses_single_undo_step(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=2)
+            try:
+                edit_index = widget.label_role_combo.findData("working_edit")
+                widget.label_role_combo.setCurrentIndex(edit_index)
+                widget.brush_size_slider.setValue(1)
+                widget._set_current_material_id(2)
+                widget.set_annotation_tool_mode("brush", show_message=False)
+                start = self._canvas_xy_for_image_pixel(widget, 1, 4)
+                end = self._canvas_xy_for_image_pixel(widget, 6, 4)
+
+                widget.canvas.mousePressEvent(FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, start[0], start[1]))
+                widget.canvas.mouseMoveEvent(FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, end[0], end[1]))
+                widget.canvas.mouseReleaseEvent(FakeMouseEvent(Qt.LeftButton, Qt.NoButton, end[0], end[1]))
+
+                self.assertEqual(len(widget.undo_stack), 1)
+                for x in range(1, 7):
+                    self.assertEqual(int(widget.edit_volume[0, 4, x]), 2)
+                painted = widget.edit_volume.copy()
+
+                widget.undo()
+                self.assertEqual(int(np.count_nonzero(widget.edit_volume[0])), 0)
+                widget.redo()
+                np.testing.assert_array_equal(widget.edit_volume, painted)
+            finally:
+                widget.close_project(prompt_unsaved=False)
+                widget.deleteLater()
+
+    def test_lasso_fill_fills_closed_outline_and_undoes_as_single_step(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            widget = self._make_volume_widget(root, z_count=2)
+            try:
+                edit_index = widget.label_role_combo.findData("working_edit")
+                widget.label_role_combo.setCurrentIndex(edit_index)
+                widget._set_current_material_id(2)
+                widget.set_annotation_tool_mode("lasso", show_message=False)
+                raw_points = [(1, 1), (6, 1), (6, 6), (1, 6), (1, 1)]
+                canvas_points = [self._canvas_xy_for_image_pixel(widget, x, y) for x, y in raw_points]
+
+                widget.canvas.mousePressEvent(FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, canvas_points[0][0], canvas_points[0][1]))
+                for point in canvas_points[1:]:
+                    widget.canvas.mouseMoveEvent(FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, point[0], point[1]))
+                widget.canvas.mouseReleaseEvent(FakeMouseEvent(Qt.LeftButton, Qt.NoButton, canvas_points[-1][0], canvas_points[-1][1]))
+
+                self.assertEqual(len(widget.undo_stack), 1)
+                self.assertEqual(int(widget.edit_volume[0, 3, 3]), 2)
+                self.assertEqual(int(widget.edit_volume[0, 0, 0]), 0)
+                self.assertTrue(widget.working_edit_dirty)
+                self.assertIn(0, widget._dirty_edit_slices)
+                self.assertIn("Filled material 2 on slice", widget.operation_status_label.text())
+
+                filled = widget.edit_volume.copy()
+                widget.undo()
+                self.assertEqual(int(np.count_nonzero(widget.edit_volume[0])), 0)
+                widget.redo()
+                np.testing.assert_array_equal(widget.edit_volume, filled)
+
+                widget.auto_save_timer.stop()
+                self.assertTrue(widget.save_working_edit(show_message=True))
+                specimen = widget.project.get_specimen("01-0101-21")
+                edit_path = root / "viewer" / specimen["labels"]["working_edit"]["path"] / "array.npy"
+                saved = np.load(edit_path)
+                self.assertEqual(int(saved[0, 3, 3]), 2)
+            finally:
+                widget.close_project(prompt_unsaved=False)
+                widget.deleteLater()
+
+    def test_rectangle_and_ellipse_fill_preview_write_dirty_and_warn_on_risky_area(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=2)
+            try:
+                edit_index = widget.label_role_combo.findData("working_edit")
+                widget.label_role_combo.setCurrentIndex(edit_index)
+                widget._set_current_material_id(2)
+
+                widget.set_annotation_tool_mode("rectangle", show_message=False)
+                start = self._canvas_xy_for_image_pixel(widget, 0, 0)
+                end = self._canvas_xy_for_image_pixel(widget, 7, 7)
+                widget.canvas.mousePressEvent(FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, start[0], start[1]))
+                widget.canvas.mouseMoveEvent(FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, end[0], end[1]))
+                self.assertEqual(int(np.count_nonzero(widget.edit_volume[0])), 0)
+                widget.canvas.mouseReleaseEvent(FakeMouseEvent(Qt.LeftButton, Qt.NoButton, end[0], end[1]))
+
+                self.assertEqual(len(widget.undo_stack), 1)
+                self.assertEqual(int(np.count_nonzero(widget.edit_volume[0] == 2)), 64)
+                self.assertIn("Filled rectangle material 2", widget.operation_status_label.text())
+                self.assertIn("Large fill area", widget.operation_status_label.text())
+                self.assertIn("touches the image edge", widget.operation_status_label.text())
+                self.assertTrue(widget.working_edit_dirty)
+
+                widget.undo()
+                self.assertEqual(int(np.count_nonzero(widget.edit_volume[0])), 0)
+                widget.redo()
+                self.assertEqual(int(np.count_nonzero(widget.edit_volume[0] == 2)), 64)
+
+                widget.set_annotation_tool_mode("ellipse", show_message=False)
+                small = self._canvas_xy_for_image_pixel(widget, 3, 3)
+                widget.canvas.mousePressEvent(FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, small[0], small[1]))
+                widget.canvas.mouseReleaseEvent(FakeMouseEvent(Qt.LeftButton, Qt.NoButton, small[0], small[1]))
+                self.assertIn("too small", widget.operation_status_label.text())
+            finally:
+                widget.close_project(prompt_unsaved=False)
+                widget.deleteLater()
+
+    def test_current_material_copy_to_neighbor_and_clear_are_confirmed_single_undo_steps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=3)
+            try:
+                edit_index = widget.label_role_combo.findData("working_edit")
+                widget.label_role_combo.setCurrentIndex(edit_index)
+                widget._set_current_material_id(2)
+                widget.edit_volume[1, 2:5, 2:5] = 2
+                widget.slice_slider.setValue(1)
+                widget.render_current_slice()
+                module_path = "AntSleap.ui.tif_workbench.QMessageBox"
+
+                with patch(f"{module_path}.question", return_value=QMessageBox.Yes):
+                    self.assertTrue(widget.copy_current_material_to_adjacent_slice(1))
+
+                self.assertEqual(int(widget.slice_slider.value()), 2)
+                self.assertEqual(len(widget.undo_stack), 1)
+                self.assertEqual(int(np.count_nonzero(widget.edit_volume[2] == 2)), 9)
+                self.assertIn("Copied material 2 from slice 2 to slice 3", widget.operation_status_label.text())
+                self.assertIn(2, widget._dirty_edit_slices)
+
+                widget.undo()
+                self.assertEqual(int(np.count_nonzero(widget.edit_volume[2] == 2)), 0)
+                widget.redo()
+                self.assertEqual(int(np.count_nonzero(widget.edit_volume[2] == 2)), 9)
+
+                with patch(f"{module_path}.question", return_value=QMessageBox.Yes):
+                    self.assertTrue(widget.clear_current_material_on_slice())
+
+                self.assertEqual(int(np.count_nonzero(widget.edit_volume[2] == 2)), 0)
+                self.assertEqual(len(widget.undo_stack), 2)
+                self.assertIn("Cleared material 2 on slice 3", widget.operation_status_label.text())
+                widget.undo()
+                self.assertEqual(int(np.count_nonzero(widget.edit_volume[2] == 2)), 9)
+            finally:
+                widget.close_project(prompt_unsaved=False)
+                widget.deleteLater()
+
+    def test_part_volume_mask_uses_full_annotation_tools_and_saves_own_sidecar(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            widget = self._make_volume_widget(root, z_count=4)
+            try:
+                crop_volume_to_part(widget.project, "01-0101-21", "head", [[1, 3], [2, 6], [1, 5]], display_name="Head")
+                widget.refresh_project()
+                widget._select_volume_tree_item("01-0101-21", "part", "head")
+
+                self.assertEqual(widget.current_volume_scope, "part")
+                self.assertEqual(widget.current_reslice_id, "")
+                self.assertIsNotNone(widget.edit_volume)
+                self.assertTrue(widget.btn_tool_brush.isEnabled())
+                self.assertTrue(widget.btn_tool_eraser.isEnabled())
+                self.assertTrue(widget.btn_tool_lasso.isEnabled())
+                self.assertTrue(widget.btn_tool_rectangle.isEnabled())
+                self.assertTrue(widget.btn_tool_ellipse.isEnabled())
+                self.assertTrue(widget.btn_tool_picker.isEnabled())
+                self.assertTrue(widget.btn_save_edit.isEnabled())
+                self.assertFalse(widget.btn_promote.isEnabled())
+                self.assertFalse(widget.label_role_combo.isEnabled())
+
+                widget._set_current_material_id(2)
+                widget.slice_slider.setValue(0)
+                widget.set_annotation_tool_mode("rectangle", show_message=False)
+                start = self._canvas_xy_for_image_pixel(widget, 1, 1)
+                end = self._canvas_xy_for_image_pixel(widget, 2, 2)
+                widget.canvas.mousePressEvent(FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, start[0], start[1]))
+                widget.canvas.mouseMoveEvent(FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, end[0], end[1]))
+                widget.canvas.mouseReleaseEvent(FakeMouseEvent(Qt.LeftButton, Qt.NoButton, end[0], end[1]))
+
+                self.assertEqual(len(widget.undo_stack), 1)
+                self.assertGreater(int(np.count_nonzero(widget.edit_volume[0] == 2)), 0)
+                self.assertTrue(widget.working_edit_dirty)
+                self.assertTrue(widget.btn_undo.isEnabled())
+
+                widget.undo()
+                self.assertEqual(int(np.count_nonzero(widget.edit_volume[0] == 2)), 0)
+                widget.redo()
+                self.assertGreater(int(np.count_nonzero(widget.edit_volume[0] == 2)), 0)
+                self.assertTrue(widget.save_working_edit(show_message=True))
+                self.assertFalse(widget.working_edit_dirty)
+                self.assertIn("Part mask saved.", widget.operation_status_label.text())
+
+                part = widget.project.get_part("01-0101-21", "head")
+                mask_path = root / "viewer" / part["mask"]["path"]
+                saved_mask_volume = load_volume_sidecar(mask_path, mmap_mode="r")
+                saved_mask = np.asarray(saved_mask_volume).copy()
+                del saved_mask_volume
+                self.assertGreater(int(np.count_nonzero(saved_mask[0] == 2)), 0)
+                self.assertEqual(part["status"], "mask_in_progress")
+
+                specimen = widget.project.get_specimen("01-0101-21")
+                parent_edit = np.load(root / "viewer" / specimen["labels"]["working_edit"]["path"] / "array.npy")
+                self.assertEqual(int(np.count_nonzero(parent_edit)), 0)
+            finally:
+                widget.close_project(prompt_unsaved=False)
+                widget.deleteLater()
+
+    def test_saved_part_reslice_keeps_annotation_tools_read_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+            try:
+                crop_volume_to_part(widget.project, "01-0101-21", "head", [[0, 4], [1, 7], [1, 7]], display_name="Head")
+                frame = compute_local_frame(
+                    [1.5, 3.0, 3.0],
+                    [0.0, 3.0, 3.0],
+                    [3.0, 3.0, 3.0],
+                    roll_reference={
+                        "point_a": {"role": "left_eye", "zyx": [1.5, 2.0, 2.0]},
+                        "point_b": {"role": "right_eye", "zyx": [1.5, 4.0, 2.0]},
+                    },
+                )
+                export_part_reslice(
+                    widget.project,
+                    "01-0101-21",
+                    "head",
+                    {"reslice_id": "head_axis_saved", "template_id": "head", "local_frame": frame},
+                )
+                widget.refresh_project()
+                widget._select_volume_tree_item("01-0101-21", "part_reslice", "head", "head_axis_saved")
+
+                self.assertEqual(widget.current_reslice_id, "head_axis_saved")
+                self.assertIsNone(widget.edit_volume)
+                self.assertFalse(widget.btn_tool_brush.isEnabled())
+                self.assertFalse(widget.btn_tool_rectangle.isEnabled())
+                self.assertFalse(widget.btn_save_edit.isEnabled())
+                self.assertTrue(widget.btn_tool_pan.isEnabled())
+                self.assertTrue(widget.btn_tool_picker.isEnabled())
+                self.assertFalse(widget.finish_lasso_fill([[1, 1], [4, 1], [4, 4], [1, 4]]))
+                self.assertIn("Selected saved reslice is read-only", widget.operation_status_label.text())
+            finally:
+                widget.close_project(prompt_unsaved=False)
+                widget.deleteLater()
+
+    def test_shape_and_slice_helpers_respect_read_only_layer_and_axis(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=3)
+            try:
+                edit_index = widget.label_role_combo.findData("working_edit")
+                widget.label_role_combo.setCurrentIndex(edit_index)
+                widget._set_current_material_id(2)
+                before = widget.edit_volume.copy()
+                x_index = widget.slice_axis_combo.findData("x")
+                widget.slice_axis_combo.setCurrentIndex(x_index)
+                start = self._canvas_xy_for_image_pixel(widget, 1, 1)
+                end = self._canvas_xy_for_image_pixel(widget, 6, 6)
+
+                self.assertFalse(widget.finish_shape_fill_drag("rectangle", start[0], start[1], end[0], end[1]))
+                np.testing.assert_array_equal(widget.edit_volume, before)
+                self.assertIn("Painting is available on Z slices only", widget.operation_status_label.text())
+
+                widget.slice_axis_combo.setCurrentIndex(widget.slice_axis_combo.findData("z"))
+                manual_index = widget.label_role_combo.findData("manual_truth")
+                widget.label_role_combo.setCurrentIndex(manual_index)
+                self.assertFalse(widget.copy_current_material_to_adjacent_slice(1))
+                self.assertFalse(widget.clear_current_material_on_slice())
+                np.testing.assert_array_equal(widget.edit_volume, before)
+                self.assertIn("Cannot paint on this label layer", widget.operation_status_label.text())
             finally:
                 widget.close_project(prompt_unsaved=False)
                 widget.deleteLater()
@@ -3290,6 +3568,12 @@ class TifWorkbenchTests(unittest.TestCase):
 
                 widget.shortcut_tool_eraser.activated.emit()
                 self.assertEqual(widget.annotation_tool_mode, "eraser")
+                widget.shortcut_tool_lasso.activated.emit()
+                self.assertEqual(widget.annotation_tool_mode, "lasso")
+                widget.shortcut_tool_rectangle.activated.emit()
+                self.assertEqual(widget.annotation_tool_mode, "rectangle")
+                widget.shortcut_tool_ellipse.activated.emit()
+                self.assertEqual(widget.annotation_tool_mode, "ellipse")
                 widget.shortcut_tool_picker.activated.emit()
                 self.assertEqual(widget.annotation_tool_mode, "picker")
                 widget.shortcut_tool_brush.activated.emit()
@@ -3319,12 +3603,17 @@ class TifWorkbenchTests(unittest.TestCase):
         widget = TifWorkbenchWidget(manager, "en")
         try:
             self.assertIn("bucket_fill", widget.advanced_annotation_tool_specs)
+            self.assertNotIn("lasso_polygon", widget.advanced_annotation_tool_specs)
+            self.assertNotIn("rectangle", widget.advanced_annotation_tool_specs)
+            self.assertNotIn("ellipse", widget.advanced_annotation_tool_specs)
             for spec in widget.advanced_annotation_tool_specs.values():
                 self.assertTrue(spec["requires_design"])
                 self.assertTrue(spec["requires_undo_plan"])
                 self.assertTrue(spec["requires_risk_notice"])
             self.assertIsNone(widget.findChild(QWidget, "tifToolBucketFillButton"))
-            self.assertIsNone(widget.findChild(QWidget, "tifToolLassoButton"))
+            self.assertIsNotNone(widget.findChild(QWidget, "tifToolLassoButton"))
+            self.assertIsNotNone(widget.findChild(QWidget, "tifToolRectangleButton"))
+            self.assertIsNotNone(widget.findChild(QWidget, "tifToolEllipseButton"))
         finally:
             widget.close_project(prompt_unsaved=False)
             widget.deleteLater()

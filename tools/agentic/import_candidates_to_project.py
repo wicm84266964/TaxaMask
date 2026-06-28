@@ -144,6 +144,7 @@ def main() -> int:
     manager = ProjectManager()
     manager.load_project(project_path)
     manager.current_project_path = out_project
+    manager.enable_legacy_json_writes_for_compatibility(True)
 
     imported: list[dict[str, Any]] = []
     skipped: list[dict[str, str]] = []

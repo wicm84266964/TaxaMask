@@ -11,6 +11,13 @@ os.environ.setdefault("__GLX_VENDOR_LIBRARY_NAME", "nvidia")
 
 import numpy as np
 
+try:
+    from AntSleap.core.tif_transfer_function import TRANSFER_PRESET_IDS, build_transfer_lut, normalize_transfer_function
+except ModuleNotFoundError as exc:
+    if exc.name != "AntSleap":
+        raise
+    from core.tif_transfer_function import TRANSFER_PRESET_IDS, build_transfer_lut, normalize_transfer_function
+
 GPU_VOLUME_MAX_TEXTURE_DIM = 4096
 GPU_VOLUME_MAX_RAY_STEPS = 4096
 GPU_VOLUME_TRANSFER_LUT_SIZE = 256
@@ -92,6 +99,10 @@ uniform float u_clarity;
 uniform float u_mask_opacity;
 uniform float u_enhancement;
 uniform float u_tone_gamma;
+uniform float u_jitter_strength;
+uniform float u_adaptive_step_strength;
+uniform float u_gradient_opacity;
+uniform vec2 u_gradient_opacity_range;
 uniform vec3 u_tint_rgb;
 uniform vec3 u_clip_plane_normal;
 uniform float u_clip_plane_depth;
@@ -241,6 +252,11 @@ float front_clip_start_t(float ray_start, float ray_end)
     return mix(ray_start, ray_end, clamp(u_front_clip, 0.0, 0.92));
 }
 
+float hash12(vec2 p)
+{
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
 void main()
 {
     vec2 centered = v_uv * 2.0 - 1.0;
@@ -264,6 +280,8 @@ void main()
     float ray_start = max(hit.x, 0.0);
     float ray_end = hit.y;
     float t = front_clip_start_t(ray_start, ray_end);
+    float jitter = (hash12(gl_FragCoord.xy) - 0.5) * u_step_size * clamp(u_jitter_strength, 0.0, 1.0);
+    t = clamp(t + jitter, ray_start, ray_end);
     vec4 accum = vec4(0.0);
     vec4 section_accum = vec4(0.0);
     float first_depth = 0.0;
@@ -331,6 +349,17 @@ void main()
             }
         }
         float density = clamp((sample_value - u_cutoff) / max(1.0 - u_cutoff, 0.001), 0.0, 1.0);
+        if (
+            u_adaptive_step_strength > 0.0 &&
+            u_fast_interaction == 0 &&
+            u_projection_mode == 0 &&
+            u_mask_mode == 0 &&
+            u_clip_plane_enabled == 0 &&
+            sample_value <= 0.001
+        ) {
+            t += u_step_size * mix(1.0, 2.25, clamp(u_adaptive_step_strength, 0.0, 1.0));
+            continue;
+        }
         if (u_projection_mode == 1) {
             if (density > mip_density) {
                 mip_density = density;
@@ -383,17 +412,19 @@ void main()
             vec3 grad = mix(central_gradient(texcoord, texel_step), tetra_gradient(texcoord, texel_step * 1.15), detail);
             float grad_mag = clamp(length(grad) * mix(6.5, 8.8, detail), 0.0, 1.0);
             float detail_edge = smoothstep(0.10, 0.48, grad_mag) * detail;
+            float gradient_alpha = smoothstep(u_gradient_opacity_range.x, u_gradient_opacity_range.y, grad_mag) * clamp(u_gradient_opacity, 0.0, 1.0);
             vec3 normal = normalize(grad + vec3(0.0001));
             float diffuse = max(dot(normal, light_dir), 0.0);
             float rim = pow(1.0 - max(dot(normal, view_dir), 0.0), 2.0);
             float spec = pow(max(dot(reflect(-light_dir, normal), view_dir), 0.0), 24.0);
 
             float surface = smoothstep(0.05, 0.35, grad_mag) * u_gradient_weight;
+            surface = max(surface, gradient_alpha * 0.82);
             surface = max(surface, detail_edge * 0.36);
             surface = max(surface, mask_boundary * clamp(u_mask_opacity, 0.0, 1.0) * 0.55);
             if (u_projection_mode == 4) {
                 if (density > 0.035 || surface > 0.08) {
-                    float surface_alpha = clamp(max(density, surface) * transfer.a, 0.0, 1.0);
+                    float surface_alpha = clamp(max(max(density, surface), gradient_alpha * 0.72) * transfer.a, 0.0, 1.0);
                     vec3 shaded_surface = transfer_color * (0.44 + 0.50 * diffuse) + transfer_color * rim * 0.22 + vec3(spec * 0.46);
                     if (u_clarity > 0.0) {
                         surface_alpha = clamp(max(surface * 1.12, density * 0.92) * max(transfer.a, 0.38), 0.0, 1.0);
@@ -434,7 +465,8 @@ void main()
             }
             float normal_opacity = pow(density, 1.22) * 18.0 + surface * pow(density, 0.55) * 24.0;
             float clarity_opacity = pow(density, 1.55) * 9.0 + surface * pow(density, 0.70) * 14.0;
-            float opacity_density = mix(normal_opacity, clarity_opacity, clamp(u_clarity, 0.0, 1.0)) + detail_edge * 4.5;
+            float gradient_opacity_density = gradient_alpha * mix(8.0, 13.0, detail);
+            float opacity_density = mix(normal_opacity, clarity_opacity, clamp(u_clarity, 0.0, 1.0)) + detail_edge * 4.5 + gradient_opacity_density;
             float alpha = 1.0 - exp(-opacity_density * u_opacity * u_step_size);
             alpha *= transfer.a;
             alpha = clamp(alpha, 0.0, mix(0.82, 0.46, clamp(u_clarity, 0.0, 1.0)));
@@ -635,54 +667,105 @@ def build_volume_transfer_lut(
     size=GPU_VOLUME_TRANSFER_LUT_SIZE,
 ):
     """Build TaxaMask's RGBA transfer function LUT for read-only volume display."""
-    size = max(16, int(size))
-    density = np.linspace(0.0, 1.0, size, dtype=np.float32)
-    preset = str(preset or "amber").lower()
-    tint = np.asarray(_coerce_rgb(tint_rgb), dtype=np.float32)
-    if preset == "cyan":
-        low = np.asarray((0.05, 0.28, 0.46), dtype=np.float32)
-        mid = np.asarray((0.30, 0.88, 0.96), dtype=np.float32)
-        high = np.asarray((0.84, 1.0, 0.96), dtype=np.float32)
-    elif preset == "white":
-        low = np.asarray((0.10, 0.12, 0.13), dtype=np.float32)
-        mid = np.asarray((0.64, 0.68, 0.66), dtype=np.float32)
-        high = np.asarray((1.0, 0.98, 0.88), dtype=np.float32)
-    elif preset == "custom":
-        low = np.clip(tint * 0.18, 0.0, 1.0)
-        mid = np.clip(tint * 0.72 + np.asarray((0.08, 0.10, 0.12), dtype=np.float32), 0.0, 1.0)
-        high = np.clip(tint * 1.08 + np.asarray((0.12, 0.10, 0.04), dtype=np.float32), 0.0, 1.0)
-    else:
-        low = np.asarray((0.13, 0.09, 0.04), dtype=np.float32)
-        mid = np.asarray((0.86, 0.54, 0.14), dtype=np.float32)
-        high = np.asarray((1.0, 0.88, 0.42), dtype=np.float32)
-        preset = "amber"
+    return build_transfer_lut(
+        preset=preset,
+        tint_rgb=tint_rgb,
+        cutoff=cutoff,
+        opacity=opacity,
+        clarity=clarity,
+        size=size,
+    )
 
-    soft = np.clip((density - 0.02) / max(0.34, 1e-6), 0.0, 1.0)
-    soft = soft * soft * (3.0 - 2.0 * soft)
-    dense = np.clip((density - 0.32) / max(0.68, 1e-6), 0.0, 1.0)
-    dense = dense * dense * (3.0 - 2.0 * dense)
-    rgb = low[None, :] * (1.0 - soft[:, None]) + mid[None, :] * soft[:, None]
-    rgb = rgb * (1.0 - dense[:, None]) + high[None, :] * dense[:, None]
-    if preset != "custom":
-        rgb = np.clip(rgb * (0.84 + 0.28 * tint[None, :]), 0.0, 1.0)
 
-    threshold = max(0.0, min(0.98, float(cutoff)))
-    span = max(1.0 - threshold, 0.001)
-    visible = np.clip((density - threshold) / span, 0.0, 1.0)
-    edge = visible * visible * (3.0 - 2.0 * visible)
-    if bool(clarity):
-        alpha = np.clip(np.power(edge, 0.70) * 0.72, 0.0, 1.0)
-        rgb = np.clip(rgb * (0.94 + 0.20 * density[:, None]), 0.0, 1.0)
-    else:
-        alpha = np.clip(np.power(edge, 0.92) * 0.86, 0.0, 1.0)
-    alpha *= max(0.0, min(1.4, float(opacity)))
-    alpha = np.clip(alpha, 0.0, 1.0)
-    alpha[density <= threshold] = 0.0
+def _coerce_unit_float(value, fallback=0.0):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = float(fallback)
+    if not math.isfinite(number):
+        number = float(fallback)
+    return max(0.0, min(1.0, number))
 
-    lut = np.empty((1, size, 4), dtype=np.uint8)
-    lut[0, :, :3] = np.clip(rgb * 255.0, 0.0, 255.0).astype(np.uint8)
-    lut[0, :, 3] = np.clip(alpha * 255.0, 0.0, 255.0).astype(np.uint8)
-    return np.ascontiguousarray(lut)
+
+def _coerce_gradient_range(value, fallback=(0.04, 0.34)):
+    try:
+        values = tuple(float(item) for item in value)
+    except (TypeError, ValueError):
+        values = tuple(float(item) for item in fallback)
+    if len(values) != 2 or not all(math.isfinite(item) for item in values):
+        values = tuple(float(item) for item in fallback)
+    low = max(0.0, min(0.999, float(values[0])))
+    high = max(low + 0.001, min(1.0, float(values[1])))
+    return (low, high)
+
+
+def _shader_quality_mode(value):
+    mode = str(value or "preset").lower()
+    if mode in {"off", "preset", "all_still"}:
+        return mode
+    return "preset"
+
+
+def _shader_quality_enabled_for_preset(preset, quality_mode="preset"):
+    quality_mode = _shader_quality_mode(quality_mode)
+    if quality_mode == "off":
+        return False
+    if quality_mode == "all_still":
+        return True
+    return str(preset or "").lower() in {"morphology", "publication"}
+
+
+def _gradient_opacity_settings(preset, render_mode, quality_mode="all_still"):
+    if not _shader_quality_enabled_for_preset(preset, quality_mode):
+        return 0.0, (0.04, 0.34)
+    if str(render_mode) != "still":
+        return 0.0, (0.04, 0.34)
+    transfer = normalize_transfer_function(None, preset=preset)
+    gradient = transfer.get("gradient_opacity") if isinstance(transfer, dict) else {}
+    if not bool(gradient.get("enabled", False)):
+        return 0.0, (0.04, 0.34)
+    low, high = _coerce_gradient_range((gradient.get("low", 0.04), gradient.get("high", 0.34)))
+    strength = _coerce_unit_float(gradient.get("strength", 0.0), 0.0)
+    return strength, (low, high)
+
+
+def _jitter_strength_for_render(render_mode, projection_mode, gradient_opacity=0.0):
+    if str(render_mode) != "still" or str(projection_mode or "").lower() != "composite":
+        return 0.0
+    return 0.42 if float(gradient_opacity) > 0.0 else 0.28
+
+
+def _adaptive_step_strength_for_render(render_mode, projection_mode, mask_mode="image_only", clip_plane_enabled=False):
+    if str(render_mode) != "still":
+        return 0.0
+    if str(projection_mode or "").lower() != "composite":
+        return 0.0
+    if str(mask_mode or "").lower() != "image_only":
+        return 0.0
+    if bool(clip_plane_enabled):
+        return 0.0
+    return 0.35
+
+
+def volume_shader_quality_settings(
+    preset="amber",
+    render_mode="still",
+    projection_mode="composite",
+    mask_mode="image_only",
+    clip_plane_enabled=False,
+    quality_mode="preset",
+):
+    """Return display-only shader quality controls derived from the transfer preset."""
+    quality_mode = _shader_quality_mode(quality_mode)
+    enabled = _shader_quality_enabled_for_preset(preset, quality_mode)
+    gradient_opacity, gradient_range = _gradient_opacity_settings(preset, render_mode, quality_mode)
+    return {
+        "shader_quality_mode": quality_mode,
+        "jitter_strength": _jitter_strength_for_render(render_mode, projection_mode, gradient_opacity) if enabled else 0.0,
+        "adaptive_step_strength": _adaptive_step_strength_for_render(render_mode, projection_mode, mask_mode, clip_plane_enabled) if enabled else 0.0,
+        "gradient_opacity": gradient_opacity,
+        "gradient_opacity_range": gradient_range,
+    }
 
 
 def volume_shape_scale(shape_zyx, spacing_zyx=None):
@@ -811,6 +894,10 @@ class _GpuVolumeRenderCore:
         self._mask_opacity = 0.45
         self._enhancement = 0.0
         self._tone_gamma = 1.0
+        self._jitter_strength = 0.0
+        self._adaptive_step_strength = 0.0
+        self._gradient_opacity = 0.0
+        self._gradient_opacity_range = (0.04, 0.34)
         self._surface_refine = False
         self._clip_plane_enabled = False
         self._clip_plane_depth = 0.0
@@ -948,6 +1035,11 @@ class _GpuVolumeRenderCore:
         transfer_opacity=None,
         enhancement=0.0,
         tone_gamma=1.0,
+        jitter_strength=None,
+        adaptive_step_strength=None,
+        gradient_opacity=None,
+        gradient_opacity_range=None,
+        shader_quality_mode="preset",
         surface_refine=False,
         clip_plane_enabled=False,
         clip_plane_depth=0.0,
@@ -1000,8 +1092,44 @@ class _GpuVolumeRenderCore:
             tint = (1.0, 0.83, 0.30)
         self._tint_rgb = tuple(max(0.0, min(1.0, value)) for value in tint)
         self._transfer_preset = str(transfer_preset or "amber").lower()
-        if self._transfer_preset not in {"amber", "cyan", "white", "custom"}:
+        if self._transfer_preset not in TRANSFER_PRESET_IDS:
             self._transfer_preset = "amber"
+        fallback_quality = volume_shader_quality_settings(
+            self._transfer_preset,
+            self._render_mode,
+            self._projection_mode,
+            self._mask_mode,
+            self._clip_plane_enabled,
+            shader_quality_mode,
+        )
+        self._shader_quality_mode = str(fallback_quality["shader_quality_mode"])
+        fallback_gradient_opacity = float(fallback_quality["gradient_opacity"])
+        fallback_gradient_range = tuple(fallback_quality["gradient_opacity_range"])
+        if gradient_opacity is None:
+            next_gradient_opacity = fallback_gradient_opacity
+        else:
+            next_gradient_opacity = _coerce_unit_float(gradient_opacity, fallback_gradient_opacity) if self._render_mode == "still" else 0.0
+        gradient_low, gradient_high = _coerce_gradient_range(gradient_opacity_range, fallback_gradient_range)
+        self._gradient_opacity = next_gradient_opacity
+        self._gradient_opacity_range = (gradient_low, gradient_high)
+        if jitter_strength is None:
+            next_jitter = float(fallback_quality["jitter_strength"])
+        else:
+            next_jitter = _coerce_unit_float(jitter_strength, float(fallback_quality["jitter_strength"])) if self._render_mode == "still" else 0.0
+        self._jitter_strength = next_jitter
+        fallback_adaptive = float(fallback_quality["adaptive_step_strength"])
+        if adaptive_step_strength is None:
+            next_adaptive = fallback_adaptive
+        else:
+            next_adaptive = _coerce_unit_float(adaptive_step_strength, fallback_adaptive)
+        if (
+            self._render_mode != "still"
+            or self._projection_mode != "composite"
+            or self._mask_mode != "image_only"
+            or self._clip_plane_enabled
+        ):
+            next_adaptive = 0.0
+        self._adaptive_step_strength = next_adaptive
         if transfer_opacity is None:
             next_opacity = 0.72 if self._clarity_mode and self._render_mode == "still" else (1.0 if self._render_mode == "still" else 0.82)
         else:
@@ -1035,6 +1163,11 @@ class _GpuVolumeRenderCore:
             "mask_shape_zyx": tuple(int(value) for value in self._mask_shape),
             "enhancement": float(getattr(self, "_enhancement", 0.0)),
             "tone_gamma": float(getattr(self, "_tone_gamma", 1.0)),
+            "shader_quality_mode": str(getattr(self, "_shader_quality_mode", "preset")),
+            "jitter_strength": float(getattr(self, "_jitter_strength", 0.0)),
+            "adaptive_step_strength": float(getattr(self, "_adaptive_step_strength", 0.0)),
+            "gradient_opacity": float(getattr(self, "_gradient_opacity", 0.0)),
+            "gradient_opacity_range": tuple(float(value) for value in getattr(self, "_gradient_opacity_range", (0.04, 0.34))),
             "surface_refine": bool(getattr(self, "_surface_refine", False)),
             "clip_plane_enabled": bool(getattr(self, "_clip_plane_enabled", False)),
             "clip_plane_depth": float(getattr(self, "_clip_plane_depth", 0.0)),
@@ -1208,13 +1341,17 @@ class _GpuVolumeRenderCore:
         self._set_uniform_float("u_clarity", clarity)
         self._set_uniform_float("u_enhancement", self._enhancement)
         self._set_uniform_float("u_tone_gamma", self._tone_gamma)
+        self._set_uniform_float("u_jitter_strength", self._jitter_strength)
+        self._set_uniform_float("u_adaptive_step_strength", self._adaptive_step_strength)
+        self._set_uniform_float("u_gradient_opacity", self._gradient_opacity)
+        self._set_uniform_vec2("u_gradient_opacity_range", *self._gradient_opacity_range)
         self._set_uniform_vec3("u_tint_rgb", *self._tint_rgb)
         self._set_uniform_int("u_surface_refine", 1 if self._surface_refine else 0)
         self._set_uniform_int("u_fast_interaction", 1 if self._fast_interaction else 0)
         self._set_uniform_int("u_clip_plane_enabled", 1 if self._clip_plane_enabled else 0)
         self._set_uniform_float("u_clip_plane_depth", self._clip_plane_depth)
         self._set_uniform_vec3("u_clip_plane_normal", *self._clip_plane_normal)
-        self._set_uniform_float("u_opacity", 1.0)
+        self._set_uniform_float("u_opacity", max(0.0, min(1.4, float(getattr(self, "_transfer_opacity", 1.0)))))
         self._set_uniform_float("u_gradient_weight", 1.35 if clarity > 0.0 else (1.0 if self._render_mode == "still" else 0.72))
         min_steps = 192 if self._fast_interaction else 256
         steps = max(min_steps, min(GPU_VOLUME_MAX_RAY_STEPS, int(self._sample_steps)))
@@ -1854,6 +1991,10 @@ if gpu_volume_canvas_available():
             self._mask_opacity = 0.45
             self._enhancement = 0.0
             self._tone_gamma = 1.0
+            self._jitter_strength = 0.0
+            self._adaptive_step_strength = 0.0
+            self._gradient_opacity = 0.0
+            self._gradient_opacity_range = (0.04, 0.34)
             self._surface_refine = False
             self._clip_plane_enabled = False
             self._clip_plane_depth = 0.0
@@ -2014,6 +2155,11 @@ if gpu_volume_canvas_available():
             transfer_opacity=None,
             enhancement=0.0,
             tone_gamma=1.0,
+            jitter_strength=None,
+            adaptive_step_strength=None,
+            gradient_opacity=None,
+            gradient_opacity_range=None,
+            shader_quality_mode="preset",
             surface_refine=False,
             clip_plane_enabled=False,
             clip_plane_depth=0.0,
@@ -2066,8 +2212,44 @@ if gpu_volume_canvas_available():
                 tint = (1.0, 0.83, 0.30)
             self._tint_rgb = tuple(max(0.0, min(1.0, value)) for value in tint)
             self._transfer_preset = str(transfer_preset or "amber").lower()
-            if self._transfer_preset not in {"amber", "cyan", "white", "custom"}:
+            if self._transfer_preset not in TRANSFER_PRESET_IDS:
                 self._transfer_preset = "amber"
+            fallback_quality = volume_shader_quality_settings(
+                self._transfer_preset,
+                self._render_mode,
+                self._projection_mode,
+                self._mask_mode,
+                self._clip_plane_enabled,
+                shader_quality_mode,
+            )
+            self._shader_quality_mode = str(fallback_quality["shader_quality_mode"])
+            fallback_gradient_opacity = float(fallback_quality["gradient_opacity"])
+            fallback_gradient_range = tuple(fallback_quality["gradient_opacity_range"])
+            if gradient_opacity is None:
+                next_gradient_opacity = fallback_gradient_opacity
+            else:
+                next_gradient_opacity = _coerce_unit_float(gradient_opacity, fallback_gradient_opacity) if self._render_mode == "still" else 0.0
+            gradient_low, gradient_high = _coerce_gradient_range(gradient_opacity_range, fallback_gradient_range)
+            self._gradient_opacity = next_gradient_opacity
+            self._gradient_opacity_range = (gradient_low, gradient_high)
+            if jitter_strength is None:
+                next_jitter = float(fallback_quality["jitter_strength"])
+            else:
+                next_jitter = _coerce_unit_float(jitter_strength, float(fallback_quality["jitter_strength"])) if self._render_mode == "still" else 0.0
+            self._jitter_strength = next_jitter
+            fallback_adaptive = float(fallback_quality["adaptive_step_strength"])
+            if adaptive_step_strength is None:
+                next_adaptive = fallback_adaptive
+            else:
+                next_adaptive = _coerce_unit_float(adaptive_step_strength, fallback_adaptive)
+            if (
+                self._render_mode != "still"
+                or self._projection_mode != "composite"
+                or self._mask_mode != "image_only"
+                or self._clip_plane_enabled
+            ):
+                next_adaptive = 0.0
+            self._adaptive_step_strength = next_adaptive
             if transfer_opacity is None:
                 next_opacity = 0.72 if self._clarity_mode and self._render_mode == "still" else (1.0 if self._render_mode == "still" else 0.82)
             else:
@@ -2102,6 +2284,11 @@ if gpu_volume_canvas_available():
                 "mask_shape_zyx": tuple(int(value) for value in getattr(self, "_mask_shape", ())),
                 "enhancement": float(getattr(self, "_enhancement", 0.0)),
                 "tone_gamma": float(getattr(self, "_tone_gamma", 1.0)),
+                "shader_quality_mode": str(getattr(self, "_shader_quality_mode", "preset")),
+                "jitter_strength": float(getattr(self, "_jitter_strength", 0.0)),
+                "adaptive_step_strength": float(getattr(self, "_adaptive_step_strength", 0.0)),
+                "gradient_opacity": float(getattr(self, "_gradient_opacity", 0.0)),
+                "gradient_opacity_range": tuple(float(value) for value in getattr(self, "_gradient_opacity_range", (0.04, 0.34))),
                 "surface_refine": bool(getattr(self, "_surface_refine", False)),
                 "clip_plane_enabled": bool(getattr(self, "_clip_plane_enabled", False)),
                 "clip_plane_depth": float(getattr(self, "_clip_plane_depth", 0.0)),
@@ -2306,13 +2493,17 @@ if gpu_volume_canvas_available():
             self._set_uniform_float("u_clarity", clarity)
             self._set_uniform_float("u_enhancement", self._enhancement)
             self._set_uniform_float("u_tone_gamma", self._tone_gamma)
+            self._set_uniform_float("u_jitter_strength", self._jitter_strength)
+            self._set_uniform_float("u_adaptive_step_strength", self._adaptive_step_strength)
+            self._set_uniform_float("u_gradient_opacity", self._gradient_opacity)
+            self._set_uniform_vec2("u_gradient_opacity_range", *self._gradient_opacity_range)
             self._set_uniform_vec3("u_tint_rgb", *self._tint_rgb)
             self._set_uniform_int("u_surface_refine", 1 if self._surface_refine else 0)
             self._set_uniform_int("u_fast_interaction", 1 if self._fast_interaction else 0)
             self._set_uniform_int("u_clip_plane_enabled", 1 if self._clip_plane_enabled else 0)
             self._set_uniform_float("u_clip_plane_depth", self._clip_plane_depth)
             self._set_uniform_vec3("u_clip_plane_normal", *self._clip_plane_normal)
-            self._set_uniform_float("u_opacity", 1.0)
+            self._set_uniform_float("u_opacity", max(0.0, min(1.4, float(getattr(self, "_transfer_opacity", 1.0)))))
             self._set_uniform_float("u_gradient_weight", 1.35 if clarity > 0.0 else (1.0 if self._render_mode == "still" else 0.72))
             min_steps = 192 if self._fast_interaction else 256
             steps = max(min_steps, min(GPU_VOLUME_MAX_RAY_STEPS, int(self._sample_steps)))
@@ -2499,5 +2690,6 @@ __all__ = [
     "gpu_volume_unavailable_reason",
     "camera_distance_for_inside_zoom",
     "front_clip_start_t",
+    "volume_shader_quality_settings",
     "volume_shape_scale",
 ]

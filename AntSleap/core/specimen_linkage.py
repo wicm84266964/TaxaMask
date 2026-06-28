@@ -2,6 +2,10 @@ import csv
 import json
 import os
 
+from .sqlite_storage import read_project_manifest, resolve_manifest_database_path
+from .tif_project import TIF_PROJECT_TYPE
+from .tif_sqlite_loader import load_tif_sqlite_project_data
+
 
 SPECIMEN_LINKAGE_SCHEMA_VERSION = "ant3d_specimen_linkage_v1"
 
@@ -19,12 +23,24 @@ def _load_json(path):
     return payload
 
 
+def _load_project_payload(path):
+    payload = _load_json(path)
+    if payload.get("project_type") != TIF_PROJECT_TYPE or not payload.get("storage_backend"):
+        return payload
+    manifest = read_project_manifest(path)
+    database_path = resolve_manifest_database_path(path, manifest)
+    loaded = load_tif_sqlite_project_data(database_path)
+    if isinstance(loaded, dict) and isinstance(loaded.get("project_data"), dict):
+        return loaded["project_data"]
+    return loaded
+
+
 def build_specimen_linkage(project_paths):
     entries = []
     by_key = {}
     for path in project_paths:
         project_path = os.path.abspath(str(path))
-        payload = _load_json(project_path)
+        payload = _load_project_payload(project_path)
         project_type = str(payload.get("project_type", "image_2d"))
         for specimen in payload.get("specimens", []):
             if not isinstance(specimen, dict):

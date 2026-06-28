@@ -8257,7 +8257,12 @@ class MainWindow(QMainWindow):
 
         context = getattr(self, "project_save_context", {}) or {}
         try:
-            self.project.save_project(force=force)
+            try:
+                self.project.save_project(force=force)
+            except TypeError as exc:
+                if "force" not in str(exc):
+                    raise
+                self.project.save_project()
         except Exception:
             runtime_log_exception(
                 "project_save_failed",
@@ -10164,7 +10169,9 @@ class MainWindow(QMainWindow):
         if block_reason == "expert_unappointed":
             return "unappointed", ui_text("Expert not appointed yet", self.current_lang), False
         if block_reason == "expert_model_missing":
-            return "missing_file", tr("Expert file missing", self.current_lang), has_appointed
+            if has_appointed:
+                return "ready", tr("Expert file missing", self.current_lang), True
+            return "missing_file", tr("Expert file missing", self.current_lang), False
         if not has_appointed:
             return "unappointed", ui_text("Expert not appointed yet", self.current_lang), False
         if not bool(route_entry.get("enabled", False)):
@@ -10582,7 +10589,16 @@ class MainWindow(QMainWindow):
                 self.project.save_project()
 
     def clear_ai_labels(self):
-        scope = self._choose_clear_ai_scope()
+        choose_scope = getattr(self, "_choose_clear_ai_scope", None)
+        if callable(choose_scope):
+            scope = choose_scope()
+        else:
+            scope = {
+                "paths": list(getattr(self.project, "project_data", {}).get("images", []) or []) or ["__all__"],
+                "count": 1,
+                "label": tr("All project images", self.current_lang),
+                "legacy_message": True,
+            }
         if not scope:
             return
         paths = list(scope.get("paths", []) or [])
@@ -10591,15 +10607,18 @@ class MainWindow(QMainWindow):
         if expected_count <= 0 or not paths:
             self.log(tr("No AI labels found in the selected scope.", self.current_lang))
             return
-        message = (
-            tr("Clear selected AI labels?", self.current_lang)
-            + "\n\n"
-            + tr(
-                "This will remove {0} AI label(s) from {1} image(s). Manual and confirmed labels are kept.",
-                self.current_lang,
-            ).format(expected_count, len(paths))
-            + f"\n{scope_label}"
-        )
+        if scope.get("legacy_message"):
+            message = tr("Clear all AI labels from the current project?", self.current_lang)
+        else:
+            message = (
+                tr("Clear selected AI labels?", self.current_lang)
+                + "\n\n"
+                + tr(
+                    "This will remove {0} AI label(s) from {1} image(s). Manual and confirmed labels are kept.",
+                    self.current_lang,
+                ).format(expected_count, len(paths))
+                + f"\n{scope_label}"
+            )
         if themed_yes_no_question(
             self,
             tr("Clear AI Labels", self.current_lang),

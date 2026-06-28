@@ -1,5 +1,7 @@
 import math
 import os
+import time
+from collections import OrderedDict
 from datetime import datetime
 
 import numpy as np
@@ -7,6 +9,7 @@ import tifffile
 from PySide6.QtCore import QEventLoop, QObject, QPointF, QRect, QRectF, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QPixmap, QPolygonF, QShortcut
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QAbstractItemView,
     QColorDialog,
@@ -60,8 +63,16 @@ try:
     )
     from AntSleap.core.tif_prediction_import import default_prediction_id_for_tif, import_external_prediction_tif
     from AntSleap.core.tif_project import TifProjectManager
-    from AntSleap.core.tif_stack_import import import_tif_stack
+    from AntSleap.core.tif_stack_import import import_tif_stack, materialize_registered_tif_stack, register_tif_stack_metadata
+    from AntSleap.core.tif_roi_preview import DEFAULT_ROI_TEXTURE_BUDGET_BYTES, HIGH_ROI_TEXTURE_BUDGET_BYTES, build_roi_mask_preview, build_roi_volume_preview, normalize_roi_bbox_zyx, roi_shape_zyx
     from AntSleap.core.tif_volume_io import create_empty_label_sidecar_like, flush_volume_array, load_volume_sidecar, volume_sidecar_exists
+    from AntSleap.core.tif_volume_preview import (
+        build_mask_preview,
+        build_volume_preview,
+        normalize_preview_intensity,
+        scale_volume_to_uint8,
+        sample_volume_values,
+    )
     from AntSleap.core.tif_local_axis_ai import export_local_axis_training_manifest
     from AntSleap.core.tif_local_axis_reslice import compute_local_frame, create_editable_axis_from_source, export_part_reslice, source_z_axis_for_part
     from AntSleap.ui.tif_gpu_volume_canvas import (
@@ -73,6 +84,7 @@ try:
         gpu_volume_canvas_available,
         gpu_volume_offscreen_available,
         gpu_volume_unavailable_reason,
+        volume_shader_quality_settings,
         volume_pan_limit_for_zoom,
         volume_shape_scale,
     )
@@ -98,8 +110,16 @@ except ModuleNotFoundError as exc:
     )
     from core.tif_prediction_import import default_prediction_id_for_tif, import_external_prediction_tif
     from core.tif_project import TifProjectManager
-    from core.tif_stack_import import import_tif_stack
+    from core.tif_stack_import import import_tif_stack, materialize_registered_tif_stack, register_tif_stack_metadata
+    from core.tif_roi_preview import DEFAULT_ROI_TEXTURE_BUDGET_BYTES, HIGH_ROI_TEXTURE_BUDGET_BYTES, build_roi_mask_preview, build_roi_volume_preview, normalize_roi_bbox_zyx, roi_shape_zyx
     from core.tif_volume_io import create_empty_label_sidecar_like, flush_volume_array, load_volume_sidecar, volume_sidecar_exists
+    from core.tif_volume_preview import (
+        build_mask_preview,
+        build_volume_preview,
+        normalize_preview_intensity,
+        scale_volume_to_uint8,
+        sample_volume_values,
+    )
     from core.tif_local_axis_ai import export_local_axis_training_manifest
     from core.tif_local_axis_reslice import compute_local_frame, create_editable_axis_from_source, export_part_reslice, source_z_axis_for_part
     from ui.tif_gpu_volume_canvas import (
@@ -111,6 +131,7 @@ except ModuleNotFoundError as exc:
         gpu_volume_canvas_available,
         gpu_volume_offscreen_available,
         gpu_volume_unavailable_reason,
+        volume_shader_quality_settings,
         volume_pan_limit_for_zoom,
         volume_shape_scale,
     )
@@ -119,6 +140,8 @@ except ModuleNotFoundError as exc:
 TIF_VOLUME_CLARITY_PART_FULL_VOXEL_LIMIT = 128_000_000
 TIF_VOLUME_CLARITY_PART_HIGH_DIM = 3072
 TIF_VOLUME_CLARITY_PART_FULL_DIM = GPU_VOLUME_MAX_TEXTURE_DIM
+TIF_VOLUME_MAX_CACHED_SPECIMENS = 3
+TIF_VOLUME_MAX_PREVIEW_VARIANTS_PER_OWNER = 8
 
 
 TIF_TRANSLATIONS = {
@@ -131,6 +154,14 @@ TIF_TRANSLATIONS = {
         "Trainable": "可训练",
         "Choose color": "选择颜色",
         "No TIF volume loaded": "未加载 TIF 体数据",
+        "TIF metadata registered. Build a working volume before 3D preview.": "TIF metadata 已登记。进入三维预览前请先生成 working volume。",
+        "Building 3D preview...": "正在构建 3D 预览...",
+        "Preparing full-volume 3D preview...": "正在准备整只三维体预览...",
+        "Preparing ROI crop preview...": "正在准备 ROI 裁剪块预览...",
+        "Preparing local detail preview...": "正在准备局部结构高清预览...",
+        "Downsampling volume and uploading texture. This can take a moment for large TIF stacks.": "正在降采样体数据并上传纹理。大型 TIF 首次构建可能需要一段时间。",
+        "Preparing mask preview...": "正在准备 mask 预览...",
+        "Downsampling mask labels for 3D overlay. This can take a moment for large label volumes.": "Downsampling mask labels for 3D overlay. This can take a moment for large label volumes.",
         "Specimens": "Specimen",
         "Volume slices": "体数据切片",
         "Volume controls": "体数据控制",
@@ -226,7 +257,12 @@ TIF_TRANSLATIONS = {
         "Render quality": "渲染质量",
         "Ray samples": "光线采样",
         "ROI high detail": "ROI 高清",
+        "ROI Inspect": "ROI 原始块检查",
+        "Inspect ROI crop": "检查 ROI 裁剪块",
+        "Current bbox draft": "当前 bbox 草稿",
+        "ROI crop source": "ROI 裁剪源",
         "ROI scale": "ROI 倍率",
+        "ROI budget": "ROI 预算",
         "Inside depth": "视点深度",
         "Front cut": "快速近端裁剪",
         "Mask display": "Mask 显示",
@@ -239,6 +275,10 @@ TIF_TRANSLATIONS = {
         "Detail enhancement": "细节增强",
         "Local detail check": "局部结构检查",
         "Tone curve": "明暗曲线",
+        "Shader quality": "Shader 质量",
+        "Inspect presets": "检查预设",
+        "Off": "关闭",
+        "All still composite": "全部静止透明累积",
         "Surface refine": "表面精修",
         "Clip plane": "观察侧剖切面",
         "Show local axes": "显示局部轴",
@@ -291,10 +331,12 @@ TIF_TRANSLATIONS = {
         "Controls the number of samples per screen pixel along the viewing ray. Higher values stabilize internal layers and fine lines, mainly increasing GPU compute load.": "控制每个屏幕像素沿视线取样次数。数值越高，内部层次和细线更稳定，但主要增加 GPU 计算负载；如果转动不卡，可继续调高。",
         "When zoomed in and still, renders the 3D view at a higher offscreen pixel density before scaling it back, improving small-part inspection at the cost of more GPU readback work.": "静止且放大观察时，先用更高离屏像素密度渲染三维体，再缩回当前显示区域。它主要改善抗锯齿和顺滑外观；精确看边界时优先用局部结构检查。",
         "Controls the offscreen supersampling factor used by ROI high detail. Higher values make still zoomed views smoother but heavier.": "控制 ROI 高清的离屏超采样倍数。数值越高，静止放大视图越平滑，但可能让边界显得更软，负载也更重。",
+        "When full-volume ROI bbox text is present, uploads a read-only high-detail crop from the original bbox for 3D inspection. It never writes TIF, mask, part, or training data.": "当整只体数据存在 ROI bbox 文本时，从原始 bbox 只读上传高清局部块用于三维检查。它不会写入 TIF、Mask、Part 或训练数据。",
         "Sharp still rendering keeps more source intensity detail and uses crisper sampling. It may upload more data and can look grainier while revealing fine internal structures.": "局部结构检查会在静止时尽量提高部位体纹理，并保留线性采样和 ROI 高清，减少放大时的马赛克感。它可能上传更慢，但更适合判断局部结构边界。",
         "Controls how strongly dense voxels accumulate in 3D. Lower values make internal layers less blocked; higher values make weak structures more visible.": "控制三维渲染中密度累积的强弱。调低会减少遮挡，更容易看内部层次；调高会让弱信号更明显，但画面可能更厚。",
         "Enhances fine boundaries while the view is still. It is a display-only aid for checking internal layers and part edges.": "静止观察时增强细小边界。它只是显示辅助，用于检查内部层次和部位边缘，不修改原始数据。",
         "Adjusts display gamma for 3D rendering. Lower values brighten faint structures; higher values keep dense regions calmer.": "调整三维渲染的显示曲线。调低会提亮弱结构，调高会让高密度区域更克制。",
+        "Controls display-only shader experiments. Inspect presets enables them only for Morphology/Publication, Off disables them, and All still composite applies them broadly while the view is still.": "控制只影响显示的 shader 实验。检查预设只在形态/发表检查中启用；关闭会全部禁用；全部静止透明累积会在静止透明累积视图中广泛启用。",
         "Refines first surface hits in Surface mode while still. It improves contour stability without affecting Composite rendering.": "静止且使用表面边界模式时精修首次命中位置，让轮廓更稳定；不影响透明累积模式。",
         "Enables a view-aligned GPU clipping plane. It only cuts the display, not the saved TIF, mask, or training data.": "启用观察侧 GPU 剖切面，并在剖切面上绘制清晰截面。它只切开屏幕显示，不会修改已保存的 TIF、Mask 或训练数据。",
         "Shows the locked source Z axis and the selected local output axis on the 3D part preview. This is display-only and does not edit data.": "在三维部位预览中显示锁定的原始 Z 轴和当前选中局部输出轴。这个开关只影响显示，不修改数据。",
@@ -537,6 +579,8 @@ TIF_TRANSLATIONS = {
         "Amber": "琥珀黄",
         "Cyan": "青蓝",
         "White": "灰白",
+        "Morphology Inspect": "形态检查",
+        "Publication Inspect": "发表检查",
         "Custom": "自定义",
         "Import TIF stack": "导入 TIF stack",
         "Import AMIRA directory": "导入 AMIRA 目录",
@@ -600,6 +644,13 @@ TIF_TRANSLATIONS = {
         "Writing TIF sidecar": "正在写入 TIF sidecar",
         "Creating editable label layer": "正在创建可编辑标签层",
         "Saving TIF project": "正在保存 TIF 项目",
+        "Build working volume": "生成 working volume",
+        "Building working volume...": "正在生成 working volume...",
+        "Working volume build is already running.": "已有 working volume 生成任务正在运行。",
+        "Wait for the current background TIF task to finish before closing the project.": "请等待当前后台 TIF 任务完成后再关闭项目。",
+        "Working volume ready": "Working volume 已就绪",
+        "Working volume ready for specimen {0}. Report: {1}": "Specimen {0} 的 working volume 已就绪。报告：{1}",
+        "Reading metadata": "正在读取 metadata",
         "TIF import is already running.": "已有 TIF 导入正在运行。",
         "Imported AMIRA directory for specimen {0}. Report: {1}": "已为 specimen {0} 导入 AMIRA 目录。报告：{1}",
         "TIF training handoff": "TIF 训练交接",
@@ -1696,6 +1747,191 @@ class TifImportWorker(QObject):
         self.finished.emit(result)
 
 
+class TifBatchImportWorker(QObject):
+    progress = Signal(int, int, str)
+    finished = Signal(object)
+
+    def __init__(self, project_manager, jobs):
+        super().__init__()
+        self.project_manager = project_manager
+        self.jobs = [dict(job or {}) for job in jobs]
+
+    def run(self):
+        results = []
+        total_jobs = max(1, len(self.jobs))
+        for job_index, job in enumerate(self.jobs):
+            tif_path = str(job.get("tif_path") or "")
+            specimen_id = str(job.get("specimen_id") or "")
+            base_progress = job_index * 100
+
+            def emit_job_progress(current, total, message):
+                total = max(1, int(total or 100))
+                current = max(0, min(total, int(current or 0)))
+                normalized = int(round((current / float(total)) * 100.0))
+                self.progress.emit(base_progress + normalized, total_jobs * 100, f"{job_index + 1}/{total_jobs} {message}")
+
+            try:
+                emit_job_progress(0, 100, f"Importing {os.path.basename(tif_path)}")
+                result = register_tif_stack_metadata(
+                    self.project_manager,
+                    tif_path,
+                    specimen_id,
+                    progress_callback=emit_job_progress,
+                )
+                results.append(
+                    {
+                        "ok": True,
+                        "tif_path": tif_path,
+                        "specimen_id": specimen_id,
+                        "result": result,
+                        "report_path": result.get("report_path", "") if isinstance(result, dict) else "",
+                    }
+                )
+            except Exception as exc:
+                if specimen_id:
+                    try:
+                        self.project_manager.discard_specimen_scaffold(specimen_id, save=False)
+                    except Exception:
+                        pass
+                results.append(
+                    {
+                        "ok": False,
+                        "tif_path": tif_path,
+                        "specimen_id": specimen_id,
+                        "error": str(exc),
+                    }
+                )
+        self.progress.emit(total_jobs * 100, total_jobs * 100, "Finalizing TIF batch import")
+        self.finished.emit({"results": results})
+
+
+class TifMaterializeWorker(QObject):
+    progress = Signal(int, int, str)
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, project_manager, specimen_id):
+        super().__init__()
+        self.project_manager = project_manager
+        self.specimen_id = str(specimen_id or "")
+
+    def run(self):
+        specimen = self.project_manager.get_specimen(self.specimen_id, default=None)
+        if specimen is None:
+            self.failed.emit(f"unknown_specimen:{self.specimen_id}")
+            return
+        source_path = str((specimen.get("metadata") or {}).get("source_tif") or (specimen.get("source") or {}).get("raw_tif") or "")
+        if not source_path:
+            self.failed.emit(f"metadata_only_source_missing:{self.specimen_id}")
+            return
+        metadata_snapshot = dict(specimen.get("metadata") or {})
+        try:
+            result = materialize_registered_tif_stack(
+                self.project_manager,
+                self.specimen_id,
+                progress_callback=self.progress.emit,
+            )
+            restored = self.project_manager.get_specimen(self.specimen_id, default=None)
+            if restored is not None:
+                restored.setdefault("metadata", {}).update(
+                    {
+                        key: value
+                        for key, value in metadata_snapshot.items()
+                        if key not in {"import_status"}
+                    }
+                )
+                restored.setdefault("metadata", {})["import_status"] = "materialized"
+                self.project_manager.save_project()
+        except Exception as exc:
+            self.failed.emit(str(exc))
+            return
+        self.progress.emit(100, 100, "Working volume ready")
+        self.finished.emit(result)
+
+
+class TifVolumePreviewBuildWorker(QObject):
+    progress = Signal(str)
+    finished = Signal(object)
+    failed = Signal(object)
+
+    def __init__(self, token, volume=None, volume_request=None, mask=None, mask_request=None):
+        super().__init__()
+        self.token = int(token)
+        self.volume = volume
+        self.volume_request = dict(volume_request or {})
+        self.mask = mask
+        self.mask_request = dict(mask_request or {})
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    def run(self):
+        result = {
+            "token": self.token,
+            "cancelled": False,
+            "preview": None,
+            "mask_preview": None,
+            "volume_request": dict(self.volume_request),
+            "mask_request": dict(self.mask_request),
+            "build_ms": 0.0,
+        }
+        started = time.perf_counter()
+        try:
+            if self.volume_request and self.volume is not None:
+                self.progress.emit(str(self.volume_request.get("message") or "Preparing full-volume 3D preview..."))
+                if self._cancelled:
+                    result["cancelled"] = True
+                    self.finished.emit(result)
+                    return
+                roi_bbox = self.volume_request.get("roi_bbox")
+                if roi_bbox is not None:
+                    preview = build_roi_volume_preview(
+                        self.volume,
+                        roi_bbox,
+                        int(self.volume_request.get("max_dim", 1024)),
+                        mode=str(self.volume_request.get("algorithm", "hybrid")),
+                        preserve_source=bool(self.volume_request.get("preserve_source", False)),
+                        texture_budget_bytes=int(self.volume_request.get("texture_budget_bytes", DEFAULT_ROI_TEXTURE_BUDGET_BYTES)),
+                        max_texture_dim=GPU_VOLUME_MAX_TEXTURE_DIM,
+                    )
+                else:
+                    preview = build_volume_preview(
+                        self.volume,
+                        int(self.volume_request.get("max_dim", 1024)),
+                        mode=str(self.volume_request.get("algorithm", "hybrid")),
+                        preserve_source=bool(self.volume_request.get("preserve_source", False)),
+                    )
+                result["preview"] = preview
+            if self.mask_request and self.mask is not None:
+                self.progress.emit(str(self.mask_request.get("message") or "Preparing mask preview..."))
+                if self._cancelled:
+                    result["cancelled"] = True
+                    self.finished.emit(result)
+                    return
+                roi_bbox = self.mask_request.get("roi_bbox")
+                if roi_bbox is not None:
+                    mask_preview = build_roi_mask_preview(
+                        self.mask,
+                        roi_bbox,
+                        int(self.mask_request.get("max_dim", 1024)),
+                        mode=str(self.mask_request.get("algorithm", "occupancy")),
+                        max_texture_dim=GPU_VOLUME_MAX_TEXTURE_DIM,
+                    )
+                else:
+                    mask_preview = build_mask_preview(
+                        self.mask,
+                        int(self.mask_request.get("max_dim", 1024)),
+                        mode=str(self.mask_request.get("algorithm", "occupancy")),
+                    )
+                result["mask_preview"] = mask_preview
+            result["cancelled"] = bool(self._cancelled)
+            result["build_ms"] = max(0.0, (time.perf_counter() - started) * 1000.0)
+            self.finished.emit(result)
+        except Exception as exc:
+            self.failed.emit({"token": self.token, "error": str(exc)})
+
+
 class TifLocalAxisResliceExportWorker(QObject):
     progress = Signal(int, int, str)
     finished = Signal(object)
@@ -1765,6 +2001,11 @@ class TifWorkbenchWidget(QWidget):
         self._tif_import_worker = None
         self._tif_import_progress = None
         self._tif_import_specimen_id = ""
+        self._tif_import_jobs = []
+        self._tif_materialize_thread = None
+        self._tif_materialize_worker = None
+        self._tif_materialize_progress = None
+        self._tif_materialize_specimen_id = ""
         self._local_axis_reslice_export_thread = None
         self._local_axis_reslice_export_worker = None
         self._local_axis_reslice_export_progress = None
@@ -1773,11 +2014,14 @@ class TifWorkbenchWidget(QWidget):
         self.slice_axis = "z"
         self._slice_positions = {"z": 0, "y": 0, "x": 0}
         self.display_mode = "slice"
-        self._volume_preview_cache = {}
+        self._volume_preview_cache = OrderedDict()
         self._volume_preview = None
         self._volume_preview_source_shape = ()
+        self._volume_roi_preview_bbox = None
+        self._volume_roi_preview_source_shape = ()
         self._volume_render_mode = "still"
         self._volume_last_stats = {}
+        self._volume_last_preview_build_ms = 0.0
         self._volume_canvas_renderer = "cpu"
         self._volume_renderer_warning = ""
         self._volume_gl_renderer_info = ""
@@ -1791,9 +2035,17 @@ class TifWorkbenchWidget(QWidget):
         self._volume_zoom = 1.0
         self._volume_pan_x = 0.0
         self._volume_pan_y = 0.0
-        self._volume_mask_preview_cache = {}
-        self._volume_masked_preview_cache = {}
+        self._volume_mask_preview_cache = OrderedDict()
+        self._volume_masked_preview_cache = OrderedDict()
         self._volume_clarity_mode = False
+        self._volume_preview_build_thread = None
+        self._volume_preview_build_worker = None
+        self._volume_preview_build_token = 0
+        self._volume_preview_pending_token = 0
+        self._volume_preview_pending_key = None
+        self._volume_preview_pending_mask_key = None
+        self._volume_preview_pending_message = ""
+        self._volume_preview_busy_control_states = []
 
         self.specimen_list = TifSpecimenTree()
         self.specimen_list.setObjectName("tifSpecimenList")
@@ -1866,12 +2118,25 @@ class TifWorkbenchWidget(QWidget):
         self.volume_roi_detail_check = QCheckBox("ROI high detail")
         self.volume_roi_detail_check.setObjectName("tifVolumeRoiDetailCheck")
         self.volume_roi_detail_check.setChecked(True)
-        self.volume_roi_detail_check.toggled.connect(self.render_volume_preview)
+        self.volume_roi_detail_check.toggled.connect(self._refresh_volume_preview)
+        self.volume_roi_source_combo = WheelSafeComboBox()
+        self.volume_roi_source_combo.setObjectName("tifVolumeRoiSourceCombo")
+        self._populate_volume_roi_source_combo()
+        self.volume_roi_source_combo.currentIndexChanged.connect(self._refresh_volume_preview)
+        self.volume_roi_inspect_check = QCheckBox("Inspect ROI crop")
+        self.volume_roi_inspect_check.setObjectName("tifVolumeRoiInspectCheck")
+        self.volume_roi_inspect_check.setChecked(False)
+        self.volume_roi_inspect_check.toggled.connect(self._refresh_volume_preview)
         self.volume_roi_scale_slider = WheelSafeSlider(Qt.Horizontal)
         self.volume_roi_scale_slider.setObjectName("tifVolumeRoiScaleSlider")
         self.volume_roi_scale_slider.setRange(100, 300)
         self.volume_roi_scale_slider.setValue(200)
         self.volume_roi_scale_slider.valueChanged.connect(self.render_volume_preview)
+        self.volume_roi_budget_combo = WheelSafeComboBox()
+        self.volume_roi_budget_combo.setObjectName("tifVolumeRoiBudgetCombo")
+        self.volume_roi_budget_combo.addItem("Balanced 1.5 GB", "balanced")
+        self.volume_roi_budget_combo.addItem("High 2.5 GB", "high")
+        self.volume_roi_budget_combo.currentIndexChanged.connect(self._refresh_volume_preview)
         self.volume_inside_slider = WheelSafeSlider(Qt.Horizontal)
         self.volume_inside_slider.setObjectName("tifVolumeInsideSlider")
         self.volume_inside_slider.setRange(0, 160)
@@ -1889,6 +2154,9 @@ class TifWorkbenchWidget(QWidget):
         self.btn_volume_custom_color = QPushButton("Choose color")
         self.btn_volume_custom_color.setObjectName("tifVolumeCustomColorButton")
         self.btn_volume_custom_color.clicked.connect(self.choose_volume_custom_color)
+        self.btn_volume_morphology_preset = QPushButton("Morphology Inspect")
+        self.btn_volume_morphology_preset.setObjectName("tifVolumeMorphologyPresetButton")
+        self.btn_volume_morphology_preset.clicked.connect(self.apply_morphology_inspect_preset)
         self.volume_transfer_opacity_slider = WheelSafeSlider(Qt.Horizontal)
         self.volume_transfer_opacity_slider.setObjectName("tifVolumeTransferOpacitySlider")
         self.volume_transfer_opacity_slider.setRange(25, 140)
@@ -1904,6 +2172,10 @@ class TifWorkbenchWidget(QWidget):
         self.volume_tone_slider.setRange(70, 130)
         self.volume_tone_slider.setValue(100)
         self.volume_tone_slider.valueChanged.connect(self._on_volume_display_enhancement_changed)
+        self.volume_shader_quality_combo = WheelSafeComboBox()
+        self.volume_shader_quality_combo.setObjectName("tifVolumeShaderQualityCombo")
+        self._populate_volume_shader_quality_combo()
+        self.volume_shader_quality_combo.currentIndexChanged.connect(self._on_volume_shader_quality_changed)
         self.volume_surface_refine_check = QCheckBox("Surface refine")
         self.volume_surface_refine_check.setObjectName("tifVolumeSurfaceRefineCheck")
         self.volume_surface_refine_check.setChecked(True)
@@ -2369,12 +2641,57 @@ class TifWorkbenchWidget(QWidget):
             ("amber", "Amber"),
             ("cyan", "Cyan"),
             ("white", "White"),
+            ("morphology", "Morphology Inspect"),
+            ("publication", "Publication Inspect"),
             ("custom", "Custom"),
         ):
             self.volume_tint_combo.addItem(tt(label, self.lang), mode)
         index = self.volume_tint_combo.findData(current)
         self.volume_tint_combo.setCurrentIndex(index if index >= 0 else 0)
         self.volume_tint_combo.blockSignals(False)
+
+    def _populate_volume_shader_quality_combo(self):
+        current = self._active_volume_view_settings().get("volume_shader_quality", "preset")
+        self.volume_shader_quality_combo.blockSignals(True)
+        self.volume_shader_quality_combo.clear()
+        for mode, label in (
+            ("preset", "Inspect presets"),
+            ("off", "Off"),
+            ("all_still", "All still composite"),
+        ):
+            self.volume_shader_quality_combo.addItem(tt(label, self.lang), mode)
+        index = self.volume_shader_quality_combo.findData(current)
+        self.volume_shader_quality_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.volume_shader_quality_combo.blockSignals(False)
+
+    def _populate_volume_roi_source_combo(self):
+        combo = getattr(self, "volume_roi_source_combo", None)
+        if combo is None:
+            return
+        current = str(combo.currentData() or "full")
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem(tt("Full volume", self.lang), "full")
+        combo.addItem(tt("Current bbox draft", self.lang), "current_bbox")
+        specimen = self.project.get_specimen(self.current_specimen_id, default=None) if self.current_specimen_id else None
+        for roi in (specimen or {}).get("part_rois", []) or []:
+            if (roi or {}).get("status") == "cancelled":
+                continue
+            roi_id = str((roi or {}).get("roi_id", "") or "")
+            if not roi_id:
+                continue
+            label = str((roi or {}).get("display_name") or roi_id)
+            combo.addItem(f"ROI: {label}", f"roi:{roi_id}")
+        for part in (specimen or {}).get("parts", []) or []:
+            part_id = str((part or {}).get("part_id", "") or "")
+            image_path = ((part or {}).get("image") or {}).get("path", "")
+            if not part_id or not image_path:
+                continue
+            label = str((part or {}).get("display_name") or part_id)
+            combo.addItem(f"Part: {label}", f"part:{part_id}")
+        index = combo.findData(current)
+        combo.setCurrentIndex(index if index >= 0 else 0)
+        combo.blockSignals(False)
 
     def _apply_volume_transfer_opacity_setting(self):
         if not hasattr(self, "volume_transfer_opacity_slider"):
@@ -2436,7 +2753,7 @@ class TifWorkbenchWidget(QWidget):
         if self.current_volume_scope == "part" and isinstance(self.current_part, dict):
             part_settings = self.current_part.setdefault("view_settings", {})
             parent_settings = self._project_view_settings()
-            for key in ("volume_tint", "volume_tint_custom", "volume_transfer_opacity"):
+            for key in ("volume_tint", "volume_tint_custom", "volume_transfer_opacity", "volume_shader_quality"):
                 if key not in part_settings and key in parent_settings:
                     part_settings[key] = parent_settings[key]
             return part_settings
@@ -2469,6 +2786,8 @@ class TifWorkbenchWidget(QWidget):
         self._populate_display_mode_combo()
         self._populate_volume_projection_combo()
         self._populate_volume_tint_combo()
+        self._populate_volume_shader_quality_combo()
+        self._populate_volume_roi_source_combo()
         self._apply_volume_transfer_opacity_setting()
         self._populate_volume_mask_combo()
         if hasattr(self, "task_tabs"):
@@ -2493,6 +2812,7 @@ class TifWorkbenchWidget(QWidget):
         self.volume_transfer_opacity_label.setText(tt("Density opacity", self.lang))
         self.volume_enhancement_label.setText(tt("Detail enhancement", self.lang))
         self.volume_tone_label.setText(tt("Tone curve", self.lang))
+        self.volume_shader_quality_label.setText(tt("Shader quality", self.lang))
         self.volume_surface_refine_check.setText(tt("Surface refine", self.lang))
         self.volume_clip_plane_check.setText(tt("Clip plane", self.lang))
         self.volume_local_axes_check.setText(tt("Show local axes", self.lang))
@@ -2504,10 +2824,14 @@ class TifWorkbenchWidget(QWidget):
         self.volume_sample_label.setText(tt("Ray samples", self.lang))
         self.volume_clarity_check.setText(tt("Local detail check", self.lang))
         self.volume_roi_detail_check.setText(tt("ROI high detail", self.lang))
+        self.volume_roi_inspect_check.setText(tt("Inspect ROI crop", self.lang))
+        self._populate_volume_roi_source_combo()
         self.volume_roi_scale_label.setText(tt("ROI scale", self.lang))
+        self.volume_roi_budget_label.setText(tt("ROI budget", self.lang))
         self.volume_inside_label.setText(tt("Inside depth", self.lang))
         self.volume_clip_label.setText(tt("Front cut", self.lang))
         self.btn_volume_custom_color.setText(tt("Choose color", self.lang))
+        self.btn_volume_morphology_preset.setText(tt("Morphology Inspect", self.lang))
         self.btn_reset_volume_view.setText(tt("Reset 3D view", self.lang))
         self._update_volume_control_tooltips()
         if hasattr(self, "operation_status_label") and not self.operation_status_label.text():
@@ -2651,6 +2975,11 @@ class TifWorkbenchWidget(QWidget):
                 "Controls how strongly dense voxels accumulate in 3D. Lower values make internal layers less blocked; higher values make weak structures more visible.",
             ),
             (
+                self.btn_volume_morphology_preset,
+                self.btn_volume_morphology_preset,
+                "Applies a display-only CT morphology inspection preset for weak internal structures, boundaries, and shell detail.",
+            ),
+            (
                 self.volume_enhancement_label,
                 self.volume_enhancement_slider,
                 "Enhances fine boundaries while the view is still. It is a display-only aid for checking internal layers and part edges.",
@@ -2659,6 +2988,11 @@ class TifWorkbenchWidget(QWidget):
                 self.volume_tone_label,
                 self.volume_tone_slider,
                 "Adjusts display gamma for 3D rendering. Lower values brighten faint structures; higher values keep dense regions calmer.",
+            ),
+            (
+                self.volume_shader_quality_label,
+                self.volume_shader_quality_combo,
+                "Controls display-only shader experiments. Inspect presets enables them only for Morphology/Publication, Off disables them, and All still composite applies them broadly while the view is still.",
             ),
             (
                 self.volume_surface_refine_check,
@@ -2686,9 +3020,19 @@ class TifWorkbenchWidget(QWidget):
                 "When zoomed in and still, renders the 3D view at a higher offscreen pixel density before scaling it back, improving small-part inspection at the cost of more GPU readback work.",
             ),
             (
+                self.volume_roi_inspect_check,
+                self.volume_roi_inspect_check,
+                "When full-volume ROI bbox text is present, uploads a read-only high-detail crop from the original bbox for 3D inspection. It never writes TIF, mask, part, or training data.",
+            ),
+            (
                 self.volume_roi_scale_label,
                 self.volume_roi_scale_slider,
                 "Controls the offscreen supersampling factor used by ROI high detail. Higher values make still zoomed views smoother but heavier.",
+            ),
+            (
+                self.volume_roi_budget_label,
+                self.volume_roi_budget_combo,
+                "Controls the maximum GPU texture memory used by true ROI high-detail crops. High is intended for 8 GB or larger GPUs.",
             ),
             (
                 self.volume_inside_label,
@@ -2790,11 +3134,14 @@ class TifWorkbenchWidget(QWidget):
             "volume_clarity_mode": clarity,
             "volume_detail_enhancement": f"{int(self.volume_enhancement_slider.value())}%",
             "volume_tone_curve": f"{int(self.volume_tone_slider.value())}%",
+            "volume_shader_quality": self._volume_shader_quality_mode(),
             "volume_surface_refine": "on" if self.volume_surface_refine_check.isChecked() else "off",
             "volume_clip_plane": "on" if self.volume_clip_plane_check.isChecked() else "off",
             "volume_clip_plane_depth": f"{int(self.volume_clip_plane_depth_slider.value())}%",
             "volume_roi_high_detail": "on" if self.volume_roi_detail_check.isChecked() else "off",
+            "volume_roi_inspect": "on" if self._volume_roi_inspect_enabled() else "off",
             "volume_roi_scale": f"{self._active_volume_roi_scale():.1f}x",
+            "volume_roi_budget": f"{self._roi_texture_budget_bytes() / (1024.0 ** 3):.1f} GB",
             "volume_inside_depth": f"{int(self.volume_inside_slider.value())}%",
             "volume_front_cut": f"{int(self.volume_clip_slider.value())}%",
             "volume_zoom": f"{int(round(float(self._volume_zoom) * 100))}%",
@@ -2948,10 +3295,16 @@ class TifWorkbenchWidget(QWidget):
             self.volume_enhancement_slider,
             self.volume_tone_label,
             self.volume_tone_slider,
+            self.volume_shader_quality_label,
+            self.volume_shader_quality_combo,
             self.volume_surface_refine_check,
             self.volume_roi_detail_check,
+            self.volume_roi_source_combo,
+            self.volume_roi_inspect_check,
             self.volume_roi_scale_label,
             self.volume_roi_scale_slider,
+            self.volume_roi_budget_label,
+            self.volume_roi_budget_combo,
             self.volume_clip_plane_check,
             self.volume_clip_plane_depth_label,
             self.volume_clip_plane_depth_slider,
@@ -2973,10 +3326,16 @@ class TifWorkbenchWidget(QWidget):
             self.volume_enhancement_slider,
             self.volume_tone_label,
             self.volume_tone_slider,
+            self.volume_shader_quality_label,
+            self.volume_shader_quality_combo,
             self.volume_surface_refine_check,
             self.volume_roi_detail_check,
+            self.volume_roi_source_combo,
+            self.volume_roi_inspect_check,
             self.volume_roi_scale_label,
             self.volume_roi_scale_slider,
+            self.volume_roi_budget_label,
+            self.volume_roi_budget_combo,
             self.volume_clip_plane_check,
             self.volume_clip_plane_depth_label,
             self.volume_clip_plane_depth_slider,
@@ -2991,8 +3350,15 @@ class TifWorkbenchWidget(QWidget):
             message = self._volume_renderer_status_message()
             self.training_status_label.setText(message)
             self.log(message)
+            if self.materialize_current_tif_metadata():
+                self._set_scope_controls_enabled()
+                return
             self._apply_default_volume_mask_mode()
             self._set_scope_controls_enabled()
+            if hasattr(self, "volume_canvas"):
+                self.volume_canvas.setText(tt("Preparing full-volume 3D preview...", self.lang))
+            self._update_volume_render_status_label(tt("Preparing full-volume 3D preview...", self.lang))
+            QApplication.processEvents()
             self.render_volume_preview()
         else:
             self._set_scope_controls_enabled()
@@ -3322,6 +3688,24 @@ class TifWorkbenchWidget(QWidget):
     def _select_specimen_after_import(self, specimen_id):
         self._select_volume_tree_item(specimen_id, "full")
 
+    def _default_import_specimen_id(self, tif_path, used_ids=None):
+        used = {str(value or "") for value in (used_ids or set())}
+        used.update(
+            str(specimen.get("specimen_id") or "")
+            for specimen in (self.project.project_data.get("specimens", []) or [])
+            if isinstance(specimen, dict)
+        )
+        base = os.path.splitext(os.path.basename(str(tif_path or "")))[0]
+        clean = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in base).strip("._")
+        clean = clean or "tif_specimen"
+        candidate = clean
+        suffix = 2
+        while candidate in used:
+            candidate = f"{clean}_{suffix}"
+            suffix += 1
+        used.add(candidate)
+        return candidate
+
     def _set_tif_import_controls_enabled(self, enabled):
         for button in (self.btn_import_tif, self.btn_import_amira):
             button.setEnabled(bool(enabled))
@@ -3350,6 +3734,7 @@ class TifWorkbenchWidget(QWidget):
         self._tif_import_worker = None
         self._tif_import_thread = None
         self._tif_import_specimen_id = ""
+        self._tif_import_jobs = []
 
     def _on_tif_import_progress(self, current, total, message):
         if self._tif_import_progress is None:
@@ -3361,6 +3746,30 @@ class TifWorkbenchWidget(QWidget):
         self._tif_import_progress.setLabelText(tt(message, self.lang))
 
     def _on_tif_import_finished(self, result):
+        batch_results = result.get("results") if isinstance(result, dict) else None
+        if isinstance(batch_results, list):
+            successes = [item for item in batch_results if item.get("ok")]
+            failures = [item for item in batch_results if not item.get("ok")]
+            first_id = successes[0].get("specimen_id", "") if successes else ""
+            self.refresh_project()
+            if first_id:
+                self._select_specimen_after_import(first_id)
+            message = tt("Imported {0}/{1} TIF stack(s).", self.lang).format(len(successes), len(batch_results))
+            if failures:
+                message = f"{message} {tt('Failed', self.lang)}: {len(failures)}"
+            self.training_status_label.setText(message)
+            self.log(message)
+            for item in failures:
+                self.log(f"TIF import failed [{item.get('specimen_id', '')}]: {item.get('error', '')}")
+            thread = self._tif_import_thread
+            self._cleanup_tif_import_thread()
+            if thread is not None:
+                thread.quit()
+            if failures:
+                details = "\n".join(f"{item.get('specimen_id', '')}: {item.get('error', '')}" for item in failures[:8])
+                QMessageBox.warning(self, tt("Import TIF Stack", self.lang), f"{message}\n{details}")
+            return
+
         specimen_id = self._tif_import_specimen_id
         self.refresh_project()
         self._select_specimen_after_import(specimen_id)
@@ -3379,6 +3788,93 @@ class TifWorkbenchWidget(QWidget):
         if thread is not None:
             thread.quit()
         QMessageBox.critical(self, tt("Import TIF Stack", self.lang), message)
+
+    def _is_metadata_only_specimen(self, specimen=None):
+        specimen = specimen if specimen is not None else self.project.get_specimen(self.current_specimen_id, default=None)
+        if specimen is None:
+            return False
+        return (specimen.get("metadata") or {}).get("import_status") == "metadata_only" or ((specimen.get("working_volume") or {}).get("status") == "metadata_only")
+
+    def _cleanup_tif_materialize_thread(self):
+        if self._tif_materialize_progress is not None:
+            self._tif_materialize_progress.close()
+            self._tif_materialize_progress.deleteLater()
+        self._tif_materialize_progress = None
+        self._tif_materialize_worker = None
+        self._tif_materialize_thread = None
+        self._tif_materialize_specimen_id = ""
+
+    def _on_tif_materialize_progress(self, current, total, message):
+        if self._tif_materialize_progress is None:
+            return
+        maximum = max(1, int(total or 100))
+        value = max(0, min(maximum, int(current or 0)))
+        self._tif_materialize_progress.setMaximum(maximum)
+        self._tif_materialize_progress.setValue(value)
+        self._tif_materialize_progress.setLabelText(tt(message, self.lang))
+
+    def _on_tif_materialize_finished(self, result):
+        specimen_id = self._tif_materialize_specimen_id
+        report_path = result.get("report_path", "") if isinstance(result, dict) else ""
+        thread = self._tif_materialize_thread
+        self._cleanup_tif_materialize_thread()
+        if thread is not None:
+            thread.quit()
+        self.refresh_project()
+        if specimen_id:
+            self._select_specimen_after_import(specimen_id)
+        message = tt("Working volume ready for specimen {0}. Report: {1}", self.lang).format(specimen_id, report_path)
+        self.training_status_label.setText(message)
+        self.log(message)
+
+    def _on_tif_materialize_failed(self, message):
+        thread = self._tif_materialize_thread
+        specimen_id = self._tif_materialize_specimen_id
+        self._cleanup_tif_materialize_thread()
+        if thread is not None:
+            thread.quit()
+        self.refresh_project()
+        if specimen_id:
+            self._select_volume_tree_item(specimen_id, "full", "")
+        QMessageBox.critical(self, tt("Build working volume", self.lang), message)
+
+    def materialize_current_tif_metadata(self):
+        if not self.current_specimen_id:
+            return False
+        specimen = self.project.get_specimen(self.current_specimen_id, default=None)
+        if not self._is_metadata_only_specimen(specimen):
+            return False
+        if self._tif_materialize_thread is not None:
+            QMessageBox.information(self, tt("Build working volume", self.lang), tt("Working volume build is already running.", self.lang))
+            return True
+        self._tif_materialize_specimen_id = self.current_specimen_id
+        self._tif_materialize_progress = QProgressDialog(
+            tt("Building working volume...", self.lang),
+            "",
+            0,
+            100,
+            self,
+        )
+        self._tif_materialize_progress.setWindowTitle(tt("Build working volume", self.lang))
+        self._tif_materialize_progress.setCancelButton(None)
+        self._tif_materialize_progress.setAutoClose(False)
+        self._tif_materialize_progress.setAutoReset(False)
+        self._tif_materialize_progress.setWindowModality(Qt.WindowModal)
+        self._tif_materialize_progress.show()
+
+        self._tif_materialize_thread = QThread(self)
+        self._tif_materialize_worker = TifMaterializeWorker(self.project, self.current_specimen_id)
+        self._tif_materialize_worker.moveToThread(self._tif_materialize_thread)
+        self._tif_materialize_thread.started.connect(self._tif_materialize_worker.run)
+        self._tif_materialize_worker.progress.connect(self._on_tif_materialize_progress)
+        self._tif_materialize_worker.finished.connect(self._on_tif_materialize_finished)
+        self._tif_materialize_worker.failed.connect(self._on_tif_materialize_failed)
+        self._tif_materialize_worker.finished.connect(self._tif_materialize_thread.quit)
+        self._tif_materialize_worker.failed.connect(self._tif_materialize_thread.quit)
+        self._tif_materialize_thread.finished.connect(self._tif_materialize_worker.deleteLater)
+        self._tif_materialize_thread.finished.connect(self._tif_materialize_thread.deleteLater)
+        self._tif_materialize_thread.start()
+        return True
 
     def _cleanup_local_axis_reslice_export_thread(self):
         if self._local_axis_reslice_export_progress is not None:
@@ -3413,30 +3909,44 @@ class TifWorkbenchWidget(QWidget):
                 tt("TIF import is already running.", self.lang),
             )
             return
-        tif_path, _ = QFileDialog.getOpenFileName(
+        tif_paths, _ = QFileDialog.getOpenFileNames(
             self,
             tt("Import TIF Stack", self.lang),
             "",
             "TIF/TIFF (*.tif *.tiff)",
         )
-        if not tif_path:
+        if not tif_paths:
             return
-        default_id = os.path.splitext(os.path.basename(tif_path))[0]
-        specimen_id, ok = QInputDialog.getText(
-            self,
-            tt("Import TIF Stack", self.lang),
-            tt("Specimen ID:", self.lang),
-            text=default_id,
-        )
-        if not ok or not specimen_id:
+        tif_paths = [str(path) for path in tif_paths if str(path or "").strip()]
+        if not tif_paths:
             return
+        jobs = []
+        used_ids = set()
+        if len(tif_paths) == 1:
+            tif_path = tif_paths[0]
+            default_id = self._default_import_specimen_id(tif_path, used_ids)
+            specimen_id, ok = QInputDialog.getText(
+                self,
+                tt("Import TIF Stack", self.lang),
+                tt("Specimen ID:", self.lang),
+                text=default_id,
+            )
+            if not ok or not specimen_id:
+                return
+            jobs.append({"tif_path": tif_path, "specimen_id": str(specimen_id)})
+        else:
+            for tif_path in tif_paths:
+                specimen_id = self._default_import_specimen_id(tif_path, used_ids)
+                used_ids.add(specimen_id)
+                jobs.append({"tif_path": tif_path, "specimen_id": specimen_id})
         self._set_tif_import_controls_enabled(False)
-        self._tif_import_specimen_id = specimen_id
+        self._tif_import_jobs = jobs
+        self._tif_import_specimen_id = jobs[0]["specimen_id"] if jobs else ""
         self._tif_import_progress = QProgressDialog(
-            tt("Importing TIF stack...", self.lang),
+            tt("Importing TIF stack...", self.lang) if len(jobs) == 1 else tt("Importing TIF stack batch...", self.lang),
             "",
             0,
-            100,
+            max(100, len(jobs) * 100),
             self,
         )
         self._tif_import_progress.setWindowTitle(tt("Import TIF Stack", self.lang))
@@ -3447,14 +3957,19 @@ class TifWorkbenchWidget(QWidget):
         self._tif_import_progress.show()
 
         self._tif_import_thread = QThread(self)
-        self._tif_import_worker = TifImportWorker(self.project, tif_path, specimen_id)
+        if len(jobs) == 1:
+            self._tif_import_worker = TifImportWorker(self.project, jobs[0]["tif_path"], jobs[0]["specimen_id"])
+        else:
+            self._tif_import_worker = TifBatchImportWorker(self.project, jobs)
         self._tif_import_worker.moveToThread(self._tif_import_thread)
         self._tif_import_thread.started.connect(self._tif_import_worker.run)
         self._tif_import_worker.progress.connect(self._on_tif_import_progress)
         self._tif_import_worker.finished.connect(self._on_tif_import_finished)
-        self._tif_import_worker.failed.connect(self._on_tif_import_failed)
+        if hasattr(self._tif_import_worker, "failed"):
+            self._tif_import_worker.failed.connect(self._on_tif_import_failed)
         self._tif_import_worker.finished.connect(self._tif_import_thread.quit)
-        self._tif_import_worker.failed.connect(self._tif_import_thread.quit)
+        if hasattr(self._tif_import_worker, "failed"):
+            self._tif_import_worker.failed.connect(self._tif_import_thread.quit)
         self._tif_import_thread.finished.connect(self._tif_import_worker.deleteLater)
         self._tif_import_thread.finished.connect(self._tif_import_thread.deleteLater)
         self._tif_import_thread.start()
@@ -3753,6 +4268,7 @@ class TifWorkbenchWidget(QWidget):
                 return None
         self.active_part_roi_id = roi.get("roi_id", "")
         self.part_bbox_edit.setText(self._bbox_text(roi.get("bbox_zyx", [])))
+        self._populate_volume_roi_source_combo()
         message = tt("Saved ROI draft {0}.", self.lang).format(roi.get("display_name") or roi.get("roi_id"))
         self.training_status_label.setText(message)
         self.log(message)
@@ -3807,6 +4323,7 @@ class TifWorkbenchWidget(QWidget):
             return
         self.active_part_roi_id = ""
         self.refresh_project()
+        self._populate_volume_roi_source_combo()
         self._select_volume_tree_item(self.current_specimen_id, "part", part.get("part_id", ""))
         message = tt("Confirmed ROI and created part {0}.", self.lang).format(part.get("display_name") or part.get("part_id"))
         self.training_status_label.setText(message)
@@ -3959,6 +4476,7 @@ class TifWorkbenchWidget(QWidget):
             return
         self.active_part_roi_id = ""
         self.refresh_project()
+        self._populate_volume_roi_source_combo()
         self._select_volume_tree_item(self.current_specimen_id, "part", part.get("part_id", ""))
         message = tt("Created part {0} from bbox {1}.", self.lang).format(part.get("display_name") or part.get("part_id"), part.get("parent_bbox_zyx"))
         self.training_status_label.setText(message)
@@ -4585,6 +5103,7 @@ class TifWorkbenchWidget(QWidget):
         self.volume_quality_label = QLabel("Render quality")
         self.volume_sample_label = QLabel("Ray samples")
         self.volume_roi_scale_label = QLabel("ROI scale")
+        self.volume_roi_budget_label = QLabel("ROI budget")
         self.volume_inside_label = QLabel("Inside depth")
         self.volume_clip_label = QLabel("Front cut")
         volume_controls.addWidget(self.volume_projection_label, 0, 0)
@@ -4593,6 +5112,7 @@ class TifWorkbenchWidget(QWidget):
         color_row = QHBoxLayout()
         color_row.addWidget(self.volume_tint_combo, 1)
         color_row.addWidget(self.btn_volume_custom_color)
+        color_row.addWidget(self.btn_volume_morphology_preset)
         volume_controls.addLayout(color_row, 1, 1)
         self.volume_transfer_opacity_label = QLabel("Density opacity")
         volume_controls.addWidget(self.volume_transfer_opacity_label, 2, 0)
@@ -4601,28 +5121,35 @@ class TifWorkbenchWidget(QWidget):
         volume_controls.addWidget(self.volume_enhancement_slider, 3, 1)
         volume_controls.addWidget(self.volume_tone_label, 4, 0)
         volume_controls.addWidget(self.volume_tone_slider, 4, 1)
-        volume_controls.addWidget(self.volume_mask_label, 5, 0)
-        volume_controls.addWidget(self.volume_mask_combo, 5, 1)
-        volume_controls.addWidget(self.volume_mask_opacity_label, 6, 0)
-        volume_controls.addWidget(self.volume_mask_opacity_slider, 6, 1)
-        volume_controls.addWidget(self.volume_cutoff_label, 7, 0)
-        volume_controls.addWidget(self.volume_cutoff_slider, 7, 1)
-        volume_controls.addWidget(self.volume_quality_label, 8, 0)
-        volume_controls.addWidget(self.volume_quality_slider, 8, 1)
-        volume_controls.addWidget(self.volume_sample_label, 9, 0)
-        volume_controls.addWidget(self.volume_sample_slider, 9, 1)
-        volume_controls.addWidget(self.volume_clarity_check, 10, 0, 1, 2)
-        volume_controls.addWidget(self.volume_surface_refine_check, 11, 0, 1, 2)
-        volume_controls.addWidget(self.volume_roi_detail_check, 12, 0, 1, 2)
-        volume_controls.addWidget(self.volume_roi_scale_label, 13, 0)
-        volume_controls.addWidget(self.volume_roi_scale_slider, 13, 1)
-        volume_controls.addWidget(self.volume_clip_plane_check, 14, 0, 1, 2)
-        volume_controls.addWidget(self.volume_clip_plane_depth_label, 15, 0)
-        volume_controls.addWidget(self.volume_clip_plane_depth_slider, 15, 1)
-        volume_controls.addWidget(self.volume_inside_label, 16, 0)
-        volume_controls.addWidget(self.volume_inside_slider, 16, 1)
-        volume_controls.addWidget(self.volume_clip_label, 17, 0)
-        volume_controls.addWidget(self.volume_clip_slider, 17, 1)
+        self.volume_shader_quality_label = QLabel("Shader quality")
+        volume_controls.addWidget(self.volume_shader_quality_label, 5, 0)
+        volume_controls.addWidget(self.volume_shader_quality_combo, 5, 1)
+        volume_controls.addWidget(self.volume_mask_label, 6, 0)
+        volume_controls.addWidget(self.volume_mask_combo, 6, 1)
+        volume_controls.addWidget(self.volume_mask_opacity_label, 7, 0)
+        volume_controls.addWidget(self.volume_mask_opacity_slider, 7, 1)
+        volume_controls.addWidget(self.volume_cutoff_label, 8, 0)
+        volume_controls.addWidget(self.volume_cutoff_slider, 8, 1)
+        volume_controls.addWidget(self.volume_quality_label, 9, 0)
+        volume_controls.addWidget(self.volume_quality_slider, 9, 1)
+        volume_controls.addWidget(self.volume_sample_label, 10, 0)
+        volume_controls.addWidget(self.volume_sample_slider, 10, 1)
+        volume_controls.addWidget(self.volume_clarity_check, 11, 0, 1, 2)
+        volume_controls.addWidget(self.volume_surface_refine_check, 12, 0, 1, 2)
+        volume_controls.addWidget(self.volume_roi_detail_check, 13, 0, 1, 2)
+        volume_controls.addWidget(self.volume_roi_source_combo, 14, 0, 1, 2)
+        volume_controls.addWidget(self.volume_roi_inspect_check, 15, 0, 1, 2)
+        volume_controls.addWidget(self.volume_roi_scale_label, 16, 0)
+        volume_controls.addWidget(self.volume_roi_scale_slider, 16, 1)
+        volume_controls.addWidget(self.volume_roi_budget_label, 17, 0)
+        volume_controls.addWidget(self.volume_roi_budget_combo, 17, 1)
+        volume_controls.addWidget(self.volume_clip_plane_check, 18, 0, 1, 2)
+        volume_controls.addWidget(self.volume_clip_plane_depth_label, 19, 0)
+        volume_controls.addWidget(self.volume_clip_plane_depth_slider, 19, 1)
+        volume_controls.addWidget(self.volume_inside_label, 20, 0)
+        volume_controls.addWidget(self.volume_inside_slider, 20, 1)
+        volume_controls.addWidget(self.volume_clip_label, 21, 0)
+        volume_controls.addWidget(self.volume_clip_slider, 21, 1)
         volume_render_layout.addLayout(volume_controls)
         volume_render_layout.addWidget(self.btn_reset_volume_view)
         self.display_task_layout.addWidget(self.volume_render_section)
@@ -5032,6 +5559,15 @@ class TifWorkbenchWidget(QWidget):
         super().keyPressEvent(event)
 
     def close_project(self, prompt_unsaved=True):
+        if self._tif_import_thread is not None or self._tif_materialize_thread is not None or self._local_axis_reslice_export_thread is not None:
+            if prompt_unsaved:
+                QMessageBox.information(
+                    self,
+                    tt("TIF data import", self.lang),
+                    tt("Wait for the current background TIF task to finish before closing the project.", self.lang),
+                )
+            return False
+        self._cancel_and_wait_volume_preview_build()
         if prompt_unsaved and not self._confirm_discard_or_save_working_edit():
             return False
         self.release_volume_renderer()
@@ -5176,6 +5712,7 @@ class TifWorkbenchWidget(QWidget):
                 parent.addChild(part_item)
             self.specimen_list.addTopLevelItem(parent)
         self.specimen_list.blockSignals(False)
+        self._populate_volume_roi_source_combo()
         if self.specimen_list.count():
             if not self._select_volume_tree_item(previous_id, previous_scope, previous_part_id):
                 self._select_volume_tree_item("", "full", "")
@@ -5314,7 +5851,7 @@ class TifWorkbenchWidget(QWidget):
             self._dirty_edit_slices = set()
             self.material_map = {}
             self.material_colors = {}
-            self._clear_volume_preview_cache()
+            self._reset_active_volume_preview_state()
             self.undo_stack = []
             self.redo_stack = []
 
@@ -5331,6 +5868,11 @@ class TifWorkbenchWidget(QWidget):
             else:
                 self.slice_slider.setRange(0, 0)
                 self.canvas.reset_view()
+                if (specimen.get("metadata") or {}).get("import_status") == "metadata_only" or (specimen.get("working_volume") or {}).get("status") == "metadata_only":
+                    message = tt("TIF metadata registered. Build a working volume before 3D preview.", self.lang)
+                    self.canvas.setText(message)
+                    self.volume_canvas.setText(message)
+                    self._update_volume_render_status_label(message)
 
             material_path = self.project.to_absolute(specimen.get("material_map", ""))
             if material_path and os.path.exists(material_path):
@@ -5393,7 +5935,7 @@ class TifWorkbenchWidget(QWidget):
             self.material_map = {}
             self.material_colors = {}
             self.part_preview_mask = None
-            self._clear_volume_preview_cache()
+            self._reset_active_volume_preview_state()
             self.undo_stack = []
             self.redo_stack = []
 
@@ -6884,11 +7426,13 @@ class TifWorkbenchWidget(QWidget):
             self._volume_mode_label(),
             f"{tt('Mode', self.lang)} {self._volume_projection_label()}",
             f"{tt('Transfer function', self.lang)} {self._volume_transfer_label()}",
+            f"{tt('Shader quality', self.lang)} {self._volume_shader_quality_label_text()}",
             f"{tt('Mask display', self.lang)} {self._volume_mask_label_text()}",
             f"{tt('Detail enhancement', self.lang)} {int(self.volume_enhancement_slider.value())}%",
             f"{tt('Texture', self.lang)} {self._active_volume_target_dim()}",
             f"{tt('Samples', self.lang)} {self._active_volume_sample_count()}",
             f"{tt('ROI', self.lang)} {self._active_volume_roi_scale():.1f}x",
+            f"{tt('ROI budget', self.lang)} {self._roi_texture_budget_bytes() / (1024.0 ** 3):.1f} GB",
         ]
         if self.volume_clip_plane_check.isChecked():
             parts.append(f"{tt('Clip plane', self.lang)} {int(self.volume_clip_plane_depth_slider.value())}%")
@@ -6947,6 +7491,8 @@ class TifWorkbenchWidget(QWidget):
             "amber": "Amber",
             "cyan": "Cyan",
             "white": "White",
+            "morphology": "Morphology Inspect",
+            "publication": "Publication Inspect",
             "custom": "Custom",
         }
         return tt(labels.get(self._volume_transfer_preset(), "Amber"), self.lang)
@@ -6996,6 +7542,35 @@ class TifWorkbenchWidget(QWidget):
         if float(self._volume_zoom) <= 1.01:
             return 1.0
         return max(1.0, min(3.0, float(self.volume_roi_scale_slider.value()) / 100.0))
+
+    def _volume_roi_inspect_enabled(self):
+        return bool(getattr(self, "volume_roi_inspect_check", None) and self.volume_roi_inspect_check.isChecked())
+
+    def _volume_roi_source_mode(self):
+        if not getattr(self, "volume_roi_source_combo", None):
+            return "full"
+        mode = str(self.volume_roi_source_combo.currentData() or "full")
+        if mode in {"full", "current_bbox"} or mode.startswith("roi:") or mode.startswith("part:"):
+            return mode
+        return "full"
+
+    def _selected_volume_roi_source_bbox(self):
+        mode = self._volume_roi_source_mode()
+        if mode == "current_bbox":
+            if not hasattr(self, "part_bbox_edit") or not self.part_bbox_edit.text().strip():
+                return None
+            return self._parse_part_bbox_text()
+        if mode.startswith("roi:"):
+            roi = self.project.get_part_roi(self.current_specimen_id, mode.split(":", 1)[1], default=None) if self.current_specimen_id else None
+            if roi is None or (roi or {}).get("status") == "cancelled":
+                return None
+            return roi.get("bbox_zyx", [])
+        if mode.startswith("part:"):
+            part = self.project.get_part(self.current_specimen_id, mode.split(":", 1)[1], default=None) if self.current_specimen_id else None
+            if part is None:
+                return None
+            return part.get("parent_bbox_zyx", [])
+        return None
 
     def _active_volume_sample_count(self):
         samples = int(self.volume_sample_slider.value())
@@ -7054,9 +7629,18 @@ class TifWorkbenchWidget(QWidget):
                 parts.append(f"{tt('Clip plane', self.lang)} {int(round(float(stats.get('clip_plane_depth') or 0.0) * 100))}%")
             except (TypeError, ValueError):
                 parts.append(tt("Clip plane", self.lang))
+        cache_bytes = self._volume_cache_estimated_bytes()
+        if cache_bytes > 0:
+            parts.append(f"Cache {self._volume_cache_owner_count()}/{TIF_VOLUME_MAX_CACHED_SPECIMENS} {cache_bytes / (1024.0 ** 2):.0f} MB")
+        if float(getattr(self, "_volume_last_preview_build_ms", 0.0) or 0.0) > 0.0:
+            parts.append(f"Load {float(self._volume_last_preview_build_ms):.0f} ms")
         supersample = float(stats.get("supersample_scale") or 1.0)
         if supersample > 1.01:
             parts.append(f"{tt('ROI', self.lang)} {supersample:.1f}x")
+            parts.append(f"{tt('ROI budget', self.lang)} {self._roi_texture_budget_bytes() / (1024.0 ** 3):.1f} GB")
+        roi_shape = tuple(int(value) for value in getattr(self, "_volume_roi_preview_source_shape", ()) or ())
+        if len(roi_shape) == 3 and all(value > 0 for value in roi_shape):
+            parts.append(f"{tt('ROI crop source', self.lang)} {int(roi_shape[2])}x{int(roi_shape[1])}x{int(roi_shape[0])}")
         byte_count = int(stats.get("bytes") or 0)
         if byte_count > 0:
             parts.append(f"{tt('VRAM', self.lang)} {byte_count / (1024.0 ** 3):.2f} GB")
@@ -7105,6 +7689,18 @@ class TifWorkbenchWidget(QWidget):
             "render_mode": self._volume_render_mode,
             "projection_mode": self._volume_projection_mode(),
             "roi_scale": float(self._active_volume_roi_scale()),
+            "roi_texture_budget_bytes": int(self._roi_texture_budget_bytes()),
+            "cache_specimen_count": int(self._volume_cache_owner_count()),
+            "cache_max_specimens": int(TIF_VOLUME_MAX_CACHED_SPECIMENS),
+            "cache_estimated_bytes": int(self._volume_cache_estimated_bytes()),
+            "cache_estimated_gb": float(self._volume_cache_estimated_bytes()) / (1024.0 ** 3),
+            "load_ms": float(getattr(self, "_volume_last_preview_build_ms", 0.0) or 0.0),
+            "roi_source_mode": self._volume_roi_source_mode(),
+            "roi_inspect_enabled": bool(self._volume_roi_inspect_enabled()),
+            "roi_inspect_active": bool(getattr(self, "_volume_roi_preview_bbox", None)),
+            "roi_bbox_zyx": getattr(self, "_volume_roi_preview_bbox", None),
+            "roi_source_shape_zyx": tuple(int(value) for value in getattr(self, "_volume_roi_preview_source_shape", ()) or ()),
+            "shader_quality_mode": self._volume_shader_quality_mode(),
             "clip_plane_enabled": bool(self.volume_clip_plane_check.isChecked()),
             "diagnosis": self._volume_performance_diagnosis(stats),
         }
@@ -7242,7 +7838,7 @@ class TifWorkbenchWidget(QWidget):
 
     def _on_volume_clarity_toggled(self, checked):
         self._volume_clarity_mode = bool(checked)
-        self._clear_volume_preview_cache()
+        self._reset_active_volume_preview_state()
         self.render_volume_preview()
 
     def _on_volume_display_enhancement_changed(self, *_args):
@@ -7261,6 +7857,10 @@ class TifWorkbenchWidget(QWidget):
             color = QColor("#61D9FF")
         elif mode == "white":
             color = QColor("#F0F4F2")
+        elif mode == "morphology":
+            color = QColor("#9CB8A6")
+        elif mode == "publication":
+            color = QColor("#FFE1A1")
         elif mode == "custom":
             color = QColor(str(settings.get("volume_tint_custom", "#FFD34D")))
             if not color.isValid():
@@ -7273,7 +7873,7 @@ class TifWorkbenchWidget(QWidget):
         settings = self._active_volume_view_settings()
         mode = self.volume_tint_combo.currentData() if hasattr(self, "volume_tint_combo") else settings.get("volume_tint", "amber")
         mode = str(mode or "amber").lower()
-        return mode if mode in {"amber", "cyan", "white", "custom"} else "amber"
+        return mode if mode in {"amber", "cyan", "white", "custom", "morphology", "publication"} else "amber"
 
     def _volume_transfer_lut(self):
         return build_volume_transfer_lut(
@@ -7283,6 +7883,47 @@ class TifWorkbenchWidget(QWidget):
             opacity=self._volume_transfer_opacity(),
             clarity=self._volume_clarity_mode and self._volume_render_mode == "still",
         )
+
+    def _volume_shader_quality_mode(self):
+        if hasattr(self, "volume_shader_quality_combo"):
+            mode = self.volume_shader_quality_combo.currentData()
+        else:
+            mode = self._active_volume_view_settings().get("volume_shader_quality", "preset")
+        mode = str(mode or "preset").lower()
+        return mode if mode in {"off", "preset", "all_still"} else "preset"
+
+    def _volume_shader_quality_label_text(self):
+        labels = {
+            "off": "Off",
+            "preset": "Inspect presets",
+            "all_still": "All still composite",
+        }
+        return tt(labels.get(self._volume_shader_quality_mode(), "Inspect presets"), self.lang)
+
+    def _volume_shader_quality_settings(self, mode=None):
+        mode = "drag" if mode == "drag" else "still"
+        clip_plane_enabled = bool(hasattr(self, "volume_clip_plane_check") and self.volume_clip_plane_check.isChecked())
+        settings = volume_shader_quality_settings(
+            self._volume_transfer_preset(),
+            mode,
+            self._volume_projection_mode(),
+            self._volume_mask_mode(),
+            clip_plane_enabled,
+            self._volume_shader_quality_mode(),
+        )
+        return settings
+
+    def _volume_gradient_opacity_settings(self, mode=None):
+        settings = self._volume_shader_quality_settings(mode)
+        return float(settings["gradient_opacity"]), tuple(settings["gradient_opacity_range"])
+
+    def _volume_jitter_strength(self, mode=None):
+        settings = self._volume_shader_quality_settings(mode)
+        return float(settings["jitter_strength"])
+
+    def _volume_adaptive_step_strength(self, mode=None):
+        settings = self._volume_shader_quality_settings(mode)
+        return float(settings["adaptive_step_strength"])
 
     def _on_volume_tint_changed(self):
         settings = self._active_volume_view_settings()
@@ -7296,11 +7937,17 @@ class TifWorkbenchWidget(QWidget):
         self._save_active_volume_view_settings()
         self.render_volume_preview()
 
+    def _on_volume_shader_quality_changed(self):
+        settings = self._active_volume_view_settings()
+        settings["volume_shader_quality"] = self._volume_shader_quality_mode()
+        self._save_active_volume_view_settings()
+        self.render_volume_preview()
+
     def _on_volume_mask_changed(self):
         settings = self._active_volume_view_settings()
         settings["volume_mask_mode"] = self._volume_mask_mode()
         self._save_active_volume_view_settings()
-        self._clear_volume_mask_caches()
+        self._clear_volume_mask_caches(owner=self._active_volume_cache_owner())
         self.render_volume_preview()
 
     def choose_volume_custom_color(self):
@@ -7313,6 +7960,45 @@ class TifWorkbenchWidget(QWidget):
         index = self.volume_tint_combo.findData("custom")
         if index >= 0:
             self.volume_tint_combo.setCurrentIndex(index)
+        self._save_active_volume_view_settings()
+        self.render_volume_preview()
+
+    def apply_morphology_inspect_preset(self):
+        controls = [
+            self.volume_projection_combo,
+            self.volume_tint_combo,
+            self.volume_shader_quality_combo,
+            self.volume_cutoff_slider,
+            self.volume_transfer_opacity_slider,
+            self.volume_enhancement_slider,
+            self.volume_tone_slider,
+            self.volume_surface_refine_check,
+        ]
+        for control in controls:
+            control.blockSignals(True)
+        try:
+            projection_index = self.volume_projection_combo.findData("composite")
+            if projection_index >= 0:
+                self.volume_projection_combo.setCurrentIndex(projection_index)
+            transfer_index = self.volume_tint_combo.findData("morphology")
+            if transfer_index >= 0:
+                self.volume_tint_combo.setCurrentIndex(transfer_index)
+            quality_index = self.volume_shader_quality_combo.findData("preset")
+            if quality_index >= 0:
+                self.volume_shader_quality_combo.setCurrentIndex(quality_index)
+            self.volume_cutoff_slider.setValue(18)
+            self.volume_transfer_opacity_slider.setValue(92)
+            self.volume_enhancement_slider.setValue(72)
+            self.volume_tone_slider.setValue(92)
+            self.volume_surface_refine_check.setChecked(True)
+        finally:
+            for control in controls:
+                control.blockSignals(False)
+
+        settings = self._active_volume_view_settings()
+        settings["volume_tint"] = "morphology"
+        settings["volume_shader_quality"] = "preset"
+        settings["volume_transfer_opacity"] = int(self.volume_transfer_opacity_slider.value())
         self._save_active_volume_view_settings()
         self.render_volume_preview()
 
@@ -7375,21 +8061,144 @@ class TifWorkbenchWidget(QWidget):
         self.render_volume_preview()
 
     def _refresh_volume_preview(self):
-        self._clear_volume_preview_cache()
+        self._cancel_volume_preview_build()
+        self._reset_active_volume_preview_state()
+        if self.display_mode == "volume":
+            message = tt("Preparing full-volume 3D preview...", self.lang)
+            if self._volume_roi_inspect_enabled() and self._volume_roi_source_mode() != "full":
+                message = tt("Preparing ROI crop preview...", self.lang)
+            elif bool(getattr(self, "_volume_clarity_mode", False)) or self.current_volume_scope == "part":
+                message = tt("Preparing local detail preview...", self.lang)
+            if hasattr(self, "volume_canvas"):
+                self.volume_canvas.setText(message)
+            self._update_volume_render_status_label(message)
+            QApplication.processEvents()
         self.render_volume_preview()
 
-    def _clear_volume_preview_cache(self):
-        self._volume_preview_cache = {}
-        self._clear_volume_mask_caches()
+    def _reset_active_volume_preview_state(self):
         self._volume_preview = None
         self._volume_preview_source_shape = ()
+        self._volume_roi_preview_bbox = None
+        self._volume_roi_preview_source_shape = ()
         self._volume_last_stats = {}
+        self._volume_last_preview_build_ms = 0.0
         self._volume_render_mode = "still"
         self._volume_interaction_render_pending = False
 
-    def _clear_volume_mask_caches(self):
-        self._volume_mask_preview_cache = {}
-        self._volume_masked_preview_cache = {}
+    def _clear_volume_preview_cache(self):
+        self._cancel_volume_preview_build()
+        self._volume_preview_cache = OrderedDict()
+        self._clear_volume_mask_caches()
+        self._reset_active_volume_preview_state()
+
+    def _active_volume_cache_owner(self):
+        specimen_id = str(getattr(self, "current_specimen_id", "") or "")
+        scope = str(getattr(self, "current_volume_scope", "") or "full")
+        part_id = str(getattr(self, "current_part_id", "") or "")
+        reslice_id = str(getattr(self, "current_reslice_id", "") or "")
+        return (specimen_id, scope, part_id, reslice_id)
+
+    def _volume_cache_owner_from_key(self, cache_key):
+        if isinstance(cache_key, tuple) and cache_key and isinstance(cache_key[0], tuple) and len(cache_key[0]) == 4:
+            return cache_key[0]
+        return None
+
+    def _clear_active_volume_preview_cache(self):
+        self._cancel_volume_preview_build()
+        owner = self._active_volume_cache_owner()
+        self._volume_preview_cache = OrderedDict(
+            (key, value)
+            for key, value in self._volume_preview_cache.items()
+            if self._volume_cache_owner_from_key(key) != owner
+        )
+        self._clear_volume_mask_caches(owner=owner)
+        self._reset_active_volume_preview_state()
+
+    def _clear_volume_mask_caches(self, owner=None):
+        if owner is None:
+            self._volume_mask_preview_cache = OrderedDict()
+            self._volume_masked_preview_cache = OrderedDict()
+            return
+        self._volume_mask_preview_cache = OrderedDict(
+            (key, value)
+            for key, value in self._volume_mask_preview_cache.items()
+            if self._volume_cache_owner_from_key(key) != owner
+        )
+        self._volume_masked_preview_cache = OrderedDict(
+            (key, value)
+            for key, value in self._volume_masked_preview_cache.items()
+            if self._volume_cache_owner_from_key(key) != owner
+        )
+
+    def _touch_volume_cache_owner(self, owner):
+        for cache in (self._volume_preview_cache, self._volume_mask_preview_cache, self._volume_masked_preview_cache):
+            for key in list(cache.keys()):
+                if self._volume_cache_owner_from_key(key) == owner:
+                    cache.move_to_end(key)
+
+    def _prune_volume_preview_cache(self):
+        owners = []
+        for cache in (self._volume_preview_cache, self._volume_mask_preview_cache, self._volume_masked_preview_cache):
+            for key in cache.keys():
+                owner = self._volume_cache_owner_from_key(key)
+                if owner is not None and owner not in owners:
+                    owners.append(owner)
+        while len(owners) > TIF_VOLUME_MAX_CACHED_SPECIMENS:
+            evicted_owner = owners.pop(0)
+            self._volume_preview_cache = OrderedDict(
+                (key, value)
+                for key, value in self._volume_preview_cache.items()
+                if self._volume_cache_owner_from_key(key) != evicted_owner
+            )
+            self._volume_mask_preview_cache = OrderedDict(
+                (key, value)
+                for key, value in self._volume_mask_preview_cache.items()
+                if self._volume_cache_owner_from_key(key) != evicted_owner
+            )
+            self._volume_masked_preview_cache = OrderedDict(
+                (key, value)
+                for key, value in self._volume_masked_preview_cache.items()
+                if self._volume_cache_owner_from_key(key) != evicted_owner
+            )
+        self._prune_volume_preview_variants_per_owner()
+
+    def _prune_volume_preview_variants_per_owner(self):
+        max_variants = int(max(1, TIF_VOLUME_MAX_PREVIEW_VARIANTS_PER_OWNER))
+        for cache_name in ("_volume_preview_cache", "_volume_mask_preview_cache", "_volume_masked_preview_cache"):
+            cache = getattr(self, cache_name, OrderedDict())
+            owner_keys = {}
+            for key in list(cache.keys()):
+                owner = self._volume_cache_owner_from_key(key)
+                if owner is not None:
+                    owner_keys.setdefault(owner, []).append(key)
+            for keys in owner_keys.values():
+                while len(keys) > max_variants:
+                    stale_key = keys.pop(0)
+                    cache.pop(stale_key, None)
+
+    def _volume_cache_owner_count(self):
+        owners = set()
+        for cache in (self._volume_preview_cache, self._volume_mask_preview_cache, self._volume_masked_preview_cache):
+            for key in cache.keys():
+                owner = self._volume_cache_owner_from_key(key)
+                if owner is not None:
+                    owners.add(owner)
+        return len(owners)
+
+    def _volume_cache_estimated_bytes(self):
+        total = 0
+        seen = set()
+        for cache in (self._volume_preview_cache, self._volume_mask_preview_cache, self._volume_masked_preview_cache):
+            for value in cache.values():
+                marker = id(value)
+                if marker in seen:
+                    continue
+                seen.add(marker)
+                try:
+                    total += int(getattr(value, "nbytes", 0) or 0)
+                except Exception:
+                    pass
+        return int(total)
 
     def _volume_drag_target_dim(self):
         requested = self._volume_texture_target_dim()
@@ -7417,7 +8226,75 @@ class TifWorkbenchWidget(QWidget):
                     requested = max(requested, min(max(shape), 1536))
         return requested
 
-    def _ensure_volume_preview(self, mode=None):
+    def _active_volume_roi_bbox(self, mode=None):
+        mode = "drag" if mode == "drag" else "still"
+        if mode != "still" or self.current_volume_scope != "full" or self.image_volume is None:
+            return None
+        if not self._volume_roi_inspect_enabled():
+            return None
+        if self._volume_roi_source_mode() == "full":
+            return None
+        try:
+            bbox = self._selected_volume_roi_source_bbox()
+            if not bbox:
+                return None
+            return normalize_roi_bbox_zyx(bbox, self.image_volume.shape)
+        except Exception:
+            return None
+
+    def _roi_texture_budget_bytes(self):
+        mode = ""
+        if hasattr(self, "volume_roi_budget_combo"):
+            mode = str(self.volume_roi_budget_combo.currentData() or "").lower()
+        if mode == "high":
+            return HIGH_ROI_TEXTURE_BUDGET_BYTES
+        return DEFAULT_ROI_TEXTURE_BUDGET_BYTES
+
+    def _volume_preview_progress_message(self, mode, roi_bbox=None):
+        if roi_bbox is not None:
+            return tt("Preparing ROI crop preview...", self.lang)
+        if bool(getattr(self, "_volume_clarity_mode", False)) or self.current_volume_scope == "part":
+            return tt("Preparing local detail preview...", self.lang)
+        return tt("Preparing full-volume 3D preview...", self.lang)
+
+    def _should_show_volume_preview_progress(self, mode, roi_bbox=None):
+        if mode != "still" or self.display_mode != "volume" or self.image_volume is None:
+            return False
+        try:
+            dtype_size = max(1, int(np.dtype(getattr(self.image_volume, "dtype", np.uint8)).itemsize))
+            if roi_bbox is not None:
+                shape = roi_shape_zyx(roi_bbox)
+                bytes_estimate = int(shape[0]) * int(shape[1]) * int(shape[2]) * dtype_size
+                return bytes_estimate >= 32 * 1024 * 1024
+            bytes_estimate = int(getattr(self.image_volume, "nbytes", 0) or 0)
+            if self.current_volume_scope == "part" or bool(getattr(self, "_volume_clarity_mode", False)):
+                return bytes_estimate >= 32 * 1024 * 1024
+            return bytes_estimate >= 64 * 1024 * 1024
+        except Exception:
+            return True
+
+    def _show_volume_preview_progress(self, message, detail=None):
+        dialog = QProgressDialog(message, "", 0, 0, self)
+        dialog.setWindowTitle(tt("Volume render", self.lang))
+        dialog.setCancelButton(None)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        dialog.setMinimumDuration(0)
+        if detail is None:
+            detail = tt(
+                "Downsampling volume and uploading texture. This can take a moment for large TIF stacks.",
+                self.lang,
+            )
+        dialog.setLabelText(
+            str(message or "")
+            + "\n"
+            + str(detail or "")
+        )
+        dialog.show()
+        QApplication.processEvents()
+        return dialog
+
+    def _volume_preview_request(self, mode=None):
         if self.image_volume is None:
             return None
         shape = tuple(int(value) for value in self.image_volume.shape)
@@ -7425,22 +8302,309 @@ class TifWorkbenchWidget(QWidget):
         max_dim = self._active_volume_target_dim(mode)
         source_dtype = str(np.dtype(getattr(self.image_volume, "dtype", np.uint8)))
         preserve_source = mode == "still" and (self._volume_clarity_mode or self.current_volume_scope == "part")
-        cache_key = (shape, source_dtype, max_dim, preserve_source)
-        cached = self._volume_preview_cache.get(cache_key)
-        if cached is not None:
-            self._volume_preview = cached
-            self._volume_preview_source_shape = cache_key
-            return cached
+        algorithm = self._volume_preview_algorithm(mode)
+        roi_bbox = self._active_volume_roi_bbox(mode)
+        roi_key = tuple(tuple(int(value) for value in pair) for pair in roi_bbox) if roi_bbox is not None else None
+        if roi_bbox is not None:
+            preserve_source = mode == "still" and (self._volume_clarity_mode or self.current_volume_scope == "part" or self._active_volume_roi_scale() > 1.0)
+        owner = self._active_volume_cache_owner()
+        cache_key = (owner, shape, source_dtype, max_dim, preserve_source, algorithm, roi_key, self._roi_texture_budget_bytes())
+        return {
+            "cache_key": cache_key,
+            "owner": owner,
+            "shape": shape,
+            "source_dtype": source_dtype,
+            "max_dim": max_dim,
+            "preserve_source": preserve_source,
+            "algorithm": algorithm,
+            "roi_bbox": roi_bbox,
+            "roi_key": roi_key,
+            "texture_budget_bytes": self._roi_texture_budget_bytes(),
+            "mode": mode,
+            "message": self._volume_preview_progress_message(mode, roi_bbox),
+        }
 
-        factors = [max(1, int(math.ceil(size / float(max_dim)))) for size in shape]
-        source = self.image_volume[:: factors[0], :: factors[1], :: factors[2]]
-        preview = self._normalize_volume_preview(source, preserve_source=preserve_source)
-        if preview is None:
+    def _volume_mask_preview_request(self, mode=None):
+        mask = self._active_part_mask_volume()
+        if mask is None:
             return None
+        shape = tuple(int(value) for value in getattr(mask, "shape", ()) or ())
+        mode = "drag" if mode == "drag" else "still"
+        max_dim = self._active_volume_target_dim(mode)
+        mask_algorithm = "nearest" if mode == "drag" else "occupancy"
+        roi_bbox = self._active_volume_roi_bbox(mode)
+        roi_key = tuple(tuple(int(value) for value in pair) for pair in roi_bbox) if roi_bbox is not None else None
+        owner = self._active_volume_cache_owner()
+        cache_key = (owner, shape, str(np.dtype(getattr(mask, "dtype", np.uint16))), max_dim, id(mask), mask_algorithm, roi_key)
+        return {
+            "cache_key": cache_key,
+            "owner": owner,
+            "shape": shape,
+            "max_dim": max_dim,
+            "algorithm": mask_algorithm,
+            "roi_bbox": roi_bbox,
+            "roi_key": roi_key,
+            "mode": mode,
+            "message": tt("Preparing mask preview...", self.lang),
+        }
+
+    def _cache_volume_preview_result(self, request, preview, build_ms=None):
+        if request is None or preview is None:
+            return None
+        cache_key = request["cache_key"]
+        roi_bbox = request.get("roi_bbox")
+        owner = request.get("owner")
         self._volume_preview_cache[cache_key] = preview
+        self._touch_volume_cache_owner(owner)
+        self._prune_volume_preview_cache()
         self._volume_preview = preview
         self._volume_preview_source_shape = cache_key
+        self._volume_roi_preview_bbox = roi_bbox
+        self._volume_roi_preview_source_shape = roi_shape_zyx(roi_bbox) if roi_bbox is not None else ()
+        if build_ms is not None:
+            self._volume_last_preview_build_ms = max(0.0, float(build_ms))
         return preview
+
+    def _cache_volume_mask_preview_result(self, request, preview):
+        if request is None or preview is None:
+            return None
+        cache_key = request["cache_key"]
+        self._volume_mask_preview_cache[cache_key] = preview
+        self._touch_volume_cache_owner(request.get("owner"))
+        self._prune_volume_preview_cache()
+        return preview
+
+    def _ensure_volume_preview(self, mode=None):
+        request = self._volume_preview_request(mode)
+        if request is None:
+            return None
+        cache_key = request["cache_key"]
+        roi_bbox = request.get("roi_bbox")
+        cached = self._volume_preview_cache.get(cache_key)
+        if cached is not None:
+            self._volume_preview_cache.move_to_end(cache_key)
+            self._touch_volume_cache_owner(request.get("owner"))
+            self._volume_last_preview_build_ms = 0.0
+            self._volume_preview = cached
+            self._volume_preview_source_shape = cache_key
+            self._volume_roi_preview_bbox = roi_bbox
+            self._volume_roi_preview_source_shape = roi_shape_zyx(roi_bbox) if roi_bbox is not None else ()
+            return cached
+
+        mode = request["mode"]
+        if self._should_show_volume_preview_progress(mode, roi_bbox):
+            message = request.get("message") or tt("Preparing full-volume 3D preview...", self.lang)
+            if hasattr(self, "volume_canvas"):
+                self.volume_canvas.setText(message)
+            self._update_volume_render_status_label(message)
+            QApplication.processEvents()
+        build_start = time.perf_counter()
+        if roi_bbox is not None:
+            preview = build_roi_volume_preview(
+                self.image_volume,
+                roi_bbox,
+                request["max_dim"],
+                mode=request["algorithm"],
+                preserve_source=request["preserve_source"],
+                texture_budget_bytes=request["texture_budget_bytes"],
+                max_texture_dim=GPU_VOLUME_MAX_TEXTURE_DIM,
+            )
+        else:
+            preview = build_volume_preview(
+                self.image_volume,
+                request["max_dim"],
+                mode=request["algorithm"],
+                preserve_source=request["preserve_source"],
+            )
+        return self._cache_volume_preview_result(request, preview, (time.perf_counter() - build_start) * 1000.0)
+
+    def _should_show_gpu_upload_progress(self, preview, mask_preview=None):
+        if self._volume_canvas_renderer != "gpu" or self._volume_render_mode == "drag":
+            return False
+        try:
+            bytes_estimate = int(getattr(preview, "nbytes", 0) or 0)
+            if mask_preview is not None:
+                bytes_estimate += int(getattr(mask_preview, "nbytes", 0) or 0)
+            return bytes_estimate >= 32 * 1024 * 1024
+        except Exception:
+            return True
+
+    def _should_show_volume_mask_preview_progress(self, mode, mask):
+        if mode != "still" or self.display_mode != "volume" or mask is None:
+            return False
+        try:
+            bytes_estimate = int(getattr(mask, "nbytes", 0) or 0)
+            return bytes_estimate >= 32 * 1024 * 1024
+        except Exception:
+            return True
+
+    def _cancel_volume_preview_build(self):
+        worker = getattr(self, "_volume_preview_build_worker", None)
+        if worker is not None and hasattr(worker, "cancel"):
+            try:
+                worker.cancel()
+            except Exception:
+                pass
+        self._volume_preview_pending_token = 0
+        self._volume_preview_pending_key = None
+        self._volume_preview_pending_mask_key = None
+        self._set_volume_preview_build_controls_busy(False)
+
+    def _cancel_and_wait_volume_preview_build(self, timeout_ms=2000):
+        thread = getattr(self, "_volume_preview_build_thread", None)
+        self._cancel_volume_preview_build()
+        if thread is not None and thread.isRunning():
+            thread.quit()
+            thread.wait(int(max(0, timeout_ms)))
+
+    def _cleanup_volume_preview_build_thread(self, thread=None, worker=None):
+        if thread is not None and self._volume_preview_build_thread is not thread:
+            return
+        if worker is not None and self._volume_preview_build_worker is not worker:
+            return
+        self._volume_preview_build_thread = None
+        self._volume_preview_build_worker = None
+
+    def _volume_preview_build_controls(self):
+        controls = []
+        for name in (
+            "specimen_list",
+            "volume_quality_slider",
+            "volume_clarity_check",
+            "volume_roi_detail_check",
+            "volume_roi_source_combo",
+            "volume_roi_inspect_check",
+            "volume_roi_scale_slider",
+            "volume_roi_budget_combo",
+            "volume_mask_combo",
+        ):
+            control = getattr(self, name, None)
+            if control is not None:
+                controls.append(control)
+        return controls
+
+    def _set_volume_preview_build_controls_busy(self, busy):
+        busy = bool(busy)
+        state_attr = "_volume_preview_busy_control_states"
+        if busy:
+            if getattr(self, state_attr, None):
+                return
+            states = []
+            for control in self._volume_preview_build_controls():
+                try:
+                    states.append((control, bool(control.isEnabled())))
+                    control.setEnabled(False)
+                except RuntimeError:
+                    continue
+            setattr(self, state_attr, states)
+            return
+        states = list(getattr(self, state_attr, []) or [])
+        setattr(self, state_attr, [])
+        for control, was_enabled in states:
+            try:
+                control.setEnabled(bool(was_enabled))
+            except RuntimeError:
+                continue
+        if hasattr(self, "_set_scope_controls_enabled"):
+            self._set_scope_controls_enabled()
+
+    def _is_volume_preview_build_pending(self, preview_key, mask_key=None):
+        if self._volume_preview_build_thread is None:
+            return False
+        return self._volume_preview_pending_key == preview_key and self._volume_preview_pending_mask_key == mask_key
+
+    def _start_volume_preview_build(self, volume_request=None, mask_request=None):
+        if volume_request is None and mask_request is None:
+            return False
+        preview_key = volume_request.get("cache_key") if volume_request else None
+        mask_key = mask_request.get("cache_key") if mask_request else None
+        if self._is_volume_preview_build_pending(preview_key, mask_key):
+            return True
+        self._cancel_volume_preview_build()
+        self._volume_preview_build_token += 1
+        token = int(self._volume_preview_build_token)
+        self._volume_preview_pending_token = token
+        self._volume_preview_pending_key = preview_key
+        self._volume_preview_pending_mask_key = mask_key
+        message = (volume_request or {}).get("message") or tt("Preparing full-volume 3D preview...", self.lang)
+        if mask_request and (volume_request is None or self._volume_preview_cache.get(preview_key) is not None):
+            message = mask_request.get("message") or tt("Preparing mask preview...", self.lang)
+        self._volume_preview_pending_message = str(message or "")
+        if hasattr(self.volume_canvas, "setText"):
+            self.volume_canvas.setText(self._volume_preview_pending_message)
+        self._update_volume_render_status_label(self._volume_preview_pending_message)
+        self._set_volume_preview_build_controls_busy(True)
+        thread = QThread(self)
+        worker = TifVolumePreviewBuildWorker(
+            token,
+            volume=self.image_volume,
+            volume_request=volume_request,
+            mask=self._active_part_mask_volume() if mask_request else None,
+            mask_request=mask_request,
+        )
+        self._volume_preview_build_thread = thread
+        self._volume_preview_build_worker = worker
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._on_volume_preview_build_progress)
+        worker.finished.connect(self._on_volume_preview_build_finished)
+        worker.failed.connect(self._on_volume_preview_build_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(lambda t=thread, w=worker: self._cleanup_volume_preview_build_thread(t, w))
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+        return True
+
+    def _on_volume_preview_build_progress(self, message):
+        token = int(getattr(self, "_volume_preview_pending_token", 0) or 0)
+        if token <= 0:
+            return
+        self._volume_preview_pending_message = str(message or "")
+        if self.display_mode == "volume":
+            if hasattr(self.volume_canvas, "setText"):
+                self.volume_canvas.setText(self._volume_preview_pending_message)
+            self._update_volume_render_status_label(self._volume_preview_pending_message)
+
+    def _on_volume_preview_build_finished(self, result):
+        result = dict(result or {})
+        token = int(result.get("token", 0) or 0)
+        if token != int(getattr(self, "_volume_preview_pending_token", 0) or 0):
+            return
+        self._volume_preview_pending_token = 0
+        self._volume_preview_pending_key = None
+        self._volume_preview_pending_mask_key = None
+        self._set_volume_preview_build_controls_busy(False)
+        if result.get("cancelled"):
+            return
+        volume_request = result.get("volume_request") or {}
+        mask_request = result.get("mask_request") or {}
+        if result.get("preview") is not None:
+            self._cache_volume_preview_result(volume_request, result.get("preview"), result.get("build_ms", 0.0))
+        if result.get("mask_preview") is not None:
+            self._cache_volume_mask_preview_result(mask_request, result.get("mask_preview"))
+        if self.display_mode == "volume" and not getattr(self, "_handling_gpu_volume_failure", False):
+            self.render_volume_preview()
+
+    def _on_volume_preview_build_failed(self, result):
+        result = dict(result or {})
+        token = int(result.get("token", 0) or 0)
+        if token != int(getattr(self, "_volume_preview_pending_token", 0) or 0):
+            return
+        self._volume_preview_pending_token = 0
+        self._volume_preview_pending_key = None
+        self._volume_preview_pending_mask_key = None
+        self._set_volume_preview_build_controls_busy(False)
+        message = tt("GPU renderer failed. Using CPU fallback: {0}", self.lang).format(str(result.get("error", "")))
+        self._update_volume_render_status_label(message)
+        self.log(message)
+
+    def _volume_preview_algorithm(self, mode=None):
+        mode = "drag" if mode == "drag" else "still"
+        if mode == "drag":
+            return "stride"
+        return "hybrid"
 
     def _active_part_mask_volume(self):
         if self.current_volume_scope != "part" or self.image_volume is None:
@@ -7473,23 +8637,35 @@ class TifWorkbenchWidget(QWidget):
         mask = self._active_part_mask_volume()
         if mask is None:
             return None
-        shape = tuple(int(value) for value in getattr(mask, "shape", ()) or ())
-        mode = "drag" if mode == "drag" else "still"
-        max_dim = self._active_volume_target_dim(mode)
-        cache_key = (shape, str(np.dtype(getattr(mask, "dtype", np.uint16))), max_dim, id(mask))
+        request = self._volume_mask_preview_request(mode)
+        if request is None:
+            return None
+        mode = request["mode"]
+        roi_bbox = request.get("roi_bbox")
+        cache_key = request["cache_key"]
         cached = self._volume_mask_preview_cache.get(cache_key)
         if cached is not None:
+            self._volume_mask_preview_cache.move_to_end(cache_key)
+            self._touch_volume_cache_owner(request.get("owner"))
             return cached
-        factors = [max(1, int(math.ceil(size / float(max_dim)))) for size in shape]
-        preview = (np.asarray(mask[:: factors[0], :: factors[1], :: factors[2]]) > 0).astype(np.uint8)
-        preview = np.ascontiguousarray(preview)
-        self._volume_mask_preview_cache[cache_key] = preview
-        return preview
+        if self._should_show_volume_mask_preview_progress(mode, mask):
+            message = request.get("message") or tt("Preparing mask preview...", self.lang)
+            if hasattr(self, "volume_canvas"):
+                self.volume_canvas.setText(message)
+            self._update_volume_render_status_label(message)
+            QApplication.processEvents()
+        if roi_bbox is not None:
+            preview = build_roi_mask_preview(mask, roi_bbox, request["max_dim"], mode=request["algorithm"], max_texture_dim=GPU_VOLUME_MAX_TEXTURE_DIM)
+        else:
+            preview = build_mask_preview(mask, request["max_dim"], mode=request["algorithm"])
+        return self._cache_volume_mask_preview_result(request, preview)
 
     def _masked_volume_preview(self, preview, mask_preview):
         if mask_preview is None or tuple(mask_preview.shape) != tuple(preview.shape):
             return preview
+        owner = self._active_volume_cache_owner()
         cache_key = (
+            owner,
             id(preview),
             id(mask_preview),
             tuple(int(value) for value in preview.shape),
@@ -7497,10 +8673,14 @@ class TifWorkbenchWidget(QWidget):
         )
         cached = self._volume_masked_preview_cache.get(cache_key)
         if cached is not None:
+            self._volume_masked_preview_cache.move_to_end(cache_key)
+            self._touch_volume_cache_owner(owner)
             return cached
         mask_values = np.asarray(mask_preview) > 0
         masked = np.ascontiguousarray(np.where(mask_values, preview, np.zeros_like(preview)))
         self._volume_masked_preview_cache[cache_key] = masked
+        self._touch_volume_cache_owner(owner)
+        self._prune_volume_preview_cache()
         return masked
 
     def _viewer_side_front_clip_mask(self, rotated_depth, front_clip):
@@ -7533,59 +8713,16 @@ class TifWorkbenchWidget(QWidget):
         return mask & ~eroded
 
     def _normalize_volume_preview(self, source, preserve_source=False):
-        if source is None:
-            return None
-        source_dtype = np.dtype(getattr(source, "dtype", np.uint8))
-        if preserve_source and source_dtype == np.uint16:
-            preview = np.ascontiguousarray(source)
-            return preview if preview.size else None
-        if source_dtype == np.uint8:
-            preview = np.ascontiguousarray(source)
-            return preview if preview.size else None
-        preview = np.asarray(source)
-        if preview.size == 0:
-            return None
-        sample = self._sample_volume_preview_values(preview)
-        if np.issubdtype(preview.dtype, np.integer):
-            sample_values = np.asarray(sample, dtype=np.float32).reshape(-1)
-        else:
-            sample_values = np.asarray(sample, dtype=np.float32).reshape(-1)
-        finite = sample_values[np.isfinite(sample_values)]
-        if finite.size == 0:
-            return np.zeros(preview.shape, dtype=np.uint8)
-        low = float(np.percentile(finite, 1))
-        high = float(np.percentile(finite, 99.5))
-        if high <= low:
-            low = float(np.min(finite))
-            high = float(np.max(finite))
-        if high <= low:
-            return np.zeros(preview.shape, dtype=np.uint8)
-        return self._scale_volume_preview_to_uint8(preview, low, high)
+        return normalize_preview_intensity(source, preserve_source=preserve_source)
 
     def _normalize_volume_preview_to_uint8(self, source):
         return self._normalize_volume_preview(source, preserve_source=False)
 
     def _sample_volume_preview_values(self, preview, max_samples=1_000_000):
-        if preview.size <= max_samples:
-            return preview
-        step = max(1, int(math.ceil((float(preview.size) / float(max_samples)) ** (1.0 / 3.0))))
-        return preview[::step, ::step, ::step]
+        return sample_volume_values(preview, max_samples=max_samples)
 
     def _scale_volume_preview_to_uint8(self, preview, low, high):
-        scale = 255.0 / max(float(high) - float(low), 1e-6)
-        result = np.empty(preview.shape, dtype=np.uint8)
-        if preview.ndim < 3:
-            chunk = np.asarray(preview, dtype=np.float32)
-            chunk = np.clip((chunk - float(low)) * scale, 0.0, 255.0)
-            return np.ascontiguousarray(chunk.astype(np.uint8))
-        plane_values = max(1, int(np.prod(preview.shape[1:])))
-        z_chunk = max(1, min(int(preview.shape[0]), int((64 * 1024 * 1024) / (plane_values * 4))))
-        for z0 in range(0, int(preview.shape[0]), z_chunk):
-            z1 = min(int(preview.shape[0]), z0 + z_chunk)
-            chunk = np.asarray(preview[z0:z1], dtype=np.float32)
-            chunk = np.clip((chunk - float(low)) * scale, 0.0, 255.0)
-            result[z0:z1] = chunk.astype(np.uint8)
-        return np.ascontiguousarray(result)
+        return scale_volume_to_uint8(preview, low, high)
 
     def _volume_texture_target_dim(self):
         requested = max(8, int(self.volume_quality_slider.value()))
@@ -7595,12 +8732,13 @@ class TifWorkbenchWidget(QWidget):
 
     def _volume_render_state(self, mode=None):
         mode = "drag" if mode == "drag" else "still"
-        samples = int(self.volume_sample_slider.value())
+        samples = self._active_volume_sample_count() if mode == "still" else int(self.volume_sample_slider.value())
         if mode == "drag":
             if self._volume_projection_mode() == "composite":
                 samples = max(192, min(samples, 384))
             else:
                 samples = max(256, min(samples, 768))
+        gradient_opacity, gradient_opacity_range = self._volume_gradient_opacity_settings(mode)
         return {
             "cutoff_percent": self.volume_cutoff_slider.value(),
             "yaw": self._volume_yaw,
@@ -7623,6 +8761,11 @@ class TifWorkbenchWidget(QWidget):
             "mask_opacity": max(0.0, min(1.0, float(self.volume_mask_opacity_slider.value()) / 100.0)),
             "enhancement": self._volume_detail_enhancement(mode),
             "tone_gamma": self._volume_tone_gamma(),
+            "shader_quality_mode": self._volume_shader_quality_mode(),
+            "jitter_strength": self._volume_jitter_strength(mode),
+            "adaptive_step_strength": self._volume_adaptive_step_strength(mode),
+            "gradient_opacity": gradient_opacity,
+            "gradient_opacity_range": gradient_opacity_range,
             "surface_refine": bool(self.volume_surface_refine_check.isChecked()),
             "clip_plane_enabled": bool(self.volume_clip_plane_check.isChecked()),
             "clip_plane_depth": float(self.volume_clip_plane_depth_slider.value()) / 100.0,
@@ -7641,6 +8784,12 @@ class TifWorkbenchWidget(QWidget):
         state["mask_mode"] = mask_mode
         if hasattr(self.volume_canvas, "set_axis_overlays"):
             self.volume_canvas.set_axis_overlays(self._local_axis_volume_overlays())
+        if self._should_show_gpu_upload_progress(preview, mask_preview if mask_mode != "image_only" else None):
+            message = tt("Uploading 3D preview to GPU...", self.lang)
+            if hasattr(self.volume_canvas, "setText"):
+                self.volume_canvas.setText(message)
+            self._update_volume_render_status_label(message)
+            QApplication.processEvents()
         if hasattr(self.volume_canvas, "set_volume_render_inputs"):
             self.volume_canvas.set_volume_render_inputs(
                 preview,
@@ -7704,6 +8853,9 @@ class TifWorkbenchWidget(QWidget):
     def _volume_source_geometry(self):
         shape = tuple(int(value) for value in getattr(self.image_volume, "shape", ()) or ())
         spacing = ()
+        roi_shape = tuple(int(value) for value in getattr(self, "_volume_roi_preview_source_shape", ()) or ())
+        if len(roi_shape) == 3 and min(roi_shape) > 0:
+            shape = roi_shape
         if self.current_volume_scope == "part":
             record = ((self.current_part or {}).get("image") or {})
         else:
@@ -7714,7 +8866,7 @@ class TifWorkbenchWidget(QWidget):
             record_shape = tuple(int(value) for value in record_shape)
         except (TypeError, ValueError):
             record_shape = ()
-        if len(record_shape) == 3 and min(record_shape) > 0:
+        if not roi_shape and len(record_shape) == 3 and min(record_shape) > 0:
             shape = record_shape
         record_spacing = record.get("spacing_zyx") or []
         try:
@@ -7745,13 +8897,42 @@ class TifWorkbenchWidget(QWidget):
         if self.display_mode == "volume":
             self._ensure_volume_canvas()
         if self.image_volume is None:
+            specimen = self.project.get_specimen(self.current_specimen_id, default=None) if self.current_specimen_id else None
+            if (specimen or {}).get("metadata", {}).get("import_status") == "metadata_only" or ((specimen or {}).get("working_volume") or {}).get("status") == "metadata_only":
+                message = tt("TIF metadata registered. Build a working volume before 3D preview.", self.lang)
+            else:
+                message = tt("No TIF volume loaded", self.lang)
             if hasattr(self.volume_canvas, "set_axis_overlays"):
                 self.volume_canvas.set_axis_overlays([])
             self.volume_canvas.clear()
-            self.volume_canvas.setText(tt("No TIF volume loaded", self.lang))
-            self._update_volume_render_status_label(tt("No TIF volume loaded", self.lang))
+            self.volume_canvas.setText(message)
+            self._update_volume_render_status_label(message)
             return
-        preview = self._ensure_volume_preview(self._volume_render_mode)
+        mode = "drag" if self._volume_render_mode == "drag" else "still"
+        volume_request = self._volume_preview_request(mode)
+        if volume_request is not None:
+            self._update_volume_render_status_label(
+                volume_request.get("message") or self._volume_preview_progress_message(mode, volume_request.get("roi_bbox"))
+            )
+        else:
+            self._update_volume_render_status_label(tt("Building 3D preview...", self.lang))
+        preview = None
+        if volume_request is not None:
+            preview = self._volume_preview_cache.get(volume_request["cache_key"])
+            if preview is not None:
+                self._volume_preview_cache.move_to_end(volume_request["cache_key"])
+                self._touch_volume_cache_owner(volume_request.get("owner"))
+                self._volume_preview = preview
+                self._volume_preview_source_shape = volume_request["cache_key"]
+                roi_bbox = volume_request.get("roi_bbox")
+                self._volume_roi_preview_bbox = roi_bbox
+                self._volume_roi_preview_source_shape = roi_shape_zyx(roi_bbox) if roi_bbox is not None else ()
+            elif mode == "still" and self.display_mode == "volume":
+                if self._should_show_volume_preview_progress(mode, volume_request.get("roi_bbox")):
+                    self._start_volume_preview_build(volume_request=volume_request)
+                    return
+        if preview is None:
+            preview = self._ensure_volume_preview(mode)
         if preview is None:
             if hasattr(self.volume_canvas, "set_axis_overlays"):
                 self.volume_canvas.set_axis_overlays([])
@@ -7760,7 +8941,21 @@ class TifWorkbenchWidget(QWidget):
             self._update_volume_render_status_label(tt("No TIF volume loaded", self.lang))
             return
         mask_mode = self._volume_mask_mode()
-        mask_preview = self._ensure_volume_mask_preview(self._volume_render_mode) if mask_mode != "image_only" else None
+        mask_preview = None
+        mask_request = None
+        if mask_mode != "image_only":
+            mask_request = self._volume_mask_preview_request(mode)
+            if mask_request is not None:
+                mask_preview = self._volume_mask_preview_cache.get(mask_request["cache_key"])
+                if mask_preview is not None:
+                    self._volume_mask_preview_cache.move_to_end(mask_request["cache_key"])
+                    self._touch_volume_cache_owner(mask_request.get("owner"))
+                elif mode == "still" and self.display_mode == "volume":
+                    if self._should_show_volume_mask_preview_progress(mode, self._active_part_mask_volume()):
+                        self._start_volume_preview_build(mask_request=mask_request)
+                        return
+            if mask_preview is None:
+                mask_preview = self._ensure_volume_mask_preview(mode)
         if mask_preview is None and mask_mode != "image_only":
             mask_mode = "image_only"
         self._try_restore_gpu_volume_canvas()

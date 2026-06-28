@@ -23,11 +23,45 @@ for %%P in (
     "%CONDA_PREFIX%\python.exe"
     "%USERPROFILE%\miniconda3\envs\taxamask\python.exe"
     "%USERPROFILE%\anaconda3\envs\taxamask\python.exe"
+    "%USERPROFILE%\miniforge3\envs\taxamask\python.exe"
+    "%USERPROFILE%\mambaforge\envs\taxamask\python.exe"
     "%ProgramData%\miniconda3\envs\taxamask\python.exe"
     "%ProgramData%\anaconda3\envs\taxamask\python.exe"
+    "%ProgramData%\miniforge3\envs\taxamask\python.exe"
+    "%ProgramData%\mambaforge\envs\taxamask\python.exe"
 ) do (
     call :TryPython "%%~P" "known environment path" 0
     if defined PYTHON_EXE goto PythonFound
+)
+
+for %%C in (
+    conda
+    "%USERPROFILE%\miniconda3\condabin\conda.bat"
+    "%USERPROFILE%\anaconda3\condabin\conda.bat"
+    "%USERPROFILE%\miniforge3\condabin\conda.bat"
+    "%USERPROFILE%\mambaforge\condabin\conda.bat"
+    "%ProgramData%\miniconda3\condabin\conda.bat"
+    "%ProgramData%\anaconda3\condabin\conda.bat"
+    "%ProgramData%\miniforge3\condabin\conda.bat"
+    "%ProgramData%\mambaforge\condabin\conda.bat"
+) do (
+    call :TryCondaEnvList "%%~C"
+    if defined PYTHON_EXE goto PythonFound
+)
+
+for %%D in (C D E F G H) do (
+    for %%C in (
+        "%%D:\miniconda3\condabin\conda.bat"
+        "%%D:\anaconda3\condabin\conda.bat"
+        "%%D:\miniforge3\condabin\conda.bat"
+        "%%D:\mambaforge\condabin\conda.bat"
+        "%%D:\conda\condabin\conda.bat"
+        "%%D:\Anaconda\condabin\conda.bat"
+        "%%D:\Miniconda\condabin\conda.bat"
+    ) do (
+        call :TryCondaEnvList "%%~C"
+        if defined PYTHON_EXE goto PythonFound
+    )
 )
 
 for /d %%E in (
@@ -38,9 +72,26 @@ for /d %%E in (
     "%USERPROFILE%\.conda\envs\taxamask*"
     "%ProgramData%\miniconda3\envs\taxamask*"
     "%ProgramData%\anaconda3\envs\taxamask*"
+    "%ProgramData%\miniforge3\envs\taxamask*"
+    "%ProgramData%\mambaforge\envs\taxamask*"
 ) do (
     call :TryPython "%%~fE\python.exe" "named conda env %%~nxE" 0
     if defined PYTHON_EXE goto PythonFound
+)
+
+for %%D in (C D E F G H) do (
+    for /d %%E in (
+        "%%D:\miniconda3\envs\taxamask*"
+        "%%D:\anaconda3\envs\taxamask*"
+        "%%D:\miniforge3\envs\taxamask*"
+        "%%D:\mambaforge\envs\taxamask*"
+        "%%D:\conda\envs\taxamask*"
+        "%%D:\Anaconda\envs\taxamask*"
+        "%%D:\Miniconda\envs\taxamask*"
+    ) do (
+        call :TryPython "%%~fE\python.exe" "drive conda env %%~fE" 0
+        if defined PYTHON_EXE goto PythonFound
+    )
 )
 
 if not defined PYTHON_EXE (
@@ -117,3 +168,12 @@ if errorlevel 1 (
 set "PYTHON_EXE=%CANDIDATE_PYTHON%"
 set "PYTHON_SOURCE=%CANDIDATE_SOURCE%"
 exit /b 0
+
+:TryCondaEnvList
+set "TAXAMASK_CONDA_CANDIDATE=%~1"
+if /i not "%TAXAMASK_CONDA_CANDIDATE%"=="conda" if not exist "%TAXAMASK_CONDA_CANDIDATE%" exit /b 1
+for /f "delims=" %%E in ('powershell -NoProfile -ExecutionPolicy Bypass -Command "$conda=$env:TAXAMASK_CONDA_CANDIDATE; $raw=& $conda env list --json 2^>$null; if ($LASTEXITCODE -ne 0 -or -not $raw) { exit 0 }; $envs=($raw ^| ConvertFrom-Json).envs; foreach ($envPath in $envs) { $leaf=Split-Path -Leaf $envPath; if ($leaf -like 'taxamask*') { $envPath } }" 2^>nul') do (
+    call :TryPython "%%E\python.exe" "conda env list %%E" 0
+    if defined PYTHON_EXE exit /b 0
+)
+exit /b 1

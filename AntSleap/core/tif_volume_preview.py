@@ -179,9 +179,23 @@ def _block_max_streaming(array, factors):
 
 
 def _block_hybrid_streaming(array, factors):
-    mean_values = _block_mean_streaming(array, factors)
-    detail_values = _block_max_streaming(array, factors).astype(np.float32, copy=False)
-    return mean_values * 0.65 + detail_values * 0.35
+    out_shape = preview_shape_for_factors(array.shape, factors)
+    result = np.empty(out_shape, dtype=np.float32)
+    zf, yf, xf = factors
+    x_starts = _reduceat_starts(array.shape[2], xf)
+    tail_count = int(array.shape[2] - int(x_starts[-1]))
+    tail_scale = float(xf) / float(tail_count) if tail_count > 0 and tail_count != xf else 1.0
+    for oz, z0 in enumerate(range(0, array.shape[0], zf)):
+        z1 = min(array.shape[0], z0 + zf)
+        for oy, y0 in enumerate(range(0, array.shape[1], yf)):
+            y1 = min(array.shape[1], y0 + yf)
+            block = np.asarray(array[z0:z1, y0:y1], dtype=np.float32)
+            mean_row = np.add.reduceat(block, x_starts, axis=2).sum(axis=(0, 1)) / float((z1 - z0) * (y1 - y0) * xf)
+            if tail_scale != 1.0:
+                mean_row[-1] *= tail_scale
+            max_row = np.maximum.reduceat(block, x_starts, axis=2).max(axis=(0, 1))
+            result[oz, oy] = mean_row * 0.65 + max_row * 0.35
+    return result
 
 
 def _block_mask_occupancy_streaming(mask, factors):

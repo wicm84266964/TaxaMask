@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from AntSleap.ui import tif_gpu_volume_canvas as gpu_canvas
 
@@ -154,6 +155,164 @@ class TifGpuVolumeCanvasImportTests(unittest.TestCase):
         self.assertGreater(int(amber[0, -1, 3]), int(amber[0, 4, 3]))
         self.assertFalse((amber[0, 180, :3] == cyan[0, 180, :3]).all())
         self.assertLess(int(custom[0, -1, 3]), int(amber[0, -1, 3]))
+
+    def test_gpu_texture_cache_budget_env_parser(self):
+        import os
+
+        old = os.environ.get("TAXAMASK_TIF_GPU_TEXTURE_CACHE_GB")
+        try:
+            os.environ["TAXAMASK_TIF_GPU_TEXTURE_CACHE_GB"] = "1.5"
+            self.assertEqual(gpu_canvas._gpu_texture_cache_budget_bytes(), int(1.5 * 1024 * 1024 * 1024))
+            os.environ["TAXAMASK_TIF_GPU_TEXTURE_CACHE_GB"] = "0"
+            self.assertEqual(gpu_canvas._gpu_texture_cache_budget_bytes(), 0)
+            os.environ["TAXAMASK_TIF_GPU_TEXTURE_CACHE_GB"] = "bad"
+            self.assertEqual(gpu_canvas._gpu_texture_cache_budget_bytes(), gpu_canvas.GPU_VOLUME_TEXTURE_CACHE_DEFAULT_BUDGET_BYTES)
+            self.assertEqual(gpu_canvas.GPU_VOLUME_TEXTURE_CACHE_DEFAULT_BUDGET_BYTES, 2 * 1024 * 1024 * 1024)
+        finally:
+            if old is None:
+                os.environ.pop("TAXAMASK_TIF_GPU_TEXTURE_CACHE_GB", None)
+            else:
+                os.environ["TAXAMASK_TIF_GPU_TEXTURE_CACHE_GB"] = old
+
+    def test_gpu_render_core_cache_activation_skips_reupload(self):
+        core = gpu_canvas._GpuVolumeRenderCore()
+        core._init_render_state()
+        key = ("owner", "volume", 1)
+        record_key = core._texture_cache_record_key(key, "volume")
+        core._texture_cache[record_key] = {
+            "texture_id": 17,
+            "kind": "volume",
+            "shape": (2, 3, 4),
+            "dtype": "uint8",
+            "bytes": 24,
+        }
+        core._texture_cache_bytes = 24
+
+        self.assertTrue(core._store_volume_data(gpu_canvas.np.zeros((2, 3, 4), dtype=gpu_canvas.np.uint8), cache_key=key))
+
+        self.assertEqual(core._texture_id, 17)
+        self.assertFalse(core._upload_needed)
+        self.assertEqual(core._uploaded_shape, (2, 3, 4))
+        self.assertEqual(core.render_stats()["texture_cache_hits"], 1)
+
+    def test_gpu_texture_cache_eviction_prefers_non_active_owner_and_mask(self):
+        core = gpu_canvas._GpuVolumeRenderCore()
+        core._init_render_state()
+        core._texture_cache_budget_bytes = 100
+        active_owner = ("active", "full", "", "")
+        other_owner = ("other", "full", "", "")
+        active_key = (active_owner, "volume-active")
+        active_record_key = core._texture_cache_record_key(active_key, "volume")
+        other_volume_key = (other_owner, "volume")
+        other_mask_key = (other_owner, "mask")
+        active_mask_key = (active_owner, "mask")
+        for key, kind, texture_id in (
+            (active_key, "volume", 1),
+            (other_volume_key, "volume", 2),
+            (other_mask_key, "mask", 3),
+            (active_mask_key, "mask", 4),
+        ):
+            core._texture_cache[core._texture_cache_record_key(key, kind)] = {
+                "texture_id": texture_id,
+                "kind": kind,
+                "owner": core._texture_cache_owner_from_key(key),
+                "shape": (1, 1, 1),
+                "dtype": "uint8",
+                "bytes": 60,
+            }
+        core._texture_cache_bytes = 240
+        core._texture_id = 1
+        core._volume_cache_key = active_key
+
+        candidate_key, candidate = core._texture_cache_eviction_candidate()
+
+        self.assertEqual(candidate["texture_id"], 3)
+        self.assertNotEqual(candidate_key, active_record_key)
+
+    def test_cached_texture_delete_detaches_without_deleting_lru_entry(self):
+        core = gpu_canvas._GpuVolumeRenderCore()
+        core._init_render_state()
+        key = (("owner", "full", "", ""), "volume")
+        record_key = core._texture_cache_record_key(key, "volume")
+        core._texture_cache[record_key] = {
+            "texture_id": 33,
+            "kind": "volume",
+            "owner": core._texture_cache_owner_from_key(key),
+            "shape": (1, 1, 1),
+            "dtype": "uint8",
+            "bytes": 1,
+        }
+        core._texture_id = 33
+        core._initialized = True
+
+        with patch.object(gpu_canvas.GL, "glDeleteTextures") as delete_textures:
+            core._delete_volume_texture()
+
+        delete_textures.assert_not_called()
+        self.assertIsNone(core._texture_id)
+        self.assertIn(record_key, core._texture_cache)
+
+    def test_release_texture_cache_deletes_records_and_detaches_active_ids(self):
+        core = gpu_canvas._GpuVolumeRenderCore()
+        core._init_render_state()
+        key = (("owner", "full", "", ""), "volume")
+        record_key = core._texture_cache_record_key(key, "volume")
+        core._texture_cache[record_key] = {
+            "texture_id": 44,
+            "kind": "volume",
+            "owner": core._texture_cache_owner_from_key(key),
+            "shape": (1, 1, 1),
+            "dtype": "uint8",
+            "bytes": 1,
+        }
+        core._texture_cache_bytes = 1
+        core._texture_id = 44
+        core._initialized = True
+
+        with patch.object(gpu_canvas.GL, "glDeleteTextures") as delete_textures:
+            core._release_texture_cache()
+
+        delete_textures.assert_called_once()
+        self.assertEqual(len(core._texture_cache), 0)
+        self.assertEqual(core._texture_cache_bytes, 0)
+        self.assertIsNone(core._texture_id)
+
+    def test_prune_texture_cache_keeps_only_active_when_active_exceeds_budget(self):
+        core = gpu_canvas._GpuVolumeRenderCore()
+        core._init_render_state()
+        core._texture_cache_budget_bytes = 100
+        active_key = (("active", "full", "", ""), "volume")
+        stale_key = (("stale", "full", "", ""), "volume")
+        active_record_key = core._texture_cache_record_key(active_key, "volume")
+        stale_record_key = core._texture_cache_record_key(stale_key, "volume")
+        core._texture_cache[stale_record_key] = {
+            "texture_id": 55,
+            "kind": "volume",
+            "owner": core._texture_cache_owner_from_key(stale_key),
+            "shape": (1, 1, 1),
+            "dtype": "uint8",
+            "bytes": 80,
+        }
+        core._texture_cache[active_record_key] = {
+            "texture_id": 66,
+            "kind": "volume",
+            "owner": core._texture_cache_owner_from_key(active_key),
+            "shape": (1, 1, 1),
+            "dtype": "uint8",
+            "bytes": 160,
+        }
+        core._texture_cache_bytes = 240
+        core._texture_id = 66
+        core._volume_cache_key = active_key
+        core._initialized = True
+
+        with patch.object(gpu_canvas.GL, "glDeleteTextures") as delete_textures:
+            core._prune_texture_cache()
+
+        delete_textures.assert_called_once()
+        self.assertIn(active_record_key, core._texture_cache)
+        self.assertNotIn(stale_record_key, core._texture_cache)
+        self.assertEqual(core._texture_cache_bytes, 160)
 
 
 if __name__ == "__main__":

@@ -63,6 +63,27 @@ class TifVolumePreviewTests(unittest.TestCase):
                     expected[oz, oy, ox] = int(round(float(block.mean()) * 0.65 + float(block.max()) * 0.35))
         np.testing.assert_array_equal(preview, expected)
 
+    def test_hybrid_downsample_uses_single_streaming_pass(self):
+        import AntSleap.core.tif_volume_preview as preview_module
+
+        volume = np.arange(4 * 8 * 8, dtype=np.uint16).reshape((4, 8, 8))
+        original_mean = preview_module._block_mean_streaming
+        original_max = preview_module._block_max_streaming
+
+        def fail_if_called(*_args, **_kwargs):
+            raise AssertionError("hybrid should not allocate separate full mean/max previews")
+
+        preview_module._block_mean_streaming = fail_if_called
+        preview_module._block_max_streaming = fail_if_called
+        try:
+            preview = downsample_volume(volume, (2, 2, 2), mode="hybrid")
+        finally:
+            preview_module._block_mean_streaming = original_mean
+            preview_module._block_max_streaming = original_max
+
+        self.assertEqual(tuple(preview.shape), (2, 4, 4))
+        self.assertEqual(preview.dtype, volume.dtype)
+
     def test_build_volume_preview_normalizes_uint16_when_not_preserving_source(self):
         volume = np.zeros((2, 8, 8), dtype=np.uint16)
         volume[:, 2:6, 2:6] = 1000

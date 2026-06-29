@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import os
 import time
+from collections import OrderedDict
 
 os.environ.setdefault("__NV_PRIME_RENDER_OFFLOAD", "1")
 os.environ.setdefault("__GLX_VENDOR_LIBRARY_NAME", "nvidia")
@@ -21,6 +22,7 @@ except ModuleNotFoundError as exc:
 GPU_VOLUME_MAX_TEXTURE_DIM = 4096
 GPU_VOLUME_MAX_RAY_STEPS = 4096
 GPU_VOLUME_TRANSFER_LUT_SIZE = 256
+GPU_VOLUME_TEXTURE_CACHE_DEFAULT_BUDGET_BYTES = 2 * 1024 * 1024 * 1024
 GPU_VOLUME_RENDER_MODES = {
     "composite": 0,
     "mip": 1,
@@ -33,6 +35,19 @@ GPU_VOLUME_MASK_MODES = {
     "mask_boundary": 1,
     "masked_image": 2,
 }
+
+def _gpu_texture_cache_budget_bytes():
+    value = os.environ.get("TAXAMASK_TIF_GPU_TEXTURE_CACHE_GB", "").strip()
+    if value:
+        try:
+            gb = float(value)
+            if gb <= 0:
+                return 0
+            return int(gb * 1024 * 1024 * 1024)
+        except (TypeError, ValueError):
+            pass
+    return int(GPU_VOLUME_TEXTURE_CACHE_DEFAULT_BUDGET_BYTES)
+
 
 try:
     from PySide6.QtCore import QRect, Qt, QTimer, Signal
@@ -862,6 +877,7 @@ class _GpuVolumeRenderCore:
     def _init_render_state(self):
         self._volume_data = None
         self._volume_shape = ()
+        self._volume_cache_key = None
         self._source_shape = ()
         self._source_spacing = ()
         self._upload_needed = False
@@ -874,7 +890,13 @@ class _GpuVolumeRenderCore:
         self._mask_texture_id = None
         self._mask_data = None
         self._mask_shape = ()
+        self._mask_cache_key = None
         self._mask_upload_needed = False
+        self._texture_cache = OrderedDict()
+        self._texture_cache_bytes = 0
+        self._texture_cache_hits = 0
+        self._texture_cache_misses = 0
+        self._texture_cache_budget_bytes = _gpu_texture_cache_budget_bytes()
         self._transfer_lut_texture_id = None
         self._transfer_lut_data = build_volume_transfer_lut()
         self._transfer_lut_upload_needed = True
@@ -917,10 +939,21 @@ class _GpuVolumeRenderCore:
         self._transfer_preset = "amber"
         self._transfer_opacity = 1.0
 
-    def _store_volume_data(self, volume, source_shape=None, spacing_zyx=None):
+    def _store_volume_data(self, volume, source_shape=None, spacing_zyx=None, cache_key=None):
         if volume is None:
             self.clear_volume()
             return False
+        if cache_key is not None and self._activate_cached_texture(cache_key, "volume"):
+            self._volume_cache_key = cache_key
+            self._source_shape = tuple(int(value) for value in (source_shape or self._volume_shape))
+            try:
+                next_spacing = tuple(float(value) for value in (spacing_zyx or ()))
+            except (TypeError, ValueError):
+                next_spacing = ()
+            self._source_spacing = next_spacing if len(next_spacing) == 3 and min(next_spacing) > 0 else ()
+            self._volume_data = np.asarray(volume)
+            self._upload_needed = False
+            return True
         source = np.asarray(volume)
         if source.dtype == np.uint16:
             array = np.ascontiguousarray(source, dtype=np.uint16)
@@ -941,44 +974,58 @@ class _GpuVolumeRenderCore:
         if self._volume_data is not array:
             self._volume_data = array
             self._volume_shape = tuple(int(value) for value in array.shape)
+            self._volume_cache_key = cache_key
             self._upload_needed = True
+        else:
+            self._volume_cache_key = cache_key
         self._source_shape = next_source_shape
         self._source_spacing = next_spacing
         return True
 
-    def _store_mask_data(self, mask):
+    def _store_mask_data(self, mask, cache_key=None):
         if mask is None:
             if self._mask_data is not None or self._mask_texture_id:
-                self._delete_mask_texture()
+                self._detach_mask_texture()
             self._mask_data = None
             self._mask_shape = ()
+            self._mask_cache_key = None
             self._mask_upload_needed = False
             return False
+        if cache_key is not None and self._activate_cached_texture(cache_key, "mask"):
+            self._mask_cache_key = cache_key
+            self._mask_data = np.asarray(mask)
+            self._mask_upload_needed = False
+            return True
         source = np.asarray(mask)
         if source.ndim != 3 or min(source.shape) <= 0:
-            self._delete_mask_texture()
+            self._detach_mask_texture()
             self._mask_data = None
             self._mask_shape = ()
+            self._mask_cache_key = None
             self._mask_upload_needed = False
             return False
         array = np.ascontiguousarray((source > 0).astype(np.uint8) * 255)
         if self._mask_data is None or self._mask_data.shape != array.shape or not np.array_equal(self._mask_data, array):
             self._mask_data = array
             self._mask_shape = tuple(int(value) for value in array.shape)
+            self._mask_cache_key = cache_key
             self._mask_upload_needed = True
+        else:
+            self._mask_cache_key = cache_key
         return True
 
     def clear_volume(self):
         self._volume_data = None
         self._volume_shape = ()
+        self._volume_cache_key = None
         self._source_shape = ()
         self._source_spacing = ()
         self._upload_needed = False
-        self._delete_volume_texture()
-        self._delete_mask_texture()
+        self._release_texture_cache()
         self._texture_id = None
         self._mask_data = None
         self._mask_shape = ()
+        self._mask_cache_key = None
         self._mask_upload_needed = False
         self._uploaded_shape = ()
         self._uploaded_bytes = 0
@@ -990,9 +1037,11 @@ class _GpuVolumeRenderCore:
     def _delete_volume_texture(self):
         if self._initialized and self._texture_id:
             try:
-                GL.glDeleteTextures([int(self._texture_id)])
+                if not self._texture_id_is_cached(self._texture_id):
+                    GL.glDeleteTextures([int(self._texture_id)])
             except Exception:
                 pass
+        self._texture_id = None
         if self._initialized and self._transfer_lut_texture_id:
             try:
                 GL.glDeleteTextures([int(self._transfer_lut_texture_id)])
@@ -1004,10 +1053,156 @@ class _GpuVolumeRenderCore:
     def _delete_mask_texture(self):
         if self._initialized and self._mask_texture_id:
             try:
-                GL.glDeleteTextures([int(self._mask_texture_id)])
+                if not self._texture_id_is_cached(self._mask_texture_id):
+                    GL.glDeleteTextures([int(self._mask_texture_id)])
             except Exception:
                 pass
         self._mask_texture_id = None
+
+    def _detach_mask_texture(self):
+        self._mask_texture_id = None
+
+    def _texture_record_bytes(self, array):
+        try:
+            return int(getattr(array, "nbytes", 0) or 0)
+        except Exception:
+            return 0
+
+    def _texture_cache_record_key(self, key, kind):
+        if key is None:
+            return None
+        return (str(kind or "volume"), repr(key))
+
+    def _texture_cache_owner_from_key(self, key):
+        if isinstance(key, tuple) and key:
+            owner = key[0]
+            if isinstance(owner, tuple):
+                return tuple(owner)
+        return None
+
+    def _activate_cached_texture(self, key, kind):
+        record_key = self._texture_cache_record_key(key, kind)
+        if record_key is None:
+            return False
+        record = self._texture_cache.get(record_key)
+        if not record:
+            self._texture_cache_misses += 1
+            return False
+        self._texture_cache.move_to_end(record_key)
+        texture_id = int(record.get("texture_id") or 0)
+        if kind == "mask":
+            self._mask_texture_id = texture_id
+            self._mask_shape = tuple(int(value) for value in record.get("shape") or ())
+            self._mask_upload_needed = False
+        else:
+            self._texture_id = texture_id
+            self._volume_shape = tuple(int(value) for value in record.get("shape") or ())
+            self._uploaded_shape = self._volume_shape
+            self._uploaded_bytes = int(record.get("bytes") or 0)
+            self._uploaded_dtype = str(record.get("dtype") or "")
+            self._upload_needed = False
+        self._last_upload_ms = 0.0
+        self._texture_cache_hits += 1
+        return True
+
+    def _texture_id_is_cached(self, texture_id):
+        texture_id = int(texture_id or 0)
+        if not texture_id:
+            return False
+        return any(int(record.get("texture_id") or 0) == texture_id for record in self._texture_cache.values())
+
+    def _new_upload_texture_id(self, kind):
+        current_id = int((self._mask_texture_id if kind == "mask" else self._texture_id) or 0)
+        if current_id and not self._texture_id_is_cached(current_id):
+            return current_id
+        return GL.glGenTextures(1)
+
+    def _remember_texture(self, key, kind, texture_id, shape, dtype, byte_count):
+        record_key = self._texture_cache_record_key(key, kind)
+        if record_key is None or not texture_id:
+            return
+        if int(max(0, self._texture_cache_budget_bytes)) <= 0:
+            return
+        old = self._texture_cache.pop(record_key, None)
+        if old:
+            self._texture_cache_bytes = max(0, self._texture_cache_bytes - int(old.get("bytes") or 0))
+            old_id = int(old.get("texture_id") or 0)
+            if old_id and old_id != int(texture_id):
+                try:
+                    GL.glDeleteTextures([old_id])
+                except Exception:
+                    pass
+        record = {
+            "texture_id": int(texture_id),
+            "kind": str(kind or "volume"),
+            "owner": self._texture_cache_owner_from_key(key),
+            "shape": tuple(int(value) for value in shape or ()),
+            "dtype": str(dtype or ""),
+            "bytes": int(max(0, byte_count)),
+        }
+        self._texture_cache[record_key] = record
+        self._texture_cache_bytes += int(record["bytes"])
+        self._prune_texture_cache()
+
+    def _prune_texture_cache(self):
+        budget = int(max(0, self._texture_cache_budget_bytes))
+        while self._texture_cache and (budget <= 0 or self._texture_cache_bytes > budget):
+            record_key, record = self._texture_cache_eviction_candidate()
+            if record_key is None:
+                break
+            texture_id = int(record.get("texture_id") or 0)
+            self._texture_cache.pop(record_key, None)
+            self._texture_cache_bytes = max(0, self._texture_cache_bytes - int(record.get("bytes") or 0))
+            if texture_id:
+                try:
+                    GL.glDeleteTextures([texture_id])
+                except Exception:
+                    pass
+
+    def _texture_cache_eviction_candidate(self):
+        active_ids = {int(self._texture_id or 0), int(self._mask_texture_id or 0)}
+        active_owner = self._texture_cache_owner_from_key(self._volume_cache_key)
+        candidates = []
+        for index, (record_key, record) in enumerate(self._texture_cache.items()):
+            texture_id = int(record.get("texture_id") or 0)
+            if texture_id in active_ids:
+                continue
+            owner = record.get("owner")
+            kind = str(record.get("kind") or "volume")
+            candidates.append(
+                (
+                    0 if owner != active_owner else 1,
+                    0 if kind == "mask" else 1,
+                    index,
+                    record_key,
+                    record,
+                )
+            )
+        if not candidates:
+            return None, None
+        candidates.sort()
+        return candidates[0][3], candidates[0][4]
+
+    def _release_texture_cache(self):
+        deleted_ids = set()
+        if self._initialized:
+            for record in list(self._texture_cache.values()):
+                texture_id = int(record.get("texture_id") or 0)
+                if texture_id:
+                    try:
+                        GL.glDeleteTextures([texture_id])
+                        deleted_ids.add(texture_id)
+                    except Exception:
+                        pass
+        self._texture_cache = OrderedDict()
+        self._texture_cache_bytes = 0
+        if int(self._texture_id or 0) in deleted_ids:
+            self._texture_id = None
+        if int(self._mask_texture_id or 0) in deleted_ids:
+            self._mask_texture_id = None
+
+    def release_texture_cache(self):
+        self._release_texture_cache()
 
     def has_volume(self):
         return self._volume_data is not None and not self._failed
@@ -1177,6 +1372,11 @@ class _GpuVolumeRenderCore:
             "transfer_preset": getattr(self, "_transfer_preset", "amber"),
             "transfer_opacity": float(getattr(self, "_transfer_opacity", 1.0)),
             "transfer_lut": tuple(int(value) for value in getattr(self, "_transfer_lut_data", np.zeros((1, 0, 4), dtype=np.uint8)).shape),
+            "texture_cache_entries": int(len(getattr(self, "_texture_cache", {}) or {})),
+            "texture_cache_bytes": int(getattr(self, "_texture_cache_bytes", 0) or 0),
+            "texture_cache_budget_bytes": int(getattr(self, "_texture_cache_budget_bytes", 0) or 0),
+            "texture_cache_hits": int(getattr(self, "_texture_cache_hits", 0) or 0),
+            "texture_cache_misses": int(getattr(self, "_texture_cache_misses", 0) or 0),
         }
 
     def renderer_label(self):
@@ -1215,8 +1415,7 @@ class _GpuVolumeRenderCore:
         if not self._upload_needed or self._volume_data is None:
             return
         depth, height, width = self._volume_shape
-        if not self._texture_id:
-            self._texture_id = GL.glGenTextures(1)
+        self._texture_id = self._new_upload_texture_id("volume")
         GL.glBindTexture(GL.GL_TEXTURE_3D, self._texture_id)
         texture_filter = GL.GL_NEAREST if _crisp_sampling_enabled(self._clarity_mode, self._render_mode, self._clip_plane_enabled) else GL.GL_LINEAR
         GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MIN_FILTER, texture_filter)
@@ -1248,6 +1447,14 @@ class _GpuVolumeRenderCore:
         self._uploaded_shape = (int(depth), int(height), int(width))
         self._uploaded_bytes = int(self._volume_data.nbytes)
         self._uploaded_dtype = str(self._volume_data.dtype)
+        self._remember_texture(
+            self._volume_cache_key,
+            "volume",
+            self._texture_id,
+            self._uploaded_shape,
+            self._uploaded_dtype,
+            self._uploaded_bytes,
+        )
         GL.glBindTexture(GL.GL_TEXTURE_3D, 0)
         self._upload_needed = False
 
@@ -1255,8 +1462,7 @@ class _GpuVolumeRenderCore:
         if not self._mask_upload_needed or self._mask_data is None:
             return
         depth, height, width = self._mask_shape
-        if not self._mask_texture_id:
-            self._mask_texture_id = GL.glGenTextures(1)
+        self._mask_texture_id = self._new_upload_texture_id("mask")
         GL.glActiveTexture(GL.GL_TEXTURE2)
         GL.glBindTexture(GL.GL_TEXTURE_3D, self._mask_texture_id)
         GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_NEAREST)
@@ -1276,6 +1482,14 @@ class _GpuVolumeRenderCore:
             GL.GL_LUMINANCE,
             GL.GL_UNSIGNED_BYTE,
             self._mask_data,
+        )
+        self._remember_texture(
+            self._mask_cache_key,
+            "mask",
+            self._mask_texture_id,
+            self._mask_shape,
+            "uint8",
+            int(getattr(self._mask_data, "nbytes", 0) or 0),
         )
         GL.glBindTexture(GL.GL_TEXTURE_3D, 0)
         GL.glActiveTexture(GL.GL_TEXTURE0)
@@ -1411,6 +1625,7 @@ class _GpuVolumeRenderCore:
     def _release_render_core(self):
         if not self._initialized:
             return
+        self._release_texture_cache()
         if self._texture_id:
             GL.glDeleteTextures([int(self._texture_id)])
             self._texture_id = None
@@ -1474,11 +1689,11 @@ if gpu_volume_offscreen_available():
                 raise
             context.doneCurrent()
 
-        def set_volume_data(self, volume, source_shape=None, spacing_zyx=None):
-            return self._store_volume_data(volume, source_shape=source_shape, spacing_zyx=spacing_zyx)
+        def set_volume_data(self, volume, source_shape=None, spacing_zyx=None, cache_key=None):
+            return self._store_volume_data(volume, source_shape=source_shape, spacing_zyx=spacing_zyx, cache_key=cache_key)
 
-        def set_mask_data(self, mask):
-            return self._store_mask_data(mask)
+        def set_mask_data(self, mask, cache_key=None):
+            return self._store_mask_data(mask, cache_key=cache_key)
 
         def render_image(self, width, height):
             display_width = max(1, int(width))
@@ -1647,17 +1862,17 @@ if gpu_volume_offscreen_available():
         def has_volume(self):
             return self._renderer.has_volume() and not self._failed
 
-        def set_volume_data(self, volume, source_shape=None, spacing_zyx=None):
+        def set_volume_data(self, volume, source_shape=None, spacing_zyx=None, cache_key=None):
             try:
-                self._renderer.set_volume_data(volume, source_shape=source_shape, spacing_zyx=spacing_zyx)
+                self._renderer.set_volume_data(volume, source_shape=source_shape, spacing_zyx=spacing_zyx, cache_key=cache_key)
                 self._emit_renderer_info()
                 self._request_render_to_label()
             except Exception as exc:
                 self._mark_failed(f"GPU offscreen texture upload failed: {exc}")
 
-        def set_mask_data(self, mask):
+        def set_mask_data(self, mask, cache_key=None):
             try:
-                self._renderer.set_mask_data(mask)
+                self._renderer.set_mask_data(mask, cache_key=cache_key)
                 self._request_render_to_label()
             except Exception as exc:
                 self._mark_failed(f"GPU offscreen mask upload failed: {exc}")
@@ -1676,11 +1891,11 @@ if gpu_volume_offscreen_available():
             except Exception as exc:
                 self._mark_failed(f"GPU offscreen interaction render failed: {exc}")
 
-        def set_volume_render_inputs(self, volume, mask=None, render_state=None, source_shape=None, spacing_zyx=None):
+        def set_volume_render_inputs(self, volume, mask=None, render_state=None, source_shape=None, spacing_zyx=None, volume_cache_key=None, mask_cache_key=None):
             self._batch_update_depth += 1
             try:
-                self.set_volume_data(volume, source_shape=source_shape, spacing_zyx=spacing_zyx)
-                self.set_mask_data(mask)
+                self.set_volume_data(volume, source_shape=source_shape, spacing_zyx=spacing_zyx, cache_key=volume_cache_key)
+                self.set_mask_data(mask, cache_key=mask_cache_key)
                 if render_state is not None:
                     self.set_render_state(**dict(render_state))
             finally:
@@ -1691,6 +1906,13 @@ if gpu_volume_offscreen_available():
 
         def render_stats(self):
             return self._renderer.render_stats()
+
+        def release_texture_cache(self):
+            try:
+                self._renderer.release_texture_cache()
+                self.render_stats_changed.emit()
+            except Exception as exc:
+                self._mark_failed(f"GPU offscreen texture cache release failed: {exc}")
 
         def renderer_label(self):
             return self._renderer.renderer_label()
@@ -1957,6 +2179,7 @@ if gpu_volume_canvas_available():
             self._empty_text = "No TIF volume loaded"
             self._volume_data = None
             self._volume_shape = ()
+            self._volume_cache_key = None
             self._source_shape = ()
             self._source_spacing = ()
             self._upload_needed = False
@@ -1969,7 +2192,13 @@ if gpu_volume_canvas_available():
             self._mask_texture_id = None
             self._mask_data = None
             self._mask_shape = ()
+            self._mask_cache_key = None
             self._mask_upload_needed = False
+            self._texture_cache = OrderedDict()
+            self._texture_cache_bytes = 0
+            self._texture_cache_hits = 0
+            self._texture_cache_misses = 0
+            self._texture_cache_budget_bytes = _gpu_texture_cache_budget_bytes()
             self._transfer_lut_texture_id = None
             self._transfer_lut_data = build_volume_transfer_lut()
             self._transfer_lut_upload_needed = True
@@ -2021,12 +2250,14 @@ if gpu_volume_canvas_available():
         def clear_volume(self):
             self._volume_data = None
             self._volume_shape = ()
+            self._volume_cache_key = None
             self._source_shape = ()
             self._source_spacing = ()
             self._upload_needed = False
             if self._initialized and (self._texture_id or self._mask_texture_id or self._transfer_lut_texture_id):
                 try:
                     self.makeCurrent()
+                    self._release_texture_cache()
                     if self._texture_id:
                         GL.glDeleteTextures([int(self._texture_id)])
                     if self._mask_texture_id:
@@ -2042,6 +2273,7 @@ if gpu_volume_canvas_available():
             self._texture_id = None
             self._mask_data = None
             self._mask_shape = ()
+            self._mask_cache_key = None
             self._mask_upload_needed = False
             self._uploaded_shape = ()
             self._uploaded_bytes = 0
@@ -2055,18 +2287,56 @@ if gpu_volume_canvas_available():
             if self._initialized and self._mask_texture_id:
                 try:
                     self.makeCurrent()
-                    GL.glDeleteTextures([int(self._mask_texture_id)])
+                    if not self._texture_id_is_cached(self._mask_texture_id):
+                        GL.glDeleteTextures([int(self._mask_texture_id)])
                     self.doneCurrent()
                 except Exception:
                     pass
             self._mask_texture_id = None
 
+        _detach_mask_texture = _GpuVolumeRenderCore._detach_mask_texture
+        _texture_cache_record_key = _GpuVolumeRenderCore._texture_cache_record_key
+        _texture_cache_owner_from_key = _GpuVolumeRenderCore._texture_cache_owner_from_key
+        _activate_cached_texture = _GpuVolumeRenderCore._activate_cached_texture
+        _texture_id_is_cached = _GpuVolumeRenderCore._texture_id_is_cached
+        _new_upload_texture_id = _GpuVolumeRenderCore._new_upload_texture_id
+        _remember_texture = _GpuVolumeRenderCore._remember_texture
+        _prune_texture_cache = _GpuVolumeRenderCore._prune_texture_cache
+        _texture_cache_eviction_candidate = _GpuVolumeRenderCore._texture_cache_eviction_candidate
+        _release_texture_cache = _GpuVolumeRenderCore._release_texture_cache
+
         def has_volume(self):
             return self._volume_data is not None and not self._failed
 
-        def set_volume_data(self, volume, source_shape=None, spacing_zyx=None):
+        def release_texture_cache(self):
+            if not self._initialized:
+                return
+            try:
+                self.makeCurrent()
+                self._release_texture_cache()
+                self.doneCurrent()
+                self.render_stats_changed.emit()
+            except Exception:
+                try:
+                    self.doneCurrent()
+                except Exception:
+                    pass
+
+        def set_volume_data(self, volume, source_shape=None, spacing_zyx=None, cache_key=None):
             if volume is None:
                 self.clear_volume()
+                return
+            if cache_key is not None and self._activate_cached_texture(cache_key, "volume"):
+                self._volume_cache_key = cache_key
+                self._source_shape = tuple(int(value) for value in (source_shape or self._volume_shape))
+                try:
+                    next_spacing = tuple(float(value) for value in (spacing_zyx or ()))
+                except (TypeError, ValueError):
+                    next_spacing = ()
+                self._source_spacing = next_spacing if len(next_spacing) == 3 and min(next_spacing) > 0 else ()
+                self._volume_data = np.asarray(volume)
+                self._upload_needed = False
+                self.update()
                 return
             source = np.asarray(volume)
             if source.dtype == np.uint16:
@@ -2088,7 +2358,10 @@ if gpu_volume_canvas_available():
             if self._volume_data is not array:
                 self._volume_data = array
                 self._volume_shape = tuple(int(value) for value in array.shape)
+                self._volume_cache_key = cache_key
                 self._upload_needed = True
+            else:
+                self._volume_cache_key = cache_key
             self._source_shape = next_source_shape
             self._source_spacing = next_spacing
             if self._initialized and not self._failed:
@@ -2101,19 +2374,27 @@ if gpu_volume_canvas_available():
                     self._mark_failed(f"GPU texture upload failed: {exc}")
             self.update()
 
-        def set_mask_data(self, mask):
+        def set_mask_data(self, mask, cache_key=None):
             if mask is None:
-                self._delete_mask_texture()
+                self._detach_mask_texture()
                 self._mask_data = None
                 self._mask_shape = ()
+                self._mask_cache_key = None
+                self._mask_upload_needed = False
+                self.update()
+                return
+            if cache_key is not None and self._activate_cached_texture(cache_key, "mask"):
+                self._mask_cache_key = cache_key
+                self._mask_data = np.asarray(mask)
                 self._mask_upload_needed = False
                 self.update()
                 return
             source = np.asarray(mask)
             if source.ndim != 3 or min(source.shape) <= 0:
-                self._delete_mask_texture()
+                self._detach_mask_texture()
                 self._mask_data = None
                 self._mask_shape = ()
+                self._mask_cache_key = None
                 self._mask_upload_needed = False
                 self.update()
                 return
@@ -2121,7 +2402,10 @@ if gpu_volume_canvas_available():
             if self._mask_data is None or self._mask_data.shape != array.shape or not np.array_equal(self._mask_data, array):
                 self._mask_data = array
                 self._mask_shape = tuple(int(value) for value in array.shape)
+                self._mask_cache_key = cache_key
                 self._mask_upload_needed = True
+            else:
+                self._mask_cache_key = cache_key
             if self._initialized and not self._failed:
                 try:
                     self.makeCurrent()
@@ -2298,6 +2582,11 @@ if gpu_volume_canvas_available():
                 "transfer_preset": getattr(self, "_transfer_preset", "amber"),
                 "transfer_opacity": float(getattr(self, "_transfer_opacity", 1.0)),
                 "transfer_lut": tuple(int(value) for value in getattr(self, "_transfer_lut_data", np.zeros((1, 0, 4), dtype=np.uint8)).shape),
+                "texture_cache_entries": int(len(getattr(self, "_texture_cache", {}) or {})),
+                "texture_cache_bytes": int(getattr(self, "_texture_cache_bytes", 0) or 0),
+                "texture_cache_budget_bytes": int(getattr(self, "_texture_cache_budget_bytes", 0) or 0),
+                "texture_cache_hits": int(getattr(self, "_texture_cache_hits", 0) or 0),
+                "texture_cache_misses": int(getattr(self, "_texture_cache_misses", 0) or 0),
             }
 
         def initializeGL(self):
@@ -2366,8 +2655,7 @@ if gpu_volume_canvas_available():
             if not self._upload_needed or self._volume_data is None:
                 return
             depth, height, width = self._volume_shape
-            if not self._texture_id:
-                self._texture_id = GL.glGenTextures(1)
+            self._texture_id = self._new_upload_texture_id("volume")
             GL.glBindTexture(GL.GL_TEXTURE_3D, self._texture_id)
             texture_filter = GL.GL_NEAREST if _crisp_sampling_enabled(self._clarity_mode, self._render_mode, self._clip_plane_enabled) else GL.GL_LINEAR
             GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MIN_FILTER, texture_filter)
@@ -2399,6 +2687,14 @@ if gpu_volume_canvas_available():
             self._uploaded_shape = (int(depth), int(height), int(width))
             self._uploaded_bytes = int(self._volume_data.nbytes)
             self._uploaded_dtype = str(self._volume_data.dtype)
+            self._remember_texture(
+                self._volume_cache_key,
+                "volume",
+                self._texture_id,
+                self._uploaded_shape,
+                self._uploaded_dtype,
+                self._uploaded_bytes,
+            )
             GL.glBindTexture(GL.GL_TEXTURE_3D, 0)
             self._upload_needed = False
             QTimer.singleShot(0, self.render_stats_changed.emit)
@@ -2407,8 +2703,7 @@ if gpu_volume_canvas_available():
             if not self._mask_upload_needed or self._mask_data is None:
                 return
             depth, height, width = self._mask_shape
-            if not self._mask_texture_id:
-                self._mask_texture_id = GL.glGenTextures(1)
+            self._mask_texture_id = self._new_upload_texture_id("mask")
             GL.glActiveTexture(GL.GL_TEXTURE2)
             GL.glBindTexture(GL.GL_TEXTURE_3D, self._mask_texture_id)
             GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_NEAREST)
@@ -2428,6 +2723,14 @@ if gpu_volume_canvas_available():
                 GL.GL_LUMINANCE,
                 GL.GL_UNSIGNED_BYTE,
                 self._mask_data,
+            )
+            self._remember_texture(
+                self._mask_cache_key,
+                "mask",
+                self._mask_texture_id,
+                self._mask_shape,
+                "uint8",
+                int(getattr(self._mask_data, "nbytes", 0) or 0),
             )
             GL.glBindTexture(GL.GL_TEXTURE_3D, 0)
             GL.glActiveTexture(GL.GL_TEXTURE0)
@@ -2638,6 +2941,8 @@ if gpu_volume_canvas_available():
             except Exception:
                 return
             try:
+                if hasattr(self, "_release_texture_cache"):
+                    self._release_texture_cache()
                 if self._texture_id:
                     GL.glDeleteTextures([int(self._texture_id)])
                     self._texture_id = None

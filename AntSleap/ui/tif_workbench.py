@@ -142,6 +142,8 @@ TIF_VOLUME_CLARITY_PART_HIGH_DIM = 3072
 TIF_VOLUME_CLARITY_PART_FULL_DIM = GPU_VOLUME_MAX_TEXTURE_DIM
 TIF_VOLUME_MAX_CACHED_SPECIMENS = 3
 TIF_VOLUME_MAX_PREVIEW_VARIANTS_PER_OWNER = 8
+TIF_VOLUME_HIGH_QUALITY_CACHE_OWNER_LIMIT = 2
+TIF_VOLUME_ULTRA_QUALITY_CACHE_OWNER_LIMIT = 1
 
 
 TIF_TRANSLATIONS = {
@@ -159,6 +161,8 @@ TIF_TRANSLATIONS = {
         "Preparing full-volume 3D preview...": "正在准备整只三维体预览...",
         "Preparing ROI crop preview...": "正在准备 ROI 裁剪块预览...",
         "Preparing local detail preview...": "正在准备局部结构高清预览...",
+        "Release Render quality to rebuild the 3D preview.": "松开渲染质量滑条后，将按最终值重建三维预览。",
+        "Release ROI scale to update the 3D preview.": "松开 ROI 倍率滑条后，将按最终值更新三维预览。",
         "Downsampling volume and uploading texture. This can take a moment for large TIF stacks.": "正在降采样体数据并上传纹理。大型 TIF 首次构建可能需要一段时间。",
         "Preparing mask preview...": "正在准备 mask 预览...",
         "Downsampling mask labels for 3D overlay. This can take a moment for large label volumes.": "Downsampling mask labels for 3D overlay. This can take a moment for large label volumes.",
@@ -2106,7 +2110,12 @@ class TifWorkbenchWidget(QWidget):
         self.volume_quality_slider.setObjectName("tifVolumeQualitySlider")
         self.volume_quality_slider.setRange(128, GPU_VOLUME_MAX_TEXTURE_DIM)
         self.volume_quality_slider.setValue(1024)
-        self.volume_quality_slider.valueChanged.connect(self._refresh_volume_preview)
+        self.volume_quality_slider.setTracking(False)
+        self._volume_quality_committed_value = int(self.volume_quality_slider.value())
+        self._volume_quality_drag_pending = False
+        self.volume_quality_slider.sliderPressed.connect(self._on_volume_quality_drag_started)
+        self.volume_quality_slider.sliderMoved.connect(self._on_volume_quality_drag_moved)
+        self.volume_quality_slider.sliderReleased.connect(self._on_volume_quality_released)
         self.volume_sample_slider = WheelSafeSlider(Qt.Horizontal)
         self.volume_sample_slider.setObjectName("tifVolumeSampleSlider")
         self.volume_sample_slider.setRange(256, GPU_VOLUME_MAX_RAY_STEPS)
@@ -2131,7 +2140,11 @@ class TifWorkbenchWidget(QWidget):
         self.volume_roi_scale_slider.setObjectName("tifVolumeRoiScaleSlider")
         self.volume_roi_scale_slider.setRange(100, 300)
         self.volume_roi_scale_slider.setValue(200)
-        self.volume_roi_scale_slider.valueChanged.connect(self.render_volume_preview)
+        self.volume_roi_scale_slider.setTracking(False)
+        self._volume_roi_scale_committed_value = int(self.volume_roi_scale_slider.value())
+        self.volume_roi_scale_slider.sliderPressed.connect(self._on_volume_roi_scale_drag_started)
+        self.volume_roi_scale_slider.valueChanged.connect(self._on_volume_roi_scale_changed)
+        self.volume_roi_scale_slider.sliderReleased.connect(self._on_volume_roi_scale_released)
         self.volume_roi_budget_combo = WheelSafeComboBox()
         self.volume_roi_budget_combo.setObjectName("tifVolumeRoiBudgetCombo")
         self.volume_roi_budget_combo.addItem("Balanced 1.5 GB", "balanced")
@@ -2161,6 +2174,8 @@ class TifWorkbenchWidget(QWidget):
         self.volume_transfer_opacity_slider.setObjectName("tifVolumeTransferOpacitySlider")
         self.volume_transfer_opacity_slider.setRange(25, 140)
         self.volume_transfer_opacity_slider.setValue(100)
+        self._volume_transfer_opacity_drag_pending = False
+        self.volume_transfer_opacity_slider.sliderReleased.connect(self._on_volume_transfer_opacity_released)
         self.volume_transfer_opacity_slider.valueChanged.connect(self._on_volume_transfer_opacity_changed)
         self.volume_enhancement_slider = WheelSafeSlider(Qt.Horizontal)
         self.volume_enhancement_slider.setObjectName("tifVolumeEnhancementSlider")
@@ -2209,8 +2224,11 @@ class TifWorkbenchWidget(QWidget):
         self.btn_reset_volume_view.clicked.connect(self.reset_volume_view)
         self.volume_render_status_label = QLabel("")
         self.volume_render_status_label.setObjectName("tifVolumeRenderStatus")
-        self.volume_render_status_label.setWordWrap(True)
-        self.volume_render_status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.volume_render_status_label.setWordWrap(False)
+        status_height = max(26, self.volume_render_status_label.fontMetrics().height() + 12)
+        self.volume_render_status_label.setMinimumHeight(status_height)
+        self.volume_render_status_label.setMaximumHeight(status_height)
+        self.volume_render_status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.volume_render_status_label.setVisible(False)
         self.local_axis_summary_label = QLabel("")
         self.local_axis_summary_label.setObjectName("tifLocalAxisSummaryText")
@@ -2744,7 +2762,8 @@ class TifWorkbenchWidget(QWidget):
 
     def _apply_default_volume_mask_mode(self):
         if self._set_volume_mask_mode(self._default_volume_mask_mode()):
-            self._clear_volume_preview_cache()
+            self._clear_volume_mask_caches(owner=self._active_volume_cache_owner())
+            self._reset_active_volume_preview_state()
 
     def _project_view_settings(self):
         return self.project.project_data.setdefault("view_settings", {})
@@ -3355,10 +3374,11 @@ class TifWorkbenchWidget(QWidget):
                 return
             self._apply_default_volume_mask_mode()
             self._set_scope_controls_enabled()
-            if hasattr(self, "volume_canvas"):
-                self.volume_canvas.setText(tt("Preparing full-volume 3D preview...", self.lang))
-            self._update_volume_render_status_label(tt("Preparing full-volume 3D preview...", self.lang))
-            QApplication.processEvents()
+            message = tt("Preparing full-volume 3D preview...", self.lang)
+            show_canvas_status = self._set_volume_canvas_status_text(message)
+            self._update_volume_render_status_label(message)
+            if show_canvas_status:
+                QApplication.processEvents()
             self.render_volume_preview()
         else:
             self._set_scope_controls_enabled()
@@ -4948,8 +4968,8 @@ class TifWorkbenchWidget(QWidget):
         slice_row = QHBoxLayout()
         slice_row.setContentsMargins(10, 6, 10, 6)
         self.display_mode_label = QLabel("Display mode")
-        slice_row.addWidget(self.display_mode_label)
         slice_row.addWidget(self.display_mode_combo)
+        slice_row.addWidget(self.display_mode_label)
         self.slice_axis_label = QLabel("View plane")
         slice_row.addWidget(self.slice_axis_label)
         slice_row.addWidget(self.slice_axis_combo)
@@ -5504,6 +5524,13 @@ class TifWorkbenchWidget(QWidget):
             QLabel#tifSaveStatusText[tifSaveState="failed"] {
                 color: #FFD2D2;
                 border-color: #9B4D4D;
+            }
+            QLabel#tifVolumeRenderStatus {
+                background: #11181C;
+                color: #BFD0D7;
+                border: 1px solid #2D3A41;
+                border-radius: 6px;
+                padding: 4px 8px;
             }
             QLabel#tifStatusText,
             QLabel#tifMetadataText,
@@ -7631,7 +7658,15 @@ class TifWorkbenchWidget(QWidget):
                 parts.append(tt("Clip plane", self.lang))
         cache_bytes = self._volume_cache_estimated_bytes()
         if cache_bytes > 0:
-            parts.append(f"Cache {self._volume_cache_owner_count()}/{TIF_VOLUME_MAX_CACHED_SPECIMENS} {cache_bytes / (1024.0 ** 2):.0f} MB")
+            parts.append(f"Cache {self._volume_cache_owner_count()}/{self._volume_cache_owner_limit()} {cache_bytes / (1024.0 ** 2):.0f} MB")
+        texture_cache_bytes = int(stats.get("texture_cache_bytes") or 0)
+        texture_cache_entries = int(stats.get("texture_cache_entries") or 0)
+        if texture_cache_entries > 0:
+            hits = int(stats.get("texture_cache_hits") or 0)
+            misses = int(stats.get("texture_cache_misses") or 0)
+            parts.append(
+                f"GPU cache {texture_cache_entries} {texture_cache_bytes / (1024.0 ** 2):.0f} MB hit {hits}/{hits + misses}"
+            )
         if float(getattr(self, "_volume_last_preview_build_ms", 0.0) or 0.0) > 0.0:
             parts.append(f"Load {float(self._volume_last_preview_build_ms):.0f} ms")
         supersample = float(stats.get("supersample_scale") or 1.0)
@@ -7650,6 +7685,36 @@ class TifWorkbenchWidget(QWidget):
             parts.append(f"{tt('Upload', self.lang)} {upload_ms:.0f} ms")
         if draw_ms > 0:
             parts.append(f"{tt('Draw', self.lang)} {draw_ms:.1f} ms")
+        diagnosis = self._volume_performance_diagnosis(stats)
+        if diagnosis:
+            parts.append(diagnosis)
+        return " | ".join(parts)
+
+    def _volume_status_summary_text(self):
+        if self.image_volume is None:
+            return tt("No TIF volume loaded", self.lang)
+        parts = [
+            tt("Volume view", self.lang),
+            tt("GPU ray march", self.lang) if self._volume_canvas_renderer == "gpu" else tt("CPU fallback", self.lang),
+            self._volume_mode_label(),
+            f"{tt('Mode', self.lang)} {self._volume_projection_label()}",
+            f"{tt('Texture', self.lang)} {self._active_volume_target_dim()}",
+            f"{tt('Samples', self.lang)} {self._active_volume_sample_count()}",
+        ]
+        roi_scale = self._active_volume_roi_scale()
+        if roi_scale > 1.01:
+            parts.append(f"{tt('ROI', self.lang)} {roi_scale:.1f}x")
+        cache_bytes = self._volume_cache_estimated_bytes()
+        if cache_bytes > 0:
+            parts.append(f"Cache {self._volume_cache_owner_count()}/{self._volume_cache_owner_limit()}")
+        stats = dict(getattr(self, "_volume_last_stats", {}) or {})
+        texture_cache_entries = int(stats.get("texture_cache_entries") or 0)
+        if texture_cache_entries > 0:
+            texture_cache_bytes = int(stats.get("texture_cache_bytes") or 0)
+            parts.append(f"GPU {texture_cache_entries} {texture_cache_bytes / (1024.0 ** 2):.0f} MB")
+        load_ms = float(getattr(self, "_volume_last_preview_build_ms", 0.0) or 0.0)
+        if load_ms > 0.0:
+            parts.append(f"Load {load_ms:.0f} ms")
         diagnosis = self._volume_performance_diagnosis(stats)
         if diagnosis:
             parts.append(diagnosis)
@@ -7691,9 +7756,15 @@ class TifWorkbenchWidget(QWidget):
             "roi_scale": float(self._active_volume_roi_scale()),
             "roi_texture_budget_bytes": int(self._roi_texture_budget_bytes()),
             "cache_specimen_count": int(self._volume_cache_owner_count()),
-            "cache_max_specimens": int(TIF_VOLUME_MAX_CACHED_SPECIMENS),
+            "cache_max_specimens": int(self._volume_cache_owner_limit()),
             "cache_estimated_bytes": int(self._volume_cache_estimated_bytes()),
             "cache_estimated_gb": float(self._volume_cache_estimated_bytes()) / (1024.0 ** 3),
+            "gpu_texture_cache_entries": int(stats.get("texture_cache_entries") or 0),
+            "gpu_texture_cache_bytes": int(stats.get("texture_cache_bytes") or 0),
+            "gpu_texture_cache_gb": float(stats.get("texture_cache_bytes") or 0) / (1024.0 ** 3),
+            "gpu_texture_cache_budget_bytes": int(stats.get("texture_cache_budget_bytes") or 0),
+            "gpu_texture_cache_hits": int(stats.get("texture_cache_hits") or 0),
+            "gpu_texture_cache_misses": int(stats.get("texture_cache_misses") or 0),
             "load_ms": float(getattr(self, "_volume_last_preview_build_ms", 0.0) or 0.0),
             "roi_source_mode": self._volume_roi_source_mode(),
             "roi_inspect_enabled": bool(self._volume_roi_inspect_enabled()),
@@ -7713,9 +7784,48 @@ class TifWorkbenchWidget(QWidget):
     def _update_volume_render_status_label(self, text=None):
         if not hasattr(self, "volume_render_status_label"):
             return
+        full_text = self.volume_canvas_overlay_text() if self.image_volume is not None else ""
         if text is None:
-            text = self.volume_canvas_overlay_text() if self.image_volume is not None else tt("No TIF volume loaded", self.lang)
+            text = self._volume_status_summary_text()
+            tooltip = full_text or str(text or "")
+        else:
+            text = str(text or "")
+            tooltip = text
+            if full_text and full_text != text:
+                tooltip = f"{text}\n\n{full_text}"
         self.volume_render_status_label.setText(str(text or ""))
+        self.volume_render_status_label.setToolTip(tooltip)
+
+    def _volume_canvas_has_visible_content(self):
+        canvas = getattr(self, "volume_canvas", None)
+        if canvas is None:
+            return False
+        if callable(getattr(canvas, "has_volume", None)):
+            try:
+                if canvas.has_volume():
+                    return True
+            except Exception:
+                pass
+        if callable(getattr(canvas, "pixmap", None)):
+            try:
+                pixmap = canvas.pixmap()
+                if pixmap is not None and not pixmap.isNull():
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def _set_volume_canvas_status_text(self, text, replace_existing=False):
+        canvas = getattr(self, "volume_canvas", None)
+        if canvas is None or not hasattr(canvas, "setText"):
+            return False
+        if not replace_existing and self._volume_canvas_has_visible_content():
+            return False
+        try:
+            canvas.setText(str(text or ""))
+            return True
+        except Exception:
+            return False
 
     def _volume_renderer_label(self):
         renderer = tt("GPU ray march", self.lang) if self._volume_canvas_renderer == "gpu" else tt("CPU fallback", self.lang)
@@ -7841,6 +7951,74 @@ class TifWorkbenchWidget(QWidget):
         self._reset_active_volume_preview_state()
         self.render_volume_preview()
 
+    def _on_volume_quality_drag_started(self):
+        self._volume_quality_drag_pending = True
+        try:
+            self._volume_quality_committed_value = int(self.volume_quality_slider.value())
+        except Exception:
+            self._volume_quality_committed_value = None
+        self._show_volume_quality_release_status()
+
+    def _on_volume_quality_drag_moved(self, *_args):
+        self._volume_quality_drag_pending = True
+        self._show_volume_quality_release_status()
+
+    def _show_volume_quality_release_status(self):
+        if self.display_mode != "volume":
+            return
+        message = tt("Release Render quality to rebuild the 3D preview.", self.lang)
+        self._set_volume_canvas_status_text(message)
+        self._update_volume_render_status_label(message)
+
+    def _on_volume_quality_changed(self, *_args):
+        if getattr(self, "_volume_quality_drag_pending", False):
+            self._show_volume_quality_release_status()
+        elif self.display_mode == "volume":
+            self._update_volume_render_status_label()
+
+    def _on_volume_quality_released(self):
+        self._commit_volume_quality_change()
+
+    def _commit_volume_quality_change(self):
+        try:
+            value = int(self.volume_quality_slider.value())
+        except Exception:
+            value = None
+        if value == getattr(self, "_volume_quality_committed_value", None):
+            self._volume_quality_drag_pending = False
+            return
+        self._volume_quality_committed_value = value
+        self._volume_quality_drag_pending = False
+        self._release_gpu_texture_cache()
+        self._prune_volume_preview_cache()
+        self._refresh_volume_preview()
+
+    def _on_volume_roi_scale_drag_started(self):
+        try:
+            self._volume_roi_scale_committed_value = int(self.volume_roi_scale_slider.value())
+        except Exception:
+            self._volume_roi_scale_committed_value = None
+
+    def _on_volume_roi_scale_changed(self, *_args):
+        if callable(getattr(self.volume_roi_scale_slider, "isSliderDown", None)) and self.volume_roi_scale_slider.isSliderDown():
+            if self.display_mode == "volume":
+                self._update_volume_render_status_label(tt("Release ROI scale to update the 3D preview.", self.lang))
+            return
+        self._commit_volume_roi_scale_change()
+
+    def _on_volume_roi_scale_released(self):
+        self._commit_volume_roi_scale_change()
+
+    def _commit_volume_roi_scale_change(self):
+        try:
+            value = int(self.volume_roi_scale_slider.value())
+        except Exception:
+            value = None
+        if value == getattr(self, "_volume_roi_scale_committed_value", None):
+            return
+        self._volume_roi_scale_committed_value = value
+        self.render_volume_preview()
+
     def _on_volume_display_enhancement_changed(self, *_args):
         self.render_volume_preview()
 
@@ -7932,10 +8110,24 @@ class TifWorkbenchWidget(QWidget):
         self.render_volume_preview()
 
     def _on_volume_transfer_opacity_changed(self):
+        if callable(getattr(self.volume_transfer_opacity_slider, "isSliderDown", None)) and self.volume_transfer_opacity_slider.isSliderDown():
+            self._volume_transfer_opacity_drag_pending = True
+            self.render_volume_preview()
+            return
+        self._volume_transfer_opacity_drag_pending = False
+        self._save_volume_transfer_opacity_setting()
+        self.render_volume_preview()
+
+    def _on_volume_transfer_opacity_released(self):
+        if not getattr(self, "_volume_transfer_opacity_drag_pending", False):
+            return
+        self._volume_transfer_opacity_drag_pending = False
+        self._save_volume_transfer_opacity_setting()
+
+    def _save_volume_transfer_opacity_setting(self):
         settings = self._active_volume_view_settings()
         settings["volume_transfer_opacity"] = int(self.volume_transfer_opacity_slider.value())
         self._save_active_volume_view_settings()
-        self.render_volume_preview()
 
     def _on_volume_shader_quality_changed(self):
         settings = self._active_volume_view_settings()
@@ -8069,10 +8261,10 @@ class TifWorkbenchWidget(QWidget):
                 message = tt("Preparing ROI crop preview...", self.lang)
             elif bool(getattr(self, "_volume_clarity_mode", False)) or self.current_volume_scope == "part":
                 message = tt("Preparing local detail preview...", self.lang)
-            if hasattr(self, "volume_canvas"):
-                self.volume_canvas.setText(message)
+            show_canvas_status = self._set_volume_canvas_status_text(message)
             self._update_volume_render_status_label(message)
-            QApplication.processEvents()
+            if show_canvas_status:
+                QApplication.processEvents()
         self.render_volume_preview()
 
     def _reset_active_volume_preview_state(self):
@@ -8084,6 +8276,17 @@ class TifWorkbenchWidget(QWidget):
         self._volume_last_preview_build_ms = 0.0
         self._volume_render_mode = "still"
         self._volume_interaction_render_pending = False
+
+    def _release_gpu_texture_cache(self):
+        canvas = getattr(self, "volume_canvas", None)
+        if canvas is None or not callable(getattr(canvas, "release_texture_cache", None)):
+            return False
+        try:
+            canvas.release_texture_cache()
+            self._volume_last_stats = dict(canvas.render_stats() or {}) if callable(getattr(canvas, "render_stats", None)) else {}
+            return True
+        except Exception:
+            return False
 
     def _clear_volume_preview_cache(self):
         self._cancel_volume_preview_build()
@@ -8136,6 +8339,18 @@ class TifWorkbenchWidget(QWidget):
                 if self._volume_cache_owner_from_key(key) == owner:
                     cache.move_to_end(key)
 
+    def _volume_cache_owner_limit(self):
+        try:
+            target_dim = int(self._active_volume_target_dim("still"))
+        except Exception:
+            slider = getattr(self, "volume_quality_slider", None)
+            target_dim = int(slider.value()) if hasattr(slider, "value") else 0
+        if target_dim >= 3072:
+            return int(TIF_VOLUME_ULTRA_QUALITY_CACHE_OWNER_LIMIT)
+        if target_dim >= 2048:
+            return int(TIF_VOLUME_HIGH_QUALITY_CACHE_OWNER_LIMIT)
+        return int(TIF_VOLUME_MAX_CACHED_SPECIMENS)
+
     def _prune_volume_preview_cache(self):
         owners = []
         for cache in (self._volume_preview_cache, self._volume_mask_preview_cache, self._volume_masked_preview_cache):
@@ -8143,7 +8358,8 @@ class TifWorkbenchWidget(QWidget):
                 owner = self._volume_cache_owner_from_key(key)
                 if owner is not None and owner not in owners:
                     owners.append(owner)
-        while len(owners) > TIF_VOLUME_MAX_CACHED_SPECIMENS:
+        owner_limit = max(1, int(self._volume_cache_owner_limit()))
+        while len(owners) > owner_limit:
             evicted_owner = owners.pop(0)
             self._volume_preview_cache = OrderedDict(
                 (key, value)
@@ -8394,10 +8610,10 @@ class TifWorkbenchWidget(QWidget):
         mode = request["mode"]
         if self._should_show_volume_preview_progress(mode, roi_bbox):
             message = request.get("message") or tt("Preparing full-volume 3D preview...", self.lang)
-            if hasattr(self, "volume_canvas"):
-                self.volume_canvas.setText(message)
+            show_canvas_status = self._set_volume_canvas_status_text(message)
             self._update_volume_render_status_label(message)
-            QApplication.processEvents()
+            if show_canvas_status:
+                QApplication.processEvents()
         build_start = time.perf_counter()
         if roi_bbox is not None:
             preview = build_roi_volume_preview(
@@ -8530,8 +8746,7 @@ class TifWorkbenchWidget(QWidget):
         if mask_request and (volume_request is None or self._volume_preview_cache.get(preview_key) is not None):
             message = mask_request.get("message") or tt("Preparing mask preview...", self.lang)
         self._volume_preview_pending_message = str(message or "")
-        if hasattr(self.volume_canvas, "setText"):
-            self.volume_canvas.setText(self._volume_preview_pending_message)
+        self._set_volume_canvas_status_text(self._volume_preview_pending_message)
         self._update_volume_render_status_label(self._volume_preview_pending_message)
         self._set_volume_preview_build_controls_busy(True)
         thread = QThread(self)
@@ -8563,8 +8778,7 @@ class TifWorkbenchWidget(QWidget):
             return
         self._volume_preview_pending_message = str(message or "")
         if self.display_mode == "volume":
-            if hasattr(self.volume_canvas, "setText"):
-                self.volume_canvas.setText(self._volume_preview_pending_message)
+            self._set_volume_canvas_status_text(self._volume_preview_pending_message)
             self._update_volume_render_status_label(self._volume_preview_pending_message)
 
     def _on_volume_preview_build_finished(self, result):
@@ -8650,10 +8864,10 @@ class TifWorkbenchWidget(QWidget):
             return cached
         if self._should_show_volume_mask_preview_progress(mode, mask):
             message = request.get("message") or tt("Preparing mask preview...", self.lang)
-            if hasattr(self, "volume_canvas"):
-                self.volume_canvas.setText(message)
+            show_canvas_status = self._set_volume_canvas_status_text(message)
             self._update_volume_render_status_label(message)
-            QApplication.processEvents()
+            if show_canvas_status:
+                QApplication.processEvents()
         if roi_bbox is not None:
             preview = build_roi_mask_preview(mask, roi_bbox, request["max_dim"], mode=request["algorithm"], max_texture_dim=GPU_VOLUME_MAX_TEXTURE_DIM)
         else:
@@ -8725,7 +8939,13 @@ class TifWorkbenchWidget(QWidget):
         return scale_volume_to_uint8(preview, low, high)
 
     def _volume_texture_target_dim(self):
-        requested = max(8, int(self.volume_quality_slider.value()))
+        if getattr(self, "_volume_quality_drag_pending", False):
+            requested = getattr(self, "_volume_quality_committed_value", None)
+        else:
+            requested = None
+        if requested is None:
+            requested = int(self.volume_quality_slider.value())
+        requested = max(8, int(requested))
         if self._volume_canvas_renderer == "gpu":
             return max(256, min(GPU_VOLUME_MAX_TEXTURE_DIM, requested))
         return max(32, min(128, requested))
@@ -8772,7 +8992,7 @@ class TifWorkbenchWidget(QWidget):
             "clip_plane_normal": self._volume_clip_plane_normal(),
         }
 
-    def _sync_gpu_volume_canvas(self, preview, mask_preview=None, mask_mode=None):
+    def _sync_gpu_volume_canvas(self, preview, mask_preview=None, mask_mode=None, volume_request=None, mask_request=None):
         if self._volume_canvas_renderer != "gpu" or not hasattr(self.volume_canvas, "set_volume_data"):
             return False
         mask_mode = mask_mode if mask_mode in {"mask_boundary", "masked_image"} else "image_only"
@@ -8786,10 +9006,10 @@ class TifWorkbenchWidget(QWidget):
             self.volume_canvas.set_axis_overlays(self._local_axis_volume_overlays())
         if self._should_show_gpu_upload_progress(preview, mask_preview if mask_mode != "image_only" else None):
             message = tt("Uploading 3D preview to GPU...", self.lang)
-            if hasattr(self.volume_canvas, "setText"):
-                self.volume_canvas.setText(message)
+            show_canvas_status = self._set_volume_canvas_status_text(message)
             self._update_volume_render_status_label(message)
-            QApplication.processEvents()
+            if show_canvas_status:
+                QApplication.processEvents()
         if hasattr(self.volume_canvas, "set_volume_render_inputs"):
             self.volume_canvas.set_volume_render_inputs(
                 preview,
@@ -8797,11 +9017,27 @@ class TifWorkbenchWidget(QWidget):
                 render_state=state,
                 source_shape=source_shape,
                 spacing_zyx=spacing_zyx,
+                volume_cache_key=(volume_request or {}).get("cache_key"),
+                mask_cache_key=(mask_request or {}).get("cache_key") if mask_mode != "image_only" else None,
             )
             return True
-        self.volume_canvas.set_volume_data(preview, source_shape=source_shape, spacing_zyx=spacing_zyx)
+        try:
+            self.volume_canvas.set_volume_data(
+                preview,
+                source_shape=source_shape,
+                spacing_zyx=spacing_zyx,
+                cache_key=(volume_request or {}).get("cache_key"),
+            )
+        except TypeError:
+            self.volume_canvas.set_volume_data(preview, source_shape=source_shape, spacing_zyx=spacing_zyx)
         if hasattr(self.volume_canvas, "set_mask_data"):
-            self.volume_canvas.set_mask_data(mask_preview if mask_mode != "image_only" else None)
+            try:
+                self.volume_canvas.set_mask_data(
+                    mask_preview if mask_mode != "image_only" else None,
+                    cache_key=(mask_request or {}).get("cache_key") if mask_mode != "image_only" else None,
+                )
+            except TypeError:
+                self.volume_canvas.set_mask_data(mask_preview if mask_mode != "image_only" else None)
         if hasattr(self.volume_canvas, "set_render_state"):
             self.volume_canvas.set_render_state(**state)
         return True
@@ -8959,7 +9195,13 @@ class TifWorkbenchWidget(QWidget):
         if mask_preview is None and mask_mode != "image_only":
             mask_mode = "image_only"
         self._try_restore_gpu_volume_canvas()
-        if self._sync_gpu_volume_canvas(preview, mask_preview=mask_preview, mask_mode=mask_mode):
+        if self._sync_gpu_volume_canvas(
+            preview,
+            mask_preview=mask_preview,
+            mask_mode=mask_mode,
+            volume_request=volume_request,
+            mask_request=mask_request,
+        ):
             self._update_volume_render_status_label()
             return
         if mask_mode != "image_only" and not hasattr(self.volume_canvas, "set_volume_pixmap"):

@@ -13,6 +13,7 @@ from .tif_volume_io import create_empty_label_sidecar_like, create_volume_sideca
 
 TIF_STACK_IMPORT_REPORT_SCHEMA_VERSION = "ant3d_tif_stack_import_report_v1"
 TIF_STACK_IMPORT_ADAPTER_VERSION = "tif_stack_import_adapter_v1"
+TIF_STACK_METADATA_IMPORT_ADAPTER_VERSION = "tif_stack_metadata_import_adapter_v1"
 
 
 def _now_iso():
@@ -346,6 +347,260 @@ def import_tif_stack(
         project_manager.save_project()
     except Exception:
         project_manager.discard_specimen_scaffold(specimen_id, save=True)
+        raise
+
+    return {
+        "specimen": specimen,
+        "report": report,
+        "report_path": report_abs,
+    }
+
+
+def register_tif_stack_metadata(
+    project_manager,
+    tif_path,
+    specimen_id,
+    modality="unknown",
+    metadata_ref="",
+    material_map=None,
+    progress_callback=None,
+):
+    if not isinstance(project_manager, TifProjectManager):
+        raise TypeError("project_manager_must_be_tif_project_manager")
+    source_path = os.path.abspath(str(tif_path))
+    if not os.path.exists(source_path):
+        raise FileNotFoundError(source_path)
+    if os.path.splitext(source_path)[1].lower() not in {".tif", ".tiff"}:
+        raise ValueError(f"not_tif_file:{source_path}")
+
+    _emit_progress(progress_callback, 1, 100, "Reading TIF metadata")
+    tif_metadata = _read_tif_metadata(source_path)
+    warnings = list(tif_metadata.get("warnings", []))
+    file_size = int(os.path.getsize(source_path))
+
+    specimen = project_manager.create_specimen_scaffold(
+        specimen_id,
+        material_map=material_map or {},
+        modality=modality,
+        metadata_ref=metadata_ref,
+    )
+    try:
+        specimen_root_rel = project_manager.specimen_dir(specimen_id)
+        material_map_rel = os.path.join(specimen_root_rel, "material_map.json").replace("\\", "/")
+        material_map_payload = write_material_map(
+            project_manager.to_absolute(material_map_rel),
+            material_map or {},
+            source=(material_map or {}).get("source", "manual") if isinstance(material_map, dict) else "manual",
+        )
+
+        shape_zyx = [int(value) for value in tif_metadata.get("shape_zyx", [])]
+        spacing_zyx = [float(value) for value in tif_metadata.get("spacing_zyx", []) or []]
+        metadata_record = {
+            "import_status": "metadata_only",
+            "source_tif": source_path,
+            "source_file_size": file_size,
+            "shape_zyx": shape_zyx,
+            "dtype": str(tif_metadata.get("dtype") or ""),
+            "spacing_zyx": spacing_zyx,
+            "spacing_unit": str(tif_metadata.get("spacing_unit", "micrometer") or "micrometer"),
+            "orientation": str(tif_metadata.get("orientation", "unknown") or "unknown"),
+            "tiff_metadata": dict(tif_metadata),
+        }
+
+        specimen = project_manager.get_specimen(specimen_id)
+        specimen["source"]["raw_tif"] = source_path
+        specimen["material_map"] = material_map_rel
+        specimen["working_volume"].update(
+            {
+                "path": "",
+                "format": "",
+                "shape_zyx": shape_zyx,
+                "dtype": metadata_record["dtype"],
+                "spacing_zyx": spacing_zyx,
+                "spacing_unit": metadata_record["spacing_unit"],
+                "orientation": metadata_record["orientation"],
+                "status": "metadata_only",
+                "source_path": source_path,
+                "source_file_size": file_size,
+            }
+        )
+        specimen["review_status"] = "not_started"
+        specimen["train_ready"] = False
+        specimen["metadata"].update(metadata_record)
+        specimen["provenance"] = {
+            "import_method": TIF_STACK_METADATA_IMPORT_ADAPTER_VERSION,
+            "source_file": source_path,
+            "notes": "Metadata-only TIF registration. Full sidecar materialization is deferred until explicitly requested.",
+        }
+
+        report = {
+            "schema_version": TIF_STACK_IMPORT_REPORT_SCHEMA_VERSION,
+            "imported_at": _now_iso(),
+            "adapter_version": TIF_STACK_METADATA_IMPORT_ADAPTER_VERSION,
+            "source_file": source_path,
+            "specimen_id": str(specimen_id),
+            "files": {
+                "raw_tif": source_path,
+                "working_image": "",
+                "working_edit": "",
+                "material_map": material_map_rel,
+            },
+            "shapes": {
+                "tif_stack_zyx": shape_zyx,
+                "working_image_zyx": [],
+                "working_edit_zyx": [],
+            },
+            "dtype": {
+                "source_tif": metadata_record["dtype"],
+                "working_image": "",
+                "working_edit": "",
+            },
+            "tiff_metadata": tif_metadata,
+            "materials": {
+                "count": len(material_map_payload.get("materials", [])),
+                "source": material_map_payload.get("source", "manual"),
+            },
+            "alignment": {
+                "working_image": "metadata_only_not_materialized",
+                "manual_truth": "not_created",
+                "raw_tif_used_as": "deferred_source",
+            },
+            "memory_policy": {
+                "import_mode": "metadata_only",
+                "whole_volume_imread": False,
+                "sidecar_created_on_import": False,
+                "ome_zarr_exchange_deferred": True,
+                "source_tif_copied": False,
+                "working_edit_created_on_import": False,
+                "source_file_size": file_size,
+            },
+            "warnings": warnings,
+            "errors": [],
+        }
+        report_rel = os.path.join(specimen_root_rel, "working", "import_report.json").replace("\\", "/")
+        report_abs = project_manager.to_absolute(report_rel)
+        atomic_write_json(report_abs, report, indent=2, ensure_ascii=False)
+        specimen["working_volume"]["import_report"] = report_rel
+        _emit_progress(progress_callback, 100, 100, "Saving TIF metadata")
+        project_manager.save_project()
+    except Exception:
+        project_manager.discard_specimen_scaffold(specimen_id, save=True)
+        raise
+
+    return {
+        "specimen": specimen,
+        "report": report,
+        "report_path": report_abs,
+    }
+
+
+def materialize_registered_tif_stack(
+    project_manager,
+    specimen_id,
+    progress_callback=None,
+):
+    if not isinstance(project_manager, TifProjectManager):
+        raise TypeError("project_manager_must_be_tif_project_manager")
+    specimen = project_manager.get_specimen(specimen_id, default=None)
+    if specimen is None:
+        raise KeyError(f"unknown_specimen_id:{specimen_id}")
+    source_text = str((specimen.get("metadata") or {}).get("source_tif") or (specimen.get("source") or {}).get("raw_tif") or "")
+    if not source_text:
+        raise FileNotFoundError(source_text)
+    source_path = os.path.abspath(source_text)
+    if not os.path.exists(source_path):
+        raise FileNotFoundError(source_path)
+    if os.path.splitext(source_path)[1].lower() not in {".tif", ".tiff"}:
+        raise ValueError(f"not_tif_file:{source_path}")
+
+    _emit_progress(progress_callback, 1, 100, "Reading metadata")
+    tif_metadata = _read_tif_metadata(source_path)
+    warnings = list(tif_metadata.get("warnings", []))
+    source_ref = source_path
+    specimen_root_rel = project_manager.specimen_dir(specimen_id)
+    image_rel = os.path.join(specimen_root_rel, "working", "image.ome.zarr").replace("\\", "/")
+    image_abs = project_manager.to_absolute(image_rel)
+    material_map_rel = specimen.get("material_map", "") or os.path.join(specimen_root_rel, "material_map.json").replace("\\", "/")
+    tif_metadata["source_path"] = source_ref
+    try:
+        _emit_progress(progress_callback, 5, 100, "Preparing sidecar")
+        image_meta = _stream_tif_stack_to_sidecar(
+            source_path,
+            image_abs,
+            tif_metadata,
+            progress_callback=progress_callback,
+        )
+        project_manager.register_working_volume(
+            specimen_id,
+            image_rel,
+            image_meta["shape_zyx"],
+            image_meta["dtype"],
+            spacing_zyx=image_meta["spacing_zyx"],
+            spacing_unit=image_meta["spacing_unit"],
+            orientation=image_meta["orientation"],
+            fmt=image_meta["format"],
+            save=False,
+        )
+        specimen = project_manager.get_specimen(specimen_id)
+        specimen["source"]["raw_tif"] = source_ref
+        specimen["material_map"] = material_map_rel
+        specimen.setdefault("metadata", {})["import_status"] = "materialized"
+        specimen.setdefault("metadata", {})["source_tif"] = source_path
+        specimen["provenance"] = {
+            "import_method": TIF_STACK_IMPORT_ADAPTER_VERSION,
+            "source_file": source_path,
+            "notes": "Metadata-only TIF registration materialized into a working image sidecar. No working_edit was created.",
+        }
+
+        report = {
+            "schema_version": TIF_STACK_IMPORT_REPORT_SCHEMA_VERSION,
+            "imported_at": _now_iso(),
+            "adapter_version": TIF_STACK_IMPORT_ADAPTER_VERSION,
+            "source_file": source_path,
+            "specimen_id": str(specimen_id),
+            "files": {
+                "raw_tif": source_ref,
+                "working_image": image_rel,
+                "working_edit": "",
+                "material_map": material_map_rel,
+            },
+            "shapes": {
+                "tif_stack_zyx": image_meta["shape_zyx"],
+                "working_image_zyx": image_meta["shape_zyx"],
+                "working_edit_zyx": [],
+            },
+            "dtype": {
+                "working_image": image_meta["dtype"],
+                "working_edit": "",
+            },
+            "tiff_metadata": tif_metadata,
+            "alignment": {
+                "working_image": "plain_tif_stack",
+                "manual_truth": "not_created",
+                "raw_tif_used_as": "deferred_source",
+            },
+            "memory_policy": {
+                "import_mode": "materialize_metadata_to_memmap_sidecar",
+                "whole_volume_imread": False,
+                "ome_zarr_exchange_deferred": True,
+                "source_tif_copied": False,
+                "working_edit_created_on_import": False,
+            },
+            "warnings": warnings,
+            "errors": [],
+        }
+        report_rel = os.path.join(specimen_root_rel, "working", "import_report.json").replace("\\", "/")
+        report_abs = project_manager.to_absolute(report_rel)
+        atomic_write_json(report_abs, report, indent=2, ensure_ascii=False)
+        specimen["working_volume"]["import_report"] = report_rel
+        _emit_progress(progress_callback, 100, 100, "Saving TIF project")
+        project_manager.save_project()
+    except Exception:
+        try:
+            if os.path.exists(image_abs):
+                shutil.rmtree(image_abs)
+        except Exception:
+            pass
         raise
 
     return {

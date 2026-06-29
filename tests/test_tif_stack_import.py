@@ -8,7 +8,7 @@ import numpy as np
 import tifffile
 
 from AntSleap.core.tif_project import TifProjectManager
-from AntSleap.core.tif_stack_import import import_tif_stack
+from AntSleap.core.tif_stack_import import import_tif_stack, register_tif_stack_metadata
 from AntSleap.core.tif_volume_io import load_volume_sidecar, read_volume_metadata
 
 
@@ -122,6 +122,31 @@ class TifStackImportTests(unittest.TestCase):
             self.assertFalse(result["report"]["memory_policy"]["source_tif_copied"])
             self.assertFalse(result["report"]["memory_policy"]["working_edit_created_on_import"])
             self.assertFalse((Path(manager.project_dir) / "specimens" / "01-0101-preview" / "source" / "raw" / tif_path.name).exists())
+
+    def test_metadata_only_tif_registration_does_not_create_sidecar_or_read_volume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tif_path = root / "metadata_only.tif"
+            source_volume = np.arange(2 * 3 * 4, dtype=np.uint8).reshape((2, 3, 4))
+            tifffile.imwrite(tif_path, source_volume, photometric="minisblack")
+
+            manager = TifProjectManager()
+            manager.create_project("metadata_only", root / "metadata_project")
+            with patch("AntSleap.core.tif_stack_import._stream_tif_stack_to_sidecar", side_effect=AssertionError("sidecar should not be created")):
+                result = register_tif_stack_metadata(manager, tif_path, "01-0101-meta")
+
+            specimen = manager.get_specimen("01-0101-meta")
+            self.assertEqual(os.path.normcase(specimen["source"]["raw_tif"]), os.path.normcase(str(tif_path.resolve())))
+            self.assertEqual(specimen["metadata"]["import_status"], "metadata_only")
+            self.assertEqual(specimen["metadata"]["shape_zyx"], [2, 3, 4])
+            self.assertEqual(specimen["metadata"]["dtype"], "uint8")
+            self.assertEqual(specimen["metadata"]["source_file_size"], tif_path.stat().st_size)
+            self.assertEqual(specimen["working_volume"]["path"], "")
+            self.assertEqual(specimen["working_volume"]["shape_zyx"], [2, 3, 4])
+            self.assertEqual(specimen["working_volume"]["status"], "metadata_only")
+            self.assertEqual(result["report"]["memory_policy"]["import_mode"], "metadata_only")
+            self.assertFalse(result["report"]["memory_policy"]["sidecar_created_on_import"])
+            self.assertFalse((Path(manager.project_dir) / "specimens" / "01-0101-meta" / "working" / "image.ome.zarr").exists())
 
     def test_failed_tif_read_does_not_leave_half_registered_specimen(self):
         with tempfile.TemporaryDirectory() as tmp:

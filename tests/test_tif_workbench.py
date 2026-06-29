@@ -38,7 +38,7 @@ else:
     from AntSleap.ui.tif_gpu_volume_canvas import gpu_volume_canvas_available, gpu_volume_offscreen_available, gpu_volume_unavailable_reason
     from AntSleap.ui.tif_local_axis_model_panel import TifLocalAxisModelPanel
     from AntSleap.ui.tif_local_axis_review_queue import TifLocalAxisReviewQueueWidget
-    from AntSleap.ui.tif_workbench import TifVolumeCanvas, TifWorkbenchWidget, create_tif_volume_canvas
+    from AntSleap.ui.tif_workbench import TifBatchImportWorker, TifMaterializeWorker, TifVolumeCanvas, TifWorkbenchWidget, create_tif_volume_canvas
 
     has_pyside6 = True
 
@@ -1872,7 +1872,11 @@ class TifWorkbenchTests(unittest.TestCase):
             self.assertIsNotNone(widget.findChild(type(widget.btn_reset_volume_view), "tifResetVolumeViewButton"))
             self.assertIsNotNone(widget.findChild(type(widget.volume_clarity_check), "tifVolumeClarityCheck"))
             self.assertIsNotNone(widget.findChild(type(widget.volume_roi_detail_check), "tifVolumeRoiDetailCheck"))
+            self.assertIsNotNone(widget.findChild(type(widget.volume_roi_source_combo), "tifVolumeRoiSourceCombo"))
+            self.assertIsNotNone(widget.findChild(type(widget.volume_roi_inspect_check), "tifVolumeRoiInspectCheck"))
             self.assertIsNotNone(widget.findChild(type(widget.volume_roi_scale_slider), "tifVolumeRoiScaleSlider"))
+            self.assertIsNotNone(widget.findChild(type(widget.volume_roi_budget_combo), "tifVolumeRoiBudgetCombo"))
+            self.assertIsNotNone(widget.findChild(type(widget.volume_shader_quality_combo), "tifVolumeShaderQualityCombo"))
             self.assertIsNotNone(widget.findChild(QWidget, "tifSliceDisplaySection"))
             self.assertIsNotNone(widget.findChild(QWidget, "tifVolumeRenderSection"))
             self.assertIsNotNone(widget.findChild(QWidget, "tifVolumeCanvas"))
@@ -1881,6 +1885,11 @@ class TifWorkbenchTests(unittest.TestCase):
             self.assertEqual(widget.volume_inside_slider.maximum(), 160)
             self.assertEqual(widget.volume_projection_combo.currentData(), "composite")
             self.assertEqual(widget.volume_roi_scale_slider.value(), 200)
+            self.assertEqual(widget.volume_roi_budget_combo.currentData(), "balanced")
+            self.assertEqual(widget.volume_roi_source_combo.currentData(), "full")
+            self.assertEqual(widget.volume_roi_source_combo.itemText(widget.volume_roi_source_combo.findData("current_bbox")), "Current bbox draft")
+            self.assertFalse(widget.volume_roi_inspect_check.isChecked())
+            self.assertEqual(widget.volume_shader_quality_combo.currentData(), "preset")
             self.assertFalse(widget.slice_display_section.isHidden())
             self.assertFalse(widget.annotation_section.isHidden())
             self.assertTrue(widget.volume_render_section.isHidden())
@@ -2238,12 +2247,34 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertEqual(composite_state["render_quality"], 384)
                 self.assertEqual(composite_state["sample_steps"], 384)
                 self.assertLess(composite_state["transfer_opacity"], 0.7)
+                self.assertEqual(composite_state["adaptive_step_strength"], 0.0)
 
                 widget.volume_projection_combo.setCurrentIndex(widget.volume_projection_combo.findData("mip"))
                 mip_state = widget._volume_render_state("drag")
 
                 self.assertEqual(widget._active_volume_target_dim("drag"), 640)
                 self.assertEqual(mip_state["sample_steps"], 768)
+                self.assertEqual(mip_state["adaptive_step_strength"], 0.0)
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_roi_high_detail_scale_raises_still_gpu_sample_steps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+            try:
+                widget._volume_canvas_renderer = "gpu"
+                widget._volume_render_mode = "still"
+                widget._volume_zoom = 2.5
+                widget.volume_sample_slider.setValue(2048)
+                widget.volume_roi_detail_check.setChecked(True)
+                widget.volume_roi_scale_slider.setValue(250)
+
+                state = widget._volume_render_state("still")
+
+                self.assertEqual(widget._active_volume_sample_count(), 3072)
+                self.assertEqual(state["sample_steps"], 3072)
+                self.assertEqual(state["supersample_scale"], 2.5)
             finally:
                 widget.close_project()
                 widget.deleteLater()
@@ -2272,6 +2303,117 @@ class TifWorkbenchTests(unittest.TestCase):
                     slider.sliderReleased.emit()
 
                 self.assertEqual(calls, ["drag", "drag", "drag"])
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_volume_quality_slider_rebuilds_only_after_release(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+            try:
+                widget.display_mode_combo.setCurrentIndex(widget.display_mode_combo.findData("volume"))
+                calls = []
+
+                def fake_refresh():
+                    calls.append(int(widget.volume_quality_slider.value()))
+
+                widget._refresh_volume_preview = fake_refresh
+                widget.volume_quality_slider.setValue(1024)
+                calls.clear()
+
+                widget.volume_quality_slider.sliderPressed.emit()
+                widget.volume_quality_slider.sliderMoved.emit(2048)
+                widget.volume_quality_slider.setSliderDown(True)
+                widget.volume_quality_slider.setValue(2048)
+                widget._on_volume_quality_changed()
+                widget.volume_quality_slider.sliderMoved.emit(3072)
+                widget.volume_quality_slider.setValue(3072)
+                widget._on_volume_quality_changed()
+                widget.volume_quality_slider.sliderMoved.emit(4096)
+                widget.volume_quality_slider.setValue(4096)
+                widget._on_volume_quality_changed()
+
+                self.assertEqual(calls, [])
+                self.assertEqual(widget._volume_quality_committed_value, 1024)
+                self.assertIn("Release Render quality", widget.volume_render_status_label.text())
+
+                widget.volume_quality_slider.setSliderDown(False)
+                widget.volume_quality_slider.sliderReleased.emit()
+
+                self.assertEqual(calls, [4096])
+
+                widget.volume_quality_slider.sliderPressed.emit()
+                widget.volume_quality_slider.setSliderDown(True)
+                widget._on_volume_quality_changed()
+                widget.volume_quality_slider.setSliderDown(False)
+                widget.volume_quality_slider.sliderReleased.emit()
+
+                self.assertEqual(calls, [4096])
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_volume_roi_scale_slider_updates_only_after_release(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+            try:
+                widget.display_mode_combo.setCurrentIndex(widget.display_mode_combo.findData("volume"))
+                calls = []
+
+                def fake_render():
+                    calls.append(int(widget.volume_roi_scale_slider.value()))
+
+                widget.render_volume_preview = fake_render
+                widget.volume_roi_scale_slider.setValue(200)
+                calls.clear()
+
+                widget.volume_roi_scale_slider.sliderPressed.emit()
+                widget.volume_roi_scale_slider.setSliderDown(True)
+                widget.volume_roi_scale_slider.setValue(250)
+                widget._on_volume_roi_scale_changed()
+                widget.volume_roi_scale_slider.setValue(300)
+                widget._on_volume_roi_scale_changed()
+
+                self.assertEqual(calls, [])
+                self.assertIn("Release ROI scale", widget.volume_render_status_label.text())
+
+                widget.volume_roi_scale_slider.setSliderDown(False)
+                widget.volume_roi_scale_slider.sliderReleased.emit()
+
+                self.assertEqual(calls, [300])
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_volume_transfer_opacity_saves_only_after_drag_release(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+            try:
+                widget.display_mode_combo.setCurrentIndex(widget.display_mode_combo.findData("volume"))
+                saves = []
+                renders = []
+
+                def fake_save():
+                    saves.append(int(widget.volume_transfer_opacity_slider.value()))
+
+                def fake_render():
+                    renders.append(int(widget.volume_transfer_opacity_slider.value()))
+
+                widget._save_active_volume_view_settings = fake_save
+                widget.render_volume_preview = fake_render
+
+                widget.volume_transfer_opacity_slider.sliderPressed.emit()
+                widget.volume_transfer_opacity_slider.setSliderDown(True)
+                widget.volume_transfer_opacity_slider.setValue(80)
+                widget.volume_transfer_opacity_slider.setValue(120)
+
+                self.assertEqual(saves, [])
+                self.assertEqual(renders[-2:], [80, 120])
+
+                widget.volume_transfer_opacity_slider.setSliderDown(False)
+                widget.volume_transfer_opacity_slider.sliderReleased.emit()
+
+                self.assertEqual(saves, [120])
             finally:
                 widget.close_project()
                 widget.deleteLater()
@@ -2482,6 +2624,18 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.close_project()
                 widget.deleteLater()
 
+    def test_display_mode_switcher_stays_left_of_its_label(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+        try:
+            row = widget.display_mode_combo.parentWidget().layout()
+            self.assertLess(row.indexOf(widget.display_mode_combo), row.indexOf(widget.display_mode_label))
+            widget.display_mode_combo.setCurrentIndex(widget.display_mode_combo.findData("volume"))
+            self.assertLess(row.indexOf(widget.display_mode_combo), row.indexOf(widget.display_mode_label))
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+
     def test_tif_workbench_can_render_drag_rotate_volume_preview(self):
         with tempfile.TemporaryDirectory() as tmp:
             widget = self._make_volume_widget(Path(tmp), z_count=5)
@@ -2543,7 +2697,13 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertIn("纵移 0%", widget.volume_canvas_overlay_text())
                 self.assertIn("静止高清", widget.volume_quality_slider.toolTip())
                 widget._update_volume_render_status_label()
-                self.assertIn("RTX 3090", widget.volume_render_status_label.text())
+                self.assertFalse(widget.volume_render_status_label.wordWrap())
+                self.assertEqual(widget.volume_render_status_label.minimumHeight(), widget.volume_render_status_label.maximumHeight())
+                self.assertNotIn("\n", widget.volume_render_status_label.text())
+                self.assertNotIn("RTX 3090", widget.volume_render_status_label.text())
+                self.assertIn("RTX 3090", widget.volume_render_status_label.toolTip())
+                self.assertIn("4096", widget.volume_render_status_label.text())
+                self.assertIn("0%", widget.volume_render_status_label.toolTip())
 
                 old_yaw = widget._volume_yaw
                 widget.rotate_volume_preview(25, -10)
@@ -2626,6 +2786,201 @@ class TifWorkbenchTests(unittest.TestCase):
             self.assertLessEqual(max(still.shape), 1024)
             self.assertGreaterEqual(max(still.shape), max(drag.shape))
             self.assertEqual(len(widget._volume_preview_cache), 2)
+            self.assertEqual(widget._volume_preview_algorithm("still"), "hybrid")
+            self.assertEqual(widget._volume_preview_algorithm("drag"), "stride")
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+
+    def test_volume_preview_cache_keeps_three_recent_specimen_owners(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+        try:
+            widget._volume_canvas_renderer = "gpu"
+            widget.volume_quality_slider.setValue(128)
+            for specimen_id in ("specimen-a", "specimen-b", "specimen-c"):
+                widget.current_specimen_id = specimen_id
+                widget.current_volume_scope = "full"
+                widget.current_part_id = ""
+                widget.current_reslice_id = ""
+                widget.image_volume = np.full((4, 16, 16), len(specimen_id), dtype=np.uint8)
+                self.assertIsNotNone(widget._ensure_volume_preview("still"))
+
+            widget.current_specimen_id = "specimen-a"
+            widget.image_volume = np.full((4, 16, 16), 1, dtype=np.uint8)
+            cached_a = widget._ensure_volume_preview("still")
+
+            widget.current_specimen_id = "specimen-d"
+            widget.image_volume = np.full((4, 16, 16), 4, dtype=np.uint8)
+            self.assertIsNotNone(widget._ensure_volume_preview("still"))
+
+            owners = {key[0][0] for key in widget._volume_preview_cache.keys()}
+            self.assertEqual(owners, {"specimen-a", "specimen-c", "specimen-d"})
+            self.assertNotIn("specimen-b", owners)
+            report = widget.volume_performance_report()
+            self.assertEqual(report["cache_specimen_count"], 3)
+            self.assertEqual(report["cache_max_specimens"], 3)
+            self.assertGreater(report["cache_estimated_bytes"], 0)
+
+            widget.current_specimen_id = "specimen-a"
+            widget.image_volume = np.full((4, 16, 16), 1, dtype=np.uint8)
+            self.assertIs(widget._ensure_volume_preview("still"), cached_a)
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+
+    def test_high_quality_volume_preview_cache_reduces_owner_limit(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+        try:
+            widget._volume_canvas_renderer = "gpu"
+            widget.volume_quality_slider.setValue(4096)
+            for specimen_id in ("specimen-a", "specimen-b", "specimen-c"):
+                widget.current_specimen_id = specimen_id
+                widget.current_volume_scope = "full"
+                widget.current_part_id = ""
+                widget.current_reslice_id = ""
+                widget.image_volume = np.full((4, 16, 16), len(specimen_id), dtype=np.uint8)
+                self.assertIsNotNone(widget._ensure_volume_preview("still"))
+
+            owners = {key[0][0] for key in widget._volume_preview_cache.keys()}
+            self.assertEqual(owners, {"specimen-c"})
+            report = widget.volume_performance_report()
+            self.assertEqual(report["cache_specimen_count"], 1)
+            self.assertEqual(report["cache_max_specimens"], 1)
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+
+    def test_volume_quality_change_keeps_gpu_texture_cache_before_budgeted_rebuild(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+
+        class FakeCanvas(QLabel):
+            def __init__(self):
+                super().__init__()
+                self.release_texture_cache_calls = 0
+
+            def release_texture_cache(self):
+                self.release_texture_cache_calls += 1
+
+            def render_stats(self):
+                return {"texture_cache_entries": 0, "texture_cache_bytes": 0}
+
+            def has_volume(self):
+                return True
+
+        fake_canvas = FakeCanvas()
+        try:
+            widget.view_stack.addWidget(fake_canvas)
+            widget.volume_canvas = fake_canvas
+            widget._volume_canvas_renderer = "gpu"
+            widget._volume_canvas_created = True
+            calls = []
+
+            def fake_refresh():
+                calls.append(int(widget.volume_quality_slider.value()))
+
+            widget._refresh_volume_preview = fake_refresh
+            widget.volume_quality_slider.setValue(1024)
+            widget._volume_quality_committed_value = 1024
+
+            widget.volume_quality_slider.setValue(4096)
+            widget._commit_volume_quality_change()
+
+            self.assertEqual(fake_canvas.release_texture_cache_calls, 0)
+            self.assertEqual(calls, [4096])
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+            fake_canvas.deleteLater()
+
+    def test_switching_specimen_resets_active_preview_without_flushing_lru_cache(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+        try:
+            widget._volume_canvas_renderer = "gpu"
+            widget.current_specimen_id = "specimen-a"
+            widget.image_volume = np.zeros((4, 16, 16), dtype=np.uint8)
+            first = widget._ensure_volume_preview("still")
+
+            widget.current_specimen_id = "specimen-b"
+            widget._reset_active_volume_preview_state()
+
+            self.assertIsNone(widget._volume_preview)
+            self.assertEqual(len(widget._volume_preview_cache), 1)
+            self.assertIs(next(iter(widget._volume_preview_cache.values())), first)
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+
+    def test_metadata_only_specimen_shows_deferred_volume_message(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = TifProjectManager()
+            manager.create_project("metadata_ui", root / "metadata_ui")
+            manager.create_specimen_scaffold("specimen-meta")
+            specimen = manager.get_specimen("specimen-meta")
+            specimen["metadata"]["import_status"] = "metadata_only"
+            specimen["working_volume"].update(
+                {
+                    "path": "",
+                    "shape_zyx": [2, 3, 4],
+                    "dtype": "uint8",
+                    "status": "metadata_only",
+                }
+            )
+            manager.save_project()
+            widget = TifWorkbenchWidget(manager, "en")
+            try:
+                widget.load_specimen("specimen-meta")
+                widget.display_mode = "volume"
+                widget.render_volume_preview()
+
+                self.assertIsNone(widget.image_volume)
+                self.assertEqual(widget.volume_render_status_label.text(), "TIF metadata registered. Build a working volume before 3D preview.")
+                self.assertIn("metadata registered", widget.volume_canvas.text())
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_switching_metadata_only_specimen_to_volume_starts_materialize_flow(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = TifProjectManager()
+            manager.create_project("metadata_volume", root / "metadata_volume")
+            manager.create_specimen_scaffold("specimen-meta")
+            specimen = manager.get_specimen("specimen-meta")
+            specimen["metadata"]["import_status"] = "metadata_only"
+            specimen["working_volume"].update({"path": "", "shape_zyx": [2, 3, 4], "dtype": "uint8", "status": "metadata_only"})
+            manager.save_project()
+            widget = TifWorkbenchWidget(manager, "en")
+            try:
+                widget.load_specimen("specimen-meta")
+                mode_index = widget.display_mode_combo.findData("volume")
+                with patch.object(widget, "materialize_current_tif_metadata", return_value=True) as materialize:
+                    widget.display_mode_combo.setCurrentIndex(mode_index)
+                    widget.on_display_mode_changed()
+                self.assertTrue(materialize.called)
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_still_volume_preview_uses_detail_preserving_downsample(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "zh")
+        try:
+            widget._volume_canvas_renderer = "gpu"
+            widget.image_volume = np.zeros((2, 512, 512), dtype=np.uint16)
+            widget.image_volume[:, 1:257:2, 1:257:2] = 4000
+            widget.volume_quality_slider.setValue(128)
+
+            still = widget._ensure_volume_preview("still")
+            drag = widget._ensure_volume_preview("drag")
+
+            self.assertEqual(tuple(still.shape), (2, 256, 256))
+            self.assertEqual(tuple(drag.shape), (2, 256, 256))
+            self.assertGreater(int(still.max()), int(drag.max()))
         finally:
             widget.close_project()
             widget.deleteLater()
@@ -2664,6 +3019,295 @@ class TifWorkbenchTests(unittest.TestCase):
                 drag = None
                 widget.close_project()
                 widget.deleteLater()
+
+    def test_full_volume_roi_high_detail_uploads_original_bbox_crop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = TifProjectManager()
+            manager.create_project("roi_detail", root / "roi_detail")
+            manager.create_specimen_scaffold("01-0101-roi")
+            image = np.zeros((6, 32, 32), dtype=np.uint16)
+            image[:, 24:, 24:] = 60000
+            image[1:4, 4:20, 6:22] = 4000
+            image_rel = "specimens/01-0101-roi/working/image.ome.zarr"
+            image_meta = write_volume_sidecar(root / "roi_detail" / image_rel, image, role="working_image")
+            manager.register_working_volume("01-0101-roi", image_rel, image_meta["shape_zyx"], image_meta["dtype"], save=False)
+            manager.save_project()
+            widget = TifWorkbenchWidget(manager, "en")
+
+            class FakeGpuLabel(QLabel):
+                def __init__(self):
+                    super().__init__()
+                    self.uploads = []
+                    self.render_state_kwargs = []
+                    self.source_shapes = []
+
+                def set_volume_data(self, volume, *args, **kwargs):
+                    self.uploads.append(np.asarray(volume).copy())
+                    self.source_shapes.append(tuple(kwargs.get("source_shape") or ()))
+
+                def set_render_state(self, *args, **kwargs):
+                    self.render_state_kwargs.append(dict(kwargs))
+
+            fake_canvas = FakeGpuLabel()
+            try:
+                widget.load_specimen("01-0101-roi")
+                widget._volume_canvas_renderer = "gpu"
+                widget._volume_canvas_created = True
+                widget.view_stack.addWidget(fake_canvas)
+                widget.volume_canvas = fake_canvas
+                widget.display_mode = "volume"
+                widget._volume_render_mode = "still"
+                widget._volume_zoom = 2.5
+                widget.volume_roi_detail_check.setChecked(True)
+                widget.volume_roi_source_combo.setCurrentIndex(widget.volume_roi_source_combo.findData("current_bbox"))
+                widget.volume_roi_inspect_check.setChecked(True)
+                widget.volume_roi_scale_slider.setValue(250)
+                widget.volume_quality_slider.setValue(4096)
+                widget.part_bbox_edit.setText("1,4,4,20,6,22")
+                fake_canvas.uploads.clear()
+                fake_canvas.source_shapes.clear()
+                fake_canvas.render_state_kwargs.clear()
+
+                widget.render_volume_preview()
+
+                self.assertEqual(len(fake_canvas.uploads), 1)
+                uploaded = fake_canvas.uploads[-1]
+                self.assertEqual(tuple(uploaded.shape), (3, 16, 16))
+                self.assertEqual(uploaded.dtype, np.uint16)
+                self.assertEqual(int(uploaded.max()), 4000)
+                self.assertEqual(fake_canvas.source_shapes[-1], (3, 16, 16))
+                self.assertEqual(widget._volume_roi_preview_bbox, [[1, 4], [4, 20], [6, 22]])
+                report = widget.volume_performance_report()
+                self.assertTrue(report["roi_inspect_enabled"])
+                self.assertTrue(report["roi_inspect_active"])
+                self.assertEqual(report["roi_source_shape_zyx"], (3, 16, 16))
+                self.assertEqual(report["roi_texture_budget_bytes"], widget._roi_texture_budget_bytes())
+                self.assertEqual(manager.list_parts("01-0101-roi"), [])
+
+                widget._volume_render_mode = "drag"
+                drag = widget._ensure_volume_preview("drag")
+                self.assertEqual(widget._volume_roi_preview_bbox, None)
+                self.assertNotEqual(tuple(drag.shape), (3, 16, 16))
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+                fake_canvas.deleteLater()
+
+    def test_roi_crop_request_uses_roi_status_text_at_default_zoom(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "zh")
+        try:
+            widget._volume_canvas_renderer = "gpu"
+            widget._volume_render_mode = "still"
+            widget.display_mode = "volume"
+            widget.current_volume_scope = "full"
+            widget.image_volume = np.zeros((6, 32, 32), dtype=np.uint16)
+            widget.part_bbox_edit.setText("1,4,4,20,6,22")
+            widget.volume_roi_detail_check.setChecked(True)
+            widget.volume_roi_source_combo.setCurrentIndex(widget.volume_roi_source_combo.findData("current_bbox"))
+            widget.volume_roi_inspect_check.setChecked(True)
+            widget._volume_zoom = 1.0
+
+            request = widget._volume_preview_request("still")
+
+            self.assertEqual(request["roi_bbox"], [[1, 4], [4, 20], [6, 22]])
+            self.assertEqual(request["message"], "正在准备 ROI 裁剪块预览...")
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+
+    def test_full_volume_bbox_does_not_crop_without_roi_inspect(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+        try:
+            widget._volume_canvas_renderer = "gpu"
+            widget._volume_render_mode = "still"
+            widget._volume_zoom = 2.5
+            widget.current_volume_scope = "full"
+            widget.image_volume = np.zeros((6, 32, 32), dtype=np.uint16)
+            widget.image_volume[1:4, 4:20, 6:22] = 4000
+            widget.part_bbox_edit.setText("1,4,4,20,6,22")
+            widget.volume_roi_detail_check.setChecked(True)
+            widget.volume_roi_source_combo.setCurrentIndex(widget.volume_roi_source_combo.findData("current_bbox"))
+            widget.volume_roi_inspect_check.setChecked(False)
+            widget.volume_roi_scale_slider.setValue(250)
+            widget.volume_quality_slider.setValue(4096)
+
+            preview = widget._ensure_volume_preview("still")
+
+            self.assertNotEqual(tuple(preview.shape), (3, 16, 16))
+            self.assertEqual(widget._volume_roi_preview_bbox, None)
+            report = widget.volume_performance_report()
+            self.assertFalse(report["roi_inspect_enabled"])
+            self.assertFalse(report["roi_inspect_active"])
+            self.assertEqual(report["roi_source_shape_zyx"], ())
+            self.assertIn("ROI 2.5x", widget.volume_canvas_overlay_text())
+            self.assertNotIn("ROI crop source", widget.volume_canvas_overlay_text())
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+
+    def test_full_volume_bbox_does_not_crop_until_bbox_source_selected(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+        try:
+            widget._volume_canvas_renderer = "gpu"
+            widget._volume_render_mode = "still"
+            widget._volume_zoom = 2.5
+            widget.current_volume_scope = "full"
+            widget.image_volume = np.zeros((6, 32, 32), dtype=np.uint16)
+            widget.image_volume[1:4, 4:20, 6:22] = 4000
+            widget.part_bbox_edit.setText("1,4,4,20,6,22")
+            widget.volume_roi_detail_check.setChecked(True)
+            widget.volume_roi_source_combo.setCurrentIndex(widget.volume_roi_source_combo.findData("full"))
+            widget.volume_roi_inspect_check.setChecked(True)
+            widget.volume_roi_scale_slider.setValue(250)
+            widget.volume_quality_slider.setValue(4096)
+
+            preview = widget._ensure_volume_preview("still")
+
+            self.assertNotEqual(tuple(preview.shape), (3, 16, 16))
+            self.assertEqual(widget._volume_roi_preview_bbox, None)
+            report = widget.volume_performance_report()
+            self.assertEqual(report["roi_source_mode"], "full")
+            self.assertTrue(report["roi_inspect_enabled"])
+            self.assertFalse(report["roi_inspect_active"])
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+
+    def test_volume_roi_source_can_use_saved_roi_draft(self):
+        manager = TifProjectManager()
+        manager.project_data["specimens"].append(
+            {
+                "specimen_id": "specimen-roi",
+                "display_name": "specimen-roi",
+                "metadata_ref": "",
+                "modality": "unknown",
+                "source": {},
+                "working_volume": {"path": "", "shape_zyx": [6, 32, 32], "dtype": "uint16", "spacing_zyx": [], "format": ""},
+                "labels": {"manual_truth": {"path": ""}, "working_edit": {"path": ""}, "model_drafts": []},
+                "material_map": "",
+                "review_status": "not_started",
+                "train_ready": False,
+                "provenance": {},
+                "metadata": {},
+                "parts": [],
+                "part_rois": [],
+            }
+        )
+        manager.add_part_roi("specimen-roi", "head_roi", display_name="Head", bbox_zyx=[[1, 4], [4, 20], [6, 22]], save=False)
+        widget = TifWorkbenchWidget(manager, "en")
+        try:
+            widget.current_specimen_id = "specimen-roi"
+            widget._populate_volume_roi_source_combo()
+            widget._volume_canvas_renderer = "gpu"
+            widget._volume_render_mode = "still"
+            widget._volume_zoom = 2.5
+            widget.current_volume_scope = "full"
+            widget.image_volume = np.zeros((6, 32, 32), dtype=np.uint16)
+            widget.image_volume[1:4, 4:20, 6:22] = 4000
+            widget.volume_roi_detail_check.setChecked(True)
+            widget.volume_roi_source_combo.setCurrentIndex(widget.volume_roi_source_combo.findData("roi:head_roi"))
+            widget.volume_roi_inspect_check.setChecked(True)
+            widget.volume_roi_scale_slider.setValue(250)
+            widget.volume_quality_slider.setValue(4096)
+
+            preview = widget._ensure_volume_preview("still")
+
+            self.assertEqual(tuple(preview.shape), (3, 16, 16))
+            self.assertEqual(widget._volume_roi_preview_bbox, [[1, 4], [4, 20], [6, 22]])
+            self.assertEqual(widget.volume_performance_report()["roi_source_mode"], "roi:head_roi")
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+
+    def test_volume_roi_source_can_use_part_parent_bbox(self):
+        manager = TifProjectManager()
+        manager.project_data["specimens"].append(
+            {
+                "specimen_id": "specimen-part",
+                "display_name": "specimen-part",
+                "metadata_ref": "",
+                "modality": "unknown",
+                "source": {},
+                "working_volume": {"path": "", "shape_zyx": [6, 32, 32], "dtype": "uint16", "spacing_zyx": [], "format": ""},
+                "labels": {"manual_truth": {"path": ""}, "working_edit": {"path": ""}, "model_drafts": []},
+                "material_map": "",
+                "review_status": "not_started",
+                "train_ready": False,
+                "provenance": {},
+                "metadata": {},
+                "parts": [],
+                "part_rois": [],
+            }
+        )
+        manager.add_part(
+            "specimen-part",
+            "leg",
+            display_name="Leg",
+            image={"path": "specimens/specimen-part/parts/leg/image.ome.zarr", "shape_zyx": [3, 16, 16], "dtype": "uint16"},
+            parent_bbox_zyx=[[2, 5], [8, 24], [10, 26]],
+            save=False,
+        )
+        widget = TifWorkbenchWidget(manager, "en")
+        try:
+            widget.current_specimen_id = "specimen-part"
+            widget._populate_volume_roi_source_combo()
+            widget._volume_canvas_renderer = "gpu"
+            widget._volume_render_mode = "still"
+            widget._volume_zoom = 2.5
+            widget.current_volume_scope = "full"
+            widget.image_volume = np.zeros((6, 32, 32), dtype=np.uint16)
+            widget.image_volume[2:5, 8:24, 10:26] = 5000
+            widget.volume_roi_detail_check.setChecked(True)
+            widget.volume_roi_source_combo.setCurrentIndex(widget.volume_roi_source_combo.findData("part:leg"))
+            widget.volume_roi_inspect_check.setChecked(True)
+            widget.volume_roi_scale_slider.setValue(250)
+            widget.volume_quality_slider.setValue(4096)
+
+            preview = widget._ensure_volume_preview("still")
+
+            self.assertEqual(tuple(preview.shape), (3, 16, 16))
+            self.assertEqual(widget._volume_roi_preview_bbox, [[2, 5], [8, 24], [10, 26]])
+            self.assertEqual(widget.volume_performance_report()["roi_source_mode"], "part:leg")
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+
+    def test_roi_high_detail_budget_preset_controls_texture_budget_and_cache_key(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+        try:
+            widget._volume_canvas_renderer = "gpu"
+            widget._volume_render_mode = "still"
+            widget._volume_zoom = 2.5
+            widget.image_volume = np.zeros((8, 64, 64), dtype=np.uint16)
+            widget.part_bbox_edit.setText("0,8,0,64,0,64")
+            widget.volume_roi_detail_check.setChecked(True)
+            widget.volume_roi_source_combo.setCurrentIndex(widget.volume_roi_source_combo.findData("current_bbox"))
+            widget.volume_roi_inspect_check.setChecked(True)
+            widget.volume_quality_slider.setValue(4096)
+
+            balanced = widget._ensure_volume_preview("still")
+            balanced_key = widget._volume_preview_source_shape
+            balanced_budget = widget._roi_texture_budget_bytes()
+            high_index = widget.volume_roi_budget_combo.findData("high")
+            self.assertGreaterEqual(high_index, 0)
+
+            widget.volume_roi_budget_combo.setCurrentIndex(high_index)
+            high = widget._ensure_volume_preview("still")
+            high_key = widget._volume_preview_source_shape
+
+            self.assertGreater(widget._roi_texture_budget_bytes(), balanced_budget)
+            self.assertNotEqual(balanced_key, high_key)
+            self.assertEqual(high_key[-1], widget._roi_texture_budget_bytes())
+            self.assertEqual(tuple(high.shape), tuple(balanced.shape))
+            self.assertIn("ROI budget 2.5 GB", widget.volume_canvas_overlay_text())
+        finally:
+            widget.close_project()
+            widget.deleteLater()
 
     def test_cpu_volume_front_clip_discards_viewer_side_depths(self):
         manager = TifProjectManager()
@@ -2714,6 +3358,115 @@ class TifWorkbenchTests(unittest.TestCase):
             preview = widget._ensure_volume_preview("still")
             self.assertEqual(preview.dtype, np.uint16)
             np.testing.assert_array_equal(preview, widget.image_volume)
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+
+    def test_clarity_toggle_keeps_previous_preview_variants_cached(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+        try:
+            widget._volume_canvas_renderer = "gpu"
+            widget._volume_render_mode = "still"
+            widget.current_volume_scope = "full"
+            widget.image_volume = np.arange(8 * 16 * 16, dtype=np.uint16).reshape((8, 16, 16))
+
+            widget._volume_clarity_mode = False
+            normal_request = widget._volume_preview_request("still")
+            normal_preview = widget._ensure_volume_preview("still")
+            self.assertIn(normal_request["cache_key"], widget._volume_preview_cache)
+
+            widget._on_volume_clarity_toggled(True)
+            clarity_request = widget._volume_preview_request("still")
+            clarity_preview = widget._ensure_volume_preview("still")
+            self.assertIn(clarity_request["cache_key"], widget._volume_preview_cache)
+            self.assertIn(normal_request["cache_key"], widget._volume_preview_cache)
+            self.assertIs(widget._volume_preview_cache[normal_request["cache_key"]], normal_preview)
+
+            widget._on_volume_clarity_toggled(False)
+            reused_normal = widget._ensure_volume_preview("still")
+
+            self.assertIs(reused_normal, normal_preview)
+            self.assertIn(clarity_request["cache_key"], widget._volume_preview_cache)
+            self.assertIs(widget._volume_preview_cache[clarity_request["cache_key"]], clarity_preview)
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+
+    def test_volume_preview_cache_limits_variants_per_owner(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+        try:
+            owner = ("specimen", "full", "", "")
+            other_owner = ("other", "full", "", "")
+            for index in range(10):
+                key = (owner, (2, 2, 2), "uint8", 128 + index, False, "hybrid", None, index)
+                widget._volume_preview_cache[key] = np.zeros((1, 1, 1), dtype=np.uint8)
+            other_key = (other_owner, (2, 2, 2), "uint8", 128, False, "hybrid", None, 0)
+            widget._volume_preview_cache[other_key] = np.ones((1, 1, 1), dtype=np.uint8)
+
+            widget._prune_volume_preview_cache()
+
+            owner_keys = [
+                key for key in widget._volume_preview_cache.keys()
+                if widget._volume_cache_owner_from_key(key) == owner
+            ]
+            self.assertLessEqual(len(owner_keys), 8)
+            self.assertNotIn((owner, (2, 2, 2), "uint8", 128, False, "hybrid", None, 0), widget._volume_preview_cache)
+            self.assertIn(other_key, widget._volume_preview_cache)
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+
+    def test_default_mask_mode_change_keeps_volume_preview_cache(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+        try:
+            widget.current_specimen_id = "specimen"
+            widget.current_volume_scope = "part"
+            widget.current_part_id = "part"
+            widget.current_part = {"view_settings": {"volume_mask_mode": "masked_image"}}
+            widget.image_volume = np.zeros((2, 4, 4), dtype=np.uint8)
+            widget.part_preview_mask = np.ones((2, 4, 4), dtype=np.uint8)
+            owner = widget._active_volume_cache_owner()
+            volume_key = (owner, (2, 4, 4), "uint8", 128, False, "hybrid", None, 0)
+            mask_key = (owner, (2, 4, 4), "uint8", 128, 1, "occupancy", None)
+            widget._volume_preview_cache[volume_key] = np.zeros((2, 4, 4), dtype=np.uint8)
+            widget._volume_mask_preview_cache[mask_key] = np.ones((2, 4, 4), dtype=np.uint8)
+
+            widget._apply_default_volume_mask_mode()
+
+            self.assertEqual(widget.volume_mask_combo.currentData(), "masked_image")
+            self.assertIn(volume_key, widget._volume_preview_cache)
+            self.assertNotIn(mask_key, widget._volume_mask_preview_cache)
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+
+    def test_volume_performance_report_exposes_gpu_texture_cache(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+        try:
+            widget._volume_canvas_renderer = "gpu"
+            widget.image_volume = np.zeros((2, 4, 4), dtype=np.uint8)
+            widget._volume_last_stats = {
+                "shape_zyx": (2, 4, 4),
+                "dtype": "uint8",
+                "bytes": 32,
+                "texture_cache_entries": 3,
+                "texture_cache_bytes": 256 * 1024 * 1024,
+                "texture_cache_budget_bytes": 5 * 1024 * 1024 * 1024,
+                "texture_cache_hits": 4,
+                "texture_cache_misses": 1,
+            }
+
+            report = widget.volume_performance_report()
+            overlay = widget.volume_canvas_overlay_text()
+
+            self.assertEqual(report["gpu_texture_cache_entries"], 3)
+            self.assertEqual(report["gpu_texture_cache_hits"], 4)
+            self.assertEqual(report["gpu_texture_cache_misses"], 1)
+            self.assertIn("GPU cache 3 256 MB hit 4/5", overlay)
         finally:
             widget.close_project()
             widget.deleteLater()
@@ -2813,6 +3566,163 @@ class TifWorkbenchTests(unittest.TestCase):
             widget.deleteLater()
             fake_canvas.deleteLater()
 
+    def test_morphology_transfer_function_is_available_without_reuploading_texture(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+
+        class FakeGpuLabel(QLabel):
+            def __init__(self):
+                super().__init__()
+                self.upload_ids = []
+                self.render_state_kwargs = []
+
+            def set_volume_data(self, volume, *args, **kwargs):
+                self.upload_ids.append(id(volume))
+
+            def set_render_state(self, *args, **kwargs):
+                self.render_state_kwargs.append(dict(kwargs))
+
+        fake_canvas = FakeGpuLabel()
+        try:
+            widget._volume_canvas_renderer = "gpu"
+            widget._volume_canvas_created = True
+            widget.view_stack.addWidget(fake_canvas)
+            widget.volume_canvas = fake_canvas
+            widget.display_mode = "volume"
+            widget.image_volume = np.zeros((8, 96, 96), dtype=np.uint8)
+            widget.image_volume[:, 24:72, 24:72] = 180
+
+            widget.render_volume_preview()
+            before_upload = fake_canvas.upload_ids[-1]
+            morphology_index = widget.volume_tint_combo.findData("morphology")
+            self.assertGreaterEqual(morphology_index, 0)
+            widget.volume_tint_combo.setCurrentIndex(morphology_index)
+
+            self.assertEqual(fake_canvas.upload_ids[-1], before_upload)
+            self.assertEqual(fake_canvas.render_state_kwargs[-1]["transfer_preset"], "morphology")
+            self.assertAlmostEqual(fake_canvas.render_state_kwargs[-1]["gradient_opacity"], 0.65)
+            self.assertEqual(fake_canvas.render_state_kwargs[-1]["gradient_opacity_range"], (0.04, 0.34))
+            self.assertGreater(fake_canvas.render_state_kwargs[-1]["jitter_strength"], 0.0)
+            self.assertGreater(fake_canvas.render_state_kwargs[-1]["adaptive_step_strength"], 0.0)
+            self.assertIn("Morphology Inspect", widget.volume_canvas_overlay_text())
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+            fake_canvas.deleteLater()
+
+    def test_shader_quality_mode_controls_experimental_rendering(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+
+        class FakeGpuLabel(QLabel):
+            def __init__(self):
+                super().__init__()
+                self.render_state_kwargs = []
+
+            def set_volume_data(self, *args, **kwargs):
+                return None
+
+            def set_render_state(self, *args, **kwargs):
+                self.render_state_kwargs.append(dict(kwargs))
+
+        fake_canvas = FakeGpuLabel()
+        try:
+            widget._volume_canvas_renderer = "gpu"
+            widget._volume_canvas_created = True
+            widget.view_stack.addWidget(fake_canvas)
+            widget.volume_canvas = fake_canvas
+            widget.display_mode = "volume"
+            widget.image_volume = np.zeros((8, 96, 96), dtype=np.uint8)
+            widget.image_volume[:, 24:72, 24:72] = 180
+
+            widget.render_volume_preview()
+            state = fake_canvas.render_state_kwargs[-1]
+            self.assertEqual(state["shader_quality_mode"], "preset")
+            self.assertEqual(state["transfer_preset"], "amber")
+            self.assertEqual(state["jitter_strength"], 0.0)
+            self.assertEqual(state["adaptive_step_strength"], 0.0)
+            self.assertEqual(state["gradient_opacity"], 0.0)
+
+            morphology_index = widget.volume_tint_combo.findData("morphology")
+            widget.volume_tint_combo.setCurrentIndex(morphology_index)
+            state = fake_canvas.render_state_kwargs[-1]
+            self.assertGreater(state["jitter_strength"], 0.0)
+            self.assertGreater(state["adaptive_step_strength"], 0.0)
+            self.assertGreater(state["gradient_opacity"], 0.0)
+
+            off_index = widget.volume_shader_quality_combo.findData("off")
+            widget.volume_shader_quality_combo.setCurrentIndex(off_index)
+            state = fake_canvas.render_state_kwargs[-1]
+            self.assertEqual(state["shader_quality_mode"], "off")
+            self.assertEqual(state["jitter_strength"], 0.0)
+            self.assertEqual(state["adaptive_step_strength"], 0.0)
+            self.assertEqual(state["gradient_opacity"], 0.0)
+
+            amber_index = widget.volume_tint_combo.findData("amber")
+            all_index = widget.volume_shader_quality_combo.findData("all_still")
+            widget.volume_tint_combo.setCurrentIndex(amber_index)
+            widget.volume_shader_quality_combo.setCurrentIndex(all_index)
+            state = fake_canvas.render_state_kwargs[-1]
+            self.assertEqual(state["shader_quality_mode"], "all_still")
+            self.assertGreater(state["jitter_strength"], 0.0)
+            self.assertGreater(state["adaptive_step_strength"], 0.0)
+            self.assertEqual(state["gradient_opacity"], 0.0)
+            self.assertIn("Shader quality All still composite", widget.volume_canvas_overlay_text())
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+            fake_canvas.deleteLater()
+
+    def test_apply_morphology_inspect_preset_updates_display_without_reuploading_texture(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+
+        class FakeGpuLabel(QLabel):
+            def __init__(self):
+                super().__init__()
+                self.upload_ids = []
+                self.render_state_kwargs = []
+
+            def set_volume_data(self, volume, *args, **kwargs):
+                self.upload_ids.append(id(volume))
+
+            def set_render_state(self, *args, **kwargs):
+                self.render_state_kwargs.append(dict(kwargs))
+
+        fake_canvas = FakeGpuLabel()
+        try:
+            widget._volume_canvas_renderer = "gpu"
+            widget._volume_canvas_created = True
+            widget.view_stack.addWidget(fake_canvas)
+            widget.volume_canvas = fake_canvas
+            widget.display_mode = "volume"
+            widget.image_volume = np.zeros((8, 96, 96), dtype=np.uint8)
+            widget.image_volume[:, 24:72, 24:72] = 180
+
+            widget.render_volume_preview()
+            first_upload = fake_canvas.upload_ids[-1]
+            widget.apply_morphology_inspect_preset()
+
+            self.assertEqual(fake_canvas.upload_ids[-1], first_upload)
+            state = fake_canvas.render_state_kwargs[-1]
+            self.assertEqual(state["transfer_preset"], "morphology")
+            self.assertEqual(state["projection_mode"], "composite")
+            self.assertEqual(state["shader_quality_mode"], "preset")
+            self.assertAlmostEqual(state["enhancement"], 0.72)
+            self.assertAlmostEqual(state["tone_gamma"], 0.92)
+            self.assertAlmostEqual(state["gradient_opacity"], 0.65)
+            self.assertEqual(state["gradient_opacity_range"], (0.04, 0.34))
+            self.assertAlmostEqual(state["jitter_strength"], 0.42)
+            self.assertAlmostEqual(state["adaptive_step_strength"], 0.35)
+            self.assertTrue(state["surface_refine"])
+            self.assertEqual(widget.volume_cutoff_slider.value(), 18)
+            self.assertEqual(widget.project.project_data["view_settings"]["volume_tint"], "morphology")
+            self.assertEqual(widget.project.project_data["view_settings"]["volume_shader_quality"], "preset")
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+            fake_canvas.deleteLater()
+
     def test_volume_drag_updates_gpu_camera_without_reuploading_texture(self):
         manager = TifProjectManager()
         widget = TifWorkbenchWidget(manager, "en")
@@ -2863,6 +3773,9 @@ class TifWorkbenchTests(unittest.TestCase):
             self.assertTrue(fake_canvas.interaction_state_kwargs)
             self.assertEqual(fake_canvas.interaction_state_kwargs[-1]["render_mode"], "drag")
             self.assertLessEqual(fake_canvas.interaction_state_kwargs[-1]["sample_steps"], 768)
+            self.assertEqual(fake_canvas.interaction_state_kwargs[-1]["jitter_strength"], 0.0)
+            self.assertEqual(fake_canvas.interaction_state_kwargs[-1]["adaptive_step_strength"], 0.0)
+            self.assertEqual(fake_canvas.interaction_state_kwargs[-1]["gradient_opacity"], 0.0)
             self.assertEqual(widget._volume_render_mode, "drag")
             widget._finish_volume_interaction()
             self.assertEqual(widget._volume_render_mode, "still")
@@ -2914,6 +3827,484 @@ class TifWorkbenchTests(unittest.TestCase):
             widget.deleteLater()
             fake_canvas.deleteLater()
 
+    def test_large_gpu_upload_uses_non_modal_status(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+
+        class FakeGpuLabel(QLabel):
+            def __init__(self):
+                super().__init__()
+                self.render_inputs = []
+                self.text_updates = []
+
+            def setText(self, text):
+                self.text_updates.append(str(text or ""))
+                super().setText(text)
+
+            def has_volume(self):
+                return True
+
+            def set_volume_data(self, volume, *args, **kwargs):
+                return None
+
+            def set_volume_render_inputs(self, volume, *args, **kwargs):
+                self.render_inputs.append((volume, kwargs))
+
+        fake_canvas = FakeGpuLabel()
+        try:
+            widget._volume_canvas_renderer = "gpu"
+            widget._volume_canvas_created = True
+            widget._volume_render_mode = "still"
+            widget.display_mode = "volume"
+            widget.view_stack.addWidget(fake_canvas)
+            widget.volume_canvas = fake_canvas
+            preview = np.zeros((33, 1024, 1024), dtype=np.uint8)
+
+            FakeProgressDialog.instances.clear()
+            with patch("AntSleap.ui.tif_workbench.QProgressDialog", FakeProgressDialog):
+                self.assertTrue(widget._sync_gpu_volume_canvas(preview))
+
+            self.assertEqual(len(fake_canvas.render_inputs), 1)
+            self.assertEqual(len(FakeProgressDialog.instances), 0)
+            self.assertIn("Uploading 3D preview to GPU", widget.volume_render_status_label.text())
+            self.assertNotIn("Uploading 3D preview to GPU...", fake_canvas.text_updates)
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+            fake_canvas.deleteLater()
+
+    def test_large_gpu_upload_keeps_previous_frame_without_forced_process_events(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+
+        class FakeGpuLabel(QLabel):
+            def __init__(self):
+                super().__init__()
+                self.render_inputs = []
+
+            def has_volume(self):
+                return True
+
+            def set_volume_data(self, volume, *args, **kwargs):
+                return None
+
+            def set_volume_render_inputs(self, volume, *args, **kwargs):
+                self.render_inputs.append((volume, kwargs))
+
+        fake_canvas = FakeGpuLabel()
+        try:
+            widget._volume_canvas_renderer = "gpu"
+            widget._volume_canvas_created = True
+            widget._volume_render_mode = "still"
+            widget.display_mode = "volume"
+            widget.view_stack.addWidget(fake_canvas)
+            widget.volume_canvas = fake_canvas
+            preview = np.zeros((33, 1024, 1024), dtype=np.uint8)
+
+            with patch("AntSleap.ui.tif_workbench.QApplication.processEvents") as process_events:
+                self.assertTrue(widget._sync_gpu_volume_canvas(preview))
+
+            self.assertEqual(len(fake_canvas.render_inputs), 1)
+            process_events.assert_not_called()
+            self.assertIn("Uploading 3D preview to GPU", widget.volume_render_status_label.text())
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+            fake_canvas.deleteLater()
+
+    def test_full_volume_still_preview_prefers_gpu_stream_build_before_cpu_preview(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+
+        class FakeGpuStreamCanvas(QLabel):
+            def __init__(self):
+                super().__init__()
+                self.build_calls = []
+                self.render_states = []
+                self.mask_uploads = []
+
+            def has_volume(self):
+                return bool(self.build_calls)
+
+            def build_volume_texture_from_source(self, volume, max_dim, **kwargs):
+                self.build_calls.append((volume, int(max_dim), dict(kwargs)))
+                return object()
+
+            def set_mask_data(self, mask, *args, **kwargs):
+                self.mask_uploads.append(mask)
+
+            def set_render_state(self, **kwargs):
+                self.render_states.append(dict(kwargs))
+
+            def render_stats(self):
+                return {"preview_provider": {"kind": "gpu_texture", "build_backend": "gpu_stream"}}
+
+        fake_canvas = FakeGpuStreamCanvas()
+        try:
+            widget._volume_canvas_renderer = "gpu"
+            widget._volume_canvas_created = True
+            widget._volume_render_mode = "still"
+            widget.display_mode = "volume"
+            widget.view_stack.addWidget(fake_canvas)
+            widget.volume_canvas = fake_canvas
+            widget.image_volume = np.zeros((4, 16, 16), dtype=np.uint8)
+            widget.image_volume[:, 4:12, 4:12] = 180
+
+            with patch("AntSleap.ui.tif_workbench.build_volume_preview") as cpu_builder:
+                widget.render_volume_preview()
+
+            cpu_builder.assert_not_called()
+            self.assertEqual(len(fake_canvas.build_calls), 1)
+            self.assertEqual(fake_canvas.build_calls[0][1], widget._active_volume_target_dim("still"))
+            self.assertEqual(fake_canvas.build_calls[0][2]["cache_key"], widget._volume_preview_request("still")["cache_key"])
+            self.assertEqual(fake_canvas.mask_uploads[-1], None)
+            self.assertEqual(fake_canvas.render_states[-1]["mask_mode"], "image_only")
+            self.assertEqual(widget._volume_last_stats["preview_provider"]["build_backend"], "gpu_stream")
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+            fake_canvas.deleteLater()
+
+    def test_roi_crop_preview_prefers_gpu_stream_build_before_cpu_preview(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+
+        class FakeGpuStreamCanvas(QLabel):
+            def __init__(self):
+                super().__init__()
+                self.build_calls = []
+                self.render_states = []
+                self.mask_uploads = []
+
+            def has_volume(self):
+                return bool(self.build_calls)
+
+            def build_volume_texture_from_source(self, volume, max_dim, **kwargs):
+                self.build_calls.append((volume, int(max_dim), dict(kwargs)))
+                return object()
+
+            def set_mask_data(self, mask, *args, **kwargs):
+                self.mask_uploads.append(mask)
+
+            def set_render_state(self, **kwargs):
+                self.render_states.append(dict(kwargs))
+
+            def render_stats(self):
+                return {"preview_provider": {"kind": "gpu_texture", "build_backend": "gpu_stream"}}
+
+        fake_canvas = FakeGpuStreamCanvas()
+        try:
+            widget._volume_canvas_renderer = "gpu"
+            widget._volume_canvas_created = True
+            widget._volume_render_mode = "still"
+            widget.display_mode = "volume"
+            widget.view_stack.addWidget(fake_canvas)
+            widget.volume_canvas = fake_canvas
+            widget.image_volume = np.zeros((6, 32, 32), dtype=np.uint16)
+            widget.part_bbox_edit.setText("1,5,8,24,10,26")
+            widget.volume_roi_detail_check.setChecked(True)
+            widget.volume_roi_source_combo.setCurrentIndex(widget.volume_roi_source_combo.findData("current_bbox"))
+            widget.volume_roi_inspect_check.setChecked(True)
+            fake_canvas.build_calls.clear()
+            fake_canvas.render_states.clear()
+            fake_canvas.mask_uploads.clear()
+
+            with patch("AntSleap.ui.tif_workbench.build_roi_volume_preview") as cpu_roi_builder:
+                widget.render_volume_preview()
+
+            cpu_roi_builder.assert_not_called()
+            self.assertEqual(len(fake_canvas.build_calls), 1)
+            self.assertEqual(tuple(fake_canvas.build_calls[0][0].shape), (4, 16, 16))
+            self.assertEqual(fake_canvas.build_calls[0][2]["cache_key"], widget._volume_preview_request("still")["cache_key"])
+            self.assertEqual(fake_canvas.render_states[-1]["mask_mode"], "image_only")
+            self.assertEqual(widget._volume_roi_preview_source_shape, (4, 16, 16))
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+            fake_canvas.deleteLater()
+
+    def test_part_local_detail_preview_prefers_gpu_stream_build_before_cpu_preview(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+
+        class FakeGpuStreamCanvas(QLabel):
+            def __init__(self):
+                super().__init__()
+                self.build_calls = []
+                self.mask_build_calls = []
+                self.mask_uploads = []
+                self.render_states = []
+
+            def has_volume(self):
+                return bool(self.build_calls)
+
+            def build_volume_texture_from_source(self, volume, max_dim, **kwargs):
+                self.build_calls.append((volume, int(max_dim), dict(kwargs)))
+                return object()
+
+            def build_mask_texture_from_source(self, mask, max_dim, **kwargs):
+                self.mask_build_calls.append((mask, int(max_dim), dict(kwargs)))
+                return True
+
+            def set_mask_data(self, mask, *args, **kwargs):
+                self.mask_uploads.append(mask)
+
+            def set_render_state(self, **kwargs):
+                self.render_states.append(dict(kwargs))
+
+            def render_stats(self):
+                return {"preview_provider": {"kind": "gpu_texture", "build_backend": "gpu_stream"}}
+
+        fake_canvas = FakeGpuStreamCanvas()
+        try:
+            widget._volume_canvas_renderer = "gpu"
+            widget._volume_canvas_created = True
+            widget._volume_render_mode = "still"
+            widget.current_volume_scope = "part"
+            widget.display_mode = "volume"
+            widget.view_stack.addWidget(fake_canvas)
+            widget.volume_canvas = fake_canvas
+            widget.image_volume = np.zeros((4, 32, 32), dtype=np.uint8)
+            widget.part_preview_mask = np.zeros((4, 32, 32), dtype=np.uint8)
+            widget.part_preview_mask[:, 8:24, 8:24] = 1
+            widget.volume_clarity_check.setChecked(True)
+            widget.volume_mask_combo.setCurrentIndex(widget.volume_mask_combo.findData("masked_image"))
+            fake_canvas.build_calls.clear()
+            fake_canvas.mask_build_calls.clear()
+            fake_canvas.render_states.clear()
+            fake_canvas.mask_uploads.clear()
+
+            with patch("AntSleap.ui.tif_workbench.build_volume_preview") as cpu_builder, \
+                patch("AntSleap.ui.tif_workbench.build_mask_preview") as cpu_mask_builder:
+                widget.render_volume_preview()
+
+            cpu_builder.assert_not_called()
+            cpu_mask_builder.assert_not_called()
+            self.assertEqual(len(fake_canvas.build_calls), 1)
+            self.assertEqual(len(fake_canvas.mask_build_calls), 1)
+            self.assertEqual(tuple(fake_canvas.build_calls[0][0].shape), (4, 32, 32))
+            self.assertEqual(tuple(fake_canvas.mask_build_calls[0][0].shape), (4, 32, 32))
+            self.assertEqual(fake_canvas.mask_build_calls[0][2]["cache_key"], widget._volume_mask_preview_request("still")["cache_key"])
+            self.assertEqual(fake_canvas.mask_uploads, [])
+            self.assertEqual(fake_canvas.render_states[-1]["mask_mode"], "masked_image")
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+            fake_canvas.deleteLater()
+
+    def test_gpu_mask_source_for_roi_request_uses_roi_crop(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+        try:
+            widget.current_volume_scope = "part"
+            widget.image_volume = np.zeros((6, 32, 32), dtype=np.uint8)
+            widget.part_preview_mask = np.arange(6 * 32 * 32, dtype=np.uint16).reshape((6, 32, 32))
+            request = {"roi_bbox": ((1, 5), (8, 24), (10, 26))}
+
+            source, source_shape, normalized = widget._gpu_mask_source_for_request(request)
+
+            self.assertEqual(source_shape, (4, 16, 16))
+            self.assertEqual(normalized, ((1, 5), (8, 24), (10, 26)))
+            self.assertEqual(tuple(source.shape), (4, 16, 16))
+            self.assertEqual(int(source[0, 0, 0]), int(widget.part_preview_mask[1, 8, 10]))
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+
+    def test_gpu_stream_degradation_is_reported_without_extra_panel(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+        try:
+            widget._volume_canvas_renderer = "gpu"
+            widget.display_mode = "volume"
+            widget.image_volume = np.zeros((4, 16, 16), dtype=np.uint8)
+            widget._volume_last_stats = {
+                "shape_zyx": (128, 128, 128),
+                "dtype": "uint16",
+                "bytes": 128 * 128 * 128 * 2,
+                "gpu_stream_build": {
+                    "degraded": True,
+                    "degrade_reason": "texture_budget",
+                    "requested_max_dim": 512,
+                    "actual_max_dim": 128,
+                },
+            }
+
+            summary = widget._volume_status_summary_text()
+            details = widget._volume_stats_text()
+            report = widget.volume_performance_report()
+
+            self.assertIn("GPU budget 128/512", summary)
+            self.assertIn("GPU budget auto-scaled preview 128/512", details)
+            self.assertTrue(report["gpu_stream_degraded"])
+            self.assertEqual(report["gpu_stream_build"]["degrade_reason"], "texture_budget")
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+
+    def test_volume_quality_commit_keeps_gpu_texture_cache_for_budgeted_reuse(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+
+        class FakeGpuCanvas(QLabel):
+            def __init__(self):
+                super().__init__()
+                self.release_calls = 0
+
+            def release_texture_cache(self):
+                self.release_calls += 1
+
+            def render_stats(self):
+                return {"texture_cache_entries": 2}
+
+        fake_canvas = FakeGpuCanvas()
+        try:
+            widget._volume_canvas_renderer = "gpu"
+            widget._volume_canvas_created = True
+            widget.display_mode = "slice"
+            widget.view_stack.addWidget(fake_canvas)
+            widget.volume_canvas = fake_canvas
+            widget.image_volume = np.zeros((4, 16, 16), dtype=np.uint8)
+            widget._volume_quality_committed_value = 512
+            widget.volume_quality_slider.setValue(1024)
+
+            with patch.object(widget, "_refresh_volume_preview") as refresh:
+                widget._commit_volume_quality_change()
+
+            self.assertEqual(fake_canvas.release_calls, 0)
+            refresh.assert_called_once()
+            self.assertEqual(widget._volume_quality_committed_value, 1024)
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+            fake_canvas.deleteLater()
+
+    def test_gpu_stream_degradation_reduces_preview_cache_owner_limit(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+        try:
+            widget._volume_canvas_renderer = "gpu"
+            widget.volume_quality_slider.setValue(1024)
+
+            self.assertEqual(widget._volume_cache_owner_limit(), 3)
+
+            widget._volume_last_stats = {"gpu_stream_build": {"degraded": True}}
+
+            self.assertEqual(widget._volume_cache_owner_limit(), 1)
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+
+    def test_large_volume_mask_preview_can_run_in_background_with_status(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+        try:
+            widget._volume_canvas_renderer = "gpu"
+            widget._volume_render_mode = "still"
+            widget.display_mode = "volume"
+            widget.current_volume_scope = "part"
+            widget.image_volume = np.zeros((4, 32, 32), dtype=np.uint8)
+            widget.part_preview_mask = np.zeros((4, 32, 32), dtype=np.uint8)
+            widget.part_preview_mask[:, 8:24, 8:24] = 1
+            widget.volume_quality_slider.setValue(128)
+            widget.volume_mask_combo.setCurrentIndex(widget.volume_mask_combo.findData("masked_image"))
+            volume_request = widget._volume_preview_request("still")
+            widget._cache_volume_preview_result(volume_request, np.zeros((4, 32, 32), dtype=np.uint8), 0.0)
+
+            FakeProgressDialog.instances.clear()
+            with patch("AntSleap.ui.tif_workbench.QProgressDialog", FakeProgressDialog):
+                with patch.object(widget, "_should_show_volume_mask_preview_progress", return_value=True):
+                    widget.render_volume_preview()
+
+            self.assertEqual(len(FakeProgressDialog.instances), 0)
+            mask_request = widget._volume_mask_preview_request("still")
+            self.assertTrue(
+                widget._volume_preview_build_thread is not None
+                or mask_request["cache_key"] in widget._volume_mask_preview_cache
+            )
+            widget._cancel_and_wait_volume_preview_build()
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+
+    def test_stale_background_volume_preview_result_is_ignored(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+        try:
+            widget._volume_canvas_renderer = "gpu"
+            widget._volume_render_mode = "still"
+            widget.display_mode = "volume"
+            widget.image_volume = np.zeros((4, 16, 16), dtype=np.uint8)
+            request = widget._volume_preview_request("still")
+            stale_preview = np.ones((4, 16, 16), dtype=np.uint8)
+
+            widget._volume_preview_pending_token = 7
+            widget._volume_preview_pending_key = request["cache_key"]
+            widget._on_volume_preview_build_finished(
+                {
+                    "token": 6,
+                    "preview": stale_preview,
+                    "volume_request": request,
+                    "build_ms": 12.0,
+                }
+            )
+
+            self.assertNotIn(request["cache_key"], widget._volume_preview_cache)
+            self.assertEqual(widget._volume_preview_pending_token, 7)
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+
+    def test_stale_background_volume_preview_cleanup_keeps_current_task(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+        try:
+            old_thread = object()
+            old_worker = object()
+            current_thread = object()
+            current_worker = object()
+            widget._volume_preview_build_thread = current_thread
+            widget._volume_preview_build_worker = current_worker
+
+            widget._cleanup_volume_preview_build_thread(old_thread, old_worker)
+
+            self.assertIs(widget._volume_preview_build_thread, current_thread)
+            self.assertIs(widget._volume_preview_build_worker, current_worker)
+
+            widget._cleanup_volume_preview_build_thread(current_thread, current_worker)
+
+            self.assertIsNone(widget._volume_preview_build_thread)
+            self.assertIsNone(widget._volume_preview_build_worker)
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+
+    def test_background_volume_preview_busy_locks_rebuild_controls(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+        try:
+            widget.volume_quality_slider.setEnabled(True)
+            widget.volume_roi_inspect_check.setEnabled(True)
+            widget.volume_roi_scale_slider.setEnabled(False)
+            widget.specimen_list.setEnabled(True)
+
+            widget._set_volume_preview_build_controls_busy(True)
+
+            self.assertFalse(widget.volume_quality_slider.isEnabled())
+            self.assertFalse(widget.volume_roi_inspect_check.isEnabled())
+            self.assertFalse(widget.volume_roi_scale_slider.isEnabled())
+            self.assertFalse(widget.specimen_list.isEnabled())
+
+            widget._set_volume_preview_build_controls_busy(False)
+
+            self.assertTrue(widget.volume_quality_slider.isEnabled())
+            self.assertTrue(widget.volume_roi_inspect_check.isEnabled())
+            self.assertFalse(widget.volume_roi_scale_slider.isEnabled())
+            self.assertTrue(widget.specimen_list.isEnabled())
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+
     def test_volume_enhancement_and_clip_plane_are_passed_to_gpu_state(self):
         manager = TifProjectManager()
         widget = TifWorkbenchWidget(manager, "en")
@@ -2955,6 +4346,10 @@ class TifWorkbenchTests(unittest.TestCase):
             state = fake_canvas.render_state_kwargs[-1]
             self.assertAlmostEqual(state["enhancement"], 0.8)
             self.assertAlmostEqual(state["tone_gamma"], 0.9)
+            self.assertEqual(state["shader_quality_mode"], "preset")
+            self.assertEqual(state["jitter_strength"], 0.0)
+            self.assertEqual(state["adaptive_step_strength"], 0.0)
+            self.assertEqual(state["gradient_opacity"], 0.0)
             self.assertTrue(state["surface_refine"])
             self.assertTrue(state["clip_plane_enabled"])
             self.assertAlmostEqual(state["clip_plane_depth"], 0.62)
@@ -2965,6 +4360,9 @@ class TifWorkbenchTests(unittest.TestCase):
             widget._volume_render_mode = "drag"
             widget.render_volume_preview()
             self.assertEqual(fake_canvas.render_state_kwargs[-1]["enhancement"], 0.0)
+            self.assertEqual(fake_canvas.render_state_kwargs[-1]["jitter_strength"], 0.0)
+            self.assertEqual(fake_canvas.render_state_kwargs[-1]["adaptive_step_strength"], 0.0)
+            self.assertEqual(fake_canvas.render_state_kwargs[-1]["gradient_opacity"], 0.0)
         finally:
             widget.close_project()
             widget.deleteLater()
@@ -3009,6 +4407,134 @@ class TifWorkbenchTests(unittest.TestCase):
             finally:
                 widget.close_project()
                 widget.deleteLater()
+
+    def test_tif_batch_import_worker_registers_multiple_stacks_metadata_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = TifProjectManager()
+            manager.create_project("batch_import", root / "batch_import")
+            tif_a = root / "a.tif"
+            tif_b = root / "b.tif"
+            tifffile.imwrite(tif_a, np.arange(2 * 5 * 6, dtype=np.uint16).reshape(2, 5, 6), photometric="minisblack")
+            tifffile.imwrite(tif_b, np.ones((3, 4, 5), dtype=np.uint8), photometric="minisblack")
+            worker = TifBatchImportWorker(
+                manager,
+                [
+                    {"tif_path": str(tif_a), "specimen_id": "specimen-a"},
+                    {"tif_path": str(tif_b), "specimen_id": "specimen-b"},
+                ],
+            )
+            finished = []
+            worker.finished.connect(finished.append)
+
+            worker.run()
+
+            self.assertEqual(len(finished), 1)
+            results = finished[0]["results"]
+            self.assertEqual([item["ok"] for item in results], [True, True])
+            for specimen_id in ("specimen-a", "specimen-b"):
+                specimen = manager.get_specimen(specimen_id)
+                self.assertIsNotNone(specimen)
+                self.assertEqual((specimen.get("metadata") or {}).get("import_status"), "metadata_only")
+                self.assertEqual((specimen.get("working_volume") or {}).get("path"), "")
+                self.assertEqual((specimen.get("working_volume") or {}).get("status"), "metadata_only")
+                self.assertFalse((specimen.get("labels") or {}).get("working_edit", {}).get("path"))
+
+    def test_tif_batch_import_worker_keeps_successes_when_one_stack_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = TifProjectManager()
+            manager.create_project("batch_partial", root / "batch_partial")
+            good_tif = root / "good.tif"
+            bad_tif = root / "bad.tif"
+            tifffile.imwrite(good_tif, np.ones((2, 4, 4), dtype=np.uint8), photometric="minisblack")
+            bad_tif.write_bytes(b"not a tif")
+            worker = TifBatchImportWorker(
+                manager,
+                [
+                    {"tif_path": str(bad_tif), "specimen_id": "bad"},
+                    {"tif_path": str(good_tif), "specimen_id": "good"},
+                ],
+            )
+            finished = []
+            worker.finished.connect(finished.append)
+
+            worker.run()
+
+            self.assertEqual(len(finished), 1)
+            results = finished[0]["results"]
+            self.assertEqual([item["ok"] for item in results], [False, True])
+            self.assertIsNone(manager.get_specimen("bad"))
+            self.assertIsNotNone(manager.get_specimen("good"))
+
+    def test_tif_materialize_worker_builds_working_volume_for_metadata_only_specimen(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = TifProjectManager()
+            manager.create_project("materialize", root / "materialize")
+            tif_path = root / "source.tif"
+            source = np.arange(2 * 4 * 5, dtype=np.uint8).reshape(2, 4, 5)
+            tifffile.imwrite(tif_path, source, photometric="minisblack")
+            batch = TifBatchImportWorker(manager, [{"tif_path": str(tif_path), "specimen_id": "specimen-meta"}])
+            batch_finished = []
+            batch.finished.connect(batch_finished.append)
+            batch.run()
+            self.assertEqual(manager.get_specimen("specimen-meta")["metadata"]["import_status"], "metadata_only")
+
+            worker = TifMaterializeWorker(manager, "specimen-meta")
+            finished = []
+            failed = []
+            progress = []
+            worker.finished.connect(finished.append)
+            worker.failed.connect(failed.append)
+            worker.progress.connect(lambda current, total, message: progress.append((current, total, message)))
+            worker.run()
+
+            self.assertEqual(failed, [])
+            self.assertEqual(len(finished), 1)
+            specimen = manager.get_specimen("specimen-meta")
+            self.assertEqual((specimen.get("metadata") or {}).get("import_status"), "materialized")
+            self.assertTrue((specimen.get("working_volume") or {}).get("path"))
+            self.assertFalse((specimen.get("labels") or {}).get("working_edit", {}).get("path"))
+            image_abs = manager.to_absolute(specimen["working_volume"]["path"])
+            np.testing.assert_array_equal(load_volume_sidecar(image_abs), source)
+            self.assertTrue(any("Reading" in item[2] or "Working volume ready" in item[2] for item in progress))
+
+    def test_tif_materialize_worker_does_not_delete_source_inside_specimen_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = TifProjectManager()
+            manager.create_project("materialize_internal", root / "materialize_internal")
+            manager.create_specimen_scaffold("specimen-meta")
+            tif_path = Path(manager.project_dir) / "specimens" / "specimen-meta" / "source" / "raw" / "source.tif"
+            source = np.arange(2 * 4 * 5, dtype=np.uint8).reshape(2, 4, 5)
+            tifffile.imwrite(tif_path, source, photometric="minisblack")
+            specimen = manager.get_specimen("specimen-meta")
+            specimen["source"]["raw_tif"] = str(tif_path)
+            specimen["metadata"].update(
+                {
+                    "import_status": "metadata_only",
+                    "source_tif": str(tif_path),
+                    "shape_zyx": [2, 4, 5],
+                    "dtype": "uint8",
+                }
+            )
+            specimen["working_volume"].update({"path": "", "shape_zyx": [2, 4, 5], "dtype": "uint8", "status": "metadata_only"})
+            manager.save_project()
+
+            worker = TifMaterializeWorker(manager, "specimen-meta")
+            finished = []
+            failed = []
+            worker.finished.connect(finished.append)
+            worker.failed.connect(failed.append)
+            worker.run()
+
+            self.assertEqual(failed, [])
+            self.assertEqual(len(finished), 1)
+            self.assertTrue(tif_path.exists())
+            specimen = manager.get_specimen("specimen-meta")
+            self.assertTrue((specimen.get("working_volume") or {}).get("path"))
+            np.testing.assert_array_equal(load_volume_sidecar(manager.to_absolute(specimen["working_volume"]["path"])), source)
 
     def test_tif_workbench_chinese_labels_cover_import_and_backend_controls(self):
         manager = TifProjectManager()

@@ -413,6 +413,9 @@ class BlinkExpertTrainer:
         )
 
     def _build_checkpoint_meta(self, target_size, epochs, batch_size, best_loss):
+        training_strategy = sanitize_blink_training_strategy(
+            getattr(self, "training_strategy", BLINK_STRATEGY_TRIVIEW_RANDOM)
+        )
         return {
             "kind": "blink_expert_locator",
             "part_name": self.part_name,
@@ -423,18 +426,22 @@ class BlinkExpertTrainer:
             "epochs": int(epochs),
             "batch_size": int(batch_size),
             "best_loss": float(best_loss),
-            "training_strategy": self.training_strategy,
+            "training_strategy": training_strategy,
             "created_at": datetime.now().isoformat(timespec="seconds"),
         }
 
     def write_manifest(self, save_path, target_size, dataset):
+        training_strategy = sanitize_blink_training_strategy(
+            getattr(self, "training_strategy", BLINK_STRATEGY_TRIVIEW_RANDOM)
+        )
         train_params = {
             "learning_rate": float(self.learning_rate),
             "weight_decay": float(self.weight_decay),
-            "training_strategy": self.training_strategy,
+            "training_strategy": training_strategy,
         }
-        if self.training_scope:
-            train_params["training_scope"] = dict(self.training_scope)
+        training_scope = getattr(self, "training_scope", {})
+        if training_scope:
+            train_params["training_scope"] = dict(training_scope)
         manifest_path, manifest = write_blink_expert_manifest(
             save_path,
             expert_backend=BLINK_EXPERT_BACKEND_VIT_B,

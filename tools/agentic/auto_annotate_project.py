@@ -276,6 +276,7 @@ def main() -> int:
     manager = ProjectManager()
     manager.load_project(project_path)
     manager.current_project_path = out_project
+    manager.enable_legacy_json_writes_for_compatibility(True)
 
     if args.run_engine:
         records = _run_engine_predictions(manager, float(args.confidence), only_new=bool(args.only_new), device=args.device)

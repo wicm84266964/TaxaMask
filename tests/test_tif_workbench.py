@@ -2852,7 +2852,7 @@ class TifWorkbenchTests(unittest.TestCase):
             widget.close_project()
             widget.deleteLater()
 
-    def test_volume_quality_change_releases_gpu_texture_cache_before_rebuild(self):
+    def test_volume_quality_change_keeps_gpu_texture_cache_before_budgeted_rebuild(self):
         manager = TifProjectManager()
         widget = TifWorkbenchWidget(manager, "en")
 
@@ -2888,7 +2888,7 @@ class TifWorkbenchTests(unittest.TestCase):
             widget.volume_quality_slider.setValue(4096)
             widget._commit_volume_quality_change()
 
-            self.assertEqual(fake_canvas.release_texture_cache_calls, 1)
+            self.assertEqual(fake_canvas.release_texture_cache_calls, 0)
             self.assertEqual(calls, [4096])
         finally:
             widget.close_project()
@@ -3911,6 +3911,289 @@ class TifWorkbenchTests(unittest.TestCase):
             widget.close_project()
             widget.deleteLater()
             fake_canvas.deleteLater()
+
+    def test_full_volume_still_preview_prefers_gpu_stream_build_before_cpu_preview(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+
+        class FakeGpuStreamCanvas(QLabel):
+            def __init__(self):
+                super().__init__()
+                self.build_calls = []
+                self.render_states = []
+                self.mask_uploads = []
+
+            def has_volume(self):
+                return bool(self.build_calls)
+
+            def build_volume_texture_from_source(self, volume, max_dim, **kwargs):
+                self.build_calls.append((volume, int(max_dim), dict(kwargs)))
+                return object()
+
+            def set_mask_data(self, mask, *args, **kwargs):
+                self.mask_uploads.append(mask)
+
+            def set_render_state(self, **kwargs):
+                self.render_states.append(dict(kwargs))
+
+            def render_stats(self):
+                return {"preview_provider": {"kind": "gpu_texture", "build_backend": "gpu_stream"}}
+
+        fake_canvas = FakeGpuStreamCanvas()
+        try:
+            widget._volume_canvas_renderer = "gpu"
+            widget._volume_canvas_created = True
+            widget._volume_render_mode = "still"
+            widget.display_mode = "volume"
+            widget.view_stack.addWidget(fake_canvas)
+            widget.volume_canvas = fake_canvas
+            widget.image_volume = np.zeros((4, 16, 16), dtype=np.uint8)
+            widget.image_volume[:, 4:12, 4:12] = 180
+
+            with patch("AntSleap.ui.tif_workbench.build_volume_preview") as cpu_builder:
+                widget.render_volume_preview()
+
+            cpu_builder.assert_not_called()
+            self.assertEqual(len(fake_canvas.build_calls), 1)
+            self.assertEqual(fake_canvas.build_calls[0][1], widget._active_volume_target_dim("still"))
+            self.assertEqual(fake_canvas.build_calls[0][2]["cache_key"], widget._volume_preview_request("still")["cache_key"])
+            self.assertEqual(fake_canvas.mask_uploads[-1], None)
+            self.assertEqual(fake_canvas.render_states[-1]["mask_mode"], "image_only")
+            self.assertEqual(widget._volume_last_stats["preview_provider"]["build_backend"], "gpu_stream")
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+            fake_canvas.deleteLater()
+
+    def test_roi_crop_preview_prefers_gpu_stream_build_before_cpu_preview(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+
+        class FakeGpuStreamCanvas(QLabel):
+            def __init__(self):
+                super().__init__()
+                self.build_calls = []
+                self.render_states = []
+                self.mask_uploads = []
+
+            def has_volume(self):
+                return bool(self.build_calls)
+
+            def build_volume_texture_from_source(self, volume, max_dim, **kwargs):
+                self.build_calls.append((volume, int(max_dim), dict(kwargs)))
+                return object()
+
+            def set_mask_data(self, mask, *args, **kwargs):
+                self.mask_uploads.append(mask)
+
+            def set_render_state(self, **kwargs):
+                self.render_states.append(dict(kwargs))
+
+            def render_stats(self):
+                return {"preview_provider": {"kind": "gpu_texture", "build_backend": "gpu_stream"}}
+
+        fake_canvas = FakeGpuStreamCanvas()
+        try:
+            widget._volume_canvas_renderer = "gpu"
+            widget._volume_canvas_created = True
+            widget._volume_render_mode = "still"
+            widget.display_mode = "volume"
+            widget.view_stack.addWidget(fake_canvas)
+            widget.volume_canvas = fake_canvas
+            widget.image_volume = np.zeros((6, 32, 32), dtype=np.uint16)
+            widget.part_bbox_edit.setText("1,5,8,24,10,26")
+            widget.volume_roi_detail_check.setChecked(True)
+            widget.volume_roi_source_combo.setCurrentIndex(widget.volume_roi_source_combo.findData("current_bbox"))
+            widget.volume_roi_inspect_check.setChecked(True)
+            fake_canvas.build_calls.clear()
+            fake_canvas.render_states.clear()
+            fake_canvas.mask_uploads.clear()
+
+            with patch("AntSleap.ui.tif_workbench.build_roi_volume_preview") as cpu_roi_builder:
+                widget.render_volume_preview()
+
+            cpu_roi_builder.assert_not_called()
+            self.assertEqual(len(fake_canvas.build_calls), 1)
+            self.assertEqual(tuple(fake_canvas.build_calls[0][0].shape), (4, 16, 16))
+            self.assertEqual(fake_canvas.build_calls[0][2]["cache_key"], widget._volume_preview_request("still")["cache_key"])
+            self.assertEqual(fake_canvas.render_states[-1]["mask_mode"], "image_only")
+            self.assertEqual(widget._volume_roi_preview_source_shape, (4, 16, 16))
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+            fake_canvas.deleteLater()
+
+    def test_part_local_detail_preview_prefers_gpu_stream_build_before_cpu_preview(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+
+        class FakeGpuStreamCanvas(QLabel):
+            def __init__(self):
+                super().__init__()
+                self.build_calls = []
+                self.mask_build_calls = []
+                self.mask_uploads = []
+                self.render_states = []
+
+            def has_volume(self):
+                return bool(self.build_calls)
+
+            def build_volume_texture_from_source(self, volume, max_dim, **kwargs):
+                self.build_calls.append((volume, int(max_dim), dict(kwargs)))
+                return object()
+
+            def build_mask_texture_from_source(self, mask, max_dim, **kwargs):
+                self.mask_build_calls.append((mask, int(max_dim), dict(kwargs)))
+                return True
+
+            def set_mask_data(self, mask, *args, **kwargs):
+                self.mask_uploads.append(mask)
+
+            def set_render_state(self, **kwargs):
+                self.render_states.append(dict(kwargs))
+
+            def render_stats(self):
+                return {"preview_provider": {"kind": "gpu_texture", "build_backend": "gpu_stream"}}
+
+        fake_canvas = FakeGpuStreamCanvas()
+        try:
+            widget._volume_canvas_renderer = "gpu"
+            widget._volume_canvas_created = True
+            widget._volume_render_mode = "still"
+            widget.current_volume_scope = "part"
+            widget.display_mode = "volume"
+            widget.view_stack.addWidget(fake_canvas)
+            widget.volume_canvas = fake_canvas
+            widget.image_volume = np.zeros((4, 32, 32), dtype=np.uint8)
+            widget.part_preview_mask = np.zeros((4, 32, 32), dtype=np.uint8)
+            widget.part_preview_mask[:, 8:24, 8:24] = 1
+            widget.volume_clarity_check.setChecked(True)
+            widget.volume_mask_combo.setCurrentIndex(widget.volume_mask_combo.findData("masked_image"))
+            fake_canvas.build_calls.clear()
+            fake_canvas.mask_build_calls.clear()
+            fake_canvas.render_states.clear()
+            fake_canvas.mask_uploads.clear()
+
+            with patch("AntSleap.ui.tif_workbench.build_volume_preview") as cpu_builder, \
+                patch("AntSleap.ui.tif_workbench.build_mask_preview") as cpu_mask_builder:
+                widget.render_volume_preview()
+
+            cpu_builder.assert_not_called()
+            cpu_mask_builder.assert_not_called()
+            self.assertEqual(len(fake_canvas.build_calls), 1)
+            self.assertEqual(len(fake_canvas.mask_build_calls), 1)
+            self.assertEqual(tuple(fake_canvas.build_calls[0][0].shape), (4, 32, 32))
+            self.assertEqual(tuple(fake_canvas.mask_build_calls[0][0].shape), (4, 32, 32))
+            self.assertEqual(fake_canvas.mask_build_calls[0][2]["cache_key"], widget._volume_mask_preview_request("still")["cache_key"])
+            self.assertEqual(fake_canvas.mask_uploads, [])
+            self.assertEqual(fake_canvas.render_states[-1]["mask_mode"], "masked_image")
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+            fake_canvas.deleteLater()
+
+    def test_gpu_mask_source_for_roi_request_uses_roi_crop(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+        try:
+            widget.current_volume_scope = "part"
+            widget.image_volume = np.zeros((6, 32, 32), dtype=np.uint8)
+            widget.part_preview_mask = np.arange(6 * 32 * 32, dtype=np.uint16).reshape((6, 32, 32))
+            request = {"roi_bbox": ((1, 5), (8, 24), (10, 26))}
+
+            source, source_shape, normalized = widget._gpu_mask_source_for_request(request)
+
+            self.assertEqual(source_shape, (4, 16, 16))
+            self.assertEqual(normalized, ((1, 5), (8, 24), (10, 26)))
+            self.assertEqual(tuple(source.shape), (4, 16, 16))
+            self.assertEqual(int(source[0, 0, 0]), int(widget.part_preview_mask[1, 8, 10]))
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+
+    def test_gpu_stream_degradation_is_reported_without_extra_panel(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+        try:
+            widget._volume_canvas_renderer = "gpu"
+            widget.display_mode = "volume"
+            widget.image_volume = np.zeros((4, 16, 16), dtype=np.uint8)
+            widget._volume_last_stats = {
+                "shape_zyx": (128, 128, 128),
+                "dtype": "uint16",
+                "bytes": 128 * 128 * 128 * 2,
+                "gpu_stream_build": {
+                    "degraded": True,
+                    "degrade_reason": "texture_budget",
+                    "requested_max_dim": 512,
+                    "actual_max_dim": 128,
+                },
+            }
+
+            summary = widget._volume_status_summary_text()
+            details = widget._volume_stats_text()
+            report = widget.volume_performance_report()
+
+            self.assertIn("GPU budget 128/512", summary)
+            self.assertIn("GPU budget auto-scaled preview 128/512", details)
+            self.assertTrue(report["gpu_stream_degraded"])
+            self.assertEqual(report["gpu_stream_build"]["degrade_reason"], "texture_budget")
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+
+    def test_volume_quality_commit_keeps_gpu_texture_cache_for_budgeted_reuse(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+
+        class FakeGpuCanvas(QLabel):
+            def __init__(self):
+                super().__init__()
+                self.release_calls = 0
+
+            def release_texture_cache(self):
+                self.release_calls += 1
+
+            def render_stats(self):
+                return {"texture_cache_entries": 2}
+
+        fake_canvas = FakeGpuCanvas()
+        try:
+            widget._volume_canvas_renderer = "gpu"
+            widget._volume_canvas_created = True
+            widget.display_mode = "slice"
+            widget.view_stack.addWidget(fake_canvas)
+            widget.volume_canvas = fake_canvas
+            widget.image_volume = np.zeros((4, 16, 16), dtype=np.uint8)
+            widget._volume_quality_committed_value = 512
+            widget.volume_quality_slider.setValue(1024)
+
+            with patch.object(widget, "_refresh_volume_preview") as refresh:
+                widget._commit_volume_quality_change()
+
+            self.assertEqual(fake_canvas.release_calls, 0)
+            refresh.assert_called_once()
+            self.assertEqual(widget._volume_quality_committed_value, 1024)
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+            fake_canvas.deleteLater()
+
+    def test_gpu_stream_degradation_reduces_preview_cache_owner_limit(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+        try:
+            widget._volume_canvas_renderer = "gpu"
+            widget.volume_quality_slider.setValue(1024)
+
+            self.assertEqual(widget._volume_cache_owner_limit(), 3)
+
+            widget._volume_last_stats = {"gpu_stream_build": {"degraded": True}}
+
+            self.assertEqual(widget._volume_cache_owner_limit(), 1)
+        finally:
+            widget.close_project()
+            widget.deleteLater()
 
     def test_large_volume_mask_preview_can_run_in_background_with_status(self):
         manager = TifProjectManager()

@@ -6,6 +6,7 @@ import math
 import os
 import time
 from collections import OrderedDict
+from dataclasses import dataclass
 
 os.environ.setdefault("__NV_PRIME_RENDER_OFFLOAD", "1")
 os.environ.setdefault("__GLX_VENDOR_LIBRARY_NAME", "nvidia")
@@ -22,7 +23,7 @@ except ModuleNotFoundError as exc:
 GPU_VOLUME_MAX_TEXTURE_DIM = 4096
 GPU_VOLUME_MAX_RAY_STEPS = 4096
 GPU_VOLUME_TRANSFER_LUT_SIZE = 256
-GPU_VOLUME_TEXTURE_CACHE_DEFAULT_BUDGET_BYTES = 2 * 1024 * 1024 * 1024
+GPU_VOLUME_TEXTURE_CACHE_DEFAULT_BUDGET_BYTES = 5 * 1024 * 1024 * 1024
 GPU_VOLUME_RENDER_MODES = {
     "composite": 0,
     "mip": 1,
@@ -35,6 +36,83 @@ GPU_VOLUME_MASK_MODES = {
     "mask_boundary": 1,
     "masked_image": 2,
 }
+GPU_PREVIEW_BUILD_BACKEND_UNAVAILABLE = "unavailable"
+GPU_PREVIEW_BUILD_BACKEND_FRAGMENT = "fragment"
+GPU_PREVIEW_BUILD_BACKEND_COMPUTE = "compute"
+GPU_VOLUME_STREAM_BUILD_DEFAULT_STAGING_BYTES = 128 * 1024 * 1024
+GPU_VOLUME_STREAM_BUILD_MIN_DIM = 128
+GPU_VOLUME_COMPUTE_LOCAL_SIZE = (8, 8, 4)
+
+_COMPUTE_COPY_SHADER_TEMPLATE = """
+#version 430
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 4) in;
+
+uniform sampler3D u_source;
+uniform ivec3 u_source_shape;
+uniform ivec3 u_target_slab_shape;
+uniform ivec3 u_factors;
+uniform int u_algorithm;
+uniform int u_apply_window;
+uniform vec2 u_window;
+uniform int u_z_offset;
+
+layout(__IMAGE_FORMAT__, binding = 0) writeonly uniform image3D u_dest;
+
+float normalized_output(float value)
+{
+    if (u_apply_window == 0) {
+        return clamp(value, 0.0, 1.0);
+    }
+    float width = max(u_window.y - u_window.x, 0.000001);
+    return clamp((value - u_window.x) / width, 0.0, 1.0);
+}
+
+void main()
+{
+    ivec3 local_pos = ivec3(gl_GlobalInvocationID.xyz);
+    if (
+        local_pos.x >= u_target_slab_shape.x ||
+        local_pos.y >= u_target_slab_shape.y ||
+        local_pos.z >= u_target_slab_shape.z
+    ) {
+        return;
+    }
+    ivec3 block_start = ivec3(local_pos.x * u_factors.x, local_pos.y * u_factors.y, local_pos.z * u_factors.z);
+    ivec3 block_end = min(block_start + u_factors, u_source_shape);
+    block_start = clamp(block_start, ivec3(0), max(u_source_shape - ivec3(1), ivec3(0)));
+    block_end = max(block_end, block_start + ivec3(1));
+
+    float value = 0.0;
+    if (u_algorithm == 0) {
+        value = texelFetch(u_source, block_start, 0).r;
+    } else {
+        float sum_value = 0.0;
+        float max_value = 0.0;
+        int sample_count = 0;
+        for (int z = block_start.z; z < block_end.z; ++z) {
+            for (int y = block_start.y; y < block_end.y; ++y) {
+                for (int x = block_start.x; x < block_end.x; ++x) {
+                    float sample_value = texelFetch(u_source, ivec3(x, y, z), 0).r;
+                    sum_value += sample_value;
+                    max_value = max(max_value, sample_value);
+                    sample_count += 1;
+                }
+            }
+        }
+        float mean_value = sum_value / float(max(sample_count, 1));
+        if (u_algorithm == 1) {
+            value = mean_value;
+        } else if (u_algorithm == 2) {
+            value = max_value;
+        } else {
+            value = mean_value * 0.65 + max_value * 0.35;
+        }
+    }
+    value = normalized_output(value);
+    imageStore(u_dest, ivec3(local_pos.x, local_pos.y, local_pos.z + u_z_offset), vec4(value, 0.0, 0.0, 1.0));
+}
+"""
 
 def _gpu_texture_cache_budget_bytes():
     value = os.environ.get("TAXAMASK_TIF_GPU_TEXTURE_CACHE_GB", "").strip()
@@ -633,6 +711,405 @@ def _decode_gl_string(value):
     return str(value)
 
 
+def _parse_gl_version(value):
+    text = _decode_gl_string(value)
+    is_es = "OpenGL ES" in text
+    parts = text.replace("OpenGL ES", "").replace("OpenGL", "").strip().split()
+    if not parts:
+        return (0, 0, False)
+    version = parts[0].split(".")
+    try:
+        major = int(version[0])
+        minor = int(version[1]) if len(version) > 1 else 0
+    except (TypeError, ValueError):
+        return (0, 0, False)
+    return (major, minor, is_es)
+
+
+def _gl_integer(gl_module, name, default=0):
+    try:
+        value = gl_module.glGetIntegerv(name)
+    except Exception:
+        return default
+    try:
+        if isinstance(value, (list, tuple)):
+            return int(value[0]) if value else default
+        if hasattr(value, "flat"):
+            return int(value.flat[0]) if value.size else default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _gl_integer_tuple(gl_module, name, count=3):
+    try:
+        value = gl_module.glGetIntegerv(name)
+    except Exception:
+        return tuple(0 for _ in range(int(count)))
+    try:
+        if hasattr(value, "flat"):
+            values = [int(item) for item in value.flat]
+        elif isinstance(value, (list, tuple)):
+            values = [int(item) for item in value]
+        else:
+            values = [int(value)]
+    except (TypeError, ValueError):
+        values = []
+    values = values[: int(count)]
+    while len(values) < int(count):
+        values.append(0)
+    return tuple(values)
+
+
+def _gl_extensions(gl_module):
+    try:
+        return _decode_gl_string(gl_module.glGetString(gl_module.GL_EXTENSIONS))
+    except Exception:
+        return ""
+
+
+def _gl_has_extension(extensions, name):
+    return str(name) in set(str(extensions or "").split())
+
+
+@dataclass(frozen=True)
+class GpuPreviewBuildCapabilities:
+    available: bool = False
+    backend: str = GPU_PREVIEW_BUILD_BACKEND_UNAVAILABLE
+    reason: str = ""
+    vendor: str = ""
+    renderer: str = ""
+    version: str = ""
+    max_3d_texture_size: int = 0
+    max_compute_work_group_count: tuple = (0, 0, 0)
+    max_compute_work_group_size: tuple = (0, 0, 0)
+    supports_compute_shader: bool = False
+    supports_image_load_store: bool = False
+    supports_r16_texture: bool = False
+    supports_fence_sync: bool = False
+
+    def to_stats(self):
+        return {
+            "available": bool(self.available),
+            "backend": str(self.backend),
+            "reason": str(self.reason),
+            "vendor": str(self.vendor),
+            "renderer": str(self.renderer),
+            "version": str(self.version),
+            "max_3d_texture_size": int(self.max_3d_texture_size),
+            "max_compute_work_group_count": tuple(int(value) for value in self.max_compute_work_group_count),
+            "max_compute_work_group_size": tuple(int(value) for value in self.max_compute_work_group_size),
+            "supports_compute_shader": bool(self.supports_compute_shader),
+            "supports_image_load_store": bool(self.supports_image_load_store),
+            "supports_r16_texture": bool(self.supports_r16_texture),
+            "supports_fence_sync": bool(self.supports_fence_sync),
+        }
+
+
+@dataclass(frozen=True)
+class VolumePreviewTextureProvider:
+    kind: str
+    cache_key: object = None
+    shape_zyx: tuple = ()
+    dtype: str = ""
+    source_shape_zyx: tuple = ()
+    spacing_zyx: tuple = ()
+    texture_id: int = 0
+    cpu_volume: object = None
+    build_backend: str = "cpu"
+    estimated_bytes: int = 0
+
+    @property
+    def is_gpu_texture(self):
+        return self.kind == "gpu_texture" and int(self.texture_id or 0) > 0
+
+    @property
+    def requires_upload(self):
+        return self.kind == "cpu_array" and self.cpu_volume is not None
+
+    def to_stats(self):
+        return {
+            "kind": str(self.kind),
+            "shape_zyx": tuple(int(value) for value in self.shape_zyx),
+            "dtype": str(self.dtype),
+            "source_shape_zyx": tuple(int(value) for value in self.source_shape_zyx),
+            "build_backend": str(self.build_backend),
+            "estimated_bytes": int(self.estimated_bytes or 0),
+            "is_gpu_texture": bool(self.is_gpu_texture),
+            "requires_upload": bool(self.requires_upload),
+        }
+
+
+def cpu_volume_preview_provider(volume, source_shape=None, spacing_zyx=None, cache_key=None, build_backend="cpu"):
+    source = np.asarray(volume) if volume is not None else None
+    shape = tuple(int(value) for value in getattr(source, "shape", ()) or ())
+    dtype = str(getattr(source, "dtype", "") or "")
+    estimated_bytes = int(getattr(source, "nbytes", 0) or 0)
+    return VolumePreviewTextureProvider(
+        kind="cpu_array",
+        cache_key=cache_key,
+        shape_zyx=shape,
+        dtype=dtype,
+        source_shape_zyx=tuple(int(value) for value in (source_shape or shape)),
+        spacing_zyx=tuple(float(value) for value in (spacing_zyx or ())),
+        cpu_volume=volume,
+        build_backend=str(build_backend or "cpu"),
+        estimated_bytes=estimated_bytes,
+    )
+
+
+def gpu_texture_preview_provider(texture_id, shape_zyx, dtype, source_shape=None, spacing_zyx=None, cache_key=None, build_backend="gpu"):
+    dtype_text = str(dtype or "")
+    shape = tuple(int(value) for value in (shape_zyx or ()))
+    bytes_per_voxel = 2 if dtype_text in {"uint16", "GL_R16", "r16"} else 1
+    estimated_bytes = int(np.prod(shape)) * int(bytes_per_voxel) if len(shape) == 3 else 0
+    return VolumePreviewTextureProvider(
+        kind="gpu_texture",
+        cache_key=cache_key,
+        shape_zyx=shape,
+        dtype=dtype_text,
+        source_shape_zyx=tuple(int(value) for value in (source_shape or shape)),
+        spacing_zyx=tuple(float(value) for value in (spacing_zyx or ())),
+        texture_id=int(texture_id or 0),
+        build_backend=str(build_backend or "gpu"),
+        estimated_bytes=estimated_bytes,
+    )
+
+
+def _gl_has_attrs(gl_module, names):
+    return gl_module is not None and all(hasattr(gl_module, name) for name in names)
+
+
+def _volume_texture_format(dtype, gl_module=None):
+    gl_module = gl_module or GL
+    is_uint16 = np.dtype(dtype) == np.uint16
+    if is_uint16:
+        if _gl_has_attrs(gl_module, ("GL_R16", "GL_RED", "GL_UNSIGNED_SHORT")):
+            return gl_module.GL_R16, gl_module.GL_RED, gl_module.GL_UNSIGNED_SHORT, "r16"
+        return gl_module.GL_LUMINANCE16, gl_module.GL_LUMINANCE, gl_module.GL_UNSIGNED_SHORT, "luminance16"
+    if _gl_has_attrs(gl_module, ("GL_R8", "GL_RED", "GL_UNSIGNED_BYTE")):
+        return gl_module.GL_R8, gl_module.GL_RED, gl_module.GL_UNSIGNED_BYTE, "r8"
+    return gl_module.GL_LUMINANCE, gl_module.GL_LUMINANCE, gl_module.GL_UNSIGNED_BYTE, "luminance8"
+
+
+def _compute_image_format_layout(texture_format_name):
+    name = str(texture_format_name or "").lower()
+    if name == "r16":
+        return "r16"
+    if name == "r8":
+        return "r8"
+    return ""
+
+
+def _preview_factors_for_shape(shape_zyx, max_dim):
+    limit = max(1, int(max_dim))
+    return tuple(max(1, int(math.ceil(int(size) / float(limit)))) for size in shape_zyx)
+
+
+def _preview_shape_for_factors(shape_zyx, factors_zyx):
+    return tuple(int(math.ceil(int(size) / float(max(1, int(factor))))) for size, factor in zip(shape_zyx, factors_zyx))
+
+
+def _preview_shape_bytes(shape_zyx, bytes_per_voxel):
+    if len(shape_zyx) != 3 or min(tuple(int(value) for value in shape_zyx)) <= 0:
+        return 0
+    return int(np.prod(tuple(int(value) for value in shape_zyx))) * int(max(1, bytes_per_voxel))
+
+
+def _budget_limited_preview_shape(shape_zyx, requested_max_dim, bytes_per_voxel, budget_bytes, max_texture_dim):
+    source_shape = tuple(int(value) for value in shape_zyx)
+    requested_limit = max(1, int(requested_max_dim))
+    gl_limit = int(max_texture_dim or requested_limit)
+    limit = max(1, min(requested_limit, gl_limit))
+    budget = int(max(0, budget_bytes or 0))
+    factors = _preview_factors_for_shape(source_shape, limit)
+    target_shape = _preview_shape_for_factors(source_shape, factors)
+    target_bytes = _preview_shape_bytes(target_shape, bytes_per_voxel)
+    degrade_reason = ""
+    if budget > 0 and target_bytes > budget:
+        degrade_reason = "texture_budget"
+        while limit > GPU_VOLUME_STREAM_BUILD_MIN_DIM:
+            limit = max(GPU_VOLUME_STREAM_BUILD_MIN_DIM, int(math.floor(limit * 0.85)))
+            factors = _preview_factors_for_shape(source_shape, limit)
+            target_shape = _preview_shape_for_factors(source_shape, factors)
+            target_bytes = _preview_shape_bytes(target_shape, bytes_per_voxel)
+            if target_bytes <= budget:
+                break
+        if target_bytes > budget and limit > 1:
+            voxel_budget = max(1, int(budget / max(1, bytes_per_voxel)))
+            scale = max(1.0, (float(np.prod(source_shape)) / float(voxel_budget)) ** (1.0 / 3.0))
+            limit = max(1, min(limit, int(math.floor(max(source_shape) / scale))))
+            factors = _preview_factors_for_shape(source_shape, limit)
+            target_shape = _preview_shape_for_factors(source_shape, factors)
+            target_bytes = _preview_shape_bytes(target_shape, bytes_per_voxel)
+    return {
+        "requested_max_dim": int(requested_limit),
+        "target_max_dim": int(limit),
+        "factors": tuple(int(value) for value in factors),
+        "shape": tuple(int(value) for value in target_shape),
+        "bytes": int(target_bytes),
+        "degraded": bool(limit < requested_limit or bool(degrade_reason)),
+        "degrade_reason": degrade_reason,
+    }
+
+
+def _sample_intensity_window_for_gpu_upload(array, max_samples=1_000_000):
+    source = np.asarray(array)
+    if source.size <= 0:
+        return 0.0, 0.0
+    step = max(1, int(math.ceil((float(source.size) / float(max_samples)) ** (1.0 / max(source.ndim, 1)))))
+    if source.ndim == 3:
+        sample = np.asarray(source[::step, ::step, ::step], dtype=np.float32).reshape(-1)
+    else:
+        sample = np.asarray(source.reshape(-1)[::step], dtype=np.float32)
+    finite = sample[np.isfinite(sample)]
+    if finite.size == 0:
+        return 0.0, 0.0
+    low = float(np.percentile(finite, 1.0))
+    high = float(np.percentile(finite, 99.5))
+    if high <= low:
+        low = float(np.min(finite))
+        high = float(np.max(finite))
+    return low, high
+
+
+def _reduceat_starts(length, factor):
+    return np.arange(0, int(length), max(1, int(factor)), dtype=np.int64)
+
+
+def _downsample_source_to_upload_slab(source, factors, target_shape, oz0, oz1, algorithm, preserve_source, intensity_window):
+    zf, yf, xf = tuple(max(1, int(value)) for value in factors)
+    z_count, y_count, x_count = tuple(int(value) for value in target_shape)
+    algorithm = str(algorithm or "hybrid").lower()
+    if algorithm not in {"stride", "mean", "max", "hybrid"}:
+        algorithm = "hybrid"
+    preserve = bool(preserve_source and np.dtype(source.dtype) == np.uint16)
+    upload_dtype = np.uint16 if preserve else np.uint8
+    result = np.empty((int(oz1) - int(oz0), y_count, x_count), dtype=np.float32 if not preserve else np.uint16)
+    x_starts = _reduceat_starts(source.shape[2], xf)[:x_count]
+    tail_count = int(source.shape[2] - int(x_starts[-1])) if len(x_starts) else 0
+    tail_scale = float(xf) / float(tail_count) if tail_count > 0 and tail_count != xf else 1.0
+    for out_index, oz in enumerate(range(int(oz0), int(oz1))):
+        z0 = min(int(source.shape[0]), int(oz) * zf)
+        z1 = min(int(source.shape[0]), z0 + zf)
+        if algorithm == "stride":
+            plane = np.asarray(source[z0, ::yf, ::xf])[:y_count, :x_count]
+            result[out_index] = plane
+            continue
+        for oy, y0 in enumerate(range(0, int(source.shape[1]), yf)):
+            if oy >= y_count:
+                break
+            y1 = min(int(source.shape[1]), y0 + yf)
+            if algorithm == "max":
+                block = np.asarray(source[z0:z1, y0:y1])
+                row = np.maximum.reduceat(block, x_starts, axis=2).max(axis=(0, 1))
+            else:
+                block = np.asarray(source[z0:z1, y0:y1], dtype=np.float32)
+                mean_row = np.add.reduceat(block, x_starts, axis=2).sum(axis=(0, 1)) / float((z1 - z0) * (y1 - y0) * xf)
+                if tail_scale != 1.0:
+                    mean_row[-1] *= tail_scale
+                if algorithm == "mean":
+                    row = mean_row
+                else:
+                    max_row = np.maximum.reduceat(block, x_starts, axis=2).max(axis=(0, 1))
+                    row = mean_row * 0.65 + max_row * 0.35
+            result[out_index, oy] = row[:x_count]
+    if preserve:
+        return np.ascontiguousarray(np.clip(np.rint(result), 0, np.iinfo(upload_dtype).max).astype(upload_dtype))
+    if np.dtype(source.dtype) == np.uint8 and algorithm == "stride":
+        return np.ascontiguousarray(np.clip(np.rint(result), 0, 255).astype(np.uint8))
+    low, high = (float(intensity_window[0]), float(intensity_window[1]))
+    if high <= low:
+        return np.zeros(result.shape, dtype=np.uint8)
+    scale = 255.0 / max(high - low, 1e-6)
+    return np.ascontiguousarray(np.clip((result - low) * scale, 0.0, 255.0).astype(np.uint8))
+
+
+def _downsample_mask_to_upload_slab(source, factors, target_shape, oz0, oz1, algorithm="occupancy"):
+    zf, yf, xf = tuple(max(1, int(value)) for value in factors)
+    z_count, y_count, x_count = tuple(int(value) for value in target_shape)
+    algorithm = str(algorithm or "occupancy").lower()
+    result = np.zeros((int(oz1) - int(oz0), y_count, x_count), dtype=np.uint8)
+    for out_index, oz in enumerate(range(int(oz0), int(oz1))):
+        z0 = min(int(source.shape[0]), int(oz) * zf)
+        z1 = min(int(source.shape[0]), z0 + zf)
+        if algorithm == "nearest":
+            plane = np.asarray(source[z0, ::yf, ::xf])[:y_count, :x_count]
+            result[out_index] = np.where(plane > 0, 255, 0).astype(np.uint8, copy=False)
+            continue
+        for oy, y0 in enumerate(range(0, int(source.shape[1]), yf)):
+            if oy >= y_count:
+                break
+            y1 = min(int(source.shape[1]), y0 + yf)
+            for ox, x0 in enumerate(range(0, int(source.shape[2]), xf)):
+                if ox >= x_count:
+                    break
+                x1 = min(int(source.shape[2]), x0 + xf)
+                if np.any(np.asarray(source[z0:z1, y0:y1, x0:x1]) > 0):
+                    result[out_index, oy, ox] = 255
+    return np.ascontiguousarray(result)
+
+
+def probe_gpu_preview_build_capabilities(gl_module=None):
+    gl_module = gl_module or GL
+    if gl_module is None:
+        return GpuPreviewBuildCapabilities(reason=f"PyOpenGL is unavailable: {_PYOPENGL_IMPORT_ERROR}")
+    try:
+        vendor = _decode_gl_string(gl_module.glGetString(gl_module.GL_VENDOR))
+        renderer = _decode_gl_string(gl_module.glGetString(gl_module.GL_RENDERER))
+        version = _decode_gl_string(gl_module.glGetString(gl_module.GL_VERSION))
+    except Exception as exc:
+        return GpuPreviewBuildCapabilities(reason=f"OpenGL capability probe failed: {exc}")
+    if not version:
+        return GpuPreviewBuildCapabilities(reason="OpenGL capability probe needs a current context")
+    major, minor, is_es = _parse_gl_version(version)
+    extensions = _gl_extensions(gl_module)
+    max_3d = _gl_integer(gl_module, getattr(gl_module, "GL_MAX_3D_TEXTURE_SIZE", 0), 0)
+    compute_count = _gl_integer_tuple(gl_module, getattr(gl_module, "GL_MAX_COMPUTE_WORK_GROUP_COUNT", 0), 3)
+    compute_size = _gl_integer_tuple(gl_module, getattr(gl_module, "GL_MAX_COMPUTE_WORK_GROUP_SIZE", 0), 3)
+    supports_compute = (
+        (major, minor) >= (4, 3)
+        or (is_es and (major, minor) >= (3, 1))
+        or _gl_has_extension(extensions, "GL_ARB_compute_shader")
+    ) and hasattr(gl_module, "glDispatchCompute")
+    supports_image = (
+        (major, minor) >= (4, 2)
+        or _gl_has_extension(extensions, "GL_ARB_shader_image_load_store")
+    )
+    supports_r16 = all(hasattr(gl_module, name) for name in ("GL_R16", "GL_RED", "GL_UNSIGNED_SHORT"))
+    supports_fence = (
+        (major, minor) >= (3, 2)
+        or _gl_has_extension(extensions, "GL_ARB_sync")
+    ) and hasattr(gl_module, "glFenceSync")
+    if max_3d <= 0:
+        backend = GPU_PREVIEW_BUILD_BACKEND_UNAVAILABLE
+        reason = "3D texture support was not reported by the current OpenGL context"
+        available = False
+    elif supports_compute and supports_image and supports_r16:
+        backend = GPU_PREVIEW_BUILD_BACKEND_COMPUTE
+        reason = ""
+        available = True
+    else:
+        backend = GPU_PREVIEW_BUILD_BACKEND_FRAGMENT
+        reason = "Compute preview build is unavailable; fragment fallback may be used"
+        available = True
+    return GpuPreviewBuildCapabilities(
+        available=available,
+        backend=backend,
+        reason=reason,
+        vendor=vendor,
+        renderer=renderer,
+        version=version,
+        max_3d_texture_size=max_3d,
+        max_compute_work_group_count=compute_count,
+        max_compute_work_group_size=compute_size,
+        supports_compute_shader=supports_compute,
+        supports_image_load_store=supports_image,
+        supports_r16_texture=supports_r16,
+        supports_fence_sync=supports_fence,
+    )
+
+
 def _compact_renderer_text(value):
     text = " ".join(str(value or "").split())
     if not text:
@@ -833,6 +1310,21 @@ def _link_program(vertex_source, fragment_source):
     return program
 
 
+def _link_compute_program(compute_source):
+    if not hasattr(GL, "GL_COMPUTE_SHADER"):
+        raise RuntimeError("OpenGL compute shader enum is unavailable")
+    compute = _compile_shader(compute_source, GL.GL_COMPUTE_SHADER)
+    program = GL.glCreateProgram()
+    GL.glAttachShader(program, compute)
+    GL.glLinkProgram(program)
+    GL.glDeleteShader(compute)
+    if not GL.glGetProgramiv(program, GL.GL_LINK_STATUS):
+        log = _program_log(program)
+        GL.glDeleteProgram(program)
+        raise RuntimeError(log or "OpenGL compute shader link failed")
+    return program
+
+
 def _rotation_inverse_matrix(yaw_degrees, pitch_degrees):
     yaw = math.radians(float(yaw_degrees))
     pitch = math.radians(float(pitch_degrees))
@@ -897,6 +1389,9 @@ class _GpuVolumeRenderCore:
         self._texture_cache_hits = 0
         self._texture_cache_misses = 0
         self._texture_cache_budget_bytes = _gpu_texture_cache_budget_bytes()
+        self._preview_build_capabilities = GpuPreviewBuildCapabilities(reason="GPU preview build capability has not been probed")
+        self._preview_texture_provider = None
+        self._preview_stream_build_stats = {}
         self._transfer_lut_texture_id = None
         self._transfer_lut_data = build_volume_transfer_lut()
         self._transfer_lut_upload_needed = True
@@ -953,6 +1448,17 @@ class _GpuVolumeRenderCore:
             self._source_spacing = next_spacing if len(next_spacing) == 3 and min(next_spacing) > 0 else ()
             self._volume_data = np.asarray(volume)
             self._upload_needed = False
+            self._set_preview_texture_provider(
+                gpu_texture_preview_provider(
+                    self._texture_id,
+                    self._volume_shape,
+                    self._uploaded_dtype,
+                    source_shape=self._source_shape,
+                    spacing_zyx=self._source_spacing,
+                    cache_key=cache_key,
+                    build_backend="gpu_cache",
+                )
+            )
             return True
         source = np.asarray(volume)
         if source.dtype == np.uint16:
@@ -980,7 +1486,27 @@ class _GpuVolumeRenderCore:
             self._volume_cache_key = cache_key
         self._source_shape = next_source_shape
         self._source_spacing = next_spacing
+        self._set_preview_texture_provider(
+            cpu_volume_preview_provider(
+                array,
+                source_shape=next_source_shape,
+                spacing_zyx=next_spacing,
+                cache_key=cache_key,
+                build_backend="cpu",
+            )
+        )
         return True
+
+    def _set_preview_texture_provider(self, provider):
+        self._preview_texture_provider = provider
+
+    def _preview_provider_stats(self):
+        provider = getattr(self, "_preview_texture_provider", None)
+        if provider is None:
+            return {}
+        if hasattr(provider, "to_stats"):
+            return provider.to_stats()
+        return {"kind": str(getattr(provider, "kind", "") or type(provider).__name__)}
 
     def _store_mask_data(self, mask, cache_key=None):
         if mask is None:
@@ -1014,6 +1540,658 @@ class _GpuVolumeRenderCore:
             self._mask_cache_key = cache_key
         return True
 
+    def _can_stream_build_volume_texture(self):
+        capabilities = getattr(self, "_preview_build_capabilities", None)
+        if capabilities is None:
+            capabilities = probe_gpu_preview_build_capabilities()
+            self._preview_build_capabilities = capabilities
+        return bool(capabilities.available and int(capabilities.max_3d_texture_size or 0) > 0)
+
+    def _can_compute_build_volume_texture(self):
+        capabilities = getattr(self, "_preview_build_capabilities", None)
+        if capabilities is None:
+            capabilities = probe_gpu_preview_build_capabilities()
+            self._preview_build_capabilities = capabilities
+        return bool(
+            capabilities.available
+            and capabilities.backend == GPU_PREVIEW_BUILD_BACKEND_COMPUTE
+            and capabilities.supports_compute_shader
+            and capabilities.supports_image_load_store
+            and int(capabilities.max_3d_texture_size or 0) > 0
+        )
+
+    def _try_compute_upload_source_volume_texture(
+        self,
+        source,
+        max_dim,
+        algorithm,
+        preserve_source,
+        cache_key,
+        source_shape,
+        spacing,
+        target_plan,
+        upload_dtype,
+        upload_dtype_text,
+        texture_format_name,
+        internal_format,
+        upload_format,
+        pixel_type,
+        bytes_per_voxel,
+        effective_budget,
+        staging_budget_bytes,
+    ):
+        if not self._can_compute_build_volume_texture():
+            return None
+        algorithm_name = str(algorithm or "hybrid").lower()
+        if algorithm_name not in {"stride", "mean", "max", "hybrid"}:
+            algorithm_name = "hybrid"
+        if np.dtype(source.dtype) not in (np.dtype(np.uint8), np.dtype(np.uint16)):
+            return None
+        source_internal_format, source_upload_format, source_pixel_type, source_texture_format_name = _volume_texture_format(source.dtype)
+        image_layout = _compute_image_format_layout(texture_format_name)
+        if not image_layout:
+            return None
+        if not all(hasattr(GL, name) for name in ("glBindImageTexture", "glDispatchCompute", "glMemoryBarrier")):
+            return None
+        if not hasattr(GL, "GL_SHADER_IMAGE_ACCESS_BARRIER_BIT"):
+            return None
+        target_shape = tuple(int(value) for value in target_plan["shape"])
+        z_count, y_count, x_count = target_shape
+        zf, yf, xf = tuple(max(1, int(value)) for value in target_plan.get("factors") or (1, 1, 1))
+        algorithm_ids = {"stride": 0, "mean": 1, "max": 2, "hybrid": 3}
+        algorithm_id = int(algorithm_ids[algorithm_name])
+        source_dtype = np.dtype(source.dtype)
+        source_dtype_max = float(np.iinfo(source_dtype).max) if np.issubdtype(source_dtype, np.integer) else 1.0
+        max_texture_dim = int(getattr(self._preview_build_capabilities, "max_3d_texture_size", 0) or 0)
+        if max_texture_dim > 0 and (int(source.shape[2]) > max_texture_dim or int(source.shape[1]) > max_texture_dim):
+            return None
+        source_texture_id = None
+        program = None
+        texture_id = None
+        old_texture_id = self._texture_id
+        started = time.perf_counter()
+        try:
+            protect_active = int(target_plan["bytes"]) + int(self._texture_cache_bytes) <= int(max(0, self._texture_cache_budget_bytes))
+            released_for_budget = self._reserve_texture_cache_bytes(
+                int(target_plan["bytes"]),
+                protected_ids={old_texture_id} if protect_active else set(),
+                protect_active=protect_active,
+            )
+            texture_id = self._new_upload_texture_id("volume")
+            GL.glBindTexture(GL.GL_TEXTURE_3D, texture_id)
+            texture_filter = GL.GL_NEAREST if bool(preserve_source) else GL.GL_LINEAR
+            GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MIN_FILTER, texture_filter)
+            GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MAG_FILTER, texture_filter)
+            GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_S, GL.GL_CLAMP_TO_EDGE)
+            GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
+            GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_R, GL.GL_CLAMP_TO_EDGE)
+            GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
+            GL.glTexImage3D(
+                GL.GL_TEXTURE_3D,
+                0,
+                internal_format,
+                int(x_count),
+                int(y_count),
+                int(z_count),
+                0,
+                upload_format,
+                pixel_type,
+                None,
+            )
+            source_texture_id = GL.glGenTextures(1)
+            GL.glBindTexture(GL.GL_TEXTURE_3D, source_texture_id)
+            GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_NEAREST)
+            GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_NEAREST)
+            GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_S, GL.GL_CLAMP_TO_EDGE)
+            GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
+            GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_R, GL.GL_CLAMP_TO_EDGE)
+            plane_bytes = max(1, int(source.shape[1]) * int(source.shape[2]) * int(source_dtype.itemsize))
+            source_planes_per_target_chunk = 1 if algorithm_name == "stride" else max(1, int(zf))
+            z_chunk = max(1, min(int(z_count), int(max(1, staging_budget_bytes) / max(1, plane_bytes * source_planes_per_target_chunk))))
+            shader_source = _COMPUTE_COPY_SHADER_TEMPLATE.replace("__IMAGE_FORMAT__", image_layout)
+            program = _link_compute_program(shader_source)
+            GL.glUseProgram(program)
+            source_uniform = GL.glGetUniformLocation(program, "u_source")
+            source_shape_uniform = GL.glGetUniformLocation(program, "u_source_shape")
+            target_slab_shape_uniform = GL.glGetUniformLocation(program, "u_target_slab_shape")
+            factors_uniform = GL.glGetUniformLocation(program, "u_factors")
+            algorithm_uniform = GL.glGetUniformLocation(program, "u_algorithm")
+            apply_window_uniform = GL.glGetUniformLocation(program, "u_apply_window")
+            window_uniform = GL.glGetUniformLocation(program, "u_window")
+            z_offset_uniform = GL.glGetUniformLocation(program, "u_z_offset")
+            if source_uniform >= 0:
+                GL.glUniform1i(source_uniform, 0)
+            if factors_uniform >= 0:
+                GL.glUniform3i(factors_uniform, int(xf), int(yf), 1 if algorithm_name == "stride" else int(zf))
+            if algorithm_uniform >= 0:
+                GL.glUniform1i(algorithm_uniform, int(algorithm_id))
+            apply_window = bool(
+                np.dtype(upload_dtype) == np.uint8
+                and (source_dtype != np.uint8 or algorithm_name != "stride")
+            )
+            if apply_window_uniform >= 0:
+                GL.glUniform1i(apply_window_uniform, 1 if apply_window else 0)
+            if window_uniform >= 0:
+                if apply_window:
+                    low, high = _sample_intensity_window_for_gpu_upload(source)
+                    scale = max(float(source_dtype_max), 1.0)
+                    GL.glUniform2f(window_uniform, float(low) / scale, float(high) / scale)
+                else:
+                    GL.glUniform2f(window_uniform, 0.0, 1.0)
+            GL.glBindImageTexture(0, texture_id, 0, True, 0, GL.GL_WRITE_ONLY, internal_format)
+            local_x, local_y, local_z = GPU_VOLUME_COMPUTE_LOCAL_SIZE
+            for oz0 in range(0, int(z_count), int(z_chunk)):
+                oz1 = min(int(z_count), oz0 + int(z_chunk))
+                source_z0 = min(int(source.shape[0]), int(oz0) * int(zf))
+                source_z1 = min(
+                    int(source.shape[0]),
+                    max(
+                        source_z0 + 1,
+                        (int(oz1) - 1) * int(zf) + (1 if algorithm_name == "stride" else int(zf)),
+                    ),
+                )
+                if algorithm_name == "stride":
+                    slab = np.ascontiguousarray(source[source_z0:source_z1:int(zf)])
+                else:
+                    slab = np.ascontiguousarray(source[source_z0:source_z1])
+                GL.glActiveTexture(GL.GL_TEXTURE0)
+                GL.glBindTexture(GL.GL_TEXTURE_3D, source_texture_id)
+                GL.glTexImage3D(
+                    GL.GL_TEXTURE_3D,
+                    0,
+                    source_internal_format,
+                    int(source.shape[2]),
+                    int(source.shape[1]),
+                    int(slab.shape[0]),
+                    0,
+                    source_upload_format,
+                    source_pixel_type,
+                    slab,
+                )
+                if source_shape_uniform >= 0:
+                    GL.glUniform3i(source_shape_uniform, int(source.shape[2]), int(source.shape[1]), int(slab.shape[0]))
+                if target_slab_shape_uniform >= 0:
+                    GL.glUniform3i(target_slab_shape_uniform, int(x_count), int(y_count), int(oz1 - oz0))
+                if z_offset_uniform >= 0:
+                    GL.glUniform1i(z_offset_uniform, int(oz0))
+                GL.glDispatchCompute(
+                    int(math.ceil(float(x_count) / float(local_x))),
+                    int(math.ceil(float(y_count) / float(local_y))),
+                    int(math.ceil(float(oz1 - oz0) / float(local_z))),
+                )
+                GL.glMemoryBarrier(GL.GL_SHADER_IMAGE_ACCESS_BARRIER_BIT)
+            self._texture_id = texture_id
+            self._volume_data = None
+            self._volume_shape = target_shape
+            self._volume_cache_key = cache_key
+            self._source_shape = source_shape
+            self._source_spacing = spacing
+            self._upload_needed = False
+            self._uploaded_shape = self._volume_shape
+            self._uploaded_bytes = int(np.prod(self._volume_shape)) * int(bytes_per_voxel)
+            self._uploaded_dtype = upload_dtype_text
+            self._last_upload_ms = (time.perf_counter() - started) * 1000.0
+            self._preview_stream_build_stats = {
+                "backend": "gpu_compute",
+                "algorithm": str(algorithm_name),
+                "preserve_source": bool(preserve_source),
+                "requested_max_dim": int(target_plan["requested_max_dim"]),
+                "actual_max_dim": int(max(self._volume_shape) if self._volume_shape else 0),
+                "target_max_dim": int(target_plan["target_max_dim"]),
+                "source_shape_zyx": tuple(int(value) for value in source_shape),
+                "shape_zyx": tuple(int(value) for value in self._volume_shape),
+                "factors_zyx": tuple(int(value) for value in target_plan["factors"]),
+                "bytes": int(self._uploaded_bytes),
+                "budget_bytes": int(max(0, self._texture_cache_budget_bytes)),
+                "effective_budget_bytes": int(max(0, effective_budget)),
+                "staging_budget_bytes": int(max(1, staging_budget_bytes)),
+                "staging_chunk_depth": int(z_chunk),
+                "source_staging_chunk_depth": int(max(1, z_chunk * source_planes_per_target_chunk)),
+                "texture_format": str(texture_format_name),
+                "source_texture_format": str(source_texture_format_name),
+                "degraded": bool(target_plan["degraded"]),
+                "degrade_reason": str(target_plan["degrade_reason"]),
+                "released_active_for_budget": bool(int(old_texture_id or 0) in released_for_budget),
+            }
+            self._set_preview_texture_provider(
+                gpu_texture_preview_provider(
+                    self._texture_id,
+                    self._volume_shape,
+                    self._uploaded_dtype,
+                    source_shape=self._source_shape,
+                    spacing_zyx=self._source_spacing,
+                    cache_key=cache_key,
+                    build_backend="gpu_compute",
+                )
+            )
+            self._remember_texture(
+                cache_key,
+                "volume",
+                self._texture_id,
+                self._uploaded_shape,
+                self._uploaded_dtype,
+                self._uploaded_bytes,
+            )
+            if old_texture_id and old_texture_id != texture_id and not self._texture_id_is_cached(old_texture_id) and int(old_texture_id) not in released_for_budget:
+                try:
+                    GL.glDeleteTextures([int(old_texture_id)])
+                except Exception:
+                    pass
+            return self._preview_texture_provider
+        except Exception as exc:
+            self._preview_stream_build_stats = {
+                "backend": "gpu_compute",
+                "failed": True,
+                "fallback": "gpu_stream",
+                "error": str(exc),
+            }
+            if texture_id:
+                try:
+                    GL.glDeleteTextures([int(texture_id)])
+                except Exception:
+                    pass
+            return None
+        finally:
+            if program:
+                try:
+                    GL.glUseProgram(0)
+                    GL.glDeleteProgram(program)
+                except Exception:
+                    pass
+            if source_texture_id:
+                try:
+                    GL.glDeleteTextures([int(source_texture_id)])
+                except Exception:
+                    pass
+            try:
+                GL.glBindTexture(GL.GL_TEXTURE_3D, 0)
+                GL.glActiveTexture(GL.GL_TEXTURE0)
+            except Exception:
+                pass
+
+    def _stream_upload_source_volume_texture(
+        self,
+        volume,
+        max_dim,
+        algorithm="hybrid",
+        preserve_source=False,
+        cache_key=None,
+        source_shape=None,
+        spacing_zyx=None,
+        staging_budget_bytes=GPU_VOLUME_STREAM_BUILD_DEFAULT_STAGING_BYTES,
+    ):
+        source = np.asarray(volume)
+        if source.ndim != 3 or min(source.shape) <= 0:
+            raise ValueError(f"volume_must_be_non_empty_zyx:{getattr(source, 'shape', ())}")
+        if not self._can_stream_build_volume_texture():
+            raise RuntimeError(getattr(self._preview_build_capabilities, "reason", "") or "GPU preview build is unavailable")
+        source_shape = tuple(int(value) for value in (source_shape or source.shape))
+        if len(source_shape) != 3 or min(source_shape) <= 0:
+            source_shape = tuple(int(value) for value in source.shape)
+        try:
+            spacing = tuple(float(value) for value in (spacing_zyx or ()))
+        except (TypeError, ValueError):
+            spacing = ()
+        if len(spacing) != 3 or min(spacing) <= 0:
+            spacing = ()
+        if cache_key is not None and self._activate_cached_texture(cache_key, "volume"):
+            self._volume_cache_key = cache_key
+            self._source_shape = source_shape
+            self._source_spacing = spacing
+            self._volume_data = None
+            self._set_preview_texture_provider(
+                gpu_texture_preview_provider(
+                    self._texture_id,
+                    self._volume_shape,
+                    self._uploaded_dtype,
+                    source_shape=self._source_shape,
+                    spacing_zyx=self._source_spacing,
+                    cache_key=cache_key,
+                    build_backend="gpu_cache",
+                )
+            )
+            self._preview_stream_build_stats = {
+                "backend": "gpu_cache",
+                "cache_hit": True,
+                "algorithm": str(algorithm or "hybrid"),
+                "preserve_source": bool(preserve_source and np.dtype(source.dtype) == np.uint16),
+                "requested_max_dim": int(max_dim),
+                "actual_max_dim": int(max(self._volume_shape) if self._volume_shape else 0),
+                "source_shape_zyx": tuple(int(value) for value in source_shape),
+                "shape_zyx": tuple(int(value) for value in self._volume_shape),
+                "bytes": int(self._uploaded_bytes),
+                "budget_bytes": int(max(0, self._texture_cache_budget_bytes)),
+                "degraded": False,
+                "degrade_reason": "",
+            }
+            return self._preview_texture_provider
+        target_limit = min(int(max_dim), int(getattr(self._preview_build_capabilities, "max_3d_texture_size", 0) or max_dim))
+        preserve = bool(preserve_source and np.dtype(source.dtype) == np.uint16)
+        upload_dtype = np.uint16 if preserve else np.uint8
+        upload_dtype_text = "uint16" if preserve else "uint8"
+        bytes_per_voxel = int(np.dtype(upload_dtype).itemsize)
+        full_budget = int(max(0, self._texture_cache_budget_bytes))
+        effective_budget = self._stream_build_texture_budget_bytes(cache_key=cache_key)
+        target_plan = _budget_limited_preview_shape(
+            source.shape,
+            max(1, target_limit),
+            bytes_per_voxel,
+            effective_budget,
+            int(getattr(self._preview_build_capabilities, "max_3d_texture_size", 0) or target_limit),
+        )
+        active_bytes = self._active_volume_texture_cache_bytes(exclude_key=cache_key)
+        release_active_for_quality = False
+        if active_bytes > 0 and full_budget > 0 and effective_budget < full_budget:
+            full_budget_plan = _budget_limited_preview_shape(
+                source.shape,
+                max(1, target_limit),
+                bytes_per_voxel,
+                full_budget,
+                int(getattr(self._preview_build_capabilities, "max_3d_texture_size", 0) or target_limit),
+            )
+            if (
+                int(full_budget_plan.get("bytes") or 0) <= full_budget
+                and int(full_budget_plan.get("target_max_dim") or 0) > int(target_plan.get("target_max_dim") or 0)
+            ):
+                target_plan = full_budget_plan
+                effective_budget = full_budget
+                release_active_for_quality = True
+        factors = target_plan["factors"]
+        target_shape = target_plan["shape"]
+        if len(target_shape) != 3 or min(target_shape) <= 0:
+            raise RuntimeError(f"invalid_gpu_preview_shape:{target_shape}")
+        z_count, y_count, x_count = target_shape
+        if z_count > int(getattr(self._preview_build_capabilities, "max_3d_texture_size", 0) or z_count):
+            raise RuntimeError(f"gpu_preview_exceeds_3d_texture_limit:{target_shape}")
+        internal_format, upload_format, pixel_type, texture_format_name = _volume_texture_format(upload_dtype)
+        compute_provider = self._try_compute_upload_source_volume_texture(
+            source,
+            max_dim,
+            algorithm,
+            preserve,
+            cache_key,
+            source_shape,
+            spacing,
+            target_plan,
+            upload_dtype,
+            upload_dtype_text,
+            texture_format_name,
+            internal_format,
+            upload_format,
+            pixel_type,
+            bytes_per_voxel,
+            effective_budget,
+            staging_budget_bytes,
+        )
+        if compute_provider is not None:
+            return compute_provider
+        old_texture_id = self._texture_id
+        protect_active = (
+            not release_active_for_quality
+            and int(target_plan["bytes"]) + int(self._texture_cache_bytes) <= int(max(0, self._texture_cache_budget_bytes))
+        )
+        released_for_budget = self._reserve_texture_cache_bytes(
+            int(target_plan["bytes"]),
+            protected_ids={old_texture_id} if protect_active else set(),
+            protect_active=protect_active,
+        )
+        texture_id = self._new_upload_texture_id("volume")
+        GL.glBindTexture(GL.GL_TEXTURE_3D, texture_id)
+        texture_filter = GL.GL_NEAREST if preserve else GL.GL_LINEAR
+        GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MIN_FILTER, texture_filter)
+        GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MAG_FILTER, texture_filter)
+        GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_S, GL.GL_CLAMP_TO_EDGE)
+        GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
+        GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_R, GL.GL_CLAMP_TO_EDGE)
+        GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
+        GL.glTexImage3D(
+            GL.GL_TEXTURE_3D,
+            0,
+            internal_format,
+            int(x_count),
+            int(y_count),
+            int(z_count),
+            0,
+            upload_format,
+            pixel_type,
+            None,
+        )
+        intensity_window = (0.0, 65535.0) if preserve else _sample_intensity_window_for_gpu_upload(source)
+        plane_bytes = max(1, int(y_count) * int(x_count) * bytes_per_voxel)
+        z_chunk = max(1, min(int(z_count), int(max(1, staging_budget_bytes) / plane_bytes)))
+        started = time.perf_counter()
+        try:
+            for oz0 in range(0, int(z_count), int(z_chunk)):
+                oz1 = min(int(z_count), oz0 + int(z_chunk))
+                upload = _downsample_source_to_upload_slab(
+                    source,
+                    factors,
+                    target_shape,
+                    oz0,
+                    oz1,
+                    algorithm,
+                    preserve,
+                    intensity_window,
+                )
+                GL.glTexSubImage3D(
+                    GL.GL_TEXTURE_3D,
+                    0,
+                    0,
+                    0,
+                    int(oz0),
+                    int(x_count),
+                    int(y_count),
+                    int(oz1 - oz0),
+                    upload_format,
+                    pixel_type,
+                    upload,
+                )
+        except Exception:
+            if texture_id:
+                GL.glDeleteTextures([int(texture_id)])
+            GL.glBindTexture(GL.GL_TEXTURE_3D, 0)
+            raise
+        self._texture_id = texture_id
+        self._volume_data = None
+        self._volume_shape = tuple(int(value) for value in target_shape)
+        self._volume_cache_key = cache_key
+        self._source_shape = source_shape
+        self._source_spacing = spacing
+        self._upload_needed = False
+        self._uploaded_shape = self._volume_shape
+        self._uploaded_bytes = int(np.prod(self._volume_shape)) * bytes_per_voxel
+        self._uploaded_dtype = upload_dtype_text
+        self._last_upload_ms = (time.perf_counter() - started) * 1000.0
+        self._preview_stream_build_stats = {
+            "backend": "gpu_stream",
+            "algorithm": str(algorithm or "hybrid"),
+            "preserve_source": bool(preserve),
+            "requested_max_dim": int(target_plan["requested_max_dim"]),
+            "actual_max_dim": int(max(self._volume_shape) if self._volume_shape else 0),
+            "target_max_dim": int(target_plan["target_max_dim"]),
+            "source_shape_zyx": tuple(int(value) for value in source_shape),
+            "shape_zyx": tuple(int(value) for value in self._volume_shape),
+            "factors_zyx": tuple(int(value) for value in factors),
+            "bytes": int(self._uploaded_bytes),
+            "budget_bytes": int(max(0, self._texture_cache_budget_bytes)),
+            "effective_budget_bytes": int(max(0, effective_budget)),
+            "staging_budget_bytes": int(max(1, staging_budget_bytes)),
+            "staging_chunk_depth": int(z_chunk),
+            "texture_format": str(texture_format_name),
+            "degraded": bool(target_plan["degraded"]),
+            "degrade_reason": str(target_plan["degrade_reason"]),
+            "released_active_for_budget": bool(int(old_texture_id or 0) in released_for_budget),
+        }
+        self._set_preview_texture_provider(
+            gpu_texture_preview_provider(
+                self._texture_id,
+                self._volume_shape,
+                self._uploaded_dtype,
+                source_shape=self._source_shape,
+                spacing_zyx=self._source_spacing,
+                cache_key=cache_key,
+                build_backend="gpu_stream",
+            )
+        )
+        self._remember_texture(
+            cache_key,
+            "volume",
+            self._texture_id,
+            self._uploaded_shape,
+            self._uploaded_dtype,
+            self._uploaded_bytes,
+        )
+        if old_texture_id and old_texture_id != texture_id and not self._texture_id_is_cached(old_texture_id) and int(old_texture_id) not in released_for_budget:
+            try:
+                GL.glDeleteTextures([int(old_texture_id)])
+            except Exception:
+                pass
+        GL.glBindTexture(GL.GL_TEXTURE_3D, 0)
+        return self._preview_texture_provider
+
+    def _stream_upload_source_mask_texture(
+        self,
+        mask,
+        max_dim,
+        algorithm="occupancy",
+        cache_key=None,
+        source_shape=None,
+        staging_budget_bytes=GPU_VOLUME_STREAM_BUILD_DEFAULT_STAGING_BYTES,
+    ):
+        source = np.asarray(mask)
+        if source.ndim != 3 or min(source.shape) <= 0:
+            raise ValueError(f"mask_must_be_non_empty_zyx:{getattr(source, 'shape', ())}")
+        if not self._can_stream_build_volume_texture():
+            raise RuntimeError(getattr(self._preview_build_capabilities, "reason", "") or "GPU preview build is unavailable")
+        source_shape = tuple(int(value) for value in (source_shape or source.shape))
+        if len(source_shape) != 3 or min(source_shape) <= 0:
+            source_shape = tuple(int(value) for value in source.shape)
+        if cache_key is not None and self._activate_cached_texture(cache_key, "mask"):
+            self._mask_cache_key = cache_key
+            self._mask_data = None
+            self._preview_stream_build_stats = dict(getattr(self, "_preview_stream_build_stats", {}) or {})
+            self._preview_stream_build_stats["mask"] = {
+                "backend": "gpu_cache",
+                "cache_hit": True,
+                "algorithm": str(algorithm or "occupancy"),
+                "requested_max_dim": int(max_dim),
+                "actual_max_dim": int(max(self._mask_shape) if self._mask_shape else 0),
+                "source_shape_zyx": tuple(int(value) for value in source_shape),
+                "shape_zyx": tuple(int(value) for value in self._mask_shape),
+                "bytes": int(_preview_shape_bytes(self._mask_shape, 1)),
+                "budget_bytes": int(max(0, self._texture_cache_budget_bytes)),
+            }
+            return True
+        target_limit = min(int(max_dim), int(getattr(self._preview_build_capabilities, "max_3d_texture_size", 0) or max_dim))
+        effective_budget = self._stream_build_texture_budget_bytes(cache_key=cache_key)
+        target_plan = _budget_limited_preview_shape(
+            source.shape,
+            max(1, target_limit),
+            1,
+            effective_budget,
+            int(getattr(self._preview_build_capabilities, "max_3d_texture_size", 0) or target_limit),
+        )
+        factors = target_plan["factors"]
+        target_shape = target_plan["shape"]
+        if len(target_shape) != 3 or min(target_shape) <= 0:
+            raise RuntimeError(f"invalid_gpu_mask_preview_shape:{target_shape}")
+        z_count, y_count, x_count = target_shape
+        old_mask_texture_id = self._mask_texture_id
+        self._reserve_texture_cache_bytes(int(target_plan["bytes"]), protected_ids={self._texture_id}, protect_active=True)
+        texture_id = self._new_upload_texture_id("mask")
+        GL.glActiveTexture(GL.GL_TEXTURE2)
+        GL.glBindTexture(GL.GL_TEXTURE_3D, texture_id)
+        GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_NEAREST)
+        GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_NEAREST)
+        GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_S, GL.GL_CLAMP_TO_EDGE)
+        GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
+        GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_R, GL.GL_CLAMP_TO_EDGE)
+        GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
+        internal_format, upload_format, pixel_type, texture_format_name = _volume_texture_format(np.uint8)
+        GL.glTexImage3D(
+            GL.GL_TEXTURE_3D,
+            0,
+            internal_format,
+            int(x_count),
+            int(y_count),
+            int(z_count),
+            0,
+            upload_format,
+            pixel_type,
+            None,
+        )
+        plane_bytes = max(1, int(y_count) * int(x_count))
+        z_chunk = max(1, min(int(z_count), int(max(1, staging_budget_bytes) / plane_bytes)))
+        started = time.perf_counter()
+        try:
+            for oz0 in range(0, int(z_count), int(z_chunk)):
+                oz1 = min(int(z_count), oz0 + int(z_chunk))
+                upload = _downsample_mask_to_upload_slab(source, factors, target_shape, oz0, oz1, algorithm=algorithm)
+                GL.glTexSubImage3D(
+                    GL.GL_TEXTURE_3D,
+                    0,
+                    0,
+                    0,
+                    int(oz0),
+                    int(x_count),
+                    int(y_count),
+                    int(oz1 - oz0),
+                    upload_format,
+                    pixel_type,
+                    upload,
+                )
+        except Exception:
+            if texture_id:
+                GL.glDeleteTextures([int(texture_id)])
+            GL.glBindTexture(GL.GL_TEXTURE_3D, 0)
+            GL.glActiveTexture(GL.GL_TEXTURE0)
+            raise
+        self._mask_texture_id = texture_id
+        self._mask_data = None
+        self._mask_shape = tuple(int(value) for value in target_shape)
+        self._mask_cache_key = cache_key
+        self._mask_upload_needed = False
+        self._preview_stream_build_stats = dict(getattr(self, "_preview_stream_build_stats", {}) or {})
+        self._preview_stream_build_stats["mask"] = {
+            "backend": "gpu_stream",
+            "algorithm": str(algorithm or "occupancy"),
+            "requested_max_dim": int(target_plan["requested_max_dim"]),
+            "actual_max_dim": int(max(self._mask_shape) if self._mask_shape else 0),
+            "target_max_dim": int(target_plan["target_max_dim"]),
+            "source_shape_zyx": tuple(int(value) for value in source_shape),
+            "shape_zyx": tuple(int(value) for value in self._mask_shape),
+            "factors_zyx": tuple(int(value) for value in factors),
+            "bytes": int(target_plan["bytes"]),
+            "budget_bytes": int(max(0, self._texture_cache_budget_bytes)),
+            "effective_budget_bytes": int(max(0, effective_budget)),
+            "staging_budget_bytes": int(max(1, staging_budget_bytes)),
+            "staging_chunk_depth": int(z_chunk),
+            "texture_format": str(texture_format_name),
+            "degraded": bool(target_plan["degraded"]),
+            "degrade_reason": str(target_plan["degrade_reason"]),
+            "upload_ms": (time.perf_counter() - started) * 1000.0,
+        }
+        self._remember_texture(
+            cache_key,
+            "mask",
+            self._mask_texture_id,
+            self._mask_shape,
+            "uint8",
+            int(target_plan["bytes"]),
+        )
+        if (
+            old_mask_texture_id
+            and old_mask_texture_id != texture_id
+            and not self._texture_id_is_cached(old_mask_texture_id)
+        ):
+            try:
+                GL.glDeleteTextures([int(old_mask_texture_id)])
+            except Exception:
+                pass
+        GL.glBindTexture(GL.GL_TEXTURE_3D, 0)
+        GL.glActiveTexture(GL.GL_TEXTURE0)
+        return True
+
     def clear_volume(self):
         self._volume_data = None
         self._volume_shape = ()
@@ -1033,6 +2211,8 @@ class _GpuVolumeRenderCore:
         self._last_draw_ms = 0.0
         self._last_steps = 0
         self._uploaded_dtype = ""
+        self._preview_texture_provider = None
+        self._preview_stream_build_stats = {}
 
     def _delete_volume_texture(self):
         if self._initialized and self._texture_id:
@@ -1104,6 +2284,77 @@ class _GpuVolumeRenderCore:
         self._last_upload_ms = 0.0
         self._texture_cache_hits += 1
         return True
+
+    def _texture_cache_record_for_texture_id(self, texture_id):
+        texture_id = int(texture_id or 0)
+        if not texture_id:
+            return None
+        for record in self._texture_cache.values():
+            if int(record.get("texture_id") or 0) == texture_id:
+                return record
+        return None
+
+    def _active_volume_texture_cache_bytes(self, exclude_key=None):
+        active_record = self._texture_cache_record_for_texture_id(self._texture_id)
+        if not active_record:
+            return 0
+        exclude_record_key = self._texture_cache_record_key(exclude_key, "volume")
+        if exclude_record_key is not None:
+            record_key = self._texture_cache_record_key(exclude_key, "volume")
+            current_key = None
+            for key, record in self._texture_cache.items():
+                if record is active_record:
+                    current_key = key
+                    break
+            if current_key == record_key:
+                return 0
+        return int(active_record.get("bytes") or 0)
+
+    def _stream_build_texture_budget_bytes(self, cache_key=None):
+        budget = int(max(0, self._texture_cache_budget_bytes))
+        if budget <= 0:
+            return 0
+        active_bytes = self._active_volume_texture_cache_bytes(exclude_key=cache_key)
+        if active_bytes <= 0:
+            return budget
+        return max(1, budget - int(active_bytes))
+
+    def _reserve_texture_cache_bytes(self, incoming_bytes, protected_ids=None, protect_active=True):
+        budget = int(max(0, self._texture_cache_budget_bytes))
+        if budget <= 0:
+            return set()
+        protected = {int(value or 0) for value in (protected_ids or ())}
+        if protect_active:
+            protected.add(int(self._texture_id or 0))
+            protected.add(int(self._mask_texture_id or 0))
+        incoming = int(max(0, incoming_bytes))
+        deleted_ids = set()
+        while self._texture_cache and self._texture_cache_bytes + incoming > budget:
+            candidate_key = None
+            candidate_record = None
+            for record_key, record in self._texture_cache.items():
+                texture_id = int(record.get("texture_id") or 0)
+                if texture_id in protected:
+                    continue
+                candidate_key = record_key
+                candidate_record = record
+                break
+            if candidate_key is None or candidate_record is None:
+                break
+            texture_id = int(candidate_record.get("texture_id") or 0)
+            self._texture_cache.pop(candidate_key, None)
+            self._texture_cache_bytes = max(0, self._texture_cache_bytes - int(candidate_record.get("bytes") or 0))
+            if texture_id:
+                try:
+                    GL.glDeleteTextures([texture_id])
+                    deleted_ids.add(texture_id)
+                except Exception:
+                    pass
+            if texture_id == int(self._texture_id or 0):
+                self._texture_id = None
+            if texture_id == int(self._mask_texture_id or 0):
+                self._mask_texture_id = None
+        return deleted_ids
 
     def _texture_id_is_cached(self, texture_id):
         texture_id = int(texture_id or 0)
@@ -1205,7 +2456,7 @@ class _GpuVolumeRenderCore:
         self._release_texture_cache()
 
     def has_volume(self):
-        return self._volume_data is not None and not self._failed
+        return (self._volume_data is not None or self._texture_id is not None) and not self._failed
 
     def set_render_state(
         self,
@@ -1258,7 +2509,7 @@ class _GpuVolumeRenderCore:
         self._projection_mode = projection_mode if projection_mode in GPU_VOLUME_RENDER_MODES else "composite"
         self._fast_interaction = self._render_mode == "drag" and self._projection_mode == "composite"
         mask_mode = str(mask_mode or "image_only").lower()
-        if self._mask_data is None:
+        if not self._mask_texture_id or not self._mask_shape:
             mask_mode = "image_only"
         self._mask_mode = mask_mode if mask_mode in GPU_VOLUME_MASK_MODES else "image_only"
         self._mask_opacity = max(0.0, min(1.0, float(mask_opacity)))
@@ -1377,6 +2628,9 @@ class _GpuVolumeRenderCore:
             "texture_cache_budget_bytes": int(getattr(self, "_texture_cache_budget_bytes", 0) or 0),
             "texture_cache_hits": int(getattr(self, "_texture_cache_hits", 0) or 0),
             "texture_cache_misses": int(getattr(self, "_texture_cache_misses", 0) or 0),
+            "gpu_preview_build": self._preview_build_capabilities.to_stats(),
+            "gpu_stream_build": dict(getattr(self, "_preview_stream_build_stats", {}) or {}),
+            "preview_provider": self._preview_provider_stats(),
         }
 
     def renderer_label(self):
@@ -1392,6 +2646,7 @@ class _GpuVolumeRenderCore:
         GL.glClearColor(0.027, 0.035, 0.039, 1.0)
         GL.glDisable(GL.GL_DEPTH_TEST)
         self._update_renderer_label()
+        self._preview_build_capabilities = probe_gpu_preview_build_capabilities()
         self._program = _link_program(_VERTEX_SHADER, _FRAGMENT_SHADER)
         vertices = np.array([-1.0, -1.0, 1.0, -1.0, -1.0, 1.0, 1.0, 1.0], dtype=np.float32)
         self._quad_vbo = GL.glGenBuffers(1)
@@ -1424,12 +2679,7 @@ class _GpuVolumeRenderCore:
         GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
         GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_R, GL.GL_CLAMP_TO_EDGE)
         GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
-        if np.dtype(self._volume_data.dtype) == np.uint16:
-            internal_format = GL.GL_LUMINANCE16
-            pixel_type = GL.GL_UNSIGNED_SHORT
-        else:
-            internal_format = GL.GL_LUMINANCE
-            pixel_type = GL.GL_UNSIGNED_BYTE
+        internal_format, upload_format, pixel_type, _texture_format_name = _volume_texture_format(self._volume_data.dtype)
         started = time.perf_counter()
         GL.glTexImage3D(
             GL.GL_TEXTURE_3D,
@@ -1439,7 +2689,7 @@ class _GpuVolumeRenderCore:
             int(height),
             int(depth),
             0,
-            GL.GL_LUMINANCE,
+            upload_format,
             pixel_type,
             self._volume_data,
         )
@@ -1540,7 +2790,7 @@ class _GpuVolumeRenderCore:
         GL.glBindTexture(GL.GL_TEXTURE_2D, self._transfer_lut_texture_id)
         self._set_uniform_int("u_transfer_lut", 1)
         GL.glActiveTexture(GL.GL_TEXTURE2)
-        mask_mode = self._mask_mode if self._mask_texture_id and self._mask_data is not None else "image_only"
+        mask_mode = self._mask_mode if self._mask_texture_id and self._mask_shape else "image_only"
         GL.glBindTexture(GL.GL_TEXTURE_3D, self._mask_texture_id or self._texture_id)
         self._set_uniform_int("u_mask", 2)
         GL.glActiveTexture(GL.GL_TEXTURE0)
@@ -1692,8 +2942,40 @@ if gpu_volume_offscreen_available():
         def set_volume_data(self, volume, source_shape=None, spacing_zyx=None, cache_key=None):
             return self._store_volume_data(volume, source_shape=source_shape, spacing_zyx=spacing_zyx, cache_key=cache_key)
 
+        def build_volume_texture_from_source(self, volume, max_dim, algorithm="hybrid", preserve_source=False, cache_key=None, source_shape=None, spacing_zyx=None):
+            self.initialize()
+            if not self._context.makeCurrent(self._surface):
+                raise RuntimeError("OpenGL offscreen context makeCurrent failed")
+            try:
+                return self._stream_upload_source_volume_texture(
+                    volume,
+                    max_dim,
+                    algorithm=algorithm,
+                    preserve_source=preserve_source,
+                    cache_key=cache_key,
+                    source_shape=source_shape,
+                    spacing_zyx=spacing_zyx,
+                )
+            finally:
+                self._context.doneCurrent()
+
         def set_mask_data(self, mask, cache_key=None):
             return self._store_mask_data(mask, cache_key=cache_key)
+
+        def build_mask_texture_from_source(self, mask, max_dim, algorithm="occupancy", cache_key=None, source_shape=None):
+            self.initialize()
+            if not self._context.makeCurrent(self._surface):
+                raise RuntimeError("OpenGL offscreen context makeCurrent failed")
+            try:
+                return self._stream_upload_source_mask_texture(
+                    mask,
+                    max_dim,
+                    algorithm=algorithm,
+                    cache_key=cache_key,
+                    source_shape=source_shape,
+                )
+            finally:
+                self._context.doneCurrent()
 
         def render_image(self, width, height):
             display_width = max(1, int(width))
@@ -1702,7 +2984,7 @@ if gpu_volume_offscreen_available():
             width = max(1, int(round(display_width * scale)))
             height = max(1, int(round(display_height * scale)))
             self.initialize()
-            if self._failed or self._volume_data is None or not self._volume_shape:
+            if self._failed or not self.has_volume() or not self._volume_shape:
                 return None
             if not self._context.makeCurrent(self._surface):
                 raise RuntimeError("OpenGL offscreen context makeCurrent failed")
@@ -1779,6 +3061,8 @@ if gpu_volume_offscreen_available():
                 self._last_draw_ms = 0.0
                 self._last_steps = 0
                 self._uploaded_dtype = ""
+                self._preview_texture_provider = None
+                self._preview_stream_build_stats = {}
 
         def release(self):
             if self._context is not None and self._surface is not None and self._context.makeCurrent(self._surface):
@@ -1870,12 +3154,46 @@ if gpu_volume_offscreen_available():
             except Exception as exc:
                 self._mark_failed(f"GPU offscreen texture upload failed: {exc}")
 
+        def build_volume_texture_from_source(self, volume, max_dim, algorithm="hybrid", preserve_source=False, cache_key=None, source_shape=None, spacing_zyx=None):
+            try:
+                provider = self._renderer.build_volume_texture_from_source(
+                    volume,
+                    max_dim,
+                    algorithm=algorithm,
+                    preserve_source=preserve_source,
+                    cache_key=cache_key,
+                    source_shape=source_shape,
+                    spacing_zyx=spacing_zyx,
+                )
+                self._emit_renderer_info()
+                self._request_render_to_label()
+                return provider
+            except Exception as exc:
+                self._mark_failed(f"GPU streamed preview build failed: {exc}")
+                raise
+
         def set_mask_data(self, mask, cache_key=None):
             try:
                 self._renderer.set_mask_data(mask, cache_key=cache_key)
                 self._request_render_to_label()
             except Exception as exc:
                 self._mark_failed(f"GPU offscreen mask upload failed: {exc}")
+
+        def build_mask_texture_from_source(self, mask, max_dim, algorithm="occupancy", cache_key=None, source_shape=None):
+            try:
+                result = self._renderer.build_mask_texture_from_source(
+                    mask,
+                    max_dim,
+                    algorithm=algorithm,
+                    cache_key=cache_key,
+                    source_shape=source_shape,
+                )
+                self._emit_renderer_info()
+                self._request_render_to_label()
+                return result
+            except Exception as exc:
+                self._mark_failed(f"GPU streamed mask preview build failed: {exc}")
+                raise
 
         def set_render_state(self, *args, **kwargs):
             try:
@@ -2199,6 +3517,9 @@ if gpu_volume_canvas_available():
             self._texture_cache_hits = 0
             self._texture_cache_misses = 0
             self._texture_cache_budget_bytes = _gpu_texture_cache_budget_bytes()
+            self._preview_build_capabilities = GpuPreviewBuildCapabilities(reason="GPU preview build capability has not been probed")
+            self._preview_texture_provider = None
+            self._preview_stream_build_stats = {}
             self._transfer_lut_texture_id = None
             self._transfer_lut_data = build_volume_transfer_lut()
             self._transfer_lut_upload_needed = True
@@ -2281,6 +3602,8 @@ if gpu_volume_canvas_available():
             self._last_draw_ms = 0.0
             self._last_steps = 0
             self._uploaded_dtype = ""
+            self._preview_texture_provider = None
+            self._preview_stream_build_stats = {}
             self.update()
 
         def _delete_mask_texture(self):
@@ -2298,6 +3621,10 @@ if gpu_volume_canvas_available():
         _texture_cache_record_key = _GpuVolumeRenderCore._texture_cache_record_key
         _texture_cache_owner_from_key = _GpuVolumeRenderCore._texture_cache_owner_from_key
         _activate_cached_texture = _GpuVolumeRenderCore._activate_cached_texture
+        _texture_cache_record_for_texture_id = _GpuVolumeRenderCore._texture_cache_record_for_texture_id
+        _active_volume_texture_cache_bytes = _GpuVolumeRenderCore._active_volume_texture_cache_bytes
+        _stream_build_texture_budget_bytes = _GpuVolumeRenderCore._stream_build_texture_budget_bytes
+        _reserve_texture_cache_bytes = _GpuVolumeRenderCore._reserve_texture_cache_bytes
         _texture_id_is_cached = _GpuVolumeRenderCore._texture_id_is_cached
         _new_upload_texture_id = _GpuVolumeRenderCore._new_upload_texture_id
         _remember_texture = _GpuVolumeRenderCore._remember_texture
@@ -2306,7 +3633,7 @@ if gpu_volume_canvas_available():
         _release_texture_cache = _GpuVolumeRenderCore._release_texture_cache
 
         def has_volume(self):
-            return self._volume_data is not None and not self._failed
+            return (self._volume_data is not None or self._texture_id is not None) and not self._failed
 
         def release_texture_cache(self):
             if not self._initialized:
@@ -2336,6 +3663,17 @@ if gpu_volume_canvas_available():
                 self._source_spacing = next_spacing if len(next_spacing) == 3 and min(next_spacing) > 0 else ()
                 self._volume_data = np.asarray(volume)
                 self._upload_needed = False
+                self._set_preview_texture_provider(
+                    gpu_texture_preview_provider(
+                        self._texture_id,
+                        self._volume_shape,
+                        self._uploaded_dtype,
+                        source_shape=self._source_shape,
+                        spacing_zyx=self._source_spacing,
+                        cache_key=cache_key,
+                        build_backend="gpu_cache",
+                    )
+                )
                 self.update()
                 return
             source = np.asarray(volume)
@@ -2364,6 +3702,15 @@ if gpu_volume_canvas_available():
                 self._volume_cache_key = cache_key
             self._source_shape = next_source_shape
             self._source_spacing = next_spacing
+            self._set_preview_texture_provider(
+                cpu_volume_preview_provider(
+                    array,
+                    source_shape=next_source_shape,
+                    spacing_zyx=next_spacing,
+                    cache_key=cache_key,
+                    build_backend="cpu",
+                )
+            )
             if self._initialized and not self._failed:
                 try:
                     self.makeCurrent()
@@ -2373,6 +3720,69 @@ if gpu_volume_canvas_available():
                     self.doneCurrent()
                     self._mark_failed(f"GPU texture upload failed: {exc}")
             self.update()
+
+        def build_volume_texture_from_source(self, volume, max_dim, algorithm="hybrid", preserve_source=False, cache_key=None, source_shape=None, spacing_zyx=None):
+            if volume is None:
+                self.clear_volume()
+                return None
+            try:
+                if not self._initialized:
+                    self.makeCurrent()
+                    if not self._initialized:
+                        self.initializeGL()
+                else:
+                    self.makeCurrent()
+                provider = self._stream_upload_source_volume_texture(
+                    volume,
+                    max_dim,
+                    algorithm=algorithm,
+                    preserve_source=preserve_source,
+                    cache_key=cache_key,
+                    source_shape=source_shape,
+                    spacing_zyx=spacing_zyx,
+                )
+                self.doneCurrent()
+            except Exception as exc:
+                try:
+                    self.doneCurrent()
+                except Exception:
+                    pass
+                self._mark_failed(f"GPU streamed preview build failed: {exc}")
+                raise
+            self.update()
+            return provider
+
+        _set_preview_texture_provider = _GpuVolumeRenderCore._set_preview_texture_provider
+        _preview_provider_stats = _GpuVolumeRenderCore._preview_provider_stats
+
+        def build_mask_texture_from_source(self, mask, max_dim, algorithm="occupancy", cache_key=None, source_shape=None):
+            if mask is None:
+                self.set_mask_data(None)
+                return False
+            try:
+                if not self._initialized:
+                    self.makeCurrent()
+                    if not self._initialized:
+                        self.initializeGL()
+                else:
+                    self.makeCurrent()
+                result = self._stream_upload_source_mask_texture(
+                    mask,
+                    max_dim,
+                    algorithm=algorithm,
+                    cache_key=cache_key,
+                    source_shape=source_shape,
+                )
+                self.doneCurrent()
+            except Exception as exc:
+                try:
+                    self.doneCurrent()
+                except Exception:
+                    pass
+                self._mark_failed(f"GPU streamed mask preview build failed: {exc}")
+                raise
+            self.update()
+            return result
 
         def set_mask_data(self, mask, cache_key=None):
             if mask is None:
@@ -2467,7 +3877,7 @@ if gpu_volume_canvas_available():
             self._projection_mode = projection_mode if projection_mode in GPU_VOLUME_RENDER_MODES else "composite"
             self._fast_interaction = self._render_mode == "drag" and self._projection_mode == "composite"
             mask_mode = str(mask_mode or "image_only").lower()
-            if self._mask_data is None:
+            if not self._mask_texture_id or not self._mask_shape:
                 mask_mode = "image_only"
             self._mask_mode = mask_mode if mask_mode in GPU_VOLUME_MASK_MODES else "image_only"
             self._mask_opacity = max(0.0, min(1.0, float(mask_opacity)))
@@ -2587,6 +3997,9 @@ if gpu_volume_canvas_available():
                 "texture_cache_budget_bytes": int(getattr(self, "_texture_cache_budget_bytes", 0) or 0),
                 "texture_cache_hits": int(getattr(self, "_texture_cache_hits", 0) or 0),
                 "texture_cache_misses": int(getattr(self, "_texture_cache_misses", 0) or 0),
+                "gpu_preview_build": self._preview_build_capabilities.to_stats(),
+                "gpu_stream_build": dict(getattr(self, "_preview_stream_build_stats", {}) or {}),
+                "preview_provider": self._preview_provider_stats(),
             }
 
         def initializeGL(self):
@@ -2595,6 +4008,7 @@ if gpu_volume_canvas_available():
                 GL.glClearColor(0.027, 0.035, 0.039, 1.0)
                 GL.glDisable(GL.GL_DEPTH_TEST)
                 self._update_renderer_label()
+                self._preview_build_capabilities = probe_gpu_preview_build_capabilities()
                 self._program = _link_program(_VERTEX_SHADER, _FRAGMENT_SHADER)
                 vertices = np.array([-1.0, -1.0, 1.0, -1.0, -1.0, 1.0, 1.0, 1.0], dtype=np.float32)
                 self._quad_vbo = GL.glGenBuffers(1)
@@ -2642,7 +4056,7 @@ if gpu_volume_canvas_available():
             except Exception as exc:
                 self._mark_failed(f"GPU clear failed: {exc}")
                 return
-            if self._failed or self._volume_data is None or not self._volume_shape:
+            if self._failed or self._texture_id is None or not self._volume_shape:
                 return
             try:
                 self._upload_volume_if_needed()
@@ -2664,12 +4078,7 @@ if gpu_volume_canvas_available():
             GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
             GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_R, GL.GL_CLAMP_TO_EDGE)
             GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
-            if np.dtype(self._volume_data.dtype) == np.uint16:
-                internal_format = GL.GL_LUMINANCE16
-                pixel_type = GL.GL_UNSIGNED_SHORT
-            else:
-                internal_format = GL.GL_LUMINANCE
-                pixel_type = GL.GL_UNSIGNED_BYTE
+            internal_format, upload_format, pixel_type, _texture_format_name = _volume_texture_format(self._volume_data.dtype)
             started = time.perf_counter()
             GL.glTexImage3D(
                 GL.GL_TEXTURE_3D,
@@ -2679,7 +4088,7 @@ if gpu_volume_canvas_available():
                 int(height),
                 int(depth),
                 0,
-                GL.GL_LUMINANCE,
+                upload_format,
                 pixel_type,
                 self._volume_data,
             )
@@ -2781,7 +4190,7 @@ if gpu_volume_canvas_available():
             GL.glBindTexture(GL.GL_TEXTURE_2D, self._transfer_lut_texture_id)
             self._set_uniform_int("u_transfer_lut", 1)
             GL.glActiveTexture(GL.GL_TEXTURE2)
-            mask_mode = self._mask_mode if self._mask_texture_id and self._mask_data is not None else "image_only"
+            mask_mode = self._mask_mode if self._mask_texture_id and self._mask_shape else "image_only"
             GL.glBindTexture(GL.GL_TEXTURE_3D, self._mask_texture_id or self._texture_id)
             self._set_uniform_int("u_mask", 2)
             GL.glActiveTexture(GL.GL_TEXTURE0)
@@ -2989,7 +4398,15 @@ __all__ = [
     "GPU_VOLUME_TRANSFER_LUT_SIZE",
     "GPU_VOLUME_MASK_MODES",
     "GPU_VOLUME_RENDER_MODES",
+    "GPU_PREVIEW_BUILD_BACKEND_UNAVAILABLE",
+    "GPU_PREVIEW_BUILD_BACKEND_FRAGMENT",
+    "GPU_PREVIEW_BUILD_BACKEND_COMPUTE",
+    "GpuPreviewBuildCapabilities",
+    "VolumePreviewTextureProvider",
     "build_volume_transfer_lut",
+    "cpu_volume_preview_provider",
+    "gpu_texture_preview_provider",
+    "probe_gpu_preview_build_capabilities",
     "gpu_volume_canvas_available",
     "gpu_volume_offscreen_available",
     "gpu_volume_unavailable_reason",

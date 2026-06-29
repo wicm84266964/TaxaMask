@@ -164,6 +164,9 @@ TIF_TRANSLATIONS = {
         "Release Render quality to rebuild the 3D preview.": "松开渲染质量滑条后，将按最终值重建三维预览。",
         "Release ROI scale to update the 3D preview.": "松开 ROI 倍率滑条后，将按最终值更新三维预览。",
         "Downsampling volume and uploading texture. This can take a moment for large TIF stacks.": "正在降采样体数据并上传纹理。大型 TIF 首次构建可能需要一段时间。",
+        "GPU budget": "GPU 预算",
+        "GPU budget auto-scaled": "GPU 预算自动降级",
+        "GPU budget auto-scaled preview": "GPU 预算已自动降低预览规格",
         "Preparing mask preview...": "正在准备 mask 预览...",
         "Downsampling mask labels for 3D overlay. This can take a moment for large label volumes.": "Downsampling mask labels for 3D overlay. This can take a moment for large label volumes.",
         "Specimens": "Specimen",
@@ -7667,6 +7670,9 @@ class TifWorkbenchWidget(QWidget):
             parts.append(
                 f"GPU cache {texture_cache_entries} {texture_cache_bytes / (1024.0 ** 2):.0f} MB hit {hits}/{hits + misses}"
             )
+        degradation = self._volume_gpu_stream_degradation_text(stats)
+        if degradation:
+            parts.append(degradation)
         if float(getattr(self, "_volume_last_preview_build_ms", 0.0) or 0.0) > 0.0:
             parts.append(f"Load {float(self._volume_last_preview_build_ms):.0f} ms")
         supersample = float(stats.get("supersample_scale") or 1.0)
@@ -7712,6 +7718,9 @@ class TifWorkbenchWidget(QWidget):
         if texture_cache_entries > 0:
             texture_cache_bytes = int(stats.get("texture_cache_bytes") or 0)
             parts.append(f"GPU {texture_cache_entries} {texture_cache_bytes / (1024.0 ** 2):.0f} MB")
+        degradation = self._volume_gpu_stream_degradation_text(stats, compact=True)
+        if degradation:
+            parts.append(degradation)
         load_ms = float(getattr(self, "_volume_last_preview_build_ms", 0.0) or 0.0)
         if load_ms > 0.0:
             parts.append(f"Load {load_ms:.0f} ms")
@@ -7736,6 +7745,21 @@ class TifWorkbenchWidget(QWidget):
         if byte_count >= int(1.5 * 1024 * 1024 * 1024):
             return tt("large GPU texture", self.lang)
         return ""
+
+    def _volume_gpu_stream_degradation_text(self, stats=None, compact=False):
+        stats = dict(stats or getattr(self, "_volume_last_stats", {}) or {})
+        stream = dict(stats.get("gpu_stream_build") or {})
+        if not stream.get("degraded"):
+            return ""
+        actual = int(stream.get("actual_max_dim") or 0)
+        requested = int(stream.get("requested_max_dim") or 0)
+        if actual > 0 and requested > actual:
+            if compact:
+                return f"{tt('GPU budget', self.lang)} {actual}/{requested}"
+            return f"{tt('GPU budget auto-scaled preview', self.lang)} {actual}/{requested}"
+        if compact:
+            return tt("GPU budget auto-scaled", self.lang)
+        return tt("GPU budget auto-scaled preview", self.lang)
 
     def volume_performance_report(self):
         stats = dict(getattr(self, "_volume_last_stats", {}) or {})
@@ -7765,6 +7789,8 @@ class TifWorkbenchWidget(QWidget):
             "gpu_texture_cache_budget_bytes": int(stats.get("texture_cache_budget_bytes") or 0),
             "gpu_texture_cache_hits": int(stats.get("texture_cache_hits") or 0),
             "gpu_texture_cache_misses": int(stats.get("texture_cache_misses") or 0),
+            "gpu_stream_build": dict(stats.get("gpu_stream_build") or {}),
+            "gpu_stream_degraded": bool((stats.get("gpu_stream_build") or {}).get("degraded")),
             "load_ms": float(getattr(self, "_volume_last_preview_build_ms", 0.0) or 0.0),
             "roi_source_mode": self._volume_roi_source_mode(),
             "roi_inspect_enabled": bool(self._volume_roi_inspect_enabled()),
@@ -7989,7 +8015,6 @@ class TifWorkbenchWidget(QWidget):
             return
         self._volume_quality_committed_value = value
         self._volume_quality_drag_pending = False
-        self._release_gpu_texture_cache()
         self._prune_volume_preview_cache()
         self._refresh_volume_preview()
 
@@ -8345,6 +8370,9 @@ class TifWorkbenchWidget(QWidget):
         except Exception:
             slider = getattr(self, "volume_quality_slider", None)
             target_dim = int(slider.value()) if hasattr(slider, "value") else 0
+        stream = dict((getattr(self, "_volume_last_stats", {}) or {}).get("gpu_stream_build") or {})
+        if stream.get("degraded"):
+            return 1
         if target_dim >= 3072:
             return int(TIF_VOLUME_ULTRA_QUALITY_CACHE_OWNER_LIMIT)
         if target_dim >= 2048:
@@ -9042,6 +9070,137 @@ class TifWorkbenchWidget(QWidget):
             self.volume_canvas.set_render_state(**state)
         return True
 
+    def _gpu_volume_source_for_request(self, volume_request):
+        if self.image_volume is None:
+            return None, (), None
+        roi_bbox = (volume_request or {}).get("roi_bbox")
+        if roi_bbox is None:
+            return self.image_volume, tuple(int(value) for value in self.image_volume.shape), None
+        try:
+            z_pair, y_pair, x_pair = normalize_roi_bbox_zyx(roi_bbox, self.image_volume.shape)
+            source = self.image_volume[int(z_pair[0]):int(z_pair[1]), int(y_pair[0]):int(y_pair[1]), int(x_pair[0]):int(x_pair[1])]
+            shape = tuple(int(value) for value in getattr(source, "shape", ()) or ())
+            if len(shape) != 3 or min(shape) <= 0:
+                return None, (), None
+            return source, shape, (tuple(int(value) for value in z_pair), tuple(int(value) for value in y_pair), tuple(int(value) for value in x_pair))
+        except Exception:
+            return None, (), None
+
+    def _gpu_mask_source_for_request(self, mask_request):
+        mask = self._active_part_mask_volume()
+        if mask is None:
+            return None, (), None
+        shape = tuple(int(value) for value in getattr(mask, "shape", ()) or ())
+        if len(shape) != 3 or min(shape) <= 0:
+            return None, (), None
+        roi_bbox = (mask_request or {}).get("roi_bbox")
+        if roi_bbox is None:
+            return mask, shape, None
+        try:
+            z_pair, y_pair, x_pair = normalize_roi_bbox_zyx(roi_bbox, shape)
+            source = mask[int(z_pair[0]):int(z_pair[1]), int(y_pair[0]):int(y_pair[1]), int(x_pair[0]):int(x_pair[1])]
+            source_shape = tuple(int(value) for value in getattr(source, "shape", ()) or ())
+            if len(source_shape) != 3 or min(source_shape) <= 0:
+                return None, (), None
+            return source, source_shape, (tuple(int(value) for value in z_pair), tuple(int(value) for value in y_pair), tuple(int(value) for value in x_pair))
+        except Exception:
+            return None, (), None
+
+    def _try_build_mask_gpu_texture(self, mask_request):
+        if not mask_request or not hasattr(self.volume_canvas, "build_mask_texture_from_source"):
+            return False
+        source, source_shape, _normalized_roi_bbox = self._gpu_mask_source_for_request(mask_request)
+        if source is None:
+            return False
+        try:
+            return bool(
+                self.volume_canvas.build_mask_texture_from_source(
+                    source,
+                    int(mask_request.get("max_dim", 1024)),
+                    algorithm=str(mask_request.get("algorithm", "occupancy")),
+                    cache_key=mask_request.get("cache_key"),
+                    source_shape=source_shape,
+                )
+            )
+        except Exception as exc:
+            self._volume_last_stats = dict(getattr(self, "_volume_last_stats", {}) or {})
+            self._volume_last_stats["gpu_mask_build_error"] = str(exc)
+            return False
+
+    def _try_build_volume_gpu_texture(self, volume_request, mask_mode="image_only", mask_request=None, mask_preview=None):
+        if not volume_request or self.image_volume is None:
+            return False
+        if self._volume_canvas_renderer != "gpu" or not hasattr(self.volume_canvas, "build_volume_texture_from_source"):
+            return False
+        if self._volume_render_mode == "drag" or str(volume_request.get("mode") or "") == "drag":
+            return False
+        supports_streamed_mask = bool(mask_mode != "image_only" and mask_request is not None and hasattr(self.volume_canvas, "build_mask_texture_from_source"))
+        if mask_mode != "image_only" and not (supports_streamed_mask or hasattr(self.volume_canvas, "set_mask_data")):
+            return False
+        source, request_source_shape, normalized_roi_bbox = self._gpu_volume_source_for_request(volume_request)
+        if source is None:
+            return False
+        use_streamed_mask = supports_streamed_mask
+        if mask_mode != "image_only" and not use_streamed_mask and mask_preview is None and mask_request is not None:
+            mask_preview = self._volume_mask_preview_cache.get(mask_request.get("cache_key"))
+            if mask_preview is None:
+                if self._should_show_volume_mask_preview_progress(str(mask_request.get("mode") or "still"), self._active_part_mask_volume()):
+                    return False
+                else:
+                    mask_preview = self._ensure_volume_mask_preview(str(mask_request.get("mode") or "still"))
+        if mask_mode != "image_only" and mask_preview is None and not use_streamed_mask:
+            mask_mode = "image_only"
+        source_shape, spacing_zyx = self._volume_source_geometry()
+        if normalized_roi_bbox is not None:
+            source_shape = tuple(int(value) for value in request_source_shape)
+        state = self._volume_render_state("still")
+        state["mask_mode"] = mask_mode
+        message = volume_request.get("message") or tt("Preparing full-volume 3D preview...", self.lang)
+        self._update_volume_render_status_label(message)
+        try:
+            provider = self.volume_canvas.build_volume_texture_from_source(
+                source,
+                int(volume_request.get("max_dim", 1024)),
+                algorithm=str(volume_request.get("algorithm", "hybrid")),
+                preserve_source=bool(volume_request.get("preserve_source", False)),
+                cache_key=volume_request.get("cache_key"),
+                source_shape=source_shape,
+                spacing_zyx=spacing_zyx,
+            )
+        except Exception as exc:
+            self._volume_last_stats = dict(getattr(self, "_volume_last_stats", {}) or {})
+            self._volume_last_stats["gpu_preview_build_error"] = str(exc)
+            return False
+        if provider is None:
+            return False
+        self._volume_preview = None
+        self._volume_preview_source_shape = volume_request.get("cache_key")
+        self._volume_roi_preview_bbox = normalized_roi_bbox
+        self._volume_roi_preview_source_shape = tuple(int(value) for value in request_source_shape) if normalized_roi_bbox is not None else ()
+        self._volume_last_preview_build_ms = 0.0
+        if hasattr(self.volume_canvas, "set_axis_overlays"):
+            self.volume_canvas.set_axis_overlays(self._local_axis_volume_overlays())
+        if mask_mode != "image_only" and use_streamed_mask:
+            if not self._try_build_mask_gpu_texture(mask_request):
+                mask_mode = "image_only"
+                state["mask_mode"] = "image_only"
+        elif hasattr(self.volume_canvas, "set_mask_data"):
+            try:
+                self.volume_canvas.set_mask_data(
+                    mask_preview if mask_mode != "image_only" else None,
+                    cache_key=(mask_request or {}).get("cache_key") if mask_mode != "image_only" else None,
+                )
+            except TypeError:
+                self.volume_canvas.set_mask_data(mask_preview if mask_mode != "image_only" else None)
+        if hasattr(self.volume_canvas, "set_render_state"):
+            self.volume_canvas.set_render_state(**state)
+        if hasattr(self.volume_canvas, "render_stats"):
+            self._volume_last_stats = dict(self.volume_canvas.render_stats() or {})
+        return True
+
+    def _try_build_full_volume_gpu_texture(self, volume_request, mask_mode="image_only"):
+        return self._try_build_volume_gpu_texture(volume_request, mask_mode=mask_mode)
+
     def _request_volume_interaction_render(self):
         if self.display_mode != "volume":
             return
@@ -9164,6 +9323,30 @@ class TifWorkbenchWidget(QWidget):
                 self._volume_roi_preview_bbox = roi_bbox
                 self._volume_roi_preview_source_shape = roi_shape_zyx(roi_bbox) if roi_bbox is not None else ()
             elif mode == "still" and self.display_mode == "volume":
+                mask_mode_for_gpu = self._volume_mask_mode()
+                mask_request_for_gpu = None
+                mask_preview_for_gpu = None
+                if mask_mode_for_gpu != "image_only":
+                    mask_request_for_gpu = self._volume_mask_preview_request(mode)
+                    if mask_request_for_gpu is not None:
+                        mask_preview_for_gpu = self._volume_mask_preview_cache.get(mask_request_for_gpu["cache_key"])
+                        if mask_preview_for_gpu is not None:
+                            self._volume_mask_preview_cache.move_to_end(mask_request_for_gpu["cache_key"])
+                            self._touch_volume_cache_owner(mask_request_for_gpu.get("owner"))
+                        elif (
+                            not hasattr(self.volume_canvas, "build_mask_texture_from_source")
+                            and self._should_show_volume_mask_preview_progress(mode, self._active_part_mask_volume())
+                        ):
+                            self._start_volume_preview_build(mask_request=mask_request_for_gpu)
+                            return
+                if self._try_build_volume_gpu_texture(
+                    volume_request,
+                    mask_mode=mask_mode_for_gpu,
+                    mask_request=mask_request_for_gpu,
+                    mask_preview=mask_preview_for_gpu,
+                ):
+                    self._update_volume_render_status_label()
+                    return
                 if self._should_show_volume_preview_progress(mode, volume_request.get("roi_bbox")):
                     self._start_volume_preview_build(volume_request=volume_request)
                     return

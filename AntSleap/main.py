@@ -298,7 +298,7 @@ try:
         sqlite_project_migration_report_path,
     )
     from AntSleap.core.project_sqlite_writer import finish_vlm_run, record_vlm_image_result
-    from AntSleap.core.sqlite_storage import PROJECT_MANIFEST_SCHEMA_VERSION, SQLITE_BACKEND, read_project_manifest
+    from AntSleap.core.sqlite_storage import PROJECT_MANIFEST_SCHEMA_VERSION, SQLITE_BACKEND, read_project_manifest, resolve_manifest_database_path
     from AntSleap.core.literature_descriptions import (
         build_text_block_source,
         build_description_source,
@@ -414,7 +414,7 @@ except ImportError:
         sqlite_project_migration_report_path,
     )
     from core.project_sqlite_writer import finish_vlm_run, record_vlm_image_result
-    from core.sqlite_storage import PROJECT_MANIFEST_SCHEMA_VERSION, SQLITE_BACKEND, read_project_manifest
+    from core.sqlite_storage import PROJECT_MANIFEST_SCHEMA_VERSION, SQLITE_BACKEND, read_project_manifest, resolve_manifest_database_path
     from core.literature_descriptions import (
         build_text_block_source,
         build_description_source,
@@ -7708,7 +7708,18 @@ class MainWindow(QMainWindow):
         last_project = self.config.get("last_project_path", "")
         if not last_project or not os.path.exists(last_project):
             return
-        self.open_project_path(last_project)
+        try:
+            self.open_project_path(last_project)
+        except Exception:
+            runtime_log_exception("open_last_project_failed", *sys.exc_info())
+            self.config.set("last_project_path", "")
+            self.config.save()
+            self.log(tr("Last project could not be opened and was cleared from startup: {0}", self.current_lang).format(last_project))
+            QMessageBox.warning(
+                self,
+                tr("Open Last Project", self.current_lang),
+                tr("The last project could not be opened, so TaxaMask returned to the start screen.\n\n{0}", self.current_lang).format(last_project),
+            )
 
     def closeEvent(self, event):
         if getattr(self, "image_import_thread", None) is not None and self.image_import_thread.isRunning():
@@ -8146,6 +8157,44 @@ class MainWindow(QMainWindow):
 
     def _is_legacy_2d_json_project_file(self, path):
         return self._is_legacy_2d_json_project_payload(self._read_project_probe_payload(path))
+
+    def _candidate_manifest_paths_for_sqlite_database(self, path):
+        database_path = os.path.abspath(str(path))
+        directory = os.path.dirname(database_path) or "."
+        filename = os.path.basename(database_path)
+        candidates = []
+        if filename.endswith(".taxamask.sqlite"):
+            candidates.append(os.path.join(directory, f"{filename[:-len('.taxamask.sqlite')]}.sqlite_manifest.json"))
+        for name in os.listdir(directory) if os.path.isdir(directory) else []:
+            if name.endswith(".sqlite_manifest.json"):
+                candidates.append(os.path.join(directory, name))
+        seen = set()
+        unique = []
+        for candidate in candidates:
+            norm = os.path.normcase(os.path.normpath(os.path.abspath(str(candidate))))
+            if norm not in seen:
+                seen.add(norm)
+                unique.append(os.path.abspath(str(candidate)))
+        return unique
+
+    def _manifest_for_sqlite_database_file(self, path):
+        database_path = os.path.abspath(str(path))
+        database_norm = os.path.normcase(os.path.normpath(database_path))
+        for manifest_path in self._candidate_manifest_paths_for_sqlite_database(database_path):
+            if not os.path.exists(manifest_path):
+                continue
+            try:
+                payload = read_project_manifest(manifest_path)
+                resolved_db = resolve_manifest_database_path(manifest_path, payload)
+            except Exception:
+                continue
+            resolved_norm = os.path.normcase(os.path.normpath(os.path.abspath(resolved_db)))
+            if resolved_norm == database_norm:
+                return os.path.abspath(manifest_path)
+        return ""
+
+    def _is_project_sqlite_database_file(self, path):
+        return os.path.basename(str(path or "")).endswith(".taxamask.sqlite")
 
     def _active_sqlite_project_manager(self):
         manager = getattr(self, "project", None)
@@ -9060,6 +9109,27 @@ class MainWindow(QMainWindow):
         f = os.path.abspath(str(path))
         runtime_log_event("open_project_begin", path=f)
         self._flush_pending_project_save(defer_for_navigation=False)
+        if self._is_project_sqlite_database_file(f):
+            manifest_path = self._manifest_for_sqlite_database_file(f)
+            if not manifest_path:
+                QMessageBox.warning(
+                    self,
+                    tr("Project entry file not found", self.current_lang),
+                    tr(
+                        "This is a SQLite database file, but TaxaMask could not find the matching project entry file. Please open the project entry file next to it instead:\n\n2D: *.sqlite_manifest.json\n\nSelected database:\n{0}",
+                        self.current_lang,
+                    ).format(f),
+                )
+                runtime_log_event("open_project_sqlite_database_without_manifest", path=f)
+                return
+            self.log(
+                tr(
+                    "Selected a SQLite database file. Opening its project entry instead: {0}",
+                    self.current_lang,
+                ).format(manifest_path)
+            )
+            runtime_log_event("open_project_sqlite_database_redirected", path=f, manifest=manifest_path)
+            f = manifest_path
         payload = self._read_project_probe_payload(f)
         if self._is_legacy_2d_json_project_payload(payload):
             existing_manifest = self._existing_sqlite_manifest_for_legacy_json(f)

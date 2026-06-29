@@ -45,22 +45,22 @@ for %%C in (
     "%ProgramData%\miniforge3\condabin\conda.bat"
     "%ProgramData%\mambaforge\condabin\conda.bat"
 ) do (
-    call :TryCondaEnvList "%%~C"
-    if defined PYTHON_EXE goto PythonFound
+    if not defined PYTHON_EXE call :TryCondaEnvList "%%~C"
 )
 
-for %%D in (C D E F G H) do (
-    for %%C in (
-        "%%D:\miniconda3\condabin\conda.bat"
-        "%%D:\anaconda3\condabin\conda.bat"
-        "%%D:\miniforge3\condabin\conda.bat"
-        "%%D:\mambaforge\condabin\conda.bat"
-        "%%D:\conda\condabin\conda.bat"
-        "%%D:\Anaconda\condabin\conda.bat"
-        "%%D:\Miniconda\condabin\conda.bat"
+if not defined PYTHON_EXE for %%D in (C D E F G H) do (
+    for %%E in (
+        "%%D:\miniconda3\envs\taxamask\python.exe"
+        "%%D:\anaconda3\envs\taxamask\python.exe"
+        "%%D:\miniforge3\envs\taxamask\python.exe"
+        "%%D:\mambaforge\envs\taxamask\python.exe"
+        "%%D:\conda\envs\taxamask\python.exe"
+        "%%D:\Anaconda\envs\taxamask\python.exe"
+        "%%D:\Miniconda\envs\taxamask\python.exe"
+        "%%D:\miniconda3\envs\antsleap\python.exe"
+        "%%D:\anaconda3\envs\antsleap\python.exe"
     ) do (
-        call :TryCondaEnvList "%%~C"
-        if defined PYTHON_EXE goto PythonFound
+        call :TryPython "%%~fE" "drive known environment path" 0
     )
 )
 
@@ -75,8 +75,7 @@ for /d %%E in (
     "%ProgramData%\miniforge3\envs\taxamask*"
     "%ProgramData%\mambaforge\envs\taxamask*"
 ) do (
-    call :TryPython "%%~fE\python.exe" "named conda env %%~nxE" 0
-    if defined PYTHON_EXE goto PythonFound
+    if not defined PYTHON_EXE call :TryPython "%%~fE\python.exe" "named conda env %%~nxE" 0
 )
 
 for %%D in (C D E F G H) do (
@@ -89,8 +88,7 @@ for %%D in (C D E F G H) do (
         "%%D:\Anaconda\envs\taxamask*"
         "%%D:\Miniconda\envs\taxamask*"
     ) do (
-        call :TryPython "%%~fE\python.exe" "drive conda env %%~fE" 0
-        if defined PYTHON_EXE goto PythonFound
+        if not defined PYTHON_EXE call :TryPython "%%~fE\python.exe" "drive conda env %%~fE" 0
     )
 )
 
@@ -98,12 +96,13 @@ if not defined PYTHON_EXE (
     for %%C in (python.exe python py.exe) do (
         if not defined PYTHON_EXE (
             for /f "delims=" %%F in ('where %%C 2^>nul') do (
-                call :TryPython "%%F" "PATH %%C" 0
-                if defined PYTHON_EXE goto PythonFound
+                if not defined PYTHON_EXE call :TryPython "%%F" "PATH %%C" 0
             )
         )
     )
 )
+
+if defined PYTHON_EXE goto PythonFound
 
 if not defined PYTHON_EXE (
     echo Cannot find a Python environment with the minimum TaxaMask dependencies.

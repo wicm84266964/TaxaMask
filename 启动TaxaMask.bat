@@ -15,41 +15,10 @@ if defined TAXAMASK_PYTHON_EXE (
     exit /b 1
 )
 
-set "CONDA_ENV_PYTHON="
-for %%C in (
-    "%CONDA_EXE%"
-    "%CONDA_PREFIX%\Scripts\conda.exe"
-    "%CONDA_PREFIX%\condabin\conda.bat"
-    "D:\miniconda\Scripts\conda.exe"
-    "D:\miniconda\condabin\conda.bat"
-    "D:\miniconda3\Scripts\conda.exe"
-    "D:\miniconda3\condabin\conda.bat"
-    "D:\anaconda3\Scripts\conda.exe"
-    "D:\anaconda3\condabin\conda.bat"
-    "%USERPROFILE%\miniconda3\Scripts\conda.exe"
-    "%USERPROFILE%\miniconda3\condabin\conda.bat"
-    "%USERPROFILE%\anaconda3\Scripts\conda.exe"
-    "%USERPROFILE%\anaconda3\condabin\conda.bat"
-    "%ProgramData%\miniconda3\Scripts\conda.exe"
-    "%ProgramData%\miniconda3\condabin\conda.bat"
-    "%ProgramData%\anaconda3\Scripts\conda.exe"
-    "%ProgramData%\anaconda3\condabin\conda.bat"
-) do (
-    if not defined CONDA_ENV_PYTHON if exist "%%~C" (
-        for /f "usebackq delims=" %%F in (`"%%~C" run -n taxamask python -c "import sys; print(sys.executable)" 2^>nul`) do (
-            if not defined CONDA_ENV_PYTHON if exist "%%~F" set "CONDA_ENV_PYTHON=%%~F"
-        )
-    )
-)
-if not defined PYTHON_EXE if defined CONDA_ENV_PYTHON set "PYTHON_EXE=%CONDA_ENV_PYTHON%"
-
 for %%P in (
     "%~dp0.venv\Scripts\python.exe"
     "%~dp0venv\Scripts\python.exe"
     "%~dp0env\Scripts\python.exe"
-    "D:\miniconda\envs\taxamask\python.exe"
-    "D:\miniconda3\envs\taxamask\python.exe"
-    "D:\anaconda3\envs\taxamask\python.exe"
     "%CONDA_PREFIX%\python.exe"
     "%USERPROFILE%\miniconda3\envs\taxamask\python.exe"
     "%USERPROFILE%\anaconda3\envs\taxamask\python.exe"

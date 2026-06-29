@@ -6,7 +6,7 @@ from datetime import datetime
 
 import numpy as np
 import tifffile
-from PySide6.QtCore import QEventLoop, QObject, QPointF, QRect, QRectF, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QEvent, QEventLoop, QObject, QPointF, QRect, QRectF, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QPixmap, QPolygonF, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QProgressDialog,
     QPushButton,
@@ -2052,12 +2053,15 @@ class TifWorkbenchWidget(QWidget):
         self._volume_preview_pending_key = None
         self._volume_preview_pending_mask_key = None
         self._volume_preview_pending_message = ""
+        self._volume_preview_ui_wait_depth = 0
         self._volume_preview_busy_control_states = []
 
         self.specimen_list = TifSpecimenTree()
         self.specimen_list.setObjectName("tifSpecimenList")
         self.specimen_list.setHeaderHidden(True)
+        self.specimen_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.specimen_list.currentItemChanged.connect(self._on_specimen_tree_selected)
+        self.specimen_list.customContextMenuRequested.connect(self._on_specimen_tree_context_menu)
 
         self.canvas = TifSliceCanvas()
         self.canvas.workbench = self
@@ -4404,10 +4408,17 @@ class TifWorkbenchWidget(QWidget):
         if not self._is_editable_part_volume() or not self.current_specimen_id or not self.current_part_id:
             QMessageBox.information(self, tt("Part extraction", self.lang), tt("Select a part volume before exporting a part package.", self.lang))
             return
-        part = self.project.get_part(self.current_specimen_id, self.current_part_id, default=None)
+        self.delete_part_volume(self.current_specimen_id, self.current_part_id)
+
+    def delete_part_volume(self, specimen_id, part_id):
+        specimen_id = str(specimen_id or "").strip()
+        part_id = str(part_id or "").strip()
+        if not specimen_id or not part_id:
+            return False
+        part = self.project.get_part(specimen_id, part_id, default=None)
         if part is None:
-            return
-        display_name = part.get("display_name") or part.get("part_id") or self.current_part_id
+            return False
+        display_name = part.get("display_name") or part.get("part_id") or part_id
         response = QMessageBox.question(
             self,
             tt("Delete part volume?", self.lang),
@@ -4419,23 +4430,27 @@ class TifWorkbenchWidget(QWidget):
             QMessageBox.No,
         )
         if response != QMessageBox.Yes:
-            return
+            return False
         try:
-            self.image_volume = None
-            self.label_volume = None
-            self.edit_volume = None
-            self.part_preview_mask = None
-            self._clear_volume_preview_cache()
+            deleting_current = specimen_id == self.current_specimen_id and part_id == self.current_part_id
+            if deleting_current:
+                self.image_volume = None
+                self.label_volume = None
+                self.edit_volume = None
+                self.part_preview_mask = None
+                self._clear_volume_preview_cache()
+            else:
+                self._cancel_volume_preview_build()
             import gc
 
             gc.collect()
-            result = self.project.discard_part(self.current_specimen_id, self.current_part_id, remove_storage=True, save=False)
-            specimen = self.project.get_specimen(self.current_specimen_id, default=None)
+            result = self.project.discard_part(specimen_id, part_id, remove_storage=True, save=False)
+            specimen = self.project.get_specimen(specimen_id, default=None)
             if specimen is not None:
                 for roi in specimen.get("part_rois", []) or []:
-                    if str(roi.get("linked_part_id", "")) == str(self.current_part_id):
+                    if str(roi.get("linked_part_id", "")) == part_id:
                         self.project.update_part_roi(
-                            self.current_specimen_id,
+                            specimen_id,
                             roi.get("roi_id", ""),
                             status="cancelled",
                             linked_part_id="",
@@ -4444,20 +4459,21 @@ class TifWorkbenchWidget(QWidget):
             self.project.save_project()
         except Exception as exc:
             QMessageBox.warning(self, tt("Part extraction", self.lang), str(exc))
-            return
-        self.part_preview_mask = None
-        self.current_part = None
-        deleted_part_id = self.current_part_id
-        self.current_part_id = ""
-        self.current_volume_scope = "full"
-        self._clear_volume_preview_cache()
+            return False
+        if specimen_id == self.current_specimen_id and part_id == self.current_part_id:
+            self.part_preview_mask = None
+            self.current_part = None
+            self.current_part_id = ""
+            self.current_volume_scope = "full"
+            self._clear_volume_preview_cache()
         self.refresh_project()
-        self._select_volume_tree_item(self.current_specimen_id, "full", "")
+        self._select_volume_tree_item(specimen_id, "full", "")
         message = tt("Deleted part volume {0}.", self.lang).format(display_name)
         if not result.get("removed_storage"):
             message = f"{message} Storage was already missing."
         self.training_status_label.setText(message)
-        self.log(f"{message} part_id={deleted_part_id}")
+        self.log(f"{message} part_id={part_id}")
+        return True
 
     def _clip_bbox_to_shape(self, bbox, shape):
         clean = []
@@ -5782,12 +5798,35 @@ class TifWorkbenchWidget(QWidget):
             }
         return {"scope": "full", "specimen_id": str(payload or ""), "part_id": "", "reslice_id": ""}
 
+    def _on_specimen_tree_context_menu(self, position):
+        item = self.specimen_list.itemAt(position)
+        payload = self._tree_item_payload(item)
+        if payload.get("scope") not in {"part", "part_reslices", "part_reslice"}:
+            return
+        specimen_id = str(payload.get("specimen_id") or "")
+        part_id = str(payload.get("part_id") or "")
+        if not specimen_id or not part_id:
+            return
+        menu = QMenu(self)
+        delete_action = menu.addAction(tt("Delete part volume", self.lang))
+        action = menu.exec(self.specimen_list.viewport().mapToGlobal(position))
+        if action is delete_action:
+            self.delete_part_volume(specimen_id, part_id)
+
     def _select_volume_tree_item(self, specimen_id="", scope="full", part_id="", reslice_id=""):
         target_specimen = str(specimen_id or "").strip()
         target_scope = "part_reslice" if scope == "part_reslice" else ("part" if scope in {"part", "part_reslices"} else "full")
         target_part = str(part_id or "").strip()
         target_reslice = str(reslice_id or "").strip()
         fallback = None
+
+        def select_item(item):
+            self._programmatic_volume_tree_select = True
+            try:
+                self.specimen_list.setCurrentItem(item)
+            finally:
+                self._programmatic_volume_tree_select = False
+
         for row in range(self.specimen_list.topLevelItemCount()):
             parent = self.specimen_list.topLevelItem(row)
             if parent is None:
@@ -5798,7 +5837,7 @@ class TifWorkbenchWidget(QWidget):
             if target_specimen and parent_payload.get("specimen_id") != target_specimen:
                 continue
             if target_scope == "full":
-                self.specimen_list.setCurrentItem(parent.child(0) or parent)
+                select_item(parent.child(0) or parent)
                 return True
             for child_index in range(parent.childCount()):
                 child = parent.child(child_index)
@@ -5814,17 +5853,17 @@ class TifWorkbenchWidget(QWidget):
                                         reslice_item = group.child(reslice_index)
                                         reslice_payload = self._tree_item_payload(reslice_item)
                                         if reslice_payload.get("reslice_id") == target_reslice:
-                                            self.specimen_list.setCurrentItem(reslice_item)
+                                            select_item(reslice_item)
                                             return True
                                     return False
-                                self.specimen_list.setCurrentItem(group.child(0))
+                                select_item(group.child(0))
                                 return True
                         if target_reslice:
                             return False
-                    self.specimen_list.setCurrentItem(child)
+                    select_item(child)
                     return True
         if fallback is not None and not target_specimen:
-            self.specimen_list.setCurrentItem(fallback)
+            select_item(fallback)
             return True
         return False
 
@@ -5843,6 +5882,27 @@ class TifWorkbenchWidget(QWidget):
                 return
         payload = self._tree_item_payload(current)
         specimen_id = payload.get("specimen_id", "")
+        previous_payload = self._tree_item_payload(previous) if previous is not None else {}
+        target_key = (
+            payload.get("scope", "full"),
+            specimen_id,
+            payload.get("part_id", ""),
+            payload.get("reslice_id", ""),
+        )
+        previous_key = (
+            previous_payload.get("scope", "full"),
+            previous_payload.get("specimen_id", ""),
+            previous_payload.get("part_id", ""),
+            previous_payload.get("reslice_id", ""),
+        )
+        if previous is not None and target_key != previous_key and not bool(getattr(self, "_programmatic_volume_tree_select", False)):
+            self._defer_volume_preview_render_once = True
+            if self.display_mode == "volume":
+                message = tt("Preparing full-volume 3D preview...", self.lang)
+                show_canvas_status = self._set_volume_canvas_status_text(message, replace_existing=True)
+                self._update_volume_render_status_label(message)
+                if show_canvas_status:
+                    QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
         if payload.get("scope") in {"part", "part_reslices", "part_reslice"}:
             self.load_part(specimen_id, payload.get("part_id", ""), selected_reslice_id=payload.get("reslice_id", ""))
         else:
@@ -5855,6 +5915,8 @@ class TifWorkbenchWidget(QWidget):
         specimen = self.project.get_specimen(specimen_id, default=None)
         if specimen is None:
             return
+        if specimen_id != self.current_specimen_id or self.current_volume_scope != "full":
+            self._cancel_volume_preview_build()
         self._loading_specimen = True
         try:
             self.auto_save_timer.stop()
@@ -5934,6 +5996,14 @@ class TifWorkbenchWidget(QWidget):
         part = self.project.get_part(specimen_id, part_id, default=None)
         if specimen is None or part is None:
             return
+        switching_part = (
+            specimen_id != self.current_specimen_id
+            or part_id != self.current_part_id
+            or str(selected_reslice_id or "") != self.current_reslice_id
+            or self.current_volume_scope != "part"
+        )
+        if switching_part:
+            self._cancel_volume_preview_build()
         self._loading_specimen = True
         try:
             self.auto_save_timer.stop()
@@ -7853,6 +7923,54 @@ class TifWorkbenchWidget(QWidget):
         except Exception:
             return False
 
+    def _volume_preview_ui_waiting(self):
+        return int(getattr(self, "_volume_preview_ui_wait_depth", 0) or 0) > 0
+
+    def eventFilter(self, watched, event):
+        if self._volume_preview_ui_waiting() and isinstance(watched, QWidget) and (watched is self or self.isAncestorOf(watched)):
+            if event.type() in {
+                QEvent.MouseButtonPress,
+                QEvent.MouseButtonRelease,
+                QEvent.MouseButtonDblClick,
+                QEvent.KeyPress,
+                QEvent.KeyRelease,
+            }:
+                return True
+        return super().eventFilter(watched, event)
+
+    def _begin_volume_preview_ui_wait(self):
+        depth = int(getattr(self, "_volume_preview_ui_wait_depth", 0) or 0)
+        self._volume_preview_ui_wait_depth = depth + 1
+        if depth == 0:
+            try:
+                QApplication.instance().installEventFilter(self)
+            except Exception:
+                pass
+        canvas = getattr(self, "volume_canvas", None)
+        if hasattr(canvas, "set_stream_build_yield_callback"):
+            try:
+                canvas.set_stream_build_yield_callback(self._yield_volume_preview_ui_events)
+            except Exception:
+                pass
+
+    def _end_volume_preview_ui_wait(self):
+        depth = max(0, int(getattr(self, "_volume_preview_ui_wait_depth", 0) or 0) - 1)
+        self._volume_preview_ui_wait_depth = depth
+        if depth == 0:
+            canvas = getattr(self, "volume_canvas", None)
+            if hasattr(canvas, "set_stream_build_yield_callback"):
+                try:
+                    canvas.set_stream_build_yield_callback(None)
+                except Exception:
+                    pass
+            try:
+                QApplication.instance().removeEventFilter(self)
+            except Exception:
+                pass
+
+    def _yield_volume_preview_ui_events(self):
+        QApplication.processEvents()
+
     def _volume_renderer_label(self):
         renderer = tt("GPU ray march", self.lang) if self._volume_canvas_renderer == "gpu" else tt("CPU fallback", self.lang)
         gpu_label = ""
@@ -8712,7 +8830,6 @@ class TifWorkbenchWidget(QWidget):
     def _volume_preview_build_controls(self):
         controls = []
         for name in (
-            "specimen_list",
             "volume_quality_slider",
             "volume_clarity_check",
             "volume_roi_detail_check",
@@ -9112,6 +9229,7 @@ class TifWorkbenchWidget(QWidget):
         source, source_shape, _normalized_roi_bbox = self._gpu_mask_source_for_request(mask_request)
         if source is None:
             return False
+        self._begin_volume_preview_ui_wait()
         try:
             return bool(
                 self.volume_canvas.build_mask_texture_from_source(
@@ -9126,6 +9244,8 @@ class TifWorkbenchWidget(QWidget):
             self._volume_last_stats = dict(getattr(self, "_volume_last_stats", {}) or {})
             self._volume_last_stats["gpu_mask_build_error"] = str(exc)
             return False
+        finally:
+            self._end_volume_preview_ui_wait()
 
     def _try_build_volume_gpu_texture(self, volume_request, mask_mode="image_only", mask_request=None, mask_preview=None):
         if not volume_request or self.image_volume is None:
@@ -9137,6 +9257,8 @@ class TifWorkbenchWidget(QWidget):
         supports_streamed_mask = bool(mask_mode != "image_only" and mask_request is not None and hasattr(self.volume_canvas, "build_mask_texture_from_source"))
         if mask_mode != "image_only" and not (supports_streamed_mask or hasattr(self.volume_canvas, "set_mask_data")):
             return False
+        message = volume_request.get("message") or tt("Preparing full-volume 3D preview...", self.lang)
+        self._update_volume_render_status_label(message)
         source, request_source_shape, normalized_roi_bbox = self._gpu_volume_source_for_request(volume_request)
         if source is None:
             return False
@@ -9155,8 +9277,7 @@ class TifWorkbenchWidget(QWidget):
             source_shape = tuple(int(value) for value in request_source_shape)
         state = self._volume_render_state("still")
         state["mask_mode"] = mask_mode
-        message = volume_request.get("message") or tt("Preparing full-volume 3D preview...", self.lang)
-        self._update_volume_render_status_label(message)
+        self._begin_volume_preview_ui_wait()
         try:
             provider = self.volume_canvas.build_volume_texture_from_source(
                 source,
@@ -9171,6 +9292,8 @@ class TifWorkbenchWidget(QWidget):
             self._volume_last_stats = dict(getattr(self, "_volume_last_stats", {}) or {})
             self._volume_last_stats["gpu_preview_build_error"] = str(exc)
             return False
+        finally:
+            self._end_volume_preview_ui_wait()
         if provider is None:
             return False
         self._volume_preview = None
@@ -9288,6 +9411,14 @@ class TifWorkbenchWidget(QWidget):
         if not hasattr(self, "volume_canvas"):
             return
         if getattr(self, "_handling_gpu_volume_failure", False):
+            return
+        if bool(getattr(self, "_defer_volume_preview_render_once", False)):
+            self._defer_volume_preview_render_once = False
+            if self.display_mode == "volume":
+                message = tt("Preparing full-volume 3D preview...", self.lang)
+                self._set_volume_canvas_status_text(message)
+                self._update_volume_render_status_label(message)
+                QTimer.singleShot(0, self.render_volume_preview)
             return
         if self.display_mode == "volume":
             self._ensure_volume_canvas()

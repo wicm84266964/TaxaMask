@@ -403,6 +403,37 @@ class TifGpuVolumeCanvasImportTests(unittest.TestCase):
         self.assertEqual(stats["texture_format"], "r8")
         self.assertFalse(stats["degraded"])
 
+    def test_gpu_render_core_stream_build_yields_between_slabs(self):
+        core = gpu_canvas._GpuVolumeRenderCore()
+        core._init_render_state()
+        core._preview_build_capabilities = gpu_canvas.GpuPreviewBuildCapabilities(
+            available=True,
+            backend=gpu_canvas.GPU_PREVIEW_BUILD_BACKEND_FRAGMENT,
+            max_3d_texture_size=4096,
+        )
+        volume = gpu_canvas.np.arange(4 * 6 * 8, dtype=gpu_canvas.np.uint16).reshape((4, 6, 8))
+        yields = []
+        core.set_stream_build_yield_callback(lambda: yields.append("yield"))
+
+        with patch.object(gpu_canvas.GL, "glGenTextures", return_value=111), \
+            patch.object(gpu_canvas.GL, "glBindTexture"), \
+            patch.object(gpu_canvas.GL, "glTexParameteri"), \
+            patch.object(gpu_canvas.GL, "glPixelStorei"), \
+            patch.object(gpu_canvas.GL, "glTexImage3D"), \
+            patch.object(gpu_canvas.GL, "glTexSubImage3D"), \
+            patch.object(gpu_canvas.GL, "glDeleteTextures"):
+            core._stream_upload_source_volume_texture(
+                volume,
+                4,
+                algorithm="hybrid",
+                preserve_source=False,
+                cache_key=("owner", "stream-yield"),
+                source_shape=volume.shape,
+                staging_budget_bytes=16,
+            )
+
+        self.assertGreater(len(yields), 1)
+
     def test_gpu_render_core_stream_build_degrades_target_shape_to_budget(self):
         core = gpu_canvas._GpuVolumeRenderCore()
         core._init_render_state()

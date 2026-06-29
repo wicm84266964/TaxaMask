@@ -18,9 +18,9 @@ if str(PROJECT_ROOT) not in sys.path:
 has_pyside6 = False
 
 try:
-    from PySide6.QtCore import QPointF, Qt
+    from PySide6.QtCore import QEvent, QPointF, Qt
     from PySide6.QtOpenGLWidgets import QOpenGLWidget
-    from PySide6.QtWidgets import QApplication, QDialog, QLabel, QMessageBox, QTextEdit, QWidget
+    from PySide6.QtWidgets import QApplication, QDialog, QLabel, QMessageBox, QTextEdit, QTreeWidgetItem, QWidget
 except ModuleNotFoundError as exc:
     if exc.name and exc.name.startswith("PySide6"):
         QApplication = None
@@ -937,6 +937,32 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertEqual(roi["status"], "cancelled")
                 self.assertEqual(roi["linked_part_id"], "")
                 self.assertIn("Deleted part volume Head", widget.training_status_label.text())
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_delete_part_volume_from_tree_without_loading_part(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            widget = self._make_volume_widget(root, z_count=4)
+            try:
+                crop_volume_to_part(widget.project, "01-0101-21", "brain", [[1, 3], [2, 6], [1, 5]], display_name="Brain")
+                part_dir = root / "viewer" / widget.project.part_dir("01-0101-21", "brain")
+                widget.refresh_project()
+                widget._select_volume_tree_item("01-0101-21", "full", "")
+                self.assertEqual(widget.current_volume_scope, "full")
+                self.assertTrue(part_dir.exists())
+
+                with patch.object(widget, "load_part") as load_part, \
+                    patch("AntSleap.ui.tif_workbench.QMessageBox.question", return_value=QMessageBox.Yes):
+                    self.assertTrue(widget.delete_part_volume("01-0101-21", "brain"))
+
+                load_part.assert_not_called()
+                self.assertFalse(part_dir.exists())
+                self.assertIsNone(widget.project.get_part("01-0101-21", "brain", default=None))
+                self.assertEqual(widget.current_volume_scope, "full")
+                self.assertEqual(widget.current_part_id, "")
+                self.assertIn("Deleted part volume Brain", widget.training_status_label.text())
             finally:
                 widget.close_project()
                 widget.deleteLater()
@@ -2914,6 +2940,89 @@ class TifWorkbenchTests(unittest.TestCase):
             widget.close_project()
             widget.deleteLater()
 
+    def test_switching_specimen_cancels_pending_preview_without_locking_tree(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+        try:
+            widget.specimen_list.setEnabled(True)
+            widget._set_volume_preview_build_controls_busy(True)
+            worker = type("Worker", (), {"cancelled": False, "cancel": lambda self: setattr(self, "cancelled", True)})()
+            widget._volume_preview_build_worker = worker
+            widget._volume_preview_pending_token = 9
+            widget._volume_preview_pending_key = ("old",)
+            widget._volume_preview_pending_mask_key = None
+
+            widget._cancel_volume_preview_build()
+
+            self.assertTrue(worker.cancelled)
+            self.assertEqual(widget._volume_preview_pending_token, 0)
+            self.assertIsNone(widget._volume_preview_pending_key)
+            self.assertTrue(widget.specimen_list.isEnabled())
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+
+    def test_deferred_specimen_switch_render_keeps_gpu_stream_path(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+        try:
+            widget.display_mode = "volume"
+            widget._defer_volume_preview_render_once = True
+            calls = []
+
+            def fake_timer(_delay, callback):
+                calls.append(callback)
+
+            with patch("AntSleap.ui.tif_workbench.QTimer.singleShot", side_effect=fake_timer), \
+                patch.object(widget, "_try_build_volume_gpu_texture") as gpu_build:
+                widget.render_volume_preview()
+
+            self.assertEqual(calls, [widget.render_volume_preview])
+            gpu_build.assert_not_called()
+            self.assertFalse(widget._defer_volume_preview_render_once)
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+
+    def test_user_tree_switch_shows_volume_pending_status_before_loading(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+        try:
+            widget.display_mode = "volume"
+            widget._loading_specimen = False
+            previous = QTreeWidgetItem(["old"])
+            previous.setData(0, Qt.UserRole, {"scope": "full", "specimen_id": "old", "part_id": ""})
+            current = QTreeWidgetItem(["new"])
+            current.setData(0, Qt.UserRole, {"scope": "full", "specimen_id": "new", "part_id": ""})
+
+            with patch.object(widget, "_set_volume_canvas_status_text", return_value=True) as set_status, \
+                patch("AntSleap.ui.tif_workbench.QApplication.processEvents") as process_events, \
+                patch.object(widget, "load_specimen") as load_specimen:
+                widget._on_specimen_tree_selected(current, previous)
+
+            set_status.assert_called_once_with("Preparing full-volume 3D preview...", replace_existing=True)
+            process_events.assert_called_once()
+            load_specimen.assert_called_once_with("new")
+            self.assertTrue(widget._defer_volume_preview_render_once)
+            self.assertIn("Preparing full-volume 3D preview", widget.volume_render_status_label.text())
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+
+    def test_volume_preview_wait_state_blocks_clicks_but_allows_wheel_events(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+        try:
+            widget._begin_volume_preview_ui_wait()
+
+            self.assertTrue(widget.eventFilter(widget.specimen_list, QEvent(QEvent.MouseButtonPress)))
+            self.assertTrue(widget.eventFilter(widget.specimen_list, QEvent(QEvent.KeyPress)))
+            self.assertFalse(widget.eventFilter(widget.specimen_list, QEvent(QEvent.Wheel)))
+        finally:
+            widget._end_volume_preview_ui_wait()
+            widget.close_project()
+            widget.deleteLater()
+
     def test_metadata_only_specimen_shows_deferred_volume_message(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -3965,6 +4074,58 @@ class TifWorkbenchTests(unittest.TestCase):
             widget.deleteLater()
             fake_canvas.deleteLater()
 
+    def test_gpu_stream_rebuild_keeps_existing_frame_without_pending_flash(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+
+        class FakeGpuStreamCanvas(QLabel):
+            def __init__(self):
+                super().__init__()
+                self.build_calls = []
+                self.text_updates = []
+
+            def has_volume(self):
+                return True
+
+            def setText(self, text):
+                self.text_updates.append(str(text))
+                super().setText(text)
+
+            def build_volume_texture_from_source(self, volume, max_dim, **kwargs):
+                self.build_calls.append((volume, int(max_dim), dict(kwargs)))
+                return object()
+
+            def set_mask_data(self, mask, *args, **kwargs):
+                return None
+
+            def set_render_state(self, **kwargs):
+                return None
+
+            def render_stats(self):
+                return {"preview_provider": {"kind": "gpu_texture", "build_backend": "gpu_stream"}}
+
+        fake_canvas = FakeGpuStreamCanvas()
+        try:
+            widget._volume_canvas_renderer = "gpu"
+            widget._volume_canvas_created = True
+            widget._volume_render_mode = "still"
+            widget.display_mode = "volume"
+            widget.view_stack.addWidget(fake_canvas)
+            widget.volume_canvas = fake_canvas
+            widget.image_volume = np.zeros((4, 16, 16), dtype=np.uint8)
+
+            with patch("AntSleap.ui.tif_workbench.build_volume_preview") as cpu_builder:
+                widget.render_volume_preview()
+
+            cpu_builder.assert_not_called()
+            self.assertEqual(len(fake_canvas.build_calls), 1)
+            self.assertNotIn("Preparing full-volume 3D preview...", fake_canvas.text_updates)
+            self.assertEqual(widget._volume_last_stats["preview_provider"]["build_backend"], "gpu_stream")
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+            fake_canvas.deleteLater()
+
     def test_roi_crop_preview_prefers_gpu_stream_build_before_cpu_preview(self):
         manager = TifProjectManager()
         widget = TifWorkbenchWidget(manager, "en")
@@ -4293,7 +4454,7 @@ class TifWorkbenchTests(unittest.TestCase):
             self.assertFalse(widget.volume_quality_slider.isEnabled())
             self.assertFalse(widget.volume_roi_inspect_check.isEnabled())
             self.assertFalse(widget.volume_roi_scale_slider.isEnabled())
-            self.assertFalse(widget.specimen_list.isEnabled())
+            self.assertTrue(widget.specimen_list.isEnabled())
 
             widget._set_volume_preview_build_controls_busy(False)
 

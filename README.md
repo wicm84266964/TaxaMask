@@ -8,11 +8,11 @@
 
 This branch is a **developer preview**. It keeps the stable TaxaMask 2D morphology and PDF evidence workflows, and adds the newer TIF/CT 3D workflow for internal morphology review, part-volume extraction, and local-axis reslicing. The 3D route has been developed and tested mainly with AntScan ant CT data. Its data structures are not hard-coded to ants, but broad multi-taxon validation is not yet claimed.
 
-## Release 1.2.0 TIF Developer Preview
+## Release 1.3.0 TIF Developer Preview
 
-This branch release is published as `v1.2.0-tif-preview`. It keeps the stable 2D SQLite project-storage upgrade from TaxaMask 1.2.0 and additionally includes the TIF/CT SQLite project index, TIF annotation-tool polish, and local-axis developer-preview workflow.
+This branch release is prepared as `v1.3.0-tif-preview`. It keeps the stable 2D SQLite project-storage upgrade from TaxaMask 1.2.0 and upgrades the TIF/CT developer-preview route with GPU-streamed 3D preview building, texture caching, ROI high-detail inspection, transfer-function presets, and metadata-only TIF registration for large stacks.
 
-The stable `v1.2.0` tag remains the 2D-focused release. See [docs/releases/1.2.0-tif-preview.md](docs/releases/1.2.0-tif-preview.md) for the full branch release notes.
+The stable `v1.2.0` tag remains the 2D-focused release. See [docs/releases/1.3.0-tif-preview.md](docs/releases/1.3.0-tif-preview.md) for the full branch release notes.
 
 ## What This Preview Contains
 
@@ -55,7 +55,9 @@ Current TIF/CT capabilities include:
 - Drawing part ROIs and key-slice contours.
 - Interpolating masks between key slices.
 - Accepting part masks and writing part-volume records.
-- GPU 3D volume preview with clipping and section inspection.
+- GPU 3D volume preview with streamed texture building, cache reuse, clipping, transfer-function presets, and section inspection.
+- ROI high-detail 3D inspection for checking local structures without editing source data.
+- Metadata-only TIF registration followed by explicit working-volume materialization for large stacks.
 - Z/Y/X slice navigation for multi-direction review.
 - Local Axis Reslice for a selected part volume.
 - Source Z-axis display as a locked reference.

@@ -1389,6 +1389,7 @@ class _GpuVolumeRenderCore:
         self._texture_cache_hits = 0
         self._texture_cache_misses = 0
         self._texture_cache_budget_bytes = _gpu_texture_cache_budget_bytes()
+        self._stream_build_yield_callback = None
         self._preview_build_capabilities = GpuPreviewBuildCapabilities(reason="GPU preview build capability has not been probed")
         self._preview_texture_provider = None
         self._preview_stream_build_stats = {}
@@ -1433,6 +1434,18 @@ class _GpuVolumeRenderCore:
         self._uploaded_dtype = ""
         self._transfer_preset = "amber"
         self._transfer_opacity = 1.0
+
+    def set_stream_build_yield_callback(self, callback):
+        self._stream_build_yield_callback = callback if callable(callback) else None
+
+    def _yield_stream_build_events(self):
+        callback = getattr(self, "_stream_build_yield_callback", None)
+        if not callable(callback):
+            return
+        try:
+            callback()
+        except Exception:
+            pass
 
     def _store_volume_data(self, volume, source_shape=None, spacing_zyx=None, cache_key=None):
         if volume is None:
@@ -1720,6 +1733,7 @@ class _GpuVolumeRenderCore:
                     int(math.ceil(float(oz1 - oz0) / float(local_z))),
                 )
                 GL.glMemoryBarrier(GL.GL_SHADER_IMAGE_ACCESS_BARRIER_BIT)
+                self._yield_stream_build_events()
             self._texture_id = texture_id
             self._volume_data = None
             self._volume_shape = target_shape
@@ -1986,6 +2000,7 @@ class _GpuVolumeRenderCore:
                     pixel_type,
                     upload,
                 )
+                self._yield_stream_build_events()
         except Exception:
             if texture_id:
                 GL.glDeleteTextures([int(texture_id)])
@@ -2140,6 +2155,7 @@ class _GpuVolumeRenderCore:
                     pixel_type,
                     upload,
                 )
+                self._yield_stream_build_events()
         except Exception:
             if texture_id:
                 GL.glDeleteTextures([int(texture_id)])
@@ -3235,6 +3251,9 @@ if gpu_volume_offscreen_available():
         def renderer_label(self):
             return self._renderer.renderer_label()
 
+        def set_stream_build_yield_callback(self, callback):
+            self._renderer.set_stream_build_yield_callback(callback)
+
         def _emit_renderer_info(self):
             details = self._renderer.renderer_details()
             if details and details != self._last_renderer_info:
@@ -3624,6 +3643,7 @@ if gpu_volume_canvas_available():
         _texture_cache_record_for_texture_id = _GpuVolumeRenderCore._texture_cache_record_for_texture_id
         _active_volume_texture_cache_bytes = _GpuVolumeRenderCore._active_volume_texture_cache_bytes
         _stream_build_texture_budget_bytes = _GpuVolumeRenderCore._stream_build_texture_budget_bytes
+        set_stream_build_yield_callback = _GpuVolumeRenderCore.set_stream_build_yield_callback
         _reserve_texture_cache_bytes = _GpuVolumeRenderCore._reserve_texture_cache_bytes
         _texture_id_is_cached = _GpuVolumeRenderCore._texture_id_is_cached
         _new_upload_texture_id = _GpuVolumeRenderCore._new_upload_texture_id

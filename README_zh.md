@@ -1,25 +1,39 @@
-# TaxaMask
+# TaxaMask：形态部位 Mask 标注、文献证据复核与三维形态工作台
 
 [![DOI](https://zenodo.org/badge/1264598942.svg)](https://doi.org/10.5281/zenodo.20619867)
 
 [English README](README.md)
 
-**TaxaMask** 是一个面向生物形态标注、文献证据复核和 AI 训练数据构建的开源桌面工作台。
+**TaxaMask** 是一个面向生物形态身体部位 mask 标注、分类学文献证据复核和人工确认训练数据构建的开源桌面工作台。
 
-当前 `main` 是 v2.x 的主动维护线。它把 2D 形态标注、STL 复核、PDF 文献证据、内嵌 Agent Center 和 TIF/CT 三维工作台放在同一条维护主线上。TIF/CT 路线目前主要用 AntScan 蚂蚁 CT 数据进行开发和验证；数据结构没有写死蚂蚁，但还不宣称已经完成广泛跨类群验证。
+TaxaMask 起源于真实蚂蚁分类学研究，也面向蚂蚁以外的形态学分类场景。它把分类学文献、标本图像、STL 渲染形态视角图、AI 辅助 mask 草稿、人工复核、模型训练和数据集导出连接在同一个可追溯项目循环中，支持 Segment Anything（SAM）草稿 mask、视觉语言模型（VLM）first-mile 建议、父/子部位层级标注，以及面向计算机视觉和多模态 fine-tuning 的 JSONL、COCO、YOLO 风格数据集导出。
+
+当前 `main` 是 v2.x 的主动维护线。它保留 2D/STL 形态标注和 PDF 文献证据作为公开用户最核心的使用场景，同时把内嵌 Agent Center 和新的 TIF/CT 三维工作台整合在同一条维护主线上。TIF/CT 路线目前主要用 AntScan 蚂蚁 CT 数据进行开发和验证；数据结构没有写死蚂蚁，但还不宣称已经完成广泛跨类群验证。
+
+## 图示概览
+
+![TaxaMask 工作流概览](docs/assets/readme/figure_1_taxamask_workflow.png)
+
+TaxaMask 通过项目记录连接源材料、候选图像、AI 草稿、人工确认标签、导出数据集和模型反馈。研究者可以从文献筛选、图像提取进入标注、复核、训练、预测检查和数据集导出，并持续保留材料来源与处理过程。
+
+![TaxaMask 公开界面概览](docs/assets/readme/figure_2_taxamask_ui_overview.png)
+
+公开界面围绕实际工作流入口组织：Agent Center 用于本地工作流辅助，PDF Evidence 用于文献证据，candidate review 用于筛选导入材料，2D/STL Morphology 用于可复核 mask 标注，TIF Volume 用于内部三维形态工作。
 
 ## 2.0.0 发布
 
-TaxaMask `v2.0.0` 将 TIF/CT 三维工作台提升为主线能力，并加入新的 UI 主题系统：
+TaxaMask `v2.0.0` 是把成熟的 2D/STL 形态工作流、PDF 文献证据工具、Agent Center 和新的 TIF/CT 工作台合并到同一维护主线的大版本：
 
+- 2D/STL 形态工作流仍然是标本图像、分类学图版、STL 渲染视角图、SAM/VLM 草稿、父/子部位标注、模型复核循环和 COCO / YOLO / JSONL 导出的主要路线。
+- PDF 文献证据工具继续用于文献筛选、图版/caption 提取、候选材料复核和带 provenance 的性状描述记录。
+- TIF/CT 作为新的内部形态工作台进入 `main`，用于 TIFF stack、part volume、三维预览和局部轴重切片。
 - 深色模式改为更暗的「深空霓虹」主题，使用克制的深蓝、银蓝光效和更低亮度的蓝色强调色。
 - 新增真正可用的浅色模式，包括 Qt 原生 palette、主界面样式和语义按钮刷新。
 - 内嵌 Agent Center 会跟随主题切换，覆盖 transcript、composer、prompt input、send button 和 status chip 等区域。
-- TIF/CT 三维工作台合并此前开发周期中的小版本增强，包括 GPU streaming 体预览、纹理缓存、ROI 高细节检查、transfer-function presets 和大体数据 metadata-only TIF 注册。
 
 预印本提交状态保留在 `preprint-submission` 分支和 `v1.4.0` release。新的开发从 `main` 继续。
 
-## TaxaMask 包含什么
+## 核心工作流
 
 TaxaMask 现在包含四条相互连接的研究路线：
 
@@ -49,9 +63,69 @@ Agent Center
 
 TaxaMask 的核心设计仍然是人工复核的形态学数据。AI 输出、导入预测和自动建议都先作为草稿材料保存，只有研究者接受后才适合作为训练真值或正式结果。
 
+## 2D / STL 形态工作台
+
+2D/STL 工作流是 TaxaMask 当前最成熟的标注路线。它面向需要把标本照片、分类学图版、显微图像或 STL/mesh 渲染视角图转化为可审计身体部位 mask 和训练数据集的研究者。
+
+TaxaMask 把形态学材料按复核状态组织起来：源材料、候选材料、AI 草稿、人工确认标签、模型预测和导出数据集在项目记录中保持区分。PDF 图版、caption、文献性状描述、标本图像、STL 渲染视角图、VLM 框、SAM mask、外部后端预测和人工 mask 都能进入同一条复核链路，但不会自动混成训练真值。
+
+当前 2D/STL 能力包括：
+
+- 将普通形态图片和 STL 渲染视角图导入 Labeling Workbench。
+- 把 STL 视角图作为可复核 2D 形态图像处理，同时保留 specimen 和 view provenance。
+- 支持父部位和子部位身体结构标注，适合层级化形态学任务。
+- 通过可编辑 profile 管理身体部位词表，便于实验室适配昆虫、蚂蚁、节肢动物、植物或其他基于形态的类群。
+- 使用 VLM 生成 first-mile 草稿框，并可结合 SAM 生成草稿 mask。
+- 对 AI 草稿、locator 预测、子部位专家和外部模型输出进行人工复核。
+- 通过 Blink、heatmap Blink 或外部 Blink 风格后端进行子部位精修。
+- 2D 项目使用 SQLite 主存储，适合较大的标注和复核项目，并保留旧 JSON 项目迁移能力。
+- 导出 multimodal JSONL、COCO 和 YOLO 风格数据集，用于计算机视觉、VLM 或自定义 fine-tuning 工作流。
+
+TaxaMask 的核心是 mask、身体部位标签和可追溯训练数据。keypoint 或 landmark 类工作流更适合作为 profile 级扩展处理，不是当前默认导出契约。
+
+## PDF 文献证据与 Provenance
+
+TaxaMask 包含文献证据路线，让形态数据集能够持续连接到产生候选材料的论文、图版和文字描述来源。
+
+当前 PDF 与证据能力包括：
+
+- 使用可编辑分类学 profile 进行 PDF 文献筛选。
+- 提取 figure 和 caption，并区分 accepted 与 needs-review 输出。
+- 将文献性状描述整理为带来源记录的 `taxon -> part -> description` 数据。
+- 图像进入形态项目之前先进行候选材料复核。
+- 提供 headless 工具，用于 PDF 筛选、候选生成、VLM 复核和导出工作流。
+
+PDF 输出是证据和候选材料。它们不能未经研究者复核就直接变成 2D/STL 训练真值或 TIF 的 `manual_truth`。
+
+## 身体部位词表与类群适配
+
+TaxaMask 使用可编辑 profile，把通用生物结构词、昆虫和节肢动物身体部位词，以及具体类群自己的标签体系连接起来。在昆虫或蚂蚁工作流中，常见搜索词包括 head、thorax 或 mesosoma、abdomen 或 gaster、antennae、mandibles、legs、wings、appendages，以及更细粒度的标本结构。
+
+其他类群可以沿用同样的流程结构，通过调整 profile、先复核小批量数据、验证模型行为，再逐步扩大使用范围。
+
+![TaxaMask 人机协同标注循环](docs/assets/readme/figure_3_human_in_the_loop_cycle.png)
+
+TaxaMask 把 VLM 框、SAM mask、locator 预测、TIF proposal 和外部后端输出都视为草稿材料，直到研究者完成复核。这样既能利用 AI 减少重复劳动，也能让生成结果和 ground-truth 标签保持清晰边界。
+
+![蚂蚁形态学参考工作流](docs/assets/readme/figure_4_ant_morphology_case.png)
+
+TaxaMask 目前在蚂蚁形态学流程中验证最充分。在参考案例中，它用于组织文献筛选、图像提取、VLM first-mile 预标注、人工复核、父部位标注、模型训练、预测检查和数据集导出。
+
+## 谁适合使用 TaxaMask？
+
+TaxaMask 适合需要完成以下工作的研究者或研究小组：
+
+- 为形态学、分类学、生物多样性或 phenomics 项目标注生物身体部位 mask。
+- 从标本图像、分类学图版、显微图像或 STL 渲染形态视角图中构建人工复核过的分割数据集。
+- 把分类学性状描述、图注、标本图像、AI 草稿、模型预测和最终标签放入同一个可审计项目。
+- 使用 SAM、VLM、Locator、Blink 或外部后端输出作为待复核草稿，而不是直接当作 ground truth。
+- 导出 multimodal JSONL、COCO 或 YOLO 风格数据集，用于计算机视觉、VLM 或自定义 fine-tuning 工作流。
+- 根据新的类群、身体部位词表、本地模型后端或实验室标注路线改造同一套流程。
+- 在需要处理 TIFF stack 或 CT 派生体数据时，把工作流扩展到内部形态三维检查、部位体提取和局部轴重切片。
+
 ## TIF / CT 三维工作台
 
-TIF 工作台面向体数据形态学任务：原始扫描方向、标本体态和目标结构方向可能在不同样本之间差异很大，因此不能简单依赖原始 Z 轴或体信号自动定位。
+TIF/CT 工作流把 TaxaMask 从外部形态图像扩展到内部体数据形态学。它面向 TIFF stack 或 CT 派生体数据：原始扫描方向、标本体态和目标结构方向可能在不同样本之间差异很大，因此不能简单依赖原始 Z 轴或体信号自动定位。
 
 当前 TIF/CT 能力包括：
 

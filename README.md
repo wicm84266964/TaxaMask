@@ -1,25 +1,39 @@
-# TaxaMask
+# TaxaMask - Morphological Body-Part Mask Annotation, Evidence Review, and 3D Morphology Workbench
 
 [![DOI](https://zenodo.org/badge/1264598942.svg)](https://doi.org/10.5281/zenodo.20619867)
 
 [中文 README](README_zh.md)
 
-**TaxaMask** is an open-source desktop workbench for traceable biological morphology annotation, evidence review, and AI training dataset construction.
+**TaxaMask** is an open-source desktop workbench for AI-assisted mask annotation of organismal body parts, taxonomic evidence review, and human-reviewed training dataset construction.
 
-The current `main` branch is the active v2.x line. It combines the 2D morphology, STL review, PDF evidence, embedded Agent Center, and TIF/CT 3D workbench routes in one maintained branch. The TIF/CT route has been developed and tested mainly with AntScan ant CT data. Its data structures are not hard-coded to ants, but broad multi-taxon validation is not yet claimed.
+Originating from real-world ant taxonomy research and designed for morphology-based taxonomic groups beyond ants, TaxaMask connects taxonomic literature, specimen images, STL-rendered morphology views, AI-assisted mask drafts, human review, model training, and dataset export in one traceable pipeline. It supports Segment Anything (SAM) draft masks, Vision-Language Model (VLM) first-mile proposals, parent/child body-part annotation, and provenance-aware export to multimodal JSONL, COCO, and YOLO-style datasets.
+
+The current `main` branch is the active v2.x line. It keeps the 2D/STL morphology and PDF evidence workflows as the core public use case, while also integrating the embedded Agent Center and the newer TIF/CT 3D workbench in one maintained branch. The TIF/CT route has been developed and tested mainly with AntScan ant CT data. Its data structures are not hard-coded to ants, but broad multi-taxon validation is not yet claimed.
+
+## Visual Overview
+
+![TaxaMask workflow overview](docs/assets/readme/figure_1_taxamask_workflow.png)
+
+TaxaMask keeps source materials, candidate images, AI drafts, human-confirmed labels, exported datasets, and model feedback connected through project records. Researchers can move from literature screening and image extraction to annotation, review, training, prediction checking, and dataset export while preserving provenance.
+
+![TaxaMask public interface overview](docs/assets/readme/figure_2_taxamask_ui_overview.png)
+
+The public interface centers on practical workflow entries: Agent Center for local workflow help, PDF Evidence for literature material, candidate review for screening imported images, 2D/STL Morphology for reviewable mask annotation, and TIF Volume for internal 3D morphology work.
 
 ## Release 2.0.0
 
-TaxaMask `v2.0.0` promotes the TIF/CT 3D workbench into the main line and adds the new UI theme system:
+TaxaMask `v2.0.0` is the main-line release that brings the established 2D/STL morphology workflow, PDF evidence tools, Agent Center, and the newer TIF/CT workbench into one maintained branch:
 
+- The 2D/STL morphology workflow remains the main route for specimen images, taxonomic plates, rendered STL views, SAM/VLM drafts, parent/child body-part annotation, model-review loops, and COCO / YOLO / JSONL export.
+- PDF evidence tools remain available for literature screening, figure/caption extraction, candidate review, and provenance-backed trait-description records.
+- TIF/CT is promoted into `main` as an additional internal-morphology workbench for TIFF stacks, part volumes, 3D preview, and local-axis reslicing.
 - Dark Mode now uses the deeper **Deep Space Neon** palette with restrained navy and silver-blue light effects.
 - Light Mode is available as a real bright workspace theme, including refreshed Qt palettes and semantic button styles.
 - The embedded Agent Center dashboard follows the active theme, including the transcript, composer, prompt input, send button, and status chips.
-- The TIF/CT 3D workbench includes previous development-cycle improvements such as GPU-streamed volume preview building, texture caching, ROI high-detail inspection, transfer-function presets, and metadata-only TIF registration for large stacks.
 
 The preprint-submission state is preserved on the `preprint-submission` branch and in the `v1.4.0` release. New development happens on `main`.
 
-## What TaxaMask Contains
+## Core Workflows
 
 TaxaMask now has four connected research routes:
 
@@ -49,9 +63,69 @@ Agent Center
 
 The program is designed around human-reviewed morphology data. AI outputs, imported predictions, and automated suggestions remain draft material until a researcher accepts them.
 
+## 2D / STL Morphology Workbench
+
+The 2D/STL workflow is TaxaMask's most mature annotation route. It is intended for researchers who need to turn specimen photographs, taxonomic plates, microscope images, or rendered STL/mesh views into auditable body-part masks and training datasets.
+
+TaxaMask organizes morphology material by review state: source material, candidate material, AI draft, human-confirmed label, model prediction, and exported dataset are kept distinct in the project record. PDF figures, captions, literature trait descriptions, specimen images, STL-rendered views, VLM boxes, SAM masks, external backend predictions, and human masks can enter the same review chain without being merged automatically into training truth.
+
+Current 2D/STL capabilities include:
+
+- Importing ordinary morphology images and STL-derived rendered views into the Labeling Workbench.
+- Treating STL views as reviewable 2D morphology images while preserving specimen/view provenance.
+- Parent-part and child-part body-structure annotation for hierarchical morphology work.
+- Editable body-part vocabularies through profiles, so a lab can adapt labels for insects, ants, arthropods, plants, or other morphology-based groups.
+- VLM first-mile draft boxes and optional SAM-assisted draft masks.
+- Human review loops for AI drafts, locator predictions, child-part experts, and external model outputs.
+- Route-specific child-part refinement through Blink, heatmap Blink, or external Blink-style backends.
+- SQLite-backed 2D project storage for large annotation and review projects, with legacy JSON migration support.
+- Dataset export to multimodal JSONL, COCO, and YOLO-style formats for computer-vision, VLM, or custom fine-tuning workflows.
+
+TaxaMask is centered on masks, body-part labels, and traceable training data. Keypoint or landmark workflows should be treated as profile-specific extensions rather than the default export contract.
+
+## PDF Evidence and Provenance
+
+TaxaMask includes a literature evidence route so morphology datasets can stay connected to the publications and figure sources that motivated them.
+
+Current PDF and evidence capabilities include:
+
+- PDF literature screening with editable taxonomy profiles.
+- Figure and caption extraction with accepted and needs-review output folders.
+- Literature trait-description extraction into provenance-backed `taxon -> part -> description` records.
+- Candidate review before images enter a morphology project.
+- Headless tools for PDF screening, candidate generation, VLM review, and export workflows.
+
+PDF outputs are evidence and candidate material. They should not become 2D/STL training truth or TIF `manual_truth` without researcher review.
+
+## Body-Part Vocabulary and Adaptation
+
+TaxaMask uses editable profiles so a project can bridge general organism terms, insect and arthropod body-part names, and taxon-specific labels. In insect or ant workflows, searchable body-part terms may include head, thorax or mesosoma, abdomen or gaster, antennae, mandibles, legs, wings, appendages, and other fine-grained specimen structures.
+
+Other taxa can use the same workflow pattern by adapting profiles, reviewing small batches first, and validating model behavior before scaling up.
+
+![Human-in-the-loop annotation cycle in TaxaMask](docs/assets/readme/figure_3_human_in_the_loop_cycle.png)
+
+TaxaMask treats VLM boxes, SAM masks, locator predictions, TIF proposals, and external backend outputs as draft material until a researcher reviews them. This keeps AI assistance useful while keeping generated candidates separate from ground-truth labels.
+
+![Ant morphology reference workflow](docs/assets/readme/figure_4_ant_morphology_case.png)
+
+TaxaMask is currently most extensively validated on ant morphology workflows. In the reference case, it was used to organize literature screening, image extraction, VLM first-mile pre-annotation, human review, parent-part annotation, training, prediction review, and dataset export.
+
+## Who Should Use TaxaMask?
+
+TaxaMask is intended for researchers and research groups who need to:
+
+- Annotate organismal body parts with masks for morphology, taxonomy, biodiversity, or phenomics projects.
+- Build human-reviewed segmentation datasets from specimen images, taxonomic plates, microscope images, or rendered STL morphology views.
+- Link taxonomic trait descriptions, figure captions, specimen images, AI drafts, model predictions, and final labels in one auditable project.
+- Use SAM, VLM, Locator, Blink, or external backend outputs as reviewable drafts rather than unverified ground truth.
+- Export multimodal JSONL, COCO, or YOLO-style datasets for computer-vision, VLM, or custom fine-tuning workflows.
+- Adapt the same workflow to a new taxon, body-part vocabulary, local model backend, or lab-specific annotation route.
+- Extend the workflow to internal morphology when TIFF stacks or CT-derived volumes need 3D inspection, part-volume extraction, or local-axis reslicing.
+
 ## TIF / CT 3D Workbench
 
-The TIF workbench is intended for volumetric morphology tasks where the original scan direction, specimen posture, and target structure orientation vary between samples.
+The TIF/CT workflow extends TaxaMask from external morphology images into internal volumetric morphology. It is intended for TIFF stacks or CT-derived volumes where the original scan direction, specimen posture, and target structure orientation vary between samples.
 
 Current TIF/CT capabilities include:
 

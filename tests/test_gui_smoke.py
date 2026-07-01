@@ -635,12 +635,30 @@ class GuiSmokeTests(unittest.TestCase):
             script = window.agent_panel._web_bootstrap_source()
 
             self.assertIn('classList.add("taxamask-embed")', script)
+            self.assertIn("radial-gradient", script)
+            self.assertIn("rgba(180, 193, 214, 0.055", script)
             self.assertIn(".sidebar,", script)
             self.assertIn(".preview", script)
+            self.assertIn(".taxamask-embed .transcript", script)
+            self.assertIn(".taxamask-embed .composer-shell", script)
+            self.assertIn(".taxamask-embed #prompt-input", script)
+            self.assertNotIn("#15191d", script)
             self.assertNotIn("min-height: 74px", script)
-            self.assertNotIn("#prompt-input {", script)
-            self.assertNotIn("#send-button {", script)
-            self.assertNotIn(".composer {", script)
+        finally:
+            window.deleteLater()
+
+    def test_agent_panel_embed_style_switches_to_light_theme(self):
+        window = self._make_window()
+        try:
+            window.agent_panel.set_theme("light")
+            css = window.agent_panel._web_embed_style_source()
+
+            self.assertIn("#F5F8FC", css)
+            self.assertIn("#FFFFFF", css)
+            self.assertIn(".taxamask-embed .composer-shell", css)
+            self.assertIn(".taxamask-embed #prompt-input", css)
+            self.assertNotIn("radial-gradient", css)
+            self.assertNotIn("#15191d", css)
         finally:
             window.deleteLater()
 

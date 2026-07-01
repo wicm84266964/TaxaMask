@@ -24,10 +24,17 @@ SURFACE_ROLE_RAISED: Final[str] = "raised"
 SURFACE_ROLE_TOOLBAR: Final[str] = "toolbar"
 SURFACE_ROLE_CANVAS: Final[str] = "canvas"
 
-SKY_500: Final[str] = "#0EA5E9"
-SKY_400: Final[str] = "#38BDF8"
-SKY_600: Final[str] = "#0284C7"
-SKY_300: Final[str] = "#7DD3FC"
+THEME_DARK: Final[str] = "dark"
+THEME_LIGHT: Final[str] = "light"
+
+NEON_BLUE: Final[str] = "#6F8FB8"
+NEON_BLUE_HOVER: Final[str] = "#89A7CC"
+NEON_PURPLE: Final[str] = "#75849D"
+NEON_CYAN_GREEN: Final[str] = "#4F9C94"
+NEON_GOLD: Final[str] = "#C89A43"
+
+LIGHT_BLUE: Final[str] = "#0EA5E9"
+LIGHT_BLUE_HOVER: Final[str] = "#0284C7"
 
 _WINDOWS_SCHOLARLY_FONT_FILES: Final[tuple[str, ...]] = (
     r"C:\Windows\Fonts\cambria.ttc",
@@ -44,18 +51,26 @@ _windows_scholarly_fonts_registered = False
 
 
 def normalize_theme(theme: str | None = "dark") -> str:
-    """Public GitHub build currently ships the fully audited dark theme only."""
-    return "dark"
+    clean = str(theme or THEME_DARK).strip().lower()
+    if clean in {"light", "lite", "bright"}:
+        return THEME_LIGHT
+    return THEME_DARK
 
 
 class ThemeConfig(TypedDict):
     is_light: bool
     bg_main: str
+    bg_main_gradient: str
     bg_surface: str
+    bg_surface_gradient: str
     bg_surface_alt: str
+    bg_surface_alt_gradient: str
     bg_panel: str
+    bg_panel_gradient: str
     bg_input: str
+    bg_input_gradient: str
     bg_hover: str
+    bg_hover_gradient: str
     bg_pressed: str
     text_main: str
     text_soft: str
@@ -63,8 +78,10 @@ class ThemeConfig(TypedDict):
     accent: str
     accent_hover: str
     accent_soft: str
+    accent_soft_gradient: str
     border: str
     border_strong: str
+    glow_border: str
     selection: str
     success: str
     warning: str
@@ -86,41 +103,80 @@ def register_windows_scholarly_ui_fonts() -> None:
 
 def get_theme_config(theme: str = "dark") -> ThemeConfig:
     theme = normalize_theme(theme)
-    is_light = theme.lower() == "light"
+    is_light = theme == THEME_LIGHT
     return {
         "is_light": is_light,
-        "bg_main": "#F4F7FB" if is_light else "#17191D",
-        "bg_surface": "#FBFDFE" if is_light else "#1E2126",
-        "bg_surface_alt": "#F6F9FC" if is_light else "#252930",
-        "bg_panel": "#EEF3F8" if is_light else "#1A1D22",
-        "bg_input": "#FEFFFF" if is_light else "#2A2F37",
-        "bg_hover": "#EAF1F8" if is_light else "#30353D",
-        "bg_pressed": "#E0EAF5" if is_light else "#2A2F36",
-        "text_main": "#122033" if is_light else "#E8ECF1",
-        "text_soft": "#31435B" if is_light else "#C7CDD6",
-        "text_dim": "#63748A" if is_light else "#959EAA",
-        "accent": SKY_500 if is_light else SKY_400,
-        "accent_hover": SKY_600 if is_light else SKY_300,
-        "accent_soft": "#E6F4FD" if is_light else "#213140",
-        "border": "#DCE4EE" if is_light else "#363C45",
-        "border_strong": "#C7D3E1" if is_light else "#4A525E",
-        "selection": "#DCEFFA" if is_light else "#2C343E",
-        "success": "#10B981",
-        "warning": "#F59E0B",
-        "error": "#EF4444",
+        "bg_main": "#F5F8FC" if is_light else "#070D1A",
+        "bg_main_gradient": (
+            "#F5F8FC"
+            if is_light
+            else "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #17263B, stop:0.38 #101B2D, stop:0.54 rgba(156, 173, 198, 26), stop:0.68 #0D1829, stop:1 #070D1A)"
+        ),
+        "bg_surface": "#FFFFFF" if is_light else "#101A2B",
+        "bg_surface_gradient": (
+            "#FFFFFF"
+            if is_light
+            else "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #203350, stop:0.32 #182840, stop:0.54 rgba(166, 181, 204, 34), stop:0.66 #142238, stop:1 #0A1220)"
+        ),
+        "bg_surface_alt": "#F1F6FB" if is_light else "#15243A",
+        "bg_surface_alt_gradient": (
+            "#F1F6FB"
+            if is_light
+            else "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #253B5B, stop:0.36 #1B2C46, stop:0.56 rgba(158, 176, 202, 30), stop:0.70 #14233A, stop:1 #0D1627)"
+        ),
+        "bg_panel": "#EAF1F8" if is_light else "#0A1220",
+        "bg_panel_gradient": (
+            "#EAF1F8"
+            if is_light
+            else "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #17263C, stop:0.52 #0D182A, stop:0.70 rgba(124, 146, 178, 22), stop:1 #07101B)"
+        ),
+        "bg_input": "#FCFEFF" if is_light else "#101C2E",
+        "bg_input_gradient": (
+            "#FCFEFF"
+            if is_light
+            else "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #1B2D47, stop:0.46 #132239, stop:0.76 rgba(126, 148, 180, 18), stop:1 #0B1424)"
+        ),
+        "bg_hover": "#E6F0F8" if is_light else "#1E314D",
+        "bg_hover_gradient": (
+            "#E6F0F8"
+            if is_light
+            else "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #2B4568, stop:0.46 #1D334F, stop:0.66 rgba(165, 183, 208, 28), stop:1 #142238)"
+        ),
+        "bg_pressed": "#DCE9F4" if is_light else "#101A2C",
+        "text_main": "#102033" if is_light else "#F4F8FF",
+        "text_soft": "#30445F" if is_light else "#C8D7EA",
+        "text_dim": "#677A92" if is_light else "#8496B3",
+        "accent": LIGHT_BLUE if is_light else NEON_BLUE,
+        "accent_hover": LIGHT_BLUE_HOVER if is_light else NEON_BLUE_HOVER,
+        "accent_soft": "#E3F4FC" if is_light else "#142A45",
+        "accent_soft_gradient": (
+            "#E3F4FC"
+            if is_light
+            else "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(111, 143, 184, 42), stop:0.50 rgba(166, 181, 204, 22), stop:1 rgba(75, 96, 128, 24))"
+        ),
+        "border": "#D7E2EC" if is_light else "#2F4565",
+        "border_strong": "#B9CADB" if is_light else "#5C7498",
+        "glow_border": "#B9CADB" if is_light else NEON_BLUE,
+        "selection": "#DCEFFA" if is_light else "#1A3153",
+        "success": "#059669" if is_light else NEON_CYAN_GREEN,
+        "warning": "#B7791F" if is_light else "#A88948",
+        "error": "#DC2626" if is_light else "#F87171",
     }
 
 
 def get_button_style_for_theme(role: str, extras: str = "", theme: str = "dark") -> str:
     theme = normalize_theme(theme)
     c = get_theme_config(theme)
-    is_light = theme.lower() == "light"
+    is_light = theme == THEME_LIGHT
 
-    bg = "#FDFEFF" if is_light else c["bg_surface_alt"]
-    border = "#D7E2ED" if is_light else c["border"]
+    bg = "#FDFEFF" if is_light else c["bg_surface_alt_gradient"]
+    bg_property = "background-color" if is_light else "background"
+    border = "#D4DFEA" if is_light else c["border"]
     text = c["text_soft"] if is_light else c["text_main"]
-    hover_bg = "#F2F7FB" if is_light else c["bg_hover"]
+    hover_bg = "#F2F7FB" if is_light else c["bg_hover_gradient"]
+    hover_bg_property = "background-color" if is_light else "background"
     pressed_bg = "#E8F0F8" if is_light else c["bg_pressed"]
+    pressed_bg_property = "background-color"
     hover_border = border
     pressed_border = border
 
@@ -133,26 +189,35 @@ def get_button_style_for_theme(role: str, extras: str = "", theme: str = "dark")
         hover_border = c["accent_hover"]
         pressed_border = c["accent_hover"]
         if not is_light:
-            bg = "#5B7486"
-            border = "#5B7486"
-            hover_bg = "#6A8293"
-            pressed_bg = "#4E6677"
-            hover_border = "#6A8293"
-            pressed_border = "#4E6677"
+            bg = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #6F8FB8, stop:0.42 #405F88, stop:1 #223B64)"
+            bg_property = "background"
+            border = "#7898BE"
+            hover_bg = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #89A7CC, stop:0.48 #4F709A, stop:1 #2A4775)"
+            hover_bg_property = "background"
+            pressed_bg = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #344F78, stop:0.55 #243C63, stop:1 #1B2E4E)"
+            pressed_bg_property = "background"
+            hover_border = NEON_BLUE_HOVER
+            pressed_border = NEON_PURPLE
     elif role == BUTTON_ROLE_DESTRUCTIVE:
         bg = c["error"]
+        bg_property = "background-color"
         border = c["error"]
         text = "#FFFFFF"
         hover_bg = "#DC2626"
+        hover_bg_property = "background-color"
         pressed_bg = "#B91C1C"
+        pressed_bg_property = "background-color"
         hover_border = "#DC2626"
         pressed_border = "#B91C1C"
     elif role == BUTTON_ROLE_STOP:
-        bg = "#F8FBFE" if is_light else c["bg_surface"]
+        bg = "#F8FBFE" if is_light else c["bg_panel_gradient"]
+        bg_property = "background-color" if is_light else "background"
         border = "#CBD8E5" if is_light else c["border_strong"]
         text = c["text_main"]
-        hover_bg = "#EEF4FA" if is_light else c["bg_hover"]
+        hover_bg = "#EEF4FA" if is_light else c["bg_hover_gradient"]
+        hover_bg_property = "background-color" if is_light else "background"
         pressed_bg = "#E4EDF7" if is_light else c["bg_pressed"]
+        pressed_bg_property = "background-color"
         hover_border = border
         pressed_border = border
 
@@ -162,7 +227,7 @@ def get_button_style_for_theme(role: str, extras: str = "", theme: str = "dark")
 
     return f"""
     QPushButton {{
-        background-color: {bg};
+        {bg_property}: {bg};
         border: 1px solid {border};
         color: {text};
         border-radius: 8px;
@@ -170,11 +235,11 @@ def get_button_style_for_theme(role: str, extras: str = "", theme: str = "dark")
         font-weight: 600;{extra_block}
     }}
     QPushButton:hover {{
-        background-color: {hover_bg};
+        {hover_bg_property}: {hover_bg};
         border-color: {hover_border};
     }}
     QPushButton:pressed {{
-        background-color: {pressed_bg};
+        {pressed_bg_property}: {pressed_bg};
         border-color: {pressed_border};
     }}
     QPushButton:disabled {{
@@ -186,7 +251,7 @@ def get_button_style_for_theme(role: str, extras: str = "", theme: str = "dark")
 
 
 def semantic_button_style(role: str, extras: str = "") -> str:
-    return get_button_style_for_theme(role, extras, "dark")
+    return get_button_style_for_theme(role, extras, _resolve_widget_theme(None))
 
 
 def _merge_button_extras(base_extras: str = "", extras: str = "") -> str:
@@ -199,12 +264,34 @@ def _merge_button_extras(base_extras: str = "", extras: str = "") -> str:
 
 def apply_theme_button_style(button: QPushButton | None, role: str, extras: str = "", theme: str = "dark") -> None:
     if button is not None:
+        button.setProperty("themeButtonRole", role)
+        button.setProperty("themeButtonExtras", str(extras or ""))
         button.setStyleSheet(get_button_style_for_theme(role, extras, theme))
 
 
 def apply_semantic_button_style(button: QPushButton | None, role: str, extras: str = "") -> None:
     if button is not None:
-        button.setStyleSheet(semantic_button_style(role, extras))
+        apply_theme_button_style(button, role, extras, _resolve_widget_theme(button))
+
+
+def refresh_themed_buttons(root: QWidget | QApplication | None = None, theme: str = "dark") -> None:
+    theme = normalize_theme(theme)
+    if root is None:
+        root = QApplication.instance()
+    if root is None:
+        return
+    if isinstance(root, QApplication):
+        buttons = root.allWidgets()
+    else:
+        buttons = [root, *root.findChildren(QWidget)]
+    for widget in buttons:
+        if not isinstance(widget, QPushButton):
+            continue
+        role = widget.property("themeButtonRole")
+        if not isinstance(role, str) or not role:
+            continue
+        extras = widget.property("themeButtonExtras")
+        apply_theme_button_style(widget, role, str(extras or ""), theme)
 
 
 def apply_theme_dialog_button_box_style(
@@ -395,7 +482,17 @@ def apply_surface_role(widget: QWidget | None, role: str, object_name: str | Non
 
 COMMON_BASE = """
 QMainWindow, QDialog {
-    background-color: %BG%;
+    background: %BG_GRADIENT%;
+    color: %TEXT%;
+}
+
+QWidget#startCenterPage,
+QWidget#startCenterAgentMain,
+QWidget#startCenterWorkflowRail,
+QWidget#workbenchPage,
+QWidget#pdfEvidencePage,
+QWidget#blinkLabPage {
+    background: %BG_GRADIENT%;
     color: %TEXT%;
 }
 
@@ -420,19 +517,19 @@ QAbstractScrollArea, QAbstractItemView {
 QWidget#workbenchCenterPanel,
 QWidget#CenterPanel,
 QWidget#startCenterPage {
-    background-color: %SURFACE%;
+    background: %BG_GRADIENT%;
     border: 1px solid %BORDER%;
     border-radius: 14px;
 }
 
 QWidget#ModelCard {
-    background-color: %SURFACE_ALT%;
-    border: 1px solid %BORDER%;
+    background: %SURFACE_ALT_GRADIENT%;
+    border: 1px solid %BORDER_STRONG%;
     border-radius: 12px;
 }
 
 QMenuBar {
-    background-color: %SURFACE%;
+    background: %SURFACE_GRADIENT%;
     color: %TEXT%;
     border-bottom: 1px solid %BORDER%;
 }
@@ -449,7 +546,7 @@ QMenuBar::item:selected {
 }
 
 QMenu {
-    background-color: %SURFACE%;
+    background: %SURFACE_GRADIENT%;
     border: 1px solid %BORDER_STRONG%;
     color: %TEXT%;
 }
@@ -464,14 +561,14 @@ QMenu::item:selected {
 }
 
 QToolTip {
-    background-color: %SURFACE_ALT%;
+    background: %SURFACE_ALT_GRADIENT%;
     color: %TEXT%;
     border: 1px solid %BORDER_STRONG%;
     padding: 4px 6px;
 }
 
 QStatusBar {
-    background-color: %SURFACE%;
+    background: %SURFACE_GRADIENT%;
     color: %TEXT_SOFT%;
     border-top: 1px solid %BORDER%;
 }
@@ -516,8 +613,8 @@ QLabel#mutedLabel {
 }
 
 QLabel#StatusPill {
-    background-color: %ACCENT_SOFT%;
-    border: 1px solid %BORDER_STRONG%;
+    background: %ACCENT_SOFT_GRADIENT%;
+    border: 1px solid %GLOW_BORDER%;
     border-radius: 8px;
     color: %TEXT_MAIN%;
     font-weight: 600;
@@ -530,7 +627,7 @@ QGroupBox {
     margin-top: 1.3em;
     padding-top: 12px;
     font-weight: bold;
-    background-color: %SURFACE%;
+    background: %SURFACE_GRADIENT%;
 }
 
 QGroupBox::title {
@@ -550,34 +647,40 @@ QWidget[surfaceRole="canvas"],
 QGroupBox[surfaceRole="panel"],
 QGroupBox[surfaceRole="subtle"],
 QGroupBox[surfaceRole="raised"] {
-    background-color: %SURFACE%;
+    background: %SURFACE_GRADIENT%;
     border: 1px solid %BORDER%;
     border-radius: 12px;
 }
 
+QWidget[surfaceRole="panel"],
+QGroupBox[surfaceRole="panel"] {
+    background: %SURFACE_GRADIENT%;
+    border-color: %BORDER_STRONG%;
+}
+
 QWidget[surfaceRole="toolbar"] {
-    background-color: %PANEL%;
+    background: %PANEL_GRADIENT%;
 }
 
 QWidget[surfaceRole="subtle"],
 QGroupBox[surfaceRole="subtle"] {
-    background-color: %SURFACE_ALT%;
+    background: %SURFACE_ALT_GRADIENT%;
 }
 
 QWidget[surfaceRole="raised"],
 QGroupBox[surfaceRole="raised"] {
-    background-color: %SURFACE%;
-    border-color: %BORDER_STRONG%;
+    background: %SURFACE_GRADIENT%;
+    border-color: %GLOW_BORDER%;
 }
 
 QWidget[surfaceRole="canvas"] {
-    background-color: %BG%;
+    background: %BG_GRADIENT%;
     border-color: %BORDER%;
     border-radius: 14px;
 }
 
 QListWidget, QTreeWidget, QTreeView, QTableWidget {
-    background-color: %SURFACE%;
+    background: %SURFACE_GRADIENT%;
     border: 1px solid %BORDER%;
     border-radius: 10px;
     padding: 6px;
@@ -591,31 +694,39 @@ QListWidget::item, QTreeWidget::item, QTreeView::item {
 }
 
 QListWidget::item:hover, QTreeWidget::item:hover, QTreeView::item:hover {
-    background-color: %HOVER%;
+    background: %HOVER_GRADIENT%;
 }
 
 QListWidget::item:selected, QTreeWidget::item:selected, QTreeView::item:selected {
-    background-color: %SELECTION%;
+    background: %ACCENT_SOFT_GRADIENT%;
     color: %ACCENT%;
     border-left: 3px solid %ACCENT%;
     font-weight: 700;
 }
 
 QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox {
-    background-color: %INPUT_BG%;
+    background: %INPUT_GRADIENT%;
     border: 1px solid %BORDER%;
     border-radius: 8px;
     padding: 6px 10px;
     color: %TEXT%;
+    selection-background-color: %SELECTION%;
+    selection-color: %TEXT%;
 }
 
 QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus {
     border: 1px solid %ACCENT%;
 }
 
+QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled, QComboBox:disabled, QSpinBox:disabled {
+    background-color: %PANEL%;
+    border: 1px solid %BORDER%;
+    color: %TEXT_DIM%;
+}
+
 QTextEdit#LinkedDescriptionBox,
 QTextEdit#DescriptionBox {
-    background-color: %INPUT_BG%;
+    background: %INPUT_GRADIENT%;
     border: 1px solid %BORDER%;
     border-radius: 10px;
     color: %TEXT_SOFT%;
@@ -625,7 +736,7 @@ QTextEdit#DescriptionBox {
 QTextEdit#MutedLogConsole,
 QTextEdit#LogConsole,
 QPlainTextEdit#MutedLogConsole {
-    background-color: %INPUT_BG%;
+    background: %INPUT_GRADIENT%;
     border: 1px solid %BORDER%;
     border-radius: 10px;
     color: %TEXT%;
@@ -642,11 +753,16 @@ QSpinBox::down-button {
 }
 
 QComboBox QAbstractItemView {
-    background-color: %SURFACE%;
+    background: %SURFACE_GRADIENT%;
     border: 1px solid %BORDER_STRONG%;
     color: %TEXT%;
     selection-background-color: %SELECTION%;
     selection-color: %ACCENT%;
+}
+
+QComboBox::item:selected {
+    background-color: %SELECTION%;
+    color: %ACCENT%;
 }
 
 QRadioButton, QCheckBox {
@@ -693,7 +809,7 @@ QCheckBox::indicator:checked {
 }
 
 QRadioButton#toolChip, QRadioButton#scaleToolRadio {
-    background-color: %SURFACE%;
+    background: %SURFACE_GRADIENT%;
     border: 1px solid %BORDER%;
     border-radius: 10px;
     padding: 8px 14px;
@@ -712,7 +828,7 @@ QRadioButton#toolChip::indicator, QRadioButton#scaleToolRadio::indicator {
 }
 
 QRadioButton#toolChip:hover, QRadioButton#scaleToolRadio:hover {
-    background-color: %HOVER%;
+    background: %HOVER_GRADIENT%;
     border-color: %BORDER_STRONG%;
     color: %TEXT%;
 }
@@ -731,7 +847,7 @@ QProgressBar {
     border: 1px solid %BORDER%;
     border-radius: 7px;
     text-align: center;
-    background-color: %PANEL%;
+    background: %PANEL_GRADIENT%;
     color: %TEXT_SOFT%;
 }
 
@@ -810,7 +926,7 @@ QScrollBar::add-page, QScrollBar::sub-page {
 }
 
 QHeaderView::section {
-    background-color: %SURFACE_ALT%;
+    background: %SURFACE_ALT_GRADIENT%;
     color: %TEXT_SOFT%;
     padding: 6px;
     border: 1px solid %BORDER%;
@@ -829,11 +945,11 @@ QTableWidget::item:selected {
 QTabWidget::pane {
     border: 1px solid %BORDER%;
     top: -1px;
-    background-color: %BG%;
+    background: %BG_GRADIENT%;
 }
 
 QTabBar::tab {
-    background: %SURFACE_ALT%;
+    background: %SURFACE_ALT_GRADIENT%;
     color: %TEXT_DIM%;
     padding: 9px 18px;
     border-top-left-radius: 10px;
@@ -843,12 +959,12 @@ QTabBar::tab {
 }
 
 QTabBar::tab:hover {
-    background: %HOVER%;
+    background: %HOVER_GRADIENT%;
     color: %TEXT_SOFT%;
 }
 
 QTabBar::tab:selected {
-    background: %SURFACE%;
+    background: %SURFACE_GRADIENT%;
     color: %ACCENT%;
     border: 1px solid %BORDER%;
     border-bottom: 3px solid %ACCENT%;
@@ -878,19 +994,27 @@ def get_theme_stylesheet(theme: str = "dark") -> str:
     config = get_theme_config(theme)
     vars = {
         "%BG%": config["bg_main"],
+        "%BG_GRADIENT%": config["bg_main_gradient"],
         "%SURFACE%": config["bg_surface"],
+        "%SURFACE_GRADIENT%": config["bg_surface_gradient"],
         "%SURFACE_ALT%": config["bg_surface_alt"],
+        "%SURFACE_ALT_GRADIENT%": config["bg_surface_alt_gradient"],
         "%PANEL%": config["bg_panel"],
+        "%PANEL_GRADIENT%": config["bg_panel_gradient"],
         "%INPUT_BG%": config["bg_input"],
+        "%INPUT_GRADIENT%": config["bg_input_gradient"],
         "%HOVER%": config["bg_hover"],
+        "%HOVER_GRADIENT%": config["bg_hover_gradient"],
         "%TEXT%": config["text_main"],
         "%TEXT_MAIN%": config["text_main"],
         "%TEXT_SOFT%": config["text_soft"],
         "%TEXT_DIM%": config["text_dim"],
         "%ACCENT%": config["accent"],
         "%ACCENT_SOFT%": config["accent_soft"],
+        "%ACCENT_SOFT_GRADIENT%": config["accent_soft_gradient"],
         "%BORDER%": config["border"],
         "%BORDER_STRONG%": config["border_strong"],
+        "%GLOW_BORDER%": config["glow_border"],
         "%SELECTION%": config["selection"],
     }
     res = COMMON_BASE
@@ -937,3 +1061,4 @@ def apply_theme_to_app(theme: str = "dark") -> None:
         theme_setter = getattr(widget, "set_theme", None)
         if callable(theme_setter):
             theme_setter(theme)
+    refresh_themed_buttons(app, theme)

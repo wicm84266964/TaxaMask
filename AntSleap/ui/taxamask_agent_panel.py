@@ -43,6 +43,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .style import get_theme_config, normalize_theme
+
 
 def _env_requests_browser_mode():
     value = os.environ.get("TAXAMASK_ANTCODE_BROWSER_MODE", "").strip().lower()
@@ -175,6 +177,7 @@ class TaxaMaskAgentPanel(QWidget):
         self._dashboard_log_path = ""
         self._dashboard_log_handle = None
         self._browser_context_copied = False
+        self.current_theme = normalize_theme(getattr(parent, "current_theme", "dark"))
         self.browser_mode = self._resolve_browser_mode()
         self._browser_opened_for_url = ""
         self.setObjectName("taxamaskAgentPanel")
@@ -609,11 +612,185 @@ exec "$@"
         except Exception:
             return
 
+    def _web_embed_style_source(self):
+        c = get_theme_config(self.current_theme)
+        if c["is_light"]:
+            page_background = c["bg_main"]
+            workspace_background = c["bg_surface"]
+            header_background = c["bg_surface_alt"]
+            transcript_background = c["bg_surface"]
+            composer_background = c["bg_surface_alt"]
+            panel_background = c["bg_surface"]
+            input_background = c["bg_input"]
+            workspace_border = c["border"]
+            soft_border = c["border"]
+            text_color = c["text_main"]
+            muted_color = c["text_dim"]
+            accent_color = c["accent"]
+            send_background = c["accent"]
+            send_text = "#FFFFFF"
+        else:
+            page_background = (
+                "radial-gradient(circle at 18% 0%, rgba(111, 143, 184, 0.10), transparent 34%), "
+                "linear-gradient(105deg, transparent 0%, rgba(180, 193, 214, 0.055) 43%, transparent 58%), "
+                "linear-gradient(135deg, #17263B 0%, #101B2D 42%, #070D1A 100%)"
+            )
+            workspace_background = (
+                "linear-gradient(110deg, rgba(32, 51, 80, 0.94) 0%, "
+                "rgba(20, 34, 56, 0.98) 39%, rgba(168, 181, 204, 0.075) 54%, "
+                "rgba(13, 24, 41, 0.99) 68%, rgba(7, 13, 26, 1) 100%)"
+            )
+            header_background = (
+                "linear-gradient(100deg, rgba(80, 110, 150, 0.16), "
+                "rgba(164, 181, 205, 0.08), rgba(24, 42, 68, 0.84))"
+            )
+            transcript_background = (
+                "linear-gradient(105deg, rgba(16, 27, 45, 0.98), rgba(9, 17, 31, 1) 48%, "
+                "rgba(138, 157, 188, 0.045) 58%, rgba(7, 12, 22, 1))"
+            )
+            composer_background = "linear-gradient(180deg, rgba(13, 23, 39, 0.98), rgba(7, 12, 22, 1))"
+            panel_background = "rgba(16, 28, 47, 0.94)"
+            input_background = "rgba(17, 30, 50, 0.96)"
+            workspace_border = "rgba(127, 154, 191, 0.44)"
+            soft_border = "rgba(125, 149, 183, 0.42)"
+            text_color = c["text_main"]
+            muted_color = c["text_dim"]
+            accent_color = c["accent"]
+            send_background = "linear-gradient(135deg, #6F8FB8, #405F88)"
+            send_text = "#F4F8FF"
+        return f"""
+      :root {{
+        --bg: {c['bg_main']} !important;
+        --chrome: {c['bg_panel']} !important;
+        --panel: {c['bg_surface']} !important;
+        --panel-2: {c['bg_surface_alt']} !important;
+        --panel-3: {c['bg_hover']} !important;
+        --line: {soft_border} !important;
+        --line-soft: {c['border']} !important;
+        --text: {text_color} !important;
+        --text-soft: {c['text_soft']} !important;
+        --text-muted: {muted_color} !important;
+        --accent: {accent_color} !important;
+        --accent-2: {c['accent_hover']} !important;
+        --warning: {c['warning']} !important;
+        --danger: {c['error']} !important;
+        --running: {c['success']} !important;
+        --success: {c['success']} !important;
+      }}
+      .taxamask-embed,
+      .taxamask-embed-body,
+      html,
+      body {{
+        background: {page_background} !important;
+        color: {text_color} !important;
+        overflow: hidden !important;
+      }}
+      .taxamask-embed .app-shell,
+      .app-shell {{
+        background: {page_background} !important;
+        display: grid !important;
+        grid-template-columns: minmax(0, 1fr) !important;
+        gap: 0 !important;
+        height: 100vh !important;
+        max-height: 100vh !important;
+        padding: 0 !important;
+      }}
+      .taxamask-embed .sidebar,
+      .taxamask-embed .preview,
+      .sidebar,
+      .preview {{
+        display: none !important;
+      }}
+      .taxamask-embed .workspace,
+      .workspace {{
+        background: {workspace_background} !important;
+        border: 1px solid {workspace_border} !important;
+        border-radius: 0 !important;
+        grid-column: 1 / -1 !important;
+        height: 100vh !important;
+        max-height: 100vh !important;
+        min-width: 0 !important;
+        width: 100% !important;
+      }}
+      .taxamask-embed .workspace-header,
+      .workspace-header {{
+        background: {header_background} !important;
+        border-bottom: 1px solid {soft_border} !important;
+        border-radius: 0 !important;
+      }}
+      .taxamask-embed .transcript,
+      .transcript {{
+        background: {transcript_background} !important;
+      }}
+      .taxamask-embed .composer-shell,
+      .composer-shell {{
+        background: {composer_background} !important;
+        border-top: 1px solid {soft_border} !important;
+      }}
+      .taxamask-embed .empty-state,
+      .taxamask-embed .message,
+      .taxamask-embed .activity-card,
+      .taxamask-embed .workflow-panel,
+      .taxamask-embed .live-status,
+      .taxamask-embed .shutdown-panel,
+      .taxamask-embed .approval-panel,
+      .taxamask-embed .question-panel,
+      .taxamask-embed .trust-panel,
+      .taxamask-embed .context-panel,
+      .taxamask-embed .queue-panel,
+      .empty-state,
+      .message,
+      .activity-card,
+      .workflow-panel,
+      .live-status,
+      .shutdown-panel,
+      .approval-panel,
+      .question-panel,
+      .trust-panel,
+      .context-panel,
+      .queue-panel {{
+        background: {panel_background} !important;
+        border-color: {soft_border} !important;
+      }}
+      .taxamask-embed .composer,
+      .composer {{
+        background: transparent !important;
+      }}
+      .taxamask-embed #prompt-input,
+      #prompt-input {{
+        background: {input_background} !important;
+        border-color: {soft_border} !important;
+        color: {text_color} !important;
+      }}
+      .taxamask-embed .attach-button,
+      .taxamask-embed .attachment-chip,
+      .taxamask-embed .composer-footer span,
+      .taxamask-embed .composer-footer button,
+      .taxamask-embed .segmented,
+      .taxamask-embed .segmented button.active {{
+        background: {panel_background} !important;
+        border-color: {soft_border} !important;
+        color: {text_color} !important;
+      }}
+      .taxamask-embed #send-button,
+      #send-button {{
+        background: {send_background} !important;
+        border-color: {accent_color} !important;
+        color: {send_text} !important;
+      }}
+      .taxamask-embed .workspace-local,
+      .taxamask-embed .status-pill {{
+        background: {panel_background} !important;
+        border-color: {soft_border} !important;
+      }}
+    """.rstrip()
+
     def _web_bootstrap_source(self):
         return r"""
 (() => {
   if (window.__taxamaskAgentBootstrapInstalled) return;
   window.__taxamaskAgentBootstrapInstalled = true;
+  const taxamaskEmbedCss = __TAXAMASK_EMBED_STYLE__;
   const reloadKey = "__taxamaskAgentJsonReloaded";
   const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
   const guardedApiPath = (input) => {
@@ -629,43 +806,16 @@ exec "$@"
     }
   };
   const installStyle = () => {
-    if (!document.head || document.querySelector("#taxamask-agent-embed-style")) return;
+    if (!document.head) return;
     document.documentElement.classList.add("taxamask-embed");
     document.body?.classList.add("taxamask-embed-body");
-    const style = document.createElement("style");
-    style.id = "taxamask-agent-embed-style";
-    style.textContent = `
-      html,
-      body {
-        background: #15191d !important;
-        overflow: hidden !important;
-      }
-      .app-shell {
-        display: grid !important;
-        grid-template-columns: minmax(0, 1fr) !important;
-        gap: 0 !important;
-        height: 100vh !important;
-        max-height: 100vh !important;
-        padding: 0 !important;
-      }
-      .sidebar,
-      .preview {
-        display: none !important;
-      }
-      .workspace {
-        border: 0 !important;
-        border-radius: 0 !important;
-        grid-column: 1 / -1 !important;
-        height: 100vh !important;
-        max-height: 100vh !important;
-        min-width: 0 !important;
-        width: 100% !important;
-      }
-      .workspace-header {
-        border-radius: 0 !important;
-      }
-    `;
-    document.head.appendChild(style);
+    let style = document.querySelector("#taxamask-agent-embed-style");
+    if (!style) {
+      style = document.createElement("style");
+      style.id = "taxamask-agent-embed-style";
+      document.head.appendChild(style);
+    }
+    style.textContent = taxamaskEmbedCss;
   };
   installStyle();
   document.addEventListener("DOMContentLoaded", installStyle, { once: true });
@@ -714,44 +864,73 @@ exec "$@"
     }
   });
 })();
-"""
+""".replace("__TAXAMASK_EMBED_STYLE__", json.dumps(self._web_embed_style_source()))
 
-    def _apply_style(self):
-        self.setStyleSheet(
+    def _sync_web_embed_theme(self):
+        if self.web_view is None:
+            return
+        css = json.dumps(self._web_embed_style_source())
+        self.web_view.page().runJavaScript(
+            f"""
+            (() => {{
+              const css = {css};
+              if (!document.head) return false;
+              document.documentElement.classList.add("taxamask-embed");
+              document.body?.classList.add("taxamask-embed-body");
+              let style = document.querySelector("#taxamask-agent-embed-style");
+              if (!style) {{
+                style = document.createElement("style");
+                style.id = "taxamask-agent-embed-style";
+                document.head.appendChild(style);
+              }}
+              style.textContent = css;
+              return true;
+            }})();
             """
-            QWidget#taxamaskAgentPanel {
-                background: #1A1F24;
-                border: 1px solid #364149;
+        )
+
+    def _apply_style(self, theme=None):
+        self.current_theme = normalize_theme(theme or getattr(self, "current_theme", "dark"))
+        c = get_theme_config(self.current_theme)
+        self.setStyleSheet(
+            f"""
+            QWidget#taxamaskAgentPanel {{
+                background: {c['bg_surface_gradient']};
+                border: 1px solid {c['glow_border'] if not c['is_light'] else c['border']};
                 border-radius: 16px;
-            }
-            QWidget#taxamaskAgentFallback {
-                background: #252B30;
-                border: 1px solid #46535C;
+            }}
+            QWidget#taxamaskAgentFallback {{
+                background: {c['bg_surface_alt_gradient']};
+                border: 1px solid {c['border_strong']};
                 border-radius: 12px;
-            }
-            QLabel#taxamaskAgentFallbackLogo {
-                color: #E7F6F2;
+            }}
+            QLabel#taxamaskAgentFallbackLogo {{
+                color: {c['text_main']};
                 font-family: "Copperplate Gothic Bold", "Cambria", "Georgia", "Times New Roman", "Microsoft YaHei UI";
                 font-size: 52px;
                 font-weight: 800;
                 letter-spacing: 0px;
                 padding: 0 0 4px 0;
-            }
-            QLabel#taxamaskAgentFallbackMark {
+            }}
+            QLabel#taxamaskAgentFallbackMark {{
                 padding: 0;
                 margin: 0;
-            }
-            QLabel#taxamaskAgentFallbackDetail {
-                color: #8EA0A8;
+            }}
+            QLabel#taxamaskAgentFallbackDetail {{
+                color: {c['text_dim']};
                 font-size: 12px;
                 padding: 2px 20px;
-            }
-            QStackedWidget#taxamaskAgentStack {
+            }}
+            QStackedWidget#taxamaskAgentStack {{
                 background: transparent;
                 border: none;
-            }
+            }}
             """
         )
+
+    def set_theme(self, theme):
+        self._apply_style(theme)
+        self._sync_web_embed_theme()
 
     def set_language(self, lang):
         self.lang = lang
@@ -1267,6 +1446,7 @@ exec "$@"
             self.stack.setCurrentWidget(self.fallback)
             self._update_fallback()
             return
+        self._sync_web_embed_theme()
         self.web_view.page().runJavaScript(self._web_post_load_source())
         self._ensure_trusted()
         QTimer.singleShot(1200, self._verify_embedded_page_ready)

@@ -1192,13 +1192,13 @@ class BlinkBridgeTests(unittest.TestCase):
             self.assertEqual(ok_button.text(), "Delete Expert Bucket Permanently")
             self.assertEqual(cancel_button.text(), "Cancel")
             self.assertIn("min-width: 168px", ok_button.styleSheet())
-            self.assertIn("background-color: #EF4444", ok_button.styleSheet())
+            self.assertIn("background-color: #DC2626", ok_button.styleSheet())
             self.assertIn("font-weight: 700", ok_button.styleSheet())
             self.assertIn("border-radius: 8px", cancel_button.styleSheet())
             self.assertIn("font-weight: 700", cancel_button.styleSheet())
             self.assertIn("min-width: 104px", cancel_button.styleSheet())
 
-        self.assertIn("color: #EF4444", type_dialog.error_label.styleSheet())
+        self.assertIn("color: #DC2626", type_dialog.error_label.styleSheet())
 
         preview_dialog.close()
         type_dialog.close()

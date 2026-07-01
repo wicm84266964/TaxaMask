@@ -1,4 +1,4 @@
-# TaxaMask Developer Preview
+# TaxaMask
 
 [![DOI](https://zenodo.org/badge/1264598942.svg)](https://doi.org/10.5281/zenodo.20619867)
 
@@ -6,15 +6,20 @@
 
 **TaxaMask** is an open-source desktop workbench for traceable biological morphology annotation, evidence review, and AI training dataset construction.
 
-This branch is a **developer preview**. It keeps the stable TaxaMask 2D morphology and PDF evidence workflows, and adds the newer TIF/CT 3D workflow for internal morphology review, part-volume extraction, and local-axis reslicing. The 3D route has been developed and tested mainly with AntScan ant CT data. Its data structures are not hard-coded to ants, but broad multi-taxon validation is not yet claimed.
+The current `main` branch is the active v2.x line. It combines the 2D morphology, STL review, PDF evidence, embedded Agent Center, and TIF/CT 3D workbench routes in one maintained branch. The TIF/CT route has been developed and tested mainly with AntScan ant CT data. Its data structures are not hard-coded to ants, but broad multi-taxon validation is not yet claimed.
 
-## Release 1.3.0 TIF Developer Preview
+## Release 2.0.0
 
-This branch release is prepared as `v1.3.0-tif-preview`. It keeps the stable 2D SQLite project-storage upgrade from TaxaMask 1.2.0 and upgrades the TIF/CT developer-preview route with GPU-streamed 3D preview building, texture caching, ROI high-detail inspection, transfer-function presets, and metadata-only TIF registration for large stacks.
+TaxaMask `v2.0.0` promotes the TIF/CT 3D workbench into the main line and adds the new UI theme system:
 
-The stable `v1.2.0` tag remains the 2D-focused release. See [docs/releases/1.3.0-tif-preview.md](docs/releases/1.3.0-tif-preview.md) for the full branch release notes.
+- Dark Mode now uses the deeper **Deep Space Neon** palette with restrained navy and silver-blue light effects.
+- Light Mode is available as a real bright workspace theme, including refreshed Qt palettes and semantic button styles.
+- The embedded Agent Center dashboard follows the active theme, including the transcript, composer, prompt input, send button, and status chips.
+- The TIF/CT 3D workbench includes previous development-cycle improvements such as GPU-streamed volume preview building, texture caching, ROI high-detail inspection, transfer-function presets, and metadata-only TIF registration for large stacks.
 
-## What This Preview Contains
+The preprint-submission state is preserved on the `preprint-submission` branch and in the `v1.4.0` release. New development happens on `main`.
+
+## What TaxaMask Contains
 
 TaxaMask now has four connected research routes:
 
@@ -44,9 +49,9 @@ Agent Center
 
 The program is designed around human-reviewed morphology data. AI outputs, imported predictions, and automated suggestions remain draft material until a researcher accepts them.
 
-## TIF / CT Developer Preview
+## TIF / CT 3D Workbench
 
-The TIF workbench is the main new preview area. It is intended for volumetric morphology tasks where the original scan direction, specimen posture, and target structure orientation vary between samples.
+The TIF workbench is intended for volumetric morphology tasks where the original scan direction, specimen posture, and target structure orientation vary between samples.
 
 Current TIF/CT capabilities include:
 
@@ -55,7 +60,7 @@ Current TIF/CT capabilities include:
 - Drawing part ROIs and key-slice contours.
 - Interpolating masks between key slices.
 - Accepting part masks and writing part-volume records.
-- GPU 3D volume preview with streamed texture building, cache reuse, clipping, transfer-function presets, and section inspection.
+- GPU 3D volume preview with streamed texture building, cache reuse, clipping, transfer-function presets, themed clear colors, and section inspection.
 - ROI high-detail 3D inspection for checking local structures without editing source data.
 - Metadata-only TIF registration followed by explicit working-volume materialization for large stacks.
 - Z/Y/X slice navigation for multi-direction review.
@@ -133,17 +138,17 @@ Prerequisites:
 - Python 3.12.
 - Node.js 20 or newer for the embedded Agent Center dashboard.
 
-To install the public stable line, clone the default branch:
+Clone the maintained main branch:
 
 ```bash
 git clone https://github.com/wicm84266964/TaxaMask.git
 cd TaxaMask
 ```
 
-To install this TIF/CT developer preview from GitHub, select the `codex/antscan-stl-tif-rearchitecture` branch before downloading the ZIP, or clone the preview branch directly:
+For the frozen preprint-submission state, use the `preprint-submission` branch or the `v1.4.0` release:
 
 ```bash
-git clone --branch codex/antscan-stl-tif-rearchitecture --single-branch https://github.com/wicm84266964/TaxaMask.git
+git clone --branch preprint-submission --single-branch https://github.com/wicm84266964/TaxaMask.git
 cd TaxaMask
 ```
 

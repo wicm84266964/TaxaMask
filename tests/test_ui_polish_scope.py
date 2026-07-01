@@ -47,7 +47,7 @@ else:
     from AntSleap.ui.blink_lab import BlinkExpertTrainingReportDialog, BlinkLabWidget
     from AntSleap.ui.cropper import ImageCropper
     from AntSleap.ui.pdf_processing_widget import PdfProcessingWidget
-    from AntSleap.ui.style import SCI_THEME, build_theme_palette
+    from AntSleap.ui.style import BUTTON_ROLE_COMMIT, BUTTON_ROLE_NEUTRAL, SCI_THEME, apply_semantic_button_style, build_theme_palette, refresh_themed_buttons
 
     has_pyside6 = True
 
@@ -885,20 +885,46 @@ class UiPolishScopeTests(unittest.TestCase):
             "QStatusBar",
         ):
             self.assertIn(selector, SCI_THEME)
+        self.assertIn("qlineargradient", SCI_THEME)
+        self.assertNotIn("%BG_GRADIENT%", SCI_THEME)
 
     def test_dark_theme_palette_covers_linux_native_backgrounds(self):
         palette = build_theme_palette("dark")
-        self.assertEqual(palette.window().color().name().upper(), "#17191D")
-        self.assertEqual(palette.base().color().name().upper(), "#1E2126")
-        self.assertEqual(palette.button().color().name().upper(), "#1E2126")
+        self.assertEqual(palette.window().color().name().upper(), "#070D1A")
+        self.assertEqual(palette.base().color().name().upper(), "#101A2B")
+        self.assertEqual(palette.button().color().name().upper(), "#101A2B")
+
+    def test_light_theme_palette_covers_linux_native_backgrounds(self):
+        palette = build_theme_palette("light")
+        self.assertEqual(palette.window().color().name().upper(), "#F5F8FC")
+        self.assertEqual(palette.base().color().name().upper(), "#FFFFFF")
+        self.assertEqual(palette.button().color().name().upper(), "#FFFFFF")
 
     def test_scientific_theme_strengthens_generic_checked_indicators_without_touching_chip_radios(self):
         self.assertIn("QRadioButton::indicator:checked", SCI_THEME)
-        self.assertIn("border: 2px solid #38BDF8", SCI_THEME)
+        self.assertIn("border: 2px solid #6F8FB8", SCI_THEME)
         self.assertIn("QCheckBox::indicator:checked", SCI_THEME)
-        self.assertIn("background-color: #38BDF8", SCI_THEME)
+        self.assertIn("background-color: #6F8FB8", SCI_THEME)
         self.assertIn("QRadioButton#toolChip::indicator", SCI_THEME)
         self.assertIn("QRadioButton#scaleToolRadio::indicator", SCI_THEME)
+
+    def test_themed_buttons_refresh_when_switching_to_light_mode(self):
+        owner = QWidget()
+        owner.current_theme = "dark"
+        neutral = QPushButton("Neutral", owner)
+        commit = QPushButton("Commit", owner)
+        apply_semantic_button_style(neutral, BUTTON_ROLE_NEUTRAL)
+        apply_semantic_button_style(commit, BUTTON_ROLE_COMMIT)
+        self.assertIn("qlineargradient", neutral.styleSheet())
+        self.assertIn("qlineargradient", commit.styleSheet())
+
+        owner.current_theme = "light"
+        refresh_themed_buttons(owner, "light")
+
+        self.assertIn("background-color: #FDFEFF", neutral.styleSheet())
+        self.assertIn("background-color: #0EA5E9", commit.styleSheet())
+        self.assertNotIn("qlineargradient", neutral.styleSheet())
+        owner.close()
 
     def test_dialog_button_box_theme_helper_produces_button_like_controls(self):
         preflight = {
@@ -942,8 +968,8 @@ class UiPolishScopeTests(unittest.TestCase):
             self.assertIn("min-width: 104px", ok_button.styleSheet())
             self.assertIn("min-height: 36px", ok_button.styleSheet())
             self.assertIn("font-weight: 700", ok_button.styleSheet())
-            self.assertIn("background-color: #5B7486", ok_button.styleSheet())
-            self.assertIn("background-color: #1E2126", cancel_button.styleSheet())
+            self.assertIn("background-color: #0EA5E9", ok_button.styleSheet())
+            self.assertIn("background-color: #F8FBFE", cancel_button.styleSheet())
 
         preflight_dialog.close()
         entry_dialog.close()

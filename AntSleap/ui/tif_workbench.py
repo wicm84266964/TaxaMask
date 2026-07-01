@@ -76,6 +76,7 @@ try:
     )
     from AntSleap.core.tif_local_axis_ai import export_local_axis_training_manifest
     from AntSleap.core.tif_local_axis_reslice import compute_local_frame, create_editable_axis_from_source, export_part_reslice, source_z_axis_for_part
+    from AntSleap.ui.style import get_theme_config, normalize_theme
     from AntSleap.ui.tif_gpu_volume_canvas import (
         GPU_VOLUME_MAX_RAY_STEPS,
         GPU_VOLUME_MAX_TEXTURE_DIM,
@@ -123,6 +124,7 @@ except ModuleNotFoundError as exc:
     )
     from core.tif_local_axis_ai import export_local_axis_training_manifest
     from core.tif_local_axis_reslice import compute_local_frame, create_editable_axis_from_source, export_part_reslice, source_z_axis_for_part
+    from ui.style import get_theme_config, normalize_theme
     from ui.tif_gpu_volume_canvas import (
         GPU_VOLUME_MAX_RAY_STEPS,
         GPU_VOLUME_MAX_TEXTURE_DIM,
@@ -145,6 +147,59 @@ TIF_VOLUME_MAX_CACHED_SPECIMENS = 3
 TIF_VOLUME_MAX_PREVIEW_VARIANTS_PER_OWNER = 8
 TIF_VOLUME_HIGH_QUALITY_CACHE_OWNER_LIMIT = 2
 TIF_VOLUME_ULTRA_QUALITY_CACHE_OWNER_LIMIT = 1
+
+
+def _tif_canvas_background(theme="dark"):
+    theme = normalize_theme(theme)
+    return "#111A2B" if theme == "light" else "#07101D"
+
+
+def _tif_overlay_background(alpha=190, theme="dark"):
+    color = QColor(_tif_canvas_background(theme))
+    color.setAlpha(int(alpha))
+    return color
+
+
+def _tif_workbench_theme(theme="dark"):
+    c = get_theme_config(theme)
+    is_light = bool(c["is_light"])
+    canvas_bg = _tif_canvas_background(theme)
+    return {
+        "root": c["bg_main"],
+        "panel": c["bg_surface"],
+        "panel_alt": c["bg_surface_alt"],
+        "section": c["bg_surface_alt"] if is_light else c["bg_panel"],
+        "canvas_shell": "#DCE6F0" if is_light else "#0B1424",
+        "canvas": canvas_bg,
+        "input": c["bg_input"],
+        "table_alt": "#EDF3F8" if is_light else "#122039",
+        "button": "#F8FBFE" if is_light else "#17263C",
+        "button_hover": "#EEF4FA" if is_light else "#213854",
+        "button_pressed": "#E4EDF7" if is_light else "#101B2E",
+        "button_disabled": c["bg_panel"],
+        "primary": c["accent"],
+        "primary_hover": c["accent_hover"],
+        "primary_pressed": "#0369A1" if is_light else "#405F88",
+        "secondary_checked": "#DCEFFA" if is_light else "#243D63",
+        "danger": "#FDE8E8" if is_light else "#3B2528",
+        "danger_hover": "#FBD5D5" if is_light else "#512D33",
+        "danger_pressed": "#F8B4B4" if is_light else "#2D1C20",
+        "danger_border": "#F87171" if is_light else "#8D4B55",
+        "danger_text": "#991B1B" if is_light else "#FFE9EC",
+        "text": c["text_main"],
+        "text_soft": c["text_soft"],
+        "text_dim": c["text_dim"],
+        "canvas_text": "#C8D7EA",
+        "border": c["border"],
+        "border_strong": c["border_strong"],
+        "glow_border": c["glow_border"],
+        "selection": c["selection"],
+        "selection_text": c["text_main"],
+        "accent": c["accent"],
+        "success": c["success"],
+        "warning": c["warning"],
+        "error": c["error"],
+    }
 
 
 TIF_TRANSLATIONS = {
@@ -890,7 +945,12 @@ class TifSliceCanvas(QLabel):
         self._shape_drag_mode = ""
         self._shape_drag_start = None
         self._shape_drag_current = None
+        self.current_theme = "dark"
         self.workbench = None
+
+    def set_theme(self, theme):
+        self.current_theme = normalize_theme(theme)
+        self._refresh_scaled_pixmap()
 
     def set_slice_pixmap(self, pixmap, reset_view=False):
         self._pixmap = pixmap
@@ -952,7 +1012,8 @@ class TifSliceCanvas(QLabel):
         self._draw_rect = QRectF(x, y, target_w, target_h)
 
         composed = QPixmap(view_w, view_h)
-        composed.fill(QColor("#07090A"))
+        theme = getattr(self.workbench, "current_theme", self.current_theme)
+        composed.fill(QColor(_tif_canvas_background(theme)))
         painter = QPainter(composed)
         painter.drawPixmap(int(round(x)), int(round(y)), zoomed)
         self._draw_roi_overlays(painter)
@@ -1124,7 +1185,8 @@ class TifSliceCanvas(QLabel):
         metrics = painter.fontMetrics()
         text_w = metrics.horizontalAdvance(text)
         rect = QRectF(10, 10, text_w + 16, metrics.height() + 8)
-        painter.fillRect(rect, QColor(7, 9, 10, 190))
+        theme = getattr(self.workbench, "current_theme", self.current_theme)
+        painter.fillRect(rect, _tif_overlay_background(190, theme))
         painter.setPen(QColor("#DCE4E8"))
         painter.drawText(rect.adjusted(8, 4, -8, -4), Qt.AlignLeft | Qt.AlignVCenter, text)
         painter.restore()
@@ -1482,6 +1544,12 @@ class TifVolumeCanvas(QLabel):
         self._mouse_mode = ""
         self._last_drag_pos = None
         self._axis_overlays = []
+        self._volume_pixmap = None
+        self.current_theme = "dark"
+
+    def set_theme(self, theme):
+        self.current_theme = normalize_theme(theme)
+        self._refresh_volume_pixmap()
 
     def _try_start_local_axis_endpoint_drag(self, event):
         if self.workbench is None or event.button() != Qt.LeftButton:
@@ -1498,20 +1566,29 @@ class TifVolumeCanvas(QLabel):
 
     def set_axis_overlays(self, overlays):
         self._axis_overlays = list(overlays or [])
+        self._refresh_volume_pixmap()
         self.update()
 
     def set_volume_pixmap(self, pixmap):
         if pixmap is None or pixmap.isNull():
+            self._volume_pixmap = None
             self.clear()
             return
-        scaled = pixmap.scaled(
+        self._volume_pixmap = QPixmap(pixmap)
+        self._refresh_volume_pixmap()
+
+    def _refresh_volume_pixmap(self):
+        if self._volume_pixmap is None or self._volume_pixmap.isNull():
+            return
+        scaled = self._volume_pixmap.scaled(
             max(1, int(self.width())),
             max(1, int(self.height())),
             Qt.KeepAspectRatio,
             Qt.SmoothTransformation,
         )
         composed = QPixmap(max(1, int(self.width())), max(1, int(self.height())))
-        composed.fill(QColor("#07090A"))
+        theme = getattr(self.workbench, "current_theme", self.current_theme)
+        composed.fill(QColor(_tif_canvas_background(theme)))
         painter = QPainter(composed)
         x = int(round((composed.width() - scaled.width()) / 2.0))
         y = int(round((composed.height() - scaled.height()) / 2.0))
@@ -1523,6 +1600,7 @@ class TifVolumeCanvas(QLabel):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self._refresh_volume_pixmap()
         if self.workbench is not None:
             self.workbench.schedule_volume_preview_render()
 
@@ -1539,7 +1617,8 @@ class TifVolumeCanvas(QLabel):
         metrics = painter.fontMetrics()
         text_w = metrics.horizontalAdvance(text)
         rect = QRectF(10, 10, text_w + 16, metrics.height() + 8)
-        painter.fillRect(rect, QColor(7, 9, 10, 190))
+        theme = getattr(self.workbench, "current_theme", self.current_theme)
+        painter.fillRect(rect, _tif_overlay_background(190, theme))
         painter.setPen(QColor("#DCE4E8"))
         painter.drawText(rect.adjusted(8, 4, -8, -4), Qt.AlignLeft | Qt.AlignVCenter, text)
         painter.restore()
@@ -1561,7 +1640,8 @@ class TifVolumeCanvas(QLabel):
                 x, y = float(point[0]), float(point[1])
                 radius = int(overlay.get("radius", 5))
                 painter.setPen(QPen(color, 2))
-                painter.setBrush(QColor(7, 9, 10, 150))
+                theme = getattr(self.workbench, "current_theme", self.current_theme)
+                painter.setBrush(_tif_overlay_background(150, theme))
                 painter.drawEllipse(int(round(x - radius)), int(round(y - radius)), radius * 2, radius * 2)
                 label = str(overlay.get("label") or "")
                 if label:
@@ -1580,7 +1660,8 @@ class TifVolumeCanvas(QLabel):
             role = str(overlay.get("role") or "")
             handle_radius = 6 if role == "editable_output" else 3
             if role == "editable_output":
-                painter.setBrush(QColor(7, 9, 10, 185))
+                theme = getattr(self.workbench, "current_theme", self.current_theme)
+                painter.setBrush(_tif_overlay_background(185, theme))
             else:
                 painter.setBrush(Qt.NoBrush)
             painter.drawEllipse(
@@ -1636,7 +1717,8 @@ class TifVolumeCanvas(QLabel):
             rect.moveTop(bounds.top())
         if rect.bottom() > bounds.bottom():
             rect.moveBottom(bounds.bottom())
-        painter.fillRect(rect, QColor(7, 9, 10, 205))
+        theme = getattr(self.workbench, "current_theme", self.current_theme)
+        painter.fillRect(rect, _tif_overlay_background(205, theme))
         painter.setPen(QPen(color, 1))
         painter.drawRect(rect.adjusted(0, 0, -1, -1))
         painter.setPen(QColor("#F4F7F9"))
@@ -1973,6 +2055,9 @@ class TifWorkbenchWidget(QWidget):
         self.project = project_manager or TifProjectManager()
         self.lang = lang
         self.config_manager = config_manager
+        parent_theme = getattr(parent, "current_theme", None) if parent is not None else None
+        app_theme = QApplication.instance().property("activeTheme") if isinstance(QApplication.instance(), QApplication) else None
+        self.current_theme = normalize_theme(parent_theme or app_theme or "dark")
         config = self.config_manager.get("tif_backend", DEFAULT_TIF_BACKEND_CONFIG) if self.config_manager is not None else DEFAULT_TIF_BACKEND_CONFIG
         self.backend_config = sanitize_tif_backend_config(config)
         self.current_specimen_id = ""
@@ -2065,8 +2150,10 @@ class TifWorkbenchWidget(QWidget):
 
         self.canvas = TifSliceCanvas()
         self.canvas.workbench = self
+        self.canvas.set_theme(self.current_theme)
         self.volume_canvas = TifVolumeCanvas()
         self.volume_canvas.workbench = self
+        self.volume_canvas.set_theme(self.current_theme)
         self.volume_canvas.setProperty("tifVolumeRenderer", "placeholder")
         self._volume_canvas_created = False
         if hasattr(self, "volume_render_status_label"):
@@ -3458,6 +3545,8 @@ class TifWorkbenchWidget(QWidget):
                 pass
         canvas, renderer, warning = create_tif_volume_canvas()
         canvas.workbench = self
+        if hasattr(canvas, "set_theme"):
+            canvas.set_theme(self.current_theme)
         if not hasattr(canvas, "set_volume_data"):
             canvas.setProperty("tifVolumeRenderer", "cpu")
             renderer = "cpu"
@@ -3495,6 +3584,7 @@ class TifWorkbenchWidget(QWidget):
                 pass
         placeholder = TifVolumeCanvas()
         placeholder.workbench = self
+        placeholder.set_theme(self.current_theme)
         placeholder.setProperty("tifVolumeRenderer", "placeholder")
         self.volume_canvas = placeholder
         self._volume_canvas_renderer = "cpu"
@@ -5306,21 +5396,21 @@ class TifWorkbenchWidget(QWidget):
         splitter.setSizes([230, 900, 420])
 
     def _apply_soft_style(self):
-        self.setStyleSheet(
-            """
+        t = _tif_workbench_theme(self.current_theme)
+        stylesheet = """
             QWidget#tifWorkbenchRoot {
-                background: #15191D;
+                background: {t['root']};
             }
             QFrame#tifSpecimenPanel,
             QFrame#tifVolumePanel,
             QFrame#tifControlPanel,
             QFrame#tifWorkbenchTopBar {
-                background: #1B2024;
-                border: 1px solid #2F3A40;
+                background: {t['panel']};
+                border: 1px solid {t['border']};
                 border-radius: 12px;
             }
             QLabel#tifTopContextLabel {
-                color: #DCE4E8;
+                color: {t['text']};
                 font-weight: 700;
                 border: none;
             }
@@ -5336,8 +5426,8 @@ class TifWorkbenchWidget(QWidget):
             QFrame#tifBackendSection,
             QFrame#tifStatusSection,
             QFrame#tifLogSection {
-                background: #20262B;
-                border: 1px solid #334047;
+                background: {t['section']};
+                border: 1px solid {t['border']};
                 border-radius: 12px;
             }
             QWidget#tifInspectorBody {
@@ -5348,71 +5438,71 @@ class TifWorkbenchWidget(QWidget):
                 border: none;
             }
             QLabel#tifPanelTitle {
-                color: #DCE4E8;
+                color: {t['text']};
                 font-weight: 700;
                 padding-bottom: 4px;
                 border: none;
             }
             QLabel#tifSectionTitle {
-                color: #B9C5CA;
+                color: {t['text_soft']};
                 font-weight: 700;
                 margin-top: 8px;
                 border: none;
             }
             QFrame#tifCanvasShell {
-                background: #0A0D0F;
-                border: 1px solid #2F3A40;
+                background: {t['canvas_shell']};
+                border: 1px solid {t['border_strong']};
                 border-radius: 12px;
             }
             QLabel#tifSliceCanvas {
-                background: #07090A;
-                color: #859098;
+                background: {t['canvas']};
+                color: {t['canvas_text']};
                 border: none;
                 border-radius: 10px;
             }
             #tifVolumeCanvas {
-                background: #07090A;
-                color: #859098;
+                background: {t['canvas']};
+                color: {t['canvas_text']};
                 border: none;
                 border-radius: 10px;
             }
             QLabel#tifVolumeRenderStatus {
-                background: #111619;
-                color: #B9C5CA;
-                border: 1px solid #2B363B;
+                background: {t['input']};
+                color: {t['text_soft']};
+                border: 1px solid {t['border']};
                 border-radius: 8px;
                 padding: 5px 8px;
                 font-size: 11px;
             }
             QLabel#tifLocalAxisStatusText {
-                background: #151B1E;
-                color: #C9D4D8;
-                border: 1px solid #334047;
+                background: {t['input']};
+                color: {t['text_soft']};
+                border: 1px solid {t['border']};
                 border-radius: 8px;
                 padding: 5px 8px;
                 font-size: 11px;
             }
             QLabel#tifOperationStatusText {
-                background: #12191D;
-                color: #DCE4E8;
-                border: 1px solid #3D4D55;
+                background: {t['input']};
+                color: {t['text']};
+                border: 1px solid {t['border_strong']};
                 border-radius: 8px;
                 padding: 7px 9px;
             }
             QFrame#tifSliceBar {
-                background: #182023;
-                border: 1px solid #2B363B;
+                background: {t['panel_alt']};
+                border: 1px solid {t['border']};
                 border-radius: 12px;
             }
             QTreeWidget#tifSpecimenList,
             QTableWidget#tifMaterialTable {
-                background: #111619;
-                alternate-background-color: #171D20;
-                border: 1px solid #2D373D;
+                background: {t['input']};
+                alternate-background-color: {t['table_alt']};
+                border: 1px solid {t['border']};
                 border-radius: 10px;
                 padding: 2px;
-                selection-background-color: #31525D;
-                selection-color: #F4FAFC;
+                selection-background-color: {t['selection']};
+                selection-color: {t['selection_text']};
             }
             QTableWidget#tifMaterialTable::item,
             QTreeWidget#tifSpecimenList::item {
@@ -5421,133 +5511,133 @@ class TifWorkbenchWidget(QWidget):
                 border: none;
             }
             QTableWidget#tifMaterialTable QHeaderView::section {
-                background: #222A2F;
-                color: #D7E0E4;
+                background: {t['panel_alt']};
+                color: {t['text_soft']};
                 border: none;
-                border-right: 1px solid #303B42;
+                border-right: 1px solid {t['border']};
                 padding: 5px 6px;
                 font-weight: 700;
             }
             QLineEdit {
-                background: #111619;
-                color: #DCE4E8;
-                border: 1px solid #2D373D;
+                background: {t['input']};
+                color: {t['text']};
+                border: 1px solid {t['border']};
                 border-radius: 8px;
                 padding: 4px 6px;
-                selection-background-color: #31525D;
+                selection-background-color: {t['selection']};
             }
             QPushButton {
-                background: #26323A;
-                color: #EEF6F8;
-                border: 1px solid #4A5A63;
+                background: {t['button']};
+                color: {t['text']};
+                border: 1px solid {t['border_strong']};
                 border-radius: 10px;
                 padding: 8px 12px;
                 font-weight: 700;
                 min-height: 18px;
             }
             QPushButton:hover {
-                background: #31414B;
-                border-color: #6C828E;
+                background: {t['button_hover']};
+                border-color: {t['glow_border']};
             }
             QPushButton:pressed {
-                background: #1C252B;
-                border-color: #8CA4AF;
+                background: {t['button_pressed']};
+                border-color: {t['glow_border']};
                 padding-top: 9px;
                 padding-bottom: 7px;
             }
             QPushButton:disabled {
-                background: #1A2024;
-                color: #6C777D;
-                border-color: #2B3338;
+                background: {t['button_disabled']};
+                color: {t['text_dim']};
+                border-color: {t['border']};
             }
             QPushButton[tifRole="primary"] {
-                background: #2D6472;
-                border: 1px solid #67A8B8;
-                color: #F5FCFF;
+                background: {t['primary']};
+                border: 1px solid {t['glow_border']};
+                color: #FFFFFF;
             }
             QPushButton[tifRole="primary"]:hover {
-                background: #37788A;
-                border-color: #91C7D3;
+                background: {t['primary_hover']};
+                border-color: {t['glow_border']};
             }
             QPushButton[tifRole="primary"]:pressed {
-                background: #245563;
-                border-color: #B2DCE4;
+                background: {t['primary_pressed']};
+                border-color: {t['glow_border']};
             }
             QPushButton[tifRole="secondary"] {
-                background: #253038;
-                border: 1px solid #4C5B64;
-                color: #DCE7EB;
+                background: {t['button']};
+                border: 1px solid {t['border_strong']};
+                color: {t['text_soft']};
             }
             QPushButton[tifRole="secondary"]:hover {
-                background: #303D46;
-                border-color: #71848F;
+                background: {t['button_hover']};
+                border-color: {t['glow_border']};
             }
             QPushButton[tifRole="secondary"]:checked {
-                background: #365B66;
-                border: 2px solid #8ED2DE;
-                color: #F5FCFF;
+                background: {t['secondary_checked']};
+                border: 2px solid {t['glow_border']};
+                color: {t['text']};
             }
             QPushButton[tifRole="danger"] {
-                background: #3B2528;
-                border: 1px solid #8D4B55;
-                color: #FFE9EC;
+                background: {t['danger']};
+                border: 1px solid {t['danger_border']};
+                color: {t['danger_text']};
             }
             QPushButton[tifRole="danger"]:hover {
-                background: #512D33;
-                border-color: #B66974;
+                background: {t['danger_hover']};
+                border-color: {t['danger_border']};
             }
             QPushButton[tifRole="danger"]:pressed {
-                background: #2D1C20;
-                border-color: #D98A94;
+                background: {t['danger_pressed']};
+                border-color: {t['danger_border']};
             }
             QTextEdit#tifLogConsole {
-                background: #101518;
-                color: #B8C4CA;
-                border: 1px solid #2A353B;
+                background: {t['input']};
+                color: {t['text_soft']};
+                border: 1px solid {t['border']};
                 border-radius: 10px;
                 padding: 6px;
             }
             QLabel#tifLayerHelpText {
-                color: #B8C4CA;
-                background: #12191D;
-                border: 1px solid #2C3840;
+                color: {t['text_soft']};
+                background: {t['input']};
+                border: 1px solid {t['border']};
                 border-radius: 8px;
                 padding: 6px 8px;
             }
             QLabel#tifCurrentMaterialText {
-                color: #DCE4E8;
+                color: {t['text']};
                 border: none;
                 font-weight: 700;
             }
             QLabel#tifAutoSaveHintText {
-                color: #95A5AD;
+                color: {t['text_dim']};
                 border: none;
                 font-size: 11px;
             }
             QLabel#tifSaveStatusText {
-                background: #12191D;
-                color: #CDE8D5;
-                border: 1px solid #315B3F;
+                background: {t['input']};
+                color: {t['success']};
+                border: 1px solid {t['success']};
                 border-radius: 8px;
                 padding: 5px 8px;
                 font-weight: 700;
             }
             QLabel#tifSaveStatusText[tifSaveState="dirty"] {
-                color: #FFE7B3;
-                border-color: #8B6A32;
+                color: {t['warning']};
+                border-color: {t['warning']};
             }
             QLabel#tifSaveStatusText[tifSaveState="saving"] {
-                color: #B9E7FF;
-                border-color: #3D6C8A;
+                color: {t['accent']};
+                border-color: {t['glow_border']};
             }
             QLabel#tifSaveStatusText[tifSaveState="failed"] {
-                color: #FFD2D2;
-                border-color: #9B4D4D;
+                color: {t['error']};
+                border-color: {t['error']};
             }
             QLabel#tifVolumeRenderStatus {
-                background: #11181C;
-                color: #BFD0D7;
-                border: 1px solid #2D3A41;
+                background: {t['input']};
+                color: {t['text_soft']};
+                border: 1px solid {t['border']};
                 border-radius: 6px;
                 padding: 4px 8px;
             }
@@ -5555,7 +5645,7 @@ class TifWorkbenchWidget(QWidget):
             QLabel#tifMetadataText,
             QLabel#tifLocalAxisSummaryText,
             QLabel#tifTrainingStatusText {
-                color: #AEBAC0;
+                color: {t['text_soft']};
                 border: none;
             }
             QPushButton#tifExportTrainingButton,
@@ -5567,7 +5657,20 @@ class TifWorkbenchWidget(QWidget):
                 font-weight: 700;
             }
             """
-        )
+        for key, value in t.items():
+            stylesheet = stylesheet.replace("{t['" + key + "']}", str(value))
+        self.setStyleSheet(stylesheet)
+
+    def set_theme(self, theme):
+        self.current_theme = normalize_theme(theme)
+        self._apply_soft_style()
+        for canvas in (getattr(self, "canvas", None), getattr(self, "volume_canvas", None)):
+            setter = getattr(canvas, "set_theme", None)
+            if callable(setter):
+                setter(self.current_theme)
+        self._update_volume_render_status_label()
+        if hasattr(self, "view_stack"):
+            self.view_stack.update()
 
     def set_project_manager(self, project_manager):
         if not self._confirm_discard_or_save_working_edit():
@@ -8042,6 +8145,7 @@ class TifWorkbenchWidget(QWidget):
                     pass
             self.volume_canvas = TifVolumeCanvas()
             self.volume_canvas.workbench = self
+            self.volume_canvas.set_theme(self.current_theme)
             renderer_property = "cpu-mask-fallback" if str(warning or "").startswith("Mask inspection") else "cpu"
             self.volume_canvas.setProperty("tifVolumeRenderer", renderer_property)
             if hasattr(self, "view_stack"):
@@ -9583,7 +9687,7 @@ class TifWorkbenchWidget(QWidget):
                 point_indices = point_indices[keep]
             else:
                 pixmap = QPixmap(360, 360)
-                pixmap.fill(QColor("#07090A"))
+                pixmap.fill(QColor(_tif_canvas_background(self.current_theme)))
                 return pixmap
 
         out_size = 360
@@ -9596,7 +9700,7 @@ class TifWorkbenchWidget(QWidget):
         inside = (px >= 0) & (px < out_size) & (py >= 0) & (py < out_size)
         if not np.any(inside):
             pixmap = QPixmap(out_size, out_size)
-            pixmap.fill(QColor("#07090A"))
+            pixmap.fill(QColor(_tif_canvas_background(self.current_theme)))
             return pixmap
 
         px = px[inside]

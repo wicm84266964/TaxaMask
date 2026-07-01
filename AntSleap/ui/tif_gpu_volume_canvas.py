@@ -15,10 +15,12 @@ import numpy as np
 
 try:
     from AntSleap.core.tif_transfer_function import TRANSFER_PRESET_IDS, build_transfer_lut, normalize_transfer_function
+    from AntSleap.ui.style import normalize_theme
 except ModuleNotFoundError as exc:
     if exc.name != "AntSleap":
         raise
     from core.tif_transfer_function import TRANSFER_PRESET_IDS, build_transfer_lut, normalize_transfer_function
+    from ui.style import normalize_theme
 
 GPU_VOLUME_MAX_TEXTURE_DIM = 4096
 GPU_VOLUME_MAX_RAY_STEPS = 4096
@@ -42,6 +44,8 @@ GPU_PREVIEW_BUILD_BACKEND_COMPUTE = "compute"
 GPU_VOLUME_STREAM_BUILD_DEFAULT_STAGING_BYTES = 128 * 1024 * 1024
 GPU_VOLUME_STREAM_BUILD_MIN_DIM = 128
 GPU_VOLUME_COMPUTE_LOCAL_SIZE = (8, 8, 4)
+GPU_VOLUME_DARK_CLEAR_RGB = (0.027, 0.063, 0.114)
+GPU_VOLUME_LIGHT_CLEAR_RGB = (0.067, 0.102, 0.169)
 
 _COMPUTE_COPY_SHADER_TEMPLATE = """
 #version 430
@@ -125,6 +129,16 @@ def _gpu_texture_cache_budget_bytes():
         except (TypeError, ValueError):
             pass
     return int(GPU_VOLUME_TEXTURE_CACHE_DEFAULT_BUDGET_BYTES)
+
+
+def _volume_overlay_color(alpha=190, theme="dark"):
+    rgb = GPU_VOLUME_LIGHT_CLEAR_RGB if normalize_theme(theme) == "light" else GPU_VOLUME_DARK_CLEAR_RGB
+    return QColor(
+        max(0, min(255, int(round(rgb[0] * 255)))),
+        max(0, min(255, int(round(rgb[1] * 255)))),
+        max(0, min(255, int(round(rgb[2] * 255)))),
+        max(0, min(255, int(alpha))),
+    )
 
 
 try:
@@ -1367,6 +1381,8 @@ class _GpuVolumeRenderCore:
     """Shared OpenGL state for embedded and offscreen TIF volume previews."""
 
     def _init_render_state(self):
+        self.current_theme = "dark"
+        self._clear_color_rgba = (*GPU_VOLUME_DARK_CLEAR_RGB, 1.0)
         self._volume_data = None
         self._volume_shape = ()
         self._volume_cache_key = None
@@ -1434,6 +1450,15 @@ class _GpuVolumeRenderCore:
         self._uploaded_dtype = ""
         self._transfer_preset = "amber"
         self._transfer_opacity = 1.0
+
+    def set_theme(self, theme):
+        self.current_theme = normalize_theme(theme)
+        rgb = GPU_VOLUME_LIGHT_CLEAR_RGB if self.current_theme == "light" else GPU_VOLUME_DARK_CLEAR_RGB
+        self._clear_color_rgba = (float(rgb[0]), float(rgb[1]), float(rgb[2]), 1.0)
+
+    def _apply_clear_color(self):
+        red, green, blue, alpha = getattr(self, "_clear_color_rgba", (*GPU_VOLUME_DARK_CLEAR_RGB, 1.0))
+        GL.glClearColor(float(red), float(green), float(blue), float(alpha))
 
     def set_stream_build_yield_callback(self, callback):
         self._stream_build_yield_callback = callback if callable(callback) else None
@@ -2659,7 +2684,7 @@ class _GpuVolumeRenderCore:
         return self._renderer_details or self._renderer_label
 
     def _initialize_render_core(self):
-        GL.glClearColor(0.027, 0.035, 0.039, 1.0)
+        self._apply_clear_color()
         GL.glDisable(GL.GL_DEPTH_TEST)
         self._update_renderer_label()
         self._preview_build_capabilities = probe_gpu_preview_build_capabilities()
@@ -3008,7 +3033,7 @@ if gpu_volume_offscreen_available():
                 self._ensure_fbo(width, height)
                 GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, self._fbo)
                 GL.glViewport(0, 0, width, height)
-                GL.glClearColor(0.027, 0.035, 0.039, 1.0)
+                self._apply_clear_color()
                 GL.glClear(GL.GL_COLOR_BUFFER_BIT)
                 self._upload_volume_if_needed()
                 self._draw_volume(width, height)
@@ -3122,6 +3147,10 @@ if gpu_volume_offscreen_available():
             self.setFocusPolicy(Qt.StrongFocus)
             self.setFrameShape(QFrame.NoFrame)
             self.setText(self._empty_text)
+
+        def set_theme(self, theme):
+            self._renderer.set_theme(theme)
+            self.update()
 
         def _try_start_local_axis_endpoint_drag(self, event):
             if self.workbench is None or event.button() != Qt.LeftButton:
@@ -3325,7 +3354,7 @@ if gpu_volume_offscreen_available():
                     x, y = float(point[0]), float(point[1])
                     radius = int(overlay.get("radius", 5))
                     painter.setPen(QPen(color, 2))
-                    painter.setBrush(QColor(7, 9, 10, 150))
+                    painter.setBrush(_volume_overlay_color(150, self._renderer.current_theme))
                     painter.drawEllipse(int(round(x - radius)), int(round(y - radius)), radius * 2, radius * 2)
                     label = str(overlay.get("label") or "")
                     if label:
@@ -3344,7 +3373,7 @@ if gpu_volume_offscreen_available():
                 role = str(overlay.get("role") or "")
                 handle_radius = 6 if role == "editable_output" else 3
                 if role == "editable_output":
-                    painter.setBrush(QColor(7, 9, 10, 185))
+                    painter.setBrush(_volume_overlay_color(185, self._renderer.current_theme))
                 else:
                     painter.setBrush(Qt.NoBrush)
                 painter.drawEllipse(
@@ -3399,7 +3428,7 @@ if gpu_volume_offscreen_available():
                 rect.moveTop(bounds.top())
             if rect.bottom() > bounds.bottom():
                 rect.moveBottom(bounds.bottom())
-            painter.fillRect(rect, QColor(7, 9, 10, 205))
+            painter.fillRect(rect, _volume_overlay_color(205, self._renderer.current_theme))
             painter.setPen(QPen(color, 1))
             painter.drawRect(rect.adjusted(0, 0, -1, -1))
             painter.setPen(QColor("#F4F7F9"))
@@ -3579,6 +3608,18 @@ if gpu_volume_canvas_available():
             self._uploaded_dtype = ""
             self._transfer_preset = "amber"
             self._transfer_opacity = 1.0
+            self.current_theme = "dark"
+            self._clear_color_rgba = (*GPU_VOLUME_DARK_CLEAR_RGB, 1.0)
+
+        def set_theme(self, theme):
+            self.current_theme = normalize_theme(theme)
+            rgb = GPU_VOLUME_LIGHT_CLEAR_RGB if self.current_theme == "light" else GPU_VOLUME_DARK_CLEAR_RGB
+            self._clear_color_rgba = (float(rgb[0]), float(rgb[1]), float(rgb[2]), 1.0)
+            self.update()
+
+        def _apply_clear_color(self):
+            red, green, blue, alpha = getattr(self, "_clear_color_rgba", (*GPU_VOLUME_DARK_CLEAR_RGB, 1.0))
+            GL.glClearColor(float(red), float(green), float(blue), float(alpha))
 
         def setText(self, text):
             self._empty_text = str(text or "")
@@ -4025,7 +4066,7 @@ if gpu_volume_canvas_available():
         def initializeGL(self):
             self._initialized = True
             try:
-                GL.glClearColor(0.027, 0.035, 0.039, 1.0)
+                self._apply_clear_color()
                 GL.glDisable(GL.GL_DEPTH_TEST)
                 self._update_renderer_label()
                 self._preview_build_capabilities = probe_gpu_preview_build_capabilities()
@@ -4071,7 +4112,7 @@ if gpu_volume_canvas_available():
 
         def paintGL(self):
             try:
-                GL.glClearColor(0.027, 0.035, 0.039, 1.0)
+                self._apply_clear_color()
                 GL.glClear(GL.GL_COLOR_BUFFER_BIT)
             except Exception as exc:
                 self._mark_failed(f"GPU clear failed: {exc}")

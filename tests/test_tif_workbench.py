@@ -19,6 +19,7 @@ has_pyside6 = False
 
 try:
     from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QColor, QPixmap
     from PySide6.QtOpenGLWidgets import QOpenGLWidget
     from PySide6.QtWidgets import QApplication, QDialog, QLabel, QMessageBox, QTextEdit, QTreeWidgetItem, QWidget
 except ModuleNotFoundError as exc:
@@ -38,7 +39,7 @@ else:
     from AntSleap.ui.tif_gpu_volume_canvas import gpu_volume_canvas_available, gpu_volume_offscreen_available, gpu_volume_unavailable_reason
     from AntSleap.ui.tif_local_axis_model_panel import TifLocalAxisModelPanel
     from AntSleap.ui.tif_local_axis_review_queue import TifLocalAxisReviewQueueWidget
-    from AntSleap.ui.tif_workbench import TifBatchImportWorker, TifMaterializeWorker, TifVolumeCanvas, TifWorkbenchWidget, create_tif_volume_canvas
+    from AntSleap.ui.tif_workbench import TifBatchImportWorker, TifMaterializeWorker, TifVolumeCanvas, TifWorkbenchWidget, _tif_canvas_background, create_tif_volume_canvas
 
     has_pyside6 = True
 
@@ -232,6 +233,47 @@ class TifWorkbenchTests(unittest.TestCase):
         widget.canvas.resize(480, 360)
         widget.render_current_slice()
         return widget
+
+    def test_tif_workbench_theme_switch_updates_panels_and_canvas_background(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+        try:
+            widget.set_theme("dark")
+            dark_style = widget.styleSheet()
+            self.assertIn("#070D1A", dark_style)
+            self.assertIn(_tif_canvas_background("dark"), dark_style)
+            self.assertEqual(widget.canvas.current_theme, "dark")
+            self.assertEqual(widget.volume_canvas.current_theme, "dark")
+
+            widget.set_theme("light")
+            light_style = widget.styleSheet()
+            self.assertIn("#F5F8FC", light_style)
+            self.assertIn("#FFFFFF", light_style)
+            self.assertIn(_tif_canvas_background("light"), light_style)
+            self.assertEqual(widget.canvas.current_theme, "light")
+            self.assertEqual(widget.volume_canvas.current_theme, "light")
+            self.assertNotIn("#07090A", light_style)
+        finally:
+            widget.deleteLater()
+
+    def test_cpu_volume_canvas_recomposes_cached_pixmap_when_theme_changes(self):
+        canvas = TifVolumeCanvas()
+        try:
+            canvas.resize(120, 100)
+            source = QPixmap(20, 20)
+            source.fill(QColor("#DCE4E8"))
+
+            canvas.set_theme("light")
+            canvas.set_volume_pixmap(source)
+            light_background = canvas.pixmap().toImage().pixelColor(0, 0).name().upper()
+
+            canvas.set_theme("dark")
+            dark_background = canvas.pixmap().toImage().pixelColor(0, 0).name().upper()
+
+            self.assertEqual(light_background, _tif_canvas_background("light").upper())
+            self.assertEqual(dark_background, _tif_canvas_background("dark").upper())
+        finally:
+            canvas.deleteLater()
 
     def _canvas_xy_for_image_pixel(self, widget, x, y):
         point = widget.canvas._image_point_to_widget_point([float(x) + 0.5, float(y) + 0.5])

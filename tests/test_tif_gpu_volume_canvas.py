@@ -17,6 +17,20 @@ class TifGpuVolumeCanvasImportTests(unittest.TestCase):
         else:
             self.assertTrue(reason)
 
+    def test_gpu_volume_canvas_uses_theme_clear_colors(self):
+        self.assertEqual(gpu_canvas.GPU_VOLUME_DARK_CLEAR_RGB, (0.027, 0.063, 0.114))
+        self.assertEqual(gpu_canvas.GPU_VOLUME_LIGHT_CLEAR_RGB, (0.067, 0.102, 0.169))
+        dark_overlay = gpu_canvas._volume_overlay_color(205, "dark")
+        light_overlay = gpu_canvas._volume_overlay_color(205, "light")
+        self.assertEqual(dark_overlay.alpha(), 205)
+        self.assertNotEqual(dark_overlay.name().upper(), "#07090A")
+        self.assertNotEqual(light_overlay.name().upper(), "#07090A")
+
+        source = gpu_canvas.__loader__.get_source(gpu_canvas.__name__)
+        self.assertIn("def set_theme(self, theme):", source)
+        self.assertIn("self._apply_clear_color()", source)
+        self.assertNotIn("GL.glClearColor(0.027, 0.035, 0.039, 1.0)", source)
+
     def test_rotation_inverse_matrix_shape(self):
         matrix = gpu_canvas._rotation_inverse_matrix(-35.0, 20.0)
         self.assertEqual(matrix.shape, (3, 3))

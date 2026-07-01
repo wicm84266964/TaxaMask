@@ -229,6 +229,7 @@ try:
         get_theme_config,
         get_theme_stylesheet,
         normalize_theme,
+        refresh_themed_buttons,
         register_windows_scholarly_ui_fonts,
         themed_yes_no_question,
     )
@@ -355,6 +356,7 @@ except ImportError:
         get_theme_config,
         get_theme_stylesheet,
         normalize_theme,
+        refresh_themed_buttons,
         register_windows_scholarly_ui_fonts,
         themed_yes_no_question,
     )
@@ -869,7 +871,7 @@ TRANSLATIONS = {
         "Project Autosave Interval (seconds):": "项目自动保存间隔（秒）：",
         "Default Runtime Device:": "默认计算设备：",
         "Runtime device here is the default for built-in 2D/STL models and other internal Torch tasks.": "这里的计算设备是内置 2D/STL 模型和其他内部 Torch 任务的默认值。",
-        "Only the audited dark theme is currently enabled.": "当前只启用已经检查过的深色主题。",
+        "Dark Mode now uses the Deep Space Neon palette; Light Mode is available for bright workspaces.": "深色模式现使用“深空霓虹”配色；浅色模式适合明亮工作区。",
         "Autosave interval must be a positive number.": "自动保存间隔必须是正数。",
         "General settings updated.": "通用设置已更新。",
         "2D/STL Morphology Model Settings": "2D/STL 形态学模型设置",
@@ -1090,6 +1092,8 @@ TRANSLATIONS = {
         "Language": "语言",
         "Theme": "主题",
         "Dark Mode": "深色模式",
+        "Dark Mode (Deep Space Neon)": "深色模式（深空霓虹）",
+        "Light Mode": "浅色模式",
         "File": "文件",
         "Settings": "设置",
         "Epochs:": "训练轮数 (Epochs):",
@@ -5605,8 +5609,10 @@ class GeneralSettingsDialog(QDialog):
     def __init__(self, params, lang="en", parent=None):
         super().__init__(parent)
         self.lang = lang
+        self.current_theme = normalize_theme(params.get("theme", "dark"))
         self.setWindowTitle(tr("General Application Settings", lang))
         self.resize(620, 460)
+        self.setStyleSheet(get_theme_stylesheet(self.current_theme))
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 18, 18, 18)
@@ -5636,12 +5642,13 @@ class GeneralSettingsDialog(QDialog):
         form.addRow(QLabel(tr("Language:", lang)), self.language_combo)
 
         self.theme_combo = NoWheelComboBox()
-        self.theme_combo.addItem(tr("Dark Mode", lang), "dark")
-        theme_index = self.theme_combo.findData(normalize_theme(params.get("theme", "dark")))
+        self.theme_combo.addItem(tr("Dark Mode (Deep Space Neon)", lang), "dark")
+        self.theme_combo.addItem(tr("Light Mode", lang), "light")
+        theme_index = self.theme_combo.findData(self.current_theme)
         self.theme_combo.setCurrentIndex(theme_index if theme_index >= 0 else 0)
         form.addRow(QLabel(tr("Theme:", lang)), self.theme_combo)
 
-        theme_note = QLabel(tr("Only the audited dark theme is currently enabled.", lang))
+        theme_note = QLabel(tr("Dark Mode now uses the Deep Space Neon palette; Light Mode is available for bright workspaces.", lang))
         theme_note.setWordWrap(True)
         theme_note.setObjectName("mutedLabel")
         form.addRow(QLabel(""), theme_note)
@@ -5681,13 +5688,13 @@ class GeneralSettingsDialog(QDialog):
         btn_ask_agent = QPushButton(tr("Ask Agent", lang))
         btn_ask_agent.setObjectName("generalSettingsAskAgentButton")
         btn_ask_agent.setToolTip(tr("Ask Agent about these settings. Current values are summarized without sending full command text.", lang))
-        apply_semantic_button_style(btn_ask_agent, BUTTON_ROLE_NEUTRAL)
+        apply_theme_button_style(btn_ask_agent, BUTTON_ROLE_NEUTRAL, "", self.current_theme)
         btn_ask_agent.clicked.connect(self.request_agent_help)
         btn_save = QPushButton(tr("Save", lang))
-        apply_semantic_button_style(btn_save, BUTTON_ROLE_COMMIT)
+        apply_theme_button_style(btn_save, BUTTON_ROLE_COMMIT, "", self.current_theme)
         btn_save.clicked.connect(self.accept_with_validation)
         btn_cancel = QPushButton(tr("Cancel", lang))
-        apply_semantic_button_style(btn_cancel, BUTTON_ROLE_STOP)
+        apply_theme_button_style(btn_cancel, BUTTON_ROLE_STOP, "", self.current_theme)
         btn_cancel.clicked.connect(self.reject)
         buttons.addWidget(btn_ask_agent)
         buttons.addStretch(1)
@@ -11186,7 +11193,7 @@ class MainWindow(QMainWindow):
             app.setPalette(build_theme_palette(theme))
         self.setStyleSheet(get_theme_stylesheet(theme))
 
-        for widget in [self.pdf_widget, self.blink_lab, self.canvas]:
+        for widget in [self.pdf_widget, self.blink_lab, self.canvas, getattr(self, "tif_workbench", None), getattr(self, "agent_panel", None)]:
             if hasattr(widget, "set_theme"):
                 widget.set_theme(theme)
 
@@ -11195,7 +11202,9 @@ class MainWindow(QMainWindow):
 
         self.update_widget_themes()
         self.update_button_themes()
-        self.log(f"Theme: {tr('Dark Mode', self.current_lang)}")
+        refresh_themed_buttons(self, theme)
+        theme_label = tr("Light Mode", self.current_lang) if theme == "light" else tr("Dark Mode (Deep Space Neon)", self.current_lang)
+        self.log(f"{tr('Theme', self.current_lang)}: {theme_label}")
 
     def update_widget_themes(self):
         c = get_theme_config(self.current_theme)
@@ -12174,6 +12183,7 @@ class MainWindow(QMainWindow):
 
             item_to_select = None
             first_image_item = None
+            theme_colors = get_theme_config(self.current_theme)
 
             def add_group_header(group_key, text, count):
                 collapsed = bool(self.image_list_group_collapsed.get(group_key, False))
@@ -12182,7 +12192,7 @@ class MainWindow(QMainWindow):
                 item.setData(Qt.UserRole, None)
                 item.setData(Qt.UserRole + 1, group_key)
                 item.setFlags((item.flags() | Qt.ItemIsEnabled | Qt.ItemIsSelectable) & ~Qt.ItemIsEditable)
-                item.setForeground(QColor("#8EA0A8"))
+                item.setForeground(QColor(theme_colors["text_dim"]))
                 self.file_list.addItem(item)
                 return collapsed
 
@@ -12197,11 +12207,11 @@ class MainWindow(QMainWindow):
                     item.setToolTip(tr("Split Crops", self.current_lang))
 
                 if img in labeled_images:
-                    item.setForeground(QColor("#8FBC8F")) # DarkSeaGreen
+                    item.setForeground(QColor(theme_colors["success"]))
                 elif is_split_crop:
-                    item.setForeground(QColor("#AAB4C2"))
+                    item.setForeground(QColor(theme_colors["text_dim"]))
                 else:
-                    item.setForeground(QColor("#CCCCCC")) # Grey
+                    item.setForeground(QColor(theme_colors["text_soft"]))
 
                 self.file_list.addItem(item)
                 if first_image_item is None:
@@ -12255,12 +12265,13 @@ class MainWindow(QMainWindow):
             is_split_crop = group_key == "split" or self._is_split_crop_image(image_path)
         else:
             is_split_crop = group_key == "split" or image_path in set(split_images or [])
+        theme_colors = get_theme_config(self.current_theme)
         if is_labeled:
-            item.setForeground(QColor("#8FBC8F"))
+            item.setForeground(QColor(theme_colors["success"]))
         elif is_split_crop:
-            item.setForeground(QColor("#AAB4C2"))
+            item.setForeground(QColor(theme_colors["text_dim"]))
         else:
-            item.setForeground(QColor("#CCCCCC"))
+            item.setForeground(QColor(theme_colors["text_soft"]))
 
     def _refresh_current_image_list_status(self, image_path=None):
         image_path = image_path or self.current_image

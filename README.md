@@ -6,6 +6,22 @@
 
 **TaxaMask** is an open-source desktop workbench for mask annotation of external and internal biological morphological structures. It brings literature evidence, human review, AI-assisted annotation, model training, and result feedback into a traceable loop, allowing models to keep improving on real research data and gradually take on more repetitive annotation work.
 
+## A Note From The Author
+
+We are already in the age of agents. If the long sections of this README feel endless, feel free to throw them at an agent and ask it what matters for your own taxon, dataset, or workflow. For humans, let me say a few things first.
+
+First, I am a taxonomist. As an undergraduate, much of my work was counting all kinds of insects and doing coarse classification. I knew a little about many things, but was not really an expert in any one of them. Back then, my biggest wish was to automate this kind of tedious work. That is how this project gradually came into being.
+
+The core idea of TaxaMask is to use AI to reduce as much repetitive human work as possible. You can see that first in body-part annotation: the VLM pre-annotation button can hand rough body-part proposals to a multimodal model, and SAM or other models can continue from there to produce mask drafts. What researchers mostly need to do is review AI-generated content, correct it, stack up more datasets, and let the model keep learning how to annotate. In the end, the hope is to hand more and more repetitive annotation work to AI.
+
+Reducing repeated work also appears in another place: I have tried to get rid of the old professional-software habit of forcing people to read huge manuals that make you want to close the program immediately. TaxaMask directly embeds an Agent Center similar in spirit to tools such as Codex and OpenCode. You can use it to adjust configuration for your own taxonomic group, change the prediction model you want to use, or even turn your local TaxaMask into a soft pink version if you like. If you edit things until TaxaMask no longer starts, that is not the end of the world either. Ant-Code still has a fallback Dashboard where you can manage historical sessions and ask the agent to help inspect and fix the problem; it does not depend on the TaxaMask main window launching successfully.
+
+As for micro-CT, the TIF entry in the interface came from seeing the release of impressive datasets such as AntScan. I was thinking that such high-resolution micro-CT data are excellent research material, whether for external or internal morphology. Since I had already made an automatic annotation route for external structures, why not try internal structures too? That is where the TIF path and its 3D volume rendering workflow came from: viewing volume data, locating parts, drawing more precise volume masks, and exporting local-axis reslices.
+
+Of course, AI output is draft material first, not a conclusion. TaxaMask tries to keep source data, human decisions, model predictions, and training exports connected, so you can look back and see how a result was made, and also feed confirmed data back into the model so that it bothers you a little less next time.
+
+## Formal Overview
+
 Originating from real-world ant taxonomy research and designed for morphology-based taxonomic groups beyond ants, TaxaMask connects taxonomic literature, specimen images, STL-rendered morphology views, AI-assisted mask drafts, human review, model training, and dataset export in one traceable pipeline. It supports Segment Anything (SAM) draft masks, Vision-Language Model (VLM) first-mile proposals, parent/child body-part annotation, and provenance-aware export to multimodal JSONL, COCO, and YOLO-style datasets.
 
 The current `main` branch is the active v2.x line. It keeps the 2D/STL morphology and PDF evidence workflows as the core public use case, while also integrating the embedded Agent Center and the newer TIF/CT 3D workbench in one maintained branch. The TIF/CT route has been developed and tested mainly with AntScan ant CT data. Its data structures are not hard-coded to ants, but broad multi-taxon validation is not yet claimed.

@@ -857,6 +857,49 @@ exec "$@"
         background: {panel_background} !important;
         border-color: {soft_border} !important;
       }}
+      .taxamask-embed .workflow-strip,
+      .taxamask-embed .workflow-strip-toggle,
+      .taxamask-embed .workflow-strip-detail,
+      .taxamask-embed .workflow-panel {{
+        background: {panel_background} !important;
+        border-color: {soft_border} !important;
+        color: {text_color} !important;
+      }}
+      .taxamask-embed .workflow-strip-label,
+      .taxamask-embed .workflow-kicker,
+      .taxamask-embed .workflow-section-title,
+      .taxamask-embed .workflow-strip-percent,
+      .taxamask-embed .workflow-strip-chevron {{
+        color: {muted_color} !important;
+      }}
+      .taxamask-embed .workflow-strip-current,
+      .taxamask-embed .workflow-title,
+      .taxamask-embed .workflow-text {{
+        color: {c['text_soft']} !important;
+      }}
+      .taxamask-embed .workflow-strip-toggle strong,
+      .taxamask-embed .workflow-percent {{
+        color: {accent_color} !important;
+      }}
+      .taxamask-embed .workflow-strip-meter,
+      .taxamask-embed .workflow-meter {{
+        background: {progress_track} !important;
+      }}
+      .taxamask-embed .workflow-strip-meter span,
+      .taxamask-embed .workflow-meter span {{
+        background: {accent_color} !important;
+      }}
+      .taxamask-embed .workflow-mark {{
+        border-color: {soft_border} !important;
+      }}
+      .taxamask-embed .workflow-item.in_progress .workflow-mark {{
+        background: {c['success']} !important;
+        border-color: {c['success']} !important;
+      }}
+      .taxamask-embed .workflow-item.completed .workflow-mark {{
+        background: {c['success']} !important;
+        border-color: {c['success']} !important;
+      }}
       .taxamask-embed .live-status.has-background-subagents,
       .taxamask-embed .live-chip,
       .taxamask-embed .background-subagent-chip {{
@@ -1074,6 +1117,56 @@ exec "$@"
       }}
       .taxamask-embed .model-config-backdrop {{
         background: rgba(16, 32, 51, 0.18) !important;
+      }}
+      .taxamask-embed .md-code-frame,
+      .taxamask-embed .md-draft-plain,
+      .taxamask-embed .md-math-block,
+      .taxamask-embed .md-mermaid-frame,
+      .taxamask-embed .md-data-frame,
+      .taxamask-embed .md-toc,
+      .taxamask-embed .md-table-wrap,
+      .taxamask-embed .data-table-wrap {{
+        background: {code_background} !important;
+        border-color: {soft_border} !important;
+        color: {code_text} !important;
+      }}
+      .taxamask-embed .md-code-bar,
+      .taxamask-embed .md-draft-plain-label,
+      .taxamask-embed .md-rich-label,
+      .taxamask-embed .md-rich-bar {{
+        background: {summary_background} !important;
+        border-color: {soft_border} !important;
+        color: {muted_color} !important;
+      }}
+      .taxamask-embed .md-copy-code,
+      .taxamask-embed .data-copy {{
+        background: {summary_item_background} !important;
+        border-color: {soft_border} !important;
+        color: {text_color} !important;
+      }}
+      .taxamask-embed .md-copy-code:hover,
+      .taxamask-embed .data-copy:hover {{
+        background: {option_hover_background} !important;
+        color: {text_color} !important;
+      }}
+      .taxamask-embed .md-code,
+      .taxamask-embed .md-code code,
+      .taxamask-embed .md-raw-source,
+      .taxamask-embed .md-raw-source code {{
+        background: transparent !important;
+        border-color: transparent !important;
+        color: {code_text} !important;
+      }}
+      .taxamask-embed .markdown-body th,
+      .taxamask-embed .data-table th {{
+        background: {summary_background} !important;
+        border-color: {soft_border} !important;
+        color: {text_color} !important;
+      }}
+      .taxamask-embed .markdown-body td,
+      .taxamask-embed .data-table td {{
+        border-color: {soft_border} !important;
+        color: {c['text_soft']} !important;
       }}
       .taxamask-embed .draft-summary,
       .taxamask-embed .activity-summary {{

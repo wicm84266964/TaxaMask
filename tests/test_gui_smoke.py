@@ -692,6 +692,11 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertIn(".taxamask-embed .question-action-buttons button", css)
             self.assertIn(".taxamask-embed .approval-panel", css)
             self.assertIn(".taxamask-embed .model-config-card", css)
+            self.assertIn(".taxamask-embed .workflow-strip", css)
+            self.assertIn(".taxamask-embed .workflow-strip-meter", css)
+            self.assertIn(".taxamask-embed .md-code-frame", css)
+            self.assertIn(".taxamask-embed .md-code-bar", css)
+            self.assertIn(".taxamask-embed .md-copy-code", css)
             self.assertNotIn("radial-gradient", css)
             self.assertNotIn("#15191d", css)
         finally:

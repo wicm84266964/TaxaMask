@@ -7733,6 +7733,7 @@ class MainWindow(QMainWindow):
         return path if path else tr("No active project", self.current_lang)
 
     AGENT_CONTEXT_TEXT_LIMIT = 320
+    AGENT_CONTEXT_REFERENCE_TEXT_LIMIT = 960
     AGENT_CONTEXT_LOG_LINES = 6
     AGENT_CONTEXT_LOG_LINE_LIMIT = 160
     AGENT_CONTEXT_TOTAL_LIMIT = 3600
@@ -7759,7 +7760,20 @@ class MainWindow(QMainWindow):
             "project_source_kind",
             "project_path",
             "review_project_path",
+            "diagnostic_route",
+            "diagnostic_focus",
+            "health_check_summary",
+            "validation_errors",
+            "llm_context_refs",
+            "source_code_refs",
+            "artifact_hints",
+            "safety_notes",
+            "suggested_agent_action",
+            "agent_route_source",
             "active_specimen_id",
+            "active_volume_scope",
+            "active_part_id",
+            "active_part_parent_bbox_zyx",
             "active_image_path",
             "active_label_role",
             "active_slice_axis",
@@ -7775,10 +7789,16 @@ class MainWindow(QMainWindow):
             "volume_renderer",
             "volume_renderer_label",
             "volume_render_mode",
+            "volume_projection_mode",
+            "volume_mask_mode",
             "volume_density_cutoff",
+            "volume_density_opacity",
             "volume_texture_target_dim",
             "volume_ray_samples",
             "volume_clarity_mode",
+            "volume_detail_enhancement",
+            "volume_tone_curve",
+            "volume_shader_quality",
             "volume_inside_depth",
             "volume_front_cut",
             "volume_zoom",
@@ -7786,10 +7806,15 @@ class MainWindow(QMainWindow):
             "volume_yaw_pitch",
             "volume_gpu_warning",
             "volume_status_overlay",
+            "volume_performance_diagnosis",
+            "volume_uploaded_shape_zyx",
+            "volume_texture_sampling",
+            "volume_display_scaling",
             "tif_next_requirement",
             "tif_requirement_doc",
             "screener_profile",
             "figure_profile",
+            "part_description_profile",
             "screening_mode",
             "text_llm_key_configured",
             "text_llm_base_url_configured",
@@ -7803,6 +7828,8 @@ class MainWindow(QMainWindow):
             "pdf_source_dir",
             "screening_output_dir",
             "extract_input_dir",
+            "extract_result_folder",
+            "extract_db_name",
             "extract_db_path",
             "multimodal_enabled",
             "settings_scope",
@@ -7857,16 +7884,6 @@ class MainWindow(QMainWindow):
             "model_manifest_present",
             "locator_scope_count",
             "parent_box_ratio_count",
-            "validation_errors",
-            "diagnostic_route",
-            "diagnostic_focus",
-            "health_check_summary",
-            "llm_context_refs",
-            "source_code_refs",
-            "artifact_hints",
-            "safety_notes",
-            "suggested_agent_action",
-            "agent_route_source",
             "recent_log_excerpt",
         )
         compact = {}
@@ -7875,6 +7892,8 @@ class MainWindow(QMainWindow):
             if not value:
                 continue
             limit = self.AGENT_CONTEXT_TEXT_LIMIT
+            if key in ("llm_context_refs", "source_code_refs", "artifact_hints", "safety_notes"):
+                limit = self.AGENT_CONTEXT_REFERENCE_TEXT_LIMIT
             if key == "recent_log_excerpt":
                 limit = self.AGENT_CONTEXT_LOG_LINES * self.AGENT_CONTEXT_LOG_LINE_LIMIT
             compact[key] = self._agent_context_text(value, limit)

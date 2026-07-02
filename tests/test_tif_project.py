@@ -7,12 +7,14 @@ import numpy as np
 
 from AntSleap.core.tif_materials import read_material_map
 from AntSleap.core.tif_part_extraction import (
+    add_polygon_keyframe,
     add_rectangular_keyframe,
     build_preview_mask_from_contours,
     crop_volume_to_part,
     read_contours_json,
     validate_contours_for_interpolation,
 )
+from AntSleap.core.tif_local_axis_reslice import align_editable_axis_to_reference_plane
 from AntSleap.core.tif_project import TIF_PROJECT_SCHEMA_VERSION, TIF_PROJECT_TYPE, TifProjectManager
 from AntSleap.core.tif_volume_io import (
     VOLUME_SIDECAR_FORMAT,
@@ -23,6 +25,35 @@ from AntSleap.core.tif_volume_io import (
 
 
 class TifProjectTests(unittest.TestCase):
+    def test_align_editable_axis_to_three_point_reference_plane(self):
+        editable_axis = {
+            "axis_id": "local_output_z_axis",
+            "start_zyx": [1.0, 4.0, 4.0],
+            "end_zyx": [5.0, 4.0, 4.0],
+        }
+        roll_reference = {
+            "point_a": {"role": "roll_reference_a", "zyx": [3.0, 1.0, 1.0]},
+            "point_b": {"role": "roll_reference_b", "zyx": [3.0, 6.0, 1.0]},
+            "point_c": {"role": "reference_plane_c", "zyx": [5.0, 1.0, 6.0]},
+        }
+
+        aligned, plane = align_editable_axis_to_reference_plane(
+            editable_axis,
+            roll_reference,
+            spacing_zyx=[2.0, 1.0, 1.0],
+            shape_zyx=[7, 8, 8],
+        )
+
+        start = np.asarray(aligned["start_zyx"], dtype=np.float64)
+        end = np.asarray(aligned["end_zyx"], dtype=np.float64)
+        axis_world = (end - start) * np.asarray([2.0, 1.0, 1.0], dtype=np.float64)
+        axis_world /= np.linalg.norm(axis_world)
+        normal_world = np.asarray(plane["normal_world_zyx"], dtype=np.float64)
+
+        self.assertEqual(aligned["derived_from"], "three_point_reference_plane")
+        self.assertIn("reference_plane", aligned)
+        self.assertAlmostEqual(abs(float(np.dot(axis_world, normal_world))), 1.0, places=5)
+
     def test_tif_project_saves_reopens_and_tracks_train_ready_specimen(self):
         with tempfile.TemporaryDirectory() as tmp:
             project_root = Path(tmp) / "brain_project"
@@ -436,6 +467,18 @@ class TifProjectTests(unittest.TestCase):
         self.assertGreater(int(mask[1].sum()), 0)
         self.assertGreater(int(mask.sum()), int(mask[0].sum()))
 
+    def test_freehand_polygon_keyframe_preserves_subpixel_points(self):
+        contours = {"axis": "z", "keyframes": []}
+        drawn_polygon = [[1.2, 1.6], [2.4, 1.2], [4.7, 1.4], [4.4, 4.8], [2.6, 4.2], [1.3, 4.5]]
+        contours = add_polygon_keyframe(contours, 1, drawn_polygon, source="manual_freehand")
+
+        polygon = contours["keyframes"][0]["polygon"]
+        self.assertEqual(polygon, drawn_polygon)
+        self.assertIsInstance(polygon[0][0], float)
+
+        mask = build_preview_mask_from_contours(contours, (3, 6, 6))
+        self.assertGreater(int(mask[1].sum()), 0)
+
     def test_preview_mask_only_fills_between_first_and_last_keyframes(self):
         contours = {"axis": "z", "keyframes": []}
         contours = add_rectangular_keyframe(contours, 1, [[1, 4], [1, 4]])
@@ -573,6 +616,11 @@ class TifProjectTests(unittest.TestCase):
                         "output_axis": "z_axis",
                         "spacing_zyx": [2.0, 1.0, 1.0],
                         "coordinate_space": "part_volume_voxel_zyx",
+                        "reference_plane": {
+                            "plane_id": "three_point_reference_plane",
+                            "normal_axis_zyx": [1.0, 0.0, 0.0],
+                            "point_c_zyx": [2.0, 2.0, 3.0],
+                        },
                     },
                     "training": {"human_confirmed": True, "usable_for_training": True},
                     "training_sample": {
@@ -630,6 +678,7 @@ class TifProjectTests(unittest.TestCase):
             self.assertEqual(reloaded_reslice["reslice_id"], "head_axis_001")
             self.assertEqual(reloaded_reslice["local_frame"]["spacing_zyx"], [2.0, 1.0, 1.0])
             self.assertEqual(reloaded_reslice["local_frame"]["coordinate_space"], "part_volume_voxel_zyx")
+            self.assertEqual(reloaded_reslice["local_frame"]["reference_plane"]["plane_id"], "three_point_reference_plane")
             self.assertEqual(reloaded_reslice["training_sample"]["sample_id"], "01-0101-local:head:head_axis_001")
             self.assertEqual(reloaded_reslice["training_sample"]["final_editable_axis"]["end_zyx"], [4.0, 2.0, 2.0])
             self.assertEqual(run["workflow"], "tif_local_axis")

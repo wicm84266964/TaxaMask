@@ -37,9 +37,9 @@ PDF evidence
 
 TIF / CT internal morphology
   -> specimen import
-  -> part ROI location
-  -> part volume extraction
-  -> part mask key-slice review
+  -> full-volume coarse ROI location
+  -> full-volume freehand mask key slices
+  -> part volume and part mask creation
   -> 3D preview and local-axis reslice export
 
 Agent Center
@@ -119,9 +119,10 @@ Current TIF/CT capabilities include:
 
 - Importing a TIFF stack as a specimen.
 - Viewing the full volume and extracted part volumes.
-- Drawing full-volume part ROIs from researcher-selected key-slice rectangles, then confirming the ROI to create a part volume.
-- Editing part-volume masks with rectangular key slices or freehand contours.
-- Interpolating masks between part key slices and accepting part masks.
+- Drawing full-volume key-slice ROI rectangles as a coarse crop and location tool.
+- Drawing full-volume freehand contour key slices as the precise part-mask tool.
+- Previewing contour auto-fill in the full volume, then confirming the ROI to create both the part image and its part mask.
+- Reviewing or refining masks inside extracted part volumes when needed, without introducing a third part/subpart level.
 - GPU 3D volume preview with streamed texture building, cache reuse, clipping, transfer-function presets, themed clear colors, and section inspection.
 - ROI high-detail 3D inspection for checking local structures without editing source data.
 - Metadata-only TIF registration followed by explicit working-volume materialization for large stacks.
@@ -341,6 +342,7 @@ TIF / CT route:
 
 - [Parent-part external backend contract](docs/contracts/external_backend_contract_v1.md)
 - [Child-part Blink external backend contract](docs/contracts/external_blink_backend_contract_v1.md)
+- [TIF volume-segmentation backend contract](docs/contracts/ant3d_tif_backend_contract_v1.md)
 - [TIF local-axis backend contract](docs/contracts/tif_local_axis_backend_contract_v1.md)
 
 External backend predictions are review candidates. They should not be treated as confirmed training truth until checked by a researcher.

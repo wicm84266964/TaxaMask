@@ -54,7 +54,10 @@ class AgentContextRoutesTests(unittest.TestCase):
 
         self.assertEqual(context["diagnostic_route"], "tif_volume_backend_settings")
         self.assertIn("model_draft", context["diagnostic_focus"])
+        self.assertIn("volume-segmentation", context["diagnostic_focus"])
         self.assertIn("manual_truth", context["safety_notes"])
+        self.assertIn("docs/contracts/ant3d_tif_backend_contract_v1.md", context["source_code_refs"])
+        self.assertIn("docs/contracts/tif_local_axis_backend_contract_v1.md", context["source_code_refs"])
         self.assertIn("contract_placeholder=ok_or_not_applicable", context["health_check_summary"])
 
     def test_tif_volume_route_includes_gpu_preview_and_reslice_hints(self):
@@ -72,6 +75,8 @@ class AgentContextRoutesTests(unittest.TestCase):
         self.assertIn("Local Axis Reslice", context["diagnostic_focus"])
         self.assertIn("12. Local Axis Reslice", context["llm_context_refs"])
         self.assertIn("tif_gpu_volume_canvas.py", context["source_code_refs"])
+        self.assertIn("ant3d_tif_backend_contract_v1.md", context["source_code_refs"])
+        self.assertIn("tif_local_axis_backend_contract_v1.md", context["source_code_refs"])
         self.assertIn("nearest-neighbor", context["safety_notes"])
 
     def test_pdf_route_keeps_candidate_safety_visible(self):

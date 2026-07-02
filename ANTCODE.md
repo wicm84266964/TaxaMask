@@ -46,7 +46,7 @@ Treat this TaxaMask protocol as always active, not as an optional skill:
 
 ## Current Program State
 
-- Current public milestone: **TaxaMask open-source official release v1.0**.
+- Current maintained line: **TaxaMask `main` / v2.x**, integrating Agent Center, PDF evidence, 2D/STL morphology, and the newer TIF/CT workbench in one branch.
 - Startup defaults to TaxaMask Agent Center.
 - The start center main area embeds Ant-Code Dashboard through `AntSleap/ui/taxamask_agent_panel.py`.
 - The start center right rail contains recent/open/general settings controls followed by `PDF evidence workflow`, `2D/STL Morphology`, and `TIF Volume` cards. PDF evidence should remain visible near the top because it is often the first screening/review step before candidate import.
@@ -116,7 +116,8 @@ Treat model-backend adaptation as a three-level workflow:
 For custom models, keep the two backend routes separate:
 
 - 2D/STL custom models use `ExternalBackendRunner` and `taxamask_external_backend_contract_v1`; they should return prediction JSON that imports into review candidates.
-- TIF custom models use `TifBackendRunner` and `ant3d_tif_backend_contract_v1`; they should return TIF backend results and import predictions into `model_draft`.
+- TIF volume-segmentation custom models use `TifBackendRunner` and `ant3d_tif_backend_contract_v1`; they should return TIF backend results and import prediction label volumes into `model_draft`.
+- TIF Local Axis proposal backends use `taxamask_tif_local_axis_backend_contract_v1`; they should return reviewable global ROI or local-frame proposals, not label volumes or final reslice TIFFs.
 
 Default to adapter/config changes first. Escalate to TaxaMask source development only when a concrete missing program capability prevents the custom model from being adapted externally.
 

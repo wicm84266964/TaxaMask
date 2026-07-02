@@ -180,13 +180,23 @@ def _safe_int(value, default=None):
         return default
 
 
+def _safe_float(value, default=None):
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    if not np.isfinite(result):
+        return default
+    return result
+
+
 def _clean_polygon_points(polygon):
     points = []
     for point in polygon or []:
         if not isinstance(point, (list, tuple)) or len(point) < 2:
             continue
-        x = _safe_int(point[0])
-        y = _safe_int(point[1])
+        x = _safe_float(point[0])
+        y = _safe_float(point[1])
         if x is None or y is None:
             continue
         points.append([x, y])
@@ -348,7 +358,7 @@ def validate_contours_for_interpolation(contours_payload, shape_zyx=None, axis="
             outside = [
                 point
                 for point in polygon
-                if len(point) < 2 or int(point[0]) < 0 or int(point[0]) >= width or int(point[1]) < 0 or int(point[1]) >= height
+                if len(point) < 2 or float(point[0]) < 0.0 or float(point[0]) >= float(width) or float(point[1]) < 0.0 or float(point[1]) >= float(height)
             ]
             if outside:
                 warnings.append(
@@ -447,9 +457,13 @@ def add_polygon_keyframe(contours_payload, slice_index, polygon, axis="z", autho
         if not isinstance(point, (list, tuple)) or len(point) < 2:
             continue
         try:
-            clean_polygon.append([int(round(float(point[0]))), int(round(float(point[1])))])
+            x = float(point[0])
+            y = float(point[1])
         except (TypeError, ValueError):
             continue
+        if not np.isfinite(x) or not np.isfinite(y):
+            continue
+        clean_polygon.append([round(x, 3), round(y, 3)])
     if len(clean_polygon) < 3:
         raise ValueError("contour_polygon_needs_at_least_3_points")
     keyframes = [

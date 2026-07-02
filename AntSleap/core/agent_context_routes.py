@@ -62,7 +62,7 @@ AGENT_CONTEXT_ROUTES = {
     },
     "tif_model_settings": {
         "diagnostic_route": "tif_volume_backend_settings",
-        "diagnostic_focus": "TIF backend defaults for export, training, prediction, model_draft import, and train-ready safety.",
+        "diagnostic_focus": "TIF volume-segmentation backend defaults for train-ready export, training, prediction, model_draft import, and manual_truth safety. Keep this separate from the Local Axis proposal backend.",
         "llm_context_refs": (
             "LLM_CONTEXT_DETAILED.md -> 8. TIF/CT Project Model",
             "LLM_CONTEXT_DETAILED.md -> 15. External Backend Contracts",
@@ -72,16 +72,19 @@ AGENT_CONTEXT_ROUTES = {
         "source_code_refs": (
             "AntSleap/main.py -> TifModelSettingsDialog.get_agent_context",
             "AntSleap/core/tif_backend.py",
-            "docs/ant3d_workbench/TIF后端契约_v1_实施设计_zh.md",
+            "AntSleap/core/tif_export.py",
+            "AntSleap/core/tif_prediction_import.py",
+            "docs/contracts/ant3d_tif_backend_contract_v1.md",
+            "docs/contracts/tif_local_axis_backend_contract_v1.md",
         ),
         "artifact_hints": (
-            "TIF project JSON, exported training exchange folder, backend contract JSON, backend result JSON, model_manifest, and model_draft sidecar are the key artifacts.",
+            "TIF SQLite manifest or legacy JSON entry, exported training exchange folder, backend contract JSON, backend result JSON, model_manifest, and model_draft sidecar are the key artifacts.",
         ),
         "safety_notes": COMMON_SAFETY_NOTES
         + (
             "Prediction outputs must land in model_draft and must not overwrite manual_truth automatically.",
         ),
-        "suggested_agent_action": "Check backend ID, export formats, Python executable, contract placeholders, result schema, and model_draft import path.",
+        "suggested_agent_action": "Check backend ID, export formats, Python executable, contract placeholders, result schema, train-ready manual_truth export, and model_draft import path. If the task is Local Axis orientation or reslice proposals, switch to the local-axis contract instead.",
     },
     "labeling": {
         "diagnostic_route": "labeling_workbench_context",
@@ -145,6 +148,10 @@ AGENT_CONTEXT_ROUTES = {
             "AntSleap/ui/tif_gpu_volume_canvas.py",
             "AntSleap/core/tif_project.py",
             "AntSleap/core/tif_backend.py",
+            "AntSleap/core/tif_local_axis_reslice.py",
+            "AntSleap/core/tif_local_axis_ai.py",
+            "docs/contracts/ant3d_tif_backend_contract_v1.md",
+            "docs/contracts/tif_local_axis_backend_contract_v1.md",
         ),
         "artifact_hints": (
             "TIF project JSON, current specimen sidecars, working_edit, manual_truth, model_draft, material map, volume renderer state, source spacing, and recent workbench log are the first inspection targets.",

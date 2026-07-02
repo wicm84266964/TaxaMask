@@ -37,9 +37,9 @@ PDF 文献证据
 
 TIF / CT 内部结构
   -> specimen 导入
-  -> 部位 ROI 定位
-  -> 部位体提取
-  -> 部位 mask 关键切片复核
+  -> 整只体数据粗切 ROI 定位
+  -> 整只体数据手绘 mask 关键切片
+  -> 部位体与部位 mask 生成
   -> 3D 预览与局部轴重切片导出
 
 Agent Center
@@ -119,9 +119,10 @@ TIF/CT 工作流把 TaxaMask 从外部形态图像扩展到内部体数据形态
 
 - 将 TIFF stack 导入为 specimen。
 - 查看整只体数据和已经提取出的 part volume。
-- 在整只体数据中用研究者选择的关键切片矩形绘制部位 ROI，确认 ROI 后生成 part volume。
-- 在 part volume 内用矩形关键切片或手绘轮廓编辑部位 mask。
-- 在 part 关键切片之间插值生成 mask，并接受 part mask。
+- 在整只体数据中用关键切片 ROI 矩形做粗切定位。
+- 在整只体数据中用手绘轮廓关键切片做精切 part mask。
+- 在整只体数据中预览轮廓自动填充，确认 ROI 后同时生成 part image 和 part mask。
+- 进入已提取的 part volume 后可继续复核或修订 mask，但不引入 part 下再切 subpart 的第三级结构。
 - GPU 三维体预览，支持 streaming texture 构建、缓存复用、裁切、transfer-function presets、主题化背景、截面检查和 mask 边界观察。
 - ROI 高细节 3D 检查，用于在不修改源数据的情况下复核局部结构。
 - 大体数据可先进行 metadata-only TIF 注册，再显式 materialize 工作体数据。

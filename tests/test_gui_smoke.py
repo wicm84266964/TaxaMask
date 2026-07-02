@@ -15,6 +15,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ.setdefault("QT_OPENGL", "software")
+os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu --disable-gpu-compositing")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -990,9 +992,10 @@ class GuiSmokeTests(unittest.TestCase):
             window.open_agent_from_context({"source_workbench": "general_settings", "project_type": "settings"})
 
             self.assertEqual(events, ["start"])
-            self.assertIn("来源工作台: general_settings", window.agent_panel._pending_context_prompt)
-            self.assertIn("诊断路线: general_settings_runtime", window.agent_panel._pending_context_prompt)
-            self.assertIn("建议阅读的大模型对接位置:", window.agent_panel._pending_context_prompt)
+            prompt = window.agent_panel._pending_context_prompt or QApplication.clipboard().text()
+            self.assertIn("Source workbench: general_settings", prompt)
+            self.assertIn("Diagnostic route: general_settings_runtime", prompt)
+            self.assertIn("Suggested LLM context references:", prompt)
         finally:
             window.deleteLater()
 
@@ -1010,8 +1013,8 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(events, [])
             self.assertEqual(window.agent_panel._pending_context_prompt, "")
             self.assertEqual(len(prompts), 1)
-            self.assertIn("项目类型: settings", prompts[0])
-            self.assertIn("上下文策略:", prompts[0])
+            self.assertIn("Project type: settings", prompts[0])
+            self.assertIn("Context policy:", prompts[0])
         finally:
             window.deleteLater()
 
@@ -1330,6 +1333,56 @@ class GuiSmokeTests(unittest.TestCase):
             finally:
                 model_dialog.deleteLater()
 
+        finally:
+            window.deleteLater()
+
+    def test_agent_context_compaction_keeps_pdf_and_tif_route_fields(self):
+        window = self._make_window()
+        try:
+            tif_compact = window._compact_agent_context(
+                {
+                    "source_workbench": "tif_volume",
+                    "project_type": "tif_volume",
+                    "project_path": "C:/taxamask/project.tif_sqlite_manifest.json",
+                    "active_specimen_id": "ANTSCAN_0001",
+                    "active_volume_scope": "part",
+                    "active_part_id": "head",
+                    "active_part_parent_bbox_zyx": "[[1, 3], [2, 4], [5, 7]]",
+                    "display_mode": "volume",
+                    "volume_projection_mode": "mip",
+                    "volume_mask_mode": "boundary",
+                    "volume_performance_diagnosis": "gpu_ok",
+                    "volume_uploaded_shape_zyx": "128/128/128",
+                    "volume_texture_sampling": "linear",
+                    "volume_display_scaling": "source_spacing",
+                    "tif_next_requirement": "local_axis_reslice",
+                }
+            )
+
+            self.assertEqual(tif_compact["active_volume_scope"], "part")
+            self.assertEqual(tif_compact["active_part_id"], "head")
+            self.assertEqual(tif_compact["volume_projection_mode"], "mip")
+            self.assertEqual(tif_compact["volume_performance_diagnosis"], "gpu_ok")
+            self.assertIn("ant3d_tif_backend_contract_v1.md", tif_compact["source_code_refs"])
+            self.assertIn("tif_local_axis_backend_contract_v1.md", tif_compact["source_code_refs"])
+
+            pdf_compact = window._compact_agent_context(
+                {
+                    "source_workbench": "pdf_evidence",
+                    "project_type": "pdf_evidence",
+                    "screener_profile": "Ant screening",
+                    "figure_profile": "Ant figure review",
+                    "part_description_profile": "Ant part descriptions",
+                    "extract_result_folder": "TaxaMask_outputs",
+                    "extract_db_name": "ant_literature.db",
+                    "extract_db_path": "TaxaMask_outputs/ant_literature.db",
+                }
+            )
+
+            self.assertEqual(pdf_compact["part_description_profile"], "Ant part descriptions")
+            self.assertEqual(pdf_compact["extract_result_folder"], "TaxaMask_outputs")
+            self.assertEqual(pdf_compact["extract_db_name"], "ant_literature.db")
+            self.assertIn("pdf_evidence_context", pdf_compact["diagnostic_route"])
         finally:
             window.deleteLater()
 

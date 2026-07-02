@@ -3346,6 +3346,21 @@ if gpu_volume_offscreen_available():
             font.setPointSize(9)
             painter.setFont(font)
             for overlay in self._axis_overlays:
+                if overlay.get("kind") == "polyline":
+                    points = overlay.get("points_xy") if isinstance(overlay.get("points_xy"), (list, tuple)) else []
+                    points = [point for point in points if isinstance(point, (list, tuple)) and len(point) >= 2]
+                    if len(points) < 2:
+                        continue
+                    color = QColor(str(overlay.get("color") or "#FFFFFF"))
+                    painter.setPen(QPen(color, int(overlay.get("width", 2))))
+                    for first, second in zip(points, points[1:]):
+                        painter.drawLine(int(round(float(first[0]))), int(round(float(first[1]))), int(round(float(second[0]))), int(round(float(second[1]))))
+                    label = str(overlay.get("label") or "")
+                    anchor = overlay.get("label_anchor_xy") if isinstance(overlay.get("label_anchor_xy"), (list, tuple)) else points[-1]
+                    if label and anchor:
+                        dx, dy = overlay.get("label_offset_xy") or (8, -8)
+                        self._draw_axis_label(painter, label, float(anchor[0]) + float(dx), float(anchor[1]) + float(dy), color, str(overlay.get("label_position") or "right"))
+                    continue
                 if overlay.get("kind") == "point":
                     point = overlay.get("point_xy")
                     if not point:

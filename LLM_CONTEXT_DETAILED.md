@@ -1,8 +1,7 @@
-# TaxaMask Developer Preview LLM Context
+# TaxaMask LLM Context
 
-> Target: advanced LLM assistants and developers maintaining the developer preview branch.
-> Branch scope: `codex/antscan-stl-tif-rearchitecture`.
-> Last synchronized: 2026-06-27.
+> Target: embedded AntCode agents, advanced LLM assistants, and developers maintaining the current TaxaMask `main` / v2.x line.
+> Last synchronized: 2026-07-02.
 
 This file is the current-state handoff document. It is not a changelog. Do not append dated development logs here. Keep it focused on the program state that an agent needs in order to diagnose, modify, and safely operate TaxaMask.
 
@@ -10,25 +9,26 @@ This file is the current-state handoff document. It is not a changelog. Do not a
 
 TaxaMask is a desktop research workbench for morphology annotation, literature evidence handling, model-assisted review, and dataset export.
 
-The developer preview branch contains two maintained routes:
+The current maintained line contains three user-visible workflow routes:
 
-- 2D/STL morphology route: PDF evidence, specimen images, STL-rendered 2D views, VLM/SAM drafts, parent/child part annotation, Blink experts, external model backends, and COCO/YOLO/JSONL export.
-- TIF/CT route: continuous TIFF stack import, TIF specimen projects, material/label layers, part ROI and part volume extraction, GPU volume preview, Local Axis Reslice, and training-material capture for future local-axis automation.
+- PDF evidence route: literature screening, figure/caption extraction, text part-description extraction, SQLite evidence databases, and reviewable candidate images.
+- 2D/STL morphology route: specimen images, PDF-derived candidates, STL-rendered 2D views, VLM/SAM drafts, parent/child part annotation, Blink experts, external model backends, and COCO/YOLO/JSONL export.
+- TIF/CT route: continuous TIFF stack import, TIF specimen projects, material/label layers, part ROI and part volume extraction, GPU volume preview, TIF volume-segmentation backends, Local Axis Reslice, and training-material capture for future local-axis automation.
 
 Branch release notes are kept under `docs/releases/`. The full 1.2.0 TIF developer-preview release is documented in `docs/releases/1.2.0-tif-preview.md`.
 
-The stable `main` branch keeps its own main-only documentation. Do not copy TIF/CT wording into main docs unless the user explicitly decides to promote that route.
+TIF/CT is now integrated into the maintained branch, but it remains less broadly validated than the mature PDF and 2D/STL routes. Current TIF validation is mainly AntScan ant CT oriented. Do not claim broad cross-taxon TIF/CT validation unless new evidence is added.
 
 ## 2. Documentation Roles
 
-- `README.md`: public GitHub landing page and installation entrypoint for this branch.
-- `README_zh.md`: Chinese public branch overview.
+- `README.md`: public GitHub landing page and installation entrypoint.
+- `CHANGELOG_zh.md`: Chinese historical changelog-style document.
 - `TaxaMask使用手册.md`: researcher-facing Chinese operating manual.
 - `LLM_CONTEXT_DETAILED.md`: current technical handoff for Agent/LLM/developer use.
 - `docs/contracts/`: backend contracts that are safe to expose publicly.
 - Internal design drafts, task handoffs, local agent sessions, local runtime configs, generated data, model weights, private projects, databases, and CT/TIF stacks must not be published.
 
-The root `CHANGELOG_zh.md` is intentionally not part of this developer-preview public branch. Historical development logs should stay private or be maintained separately.
+Do not recreate older duplicate root context/readme files. Keep this file as the current technical handoff rather than a dated development log.
 
 ## 3. Safety Model
 
@@ -149,6 +149,7 @@ Main source areas:
 - `AntSleap/core/tif_backend.py`
 - `AntSleap/ui/tif_workbench.py`
 - `docs/contracts/ant3d_tif_backend_contract_v1.md`
+- `docs/contracts/tif_local_axis_backend_contract_v1.md`
 
 The TIF project is independent from the 2D/STL project model.
 
@@ -175,6 +176,11 @@ Core records:
 Legacy TIF project JSON is now a migration source rather than the preferred active project store. Large volumes live in project sidecar directories.
 
 Plain TIFF stack import creates an image volume but not trusted training truth. AMIRA-style imports can provide label volumes, but label shape/material consistency must be checked before treating a specimen as train-ready.
+
+TIF has two different external-backend concepts:
+
+- Volume segmentation backend: `AntSleap/core/tif_backend.py` and `docs/contracts/ant3d_tif_backend_contract_v1.md`. It prepares train-ready `manual_truth` data, runs train/predict commands, and imports prediction label volumes as `model_draft`.
+- Local Axis proposal backend: `AntSleap/core/tif_local_axis_ai.py` and `docs/contracts/tif_local_axis_backend_contract_v1.md`. It proposes global ROI or local-frame candidates for review. It must not directly create final reslice TIFFs or write `manual_truth`.
 
 ## 9. TIF Workbench
 
@@ -394,6 +400,8 @@ TIF contracts:
 
 - `docs/contracts/ant3d_tif_backend_contract_v1.md`
 - `docs/contracts/tif_local_axis_backend_contract_v1.md`
+
+The first contract is for TIF volume segmentation and `model_draft` prediction import. The second contract is for Local Axis ROI/frame proposals. Do not route nnU-Net/MONAI-style label-volume prediction tasks to the Local Axis contract.
 
 Contract rules:
 

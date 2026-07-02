@@ -25,6 +25,11 @@ try:
 except ModuleNotFoundError as exc:
     if exc.name and exc.name.startswith("PySide6"):
         QApplication = None
+        QDialog = None
+        QMessageBox = None
+        QPointF = None
+        Qt = None
+        QWidget = None
     else:
         raise
 else:
@@ -83,11 +88,11 @@ class FakeKeyEvent:
 
 
 class FakeMouseEvent:
-    def __init__(self, button, buttons, x, y, modifiers=Qt.NoModifier):
+    def __init__(self, button, buttons, x, y, modifiers=None):
         self._button = button
         self._buttons = buttons
-        self._modifiers = modifiers
-        self._position = QPointF(float(x), float(y))
+        self._modifiers = modifiers if modifiers is not None else (Qt.NoModifier if Qt is not None else 0)
+        self._position = QPointF(float(x), float(y)) if QPointF is not None else (float(x), float(y))
         self.accepted = False
 
     def button(self):
@@ -1014,6 +1019,86 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.close_project()
                 widget.deleteLater()
 
+    def test_confirm_roi_initializes_part_mask_from_full_volume_freehand_contours(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+            try:
+                widget.part_bbox_edit.setText("0,5,0,8,0,8")
+                widget.part_mask_keyframes = [
+                    {
+                        "axis": "z",
+                        "slice_index": 1,
+                        "polygon": [[2, 2], [5, 2], [5, 5], [2, 5]],
+                        "source": "manual_freehand",
+                    },
+                    {
+                        "axis": "z",
+                        "slice_index": 3,
+                        "polygon": [[1, 1], [6, 1], [6, 6], [1, 6]],
+                        "source": "manual_freehand",
+                    },
+                ]
+
+                module_path = "AntSleap.ui.tif_workbench.TifPartNameDialog"
+                FakePartNameDialog.queue = [("head", "Head", True)]
+                with patch(module_path, FakePartNameDialog):
+                    widget.confirm_part_roi_to_part()
+
+                part = widget.project.get_part("01-0101-21", "head")
+                self.assertEqual(part["parent_bbox_zyx"], [[1, 4], [1, 7], [1, 7]])
+                self.assertEqual(part["status"], "mask_preview")
+                self.assertEqual(part.get("view_settings", {}).get("volume_mask_mode"), "masked_image")
+                self.assertEqual(part.get("metadata", {}).get("full_volume_mask_source"), "manual_freehand_key_slices")
+                self.assertEqual(part.get("metadata", {}).get("full_volume_mask_keyframe_count"), 2)
+
+                mask = np.asarray(load_volume_sidecar(widget.project.to_absolute(part["mask"]["path"]), mmap_mode="r")).copy()
+                self.assertEqual(tuple(mask.shape), (3, 6, 6))
+                self.assertGreater(int(np.count_nonzero(mask)), 0)
+                self.assertLess(int(np.count_nonzero(mask)), int(np.prod(mask.shape)))
+
+                contours = read_contours_json(widget.project.to_absolute(part["contours_path"]))
+                self.assertEqual(len(contours["keyframes"]), 2)
+                self.assertEqual([item["slice_index"] for item in contours["keyframes"]], [0, 2])
+                self.assertEqual(contours["keyframes"][0]["polygon"], [[1, 1], [4, 1], [4, 4], [1, 4]])
+                self.assertEqual(widget.project.list_parts("01-0101-21")[0]["part_id"], "head")
+                self.assertNotIn("Full-volume contour mask not initialized", widget.training_status_label.text())
+                self.assertIn("Full-volume contour mask initialized from 2 key slice", widget.training_status_label.text())
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_roi_draft_saves_and_restores_full_volume_freehand_contours(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+            try:
+                widget.part_bbox_edit.setText("0,5,0,8,0,8")
+                widget.part_mask_keyframes = [
+                    {
+                        "axis": "z",
+                        "slice_index": 2,
+                        "polygon": [[2, 2], [5, 2], [5, 5], [2, 5]],
+                        "source": "manual_freehand",
+                    }
+                ]
+                module_path = "AntSleap.ui.tif_workbench.TifPartNameDialog"
+                FakePartNameDialog.queue = [("head_roi", "Head ROI", True)]
+                with patch(module_path, FakePartNameDialog):
+                    roi = widget.save_part_roi_draft()
+
+                self.assertEqual(len((roi.get("metadata") or {}).get("part_mask_keyframes", [])), 1)
+                self.assertEqual((roi.get("metadata") or {}).get("part_mask_bbox_zyx"), [[2, 3], [2, 6], [2, 6]])
+
+                widget.part_mask_keyframes = []
+                widget._load_roi_draft_for_editing(roi)
+                widget.slice_slider.setValue(2)
+
+                self.assertEqual(len(widget.part_mask_keyframes), 1)
+                self.assertEqual(widget.part_mask_keyframes[0]["slice_index"], 2)
+                self.assertTrue(widget.current_contour_overlay_polygons())
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
     def test_part_mask_preview_ignores_roi_shell_after_adding_new_key_slice(self):
         with tempfile.TemporaryDirectory() as tmp:
             widget = self._make_volume_widget(Path(tmp), z_count=5)
@@ -1157,6 +1242,15 @@ class TifWorkbenchTests(unittest.TestCase):
             try:
                 self.assertEqual(widget.part_task_layout.indexOf(widget.btn_create_part), -1)
                 self.assertFalse(widget.btn_create_part.isEnabled())
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_rectangular_keyframe_button_is_not_in_part_mask_workflow(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=4)
+            try:
+                self.assertEqual(widget.part_mask_section.layout().indexOf(widget.btn_add_rect_keyframe), -1)
             finally:
                 widget.close_project()
                 widget.deleteLater()
@@ -1362,6 +1456,40 @@ class TifWorkbenchTests(unittest.TestCase):
                 contours = read_contours_json(contours_path)
                 self.assertEqual(contours["keyframes"], [])
                 self.assertFalse(widget.current_contour_overlay_polygons())
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_contour_draw_mode_uses_subpixel_points_and_hides_brush_radius_preview(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+            try:
+                crop_volume_to_part(widget.project, "01-0101-21", "head", [[1, 4], [1, 7], [1, 7]], display_name="Head")
+                widget.refresh_project()
+                widget._select_volume_tree_item("01-0101-21", "part", "head")
+                widget.slice_slider.setValue(1)
+                widget.brush_size_slider.setValue(31)
+                widget.btn_draw_part_contour.setChecked(True)
+                widget.canvas.resize(480, 360)
+                widget.render_current_slice()
+
+                widget.canvas.mouseMoveEvent(FakeMouseEvent(Qt.NoButton, Qt.NoButton, widget.canvas.width() / 2, widget.canvas.height() / 2))
+                self.assertEqual(widget.canvas._last_annotation_preview, {})
+
+                drawn_points = [[1.25, 1.35], [2.2, 1.05], [4.55, 1.45], [4.85, 3.1], [3.6, 4.65], [1.35, 4.35]]
+                points = [widget.canvas._image_point_to_widget_point(point) for point in drawn_points]
+                widget.canvas.mousePressEvent(FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, points[0][0], points[0][1]))
+                for point in points[1:]:
+                    widget.canvas.mouseMoveEvent(FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, point[0], point[1]))
+                widget.canvas.mouseReleaseEvent(FakeMouseEvent(Qt.LeftButton, Qt.NoButton, points[-1][0], points[-1][1]))
+
+                contours_path = widget.project.to_absolute(widget.project.get_part("01-0101-21", "head")["contours_path"])
+                contour = read_contours_json(contours_path)["keyframes"][0]
+                self.assertEqual(len(contour["polygon"]), len(drawn_points))
+                for saved, drawn in zip(contour["polygon"], drawn_points):
+                    self.assertAlmostEqual(saved[0], drawn[0], places=2)
+                    self.assertAlmostEqual(saved[1], drawn[1], places=2)
+                self.assertTrue(any(isinstance(value, float) and not float(value).is_integer() for point in contour["polygon"] for value in point))
             finally:
                 widget.close_project()
                 widget.deleteLater()
@@ -1649,6 +1777,60 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.close_project()
                 widget.deleteLater()
 
+    def test_local_axis_three_point_plane_aligns_output_z_and_exports_reference(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            widget = self._make_volume_widget(root, z_count=5)
+            try:
+                crop_volume_to_part(widget.project, "01-0101-21", "head", [[0, 4], [1, 7], [1, 7]], display_name="Head")
+                widget.refresh_project()
+                widget._select_volume_tree_item("01-0101-21", "part", "head")
+                draft = widget.copy_source_z_axis_to_local_axis_draft()
+                self.assertIsNotNone(draft)
+
+                roll = {
+                    "pair_id": "roll_reference_point_pair",
+                    "point_a": {"role": "roll_reference_a", "zyx": [1.0, 1.0, 1.0]},
+                    "point_b": {"role": "roll_reference_b", "zyx": [1.0, 5.0, 1.0]},
+                    "point_c": {"role": "reference_plane_c", "zyx": [3.0, 1.0, 5.0]},
+                }
+                widget.local_axis_draft["roll_reference"] = roll
+                old_axis = dict(widget.local_axis_draft["editable_axis"])
+
+                self.assertTrue(widget.align_local_axis_to_reference_plane())
+
+                aligned_axis = widget.local_axis_draft["editable_axis"]
+                reference_plane = widget.local_axis_draft["reference_plane"]
+                self.assertNotEqual(aligned_axis["end_zyx"], old_axis["end_zyx"])
+                self.assertEqual(aligned_axis["derived_from"], "three_point_reference_plane")
+                self.assertEqual(reference_plane["point_c_zyx"], [3.0, 1.0, 5.0])
+                self.assertEqual(widget.local_axis_draft["roll_reference"]["point_c"]["role"], "reference_plane_c")
+                self.assertIn("Plane reference: C set", widget.local_axis_summary_label.text())
+                widget.local_axis_details_check.setChecked(True)
+                self.assertIn("Reference plane normal", widget.local_axis_details_label.text())
+
+                overlays = widget._local_axis_volume_overlays()
+                self.assertIn("Plane reference C", [item.get("label") for item in overlays])
+                self.assertIn("A/B/C reference plane", [item.get("label") for item in overlays])
+
+                payload = widget._current_local_axis_reslice_payload()
+                self.assertEqual(payload["roll_reference"]["point_c"]["role"], "reference_plane_c")
+                self.assertEqual(payload["reference_plane"]["plane_id"], "three_point_reference_plane")
+
+                FakeProgressDialog.instances.clear()
+                with patch("AntSleap.ui.tif_workbench.QProgressDialog", FakeProgressDialog):
+                    result = widget.export_current_local_axis_reslice()
+
+                self.assertIsNotNone(result)
+                record = result["record"]
+                self.assertEqual(record["local_frame"]["roll_reference"]["point_c"]["role"], "reference_plane_c")
+                self.assertEqual(record["training_sample"]["roll_reference_point_pair"]["point_c"]["role"], "reference_plane_c")
+                self.assertEqual(record["training_sample"]["reference_plane"]["plane_id"], "three_point_reference_plane")
+                self.assertEqual(record["provenance"]["reference_plane_source"], "manual_three_point_plane")
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
     def test_local_axis_clip_plane_depth_advances_from_viewer_side(self):
         with tempfile.TemporaryDirectory() as tmp:
             widget = self._make_volume_widget(Path(tmp), z_count=5)
@@ -1887,18 +2069,22 @@ class TifWorkbenchTests(unittest.TestCase):
             try:
                 self.assertIs(widget.task_tabs.currentWidget(), widget.part_task_page)
                 self.assertFalse(widget.part_locate_section.isHidden())
-                self.assertTrue(widget.part_mask_section.isHidden())
+                self.assertFalse(widget.part_mask_section.isHidden())
                 self.assertTrue(widget.part_output_section.isHidden())
+                self.assertTrue(widget.btn_draw_part_contour.isEnabled())
+                self.assertTrue(widget.btn_preview_part_mask.isEnabled())
 
                 mode_index = widget.display_mode_combo.findData("volume")
                 widget.display_mode_combo.setCurrentIndex(mode_index)
                 self.assertIs(widget.task_tabs.currentWidget(), widget.display_task_page)
                 self.assertTrue(widget.part_locate_section.isHidden())
+                self.assertTrue(widget.part_mask_section.isHidden())
 
                 slice_index = widget.display_mode_combo.findData("slice")
                 widget.display_mode_combo.setCurrentIndex(slice_index)
                 self.assertIs(widget.task_tabs.currentWidget(), widget.part_task_page)
                 self.assertFalse(widget.part_locate_section.isHidden())
+                self.assertFalse(widget.part_mask_section.isHidden())
 
                 crop_volume_to_part(widget.project, "01-0101-21", "head", [[0, 4], [1, 7], [1, 7]], display_name="Head")
                 widget.refresh_project()

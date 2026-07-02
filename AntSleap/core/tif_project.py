@@ -1337,6 +1337,8 @@ class TifProjectManager:
             clean["spacing_zyx"] = spacing
         if isinstance(source.get("roll_reference"), dict):
             clean["roll_reference"] = dict(source.get("roll_reference"))
+        if isinstance(source.get("reference_plane"), dict):
+            clean["reference_plane"] = dict(source.get("reference_plane"))
         return clean
 
     def _normalize_reslice_record(self, record, specimen_id, part_id):

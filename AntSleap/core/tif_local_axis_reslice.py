@@ -147,6 +147,87 @@ def editable_axis_from_local_frame(local_frame, source_axis, part_shape_zyx, axi
     return axis
 
 
+def reference_plane_from_points(point_a_zyx, point_b_zyx, point_c_zyx, spacing_zyx=None, preferred_normal_zyx=None):
+    spacing = _normalize_spacing(spacing_zyx)
+    point_a = _point(point_a_zyx, "reference_plane_point_a")
+    point_b = _point(point_b_zyx, "reference_plane_point_b")
+    point_c = _point(point_c_zyx, "reference_plane_point_c")
+    point_a_world = point_a * spacing
+    point_b_world = point_b * spacing
+    point_c_world = point_c * spacing
+    normal_world = np.cross(point_b_world - point_a_world, point_c_world - point_a_world)
+    normal_length = float(np.linalg.norm(normal_world))
+    if normal_length <= 1e-8:
+        raise ValueError("reference_plane_points_must_not_be_collinear")
+    normal_world = normal_world / normal_length
+    if preferred_normal_zyx is not None:
+        preferred_world = _world_unit_from_voxel_axis(preferred_normal_zyx, spacing, "preferred_reference_plane_normal")
+        if float(np.dot(normal_world, preferred_world)) < 0.0:
+            normal_world = -normal_world
+    normal_axis = _voxel_unit_from_world_axis(normal_world, spacing, "reference_plane_normal")
+    return {
+        "plane_id": "three_point_reference_plane",
+        "coordinate_space": "part_volume_voxel_zyx",
+        "point_a_zyx": point_a.tolist(),
+        "point_b_zyx": point_b.tolist(),
+        "point_c_zyx": point_c.tolist(),
+        "normal_axis_zyx": normal_axis.tolist(),
+        "normal_world_zyx": normal_world.tolist(),
+        "spacing_zyx": spacing.tolist(),
+    }
+
+
+def align_editable_axis_to_reference_plane(editable_axis, roll_reference, spacing_zyx=None, shape_zyx=None):
+    axis = dict(editable_axis or {})
+    start = _point(axis.get("start_zyx"), "editable_axis_start")
+    end = _point(axis.get("end_zyx"), "editable_axis_end")
+    spacing = _normalize_spacing(spacing_zyx)
+    axis_world = (end - start) * spacing
+    axis_length_world = float(np.linalg.norm(axis_world))
+    if axis_length_world <= 1e-8:
+        raise ValueError("editable_axis_points_must_not_overlap")
+    roll = roll_reference if isinstance(roll_reference, dict) else {}
+    point_a = roll.get("point_a") if isinstance(roll.get("point_a"), dict) else {}
+    point_b = roll.get("point_b") if isinstance(roll.get("point_b"), dict) else {}
+    point_c = roll.get("point_c") if isinstance(roll.get("point_c"), dict) else {}
+    plane = reference_plane_from_points(
+        point_a.get("zyx"),
+        point_b.get("zyx"),
+        point_c.get("zyx"),
+        spacing_zyx=spacing,
+        preferred_normal_zyx=end - start,
+    )
+    normal_world = np.asarray(plane["normal_world_zyx"], dtype=np.float64)
+    center = (start + end) * 0.5
+    half_length_world = axis_length_world * 0.5
+
+    if shape_zyx is not None:
+        shape = np.asarray([float(value) for value in shape_zyx], dtype=np.float64)
+        if shape.size == 3 and np.all(np.isfinite(shape)) and np.all(shape > 0):
+            upper = np.maximum(shape - 1.0, 0.0)
+            step_per_world = normal_world / spacing
+            limits = []
+            for index, step in enumerate(step_per_world):
+                if abs(float(step)) <= 1e-10:
+                    continue
+                if step > 0:
+                    limits.append((upper[index] - center[index]) / step)
+                    limits.append(center[index] / step)
+                else:
+                    limits.append(center[index] / (-step))
+                    limits.append((upper[index] - center[index]) / (-step))
+            usable_limits = [float(value) for value in limits if np.isfinite(value) and value > 1e-8]
+            if usable_limits:
+                half_length_world = min(half_length_world, min(usable_limits))
+
+    half_delta_voxel = (normal_world * half_length_world) / spacing
+    axis["start_zyx"] = [round(float(value), 3) for value in center - half_delta_voxel]
+    axis["end_zyx"] = [round(float(value), 3) for value in center + half_delta_voxel]
+    axis["derived_from"] = "three_point_reference_plane"
+    axis["reference_plane"] = dict(plane)
+    return axis, plane
+
+
 def compute_local_frame(origin_zyx, output_axis_start_zyx, output_axis_end_zyx, roll_reference=None, spacing_zyx=None, output_axis="z_axis"):
     spacing = _normalize_spacing(spacing_zyx)
     origin = _point(origin_zyx, "origin_zyx")
@@ -234,11 +315,18 @@ def validate_roll_reference_pair(roll_reference):
     b = _point(point_b.get("zyx"), "roll_reference_point_b")
     if float(np.linalg.norm(b - a)) <= 1e-8:
         raise ValueError("roll_reference_points_must_not_overlap")
-    return {
+    clean = {
         "pair_id": str(roll_reference.get("pair_id") or ""),
         "point_a": {"role": str(point_a.get("role") or "roll_point_a"), "zyx": a.tolist()},
         "point_b": {"role": str(point_b.get("role") or "roll_point_b"), "zyx": b.tolist()},
     }
+    point_c = roll_reference.get("point_c") if isinstance(roll_reference.get("point_c"), dict) else {}
+    if point_c.get("zyx") is not None:
+        c = _point(point_c.get("zyx"), "roll_reference_point_c")
+        clean["point_c"] = {"role": str(point_c.get("role") or "reference_plane_c"), "zyx": c.tolist()}
+    if isinstance(roll_reference.get("reference_plane"), dict):
+        clean["reference_plane"] = dict(roll_reference.get("reference_plane"))
+    return clean
 
 
 def _roll_reference_from_payload(payload, local_frame):
@@ -360,6 +448,9 @@ def export_part_reslice(project_manager, specimen_id, part_id, reslice_payload):
     local_frame.setdefault("spacing_zyx", part_spacing)
     roll_reference = validate_roll_reference_pair(_roll_reference_from_payload(payload, local_frame))
     local_frame["roll_reference"] = roll_reference
+    reference_plane = dict(roll_reference.get("reference_plane") or payload.get("reference_plane") or {})
+    if reference_plane:
+        local_frame["reference_plane"] = reference_plane
     validate_local_frame(local_frame)
 
     params = dict(payload.get("reslice_params") or {})
@@ -456,6 +547,7 @@ def export_part_reslice(project_manager, specimen_id, part_id, reslice_payload):
         "origin_zyx": list(local_frame.get("origin_zyx") or []),
         "roll_reference_point_pair": roll_reference,
         "roll_reference": roll_reference,
+        "reference_plane": reference_plane,
         "local_frame": local_frame,
         "reslice_params": params,
         "outputs": outputs_payload,
@@ -480,6 +572,7 @@ def export_part_reslice(project_manager, specimen_id, part_id, reslice_payload):
         "software_version": LOCAL_AXIS_RESLICE_SOFTWARE_VERSION,
         "source": source_payload,
         "local_frame": local_frame,
+        "reference_plane": reference_plane,
         "reslice_params": params,
         "outputs": outputs_payload,
         "training": training_payload,

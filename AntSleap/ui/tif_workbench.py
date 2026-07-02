@@ -75,7 +75,7 @@ try:
         sample_volume_values,
     )
     from AntSleap.core.tif_local_axis_ai import export_local_axis_training_manifest
-    from AntSleap.core.tif_local_axis_reslice import compute_local_frame, create_editable_axis_from_source, export_part_reslice, source_z_axis_for_part
+    from AntSleap.core.tif_local_axis_reslice import align_editable_axis_to_reference_plane, compute_local_frame, create_editable_axis_from_source, export_part_reslice, source_z_axis_for_part
     from AntSleap.ui.style import get_theme_config, normalize_theme
     from AntSleap.ui.tif_gpu_volume_canvas import (
         GPU_VOLUME_MAX_RAY_STEPS,
@@ -123,7 +123,7 @@ except ModuleNotFoundError as exc:
         sample_volume_values,
     )
     from core.tif_local_axis_ai import export_local_axis_training_manifest
-    from core.tif_local_axis_reslice import compute_local_frame, create_editable_axis_from_source, export_part_reslice, source_z_axis_for_part
+    from core.tif_local_axis_reslice import align_editable_axis_to_reference_plane, compute_local_frame, create_editable_axis_from_source, export_part_reslice, source_z_axis_for_part
     from ui.style import get_theme_config, normalize_theme
     from ui.tif_gpu_volume_canvas import (
         GPU_VOLUME_MAX_RAY_STEPS,
@@ -520,21 +520,28 @@ TIF_TRANSLATIONS = {
         "ROI bbox updated and saved to draft {0}: {1}": "ROI bbox 已更新并保存到草稿 {0}：{1}",
         "ROI key slices use one view plane. Switch back to {0} or save a separate ROI.": "同一个 ROI 外壳只能使用一个观察方向。请切回 {0}，或另存一个独立 ROI。",
         "ROI shell mask initialized from {0} key slice(s).": "已根据 {0} 个关键切片初始化 ROI 外壳 mask。",
-        "Draw an ROI before saving or creating a part.": "请先手动框选 ROI，再保存 ROI 或新建部位。",
+        "Full-volume contour mask initialized from {0} key slice(s).": "已根据整只体数据中的 {0} 个手绘轮廓关键切片初始化部位 mask。",
+        "Full-volume contour mask not initialized: {0}": "整只体数据手绘轮廓 mask 未初始化：{0}",
+        "Draw an ROI or contour before saving or creating a part.": "请先手动框选 ROI 或手绘轮廓，再保存草稿或创建部位。",
         "Saved ROI draft {0}.": "已保存 ROI 草稿 {0}。",
         "Loaded ROI draft {0} for editing.": "已载入 ROI 草稿 {0}，可继续编辑。",
         "Confirmed ROI and created part {0}.": "已确认 ROI 并创建部位 {0}。",
         "Cancelled ROI draft {0}.": "已取消 ROI 草稿 {0}。",
         "This ROI is linked to a created part and cannot be cancelled here.": "这个 ROI 已关联到已创建部位，不能在这里取消。",
+        "Select a full volume or part volume before editing part masks.": "请先选择整只体数据或部位体数据，再编辑部位 mask。",
+        "Select a full volume or part volume before previewing masks.": "请先选择整只体数据或部位体数据，再预览 mask。",
+        "Select a full volume or part volume before drawing contours.": "请先选择整只体数据或部位体数据，再手绘轮廓。",
         "Select a part volume before editing part masks.": "请先选择一个部位体数据，再编辑部位 mask。",
         "Select a part volume before previewing masks.": "请先选择一个部位体数据，再预览 mask。",
         "Key-slice mask preview currently uses Z slices.": "当前关键切片 mask 预览先使用 Z 轴切片。",
         "Switch to part volume before drawing contours.": "请先选择部位体数据，再手绘轮廓。",
         "Contour drawing currently uses Z slices.": "当前手绘轮廓先使用 Z 轴切片。",
+        "Drag on the current slice to draw a closed contour.": "请在当前切片上拖拽，画出一个闭合轮廓。",
         "Drag on the current part slice to draw a closed contour.": "请在当前部位切片上拖拽，画出一个闭合轮廓。",
         "Contour saved at Z {0}.": "已在 Z={0} 保存轮廓。",
         "Contour needs at least 3 points.": "轮廓至少需要 3 个点。",
         "Deleted contour at Z {0}.": "已删除 Z={0} 的轮廓。",
+        "Clear all key slices for the current full-volume part draft? This removes the hand-drawn mask draft but keeps the ROI bbox.": "清空当前整只体数据部位草稿的全部手绘关键切片吗？这会移除精切 mask 草稿，但保留 ROI bbox。",
         "Clear all key slices for part {0}? This removes saved mask key slices and the current auto-fill preview, but keeps the cropped part image.": "清空部位 {0} 的全部关键切片吗？这会移除已保存的 mask 关键切片和当前自动填充预览，但保留裁出来的部位图像。",
         "Cleared {0} key slice(s) and reset the part mask draft.": "已清空 {0} 个关键切片，并重置部位 mask 草稿。",
         "No part key slices to clear.": "当前没有可清空的部位关键切片。",
@@ -542,6 +549,7 @@ TIF_TRANSLATIONS = {
         "No contour exists at Z {0}.": "Z={0} 没有可删除的轮廓。",
         "No previous key slice.": "没有上一张关键切片。",
         "No next key slice.": "没有下一张关键切片。",
+        "Draw at least one contour before previewing masks.": "请先至少手绘一个轮廓，再预览 mask。",
         "Part mask preview quality: {0}": "部位 mask 预览质量：{0}",
         "Quality check passed": "质量检查通过",
         "Review warnings": "有提示，请复核",
@@ -559,9 +567,15 @@ TIF_TRANSLATIONS = {
         "Moved output axis body.": "已整体移动输出轴。",
         "Pick roll reference A": "点选 Roll 参照 A",
         "Pick roll reference B": "点选 Roll 参照 B",
+        "Pick plane reference C": "点选平面参照 C",
+        "Make Z perpendicular to A/B/C plane": "令 Z 垂直 A/B/C 平面",
+        "Make Z perpendicular\nto A/B/C plane": "令 Z 垂直\nA/B/C 平面",
         "Clear roll refs": "清除 Roll 参照",
         "Clear axis draft": "清除轴草稿",
         "Click the observation-side clip plane to set {0}.": "请在观察侧剖切面上点击，设置 {0}。",
+        "Set A/B/C plane reference points before aligning output Z.": "请先设置 A/B/C 三个平面参照点，再对齐输出 Z。",
+        "Aligned output Z perpendicular to the A/B/C reference plane.": "已将输出 Z 对齐为垂直 A/B/C 参照平面。",
+        "Cannot align output Z: {0}": "无法对齐输出 Z：{0}",
         "Turn on the observation-side clip plane before picking roll references.": "请先打开观察侧剖切面，再点选 roll 参照。",
         "Turn on the observation-side clip plane before picking local-axis points.": "请先打开观察侧剖切面，再点选局部轴点。",
         "Set {0}: {1}": "已设置 {0}: {1}",
@@ -570,6 +584,7 @@ TIF_TRANSLATIONS = {
         "Roll reference": "Roll 参照",
         "Roll reference: A/B not set": "Roll 参照：A/B 未设置",
         "Roll reference: {0}": "Roll 参照：{0}",
+        "Plane reference: C {0}": "平面参照：C {0}",
         "set": "已设置",
         "not set": "未设置",
         "Frame status: ready": "坐标系状态：已就绪",
@@ -578,6 +593,8 @@ TIF_TRANSLATIONS = {
         "Axis/reference relation": "输出轴与参照点关系",
         "Roll reference A": "Roll 参照 A",
         "Roll reference B": "Roll 参照 B",
+        "Plane reference C": "平面参照 C",
+        "Reference plane normal": "参照平面法线",
         "Roll A projection on output Z": "Roll A 在输出 Z 上的位置",
         "Roll B projection on output Z": "Roll B 在输出 Z 上的位置",
         "A/B separation along output Z": "A/B 沿输出 Z 间距",
@@ -1109,6 +1126,7 @@ class TifSliceCanvas(QLabel):
         if len(widget_points) < 2:
             return
         painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
         polygon = None
         if closed and fill_alpha > 0 and len(widget_points) >= 3:
             polygon = QPolygonF([QPointF(float(x), float(y)) for x, y in widget_points])
@@ -1123,13 +1141,11 @@ class TifSliceCanvas(QLabel):
         if polygon is not None:
             painter.drawPolygon(polygon)
         for first, second in zip(widget_points, widget_points[1:]):
-            painter.drawLine(int(round(first[0])), int(round(first[1])), int(round(second[0])), int(round(second[1])))
+            painter.drawLine(QPointF(float(first[0]), float(first[1])), QPointF(float(second[0]), float(second[1])))
         if closed and len(widget_points) >= 3:
             painter.drawLine(
-                int(round(widget_points[-1][0])),
-                int(round(widget_points[-1][1])),
-                int(round(widget_points[0][0])),
-                int(round(widget_points[0][1])),
+                QPointF(float(widget_points[-1][0]), float(widget_points[-1][1])),
+                QPointF(float(widget_points[0][0]), float(widget_points[0][1])),
             )
         painter.restore()
 
@@ -1206,6 +1222,11 @@ class TifSliceCanvas(QLabel):
         self._last_annotation_preview = {}
         if self.workbench is None or self._hover_pos is None:
             return
+        if (
+            callable(getattr(self.workbench, "is_part_contour_draw_mode", None))
+            and self.workbench.is_part_contour_draw_mode()
+        ):
+            return
         if self._pixmap is None or self._pixmap.isNull() or self._draw_rect.isNull():
             return
         pixel = self.widget_to_image_pixel(self._hover_pos.x(), self._hover_pos.y())
@@ -1275,18 +1296,28 @@ class TifSliceCanvas(QLabel):
             "widget_radius": [float(radius_x), float(radius_y)],
         }
 
-    def widget_to_image_pixel(self, x, y):
+    def widget_to_image_point(self, x, y):
         if self._pixmap is None or self._pixmap.isNull() or self._draw_rect.isNull():
             return None
         if not self._draw_rect.contains(float(x), float(y)):
             return None
         rel_x = (float(x) - self._draw_rect.x()) / max(1.0, self._draw_rect.width())
         rel_y = (float(y) - self._draw_rect.y()) / max(1.0, self._draw_rect.height())
-        px = int(rel_x * self._pixmap.width())
-        py = int(rel_y * self._pixmap.height())
+        px = rel_x * float(self._pixmap.width())
+        py = rel_y * float(self._pixmap.height())
         return (
-            max(0, min(int(self._pixmap.width()) - 1, px)),
-            max(0, min(int(self._pixmap.height()) - 1, py)),
+            max(0.0, min(float(self._pixmap.width()) - 1.0, px)),
+            max(0.0, min(float(self._pixmap.height()) - 1.0, py)),
+        )
+
+    def widget_to_image_pixel(self, x, y):
+        point = self.widget_to_image_point(x, y)
+        if point is None:
+            return None
+        px, py = point
+        return (
+            max(0, min(int(self._pixmap.width()) - 1, int(px))),
+            max(0, min(int(self._pixmap.height()) - 1, int(py))),
         )
 
     def wheelEvent(self, event):
@@ -1343,8 +1374,8 @@ class TifSliceCanvas(QLabel):
             and callable(getattr(self.workbench, "is_part_contour_draw_mode", None))
             and self.workbench.is_part_contour_draw_mode()
         ):
-            pixel = self.widget_to_image_pixel(event.position().x(), event.position().y())
-            self._contour_drag_points = [list(pixel)] if pixel is not None else []
+            point = self.widget_to_image_point(event.position().x(), event.position().y())
+            self._contour_drag_points = [list(point)] if point is not None else []
             self._refresh_scaled_pixmap()
             event.accept()
             return
@@ -1423,10 +1454,12 @@ class TifSliceCanvas(QLabel):
             event.accept()
             return
         if self._contour_drag_points and event.buttons() & Qt.LeftButton:
-            pixel = self.widget_to_image_pixel(event.position().x(), event.position().y())
-            if pixel is not None:
-                if not self._contour_drag_points or self._contour_drag_points[-1] != list(pixel):
-                    self._contour_drag_points.append(list(pixel))
+            point = self.widget_to_image_point(event.position().x(), event.position().y())
+            if point is not None:
+                last = self._contour_drag_points[-1] if self._contour_drag_points else None
+                distance = math.hypot(float(point[0]) - float(last[0]), float(point[1]) - float(last[1])) if last else 999.0
+                if distance >= 0.15:
+                    self._contour_drag_points.append(list(point))
                     self._refresh_scaled_pixmap()
             event.accept()
             return
@@ -1643,6 +1676,21 @@ class TifVolumeCanvas(QLabel):
         font.setPointSize(9)
         painter.setFont(font)
         for overlay in self._axis_overlays:
+            if overlay.get("kind") == "polyline":
+                points = overlay.get("points_xy") if isinstance(overlay.get("points_xy"), (list, tuple)) else []
+                points = [point for point in points if isinstance(point, (list, tuple)) and len(point) >= 2]
+                if len(points) < 2:
+                    continue
+                color = QColor(str(overlay.get("color") or "#FFFFFF"))
+                painter.setPen(QPen(color, int(overlay.get("width", 2))))
+                for first, second in zip(points, points[1:]):
+                    painter.drawLine(int(round(float(first[0]))), int(round(float(first[1]))), int(round(float(second[0]))), int(round(float(second[1]))))
+                label = str(overlay.get("label") or "")
+                anchor = overlay.get("label_anchor_xy") if isinstance(overlay.get("label_anchor_xy"), (list, tuple)) else points[-1]
+                if label and anchor:
+                    dx, dy = overlay.get("label_offset_xy") or (8, -8)
+                    self._draw_axis_label(painter, label, float(anchor[0]) + float(dx), float(anchor[1]) + float(dy), color, str(overlay.get("label_position") or "right"))
+                continue
             if overlay.get("kind") == "point":
                 point = overlay.get("point_xy")
                 if not point:
@@ -2081,10 +2129,13 @@ class TifWorkbenchWidget(QWidget):
         self._local_axis_pick_target = ""
         self._local_axis_roll_pick_target = ""
         self.part_preview_mask = None
+        self.part_mask_preview_bbox = []
+        self.part_mask_preview_accepted = False
         self.part_roi_draw_mode = False
         self.part_contour_draw_mode = False
         self.active_part_roi_id = ""
         self.part_roi_keyframes = []
+        self.part_mask_keyframes = []
         self.image_volume = None
         self.label_volume = None
         self.material_map = {}
@@ -2527,6 +2578,13 @@ class TifWorkbenchWidget(QWidget):
         self.btn_pick_roll_ref_b.setObjectName("tifPickRollReferenceBButton")
         self.btn_pick_roll_ref_b.setCheckable(True)
         self.btn_pick_roll_ref_b.clicked.connect(lambda checked=False: self.set_local_axis_pick_target("roll_b" if checked else ""))
+        self.btn_pick_roll_ref_c = QPushButton("Pick plane reference C")
+        self.btn_pick_roll_ref_c.setObjectName("tifPickPlaneReferenceCButton")
+        self.btn_pick_roll_ref_c.setCheckable(True)
+        self.btn_pick_roll_ref_c.clicked.connect(lambda checked=False: self.set_local_axis_pick_target("roll_c" if checked else ""))
+        self.btn_align_axis_to_reference_plane = QPushButton("Make Z perpendicular\nto A/B/C plane")
+        self.btn_align_axis_to_reference_plane.setObjectName("tifAlignAxisToReferencePlaneButton")
+        self.btn_align_axis_to_reference_plane.clicked.connect(self.align_local_axis_to_reference_plane)
         self.btn_clear_roll_refs = QPushButton("Clear roll refs")
         self.btn_clear_roll_refs.setObjectName("tifClearRollRefsButton")
         self.btn_clear_roll_refs.clicked.connect(self.clear_local_axis_roll_references)
@@ -2686,6 +2744,8 @@ class TifWorkbenchWidget(QWidget):
             self.btn_copy_source_z_axis,
             self.btn_pick_roll_ref_a,
             self.btn_pick_roll_ref_b,
+            self.btn_pick_roll_ref_c,
+            self.btn_align_axis_to_reference_plane,
             self.btn_clear_roll_refs,
             self.btn_clear_local_axis_draft,
             self.btn_add_material,
@@ -2693,7 +2753,6 @@ class TifWorkbenchWidget(QWidget):
             self.btn_save_backend,
             self.btn_part_draw_roi,
             self.btn_save_part_roi,
-            self.btn_add_rect_keyframe,
             self.btn_draw_part_contour,
             self.btn_clear_part_keyframes,
             self.btn_prev_key_slice,
@@ -3028,6 +3087,8 @@ class TifWorkbenchWidget(QWidget):
         self.btn_copy_source_z_axis.setText(tt("Copy source Z axis", self.lang))
         self.btn_pick_roll_ref_a.setText(tt("Pick roll reference A", self.lang))
         self.btn_pick_roll_ref_b.setText(tt("Pick roll reference B", self.lang))
+        self.btn_pick_roll_ref_c.setText(tt("Pick plane reference C", self.lang))
+        self.btn_align_axis_to_reference_plane.setText(tt("Make Z perpendicular\nto A/B/C plane", self.lang))
         self.btn_clear_roll_refs.setText(tt("Clear roll refs", self.lang))
         self.btn_clear_local_axis_draft.setText(tt("Clear axis draft", self.lang))
         self.local_axis_trainable_check.setText(tt("Record this export as trainable local-axis data", self.lang))
@@ -3503,7 +3564,7 @@ class TifWorkbenchWidget(QWidget):
         if hasattr(self, "part_locate_section"):
             self.part_locate_section.setVisible(is_full and not is_volume)
         if hasattr(self, "part_mask_section"):
-            self.part_mask_section.setVisible(is_part and not is_volume)
+            self.part_mask_section.setVisible(not is_volume)
         if hasattr(self, "part_output_section"):
             self.part_output_section.setVisible(is_part and not is_volume)
         if hasattr(self, "task_tabs"):
@@ -3534,6 +3595,76 @@ class TifWorkbenchWidget(QWidget):
             return int((keyframe or {}).get("slice_index", default))
         except (TypeError, ValueError, OverflowError):
             return default
+
+    def _empty_contours_payload(self):
+        return {
+            "schema_version": "taxamask_tif_part_extraction_v1",
+            "axis": "z",
+            "keyframes": [],
+        }
+
+    def _full_volume_contours_payload(self):
+        payload = self._empty_contours_payload()
+        payload["scope"] = "full_volume_part_mask"
+        payload["keyframes"] = self._normalize_full_volume_mask_keyframes(self.part_mask_keyframes)
+        return payload
+
+    def _full_volume_contour_bbox(self, contours=None):
+        if self.image_volume is None:
+            return []
+        payload = contours if isinstance(contours, dict) else self._full_volume_contours_payload()
+        shape = tuple(int(value) for value in getattr(self.image_volume, "shape", ()) or ())
+        if len(shape) != 3:
+            return []
+        bbox = [[0, 0], [0, 0], [0, 0]]
+        for keyframe in payload.get("keyframes", []) or []:
+            if not isinstance(keyframe, dict) or str(keyframe.get("axis", "z")) != "z":
+                continue
+            z_index = self._safe_contour_slice_index(keyframe, None)
+            if z_index is None or not (0 <= int(z_index) < shape[0]):
+                continue
+            points = self._dedupe_contour_points(keyframe.get("polygon") or [])
+            if len(points) < 3:
+                continue
+            xs = [float(point[0]) for point in points]
+            ys = [float(point[1]) for point in points]
+            bbox[0] = self._expanded_axis_range(bbox[0], int(z_index), shape[0])
+            bbox[1] = self._union_axis_range(bbox[1], math.floor(min(ys)), math.ceil(max(ys)) + 1, shape[1])
+            bbox[2] = self._union_axis_range(bbox[2], math.floor(min(xs)), math.ceil(max(xs)) + 1, shape[2])
+        if any(int(pair[1]) <= int(pair[0]) for pair in bbox):
+            return []
+        return self._clip_bbox_to_shape(bbox, shape)
+
+    def _full_volume_contours_to_local(self, contours, bbox):
+        payload = self._empty_contours_payload()
+        if not bbox or len(bbox) != 3:
+            return payload
+        z0, y0, x0 = int(bbox[0][0]), float(bbox[1][0]), float(bbox[2][0])
+        keyframes = []
+        for keyframe in (contours or {}).get("keyframes", []) or []:
+            if not isinstance(keyframe, dict) or str(keyframe.get("axis", "z")) != "z":
+                continue
+            z_index = self._safe_contour_slice_index(keyframe, None)
+            if z_index is None:
+                continue
+            local_polygon = []
+            for point in self._dedupe_contour_points(keyframe.get("polygon") or []):
+                local_polygon.append([round(float(point[0]) - x0, 3), round(float(point[1]) - y0, 3)])
+            if len(local_polygon) < 3:
+                continue
+            keyframes.append(
+                {
+                    "axis": "z",
+                    "slice_index": int(z_index) - z0,
+                    "polygon": local_polygon,
+                    "author": str(keyframe.get("author") or "taxamask_ui_freehand"),
+                    "source": str(keyframe.get("source") or "manual_freehand"),
+                    "created_at": str(keyframe.get("created_at") or datetime.now().astimezone().isoformat(timespec="seconds")),
+                }
+            )
+        keyframes.sort(key=lambda item: int(item.get("slice_index", 0)))
+        payload["keyframes"] = keyframes
+        return payload
 
     def _connect_volume_canvas_signals(self, canvas):
         if hasattr(canvas, "render_failed"):
@@ -3845,6 +3976,8 @@ class TifWorkbenchWidget(QWidget):
             self.btn_copy_source_z_axis,
             self.btn_pick_roll_ref_a,
             self.btn_pick_roll_ref_b,
+            self.btn_pick_roll_ref_c,
+            self.btn_align_axis_to_reference_plane,
             self.btn_clear_roll_refs,
             self.btn_clear_local_axis_draft,
             self.btn_local_axis_reslice,
@@ -4312,15 +4445,26 @@ class TifWorkbenchWidget(QWidget):
     def _roi_keyframe_metadata(self):
         keyframes = self._normalize_roi_keyframes(self.part_roi_keyframes)
         axes = sorted({item["axis"] for item in keyframes})
+        mask_keyframes = self._normalize_full_volume_mask_keyframes(self.part_mask_keyframes)
+        mask_bbox = self._full_volume_contour_bbox({"keyframes": mask_keyframes}) if mask_keyframes else []
         return {
             "roi_shell_mode": "key_slice_rectangles" if keyframes else "bbox",
             "roi_keyframes": keyframes,
             "roi_axis": axes[0] if len(axes) == 1 else "",
+            "part_mask_mode": "freehand_key_slices" if mask_keyframes else "",
+            "part_mask_axis": "z" if mask_keyframes else "",
+            "part_mask_keyframes": mask_keyframes,
+            "part_mask_bbox_zyx": mask_bbox,
         }
 
     def _load_roi_draft_for_editing(self, roi):
         self.active_part_roi_id = (roi or {}).get("roi_id", "")
-        self.part_roi_keyframes = self._normalize_roi_keyframes(((roi or {}).get("metadata") or {}).get("roi_keyframes", []))
+        metadata = (roi or {}).get("metadata") or {}
+        self.part_roi_keyframes = self._normalize_roi_keyframes(metadata.get("roi_keyframes", []))
+        self.part_mask_keyframes = self._normalize_full_volume_mask_keyframes(metadata.get("part_mask_keyframes", []))
+        self.part_preview_mask = None
+        self.part_mask_preview_bbox = []
+        self.part_mask_preview_accepted = False
         self.part_bbox_edit.setText(self._bbox_text((roi or {}).get("bbox_zyx", [])))
 
     def _upsert_part_roi_keyframe(self, axis, slice_index, rect):
@@ -4489,7 +4633,7 @@ class TifWorkbenchWidget(QWidget):
     def is_part_contour_draw_mode(self):
         return bool(
             self.part_contour_draw_mode
-            and self.current_volume_scope == "part"
+            and self.current_volume_scope in {"full", "part"}
             and self.display_mode == "slice"
             and self.image_volume is not None
             and self._current_slice_axis() == "z"
@@ -4502,12 +4646,12 @@ class TifWorkbenchWidget(QWidget):
             self.btn_part_draw_roi.blockSignals(True)
             self.btn_part_draw_roi.setChecked(False)
             self.btn_part_draw_roi.blockSignals(False)
-            if self.current_volume_scope != "part" or self.image_volume is None:
+            if self.current_volume_scope not in {"full", "part"} or self.image_volume is None:
                 self.part_contour_draw_mode = False
                 self.btn_draw_part_contour.blockSignals(True)
                 self.btn_draw_part_contour.setChecked(False)
                 self.btn_draw_part_contour.blockSignals(False)
-                QMessageBox.information(self, tt("Part extraction", self.lang), tt("Switch to part volume before drawing contours.", self.lang))
+                QMessageBox.information(self, tt("Part extraction", self.lang), tt("Select a full volume or part volume before drawing contours.", self.lang))
                 return
             if self.display_mode != "slice" or self._current_slice_axis() != "z":
                 self.part_contour_draw_mode = False
@@ -4516,7 +4660,7 @@ class TifWorkbenchWidget(QWidget):
                 self.btn_draw_part_contour.blockSignals(False)
                 QMessageBox.information(self, tt("Part extraction", self.lang), tt("Contour drawing currently uses Z slices.", self.lang))
                 return
-            message = tt("Drag on the current part slice to draw a closed contour.", self.lang)
+            message = tt("Drag on the current slice to draw a closed contour.", self.lang)
             self.training_status_label.setText(message)
             self.log(message)
         self.render_current_slice()
@@ -4619,6 +4763,31 @@ class TifWorkbenchWidget(QWidget):
             )
         except Exception as exc:
             self.log(f"Failed to auto-save ROI draft {self.active_part_roi_id}: {exc}")
+            return None
+        self._populate_volume_roi_source_combo()
+        return updated
+
+    def _autosave_active_part_roi_mask_keyframes(self, bbox=None):
+        if not self.active_part_roi_id or not self.current_specimen_id:
+            return None
+        roi = self.project.get_part_roi(self.current_specimen_id, self.active_part_roi_id, default=None)
+        if roi is None or roi.get("linked_part_id") or roi.get("status") == "part_created":
+            return None
+        if bbox is None:
+            bbox = self._full_volume_contour_bbox()
+        if not bbox:
+            return None
+        try:
+            updated = self.project.update_part_roi(
+                self.current_specimen_id,
+                self.active_part_roi_id,
+                bbox_zyx=bbox,
+                status="draft",
+                metadata=self._roi_keyframe_metadata(),
+                save=True,
+            )
+        except Exception as exc:
+            self.log(f"Failed to auto-save part mask key slices for ROI draft {self.active_part_roi_id}: {exc}")
             return None
         self._populate_volume_roi_source_combo()
         return updated
@@ -4747,6 +4916,10 @@ class TifWorkbenchWidget(QWidget):
             else:
                 QMessageBox.warning(self, tt("Part extraction", self.lang), str(exc))
                 return
+        mask_contours = self._full_volume_contours_payload()
+        mask_bbox = self._full_volume_contour_bbox(mask_contours)
+        if mask_bbox:
+            bbox = mask_bbox
         if roi is not None:
             default_part_id = str(roi.get("roi_id", "")).replace("_roi", "") or f"part_{len(self.project.list_parts(self.current_specimen_id)) + 1}"
             default_display_name = str(roi.get("display_name") or default_part_id)
@@ -4772,7 +4945,11 @@ class TifWorkbenchWidget(QWidget):
         mask_message = ""
         try:
             part = crop_volume_to_part(self.project, self.current_specimen_id, part_id, bbox, display_name=display_name or part_id)
-            if roi_keyframes:
+            if mask_bbox:
+                mask_initialized, mask_message = self._initialize_part_mask_from_full_volume_contours(part, mask_contours, bbox)
+                if mask_initialized:
+                    part.setdefault("view_settings", {})["volume_mask_mode"] = "masked_image"
+            elif roi_keyframes:
                 mask_initialized, mask_message = self._initialize_part_mask_from_roi_shell(part, roi_keyframes)
                 if mask_initialized:
                     part.setdefault("view_settings", {})["volume_mask_mode"] = "masked_image"
@@ -4783,11 +4960,7 @@ class TifWorkbenchWidget(QWidget):
                     bbox_zyx=bbox,
                     status="part_created",
                     linked_part_id=part.get("part_id", ""),
-                    metadata=self._roi_keyframe_metadata() if not roi_keyframes else {
-                        "roi_shell_mode": "key_slice_rectangles",
-                        "roi_keyframes": roi_keyframes,
-                        "roi_axis": roi_keyframes[0].get("axis", "") if roi_keyframes else "",
-                    },
+                    metadata=self._roi_keyframe_metadata(),
                     save=True,
                 )
             else:
@@ -4796,14 +4969,23 @@ class TifWorkbenchWidget(QWidget):
             QMessageBox.warning(self, tt("Part extraction", self.lang), str(exc))
             return
         self.active_part_roi_id = ""
+        self.part_mask_keyframes = []
+        self.part_mask_preview_bbox = []
+        self.part_mask_preview_accepted = False
         self.refresh_project()
         self._populate_volume_roi_source_combo()
         self._select_volume_tree_item(self.current_specimen_id, "part", part.get("part_id", ""))
         message = tt("Confirmed ROI and created part {0}.", self.lang).format(part.get("display_name") or part.get("part_id"))
         if mask_initialized:
-            message = f"{message}\n{tt('ROI shell mask initialized from {0} key slice(s).', self.lang).format(len(roi_keyframes))}"
+            if mask_bbox:
+                message = f"{message}\n{tt('Full-volume contour mask initialized from {0} key slice(s).', self.lang).format(len(mask_contours.get('keyframes', []) or []))}"
+            else:
+                message = f"{message}\n{tt('ROI shell mask initialized from {0} key slice(s).', self.lang).format(len(roi_keyframes))}"
         elif mask_message:
-            message = f"{message}\nROI shell mask not initialized: {mask_message}"
+            if mask_bbox:
+                message = f"{message}\n{tt('Full-volume contour mask not initialized: {0}', self.lang).format(mask_message)}"
+            else:
+                message = f"{message}\nROI shell mask not initialized: {mask_message}"
         self.training_status_label.setText(message)
         self.log(message)
 
@@ -4907,9 +5089,51 @@ class TifWorkbenchWidget(QWidget):
             self.log(f"Failed to initialize ROI shell mask: {exc}")
             return False, str(exc)
 
+    def _initialize_part_mask_from_full_volume_contours(self, part, contours, bbox):
+        if not isinstance(part, dict) or not isinstance(contours, dict):
+            return False, ""
+        try:
+            bbox = self._clip_bbox_to_shape(bbox, self.image_volume.shape)
+            shape = tuple(int(pair[1]) - int(pair[0]) for pair in bbox)
+            if len(shape) != 3 or min(shape) <= 0:
+                return False, "invalid contour bbox"
+            local_contours = self._full_volume_contours_to_local(contours, bbox)
+            report = validate_contours_for_interpolation(local_contours, shape, axis="z")
+            if not report.get("ok"):
+                return False, self._format_contour_quality_report(report)
+            mask = build_preview_mask_from_contours(local_contours, shape)
+            metadata = write_part_mask(self.project, part, mask)
+            part["mask"].update(
+                {
+                    "shape_zyx": metadata.get("shape_zyx", []),
+                    "dtype": metadata.get("dtype", ""),
+                    "spacing_zyx": metadata.get("spacing_zyx", []),
+                    "spacing_unit": metadata.get("spacing_unit", "micrometer"),
+                    "orientation": metadata.get("orientation", "unknown"),
+                }
+            )
+            contours_path = self.project.to_absolute(part.get("contours_path", ""))
+            if contours_path:
+                write_contours_json(contours_path, local_contours)
+            metadata_payload = part.setdefault("metadata", {})
+            metadata_payload["full_volume_mask_keyframe_count"] = len(local_contours.get("keyframes", []) or [])
+            metadata_payload["full_volume_mask_bbox_zyx"] = bbox
+            metadata_payload["full_volume_mask_source"] = "manual_freehand_key_slices"
+            part = self.project.update_part_status(self.current_specimen_id, part.get("part_id", ""), "mask_preview", save=False)
+            self.project.save_project()
+            return True, self._format_contour_quality_report(report)
+        except Exception as exc:
+            self.log(f"Failed to initialize part mask from full-volume contours: {exc}")
+            return False, str(exc)
+
     def cancel_part_roi_draft(self):
         if not self.active_part_roi_id:
             self.part_bbox_edit.clear()
+            self.part_roi_keyframes = []
+            self.part_mask_keyframes = []
+            self.part_preview_mask = None
+            self.part_mask_preview_bbox = []
+            self.part_mask_preview_accepted = False
             self.render_current_slice()
             return
         roi = self.project.get_part_roi(self.current_specimen_id, self.active_part_roi_id, default=None)
@@ -4920,6 +5144,11 @@ class TifWorkbenchWidget(QWidget):
         message = tt("Cancelled ROI draft {0}.", self.lang).format(self.active_part_roi_id)
         self.active_part_roi_id = ""
         self.part_bbox_edit.clear()
+        self.part_roi_keyframes = []
+        self.part_mask_keyframes = []
+        self.part_preview_mask = None
+        self.part_mask_preview_bbox = []
+        self.part_mask_preview_accepted = False
         self.training_status_label.setText(message)
         self.log(message)
         self.render_current_slice()
@@ -5013,8 +5242,10 @@ class TifWorkbenchWidget(QWidget):
         bbox = self._parse_part_bbox_text()
         if not bbox and self.part_roi_keyframes:
             bbox = self._roi_keyframe_bbox(self.part_roi_keyframes)
+        if not bbox and self.part_mask_keyframes:
+            bbox = self._full_volume_contour_bbox()
         if not bbox:
-            raise ValueError(tt("Draw an ROI before saving or creating a part.", self.lang))
+            raise ValueError(tt("Draw an ROI or contour before saving or creating a part.", self.lang))
         return self._clip_bbox_to_shape(bbox, self.image_volume.shape)
 
     def create_part_from_bbox_dialog(self):
@@ -5076,6 +5307,33 @@ class TifWorkbenchWidget(QWidget):
         payload["keyframes"] = kept
         return payload, ignored
 
+    def _normalize_full_volume_mask_keyframes(self, keyframes):
+        normalized = []
+        shape = tuple(int(value) for value in getattr(self.image_volume, "shape", ()) or ())
+        for item in keyframes or []:
+            if not isinstance(item, dict) or str(item.get("axis", "z")) != "z":
+                continue
+            slice_index = self._safe_contour_slice_index(item, None)
+            if slice_index is None:
+                continue
+            if len(shape) == 3 and not (0 <= int(slice_index) < int(shape[0])):
+                continue
+            polygon = self._dedupe_contour_points(item.get("polygon") or [])
+            if len(polygon) < 3:
+                continue
+            normalized.append(
+                {
+                    "axis": "z",
+                    "slice_index": int(slice_index),
+                    "polygon": polygon,
+                    "author": str(item.get("author") or "taxamask_ui_freehand"),
+                    "source": str(item.get("source") or "manual_freehand"),
+                    "created_at": str(item.get("created_at") or datetime.now().astimezone().isoformat(timespec="seconds")),
+                }
+            )
+        normalized.sort(key=lambda item: int(item.get("slice_index", 0)))
+        return normalized
+
     def _format_contour_quality_report(self, report):
         if not isinstance(report, dict):
             return ""
@@ -5095,27 +5353,32 @@ class TifWorkbenchWidget(QWidget):
         for point in points or []:
             if not isinstance(point, (list, tuple)) or len(point) < 2:
                 continue
-            px = int(round(float(point[0])))
-            py = int(round(float(point[1])))
+            px = float(point[0])
+            py = float(point[1])
+            if not math.isfinite(px) or not math.isfinite(py):
+                continue
             if width > 0:
-                px = max(0, min(width - 1, px))
+                px = max(0.0, min(float(width - 1), px))
             if height > 0:
-                py = max(0, min(height - 1, py))
-            next_point = [px, py]
-            if not clean or clean[-1] != next_point:
+                py = max(0.0, min(float(height - 1), py))
+            next_point = [round(px, 3), round(py, 3)]
+            if not clean or math.hypot(clean[-1][0] - next_point[0], clean[-1][1] - next_point[1]) >= 0.15:
                 clean.append(next_point)
-        if len(clean) > 2 and clean[0] == clean[-1]:
+        if len(clean) > 2 and math.hypot(clean[0][0] - clean[-1][0], clean[0][1] - clean[-1][1]) < 0.15:
             clean.pop()
         return clean
 
     def current_contour_overlay_polygons(self):
-        if self.current_volume_scope != "part" or self.image_volume is None:
+        if self.current_volume_scope not in {"full", "part"} or self.image_volume is None:
             return []
         axis, slice_index = self._active_slice_position()
-        contours_path = self._current_part_contours_path()
-        if not contours_path:
-            return []
-        contours = read_contours_json(contours_path)
+        if self.current_volume_scope == "full":
+            contours = self._full_volume_contours_payload()
+        else:
+            contours_path = self._current_part_contours_path()
+            if not contours_path:
+                return []
+            contours = read_contours_json(contours_path)
         overlays = []
         for keyframe in contours.get("keyframes", []) or []:
             if not isinstance(keyframe, dict):
@@ -5133,13 +5396,43 @@ class TifWorkbenchWidget(QWidget):
         return overlays
 
     def finish_part_contour_drag(self, points):
-        if not self._is_editable_part_volume() or not self.is_part_contour_draw_mode() or self.image_volume is None:
+        if not self.is_part_contour_draw_mode() or self.image_volume is None:
             return
         polygon = self._dedupe_contour_points(points)
         if len(polygon) < 3:
             message = tt("Contour needs at least 3 points.", self.lang)
             self.training_status_label.setText(message)
             self.log(message)
+            return
+        if self.current_volume_scope == "full":
+            contours = self._full_volume_contours_payload()
+            slice_index = int(self.slice_slider.value())
+            try:
+                contours = add_polygon_keyframe(
+                    contours,
+                    slice_index,
+                    polygon,
+                    axis="z",
+                    author="taxamask_ui_freehand",
+                    source="manual_freehand",
+                )
+            except Exception as exc:
+                QMessageBox.warning(self, tt("Part extraction", self.lang), str(exc))
+                return
+            self.part_mask_keyframes = list(contours.get("keyframes", []) or [])
+            bbox = self._full_volume_contour_bbox(contours)
+            if bbox:
+                self.part_bbox_edit.setText(self._bbox_text(bbox))
+                self._autosave_active_part_roi_mask_keyframes(bbox)
+            self.part_preview_mask = None
+            self.part_mask_preview_bbox = []
+            self.part_mask_preview_accepted = False
+            self.render_current_slice()
+            message = tt("Contour saved at Z {0}.", self.lang).format(slice_index)
+            self.training_status_label.setText(message)
+            self.log(message)
+            return
+        if not self._is_editable_part_volume():
             return
         contours, contours_path = self._current_part_contours()
         if not contours_path:
@@ -5168,16 +5461,40 @@ class TifWorkbenchWidget(QWidget):
         self.log(message)
 
     def delete_current_part_keyframe(self):
-        if not self._is_editable_part_volume() or self.image_volume is None:
-            QMessageBox.information(self, tt("Part extraction", self.lang), tt("Select a part volume before editing part masks.", self.lang))
+        if self.current_volume_scope not in {"full", "part"} or self.image_volume is None:
+            QMessageBox.information(self, tt("Part extraction", self.lang), tt("Select a full volume or part volume before editing part masks.", self.lang))
             return
         if self._current_slice_axis() != "z":
             QMessageBox.information(self, tt("Part extraction", self.lang), tt("Contour drawing currently uses Z slices.", self.lang))
             return
+        slice_index = int(self.slice_slider.value())
+        if self.current_volume_scope == "full":
+            contours, deleted = delete_keyframe(self._full_volume_contours_payload(), slice_index, axis="z")
+            if not deleted:
+                message = tt("No contour exists at Z {0}.", self.lang).format(slice_index)
+                self.training_status_label.setText(message)
+                self.log(message)
+                return
+            self.part_mask_keyframes = list(contours.get("keyframes", []) or [])
+            bbox = self._full_volume_contour_bbox(contours)
+            if not bbox and self.part_roi_keyframes:
+                bbox = self._roi_keyframe_bbox(self.part_roi_keyframes)
+            self.part_bbox_edit.setText(self._bbox_text(bbox))
+            if bbox:
+                self._autosave_active_part_roi_mask_keyframes(bbox)
+            self.part_preview_mask = None
+            self.part_mask_preview_bbox = []
+            self.part_mask_preview_accepted = False
+            self.render_current_slice()
+            message = tt("Deleted contour at Z {0}.", self.lang).format(slice_index)
+            self.training_status_label.setText(message)
+            self.log(message)
+            return
+        if not self._is_editable_part_volume():
+            return
         contours, contours_path = self._current_part_contours()
         if not contours_path:
             return
-        slice_index = int(self.slice_slider.value())
         contours, deleted = delete_keyframe(contours, slice_index, axis="z")
         if not deleted:
             message = tt("No contour exists at Z {0}.", self.lang).format(slice_index)
@@ -5195,8 +5512,49 @@ class TifWorkbenchWidget(QWidget):
         self.log(message)
 
     def clear_part_mask_keyframes(self):
-        if not self._is_editable_part_volume() or self.image_volume is None:
-            QMessageBox.information(self, tt("Part extraction", self.lang), tt("Select a part volume before editing part masks.", self.lang))
+        if self.current_volume_scope not in {"full", "part"} or self.image_volume is None:
+            QMessageBox.information(self, tt("Part extraction", self.lang), tt("Select a full volume or part volume before editing part masks.", self.lang))
+            return False
+        if self.current_volume_scope == "full":
+            keyframes = [item for item in self.part_mask_keyframes if isinstance(item, dict)]
+            if not keyframes and self.part_preview_mask is None:
+                message = tt("No part key slices to clear.", self.lang)
+                self.training_status_label.setText(message)
+                self.log(message)
+                return False
+            response = QMessageBox.question(
+                self,
+                tt("Part extraction", self.lang),
+                tt(
+                    "Clear all key slices for the current full-volume part draft? This removes the hand-drawn mask draft but keeps the ROI bbox.",
+                    self.lang,
+                ),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if response != QMessageBox.Yes:
+                return False
+            self.part_mask_keyframes = []
+            self.part_preview_mask = None
+            self.part_mask_preview_bbox = []
+            self.part_mask_preview_accepted = False
+            bbox = self._roi_keyframe_bbox(self.part_roi_keyframes) if self.part_roi_keyframes else []
+            if bbox:
+                self.part_bbox_edit.setText(self._bbox_text(bbox))
+            else:
+                try:
+                    bbox = self._parse_part_bbox_text()
+                except Exception:
+                    bbox = []
+            if self.active_part_roi_id:
+                if bbox:
+                    self._autosave_active_part_roi_bbox(bbox)
+            self.render_current_slice()
+            message = tt("Cleared {0} key slice(s) and reset the part mask draft.", self.lang).format(len(keyframes))
+            self.training_status_label.setText(message)
+            self.log(message)
+            return True
+        if not self._is_editable_part_volume():
             return False
         part = self.project.get_part(self.current_specimen_id, self.current_part_id, default=None)
         contours, contours_path = self._current_part_contours()
@@ -5264,12 +5622,17 @@ class TifWorkbenchWidget(QWidget):
         return True
 
     def jump_part_keyframe(self, direction):
-        if not self._is_editable_part_volume() or self.image_volume is None:
+        if self.current_volume_scope not in {"full", "part"} or self.image_volume is None:
             return
         if self._current_slice_axis() != "z":
             QMessageBox.information(self, tt("Part extraction", self.lang), tt("Contour drawing currently uses Z slices.", self.lang))
             return
-        contours, _contours_path = self._current_part_contours()
+        if self.current_volume_scope == "full":
+            contours = self._full_volume_contours_payload()
+        else:
+            if not self._is_editable_part_volume():
+                return
+            contours, _contours_path = self._current_part_contours()
         neighbors = neighboring_keyframe_indices(contours, int(self.slice_slider.value()), axis="z")
         target = neighbors.get("previous" if direction == "previous" else "next")
         if target is None:
@@ -5318,8 +5681,42 @@ class TifWorkbenchWidget(QWidget):
         self.log(message)
 
     def preview_part_mask_from_keyframes(self):
-        if not self._is_editable_part_volume() or self.image_volume is None:
-            QMessageBox.information(self, tt("Part extraction", self.lang), tt("Select a part volume before previewing masks.", self.lang))
+        if self.current_volume_scope not in {"full", "part"} or self.image_volume is None:
+            QMessageBox.information(self, tt("Part extraction", self.lang), tt("Select a full volume or part volume before previewing masks.", self.lang))
+            return
+        if self.current_volume_scope == "full":
+            contours = self._full_volume_contours_payload()
+            bbox = self._full_volume_contour_bbox(contours)
+            if not bbox:
+                QMessageBox.warning(self, tt("Part extraction", self.lang), tt("Draw at least one contour before previewing masks.", self.lang))
+                return
+            local_contours = self._full_volume_contours_to_local(contours, bbox)
+            shape = tuple(int(pair[1]) - int(pair[0]) for pair in bbox)
+            preview_contours, ignored_legacy = self._part_mask_contours_for_preview(local_contours)
+            report = validate_contours_for_interpolation(preview_contours, shape, axis="z")
+            if not report.get("ok"):
+                QMessageBox.warning(self, tt("Part extraction", self.lang), self._format_contour_quality_report(report))
+                return
+            try:
+                self.part_preview_mask = build_preview_mask_from_contours(preview_contours, shape)
+            except Exception as exc:
+                QMessageBox.warning(self, tt("Part extraction", self.lang), str(exc))
+                return
+            self.part_mask_preview_bbox = bbox
+            self.part_mask_preview_accepted = False
+            self.part_bbox_edit.setText(self._bbox_text(bbox))
+            self._autosave_active_part_roi_mask_keyframes(bbox)
+            self.render_current_slice()
+            quality = self._format_contour_quality_report(report)
+            message = (
+                tt("Preview mask generated from {0} key slice(s).", self.lang).format(len(preview_contours.get("keyframes", [])))
+                + "\n"
+                + tt("Part mask preview quality: {0}", self.lang).format(quality)
+            )
+            self.training_status_label.setText(message)
+            self.log(message)
+            return
+        if not self._is_editable_part_volume():
             return
         contours_path = self._current_part_contours_path()
         contours = read_contours_json(contours_path)
@@ -5352,6 +5749,15 @@ class TifWorkbenchWidget(QWidget):
         self.log(message)
 
     def accept_part_mask_preview(self):
+        if self.current_volume_scope == "full":
+            if self.part_preview_mask is None:
+                return
+            self.part_mask_preview_accepted = True
+            self.render_current_slice()
+            message = tt("Accepted part mask.", self.lang)
+            self.training_status_label.setText(message)
+            self.log(message)
+            return
         if not self._is_editable_part_volume() or self.part_preview_mask is None:
             return
         part = self.project.get_part(self.current_specimen_id, self.current_part_id, default=None)
@@ -5385,7 +5791,12 @@ class TifWorkbenchWidget(QWidget):
 
     def clear_part_mask_preview(self):
         self.part_preview_mask = None
+        self.part_mask_preview_bbox = []
+        self.part_mask_preview_accepted = False
         self._clear_volume_preview_cache()
+        if self.current_volume_scope == "full":
+            self.render_current_slice()
+            return
         part = self.project.get_part(self.current_specimen_id, self.current_part_id, default=None)
         if part is not None:
             self.current_part = part
@@ -5555,6 +5966,7 @@ class TifWorkbenchWidget(QWidget):
         scroll = QScrollArea()
         scroll.setObjectName("tifInspectorScroll")
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setFrameShape(QFrame.NoFrame)
         body = QWidget()
         body.setObjectName(object_name)
@@ -5670,7 +6082,6 @@ class TifWorkbenchWidget(QWidget):
 
         self.part_mask_section, part_mask_layout = self._make_section("2. Build part mask", "tifPartMaskSection")
         part_key_row = QHBoxLayout()
-        part_key_row.addWidget(self.btn_add_rect_keyframe)
         part_key_row.addWidget(self.btn_draw_part_contour)
         part_mask_layout.addLayout(part_key_row)
         part_key_nav_row = QHBoxLayout()
@@ -5713,11 +6124,19 @@ class TifWorkbenchWidget(QWidget):
         local_axis_volume_row.addWidget(self.btn_copy_source_z_axis)
         local_axis_volume_row.addWidget(self.btn_local_axis_reslice)
         local_axis_volume_layout.addLayout(local_axis_volume_row)
-        local_axis_roll_row = QHBoxLayout()
-        local_axis_roll_row.addWidget(self.btn_pick_roll_ref_a)
-        local_axis_roll_row.addWidget(self.btn_pick_roll_ref_b)
-        local_axis_roll_row.addWidget(self.btn_clear_roll_refs)
-        local_axis_volume_layout.addLayout(local_axis_roll_row)
+        local_axis_roll_grid = QGridLayout()
+        local_axis_roll_grid.setHorizontalSpacing(8)
+        local_axis_roll_grid.setVerticalSpacing(8)
+        local_axis_roll_grid.addWidget(self.btn_pick_roll_ref_a, 0, 0)
+        local_axis_roll_grid.addWidget(self.btn_pick_roll_ref_b, 0, 1)
+        local_axis_roll_grid.addWidget(self.btn_pick_roll_ref_c, 1, 0)
+        local_axis_roll_grid.addWidget(self.btn_clear_roll_refs, 1, 1)
+        local_axis_roll_grid.setColumnStretch(0, 1)
+        local_axis_roll_grid.setColumnStretch(1, 1)
+        local_axis_volume_layout.addLayout(local_axis_roll_grid)
+        local_axis_plane_row = QHBoxLayout()
+        local_axis_plane_row.addWidget(self.btn_align_axis_to_reference_plane)
+        local_axis_volume_layout.addLayout(local_axis_plane_row)
         local_axis_center_row = QHBoxLayout()
         local_axis_center_row.addWidget(self.btn_clear_local_axis_draft)
         local_axis_volume_layout.addLayout(local_axis_center_row)
@@ -6266,8 +6685,11 @@ class TifWorkbenchWidget(QWidget):
         self.current_part = None
         self.local_axis_draft = None
         self.part_preview_mask = None
+        self.part_mask_preview_bbox = []
+        self.part_mask_preview_accepted = False
         self.active_part_roi_id = ""
         self.part_roi_keyframes = []
+        self.part_mask_keyframes = []
         self.undo_stack = []
         self.redo_stack = []
         self._sync_undo_redo_buttons()
@@ -6562,8 +6984,11 @@ class TifWorkbenchWidget(QWidget):
             self.current_reslice_id = ""
             self.local_axis_draft = None
             self.part_preview_mask = None
+            self.part_mask_preview_bbox = []
+            self.part_mask_preview_accepted = False
             self.active_part_roi_id = ""
             self.part_roi_keyframes = []
+            self.part_mask_keyframes = []
             self.part_roi_draw_mode = False
             self.part_contour_draw_mode = False
             self.btn_part_draw_roi.blockSignals(True)
@@ -6655,6 +7080,7 @@ class TifWorkbenchWidget(QWidget):
                 self.volume_local_axes_check.setChecked(True)
             self.active_part_roi_id = ""
             self.part_roi_keyframes = []
+            self.part_mask_keyframes = []
             self.part_roi_draw_mode = False
             self.part_contour_draw_mode = False
             self.btn_part_draw_roi.blockSignals(True)
@@ -6671,6 +7097,8 @@ class TifWorkbenchWidget(QWidget):
             self.material_map = {}
             self.material_colors = {}
             self.part_preview_mask = None
+            self.part_mask_preview_bbox = []
+            self.part_mask_preview_accepted = False
             self._reset_active_volume_preview_state()
             self.undo_stack = []
             self.redo_stack = []
@@ -7126,21 +7554,24 @@ class TifWorkbenchWidget(QWidget):
         self.btn_confirm_part_roi.setEnabled(not is_part and has_image)
         self.btn_cancel_part_roi.setEnabled(not is_part)
         self.btn_create_part.setEnabled(False)
-        self.btn_add_rect_keyframe.setEnabled(is_editable_part_volume and has_image)
-        contour_enabled = is_editable_part_volume and has_image and self.display_mode == "slice" and self._current_slice_axis() == "z"
+        self.btn_add_rect_keyframe.setEnabled(False)
+        full_volume_mask_editable = full_volume_editable and self.display_mode == "slice" and self._current_slice_axis() == "z"
+        contour_enabled = (is_editable_part_volume or full_volume_mask_editable) and has_image and self.display_mode == "slice" and self._current_slice_axis() == "z"
         self.btn_draw_part_contour.setEnabled(contour_enabled)
         self.btn_delete_part_contour.setEnabled(contour_enabled)
-        self.btn_clear_part_keyframes.setEnabled(is_editable_part_volume and has_image)
+        self.btn_clear_part_keyframes.setEnabled((is_editable_part_volume or full_volume_editable) and has_image)
         self.btn_prev_key_slice.setEnabled(contour_enabled)
         self.btn_next_key_slice.setEnabled(contour_enabled)
-        self.btn_preview_part_mask.setEnabled(is_editable_part_volume and has_image)
-        self.btn_accept_part_mask.setEnabled(is_editable_part_volume and self.part_preview_mask is not None)
-        self.btn_clear_part_preview.setEnabled(is_editable_part_volume and self.part_preview_mask is not None)
+        self.btn_preview_part_mask.setEnabled((is_editable_part_volume or full_volume_editable) and has_image)
+        self.btn_accept_part_mask.setEnabled((is_editable_part_volume or full_volume_editable) and self.part_preview_mask is not None)
+        self.btn_clear_part_preview.setEnabled((is_editable_part_volume or full_volume_editable) and self.part_preview_mask is not None)
         local_axis_export_busy = self._local_axis_reslice_export_running()
         local_axis_editable = is_editable_part_volume and has_image and not local_axis_export_busy
         self.btn_copy_source_z_axis.setEnabled(local_axis_editable)
         self.btn_pick_roll_ref_a.setEnabled(local_axis_editable)
         self.btn_pick_roll_ref_b.setEnabled(local_axis_editable)
+        self.btn_pick_roll_ref_c.setEnabled(local_axis_editable)
+        self.btn_align_axis_to_reference_plane.setEnabled(local_axis_editable)
         self.btn_clear_roll_refs.setEnabled(local_axis_editable)
         self.btn_clear_local_axis_draft.setEnabled(local_axis_editable)
         self.btn_local_axis_reslice.setEnabled(local_axis_editable)
@@ -7266,6 +7697,21 @@ class TifWorkbenchWidget(QWidget):
             and self.edit_volume.shape == self.image_volume.shape
         ):
             label_slice = self._extract_axis_slice(self.edit_volume, axis, slice_index)
+        if (
+            self.current_volume_scope == "full"
+            and self.part_preview_mask is not None
+            and self.part_mask_preview_bbox
+            and self._current_slice_axis() == "z"
+        ):
+            bbox = self.part_mask_preview_bbox
+            z0, z1 = int(bbox[0][0]), int(bbox[0][1])
+            if z0 <= int(slice_index) < z1:
+                overlay = np.zeros_like(image_slice, dtype=np.asarray(self.part_preview_mask).dtype)
+                local_z = int(slice_index) - z0
+                y0, y1 = int(bbox[1][0]), int(bbox[1][1])
+                x0, x1 = int(bbox[2][0]), int(bbox[2][1])
+                overlay[y0:y1, x0:x1] = np.asarray(self.part_preview_mask[local_z])
+                label_slice = overlay
         if self.current_volume_scope == "part" and self.part_preview_mask is not None and self.part_preview_mask.shape == self.image_volume.shape:
             label_slice = self._extract_axis_slice(self.part_preview_mask, axis, slice_index)
         pixmap = self._render_slice_pixmap(image_slice, label_slice)
@@ -7589,6 +8035,7 @@ class TifWorkbenchWidget(QWidget):
             roll = draft.get("roll_reference") if isinstance(draft.get("roll_reference"), dict) else {}
             point_a = roll.get("point_a") if isinstance(roll.get("point_a"), dict) else {}
             point_b = roll.get("point_b") if isinstance(roll.get("point_b"), dict) else {}
+            point_c = roll.get("point_c") if isinstance(roll.get("point_c"), dict) else {}
             if point_a.get("zyx") or point_b.get("zyx"):
                 lines.append(
                     tt("Roll reference: {0}", self.lang).format(
@@ -7598,6 +8045,7 @@ class TifWorkbenchWidget(QWidget):
                 )
             else:
                 lines.append(tt("Roll reference: A/B not set", self.lang))
+            lines.append(tt("Plane reference: C {0}", self.lang).format(tt("set" if point_c.get("zyx") else "not set", self.lang)))
             frame = self._refresh_local_axis_frame(draft)
             lines.append(tt("Frame status: ready" if isinstance(frame, dict) else "Frame status: waiting for roll reference", self.lang))
             detail_lines.extend(
@@ -7606,8 +8054,12 @@ class TifWorkbenchWidget(QWidget):
                     f"{tt('Output axis end z,y,x', self.lang)}: {self._format_local_axis_point(editable.get('end_zyx'))}",
                     f"{tt('Roll reference A', self.lang)}: {self._format_local_axis_point(point_a.get('zyx'))}",
                     f"{tt('Roll reference B', self.lang)}: {self._format_local_axis_point(point_b.get('zyx'))}",
+                    f"{tt('Plane reference C', self.lang)}: {self._format_local_axis_point(point_c.get('zyx'))}",
                 ]
             )
+            reference_plane = roll.get("reference_plane") if isinstance(roll.get("reference_plane"), dict) else draft.get("reference_plane") if isinstance(draft.get("reference_plane"), dict) else {}
+            if isinstance(reference_plane, dict) and reference_plane.get("normal_axis_zyx"):
+                detail_lines.append(f"{tt('Reference plane normal', self.lang)}: {self._format_local_axis_vector(reference_plane.get('normal_axis_zyx'))}")
             detail_lines.extend(self._format_local_axis_relation_metrics(editable, roll))
             if isinstance(frame, dict):
                 detail_lines.extend(
@@ -7620,6 +8072,7 @@ class TifWorkbenchWidget(QWidget):
         else:
             lines.append(tt("Draft output Z: none", self.lang))
             lines.append(tt("Roll reference: A/B not set", self.lang))
+            lines.append(tt("Plane reference: C {0}", self.lang).format(tt("not set", self.lang)))
         reslice = self._current_part_reslice_record()
         if isinstance(reslice, dict):
             lines.append(tt("Saved reslice: {0}", self.lang).format(reslice.get("reslice_id", "")))
@@ -7942,6 +8395,10 @@ class TifWorkbenchWidget(QWidget):
             self.btn_pick_roll_ref_b.blockSignals(True)
             self.btn_pick_roll_ref_b.setChecked(target == "roll_b")
             self.btn_pick_roll_ref_b.blockSignals(False)
+        if hasattr(self, "btn_pick_roll_ref_c"):
+            self.btn_pick_roll_ref_c.blockSignals(True)
+            self.btn_pick_roll_ref_c.setChecked(target == "roll_c")
+            self.btn_pick_roll_ref_c.blockSignals(False)
 
     def _sync_local_axis_pick_buttons(self):
         return self._sync_local_axis_roll_buttons()
@@ -7950,7 +8407,7 @@ class TifWorkbenchWidget(QWidget):
         target = str(target or "")
         legacy_map = {"left_eye": "roll_a", "right_eye": "roll_b"}
         target = legacy_map.get(target, target)
-        if target not in {"", "roll_a", "roll_b"}:
+        if target not in {"", "roll_a", "roll_b", "roll_c"}:
             target = ""
         if target and not self._current_local_axis_draft():
             if self.copy_source_z_axis_to_local_axis_draft() is None:
@@ -7962,7 +8419,7 @@ class TifWorkbenchWidget(QWidget):
             self._set_local_axis_status(tt("Turn on the observation-side clip plane before picking local-axis points.", self.lang))
             return False
         self._local_axis_pick_target = target
-        self._local_axis_roll_pick_target = target if target in {"roll_a", "roll_b"} else ""
+        self._local_axis_roll_pick_target = target if target in {"roll_a", "roll_b", "roll_c"} else ""
         self._sync_local_axis_pick_buttons()
         if target:
             self._set_local_axis_status(tt("Click the observation-side clip plane to set {0}.", self.lang).format(target))
@@ -7973,7 +8430,7 @@ class TifWorkbenchWidget(QWidget):
 
     def pick_local_axis_roll_reference_at(self, x, y):
         target = str(getattr(self, "_local_axis_pick_target", "") or getattr(self, "_local_axis_roll_pick_target", "") or "")
-        if target not in {"roll_a", "roll_b"}:
+        if target not in {"roll_a", "roll_b", "roll_c"}:
             return False
         draft = self._current_local_axis_draft()
         if not isinstance(draft, dict):
@@ -7987,8 +8444,15 @@ class TifWorkbenchWidget(QWidget):
         roll = dict(draft.get("roll_reference") or {})
         if not roll.get("pair_id"):
             roll["pair_id"] = "roll_reference_point_pair"
-        key = "point_a" if target == "roll_a" else "point_b"
-        role = "roll_reference_a" if target == "roll_a" else "roll_reference_b"
+        if target == "roll_a":
+            key = "point_a"
+            role = "roll_reference_a"
+        elif target == "roll_b":
+            key = "point_b"
+            role = "roll_reference_b"
+        else:
+            key = "point_c"
+            role = "reference_plane_c"
         roll[key] = {"role": role, "zyx": [round(float(value), 3) for value in point]}
         draft["roll_reference"] = roll
         draft["dirty"] = True
@@ -8011,6 +8475,8 @@ class TifWorkbenchWidget(QWidget):
         roll = dict(draft.get("roll_reference") or {})
         roll.pop("point_a", None)
         roll.pop("point_b", None)
+        roll.pop("point_c", None)
+        roll.pop("reference_plane", None)
         draft["roll_reference"] = roll
         draft["local_frame"] = None
         draft["dirty"] = True
@@ -8023,6 +8489,50 @@ class TifWorkbenchWidget(QWidget):
             self.volume_canvas.set_axis_overlays(self._local_axis_volume_overlays())
         self._set_local_axis_status(tt("Cleared roll reference points.", self.lang))
         self._request_volume_interaction_render()
+
+    def align_local_axis_to_reference_plane(self):
+        draft = self._current_local_axis_draft()
+        if not isinstance(draft, dict):
+            if self.copy_source_z_axis_to_local_axis_draft() is None:
+                return False
+            draft = self._current_local_axis_draft()
+        if not isinstance(draft, dict):
+            return False
+        roll = dict(draft.get("roll_reference") or {})
+        if not all(isinstance(roll.get(key), dict) and roll.get(key, {}).get("zyx") for key in ("point_a", "point_b", "point_c")):
+            message = tt("Set A/B/C plane reference points before aligning output Z.", self.lang)
+            self._set_local_axis_status(message)
+            self.log(message)
+            return False
+        shape = tuple(int(value) for value in getattr(self.image_volume, "shape", ()) or ())
+        try:
+            editable_axis, reference_plane = align_editable_axis_to_reference_plane(
+                draft.get("editable_axis") or {},
+                roll,
+                spacing_zyx=self._local_axis_spacing_zyx(),
+                shape_zyx=shape if len(shape) == 3 else None,
+            )
+        except Exception as exc:
+            message = tt("Cannot align output Z: {0}", self.lang).format(str(exc))
+            self._set_local_axis_status(message)
+            self.log(message)
+            return False
+        roll["reference_plane"] = dict(reference_plane)
+        draft["editable_axis"] = editable_axis
+        draft["roll_reference"] = roll
+        draft["reference_plane"] = dict(reference_plane)
+        draft["dirty"] = True
+        self._refresh_local_axis_frame(draft)
+        self.local_axis_draft = draft
+        self._sync_local_axis_pick_buttons()
+        self._update_local_axis_summary()
+        if hasattr(self.volume_canvas, "set_axis_overlays"):
+            self.volume_canvas.set_axis_overlays(self._local_axis_volume_overlays())
+        message = tt("Aligned output Z perpendicular to the A/B/C reference plane.", self.lang)
+        self._set_local_axis_status(message)
+        self.log(message)
+        self._request_volume_interaction_render()
+        return True
 
     def clear_local_axis_draft(self):
         self.local_axis_draft = None
@@ -8116,8 +8626,10 @@ class TifWorkbenchWidget(QWidget):
             roll = saved_reslice_frame.get("roll_reference") if isinstance(saved_reslice_frame.get("roll_reference"), dict) else {}
         point_a = roll.get("point_a") if isinstance(roll, dict) and isinstance(roll.get("point_a"), dict) else {}
         point_b = roll.get("point_b") if isinstance(roll, dict) and isinstance(roll.get("point_b"), dict) else {}
+        point_c = roll.get("point_c") if isinstance(roll, dict) and isinstance(roll.get("point_c"), dict) else {}
         roll_a_xy = self._project_zyx_to_volume_xy(point_a.get("zyx"), shape, source_shape=source_shape, spacing_zyx=spacing_zyx) if point_a.get("zyx") else None
         roll_b_xy = self._project_zyx_to_volume_xy(point_b.get("zyx"), shape, source_shape=source_shape, spacing_zyx=spacing_zyx) if point_b.get("zyx") else None
+        roll_c_xy = self._project_zyx_to_volume_xy(point_c.get("zyx"), shape, source_shape=source_shape, spacing_zyx=spacing_zyx) if point_c.get("zyx") else None
         if roll_a_xy and roll_b_xy:
             overlays.append(
                 {
@@ -8131,9 +8643,23 @@ class TifWorkbenchWidget(QWidget):
                     "label_position": "right",
                 }
             )
+        if roll_a_xy and roll_b_xy and roll_c_xy:
+            overlays.append(
+                {
+                    "kind": "polyline",
+                    "points_xy": [roll_a_xy, roll_b_xy, roll_c_xy, roll_a_xy],
+                    "label": tt("A/B/C reference plane", self.lang),
+                    "color": "#D6C56D",
+                    "width": 2,
+                    "label_anchor_xy": roll_c_xy,
+                    "label_offset_xy": [10, 18],
+                    "label_position": "right",
+                }
+            )
         for point, fallback_label, color, offset in (
             (point_a, "Roll reference A", "#7CE3A1", (-18, -12)),
             (point_b, "Roll reference B", "#66D9EF", (10, -12)),
+            (point_c, "Plane reference C", "#D6C56D", (10, 16)),
         ):
             xy = self._project_zyx_to_volume_xy(point.get("zyx"), shape, source_shape=source_shape, spacing_zyx=spacing_zyx) if point.get("zyx") else None
             if xy:
@@ -11009,6 +11535,7 @@ class TifWorkbenchWidget(QWidget):
         training_source = "manual_confirmed"
         if source_proposal_id:
             training_source = "AI proposed + human confirmed"
+        reference_plane = dict(draft.get("reference_plane") or ((draft.get("roll_reference") or {}).get("reference_plane") if isinstance(draft.get("roll_reference"), dict) else {}) or {})
         return {
             "reslice_id": self._default_local_axis_reslice_id(),
             "display_name": f"{self.current_part_id} local axis",
@@ -11019,6 +11546,7 @@ class TifWorkbenchWidget(QWidget):
             "final_editable_axis": dict(draft.get("editable_axis") or {}),
             "local_frame": frame,
             "roll_reference": dict(frame.get("roll_reference") or draft.get("roll_reference") or {}),
+            "reference_plane": reference_plane,
             "reslice_params": {
                 "output_shape_zyx": shape,
                 "output_spacing_zyx": spacing,
@@ -11037,6 +11565,7 @@ class TifWorkbenchWidget(QWidget):
                 "source_model_id": str(draft.get("source_model_id") or ""),
                 "source_model_version": str(draft.get("source_model_version") or ""),
                 "source_interaction": "3d_part_preview_clip_plane",
+                "reference_plane_source": "manual_three_point_plane" if reference_plane else "",
             },
         }
 

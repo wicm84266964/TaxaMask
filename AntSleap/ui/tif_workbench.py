@@ -213,6 +213,9 @@ TIF_TRANSLATIONS = {
         "Choose color": "选择颜色",
         "No TIF volume loaded": "未加载 TIF 体数据",
         "TIF metadata registered. Build a working volume before 3D preview.": "TIF metadata 已登记。进入三维预览前请先生成 working volume。",
+        "TIF metadata registered. Build a working volume before slice review.": "TIF metadata 已登记。切片复核需要先生成 working volume。",
+        "Working volume is being built. Slice review will be available when it finishes.": "正在生成 working volume。完成后即可进行切片复核。",
+        "Working volume is being built. 3D preview will open when it finishes.": "正在生成 working volume。完成后会打开三维体预览。",
         "Building 3D preview...": "正在构建 3D 预览...",
         "Preparing full-volume 3D preview...": "正在准备整只三维体预览...",
         "Preparing ROI crop preview...": "正在准备 ROI 裁剪块预览...",
@@ -482,7 +485,6 @@ TIF_TRANSLATIONS = {
         "Contours": "轮廓文件",
         "Extraction": "提取记录",
         "Parent working volume": "父工作体数据",
-        "Use center ROI": "使用中心 ROI",
         "Draw ROI": "手动框选 ROI",
         "Save ROI draft": "保存 ROI 草稿",
         "Confirm ROI": "确认 ROI",
@@ -495,6 +497,7 @@ TIF_TRANSLATIONS = {
         "Add rectangular key slice": "添加矩形关键切片",
         "Draw contour": "手绘轮廓",
         "Delete key slice": "删除当前关键切片",
+        "Clear key slices": "清空关键切片",
         "Previous key slice": "上一关键切片",
         "Next key slice": "下一关键切片",
         "Preview auto fill": "预览自动填充",
@@ -512,8 +515,12 @@ TIF_TRANSLATIONS = {
         "Switch to Full volume before saving ROI draft.": "请先切回整只体数据，再保存 ROI 草稿。",
         "Switch to Full volume before confirming ROI.": "请先切回整只体数据，再确认 ROI。",
         "Switch to Full volume before drawing ROI.": "请先切回整只体数据，再手动框选 ROI。",
-        "Drag on the current slice to update the ROI bbox.": "请在当前切片上拖拽矩形，用来更新 ROI bbox。",
+        "Drag rectangles on one or more key slices in the current view plane. The ROI bbox will expand to include them.": "在当前观察方向的一个或多个关键切片上拖拽矩形；ROI bbox 会自动合并这些框。",
         "ROI bbox updated: {0}": "ROI bbox 已更新：{0}",
+        "ROI bbox updated and saved to draft {0}: {1}": "ROI bbox 已更新并保存到草稿 {0}：{1}",
+        "ROI key slices use one view plane. Switch back to {0} or save a separate ROI.": "同一个 ROI 外壳只能使用一个观察方向。请切回 {0}，或另存一个独立 ROI。",
+        "ROI shell mask initialized from {0} key slice(s).": "已根据 {0} 个关键切片初始化 ROI 外壳 mask。",
+        "Draw an ROI before saving or creating a part.": "请先手动框选 ROI，再保存 ROI 或新建部位。",
         "Saved ROI draft {0}.": "已保存 ROI 草稿 {0}。",
         "Loaded ROI draft {0} for editing.": "已载入 ROI 草稿 {0}，可继续编辑。",
         "Confirmed ROI and created part {0}.": "已确认 ROI 并创建部位 {0}。",
@@ -528,6 +535,10 @@ TIF_TRANSLATIONS = {
         "Contour saved at Z {0}.": "已在 Z={0} 保存轮廓。",
         "Contour needs at least 3 points.": "轮廓至少需要 3 个点。",
         "Deleted contour at Z {0}.": "已删除 Z={0} 的轮廓。",
+        "Clear all key slices for part {0}? This removes saved mask key slices and the current auto-fill preview, but keeps the cropped part image.": "清空部位 {0} 的全部关键切片吗？这会移除已保存的 mask 关键切片和当前自动填充预览，但保留裁出来的部位图像。",
+        "Cleared {0} key slice(s) and reset the part mask draft.": "已清空 {0} 个关键切片，并重置部位 mask 草稿。",
+        "No part key slices to clear.": "当前没有可清空的部位关键切片。",
+        "Ignored {0} legacy ROI shell key slice(s). Use Clear key slices to remove them permanently.": "已忽略 {0} 个旧版 ROI 外壳关键切片。可点击“清空关键切片”永久移除。",
         "No contour exists at Z {0}.": "Z={0} 没有可删除的轮廓。",
         "No previous key slice.": "没有上一张关键切片。",
         "No next key slice.": "没有下一张关键切片。",
@@ -2073,6 +2084,7 @@ class TifWorkbenchWidget(QWidget):
         self.part_roi_draw_mode = False
         self.part_contour_draw_mode = False
         self.active_part_roi_id = ""
+        self.part_roi_keyframes = []
         self.image_volume = None
         self.label_volume = None
         self.material_map = {}
@@ -2457,9 +2469,6 @@ class TifWorkbenchWidget(QWidget):
         self.part_bbox_edit.setObjectName("tifPartBboxEdit")
         self.part_bbox_edit.setPlaceholderText("z0,z1,y0,y1,x0,x1")
         self.part_bbox_edit.textChanged.connect(self.render_current_slice)
-        self.btn_part_default_bbox = QPushButton("Use center ROI")
-        self.btn_part_default_bbox.setObjectName("tifPartDefaultBboxButton")
-        self.btn_part_default_bbox.clicked.connect(self.fill_default_part_bbox)
         self.btn_part_draw_roi = QPushButton("Draw ROI")
         self.btn_part_draw_roi.setObjectName("tifPartDrawRoiButton")
         self.btn_part_draw_roi.setCheckable(True)
@@ -2486,6 +2495,9 @@ class TifWorkbenchWidget(QWidget):
         self.btn_delete_part_contour = QPushButton("Delete key slice")
         self.btn_delete_part_contour.setObjectName("tifDeletePartContourButton")
         self.btn_delete_part_contour.clicked.connect(self.delete_current_part_keyframe)
+        self.btn_clear_part_keyframes = QPushButton("Clear key slices")
+        self.btn_clear_part_keyframes.setObjectName("tifClearPartKeyframesButton")
+        self.btn_clear_part_keyframes.clicked.connect(self.clear_part_mask_keyframes)
         self.btn_prev_key_slice = QPushButton("Previous key slice")
         self.btn_prev_key_slice.setObjectName("tifPrevPartKeySliceButton")
         self.btn_prev_key_slice.clicked.connect(lambda: self.jump_part_keyframe("previous"))
@@ -2645,7 +2657,6 @@ class TifWorkbenchWidget(QWidget):
             self.btn_import_prediction,
             self.btn_import_external_prediction_tif,
             self.btn_promote,
-            self.btn_create_part,
             self.btn_preview_part_mask,
             self.btn_accept_part_mask,
             self.btn_local_axis_reslice,
@@ -2680,11 +2691,11 @@ class TifWorkbenchWidget(QWidget):
             self.btn_add_material,
             self.btn_edit_material,
             self.btn_save_backend,
-            self.btn_part_default_bbox,
             self.btn_part_draw_roi,
             self.btn_save_part_roi,
             self.btn_add_rect_keyframe,
             self.btn_draw_part_contour,
+            self.btn_clear_part_keyframes,
             self.btn_prev_key_slice,
             self.btn_next_key_slice,
             self.btn_clear_part_preview,
@@ -2907,10 +2918,8 @@ class TifWorkbenchWidget(QWidget):
             for index, label in enumerate(("Part", "Display", "Annotation", "Train/export")):
                 self.task_tabs.setTabText(index, tt(label, self.lang))
         if self.image_volume is None:
-            if self.specimen_list.count():
-                self.canvas.setText(tt("Working volume missing", self.lang))
-            else:
-                self.canvas.setText(tt("No specimens in this TIF project", self.lang))
+            specimen = self.project.get_specimen(self.current_specimen_id, default=None) if self.current_specimen_id else None
+            self.canvas.setText(self._slice_unavailable_message(specimen))
         self.slice_prefix_label.setText(tt("Slice", self.lang))
         self.display_mode_label.setText(tt("Display mode", self.lang))
         self.slice_axis_label.setText(tt("View plane", self.lang))
@@ -2989,7 +2998,6 @@ class TifWorkbenchWidget(QWidget):
         self.btn_import_tif.setText(tt("Import TIF stack", self.lang))
         self.btn_import_amira.setText(tt("Import AMIRA directory", self.lang))
         self.part_bbox_edit.setPlaceholderText(tt("z0,z1,y0,y1,x0,x1", self.lang))
-        self.btn_part_default_bbox.setText(tt("Use center ROI", self.lang))
         self.btn_part_draw_roi.setText(tt("Draw ROI", self.lang))
         self.btn_save_part_roi.setText(tt("Save ROI draft", self.lang))
         self.btn_confirm_part_roi.setText(tt("Confirm ROI", self.lang))
@@ -2998,6 +3006,7 @@ class TifWorkbenchWidget(QWidget):
         self.btn_add_rect_keyframe.setText(tt("Add rectangular key slice", self.lang))
         self.btn_draw_part_contour.setText(tt("Draw contour", self.lang))
         self.btn_delete_part_contour.setText(tt("Delete key slice", self.lang))
+        self.btn_clear_part_keyframes.setText(tt("Clear key slices", self.lang))
         self.btn_prev_key_slice.setText(tt("Previous key slice", self.lang))
         self.btn_next_key_slice.setText(tt("Next key slice", self.lang))
         self.btn_preview_part_mask.setText(tt("Preview auto fill", self.lang))
@@ -3912,6 +3921,53 @@ class TifWorkbenchWidget(QWidget):
             return False
         return (specimen.get("metadata") or {}).get("import_status") == "metadata_only" or ((specimen.get("working_volume") or {}).get("status") == "metadata_only")
 
+    def _materialize_task_matches(self, specimen_id=""):
+        specimen_id = str(specimen_id or self.current_specimen_id or "")
+        return bool(
+            self._tif_materialize_thread is not None
+            and specimen_id
+            and str(self._tif_materialize_specimen_id or "") == specimen_id
+        )
+
+    def _slice_unavailable_message(self, specimen=None):
+        specimen = specimen if specimen is not None else self.project.get_specimen(self.current_specimen_id, default=None)
+        specimen_id = str((specimen or {}).get("specimen_id") or self.current_specimen_id or "")
+        if not specimen_id and not self.specimen_list.count():
+            return tt("No specimens in this TIF project", self.lang)
+        if self._materialize_task_matches(specimen_id):
+            return tt("Working volume is being built. Slice review will be available when it finishes.", self.lang)
+        if self._is_metadata_only_specimen(specimen):
+            return tt("TIF metadata registered. Build a working volume before slice review.", self.lang)
+        return tt("Working volume missing", self.lang)
+
+    def _volume_unavailable_message(self, specimen=None):
+        specimen = specimen if specimen is not None else self.project.get_specimen(self.current_specimen_id, default=None)
+        specimen_id = str((specimen or {}).get("specimen_id") or self.current_specimen_id or "")
+        if self._materialize_task_matches(specimen_id):
+            return tt("Working volume is being built. 3D preview will open when it finishes.", self.lang)
+        if self._is_metadata_only_specimen(specimen):
+            return tt("TIF metadata registered. Build a working volume before 3D preview.", self.lang)
+        return tt("No TIF volume loaded", self.lang)
+
+    def _set_slice_review_available(self, available):
+        available = bool(available)
+        if hasattr(self, "slice_slider"):
+            self.slice_slider.setEnabled(available)
+        if hasattr(self, "slice_axis_combo"):
+            self.slice_axis_combo.setEnabled(available)
+
+    def _set_slice_review_unavailable(self, message=""):
+        self._set_slice_review_available(False)
+        if hasattr(self, "slice_slider"):
+            self.slice_slider.blockSignals(True)
+            self.slice_slider.setRange(0, 0)
+            self.slice_slider.setValue(0)
+            self.slice_slider.blockSignals(False)
+        if hasattr(self, "slice_label"):
+            self.slice_label.setText("0 / 0")
+        self.canvas.reset_view()
+        self.canvas.setText(str(message or self._slice_unavailable_message()))
+
     def _cleanup_tif_materialize_thread(self):
         if self._tif_materialize_progress is not None:
             self._tif_materialize_progress.close()
@@ -3992,6 +4048,30 @@ class TifWorkbenchWidget(QWidget):
         self._tif_materialize_thread.finished.connect(self._tif_materialize_thread.deleteLater)
         self._tif_materialize_thread.start()
         return True
+
+    def _ensure_current_metadata_materializing_for_slice_review(self, specimen=None):
+        if self.display_mode == "volume" or not self.current_specimen_id:
+            return False
+        specimen = specimen if specimen is not None else self.project.get_specimen(self.current_specimen_id, default=None)
+        if not self._is_metadata_only_specimen(specimen):
+            return False
+        source_path = str((specimen.get("metadata") or {}).get("source_tif") or (specimen.get("source") or {}).get("raw_tif") or "")
+        if not source_path:
+            return False
+        if self._materialize_task_matches(self.current_specimen_id):
+            message = tt("Working volume is being built. Slice review will be available when it finishes.", self.lang)
+            self._set_slice_review_unavailable(message)
+            self.training_status_label.setText(message)
+            return True
+        if self._tif_materialize_thread is not None:
+            return False
+        if self.materialize_current_tif_metadata():
+            message = tt("Working volume is being built. Slice review will be available when it finishes.", self.lang)
+            self._set_slice_review_unavailable(message)
+            self.training_status_label.setText(message)
+            self.log(message)
+            return True
+        return False
 
     def _cleanup_local_axis_reslice_export_thread(self):
         if self._local_axis_reslice_export_progress is not None:
@@ -4118,42 +4198,266 @@ class TifWorkbenchWidget(QWidget):
         self.training_status_label.setText(message)
         self.log(message)
 
-    def _default_part_bbox(self):
-        if self.image_volume is None:
-            return []
-        shape = [int(value) for value in self.image_volume.shape]
-        bbox = []
-        for size in shape:
-            span = max(1, int(round(size * 0.45)))
-            start = max(0, int((size - span) // 2))
-            end = min(size, start + span)
-            bbox.append([start, end])
-        return bbox
-
     def _bbox_text(self, bbox):
         if not bbox or len(bbox) != 3:
             return ""
         return ",".join(str(int(value)) for pair in bbox for value in pair)
 
-    def fill_default_part_bbox(self):
-        bbox = self._default_part_bbox()
-        if bbox:
-            self.part_bbox_edit.setText(self._bbox_text(bbox))
-            self.active_part_roi_id = ""
-            self.render_current_slice()
-
     def _parse_part_bbox_text(self):
         text = self.part_bbox_edit.text().strip()
         if not text:
-            bbox = self._default_part_bbox()
-            if bbox:
-                self.part_bbox_edit.setText(self._bbox_text(bbox))
-            return bbox
+            return []
         chunks = [chunk.strip() for chunk in text.replace(";", ",").split(",") if chunk.strip()]
         if len(chunks) != 6:
             raise ValueError("bbox_must_be_z0_z1_y0_y1_x0_x1")
         values = [int(chunk) for chunk in chunks]
         return [[values[0], values[1]], [values[2], values[3]], [values[4], values[5]]]
+
+    def _empty_bbox_for_roi_drag(self):
+        if self.image_volume is None:
+            return []
+        return [[0, 0], [0, 0], [0, 0]]
+
+    def _normalize_roi_keyframes(self, keyframes, shape=None):
+        shape = tuple(int(value) for value in (shape or getattr(self.image_volume, "shape", ()) or ()))
+        normalized = []
+        for item in keyframes or []:
+            if not isinstance(item, dict):
+                continue
+            axis = str(item.get("axis") or "z")
+            if axis not in {"z", "y", "x"}:
+                continue
+            try:
+                slice_index = int(item.get("slice_index"))
+                rect = [int(value) for value in item.get("rect", [])]
+            except Exception:
+                continue
+            if len(rect) != 4:
+                continue
+            x0, y0, x1, y1 = rect
+            if len(shape) == 3:
+                if axis == "z":
+                    max_slice, height, width = shape[0], shape[1], shape[2]
+                elif axis == "y":
+                    max_slice, height, width = shape[1], shape[0], shape[2]
+                else:
+                    max_slice, height, width = shape[2], shape[0], shape[1]
+                if not (0 <= slice_index < max_slice):
+                    continue
+                x0, x1 = sorted((max(0, min(width, x0)), max(0, min(width, x1))))
+                y0, y1 = sorted((max(0, min(height, y0)), max(0, min(height, y1))))
+            else:
+                x0, x1 = sorted((x0, x1))
+                y0, y1 = sorted((y0, y1))
+            if x1 <= x0 or y1 <= y0:
+                continue
+            normalized.append(
+                {
+                    "axis": axis,
+                    "slice_index": slice_index,
+                    "rect": [x0, y0, x1, y1],
+                    "source": str(item.get("source") or "manual_rectangle"),
+                }
+            )
+        normalized.sort(key=lambda item: (item["axis"], item["slice_index"]))
+        return normalized
+
+    def _roi_keyframe_bbox(self, keyframes, shape=None):
+        shape = tuple(int(value) for value in (shape or getattr(self.image_volume, "shape", ()) or ()))
+        if len(shape) != 3:
+            return []
+        bbox = [[0, 0], [0, 0], [0, 0]]
+        for item in self._normalize_roi_keyframes(keyframes, shape):
+            axis = item["axis"]
+            index = int(item["slice_index"])
+            x0, y0, x1, y1 = [int(value) for value in item["rect"]]
+            if axis == "z":
+                bbox[0] = self._expanded_axis_range(bbox[0], index, shape[0])
+                bbox[1] = self._union_axis_range(bbox[1], y0, y1, shape[1])
+                bbox[2] = self._union_axis_range(bbox[2], x0, x1, shape[2])
+            elif axis == "y":
+                bbox[0] = self._union_axis_range(bbox[0], y0, y1, shape[0])
+                bbox[1] = self._expanded_axis_range(bbox[1], index, shape[1])
+                bbox[2] = self._union_axis_range(bbox[2], x0, x1, shape[2])
+            elif axis == "x":
+                bbox[0] = self._union_axis_range(bbox[0], y0, y1, shape[0])
+                bbox[1] = self._union_axis_range(bbox[1], x0, x1, shape[1])
+                bbox[2] = self._expanded_axis_range(bbox[2], index, shape[2])
+        if any(int(pair[1]) <= int(pair[0]) for pair in bbox):
+            return []
+        return self._clip_bbox_to_shape(bbox, shape)
+
+    def _roi_keyframes_from_bbox_for_axis(self, bbox, axis):
+        bbox = self._clip_bbox_to_shape(bbox, self.image_volume.shape) if self.image_volume is not None else bbox
+        if not bbox or len(bbox) != 3:
+            return []
+        axis = axis if axis in {"z", "y", "x"} else "z"
+        z_range, y_range, x_range = bbox
+        if axis == "z":
+            start, end = int(z_range[0]), int(z_range[1]) - 1
+            rect = [int(x_range[0]), int(y_range[0]), int(x_range[1]), int(y_range[1])]
+        elif axis == "y":
+            start, end = int(y_range[0]), int(y_range[1]) - 1
+            rect = [int(x_range[0]), int(z_range[0]), int(x_range[1]), int(z_range[1])]
+        else:
+            start, end = int(x_range[0]), int(x_range[1]) - 1
+            rect = [int(y_range[0]), int(z_range[0]), int(y_range[1]), int(z_range[1])]
+        if end < start:
+            return []
+        keyframes = [{"axis": axis, "slice_index": start, "rect": list(rect), "source": "bbox_compat"}]
+        if end != start:
+            keyframes.append({"axis": axis, "slice_index": end, "rect": list(rect), "source": "bbox_compat"})
+        return self._normalize_roi_keyframes(keyframes)
+
+    def _roi_keyframe_metadata(self):
+        keyframes = self._normalize_roi_keyframes(self.part_roi_keyframes)
+        axes = sorted({item["axis"] for item in keyframes})
+        return {
+            "roi_shell_mode": "key_slice_rectangles" if keyframes else "bbox",
+            "roi_keyframes": keyframes,
+            "roi_axis": axes[0] if len(axes) == 1 else "",
+        }
+
+    def _load_roi_draft_for_editing(self, roi):
+        self.active_part_roi_id = (roi or {}).get("roi_id", "")
+        self.part_roi_keyframes = self._normalize_roi_keyframes(((roi or {}).get("metadata") or {}).get("roi_keyframes", []))
+        self.part_bbox_edit.setText(self._bbox_text((roi or {}).get("bbox_zyx", [])))
+
+    def _upsert_part_roi_keyframe(self, axis, slice_index, rect):
+        axis = axis if axis in {"z", "y", "x"} else "z"
+        keyframes = self._normalize_roi_keyframes(self.part_roi_keyframes)
+        if not keyframes:
+            try:
+                bbox = self._parse_part_bbox_text()
+            except Exception:
+                bbox = []
+            if bbox:
+                keyframes = self._roi_keyframes_from_bbox_for_axis(bbox, axis)
+        axes = {item["axis"] for item in keyframes}
+        if axes and axis not in axes:
+            message = tt("ROI key slices use one view plane. Switch back to {0} or save a separate ROI.", self.lang).format(sorted(axes)[0].upper())
+            QMessageBox.information(self, tt("Part extraction", self.lang), message)
+            self.training_status_label.setText(message)
+            self.log(message)
+            return [], []
+        keyframes = [
+            item
+            for item in keyframes
+            if not (item["axis"] == axis and int(item["slice_index"]) == int(slice_index))
+        ]
+        keyframes.append({"axis": axis, "slice_index": int(slice_index), "rect": [int(value) for value in rect], "source": "manual_rectangle"})
+        keyframes = self._normalize_roi_keyframes(keyframes)
+        bbox = self._roi_keyframe_bbox(keyframes)
+        if bbox:
+            self.part_roi_keyframes = keyframes
+        return keyframes, bbox
+
+    def _roi_keyframe_projection_for_current_slice(self, keyframes):
+        axis, index = self._active_slice_position()
+        same_axis = [
+            item
+            for item in self._normalize_roi_keyframes(keyframes)
+            if item.get("axis") == axis
+        ]
+        if not same_axis:
+            return None
+        same_axis.sort(key=lambda item: int(item.get("slice_index", 0)))
+        index = int(index)
+        if index < int(same_axis[0]["slice_index"]) or index > int(same_axis[-1]["slice_index"]):
+            return None
+        for item in same_axis:
+            if int(item["slice_index"]) == index:
+                return list(item["rect"])
+        left = None
+        right = None
+        for item in same_axis:
+            if int(item["slice_index"]) < index:
+                left = item
+            elif int(item["slice_index"]) > index and right is None:
+                right = item
+                break
+        if left is None or right is None:
+            return None
+        left_index = int(left["slice_index"])
+        right_index = int(right["slice_index"])
+        if right_index <= left_index:
+            return None
+        weight = float(index - left_index) / float(right_index - left_index)
+        values = []
+        for left_value, right_value in zip(left["rect"], right["rect"]):
+            values.append(int(round((1.0 - weight) * float(left_value) + weight * float(right_value))))
+        if values[2] <= values[0] or values[3] <= values[1]:
+            return None
+        return values
+
+    def _roi_shell_mask_from_keyframes(self, keyframes, parent_bbox):
+        keyframes = self._normalize_roi_keyframes(keyframes)
+        axes = sorted({item["axis"] for item in keyframes})
+        if len(axes) != 1:
+            return None
+        axis = axes[0]
+        bbox = self._clip_bbox_to_shape(parent_bbox, self.image_volume.shape)
+        shape = tuple(int(pair[1]) - int(pair[0]) for pair in bbox)
+        if len(shape) != 3 or min(shape) <= 0:
+            return None
+        local_frames = []
+        for item in keyframes:
+            if item["axis"] != axis:
+                continue
+            slice_index = int(item["slice_index"])
+            x0, y0, x1, y1 = [int(value) for value in item["rect"]]
+            if axis == "z":
+                local_slice = slice_index - int(bbox[0][0])
+                rect = [x0 - int(bbox[2][0]), y0 - int(bbox[1][0]), x1 - int(bbox[2][0]), y1 - int(bbox[1][0])]
+                slice_count, height, width = shape[0], shape[1], shape[2]
+            elif axis == "y":
+                local_slice = slice_index - int(bbox[1][0])
+                rect = [x0 - int(bbox[2][0]), y0 - int(bbox[0][0]), x1 - int(bbox[2][0]), y1 - int(bbox[0][0])]
+                slice_count, height, width = shape[1], shape[0], shape[2]
+            else:
+                local_slice = slice_index - int(bbox[2][0])
+                rect = [x0 - int(bbox[1][0]), y0 - int(bbox[0][0]), x1 - int(bbox[1][0]), y1 - int(bbox[0][0])]
+                slice_count, height, width = shape[2], shape[0], shape[1]
+            if not (0 <= local_slice < slice_count):
+                continue
+            rect[0] = max(0, min(width, rect[0]))
+            rect[2] = max(0, min(width, rect[2]))
+            rect[1] = max(0, min(height, rect[1]))
+            rect[3] = max(0, min(height, rect[3]))
+            if rect[2] <= rect[0] or rect[3] <= rect[1]:
+                continue
+            local_frames.append((int(local_slice), rect))
+        if not local_frames:
+            return None
+        local_frames.sort(key=lambda item: item[0])
+        mask = np.zeros(shape, dtype=np.uint16)
+
+        def fill_slice(slice_index, rect_values):
+            x0, y0, x1, y1 = [int(value) for value in rect_values]
+            if x1 <= x0 or y1 <= y0:
+                return
+            if axis == "z":
+                mask[int(slice_index), y0:y1, x0:x1] = 1
+            elif axis == "y":
+                mask[y0:y1, int(slice_index), x0:x1] = 1
+            else:
+                mask[y0:y1, x0:x1, int(slice_index)] = 1
+
+        for idx, (slice_index, rect) in enumerate(local_frames):
+            fill_slice(slice_index, rect)
+            if idx + 1 >= len(local_frames):
+                continue
+            next_slice, next_rect = local_frames[idx + 1]
+            span = int(next_slice) - int(slice_index)
+            if span <= 0:
+                continue
+            for step in range(1, span):
+                weight = float(step) / float(span)
+                interp = []
+                for left_value, right_value in zip(rect, next_rect):
+                    interp.append(int(round((1.0 - weight) * float(left_value) + weight * float(right_value))))
+                fill_slice(int(slice_index) + step, interp)
+        return mask
 
     def is_part_roi_draw_mode(self):
         return bool(
@@ -4177,7 +4481,7 @@ class TifWorkbenchWidget(QWidget):
                 self.btn_part_draw_roi.blockSignals(False)
                 QMessageBox.information(self, tt("Part extraction", self.lang), tt("Switch to Full volume before drawing ROI.", self.lang))
                 return
-            message = tt("Drag on the current slice to update the ROI bbox.", self.lang)
+            message = tt("Drag rectangles on one or more key slices in the current view plane. The ROI bbox will expand to include them.", self.lang)
             self.training_status_label.setText(message)
             self.log(message)
         self.render_current_slice()
@@ -4225,7 +4529,10 @@ class TifWorkbenchWidget(QWidget):
             bbox = self._parse_part_bbox_text()
         except Exception:
             bbox = []
-        if bbox and len(bbox) == 3:
+        current_rect = self._roi_keyframe_projection_for_current_slice(self.part_roi_keyframes)
+        if current_rect:
+            overlays.append({"rect": current_rect, "color": "#FFD34D", "kind": "current"})
+        elif bbox and len(bbox) == 3:
             current_rect = self._bbox_projection_for_current_slice(bbox)
             if current_rect:
                 overlays.append({"rect": current_rect, "color": "#FFD34D", "kind": "current"})
@@ -4233,7 +4540,9 @@ class TifWorkbenchWidget(QWidget):
         for roi in (specimen or {}).get("part_rois", []) or []:
             if (roi or {}).get("status") == "cancelled":
                 continue
-            rect = self._bbox_projection_for_current_slice((roi or {}).get("bbox_zyx", []))
+            rect = self._roi_keyframe_projection_for_current_slice(((roi or {}).get("metadata") or {}).get("roi_keyframes", []))
+            if not rect:
+                rect = self._bbox_projection_for_current_slice((roi or {}).get("bbox_zyx", []))
             if rect:
                 color = "#42D9C8" if (roi or {}).get("status") in {"draft", "confirmed"} else "#7EE787"
                 overlays.append({"rect": rect, "color": color, "kind": "roi", "roi_id": (roi or {}).get("roi_id", "")})
@@ -4276,31 +4585,43 @@ class TifWorkbenchWidget(QWidget):
         y1 = max(int(start_pixel[1]), int(end_pixel[1])) + 1
         if x1 - x0 < 2 or y1 - y0 < 2:
             return
-        try:
-            bbox = self._parse_part_bbox_text()
-        except Exception:
-            bbox = self._default_part_bbox()
+        slice_index = int(self.slice_slider.value())
+        keyframes, bbox = self._upsert_part_roi_keyframe(axis, slice_index, [x0, y0, x1, y1])
         if not bbox:
             return
-        slice_index = int(self.slice_slider.value())
-        if axis == "z":
-            bbox[0] = self._expanded_axis_range(bbox[0], slice_index, int(self.image_volume.shape[0]))
-            bbox[1] = [y0, y1]
-            bbox[2] = [x0, x1]
-        elif axis == "y":
-            bbox[0] = [y0, y1]
-            bbox[1] = self._expanded_axis_range(bbox[1], slice_index, int(self.image_volume.shape[1]))
-            bbox[2] = [x0, x1]
-        elif axis == "x":
-            bbox[0] = [y0, y1]
-            bbox[1] = [x0, x1]
-            bbox[2] = self._expanded_axis_range(bbox[2], slice_index, int(self.image_volume.shape[2]))
-        bbox = self._clip_bbox_to_shape(bbox, self.image_volume.shape)
         self.part_bbox_edit.setText(self._bbox_text(bbox))
-        message = tt("ROI bbox updated: {0}", self.lang).format(self.part_bbox_edit.text())
+        autosaved_roi = self._autosave_active_part_roi_bbox(bbox)
+        if autosaved_roi is not None:
+            message = tt("ROI bbox updated and saved to draft {0}: {1}", self.lang).format(
+                autosaved_roi.get("display_name") or autosaved_roi.get("roi_id"),
+                self.part_bbox_edit.text(),
+            )
+        else:
+            message = tt("ROI bbox updated: {0}", self.lang).format(self.part_bbox_edit.text())
         self.training_status_label.setText(message)
         self.log(message)
         self.render_current_slice()
+
+    def _autosave_active_part_roi_bbox(self, bbox):
+        if not self.active_part_roi_id or not self.current_specimen_id:
+            return None
+        roi = self.project.get_part_roi(self.current_specimen_id, self.active_part_roi_id, default=None)
+        if roi is None or roi.get("linked_part_id") or roi.get("status") == "part_created":
+            return None
+        try:
+            updated = self.project.update_part_roi(
+                self.current_specimen_id,
+                self.active_part_roi_id,
+                bbox_zyx=bbox,
+                status="draft",
+                metadata=self._roi_keyframe_metadata(),
+                save=True,
+            )
+        except Exception as exc:
+            self.log(f"Failed to auto-save ROI draft {self.active_part_roi_id}: {exc}")
+            return None
+        self._populate_volume_roi_source_combo()
+        return updated
 
     def open_roi_at_widget_position(self, x, y):
         if self.current_volume_scope != "full" or self.image_volume is None:
@@ -4325,8 +4646,7 @@ class TifWorkbenchWidget(QWidget):
             if overlay.get("kind") == "roi" and overlay.get("roi_id"):
                 roi = self.project.get_part_roi(self.current_specimen_id, overlay.get("roi_id", ""), default=None)
                 if roi is not None:
-                    self.active_part_roi_id = roi.get("roi_id", "")
-                    self.part_bbox_edit.setText(self._bbox_text(roi.get("bbox_zyx", [])))
+                    self._load_roi_draft_for_editing(roi)
                     message = tt("Loaded ROI draft {0} for editing.", self.lang).format(roi.get("display_name") or roi.get("roi_id"))
                     self.training_status_label.setText(message)
                     self.log(message)
@@ -4343,6 +4663,22 @@ class TifWorkbenchWidget(QWidget):
             start, end = index, index + 1
         return [max(0, min(start, index)), min(int(size), max(end, index + 1))]
 
+    def _union_axis_range(self, existing_range, start_value, end_value, size):
+        start_value = max(0, min(int(size), int(start_value)))
+        end_value = max(0, min(int(size), int(end_value)))
+        if end_value < start_value:
+            start_value, end_value = end_value, start_value
+        if end_value <= start_value:
+            end_value = min(int(size), start_value + 1)
+            start_value = max(0, end_value - 1)
+        try:
+            start, end = int(existing_range[0]), int(existing_range[1])
+        except Exception:
+            start, end = start_value, end_value
+        if end <= start:
+            start, end = start_value, end_value
+        return [max(0, min(start, start_value)), min(int(size), max(end, end_value))]
+
     def _default_roi_id(self):
         existing = len(self.project.list_part_rois(self.current_specimen_id, include_cancelled=True)) if self.current_specimen_id else 0
         return f"roi_{existing + 1}"
@@ -4352,12 +4688,18 @@ class TifWorkbenchWidget(QWidget):
             QMessageBox.information(self, tt("Part extraction", self.lang), tt("Switch to Full volume before saving ROI draft.", self.lang))
             return None
         try:
-            bbox = self._clip_bbox_to_shape(self._parse_part_bbox_text(), self.image_volume.shape)
+            bbox = self._current_part_bbox_for_action()
         except Exception as exc:
             QMessageBox.warning(self, tt("Part extraction", self.lang), str(exc))
             return None
         if self.active_part_roi_id:
-            roi = self.project.update_part_roi(self.current_specimen_id, self.active_part_roi_id, bbox_zyx=bbox, status="draft")
+            roi = self.project.update_part_roi(
+                self.current_specimen_id,
+                self.active_part_roi_id,
+                bbox_zyx=bbox,
+                status="draft",
+                metadata=self._roi_keyframe_metadata(),
+            )
         else:
             dialog = TifPartNameDialog(
                 "Save ROI draft",
@@ -4379,12 +4721,12 @@ class TifWorkbenchWidget(QWidget):
                     display_name=display_name or roi_id,
                     bbox_zyx=bbox,
                     status="draft",
+                    metadata=self._roi_keyframe_metadata(),
                 )
             except Exception as exc:
                 QMessageBox.warning(self, tt("Part extraction", self.lang), str(exc))
                 return None
-        self.active_part_roi_id = roi.get("roi_id", "")
-        self.part_bbox_edit.setText(self._bbox_text(roi.get("bbox_zyx", [])))
+        self._load_roi_draft_for_editing(roi)
         self._populate_volume_roi_source_combo()
         message = tt("Saved ROI draft {0}.", self.lang).format(roi.get("display_name") or roi.get("roi_id"))
         self.training_status_label.setText(message)
@@ -4397,20 +4739,23 @@ class TifWorkbenchWidget(QWidget):
             QMessageBox.information(self, tt("Part extraction", self.lang), tt("Switch to Full volume before confirming ROI.", self.lang))
             return
         roi = self.project.get_part_roi(self.current_specimen_id, self.active_part_roi_id, default=None) if self.active_part_roi_id else None
+        try:
+            bbox = self._current_part_bbox_for_action()
+        except Exception as exc:
+            if roi is not None and roi.get("bbox_zyx"):
+                bbox = self._clip_bbox_to_shape(roi.get("bbox_zyx", []), self.image_volume.shape)
+            else:
+                QMessageBox.warning(self, tt("Part extraction", self.lang), str(exc))
+                return
         if roi is not None:
-            bbox = roi.get("bbox_zyx", [])
             default_part_id = str(roi.get("roi_id", "")).replace("_roi", "") or f"part_{len(self.project.list_parts(self.current_specimen_id)) + 1}"
             default_display_name = str(roi.get("display_name") or default_part_id)
         else:
-            try:
-                bbox = self._clip_bbox_to_shape(self._parse_part_bbox_text(), self.image_volume.shape)
-            except Exception as exc:
-                QMessageBox.warning(self, tt("Part extraction", self.lang), str(exc))
-                return
             default_part_id = f"part_{len(self.project.list_parts(self.current_specimen_id)) + 1}"
             default_display_name = default_part_id
         if not bbox:
             return
+        roi_keyframes = self._normalize_roi_keyframes(((roi or {}).get("metadata") or {}).get("roi_keyframes", []) if roi is not None else self.part_roi_keyframes)
         dialog = TifPartNameDialog(
             "Confirm ROI",
             part_id=default_part_id,
@@ -4423,14 +4768,26 @@ class TifWorkbenchWidget(QWidget):
         part_id, display_name = dialog.values()
         if not part_id:
             return
+        mask_initialized = False
+        mask_message = ""
         try:
             part = crop_volume_to_part(self.project, self.current_specimen_id, part_id, bbox, display_name=display_name or part_id)
+            if roi_keyframes:
+                mask_initialized, mask_message = self._initialize_part_mask_from_roi_shell(part, roi_keyframes)
+                if mask_initialized:
+                    part.setdefault("view_settings", {})["volume_mask_mode"] = "masked_image"
             if roi is not None:
                 self.project.update_part_roi(
                     self.current_specimen_id,
                     roi.get("roi_id", ""),
+                    bbox_zyx=bbox,
                     status="part_created",
                     linked_part_id=part.get("part_id", ""),
+                    metadata=self._roi_keyframe_metadata() if not roi_keyframes else {
+                        "roi_shell_mode": "key_slice_rectangles",
+                        "roi_keyframes": roi_keyframes,
+                        "roi_axis": roi_keyframes[0].get("axis", "") if roi_keyframes else "",
+                    },
                     save=True,
                 )
             else:
@@ -4443,6 +4800,10 @@ class TifWorkbenchWidget(QWidget):
         self._populate_volume_roi_source_combo()
         self._select_volume_tree_item(self.current_specimen_id, "part", part.get("part_id", ""))
         message = tt("Confirmed ROI and created part {0}.", self.lang).format(part.get("display_name") or part.get("part_id"))
+        if mask_initialized:
+            message = f"{message}\n{tt('ROI shell mask initialized from {0} key slice(s).', self.lang).format(len(roi_keyframes))}"
+        elif mask_message:
+            message = f"{message}\nROI shell mask not initialized: {mask_message}"
         self.training_status_label.setText(message)
         self.log(message)
 
@@ -4459,6 +4820,7 @@ class TifWorkbenchWidget(QWidget):
                     status="part_created",
                     linked_part_id=part_id,
                     display_name=display_name or part.get("display_name") or part_id,
+                    metadata=self._roi_keyframe_metadata(),
                     save=True,
                 )
             except Exception:
@@ -4472,10 +4834,78 @@ class TifWorkbenchWidget(QWidget):
                 bbox_zyx=bbox,
                 status="part_created",
                 linked_part_id=part_id,
+                metadata=self._roi_keyframe_metadata(),
                 save=True,
             )
         except ValueError:
             return None
+
+    def _roi_keyframes_to_part_contours(self, keyframes, parent_bbox):
+        bbox = self._clip_bbox_to_shape(parent_bbox, self.image_volume.shape) if self.image_volume is not None else parent_bbox
+        contours = {
+            "schema_version": "taxamask_tif_part_extraction_v1",
+            "axis": "z",
+            "keyframes": [],
+        }
+        for item in self._normalize_roi_keyframes(keyframes):
+            if item.get("axis") != "z":
+                continue
+            slice_index = int(item.get("slice_index"))
+            if not (int(bbox[0][0]) <= slice_index < int(bbox[0][1])):
+                continue
+            x0, y0, x1, y1 = [int(value) for value in item.get("rect", [])]
+            local_z = slice_index - int(bbox[0][0])
+            local_y0 = y0 - int(bbox[1][0])
+            local_y1 = y1 - int(bbox[1][0])
+            local_x0 = x0 - int(bbox[2][0])
+            local_x1 = x1 - int(bbox[2][0])
+            contours = add_rectangular_keyframe(
+                contours,
+                local_z,
+                [[local_y0, local_y1], [local_x0, local_x1]],
+                author="taxamask_roi_shell",
+            )
+        return contours
+
+    def _initialize_part_mask_from_roi_shell(self, part, roi_keyframes):
+        if not isinstance(part, dict) or not roi_keyframes:
+            return False, ""
+        if self.image_volume is None:
+            return False, ""
+        try:
+            bbox = self._clip_bbox_to_shape(part.get("parent_bbox_zyx", []), self.image_volume.shape)
+            shape = tuple(int(pair[1]) - int(pair[0]) for pair in bbox)
+            if len(shape) != 3 or min(shape) <= 0:
+                return False, ""
+            contours = self._roi_keyframes_to_part_contours(roi_keyframes, bbox)
+            mask = self._roi_shell_mask_from_keyframes(roi_keyframes, bbox)
+            if mask is None or not np.any(np.asarray(mask) > 0):
+                report = validate_contours_for_interpolation(contours, shape, axis="z")
+                if not report.get("ok"):
+                    return False, self._format_contour_quality_report(report)
+                mask = build_preview_mask_from_contours(contours, shape)
+                quality = self._format_contour_quality_report(report)
+            else:
+                quality = "rectangular key-slice shell"
+            metadata = write_part_mask(self.project, part, mask)
+            part["mask"].update(
+                {
+                    "shape_zyx": metadata.get("shape_zyx", []),
+                    "dtype": metadata.get("dtype", ""),
+                    "spacing_zyx": metadata.get("spacing_zyx", []),
+                    "spacing_unit": metadata.get("spacing_unit", "micrometer"),
+                    "orientation": metadata.get("orientation", "unknown"),
+                }
+            )
+            metadata_payload = part.setdefault("metadata", {})
+            metadata_payload["roi_shell_keyframe_count"] = len(self._normalize_roi_keyframes(roi_keyframes))
+            metadata_payload["roi_shell_keyframes"] = self._normalize_roi_keyframes(roi_keyframes)
+            self.project.update_part_status(self.current_specimen_id, part.get("part_id", ""), "mask_preview", save=False)
+            self.project.save_project()
+            return True, quality
+        except Exception as exc:
+            self.log(f"Failed to initialize ROI shell mask: {exc}")
+            return False, str(exc)
 
     def cancel_part_roi_draft(self):
         if not self.active_part_roi_id:
@@ -4579,6 +5009,14 @@ class TifWorkbenchWidget(QWidget):
             clean.append([start, end])
         return clean
 
+    def _current_part_bbox_for_action(self):
+        bbox = self._parse_part_bbox_text()
+        if not bbox and self.part_roi_keyframes:
+            bbox = self._roi_keyframe_bbox(self.part_roi_keyframes)
+        if not bbox:
+            raise ValueError(tt("Draw an ROI before saving or creating a part.", self.lang))
+        return self._clip_bbox_to_shape(bbox, self.image_volume.shape)
+
     def create_part_from_bbox_dialog(self):
         if self.current_volume_scope != "full" or not self.current_specimen_id or self.image_volume is None:
             QMessageBox.information(self, tt("Part extraction", self.lang), tt("Switch to Full volume before creating a part.", self.lang))
@@ -4597,7 +5035,7 @@ class TifWorkbenchWidget(QWidget):
         if not part_id:
             return
         try:
-            bbox = self._clip_bbox_to_shape(self._parse_part_bbox_text(), self.image_volume.shape)
+            bbox = self._current_part_bbox_for_action()
             part = crop_volume_to_part(self.project, self.current_specimen_id, part_id, bbox, display_name=display_name or part_id)
             self._ensure_roi_for_created_part(part, bbox, display_name=display_name or part_id)
         except Exception as exc:
@@ -4622,6 +5060,21 @@ class TifWorkbenchWidget(QWidget):
         if not contours_path:
             return {}, ""
         return read_contours_json(contours_path), contours_path
+
+    def _is_legacy_roi_shell_keyframe(self, keyframe):
+        if not isinstance(keyframe, dict):
+            return False
+        author = str(keyframe.get("author") or "")
+        source = str(keyframe.get("source") or "")
+        return author == "taxamask_roi_shell" or source in {"roi_shell", "roi_key_slice_rectangle"}
+
+    def _part_mask_contours_for_preview(self, contours):
+        payload = dict(contours or {})
+        keyframes = payload.get("keyframes", []) if isinstance(payload.get("keyframes", []), list) else []
+        kept = [item for item in keyframes if isinstance(item, dict) and not self._is_legacy_roi_shell_keyframe(item)]
+        ignored = len([item for item in keyframes if isinstance(item, dict) and self._is_legacy_roi_shell_keyframe(item)])
+        payload["keyframes"] = kept
+        return payload, ignored
 
     def _format_contour_quality_report(self, report):
         if not isinstance(report, dict):
@@ -4666,6 +5119,8 @@ class TifWorkbenchWidget(QWidget):
         overlays = []
         for keyframe in contours.get("keyframes", []) or []:
             if not isinstance(keyframe, dict):
+                continue
+            if self._is_legacy_roi_shell_keyframe(keyframe):
                 continue
             if str(keyframe.get("axis", "z")) != axis:
                 continue
@@ -4739,6 +5194,75 @@ class TifWorkbenchWidget(QWidget):
         self.training_status_label.setText(message)
         self.log(message)
 
+    def clear_part_mask_keyframes(self):
+        if not self._is_editable_part_volume() or self.image_volume is None:
+            QMessageBox.information(self, tt("Part extraction", self.lang), tt("Select a part volume before editing part masks.", self.lang))
+            return False
+        part = self.project.get_part(self.current_specimen_id, self.current_part_id, default=None)
+        contours, contours_path = self._current_part_contours()
+        if part is None or not contours_path:
+            return False
+        keyframes = [item for item in (contours.get("keyframes", []) or []) if isinstance(item, dict)]
+        if not keyframes and self.part_preview_mask is None and not self._active_part_mask_has_voxels():
+            message = tt("No part key slices to clear.", self.lang)
+            self.training_status_label.setText(message)
+            self.log(message)
+            return False
+        display_name = part.get("display_name") or part.get("part_id") or self.current_part_id
+        response = QMessageBox.question(
+            self,
+            tt("Part extraction", self.lang),
+            tt(
+                "Clear all key slices for part {0}? This removes saved mask key slices and the current auto-fill preview, but keeps the cropped part image.",
+                self.lang,
+            ).format(display_name),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if response != QMessageBox.Yes:
+            return False
+        try:
+            contours["keyframes"] = []
+            write_contours_json(contours_path, contours)
+            mask_path = self._current_part_mask_path()
+            if mask_path and volume_sidecar_exists(mask_path):
+                target = load_volume_sidecar(mask_path, mmap_mode="r+")
+                try:
+                    target[:] = 0
+                    metadata = flush_volume_array(mask_path, target)
+                finally:
+                    mmap_handle = getattr(target, "_mmap", None)
+                    if mmap_handle is not None:
+                        mmap_handle.close()
+                part.setdefault("mask", {}).update(
+                    {
+                        "shape_zyx": metadata.get("shape_zyx", []),
+                        "dtype": metadata.get("dtype", ""),
+                        "spacing_zyx": metadata.get("spacing_zyx", []),
+                        "spacing_unit": metadata.get("spacing_unit", "micrometer"),
+                        "orientation": metadata.get("orientation", "unknown"),
+                    }
+                )
+            metadata_payload = part.setdefault("metadata", {})
+            metadata_payload["part_mask_keyframes_cleared_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+            metadata_payload["part_mask_keyframes_cleared_count"] = len(keyframes)
+            part = self.project.update_part_status(self.current_specimen_id, self.current_part_id, "roi_confirmed", save=False)
+            self.project.save_project()
+        except Exception as exc:
+            QMessageBox.warning(self, tt("Part extraction", self.lang), str(exc))
+            return False
+        self.current_part = part
+        self.part_preview_mask = None
+        self.edit_volume = None
+        self._clear_volume_preview_cache()
+        self._reload_label_volume()
+        self._update_status_labels(self.project.get_specimen(self.current_specimen_id), part=part)
+        self.render_current_slice()
+        message = tt("Cleared {0} key slice(s) and reset the part mask draft.", self.lang).format(len(keyframes))
+        self.training_status_label.setText(message)
+        self.log(message)
+        return True
+
     def jump_part_keyframe(self, direction):
         if not self._is_editable_part_volume() or self.image_volume is None:
             return
@@ -4799,12 +5323,13 @@ class TifWorkbenchWidget(QWidget):
             return
         contours_path = self._current_part_contours_path()
         contours = read_contours_json(contours_path)
-        report = validate_contours_for_interpolation(contours, self.image_volume.shape, axis="z")
+        preview_contours, ignored_legacy = self._part_mask_contours_for_preview(contours)
+        report = validate_contours_for_interpolation(preview_contours, self.image_volume.shape, axis="z")
         if not report.get("ok"):
             QMessageBox.warning(self, tt("Part extraction", self.lang), self._format_contour_quality_report(report))
             return
         try:
-            self.part_preview_mask = build_preview_mask_from_contours(contours, self.image_volume.shape)
+            self.part_preview_mask = build_preview_mask_from_contours(preview_contours, self.image_volume.shape)
         except Exception as exc:
             QMessageBox.warning(self, tt("Part extraction", self.lang), str(exc))
             return
@@ -4814,10 +5339,15 @@ class TifWorkbenchWidget(QWidget):
         self.render_current_slice()
         quality = self._format_contour_quality_report(report)
         message = (
-            tt("Preview mask generated from {0} key slice(s).", self.lang).format(len(contours.get("keyframes", [])))
+            tt("Preview mask generated from {0} key slice(s).", self.lang).format(len(preview_contours.get("keyframes", [])))
             + "\n"
             + tt("Part mask preview quality: {0}", self.lang).format(quality)
         )
+        if ignored_legacy:
+            message = (
+                f"{message}\n"
+                + tt("Ignored {0} legacy ROI shell key slice(s). Use Clear key slices to remove them permanently.", self.lang).format(ignored_legacy)
+            )
         self.training_status_label.setText(message)
         self.log(message)
 
@@ -5127,7 +5657,6 @@ class TifWorkbenchWidget(QWidget):
         self.part_locate_section, part_locate_layout = self._make_section("1. Locate part", "tifPartLocateSection")
         part_locate_layout.addWidget(self.part_bbox_edit)
         part_bbox_row = QHBoxLayout()
-        part_bbox_row.addWidget(self.btn_part_default_bbox)
         part_bbox_row.addWidget(self.btn_part_draw_roi)
         part_locate_layout.addLayout(part_bbox_row)
         part_draft_row = QHBoxLayout()
@@ -5135,7 +5664,6 @@ class TifWorkbenchWidget(QWidget):
         part_draft_row.addWidget(self.btn_confirm_part_roi)
         part_locate_layout.addLayout(part_draft_row)
         part_action_row = QHBoxLayout()
-        part_action_row.addWidget(self.btn_create_part)
         part_action_row.addWidget(self.btn_cancel_part_roi)
         part_locate_layout.addLayout(part_action_row)
         self.part_task_layout.addWidget(self.part_locate_section)
@@ -5151,6 +5679,7 @@ class TifWorkbenchWidget(QWidget):
         part_mask_layout.addLayout(part_key_nav_row)
         part_key_action_row = QHBoxLayout()
         part_key_action_row.addWidget(self.btn_delete_part_contour)
+        part_key_action_row.addWidget(self.btn_clear_part_keyframes)
         part_key_action_row.addWidget(self.btn_preview_part_mask)
         part_mask_layout.addLayout(part_key_action_row)
         part_mask_row = QHBoxLayout()
@@ -5737,6 +6266,8 @@ class TifWorkbenchWidget(QWidget):
         self.current_part = None
         self.local_axis_draft = None
         self.part_preview_mask = None
+        self.active_part_roi_id = ""
+        self.part_roi_keyframes = []
         self.undo_stack = []
         self.redo_stack = []
         self._sync_undo_redo_buttons()
@@ -5790,6 +6321,7 @@ class TifWorkbenchWidget(QWidget):
         count = self._slice_count_for_axis(axis)
         position = int(self._slice_positions.get(axis, 0)) if preserve_position else 0
         position = max(0, min(count - 1, position))
+        self._set_slice_review_available(self.image_volume is not None)
         self.slice_slider.blockSignals(True)
         self.slice_slider.setRange(0, count - 1)
         self.slice_slider.setValue(position)
@@ -6031,6 +6563,7 @@ class TifWorkbenchWidget(QWidget):
             self.local_axis_draft = None
             self.part_preview_mask = None
             self.active_part_roi_id = ""
+            self.part_roi_keyframes = []
             self.part_roi_draw_mode = False
             self.part_contour_draw_mode = False
             self.btn_part_draw_roi.blockSignals(True)
@@ -6061,11 +6594,9 @@ class TifWorkbenchWidget(QWidget):
                 self._configure_slice_slider_for_axis(self._current_slice_axis(), preserve_position=True)
                 self._reset_canvas_view_on_next_render = True
             else:
-                self.slice_slider.setRange(0, 0)
-                self.canvas.reset_view()
-                if (specimen.get("metadata") or {}).get("import_status") == "metadata_only" or (specimen.get("working_volume") or {}).get("status") == "metadata_only":
-                    message = tt("TIF metadata registered. Build a working volume before 3D preview.", self.lang)
-                    self.canvas.setText(message)
+                self._set_slice_review_unavailable(self._slice_unavailable_message(specimen))
+                if self._is_metadata_only_specimen(specimen) or self._materialize_task_matches(specimen_id):
+                    message = self._volume_unavailable_message(specimen)
                     self.volume_canvas.setText(message)
                     self._update_volume_render_status_label(message)
 
@@ -6085,7 +6616,8 @@ class TifWorkbenchWidget(QWidget):
             self._update_status_labels(specimen)
             self._apply_default_volume_mask_mode()
             self._sync_mode_sections()
-            self.render_current_slice()
+            if not self._ensure_current_metadata_materializing_for_slice_review(specimen):
+                self.render_current_slice()
             if self.display_mode == "volume":
                 self.render_volume_preview()
         finally:
@@ -6122,6 +6654,7 @@ class TifWorkbenchWidget(QWidget):
             if self.current_reslice_id and hasattr(self, "volume_local_axes_check"):
                 self.volume_local_axes_check.setChecked(True)
             self.active_part_roi_id = ""
+            self.part_roi_keyframes = []
             self.part_roi_draw_mode = False
             self.part_contour_draw_mode = False
             self.btn_part_draw_roi.blockSignals(True)
@@ -6163,8 +6696,7 @@ class TifWorkbenchWidget(QWidget):
                 self._configure_slice_slider_for_axis(self._current_slice_axis(), preserve_position=True)
                 self._reset_canvas_view_on_next_render = True
             else:
-                self.slice_slider.setRange(0, 0)
-                self.canvas.reset_view()
+                self._set_slice_review_unavailable(tt("Working volume missing", self.lang))
 
             material_path = self.project.to_absolute(specimen.get("material_map", ""))
             if material_path and os.path.exists(material_path):
@@ -6555,6 +7087,7 @@ class TifWorkbenchWidget(QWidget):
         label_editable = has_image and (not is_part or is_editable_part_volume)
         full_volume_editable = has_image and not is_part
         self.label_role_combo.setEnabled(full_volume_editable)
+        self._set_slice_review_available(has_image)
         for widget in (
             self.brush_size_slider,
             self.btn_save_edit,
@@ -6588,16 +7121,16 @@ class TifWorkbenchWidget(QWidget):
         self.btn_edit_material.setEnabled(full_volume_editable)
         self.btn_delete_material.setEnabled(full_volume_editable)
         self.part_bbox_edit.setEnabled(not is_part and has_image)
-        self.btn_part_default_bbox.setEnabled(not is_part and has_image)
         self.btn_part_draw_roi.setEnabled(not is_part and has_image and self.display_mode == "slice")
         self.btn_save_part_roi.setEnabled(not is_part and has_image)
         self.btn_confirm_part_roi.setEnabled(not is_part and has_image)
         self.btn_cancel_part_roi.setEnabled(not is_part)
-        self.btn_create_part.setEnabled(not is_part and has_image)
+        self.btn_create_part.setEnabled(False)
         self.btn_add_rect_keyframe.setEnabled(is_editable_part_volume and has_image)
         contour_enabled = is_editable_part_volume and has_image and self.display_mode == "slice" and self._current_slice_axis() == "z"
         self.btn_draw_part_contour.setEnabled(contour_enabled)
         self.btn_delete_part_contour.setEnabled(contour_enabled)
+        self.btn_clear_part_keyframes.setEnabled(is_editable_part_volume and has_image)
         self.btn_prev_key_slice.setEnabled(contour_enabled)
         self.btn_next_key_slice.setEnabled(contour_enabled)
         self.btn_preview_part_mask.setEnabled(is_editable_part_volume and has_image)
@@ -6717,10 +7250,8 @@ class TifWorkbenchWidget(QWidget):
 
     def render_current_slice(self):
         if self.image_volume is None:
-            if not self.current_specimen_id and not self.specimen_list.count():
-                self.canvas.setText(tt("No specimens in this TIF project", self.lang))
-            else:
-                self.canvas.setText(tt("Working volume missing", self.lang))
+            specimen = self.project.get_specimen(self.current_specimen_id, default=None) if self.current_specimen_id else None
+            self._set_slice_review_unavailable(self._slice_unavailable_message(specimen))
             return
         axis, slice_index = self._active_slice_position()
         total = self._slice_count_for_axis(axis)
@@ -9528,10 +10059,7 @@ class TifWorkbenchWidget(QWidget):
             self._ensure_volume_canvas()
         if self.image_volume is None:
             specimen = self.project.get_specimen(self.current_specimen_id, default=None) if self.current_specimen_id else None
-            if (specimen or {}).get("metadata", {}).get("import_status") == "metadata_only" or ((specimen or {}).get("working_volume") or {}).get("status") == "metadata_only":
-                message = tt("TIF metadata registered. Build a working volume before 3D preview.", self.lang)
-            else:
-                message = tt("No TIF volume loaded", self.lang)
+            message = self._volume_unavailable_message(specimen)
             if hasattr(self.volume_canvas, "set_axis_overlays"):
                 self.volume_canvas.set_axis_overlays([])
             self.volume_canvas.clear()

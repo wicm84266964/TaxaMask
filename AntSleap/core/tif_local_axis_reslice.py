@@ -200,25 +200,7 @@ def align_editable_axis_to_reference_plane(editable_axis, roll_reference, spacin
     normal_world = np.asarray(plane["normal_world_zyx"], dtype=np.float64)
     center = (start + end) * 0.5
     half_length_world = axis_length_world * 0.5
-
-    if shape_zyx is not None:
-        shape = np.asarray([float(value) for value in shape_zyx], dtype=np.float64)
-        if shape.size == 3 and np.all(np.isfinite(shape)) and np.all(shape > 0):
-            upper = np.maximum(shape - 1.0, 0.0)
-            step_per_world = normal_world / spacing
-            limits = []
-            for index, step in enumerate(step_per_world):
-                if abs(float(step)) <= 1e-10:
-                    continue
-                if step > 0:
-                    limits.append((upper[index] - center[index]) / step)
-                    limits.append(center[index] / step)
-                else:
-                    limits.append(center[index] / (-step))
-                    limits.append((upper[index] - center[index]) / (-step))
-            usable_limits = [float(value) for value in limits if np.isfinite(value) and value > 1e-8]
-            if usable_limits:
-                half_length_world = min(half_length_world, min(usable_limits))
+    _ = shape_zyx
 
     half_delta_voxel = (normal_world * half_length_world) / spacing
     axis["start_zyx"] = [round(float(value), 3) for value in center - half_delta_voxel]
@@ -304,6 +286,62 @@ def validate_local_frame(local_frame):
         "determinant": det,
         "spacing_zyx": spacing.tolist(),
     }
+
+
+def _output_axis_world_units(local_frame, source_spacing):
+    return np.stack(
+        [
+            _world_unit_from_voxel_axis(local_frame.get("z_axis"), source_spacing, "z_axis"),
+            _world_unit_from_voxel_axis(local_frame.get("y_axis"), source_spacing, "y_axis"),
+            _world_unit_from_voxel_axis(local_frame.get("x_axis"), source_spacing, "x_axis"),
+        ],
+        axis=0,
+    )
+
+
+def local_axis_output_shape_for_source_bbox(source_shape_zyx, local_frame, output_spacing_zyx=None):
+    shape = np.array([float(value) for value in source_shape_zyx], dtype=np.float64)
+    if shape.size != 3 or not np.all(np.isfinite(shape)) or np.any(shape <= 0):
+        raise ValueError("source_shape_zyx_must_have_3_positive_values")
+    source_spacing = _normalize_spacing(local_frame.get("spacing_zyx") or [1.0, 1.0, 1.0])
+    output_spacing = _normalize_spacing(output_spacing_zyx or local_frame.get("spacing_zyx") or [1.0, 1.0, 1.0])
+    origin = _point(local_frame.get("origin_zyx"), "origin_zyx")
+    axes_world = _output_axis_world_units(local_frame, source_spacing)
+    upper = np.maximum(shape - 1.0, 0.0)
+    corners = np.array(
+        [
+            [z, y, x]
+            for z in (0.0, float(upper[0]))
+            for y in (0.0, float(upper[1]))
+            for x in (0.0, float(upper[2]))
+        ],
+        dtype=np.float64,
+    )
+    deltas_world = (corners - origin.reshape((1, 3))) * source_spacing.reshape((1, 3))
+    offsets = deltas_world @ axes_world.T
+    offsets = offsets / output_spacing.reshape((1, 3))
+    half_extent = np.max(np.abs(offsets), axis=0)
+    counts = np.ceil((half_extent * 2.0) + 1.0 - 1e-9).astype(np.int64)
+    return [int(max(1, value)) for value in counts.tolist()]
+
+
+def source_point_to_reslice_point(point_zyx, local_frame, reslice_params=None):
+    params = dict(reslice_params or {})
+    output_shape = params.get("output_shape_zyx") or params.get("output_shape")
+    if output_shape is None or len(output_shape) != 3:
+        raise ValueError("output_shape_zyx_must_have_3_values")
+    output_shape = np.array([float(value) for value in output_shape], dtype=np.float64)
+    if not np.all(np.isfinite(output_shape)) or np.any(output_shape <= 0):
+        raise ValueError("output_shape_zyx_must_have_3_positive_values")
+    source_spacing = _normalize_spacing(local_frame.get("spacing_zyx") or [1.0, 1.0, 1.0])
+    output_spacing = _normalize_spacing(params.get("output_spacing_zyx") or local_frame.get("spacing_zyx") or [1.0, 1.0, 1.0])
+    origin = _point(local_frame.get("origin_zyx"), "origin_zyx")
+    point = _point(point_zyx, "source_point_zyx")
+    axes_world = _output_axis_world_units(local_frame, source_spacing)
+    delta_world = (point - origin) * source_spacing
+    offsets = (axes_world @ delta_world) / output_spacing
+    center = (output_shape - 1.0) / 2.0
+    return [float(value) for value in (center + offsets).tolist()]
 
 
 def validate_roll_reference_pair(roll_reference):
@@ -454,8 +492,9 @@ def export_part_reslice(project_manager, specimen_id, part_id, reslice_payload):
     validate_local_frame(local_frame)
 
     params = dict(payload.get("reslice_params") or {})
-    params.setdefault("output_shape_zyx", list(image.shape))
     params.setdefault("output_spacing_zyx", part_spacing)
+    if not params.get("output_shape_zyx") and not params.get("output_shape"):
+        params["output_shape_zyx"] = local_axis_output_shape_for_source_bbox(image.shape, local_frame, params.get("output_spacing_zyx"))
     image_interpolation = params.get("image_interpolation", "linear")
     image_resliced = reslice_volume(image, local_frame, params, interpolation=image_interpolation)
 

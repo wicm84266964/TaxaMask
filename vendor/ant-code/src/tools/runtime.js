@@ -70,13 +70,30 @@ export function createToolRuntime(options) {
       }
 
       const beforeHook = await emitToolHook(options, "tool.before", name, input, definition);
+      let hookApprovedByUser = false;
       if (beforeHook.blocked) {
-        return {
-          ok: false,
-          blocked: true,
-          error: beforeHook.blockingError ?? { code: "HOOK_BLOCKED", message: "Tool blocked by hook" },
-          hook: summarizeHookBlock(beforeHook)
-        };
+        const hookApproval = approvalRequestFromHookBlock(beforeHook, name, input, definition);
+        if (hookApproval && options.approve) {
+          const approved = await options.approve(hookApproval);
+          if (!approved) {
+            await emitPermissionDeniedHook(options, name, input, definition, hookApproval.decision);
+            return finishTool(options, name, input, definition, {
+              ok: false,
+              blocked: true,
+              error: beforeHook.blockingError ?? { code: "HOOK_BLOCKED", message: "Tool blocked by hook" },
+              decision: hookApproval.decision,
+              hook: summarizeHookBlock(beforeHook)
+            });
+          }
+          hookApprovedByUser = true;
+        } else {
+          return {
+            ok: false,
+            blocked: true,
+            error: beforeHook.blockingError ?? { code: "HOOK_BLOCKED", message: "Tool blocked by hook" },
+            hook: summarizeHookBlock(beforeHook)
+          };
+        }
       }
       if (options.signal?.aborted) {
         return finishTool(options, name, input, definition, interruptedToolExecution(name, input, definition));
@@ -170,8 +187,11 @@ export function createToolRuntime(options) {
         { workspace: options.cwd, ...(options.policy ?? {}) }
       );
 
-      let approvedByUser = false;
-      if (decision.decision === "ask" && options.approve) {
+      let approvedByUser = hookApprovedByUser;
+      if (decision.decision === "ask" && approvedByUser) {
+        // A blocking source-development hook approval is a stronger confirmation
+        // for the same tool call, so do not ask for the generic write prompt again.
+      } else if (decision.decision === "ask" && options.approve) {
         const approved = await options.approve({
           toolName: name,
           input,
@@ -676,6 +696,33 @@ function summarizeHookBlock(hookResult) {
     event: blocking?.event ?? "tool.before",
     name: blocking?.hook ?? null,
     message: blocking?.message ?? hookResult?.blockingError?.message ?? "blocked by hook"
+  };
+}
+
+function approvalRequestFromHookBlock(hookResult, toolName, input, definition) {
+  const blocking = hookResult?.results?.find((result) => result.blocked && result.requiresApproval === true);
+  const error = blocking?.error ?? hookResult?.blockingError ?? {};
+  if (blocking?.requiresApproval !== true && error?.taxamask?.requiresApproval !== true) {
+    return null;
+  }
+  const target = error.target ?? error.targetPath ?? input?.path ?? "";
+  const reason = error.reason ?? blocking?.message ?? error.message ?? "需要确认后继续";
+  return {
+    toolName,
+    input,
+    definition,
+    decision: {
+      decision: "ask",
+      reason,
+      sensitive: true,
+      outsideWorkspace: false,
+      targetPath: target,
+      resolvedPath: target,
+      approvalKey: error.approvalKey,
+      hook: blocking?.hook ?? null,
+      hookEvent: blocking?.event ?? "tool.before",
+      taxamask: error.taxamask ?? null
+    }
   };
 }
 

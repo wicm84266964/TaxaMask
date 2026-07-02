@@ -75,7 +75,7 @@ try:
         sample_volume_values,
     )
     from AntSleap.core.tif_local_axis_ai import export_local_axis_training_manifest
-    from AntSleap.core.tif_local_axis_reslice import align_editable_axis_to_reference_plane, compute_local_frame, create_editable_axis_from_source, export_part_reslice, source_z_axis_for_part
+    from AntSleap.core.tif_local_axis_reslice import align_editable_axis_to_reference_plane, compute_local_frame, create_editable_axis_from_source, export_part_reslice, local_axis_output_shape_for_source_bbox, source_point_to_reslice_point, source_z_axis_for_part
     from AntSleap.ui.style import get_theme_config, normalize_theme
     from AntSleap.ui.tif_gpu_volume_canvas import (
         GPU_VOLUME_MAX_RAY_STEPS,
@@ -123,7 +123,7 @@ except ModuleNotFoundError as exc:
         sample_volume_values,
     )
     from core.tif_local_axis_ai import export_local_axis_training_manifest
-    from core.tif_local_axis_reslice import align_editable_axis_to_reference_plane, compute_local_frame, create_editable_axis_from_source, export_part_reslice, source_z_axis_for_part
+    from core.tif_local_axis_reslice import align_editable_axis_to_reference_plane, compute_local_frame, create_editable_axis_from_source, export_part_reslice, local_axis_output_shape_for_source_bbox, source_point_to_reslice_point, source_z_axis_for_part
     from ui.style import get_theme_config, normalize_theme
     from ui.tif_gpu_volume_canvas import (
         GPU_VOLUME_MAX_RAY_STEPS,
@@ -193,6 +193,9 @@ def _tif_workbench_theme(theme="dark"):
         "border": c["border"],
         "border_strong": c["border_strong"],
         "glow_border": c["glow_border"],
+        "scrollbar_track": "#EEF4FA" if is_light else "#0B1424",
+        "scrollbar_thumb": c["border_strong"],
+        "scrollbar_thumb_hover": "#9FB4C8" if is_light else c["text_dim"],
         "selection": c["selection"],
         "selection_text": c["text_main"],
         "accent": c["accent"],
@@ -6387,6 +6390,55 @@ class TifWorkbenchWidget(QWidget):
                 background: transparent;
                 border: none;
             }
+            QScrollArea#tifInspectorScroll QScrollBar:vertical,
+            QTextEdit#tifLogConsole QScrollBar:vertical {
+                background: {t['scrollbar_track']};
+                border: none;
+                border-radius: 5px;
+                margin: 0px;
+                width: 10px;
+            }
+            QScrollArea#tifInspectorScroll QScrollBar::handle:vertical,
+            QTextEdit#tifLogConsole QScrollBar::handle:vertical {
+                background: {t['scrollbar_thumb']};
+                border: 2px solid {t['scrollbar_track']};
+                border-radius: 5px;
+                min-height: 22px;
+            }
+            QScrollArea#tifInspectorScroll QScrollBar::handle:vertical:hover,
+            QTextEdit#tifLogConsole QScrollBar::handle:vertical:hover {
+                background: {t['scrollbar_thumb_hover']};
+            }
+            QScrollArea#tifInspectorScroll QScrollBar:horizontal,
+            QTextEdit#tifLogConsole QScrollBar:horizontal {
+                background: {t['scrollbar_track']};
+                border: none;
+                border-radius: 5px;
+                height: 10px;
+                margin: 0px;
+            }
+            QScrollArea#tifInspectorScroll QScrollBar::handle:horizontal,
+            QTextEdit#tifLogConsole QScrollBar::handle:horizontal {
+                background: {t['scrollbar_thumb']};
+                border: 2px solid {t['scrollbar_track']};
+                border-radius: 5px;
+                min-width: 22px;
+            }
+            QScrollArea#tifInspectorScroll QScrollBar::handle:horizontal:hover,
+            QTextEdit#tifLogConsole QScrollBar::handle:horizontal:hover {
+                background: {t['scrollbar_thumb_hover']};
+            }
+            QScrollArea#tifInspectorScroll QScrollBar::add-line,
+            QScrollArea#tifInspectorScroll QScrollBar::sub-line,
+            QScrollArea#tifInspectorScroll QScrollBar::add-page,
+            QScrollArea#tifInspectorScroll QScrollBar::sub-page,
+            QTextEdit#tifLogConsole QScrollBar::add-line,
+            QTextEdit#tifLogConsole QScrollBar::sub-line,
+            QTextEdit#tifLogConsole QScrollBar::add-page,
+            QTextEdit#tifLogConsole QScrollBar::sub-page {
+                background: transparent;
+                border: none;
+            }
             QLabel#tifPanelTitle {
                 color: {t['text']};
                 font-weight: 700;
@@ -7079,7 +7131,6 @@ class TifWorkbenchWidget(QWidget):
             self.current_reslice_id = str(selected_reslice_id or "")
             self._clear_local_axis_draft_if_part_changed(specimen_id, self.current_part_id)
             if self.current_reslice_id and self.local_axis_draft is not None:
-                self.local_axis_draft = None
                 self._set_local_axis_status(tt("Selected saved reslice is read-only. Return to the part volume to edit axes or export another reslice.", self.lang))
             if self.current_reslice_id and hasattr(self, "volume_local_axes_check"):
                 self.volume_local_axes_check.setChecked(True)
@@ -7831,6 +7882,8 @@ class TifWorkbenchWidget(QWidget):
         draft = self.local_axis_draft if isinstance(self.local_axis_draft, dict) else None
         if draft is None:
             return None
+        if self.current_reslice_id:
+            return None
         if str(draft.get("specimen_id", "")) != str(self.current_specimen_id or ""):
             return None
         if str(draft.get("part_id", "")) != str(self.current_part_id or ""):
@@ -8146,6 +8199,46 @@ class TifWorkbenchWidget(QWidget):
         center_x = width / 2.0 + float(self._volume_pan_x) * pan_scale
         center_y = height / 2.0 - float(self._volume_pan_y) * pan_scale
         return [float(rotated[0] * scale + center_x), float(-rotated[1] * scale + center_y)]
+
+    def _local_axis_source_point_for_current_reslice(self, point_zyx, saved_reslice=None):
+        if not self.current_reslice_id or not point_zyx:
+            return point_zyx
+        record = saved_reslice if isinstance(saved_reslice, dict) else self._current_part_reslice_record()
+        if not isinstance(record, dict):
+            return point_zyx
+        frame = record.get("local_frame") if isinstance(record.get("local_frame"), dict) else {}
+        params = record.get("reslice_params") if isinstance(record.get("reslice_params"), dict) else {}
+        if not frame or not params:
+            return point_zyx
+        try:
+            return source_point_to_reslice_point(point_zyx, frame, params)
+        except Exception:
+            return point_zyx
+
+    def _local_axis_axis_for_current_reslice(self, axis, saved_reslice=None):
+        if not isinstance(axis, dict):
+            return {}
+        if not self.current_reslice_id:
+            return axis
+        converted = dict(axis)
+        for key in ("start_zyx", "end_zyx"):
+            if axis.get(key):
+                converted[key] = self._local_axis_source_point_for_current_reslice(axis.get(key), saved_reslice=saved_reslice)
+        return converted
+
+    def _local_axis_roll_for_current_reslice(self, roll, saved_reslice=None):
+        if not isinstance(roll, dict):
+            return {}
+        if not self.current_reslice_id:
+            return roll
+        converted = dict(roll)
+        for key in ("point_a", "point_b", "point_c"):
+            point = roll.get(key) if isinstance(roll.get(key), dict) else {}
+            if point.get("zyx"):
+                converted_point = dict(point)
+                converted_point["zyx"] = self._local_axis_source_point_for_current_reslice(point.get("zyx"), saved_reslice=saved_reslice)
+                converted[key] = converted_point
+        return converted
 
     def _local_axis_projection_context(self):
         shape = tuple(int(value) for value in getattr(self.image_volume, "shape", ()) or ())
@@ -8559,6 +8652,7 @@ class TifWorkbenchWidget(QWidget):
             return []
         source_shape, spacing_zyx = self._volume_source_geometry()
         overlays = []
+        saved_reslice = None
 
         def add_axis(start, end, label, color, width=2, label_anchor="end", label_offset=(8, -8), label_position="right", role="reference"):
             start_xy = self._project_zyx_to_volume_xy(start, shape, source_shape=source_shape, spacing_zyx=spacing_zyx)
@@ -8591,6 +8685,7 @@ class TifWorkbenchWidget(QWidget):
                     return []
 
         source_z = saved_reslice_source.get("source_axis") if isinstance(saved_reslice_source.get("source_axis"), dict) else self._source_z_axis_for_current_part()
+        source_z = self._local_axis_axis_for_current_reslice(source_z, saved_reslice=saved_reslice)
         add_axis(
             source_z.get("start_zyx"),
             source_z.get("end_zyx"),
@@ -8614,6 +8709,7 @@ class TifWorkbenchWidget(QWidget):
                 or saved_reslice_source.get("initial_editable_axis")
                 or {}
             )
+        editable = self._local_axis_axis_for_current_reslice(editable, saved_reslice=saved_reslice)
         if editable.get("start_zyx") and editable.get("end_zyx"):
             add_axis(
                 editable.get("start_zyx"),
@@ -8627,8 +8723,9 @@ class TifWorkbenchWidget(QWidget):
                 role="editable_output",
             )
         roll = (draft or {}).get("roll_reference") if isinstance(draft, dict) else {}
-        if not roll and isinstance(saved_reslice_frame, dict) and not self.current_reslice_id:
+        if not roll and isinstance(saved_reslice_frame, dict):
             roll = saved_reslice_frame.get("roll_reference") if isinstance(saved_reslice_frame.get("roll_reference"), dict) else {}
+        roll = self._local_axis_roll_for_current_reslice(roll, saved_reslice=saved_reslice)
         point_a = roll.get("point_a") if isinstance(roll, dict) and isinstance(roll.get("point_a"), dict) else {}
         point_b = roll.get("point_b") if isinstance(roll, dict) and isinstance(roll.get("point_b"), dict) else {}
         point_c = roll.get("point_c") if isinstance(roll, dict) and isinstance(roll.get("point_c"), dict) else {}
@@ -9506,7 +9603,7 @@ class TifWorkbenchWidget(QWidget):
     def rotate_volume_preview(self, dx, dy):
         self._start_volume_interaction()
         self._volume_yaw = (self._volume_yaw + float(dx) * 0.6) % 360.0
-        self._volume_pitch = max(-85.0, min(85.0, self._volume_pitch + float(dy) * 0.45))
+        self._volume_pitch = max(-85.0, min(85.0, self._volume_pitch - float(dy) * 0.45))
         self._request_volume_interaction_render()
 
     def pan_volume_preview(self, dx, dy):
@@ -10540,6 +10637,26 @@ class TifWorkbenchWidget(QWidget):
         roi_shape = tuple(int(value) for value in getattr(self, "_volume_roi_preview_source_shape", ()) or ())
         if len(roi_shape) == 3 and min(roi_shape) > 0:
             shape = roi_shape
+        if self.current_volume_scope == "part" and self.current_reslice_id:
+            reslice = self._current_part_reslice_record()
+            if isinstance(reslice, dict):
+                outputs = reslice.get("outputs") if isinstance(reslice.get("outputs"), dict) else {}
+                params = reslice.get("reslice_params") if isinstance(reslice.get("reslice_params"), dict) else {}
+                record_shape = outputs.get("image_shape_zyx") or params.get("output_shape_zyx") or []
+                try:
+                    record_shape = tuple(int(value) for value in record_shape)
+                except (TypeError, ValueError):
+                    record_shape = ()
+                if len(record_shape) == 3 and min(record_shape) > 0:
+                    shape = record_shape
+                record_spacing = params.get("output_spacing_zyx") or []
+                try:
+                    record_spacing = tuple(float(value) for value in record_spacing)
+                except (TypeError, ValueError):
+                    record_spacing = ()
+                if len(record_spacing) == 3 and min(record_spacing) > 0:
+                    spacing = record_spacing
+                return shape, spacing
         if self.current_volume_scope == "part":
             record = ((self.current_part or {}).get("image") or {})
         else:
@@ -11533,8 +11650,9 @@ class TifWorkbenchWidget(QWidget):
         frame = self._refresh_local_axis_frame(draft)
         if not isinstance(frame, dict):
             raise ValueError(tt("Local frame is not ready: {0}", self.lang).format(draft.get("local_frame_error") or "missing roll reference"))
-        shape = [int(value) for value in getattr(self.image_volume, "shape", ())]
         spacing = self._local_axis_spacing_zyx()
+        source_shape = [int(value) for value in getattr(self.image_volume, "shape", ())]
+        output_shape = local_axis_output_shape_for_source_bbox(source_shape, frame, output_spacing_zyx=spacing)
         trainable = bool(getattr(self, "local_axis_trainable_check", None) and self.local_axis_trainable_check.isChecked())
         source_proposal_id = str(draft.get("source_proposal_id") or ((draft.get("editable_axis") or {}).get("source_proposal_id") or ""))
         training_source = "manual_confirmed"
@@ -11553,9 +11671,10 @@ class TifWorkbenchWidget(QWidget):
             "roll_reference": dict(frame.get("roll_reference") or draft.get("roll_reference") or {}),
             "reference_plane": reference_plane,
             "reslice_params": {
-                "output_shape_zyx": shape,
+                "output_shape_zyx": output_shape,
                 "output_spacing_zyx": spacing,
                 "image_interpolation": "linear",
+                "coverage": "full_source_part_bbox",
             },
             "export_mask": True,
             "training": {
@@ -11571,6 +11690,7 @@ class TifWorkbenchWidget(QWidget):
                 "source_model_version": str(draft.get("source_model_version") or ""),
                 "source_interaction": "3d_part_preview_clip_plane",
                 "reference_plane_source": "manual_three_point_plane" if reference_plane else "",
+                "reslice_coverage": "full_source_part_bbox",
             },
         }
 
@@ -11660,7 +11780,6 @@ class TifWorkbenchWidget(QWidget):
         self._set_local_axis_status(message)
         self.training_status_label.setText(message)
         self.log(message)
-        self.local_axis_draft = None
         self._local_axis_pick_target = ""
         self._local_axis_roll_pick_target = ""
         self.refresh_project()

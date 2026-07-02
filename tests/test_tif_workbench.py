@@ -255,6 +255,10 @@ class TifWorkbenchTests(unittest.TestCase):
             self.assertIn("#F5F8FC", light_style)
             self.assertIn("#FFFFFF", light_style)
             self.assertIn(_tif_canvas_background("light"), light_style)
+            self.assertIn("QTextEdit#tifLogConsole QScrollBar:vertical", light_style)
+            self.assertIn("QScrollArea#tifInspectorScroll QScrollBar:vertical", light_style)
+            self.assertIn("#EEF4FA", light_style)
+            self.assertIn("#B9CADB", light_style)
             self.assertEqual(widget.canvas.current_theme, "light")
             self.assertEqual(widget.volume_canvas.current_theme, "light")
             self.assertNotIn("#07090A", light_style)
@@ -524,7 +528,10 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertEqual(widget.current_reslice_id, "head_axis_second")
                 np.testing.assert_array_equal(np.asarray(widget.image_volume), tifffile.imread(second_result["image_path"]))
                 overlays = widget._local_axis_volume_overlays()
-                self.assertEqual([item["label"] for item in overlays], ["source Z", "output Z"])
+                labels = [item["label"] for item in overlays]
+                self.assertIn("source Z", labels)
+                self.assertIn("output Z", labels)
+                self.assertIn("Roll reference", labels)
                 self.assertIn("Reslice ID: head_axis_second", widget.metadata_label.text())
             finally:
                 widget.close_project()
@@ -1908,8 +1915,13 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertEqual(record["training_sample"]["final_editable_axis"]["role"], "editable_output_axis")
                 self.assertEqual(record["training_sample"]["roll_reference_point_pair"]["point_a"]["role"], "roll_reference_a")
                 self.assertEqual(record["training_sample"]["origin_zyx"], expected_origin)
-                self.assertEqual(record["training_sample"]["outputs"]["image_shape_zyx"], [4, 6, 6])
-                self.assertIsNone(widget.local_axis_draft)
+                output_shape = record["training_sample"]["outputs"]["image_shape_zyx"]
+                self.assertEqual(output_shape, record["training_sample"]["reslice_params"]["output_shape_zyx"])
+                self.assertGreaterEqual(output_shape[0], 4)
+                self.assertGreaterEqual(output_shape[1], 6)
+                self.assertGreaterEqual(output_shape[2], 6)
+                self.assertIsNotNone(widget.local_axis_draft)
+                self.assertIsNone(widget._current_local_axis_draft())
                 self.assertEqual(widget.current_reslice_id, record["reslice_id"])
                 self.assertTrue(Path(result["metadata_path"]).exists())
                 self.assertTrue(Path(result["image_path"]).exists())
@@ -1992,7 +2004,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.close_project()
                 widget.deleteLater()
 
-    def test_selected_saved_reslice_is_read_only_and_does_not_draw_part_space_overlay(self):
+    def test_selected_saved_reslice_is_read_only_and_draws_saved_axis_overlay(self):
         with tempfile.TemporaryDirectory() as tmp:
             widget = self._make_volume_widget(Path(tmp), z_count=5)
             try:
@@ -2004,22 +2016,32 @@ class TifWorkbenchTests(unittest.TestCase):
                 saved_axis = dict(draft["editable_axis"])
                 saved_axis["start_zyx"] = [0.0, 1.0, 1.0]
                 saved_axis["end_zyx"] = [0.0, 6.0, 6.0]
+                saved_image_rel = "specimens/01-0101-21/parts/head/reslices/saved_axis/image.tif"
+                saved_image_abs = Path(tmp) / "viewer" / saved_image_rel
+                saved_image_abs.parent.mkdir(parents=True, exist_ok=True)
+                tifffile.imwrite(saved_image_abs, np.zeros((4, 6, 6), dtype=np.uint8), photometric="minisblack")
                 widget.project.add_part_reslice(
                     "01-0101-21",
                     "head",
                     {
                         "reslice_id": "saved_axis",
-                        "source": {"editable_axis": saved_axis},
+                        "image_path": saved_image_rel,
+                        "source": {
+                            "source_axis": draft["source_axis"],
+                            "editable_axis": saved_axis,
+                        },
                         "local_frame": {
                             "origin_zyx": [2.0, 3.0, 3.0],
                             "x_axis": [1.0, 0.0, 0.0],
                             "y_axis": [0.0, 1.0, 0.0],
                             "z_axis": [0.0, 0.0, 1.0],
+                            "spacing_zyx": [1.0, 1.0, 1.0],
                             "roll_reference": {
                                 "point_a": {"role": "roll_reference_a", "zyx": [1.0, 2.0, 2.0]},
                                 "point_b": {"role": "roll_reference_b", "zyx": [1.0, 4.0, 4.0]},
                             },
                         },
+                        "reslice_params": {"output_shape_zyx": [4, 6, 6], "output_spacing_zyx": [1.0, 1.0, 1.0]},
                     },
                     save=False,
                 )
@@ -2028,8 +2050,13 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.volume_local_axes_check.setChecked(True)
                 overlays = widget._local_axis_volume_overlays()
 
-                self.assertIsNone(widget.local_axis_draft)
-                self.assertEqual(overlays, [])
+                self.assertIsNotNone(widget.local_axis_draft)
+                self.assertIsNone(widget._current_local_axis_draft())
+                labels = [item.get("label") for item in overlays]
+                self.assertIn("source Z", labels)
+                self.assertIn("output Z", labels)
+                self.assertIn("Roll reference A", labels)
+                self.assertIn("Roll reference B", labels)
                 self.assertFalse(widget.btn_copy_source_z_axis.isEnabled())
                 self.assertFalse(widget.btn_local_axis_reslice.isEnabled())
                 self.assertFalse(widget.local_axis_trainable_check.isEnabled())
@@ -3282,8 +3309,10 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertIn("0%", widget.volume_render_status_label.toolTip())
 
                 old_yaw = widget._volume_yaw
+                old_pitch = widget._volume_pitch
                 widget.rotate_volume_preview(25, -10)
                 self.assertNotEqual(widget._volume_yaw, old_yaw)
+                self.assertGreater(widget._volume_pitch, old_pitch)
                 self.assertEqual(widget._volume_render_mode, "drag")
                 self.assertIn("拖动预览", widget.volume_canvas_overlay_text())
                 self.assertIn("纹理 640", widget.volume_canvas_overlay_text())

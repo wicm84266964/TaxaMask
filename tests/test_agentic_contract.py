@@ -1,6 +1,9 @@
 import json
+import shutil
 import subprocess
 import sys
+import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -46,6 +49,70 @@ class AgenticContractTests(unittest.TestCase):
         self.assertIn("{db_artifacts_dir}/review_batches", stages["stage_20_figure_extraction"]["outputs"])
         self.assertEqual(stages["stage_20_figure_extraction"]["title"], "Figure extraction and multimodal review")
         self.assertNotIn("triptych evidence", json.dumps(payload, ensure_ascii=False).lower())
+
+    def test_ant_code_source_write_hook_requests_dashboard_approval(self):
+        if shutil.which("node") is None:
+            self.skipTest("Node.js is required for Ant-Code runtime approval test")
+        script = textwrap.dedent(
+            f"""
+            import assert from "node:assert/strict";
+            import fs from "node:fs/promises";
+            import os from "node:os";
+            import path from "node:path";
+            import {{ createToolRuntime }} from {json.dumps((PROJECT_ROOT / "vendor" / "ant-code" / "src" / "tools" / "runtime.js").resolve().as_uri())};
+
+            const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "ant-code-source-approval-"));
+            await fs.mkdir(path.join(cwd, "AntSleap", "ui"), {{ recursive: true }});
+            const target = "AntSleap/ui/example.py";
+            const approvals = [];
+            const runtime = createToolRuntime({{
+              cwd,
+              config: {{
+                hooks: {{
+                  enabled: true,
+                  events: {{
+                    "tool.before": [
+                      {{
+                        name: "taxamask-source-readonly",
+                        type: "builtin",
+                        builtin: "denyTaxaMaskSourceWrites",
+                        blocking: true,
+                        managed: true,
+                        when: {{ tools: ["write_file"] }}
+                      }}
+                    ]
+                  }}
+                }}
+              }},
+              policy: {{ workspace: cwd, approvals: {{ workspaceWrites: true }} }},
+              hooksTrusted: true,
+              approve: async (request) => {{
+                approvals.push(request);
+                return true;
+              }}
+            }});
+
+            const result = await runtime.execute("write_file", {{ path: target, content: "value = 1\\n" }});
+            assert.equal(result.ok, true);
+            assert.equal(approvals.length, 1);
+            assert.equal(approvals[0].toolName, "write_file");
+            assert.equal(approvals[0].decision.sensitive, true);
+            assert.match(approvals[0].decision.reason, /TaxaMask source development permission/);
+            assert.equal(await fs.readFile(path.join(cwd, target), "utf8"), "value = 1\\n");
+            """
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            script_path = Path(tmp) / "runtime_approval_check.mjs"
+            script_path.write_text(script, encoding="utf-8")
+            result = subprocess.run(
+                ["node", str(script_path)],
+                cwd=PROJECT_ROOT,
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
 
     def test_generated_agentic_artifacts_gate_downstream_stages(self):
         contract_path = PROJECT_ROOT / "AntSleap" / "config" / "agentic_pipeline_contract.json"

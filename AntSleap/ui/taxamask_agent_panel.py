@@ -634,6 +634,26 @@ exec "$@"
             accent_color = c["accent"]
             send_background = c["accent"]
             send_text = "#FFFFFF"
+            code_background = "#F2F6FB"
+            code_text = c["text_main"]
+            progress_track = "#D8E4EF"
+            summary_background = "#F8FBFE"
+            summary_item_background = "#FFFFFF"
+            scrollbar_track = "#EEF4FA"
+            scrollbar_thumb = c["border_strong"]
+            scrollbar_thumb_hover = "#9FB4C8"
+            live_chip_background = "#F8FBFE"
+            live_subagent_background = "#FFFFFF"
+            live_chip_border = c["border"]
+            live_cancel_background = "#FFF4F4"
+            live_cancel_border = "#F8B4B4"
+            option_background = "#F8FBFE"
+            option_hover_background = "#EEF4FA"
+            option_selected_background = c["selection"]
+            warning_panel_background = "#FFF8E8"
+            warning_panel_border = "#E9C978"
+            danger_soft_background = "#FFF4F4"
+            danger_soft_border = "#F8B4B4"
         else:
             page_background = (
                 "radial-gradient(circle at 18% 0%, rgba(111, 143, 184, 0.10), transparent 34%), "
@@ -663,6 +683,26 @@ exec "$@"
             accent_color = c["accent"]
             send_background = "linear-gradient(135deg, #6F8FB8, #405F88)"
             send_text = "#F4F8FF"
+            code_background = "rgba(8, 13, 23, 0.52)"
+            code_text = c["text_main"]
+            progress_track = "rgba(125, 149, 183, 0.28)"
+            summary_background = "rgba(32, 32, 32, 0.5)"
+            summary_item_background = "rgba(24, 24, 24, 0.42)"
+            scrollbar_track = "rgba(7, 12, 22, 0.90)"
+            scrollbar_thumb = "rgba(127, 154, 191, 0.55)"
+            scrollbar_thumb_hover = "rgba(137, 167, 204, 0.72)"
+            live_chip_background = "rgba(45, 45, 45, 0.86)"
+            live_subagent_background = "rgba(45, 45, 45, 0.72)"
+            live_chip_border = "rgba(255, 255, 255, 0.06)"
+            live_cancel_background = "rgba(255, 133, 133, 0.08)"
+            live_cancel_border = "rgba(255, 133, 133, 0.34)"
+            option_background = "rgba(27, 27, 27, 0.70)"
+            option_hover_background = "rgba(49, 50, 50, 0.92)"
+            option_selected_background = "rgba(49, 50, 50, 0.92)"
+            warning_panel_background = "#29251d"
+            warning_panel_border = "#5b4b2a"
+            danger_soft_background = "rgba(255, 133, 133, 0.08)"
+            danger_soft_border = "rgba(255, 133, 133, 0.34)"
         return f"""
       :root {{
         --bg: {c['bg_main']} !important;
@@ -689,6 +729,35 @@ exec "$@"
         background: {page_background} !important;
         color: {text_color} !important;
         overflow: hidden !important;
+      }}
+      html.taxamask-embed,
+      .taxamask-embed-body,
+      .taxamask-embed * {{
+        scrollbar-color: {scrollbar_thumb} {scrollbar_track} !important;
+        scrollbar-width: thin !important;
+      }}
+      html.taxamask-embed::-webkit-scrollbar,
+      .taxamask-embed-body::-webkit-scrollbar,
+      .taxamask-embed *::-webkit-scrollbar {{
+        height: 10px !important;
+        width: 10px !important;
+      }}
+      html.taxamask-embed::-webkit-scrollbar-track,
+      .taxamask-embed-body::-webkit-scrollbar-track,
+      .taxamask-embed *::-webkit-scrollbar-track {{
+        background: {scrollbar_track} !important;
+      }}
+      html.taxamask-embed::-webkit-scrollbar-thumb,
+      .taxamask-embed-body::-webkit-scrollbar-thumb,
+      .taxamask-embed *::-webkit-scrollbar-thumb {{
+        background: {scrollbar_thumb} !important;
+        border: 2px solid {scrollbar_track} !important;
+        border-radius: 999px !important;
+      }}
+      html.taxamask-embed::-webkit-scrollbar-thumb:hover,
+      .taxamask-embed-body::-webkit-scrollbar-thumb:hover,
+      .taxamask-embed *::-webkit-scrollbar-thumb:hover {{
+        background: {scrollbar_thumb_hover} !important;
       }}
       .taxamask-embed .app-shell,
       .app-shell {{
@@ -787,6 +856,285 @@ exec "$@"
       .taxamask-embed .status-pill {{
         background: {panel_background} !important;
         border-color: {soft_border} !important;
+      }}
+      .taxamask-embed .live-status.has-background-subagents,
+      .taxamask-embed .live-chip,
+      .taxamask-embed .background-subagent-chip {{
+        background: {live_chip_background} !important;
+        border-color: {live_chip_border} !important;
+        color: {muted_color} !important;
+      }}
+      .taxamask-embed .live-status.has-background-subagents .live-main,
+      .taxamask-embed .live-subagent-head,
+      .taxamask-embed .live-subagent-title {{
+        color: {text_color} !important;
+      }}
+      .taxamask-embed .live-status.has-background-subagents .live-main::after,
+      .taxamask-embed .live-subagent-meta,
+      .taxamask-embed .live-subagent-summary {{
+        color: {muted_color} !important;
+      }}
+      .taxamask-embed .live-subagent-row {{
+        background: {live_subagent_background} !important;
+        border-color: {live_chip_border} !important;
+        color: {muted_color} !important;
+      }}
+      .taxamask-embed .chip-pulse,
+      .taxamask-embed .live-pulse {{
+        background: {c['success']} !important;
+      }}
+      .taxamask-embed .background-subagent-chip.waiting .chip-pulse,
+      .taxamask-embed .background-subagent-chip.stale .chip-pulse,
+      .taxamask-embed .live-subagent-row.waiting .chip-pulse,
+      .taxamask-embed .live-subagent-row.stale .chip-pulse {{
+        background: {c['warning']} !important;
+      }}
+      .taxamask-embed .background-subagent-chip.lost .chip-pulse,
+      .taxamask-embed .live-subagent-row.lost .chip-pulse {{
+        background: {c['error']} !important;
+      }}
+      .taxamask-embed .live-subagent-cancel {{
+        background: {live_cancel_background} !important;
+        border-color: {live_cancel_border} !important;
+        color: {c['error']} !important;
+      }}
+      .taxamask-embed .question-panel {{
+        background: {panel_background} !important;
+        border-color: {soft_border} !important;
+        color: {text_color} !important;
+      }}
+      .taxamask-embed .question-read-pane,
+      .taxamask-embed .question-prompt,
+      .taxamask-embed .question-actions {{
+        background: transparent !important;
+        color: {text_color} !important;
+      }}
+      .taxamask-embed .question-title,
+      .taxamask-embed .approval-title,
+      .taxamask-embed .trust-title,
+      .taxamask-embed .context-title,
+      .taxamask-embed .queue-title {{
+        color: {accent_color} !important;
+      }}
+      .taxamask-embed .question-copy,
+      .taxamask-embed .question-prompt-summary,
+      .taxamask-embed .trust-copy,
+      .taxamask-embed .context-copy,
+      .taxamask-embed .queue-copy,
+      .taxamask-embed .queue-more,
+      .taxamask-embed .guide-feedback small,
+      .taxamask-embed .guide-preview {{
+        color: {muted_color} !important;
+      }}
+      .taxamask-embed .question-choice,
+      .taxamask-embed .queue-item,
+      .taxamask-embed .queue-item span,
+      .taxamask-embed .guide-feedback {{
+        background: {option_background} !important;
+        border-color: {soft_border} !important;
+        color: {c['text_soft']} !important;
+      }}
+      .taxamask-embed .question-choice:hover {{
+        background: {option_hover_background} !important;
+        border-color: {workspace_border} !important;
+        color: {text_color} !important;
+      }}
+      .taxamask-embed .question-choice.selected {{
+        background: {option_selected_background} !important;
+        border-color: {accent_color} !important;
+        color: {text_color} !important;
+      }}
+      .taxamask-embed .question-choice small,
+      .taxamask-embed .queue-item,
+      .taxamask-embed .queue-item span {{
+        color: {muted_color} !important;
+      }}
+      .taxamask-embed .question-input {{
+        background: {input_background} !important;
+        border-color: {soft_border} !important;
+        color: {text_color} !important;
+      }}
+      .taxamask-embed .question-action-buttons button,
+      .taxamask-embed .approval-actions button,
+      .taxamask-embed .trust-actions button,
+      .taxamask-embed .context-confirm-actions button,
+      .taxamask-embed .context-actions button,
+      .taxamask-embed .queue-head button {{
+        background: {summary_item_background} !important;
+        border-color: {soft_border} !important;
+        color: {text_color} !important;
+      }}
+      .taxamask-embed .question-action-buttons button[data-action="submit"],
+      .taxamask-embed .approval-actions button:not(.danger),
+      .taxamask-embed .trust-actions button,
+      .taxamask-embed .queue-head button {{
+        background: {accent_color} !important;
+        border-color: {accent_color} !important;
+        color: {send_text} !important;
+      }}
+      .taxamask-embed .approval-panel {{
+        background: {warning_panel_background} !important;
+        border-color: {warning_panel_border} !important;
+        color: {text_color} !important;
+      }}
+      .taxamask-embed .approval-preview {{
+        background: {code_background} !important;
+        border-color: {soft_border} !important;
+        color: {text_color} !important;
+      }}
+      .taxamask-embed .approval-actions button.danger,
+      .taxamask-embed .context-confirm-actions button.danger,
+      .taxamask-embed .context-actions #context-clear,
+      .taxamask-embed .live-subagent-cancel {{
+        background: {danger_soft_background} !important;
+        border-color: {danger_soft_border} !important;
+        color: {c['error']} !important;
+      }}
+      .taxamask-embed .shutdown-panel,
+      .taxamask-embed .trust-panel,
+      .taxamask-embed .context-panel,
+      .taxamask-embed .queue-panel,
+      .taxamask-embed .model-panel,
+      .taxamask-embed .model-config-card {{
+        background: {panel_background} !important;
+        border-color: {soft_border} !important;
+        color: {text_color} !important;
+      }}
+      .taxamask-embed .shutdown-title,
+      .taxamask-embed .model-panel-title,
+      .taxamask-embed .model-config-head h2,
+      .taxamask-embed .model-option-name,
+      .taxamask-embed .gateway-profile-main {{
+        color: {text_color} !important;
+      }}
+      .taxamask-embed .shutdown-copy,
+      .taxamask-embed .model-panel-subtitle,
+      .taxamask-embed .model-config-kicker,
+      .taxamask-embed .model-config-grid span,
+      .taxamask-embed .model-config-toggles label,
+      .taxamask-embed .model-config-note,
+      .taxamask-embed .model-panel-empty,
+      .taxamask-embed .model-option-id,
+      .taxamask-embed .model-option-agent,
+      .taxamask-embed .gateway-profile-meta,
+      .taxamask-embed .model-delete-confirm-copy {{
+        color: {muted_color} !important;
+      }}
+      .taxamask-embed .model-agent-sync,
+      .taxamask-embed .gateway-profile-option,
+      .taxamask-embed .model-option-row,
+      .taxamask-embed .model-option-tags span {{
+        background: {option_background} !important;
+        border-color: {soft_border} !important;
+        color: {c['text_soft']} !important;
+      }}
+      .taxamask-embed .gateway-profile-option:hover,
+      .taxamask-embed .gateway-profile-option.active,
+      .taxamask-embed .model-option-row:hover,
+      .taxamask-embed .model-option-row.active {{
+        background: {option_hover_background} !important;
+        border-color: {workspace_border} !important;
+      }}
+      .taxamask-embed .model-option-row.confirming-delete {{
+        border-color: {danger_soft_border} !important;
+      }}
+      .taxamask-embed .model-option,
+      .taxamask-embed .model-status-caret {{
+        background: transparent !important;
+        border-color: transparent !important;
+        color: {text_color} !important;
+      }}
+      .taxamask-embed .model-manage-button,
+      .taxamask-embed .model-edit-button,
+      .taxamask-embed .model-delete-button,
+      .taxamask-embed .model-config-actions button,
+      .taxamask-embed .shutdown-actions button {{
+        background: {summary_item_background} !important;
+        border-color: {soft_border} !important;
+        color: {text_color} !important;
+      }}
+      .taxamask-embed .model-delete-button:hover,
+      .taxamask-embed .model-delete-button.confirm,
+      .taxamask-embed .shutdown-actions #shutdown-confirm {{
+        background: {danger_soft_background} !important;
+        border-color: {danger_soft_border} !important;
+        color: {c['error']} !important;
+      }}
+      .taxamask-embed .model-config-actions button[type="submit"] {{
+        background: {accent_color} !important;
+        border-color: {accent_color} !important;
+        color: {send_text} !important;
+      }}
+      .taxamask-embed .model-config-grid input,
+      .taxamask-embed .model-config-grid select,
+      .taxamask-embed .model-config-grid select option {{
+        background: {input_background} !important;
+        border-color: {soft_border} !important;
+        color: {text_color} !important;
+      }}
+      .taxamask-embed .model-config-backdrop {{
+        background: rgba(16, 32, 51, 0.18) !important;
+      }}
+      .taxamask-embed .draft-summary,
+      .taxamask-embed .activity-summary {{
+        background: {summary_background} !important;
+        border-color: {soft_border} !important;
+        color: {muted_color} !important;
+      }}
+      .taxamask-embed .draft-summary summary,
+      .taxamask-embed .activity-summary summary {{
+        background: transparent !important;
+        color: {text_color} !important;
+      }}
+      .taxamask-embed .draft-summary summary span:nth-child(2),
+      .taxamask-embed .draft-summary-title,
+      .taxamask-embed .summary-row {{
+        color: {text_color} !important;
+      }}
+      .taxamask-embed .draft-summary-meta,
+      .taxamask-embed .draft-summary-note {{
+        color: {muted_color} !important;
+      }}
+      .taxamask-embed .draft-summary-list,
+      .taxamask-embed .activity-summary-list {{
+        border-color: {soft_border} !important;
+      }}
+      .taxamask-embed .draft-summary-item {{
+        background: {summary_item_background} !important;
+        border-color: {soft_border} !important;
+      }}
+      .taxamask-embed .activity-card pre,
+      .taxamask-embed .activity-card code,
+      .taxamask-embed .message pre,
+      .taxamask-embed .message code,
+      .taxamask-embed .tool-preview,
+      .taxamask-embed .tool-output,
+      .taxamask-embed .tool-result,
+      .taxamask-embed .code-preview,
+      .taxamask-embed .approval-preview,
+      .taxamask-embed pre,
+      .taxamask-embed code {{
+        background: {code_background} !important;
+        color: {code_text} !important;
+        border-color: {soft_border} !important;
+      }}
+      .taxamask-embed .activity-detail,
+      .taxamask-embed .activity-meta,
+      .taxamask-embed .muted,
+      .taxamask-embed .hint,
+      .taxamask-embed .composer-footer {{
+        color: {muted_color} !important;
+      }}
+      .taxamask-embed .progress-track,
+      .taxamask-embed .task-progress,
+      .taxamask-embed .progress-bar-track {{
+        background: {progress_track} !important;
+        border-color: {soft_border} !important;
+      }}
+      .taxamask-embed .progress-bar,
+      .taxamask-embed .progress-fill,
+      .taxamask-embed .task-progress-fill {{
+        background: {accent_color} !important;
       }}
     """.rstrip()
 

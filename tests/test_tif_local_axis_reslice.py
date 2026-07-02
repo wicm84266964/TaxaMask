@@ -7,10 +7,13 @@ import numpy as np
 import tifffile
 
 from AntSleap.core.tif_local_axis_reslice import (
+    align_editable_axis_to_reference_plane,
     compute_local_frame,
     create_editable_axis_from_source,
     export_part_reslice,
+    local_axis_output_shape_for_source_bbox,
     reslice_volume,
+    source_point_to_reslice_point,
     source_z_axis_for_part,
 )
 from AntSleap.core.tif_local_axis_signal import analyze_source_z_signal, compute_source_z_signal
@@ -87,6 +90,63 @@ class TifLocalAxisResliceTests(unittest.TestCase):
         resliced = reslice_volume(volume, frame, {"output_shape_zyx": list(volume.shape)}, interpolation="nearest")
 
         np.testing.assert_array_equal(resliced, volume)
+
+    def test_three_point_alignment_preserves_axis_length_near_volume_edge(self):
+        editable = {
+            "start_zyx": [0.0, 1.5, 1.5],
+            "end_zyx": [3.0, 1.5, 1.5],
+        }
+        roll = {
+            "point_a": {"role": "roll_reference_a", "zyx": [1.5, 0.0, 0.0]},
+            "point_b": {"role": "roll_reference_b", "zyx": [1.5, 3.0, 0.0]},
+            "point_c": {"role": "reference_plane_c", "zyx": [3.0, 0.0, 3.0]},
+        }
+
+        aligned, _plane = align_editable_axis_to_reference_plane(
+            editable,
+            roll,
+            spacing_zyx=[1.0, 1.0, 1.0],
+            shape_zyx=[4, 4, 4],
+        )
+
+        original_length = np.linalg.norm(np.array(editable["end_zyx"]) - np.array(editable["start_zyx"]))
+        aligned_length = np.linalg.norm(np.array(aligned["end_zyx"]) - np.array(aligned["start_zyx"]))
+        self.assertAlmostEqual(aligned_length, original_length, places=2)
+
+    def test_output_shape_for_source_bbox_covers_rotated_part_extent(self):
+        frame = compute_local_frame(
+            [2.0, 2.0, 2.0],
+            [0.0, 2.0, 2.0],
+            [4.0, 4.0, 2.0],
+            roll_reference={
+                "point_a": {"role": "roll_point_a", "zyx": [2.0, 2.0, 0.0]},
+                "point_b": {"role": "roll_point_b", "zyx": [2.0, 2.0, 4.0]},
+            },
+            spacing_zyx=[1.0, 1.0, 1.0],
+        )
+
+        shape = local_axis_output_shape_for_source_bbox((5, 5, 5), frame, output_spacing_zyx=[1.0, 1.0, 1.0])
+
+        self.assertGreater(shape[0], 5)
+        self.assertGreaterEqual(shape[1], 5)
+        self.assertGreaterEqual(shape[2], 5)
+
+    def test_source_point_to_reslice_point_maps_origin_to_output_center(self):
+        frame = compute_local_frame(
+            [2.0, 2.0, 2.0],
+            [0.0, 2.0, 2.0],
+            [4.0, 4.0, 2.0],
+            roll_reference={
+                "point_a": {"role": "roll_point_a", "zyx": [2.0, 2.0, 0.0]},
+                "point_b": {"role": "roll_point_b", "zyx": [2.0, 2.0, 4.0]},
+            },
+            spacing_zyx=[1.0, 1.0, 1.0],
+        )
+        params = {"output_shape_zyx": [7, 9, 11], "output_spacing_zyx": [1.0, 1.0, 1.0]}
+
+        mapped = source_point_to_reslice_point(frame["origin_zyx"], frame, params)
+
+        np.testing.assert_allclose(mapped, [3.0, 4.0, 5.0], atol=1e-7)
 
     def test_export_part_reslice_writes_image_mask_metadata_and_record(self):
         with tempfile.TemporaryDirectory() as tmp:

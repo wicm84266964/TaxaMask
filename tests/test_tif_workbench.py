@@ -2090,7 +2090,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.refresh_project()
                 widget._select_volume_tree_item("01-0101-21", "part", "head")
                 self.assertIs(widget.task_tabs.currentWidget(), widget.part_task_page)
-                self.assertTrue(widget.annotation_section.isHidden())
+                self.assertFalse(widget.annotation_section.isHidden())
                 self.assertTrue(widget.part_locate_section.isHidden())
                 self.assertFalse(widget.part_mask_section.isHidden())
                 self.assertFalse(widget.part_output_section.isHidden())
@@ -5647,6 +5647,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertEqual(widget.current_volume_scope, "part")
                 self.assertEqual(widget.current_reslice_id, "")
                 self.assertIsNotNone(widget.edit_volume)
+                self.assertFalse(widget.annotation_section.isHidden())
                 self.assertTrue(widget.btn_tool_brush.isEnabled())
                 self.assertTrue(widget.btn_tool_eraser.isEnabled())
                 self.assertTrue(widget.btn_tool_lasso.isEnabled())
@@ -5656,6 +5657,19 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertTrue(widget.btn_save_edit.isEnabled())
                 self.assertFalse(widget.btn_promote.isEnabled())
                 self.assertFalse(widget.label_role_combo.isEnabled())
+                self.assertEqual(widget.annotation_tool_mode, "pan")
+                self.assertTrue(widget.btn_tool_pan.isChecked())
+
+                widget.brush_size_slider.setValue(42)
+                widget.canvas.mouseMoveEvent(
+                    FakeMouseEvent(
+                        Qt.NoButton,
+                        Qt.NoButton,
+                        widget.canvas.width() / 2,
+                        widget.canvas.height() / 2,
+                    )
+                )
+                self.assertEqual(widget.canvas._last_annotation_preview, {})
 
                 widget._set_current_material_id(2)
                 widget.slice_slider.setValue(0)
@@ -5780,8 +5794,13 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertEqual(widget.canvas._last_annotation_preview["mode"], "eraser")
                 self.assertEqual(widget.canvas._last_annotation_preview["radius"], 9.0)
 
+                widget.set_annotation_tool_mode("pan", show_message=False)
+                widget.canvas.mouseMoveEvent(FakeMouseEvent(Qt.NoButton, Qt.NoButton, x, y))
+                self.assertEqual(widget.canvas._last_annotation_preview, {})
+
                 manual_index = widget.label_role_combo.findData("manual_truth")
                 widget.label_role_combo.setCurrentIndex(manual_index)
+                widget.set_annotation_tool_mode("brush", show_message=False)
                 widget.canvas.mouseMoveEvent(FakeMouseEvent(Qt.NoButton, Qt.NoButton, x, y))
                 self.assertTrue(widget.canvas._last_annotation_preview["disabled"])
             finally:

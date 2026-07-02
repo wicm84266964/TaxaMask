@@ -3556,7 +3556,7 @@ class TifWorkbenchWidget(QWidget):
         if hasattr(self, "slice_display_section"):
             self.slice_display_section.setVisible(not is_volume)
         if hasattr(self, "annotation_section"):
-            self.annotation_section.setVisible(not is_volume and is_full)
+            self.annotation_section.setVisible(not is_volume)
         if hasattr(self, "volume_render_section"):
             self.volume_render_section.setVisible(is_volume)
         if hasattr(self, "local_axis_volume_section"):
@@ -3853,6 +3853,8 @@ class TifWorkbenchWidget(QWidget):
 
     def annotation_cursor_preview(self, pixel=None):
         mode = self.annotation_tool_mode if self.annotation_tool_mode in self._annotation_tool_modes() else "brush"
+        if mode == "pan":
+            return {}
         block_reason = ""
         if mode in {"brush", "eraser", "lasso", "rectangle", "ellipse"}:
             block_reason = self._editable_label_block_reason(require_working_edit=True)
@@ -6997,6 +6999,9 @@ class TifWorkbenchWidget(QWidget):
             self.btn_draw_part_contour.blockSignals(True)
             self.btn_draw_part_contour.setChecked(False)
             self.btn_draw_part_contour.blockSignals(False)
+            # Part review should open as inspection first; otherwise the brush
+            # radius cursor looks like a stray ROI/contour before the user edits.
+            self.set_annotation_tool_mode("pan", show_message=False)
             self.image_volume = None
             self.label_volume = None
             self.edit_volume = None

@@ -4,7 +4,7 @@
 
 [中文 README](README_zh.md)
 
-**TaxaMask** is an open-source desktop workbench for AI-assisted mask annotation of organismal body parts, taxonomic evidence review, and human-reviewed training dataset construction.
+**TaxaMask** is an open-source desktop workbench for mask annotation of external and internal biological morphological structures. It brings literature evidence, human review, AI-assisted annotation, model training, and result feedback into a traceable loop, allowing models to keep improving on real research data and gradually take on more repetitive annotation work.
 
 Originating from real-world ant taxonomy research and designed for morphology-based taxonomic groups beyond ants, TaxaMask connects taxonomic literature, specimen images, STL-rendered morphology views, AI-assisted mask drafts, human review, model training, and dataset export in one traceable pipeline. It supports Segment Anything (SAM) draft masks, Vision-Language Model (VLM) first-mile proposals, parent/child body-part annotation, and provenance-aware export to multimodal JSONL, COCO, and YOLO-style datasets.
 
@@ -20,19 +20,9 @@ TaxaMask keeps source materials, candidate images, AI drafts, human-confirmed la
 
 The public interface centers on practical workflow entries: Agent Center for local workflow help, PDF Evidence for literature material, candidate review for screening imported images, 2D/STL Morphology for reviewable mask annotation, and TIF Volume for internal 3D morphology work.
 
-## Release 2.0.1
+## Release 2.0.0
 
-TaxaMask `v2.0.1` is a focused maintenance release for the TIF/CT workbench. It keeps the `v2.0.0` main-line scope while tightening the batch TIF import, ROI location, part-volume creation, and part-mask draft cleanup workflow:
-
-- Batch TIF import remains metadata-first, and selecting a metadata-only specimen now starts working-volume generation with clearer slice-review and 3D-preview status messages.
-- Newly imported TIF specimens no longer receive a default center ROI box; part location is driven by researcher-drawn ROI rectangles on the actual slice content.
-- The visible part workflow is now Draw ROI -> optional Save ROI draft -> Confirm ROI, reducing overlap with the older Create part control.
-- ROI location supports key-slice rectangle shells in one view direction, so the initialized part mask can follow a changing head or body-part outline instead of only a rigid rectangular block.
-- ROI shell rectangles initialize the part mask but are not written into the later part-mask `contours.json`, keeping part-mask editing separate from part-location history.
-- Existing projects with legacy ROI-shell rectangles in part contours can ignore those stale key slices during auto-fill preview and clear them with the new Clear key slices action.
-- Regression coverage was added for metadata-only TIF loading, ROI key-slice drafts, ROI-to-part mask initialization, legacy ROI-shell filtering, and part-mask cleanup.
-
-TaxaMask `v2.0.0` is the main-line release that brought the established 2D/STL morphology workflow, PDF evidence tools, Agent Center, and the newer TIF/CT workbench into one maintained branch:
+TaxaMask `v2.0.0` is the main-line release that brings the established 2D/STL morphology workflow, PDF evidence tools, Agent Center, and the newer TIF/CT workbench into one maintained branch:
 
 - The 2D/STL morphology workflow remains the main route for specimen images, taxonomic plates, rendered STL views, SAM/VLM drafts, parent/child body-part annotation, model-review loops, and COCO / YOLO / JSONL export.
 - PDF evidence tools remain available for literature screening, figure/caption extraction, candidate review, and provenance-backed trait-description records.

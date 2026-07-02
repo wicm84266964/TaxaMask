@@ -20,19 +20,6 @@ TaxaMask keeps source materials, candidate images, AI drafts, human-confirmed la
 
 The public interface centers on practical workflow entries: Agent Center for local workflow help, PDF Evidence for literature material, candidate review for screening imported images, 2D/STL Morphology for reviewable mask annotation, and TIF Volume for internal 3D morphology work.
 
-## Release 2.0.0
-
-TaxaMask `v2.0.0` is the main-line release that brings the established 2D/STL morphology workflow, PDF evidence tools, Agent Center, and the newer TIF/CT workbench into one maintained branch:
-
-- The 2D/STL morphology workflow remains the main route for specimen images, taxonomic plates, rendered STL views, SAM/VLM drafts, parent/child body-part annotation, model-review loops, and COCO / YOLO / JSONL export.
-- PDF evidence tools remain available for literature screening, figure/caption extraction, candidate review, and provenance-backed trait-description records.
-- TIF/CT is promoted into `main` as an additional internal-morphology workbench for TIFF stacks, part volumes, 3D preview, and local-axis reslicing.
-- Dark Mode now uses the deeper **Deep Space Neon** palette with restrained navy and silver-blue light effects.
-- Light Mode is available as a real bright workspace theme, including refreshed Qt palettes and semantic button styles.
-- The embedded Agent Center dashboard follows the active theme, including the transcript, composer, prompt input, send button, and status chips.
-
-The preprint-submission state is preserved on the `preprint-submission` branch and in the `v1.4.0` release. New development happens on `main`.
-
 ## Core Workflows
 
 TaxaMask now has four connected research routes:
@@ -50,8 +37,9 @@ PDF evidence
 
 TIF / CT internal morphology
   -> specimen import
-  -> part ROI and key-slice masks
+  -> part ROI location
   -> part volume extraction
+  -> part mask key-slice review
   -> 3D preview and local-axis reslice export
 
 Agent Center
@@ -131,12 +119,13 @@ Current TIF/CT capabilities include:
 
 - Importing a TIFF stack as a specimen.
 - Viewing the full volume and extracted part volumes.
-- Drawing part ROIs and key-slice contours.
-- Interpolating masks between key slices.
-- Accepting part masks and writing part-volume records.
+- Drawing full-volume part ROIs from researcher-selected key-slice rectangles, then confirming the ROI to create a part volume.
+- Editing part-volume masks with rectangular key slices or freehand contours.
+- Interpolating masks between part key slices and accepting part masks.
 - GPU 3D volume preview with streamed texture building, cache reuse, clipping, transfer-function presets, themed clear colors, and section inspection.
 - ROI high-detail 3D inspection for checking local structures without editing source data.
 - Metadata-only TIF registration followed by explicit working-volume materialization for large stacks.
+- SQLite-backed TIF project indexing with volume, mask, and export data kept as sidecar files.
 - Z/Y/X slice navigation for multi-direction review.
 - Local Axis Reslice for a selected part volume.
 - Source Z-axis display as a locked reference.

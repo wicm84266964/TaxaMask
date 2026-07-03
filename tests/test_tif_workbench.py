@@ -445,6 +445,8 @@ class TifWorkbenchTests(unittest.TestCase):
                 {"reslice_id": "head_axis_001", "template_id": "head", "local_frame": frame},
             )
             exported_image = tifffile.imread(export_result["image_path"])
+            expected_reslice_shape = tuple(exported_image.shape)
+            self.assertEqual(expected_reslice_shape, (4, 4, 2))
             part_image = load_volume_sidecar(root / "reslice_tree" / manager.get_part("01-0101-reslice", "head")["image"]["path"])
             self.assertFalse(np.array_equal(exported_image, np.asarray(part_image)))
 
@@ -463,7 +465,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertEqual(widget.current_volume_scope, "part")
                 self.assertEqual(widget.current_part_id, "head")
                 self.assertEqual(widget.current_reslice_id, "head_axis_001")
-                self.assertEqual(tuple(widget.image_volume.shape), (2, 4, 4))
+                self.assertEqual(tuple(widget.image_volume.shape), expected_reslice_shape)
                 np.testing.assert_array_equal(np.asarray(widget.image_volume), exported_image)
                 self.assertFalse(np.array_equal(np.asarray(widget.image_volume), np.asarray(part_image)))
                 self.assertIn("Reslice ID: head_axis_001", widget.metadata_label.text())

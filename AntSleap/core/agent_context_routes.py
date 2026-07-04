@@ -165,11 +165,12 @@ AGENT_CONTEXT_ROUTES = {
     },
     "pdf_evidence": {
         "diagnostic_route": "pdf_evidence_context",
-        "diagnostic_focus": "PDF evidence guided workflow. Handle one stage per reply: first check key/model readiness, then screening criteria, then figure-review criteria, then run/results.",
+        "diagnostic_focus": "PDF evidence guided workflow. Handle one stage per reply: stage 0 decide whether PDFs already exist or lawful literature/PDF harvest is needed; then check key/model readiness, screening criteria, figure-review criteria, and run/results.",
         "llm_context_refs": (
             "LLM_CONTEXT_DETAILED.md -> 7. PDF Evidence Route",
             "LLM_CONTEXT_DETAILED.md -> 5. Agent Center",
             "TaxaMask使用手册.md -> 5. PDF 处理模块：从原始 PDF 到候选数据库",
+            "vendor/ant-code/config/skills/taxonomy-pdf-harvest/SKILL.md",
             ".lab-agent/skills/taxamask-pdf-evidence/SKILL.md",
         ),
         "source_code_refs": (
@@ -178,13 +179,14 @@ AGENT_CONTEXT_ROUTES = {
             "core/pdf_processor/pdf_extractor.py",
         ),
         "artifact_hints": (
-            "core_results, debug_evidence, extraction SQLite DB, candidate image paths, and evidence index reports are the relevant artifacts.",
+            "Harvest records.csv, doi_list.txt, summary.json, download_manifest.csv, harvested pdfs/, core_results, debug_evidence, extraction SQLite DB, candidate image paths, and evidence index reports are the relevant artifacts.",
         ),
         "safety_notes": COMMON_SAFETY_NOTES
         + (
+            "For PDF acquisition, use only open metadata and legally exposed PDF links. Do not use Sci-Hub, LibGen, paywall bypasses, CAPTCHA bypasses, or logged-in scraping.",
             "PDF evidence and extracted figures are candidates/provenance only; never promote them into training truth automatically.",
         ),
-        "suggested_agent_action": "Load the PDF evidence skill and stay on the current stage. Use concise requirement-confirmation questions, ask at most three items, do not dump the full workflow, and only move to the next stage after the current one is resolved.",
+        "suggested_agent_action": "First ask whether the user already has a PDF folder or needs stage 0 lawful literature/PDF harvest. If PDFs are missing, load taxonomy-pdf-harvest first; otherwise load the PDF evidence skill. Stay on the current stage, ask at most three concise requirement-confirmation questions, and move forward only after the current stage is resolved.",
     },
 }
 

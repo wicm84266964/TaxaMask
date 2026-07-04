@@ -42,6 +42,7 @@ TaxaMask now has four connected research routes:
 
 ```text
 PDF evidence
+  -> lawful open-access PDF harvest
   -> figure/caption extraction
   -> candidate review
   -> traceable literature evidence
@@ -93,13 +94,14 @@ TaxaMask includes a literature evidence route so morphology datasets can stay co
 
 Current PDF and evidence capabilities include:
 
+- Lawful open-access taxonomy PDF harvesting through an embedded Agent skill, with metadata and download manifests for source audit.
 - PDF literature screening with editable taxonomy profiles.
 - Figure and caption extraction with accepted and needs-review output folders.
 - Literature trait-description extraction into provenance-backed `taxon -> part -> description` records.
 - Candidate review before images enter a morphology project.
 - Headless tools for PDF screening, candidate generation, VLM review, and export workflows.
 
-PDF outputs are evidence and candidate material. They should not become 2D/STL training truth or TIF `manual_truth` without researcher review.
+PDF harvest and extraction outputs are evidence and candidate material. They use open metadata and legally exposed PDF links, and they should not become 2D/STL training truth or TIF `manual_truth` without researcher review.
 
 ## Body-Part Vocabulary and Adaptation
 
@@ -331,10 +333,11 @@ The internal package name `AntSleap` is kept for runtime stability and as a trib
 
 PDF evidence route:
 
-1. Configure or adapt a PDF screening profile.
-2. Extract figures, captions, and literature trait descriptions.
-3. Review accepted and needs-review outputs.
-4. Import useful candidates into TaxaMask projects.
+1. Start from an existing PDF folder, or harvest lawful open-access PDFs with metadata/download manifests.
+2. Configure or adapt a PDF screening profile.
+3. Extract figures, captions, and literature trait descriptions.
+4. Review accepted and needs-review outputs.
+5. Import useful candidates into TaxaMask projects.
 
 2D / STL morphology route:
 

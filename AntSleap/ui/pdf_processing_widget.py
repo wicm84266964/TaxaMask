@@ -189,10 +189,10 @@ TRANSLATIONS = {
         "Send a tiny text-only request to verify the text model settings before screening PDFs.": "发送一个极小的纯文本请求，在筛选 PDF 前验证文本模型配置。",
         "Send a tiny generated PNG plus text to verify the vision model settings before extracting figures.": "发送一张极小的程序生成 PNG 和文本，在提取图版前验证视觉模型配置。",
         "PDF Evidence Tools": "PDF 文献证据工具",
-        "Agent first: configure keys/models, then adapt PDF screening and figure-review rules to the target taxon.": "先让 Agent 引导配置 key/模型，再按目标类群适配 PDF 筛选和图文复核规则。",
+        "Agent first: confirm whether PDFs already exist or need lawful open-access harvest, then configure keys/models and adapt screening/review rules.": "先让 Agent 确认是否已有 PDF、是否需要合法采集开放 PDF，再配置 key/模型并适配筛选/复核规则。",
         "Start Center": "启动中心",
         "Ask Agent": "询问 Agent",
-        "Ask Agent to check key/model readiness, then adapt target taxon, screening profile, figure-review profile, provenance, and safe candidate review before running.": "运行前让 Agent 先检查 key/模型是否就绪，再适配目标类群、筛选方案、图文复核方案、证据来源和候选复核边界。",
+        "Ask Agent to first check whether PDFs already exist or need lawful open-access harvest, then adapt keys/models, screening, figure review, provenance, and safe candidate review.": "运行前让 Agent 先确认是否已有 PDF 或需要合法采集开放 PDF，再适配 key/模型、筛选方案、图文复核、证据来源和候选复核边界。",
         "Show Advanced Config": "显示高级配置",
         "Hide Advanced Config": "隐藏高级配置",
         "Screening Mode:": "筛选模式:",
@@ -4113,12 +4113,12 @@ class PdfProcessingWidget(QWidget):
         self.btn_save_api_settings.setText(self.tr("Save API Settings"))
         self.lbl_workbench_title.setText(self.tr("PDF Evidence Tools"))
         self.lbl_workbench_hint.setText(
-            self.tr("Agent first: configure keys/models, then adapt PDF screening and figure-review rules to the target taxon.")
+            self.tr("Agent first: confirm whether PDFs already exist or need lawful open-access harvest, then configure keys/models and adapt screening/review rules.")
         )
         self.btn_start_center.setText(self.tr("Start Center"))
         self.btn_ask_agent.setText(self.tr("Ask Agent"))
         self.btn_ask_agent.setToolTip(
-            self.tr("Ask Agent to check key/model readiness, then adapt target taxon, screening profile, figure-review profile, provenance, and safe candidate review before running.")
+            self.tr("Ask Agent to first check whether PDFs already exist or need lawful open-access harvest, then adapt keys/models, screening, figure review, provenance, and safe candidate review.")
         )
         self.btn_toggle_advanced.setText(
             self.tr("Hide Advanced Config") if self.advanced_config_visible else self.tr("Show Advanced Config")
@@ -4272,7 +4272,12 @@ class PdfProcessingWidget(QWidget):
         return {
             "source_workbench": "pdf_evidence",
             "project_type": "pdf_evidence",
-            "settings_question_focus": "stage_1_confirm_pdf_keys_models_with_short_requirement_questions_only",
+            "settings_question_focus": "stage_0_confirm_existing_pdf_folder_or_lawful_open_access_harvest_first",
+            "pdf_acquisition_stage": "stage_0_literature_pdf_harvest_or_existing_pdf_folder",
+            "harvest_skill": "taxonomy-pdf-harvest",
+            "harvest_skill_path": "vendor/ant-code/config/skills/taxonomy-pdf-harvest/SKILL.md",
+            "harvest_outputs": "records.csv; doi_list.txt; summary.json; download_manifest.csv; pdfs/",
+            "harvest_safety_boundary": "open metadata and legally exposed PDF links only; no Sci-Hub, LibGen, paywall bypass, CAPTCHA bypass, or logged-in scraping",
             "active_label_role": current_tab,
             "screener_profile": self.current_profile_name,
             "figure_profile": self.current_figure_profile_name,

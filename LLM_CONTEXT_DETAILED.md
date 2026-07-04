@@ -69,7 +69,7 @@ The TIF workbench status text and renderer overlay should be used to confirm whe
 
 The embedded Agent Center uses the first-party `vendor/ant-code/` runtime.
 
-In the TaxaMask `v2.1.0` line, the embedded runtime is aligned with Ant-Code `1.2.4`. This update brings long-task/background-terminal controls, gateway timeout/retry hardening, context-budget recovery fixes, and interrupted-draft preservation into the embedded TaxaMask Agent Center. It intentionally does not adopt standalone Ant-Code global model configuration as the default; the embedded workspace and configuration boundary remains the TaxaMask repository.
+In the TaxaMask `v2.1.1` line, the embedded runtime is aligned with Ant-Code `1.2.4`. This update includes the v2.1.0 long-task/background-terminal controls, gateway timeout/retry hardening, context-budget recovery fixes, interrupted-draft preservation, and the bundled taxonomy PDF harvest skill for the PDF evidence stage 0 acquisition workflow. It intentionally does not adopt standalone Ant-Code global model configuration as the default; the embedded workspace and configuration boundary remains the TaxaMask repository.
 
 Important files:
 
@@ -135,12 +135,16 @@ Main source areas:
 - `tools/agentic/`
 - `screener_configs/`
 - `part_description_configs/`
+- `vendor/ant-code/config/skills/taxonomy-pdf-harvest/`
 
 PDF processing creates evidence, candidates, captions, figure clips, and provenance. It does not create training truth automatically.
 
 Expected Agent behavior:
 
-- Work one stage at a time: key/model readiness, screening criteria, figure-review criteria, then run/result diagnosis.
+- Work one stage at a time: stage 0 PDF/literature source readiness, key/model readiness, screening criteria, figure-review criteria, then run/result diagnosis.
+- At stage 0, first ask whether the researcher already has a PDF folder. If not, use `vendor/ant-code/config/skills/taxonomy-pdf-harvest/SKILL.md` to plan lawful open-access taxonomy PDF harvest before screening.
+- Stage 0 harvest outputs are `records.csv`, `doi_list.txt`, `summary.json`, `download_manifest.csv`, and `pdfs/`. Treat `download_manifest.csv` and metadata records as source/provenance audit artifacts.
+- Harvest boundaries: use only open metadata and legally exposed PDF links. Do not use Sci-Hub, LibGen, paywall bypasses, CAPTCHA bypasses, or logged-in website scraping.
 - Keep provenance visible: PDF path, page, caption, nearby text, profile, and extraction status.
 - Do not merge PDF output into labels without researcher review.
 
@@ -434,6 +438,8 @@ Expected route keys:
 Route hints should point to current sections in this file, source files, and public contracts. Do not point Agent prompts at obsolete changelog headings.
 
 Ask Agent context should stay compact. It should help the agent know what to inspect, not dump project files or private data.
+
+For `pdf_evidence`, Ask Agent routing must preserve the stage 0 acquisition context. If the user has no PDF folder yet, the Agent should load `taxonomy-pdf-harvest` from `vendor/ant-code/config/skills/taxonomy-pdf-harvest/SKILL.md` before the downstream PDF evidence skill; if PDFs already exist, it can continue directly to key/model readiness and screening/extraction setup.
 
 ## 17. Validation Expectations
 

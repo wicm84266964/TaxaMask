@@ -7812,6 +7812,11 @@ class MainWindow(QMainWindow):
             "volume_display_scaling",
             "tif_next_requirement",
             "tif_requirement_doc",
+            "pdf_acquisition_stage",
+            "harvest_skill",
+            "harvest_skill_path",
+            "harvest_outputs",
+            "harvest_safety_boundary",
             "screener_profile",
             "figure_profile",
             "part_description_profile",
@@ -7964,20 +7969,26 @@ class MainWindow(QMainWindow):
             "请先读取并遵守这些本地规则/skill：\n"
             "- ANTCODE.md\n"
             "- .lab-agent/memory.md\n"
+            "- vendor/ant-code/config/skills/taxonomy-pdf-harvest/SKILL.md\n"
             "- .lab-agent/skills/taxamask-pdf-evidence/SKILL.md\n\n"
             "当前现场：\n"
             f"- 当前项目：{project_hint}\n"
             f"- PDF 状态：{pdf_summary}\n"
             "- PDF 筛选依赖文本 LLM key/model；启用多模态图文复核时还需要可用的视觉模型配置。\n\n"
-            "请不要一次性输出全流程长说明。请按四个阶段推进，每轮只处理当前阶段，最多问 3 个问题：\n"
+            "请不要一次性输出全流程长说明。请按五个阶段推进，每轮只处理当前阶段，最多问 3 个问题：\n"
+            "0. 文献/PDF 来源判断：用户已经有 PDF 文件夹，还是需要先用 taxonomy-pdf-harvest 合法采集开放 PDF。\n"
             "1. key/model 就绪检查。\n"
             "2. 目标类群与 PDF 筛选条件适配。\n"
             "3. figure/caption 数据处理与图文复核条件适配。\n"
             "4. 跑通流程、说明产物位置和复核/导入边界。\n\n"
+            "如果用户还没有 PDF，请先停在第 0 阶段，按 taxonomy-pdf-harvest 的边界规划检索/下载："
+            "只使用开放元数据和合法暴露的 PDF 链接，不使用 Sci-Hub、LibGen、付费墙绕过、验证码绕过或登录态抓取。"
+            "第 0 阶段的关键产物是 records.csv、doi_list.txt、summary.json、download_manifest.csv 和 pdfs/，"
+            "这些是文献来源和下载审计材料，不是训练真值。\n\n"
             "请优先使用需求确认式交互：给我简短选项或短问题让我确认，不要用长段说明替代确认。"
-            "现在先停在第 1 阶段：只确认文本 LLM key、base URL、model、API 协议是否已在本地 PDF 工具或运行环境配置好；"
-            "如果要多模态复核，再确认视觉模型配置。不要要求我在聊天里粘贴真实 key。"
-            "完成第 1 阶段后，再进入下一阶段，不要提前展开后面复杂配置。"
+            "现在先停在第 0 阶段：只确认我是否已经有待筛选 PDF 文件夹，还是需要先按目标类群合法采集开放 PDF；"
+            "若已有 PDF，再进入第 1 阶段确认文本 LLM key、base URL、model、API 协议和必要的视觉模型配置。"
+            "不要要求我在聊天里粘贴真实 key，不要提前展开后面复杂配置。"
         )
 
     def open_agent_for_pdf_workflow(self):

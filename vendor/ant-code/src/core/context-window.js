@@ -357,11 +357,11 @@ export function formatContextWindowStatus(session) {
   const summary = summarizeContextWindow(session);
   return [
     `context messages: ${summary.messages}/${summary.maxMessages}`,
-    `context tokens: ${(summary.promptTokens ?? summary.messageTokens)}/${summary.maxTokens}`,
+    `context tokens: ${summary.messageTokens}/${summary.maxTokens}`,
     `context bytes: ${summary.messageBytes}/${summary.maxBytes}`,
     summary.promptTokens ? `latest model input tokens: ${summary.promptTokens}` : null,
     Number.isFinite(summary.providerPromptTokens) ? `latest provider input tokens: ${summary.providerPromptTokens}` : null,
-    `transcript tokens: ${summary.messageTokens}`,
+    `model message tokens: ${summary.messageTokens}`,
     `compactions: ${summary.compacted}`,
     `compacted messages: ${summary.compactedMessages}`,
     `summary bytes: ${summary.summaryBytes}`,

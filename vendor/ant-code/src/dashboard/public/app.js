@@ -770,7 +770,11 @@ async function cancelBackgroundSubagent(groupId, taskId) {
   }
   state.backgroundCancelling.add(key);
   updateLiveStatus();
-  const result = await postJson("/api/background-subagents/cancel", {
+  const item = [...state.backgroundSubagents.values()].find((candidate) =>
+    (groupId && candidate.groupId === groupId) || (taskId && candidate.taskId === taskId)
+  );
+  const endpoint = item?.kind === "terminal" ? "/api/background-terminals/cancel" : "/api/background-subagents/cancel";
+  const result = await postJson(endpoint, {
     sessionId: state.currentSessionId,
     groupId,
     taskId

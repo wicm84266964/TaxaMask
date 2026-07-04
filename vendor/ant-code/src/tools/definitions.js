@@ -400,6 +400,34 @@ export const BUILT_IN_TOOLS = Object.freeze([
     }
   },
   {
+    name: "background_terminal_list",
+    description: "List registered background terminal tasks for the current session/workspace before starting or restarting long-running services.",
+    risk: "read",
+    supportsAbort: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        taskId: { type: "string" },
+        activeOnly: { type: "boolean" },
+        includeAllSessions: { type: "boolean" }
+      }
+    }
+  },
+  {
+    name: "background_terminal_cancel",
+    description: "Cancel a registered background terminal task by taskId through the same process-tree cleanup used by the Dashboard.",
+    risk: "execute",
+    supportsAbort: false,
+    inputSchema: {
+      type: "object",
+      required: ["taskId"],
+      properties: {
+        taskId: { type: "string" },
+        includeAllSessions: { type: "boolean" }
+      }
+    }
+  },
+  {
     name: "ask_user",
     description: "Ask the local user for clarification during an interactive session. Supports plain text, single-choice, multi-choice, and custom-answer confirmation prompts.",
     risk: "read",

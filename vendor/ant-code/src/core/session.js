@@ -22,7 +22,7 @@ import { accumulateProviderUsage, normalizeProviderUsageAggregate, sanitizeProvi
 import { resolveMainToolRounds } from "./tool-rounds.js";
 import { diagnoseWorkspace } from "./workspace-diagnostics.js";
 
-const DEFAULT_PROMPT_COMPACT_RATIO = 0.82;
+const DEFAULT_PROMPT_COMPACT_RATIO = 1;
 const OUTPUT_HEALTH_CHECK_ENABLED = false;
 const OUTPUT_HEALTH_MAX_RETRIES = 1;
 const OUTPUT_HEALTH_RETRY_REQUIRED_REASONS = new Set([
@@ -46,6 +46,7 @@ export async function createSession(options) {
     ? await resolveResumeMetadata({
       cwd: options.cwd,
       config,
+      tools: context.tools,
       env: options.env,
       resume: options.resume,
       preferFullContext: options.resumeFullContext === true
@@ -424,9 +425,30 @@ export async function runSessionTurn(session, options) {
         code: "GATEWAY_ERROR",
         message: "request failed"
       });
+      const failedDraft = appendFailedGatewayDraft({
+        session,
+        metadata,
+        prompt: options.prompt,
+        displayPrompt,
+        draft: interruptedDraft,
+        reason: `gateway_error:${response.error?.code ?? "GATEWAY_ERROR"}`
+      });
+      if (failedDraft) {
+        await emitEvent(eventOptions, {
+          type: "assistant_interrupted_draft",
+          reason: failedDraft.reason,
+          text: failedDraft.text,
+          outputBytes: failedDraft.bytes,
+          thinking: failedDraft.thinking,
+          thinkingBytes: failedDraft.thinkingBytes
+        });
+      }
       await emitEvent(eventOptions, {
         type: "gateway_error",
         error: response.error,
+        draftText: failedDraft?.text ?? "",
+        draftBytes: failedDraft?.bytes ?? 0,
+        draftThinkingBytes: failedDraft?.thinkingBytes ?? 0,
         outputBytes: Buffer.byteLength(finalOutput, "utf8")
       });
       await persistSessionMetadata(sessionStore, metadata, finalOutput, "gateway_error", session, options);
@@ -1246,7 +1268,7 @@ function promptEstimateOverBudget(estimate, contextWindow) {
 
 function boundedContextRatio(value, fallback) {
   const number = Number(value);
-  return Number.isFinite(number) && number > 0 && number < 1 ? number : fallback;
+  return Number.isFinite(number) && number > 0 && number <= 1 ? number : fallback;
 }
 
 function sessionGatewayProtocol(session) {
@@ -1733,7 +1755,7 @@ function recordSessionProviderUsage(session, usage, details = {}) {
 }
 
 /**
- * @param {{ cwd: string; config: Record<string, any>; env?: NodeJS.ProcessEnv; resume: string; preferFullContext?: boolean }} options
+ * @param {{ cwd: string; config: Record<string, any>; tools?: Array<Record<string, any>>; env?: NodeJS.ProcessEnv; resume: string; preferFullContext?: boolean }} options
  */
 async function resolveResumeMetadata(options) {
   const store = createSessionStore({
@@ -1750,7 +1772,7 @@ async function resolveResumeMetadata(options) {
   const transcriptArchive = normalizeTranscriptArchiveState(result.metadata.transcript?.archive);
   const modelContextArchive = normalizeTranscriptArchiveState(result.metadata.transcript?.modelArchive);
   const persistedContextWindow = result.metadata.transcript?.contextWindow ?? null;
-  const restoredContext = await restoreResumeContextMessages({
+  let restoredContext = await restoreResumeContextMessages({
     store,
     archive: transcriptArchive,
     modelArchive: modelContextArchive,
@@ -1759,8 +1781,15 @@ async function resolveResumeMetadata(options) {
     allowArchive: options.preferFullContext === true || !hasPersistedCompaction(persistedContextWindow),
     preferArchive: options.preferFullContext === true
   });
+  restoredContext = limitRestoredContextToPromptBudget(restoredContext, {
+    config: options.config,
+    model: result.metadata.model ?? options.config.modelAlias,
+    tools: options.tools,
+    clearPersistedSummary: options.preferFullContext === true,
+    contextWindow: persistedContextWindow
+  });
   const restoredContextMessages = restoredContext.messages;
-  const contextWindow = restoredContext.fromArchive && options.preferFullContext === true
+  const contextWindow = restoredContext.fromArchive && restoredContext.clearPersistedSummary === true
     ? clearPersistedContextSummary(persistedContextWindow)
     : persistedContextWindow;
 
@@ -1790,7 +1819,9 @@ async function resolveResumeMetadata(options) {
     transcriptArchive,
     modelContextArchive,
     contextWindow,
-    fullContextRestored: restoredContext.fromArchive
+    fullContextRestored: restoredContext.fromArchive,
+    fullContextRestoreLimited: restoredContext.limited === true,
+    fullContextRestoreLimitReason: restoredContext.limitReason ?? null
   };
 }
 
@@ -2265,21 +2296,58 @@ function restorePersistedContextMessages(messages, context = {}) {
 async function restoreResumeContextMessages(input) {
   const persisted = restorePersistedContextMessages(input.metadataMessages, input.context);
   if (input.allowArchive === false) {
-    return { messages: persisted, fromArchive: false };
+    return { messages: persisted, persistedMessages: persisted, fromArchive: false };
   }
   const archived = await restoreArchivedContextMessages(input.store, input.archive, input.context);
   const modelArchived = await restoreArchivedContextMessages(input.store, input.modelArchive, input.context);
   const bestArchived = mergeModelArchiveIntoBase(archived, modelArchived, input.context);
   if (input.preferArchive === true && archived.length > 0) {
-    return { messages: bestArchived.length > 0 ? bestArchived : archived, fromArchive: true };
+    return { messages: bestArchived.length > 0 ? bestArchived : archived, persistedMessages: persisted, fromArchive: true };
   }
   if (input.preferArchive === true && modelArchived.length > 0) {
-    return { messages: modelArchived, fromArchive: true };
+    return { messages: modelArchived, persistedMessages: persisted, fromArchive: true };
   }
   const archiveCandidate = bestArchived.length > 0 ? bestArchived : archived.length > 0 ? archived : modelArchived;
   return archiveCandidate.length > persisted.length
-    ? { messages: archiveCandidate, fromArchive: true }
-    : { messages: persisted, fromArchive: false };
+    ? { messages: archiveCandidate, persistedMessages: persisted, fromArchive: true }
+    : { messages: persisted, persistedMessages: persisted, fromArchive: false };
+}
+
+function limitRestoredContextToPromptBudget(restoredContext, options = {}) {
+  if (!restoredContext?.fromArchive) {
+    return restoredContext;
+  }
+  const fallbackMessages = Array.isArray(restoredContext.persistedMessages)
+    ? restoredContext.persistedMessages
+    : [];
+  if (!hasPersistedCompaction(options.contextWindow) || fallbackMessages.length === 0) {
+    return {
+      ...restoredContext,
+      clearPersistedSummary: options.clearPersistedSummary === true
+    };
+  }
+  const contextWindow = createContextWindow(options.config ?? {});
+  const estimate = estimatePromptPayload({
+    model: String(options.model ?? options.config?.modelAlias ?? ""),
+    messages: restoredContext.messages,
+    tools: options.tools,
+    toolResults: [],
+    gatewayProtocol: options.config?.lab?.gatewayProtocol
+  });
+  if (!promptEstimateNeedsCompaction(estimate, contextWindow, options.config?.context?.promptCompactRatio)) {
+    return {
+      ...restoredContext,
+      clearPersistedSummary: options.clearPersistedSummary === true
+    };
+  }
+  return {
+    ...restoredContext,
+    messages: fallbackMessages,
+    fromArchive: false,
+    limited: true,
+    limitReason: "restored_full_context_over_budget",
+    clearPersistedSummary: false
+  };
 }
 
 function mergeModelArchiveIntoBase(baseMessages, modelMessages, context = {}) {
@@ -2620,6 +2688,23 @@ function normalizeInterruptedDraft(draft) {
     bytes,
     thinking: thinkingPreview.text,
     thinkingBytes
+  };
+}
+
+function appendFailedGatewayDraft(options) {
+  const draft = normalizeInterruptedDraft(options.draft);
+  if (!draft) {
+    return null;
+  }
+  options.metadata.interruptedDraft = {
+    textBytes: draft.bytes,
+    thinkingBytes: draft.thinkingBytes,
+    reason: options.reason
+  };
+  appendInterruptedDraftMessages(options.session, options.prompt, options.displayPrompt ?? options.prompt, draft, options.reason);
+  return {
+    ...draft,
+    reason: options.reason
   };
 }
 

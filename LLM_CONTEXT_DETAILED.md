@@ -1,7 +1,7 @@
 # TaxaMask LLM Context
 
 > Target: embedded AntCode agents, advanced LLM assistants, and developers maintaining the current TaxaMask `main` / v2.x line.
-> Last synchronized: 2026-07-02.
+> Last synchronized: 2026-07-04.
 
 This file is the current-state handoff document. It is not a changelog. Do not append dated development logs here. Keep it focused on the program state that an agent needs in order to diagnose, modify, and safely operate TaxaMask.
 
@@ -69,6 +69,8 @@ The TIF workbench status text and renderer overlay should be used to confirm whe
 
 The embedded Agent Center uses the first-party `vendor/ant-code/` runtime.
 
+In the TaxaMask `v2.1.0` line, the embedded runtime is aligned with Ant-Code `1.2.4`. This update brings long-task/background-terminal controls, gateway timeout/retry hardening, context-budget recovery fixes, and interrupted-draft preservation into the embedded TaxaMask Agent Center. It intentionally does not adopt standalone Ant-Code global model configuration as the default; the embedded workspace and configuration boundary remains the TaxaMask repository.
+
 Important files:
 
 - `AntSleap/ui/taxamask_agent_panel.py`
@@ -78,6 +80,8 @@ Important files:
 Normal Ask Agent behavior sends compact workbench context, not full private project data. It should include diagnostic route, focused source references, artifact hints, and safety notes.
 
 If the GUI cannot start, use the recovery dashboard script. It avoids importing the PySide6 GUI and starts the browser-based Ant-Code dashboard.
+
+For long-running terminal jobs started by Agent Center, prefer registered background terminal tasks. Use `background_shell` for long commands, `background_terminal_list` before restarting servers/viewers/downloads/renders/training jobs, and `background_terminal_cancel` to clean up stale registered terminal tasks. This keeps PDF extraction, candidate import, preview generation, backend services, and training commands visible and cancellable from the Agent Center path.
 
 Do not send API keys, private gateway URLs, large project JSON, database contents, TIF sidecars, or full local logs into prompts unless the user explicitly approves a specific diagnostic extraction.
 

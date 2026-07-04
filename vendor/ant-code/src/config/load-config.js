@@ -23,6 +23,9 @@ const PROJECT_CONFIG_FILES = Object.freeze([
 ]);
 
 const DEFAULT_CONTEXT_TOKENS = 200000;
+const DEFAULT_GATEWAY_MAX_RETRIES = 5;
+const DEFAULT_GATEWAY_TIMEOUT_MS = 900000;
+const DEFAULT_GATEWAY_IDLE_TIMEOUT_MS = 300000;
 const PACKAGE_ROOT = resolvePackageRoot();
 const BUNDLED_CONFIG_PATH = path.join(PACKAGE_ROOT, "lab-agent.config.json");
 
@@ -134,13 +137,15 @@ const DEFAULT_CONFIG = Object.freeze({
     gatewayHealthUrl: null,
     gatewayProtocol: "lab-agent-gateway",
     gatewayApiKey: null,
-    gatewayMaxRetries: 2
+    gatewayMaxRetries: DEFAULT_GATEWAY_MAX_RETRIES,
+    gatewayTimeoutMs: DEFAULT_GATEWAY_TIMEOUT_MS,
+    gatewayIdleTimeoutMs: DEFAULT_GATEWAY_IDLE_TIMEOUT_MS
   }
 });
 
 /**
  * @typedef {typeof DEFAULT_CONFIG & {
- *   lab: { gatewayUrl: string | null; gatewayHealthUrl: string | null; gatewayProtocol: string; gatewayApiKey: string | null; gatewayMaxRetries: number; configPath: string | null };
+ *   lab: { gatewayUrl: string | null; gatewayHealthUrl: string | null; gatewayProtocol: string; gatewayApiKey: string | null; gatewayMaxRetries: number; gatewayTimeoutMs: number; gatewayIdleTimeoutMs: number; configPath: string | null };
  *   projectConfigPath: string | null;
  * }} LabAgentConfig
  */
@@ -176,7 +181,9 @@ export async function loadConfig(options = {}) {
     gatewayHealthUrl: env.LAB_MODEL_GATEWAY_HEALTH_URL ?? hardened.lab?.gatewayHealthUrl ?? null,
     gatewayProtocol: env.LAB_MODEL_GATEWAY_PROTOCOL ?? hardened.lab?.gatewayProtocol ?? "lab-agent-gateway",
     gatewayApiKey: env.LAB_MODEL_GATEWAY_API_KEY ?? hardened.lab?.gatewayApiKey ?? null,
-    gatewayMaxRetries: parseOptionalInteger(env.LAB_MODEL_GATEWAY_MAX_RETRIES, hardened.lab?.gatewayMaxRetries ?? 2),
+    gatewayMaxRetries: parseOptionalInteger(env.LAB_MODEL_GATEWAY_MAX_RETRIES, hardened.lab?.gatewayMaxRetries ?? DEFAULT_GATEWAY_MAX_RETRIES),
+    gatewayTimeoutMs: parseOptionalInteger(env.LAB_MODEL_GATEWAY_TIMEOUT_MS, hardened.lab?.gatewayTimeoutMs ?? DEFAULT_GATEWAY_TIMEOUT_MS),
+    gatewayIdleTimeoutMs: parseOptionalInteger(env.LAB_MODEL_GATEWAY_IDLE_TIMEOUT_MS, hardened.lab?.gatewayIdleTimeoutMs ?? DEFAULT_GATEWAY_IDLE_TIMEOUT_MS),
     activeGatewayProfile: typeof hardened.lab?.activeGatewayProfile === "string" ? hardened.lab.activeGatewayProfile : "",
     gatewayProfiles: Array.isArray(hardened.lab?.gatewayProfiles) ? hardened.lab.gatewayProfiles : [],
     configPath: labConfigPath
@@ -200,11 +207,12 @@ function normalizeContextConfig(config, env) {
   const context = config.context ?? {};
   const maxMessages = context.maxMessages;
   const maxTokens = context.maxTokens;
-  const maxBytes = context.maxBytes;
+  const maxBytes = normalizeContextMaxBytes(context, env);
   return {
     ...config,
     context: {
       ...context,
+      maxBytes,
       resumeMaxMessages: env.LAB_AGENT_CONTEXT_RESUME_MAX_MESSAGES
         ? context.resumeMaxMessages
         : Math.max(context.resumeMaxMessages ?? maxMessages, maxMessages),
@@ -216,6 +224,16 @@ function normalizeContextConfig(config, env) {
         : Math.max(context.resumeMaxBytes ?? maxBytes, maxBytes)
     }
   };
+}
+
+function normalizeContextMaxBytes(context, env) {
+  const maxTokens = Number.isInteger(context.maxTokens) && context.maxTokens > 0 ? context.maxTokens : null;
+  const currentMaxBytes = Number.isInteger(context.maxBytes) && context.maxBytes > 0 ? context.maxBytes : null;
+  const tokenAlignedMaxBytes = maxTokens ? maxTokens * 4 : null;
+  if (env.LAB_AGENT_CONTEXT_MAX_BYTES) {
+    return currentMaxBytes;
+  }
+  return Math.max(currentMaxBytes ?? 0, tokenAlignedMaxBytes ?? 0) || currentMaxBytes;
 }
 
 /**
@@ -451,7 +469,7 @@ function validateConfig(config) {
   if (
     context.promptCompactRatio !== undefined
     && context.promptCompactRatio !== null
-    && (!Number.isFinite(context.promptCompactRatio) || context.promptCompactRatio <= 0 || context.promptCompactRatio >= 1)
+    && (!Number.isFinite(context.promptCompactRatio) || context.promptCompactRatio <= 0 || context.promptCompactRatio > 1)
   ) {
     throw new Error(`Unsupported context.promptCompactRatio: ${context.promptCompactRatio}`);
   }
@@ -782,7 +800,7 @@ function validateVisionAgentConfig(value) {
 }
 
 /**
- * @param {{ gatewayProtocol?: string; gatewayApiKey?: string | null; gatewayMaxRetries?: number }} lab
+ * @param {{ gatewayProtocol?: string; gatewayApiKey?: string | null; gatewayMaxRetries?: number; gatewayTimeoutMs?: number; gatewayIdleTimeoutMs?: number }} lab
  */
 function validateLabConfig(lab) {
   const protocol = lab.gatewayProtocol ?? "lab-agent-gateway";
@@ -794,6 +812,12 @@ function validateLabConfig(lab) {
   }
   if (!Number.isInteger(lab.gatewayMaxRetries) || lab.gatewayMaxRetries < 0 || lab.gatewayMaxRetries > 5) {
     throw new Error(`Unsupported lab.gatewayMaxRetries: ${lab.gatewayMaxRetries}`);
+  }
+  if (!Number.isInteger(lab.gatewayTimeoutMs) || lab.gatewayTimeoutMs < 1000 || lab.gatewayTimeoutMs > 900000) {
+    throw new Error(`Unsupported lab.gatewayTimeoutMs: ${lab.gatewayTimeoutMs}`);
+  }
+  if (!Number.isInteger(lab.gatewayIdleTimeoutMs) || lab.gatewayIdleTimeoutMs < 1000 || lab.gatewayIdleTimeoutMs > 300000) {
+    throw new Error(`Unsupported lab.gatewayIdleTimeoutMs: ${lab.gatewayIdleTimeoutMs}`);
   }
 }
 

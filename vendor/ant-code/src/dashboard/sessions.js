@@ -2,13 +2,14 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { createSession, runSessionTurn } from "../core/session.js";
-import { clearSessionContext, compactSessionContextWithModel, summarizeContextWindow } from "../core/context-window.js";
+import { clearSessionContext, compactSessionContextWithModel, createContextWindow, summarizeContextWindow } from "../core/context-window.js";
 import { createLabModelGateway } from "../model-gateway/client.js";
 import { listConfiguredModels, normalizeAgentModelTiers, resolveModelSelection } from "../model-gateway/models.js";
 import { resolveWorkspaceTrust, trustWorkspace as saveWorkspaceTrust } from "../permissions/workspace-trust.js";
 import { createSessionStore } from "../storage/session-store.js";
 import { GATEWAY_PROTOCOLS, loadConfig, localProjectConfigPath } from "../config/load-config.js";
 import { cancelBackgroundAgentTasks } from "../agents/background-registry.js";
+import { cancelBackgroundTerminalTasks, listBackgroundTerminalTasks } from "../agents/background-terminal-registry.js";
 import { createAgentTaskStore } from "../agents/task-store.js";
 import { createAgentTaskGroupStore, summarizeGroupStatus } from "../agents/task-group-store.js";
 import { cloneWorkflowState } from "../tools/workflow-tools.js";
@@ -24,6 +25,7 @@ const MAX_TRANSCRIPT_PAGE_LIMIT = 200;
 const BACKGROUND_SNAPSHOT_INTERVAL_MS = 15_000;
 const BACKGROUND_STALE_PROGRESS_MS = 10 * 60 * 1000;
 const BACKGROUND_DEAD_HEARTBEAT_MS = 5 * 60 * 1000;
+const DEFAULT_INTERRUPT_FORCE_SETTLE_MS = 5_000;
 const VISIBLE_TRANSCRIPT_ROLES = new Set(["user", "assistant"]);
 const TERMINAL_TASK_STATUSES = new Set(["completed", "failed", "partial", "blocked", "cancelled", "interrupted"]);
 const TERMINAL_GROUP_STATUSES = new Set(["completed", "failed", "partial", "blocked", "cancelled", "interrupted"]);
@@ -154,12 +156,13 @@ export function createDashboardRuntime(options) {
       }
       const modelConfig = selectedModelId ? { ...refreshed, modelAlias: selectedModelId } : refreshed;
       const syncedState = syncIdleSessionConfig(active, input.sessionId, modelConfig);
-      const activeConfig = syncedState?.session.config ?? modelConfig;
+      const state = syncedState ?? activeStateForSession(active, input.sessionId);
+      const activeConfig = syncedState?.session.config ?? (state?.session.config ? configForStatusLists(state.session.config, modelConfig) : modelConfig);
       return {
         ok: true,
         configPath: localPath,
         sessionId: syncedState?.session.id,
-        sessionStatus: syncedState ? sessionStatusSummary(syncedState.session) : sessionStatusFromConfig(modelConfig),
+        sessionStatus: state ? sessionStatusForConfigUpdate(state.session, modelConfig) : sessionStatusFromConfig(modelConfig),
         models: modelOptions(activeConfig),
         agentModelTiers: publicAgentModelTiers(activeConfig),
         visionAgent: publicVisionAgent(activeConfig),
@@ -343,7 +346,8 @@ export function createDashboardRuntime(options) {
       }));
       const byId = new Map(persisted.map((record) => [record.id, record]));
       for (const state of active.values()) {
-        const activeRecord = activeSessionRecord(state, byId.get(state.session.id));
+        const snapshot = await buildBackgroundSubagentSnapshot(state);
+        const activeRecord = activeSessionRecord(state, byId.get(state.session.id), snapshot);
         byId.set(activeRecord.id, activeRecord);
       }
       return Array.from(byId.values()).sort(compareSessionRecords);
@@ -365,6 +369,8 @@ export function createDashboardRuntime(options) {
         : storedTranscript;
       const transcriptPage = createTranscriptPage(transcript);
       const finalText = activeState?.finalOutput || assistantTranscriptText(transcript);
+      const snapshotState = activeState ?? createSnapshotReadState(metadata, options.cwd);
+      const backgroundSnapshot = snapshotState ? await buildBackgroundSubagentSnapshot(snapshotState) : null;
       return {
         ok: true,
         session: {
@@ -388,6 +394,7 @@ export function createDashboardRuntime(options) {
             workflow: session.workflow ?? metadata.workflow ?? null
           }, finalText),
           workflow: session.workflow ?? metadata.workflow ?? null,
+          backgroundSnapshot: backgroundSnapshot ? publicBackgroundSnapshot(backgroundSnapshot) : null,
           modifiedAt: result.modifiedAt ?? null,
           finishedAt: metadata.finishedAt ?? null
         }
@@ -494,11 +501,15 @@ export function createDashboardRuntime(options) {
         };
       }
 
-      beginPrompt(state, createQueueItem(prompt, mode, "prompt", "", attachments), configEnv);
+      const item = createQueueItem(prompt, mode, "prompt", "", attachments);
+      beginPrompt(state, item, configEnv);
       return {
         ok: true,
         sessionId: state.session.id,
         eventCursor,
+        running: true,
+        queue: queueSnapshot(state),
+        current: publicQueueItem(item),
         permission: permissionModeSummary(state.session),
         sessionStatus: sessionStatusSummary(state.session)
       };
@@ -637,6 +648,38 @@ export function createDashboardRuntime(options) {
         taskId: taskId || null,
         abortedTaskIds: aborted.map((task) => task.taskId),
         updatedTaskIds: updatedTasks.map((task) => task.id),
+        sessionStatus: sessionStatusSummary(state.session)
+      };
+    },
+    async cancelBackgroundTerminal(input = {}) {
+      const sessionId = String(input.sessionId ?? "").trim();
+      const state = active.get(sessionId);
+      if (!state) {
+        return { ok: false, status: 404, error: "会话不存在" };
+      }
+      const taskId = String(input.taskId ?? "").trim();
+      if (!taskId) {
+        return { ok: false, status: 400, error: "请选择要回收的后台终端任务" };
+      }
+      const cancelled = cancelBackgroundTerminalTasks({
+        parentSessionId: state.session.id,
+        cwd: state.session.cwd,
+        taskId
+      });
+      appendDashboardEvent(state, {
+        type: "background_terminal_cancelled",
+        id: eventId("background-terminal-cancelled"),
+        taskId,
+        cancelledTaskIds: cancelled.map((task) => task.taskId),
+        sessionStatus: sessionStatusSummary(state.session),
+        at: new Date().toISOString()
+      });
+      await appendBackgroundSubagentSnapshot(state);
+      return {
+        ok: true,
+        sessionId: state.session.id,
+        taskId,
+        cancelledTaskIds: cancelled.map((task) => task.taskId),
         sessionStatus: sessionStatusSummary(state.session)
       };
     },
@@ -900,23 +943,29 @@ function applySessionModel(session, modelId) {
   }
   session.model = id;
   session.config = { ...session.config, modelAlias: id };
-  const previous = session.contextWindow ?? {};
-  session.contextWindow = {
-    ...previous,
-    modelMaxTokens: modelContextTokens(session.config),
-    maxTokens: session.config.context?.maxTokens ?? previous.maxTokens
-  };
+  refreshSessionContextWindow(session);
 }
 
 function applySessionConfig(session, config) {
   const id = String(config.modelAlias ?? session.model ?? "").trim();
   session.model = id;
   session.config = { ...config, modelAlias: id };
+  refreshSessionContextWindow(session);
+}
+
+function refreshSessionContextWindow(session) {
   const previous = session.contextWindow ?? {};
+  const next = createContextWindow(session.config ?? {});
   session.contextWindow = {
-    ...previous,
-    modelMaxTokens: modelContextTokens(session.config),
-    maxTokens: session.config.context?.maxTokens ?? previous.maxTokens
+    ...next,
+    summary: typeof previous.summary === "string" ? previous.summary : next.summary,
+    compactionCount: Number.isFinite(previous.compactionCount) ? previous.compactionCount : next.compactionCount,
+    compactedMessages: Number.isFinite(previous.compactedMessages) ? previous.compactedMessages : next.compactedMessages,
+    lastCompactedAt: previous.lastCompactedAt ?? next.lastCompactedAt,
+    lastReason: previous.lastReason ?? next.lastReason,
+    lastStrategy: previous.lastStrategy ?? next.lastStrategy,
+    lastFallbackReason: previous.lastFallbackReason ?? next.lastFallbackReason,
+    lastInternalAgent: previous.lastInternalAgent ?? next.lastInternalAgent
   };
 }
 
@@ -926,6 +975,36 @@ function configForExistingSession(session, config) {
     return { ...config, modelAlias: currentModel };
   }
   return config;
+}
+
+function activeStateForSession(active, sessionId) {
+  const id = String(sessionId ?? "").trim();
+  return id ? active.get(id) ?? null : null;
+}
+
+function configForStatusLists(sessionConfig, refreshedConfig) {
+  return {
+    ...refreshedConfig,
+    modelAlias: sessionConfig.modelAlias ?? refreshedConfig.modelAlias
+  };
+}
+
+function sessionStatusForConfigUpdate(session, config) {
+  if (!session) {
+    return sessionStatusFromConfig(config);
+  }
+  const current = sessionStatusSummary(session);
+  const configured = sessionStatusFromConfig(config);
+  return {
+    ...current,
+    model: current.model || configured.model,
+    context: {
+      ...(current.context ?? {}),
+      maxTokens: configured.context?.maxTokens ?? current.context?.maxTokens,
+      maxBytes: configured.context?.maxBytes ?? current.context?.maxBytes,
+      modelMaxTokens: configured.context?.modelMaxTokens ?? current.context?.modelMaxTokens
+    }
+  };
 }
 
 function syncIdleSessionConfig(active, sessionId, config) {
@@ -1212,7 +1291,24 @@ function buildLocalModelConfig(local, config, normalized) {
   }
   next.lab.gatewayProfiles = upsertGatewayProfileEntries(local, config, normalized, next);
   next.lab.activeGatewayProfile = gatewayProfileIdFromParts(normalized.gatewayProtocol, normalized.gatewayUrl);
+  applyModelContextBudget(next, local, config, normalized.model.contextTokens);
   return next;
+}
+
+function applyModelContextBudget(next, local, config, contextTokens) {
+  if (!Number.isFinite(contextTokens) || contextTokens <= 0) {
+    return;
+  }
+  const nextContext = {
+    ...(isPlainObject(config.context) ? config.context : {}),
+    ...(isPlainObject(local.context) ? local.context : {}),
+    ...(isPlainObject(next.context) ? next.context : {})
+  };
+  nextContext.maxTokens = contextTokens;
+  nextContext.maxBytes = contextTokens * 4;
+  nextContext.resumeMaxTokens = Math.max(positiveIntegerOrNull(nextContext.resumeMaxTokens) ?? 0, contextTokens);
+  nextContext.resumeMaxBytes = Math.max(positiveIntegerOrNull(nextContext.resumeMaxBytes) ?? 0, contextTokens * 4);
+  next.context = nextContext;
 }
 
 function replaceModelInAgentConfig(agents, previousModelId, nextModelId) {
@@ -1710,6 +1806,33 @@ function createTurnState(session) {
   };
 }
 
+function createSnapshotReadState(metadata = {}, cwd) {
+  const id = String(metadata.id ?? "").trim();
+  if (!id) {
+    return null;
+  }
+  return {
+    session: {
+      id,
+      cwd: metadata.cwd ?? cwd,
+      model: metadata.model ?? "",
+      config: {},
+      messages: Array.isArray(metadata.transcript?.messages) ? metadata.transcript.messages : [],
+      contextWindow: metadata.context ?? null,
+      workflow: metadata.workflow ?? null
+    }
+  };
+}
+
+function publicBackgroundSnapshot(snapshot) {
+  return {
+    groups: snapshot.groups,
+    totalGroups: snapshot.totalGroups,
+    visibleGroups: snapshot.groups.length,
+    hasRecords: snapshot.hasRecords === true
+  };
+}
+
 function assistantTranscriptText(messages = []) {
   if (!Array.isArray(messages)) {
     return "";
@@ -1835,8 +1958,10 @@ function activeReplayCursor(state) {
   return index > 0 ? nonNegativeInteger(state.events[index - 1].sequence) : 0;
 }
 
-function activeSessionRecord(state, persisted = null) {
+function activeSessionRecord(state, persisted = null, backgroundSnapshot = null) {
   const modifiedAt = latestEventTime(state) ?? persisted?.modifiedAt ?? new Date().toISOString();
+  const visibleBackground = Array.isArray(backgroundSnapshot?.groups) ? backgroundSnapshot.groups : [];
+  const backgroundKinds = [...new Set(visibleBackground.map((group) => group.kind === "terminal" ? "terminal" : "subagent"))];
   return {
     id: state.session.id,
     title: state.session.title || persisted?.title || state.session.prompt || "未命名任务",
@@ -1849,7 +1974,10 @@ function activeSessionRecord(state, persisted = null) {
     encrypted: persisted?.encrypted === true,
     active: true,
     running: state.running === true,
-    queueLength: state.queuedPrompts.length
+    queueLength: state.queuedPrompts.length,
+    backgroundVisible: visibleBackground.length > 0,
+    backgroundKinds,
+    backgroundCount: visibleBackground.length
   };
 }
 
@@ -1893,6 +2021,7 @@ function beginPrompt(state, item, env) {
   state.currentPermissionMode = item.permissionMode;
   state.turnChangeStats = emptyChangeStats();
   state.controller = new AbortController();
+  state.turnEnv = env;
   appendDashboardEvent(state, {
     type: "run_state",
     id: eventId("run-state"),
@@ -1918,7 +2047,9 @@ function beginPrompt(state, item, env) {
 
 function runTurnInBackground(state, item, env) {
   const controller = state.controller;
+  const turnId = state.currentTurnId;
   const eventStartIndex = state.events.length;
+  state.forceSettleTimer = null;
   queueMicrotask(async () => {
     try {
       const result = await runSessionTurn(state.session, {
@@ -1932,10 +2063,15 @@ function runTurnInBackground(state, item, env) {
         approvalCallback: (request) => askApproval(state, request),
         userInputCallback: (request) => askQuestion(state, request),
         onEvent: async (event) => {
+          const currentTurn = isCurrentTurn(state, controller, turnId);
+          const backgroundEvent = isBackgroundLifecycleEvent(event);
+          if (!currentTurn && !backgroundEvent) {
+            return;
+          }
           for (const mapped of mapSessionEventToDashboard(event)) {
-            mapped.turnId = state.currentTurnId;
+            mapped.turnId = turnId;
             mapped.sessionStatus = sessionStatusSummary(state.session);
-            if (mapped.type === "activity" && mapped.changeStats) {
+            if (currentTurn && mapped.type === "activity" && mapped.changeStats) {
               if (mapped.turnChangeStats) {
                 state.turnChangeStats = normalizeChangeStats(mapped.turnChangeStats);
               } else {
@@ -1948,10 +2084,13 @@ function runTurnInBackground(state, item, env) {
           if (String(event.type ?? "").startsWith("subagent_group_")) {
             await appendBackgroundSubagentSnapshot(state);
           }
-          if (event.type === "tool_finish" && (event.name === "todo_write" || event.name === "plan_update")) {
+          if (String(event.type ?? "").startsWith("background_terminal_")) {
+            await appendBackgroundSubagentSnapshot(state);
+          }
+          if (currentTurn && event.type === "tool_finish" && (event.name === "todo_write" || event.name === "plan_update")) {
             appendWorkflowSnapshot(state, event.name);
           }
-          if (event.type === "workflow_updated") {
+          if (currentTurn && event.type === "workflow_updated") {
             appendWorkflowSnapshot(state, event.reason ?? "workflow_updated");
           }
           if (event.type === "subagent_group_wakeup") {
@@ -1959,6 +2098,9 @@ function runTurnInBackground(state, item, env) {
           }
         }
       });
+      if (!isCurrentTurn(state, controller, turnId)) {
+        return;
+      }
       state.finalOutput = result.output ?? "";
       const turnEvents = state.events.slice(eventStartIndex);
       if (!result.interrupted && !turnEvents.some((event) => event.type === "assistant_final")) {
@@ -1981,6 +2123,9 @@ function runTurnInBackground(state, item, env) {
       });
       state.status = result.interrupted ? "interrupted" : "completed";
     } catch (error) {
+      if (!isCurrentTurn(state, controller, turnId)) {
+        return;
+      }
       appendDashboardEvent(state, {
         type: "error",
         id: eventId("error"),
@@ -1989,9 +2134,11 @@ function runTurnInBackground(state, item, env) {
       });
       state.status = "failed";
     } finally {
-      if (state.controller === controller) {
-        state.controller = null;
+      if (state.forceSettledTurnId === turnId || state.controller !== controller || state.currentTurnId !== turnId) {
+        return;
       }
+      clearForceSettleTimer(state);
+      state.controller = null;
       state.running = false;
       await appendBackgroundSubagentSnapshot(state);
       state.currentPrompt = "";
@@ -2012,9 +2159,20 @@ function runTurnInBackground(state, item, env) {
         });
         state.currentTurnId = "";
         state.currentTranscriptStart = activeTranscriptMessages(state).length;
+        state.turnEnv = null;
+        state.forceSettledTurnId = "";
       }
     }
   });
+}
+
+function isCurrentTurn(state, controller, turnId) {
+  return state.controller === controller && state.currentTurnId === turnId && state.forceSettledTurnId !== turnId;
+}
+
+function isBackgroundLifecycleEvent(event) {
+  const type = String(event?.type ?? "");
+  return type.startsWith("subagent_group_") || type.startsWith("background_terminal_");
 }
 
 function requestTurnInterrupt(state, reason) {
@@ -2029,6 +2187,80 @@ function requestTurnInterrupt(state, reason) {
   if (state.controller && !state.controller.signal.aborted) {
     state.controller.abort(reason);
   }
+  scheduleForceSettleInterruptedTurn(state, reason);
+}
+
+function scheduleForceSettleInterruptedTurn(state, reason) {
+  clearForceSettleTimer(state);
+  const turnId = state.currentTurnId;
+  if (!state.running || !turnId) {
+    return;
+  }
+  const delayMs = interruptForceSettleMs(state.turnEnv);
+  state.forceSettleTimer = setTimeout(() => {
+    if (!state.running || state.currentTurnId !== turnId) {
+      return;
+    }
+    forceSettleInterruptedTurn(state, reason, turnId);
+  }, delayMs);
+  state.forceSettleTimer.unref?.();
+}
+
+function interruptForceSettleMs(env = process.env) {
+  const value = Number(env?.ANT_CODE_INTERRUPT_FORCE_SETTLE_MS ?? DEFAULT_INTERRUPT_FORCE_SETTLE_MS);
+  if (!Number.isFinite(value)) {
+    return DEFAULT_INTERRUPT_FORCE_SETTLE_MS;
+  }
+  return Math.max(50, Math.min(30000, Math.trunc(value)));
+}
+
+function clearForceSettleTimer(state) {
+  if (state.forceSettleTimer) {
+    clearTimeout(state.forceSettleTimer);
+    state.forceSettleTimer = null;
+  }
+}
+
+function forceSettleInterruptedTurn(state, reason, turnId) {
+  state.forceSettleTimer = null;
+  state.forceSettledTurnId = turnId;
+  state.running = false;
+  state.status = "interrupted";
+  if (state.controller && !state.controller.signal.aborted) {
+    state.controller.abort(reason);
+  }
+  state.controller = null;
+  cancelPendingInteractions(state, reason);
+  appendDashboardEvent(state, {
+    type: "error",
+    id: eventId("error"),
+    message: "任务已中断，但底层请求未及时返回；Dashboard 已强制释放当前会话状态。",
+    turnId,
+    interrupted: true,
+    at: new Date().toISOString()
+  });
+  void appendBackgroundSubagentSnapshot(state);
+  const next = state.queuedPrompts.shift();
+  if (next) {
+    appendQueueUpdated(state);
+    beginPrompt(state, next, state.turnEnv ?? process.env);
+    return;
+  }
+  appendDashboardEvent(state, {
+    type: "run_state",
+    id: eventId("run-state"),
+    running: false,
+    turnId,
+    queue: queueSnapshot(state),
+    sessionStatus: sessionStatusSummary(state.session),
+    changeStats: { ...state.turnChangeStats },
+    forced: true,
+    at: new Date().toISOString()
+  });
+  state.currentPrompt = "";
+  state.currentTurnId = "";
+  state.currentTranscriptStart = activeTranscriptMessages(state).length;
+  state.turnEnv = null;
 }
 
 function cancelPendingInteractions(state, reason) {
@@ -2293,6 +2525,15 @@ async function markWakePromptConsumed(state, event) {
 async function appendBackgroundSubagentSnapshot(state) {
   const snapshot = await buildBackgroundSubagentSnapshot(state);
   if (!snapshot.hasRecords && snapshot.groups.length === 0) {
+    appendDashboardEvent(state, {
+      type: "background_subagent_snapshot",
+      id: eventId("background-subagents"),
+      groups: [],
+      totalGroups: 0,
+      visibleGroups: 0,
+      sessionStatus: sessionStatusSummary(state.session),
+      at: new Date().toISOString()
+    });
     stopBackgroundSnapshotPolling(state);
     return;
   }
@@ -2346,7 +2587,40 @@ async function buildBackgroundSubagentSnapshot(state) {
         updatedAt: latestSnapshotTimestamp(group, tasks)
       });
     }
-    return { hasRecords: groups.length > 0, totalGroups: groups.length, groups: visible };
+    const terminals = listBackgroundTerminalTasks({ parentSessionId: state.session.id, cwd: state.session.cwd })
+      .filter((task) => task.status === "running" || task.status === "starting")
+      .map((task) => ({
+        groupId: null,
+        taskId: task.taskId,
+        kind: "terminal",
+        profile: "terminal",
+        waitFor: null,
+        wakeParent: false,
+        status: task.status === "starting" ? "starting" : "running",
+        stale: false,
+        staleKind: null,
+        staleReason: "",
+        lastProgressAt: task.updatedAt,
+        heartbeatAt: task.updatedAt,
+        staleSeconds: null,
+        heartbeatAgeSeconds: null,
+        cancellable: true,
+        completed: false,
+        wakePromptQueued: false,
+        summary: [
+          task.title,
+          task.pid ? `pid=${task.pid}` : null,
+          task.stdoutPath ? `stdout=${task.stdoutPath}` : null
+        ].filter(Boolean).join(" · "),
+        taskCount: 1,
+        runningCount: task.status === "running" ? 1 : 0,
+        updatedAt: task.updatedAt
+      }));
+    return {
+      hasRecords: groups.length > 0 || terminals.length > 0,
+      totalGroups: groups.length + terminals.length,
+      groups: [...visible, ...terminals]
+    };
   } catch {
     return { hasRecords: false, totalGroups: 0, groups: [] };
   }

@@ -147,6 +147,12 @@ def _build_legacy_tif_project(project_root):
             "metadata_path": "specimens/01-0101-local/parts/head/reslices/head_axis_001/metadata.json",
             "local_frame": {"output_axis": "z_axis"},
             "training": {"human_confirmed": True, "usable_for_training": True},
+            "labels": {
+                "editable_ai_result": _volume_record(
+                    "specimens/01-0101-local/parts/head/reslices/head_axis_001/labels/editable_ai_result.ome.zarr",
+                    dtype="uint16",
+                )
+            },
         },
         save=False,
     )
@@ -413,6 +419,10 @@ class LegacyTifJsonToSQLiteMigrationTests(unittest.TestCase):
             self.assertEqual(manager.list_parts("01-0101-local")[0]["part_id"], "head")
             self.assertEqual(manager.list_part_rois("01-0101-local")[0]["linked_part_id"], "head")
             self.assertEqual(manager.list_local_axis_runs()[0]["run_id"], "predict_local_frame_001")
+            self.assertIn(
+                "reslices/head_axis_001/labels/editable_ai_result.ome.zarr",
+                manager.part_label_record("01-0101-local", "head", "editable_ai_result", "head_axis_001")["path"],
+            )
 
             manager.add_part(
                 "01-0101-local",
@@ -427,6 +437,10 @@ class LegacyTifJsonToSQLiteMigrationTests(unittest.TestCase):
             reloaded.load_project(manifest_path)
             self.assertEqual([part["part_id"] for part in reloaded.list_parts("01-0101-local")], ["head", "antenna"])
             self.assertEqual(reloaded.get_part_roi("01-0101-local", "roi_head")["status"], "cancelled")
+            self.assertIn(
+                "reslices/head_axis_001/labels/editable_ai_result.ome.zarr",
+                reloaded.part_label_record("01-0101-local", "head", "editable_ai_result", "head_axis_001")["path"],
+            )
 
             conn = sqlite3.connect(db_path)
             try:

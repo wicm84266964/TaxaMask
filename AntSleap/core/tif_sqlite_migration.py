@@ -158,6 +158,23 @@ def _empty_stats():
 
 
 def _insert_project_row(connection, project_data):
+    metadata_payload = {
+        key: value
+        for key, value in project_data.items()
+        if key
+        not in {
+            "schema_version",
+            "project_type",
+            "project_id",
+            "name",
+            "created_at",
+            "updated_at",
+            "specimens",
+            "models",
+            "runs",
+            "view_settings",
+        }
+    }
     connection.execute(
         """
         UPDATE tif_projects
@@ -176,25 +193,7 @@ def _insert_project_row(connection, project_data):
             TIF_SQLITE_PROJECT_TYPE,
             str(project_data.get("schema_version") or TIF_PROJECT_SCHEMA_VERSION),
             json_text(_as_dict(project_data.get("view_settings"))),
-            json_text(
-                {
-                    key: value
-                    for key, value in project_data.items()
-                    if key
-                    not in {
-                        "schema_version",
-                        "project_type",
-                        "project_id",
-                        "name",
-                        "created_at",
-                        "updated_at",
-                        "specimens",
-                        "models",
-                        "runs",
-                        "view_settings",
-                    }
-                }
-            ),
+            json_text(metadata_payload),
         ),
     )
 
@@ -357,6 +356,10 @@ def _insert_material_map(connection, specimen_row_id, specimen):
 
 
 def _insert_part_shell(connection, specimen_row_id, part):
+    metadata_payload = _dict_without_keys(part.get("metadata"), {"local_axis_reslices", "local_axis_frame_proposals"})
+    metadata_payload["training"] = _as_dict(part.get("training"))
+    metadata_payload["system_status"] = str(part.get("system_status") or "")
+    metadata_payload["user_tags"] = _as_list(part.get("user_tags"))
     cursor = connection.execute(
         """
         INSERT INTO parts (
@@ -376,7 +379,7 @@ def _insert_part_shell(connection, specimen_row_id, part):
             str(part.get("extraction_path") or ""),
             json_text(_as_list(part.get("parent_bbox_zyx"))),
             json_text(_as_dict(part.get("source"))),
-            json_text(_dict_without_keys(part.get("metadata"), {"local_axis_reslices", "local_axis_frame_proposals"})),
+            json_text(metadata_payload),
             json_text(_as_dict(part.get("view_settings"))),
             str(part.get("created_at") or time.strftime("%Y-%m-%dT%H:%M:%S%z")),
             str(part.get("updated_at") or time.strftime("%Y-%m-%dT%H:%M:%S%z")),
@@ -430,6 +433,9 @@ def _insert_part_roi(connection, specimen_row_id, roi, part_row_by_part_id):
 
 
 def _insert_part_reslice(connection, part_row_id, record):
+    training_payload = _as_dict(record.get("training"))
+    if isinstance(record.get("labels"), dict):
+        training_payload["_reslice_labels"] = _as_dict(record.get("labels"))
     cursor = connection.execute(
         """
         INSERT INTO part_reslices (
@@ -454,7 +460,7 @@ def _insert_part_reslice(connection, part_row_id, record):
             json_text(_as_dict(record.get("local_frame"))),
             json_text(_as_dict(record.get("reslice_params"))),
             json_text(_as_dict(record.get("source"))),
-            json_text(_as_dict(record.get("training"))),
+            json_text(training_payload),
             json_text(_as_dict(record.get("training_sample"))),
             json_text(_as_dict(record.get("provenance"))),
             str(record.get("created_at") or time.strftime("%Y-%m-%dT%H:%M:%S%z")),
@@ -760,6 +766,23 @@ def _insert_specimen_tree(connection, specimen, stats):
             stats["volume_asset_count"] += 1
         if image_asset_id or mask_asset_id:
             _update_part_asset_refs(connection, part_row_id, image_asset_id, mask_asset_id)
+
+        part_labels = _as_dict(part.get("labels"))
+        for role in ("manual_truth", "editable_ai_result", "raw_ai_prediction_backup"):
+            record = _as_dict(part_labels.get(role))
+            asset_id = _insert_volume_asset(
+                connection,
+                specimen_row_id,
+                record,
+                role=f"part_{role}",
+                asset_key=f"parts.{part_id}.labels.{role}",
+                part_row_id=part_row_id,
+                status=record.get("status", ""),
+            )
+            if asset_id:
+                stats["volume_asset_count"] += 1
+                _insert_label_layer(connection, specimen_row_id, asset_id, record, role=f"part_{role}")
+                stats["label_layer_count"] += 1
 
         metadata = _as_dict(part.get("metadata"))
         for reslice in _as_list(metadata.get("local_axis_reslices")):

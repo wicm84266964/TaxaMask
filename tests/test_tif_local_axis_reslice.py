@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import tifffile
@@ -90,6 +91,37 @@ class TifLocalAxisResliceTests(unittest.TestCase):
         resliced = reslice_volume(volume, frame, {"output_shape_zyx": list(volume.shape)}, interpolation="nearest")
 
         np.testing.assert_array_equal(resliced, volume)
+
+    def test_reslice_volume_chunks_coordinate_grid_under_budget(self):
+        volume = np.arange(3 * 4 * 5, dtype=np.uint16).reshape((3, 4, 5))
+        frame = {
+            "origin_zyx": [1.0, 1.5, 2.0],
+            "x_axis": [0.0, 0.0, 1.0],
+            "y_axis": [0.0, 1.0, 0.0],
+            "z_axis": [1.0, 0.0, 0.0],
+            "output_axis": "z_axis",
+            "spacing_zyx": [1.0, 1.0, 1.0],
+        }
+        params = {
+            "output_shape_zyx": [6, 7, 8],
+            "coordinate_budget_bytes": 3 * 2 * 4 * 4 * 8,
+        }
+        calls = []
+        from AntSleap.core import tif_local_axis_reslice as reslice_module
+
+        real_map_coordinates = reslice_module.map_coordinates
+
+        def capture_map_coordinates(array, coords, *args, **kwargs):
+            calls.append(tuple(int(value) for value in coords.shape))
+            self.assertLessEqual(coords.shape[1], 2)
+            return real_map_coordinates(array, coords, *args, **kwargs)
+
+        with patch("AntSleap.core.tif_local_axis_reslice.map_coordinates", side_effect=capture_map_coordinates):
+            resliced = reslice_volume(volume, frame, params, interpolation="nearest")
+
+        self.assertEqual(resliced.shape, (6, 7, 8))
+        self.assertGreater(len(calls), 1)
+        self.assertNotIn((3, 6, 7, 8), calls)
 
     def test_three_point_alignment_preserves_axis_length_near_volume_edge(self):
         editable = {

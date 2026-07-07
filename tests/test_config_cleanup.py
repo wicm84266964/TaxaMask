@@ -74,6 +74,59 @@ class ConfigCleanupTests(unittest.TestCase):
             self.assertEqual(migrated_payload["language"], "en")
             self.assertEqual(legacy_payload["language"], "zh")
 
+    def test_legacy_empty_tif_backend_migrates_to_nnunet_v2_commands(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_path = Path(tmp_dir) / "user_config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "tif_backend": {
+                            "backend_id": "custom_tif_backend",
+                            "display_name": "TIF Volume Backend",
+                            "python_executable": "C:/taxamask/python.exe",
+                            "prepare_dataset_command": "",
+                            "train_command": "",
+                            "predict_command": "",
+                            "model_manifest": "",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            manager = ConfigManager(config_path=config_path, legacy_config_path=Path(tmp_dir) / "missing.json")
+            backend = manager.get("tif_backend")
+
+            self.assertEqual(backend["backend_id"], "taxamask_tif_nnunet_v2_backend")
+            self.assertEqual(backend["python_executable"], "C:/taxamask/python.exe")
+            self.assertIn("AntSleap.tools.tif_nnunet_v2_backend", backend["train_command"])
+
+    def test_named_custom_tif_backend_is_not_overwritten_by_migration(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_path = Path(tmp_dir) / "user_config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "tif_backend": {
+                            "backend_id": "monai_volume_backend",
+                            "display_name": "MONAI volume backend",
+                            "python_executable": "python",
+                            "prepare_dataset_command": "",
+                            "train_command": "",
+                            "predict_command": "",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            manager = ConfigManager(config_path=config_path, legacy_config_path=Path(tmp_dir) / "missing.json")
+            backend = manager.get("tif_backend")
+
+            self.assertEqual(backend["backend_id"], "monai_volume_backend")
+            self.assertEqual(backend["display_name"], "MONAI volume backend")
+            self.assertEqual(backend["train_command"], "")
+
     def test_platform_config_path_rules_are_stable(self):
         win_path = user_config_path(
             platform="win32",

@@ -84,12 +84,24 @@ def import_external_prediction_tif(
         raise ValueError(f"external_prediction_shape_mismatch:{clean_specimen_id}:{label_shape}:{working_shape}")
 
     safe_prediction_id = _safe_prediction_id(prediction_id or default_prediction_id_for_tif(source_path))
+    backup_rel = os.path.join(
+        project_manager.specimen_dir(clean_specimen_id),
+        "labels",
+        "raw_ai_prediction_backup.ome.zarr",
+    ).replace("\\", "/")
+    editable_rel = os.path.join(
+        project_manager.specimen_dir(clean_specimen_id),
+        "labels",
+        "working_edit.ome.zarr",
+    ).replace("\\", "/")
     draft_rel = os.path.join(
         project_manager.specimen_dir(clean_specimen_id),
         "labels",
         "model_draft",
         f"{safe_prediction_id}.ome.zarr",
     ).replace("\\", "/")
+    backup_abs = project_manager.to_absolute(backup_rel)
+    editable_abs = project_manager.to_absolute(editable_rel)
     draft_abs = project_manager.to_absolute(draft_rel)
     if os.path.exists(draft_abs):
         raise FileExistsError(draft_abs)
@@ -97,7 +109,7 @@ def import_external_prediction_tif(
     report_rel = os.path.join(
         project_manager.specimen_dir(clean_specimen_id),
         "labels",
-        "model_draft",
+        "import_reports",
         f"{safe_prediction_id}_import_report.json",
     ).replace("\\", "/")
     report_abs = project_manager.to_absolute(report_rel)
@@ -106,8 +118,42 @@ def import_external_prediction_tif(
 
     source_model_text = str(source_model or "external_tif")
     draft = None
+    labels = specimen.setdefault("labels", {})
+    previous_train_ready = bool(specimen.get("train_ready"))
+    working_edit_existed = bool(str((labels.get("working_edit") or {}).get("path") or "").strip())
+    created_fixed_paths = {
+        backup_abs: os.path.exists(backup_abs),
+        editable_abs: os.path.exists(editable_abs),
+    }
     try:
-        metadata = write_volume_sidecar(
+        common_metadata = {
+            "source_path": source_path,
+            "prediction_id": safe_prediction_id,
+            "source_model": source_model_text,
+            "import_adapter": TIF_EXTERNAL_PREDICTION_IMPORT_ADAPTER_VERSION,
+            "note": "External prediction label TIF imported as editable review result; not training truth.",
+        }
+        backup_meta = write_volume_sidecar(
+            backup_abs,
+            volume,
+            role="raw_ai_prediction_backup",
+            spacing_zyx=working_meta.get("spacing_zyx") or working_record.get("spacing_zyx"),
+            spacing_unit=working_meta.get("spacing_unit", working_record.get("spacing_unit", "micrometer")),
+            orientation=working_meta.get("orientation", working_record.get("orientation", "unknown")),
+            source_format="external_prediction_tif",
+            extra_metadata=common_metadata,
+        )
+        editable_meta = write_volume_sidecar(
+            editable_abs,
+            volume,
+            role="working_edit",
+            spacing_zyx=working_meta.get("spacing_zyx") or working_record.get("spacing_zyx"),
+            spacing_unit=working_meta.get("spacing_unit", working_record.get("spacing_unit", "micrometer")),
+            orientation=working_meta.get("orientation", working_record.get("orientation", "unknown")),
+            source_format="external_prediction_tif",
+            extra_metadata=common_metadata,
+        )
+        draft_meta = write_volume_sidecar(
             draft_abs,
             volume,
             role="model_draft",
@@ -115,27 +161,51 @@ def import_external_prediction_tif(
             spacing_unit=working_meta.get("spacing_unit", working_record.get("spacing_unit", "micrometer")),
             orientation=working_meta.get("orientation", working_record.get("orientation", "unknown")),
             source_format="external_prediction_tif",
-            extra_metadata={
-                "source_path": source_path,
-                "prediction_id": safe_prediction_id,
-                "source_model": source_model_text,
-                "import_adapter": TIF_EXTERNAL_PREDICTION_IMPORT_ADAPTER_VERSION,
-                "note": "External prediction label TIF imported as model_draft only; not manual_truth.",
-            },
+            extra_metadata={**common_metadata, "note": "Legacy read-only copy of the external prediction label TIF."},
         )
+        labels["raw_ai_prediction_backup"] = project_manager._volume_payload(
+            backup_rel,
+            backup_meta["shape_zyx"],
+            backup_meta["dtype"],
+            backup_meta.get("spacing_zyx"),
+            backup_meta.get("spacing_unit", "micrometer"),
+            backup_meta.get("orientation", "unknown"),
+            backup_meta.get("format", ""),
+        )
+        labels["raw_ai_prediction_backup"]["role"] = "raw_ai_prediction_backup"
+        labels["raw_ai_prediction_backup"]["status"] = "raw_backup"
+        labels["raw_ai_prediction_backup"]["prediction_id"] = safe_prediction_id
+        labels["raw_ai_prediction_backup"]["source_model"] = source_model_text
+        editable = project_manager.register_label_volume(
+            clean_specimen_id,
+            "working_edit",
+            editable_rel,
+            editable_meta["shape_zyx"],
+            editable_meta["dtype"],
+            status="pending_review",
+            spacing_zyx=editable_meta.get("spacing_zyx"),
+            spacing_unit=editable_meta.get("spacing_unit", "micrometer"),
+            orientation=editable_meta.get("orientation", "unknown"),
+            fmt=editable_meta.get("format", ""),
+            save=False,
+        )
+        editable["prediction_id"] = safe_prediction_id
+        editable["source_model"] = source_model_text
         draft = project_manager.add_model_draft(
             clean_specimen_id,
             draft_rel,
-            metadata["shape_zyx"],
-            metadata["dtype"],
+            draft_meta["shape_zyx"],
+            draft_meta["dtype"],
             prediction_id=safe_prediction_id,
             source_model=source_model_text,
-            spacing_zyx=metadata.get("spacing_zyx"),
-            spacing_unit=metadata.get("spacing_unit", "micrometer"),
-            orientation=metadata.get("orientation", "unknown"),
-            fmt=metadata.get("format", ""),
+            spacing_zyx=draft_meta.get("spacing_zyx"),
+            spacing_unit=draft_meta.get("spacing_unit", "micrometer"),
+            orientation=draft_meta.get("orientation", "unknown"),
+            fmt=draft_meta.get("format", ""),
             save=False,
         )
+        specimen["review_status"] = "pending_review"
+        specimen["train_ready"] = False
         report = {
             "schema_version": TIF_EXTERNAL_PREDICTION_IMPORT_REPORT_SCHEMA_VERSION,
             "imported_at": _now_iso(),
@@ -145,6 +215,8 @@ def import_external_prediction_tif(
             "prediction_id": safe_prediction_id,
             "source_model": source_model_text,
             "files": {
+                "raw_ai_prediction_backup": backup_rel,
+                "working_edit": editable_rel,
                 "model_draft": draft_rel,
                 "import_report": report_rel,
             },
@@ -154,18 +226,24 @@ def import_external_prediction_tif(
             },
             "dtype": {
                 "prediction_label": str(volume.dtype),
-                "model_draft": metadata["dtype"],
+                "raw_ai_prediction_backup": backup_meta["dtype"],
+                "working_edit": editable_meta["dtype"],
+                "model_draft": draft_meta["dtype"],
             },
             "safety": {
-                "imported_role": "model_draft",
+                "imported_role": "working_edit",
+                "review_status": "pending_review",
+                "working_edit_overwritten": working_edit_existed,
                 "manual_truth_overwritten": False,
-                "train_ready_changed": False,
+                "train_ready_changed": previous_train_ready,
             },
             "warnings": [],
             "errors": [],
         }
         atomic_write_json(report_abs, report, indent=2, ensure_ascii=False)
         draft["import_report"] = report_rel
+        editable["import_report"] = report_rel
+        labels["raw_ai_prediction_backup"]["import_report"] = report_rel
         project_manager.save_project()
     except Exception:
         if draft is not None:
@@ -175,8 +253,10 @@ def import_external_prediction_tif(
                 for item in drafts
                 if item.get("path") != draft_rel and item.get("prediction_id") != safe_prediction_id
             ]
-        if os.path.exists(draft_abs):
-            shutil.rmtree(draft_abs, ignore_errors=True)
+        for path in (draft_abs, backup_abs, editable_abs):
+            if path == draft_abs or not created_fixed_paths.get(path, False):
+                if os.path.exists(path):
+                    shutil.rmtree(path, ignore_errors=True)
         if os.path.exists(report_abs):
             try:
                 os.remove(report_abs)
@@ -185,6 +265,8 @@ def import_external_prediction_tif(
         raise
 
     return {
+        "working_edit": labels.get("working_edit") or {},
+        "raw_ai_prediction_backup": labels.get("raw_ai_prediction_backup") or {},
         "draft": draft,
         "report": report,
         "report_path": report_abs,

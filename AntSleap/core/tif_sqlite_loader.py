@@ -35,6 +35,16 @@ def _volume_record(row):
             "spacing_unit": "micrometer",
             "orientation": "unknown",
         }
+    if "shape_zyx_json" not in row and isinstance(row, dict):
+        record = dict(row)
+        record.setdefault("path", "")
+        record.setdefault("format", "")
+        record.setdefault("shape_zyx", [])
+        record.setdefault("dtype", "")
+        record.setdefault("spacing_zyx", [])
+        record.setdefault("spacing_unit", "micrometer")
+        record.setdefault("orientation", "unknown")
+        return record
     record = {
         "path": str(row["path"] or ""),
         "format": str(row["format"] or ""),
@@ -58,7 +68,16 @@ def _empty_labels():
     return {
         "manual_truth": _volume_record(None),
         "working_edit": _volume_record(None),
+        "raw_ai_prediction_backup": _volume_record(None),
         "model_drafts": [],
+    }
+
+
+def _empty_part_labels():
+    return {
+        "manual_truth": _volume_record(None),
+        "editable_ai_result": _volume_record(None),
+        "raw_ai_prediction_backup": _volume_record(None),
     }
 
 
@@ -125,7 +144,7 @@ def _load_label_layers(connection, volume_assets_by_id):
             if key not in record:
                 record[key] = value
         labels = by_specimen.setdefault(specimen_id, _empty_labels())
-        if role in {"manual_truth", "working_edit"}:
+        if role in {"manual_truth", "working_edit", "raw_ai_prediction_backup"}:
             labels[role] = record
         elif role == "model_draft":
             labels.setdefault("model_drafts", []).append(record)
@@ -143,7 +162,8 @@ def _load_material_maps(connection):
     return {int(row["specimen_id"]): str(row["path"] or "") for row in rows}
 
 
-def _load_parts(connection, volume_assets_by_id):
+def _load_parts(connection, volume_assets_by_id, volume_assets_by_part_role=None):
+    volume_assets_by_part_role = volume_assets_by_part_role or {}
     rows = connection.execute(
         """
         SELECT *
@@ -160,6 +180,7 @@ def _load_parts(connection, volume_assets_by_id):
             "status": str(row["status"] or "draft"),
             "image": _volume_record(volume_assets_by_id.get(int(row["image_asset_id"])) if row["image_asset_id"] is not None else None),
             "mask": _volume_record(volume_assets_by_id.get(int(row["mask_asset_id"])) if row["mask_asset_id"] is not None else None),
+            "labels": _empty_part_labels(),
             "contours_path": str(row["contours_path"] or ""),
             "extraction_path": str(row["extraction_path"] or ""),
             "parent_bbox_zyx": _as_list(_json_loads(row["parent_bbox_zyx_json"], [])),
@@ -170,6 +191,22 @@ def _load_parts(connection, volume_assets_by_id):
             "view_settings": _as_dict(_json_loads(row["view_settings_json"], {})),
         }
         row_id = int(row["id"])
+        metadata = part["metadata"]
+        training = _as_dict(metadata.pop("training", {}))
+        system_status = str(metadata.pop("system_status", "") or training.get("system_status", "") or "cut_pending_labeling")
+        part["training"] = training
+        part["system_status"] = system_status
+        part["user_tags"] = _as_list(metadata.pop("user_tags", []))
+        by_role = volume_assets_by_part_role.get(row_id, {})
+        role_map = {
+            "part_manual_truth": "manual_truth",
+            "part_editable_ai_result": "editable_ai_result",
+            "part_raw_ai_prediction_backup": "raw_ai_prediction_backup",
+        }
+        for stored_role, label_role in role_map.items():
+            rows_for_role = by_role.get(stored_role) or []
+            if rows_for_role:
+                part["labels"][label_role] = _volume_record(rows_for_role[-1])
         by_id[row_id] = part
         by_specimen.setdefault(int(row["specimen_id"]), []).append(part)
     return by_id, by_specimen
@@ -211,6 +248,8 @@ def _load_part_reslices(connection, parts_by_id):
         part = parts_by_id.get(int(row["part_id"]))
         if part is None:
             continue
+        training = _as_dict(_json_loads(row["training_json"], {}))
+        labels = _as_dict(training.pop("_reslice_labels", {}))
         record = {
             "reslice_id": str(row["reslice_id"] or ""),
             "part_id": part.get("part_id", ""),
@@ -224,7 +263,12 @@ def _load_part_reslices(connection, parts_by_id):
             "local_frame": _as_dict(_json_loads(row["local_frame_json"], {})),
             "reslice_params": _as_dict(_json_loads(row["reslice_params_json"], {})),
             "source": _as_dict(_json_loads(row["source_json"], {})),
-            "training": _as_dict(_json_loads(row["training_json"], {})),
+            "labels": {
+                "manual_truth": _volume_record(labels.get("manual_truth")),
+                "editable_ai_result": _volume_record(labels.get("editable_ai_result")),
+                "raw_ai_prediction_backup": _volume_record(labels.get("raw_ai_prediction_backup")),
+            },
+            "training": training,
             "training_sample": _as_dict(_json_loads(row["training_sample_json"], {})),
             "provenance": _as_dict(_json_loads(row["provenance_json"], {})),
             "created_at": str(row["created_at"] or ""),
@@ -417,10 +461,10 @@ def load_tif_sqlite_project_data(database_path):
         integrity = ensure_integrity_ok(connection)
         connection.row_factory = lambda cursor, row: {column[0]: row[index] for index, column in enumerate(cursor.description)}
         project_row = _load_project_row(connection)
-        volume_assets_by_id, _volume_assets_by_specimen_role, _volume_assets_by_part_role = _load_volume_assets(connection)
+        volume_assets_by_id, _volume_assets_by_specimen_role, volume_assets_by_part_role = _load_volume_assets(connection)
         label_layers_by_specimen = _load_label_layers(connection, volume_assets_by_id)
         material_maps_by_specimen = _load_material_maps(connection)
-        parts_by_id, parts_by_specimen = _load_parts(connection, volume_assets_by_id)
+        parts_by_id, parts_by_specimen = _load_parts(connection, volume_assets_by_id, volume_assets_by_part_role)
         part_rois_by_specimen = _load_part_rois(connection)
         _load_part_reslices(connection, parts_by_id)
         _load_local_frame_proposals(connection, parts_by_id)
@@ -480,6 +524,8 @@ def load_tif_sqlite_project_data(database_path):
             "view_settings": _as_dict(_json_loads(project_row["view_settings_json"], {})),
         }
         metadata = _as_dict(_json_loads(project_row["metadata_json"], {}))
+        project_data["label_schemas"] = _as_list(metadata.pop("label_schemas", []))
+        project_data["part_user_tags"] = _as_list(metadata.pop("part_user_tags", []))
         for key, value in metadata.items():
             if key not in project_data:
                 project_data[key] = value

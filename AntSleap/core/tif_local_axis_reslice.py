@@ -14,6 +14,7 @@ from .tif_volume_io import load_volume_sidecar, read_volume_metadata, volume_sid
 LOCAL_AXIS_RESLICE_SCHEMA_VERSION = "taxamask_local_axis_reslice_v1"
 LOCAL_AXIS_TRAINING_SAMPLE_SCHEMA_VERSION = "taxamask_tif_local_axis_training_sample_v1"
 LOCAL_AXIS_RESLICE_SOFTWARE_VERSION = "TaxaMask local_axis_reslice_v1"
+LOCAL_AXIS_RESLICE_COORDINATE_BUDGET_BYTES = 256 * 1024 * 1024
 
 
 def _now_iso():
@@ -377,15 +378,11 @@ def _roll_reference_from_payload(payload, local_frame):
     return {}
 
 
-def reslice_volume(volume, local_frame, params=None, interpolation="linear"):
-    array = np.asarray(volume)
-    if array.ndim != 3:
-        raise ValueError(f"volume_must_be_3d:{array.ndim}")
-    params = dict(params or {})
-    output_shape = params.get("output_shape_zyx") or params.get("output_shape") or list(array.shape)
-    if len(output_shape) != 3:
-        raise ValueError("output_shape_zyx_must_have_3_values")
-    output_shape = tuple(max(1, int(value)) for value in output_shape)
+def _reslice_interpolation_order(interpolation):
+    return 0 if str(interpolation).lower() in {"nearest", "nearest-neighbor", "nearest_neighbor"} else 1
+
+
+def _reslice_axis_steps(local_frame, params, output_shape):
     spacing = _normalize_spacing(params.get("output_spacing_zyx") or local_frame.get("spacing_zyx") or [1.0, 1.0, 1.0])
     source_spacing = _normalize_spacing(local_frame.get("spacing_zyx") or [1.0, 1.0, 1.0])
     origin = _point(local_frame.get("origin_zyx"), "origin_zyx")
@@ -401,16 +398,47 @@ def reslice_volume(volume, local_frame, params=None, interpolation="linear"):
     for axis_index, axis_voxel in enumerate(axes_voxel):
         world_unit = _world_unit_from_voxel_axis(axis_voxel, source_spacing, f"local_frame_axis_{axis_index}")
         axis_steps.append((world_unit * spacing[axis_index]) / source_spacing)
-    axis_steps = np.stack(axis_steps, axis=0)
+    return origin, np.stack(axis_steps, axis=0), (np.array(output_shape, dtype=np.float64) - 1.0) / 2.0
 
-    center = (np.array(output_shape, dtype=np.float64) - 1.0) / 2.0
-    grid = np.indices(output_shape, dtype=np.float64)
-    offsets = np.stack([grid[0] - center[0], grid[1] - center[1], grid[2] - center[2]], axis=0)
-    coords = origin.reshape((3, 1, 1, 1)) + np.einsum("ia, i... -> a...", axis_steps, offsets)
 
-    order = 0 if str(interpolation).lower() in {"nearest", "nearest-neighbor", "nearest_neighbor"} else 1
-    cval = params.get("cval", 0)
-    sampled = map_coordinates(array, coords, order=order, mode=str(params.get("mode") or "constant"), cval=float(cval), prefilter=order > 1)
+def _reslice_chunk_shape(output_shape, params):
+    requested = params.get("chunk_shape_zyx")
+    if isinstance(requested, (list, tuple)) and len(requested) == 3:
+        return tuple(max(1, min(int(output_shape[index]), int(value))) for index, value in enumerate(requested))
+    budget = params.get("coordinate_budget_bytes", LOCAL_AXIS_RESLICE_COORDINATE_BUDGET_BYTES)
+    try:
+        budget = int(budget)
+    except (TypeError, ValueError):
+        budget = LOCAL_AXIS_RESLICE_COORDINATE_BUDGET_BYTES
+    budget = max(3 * np.dtype(np.float64).itemsize, budget)
+    max_coordinate_voxels = max(1, int(budget // (3 * np.dtype(np.float64).itemsize)))
+    z_count, y_count, x_count = [int(value) for value in output_shape]
+    x_chunk = min(x_count, max(1, max_coordinate_voxels))
+    y_chunk = min(y_count, max(1, max_coordinate_voxels // max(1, x_chunk)))
+    z_chunk = min(z_count, max(1, max_coordinate_voxels // max(1, y_chunk * x_chunk)))
+    return z_chunk, y_chunk, x_chunk
+
+
+def _reslice_volume_chunk(array, origin, axis_steps, center, output_slices, params, order):
+    z_slice, y_slice, x_slice = output_slices
+    z_offsets = (np.arange(z_slice.start, z_slice.stop, dtype=np.float64) - center[0]).reshape((-1, 1, 1))
+    y_offsets = (np.arange(y_slice.start, y_slice.stop, dtype=np.float64) - center[1]).reshape((1, -1, 1))
+    x_offsets = (np.arange(x_slice.start, x_slice.stop, dtype=np.float64) - center[2]).reshape((1, 1, -1))
+    coords_shape = (3, z_slice.stop - z_slice.start, y_slice.stop - y_slice.start, x_slice.stop - x_slice.start)
+    coords = np.empty(coords_shape, dtype=np.float64)
+    for source_axis in range(3):
+        coords[source_axis] = origin[source_axis]
+        coords[source_axis] += axis_steps[0, source_axis] * z_offsets
+        coords[source_axis] += axis_steps[1, source_axis] * y_offsets
+        coords[source_axis] += axis_steps[2, source_axis] * x_offsets
+    sampled = map_coordinates(
+        array,
+        coords,
+        order=order,
+        mode=str(params.get("mode") or "constant"),
+        cval=float(params.get("cval", 0)),
+        prefilter=order > 1,
+    )
     if order == 0:
         return sampled.astype(array.dtype, copy=False)
     if np.issubdtype(array.dtype, np.integer):
@@ -418,6 +446,157 @@ def reslice_volume(volume, local_frame, params=None, interpolation="linear"):
         sampled = np.clip(np.rint(sampled), info.min, info.max)
         return sampled.astype(array.dtype)
     return sampled.astype(array.dtype, copy=False)
+
+
+def reslice_volume_to_array(
+    volume,
+    local_frame,
+    output,
+    params=None,
+    interpolation="linear",
+    progress_callback=None,
+):
+    array = np.asarray(volume)
+    if array.ndim != 3:
+        raise ValueError(f"volume_must_be_3d:{array.ndim}")
+    params = dict(params or {})
+    output_shape = params.get("output_shape_zyx") or params.get("output_shape") or list(array.shape)
+    if len(output_shape) != 3:
+        raise ValueError("output_shape_zyx_must_have_3_values")
+    output_shape = tuple(max(1, int(value)) for value in output_shape)
+    target = np.asarray(output)
+    if tuple(int(value) for value in target.shape) != output_shape:
+        raise ValueError(f"output_shape_mismatch:{target.shape}:{output_shape}")
+    origin, axis_steps, center = _reslice_axis_steps(local_frame, params, output_shape)
+    order = _reslice_interpolation_order(interpolation)
+    z_chunk, y_chunk, x_chunk = _reslice_chunk_shape(output_shape, params)
+    total_chunks = (
+        ((output_shape[0] + z_chunk - 1) // z_chunk)
+        * ((output_shape[1] + y_chunk - 1) // y_chunk)
+        * ((output_shape[2] + x_chunk - 1) // x_chunk)
+    )
+    done = 0
+    for z0 in range(0, output_shape[0], z_chunk):
+        z1 = min(output_shape[0], z0 + z_chunk)
+        for y0 in range(0, output_shape[1], y_chunk):
+            y1 = min(output_shape[1], y0 + y_chunk)
+            for x0 in range(0, output_shape[2], x_chunk):
+                x1 = min(output_shape[2], x0 + x_chunk)
+                output_slices = (slice(z0, z1), slice(y0, y1), slice(x0, x1))
+                target[output_slices] = _reslice_volume_chunk(
+                    array,
+                    origin,
+                    axis_steps,
+                    center,
+                    output_slices,
+                    params,
+                    order,
+                )
+                done += 1
+                if callable(progress_callback):
+                    progress_callback(done, total_chunks)
+    if hasattr(output, "flush"):
+        output.flush()
+    return output
+
+
+def reslice_volume(volume, local_frame, params=None, interpolation="linear"):
+    array = np.asarray(volume)
+    if array.ndim != 3:
+        raise ValueError(f"volume_must_be_3d:{array.ndim}")
+    params = dict(params or {})
+    output_shape = params.get("output_shape_zyx") or params.get("output_shape") or list(array.shape)
+    if len(output_shape) != 3:
+        raise ValueError("output_shape_zyx_must_have_3_values")
+    output_shape = tuple(max(1, int(value)) for value in output_shape)
+    output = np.empty(output_shape, dtype=array.dtype)
+    return reslice_volume_to_array(array, local_frame, output, params=params, interpolation=interpolation)
+
+
+def _emit_progress(progress_callback, current, total, message):
+    if callable(progress_callback):
+        progress_callback(int(current), int(total), str(message or ""))
+
+
+def _close_memmap(array):
+    mmap = getattr(array, "_mmap", None)
+    if mmap is not None:
+        try:
+            mmap.close()
+        except Exception:
+            pass
+
+
+def _temporary_tif_path(final_path):
+    root, ext = os.path.splitext(str(final_path))
+    ext = ext or ".tif"
+    return f"{root}.tmp_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{os.getpid()}{ext}"
+
+
+def _write_resliced_tif(
+    volume,
+    local_frame,
+    params,
+    output_path,
+    interpolation="linear",
+    progress_callback=None,
+    progress_start=0,
+    progress_end=100,
+    progress_label="Reslicing volume",
+):
+    array = np.asarray(volume)
+    output_shape = params.get("output_shape_zyx") or params.get("output_shape") or list(array.shape)
+    if len(output_shape) != 3:
+        raise ValueError("output_shape_zyx_must_have_3_values")
+    output_shape = tuple(max(1, int(value)) for value in output_shape)
+    output_path = os.path.abspath(str(output_path))
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    tmp_path = _temporary_tif_path(output_path)
+    output = None
+    try:
+        output = tifffile.memmap(
+            tmp_path,
+            shape=output_shape,
+            dtype=array.dtype,
+            photometric="minisblack",
+            bigtiff=True,
+        )
+
+        def _on_chunk(done, total):
+            span = max(0, int(progress_end) - int(progress_start))
+            if total > 0:
+                current = int(progress_start) + int(round(span * float(done) / float(total)))
+            else:
+                current = int(progress_start)
+            _emit_progress(progress_callback, current, 100, progress_label)
+
+        reslice_volume_to_array(
+            array,
+            local_frame,
+            output,
+            params=params,
+            interpolation=interpolation,
+            progress_callback=_on_chunk if callable(progress_callback) else None,
+        )
+        if hasattr(output, "flush"):
+            output.flush()
+        _close_memmap(output)
+        output = None
+        os.replace(tmp_path, output_path)
+        return {
+            "path": output_path,
+            "shape_zyx": [int(value) for value in output_shape],
+            "dtype": str(array.dtype),
+        }
+    except Exception:
+        if output is not None:
+            _close_memmap(output)
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def build_reslice_preview(volume, local_frame, params=None, max_shape_zyx=(96, 96, 96)):
@@ -440,7 +619,7 @@ def build_reslice_preview(volume, local_frame, params=None, max_shape_zyx=(96, 9
     return reslice_volume(array, local_frame, preview_params, interpolation=params.get("interpolation", "linear"))
 
 
-def export_part_reslice(project_manager, specimen_id, part_id, reslice_payload):
+def export_part_reslice(project_manager, specimen_id, part_id, reslice_payload, progress_callback=None):
     if not isinstance(project_manager, TifProjectManager):
         raise TypeError("project_manager_must_be_tif_project_manager")
     part = project_manager.get_part(specimen_id, part_id, default=None)
@@ -465,7 +644,7 @@ def export_part_reslice(project_manager, specimen_id, part_id, reslice_payload):
     image_path = project_manager.to_absolute(part_image.get("path", ""))
     if not volume_sidecar_exists(image_path):
         raise FileNotFoundError(image_path)
-    image = load_volume_sidecar(image_path)
+    image = load_volume_sidecar(image_path, mmap_mode="r")
     image_meta = read_volume_metadata(image_path)
     part_image_shape = _shape_payload(image_meta.get("shape_zyx") or part_image.get("shape_zyx"), image.shape)
     part_spacing = _spacing_payload(image_meta.get("spacing_zyx") or (part_image.get("spacing_zyx") or [1.0, 1.0, 1.0]))
@@ -496,25 +675,44 @@ def export_part_reslice(project_manager, specimen_id, part_id, reslice_payload):
     if not params.get("output_shape_zyx") and not params.get("output_shape"):
         params["output_shape_zyx"] = local_axis_output_shape_for_source_bbox(image.shape, local_frame, params.get("output_spacing_zyx"))
     image_interpolation = params.get("image_interpolation", "linear")
-    image_resliced = reslice_volume(image, local_frame, params, interpolation=image_interpolation)
 
     os.makedirs(reslice_root_abs, exist_ok=True)
     image_rel = f"{reslice_root_rel}/image.tif"
     image_abs = project_manager.to_absolute(image_rel)
-    tifffile.imwrite(image_abs, image_resliced, photometric="minisblack")
+    _emit_progress(progress_callback, 5, 100, "Preparing Local Axis Reslice image...")
+    image_write = _write_resliced_tif(
+        image,
+        local_frame,
+        params,
+        image_abs,
+        interpolation=image_interpolation,
+        progress_callback=progress_callback,
+        progress_start=5,
+        progress_end=75,
+        progress_label="Reslicing Local Axis image",
+    )
 
     mask_rel = ""
     mask_meta_payload = {}
     if bool(payload.get("export_mask", True)):
         if part_mask_available:
-            mask = load_volume_sidecar(mask_path)
-            mask_resliced = reslice_volume(mask, local_frame, params, interpolation="nearest")
+            mask = load_volume_sidecar(mask_path, mmap_mode="r")
             mask_rel = f"{reslice_root_rel}/mask.tif"
-            tifffile.imwrite(project_manager.to_absolute(mask_rel), mask_resliced, photometric="minisblack")
+            mask_write = _write_resliced_tif(
+                mask,
+                local_frame,
+                params,
+                project_manager.to_absolute(mask_rel),
+                interpolation="nearest",
+                progress_callback=progress_callback,
+                progress_start=75,
+                progress_end=95,
+                progress_label="Reslicing Local Axis mask",
+            )
             mask_meta_payload = {
                 "mask_path": mask_rel,
-                "mask_dtype": str(mask_resliced.dtype),
-                "mask_shape_zyx": [int(value) for value in mask_resliced.shape],
+                "mask_dtype": str(mask_write["dtype"]),
+                "mask_shape_zyx": [int(value) for value in mask_write["shape_zyx"]],
                 "mask_interpolation": "nearest",
             }
 
@@ -550,8 +748,8 @@ def export_part_reslice(project_manager, specimen_id, part_id, reslice_payload):
     }
     outputs_payload = {
         "image_path": image_rel,
-        "image_dtype": str(image_resliced.dtype),
-        "image_shape_zyx": [int(value) for value in image_resliced.shape],
+        "image_dtype": str(image_write["dtype"]),
+        "image_shape_zyx": [int(value) for value in image_write["shape_zyx"]],
         "image_interpolation": str(image_interpolation),
         **mask_meta_payload,
     }
@@ -646,7 +844,7 @@ def export_part_reslice(project_manager, specimen_id, part_id, reslice_payload):
     return {
         "record": saved_record,
         "metadata": metadata,
-        "image": image_resliced,
+        "image": None,
         "image_path": image_abs,
         "mask_path": project_manager.to_absolute(mask_rel) if mask_rel else "",
         "metadata_path": metadata_abs,

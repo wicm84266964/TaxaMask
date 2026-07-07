@@ -149,7 +149,8 @@ class TifLocalAxisAiTests(unittest.TestCase):
             self.assertEqual(sample["final_editable_axis"]["role"], "editable_output_axis")
             self.assertEqual(sample["origin_zyx"], [1.5, 1.5, 2.0])
             self.assertEqual(sample["roll_reference_point_pair"]["point_a"]["role"], "left_eye")
-            self.assertEqual(sample["outputs"]["image_shape_zyx"], [4, 4, 5])
+            self.assertEqual(sample["reslice_params"]["output_shape_zyx"], [4, 5, 4])
+            self.assertEqual(sample["outputs"]["image_shape_zyx"], sample["reslice_params"]["output_shape_zyx"])
             self.assertTrue(sample["outputs"]["image_path"].endswith("image.tif"))
             self.assertTrue(sample["metadata_path"].endswith("metadata.json"))
 

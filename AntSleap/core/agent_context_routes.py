@@ -62,29 +62,36 @@ AGENT_CONTEXT_ROUTES = {
     },
     "tif_model_settings": {
         "diagnostic_route": "tif_volume_backend_settings",
-        "diagnostic_focus": "TIF volume-segmentation backend defaults for train-ready export, training, prediction, model_draft import, and manual_truth safety. Keep this separate from the Local Axis proposal backend.",
+        "diagnostic_focus": "TIF volume-segmentation backend defaults for label-schema based train-ready export, project-wide part/reslice training selection, nnU-Net v2 or custom backend commands, trained model library, prediction import as editable_ai_result, raw prediction backup, and manual_truth safety. Keep this separate from the Local Axis proposal backend.",
         "llm_context_refs": (
             "LLM_CONTEXT_DETAILED.md -> 8. TIF/CT Project Model",
+            "LLM_CONTEXT_DETAILED.md -> 9. TIF Workbench",
             "LLM_CONTEXT_DETAILED.md -> 15. External Backend Contracts",
             "LLM_CONTEXT_DETAILED.md -> 16. Ask Agent Routing",
-            "TaxaMask使用手册.md -> 10. TIF 体数据工作台：切片、部位体与局部轴重切片",
+            "TaxaMask使用手册.md -> 10. TIF 体数据工作台：标注与训练、部位体与局部轴重切片",
+            "TaxaMask使用手册.md -> 12.4 TIF 训练体导出",
         ),
         "source_code_refs": (
             "AntSleap/main.py -> TifModelSettingsDialog.get_agent_context",
+            "AntSleap/ui/tif_workbench.py -> TifWorkbenchWidget.get_agent_context",
+            "AntSleap/ui/tif_workbench.py -> TifWorkbenchWidget._selected_backend_samples_for_action",
             "AntSleap/core/tif_backend.py",
             "AntSleap/core/tif_export.py",
             "AntSleap/core/tif_prediction_import.py",
+            "AntSleap/tools/tif_nnunet_v2_backend.py",
             "docs/contracts/ant3d_tif_backend_contract_v1.md",
             "docs/contracts/tif_local_axis_backend_contract_v1.md",
         ),
         "artifact_hints": (
-            "TIF SQLite manifest or legacy JSON entry, exported training exchange folder, backend contract JSON, backend result JSON, model_manifest, and model_draft sidecar are the key artifacts.",
+            "TIF SQLite manifest or legacy JSON entry, train-ready part/reslice refs, exported training exchange folder, backend contract JSON, backend result JSON, nnunet_v2_commands.log, TaxaMask model_manifest, project model-library record, editable_ai_result sidecar, and raw_ai_prediction_backup sidecar are the key artifacts.",
         ),
         "safety_notes": COMMON_SAFETY_NOTES
         + (
-            "Prediction outputs must land in model_draft and must not overwrite manual_truth automatically.",
+            "Part prediction outputs must land in editable_ai_result with a raw_ai_prediction_backup and must not overwrite manual_truth automatically.",
+            "A label schema only defines numeric label meaning; it is not a training sample unless reviewed manual_truth exists, shapes match, and the part/reslice or specimen is marked train-ready.",
+            "The bundled real nnU-Net v2 train adapter requires at least two exported training samples; prepare_dataset can still run with one sample for layout inspection.",
         ),
-        "suggested_agent_action": "Check backend ID, export formats, Python executable, contract placeholders, result schema, train-ready manual_truth export, and model_draft import path. If the task is Local Axis orientation or reslice proposals, switch to the local-axis contract instead.",
+        "suggested_agent_action": "Check backend ID, export formats, Python executable, editable command fields, contract placeholders, nnU-Net command availability, selected model manifest/model-library record, train-ready part/reslice sample count, top-level fallback count, result schema, editable_ai_result import path, and raw backup path. If the task is Local Axis orientation or reslice proposals, switch to the local-axis contract instead.",
     },
     "labeling": {
         "diagnostic_route": "labeling_workbench_context",
@@ -134,14 +141,16 @@ AGENT_CONTEXT_ROUTES = {
     },
     "tif_volume": {
         "diagnostic_route": "tif_volume_workbench_context",
-        "diagnostic_focus": "Current TIF specimen, label role, material ID, sidecar volumes, slice/3D volume view state, GPU preview, Local Axis Reslice, and train-ready/manual_truth safety.",
+        "diagnostic_focus": "Current TIF specimen, label role, label schema, material ID, sidecar volumes, slice/3D volume view state, GPU preview, Local Axis Reslice, project-wide train-ready sample selection, trained model library, backend run state, and manual_truth safety.",
         "llm_context_refs": (
             "LLM_CONTEXT_DETAILED.md -> 8. TIF/CT Project Model",
             "LLM_CONTEXT_DETAILED.md -> 9. TIF Workbench",
             "LLM_CONTEXT_DETAILED.md -> 11. GPU Volume Preview",
             "LLM_CONTEXT_DETAILED.md -> 12. Local Axis Reslice",
             "LLM_CONTEXT_DETAILED.md -> 13. Local Axis Training Material Capture",
-            "TaxaMask使用手册.md -> 10. TIF 体数据工作台：切片、部位体与局部轴重切片",
+            "LLM_CONTEXT_DETAILED.md -> 15. External Backend Contracts",
+            "TaxaMask使用手册.md -> 10. TIF 体数据工作台：标注与训练、部位体与局部轴重切片",
+            "TaxaMask使用手册.md -> 12.4 TIF 训练体导出",
         ),
         "source_code_refs": (
             "AntSleap/ui/tif_workbench.py -> TifWorkbenchWidget.get_agent_context",
@@ -154,14 +163,15 @@ AGENT_CONTEXT_ROUTES = {
             "docs/contracts/tif_local_axis_backend_contract_v1.md",
         ),
         "artifact_hints": (
-            "TIF project JSON, current specimen sidecars, working_edit, manual_truth, model_draft, material map, volume renderer state, source spacing, and recent workbench log are the first inspection targets.",
+            "TIF SQLite manifest or legacy JSON entry, current specimen sidecars, active label schema, working_edit, manual_truth, editable_ai_result, raw_ai_prediction_backup, train-ready part refs, selected model manifest, backend run/result JSON, material map, volume renderer state, source spacing, and recent workbench log are the first inspection targets.",
         ),
         "safety_notes": COMMON_SAFETY_NOTES
         + (
             "Do not write predictions or working_edit into manual_truth unless the researcher explicitly confirms that review is complete.",
             "Local Axis Reslice must preserve source provenance and use nearest-neighbor interpolation for label volumes.",
+            "Preparing or training TIF data should use reviewed train-ready samples across the project, not just the currently selected part, unless the code path explicitly says otherwise.",
         ),
-        "suggested_agent_action": "Check display_mode, slice axis/position, volume renderer, shape/spacing, label role, material ID, selected part/reslice item, and Local Axis draft/output state before interpreting a missing overlay, GPU preview issue, training readiness issue, prediction import problem, or reslice request.",
+        "suggested_agent_action": "Check display_mode, slice axis/position, volume renderer, shape/spacing, label role, label schema, material ID, selected part/reslice item, train-ready sample counts, selected model manifest, backend run state, and Local Axis draft/output state before interpreting a missing overlay, GPU preview issue, training readiness issue, prediction import problem, or reslice request.",
     },
     "pdf_evidence": {
         "diagnostic_route": "pdf_evidence_context",
@@ -186,7 +196,7 @@ AGENT_CONTEXT_ROUTES = {
             "For PDF acquisition, use only open metadata and legally exposed PDF links. Do not use Sci-Hub, LibGen, paywall bypasses, CAPTCHA bypasses, or logged-in scraping.",
             "PDF evidence and extracted figures are candidates/provenance only; never promote them into training truth automatically.",
         ),
-        "suggested_agent_action": "First ask whether the user already has a PDF folder or needs stage 0 lawful literature/PDF harvest. If PDFs are missing, load taxonomy-pdf-harvest first; otherwise load the PDF evidence skill. Stay on the current stage, ask at most three concise requirement-confirmation questions, and move forward only after the current stage is resolved.",
+        "suggested_agent_action": "First ask whether the user already has a PDF folder or needs stage 0 lawful literature/PDF harvest. If PDFs are missing, load taxonomy-pdf-harvest first; otherwise load the PDF evidence skill. Stay on the current stage, ask at most three concise requirement-confirmation questions, summarize them as at most three items, do not dump the full workflow, and move forward only after the current stage is resolved.",
     },
 }
 

@@ -1,9 +1,11 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
+import tifffile
 
 from AntSleap.core.tif_materials import read_material_map
 from AntSleap.core.tif_part_extraction import (
@@ -723,6 +725,394 @@ class TifProjectTests(unittest.TestCase):
             self.assertEqual(reloaded.project_data["runs"][0]["action"], "train")
             self.assertEqual(reloaded.list_local_axis_models(), [])
             self.assertEqual(reloaded.list_local_axis_runs(), [])
+
+    def test_tif_segmentation_models_round_trip_notes_and_delete_registration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "tif_segmentation_models"
+            manager = TifProjectManager()
+            project_json = manager.create_project("tif_segmentation_models", project_root)
+            output_dir = project_root / "runs" / "train" / "outputs"
+            output_dir.mkdir(parents=True)
+            checkpoint = output_dir / "checkpoint_final.pth"
+            checkpoint.write_bytes(b"fake weights")
+            manifest_path = output_dir / "model_manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "ant3d_tif_model_manifest_v1",
+                        "model_id": "taxamask_tif_nnunet_v2_backend/train_001",
+                        "backend_id": "taxamask_tif_nnunet_v2_backend",
+                        "model_family": "nnunet_v2_tif_region",
+                        "created_at": "2026-07-07T12:00:00+08:00",
+                        "trained_specimens": ["s1", "s2"],
+                        "trained_parts": [
+                            {"specimen_id": "s1", "part_id": "head", "reslice_id": "axis_1"},
+                            {"specimen_id": "s2", "part_id": "head", "reslice_id": "axis_1"},
+                        ],
+                        "input_scope": "part_reslice",
+                        "label_schema_ids": ["head_regions"],
+                        "nnunet": {
+                            "model_output_dir": str(output_dir),
+                            "checkpoint_path": str(checkpoint),
+                        },
+                        "usable_for_research_prediction": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            model = manager.register_tif_segmentation_model_from_manifest(
+                manifest_path,
+                {"run_id": "train_001", "training_samples": 2, "notes": "first accepted model"},
+                save=True,
+            )
+            manager.register_tif_segmentation_model_from_manifest(
+                manager.to_relative(manifest_path),
+                {"run_id": "train_001", "training_samples": 2},
+                save=True,
+            )
+
+            reloaded = TifProjectManager()
+            reloaded.load_project(project_json)
+            records = reloaded.list_tif_segmentation_models()
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["model_id"], model["model_id"])
+            self.assertEqual(records[0]["training_samples"], 2)
+            self.assertEqual(records[0]["notes"], "first accepted model")
+            self.assertEqual(reloaded.to_absolute(records[0]["model_manifest"]), str(manifest_path))
+            self.assertEqual(reloaded.list_local_axis_models(), [])
+
+            reloaded.update_tif_segmentation_model_notes(model["model_id"], "use for July batch", save=True)
+            reloaded_again = TifProjectManager()
+            reloaded_again.load_project(project_json)
+            self.assertEqual(reloaded_again.get_tif_segmentation_model(model["model_id"])["notes"], "use for July batch")
+
+            removed = reloaded_again.delete_tif_segmentation_model(model["model_id"], save=True)
+            self.assertIsNotNone(removed)
+            self.assertTrue(manifest_path.exists())
+            final = TifProjectManager()
+            final.load_project(project_json)
+            self.assertEqual(final.list_tif_segmentation_models(), [])
+
+    def test_part_training_labels_schema_and_user_tags_round_trip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "part_training_roundtrip"
+            manager = TifProjectManager()
+            project_json = manager.create_project("part_training_roundtrip", project_root)
+            manager.create_specimen_scaffold("01-0101-brain")
+            part_image_rel = "specimens/01-0101-brain/parts/brain/image.ome.zarr"
+            part_mask_rel = "specimens/01-0101-brain/parts/brain/mask.ome.zarr"
+            part_manual_rel = "specimens/01-0101-brain/parts/brain/labels/manual_truth.ome.zarr"
+            image_meta = write_volume_sidecar(project_root / part_image_rel, np.zeros((2, 3, 4), dtype=np.uint8), role="part_image")
+            mask_meta = write_volume_sidecar(project_root / part_mask_rel, np.zeros((2, 3, 4), dtype=np.uint16), role="part_mask")
+            manual_meta = write_volume_sidecar(project_root / part_manual_rel, np.ones((2, 3, 4), dtype=np.uint16), role="manual_truth")
+            manager.add_part(
+                "01-0101-brain",
+                "brain",
+                image={"path": part_image_rel, **image_meta},
+                mask={"path": part_mask_rel, **mask_meta},
+                save=False,
+            )
+            manager.add_or_update_label_schema(
+                "brain_regions",
+                labels=[
+                    {"id": 1, "name": "mushroom_body", "color": "#ff0000"},
+                    {"id": 2, "name": "antennal_lobe", "color": "#00ff00"},
+                ],
+                user_defined_part_name="brain",
+                save=False,
+            )
+            manager.upsert_part_user_tag("round_1", "Round 1", order_index=0, save=False)
+            manager.set_part_user_tags("01-0101-brain", "brain", ["round_1"], save=False)
+            manager.register_part_label_volume(
+                "01-0101-brain",
+                "brain",
+                "manual_truth",
+                part_manual_rel,
+                manual_meta["shape_zyx"],
+                manual_meta["dtype"],
+                status="reviewed",
+                save=False,
+            )
+            manager.set_part_training_metadata(
+                "01-0101-brain",
+                "brain",
+                user_defined_part_name="brain",
+                label_schema_id="brain_regions",
+                system_status="verified_train_ready",
+                save=True,
+            )
+
+            reloaded = TifProjectManager()
+            reloaded.load_project(project_json)
+            part = reloaded.get_part("01-0101-brain", "brain")
+
+            self.assertEqual(reloaded.get_label_schema("brain_regions")["labels"][0]["name"], "mushroom_body")
+            self.assertEqual(reloaded.project_data["part_user_tags"][0]["tag_id"], "round_1")
+            self.assertEqual(part["user_tags"], ["round_1"])
+            self.assertEqual(part["training"]["label_schema_id"], "brain_regions")
+            self.assertEqual(part["labels"]["manual_truth"]["path"], part_manual_rel)
+            self.assertTrue(reloaded.validate_part_label_ids("01-0101-brain", "brain")["ok"])
+
+    def test_label_schema_export_import_round_trip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = TifProjectManager()
+            source.create_project("schema_source", root / "source")
+            source.add_or_update_label_schema(
+                "brain_regions",
+                labels=[
+                    {"id": 1, "name": "mushroom_body", "display_name": "Mushroom body", "color": "#ff0000"},
+                    {"id": 2, "name": "antennal_lobe", "display_name": "Antennal lobe", "color": "#00ff00"},
+                    {"id": 2, "name": "duplicate_should_drop", "color": "#0000ff"},
+                ],
+                user_defined_part_name="brain",
+                save=True,
+            )
+            export_path = root / "brain_regions.schema.json"
+
+            payload = source.export_label_schema("brain_regions", export_path)
+
+            self.assertTrue(export_path.exists())
+            self.assertEqual(payload["schema_version"], "taxamask_tif_label_schema_v1")
+            self.assertEqual(payload["label_schema"]["schema_id"], "brain_regions")
+            self.assertEqual([item["id"] for item in payload["label_schema"]["labels"]], [1, 2])
+
+            target = TifProjectManager()
+            target.create_project("schema_target", root / "target")
+            imported = target.import_label_schema(export_path)
+
+            self.assertEqual(imported["schema_id"], "brain_regions")
+            self.assertEqual(imported["user_defined_part_name"], "brain")
+            self.assertEqual(target.get_label_schema("brain_regions")["labels"][1]["name"], "antennal_lobe")
+
+            raw_export = root / "raw_schema.json"
+            raw_export.write_text(
+                json.dumps(
+                    {
+                        "schema_id": "brain_regions",
+                        "labels": [{"id": 3, "name": "central_complex", "color": "#123456"}],
+                        "user_defined_part_name": "brain",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(FileExistsError):
+                target.import_label_schema(raw_export, replace=False)
+            replaced = target.import_label_schema(raw_export, replace=True)
+            self.assertEqual([item["id"] for item in replaced["labels"]], [3])
+
+            empty_export = root / "empty_schema.json"
+            empty_export.write_text(json.dumps({"schema_id": "empty", "labels": []}), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "label_schema_empty"):
+                target.import_label_schema(empty_export)
+
+    def test_part_user_tags_reorder_and_delete_do_not_override_system_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "part_tags"
+            manager = TifProjectManager()
+            manager.create_project("part_tags", project_root)
+            manager.create_specimen_scaffold("01-0101-tags")
+            manager.add_part("01-0101-tags", "brain", save=False)
+            manager.set_part_training_metadata(
+                "01-0101-tags",
+                "brain",
+                system_status="predicted_pending_review",
+                save=False,
+            )
+            manager.upsert_part_user_tag("candidate", "Candidate", order_index=0, save=False)
+            manager.upsert_part_user_tag("paper_fig", "Paper figure", order_index=1, save=False)
+            manager.set_part_user_tags("01-0101-tags", "brain", ["candidate", "paper_fig"], save=False)
+            manager.set_part_user_tag_order(["paper_fig", "candidate"], save=False)
+            manager.delete_part_user_tag("candidate", save=True)
+
+            part = manager.get_part("01-0101-tags", "brain")
+            tags = manager.project_data["part_user_tags"]
+            self.assertEqual([tag["tag_id"] for tag in tags], ["paper_fig"])
+            self.assertEqual(tags[0]["order_index"], 0)
+            self.assertEqual(part["user_tags"], ["paper_fig"])
+            self.assertEqual(part["training"]["system_status"], "predicted_pending_review")
+
+    def test_reviewed_part_editable_result_batch_promotes_to_manual_truth(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "part_review_batch"
+            manager = TifProjectManager()
+            manager.create_project("part_review_batch", project_root)
+            manager.create_specimen_scaffold("01-0101-review")
+            part_image_rel = "specimens/01-0101-review/parts/brain/image.ome.zarr"
+            reslice_rel = "specimens/01-0101-review/parts/brain/reslices/brain_axis_001/image.tif"
+            edit_rel = "specimens/01-0101-review/parts/brain/reslices/brain_axis_001/labels/editable_ai_result.ome.zarr"
+            image_meta = write_volume_sidecar(project_root / part_image_rel, np.zeros((2, 3, 4), dtype=np.uint8), role="part_image")
+            (project_root / reslice_rel).parent.mkdir(parents=True, exist_ok=True)
+            tifffile.imwrite(project_root / reslice_rel, np.zeros((2, 3, 4), dtype=np.uint8))
+            edit_array = np.ones((2, 3, 4), dtype=np.uint16)
+            edit_array[0, 0, 0] = 2
+            edit_meta = write_volume_sidecar(project_root / edit_rel, edit_array, role="editable_ai_result")
+            manager.add_part(
+                "01-0101-review",
+                "brain",
+                image={"path": part_image_rel, **image_meta},
+                save=False,
+            )
+            manager.add_or_update_label_schema(
+                "brain_regions",
+                labels=[
+                    {"id": 1, "name": "mushroom_body", "color": "#ff0000"},
+                    {"id": 2, "name": "antennal_lobe", "color": "#00ff00"},
+                ],
+                user_defined_part_name="brain",
+                save=False,
+            )
+            manager.add_part_reslice(
+                "01-0101-review",
+                "brain",
+                {"reslice_id": "brain_axis_001", "image_path": reslice_rel, "status": "exported"},
+                save=False,
+            )
+            manager.register_part_reslice_label_volume(
+                "01-0101-review",
+                "brain",
+                "brain_axis_001",
+                "editable_ai_result",
+                edit_rel,
+                edit_meta["shape_zyx"],
+                edit_meta["dtype"],
+                status="pending_review",
+                save=False,
+            )
+            manager.set_part_training_metadata(
+                "01-0101-review",
+                "brain",
+                label_schema_id="brain_regions",
+                active_reslice_id="brain_axis_001",
+                opened_for_review=False,
+                save=True,
+            )
+
+            report = manager.evaluate_part_editable_result_review_ready("01-0101-review", "brain", "brain_axis_001")
+            self.assertTrue(report["review_ready"])
+            self.assertEqual(report["reslice_id"], "brain_axis_001")
+            self.assertFalse(report["opened_for_review"])
+            self.assertIn("editable_ai_result_not_opened_for_review", report["reasons"])
+            self.assertEqual(report["label_schema_id"], "brain_regions")
+            self.assertEqual(report["label_ids"], [1, 2])
+            acceptance = manager.build_part_review_acceptance_report(
+                [{"specimen_id": "01-0101-review", "part_id": "brain", "reslice_id": "brain_axis_001"}],
+                require_opened_for_review=False,
+            )
+            self.assertEqual(acceptance["ready_count"], 1)
+            self.assertEqual(acceptance["not_opened_count"], 1)
+            self.assertEqual(acceptance["blocked_count"], 0)
+            blocked_acceptance = manager.build_part_review_acceptance_report(
+                [{"specimen_id": "01-0101-review", "part_id": "brain", "reslice_id": "brain_axis_001"}],
+                require_opened_for_review=True,
+            )
+            self.assertEqual(blocked_acceptance["ready_count"], 0)
+            self.assertEqual(blocked_acceptance["blocked_count"], 1)
+            with self.assertRaisesRegex(ValueError, "part_review_not_ready"):
+                manager.promote_reviewed_part_results_to_manual_truth(
+                    [{"specimen_id": "01-0101-review", "part_id": "brain", "reslice_id": "brain_axis_001"}],
+                    require_opened_for_review=True,
+                )
+
+            result = manager.promote_reviewed_part_results_to_manual_truth(
+                [{"specimen_id": "01-0101-review", "part_id": "brain", "reslice_id": "brain_axis_001"}],
+                require_opened_for_review=False,
+            )
+            part = manager.get_part("01-0101-review", "brain")
+            reslice = manager.get_part_reslice("01-0101-review", "brain", "brain_axis_001")
+            self.assertEqual(result["count"], 1)
+            self.assertFalse((part["labels"]["manual_truth"] or {}).get("path"))
+            self.assertEqual(reslice["labels"]["manual_truth"]["status"], "reviewed")
+            self.assertEqual(part["training"]["system_status"], "verified_train_ready")
+            self.assertTrue(manager.evaluate_part_train_ready("01-0101-review", "brain")["train_ready"])
+            np.testing.assert_array_equal(load_volume_sidecar(project_root / reslice["labels"]["manual_truth"]["path"]), edit_array)
+
+    def test_reslice_shape_check_uses_tif_metadata_without_full_read_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "reslice_shape_metadata"
+            manager = TifProjectManager()
+            manager.create_project("reslice_shape_metadata", project_root)
+            manager.create_specimen_scaffold("01-0101-shape")
+            part_image_rel = "specimens/01-0101-shape/parts/head/image.ome.zarr"
+            part_meta = write_volume_sidecar(project_root / part_image_rel, np.zeros((2, 3, 4), dtype=np.uint8), role="part_image")
+            manager.add_part("01-0101-shape", "head", image={"path": part_image_rel, **part_meta}, save=False)
+            manager.add_or_update_label_schema("head_regions", labels=[{"id": 1, "name": "label_1"}], save=False)
+            reslice_rel = "specimens/01-0101-shape/parts/head/reslices/compressed_axis/image.tif"
+            reslice_abs = project_root / reslice_rel
+            reslice_abs.parent.mkdir(parents=True, exist_ok=True)
+            tifffile.imwrite(reslice_abs, np.zeros((2, 4, 5), dtype=np.uint8), compression="deflate")
+            manager.add_part_reslice(
+                "01-0101-shape",
+                "head",
+                {"reslice_id": "compressed_axis", "image_path": reslice_rel, "status": "exported"},
+                save=False,
+            )
+            manager.set_part_training_metadata(
+                "01-0101-shape",
+                "head",
+                label_schema_id="head_regions",
+                active_reslice_id="compressed_axis",
+                save=True,
+            )
+
+            with patch("tifffile.imread", side_effect=AssertionError("full TIF read should be avoided")):
+                report = manager.evaluate_part_predict_ready("01-0101-shape", "head", "compressed_axis")
+
+            self.assertTrue(report["predict_ready"])
+            self.assertEqual(report["input_shape_zyx"], [2, 4, 5])
+
+    def test_reviewed_part_editable_result_rejects_unknown_label_ids(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "part_review_unknown_label"
+            manager = TifProjectManager()
+            manager.create_project("part_review_unknown_label", project_root)
+            manager.create_specimen_scaffold("01-0101-review")
+            part_image_rel = "specimens/01-0101-review/parts/brain/image.ome.zarr"
+            edit_rel = "specimens/01-0101-review/parts/brain/labels/editable_ai_result.ome.zarr"
+            image_meta = write_volume_sidecar(project_root / part_image_rel, np.zeros((2, 3, 4), dtype=np.uint8), role="part_image")
+            edit_meta = write_volume_sidecar(project_root / edit_rel, np.full((2, 3, 4), 9, dtype=np.uint16), role="editable_ai_result")
+            manager.add_part("01-0101-review", "brain", image={"path": part_image_rel, **image_meta}, save=False)
+            manager.add_or_update_label_schema(
+                "brain_regions",
+                labels=[{"id": 1, "name": "mushroom_body", "color": "#ff0000"}],
+                save=False,
+            )
+            manager.register_part_label_volume(
+                "01-0101-review",
+                "brain",
+                "editable_ai_result",
+                edit_rel,
+                edit_meta["shape_zyx"],
+                edit_meta["dtype"],
+                save=False,
+            )
+            manager.set_part_training_metadata(
+                "01-0101-review",
+                "brain",
+                label_schema_id="brain_regions",
+                opened_for_review=True,
+                save=True,
+            )
+
+            report = manager.evaluate_part_editable_result_review_ready("01-0101-review", "brain")
+            self.assertFalse(report["review_ready"])
+            self.assertIn("unknown_label_ids", report["reasons"])
+            self.assertEqual(report["label_report"]["unknown_label_ids"], [9])
+            self.assertEqual(report["unknown_label_ids"], [9])
+            acceptance = manager.build_part_review_acceptance_report(
+                [{"specimen_id": "01-0101-review", "part_id": "brain"}],
+                require_opened_for_review=False,
+            )
+            self.assertEqual(acceptance["ready_count"], 0)
+            self.assertEqual(acceptance["blocked_count"], 1)
+            self.assertEqual(acceptance["blocked"][0]["report"]["unknown_label_ids"], [9])
+            with self.assertRaisesRegex(ValueError, "part_review_not_ready"):
+                manager.promote_reviewed_part_results_to_manual_truth(
+                    [{"specimen_id": "01-0101-review", "part_id": "brain"}],
+                    require_opened_for_review=False,
+                )
 
 
 if __name__ == "__main__":

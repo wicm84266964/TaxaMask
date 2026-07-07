@@ -16,7 +16,7 @@ The core idea of TaxaMask is to use AI to reduce as much repetitive human work a
 
 Reducing repeated work also appears in another place: I have tried to get rid of the old professional-software habit of forcing people to read huge manuals that make you want to close the program immediately. TaxaMask directly embeds an Agent Center similar in spirit to tools such as Codex and OpenCode. If anything about TaxaMask is unclear, just ask it; it has the whole TaxaMask source tree in front of it, and with your confirmation you can ask it to change the local repository however you want. You can use it to adjust configuration for your own taxonomic group, change the prediction model you want to use, or even turn your local TaxaMask into a soft pink version if you like. If you edit things until TaxaMask no longer starts, that is not the end of the world either. Ant-Code still has a fallback Dashboard where you can manage historical sessions and ask the agent to help inspect and fix the problem; it does not depend on the TaxaMask main window launching successfully.
 
-As for micro-CT, the TIF entry in the interface came from seeing the release of impressive datasets such as AntScan. I was thinking that such high-resolution micro-CT data are excellent research material, whether for external or internal morphology. Since I had already made an automatic annotation route for external structures, why not try internal structures too? That is where the TIF path and its 3D volume rendering workflow came from: viewing volume data, locating parts, drawing more precise volume masks, and exporting local-axis reslices.
+As for micro-CT, the TIF entry in the interface came from seeing the release of impressive datasets such as AntScan. I was thinking that such high-resolution micro-CT data are excellent research material, whether for external or internal morphology. Since I had already made an automatic annotation route for external structures, why not try internal structures too? That is where the TIF path and its 3D volume rendering workflow came from: viewing volume data, locating parts, drawing more precise volume masks, exporting local-axis reslices, and feeding reviewed volume labels back into training and prediction.
 
 Of course, AI output is draft material first, not a conclusion. TaxaMask tries to keep source data, human decisions, model predictions, and training exports connected, so you can look back and see how a result was made, and also feed confirmed data back into the model so that it bothers you a little less next time.
 
@@ -58,6 +58,10 @@ TIF / CT internal morphology
   -> full-volume freehand mask key slices
   -> part volume and part mask creation
   -> 3D preview and local-axis reslice export
+  -> label-schema based part/reslice annotation
+  -> reviewed manual_truth and train-ready samples
+  -> TIF backend dataset preparation, training, and prediction
+  -> prediction review in draft label layers with raw_ai_prediction_backup
 
 Agent Center
   -> workflow inspection
@@ -127,7 +131,7 @@ TaxaMask is intended for researchers and research groups who need to:
 - Use SAM, VLM, Locator, Blink, or external backend outputs as reviewable drafts rather than unverified ground truth.
 - Export multimodal JSONL, COCO, or YOLO-style datasets for computer-vision, VLM, or custom fine-tuning workflows.
 - Adapt the same workflow to a new taxon, body-part vocabulary, local model backend, or lab-specific annotation route.
-- Extend the workflow to internal morphology when TIFF stacks or CT-derived volumes need 3D inspection, part-volume extraction, or local-axis reslicing.
+- Extend the workflow to internal morphology when TIFF stacks or CT-derived volumes need 3D inspection, part-volume extraction, local-axis reslicing, or volume-segmentation training and prediction.
 
 ## TIF / CT 3D Workbench
 
@@ -152,7 +156,14 @@ Current TIF/CT capabilities include:
 - Roll reference point pair for orientation standardization.
 - Resliced grayscale TIFF export, with metadata JSON.
 - Optional mask TIFF export when a part mask is available.
-- Training-material records that capture manual part extraction and local-axis decisions for later model development.
+- Training-material records that capture manual part extraction and local-axis decisions.
+- Label schema import/export/binding so several specimens can share the same numeric labels.
+- Brush, eraser, and auto-fill assisted label editing on part volumes and local-axis reslices.
+- Explicit review promotion from editable labels to `manual_truth`; AI predictions are never training truth by default.
+- Train-ready sample selection across part volumes and reslices, with whole-volume fallback when a project has no part/reslice truth.
+- Backend-neutral TIF `prepare_dataset`, `train`, and `predict` actions. The bundled preset targets nnU-Net v2, while editable commands allow MONAI or custom 3D segmentation backends.
+- TIF model-library records with selectable trained-model manifests for later prediction runs.
+- Prediction import into reviewable label layers: `editable_ai_result` for part/reslice predictions, and a pending-review top-level edit layer for whole-volume predictions, with `raw_ai_prediction_backup` retained for audit and recovery.
 
 The local-axis workflow is intentionally generic. The first validated template is brain/head oriented, but the module is named **Local Axis Reslice** and stores general local-frame metadata rather than brain-only fields.
 
@@ -321,7 +332,7 @@ screener_configs/           PDF screening templates and examples
 multimodal_configs/         Figure extraction and review profiles
 part_description_configs/   Literature trait-description extraction profiles
 json_projects/templates/    Clean project templates
-docs/contracts/             Public backend and TIF local-axis contracts
+docs/contracts/             Public backend, TIF volume-segmentation, and TIF local-axis contracts
 vendor/ant-code/            First-party Agent Center runtime
 tests/                      Unit and workflow tests
 TaxaMask使用手册.md           Chinese user manual
@@ -356,6 +367,11 @@ TIF / CT route:
 5. Copy the source Z-axis into an editable local output axis.
 6. Set roll reference points for orientation standardization.
 7. Export the resliced part TIFF and metadata.
+8. Bind a label schema for the current part or reslice.
+9. Paint, erase, or auto-fill labels, then save and review them as `manual_truth`.
+10. Mark reviewed samples as train-ready.
+11. Prepare a training dataset and train through the nnU-Net v2 preset or a custom TIF backend command.
+12. Select a trained model manifest, run prediction, and review the imported prediction layer before accepting it as truth.
 
 ## External Backend Contracts
 
@@ -365,6 +381,8 @@ TIF / CT route:
 - [TIF local-axis backend contract](docs/contracts/tif_local_axis_backend_contract_v1.md)
 
 External backend predictions are review candidates. They should not be treated as confirmed training truth until checked by a researcher.
+
+The TIF volume-segmentation contract covers label-volume dataset preparation, training, and prediction. The TIF local-axis contract is separate and covers ROI/frame proposals for reslice orientation.
 
 ## Documentation
 

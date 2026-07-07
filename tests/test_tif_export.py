@@ -1,17 +1,75 @@
 import os
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
 import numpy as np
 
-from AntSleap.core.tif_export import export_monai_dataset, export_nnunet_dataset, export_tif_training_dataset
+from AntSleap.core.tif_export import export_monai_dataset, export_nnunet_dataset, export_tif_part_nnunet_dataset, export_tif_part_training_dataset, export_tif_training_dataset, read_nifti_volume_with_metadata, write_nifti_volume
+from AntSleap.core.tif_local_axis_reslice import compute_local_frame, export_part_reslice
 from AntSleap.core.tif_part_extraction import crop_volume_to_part, export_part_package
 from AntSleap.core.tif_project import TifProjectManager
 from AntSleap.core.tif_volume_io import read_volume_metadata, write_volume_sidecar
 
 
 class TifExportTests(unittest.TestCase):
+    def _make_part_training_project(self, root):
+        manager = TifProjectManager()
+        project_root = Path(root) / "part_project"
+        manager.create_project("part_project", project_root)
+        manager.create_specimen_scaffold("01-0101-brain")
+        image_rel = "specimens/01-0101-brain/working/image.ome.zarr"
+        image_meta = write_volume_sidecar(project_root / image_rel, np.arange(3 * 4 * 5, dtype=np.uint8).reshape((3, 4, 5)), role="working_image")
+        manager.register_working_volume("01-0101-brain", image_rel, image_meta["shape_zyx"], image_meta["dtype"], save=False)
+        manager.save_project()
+        crop_volume_to_part(manager, "01-0101-brain", "brain", [[0, 2], [0, 3], [0, 4]], display_name="Brain")
+        roll_reference = {
+            "point_a": {"role": "left_reference", "zyx": [0.5, 0.5, 1.0]},
+            "point_b": {"role": "right_reference", "zyx": [0.5, 2.5, 1.0]},
+            "point_c": {"role": "plane_reference", "zyx": [1.0, 0.5, 3.0]},
+        }
+        frame = compute_local_frame([0.5, 1.5, 2.0], [0.0, 1.5, 2.0], [1.0, 1.5, 2.0], roll_reference=roll_reference)
+        export_part_reslice(
+            manager,
+            "01-0101-brain",
+            "brain",
+            {"reslice_id": "brain_axis_001", "template_id": "brain", "local_frame": frame, "roll_reference": roll_reference},
+        )
+        reslice = manager.get_part_reslice("01-0101-brain", "brain", "brain_axis_001")
+        import tifffile
+
+        reslice_shape = tuple(tifffile.imread(manager.to_absolute(reslice["image_path"])).shape)
+        manager.add_or_update_label_schema(
+            "brain_regions",
+            labels=[{"id": 1, "name": "mushroom_body", "color": "#ff0000"}],
+            user_defined_part_name="brain",
+            save=False,
+        )
+        manual_rel = "specimens/01-0101-brain/parts/brain/reslices/brain_axis_001/labels/manual_truth.ome.zarr"
+        manual_meta = write_volume_sidecar(project_root / manual_rel, np.ones(reslice_shape, dtype=np.uint16), role="manual_truth")
+        manager.register_part_reslice_label_volume(
+            "01-0101-brain",
+            "brain",
+            "brain_axis_001",
+            "manual_truth",
+            manual_rel,
+            manual_meta["shape_zyx"],
+            manual_meta["dtype"],
+            status="reviewed",
+            save=False,
+        )
+        manager.set_part_training_metadata(
+            "01-0101-brain",
+            "brain",
+            user_defined_part_name="brain",
+            label_schema_id="brain_regions",
+            active_reslice_id="brain_axis_001",
+            system_status="verified_train_ready",
+            save=True,
+        )
+        return manager
+
     def test_sidecar_writes_minimal_ome_ngff_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
             sidecar = Path(tmp) / "image.ome.zarr"
@@ -108,6 +166,158 @@ class TifExportTests(unittest.TestCase):
             self.assertEqual(monai["exported_count"], 1)
             self.assertTrue((root / "monai" / "monai_datalist.json").exists())
             self.assertTrue((root / "monai" / "monai_manifest.json").exists())
+
+    def test_part_training_export_uses_resliced_part_and_manual_truth(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = self._make_part_training_project(root)
+
+            result = export_tif_part_training_dataset(manager, root / "part_export", formats=["tiff", "nifti"])
+
+            self.assertEqual(result["exported_count"], 1)
+            manifest = result["manifest"]
+            self.assertEqual(manifest["schema_version"], "ant3d_tif_part_training_export_v1")
+            self.assertEqual(manifest["safety"]["input_scope"], "part_reslice")
+            self.assertFalse(manifest["safety"]["allow_editable_ai_result_as_training_label"])
+            sample = manifest["samples"][0]
+            self.assertEqual(sample["specimen_id"], "01-0101-brain")
+            self.assertEqual(sample["part_id"], "brain")
+            self.assertEqual(sample["reslice_id"], "brain_axis_001")
+            self.assertEqual(sample["label_schema_id"], "brain_regions")
+            self.assertEqual(sample["label_role"], "manual_truth")
+            self.assertIn("reslices/brain_axis_001/labels/manual_truth.ome.zarr", manager.part_label_record("01-0101-brain", "brain", "manual_truth", "brain_axis_001")["path"])
+            self.assertTrue((root / "part_export" / sample["image_exports"]["tiff"]).exists())
+            self.assertTrue((root / "part_export" / sample["label_exports"]["tiff"]).exists())
+            self.assertTrue((root / "part_export" / sample["label_schema"]).exists())
+
+    def test_part_nnunet_export_uses_label_schema_mapping(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = self._make_part_training_project(root)
+            manager.add_or_update_label_schema(
+                "brain_regions",
+                labels=[
+                    {"id": 1, "name": "mushroom_body", "color": "#ff0000"},
+                    {"id": 2, "name": "antennal_lobe", "color": "#00ff00"},
+                ],
+                user_defined_part_name="brain",
+                save=True,
+            )
+
+            result = export_tif_part_nnunet_dataset(manager, root / "part_nnunet", dataset_name="Dataset901_BrainParts")
+
+            self.assertEqual(result["exported_count"], 1)
+            self.assertTrue((root / "part_nnunet" / "imagesTr").exists())
+            self.assertTrue((root / "part_nnunet" / "labelsTr").exists())
+            self.assertTrue(any((root / "part_nnunet" / "imagesTr").glob("*_0000.nii")))
+            self.assertTrue(any((root / "part_nnunet" / "labelsTr").glob("*.nii")))
+            with open(root / "part_nnunet" / "dataset.json", "r", encoding="utf-8") as handle:
+                dataset_json = json.load(handle)
+            self.assertEqual(dataset_json["name"], "Dataset901_BrainParts")
+            self.assertEqual(dataset_json["labels"]["background"], 0)
+            self.assertEqual(dataset_json["labels"]["mushroom_body"], 1)
+            self.assertEqual(dataset_json["labels"]["antennal_lobe"], 2)
+            manifest = result["manifest"]
+            self.assertEqual(manifest["schema_version"], "ant3d_tif_part_nnunet_dataset_v1")
+            self.assertEqual(manifest["safety"]["input_scope"], "part_reslice")
+            self.assertFalse(manifest["safety"]["allow_editable_ai_result_as_training_label"])
+            self.assertEqual(manifest["training"][0]["part_id"], "brain")
+
+    def test_part_nnunet_export_can_write_compact_nii_gz_labels(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = self._make_part_training_project(root)
+            manager.add_or_update_label_schema(
+                "brain_regions",
+                labels=[
+                    {"id": 2, "name": "mushroom_body", "color": "#ff0000"},
+                    {"id": 5, "name": "antennal_lobe", "color": "#00ff00"},
+                ],
+                user_defined_part_name="brain",
+                save=True,
+            )
+            manual_rel = manager.part_label_record("01-0101-brain", "brain", "manual_truth", "brain_axis_001")["path"]
+            import tifffile
+
+            reslice = manager.get_part_reslice("01-0101-brain", "brain", "brain_axis_001")
+            shape = tuple(tifffile.imread(manager.to_absolute(reslice["image_path"])).shape)
+            labels = np.zeros(shape, dtype=np.uint16)
+            labels.flat[0] = 2
+            labels.flat[-1] = 5
+            write_volume_sidecar(root / "part_project" / manual_rel, labels, role="manual_truth")
+
+            result = export_tif_part_nnunet_dataset(
+                manager,
+                root / "part_nnunet",
+                dataset_name="Dataset902_BrainParts",
+                file_ending=".nii.gz",
+                label_id_mode="compact",
+                split_mode="leave_one_val",
+            )
+
+            self.assertTrue(any((root / "part_nnunet" / "imagesTr").glob("*_0000.nii.gz")))
+            self.assertTrue(any((root / "part_nnunet" / "labelsTr").glob("*.nii.gz")))
+            with open(root / "part_nnunet" / "dataset.json", "r", encoding="utf-8") as handle:
+                dataset_json = json.load(handle)
+            self.assertEqual(dataset_json["file_ending"], ".nii.gz")
+            self.assertEqual(dataset_json["labels"]["mushroom_body"], 1)
+            self.assertEqual(dataset_json["labels"]["antennal_lobe"], 2)
+            manifest = result["manifest"]
+            self.assertEqual(manifest["label_id_mode"], "compact")
+            self.assertEqual(manifest["label_id_mapping"]["source_to_nnunet"]["2"], 1)
+            self.assertEqual(manifest["label_id_mapping"]["source_to_nnunet"]["5"], 2)
+            self.assertTrue((root / "part_nnunet" / "splits_final.json").exists())
+
+    def test_nifti_round_trip_preserves_spacing_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "volume.nii.gz"
+            array = np.zeros((2, 3, 4), dtype=np.uint16)
+
+            write_nifti_volume(path, array, {"spacing_zyx": [2.5, 1.5, 0.75], "spacing_unit": "micrometer"})
+            loaded, metadata = read_nifti_volume_with_metadata(path)
+
+            np.testing.assert_array_equal(loaded, array)
+            self.assertEqual(metadata["spacing_zyx"], [2.5, 1.5, 0.75])
+            self.assertEqual(metadata["spacing_unit"], "micrometer")
+
+    def test_part_nnunet_export_rejects_mixed_incompatible_label_schemas(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = self._make_part_training_project(root)
+            specimen = manager.get_specimen("01-0101-brain")
+            source_part = manager.get_part("01-0101-brain", "brain")
+            import copy
+
+            second = copy.deepcopy(source_part)
+            second["part_id"] = "brain_alt"
+            second["display_name"] = "Brain alt"
+            second["training"]["label_schema_id"] = "brain_regions_alt"
+            specimen["parts"].append(second)
+            manager.add_or_update_label_schema(
+                "brain_regions_alt",
+                labels=[{"id": 1, "name": "central_complex", "color": "#0000ff"}],
+                user_defined_part_name="brain",
+                save=True,
+            )
+
+            with self.assertRaisesRegex(ValueError, "mixed_part_label_schemas_not_supported"):
+                export_tif_part_nnunet_dataset(
+                    manager,
+                    root / "part_nnunet",
+                    part_refs=[
+                        {"specimen_id": "01-0101-brain", "part_id": "brain", "reslice_id": "brain_axis_001"},
+                        {"specimen_id": "01-0101-brain", "part_id": "brain_alt", "reslice_id": "brain_axis_001"},
+                    ],
+                )
+
+    def test_part_training_export_rejects_empty_sample_selection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = self._make_part_training_project(root)
+
+            with self.assertRaisesRegex(ValueError, "no_part_training_samples"):
+                export_tif_part_training_dataset(manager, root / "part_export", part_refs=[])
 
     def test_part_package_export_keeps_part_artifacts_separate_from_training(self):
         with tempfile.TemporaryDirectory() as tmp:

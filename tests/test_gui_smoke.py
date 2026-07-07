@@ -360,6 +360,7 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(window.btn_stop_ant_code.text(), "Stop Ant-Code")
             self.assertIsNone(window.agent_panel.findChild(main_module.QWidget, "taxamaskAgentInlineStatus"))
             self.assertIsNone(window.agent_panel.findChild(main_module.QWidget, "taxamaskStartAntCodeButton"))
+            self.assertIsNone(window.agent_panel.web_view)
             self.assertEqual(window.agent_panel.fallback_logo.text(), "TaxaMask")
             self.assertIsNotNone(window.agent_panel.fallback_mark.pixmap())
             self.assertFalse(window.agent_panel.fallback_detail.isVisible())
@@ -425,8 +426,14 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(preload_events, ["preload"])
             self.assertIsNone(window.sam_worker)
             self.assertIsNone(window.sam_thread)
-            self.assertFalse(hasattr(window, "enter_" + "t" + "if" + "_workflow"))
-            self.assertFalse(hasattr(window, "ti" + "f_workbench"))
+            self.assertIsNone(window.findChild(main_module.QWidget, "start" + "T" + "if" + "WorkflowCard"))
+
+            window.tif_workflow_enabled = True
+            window.enter_tif_workflow()
+            self.assertEqual(window.active_project_kind, "tif")
+            self.assertEqual(window.tabs.count(), 1)
+            self.assertEqual(window.tabs.currentWidget(), window.tif_workbench)
+            self.assertEqual(window.tabs.tabText(0), "TIF Volume Workbench")
         finally:
             window.deleteLater()
 
@@ -519,6 +526,82 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertNotIn(r"C:\legacy\ant-code.exe", command)
         finally:
             panel.deleteLater()
+
+    def test_agent_panel_defers_embedded_webview_until_dashboard_load(self):
+        with patch.dict(os.environ, {"TAXAMASK_ANTCODE_BROWSER_MODE": "0"}, clear=False), \
+             patch("AntSleap.ui.taxamask_agent_panel.sys.platform", "win32"):
+            panel = main_module.TaxaMaskAgentPanel("en", workspace_dir=str(PROJECT_ROOT))
+        try:
+            self.assertFalse(panel.browser_mode)
+            self.assertIsNone(panel.web_view)
+            self.assertIsNotNone(panel.findChild(main_module.QWidget, "taxamaskAgentStack"))
+            self.assertFalse(panel.fallback_detail.isVisible())
+        finally:
+            panel.deleteLater()
+
+    def test_agent_panel_creates_embedded_webview_on_load(self):
+        with patch.dict(os.environ, {"TAXAMASK_ANTCODE_BROWSER_MODE": "0"}, clear=False), \
+             patch("AntSleap.ui.taxamask_agent_panel.sys.platform", "win32"):
+            panel = main_module.TaxaMaskAgentPanel("en", workspace_dir=str(PROJECT_ROOT))
+        try:
+            created = []
+
+            class FakePage:
+                def scripts(self):
+                    class Scripts:
+                        def insert(self, _script):
+                            return None
+
+                    return Scripts()
+
+                def runJavaScript(self, *_args, **_kwargs):
+                    return None
+
+            class FakeLoadFinished:
+                def connect(self, _callback):
+                    return None
+
+            class FakeWebView(main_module.QWidget):
+                def __init__(self):
+                    super().__init__()
+                    created.append("webview")
+                    self.loadFinished = FakeLoadFinished()
+                    self.loaded_url = None
+
+                def setPage(self, _page):
+                    return None
+
+                def page(self):
+                    return FakePage()
+
+                def load(self, url):
+                    self.loaded_url = url
+
+            with patch("AntSleap.ui.taxamask_agent_panel._load_qtwebengine_classes", return_value=True), \
+                 patch("AntSleap.ui.taxamask_agent_panel.QWebEngineView", FakeWebView), \
+                 patch("AntSleap.ui.taxamask_agent_panel.QWebEngineProfile", None), \
+                 patch("AntSleap.ui.taxamask_agent_panel.QWebEngineScript", None):
+                panel.dashboard_url = "http://127.0.0.1:7410"
+                panel._load_dashboard()
+
+            self.assertEqual(created, ["webview"])
+            self.assertIsNotNone(panel.web_view)
+            self.assertEqual(panel.stack.currentWidget(), panel.web_view)
+            self.assertIn("127.0.0.1:7410", panel.web_view.loaded_url.toString())
+        finally:
+            panel.deleteLater()
+
+    def test_qtwebengine_flags_disable_agent_gpu_logging_by_default(self):
+        flags = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
+        self.assertIn("--disable-gpu", flags)
+        self.assertIn("--disable-gpu-compositing", flags)
+        self.assertIn("--disable-accelerated-2d-canvas", flags)
+        self.assertIn("--disable-es3-gl-context", flags)
+        self.assertIn("--disable-es3-apis", flags)
+        self.assertIn("--disable-webgl", flags)
+        self.assertIn("--disable-3d-apis", flags)
+        self.assertIn("--disable-logging", flags)
+        self.assertIn("--log-level=3", flags)
 
     def test_agent_panel_can_launch_dashboard_through_wsl(self):
         with patch.dict(
@@ -1375,12 +1458,28 @@ class GuiSmokeTests(unittest.TestCase):
                     "volume_uploaded_shape_zyx": "128/128/128",
                     "volume_texture_sampling": "linear",
                     "volume_display_scaling": "source_spacing",
-                    "tif_next_requirement": "local_axis_reslice",
+                    "active_label_schema_id": "head_regions",
+                    "train_ready_part_sample_count": "2",
+                    "train_ready_top_level_sample_count": "0",
+                    "training_selection_scope": "part_reslice",
+                    "registered_tif_model_count": "1",
+                    "selected_tif_model_id": "taxamask_tif_nnunet_v2_backend/train_1",
+                    "selected_model_manifest": "C:/taxamask/model_manifest.json",
+                    "backend_run_active": "no",
+                    "backend_run_dir": "C:/taxamask/runs/train/train_1",
+                    "backend_result_json": "C:/taxamask/runs/train/train_1/result.json",
+                    "tif_next_requirement": "annotation_training_loop",
                 }
             )
 
             self.assertEqual(tif_compact["active_volume_scope"], "part")
             self.assertEqual(tif_compact["active_part_id"], "head")
+            self.assertEqual(tif_compact["active_label_schema_id"], "head_regions")
+            self.assertEqual(tif_compact["train_ready_part_sample_count"], "2")
+            self.assertEqual(tif_compact["training_selection_scope"], "part_reslice")
+            self.assertEqual(tif_compact["selected_tif_model_id"], "taxamask_tif_nnunet_v2_backend/train_1")
+            self.assertIn("model_manifest.json", tif_compact["selected_model_manifest"])
+            self.assertIn("result.json", tif_compact["backend_result_json"])
             self.assertEqual(tif_compact["volume_projection_mode"], "mip")
             self.assertEqual(tif_compact["volume_performance_diagnosis"], "gpu_ok")
             self.assertIn("ant3d_tif_backend_contract_v1.md", tif_compact["source_code_refs"])

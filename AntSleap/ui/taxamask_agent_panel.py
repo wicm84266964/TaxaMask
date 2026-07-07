@@ -19,9 +19,18 @@ def _is_wsl_runtime():
 
 
 def _ensure_qtwebengine_cpu_compositing():
-    flags_to_append = ["--disable-gpu-compositing"]
-    if sys.platform == "linux" or _is_wsl_runtime():
-        flags_to_append.append("--disable-gpu")
+    flags_to_append = [
+        "--disable-gpu",
+        "--disable-gpu-compositing",
+        "--disable-accelerated-2d-canvas",
+        "--disable-es3-gl-context",
+        "--disable-es3-apis",
+        "--disable-webgl",
+        "--disable-3d-apis",
+    ]
+    verbose = os.environ.get("TAXAMASK_QTWEBENGINE_VERBOSE", "").strip().lower()
+    if verbose not in {"1", "true", "yes", "on", "verbose", "debug"}:
+        flags_to_append.extend(["--disable-logging", "--log-level=3"])
     for flag in flags_to_append:
         current = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
         flags = current.split()
@@ -57,23 +66,50 @@ def _should_import_qtwebengine():
     return True
 
 
-if _should_import_qtwebengine():
-    try:
-        from PySide6.QtWebEngineWidgets import QWebEngineView
-    except Exception:  # pragma: no cover - depends on local Qt installation
-        QWebEngineView = None
+QWebEngineView = None
+QWebEnginePage = None
+QWebEngineProfile = None
+QWebEngineScript = None
+TaxaMaskAgentWebPage = None
+_QTWEBENGINE_IMPORT_ATTEMPTED = False
+_QTWEBENGINE_IMPORT_ERROR = None
 
+
+def _load_qtwebengine_classes():
+    global QWebEngineView, QWebEnginePage, QWebEngineProfile, QWebEngineScript
+    global _QTWEBENGINE_IMPORT_ATTEMPTED, _QTWEBENGINE_IMPORT_ERROR
+
+    if not _should_import_qtwebengine():
+        return False
+    if _QTWEBENGINE_IMPORT_ATTEMPTED:
+        return QWebEngineView is not None
+
+    _QTWEBENGINE_IMPORT_ATTEMPTED = True
+    _QTWEBENGINE_IMPORT_ERROR = None
     try:
-        from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineScript
-    except Exception:  # pragma: no cover - depends on local Qt installation
+        from PySide6.QtWebEngineWidgets import QWebEngineView as ImportedWebEngineView
+    except Exception as exc:  # pragma: no cover - depends on local Qt installation
+        QWebEngineView = None
+        _QTWEBENGINE_IMPORT_ERROR = exc
+        return False
+
+    QWebEngineView = ImportedWebEngineView
+    try:
+        from PySide6.QtWebEngineCore import (
+            QWebEnginePage as ImportedWebEnginePage,
+            QWebEngineProfile as ImportedWebEngineProfile,
+            QWebEngineScript as ImportedWebEngineScript,
+        )
+    except Exception as exc:  # pragma: no cover - depends on local Qt installation
         QWebEnginePage = None
         QWebEngineProfile = None
         QWebEngineScript = None
-else:
-    QWebEngineView = None
-    QWebEnginePage = None
-    QWebEngineProfile = None
-    QWebEngineScript = None
+        _QTWEBENGINE_IMPORT_ERROR = exc
+    else:
+        QWebEnginePage = ImportedWebEnginePage
+        QWebEngineProfile = ImportedWebEngineProfile
+        QWebEngineScript = ImportedWebEngineScript
+    return QWebEngineView is not None
 
 
 AGENT_TRANSLATIONS = {
@@ -117,8 +153,14 @@ def find_free_port(start=7410, host="127.0.0.1"):
     raise RuntimeError("No available local port for Ant-Code Dashboard")
 
 
-if QWebEnginePage is not None:
-    class TaxaMaskAgentWebPage(QWebEnginePage):
+def _ensure_agent_web_page_class():
+    global TaxaMaskAgentWebPage
+    if TaxaMaskAgentWebPage is not None:
+        return TaxaMaskAgentWebPage
+    if QWebEnginePage is None:
+        return None
+
+    class _TaxaMaskAgentWebPage(QWebEnginePage):
         def __init__(self, panel, profile=None, parent=None):
             if profile is not None:
                 super().__init__(profile, parent)
@@ -131,8 +173,9 @@ if QWebEnginePage is not None:
                 self._panel._on_web_console_message(level, message, lineNumber, sourceID)
             except Exception:
                 return
-else:
-    TaxaMaskAgentWebPage = None
+
+    TaxaMaskAgentWebPage = _TaxaMaskAgentWebPage
+    return TaxaMaskAgentWebPage
 
 
 class TaxaMaskAgentPanel(QWidget):
@@ -550,15 +593,7 @@ exec "$@"
         fallback_layout.addWidget(self.fallback_detail)
         fallback_layout.addStretch(1)
         self.stack.addWidget(self.fallback)
-        self.web_view = None if self.browser_mode else (QWebEngineView() if QWebEngineView is not None else None)
-        if self.web_view is not None:
-            self.web_view.setObjectName("taxamaskAntCodeWebView")
-            if TaxaMaskAgentWebPage is not None:
-                self.web_view.setPage(TaxaMaskAgentWebPage(self, parent=self.web_view))
-            self._configure_web_profile()
-            self._install_web_bootstrap_script()
-            self.web_view.loadFinished.connect(self._on_web_load_finished)
-            self.stack.addWidget(self.web_view)
+        self.web_view = None
         root.addWidget(self.stack, 1)
 
         self.health_timer = QTimer(self)
@@ -567,6 +602,24 @@ exec "$@"
         self.prompt_retry_timer = QTimer(self)
         self.prompt_retry_timer.setSingleShot(True)
         self.prompt_retry_timer.timeout.connect(self._flush_pending_context_prompt)
+
+    def _ensure_web_view(self):
+        if self.browser_mode:
+            return False
+        if self.web_view is not None:
+            return True
+        if not _load_qtwebengine_classes():
+            return False
+        self.web_view = QWebEngineView()
+        self.web_view.setObjectName("taxamaskAntCodeWebView")
+        web_page_class = _ensure_agent_web_page_class()
+        if web_page_class is not None:
+            self.web_view.setPage(web_page_class(self, parent=self.web_view))
+        self._configure_web_profile()
+        self._install_web_bootstrap_script()
+        self.web_view.loadFinished.connect(self._on_web_load_finished)
+        self.stack.addWidget(self.web_view)
+        return True
 
     def _load_fallback_mark(self):
         mark_path = Path(__file__).resolve().parents[1] / "assets" / "brand" / "taxamask_mark.png"
@@ -1409,6 +1462,9 @@ exec "$@"
         if self.is_running():
             self._prepare_dashboard_load(reset=True)
             return
+        if not self.browser_mode and not self._ensure_web_view():
+            self.browser_mode = True
+            self._update_fallback()
         try:
             self.port = find_free_port(7410)
             self.dashboard_url = f"http://127.0.0.1:{self.port}"
@@ -1554,6 +1610,10 @@ exec "$@"
             self.stack.setCurrentWidget(self.fallback)
             self._update_fallback()
             return
+        if not self._ensure_web_view():
+            self.stack.setCurrentWidget(self.fallback)
+            self._update_fallback()
+            return
         if self._preflight_dashboard(report_error=False):
             QTimer.singleShot(250, self._load_dashboard)
             return
@@ -1568,6 +1628,8 @@ exec "$@"
     def _load_dashboard(self):
         if not self.dashboard_url:
             return
+        if not self.browser_mode:
+            self._ensure_web_view()
         if self.web_view is None:
             self.stack.setCurrentWidget(self.fallback)
             self._update_fallback()
@@ -2165,6 +2227,8 @@ exec "$@"
                 self.open_dashboard_in_browser()
             self._update_fallback()
             return
+        if self.is_running() and self.web_view is None:
+            self._ensure_web_view()
         if not self.is_running() or self.web_view is None:
             return
         escaped = prompt.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
@@ -2274,6 +2338,21 @@ exec "$@"
             ("active_label_shape_zyx", "当前标签 shape"),
             ("train_ready_status", "TIF 可训练状态"),
             ("train_ready_reasons", "TIF 不可训练原因"),
+            ("active_label_schema_id", "当前标签方案"),
+            ("train_ready_part_sample_count", "可训练部位/重切片样本数"),
+            ("train_ready_top_level_sample_count", "可训练整只体样本数"),
+            ("training_selection_scope", "训练样本选择范围"),
+            ("training_sample_rule", "TIF 训练样本规则"),
+            ("registered_tif_model_count", "已登记 TIF 模型数"),
+            ("selected_tif_model_id", "已选 TIF 模型"),
+            ("selected_model_manifest", "已选模型 manifest"),
+            ("tif_backend_id", "TIF 后端 ID"),
+            ("tif_backend_python", "TIF 后端 Python"),
+            ("tif_backend_command_presence", "TIF 后端命令填写状态"),
+            ("backend_run_active", "TIF 后台任务运行中"),
+            ("backend_action", "TIF 后台动作"),
+            ("backend_run_dir", "TIF 后台运行目录"),
+            ("backend_result_json", "TIF 后台结果 JSON"),
             ("volume_renderer", "体预览渲染器"),
             ("volume_renderer_label", "体预览渲染器说明"),
             ("volume_render_mode", "体预览交互模式"),
@@ -2377,6 +2456,21 @@ exec "$@"
             ("active_label_shape_zyx", "Active label shape"),
             ("train_ready_status", "TIF train-ready status"),
             ("train_ready_reasons", "TIF train-ready reasons"),
+            ("active_label_schema_id", "Active label schema"),
+            ("train_ready_part_sample_count", "Train-ready part/reslice samples"),
+            ("train_ready_top_level_sample_count", "Train-ready top-level samples"),
+            ("training_selection_scope", "Training sample scope"),
+            ("training_sample_rule", "TIF training sample rule"),
+            ("registered_tif_model_count", "Registered TIF models"),
+            ("selected_tif_model_id", "Selected TIF model"),
+            ("selected_model_manifest", "Selected model manifest"),
+            ("tif_backend_id", "TIF backend ID"),
+            ("tif_backend_python", "TIF backend Python"),
+            ("tif_backend_command_presence", "TIF backend command presence"),
+            ("backend_run_active", "TIF backend task running"),
+            ("backend_action", "TIF backend action"),
+            ("backend_run_dir", "TIF backend run directory"),
+            ("backend_result_json", "TIF backend result JSON"),
             ("volume_renderer", "Volume renderer"),
             ("volume_renderer_label", "Volume renderer label"),
             ("volume_render_mode", "Volume interaction mode"),
@@ -2662,7 +2756,7 @@ exec "$@"
             lines.append("Browser mode is active for this Linux/WSL session. If the dashboard did not open automatically, open the URL below.")
             if self._browser_context_copied:
                 lines.append(at("Agent context copied to clipboard. Paste it into the browser prompt.", self.lang))
-        elif QWebEngineView is None:
+        elif _QTWEBENGINE_IMPORT_ATTEMPTED and QWebEngineView is None:
             lines.append(at("Qt WebEngine is unavailable in this environment. Start Ant-Code and open it in a browser.", self.lang))
         if self.dashboard_url:
             lines.append(self.dashboard_url)

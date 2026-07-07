@@ -15,9 +15,12 @@ DEFAULT_TIF_PROJECT_FILENAME = "project.json"
 TIF_PROJECT_BACKUP_LIMIT = 30
 TIF_PROJECT_BACKUP_MIN_INTERVAL_SECONDS = 300
 TIF_REVIEW_STATUSES = {"not_started", "in_progress", "fully_annotated", "reviewed", "train_ready"}
-TIF_PART_STATUSES = {"draft", "roi_confirmed", "mask_preview", "reviewed"}
+TIF_PART_STATUSES = {"draft", "roi_confirmed", "mask_preview", "mask_in_progress", "reviewed", "ready_for_labeling", "predicted_pending_review", "train_ready", "failed"}
+TIF_PART_SYSTEM_STATUSES = {"cut_pending_labeling", "predicted_pending_review", "verified_train_ready", "failed"}
+TIF_PART_LABEL_ROLES = {"manual_truth", "editable_ai_result", "raw_ai_prediction_backup"}
 TIF_PART_ROI_STATUSES = {"draft", "confirmed", "part_created", "cancelled"}
 LOCAL_AXIS_PROPOSAL_STATUSES = {"proposed", "needs_review", "accepted", "rejected", "exported"}
+TIF_LABEL_SCHEMA_EXPORT_SCHEMA_VERSION = "taxamask_tif_label_schema_v1"
 
 
 def _now_iso():
@@ -60,6 +63,17 @@ def _safe_record_id(value, fallback="record"):
     return clean
 
 
+def _tif_shape_from_metadata(path):
+    try:
+        import tifffile
+
+        with tifffile.TiffFile(path) as tif:
+            shape = getattr(tif.series[0], "shape", ()) if tif.series else ()
+        return [int(value) for value in shape] if shape else []
+    except Exception:
+        return []
+
+
 def _default_project_data(name="Untitled TIF Project", project_id=None):
     now = _now_iso()
     return {
@@ -70,6 +84,8 @@ def _default_project_data(name="Untitled TIF Project", project_id=None):
         "created_at": now,
         "updated_at": now,
         "specimens": [],
+        "label_schemas": [],
+        "part_user_tags": [],
         "models": [],
         "runs": [],
         "view_settings": {},
@@ -237,6 +253,16 @@ class TifProjectManager:
             for item in (payload.get("runs", []) if isinstance(payload.get("runs", []), list) else [])
             if isinstance(item, dict)
         ]
+        payload["label_schemas"] = [
+            self._normalize_label_schema(item)
+            for item in (payload.get("label_schemas", []) if isinstance(payload.get("label_schemas", []), list) else [])
+            if isinstance(item, dict)
+        ]
+        payload["part_user_tags"] = [
+            self._normalize_part_user_tag(item, index)
+            for index, item in enumerate(payload.get("part_user_tags", []) if isinstance(payload.get("part_user_tags", []), list) else [])
+            if isinstance(item, dict)
+        ]
         payload.setdefault("view_settings", {})
         payload.setdefault("updated_at", payload.get("created_at", _now_iso()))
         for specimen in specimens:
@@ -286,6 +312,15 @@ class TifProjectManager:
     def legacy_json_payload(self, project_path=None):
         target_project_path = os.path.abspath(str(project_path or self.current_project_path or DEFAULT_TIF_PROJECT_FILENAME))
         payload = json.loads(json.dumps(self.project_data, ensure_ascii=False))
+        payload["label_schemas"] = [
+            self._normalize_label_schema(item)
+            for item in payload.get("label_schemas", []) if isinstance(item, dict)
+        ]
+        payload["part_user_tags"] = [
+            self._normalize_part_user_tag(item, index)
+            for index, item in enumerate(payload.get("part_user_tags", []) if isinstance(payload.get("part_user_tags"), list) else [])
+            if isinstance(item, dict)
+        ]
         for specimen in payload.get("specimens", []) if isinstance(payload.get("specimens"), list) else []:
             if not isinstance(specimen, dict):
                 continue
@@ -295,7 +330,7 @@ class TifProjectManager:
             self._rebase_volume_record_paths(specimen.get("working_volume"), target_project_path)
             labels = specimen.get("labels", {})
             if isinstance(labels, dict):
-                for role in ("manual_truth", "working_edit"):
+                for role in ("manual_truth", "working_edit", "raw_ai_prediction_backup"):
                     self._rebase_volume_record_paths(labels.get(role), target_project_path)
                 for draft in labels.get("model_drafts", []) if isinstance(labels.get("model_drafts"), list) else []:
                     self._rebase_volume_record_paths(draft, target_project_path)
@@ -315,6 +350,14 @@ class TifProjectManager:
                         for key in ("image_path", "mask_path", "metadata_path", "preview_path"):
                             if reslice.get(key):
                                 reslice[key] = self._relative_to_project_path(reslice.get(key), target_project_path)
+                        reslice_labels = reslice.get("labels", {})
+                        if isinstance(reslice_labels, dict):
+                            for role in ("manual_truth", "editable_ai_result", "raw_ai_prediction_backup"):
+                                self._rebase_volume_record_paths(reslice_labels.get(role), target_project_path)
+                part_labels = part.get("labels", {})
+                if isinstance(part_labels, dict):
+                    for role in ("manual_truth", "editable_ai_result", "raw_ai_prediction_backup"):
+                        self._rebase_volume_record_paths(part_labels.get(role), target_project_path)
         for model in payload.get("models", []) if isinstance(payload.get("models"), list) else []:
             if not isinstance(model, dict):
                 continue
@@ -503,6 +546,638 @@ class TifProjectManager:
             self.save_project()
         return draft
 
+    def add_or_update_label_schema(self, schema_id, labels=None, user_defined_part_name="", display_name="", save=True):
+        schema_id = _safe_record_id(schema_id, fallback="label_schema")
+        schemas = self.project_data.setdefault("label_schemas", [])
+        existing = None
+        for schema in schemas:
+            if isinstance(schema, dict) and str(schema.get("schema_id") or "") == schema_id:
+                existing = schema
+                break
+        record = self._normalize_label_schema(
+            {
+                "schema_id": schema_id,
+                "display_name": display_name or schema_id,
+                "user_defined_part_name": user_defined_part_name,
+                "labels": labels or [],
+                "created_at": (existing or {}).get("created_at") or _now_iso(),
+                "updated_at": _now_iso(),
+            }
+        )
+        if existing is None:
+            schemas.append(record)
+        else:
+            existing.clear()
+            existing.update(record)
+            record = existing
+        if save:
+            self.save_project()
+        return record
+
+    def export_label_schema(self, schema_id, output_path):
+        schema = self.get_label_schema(schema_id, default=None)
+        if schema is None:
+            raise KeyError(f"label_schema_not_found:{schema_id}")
+        record = self._normalize_label_schema(schema)
+        if not record.get("labels"):
+            raise ValueError(f"label_schema_empty:{schema_id}")
+        payload = {
+            "schema_version": TIF_LABEL_SCHEMA_EXPORT_SCHEMA_VERSION,
+            "exported_at": _now_iso(),
+            "source_project": {
+                "project_id": str(self.project_data.get("project_id") or ""),
+                "project_name": str(self.project_data.get("name") or ""),
+            },
+            "label_schema": record,
+            "notes": [
+                "TaxaMask TIF label schema export.",
+                "Label IDs and colors are preserved so volume-segmentation training datasets remain comparable across projects.",
+            ],
+        }
+        atomic_write_json(output_path, payload, indent=2, ensure_ascii=False)
+        return payload
+
+    def import_label_schema(self, path, *, schema_id=None, replace=True, save=True):
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if not isinstance(payload, dict):
+            raise ValueError("label_schema_import_root_not_object")
+        if payload.get("schema_version") == TIF_LABEL_SCHEMA_EXPORT_SCHEMA_VERSION and isinstance(payload.get("label_schema"), dict):
+            source = dict(payload.get("label_schema") or {})
+        elif any(key in payload for key in ("schema_id", "labels", "user_defined_part_name")):
+            source = dict(payload)
+        else:
+            raise ValueError(f"unsupported_label_schema_file:{payload.get('schema_version', '')}")
+        if schema_id:
+            source["schema_id"] = str(schema_id)
+        record = self._normalize_label_schema(source)
+        if not record.get("labels"):
+            raise ValueError(f"label_schema_empty:{record.get('schema_id', '')}")
+        schemas = self.project_data.setdefault("label_schemas", [])
+        existing = self.get_label_schema(record.get("schema_id"), default=None)
+        if existing is not None and not replace:
+            raise FileExistsError(f"label_schema_exists:{record.get('schema_id')}")
+        if existing is None:
+            schemas.append(record)
+        else:
+            existing.clear()
+            existing.update(record)
+            record = existing
+        record["updated_at"] = _now_iso()
+        if save:
+            self.save_project()
+        return record
+
+    def get_label_schema(self, schema_id, default=None):
+        wanted = str(schema_id or "").strip()
+        for schema in self.project_data.get("label_schemas", []) or []:
+            if isinstance(schema, dict) and str(schema.get("schema_id") or "") == wanted:
+                return schema
+        return default
+
+    def label_schema_ids(self, schema_id):
+        schema = self.get_label_schema(schema_id, default=None)
+        if schema is None:
+            return set()
+        ids = set()
+        for label in schema.get("labels", []) or []:
+            if not isinstance(label, dict):
+                continue
+            try:
+                ids.add(int(label.get("id")))
+            except (TypeError, ValueError):
+                continue
+        ids.add(0)
+        return ids
+
+    def upsert_part_user_tag(self, tag_id, label="", color="#6B8AFD", order_index=None, save=True):
+        tag_id = _safe_record_id(tag_id, fallback="tag")
+        tags = self.project_data.setdefault("part_user_tags", [])
+        existing = None
+        for tag in tags:
+            if isinstance(tag, dict) and str(tag.get("tag_id") or "") == tag_id:
+                existing = tag
+                break
+        record = self._normalize_part_user_tag(
+            {
+                "tag_id": tag_id,
+                "label": label or tag_id,
+                "color": color or "#6B8AFD",
+                "order_index": len(tags) if order_index is None else order_index,
+                "created_at": (existing or {}).get("created_at") or _now_iso(),
+                "updated_at": _now_iso(),
+            },
+            len(tags) if order_index is None else order_index,
+        )
+        if existing is None:
+            tags.append(record)
+        else:
+            existing.clear()
+            existing.update(record)
+            record = existing
+        tags.sort(key=lambda item: int((item or {}).get("order_index", 0)))
+        if save:
+            self.save_project()
+        return record
+
+    def set_part_user_tag_order(self, tag_ids, save=True):
+        wanted = [str(item or "").strip() for item in (tag_ids or []) if str(item or "").strip()]
+        tags = self.project_data.setdefault("part_user_tags", [])
+        ordered = []
+        seen = set()
+        by_id = {
+            str((tag or {}).get("tag_id") or ""): tag
+            for tag in tags
+            if isinstance(tag, dict) and str((tag or {}).get("tag_id") or "")
+        }
+        for tag_id in wanted:
+            if tag_id in by_id and tag_id not in seen:
+                ordered.append(by_id[tag_id])
+                seen.add(tag_id)
+        remaining = [
+            tag for tag in tags
+            if isinstance(tag, dict) and str((tag or {}).get("tag_id") or "") not in seen
+        ]
+        remaining.sort(key=lambda item: int((item or {}).get("order_index", 0)))
+        ordered.extend(remaining)
+        now = _now_iso()
+        for index, tag in enumerate(ordered):
+            tag["order_index"] = index
+            tag["updated_at"] = now
+        self.project_data["part_user_tags"] = ordered
+        if save:
+            self.save_project()
+        return list(ordered)
+
+    def delete_part_user_tag(self, tag_id, save=True):
+        wanted = str(tag_id or "").strip()
+        if not wanted:
+            return False
+        tags = self.project_data.setdefault("part_user_tags", [])
+        original_count = len(tags)
+        self.project_data["part_user_tags"] = [
+            tag for tag in tags
+            if not (isinstance(tag, dict) and str(tag.get("tag_id") or "") == wanted)
+        ]
+        deleted = len(self.project_data["part_user_tags"]) != original_count
+        if not deleted:
+            return False
+        self.set_part_user_tag_order([str((tag or {}).get("tag_id") or "") for tag in self.project_data.get("part_user_tags", [])], save=False)
+        for specimen in self.project_data.get("specimens", []) or []:
+            if not isinstance(specimen, dict):
+                continue
+            for part in specimen.get("parts", []) or []:
+                if not isinstance(part, dict):
+                    continue
+                existing_tags = [str(item) for item in (part.get("user_tags") or [])]
+                clean_tags = [item for item in existing_tags if item != wanted]
+                if clean_tags != existing_tags:
+                    part["user_tags"] = clean_tags
+                    part["updated_at"] = _now_iso()
+        if save:
+            self.save_project()
+        return True
+
+    def set_part_user_tags(self, specimen_id, part_id, tag_ids, save=True):
+        part = self._require_part(specimen_id, part_id)
+        known = {
+            str(tag.get("tag_id") or "")
+            for tag in self.project_data.get("part_user_tags", []) or []
+            if isinstance(tag, dict)
+        }
+        clean = []
+        for tag_id in tag_ids or []:
+            text = str(tag_id or "").strip()
+            if text and text in known and text not in clean:
+                clean.append(text)
+        part["user_tags"] = clean
+        part["updated_at"] = _now_iso()
+        if save:
+            self.save_project()
+        return clean
+
+    def set_part_training_metadata(
+        self,
+        specimen_id,
+        part_id,
+        *,
+        user_defined_part_name=None,
+        label_schema_id=None,
+        active_reslice_id=None,
+        system_status=None,
+        opened_for_review=None,
+        save=True,
+    ):
+        part = self._require_part(specimen_id, part_id)
+        training = part.setdefault("training", {})
+        if user_defined_part_name is not None:
+            training["user_defined_part_name"] = str(user_defined_part_name or "")
+        if label_schema_id is not None:
+            training["label_schema_id"] = str(label_schema_id or "")
+        if active_reslice_id is not None:
+            training["active_reslice_id"] = str(active_reslice_id or "")
+        if system_status is not None:
+            clean_status = str(system_status or "").strip()
+            if clean_status not in TIF_PART_SYSTEM_STATUSES:
+                raise ValueError(f"invalid_tif_part_system_status:{clean_status}")
+            training["system_status"] = clean_status
+        if opened_for_review is not None:
+            training["opened_for_review"] = bool(opened_for_review)
+        training["updated_at"] = _now_iso()
+        part["updated_at"] = _now_iso()
+        if save:
+            self.save_project()
+        return training
+
+    def register_part_label_volume(
+        self,
+        specimen_id,
+        part_id,
+        role,
+        path,
+        shape_zyx,
+        dtype,
+        status="available",
+        prediction_id="",
+        source_model="",
+        spacing_zyx=None,
+        spacing_unit="micrometer",
+        orientation="unknown",
+        fmt=VOLUME_SIDECAR_FORMAT,
+        save=True,
+    ):
+        role = str(role or "").strip()
+        if role not in TIF_PART_LABEL_ROLES:
+            raise ValueError(f"unsupported_part_label_role:{role}")
+        part = self._require_part(specimen_id, part_id)
+        labels = part.setdefault("labels", self._normalize_part_labels(None))
+        record = self._volume_payload(path, shape_zyx, dtype, spacing_zyx, spacing_unit, orientation, fmt)
+        record["role"] = role
+        record["status"] = str(status or "available")
+        if prediction_id:
+            record["prediction_id"] = str(prediction_id)
+        if source_model:
+            record["source_model"] = str(source_model)
+        if role == "manual_truth":
+            labels["manual_truth"] = record
+            self.set_part_training_metadata(
+                specimen_id,
+                part_id,
+                system_status="verified_train_ready",
+                save=False,
+            )
+        elif role == "editable_ai_result":
+            labels["editable_ai_result"] = record
+            self.set_part_training_metadata(
+                specimen_id,
+                part_id,
+                system_status="predicted_pending_review",
+                save=False,
+            )
+        else:
+            labels["raw_ai_prediction_backup"] = record
+        part["updated_at"] = _now_iso()
+        if save:
+            self.save_project()
+        return record
+
+    def _part_label_container(self, specimen_id, part_id, reslice_id=""):
+        part = self._require_part(specimen_id, part_id)
+        clean_reslice_id = str(reslice_id or "").strip()
+        if clean_reslice_id:
+            reslice = self.get_part_reslice(specimen_id, part_id, clean_reslice_id, default=None)
+            if reslice is None:
+                raise KeyError(f"unknown_part_reslice_id:{specimen_id}:{part_id}:{clean_reslice_id}")
+            return reslice.setdefault("labels", self._normalize_part_labels(reslice.get("labels"))), part, reslice
+        return part.setdefault("labels", self._normalize_part_labels(None)), part, None
+
+    def part_label_record(self, specimen_id, part_id, role="manual_truth", reslice_id=""):
+        role = str(role or "").strip()
+        if role not in TIF_PART_LABEL_ROLES:
+            return {}
+        try:
+            labels, _part, _reslice = self._part_label_container(specimen_id, part_id, reslice_id)
+        except Exception:
+            return {}
+        return (labels or {}).get(role) or {}
+
+    def register_part_reslice_label_volume(
+        self,
+        specimen_id,
+        part_id,
+        reslice_id,
+        role,
+        path,
+        shape_zyx,
+        dtype,
+        status="available",
+        prediction_id="",
+        source_model="",
+        spacing_zyx=None,
+        spacing_unit="micrometer",
+        orientation="local_axis_reslice",
+        fmt=VOLUME_SIDECAR_FORMAT,
+        save=True,
+    ):
+        role = str(role or "").strip()
+        if role not in TIF_PART_LABEL_ROLES:
+            raise ValueError(f"unsupported_part_label_role:{role}")
+        labels, part, reslice = self._part_label_container(specimen_id, part_id, reslice_id)
+        if reslice is None:
+            raise ValueError("reslice_id_required_for_reslice_label")
+        record = self._volume_payload(path, shape_zyx, dtype, spacing_zyx, spacing_unit, orientation, fmt)
+        record["role"] = role
+        record["status"] = str(status or "available")
+        record["coordinate_space"] = "local_axis_reslice_voxel_zyx"
+        record["reslice_id"] = str(reslice_id or "")
+        if prediction_id:
+            record["prediction_id"] = str(prediction_id)
+        if source_model:
+            record["source_model"] = str(source_model)
+        labels[role] = record
+        reslice["updated_at"] = _now_iso()
+        part["updated_at"] = _now_iso()
+        if role == "manual_truth":
+            self.set_part_training_metadata(
+                specimen_id,
+                part_id,
+                active_reslice_id=str(reslice_id or ""),
+                system_status="verified_train_ready",
+                save=False,
+            )
+        elif role == "editable_ai_result":
+            self.set_part_training_metadata(
+                specimen_id,
+                part_id,
+                active_reslice_id=str(reslice_id or ""),
+                system_status="predicted_pending_review",
+                save=False,
+            )
+        if save:
+            self.save_project()
+        return record
+
+    def promote_part_reslice_editable_result_to_manual_truth(self, specimen_id, part_id, reslice_id, source_role="editable_ai_result", mark_train_ready=True, save=True):
+        labels, part, reslice = self._part_label_container(specimen_id, part_id, reslice_id)
+        if reslice is None:
+            raise ValueError("reslice_id_required_for_reslice_label")
+        if source_role not in {"editable_ai_result", "manual_truth"}:
+            raise ValueError(f"unsupported_part_manual_truth_source:{source_role}")
+        source = labels.get(source_role) or {}
+        source_path = source.get("path", "")
+        if not source_path:
+            raise ValueError(f"part_reslice_label_source_missing:{source_role}")
+        target_path = (labels.get("manual_truth") or {}).get("path")
+        if not target_path:
+            target_path = os.path.join(self.part_dir(specimen_id, part_id), "reslices", _safe_record_id(reslice_id, "reslice"), "labels", "manual_truth.ome.zarr").replace("\\", "/")
+        source_abs = self.to_absolute(source_path)
+        target_abs = self.to_absolute(target_path)
+        if os.path.normcase(os.path.abspath(source_abs)) == os.path.normcase(os.path.abspath(target_abs)):
+            labels["manual_truth"]["status"] = "reviewed"
+            if mark_train_ready:
+                self.set_part_training_metadata(specimen_id, part_id, active_reslice_id=str(reslice_id or ""), system_status="verified_train_ready", save=False)
+            if save:
+                self.save_project()
+            return labels["manual_truth"]
+        metadata = copy_volume_sidecar(source_abs, target_abs, role="manual_truth")
+        labels["manual_truth"] = self._volume_payload(
+            target_path,
+            metadata["shape_zyx"],
+            metadata["dtype"],
+            metadata.get("spacing_zyx"),
+            metadata.get("spacing_unit", "micrometer"),
+            metadata.get("orientation", "local_axis_reslice"),
+            metadata.get("format", VOLUME_SIDECAR_FORMAT),
+        )
+        labels["manual_truth"]["role"] = "manual_truth"
+        labels["manual_truth"]["status"] = "reviewed"
+        labels["manual_truth"]["coordinate_space"] = "local_axis_reslice_voxel_zyx"
+        labels["manual_truth"]["reslice_id"] = str(reslice_id or "")
+        reslice["updated_at"] = _now_iso()
+        part["updated_at"] = _now_iso()
+        if mark_train_ready:
+            self.set_part_training_metadata(specimen_id, part_id, active_reslice_id=str(reslice_id or ""), system_status="verified_train_ready", save=False)
+        if save:
+            self.save_project()
+        return labels["manual_truth"]
+
+    def promote_part_editable_result_to_manual_truth(self, specimen_id, part_id, source_role="editable_ai_result", mark_train_ready=True, save=True):
+        part = self._require_part(specimen_id, part_id)
+        labels = part.setdefault("labels", self._normalize_part_labels(None))
+        if source_role not in {"editable_ai_result", "manual_truth"}:
+            raise ValueError(f"unsupported_part_manual_truth_source:{source_role}")
+        source = labels.get(source_role) or {}
+        source_path = source.get("path", "")
+        if not source_path:
+            raise ValueError(f"part_label_source_missing:{source_role}")
+        target_path = (labels.get("manual_truth") or {}).get("path")
+        if not target_path:
+            target_path = os.path.join(self.part_dir(specimen_id, part_id), "labels", "manual_truth.ome.zarr").replace("\\", "/")
+        source_abs = self.to_absolute(source_path)
+        target_abs = self.to_absolute(target_path)
+        if os.path.normcase(os.path.abspath(source_abs)) == os.path.normcase(os.path.abspath(target_abs)):
+            labels["manual_truth"]["status"] = "reviewed"
+            if mark_train_ready:
+                self.set_part_training_metadata(specimen_id, part_id, system_status="verified_train_ready", save=False)
+            if save:
+                self.save_project()
+            return labels["manual_truth"]
+        metadata = copy_volume_sidecar(source_abs, target_abs, role="manual_truth")
+        labels["manual_truth"] = self._volume_payload(
+            target_path,
+            metadata["shape_zyx"],
+            metadata["dtype"],
+            metadata.get("spacing_zyx"),
+            metadata.get("spacing_unit", "micrometer"),
+            metadata.get("orientation", "unknown"),
+            metadata.get("format", VOLUME_SIDECAR_FORMAT),
+        )
+        labels["manual_truth"]["role"] = "manual_truth"
+        labels["manual_truth"]["status"] = "reviewed"
+        if mark_train_ready:
+            self.set_part_training_metadata(specimen_id, part_id, system_status="verified_train_ready", save=False)
+        part["updated_at"] = _now_iso()
+        if save:
+            self.save_project()
+        return labels["manual_truth"]
+
+    def evaluate_part_editable_result_review_ready(self, specimen_id, part_id, reslice_id=""):
+        part = self._require_part(specimen_id, part_id)
+        training = part.get("training") or {}
+        clean_reslice_id = str(reslice_id or "").strip()
+        editable = self.part_label_record(specimen_id, part_id, "editable_ai_result", reslice_id=clean_reslice_id)
+        schema_id = str(training.get("label_schema_id") or "")
+        schema = self.get_label_schema(schema_id, default={}) if schema_id else {}
+        schema_labels = []
+        for item in (schema.get("labels", []) if isinstance(schema, dict) else []):
+            if not isinstance(item, dict):
+                continue
+            try:
+                label_id = int(item.get("id"))
+            except (TypeError, ValueError):
+                continue
+            schema_labels.append(
+                {
+                    "id": label_id,
+                    "name": str(item.get("name") or f"label_{label_id}"),
+                    "display_name": str(item.get("display_name") or item.get("name") or f"Label {label_id}"),
+                }
+            )
+        checks = {
+            "editable_ai_result_exists": self._volume_record_exists(editable),
+            "label_ids_known": False,
+            "opened_for_review": bool(training.get("opened_for_review")),
+        }
+        label_report = (
+            self.validate_part_label_ids(specimen_id, part_id, "editable_ai_result", reslice_id=clean_reslice_id)
+            if checks["editable_ai_result_exists"]
+            else {
+                "ok": False,
+                "reasons": ["editable_ai_result_missing"],
+                "unknown_label_ids": [],
+                "label_ids": [],
+            }
+        )
+        checks["label_ids_known"] = bool(label_report.get("ok"))
+        reason_labels = {
+            "editable_ai_result_exists": "editable_ai_result_missing",
+            "label_ids_known": "unknown_label_ids",
+            "opened_for_review": "editable_ai_result_not_opened_for_review",
+        }
+        reasons = [reason_labels[key] for key, passed in checks.items() if not passed]
+        if not checks["label_ids_known"]:
+            for reason in label_report.get("reasons", []) or []:
+                if reason not in reasons and reason != "editable_ai_result_missing":
+                    reasons.append(reason)
+        return {
+            "specimen_id": str(specimen_id or ""),
+            "part_id": str(part_id or ""),
+            "reslice_id": clean_reslice_id,
+            "checks": checks,
+            "reasons": reasons,
+            "review_ready": checks["editable_ai_result_exists"] and checks["label_ids_known"],
+            "opened_for_review": checks["opened_for_review"],
+            "label_report": label_report,
+            "label_schema_id": schema_id,
+            "label_schema_labels": schema_labels,
+            "label_ids": list(label_report.get("label_ids") or []),
+            "unknown_label_ids": list(label_report.get("unknown_label_ids") or []),
+            "can_accept_without_open_warning": checks["editable_ai_result_exists"] and checks["label_ids_known"],
+            "can_accept_now": checks["editable_ai_result_exists"] and checks["label_ids_known"] and checks["opened_for_review"],
+        }
+
+    def build_part_review_acceptance_report(self, part_refs, require_opened_for_review=True):
+        refs = []
+        seen = set()
+        for ref in part_refs or []:
+            if not isinstance(ref, dict):
+                continue
+            specimen_id = str(ref.get("specimen_id") or "").strip()
+            part_id = str(ref.get("part_id") or "").strip()
+            reslice_id = str(ref.get("reslice_id") or "").strip()
+            key = (specimen_id, part_id, reslice_id)
+            if specimen_id and part_id and key not in seen:
+                seen.add(key)
+                refs.append({"specimen_id": specimen_id, "part_id": part_id, "reslice_id": reslice_id})
+        ready = []
+        not_opened = []
+        blocked = []
+        for ref in refs:
+            report = self.evaluate_part_editable_result_review_ready(ref["specimen_id"], ref["part_id"], ref.get("reslice_id", ""))
+            item = {**ref, "reasons": list(report.get("reasons") or []), "report": report}
+            if not report.get("review_ready"):
+                blocked.append(item)
+                continue
+            if not report.get("opened_for_review"):
+                not_opened.append(item)
+                if require_opened_for_review:
+                    blocked.append(item)
+                    continue
+            ready.append(ref)
+        return {
+            "refs": refs,
+            "ready": ready,
+            "not_opened": not_opened,
+            "blocked": blocked,
+            "require_opened_for_review": bool(require_opened_for_review),
+            "count": len(refs),
+            "ready_count": len(ready),
+            "not_opened_count": len(not_opened),
+            "blocked_count": len(blocked),
+        }
+
+    def promote_reviewed_part_results_to_manual_truth(self, part_refs, require_opened_for_review=True, save=True):
+        report = self.build_part_review_acceptance_report(
+            part_refs,
+            require_opened_for_review=require_opened_for_review,
+        )
+        refs = report["ready"]
+        blocked = report["blocked"]
+        if blocked:
+            raise ValueError(f"part_review_not_ready:{blocked}")
+        promoted = []
+        for ref in refs:
+            if ref.get("reslice_id"):
+                manual = self.promote_part_reslice_editable_result_to_manual_truth(
+                    ref["specimen_id"],
+                    ref["part_id"],
+                    ref.get("reslice_id", ""),
+                    mark_train_ready=True,
+                    save=False,
+                )
+            else:
+                manual = self.promote_part_editable_result_to_manual_truth(
+                    ref["specimen_id"],
+                    ref["part_id"],
+                    mark_train_ready=True,
+                    save=False,
+                )
+            promoted.append({**ref, "manual_truth": manual})
+        if save and promoted:
+            self.save_project()
+        return {"promoted": promoted, "count": len(promoted)}
+
+    def validate_part_label_ids(self, specimen_id, part_id, role="manual_truth", reslice_id=""):
+        part = self._require_part(specimen_id, part_id)
+        training = part.get("training") or {}
+        schema_id = str(training.get("label_schema_id") or "")
+        schema_ids = self.label_schema_ids(schema_id)
+        record = self.part_label_record(specimen_id, part_id, role, reslice_id=reslice_id)
+        path = record.get("path", "")
+        result = {
+            "specimen_id": str(specimen_id or ""),
+            "part_id": str(part_id or ""),
+            "reslice_id": str(reslice_id or ""),
+            "role": str(role or ""),
+            "label_schema_id": schema_id,
+            "ok": False,
+            "unknown_label_ids": [],
+            "label_ids": [],
+            "reasons": [],
+        }
+        if not schema_id or not schema_ids:
+            result["reasons"].append("label_schema_missing")
+            return result
+        if not self._volume_record_exists(record):
+            result["reasons"].append(f"{role}_missing")
+            return result
+        try:
+            from .tif_volume_io import load_volume_sidecar
+            import numpy as np
+
+            array = load_volume_sidecar(self.to_absolute(path), mmap_mode="r")
+            values = sorted(int(value) for value in np.unique(array))
+        except Exception as exc:
+            result["reasons"].append(f"label_volume_unreadable:{exc}")
+            return result
+        result["label_ids"] = values
+        unknown = [value for value in values if value not in schema_ids]
+        result["unknown_label_ids"] = unknown
+        if unknown:
+            result["reasons"].append("unknown_label_ids")
+        result["ok"] = not result["reasons"]
+        return result
+
     def copy_label_layer_to_working_edit(self, specimen_id, source_role="manual_truth", draft_index=-1, save=True):
         specimen = self._require_specimen(specimen_id)
         labels = specimen.get("labels") or {}
@@ -624,6 +1299,139 @@ class TifProjectManager:
                 ready.append(specimen)
         return ready
 
+    def evaluate_part_train_ready(self, specimen_id, part_id, reslice_id="", validate_label_ids=True):
+        specimen = self._require_specimen(specimen_id)
+        part = self._require_part(specimen_id, part_id)
+        checks = {}
+        reasons = []
+        training = part.get("training") or {}
+        labels = part.get("labels") or {}
+        active_reslice_id = str(reslice_id or training.get("active_reslice_id") or "").strip()
+        reslice = self.get_part_reslice(specimen_id, part_id, active_reslice_id, default=None) if active_reslice_id else None
+        if reslice is None:
+            reslices = self.list_part_reslices(specimen_id, part_id)
+            reslice = reslices[-1] if reslices else None
+            active_reslice_id = str((reslice or {}).get("reslice_id") or "")
+
+        part_image = part.get("image") or {}
+        manual = self.part_label_record(specimen_id, part_id, "manual_truth", reslice_id=active_reslice_id)
+        schema_id = str(training.get("label_schema_id") or "")
+        schema = self.get_label_schema(schema_id, default=None)
+
+        checks["part_record_exists"] = bool(part)
+        checks["part_volume_exists"] = self._volume_record_exists(part_image)
+        checks["reslice_record_exists"] = bool(reslice and active_reslice_id)
+        checks["reslice_output_exists"] = bool((reslice or {}).get("image_path") and os.path.exists(self.to_absolute((reslice or {}).get("image_path", ""))))
+        checks["label_schema_exists"] = bool(schema and schema.get("labels"))
+        checks["manual_truth_exists"] = self._volume_record_exists(manual)
+
+        input_shape = self._path_volume_shape((reslice or {}).get("image_path", "")) if reslice else []
+        part_shape = input_shape or self._volume_shape(part_image)
+        manual_shape = self._volume_shape(manual)
+        checks["shape_matches"] = bool(part_shape and manual_shape and list(part_shape) == list(manual_shape))
+
+        if checks["manual_truth_exists"] and validate_label_ids:
+            label_report = self.validate_part_label_ids(specimen_id, part_id, "manual_truth", reslice_id=active_reslice_id)
+        elif checks["manual_truth_exists"]:
+            label_report = {"ok": True, "reasons": [], "skipped": "label_id_scan_deferred"}
+        else:
+            label_report = {"ok": False, "reasons": ["manual_truth_missing"]}
+        checks["label_ids_known"] = bool(label_report.get("ok"))
+
+        checks["operator_marked_train_ready"] = (
+            str(training.get("system_status") or part.get("system_status") or "") == "verified_train_ready"
+            or str(part.get("status") or "") == "train_ready"
+        )
+
+        reason_labels = {
+            "part_record_exists": "part_record_missing",
+            "part_volume_exists": "part_volume_missing",
+            "reslice_record_exists": "reslice_record_missing",
+            "reslice_output_exists": "reslice_output_missing",
+            "label_schema_exists": "label_schema_missing",
+            "manual_truth_exists": "manual_truth_missing",
+            "shape_matches": "part_label_shape_mismatch",
+            "label_ids_known": "unknown_label_ids",
+            "operator_marked_train_ready": "part_not_marked_train_ready",
+        }
+        for key, passed in checks.items():
+            if not passed:
+                reasons.append(reason_labels[key])
+        if not checks["label_ids_known"]:
+            for reason in label_report.get("reasons", []) or []:
+                if reason not in reasons and reason != "manual_truth_missing":
+                    reasons.append(reason)
+
+        return {
+            "specimen_id": specimen.get("specimen_id"),
+            "part_id": part.get("part_id"),
+            "reslice_id": active_reslice_id,
+            "label_schema_id": schema_id,
+            "train_ready": all(checks.values()),
+            "checks": checks,
+            "reasons": reasons,
+            "label_report": label_report,
+            "input_shape_zyx": part_shape,
+            "label_record": manual,
+        }
+
+    def evaluate_part_predict_ready(self, specimen_id, part_id, reslice_id=""):
+        specimen = self._require_specimen(specimen_id)
+        part = self._require_part(specimen_id, part_id)
+        training = part.get("training") or {}
+        part_image = part.get("image") or {}
+        active_reslice_id = str(reslice_id or training.get("active_reslice_id") or "").strip()
+        reslice = self.get_part_reslice(specimen_id, part_id, active_reslice_id, default=None) if active_reslice_id else None
+        if reslice is None:
+            reslices = self.list_part_reslices(specimen_id, part_id)
+            reslice = reslices[-1] if reslices else None
+            active_reslice_id = str((reslice or {}).get("reslice_id") or "")
+
+        schema_id = str(training.get("label_schema_id") or "")
+        schema = self.get_label_schema(schema_id, default=None)
+        checks = {
+            "part_record_exists": bool(part),
+            "part_volume_exists": self._volume_record_exists(part_image),
+            "reslice_record_exists": bool(reslice and active_reslice_id),
+            "reslice_output_exists": bool((reslice or {}).get("image_path") and os.path.exists(self.to_absolute((reslice or {}).get("image_path", "")))),
+            "label_schema_exists": bool(schema and schema.get("labels")),
+        }
+        reason_labels = {
+            "part_record_exists": "part_record_missing",
+            "part_volume_exists": "part_volume_missing",
+            "reslice_record_exists": "reslice_record_missing",
+            "reslice_output_exists": "reslice_output_missing",
+            "label_schema_exists": "label_schema_missing",
+        }
+        reasons = [reason_labels[key] for key, passed in checks.items() if not passed]
+        input_shape = self._path_volume_shape((reslice or {}).get("image_path", "")) if reslice else []
+        part_shape = input_shape or self._volume_shape(part_image)
+        return {
+            "specimen_id": specimen.get("specimen_id"),
+            "part_id": part.get("part_id"),
+            "reslice_id": active_reslice_id,
+            "label_schema_id": schema_id,
+            "predict_ready": all(checks.values()),
+            "checks": checks,
+            "reasons": reasons,
+            "input_shape_zyx": part_shape,
+        }
+
+    def list_train_ready_parts(self, specimen_ids=None):
+        wanted = {str(item) for item in specimen_ids} if specimen_ids else None
+        ready = []
+        for specimen in self.project_data.get("specimens", []) or []:
+            specimen_id = str((specimen or {}).get("specimen_id") or "")
+            if wanted is not None and specimen_id not in wanted:
+                continue
+            for part in (specimen or {}).get("parts", []) or []:
+                if not isinstance(part, dict):
+                    continue
+                result = self.evaluate_part_train_ready(specimen_id, part.get("part_id", ""))
+                if result["train_ready"]:
+                    ready.append({"specimen": specimen, "part": part, "readiness": result})
+        return ready
+
     def add_part(
         self,
         specimen_id,
@@ -648,8 +1456,12 @@ class TifProjectManager:
             "part_id": clean_id,
             "display_name": str(display_name or clean_id),
             "status": status,
+            "system_status": "cut_pending_labeling",
+            "user_tags": [],
             "image": self._normalize_volume_record(image),
             "mask": self._normalize_volume_record(mask),
+            "labels": self._normalize_part_labels(None),
+            "training": {},
             "contours_path": self.to_relative(contours_path),
             "extraction_path": self.to_relative(extraction_path),
             "parent_bbox_zyx": self._normalize_bbox_zyx(parent_bbox_zyx),
@@ -934,6 +1746,126 @@ class TifProjectManager:
                 return record
         return default
 
+    def register_tif_segmentation_model_from_manifest(self, manifest_path, model_record=None, save=True):
+        manifest_abs = self.to_absolute(manifest_path)
+        manifest = {}
+        if manifest_abs and os.path.exists(manifest_abs):
+            with open(manifest_abs, "r", encoding="utf-8") as handle:
+                loaded = json.load(handle)
+            if isinstance(loaded, dict):
+                manifest = loaded
+        source = dict(model_record or {})
+
+        def fill(key, value):
+            if value in (None, "", [], {}):
+                return
+            current = source.get(key)
+            if current in (None, "", [], {}):
+                source[key] = value
+
+        nnunet = manifest.get("nnunet") if isinstance(manifest.get("nnunet"), dict) else {}
+        fill("model_id", manifest.get("model_id"))
+        fill("backend_id", manifest.get("backend_id"))
+        fill("model_family", manifest.get("model_family"))
+        fill("input_scope", manifest.get("input_scope"))
+        fill("label_schema_ids", manifest.get("label_schema_ids"))
+        fill("trained_specimens", manifest.get("trained_specimens"))
+        fill("trained_parts", manifest.get("trained_parts"))
+        fill("trained_top_level_volumes", manifest.get("trained_top_level_volumes"))
+        fill("model_path", nnunet.get("model_output_dir"))
+        fill("model_manifest", manifest_abs or manifest_path)
+        fill("training_manifest_path", source.get("dataset_manifest"))
+        fill("usable_for_research_prediction", manifest.get("usable_for_research_prediction"))
+        fill("created_at", manifest.get("created_at"))
+        if "training_samples" not in source:
+            source["training_samples"] = len(manifest.get("trained_parts") or manifest.get("trained_top_level_volumes") or [])
+        return self.register_tif_segmentation_model(source, save=save)
+
+    def register_tif_segmentation_model(self, model_record, save=True):
+        record = self._normalize_tif_segmentation_model(model_record)
+        models = self.project_data.setdefault("models", [])
+        wanted_id = str(record.get("model_id") or "").strip()
+        wanted_manifest = str(record.get("model_manifest") or "").strip()
+        wanted_manifest_abs = os.path.normcase(os.path.abspath(self.to_absolute(wanted_manifest))) if wanted_manifest else ""
+        for index, existing in enumerate(models):
+            if not isinstance(existing, dict):
+                continue
+            existing_id = str(existing.get("model_id") or "").strip()
+            existing_manifest = str(existing.get("model_manifest") or "").strip()
+            existing_manifest_abs = os.path.normcase(os.path.abspath(self.to_absolute(existing_manifest))) if existing_manifest else ""
+            same_id = bool(wanted_id and existing_id == wanted_id)
+            same_manifest = bool(wanted_manifest_abs and existing_manifest_abs == wanted_manifest_abs)
+            if same_id or same_manifest:
+                normalized_existing = self._normalize_model_record(existing)
+                if not record.get("notes") and normalized_existing.get("notes"):
+                    record["notes"] = normalized_existing.get("notes", "")
+                record["created_at"] = normalized_existing.get("created_at") or record.get("created_at") or _now_iso()
+                record["updated_at"] = _now_iso()
+                models[index] = record
+                if save:
+                    self.save_project()
+                return record
+        models.append(record)
+        if save:
+            self.save_project()
+        return record
+
+    def list_tif_segmentation_models(self, filters=None):
+        records = []
+        for record in self.project_data.get("models", []) or []:
+            if not isinstance(record, dict) or self._is_local_axis_model_record(record):
+                continue
+            if self._is_tif_segmentation_model_record(record) or str(record.get("model_manifest") or "").strip():
+                records.append(record)
+        return self._filter_records(records, filters)
+
+    def get_tif_segmentation_model(self, model_id, default=None):
+        wanted = str(model_id or "").strip()
+        wanted_abs = os.path.normcase(os.path.abspath(self.to_absolute(wanted))) if wanted else ""
+        for record in self.list_tif_segmentation_models():
+            current_id = str(record.get("model_id") or "").strip()
+            current_manifest = str(record.get("model_manifest") or "").strip()
+            current_manifest_abs = os.path.normcase(os.path.abspath(self.to_absolute(current_manifest))) if current_manifest else ""
+            if wanted in {current_id, current_manifest} or (wanted_abs and current_manifest_abs == wanted_abs):
+                return record
+        return default
+
+    def update_tif_segmentation_model_notes(self, model_id, notes, save=True):
+        record = self.get_tif_segmentation_model(model_id, default=None)
+        if record is None:
+            raise KeyError(f"unknown_tif_segmentation_model_id:{model_id}")
+        record["notes"] = str(notes or "")
+        record["updated_at"] = _now_iso()
+        if save:
+            self.save_project()
+        return record
+
+    def delete_tif_segmentation_model(self, model_id, save=True):
+        wanted = str(model_id or "").strip()
+        wanted_abs = os.path.normcase(os.path.abspath(self.to_absolute(wanted))) if wanted else ""
+        models = self.project_data.setdefault("models", [])
+        kept = []
+        removed = None
+        for record in models:
+            current_manifest = str((record or {}).get("model_manifest") or "").strip() if isinstance(record, dict) else ""
+            current_manifest_abs = os.path.normcase(os.path.abspath(self.to_absolute(current_manifest))) if current_manifest else ""
+            if (
+                removed is None
+                and isinstance(record, dict)
+                and not self._is_local_axis_model_record(record)
+                and (
+                    wanted in {str(record.get("model_id") or "").strip(), current_manifest}
+                    or (wanted_abs and current_manifest_abs == wanted_abs)
+                )
+            ):
+                removed = record
+            else:
+                kept.append(record)
+        self.project_data["models"] = kept
+        if removed is not None and save:
+            self.save_project()
+        return removed
+
     def add_local_axis_run(self, run_record, save=True):
         record = self._normalize_local_axis_run(run_record)
         runs = self.project_data.setdefault("runs", [])
@@ -1113,7 +2045,68 @@ class TifProjectManager:
         return {
             "manual_truth": self._normalize_volume_record(source.get("manual_truth")),
             "working_edit": self._normalize_volume_record(source.get("working_edit")),
+            "raw_ai_prediction_backup": self._normalize_volume_record(source.get("raw_ai_prediction_backup")),
             "model_drafts": list(source.get("model_drafts", [])) if isinstance(source.get("model_drafts", []), list) else [],
+        }
+
+    def _normalize_part_labels(self, labels):
+        source = labels if isinstance(labels, dict) else {}
+        return {
+            "manual_truth": self._normalize_volume_record(source.get("manual_truth")),
+            "editable_ai_result": self._normalize_volume_record(source.get("editable_ai_result") or source.get("working_edit")),
+            "raw_ai_prediction_backup": self._normalize_volume_record(source.get("raw_ai_prediction_backup") or source.get("model_draft")),
+        }
+
+    def _normalize_label_schema(self, schema):
+        source = schema if isinstance(schema, dict) else {}
+        schema_id = _safe_record_id(source.get("schema_id") or source.get("id") or source.get("name") or "label_schema", fallback="label_schema")
+        labels = []
+        used_ids = set()
+        for item in source.get("labels", []) if isinstance(source.get("labels", []), list) else []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                label_id = int(item.get("id"))
+            except (TypeError, ValueError):
+                continue
+            if label_id < 0 or label_id in used_ids:
+                continue
+            used_ids.add(label_id)
+            labels.append(
+                {
+                    "id": label_id,
+                    "name": str(item.get("name") or f"label_{label_id}"),
+                    "display_name": str(item.get("display_name") or item.get("name") or f"Label {label_id}"),
+                    "color": str(item.get("color") or "#F94144"),
+                    "trainable": bool(item.get("trainable", label_id != 0)),
+                }
+            )
+        labels.sort(key=lambda item: int(item.get("id", 0)))
+        created_at = str(source.get("created_at") or _now_iso())
+        return {
+            "schema_id": schema_id,
+            "display_name": str(source.get("display_name") or source.get("name") or schema_id),
+            "user_defined_part_name": str(source.get("user_defined_part_name") or source.get("part_name") or ""),
+            "labels": labels,
+            "created_at": created_at,
+            "updated_at": str(source.get("updated_at") or created_at),
+        }
+
+    def _normalize_part_user_tag(self, tag, index=0):
+        source = tag if isinstance(tag, dict) else {}
+        tag_id = _safe_record_id(source.get("tag_id") or source.get("id") or source.get("label") or f"tag_{int(index) + 1}", fallback="tag")
+        created_at = str(source.get("created_at") or _now_iso())
+        try:
+            order_index = int(source.get("order_index", index))
+        except (TypeError, ValueError):
+            order_index = int(index)
+        return {
+            "tag_id": tag_id,
+            "label": str(source.get("label") or source.get("name") or tag_id),
+            "color": str(source.get("color") or "#6B8AFD"),
+            "order_index": order_index,
+            "created_at": created_at,
+            "updated_at": str(source.get("updated_at") or created_at),
         }
 
     def _normalize_parts(self, specimen):
@@ -1187,6 +2180,11 @@ class TifProjectManager:
         part_id = _safe_part_id(source.get("part_id") or source.get("id") or fallback_id)
         created_at = str(source.get("created_at") or _now_iso())
         metadata = dict(source.get("metadata") or {})
+        training = dict(source.get("training") or {})
+        system_status = str(source.get("system_status") or training.get("system_status") or "").strip()
+        if system_status not in TIF_PART_SYSTEM_STATUSES:
+            system_status = "cut_pending_labeling"
+        training.setdefault("system_status", system_status)
         metadata["local_axis_reslices"] = [
             self._normalize_reslice_record(item, item.get("specimen_id") or specimen_id, part_id)
             for item in metadata.get("local_axis_reslices", []) or []
@@ -1206,8 +2204,12 @@ class TifProjectManager:
             "part_id": part_id,
             "display_name": str(source.get("display_name") or source.get("name") or part_id),
             "status": status,
+            "system_status": system_status,
+            "user_tags": self._normalize_list(source.get("user_tags"), str),
             "image": self._normalize_volume_record(source.get("image")),
             "mask": self._normalize_volume_record(source.get("mask")),
+            "labels": self._normalize_part_labels(source.get("labels")),
+            "training": training,
             "contours_path": self.to_relative(source.get("contours_path", "")),
             "extraction_path": self.to_relative(source.get("extraction_path", "")),
             "parent_bbox_zyx": self._normalize_bbox_zyx(source.get("parent_bbox_zyx")),
@@ -1277,6 +2279,25 @@ class TifProjectManager:
                 return [int(value) for value in read_volume_metadata(self.to_absolute(path)).get("shape_zyx", [])]
             except Exception:
                 return []
+        return []
+
+    def _path_volume_shape(self, path):
+        text = str(path or "").strip()
+        if not text:
+            return []
+        abs_path = self.to_absolute(text)
+        if volume_sidecar_exists(abs_path):
+            try:
+                return [int(value) for value in read_volume_metadata(abs_path).get("shape_zyx", [])]
+            except Exception:
+                return []
+        if os.path.exists(abs_path):
+            try:
+                import tifffile
+
+                return [int(value) for value in tifffile.memmap(abs_path).shape]
+            except Exception:
+                return _tif_shape_from_metadata(abs_path)
         return []
 
     def _normalize_specimen_metadata(self, specimen):
@@ -1360,6 +2381,7 @@ class TifProjectManager:
             "local_frame": self._normalize_local_frame(source.get("local_frame")),
             "reslice_params": dict(source.get("reslice_params") or {}),
             "source": dict(source.get("source") or {}),
+            "labels": self._normalize_part_labels(source.get("labels")),
             "training": dict(source.get("training") or {}),
             "training_sample": dict(source.get("training_sample") or {}),
             "provenance": dict(source.get("provenance") or {}),
@@ -1476,10 +2498,68 @@ class TifProjectManager:
             return True
         return False
 
+    def _is_tif_segmentation_model_record(self, record):
+        source = record if isinstance(record, dict) else {}
+        if source.get("profile_scope") == "tif_segmentation":
+            return True
+        if source.get("model_type") == "tif_segmentation":
+            return True
+        family = str(source.get("model_family") or "")
+        if family in {"nnunet_v2_tif_region", "nnunet_v2_part_reslice"}:
+            return True
+        return False
+
+    def _normalize_tif_segmentation_model(self, record):
+        source = record if isinstance(record, dict) else {}
+        now = _now_iso()
+        created_at = str(source.get("created_at") or now)
+        model_id = str(source.get("model_id") or "").strip()
+        if not model_id:
+            base = source.get("model_manifest") or source.get("run_id") or f"tif_segmentation_model_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            model_id = _safe_record_id(base, fallback="tif_segmentation_model")
+        try:
+            training_samples = int(source.get("training_samples", 0) or 0)
+        except (TypeError, ValueError):
+            training_samples = 0
+        clean = {
+            "model_id": model_id,
+            "model_version": str(source.get("model_version") or ""),
+            "profile_scope": str(source.get("profile_scope") or "tif_segmentation"),
+            "template_id": str(source.get("template_id") or ""),
+            "model_type": str(source.get("model_type") or "tif_segmentation"),
+            "backend_type": str(source.get("backend_type") or "external_segmentation"),
+            "backend_id": str(source.get("backend_id") or ""),
+            "model_family": str(source.get("model_family") or ""),
+            "input_scope": str(source.get("input_scope") or ""),
+            "label_schema_ids": self._normalize_list(source.get("label_schema_ids"), str),
+            "trained_specimens": self._normalize_list(source.get("trained_specimens"), str),
+            "trained_parts": list(source.get("trained_parts", []) or []) if isinstance(source.get("trained_parts", []), list) else [],
+            "trained_top_level_volumes": list(source.get("trained_top_level_volumes", []) or []) if isinstance(source.get("trained_top_level_volumes", []), list) else [],
+            "training_samples": training_samples,
+            "usable_for_research_prediction": bool(source.get("usable_for_research_prediction", True)),
+            "run_id": str(source.get("run_id") or ""),
+            "run_dir": self.to_relative(source.get("run_dir", "")),
+            "result_json": self.to_relative(source.get("result_json", "")),
+            "input_contract": dict(source.get("input_contract") or {}),
+            "output_contract": dict(source.get("output_contract") or {}),
+            "model_path": self.to_relative(source.get("model_path", "")),
+            "model_manifest": self.to_relative(source.get("model_manifest", "")),
+            "training_manifest_path": self.to_relative(source.get("training_manifest_path", "")),
+            "notes": str(source.get("notes") or ""),
+            "created_at": created_at,
+            "updated_at": str(source.get("updated_at") or created_at),
+        }
+        for key, value in source.items():
+            if key not in clean:
+                clean[str(key)] = value
+        return clean
+
     def _normalize_model_record(self, record):
         source = record if isinstance(record, dict) else {}
         if self._is_local_axis_model_record(source):
             return self._normalize_local_axis_model(source)
+        if self._is_tif_segmentation_model_record(source):
+            return self._normalize_tif_segmentation_model(source)
         clean = dict(source)
         for key in ("model_path", "model_manifest", "training_manifest_path"):
             if key in clean:

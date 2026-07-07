@@ -46,12 +46,12 @@ DEFAULT_CONFIG = {
         "model_manifest": "",
     },
     "tif_backend": {
-        "backend_id": "custom_tif_backend",
-        "display_name": "TIF Volume Backend",
+        "backend_id": "taxamask_tif_nnunet_v2_backend",
+        "display_name": "nnU-Net v2 TIF Region Segmentation",
         "python_executable": "python",
-        "prepare_dataset_command": "",
-        "train_command": "",
-        "predict_command": "",
+        "prepare_dataset_command": "{python} -m AntSleap.tools.tif_nnunet_v2_backend --contract {contract_json}",
+        "train_command": "{python} -m AntSleap.tools.tif_nnunet_v2_backend --contract {contract_json}",
+        "predict_command": "{python} -m AntSleap.tools.tif_nnunet_v2_backend --contract {contract_json}",
         "model_manifest": "",
         "export_formats": "ome_tiff,nrrd,mha,nifti",
     },
@@ -75,6 +75,35 @@ DEFAULT_CONFIG = {
     "inf_poly_epsilon": 2.0,   # Polygon simplification tolerance (pixels)
 }
 
+_TIF_BACKEND_COMMAND_KEYS = (
+    "prepare_dataset_command",
+    "train_command",
+    "predict_command",
+)
+
+
+def _tif_backend_commands_are_empty(config):
+    if not isinstance(config, dict):
+        return True
+    return not any(str(config.get(key) or "").strip() for key in _TIF_BACKEND_COMMAND_KEYS)
+
+
+def _is_legacy_empty_tif_backend_config(config):
+    if not isinstance(config, dict):
+        return True
+    backend_id = str(config.get("backend_id") or "").strip()
+    display_name = str(config.get("display_name") or "").strip()
+    legacy_ids = {"", "custom_tif_backend", "taxamask_tif_nnunet_v2_backend"}
+    legacy_names = {"", "TIF Volume Backend", "nnU-Net v2 TIF Brain Regions", "nnU-Net v2 TIF Region Segmentation"}
+    return backend_id in legacy_ids and display_name in legacy_names and _tif_backend_commands_are_empty(config)
+
+
+def _default_nnunet_v2_tif_backend_config(python_executable="python"):
+    config = deepcopy(DEFAULT_CONFIG["tif_backend"])
+    if python_executable:
+        config["python_executable"] = str(python_executable)
+    return config
+
 class ConfigManager:
     def __init__(self, config_path=None, legacy_config_path=None):
         self.config_path = os.path.abspath(config_path or CONFIG_FILE)
@@ -85,6 +114,15 @@ class ConfigManager:
     def _drop_obsolete_keys(self):
         for key in OBSOLETE_CONFIG_KEYS:
             self.config.pop(key, None)
+
+    def _migrate_tif_backend_defaults(self):
+        backend = self.config.get("tif_backend")
+        if not isinstance(backend, dict):
+            self.config["tif_backend"] = _default_nnunet_v2_tif_backend_config()
+            return
+        if _is_legacy_empty_tif_backend_config(backend):
+            python_executable = str(backend.get("python_executable") or DEFAULT_CONFIG["tif_backend"].get("python_executable") or "python")
+            self.config["tif_backend"] = _default_nnunet_v2_tif_backend_config(python_executable)
 
     def _migrate_legacy_config(self):
         if os.path.exists(self.config_path):
@@ -107,6 +145,7 @@ class ConfigManager:
             except Exception:
                 pass
         self._drop_obsolete_keys()
+        self._migrate_tif_backend_defaults()
 
     def save(self):
         self._drop_obsolete_keys()

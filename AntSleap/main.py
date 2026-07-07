@@ -20,13 +20,29 @@ def _append_env_flag(name, flag):
         os.environ[name] = " ".join(flags)
 
 
+def _ensure_qtwebengine_quiet_cpu_flags():
+    for flag in (
+        "--disable-gpu",
+        "--disable-gpu-compositing",
+        "--disable-accelerated-2d-canvas",
+        "--disable-es3-gl-context",
+        "--disable-es3-apis",
+        "--disable-webgl",
+        "--disable-3d-apis",
+    ):
+        _append_env_flag("QTWEBENGINE_CHROMIUM_FLAGS", flag)
+    verbose = os.environ.get("TAXAMASK_QTWEBENGINE_VERBOSE", "").strip().lower()
+    if verbose not in {"1", "true", "yes", "on", "verbose", "debug"}:
+        _append_env_flag("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-logging")
+        _append_env_flag("QTWEBENGINE_CHROMIUM_FLAGS", "--log-level=3")
+
+
 def _prepare_qt_runtime_environment():
     # These must be set before importing cv2/PySide6. WSLg and some Linux
     # desktops can segfault while Qt WebEngine probes EGL/GPU acceleration.
-    _append_env_flag("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu-compositing")
+    _ensure_qtwebengine_quiet_cpu_flags()
     linux_runtime = sys.platform == "linux" or _is_wsl_runtime()
     if linux_runtime:
-        _append_env_flag("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu")
         os.environ.setdefault("QT_OPENGL", "software")
         os.environ.setdefault("QT_QUICK_BACKEND", "software")
         os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
@@ -49,12 +65,7 @@ os.environ["YOLO_VERBOSE"] = "False"
 os.environ["ULTRALYTICS_QUIET"] = "True"
 
 
-def _ensure_qtwebengine_cpu_compositing():
-    _append_env_flag("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu")
-    _append_env_flag("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu-compositing")
-
-
-_ensure_qtwebengine_cpu_compositing()
+_ensure_qtwebengine_quiet_cpu_flags()
 
 PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(PACKAGE_DIR)
@@ -279,7 +290,7 @@ try:
     )
     from AntSleap.core.project_templates import DEFAULT_PROJECT_TEMPLATE_ID, iter_project_templates
     from AntSleap.core.external_backend import BUILTIN_BACKEND_ID, EXTERNAL_BACKEND_ID, ExternalBackendRunner, sanitize_external_backend_config
-    from AntSleap.core.tif_backend import DEFAULT_TIF_BACKEND_CONFIG, sanitize_tif_backend_config
+    from AntSleap.core.tif_backend import DEFAULT_TIF_BACKEND_CONFIG, nnunet_v2_tif_backend_preset, sanitize_tif_backend_config
     from AntSleap.core.tif_export import SUPPORTED_TIF_EXPORT_FORMATS
     from AntSleap.core.tif_project import TIF_PROJECT_SCHEMA_VERSION, TIF_PROJECT_TYPE, TifProjectManager
     from AntSleap.core.stl_project import STL_PROJECT_SCHEMA_VERSION, STL_PROJECT_TYPE, StlRenderedProjectManager
@@ -406,7 +417,7 @@ except ImportError:
     )
     from core.project_templates import DEFAULT_PROJECT_TEMPLATE_ID, iter_project_templates
     from core.external_backend import BUILTIN_BACKEND_ID, EXTERNAL_BACKEND_ID, ExternalBackendRunner, sanitize_external_backend_config
-    from core.tif_backend import DEFAULT_TIF_BACKEND_CONFIG, sanitize_tif_backend_config
+    from core.tif_backend import DEFAULT_TIF_BACKEND_CONFIG, nnunet_v2_tif_backend_preset, sanitize_tif_backend_config
     from core.tif_export import SUPPORTED_TIF_EXPORT_FORMATS
     from core.tif_project import TIF_PROJECT_SCHEMA_VERSION, TIF_PROJECT_TYPE, TifProjectManager
     from core.stl_project import STL_PROJECT_SCHEMA_VERSION, STL_PROJECT_TYPE, StlRenderedProjectManager
@@ -879,14 +890,17 @@ TRANSLATIONS = {
         "TIF Volume Training Settings": "TIF 体数据训练设置",
         "TIF Backend Defaults": "TIF 后端默认配置",
         "Controls the default external backend used by TIF Volume Workbench. The workbench can still edit the same defaults while you are inside a project.": "这里控制 TIF 体数据工作台默认使用的外部后端。在进入具体项目后，工作台内也可以编辑同一套默认配置。",
-        "TIF training uses manual_truth label volumes only. Prediction results are imported as model_draft, so they must be reviewed before becoming manual truth.": "TIF 训练只使用 manual_truth 人工真值标注体。模型预测结果导入为 model_draft 草稿层，必须人工复核后才可成为人工真值。",
+        "TIF training uses manual_truth label volumes only. Part prediction results are imported as editable_ai_result plus a raw backup, so they must be reviewed before becoming manual truth.": "TIF 训练只使用 manual_truth 人工真值标注体。部位预测结果会导入为待核验 editable_ai_result，并保留原始备份，必须人工复核后才可成为人工真值。",
         "Training Data Safety": "训练数据安全规则",
         "Training source: manual_truth only.": "训练来源：仅 manual_truth 人工真值。",
-        "Prediction import: model_draft layer.": "预测导入：进入 model_draft 草稿层。",
+        "Prediction import: editable_ai_result layer.": "预测导入：进入待核验 editable_ai_result 层。",
         "Manual truth is never overwritten automatically.": "人工真值不会被自动覆盖。",
         "Export Formats:": "导出格式：",
         "Supported export formats: {0}": "支持的导出格式：{0}",
         "Validate TIF Backend": "校验 TIF 后端",
+        "Use nnU-Net v2 Preset": "使用 nnU-Net v2 预设",
+        "Fill the editable command fields with the bundled TaxaMask nnU-Net v2 contract adapter.": "用 TaxaMask 自带 nnU-Net v2 合同适配器填入可编辑命令字段。",
+        "nnU-Net v2 preset filled. Commands remain editable for other 3D backends.": "已填入 nnU-Net v2 预设。命令仍可编辑，以便接入其他 3D 后端。",
         "TIF backend configuration looks valid.": "TIF 后端配置看起来可用。",
         "TIF backend ID is required.": "TIF 后端 ID 不能为空。",
         "TIF backend export formats are required.": "TIF 后端导出格式不能为空。",
@@ -5774,9 +5788,9 @@ class TifModelSettingsDialog(QDialog):
         safety_layout.setContentsMargins(12, 12, 12, 12)
         safety_layout.setSpacing(6)
         for text in (
-            "TIF training uses manual_truth label volumes only. Prediction results are imported as model_draft, so they must be reviewed before becoming manual truth.",
+            "TIF training uses manual_truth label volumes only. Part prediction results are imported as editable_ai_result plus a raw backup, so they must be reviewed before becoming manual truth.",
             "Training source: manual_truth only.",
-            "Prediction import: model_draft layer.",
+            "Prediction import: editable_ai_result layer.",
             "Manual truth is never overwritten automatically.",
         ):
             label = QLabel(tr(text, lang))
@@ -5838,7 +5852,19 @@ class TifModelSettingsDialog(QDialog):
         btn_validate = QPushButton(tr("Validate TIF Backend", lang))
         apply_semantic_button_style(btn_validate, BUTTON_ROLE_NEUTRAL)
         btn_validate.clicked.connect(self.validate_backend)
-        form.addRow(QLabel(""), btn_validate)
+        btn_nnunet_preset = QPushButton(tr("Use nnU-Net v2 Preset", lang))
+        btn_nnunet_preset.setObjectName("tifUseNnunetV2PresetButton")
+        btn_nnunet_preset.setToolTip(
+            tr("Fill the editable command fields with the bundled TaxaMask nnU-Net v2 contract adapter.", lang)
+        )
+        apply_semantic_button_style(btn_nnunet_preset, BUTTON_ROLE_NEUTRAL)
+        btn_nnunet_preset.clicked.connect(self.apply_nnunet_v2_preset)
+        preset_row = QHBoxLayout()
+        preset_row.setSpacing(8)
+        preset_row.addWidget(btn_nnunet_preset)
+        preset_row.addWidget(btn_validate)
+        preset_row.addStretch(1)
+        form.addRow(QLabel(""), preset_row)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -5875,6 +5901,21 @@ class TifModelSettingsDialog(QDialog):
 
     def _command_text(self, editor):
         return editor.toPlainText().strip()
+
+    def _set_backend_fields(self, config):
+        config = sanitize_tif_backend_config(config or {})
+        self.backend_id_edit.setText(config.get("backend_id", ""))
+        self.display_name_edit.setText(config.get("display_name", ""))
+        self.python_edit.setText(config.get("python_executable", "python"))
+        self.export_formats_edit.setText(config.get("export_formats", "ome_tiff,nrrd,mha,nifti"))
+        self.prepare_command_edit.setPlainText(config.get("prepare_dataset_command", ""))
+        self.train_command_edit.setPlainText(config.get("train_command", ""))
+        self.predict_command_edit.setPlainText(config.get("predict_command", ""))
+        self.model_manifest_edit.setText(config.get("model_manifest", ""))
+
+    def apply_nnunet_v2_preset(self):
+        self._set_backend_fields(nnunet_v2_tif_backend_preset(self.python_edit.text().strip() or "python"))
+        self.validation_label.setText(tr("nnU-Net v2 preset filled. Commands remain editable for other 3D backends.", self.lang))
 
     def _export_formats(self):
         return [
@@ -7781,11 +7822,26 @@ class MainWindow(QMainWindow):
             "active_volume_shape_zyx",
             "active_volume_spacing_zyx",
             "active_label_shape_zyx",
+            "active_label_schema_id",
             "selected_part",
             "selected_material_id",
             "display_mode",
             "train_ready_status",
             "train_ready_reasons",
+            "train_ready_part_sample_count",
+            "train_ready_top_level_sample_count",
+            "training_selection_scope",
+            "training_sample_rule",
+            "registered_tif_model_count",
+            "selected_tif_model_id",
+            "selected_model_manifest",
+            "tif_backend_id",
+            "tif_backend_python",
+            "tif_backend_command_presence",
+            "backend_run_active",
+            "backend_action",
+            "backend_run_dir",
+            "backend_result_json",
             "volume_renderer",
             "volume_renderer_label",
             "volume_render_mode",

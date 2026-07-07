@@ -54,7 +54,7 @@ def make_project_with_working_and_truth(root):
 
 
 class TifPredictionImportTests(unittest.TestCase):
-    def test_external_prediction_tif_imports_only_model_draft(self):
+    def test_external_prediction_tif_imports_editable_review_result_with_backup(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             manager = make_project_with_working_and_truth(root)
@@ -73,22 +73,41 @@ class TifPredictionImportTests(unittest.TestCase):
             specimen = manager.get_specimen("01-0101-20")
             drafts = specimen["labels"]["model_drafts"]
             draft_path = manager.to_absolute(drafts[0]["path"])
+            edit_path = manager.to_absolute(specimen["labels"]["working_edit"]["path"])
+            backup_path = manager.to_absolute(specimen["labels"]["raw_ai_prediction_backup"]["path"])
             manual = load_volume_sidecar(manager.to_absolute(specimen["labels"]["manual_truth"]["path"]))
+            edit = load_volume_sidecar(edit_path)
+            backup = load_volume_sidecar(backup_path)
             draft = load_volume_sidecar(draft_path)
-            metadata = read_volume_metadata(draft_path)
+            edit_metadata = read_volume_metadata(edit_path)
+            backup_metadata = read_volume_metadata(backup_path)
+            draft_metadata = read_volume_metadata(draft_path)
 
             self.assertEqual(len(drafts), 1)
             self.assertEqual(drafts[0]["prediction_id"], "nnunet_fold0")
             self.assertEqual(drafts[0]["source_model"], "nnUNet")
             self.assertEqual(drafts[0]["role"], "model_draft")
             self.assertEqual(drafts[0]["import_report"], result["report"]["files"]["import_report"])
+            self.assertEqual(specimen["labels"]["working_edit"]["prediction_id"], "nnunet_fold0")
+            self.assertEqual(specimen["labels"]["working_edit"]["status"], "pending_review")
+            self.assertEqual(specimen["labels"]["raw_ai_prediction_backup"]["role"], "raw_ai_prediction_backup")
+            self.assertEqual(specimen["labels"]["raw_ai_prediction_backup"]["status"], "raw_backup")
+            self.assertEqual(specimen["review_status"], "pending_review")
             np.testing.assert_array_equal(draft, prediction)
+            np.testing.assert_array_equal(edit, prediction)
+            np.testing.assert_array_equal(backup, prediction)
             self.assertTrue(np.all(manual == 1))
-            self.assertTrue(manager.evaluate_train_ready("01-0101-20")["train_ready"])
-            self.assertEqual(metadata["source_format"], "external_prediction_tif")
-            self.assertEqual(metadata["spacing_zyx"], [2.0, 0.5, 0.5])
+            self.assertFalse(manager.evaluate_train_ready("01-0101-20")["train_ready"])
+            self.assertEqual(edit_metadata["source_format"], "external_prediction_tif")
+            self.assertEqual(edit_metadata["role"], "working_edit")
+            self.assertEqual(edit_metadata["spacing_zyx"], [2.0, 0.5, 0.5])
+            self.assertEqual(backup_metadata["role"], "raw_ai_prediction_backup")
+            self.assertEqual(draft_metadata["role"], "model_draft")
             self.assertTrue(Path(result["report_path"]).exists())
+            self.assertEqual(result["report"]["safety"]["imported_role"], "working_edit")
+            self.assertTrue(result["report"]["safety"]["working_edit_overwritten"])
             self.assertFalse(result["report"]["safety"]["manual_truth_overwritten"])
+            self.assertTrue(result["report"]["safety"]["train_ready_changed"])
 
     def test_shape_mismatch_is_rejected_without_draft_record(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -102,6 +121,8 @@ class TifPredictionImportTests(unittest.TestCase):
 
             specimen = manager.get_specimen("01-0101-20")
             self.assertEqual(specimen["labels"]["model_drafts"], [])
+            self.assertEqual((specimen["labels"].get("raw_ai_prediction_backup") or {}).get("path", ""), "")
+            self.assertEqual(specimen["review_status"], "train_ready")
             self.assertFalse((Path(manager.project_dir) / "specimens" / "01-0101-20" / "labels" / "model_draft" / "wrong_shape.ome.zarr").exists())
 
     def test_float_prediction_tif_is_rejected_as_label_data(self):
@@ -116,6 +137,7 @@ class TifPredictionImportTests(unittest.TestCase):
 
             specimen = manager.get_specimen("01-0101-20")
             self.assertEqual(specimen["labels"]["model_drafts"], [])
+            self.assertEqual((specimen["labels"].get("raw_ai_prediction_backup") or {}).get("path", ""), "")
 
 
 if __name__ == "__main__":

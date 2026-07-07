@@ -39,7 +39,7 @@ class AgentContextRoutesTests(unittest.TestCase):
         self.assertIn("external_backend_contract_v1.md", context["source_code_refs"])
         self.assertNotIn("train.py", str(context))
 
-    def test_tif_route_keeps_manual_truth_safety_visible(self):
+    def test_tif_route_keeps_part_prediction_review_safety_visible(self):
         context = enrich_agent_context(
             {
                 "source_workbench": "tif_model_settings",
@@ -53,7 +53,8 @@ class AgentContextRoutesTests(unittest.TestCase):
         )
 
         self.assertEqual(context["diagnostic_route"], "tif_volume_backend_settings")
-        self.assertIn("model_draft", context["diagnostic_focus"])
+        self.assertIn("editable_ai_result", context["diagnostic_focus"])
+        self.assertIn("raw prediction backup", context["diagnostic_focus"])
         self.assertIn("volume-segmentation", context["diagnostic_focus"])
         self.assertIn("manual_truth", context["safety_notes"])
         self.assertIn("docs/contracts/ant3d_tif_backend_contract_v1.md", context["source_code_refs"])

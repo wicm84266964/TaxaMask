@@ -1,7 +1,7 @@
 # TaxaMask LLM Context
 
 > Target: embedded AntCode agents, advanced LLM assistants, and developers maintaining the current TaxaMask `main` / v2.x line.
-> Last synchronized: 2026-07-04.
+> Last synchronized: 2026-07-07.
 
 This file is the current-state handoff document. It is not a changelog. Do not append dated development logs here. Keep it focused on the program state that an agent needs in order to diagnose, modify, and safely operate TaxaMask.
 
@@ -13,7 +13,7 @@ The current maintained line contains three user-visible workflow routes:
 
 - PDF evidence route: literature screening, figure/caption extraction, text part-description extraction, SQLite evidence databases, and reviewable candidate images.
 - 2D/STL morphology route: specimen images, PDF-derived candidates, STL-rendered 2D views, VLM/SAM drafts, parent/child part annotation, Blink experts, external model backends, and COCO/YOLO/JSONL export.
-- TIF/CT route: continuous TIFF stack import, TIF specimen projects, material/label layers, part ROI and part volume extraction, GPU volume preview, TIF volume-segmentation backends, Local Axis Reslice, and training-material capture for future local-axis automation.
+- TIF/CT route: continuous TIFF stack import, TIF specimen projects, material/label layers, part ROI and part volume extraction, GPU volume preview, Local Axis Reslice, reviewed part/reslice annotation, project-wide train-ready sample collection, nnU-Net v2/custom TIF volume-segmentation backends, trained model library, prediction review import, and training-material capture for future local-axis automation.
 
 Branch release notes are kept under `docs/releases/`. The full 1.2.0 TIF developer-preview release is documented in `docs/releases/1.2.0-tif-preview.md`.
 
@@ -43,7 +43,7 @@ Do not let automated tools overwrite:
 - part volumes, part masks, contours, or extraction metadata
 - exported Local Axis reslices, unless the user explicitly performs a destructive delete
 
-For TIF labels, model predictions should land in `model_draft`, not `manual_truth`.
+For TIF part labels, model predictions should land in `editable_ai_result` with a `raw_ai_prediction_backup`, not `manual_truth`.
 
 For Local Axis automation, future model outputs should be proposals that require review. They should not directly create final reslice outputs without explicit researcher confirmation.
 
@@ -69,7 +69,7 @@ The TIF workbench status text and renderer overlay should be used to confirm whe
 
 The embedded Agent Center uses the first-party `vendor/ant-code/` runtime.
 
-In the TaxaMask `v2.1.1` line, the embedded runtime is aligned with Ant-Code `1.2.4`. This update includes the v2.1.0 long-task/background-terminal controls, gateway timeout/retry hardening, context-budget recovery fixes, interrupted-draft preservation, and the bundled taxonomy PDF harvest skill for the PDF evidence stage 0 acquisition workflow. It intentionally does not adopt standalone Ant-Code global model configuration as the default; the embedded workspace and configuration boundary remains the TaxaMask repository.
+In the TaxaMask `v2.2.0` line, the embedded runtime is aligned with Ant-Code `1.2.4`. This line includes the v2.1.0 long-task/background-terminal controls, gateway timeout/retry hardening, context-budget recovery fixes, interrupted-draft preservation, the bundled taxonomy PDF harvest skill for the PDF evidence stage 0 acquisition workflow, and the TIF/CT annotation-training-prediction loop described below. It intentionally does not adopt standalone Ant-Code global model configuration as the default; the embedded workspace and configuration boundary remains the TaxaMask repository.
 
 Important files:
 
@@ -174,20 +174,33 @@ Core records:
 - specimen records
 - sidecar volume paths
 - material maps
-- label roles: `working_edit`, `manual_truth`, `model_draft`
+- label schemas for part/reslice segmentation training
+- label roles: `working_edit`, `manual_truth`, `editable_ai_result`, `raw_ai_prediction_backup`; legacy full-specimen model drafts may still appear as `model_draft`
 - part records
 - part ROI records
 - part masks and contours
 - extraction metadata
 - Local Axis reslice records
+- TIF segmentation model library records
 
 Legacy TIF project JSON is now a migration source rather than the preferred active project store. Large volumes live in project sidecar directories.
 
 Plain TIFF stack import creates an image volume but not trusted training truth. AMIRA-style imports can provide label volumes, but label shape/material consistency must be checked before treating a specimen as train-ready.
 
+Current TIF volume-segmentation training semantics:
+
+- A label schema defines numeric label meaning. It is not a training sample by itself.
+- For `prepare_dataset` and `train`, the workbench first collects all project-wide train-ready part/reslice samples that have reviewed `manual_truth`, matching image/label shape, a bound nonempty label schema, valid label IDs, and verified train-ready status.
+- If there are no train-ready part/reslice samples, it falls back to train-ready top-level specimen volumes.
+- `prepare_dataset` can run with one exported sample for layout inspection. The bundled real nnU-Net v2 train adapter requires at least two exported training samples before calling nnU-Net.
+- Prediction import writes a review layer plus `raw_ai_prediction_backup`. For part/reslice targets the review layer is `editable_ai_result`; for top-level specimen targets it is pending-review `working_edit` plus a legacy `model_draft` audit record. It must never auto-overwrite `manual_truth`.
+- Successful train runs register a TIF segmentation model record in the project model library. The record stores model manifest, run/result paths, trained samples, label schema IDs, notes, and usability metadata. Deleting a model-library record removes only the registration, not weights or run artifacts.
+
 TIF has two different external-backend concepts:
 
-- Volume segmentation backend: `AntSleap/core/tif_backend.py` and `docs/contracts/ant3d_tif_backend_contract_v1.md`. It prepares train-ready `manual_truth` data, runs train/predict commands, and imports prediction label volumes as `model_draft`.
+- Volume segmentation backend: `AntSleap/core/tif_backend.py` and `docs/contracts/ant3d_tif_backend_contract_v1.md`. It prepares train-ready part/reslice or top-level `manual_truth` data, runs editable prepare/train/predict commands, imports part/reslice predictions as `editable_ai_result` plus `raw_ai_prediction_backup`, and imports top-level predictions as pending-review `working_edit` plus `raw_ai_prediction_backup` and a legacy `model_draft` audit record.
+- Default TIF volume backend preset: `taxamask_tif_nnunet_v2_backend`, implemented by `AntSleap/tools/tif_nnunet_v2_backend.py`. It exports nnU-Net v2 `.nii.gz` raw datasets, calls `nnUNetv2_plan_and_preprocess`, `nnUNetv2_train`, and `nnUNetv2_predict`, writes a TaxaMask model manifest, and remaps compact nnU-Net labels back to the project label-schema IDs before import.
+- The TIF backend contract is backend-neutral. Users or Agent tasks may replace the editable command fields with MONAI, a custom 3D U-Net, or another backend if it reads `ant3d_tif_backend_contract_v1` and writes `ant3d_tif_backend_result_v1`.
 - Local Axis proposal backend: `AntSleap/core/tif_local_axis_ai.py` and `docs/contracts/tif_local_axis_backend_contract_v1.md`. It proposes global ROI or local-frame candidates for review. It must not directly create final reslice TIFFs or write `manual_truth`.
 
 ## 9. TIF Workbench
@@ -203,8 +216,10 @@ The TIF workbench supports:
 - slice review across Z/Y/X axes
 - material map inspection/editing with visible swatches and color picker support
 - explicit annotation tools: brush, eraser, picker, and pan
+- label-schema creation/import/export/binding before label selection
 - annotation cursor radius preview for brush/eraser/picker
 - save-status feedback for dirty working-edit slices
+- editable AI result review, raw prediction backup display, and acceptance to `manual_truth`
 - undo/redo and annotation shortcuts
 - ROI and key-slice contour workflow
 - part volume creation
@@ -213,6 +228,9 @@ The TIF workbench supports:
 - full volume and part volume view modes
 - Local Axis Reslice in the right-side work area
 - training-material manifest export for Local Axis data capture
+- TIF backend prepare/train/predict controls
+- train-ready sample diagnostics and top-level fallback
+- trained model library selection, notes, model-manifest handoff, and registration-only deletion
 
 The TIF workbench should remain a specialized TIF route. Do not force its controls into the 2D/STL main labeling workflow.
 
@@ -332,11 +350,11 @@ Selecting a part loads the original part volume. Selecting a reslice item loads 
 
 ## 13. Local Axis Training Material Capture
 
-Current TIF/CT automation stance:
+Current TIF/CT Local Axis automation stance:
 
 - Data capture is in scope.
-- Fully integrated training/inference is not yet the daily UI workflow.
-- Backend scaffolding and contracts may exist, but researcher-facing operation should remain review-first.
+- Fully integrated Local Axis training/inference is not yet the daily UI workflow.
+- Backend scaffolding and contracts may exist for Local Axis proposals, but researcher-facing operation should remain review-first.
 
 Each exported Local Axis reslice should record a `training_sample` both in `metadata.json` and in the project reslice record.
 
@@ -364,7 +382,7 @@ The sample should include:
 
 `export_local_axis_training_manifest(...)` should prefer saved `training_sample` records instead of reconstructing loose fields. This keeps future AI training data auditable.
 
-Future training/inference should follow the 2D external-backend style:
+Future Local Axis training/inference should follow the 2D external-backend style:
 
 1. TaxaMask exports a contract and dataset manifest.
 2. External backend trains or predicts.
@@ -409,7 +427,7 @@ TIF contracts:
 - `docs/contracts/ant3d_tif_backend_contract_v1.md`
 - `docs/contracts/tif_local_axis_backend_contract_v1.md`
 
-The first contract is for TIF volume segmentation and `model_draft` prediction import. The second contract is for Local Axis ROI/frame proposals. Do not route nnU-Net/MONAI-style label-volume prediction tasks to the Local Axis contract.
+The first contract is for TIF volume segmentation, project-wide train-ready part/reslice or top-level sample export, model-manifest production, model-library registration, and review-layer prediction import with raw prediction backup. The second contract is for Local Axis ROI/frame proposals. Do not route nnU-Net/MONAI-style label-volume prediction tasks to the Local Axis contract.
 
 Contract rules:
 
@@ -418,6 +436,7 @@ Contract rules:
 - Model outputs should be drafts/proposals.
 - Importers should validate shape, material ID, schema version, and provenance.
 - External backend failures should be recorded without corrupting project state.
+- The bundled nnU-Net v2 adapter requires at least two samples for real training; one-sample `prepare_dataset` is useful for export inspection only.
 
 ## 16. Ask Agent Routing
 
@@ -438,6 +457,8 @@ Expected route keys:
 Route hints should point to current sections in this file, source files, and public contracts. Do not point Agent prompts at obsolete changelog headings.
 
 Ask Agent context should stay compact. It should help the agent know what to inspect, not dump project files or private data.
+
+For `tif_volume`, the context should expose label schema ID, train-ready part/reslice count, train-ready top-level count, selected training scope, selected/registered model-library state, backend command presence, active backend action, run folder, result JSON, and recent log excerpt. This lets the Agent explain whether the user is blocked by missing labels, missing review acceptance, missing nnU-Net commands, insufficient sample count, or prediction model selection.
 
 For `pdf_evidence`, Ask Agent routing must preserve the stage 0 acquisition context. If the user has no PDF folder yet, the Agent should load `taxonomy-pdf-harvest` from `vendor/ant-code/config/skills/taxonomy-pdf-harvest/SKILL.md` before the downstream PDF evidence skill; if PDFs already exist, it can continue directly to key/model readiness and screening/extraction setup.
 

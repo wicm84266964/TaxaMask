@@ -1,3 +1,4 @@
+import json
 import math
 import os
 import time
@@ -6,8 +7,8 @@ from datetime import datetime
 
 import numpy as np
 import tifffile
-from PySide6.QtCore import QEvent, QEventLoop, QObject, QPointF, QRect, QRectF, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QPixmap, QPolygonF, QShortcut
+from PySide6.QtCore import QEvent, QEventLoop, QObject, QPointF, QRect, QRectF, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QImage, QKeySequence, QPainter, QPen, QPixmap, QPolygonF, QShortcut, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -28,6 +29,8 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressDialog,
     QPushButton,
+    QProgressBar,
+    QRadioButton,
     QScrollArea,
     QSlider,
     QSizePolicy,
@@ -45,9 +48,10 @@ from PySide6.QtWidgets import (
 )
 
 try:
+    from AntSleap.core.safe_io import atomic_write_json
     from AntSleap.core.amira_import import import_amira_directory
-    from AntSleap.core.tif_backend import DEFAULT_TIF_BACKEND_CONFIG, TifBackendRunner, sanitize_tif_backend_config
-    from AntSleap.core.tif_export import export_tif_training_dataset
+    from AntSleap.core.tif_backend import DEFAULT_TIF_BACKEND_CONFIG, TifBackendRunner, nnunet_v2_tif_backend_preset, normalize_tif_backend_runtime_config, sanitize_tif_backend_config
+    from AntSleap.core.tif_export import export_tif_part_training_dataset, export_tif_training_dataset
     from AntSleap.core.tif_materials import next_material_id, read_material_map, remove_material, upsert_material, write_material_map
     from AntSleap.core.tif_part_extraction import (
         add_rectangular_keyframe,
@@ -58,6 +62,7 @@ try:
         export_part_package,
         neighboring_keyframe_indices,
         read_contours_json,
+        signed_distance,
         validate_contours_for_interpolation,
         write_contours_json,
         write_part_mask,
@@ -66,7 +71,7 @@ try:
     from AntSleap.core.tif_project import TifProjectManager
     from AntSleap.core.tif_stack_import import import_tif_stack, materialize_registered_tif_stack, register_tif_stack_metadata
     from AntSleap.core.tif_roi_preview import DEFAULT_ROI_TEXTURE_BUDGET_BYTES, HIGH_ROI_TEXTURE_BUDGET_BYTES, build_roi_mask_preview, build_roi_volume_preview, normalize_roi_bbox_zyx, roi_shape_zyx
-    from AntSleap.core.tif_volume_io import create_empty_label_sidecar_like, flush_volume_array, load_volume_sidecar, volume_sidecar_exists
+    from AntSleap.core.tif_volume_io import create_empty_label_sidecar_like, create_volume_sidecar_memmap, flush_volume_array, load_volume_sidecar, volume_sidecar_exists
     from AntSleap.core.tif_volume_preview import (
         build_mask_preview,
         build_volume_preview,
@@ -93,9 +98,10 @@ try:
 except ModuleNotFoundError as exc:
     if exc.name != "AntSleap":
         raise
+    from core.safe_io import atomic_write_json
     from core.amira_import import import_amira_directory
-    from core.tif_backend import DEFAULT_TIF_BACKEND_CONFIG, TifBackendRunner, sanitize_tif_backend_config
-    from core.tif_export import export_tif_training_dataset
+    from core.tif_backend import DEFAULT_TIF_BACKEND_CONFIG, TifBackendRunner, nnunet_v2_tif_backend_preset, normalize_tif_backend_runtime_config, sanitize_tif_backend_config
+    from core.tif_export import export_tif_part_training_dataset, export_tif_training_dataset
     from core.tif_materials import next_material_id, read_material_map, remove_material, upsert_material, write_material_map
     from core.tif_part_extraction import (
         add_rectangular_keyframe,
@@ -106,6 +112,7 @@ except ModuleNotFoundError as exc:
         export_part_package,
         neighboring_keyframe_indices,
         read_contours_json,
+        signed_distance,
         validate_contours_for_interpolation,
         write_contours_json,
         write_part_mask,
@@ -114,7 +121,7 @@ except ModuleNotFoundError as exc:
     from core.tif_project import TifProjectManager
     from core.tif_stack_import import import_tif_stack, materialize_registered_tif_stack, register_tif_stack_metadata
     from core.tif_roi_preview import DEFAULT_ROI_TEXTURE_BUDGET_BYTES, HIGH_ROI_TEXTURE_BUDGET_BYTES, build_roi_mask_preview, build_roi_volume_preview, normalize_roi_bbox_zyx, roi_shape_zyx
-    from core.tif_volume_io import create_empty_label_sidecar_like, flush_volume_array, load_volume_sidecar, volume_sidecar_exists
+    from core.tif_volume_io import create_empty_label_sidecar_like, create_volume_sidecar_memmap, flush_volume_array, load_volume_sidecar, volume_sidecar_exists
     from core.tif_volume_preview import (
         build_mask_preview,
         build_volume_preview,
@@ -147,6 +154,360 @@ TIF_VOLUME_MAX_CACHED_SPECIMENS = 3
 TIF_VOLUME_MAX_PREVIEW_VARIANTS_PER_OWNER = 8
 TIF_VOLUME_HIGH_QUALITY_CACHE_OWNER_LIMIT = 2
 TIF_VOLUME_ULTRA_QUALITY_CACHE_OWNER_LIMIT = 1
+TIF_CONFIRM_PART_BACKGROUND_VOXELS = 1_000_000
+TIF_GPU_STREAM_SYNC_MAX_BYTES = 32 * 1024 * 1024
+TIF_MASK_PREVIEW_TRUSTED_STATUSES = {
+    "mask_preview",
+    "mask_in_progress",
+    "reviewed",
+    "ready_for_labeling",
+    "predicted_pending_review",
+    "train_ready",
+}
+
+
+def _tif_empty_contours_payload():
+    return {
+        "schema_version": "taxamask_tif_part_extraction_v1",
+        "axis": "z",
+        "keyframes": [],
+    }
+
+
+def _tif_clip_bbox_to_shape(bbox, shape):
+    clean = []
+    shape = tuple(int(value) for value in (shape or ()))
+    if len(shape) != 3:
+        return []
+    for axis, pair in enumerate(bbox or []):
+        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+            return []
+        size = int(shape[axis])
+        start = max(0, min(size, int(pair[0])))
+        end = max(0, min(size, int(pair[1])))
+        if end < start:
+            start, end = end, start
+        if end == start:
+            end = min(shape[axis], start + 1)
+            start = max(0, end - 1)
+        clean.append([start, end])
+    return clean if len(clean) == 3 else []
+
+
+def _tif_bbox_shape(bbox):
+    return tuple(int(pair[1]) - int(pair[0]) for pair in (bbox or []))
+
+
+def _tif_dedupe_contour_points(points, shape=None):
+    clean = []
+    shape = tuple(int(value) for value in (shape or ()))
+    width = int(shape[2]) if len(shape) == 3 else 0
+    height = int(shape[1]) if len(shape) == 3 else 0
+    for point in points or []:
+        if not isinstance(point, (list, tuple)) or len(point) < 2:
+            continue
+        try:
+            px = float(point[0])
+            py = float(point[1])
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if not math.isfinite(px) or not math.isfinite(py):
+            continue
+        if width > 0:
+            px = max(0.0, min(float(width - 1), px))
+        if height > 0:
+            py = max(0.0, min(float(height - 1), py))
+        next_point = [round(px, 3), round(py, 3)]
+        if not clean or math.hypot(clean[-1][0] - next_point[0], clean[-1][1] - next_point[1]) >= 0.15:
+            clean.append(next_point)
+    if len(clean) > 2 and math.hypot(clean[0][0] - clean[-1][0], clean[0][1] - clean[-1][1]) < 0.15:
+        clean.pop()
+    return clean
+
+
+def _tif_safe_contour_slice_index(keyframe, default=None):
+    try:
+        return int((keyframe or {}).get("slice_index", default))
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def _tif_full_volume_contours_to_local(contours, bbox, source_shape=None):
+    payload = _tif_empty_contours_payload()
+    bbox = _tif_clip_bbox_to_shape(bbox, source_shape) if source_shape else [list(pair) for pair in (bbox or [])]
+    if not bbox or len(bbox) != 3:
+        return payload
+    z0, y0, x0 = int(bbox[0][0]), float(bbox[1][0]), float(bbox[2][0])
+    keyframes = []
+    for keyframe in (contours or {}).get("keyframes", []) or []:
+        if not isinstance(keyframe, dict) or str(keyframe.get("axis", "z")) != "z":
+            continue
+        z_index = _tif_safe_contour_slice_index(keyframe, None)
+        if z_index is None:
+            continue
+        local_polygon = []
+        for point in _tif_dedupe_contour_points(keyframe.get("polygon") or [], source_shape):
+            local_polygon.append([round(float(point[0]) - x0, 3), round(float(point[1]) - y0, 3)])
+        if len(local_polygon) < 3:
+            continue
+        keyframes.append(
+            {
+                "axis": "z",
+                "slice_index": int(z_index) - z0,
+                "polygon": local_polygon,
+                "author": str(keyframe.get("author") or "taxamask_ui_freehand"),
+                "source": str(keyframe.get("source") or "manual_freehand"),
+                "created_at": str(keyframe.get("created_at") or datetime.now().astimezone().isoformat(timespec="seconds")),
+            }
+        )
+    keyframes.sort(key=lambda item: int(item.get("slice_index", 0)))
+    payload["keyframes"] = keyframes
+    return payload
+
+
+def _tif_normalize_roi_keyframes(keyframes, shape=None):
+    shape = tuple(int(value) for value in (shape or ()))
+    normalized = []
+    for item in keyframes or []:
+        if not isinstance(item, dict):
+            continue
+        axis = str(item.get("axis") or "z")
+        if axis not in {"z", "y", "x"}:
+            continue
+        try:
+            slice_index = int(item.get("slice_index"))
+            rect = [int(value) for value in item.get("rect", [])]
+        except Exception:
+            continue
+        if len(rect) != 4:
+            continue
+        x0, y0, x1, y1 = rect
+        if len(shape) == 3:
+            if axis == "z":
+                max_slice, height, width = shape[0], shape[1], shape[2]
+            elif axis == "y":
+                max_slice, height, width = shape[1], shape[0], shape[2]
+            else:
+                max_slice, height, width = shape[2], shape[0], shape[1]
+            if not (0 <= slice_index < max_slice):
+                continue
+            x0, x1 = sorted((max(0, min(width, x0)), max(0, min(width, x1))))
+            y0, y1 = sorted((max(0, min(height, y0)), max(0, min(height, y1))))
+        else:
+            x0, x1 = sorted((x0, x1))
+            y0, y1 = sorted((y0, y1))
+        if x1 <= x0 or y1 <= y0:
+            continue
+        normalized.append(
+            {
+                "axis": axis,
+                "slice_index": slice_index,
+                "rect": [x0, y0, x1, y1],
+                "source": str(item.get("source") or "manual_rectangle"),
+            }
+        )
+    normalized.sort(key=lambda item: (item["axis"], item["slice_index"]))
+    return normalized
+
+
+def _tif_roi_keyframes_to_part_contours(keyframes, parent_bbox, source_shape=None):
+    bbox = _tif_clip_bbox_to_shape(parent_bbox, source_shape) if source_shape else [list(pair) for pair in (parent_bbox or [])]
+    contours = _tif_empty_contours_payload()
+    if not bbox or len(bbox) != 3:
+        return contours
+    for item in _tif_normalize_roi_keyframes(keyframes, source_shape):
+        if item.get("axis") != "z":
+            continue
+        slice_index = int(item.get("slice_index"))
+        if not (int(bbox[0][0]) <= slice_index < int(bbox[0][1])):
+            continue
+        x0, y0, x1, y1 = [int(value) for value in item.get("rect", [])]
+        local_z = slice_index - int(bbox[0][0])
+        local_y0 = y0 - int(bbox[1][0])
+        local_y1 = y1 - int(bbox[1][0])
+        local_x0 = x0 - int(bbox[2][0])
+        local_x1 = x1 - int(bbox[2][0])
+        contours = add_rectangular_keyframe(
+            contours,
+            local_z,
+            [[local_y0, local_y1], [local_x0, local_x1]],
+            author="taxamask_roi_shell",
+        )
+    return contours
+
+
+def _tif_roi_shell_mask_from_keyframes(keyframes, parent_bbox, source_shape):
+    keyframes = _tif_normalize_roi_keyframes(keyframes, source_shape)
+    axes = sorted({item["axis"] for item in keyframes})
+    if len(axes) != 1:
+        return None
+    axis = axes[0]
+    bbox = _tif_clip_bbox_to_shape(parent_bbox, source_shape)
+    shape = _tif_bbox_shape(bbox)
+    if len(shape) != 3 or min(shape) <= 0:
+        return None
+    local_frames = []
+    for item in keyframes:
+        if item["axis"] != axis:
+            continue
+        slice_index = int(item["slice_index"])
+        x0, y0, x1, y1 = [int(value) for value in item["rect"]]
+        if axis == "z":
+            local_slice = slice_index - int(bbox[0][0])
+            rect = [x0 - int(bbox[2][0]), y0 - int(bbox[1][0]), x1 - int(bbox[2][0]), y1 - int(bbox[1][0])]
+            slice_count, height, width = shape[0], shape[1], shape[2]
+        elif axis == "y":
+            local_slice = slice_index - int(bbox[1][0])
+            rect = [x0 - int(bbox[2][0]), y0 - int(bbox[0][0]), x1 - int(bbox[2][0]), y1 - int(bbox[0][0])]
+            slice_count, height, width = shape[1], shape[0], shape[2]
+        else:
+            local_slice = slice_index - int(bbox[2][0])
+            rect = [x0 - int(bbox[1][0]), y0 - int(bbox[0][0]), x1 - int(bbox[1][0]), y1 - int(bbox[0][0])]
+            slice_count, height, width = shape[2], shape[0], shape[1]
+        if not (0 <= local_slice < slice_count):
+            continue
+        rect[0] = max(0, min(width, rect[0]))
+        rect[2] = max(0, min(width, rect[2]))
+        rect[1] = max(0, min(height, rect[1]))
+        rect[3] = max(0, min(height, rect[3]))
+        if rect[2] <= rect[0] or rect[3] <= rect[1]:
+            continue
+        local_frames.append((int(local_slice), rect))
+    if not local_frames:
+        return None
+    local_frames.sort(key=lambda item: item[0])
+    mask = np.zeros(shape, dtype=np.uint16)
+
+    def fill_slice(slice_index, rect_values):
+        x0, y0, x1, y1 = [int(value) for value in rect_values]
+        if x1 <= x0 or y1 <= y0:
+            return
+        if axis == "z":
+            mask[int(slice_index), y0:y1, x0:x1] = 1
+        elif axis == "y":
+            mask[y0:y1, int(slice_index), x0:x1] = 1
+        else:
+            mask[y0:y1, x0:x1, int(slice_index)] = 1
+
+    for idx, (slice_index, rect) in enumerate(local_frames):
+        fill_slice(slice_index, rect)
+        if idx + 1 >= len(local_frames):
+            continue
+        next_slice, next_rect = local_frames[idx + 1]
+        span = int(next_slice) - int(slice_index)
+        if span <= 0:
+            continue
+        for step in range(1, span):
+            weight = float(step) / float(span)
+            interp = []
+            for left_value, right_value in zip(rect, next_rect):
+                interp.append(int(round((1.0 - weight) * float(left_value) + weight * float(right_value))))
+            fill_slice(int(slice_index) + step, interp)
+    return mask
+
+
+def _tif_format_contour_quality_report(report):
+    if not isinstance(report, dict):
+        return ""
+    problems = []
+    for item in report.get("errors", []) or []:
+        problems.append(str(item.get("message") or item.get("code") or "error"))
+    for item in report.get("warnings", []) or []:
+        problems.append(str(item.get("message") or item.get("code") or "warning"))
+    if not problems:
+        return "Quality check passed"
+    return "Review warnings: " + " | ".join(problems[:4])
+
+
+def _tif_shape_from_metadata(path):
+    try:
+        with tifffile.TiffFile(path) as tif:
+            shape = getattr(tif.series[0], "shape", ()) if tif.series else ()
+        return tuple(int(value) for value in shape) if shape else ()
+    except Exception:
+        return ()
+
+
+def _tif_open_reslice_volume_for_review(path):
+    if not path or not os.path.exists(path):
+        return None, ""
+    try:
+        return tifffile.memmap(path), ""
+    except Exception as exc:
+        shape = _tif_shape_from_metadata(path)
+        detail = f"{type(exc).__name__}: {exc}"
+        if shape:
+            return None, f"reslice_tif_not_memory_mappable:{shape}:{detail}"
+        return None, f"reslice_tif_not_memory_mappable:{detail}"
+
+
+def _tif_write_mask_metadata(project_manager, part, mask):
+    metadata = write_part_mask(project_manager, part, mask)
+    part.setdefault("mask", {}).update(
+        {
+            "shape_zyx": metadata.get("shape_zyx", []),
+            "dtype": metadata.get("dtype", ""),
+            "spacing_zyx": metadata.get("spacing_zyx", []),
+            "spacing_unit": metadata.get("spacing_unit", "micrometer"),
+            "orientation": metadata.get("orientation", "unknown"),
+        }
+    )
+    return metadata
+
+
+def _tif_initialize_part_mask_from_roi_shell(project_manager, specimen_id, part, roi_keyframes, source_shape):
+    if not isinstance(part, dict) or not roi_keyframes:
+        return False, ""
+    bbox = _tif_clip_bbox_to_shape(part.get("parent_bbox_zyx", []), source_shape)
+    shape = _tif_bbox_shape(bbox)
+    if len(shape) != 3 or min(shape) <= 0:
+        return False, ""
+    contours = _tif_roi_keyframes_to_part_contours(roi_keyframes, bbox, source_shape)
+    mask = _tif_roi_shell_mask_from_keyframes(roi_keyframes, bbox, source_shape)
+    if mask is None or not np.any(np.asarray(mask) > 0):
+        report = validate_contours_for_interpolation(contours, shape, axis="z")
+        if not report.get("ok"):
+            return False, _tif_format_contour_quality_report(report)
+        mask = build_preview_mask_from_contours(contours, shape)
+        quality = _tif_format_contour_quality_report(report)
+    else:
+        quality = "rectangular key-slice shell"
+    _tif_write_mask_metadata(project_manager, part, mask)
+    metadata_payload = part.setdefault("metadata", {})
+    metadata_payload["roi_shell_keyframe_count"] = len(_tif_normalize_roi_keyframes(roi_keyframes, source_shape))
+    metadata_payload["roi_shell_keyframes"] = _tif_normalize_roi_keyframes(roi_keyframes, source_shape)
+    project_manager.update_part_status(specimen_id, part.get("part_id", ""), "mask_preview", save=False)
+    project_manager.save_project()
+    return True, quality
+
+
+def _tif_initialize_part_mask_from_full_volume_contours(project_manager, specimen_id, part, contours, bbox, source_shape, accepted_preview_mask=None):
+    if not isinstance(part, dict) or not isinstance(contours, dict):
+        return False, ""
+    bbox = _tif_clip_bbox_to_shape(bbox, source_shape)
+    shape = _tif_bbox_shape(bbox)
+    if len(shape) != 3 or min(shape) <= 0:
+        return False, "invalid contour bbox"
+    local_contours = _tif_full_volume_contours_to_local(contours, bbox, source_shape)
+    report = validate_contours_for_interpolation(local_contours, shape, axis="z")
+    if not report.get("ok"):
+        return False, _tif_format_contour_quality_report(report)
+    mask = None
+    if accepted_preview_mask is not None and tuple(getattr(accepted_preview_mask, "shape", ()) or ()) == tuple(shape):
+        mask = accepted_preview_mask
+    if mask is None:
+        mask = build_preview_mask_from_contours(local_contours, shape)
+    _tif_write_mask_metadata(project_manager, part, mask)
+    contours_path = project_manager.to_absolute(part.get("contours_path", ""))
+    if contours_path:
+        write_contours_json(contours_path, local_contours)
+    metadata_payload = part.setdefault("metadata", {})
+    metadata_payload["full_volume_mask_keyframe_count"] = len(local_contours.get("keyframes", []) or [])
+    metadata_payload["full_volume_mask_bbox_zyx"] = bbox
+    metadata_payload["full_volume_mask_source"] = "manual_freehand_key_slices"
+    project_manager.update_part_status(specimen_id, part.get("part_id", ""), "mask_preview", save=False)
+    project_manager.save_project()
+    return True, _tif_format_contour_quality_report(report)
 
 
 def _tif_canvas_background(theme="dark"):
@@ -220,7 +581,7 @@ TIF_TRANSLATIONS = {
         "Working volume is being built. Slice review will be available when it finishes.": "正在生成 working volume。完成后即可进行切片复核。",
         "Working volume is being built. 3D preview will open when it finishes.": "正在生成 working volume。完成后会打开三维体预览。",
         "Building 3D preview...": "正在构建 3D 预览...",
-        "Preparing full-volume 3D preview...": "正在准备整只三维体预览...",
+        "Preparing full-volume 3D preview...": "正在准备顶层导入体数据三维预览...",
         "Preparing ROI crop preview...": "正在准备 ROI 裁剪块预览...",
         "Preparing local detail preview...": "正在准备局部结构高清预览...",
         "Release Render quality to rebuild the 3D preview.": "松开渲染质量滑条后，将按最终值重建三维预览。",
@@ -231,6 +592,13 @@ TIF_TRANSLATIONS = {
         "GPU budget auto-scaled preview": "GPU 预算已自动降低预览规格",
         "Preparing mask preview...": "正在准备 mask 预览...",
         "Downsampling mask labels for 3D overlay. This can take a moment for large label volumes.": "Downsampling mask labels for 3D overlay. This can take a moment for large label volumes.",
+        "Saving labels in background...": "正在后台保存标注...",
+        "Finishing auto-save before manual save...": "正在等待自动保存完成，然后继续手动保存...",
+        "Finishing auto-save before accepting training truth...": "正在等待自动保存完成，然后继续核验为训练真值...",
+        "Auto-save is still finishing. Wait a moment, then try again.": "自动保存正在收尾。请稍等完成后再继续操作。",
+        "Accepting training truth in background...": "正在后台核验为训练真值...",
+        "Label save is running. Wait until it finishes before editing project data.": "标注正在保存中。请等待完成后再修改项目数据。",
+        "Training truth acceptance is running. Wait until it finishes before editing project data.": "正在核验为训练真值。请等待完成后再修改项目数据。",
         "Specimens": "Specimen",
         "Volume slices": "体数据切片",
         "Volume controls": "体数据控制",
@@ -241,6 +609,95 @@ TIF_TRANSLATIONS = {
         "Display": "显示",
         "Annotation": "标注",
         "Train/export": "训练/导出",
+        "Review": "复核预览",
+        "Part Extraction": "部位切分",
+        "Annotation / training": "标注与训练",
+        "Label review": "标注核验",
+        "Train / predict": "训练与预测",
+        "Result comparison": "结果对比",
+        "Region label schema": "结构区域标签表",
+        "Schema ID": "标签表 ID",
+        "User-defined part name": "用户定义部位名",
+        "New schema": "新建标签表",
+        "Save schema": "保存标签表",
+        "Bind to current part": "绑定到当前部位",
+        "Add region label": "新增区域标签",
+        "Remove region label": "删除区域标签",
+        "Import schema": "导入 TaxaMask 标签表 JSON",
+        "Export schema": "导出标签表",
+        "Choose label color": "选择标签颜色",
+        "Choose group color": "选择分组颜色",
+        "Bind a label schema first so every specimen uses the same numeric labels for annotation, training, prediction import, and result comparison. Import files should be TaxaMask label schema JSON exported from this panel.": "请先绑定标签表，让多个个体使用同一套编号方案；标注、训练、预测导入和结果对比都会使用这里的编号。导入文件应是从本面板导出的 TaxaMask 标签表 JSON。",
+        "After binding a label schema, select one current label here before using the brush or fill tools.": "绑定标签表后，请先在这里选择当前标签，再使用画笔或填充工具标注切片。",
+        "Region labels are the structure classes used for painting, training, prediction import, and result comparison. The JSON file is a TaxaMask label schema exported from this panel.": "区域标签是用于标注、训练、预测导入和结果对比的结构类别。导入文件应是从这里导出的 TaxaMask 标签表 JSON。",
+        "The active label list below is what the brush writes. Select a row first, then paint or fill on the slice.": "下面的当前标签列表就是画笔会写入的类别。请先选中一行，再用画笔或填充工具标注切片。",
+        "Current labels are for selecting the label written by brush/fill tools. For project part volumes and reslices, create or edit labels in the bound schema above.": "当前标签只用于选择画笔或填充工具写入的类别。项目内的部位体和重切片请在上方已绑定的标签表中新建或编辑标签。",
+        "Label IDs are the numeric labels stored in the current volume. For project part volumes and their reslices, this list follows the bound region label schema; for top-level imported volumes, it is the specimen label map.": "标签编号是写入当前体数据的实际数值。项目内的部位体及其重切片会跟随已绑定的区域标签表；顶层导入体则使用整只个体的标签表。",
+        "Label IDs are the numeric labels stored in the current volume. For project part volumes, this list follows the bound region label schema; for top-level imported volumes, it is the specimen label map.": "标签编号是当前体数据中实际写入的数字标签。项目内切分的部位体数据会跟随已绑定的区域标签表；顶层导入体数据使用当前个体的标签表。",
+        "Group tags only organize part volumes for prediction rounds or review batches. They are not annotation classes, label schemas, or training labels.": "分组标签只用于把部位体数据按预测轮次或复核批次分组；它不是标注类别、标签表，也不会作为训练标签。",
+        "Export Label Schema": "导出标签表",
+        "Import Label Schema": "导入标签表",
+        "TaxaMask label schema (*.json)": "TaxaMask 标签表 (*.json)",
+        "Exported label schema {0}: {1}": "已导出标签表 {0}：{1}",
+        "Imported label schema {0}.": "已导入标签表 {0}。",
+        "Select a label schema before exporting.": "请先选择一个标签表再导出。",
+        "Label schema {0} already exists. Replace it with the imported schema?": "标签表 {0} 已存在。是否用导入的标签表替换它？",
+        "Label schema export failed: {0}": "标签表导出失败：{0}",
+        "Label schema import failed: {0}": "标签表导入失败：{0}",
+        "Select or create a label schema before saving.": "请先选择或新建一个标签表。",
+        "Edit the bound label schema above to add, rename, or recolor labels for this part/reslice.": "请在上方已绑定的标签表中为当前部位/重切片新增、重命名或修改标签颜色。",
+        "Label ID": "标签编号",
+        "Region name": "区域名称",
+        "Saved label schema {0}.": "已保存标签表 {0}。",
+        "Bound label schema {0} to current part {1}.": "已将标签表 {0} 绑定到当前部位 {1}。",
+        "Select a part volume before binding a label schema.": "请先选择一个部位体数据，再绑定标签表。",
+        "Part group tags": "部位分组标签",
+        "Group tag ID": "分组标签 ID",
+        "Group tag label": "分组标签名称",
+        "Assigned": "已分配",
+        "Add group tag": "新增分组标签",
+        "Save group tag": "保存分组标签",
+        "Delete group tag": "删除分组标签",
+        "Move up": "上移",
+        "Move down": "下移",
+        "Apply tags to current part": "应用到当前部位",
+        "Select a part volume before assigning tags.": "请先选择一个部位体数据，再分配分组标签。",
+        "Saved part tag {0}.": "已保存分组标签 {0}。",
+        "Deleted part tag {0}.": "已删除分组标签 {0}。",
+        "Applied {0} user tag(s) to current part.": "已给当前部位应用 {0} 个分组标签。",
+        "Review source": "复核来源",
+        "Region label": "区域标签",
+        "Refresh comparison": "刷新对比",
+        "Open selected in 3D": "打开选中个体三维预览",
+        "Opening selected result in 3D...": "正在打开选中结果的三维预览...",
+        "Highlight selected region": "高亮所选区域",
+        "Specimen": "个体",
+        "Part": "部位",
+        "Reslice": "重切片",
+        "Region voxels": "区域体素",
+        "Labeled voxels": "已标注体素",
+        "Region %": "区域占比",
+        "Source status": "来源状态",
+        "Shape Z/Y/X": "形状 Z/Y/X",
+        "Missing {0}": "缺少 {0}",
+        "Label path missing": "标签路径缺失",
+        "Label file missing": "标签文件缺失",
+        "Label read failed: {0}": "标签读取失败：{0}",
+        "Shape mismatch with current image": "形状与当前图像不匹配",
+        "Listed {0} {1} part result(s); {2} have {3}. Region voxels: {4} / labeled voxels: {5} ({6}%).": "已列出 {0} 个 {1} 部位结果；{2} 个有 {3}。区域体素：{4} / 已标注体素：{5}（{6}%）。",
+        "Select a result row before opening the 3D preview.": "请先在结果表中选择一个结果，再打开三维预览。",
+        "Opened {0} / {1} for 3D region comparison.": "已打开 {0} / {1} 的三维区域对比预览。",
+        "No comparable part is selected yet. Select a part volume or use all parts.": "还没有选中可对比的部位。请选择一个部位体数据，或查看全部部位。",
+        "Selected source has no label volume for the current part.": "当前部位没有所选来源的标签体。",
+        "Region highlight requires a specific region label.": "高亮区域需要先选择一个具体区域标签。",
+        "Region highlight is ready in 3D preview.": "区域高亮已在三维预览中准备好。",
+        "All comparable parts": "全部可对比部位",
+        "All": "全部",
+        "Export current rendering screenshot": "导出当前渲染截图",
+        "Export current rendering": "导出当前渲染",
+        "Select a TIF volume before exporting the current rendering.": "请先选择一个 TIF 体数据，再导出当前渲染。",
+        "Exported current rendering screenshot: {0}": "已导出当前渲染截图：{0}",
+        "Screenshot export failed: {0}": "截图导出失败：{0}",
         "Slice display": "切片显示",
         "3D rendering": "三维体渲染",
         "Annotation tools": "标注工具",
@@ -250,14 +707,16 @@ TIF_TRANSLATIONS = {
         "Lasso fill": "套索填充",
         "Rectangle fill": "矩形填充",
         "Ellipse fill": "椭圆填充",
+        "Interpolate fill": "插值自动填充",
         "Picker": "取样",
         "Pan/view": "平移查看",
-        "Brush (B): paint the selected material. Hold Ctrl for temporary erase.": "画笔（B）：绘制当前 material。按住 Ctrl 可临时擦除。",
+        "Brush (B): paint the selected label. Hold Ctrl for temporary erase.": "画笔（B）：绘制当前标签。按住 Ctrl 可临时擦除。",
         "Eraser (E): write background 0. Ctrl + left drag still works as temporary erase.": "橡皮擦（E）：写入背景 0。Ctrl + 左键拖动仍可临时擦除。",
-        "Lasso fill (L): draw a closed outline and fill it with the selected material.": "套索填充（L）：圈出闭合区域，并用当前 material 填充。",
-        "Rectangle fill (R): drag a box and fill it with the selected material.": "矩形填充（R）：拖出矩形，并用当前 material 填充。",
-        "Ellipse fill (O): drag an ellipse and fill it with the selected material.": "椭圆填充（O）：拖出椭圆，并用当前 material 填充。",
-        "Picker (I): sample a label under the cursor and select that material.": "取样（I）：读取光标下的标签，并切换到对应 material。",
+        "Lasso fill (L): draw a closed outline and fill it with the selected label.": "套索填充（L）：圈出闭合区域，并用当前标签填充。",
+        "Rectangle fill (R): drag a box and fill it with the selected label.": "矩形填充（R）：拖出矩形，并用当前标签填充。",
+        "Ellipse fill (O): drag an ellipse and fill it with the selected label.": "椭圆填充（O）：拖出椭圆，并用当前标签填充。",
+        "Interpolate fill: use slices where the current label already exists as key slices, then fill the slices between them.": "插值自动填充：把已画出当前标签的切片作为关键切片，并补齐它们之间的切片。",
+        "Picker (I): sample a label under the cursor and select that label.": "取样（I）：读取光标下的标签，并切换到对应标签。",
         "Pan/view: drag the zoomed slice without changing labels. Right drag also pans when zoomed.": "平移查看：拖动放大后的切片，不修改标签。放大后右键拖动也可平移。",
         "Tool set to Brush.": "已切换到画笔。",
         "Tool set to Eraser.": "已切换到橡皮擦。",
@@ -267,43 +726,48 @@ TIF_TRANSLATIONS = {
         "Tool set to Picker.": "已切换到取样。",
         "Tool set to Pan/view. Labels will not be changed.": "已切换到平移查看。标签不会被修改。",
         "Pan/view mode is active. Labels were not changed.": "当前是平移查看模式，标签没有被修改。",
-        "Creating working edit layer before painting...": "正在创建当前编辑层，然后再写入标注...",
-        "Creating working edit layer before filling...": "正在创建当前编辑层，然后再填充标注...",
+        "Creating current label layer before painting...": "正在创建当前标注层，然后再写入标注...",
+        "Creating current label layer before filling...": "正在创建当前标注层，然后再填充标注...",
         "Lasso fill needs at least 3 points.": "套索填充至少需要 3 个点。",
         "Lasso fill did not cover any pixels.": "套索填充没有覆盖任何像素。",
         "Shape fill is too small. Drag a wider area before releasing.": "填充区域太小。请拖出更大的范围后再松开。",
-        "Filled material {0} on slice {1}: {2} pixel(s).": "已在第 {1} 张切片填充 material {0}：{2} 个像素。",
-        "Filled rectangle material {0} on slice {1}: {2} pixel(s).": "已在第 {1} 张切片矩形填充 material {0}：{2} 个像素。",
-        "Filled ellipse material {0} on slice {1}: {2} pixel(s).": "已在第 {1} 张切片椭圆填充 material {0}：{2} 个像素。",
+        "Filled label {0} on slice {1}: {2} pixel(s).": "已在第 {1} 张切片填充标签 {0}：{2} 个像素。",
+        "Filled rectangle label {0} on slice {1}: {2} pixel(s).": "已在第 {1} 张切片矩形填充标签 {0}：{2} 个像素。",
+        "Filled ellipse label {0} on slice {1}: {2} pixel(s).": "已在第 {1} 张切片椭圆填充标签 {0}：{2} 个像素。",
+        "Interpolate fill needs the current label on at least two key slices.": "插值自动填充需要当前标签至少出现在两个关键切片上。",
+        "Interpolate fill found no missing slices between key slices.": "插值自动填充没有发现需要补齐的中间切片。",
+        "Interpolate filled label {0}: {1} slice(s), {2} pixel(s).": "已插值填充标签 {0}：{1} 个切片，{2} 个像素。",
         "Large fill area: {0}% of slice.": "填充面积偏大：占当前切片 {0}%。",
         "Fill touches the image edge.": "填充区域触及图像边缘。",
-        "Copy material to previous slice": "复制到上一张",
-        "Copy material to next slice": "复制到下一张",
-        "Clear current material": "清除当前 material",
-        "Copy current material mask to the previous slice for refinement.": "将当前 material 的 mask 复制到上一张切片，便于继续精修。",
-        "Copy current material mask to the next slice for refinement.": "将当前 material 的 mask 复制到下一张切片，便于继续精修。",
-        "Clear the selected material from the current slice. Other materials are kept.": "从当前切片清除选中的 material，不影响其他 material。",
+        "Copy label to previous slice": "复制到上一张",
+        "Copy label to next slice": "复制到下一张",
+        "Clear current label": "清除当前标签",
+        "Copy current label mask to the previous slice for refinement.": "将当前标签的 mask 复制到上一张切片，便于继续精修。",
+        "Copy current label mask to the next slice for refinement.": "将当前标签的 mask 复制到下一张切片，便于继续精修。",
+        "Clear the selected label from the current slice. Other labels are kept.": "从当前切片清除选中的标签，不影响其他标签。",
         "Confirm label edit": "确认标注修改",
-        "Copy material {0} from slice {1} to slice {2}? Existing pixels of this material on the target slice will be replaced.": "将 material {0} 从第 {1} 张复制到第 {2} 张？目标切片上已有的同 material 像素会被替换。",
-        "Clear material {0} from slice {1}?": "从第 {1} 张切片清除 material {0}？",
+        "Copy label {0} from slice {1} to slice {2}? Existing pixels of this label on the target slice will be replaced.": "将标签 {0} 从第 {1} 张复制到第 {2} 张？目标切片上已有的同标签像素会被替换。",
+        "Clear label {0} from slice {1}?": "从第 {1} 张切片清除标签 {0}？",
         "No previous slice is available.": "没有上一张切片。",
         "No next slice is available.": "没有下一张切片。",
-        "Background material 0 is not supported by this helper.": "这个辅助操作不支持 background material 0。",
-        "No pixels of material {0} on slice {1}.": "第 {1} 张切片没有 material {0} 的像素。",
-        "Copied material {0} from slice {1} to slice {2}: {3} changed pixel(s).": "已将 material {0} 从第 {1} 张复制到第 {2} 张：改变 {3} 个像素。",
-        "Cleared material {0} on slice {1}: {2} pixel(s).": "已清除第 {1} 张切片的 material {0}：{2} 个像素。",
+        "Background label 0 is not supported by this helper.": "这个辅助操作不支持背景标签 0。",
+        "No pixels of label {0} on slice {1}.": "第 {1} 张切片没有标签 {0} 的像素。",
+        "Copied label {0} from slice {1} to slice {2}: {3} changed pixel(s).": "已将标签 {0} 从第 {1} 张复制到第 {2} 张：改变 {3} 个像素。",
+        "Cleared label {0} on slice {1}: {2} pixel(s).": "已清除第 {1} 张切片的标签 {0}：{2} 个像素。",
         "No label changes were needed on slice {0}.": "第 {0} 张切片无需修改。",
         "Save status": "保存状态",
         "Saved": "已保存",
         "Unsaved changes: {0} slice(s)": "未保存修改：{0} 张切片",
         "Auto-save pending: {0} slice(s)": "等待自动保存：{0} 张切片",
-        "Saving working edit...": "正在保存当前编辑层...",
+        "Saving current labels...": "正在保存当前标注...",
         "Saving part mask...": "正在保存部位 mask...",
+        "Saving editable AI result...": "正在保存待核验 AI 结果...",
         "Save failed: {0}": "保存失败：{0}",
-        "Auto-save writes working_edit about 1.2 seconds after edits.": "修改后约 1.2 秒写入 working_edit。",
+        "Auto-save writes the current label layer about 1.2 seconds after edits.": "修改后约 1.2 秒写入当前标注层。",
         "Undo last stroke (Ctrl+Z)": "撤销上一笔（Ctrl+Z）",
         "Redo stroke (Ctrl+Y / Ctrl+Shift+Z)": "重做（Ctrl+Y / Ctrl+Shift+Z）",
-        "Save current edit layer (Ctrl+S)": "保存当前编辑层（Ctrl+S）",
+        "Save current label layer (Ctrl+S)": "保存当前标注层（Ctrl+S）",
+        "Save current labels before accepting selected AI results.": "接受选中的 AI 结果前，请先保存当前标注。",
         "Decrease brush size ([)": "减小画笔半径（[）",
         "Increase brush size (])": "增大画笔半径（]）",
         "Brush size: {0}": "画笔大小：{0}",
@@ -400,7 +864,7 @@ TIF_TRANSLATIONS = {
         "Controls the number of samples per screen pixel along the viewing ray. Higher values stabilize internal layers and fine lines, mainly increasing GPU compute load.": "控制每个屏幕像素沿视线取样次数。数值越高，内部层次和细线更稳定，但主要增加 GPU 计算负载；如果转动不卡，可继续调高。",
         "When zoomed in and still, renders the 3D view at a higher offscreen pixel density before scaling it back, improving small-part inspection at the cost of more GPU readback work.": "静止且放大观察时，先用更高离屏像素密度渲染三维体，再缩回当前显示区域。它主要改善抗锯齿和顺滑外观；精确看边界时优先用局部结构检查。",
         "Controls the offscreen supersampling factor used by ROI high detail. Higher values make still zoomed views smoother but heavier.": "控制 ROI 高清的离屏超采样倍数。数值越高，静止放大视图越平滑，但可能让边界显得更软，负载也更重。",
-        "When full-volume ROI bbox text is present, uploads a read-only high-detail crop from the original bbox for 3D inspection. It never writes TIF, mask, part, or training data.": "当整只体数据存在 ROI bbox 文本时，从原始 bbox 只读上传高清局部块用于三维检查。它不会写入 TIF、Mask、Part 或训练数据。",
+        "When full-volume ROI bbox text is present, uploads a read-only high-detail crop from the original bbox for 3D inspection. It never writes TIF, mask, part, or training data.": "当顶层导入体数据存在 ROI bbox 文本时，从原始 bbox 只读上传高清局部块用于三维检查。它不会写入 TIF、Mask、Part 或训练数据。",
         "Sharp still rendering keeps more source intensity detail and uses crisper sampling. It may upload more data and can look grainier while revealing fine internal structures.": "局部结构检查会在静止时尽量提高部位体纹理，并保留线性采样和 ROI 高清，减少放大时的马赛克感。它可能上传更慢，但更适合判断局部结构边界。",
         "Controls how strongly dense voxels accumulate in 3D. Lower values make internal layers less blocked; higher values make weak structures more visible.": "控制三维渲染中密度累积的强弱。调低会减少遮挡，更容易看内部层次；调高会让弱信号更明显，但画面可能更厚。",
         "Enhances fine boundaries while the view is still. It is a display-only aid for checking internal layers and part edges.": "静止观察时增强细小边界。它只是显示辅助，用于检查内部层次和部位边缘，不修改原始数据。",
@@ -425,62 +889,66 @@ TIF_TRANSLATIONS = {
         "Side-angle slices are read-only in this version. Use Z axial view for label editing.": "当前版本中侧向切片为只读观察。需要修改标签时请切回 Z 轴切片。",
         "Painting is available on Z slices only. Switch back to Z axial view before editing labels.": "画笔编辑目前只开放在 Z 轴切片上。修改标签前请切回 Z 轴切片。",
         "Label layer": "标签层",
-        "Manual truth is a read-only reference. Switch to Current edit before changing labels.": "人工真值是只读基准层。要修改标注，请先切换到“当前编辑”。",
-        "Current edit is the editable working copy. Brush changes are saved here first.": "当前编辑是可写的工作副本。画笔修改会先保存到这一层。",
-        "Model draft is a read-only prediction candidate. Copy it to Current edit before manual correction.": "模型草稿是只读的预测候选。需要人工修正时，请先复制到“当前编辑”。",
-        "Cannot paint on this label layer. Switch to Current edit first.": "当前标签层不能直接绘制。请先切换到“当前编辑”。",
-        "Cannot paint on model draft. Copy model draft to Current edit first.": "不能直接在模型草稿上绘制。请先复制模型草稿到“当前编辑”。",
-        "manual_truth": "人工真值",
-        "working_edit": "当前编辑",
-        "model_draft": "模型草稿",
+        "Training truth is the reviewed read-only label used for training. Switch to Current labels before changing labels.": "训练真值是已经核验通过、用于训练的只读标签层。要修改标注，请先切换到“当前标注”。",
+        "Current labels are editable. Brush changes are saved here first; accept them as training truth after review.": "当前标注可直接编辑。画笔修改会先保存到这一层；复核通过后再核验为训练真值。",
+        "Model draft is a legacy read-only prediction copy kept for audit. Current prediction results open as Current labels now.": "模型草稿是旧流程保留的只读预测副本，仅用于追溯。现在的预测结果会直接打开为“当前标注”。",
+        "Editable AI result is the review layer for this project part. Brush changes are saved here; only accepted results become training truth.": "待核验 AI 结果是当前项目部位的可写复核层。画笔修改会保存到这里；只有核验通过后才会成为训练真值。",
+        "Raw AI prediction backup is read-only and kept for audit. Edit the review result layer instead.": "AI 原始备份只读，用于追溯。请在待核验结果层中修订。",
+        "Cannot paint on this label layer. Switch to Current labels first.": "当前标签层不能直接绘制。请先切换到“当前标注”。",
+        "Cannot paint on the legacy model draft. Switch to Current labels first.": "不能直接在旧版模型草稿上绘制。请先切换到“当前标注”。",
+        "manual_truth": "训练真值",
+        "working_edit": "当前标注",
+        "model_draft": "只读预测副本",
+        "editable_ai_result": "待核验 AI 结果",
+        "raw_ai_prediction_backup": "AI 原始备份",
         "Overlay": "叠加透明度",
         "Brightness": "亮度",
         "Contrast": "对比度",
         "Brush size": "画笔大小",
-        "Current material": "当前 material",
+        "Current label": "当前标签",
         "Background / erase target": "背景 / 擦除目标",
-        "Material {0}: {1}": "Material {0}：{1}",
-        "Eraser writes background 0. Current material remains {0}: {1}.": "橡皮擦会写入背景 0。当前 material 仍为 {0}：{1}。",
-        "Selected material {0}: {1}.": "已选择 material {0}：{1}。",
-        "Picked material {0}: {1}.": "已取样 material {0}：{1}。",
-        "Sampled material {0}, but it is not in the material map.": "取样到 material {0}，但它不在当前 material 表中。",
+        "Label {0}: {1}": "标签 {0}：{1}",
+        "Eraser writes background 0. Current label remains {0}: {1}.": "橡皮擦会写入背景 0。当前标签仍为 {0}：{1}。",
+        "Selected label {0}: {1}.": "已选择标签 {0}：{1}。",
+        "Picked label {0}: {1}.": "已取样标签 {0}：{1}。",
+        "Sampled label {0}, but it is not in the current label table.": "取样到标签 {0}，但它不在当前标签表中。",
         "No label layer is loaded to sample from.": "当前没有可取样的标签层。",
-        "Material picker is available on Z slices only. Switch back to Z axial view before sampling labels.": "取样工具目前只开放在 Z 轴切片上。取样前请切回 Z 轴切片。",
-        "Working edit layer is unavailable. Check the working volume path before editing labels.": "当前编辑层不可用。请检查 working volume 路径后再修改标签。",
+        "Label picker is available on Z slices only. Switch back to Z axial view before sampling labels.": "取样工具目前只开放在 Z 轴切片上。取样前请切回 Z 轴切片。",
+        "Current label layer is unavailable. Check the working volume path before editing labels.": "当前标注层不可用。请检查工作体数据路径后再修改标签。",
         "Part mask layer is unavailable. Check the part mask path before editing labels.": "部位 mask 图层不可用。请检查部位 mask 路径后再修改标签。",
         "Undo": "撤销",
         "Redo": "重做",
-        "Save working edit": "保存当前编辑层",
-        "Auto-save edit": "自动保存编辑层",
-        "Working edit saved.": "当前编辑层已保存。",
-        "Auto-saved working edit.": "已自动保存当前编辑层。",
+        "Save current labels": "保存当前标注",
+        "Auto-save labels": "自动保存标注",
+        "Current labels saved.": "当前标注已保存。",
+        "Auto-saved current labels.": "已自动保存当前标注。",
         "Part mask saved.": "部位 mask 已保存。",
         "Auto-saved part mask.": "已自动保存部位 mask。",
-        "Painted material {0} on slice {1}.": "已在第 {1} 张切片绘制 material {0}。",
+        "Painted label {0} on slice {1}.": "已在第 {1} 张切片绘制标签 {0}。",
         "Erased labels on slice {0}.": "已擦除第 {0} 张切片上的标签。",
-        "Unsaved working edit": "未保存的当前编辑层",
+        "Unsaved current labels": "未保存的当前标注",
         "Unsaved part mask": "未保存的部位 mask",
-        "Save changes to the current working_edit before continuing?": "继续前是否保存当前 working_edit 的修改？",
+        "Save changes to the current labels before continuing?": "继续前是否保存当前标注的修改？",
         "Save changes to the current part mask before continuing?": "继续前是否保存当前部位 mask 的修改？",
         "Auto-save is on. Brush changes are saved shortly after editing.": "自动保存已开启。修改后会短延迟保存。",
-        "Auto-save is off. Remember to save the current edit layer.": "自动保存已关闭。请记得手动保存当前编辑层。",
+        "Auto-save is off. Remember to save the current labels.": "自动保存已关闭。请记得手动保存当前标注。",
         "Auto-save is off. Remember to save the current part mask.": "自动保存已关闭。请记得手动保存当前部位 mask。",
-        "Accept as manual truth": "确认为人工真值",
-        "Copy model draft to working edit": "复制模型草稿到当前编辑层",
-        "Material map": "材料表",
-        "Add material": "新增 material",
-        "Edit material": "编辑 material",
-        "Delete material": "删除 material",
+        "Accept as training truth": "核验为训练真值",
+        "Copy legacy model draft to current labels": "复制旧版模型草稿到当前标注",
+        "Label table": "标签表",
+        "Add material": "新增标签",
+        "Edit material": "编辑标签",
+        "Delete material": "删除标签",
         "Data import": "数据导入",
         "Part extraction": "部位提取",
         "1. Locate part": "1. 定位部位",
         "2. Build part mask": "2. 生成部位 mask",
         "3. Output and manage": "3. 输出与管理",
-        "Full volume": "整只体数据",
-        "Part volume": "部位体数据",
+        "Full volume": "顶层导入体数据",
+        "Part volume": "项目部位体数据",
         "Part": "部位",
         "Reslices": "重切片",
-        "Parent specimen": "父标本",
+        "Parent specimen": "父级导入体数据",
         "Current view": "当前视图",
         "Parent bbox Z/Y/X": "父体 bbox Z/Y/X",
         "Part image": "部位图像",
@@ -504,7 +972,20 @@ TIF_TRANSLATIONS = {
         "Previous key slice": "上一关键切片",
         "Next key slice": "下一关键切片",
         "Preview auto fill": "预览自动填充",
+        "Preview auto fill is already running.": "预览自动填充正在运行。",
+        "Preview auto fill is running...": "正在预览自动填充...",
+        "Preview auto fill finished": "预览自动填充完成",
+        "Part volume creation is already running.": "部位体数据正在创建中。",
+        "Part volume creation is running. Wait until it finishes before editing project data.": "部位体数据正在创建中。请等待完成后再修改项目数据。",
+        "Local Axis Reslice export is running. Wait until it finishes before editing project data.": "局部轴重切片正在导出中。请等待完成后再修改项目数据。",
+        "Creating part volume...": "正在创建部位体数据...",
+        "Writing part image and empty mask...": "正在写入部位图像和空 mask...",
+        "Initializing accepted/freehand part mask...": "正在初始化已接受/手绘部位 mask...",
+        "Initializing ROI shell part mask...": "正在初始化 ROI 外壳部位 mask...",
+        "Finalizing ROI...": "正在完成 ROI 保存...",
+        "Review the preview, then accept it before creating the part volume.": "请先检查预览，确认可用后接受，再创建部位体数据。",
         "Accept part mask": "接受部位 mask",
+        "Use Confirm ROI to create the part volume with this accepted mask.": "请用“确认 ROI”创建带有此已接受 mask 的部位体数据。",
         "Clear preview": "清除预览",
         "Local Axis Reslice": "局部轴重切片",
         "Local Axis Reslice / part volume": "局部轴重切片 / 部位体数据",
@@ -514,26 +995,26 @@ TIF_TRANSLATIONS = {
         "Delete part volume?": "删除部位体数据？",
         "Delete part volume {0}? This removes the cropped image, mask, contours, and extraction files, but keeps the parent TIF volume.": "确认删除部位体数据 {0} 吗？这会删除裁剪图像、mask、轮廓和提取记录，但不会删除父级 TIF 体数据。",
         "Deleted part volume {0}.": "已删除部位体数据 {0}。",
-        "Switch to Full volume before creating a part.": "请先切回整只体数据，再新建部位。",
-        "Switch to Full volume before saving ROI draft.": "请先切回整只体数据，再保存 ROI 草稿。",
-        "Switch to Full volume before confirming ROI.": "请先切回整只体数据，再确认 ROI。",
-        "Switch to Full volume before drawing ROI.": "请先切回整只体数据，再手动框选 ROI。",
+        "Switch to Full volume before creating a part.": "请先切回顶层导入体数据，再新建部位。",
+        "Switch to Full volume before saving ROI draft.": "请先切回顶层导入体数据，再保存 ROI 草稿。",
+        "Switch to Full volume before confirming ROI.": "请先切回顶层导入体数据，再确认 ROI。",
+        "Switch to Full volume before drawing ROI.": "请先切回顶层导入体数据，再手动框选 ROI。",
         "Drag rectangles on one or more key slices in the current view plane. The ROI bbox will expand to include them.": "在当前观察方向的一个或多个关键切片上拖拽矩形；ROI bbox 会自动合并这些框。",
         "ROI bbox updated: {0}": "ROI bbox 已更新：{0}",
         "ROI bbox updated and saved to draft {0}: {1}": "ROI bbox 已更新并保存到草稿 {0}：{1}",
         "ROI key slices use one view plane. Switch back to {0} or save a separate ROI.": "同一个 ROI 外壳只能使用一个观察方向。请切回 {0}，或另存一个独立 ROI。",
         "ROI shell mask initialized from {0} key slice(s).": "已根据 {0} 个关键切片初始化 ROI 外壳 mask。",
-        "Full-volume contour mask initialized from {0} key slice(s).": "已根据整只体数据中的 {0} 个手绘轮廓关键切片初始化部位 mask。",
-        "Full-volume contour mask not initialized: {0}": "整只体数据手绘轮廓 mask 未初始化：{0}",
+        "Full-volume contour mask initialized from {0} key slice(s).": "已根据顶层导入体数据中的 {0} 个手绘轮廓关键切片初始化部位 mask。",
+        "Full-volume contour mask not initialized: {0}": "顶层导入体数据手绘轮廓 mask 未初始化：{0}",
         "Draw an ROI or contour before saving or creating a part.": "请先手动框选 ROI 或手绘轮廓，再保存草稿或创建部位。",
         "Saved ROI draft {0}.": "已保存 ROI 草稿 {0}。",
         "Loaded ROI draft {0} for editing.": "已载入 ROI 草稿 {0}，可继续编辑。",
         "Confirmed ROI and created part {0}.": "已确认 ROI 并创建部位 {0}。",
         "Cancelled ROI draft {0}.": "已取消 ROI 草稿 {0}。",
         "This ROI is linked to a created part and cannot be cancelled here.": "这个 ROI 已关联到已创建部位，不能在这里取消。",
-        "Select a full volume or part volume before editing part masks.": "请先选择整只体数据或部位体数据，再编辑部位 mask。",
-        "Select a full volume or part volume before previewing masks.": "请先选择整只体数据或部位体数据，再预览 mask。",
-        "Select a full volume or part volume before drawing contours.": "请先选择整只体数据或部位体数据，再手绘轮廓。",
+        "Select a full volume or part volume before editing part masks.": "请先选择顶层导入体数据或项目部位体数据，再编辑部位 mask。",
+        "Select a full volume or part volume before previewing masks.": "请先选择顶层导入体数据或项目部位体数据，再预览 mask。",
+        "Select a full volume or part volume before drawing contours.": "请先选择顶层导入体数据或项目部位体数据，再手绘轮廓。",
         "Select a part volume before editing part masks.": "请先选择一个部位体数据，再编辑部位 mask。",
         "Select a part volume before previewing masks.": "请先选择一个部位体数据，再预览 mask。",
         "Key-slice mask preview currently uses Z slices.": "当前关键切片 mask 预览先使用 Z 轴切片。",
@@ -544,7 +1025,7 @@ TIF_TRANSLATIONS = {
         "Contour saved at Z {0}.": "已在 Z={0} 保存轮廓。",
         "Contour needs at least 3 points.": "轮廓至少需要 3 个点。",
         "Deleted contour at Z {0}.": "已删除 Z={0} 的轮廓。",
-        "Clear all key slices for the current full-volume part draft? This removes the hand-drawn mask draft but keeps the ROI bbox.": "清空当前整只体数据部位草稿的全部手绘关键切片吗？这会移除精切 mask 草稿，但保留 ROI bbox。",
+        "Clear all key slices for the current full-volume part draft? This removes the hand-drawn mask draft but keeps the ROI bbox.": "清空当前顶层导入体数据部位草稿的全部手绘关键切片吗？这会移除精切 mask 草稿，但保留 ROI bbox。",
         "Clear all key slices for part {0}? This removes saved mask key slices and the current auto-fill preview, but keeps the cropped part image.": "清空部位 {0} 的全部关键切片吗？这会移除已保存的 mask 关键切片和当前自动填充预览，但保留裁出来的部位图像。",
         "Cleared {0} key slice(s) and reset the part mask draft.": "已清空 {0} 个关键切片，并重置部位 mask 草稿。",
         "No part key slices to clear.": "当前没有可清空的部位关键切片。",
@@ -562,6 +1043,9 @@ TIF_TRANSLATIONS = {
         "Work in the 3D part preview first. Source Z is locked; copy it to create an editable output Z draft, then confirm the roll reference on the observation-side clip plane before export.": "优先在三维部位预览中工作。原始 Z 轴是锁定参考；先复制它生成可编辑输出 Z 草稿，再在观察侧剖切面确认 roll 参照后导出。轴中心由输出轴两端自动计算。",
         "Use the 3D part preview as the main workspace. Copy source Z, drag the output axis endpoints, then enable the observation-side clip plane and pick roll references on that plane.": "以三维部位预览作为主操作区。复制原始 Z，拖动输出轴头尾；打开观察侧剖切面后，直接在剖切面上点选 roll 参照。",
         "Use the 3D part preview as the main workspace. Copy source Z, drag the output axis endpoints, then pick the roll reference points on the observation-side clip plane. Export here when the frame is confirmed.": "以三维部位预览作为主操作区。复制原始 Z，拖动输出轴头尾，再在观察侧剖切面上点选 roll 参照点。确认后直接在这里导出。",
+        "Roll A/B/C picking works on the observation-side clip plane only. Turn on Clip plane in the 3D preview, move it to the target cross-section, then click A, B, and C on that plane.": "Roll A/B/C 只能在观察侧剖切面上点选。请在三维预览中打开“观察侧剖切面”，把切面移动到目标截面后，再在这张切面上点 A、B、C。",
+        "Pick roll/reference points on the current observation-side clip plane. If the clip plane is off, it will be enabled first.": "在当前观察侧剖切面上点选 roll/平面参照点。如果剖切面未开启，会先自动开启。",
+        "The A/B/C plane is computed from points picked on the observation-side clip plane; use it after A, B, and C are set.": "A/B/C 平面由观察侧剖切面上点选的三个点计算；请在 A、B、C 都设置后使用。",
         "Composite drag preview is downshifted while rotating; still view keeps the selected quality.": "透明累积在拖动旋转时会临时降档；停止后仍按当前质量参数显示。",
         "Selected saved reslice is read-only. Return to the part volume to edit axes or export another reslice.": "当前选中的已保存重切片为只读复核状态。请回到部位体数据节点再编辑轴或导出新的重切片。",
         "Dragging output axis {0}.": "正在拖动输出轴{0}端点。",
@@ -576,6 +1060,7 @@ TIF_TRANSLATIONS = {
         "Clear roll refs": "清除 Roll 参照",
         "Clear axis draft": "清除轴草稿",
         "Click the observation-side clip plane to set {0}.": "请在观察侧剖切面上点击，设置 {0}。",
+        "Observation-side clip plane is now enabled. Move the clip depth if needed, then click the plane to set {0}.": "已开启观察侧剖切面。需要时先调整剖切深度，然后在切面上点击设置 {0}。",
         "Set A/B/C plane reference points before aligning output Z.": "请先设置 A/B/C 三个平面参照点，再对齐输出 Z。",
         "Aligned output Z perpendicular to the A/B/C reference plane.": "已将输出 Z 对齐为垂直 A/B/C 参照平面。",
         "Cannot align output Z: {0}": "无法对齐输出 Z：{0}",
@@ -631,6 +1116,9 @@ TIF_TRANSLATIONS = {
         "Exporting confirmed Local Axis Reslice...": "正在导出已确认的局部轴重切片...",
         "Preparing Local Axis Reslice export...": "正在准备局部轴重切片导出...",
         "Finalizing Local Axis Reslice export...": "正在完成局部轴重切片导出...",
+        "Preparing Local Axis Reslice image...": "正在准备局部轴重切片图像...",
+        "Reslicing Local Axis image": "正在分块重切片局部轴图像...",
+        "Reslicing Local Axis mask": "正在分块重切片局部轴 mask...",
         "Local Axis Reslice export is already running.": "局部轴重切片正在导出中。",
         "Local Axis Reslice export did not return a result.": "局部轴重切片导出没有返回结果。",
         "Local Axis data": "局部轴数据",
@@ -666,9 +1154,37 @@ TIF_TRANSLATIONS = {
         "Accepted part mask.": "已接受部位 mask。",
         "Part volume is read-only here. Use part mask preview controls for extraction masks.": "当前部位体数据在这里按只读观察处理。请用部位 mask 预览控件生成提取 mask。",
         "Selected saved reslice is read-only. Return to the part volume to edit masks.": "当前选中的已保存重切片为只读复核状态。请回到部位体数据节点再编辑 mask。",
-        "Part volumes are not promoted to full-volume manual truth in this version.": "当前版本不会把部位体数据提升为整只体数据的人工真值。",
-        "Part volumes do not use model draft handoff in this version.": "当前版本部位体数据不走模型草稿交接。",
-        "Part volumes inherit the parent specimen material map. Switch to Full volume to edit materials.": "部位体数据继承父标本 material 表。需要编辑 material 时请切回整只体数据。",
+        "Part volumes are not promoted to full-volume manual truth in this version.": "当前版本不会把项目部位体数据提升为顶层导入体数据的训练真值。",
+        "Part volumes do not use model draft handoff in this version.": "当前项目部位体数据不走旧版模型草稿交接。",
+        "Raw AI prediction backup is read-only. Switch to editable AI result before correcting labels.": "AI 原始备份只读。请切换到待核验 AI 结果层后再修订。",
+        "Cannot paint on this part label layer. Switch to editable AI result first.": "不能在当前部位标签层绘制。请先切换到待核验 AI 结果层。",
+        "Auto-saved editable AI result.": "已自动保存待核验 AI 结果。",
+        "Editable AI result saved.": "已保存待核验 AI 结果。",
+        "Unsaved editable AI result": "待核验 AI 结果未保存",
+        "Save changes to the current editable AI result before continuing?": "继续前是否保存当前待核验 AI 结果的修改？",
+        "Part label IDs are not in the active label schema: {0}": "部位标签编号不在当前标签表中：{0}",
+        "This editable AI result has not been marked opened for review. Accept it as training truth anyway?": "这个待核验 AI 结果还没有记录为已打开复核。仍然核验为训练真值吗？",
+        "Promote the reviewed editable AI result to part-level training truth?": "将已复核的待核验 AI 结果核验为项目部位训练真值？",
+        "Accepted current labels as training truth.": "已将当前标注核验为训练真值。",
+        "Accept selected AI results": "核验通过所选 AI 结果",
+        "No selected editable AI result is ready for acceptance.": "当前没有可核验通过的已选待核验 AI 结果。",
+        "Selected editable AI result(s) have label/schema problems: {0}": "选中的待核验 AI 结果存在标签表问题：{0}",
+        "AI review check": "AI 复核检查",
+        "Select a part editable AI result to see review checks.": "请选择部位待核验 AI 结果以查看复核检查。",
+        "No editable AI result is available for this part.": "当前部位没有待核验 AI 结果。",
+        "Review check passed. This editable AI result can be accepted as training truth.": "复核检查通过。这个待核验 AI 结果可以核验为训练真值。",
+        "Review check passed, but this result has not been opened for review yet.": "复核检查通过，但这个结果尚未记录为已打开复核。",
+        "Review check blocked: {0}": "复核检查阻断：{0}",
+        "Schema {0}; labels present: {1}; unknown labels: {2}": "标签表 {0}；当前编号：{1}；未知编号：{2}",
+        "No labels present": "未发现标签编号",
+        "none": "无",
+        "Some selected editable AI result(s) have not been opened for review. Accept them as training truth anyway?": "部分选中的待核验 AI 结果还没有打开复核记录。仍然将它们核验为训练真值吗？",
+        "Accept {0} selected editable AI result(s) as training truth?": "将 {0} 个已选待核验 AI 结果核验为训练真值吗？",
+        "Accepted {0} editable AI result(s) as training truth.": "已将 {0} 个待核验 AI 结果核验为训练真值。",
+        "Auto-save is off. Remember to save the editable AI result.": "自动保存已关闭。请记得保存待核验 AI 结果。",
+        "Editable AI result": "待核验 AI 结果",
+        "Raw AI prediction backup": "AI 原始备份",
+        "Label schema": "标签表",
         "Render color": "渲染颜色",
         "Amber": "琥珀黄",
         "Cyan": "青蓝",
@@ -684,6 +1200,8 @@ TIF_TRANSLATIONS = {
         "Export train-ready volumes": "导出可训练体数据",
         "Backend parameters": "后端参数",
         "Dataset exchange": "训练数据交换",
+        "Use nnU-Net v2 preset": "使用 nnU-Net v2 预设",
+        "nnU-Net v2 preset filled. Commands remain editable for other 3D backends.": "已填入 nnU-Net v2 预设。命令仍可编辑，以便接入其他 3D 后端。",
         "Backend ID": "后端 ID",
         "Display name": "显示名称",
         "Python": "Python",
@@ -695,17 +1213,99 @@ TIF_TRANSLATIONS = {
         "Save backend settings": "保存后端设置",
         "Prepare dataset": "准备训练数据",
         "Train backend": "训练后端",
-        "Import prediction": "运行预测并导入草稿",
-        "Import external label TIF to draft": "导入外部标签 TIF 到草稿",
+        "Import prediction": "运行预测并导入待核验结果",
+        "Batch prediction targets": "批量预测目标",
+        "Browse manifest": "选择 manifest",
+        "Select model manifest": "选择模型 manifest",
+        "Selected model manifest: {0}": "已选择模型 manifest：{0}",
+        "Predict group": "预测分组",
+        "All parts": "全部部位",
+        "Current part": "当前部位",
+        "Refresh targets": "刷新目标",
+        "Select current part": "选择当前部位",
+        "Select all ready": "全选可预测",
+        "Clear selection": "清空选择",
+        "Use": "使用",
+        "Specimen": "个体",
+        "Part": "部位",
+        "Reslice": "重切片",
+        "Group tags": "分组标签",
+        "Predict check": "预测检查",
+        "Overwrite": "覆盖",
+        "Ready": "可预测",
+        "Not ready": "不可预测",
+        "Prediction targets: {0} listed, {1} ready, {2} selected, {3} will overwrite editable AI result, {4} incomplete.": "预测目标：共 {0} 个，{1} 个可预测，已选 {2} 个，{3} 个会覆盖待核验 AI 结果，{4} 个不完整。",
+        "Select a part volume before choosing the current prediction target.": "请先选择一个部位体数据，再选择当前预测目标。",
+        "Current part is not ready for prediction.": "当前部位还不满足预测的客观完整性检查。",
+        "Selected prediction target is incomplete: {0}": "选中的预测目标不完整：{0}",
+        "Select at least one prediction target.": "请至少勾选一个预测目标。",
+        "Select a model manifest before prediction.": "预测前请先选择模型 manifest。",
+        "Model manifest does not exist: {0}": "模型 manifest 不存在：{0}",
+        "Stop run": "停止运行",
+        "Open run folder": "打开运行文件夹",
+        "Open result JSON": "打开 result.json",
+        "Open model output": "打开模型输出",
+        "Open model manifest": "打开模型 manifest",
+        "Show result summary": "查看结果摘要",
+        "Backend run": "后端运行",
+        "Training result": "训练结果",
+        "No training result yet.": "当前还没有训练结果。",
+        "Training result is ready for review.": "训练结果已可复核。",
+        "Training result: {0} metric(s), {1} curve(s), {2} mask preview(s).\nModel output: {3}\nModel manifest: {4}": "训练结果：{0} 个指标、{1} 条曲线、{2} 个 mask 预览。\n模型输出：{3}\n模型 manifest：{4}",
+        "Training result summary": "训练结果摘要",
+        "Training curves": "训练曲线",
+        "Mask previews": "Mask 预览",
+        "Training curves / mask previews": "训练曲线 / Mask 预览",
+        "No training curve artifact declared.": "后端尚未声明训练曲线 artifact。",
+        "No mask preview artifact declared.": "后端尚未声明 mask 预览 artifact。",
+        "Key metrics": "关键指标",
+        "Artifacts": "产物",
+        "Warnings": "警告",
+        "Errors": "错误",
+        "Model manifest": "模型 manifest",
+        "Model output": "模型输出",
+        "No model output folder is available yet.": "当前还没有可打开的模型输出目录。",
+        "No model manifest is available yet.": "当前还没有可打开的模型 manifest。",
+        "No training result summary is available yet.": "当前还没有可查看的训练结果摘要。",
+        "Ready for batch prediction": "可进入批量预测",
+        "Enter batch prediction": "进入批量预测",
+        "Batch prediction entry will use the selected model manifest in the next phase.": "下一阶段批量预测入口会使用当前模型 manifest。",
+        "Batch prediction entry will be enabled in the Predict phase after model manifest selection is finalized.": "批量预测入口会在 Predict 阶段完成模型 manifest 选择后启用。",
+        "Model manifest filled for batch prediction. Choose target part(s), then run prediction.": "已为批量预测填入模型 manifest。请选择目标部位后再运行预测。",
+        "Value": "值",
+        "Type": "类型",
+        "Format": "格式",
+        "Path": "路径",
+        "Close": "关闭",
+        "Run ID": "运行 ID",
+        "exists": "存在",
+        "missing": "缺失",
+        "Idle": "空闲",
+        "Elapsed: 00:00": "已用时：00:00",
+        "Elapsed: {0}": "已用时：{0}",
+        "Running {0}...": "正在运行 {0}...",
+        "Cancelling {0}...": "正在停止 {0}...",
+        "Run cancelled: {0}": "运行已停止：{0}",
+        "Run failed: {0}": "运行失败：{0}",
+        "Run finished: {0}\nRun: {1}": "运行完成：{0}\n运行目录：{1}",
+        "Backend task is already running.": "后端任务正在运行中。",
+        "Backend run is active. Stop it or wait until it finishes before editing project data.": "后端运行中。请先停止或等待完成，再修改项目数据。",
+        "Wait for the current backend task to finish before closing the project.": "请等待当前后端任务结束后再关闭项目。",
+        "No backend run folder is available yet.": "当前还没有可打开的后端运行文件夹。",
+        "No backend result JSON is available yet.": "当前还没有可打开的 result.json。",
+        "This predict run will overwrite the current editable result for selected target(s), but will not overwrite training truth. Continue?": "本次预测会覆盖所选目标的待核验结果，但不会覆盖训练真值。是否继续？",
+        "Import external label TIF as review result": "导入外部标签 TIF 为待核验结果",
         "Import External Label TIF": "导入外部标签 TIF",
         "Prediction ID:": "预测编号：",
         "Source model:": "来源模型：",
-        "Imported external label TIF as model draft for specimen {0}. Report: {1}": "已为 specimen {0} 将外部标签 TIF 导入模型草稿。报告：{1}",
+        "Imported external label TIF as editable review result for specimen {0}. Report: {1}": "已为 specimen {0} 将外部标签 TIF 导入为可编辑待核验结果。报告：{1}",
         "Please select a specimen with a working volume first.": "请先选择一个已有 working volume 的 specimen。",
         "Specimen status": "Specimen 状态",
         "Volume metadata": "体数据元数据",
         "No specimens in this TIF project": "当前 TIF 项目还没有 specimen",
         "Working volume missing": "缺少 working volume",
+        "Reslice TIF cannot be opened quickly. Re-export the reslice as an uncompressed TaxaMask local-axis TIF before slice review.": "重切片 TIF 不能快速打开。请重新导出未压缩的 TaxaMask 局部轴重切片后再进行切片复核。",
+        "Reslice TIF cannot be opened for immediate slice review: {0}": "重切片 TIF 无法用于即时切片复核：{0}",
         "yes": "是",
         "no": "否",
         "Train": "训练",
@@ -720,9 +1320,9 @@ TIF_TRANSLATIONS = {
         "modality": "成像类型",
         "Source TIF": "原始 TIF",
         "Working volume": "工作体数据",
-        "Working edit": "当前编辑层",
-        "Manual truth": "人工真值层",
-        "Latest model draft": "最新模型草稿",
+        "Working edit": "当前标注",
+        "Training truth": "训练真值",
+        "Latest model draft": "最新只读预测副本",
         "Show debug paths": "显示调试路径",
         "Import report": "导入报告",
         "TIF data import": "TIF 数据导入",
@@ -750,6 +1350,7 @@ TIF_TRANSLATIONS = {
         "TIF training handoff": "TIF 训练交接",
         "Export train-ready TIF volumes": "导出可训练 TIF 体数据",
         "Exported {0} train-ready specimen(s).\nManifest: {1}": "已导出 {0} 个可训练 specimen。\nManifest：{1}",
+        "Exported {0} train-ready part(s).\nManifest: {1}": "已导出 {0} 个可训练部位。\nManifest：{1}",
         "Export failed: {0}": "导出失败：{0}",
         "TIF backend": "TIF 后端",
         "Backend settings saved.": "后端设置已保存。",
@@ -757,15 +1358,43 @@ TIF_TRANSLATIONS = {
         "Action finished: {0}\nRun: {1}": "动作完成：{0}\n运行目录：{1}",
         "Action failed: {0}": "动作失败：{0}",
         "No command configured for this backend action.": "这个后端动作还没有配置命令。",
-        "No train-ready specimens are available.": "当前没有可训练 specimen。",
-        "No specimen is available for prediction.": "当前没有可用于预测的 specimen。",
-        "Copied latest model draft into working_edit.": "已将最新模型草稿复制到当前编辑层。",
-        "No model draft is available for this specimen.": "当前 specimen 还没有模型草稿。",
-        "Background material cannot be deleted.": "不能删除 background material。",
-        "Material {0} is still used by a label volume.": "Material {0} 仍被 label volume 使用，不能删除。",
-        "Delete material {0} ({1})?": "删除 material {0}（{1}）？",
-        "Accept working edit": "确认当前编辑层",
-        "Promote the current working_edit layer to manual_truth for training?": "将当前 working_edit 提升为可训练的 manual_truth？",
+        "No train-ready top-level volumes are available.": "当前没有可训练的顶层导入体数据。",
+        "No top-level volume is available for prediction.": "当前没有可用于预测的顶层导入体数据。",
+        "No train-ready parts are available.": "当前没有可训练的部位。",
+        "Current part/reslice is not train-ready yet.": "当前部位/重切片还不能用于训练。",
+        "No train-ready samples are available for training.": "当前没有可用于训练的样本。",
+        "Part readiness": "部位训练检查",
+        "Top-level readiness": "顶层整只训练检查",
+        "No project part volumes are available.": "项目中还没有部位体数据。",
+        "No top-level volume records are available.": "项目中还没有顶层导入体数据。",
+        "All checked part samples are train-ready.": "已检查的部位样本都满足训练条件。",
+        "All checked top-level volumes are train-ready.": "已检查的顶层导入体数据都满足训练条件。",
+        "Missing: {0}": "缺项：{0}",
+        "+{0} more": "另有 {0} 个",
+        "Next step: save current labels, then click Accept as training truth in Label review. Training uses reviewed manual_truth only; editable labels are not sent to training directly.": "下一步：先保存当前标注，再到“标注核验”中点击“核验当前标注/Accept as training truth”。训练只使用已核验的 manual_truth，不会直接把待核验编辑层送入训练。",
+        "Training truth is missing; accept the current editable labels as training truth first.": "缺少训练真值；请先把当前可编辑标注核验为训练真值。",
+        "Part has not been marked as verified train-ready.": "部位还没有标记为已核验可训练。",
+        "Part record is missing.": "部位记录缺失。",
+        "Part image is missing.": "部位图像缺失。",
+        "Reslice record is missing.": "重切片记录缺失。",
+        "Reslice image is missing.": "重切片图像缺失。",
+        "Label schema is missing or empty.": "标签表缺失或为空。",
+        "Part label shape does not match the part/reslice image.": "部位标签体尺寸与部位/重切片图像不一致。",
+        "Label IDs are not all defined in the bound label schema.": "标签体中存在未在当前标签表定义的编号。",
+        "Label volume cannot be read.": "标签体无法读取。",
+        "Specimen has not been marked train-ready.": "顶层整只数据还没有标记为可训练。",
+        "Working image is missing.": "工作体数据缺失。",
+        "Material map is missing.": "材料/标签表缺失。",
+        "Image and label shapes do not match.": "图像与标签体尺寸不一致。",
+        "No trainable material is defined in the material map.": "材料/标签表中没有定义可训练标签。",
+        "No part is available for prediction.": "当前没有可用于预测的部位。",
+        "Copied latest model draft into working_edit.": "已将最新只读预测副本复制到当前标注。",
+        "No model draft is available for this specimen.": "当前 specimen 还没有只读预测副本。",
+        "Background material cannot be deleted.": "不能删除背景标签。",
+        "Material {0} is still used by a label volume.": "标签 {0} 仍被标签体数据使用，不能删除。",
+        "Delete material {0} ({1})?": "删除标签 {0}（{1}）？",
+        "Accept working edit": "核验当前标注",
+        "Promote the current working_edit layer to training truth?": "将当前标注核验为可训练的训练真值？",
     }
 }
 
@@ -872,6 +1501,354 @@ class TifPartNameDialog(QDialog):
         return part_id, display_name
 
 
+def _safe_training_result_text(value):
+    if isinstance(value, float):
+        return f"{value:.4g}"
+    if isinstance(value, (int, bool)):
+        return str(value)
+    if value is None:
+        return "-"
+    if isinstance(value, (list, tuple)):
+        return ", ".join(_safe_training_result_text(item) for item in value)
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return str(value)
+
+
+def _flatten_training_metrics(value, prefix=""):
+    rows = []
+    if isinstance(value, dict):
+        for key in sorted(value.keys(), key=lambda item: str(item)):
+            child_prefix = f"{prefix}.{key}" if prefix else str(key)
+            rows.extend(_flatten_training_metrics(value.get(key), child_prefix))
+        return rows
+    rows.append((prefix or "value", _safe_training_result_text(value)))
+    return rows
+
+
+def _artifact_absolute_path(result_json, artifact):
+    path = str((artifact or {}).get("path") or "").strip()
+    if not path:
+        return ""
+    if os.path.isabs(path):
+        return os.path.normpath(path)
+    base = os.path.dirname(os.path.abspath(str(result_json or ""))) if result_json else os.getcwd()
+    return os.path.abspath(os.path.join(base, path))
+
+
+def _result_relative_absolute_path(result_json, path):
+    path = str(path or "").strip()
+    if not path:
+        return ""
+    if os.path.isabs(path):
+        return os.path.normpath(path)
+    if result_json:
+        return os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(result_json)), path))
+    return os.path.abspath(path)
+
+
+def summarize_tif_training_result(result, result_json="", run_dir=""):
+    result = result if isinstance(result, dict) else {}
+    result_json = str(result_json or result.get("_result_json") or "").strip()
+    run_dir = str(run_dir or result.get("run_dir") or "").strip()
+    if not run_dir and result_json:
+        run_dir = os.path.dirname(os.path.abspath(result_json))
+    metrics = result.get("metrics") if isinstance(result.get("metrics"), dict) else {}
+    artifacts = []
+    for artifact in result.get("artifacts", []) or []:
+        if not isinstance(artifact, dict):
+            continue
+        item = dict(artifact)
+        item["absolute_path"] = _artifact_absolute_path(result_json, item)
+        artifacts.append(item)
+    warnings = [str(item) for item in (result.get("warnings") or [])]
+    errors = [str(item) for item in (result.get("errors") or [])]
+    provenance = result.get("provenance") if isinstance(result.get("provenance"), dict) else {}
+    model_manifest = _result_relative_absolute_path(result_json, provenance.get("model_manifest") or "")
+    if not model_manifest:
+        for artifact in artifacts:
+            if str(artifact.get("type") or "") == "model_manifest" and artifact.get("absolute_path"):
+                model_manifest = str(artifact.get("absolute_path") or "")
+                break
+    model_output = ""
+    for artifact in artifacts:
+        artifact_type = str(artifact.get("type") or "")
+        artifact_path = str(artifact.get("absolute_path") or "")
+        if artifact_type in {"model_output_dir", "model_dir", "checkpoint_dir"} and artifact_path:
+            model_output = artifact_path
+            break
+    if not model_output:
+        for artifact in artifacts:
+            artifact_path = str(artifact.get("absolute_path") or "")
+            if artifact_path and os.path.isdir(artifact_path):
+                model_output = artifact_path
+                break
+    if not model_output and run_dir:
+        candidate = os.path.join(run_dir, "outputs")
+        if os.path.isdir(candidate):
+            model_output = candidate
+    curves = []
+    previews = []
+    for artifact in artifacts:
+        artifact_type = str(artifact.get("type") or "").lower()
+        artifact_format = str(artifact.get("format") or "").lower()
+        artifact_path = str(artifact.get("path") or "").lower()
+        is_image_like = artifact_format in {"png", "jpg", "jpeg", "svg", "html"}
+        if artifact_type in {"training_curve", "training_curves", "loss_curve", "metric_curve"} or (is_image_like and "curve" in f"{artifact_type} {artifact_path}"):
+            curves.append(artifact)
+        if artifact_type in {"mask_preview", "sample_mask_preview", "prediction_preview", "validation_preview"} or "preview" in f"{artifact_type} {artifact_path}":
+            previews.append(artifact)
+    summary_metrics = _flatten_training_metrics(metrics)
+    return {
+        "action": str(result.get("action") or ""),
+        "status": str(result.get("status") or ""),
+        "backend_id": str(result.get("backend_id") or ""),
+        "run_id": str(result.get("run_id") or ""),
+        "run_dir": os.path.abspath(run_dir) if run_dir else "",
+        "result_json": os.path.abspath(result_json) if result_json else "",
+        "model_manifest": os.path.abspath(model_manifest) if model_manifest else "",
+        "model_output": os.path.abspath(model_output) if model_output else "",
+        "metrics": summary_metrics,
+        "artifacts": artifacts,
+        "curves": curves,
+        "previews": previews,
+        "warnings": warnings,
+        "errors": errors,
+        "provenance": provenance,
+    }
+
+
+class TifTrainingResultDialog(QDialog):
+    def __init__(self, summary, lang="en", parent=None):
+        super().__init__(parent)
+        self.summary = summary if isinstance(summary, dict) else {}
+        self.lang = lang
+        self.setWindowTitle(tt("Training result summary", self.lang))
+        self.resize(760, 620)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+
+        header = QLabel(self._header_text())
+        header.setWordWrap(True)
+        layout.addWidget(header)
+
+        self.metrics_table = QTableWidget(0, 2)
+        self.metrics_table.setObjectName("tifTrainingResultMetricsTable")
+        self.metrics_table.setHorizontalHeaderLabels([tt("Key metrics", self.lang), tt("Value", self.lang)])
+        self.metrics_table.horizontalHeader().setStretchLastSection(True)
+        self.metrics_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.metrics_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._populate_metrics()
+        layout.addWidget(self.metrics_table, 1)
+
+        artifact_label = QLabel(tt("Artifacts", self.lang))
+        layout.addWidget(artifact_label)
+        self.artifact_table = QTableWidget(0, 4)
+        self.artifact_table.setObjectName("tifTrainingResultArtifactTable")
+        self.artifact_table.setHorizontalHeaderLabels([tt("Type", self.lang), tt("Format", self.lang), tt("Path", self.lang), tt("Status", self.lang)])
+        self.artifact_table.horizontalHeader().setStretchLastSection(True)
+        self.artifact_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.artifact_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._populate_artifacts()
+        layout.addWidget(self.artifact_table, 1)
+
+        preview_header = QHBoxLayout()
+        preview_header.addWidget(QLabel(tt("Training curves / mask previews", self.lang)))
+        self.preview_percent_slider = QSlider(Qt.Horizontal)
+        self.preview_percent_slider.setObjectName("tifTrainingResultPreviewPercentSlider")
+        self.preview_percent_slider.setRange(5, 100)
+        self.preview_percent_slider.setValue(20)
+        self.preview_percent_slider.setTickPosition(QSlider.TicksBelow)
+        self.preview_percent_slider.setTickInterval(10)
+        self.preview_percent_label = QLabel("")
+        self.preview_percent_label.setObjectName("tifTrainingResultPreviewPercentText")
+        self.preview_percent_slider.valueChanged.connect(self._populate_preview_gallery)
+        preview_header.addWidget(self.preview_percent_slider, 1)
+        preview_header.addWidget(self.preview_percent_label)
+        layout.addLayout(preview_header)
+
+        self.preview_scroll = QScrollArea()
+        self.preview_scroll.setObjectName("tifTrainingResultPreviewScroll")
+        self.preview_scroll.setWidgetResizable(True)
+        self.preview_scroll.setMinimumHeight(150)
+        self.preview_body = QWidget()
+        self.preview_body.setObjectName("tifTrainingResultPreviewGallery")
+        self.preview_grid = QGridLayout(self.preview_body)
+        self.preview_grid.setSpacing(10)
+        self.preview_scroll.setWidget(self.preview_body)
+        layout.addWidget(self.preview_scroll, 1)
+        self._populate_preview_gallery()
+
+        detail = QTextEdit()
+        detail.setObjectName("tifTrainingResultDetailText")
+        detail.setReadOnly(True)
+        detail.setMinimumHeight(92)
+        detail.setPlainText(self._detail_text())
+        layout.addWidget(detail)
+
+        button_row = QHBoxLayout()
+        self.btn_open_run = QPushButton(tt("Open run folder", self.lang))
+        self.btn_open_run.clicked.connect(lambda: self._open_path(self.summary.get("run_dir", "")))
+        self.btn_open_run.setEnabled(bool(self.summary.get("run_dir")) and os.path.isdir(self.summary.get("run_dir", "")))
+        self.btn_open_model_output = QPushButton(tt("Open model output", self.lang))
+        self.btn_open_model_output.clicked.connect(lambda: self._open_path(self.summary.get("model_output", "")))
+        self.btn_open_model_output.setEnabled(bool(self.summary.get("model_output")) and os.path.exists(self.summary.get("model_output", "")))
+        self.btn_open_manifest = QPushButton(tt("Open model manifest", self.lang))
+        self.btn_open_manifest.clicked.connect(lambda: self._open_path(self.summary.get("model_manifest", "")))
+        self.btn_open_manifest.setEnabled(bool(self.summary.get("model_manifest")) and os.path.exists(self.summary.get("model_manifest", "")))
+        button_row.addWidget(self.btn_open_run)
+        button_row.addWidget(self.btn_open_model_output)
+        button_row.addWidget(self.btn_open_manifest)
+        button_row.addStretch(1)
+        close_button = QPushButton(tt("Close", self.lang))
+        close_button.clicked.connect(self.accept)
+        button_row.addWidget(close_button)
+        layout.addLayout(button_row)
+
+    def _header_text(self):
+        parts = [
+            f"{tt('Status', self.lang)}: {self.summary.get('status') or '-'}",
+            f"{tt('Backend ID', self.lang)}: {self.summary.get('backend_id') or '-'}",
+            f"{tt('Run ID', self.lang)}: {self.summary.get('run_id') or '-'}",
+        ]
+        model_manifest = self.summary.get("model_manifest") or "-"
+        parts.append(f"{tt('Model manifest', self.lang)}: {model_manifest}")
+        return "\n".join(parts)
+
+    def _populate_metrics(self):
+        rows = list(self.summary.get("metrics") or [])
+        if not rows:
+            rows = [(tt("Key metrics", self.lang), "-")]
+        self.metrics_table.setRowCount(len(rows))
+        for row, (key, value) in enumerate(rows):
+            self.metrics_table.setItem(row, 0, QTableWidgetItem(str(key)))
+            self.metrics_table.setItem(row, 1, QTableWidgetItem(str(value)))
+        self.metrics_table.resizeColumnsToContents()
+
+    def _populate_artifacts(self):
+        artifacts = list(self.summary.get("artifacts") or [])
+        self.artifact_table.setRowCount(len(artifacts))
+        for row, artifact in enumerate(artifacts):
+            path = str(artifact.get("absolute_path") or artifact.get("path") or "")
+            status = tt("exists", self.lang) if path and os.path.exists(path) else tt("missing", self.lang)
+            self.artifact_table.setItem(row, 0, QTableWidgetItem(str(artifact.get("type") or "")))
+            self.artifact_table.setItem(row, 1, QTableWidgetItem(str(artifact.get("format") or "")))
+            self.artifact_table.setItem(row, 2, QTableWidgetItem(path))
+            self.artifact_table.setItem(row, 3, QTableWidgetItem(status))
+        self.artifact_table.resizeColumnsToContents()
+
+    def _clear_preview_gallery(self):
+        while self.preview_grid.count():
+            item = self.preview_grid.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def _displayable_artifact_rows(self):
+        rows = []
+        for artifact in self.summary.get("curves") or []:
+            rows.append((tt("Training curves", self.lang), artifact))
+        previews = list(self.summary.get("previews") or [])
+        pct = int(self.preview_percent_slider.value()) if hasattr(self, "preview_percent_slider") else 20
+        preview_count = 0
+        if previews:
+            preview_count = max(1, int(len(previews) * (pct / 100.0)))
+        for artifact in previews[:preview_count]:
+            rows.append((tt("Mask previews", self.lang), artifact))
+        if hasattr(self, "preview_percent_label"):
+            self.preview_percent_label.setText(f"{pct}% ({preview_count})")
+        return rows
+
+    def _artifact_preview_path(self, artifact):
+        path = str((artifact or {}).get("absolute_path") or (artifact or {}).get("path") or "")
+        return path if path else ""
+
+    def _artifact_is_pixmap_like(self, artifact, path):
+        fmt = str((artifact or {}).get("format") or "").lower()
+        ext = os.path.splitext(str(path or ""))[1].lower().lstrip(".")
+        return fmt in {"png", "jpg", "jpeg", "bmp"} or ext in {"png", "jpg", "jpeg", "bmp"}
+
+    def _artifact_caption(self, section, artifact, path):
+        name = str((artifact or {}).get("display_name") or (artifact or {}).get("type") or section)
+        if path:
+            tail = os.path.basename(path) or path
+            return f"{section}\n{name}\n{tail}"
+        return f"{section}\n{name}"
+
+    def _add_preview_text(self, row, column, text):
+        label = QLabel(str(text or ""))
+        label.setWordWrap(True)
+        label.setMinimumWidth(180)
+        self.preview_grid.addWidget(label, row, column)
+
+    def _add_preview_artifact(self, index, section, artifact):
+        row = index // 3
+        column = index % 3
+        path = self._artifact_preview_path(artifact)
+        container = QWidget()
+        item_layout = QVBoxLayout(container)
+        item_layout.setContentsMargins(0, 0, 0, 0)
+        item_layout.setSpacing(4)
+        image_label = QLabel()
+        image_label.setAlignment(Qt.AlignCenter)
+        image_label.setMinimumSize(180, 92)
+        if path and os.path.exists(path) and self._artifact_is_pixmap_like(artifact, path):
+            pixmap = QPixmap(path)
+            if not pixmap.isNull():
+                pixmap = pixmap.scaledToWidth(220, Qt.SmoothTransformation)
+                image_label.setPixmap(pixmap)
+            else:
+                image_label.setText(path)
+        elif path:
+            image_label.setText(path)
+        else:
+            image_label.setText("-")
+        image_label.setToolTip(path)
+        caption = QLabel(self._artifact_caption(section, artifact, path))
+        caption.setWordWrap(True)
+        caption.setToolTip(path)
+        item_layout.addWidget(image_label)
+        item_layout.addWidget(caption)
+        self.preview_grid.addWidget(container, row, column)
+
+    def _populate_preview_gallery(self, *_args):
+        self._clear_preview_gallery()
+        rows = self._displayable_artifact_rows()
+        if not rows:
+            self._add_preview_text(0, 0, "\n".join([tt("No training curve artifact declared.", self.lang), tt("No mask preview artifact declared.", self.lang)]))
+            return
+        for index, (section, artifact) in enumerate(rows):
+            self._add_preview_artifact(index, section, artifact)
+
+    def _detail_text(self):
+        lines = []
+        curves = self.summary.get("curves") or []
+        previews = self.summary.get("previews") or []
+        lines.append(f"{tt('Training curves', self.lang)}: {len(curves)}")
+        if not curves:
+            lines.append(tt("No training curve artifact declared.", self.lang))
+        lines.append(f"{tt('Mask previews', self.lang)}: {len(previews)}")
+        if not previews:
+            lines.append(tt("No mask preview artifact declared.", self.lang))
+        warnings = self.summary.get("warnings") or []
+        errors = self.summary.get("errors") or []
+        if warnings:
+            lines.append("")
+            lines.append(tt("Warnings", self.lang))
+            lines.extend(f"- {item}" for item in warnings)
+        if errors:
+            lines.append("")
+            lines.append(tt("Errors", self.lang))
+            lines.extend(f"- {item}" for item in errors)
+        return "\n".join(lines)
+
+    def _open_path(self, path):
+        path = str(path or "")
+        if not path or not os.path.exists(path):
+            return False
+        return QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+
 class WheelSafeComboBox(QComboBox):
     def wheelEvent(self, event):
         event.ignore()
@@ -898,6 +1875,34 @@ class MirroredStatusLabel(QLabel):
         super().setToolTip(text)
         if self._mirror_label is not None:
             self._mirror_label.setToolTip(str(text or ""))
+
+
+class LazyRegionMaskVolume:
+    def __init__(self, source, region_id):
+        self.source = source
+        self.region_id = int(region_id)
+        self.shape = tuple(int(value) for value in getattr(source, "shape", ()) or ())
+        self.dtype = np.dtype(np.uint8)
+        self.ndim = len(self.shape)
+
+    @property
+    def size(self):
+        if not self.shape:
+            return 0
+        return int(np.prod(self.shape))
+
+    @property
+    def nbytes(self):
+        return int(self.size)
+
+    def __getitem__(self, key):
+        return np.asarray(np.asarray(self.source[key]) == self.region_id, dtype=np.uint8)
+
+    def __array__(self, dtype=None, copy=None):
+        array = np.asarray(self.source) == self.region_id
+        if copy is False:
+            return np.asarray(array, dtype=dtype or np.uint8)
+        return np.array(array, dtype=dtype or np.uint8, copy=True)
 
 
 class WheelSafeSlider(QSlider):
@@ -2084,6 +3089,270 @@ class TifVolumePreviewBuildWorker(QObject):
             self.failed.emit({"token": self.token, "error": str(exc)})
 
 
+class TifPartMaskPreviewWorker(QObject):
+    progress = Signal(int, int, str)
+    finished = Signal(object)
+    failed = Signal(object)
+
+    def __init__(self, token, contours, shape_zyx, context=None):
+        super().__init__()
+        self.token = int(token)
+        self.contours = dict(contours or {})
+        self.shape_zyx = tuple(int(value) for value in (shape_zyx or ()))
+        self.context = dict(context or {})
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    def run(self):
+        started = time.perf_counter()
+        try:
+            self.progress.emit(0, 0, "Preview auto fill is running...")
+            if self._cancelled:
+                self.finished.emit({"token": self.token, "cancelled": True, "context": self.context})
+                return
+            mask = build_preview_mask_from_contours(self.contours, self.shape_zyx)
+            self.progress.emit(100, 100, "Preview auto fill finished")
+            self.finished.emit(
+                {
+                    "token": self.token,
+                    "cancelled": bool(self._cancelled),
+                    "mask": mask,
+                    "contours": self.contours,
+                    "shape_zyx": self.shape_zyx,
+                    "context": self.context,
+                    "build_ms": max(0.0, (time.perf_counter() - started) * 1000.0),
+                }
+            )
+        except Exception as exc:
+            self.failed.emit({"token": self.token, "error": str(exc), "context": self.context})
+
+
+class TifLabelAutoSaveWorker(QObject):
+    finished = Signal(object)
+    failed = Signal(object)
+
+    def __init__(self, token, edit_path, slices, slice_revisions):
+        super().__init__()
+        self.token = int(token)
+        self.edit_path = str(edit_path or "")
+        self.slices = {int(key): np.asarray(value).copy() for key, value in (slices or {}).items()}
+        self.slice_revisions = {int(key): int(value) for key, value in (slice_revisions or {}).items()}
+        self.last_result = None
+        self.last_error = None
+
+    def run(self):
+        try:
+            if not self.edit_path:
+                raise ValueError("label_auto_save_path_missing")
+            result = _tif_write_label_slice_snapshots(self.token, self.edit_path, self.slices, self.slice_revisions)
+            self.last_result = result
+            self.finished.emit(result)
+        except Exception as exc:
+            self.last_error = {"token": self.token, "edit_path": self.edit_path, "error": str(exc)}
+            self.failed.emit(self.last_error)
+
+
+class TifLabelManualSaveWorker(QObject):
+    finished = Signal(object)
+    failed = Signal(object)
+
+    def __init__(self, token, edit_path, slices, slice_revisions, context=None):
+        super().__init__()
+        self.token = int(token)
+        self.edit_path = str(edit_path or "")
+        self.slices = {int(key): np.asarray(value).copy() for key, value in (slices or {}).items()}
+        self.slice_revisions = {int(key): int(value) for key, value in (slice_revisions or {}).items()}
+        self.context = dict(context or {})
+        self.last_result = None
+        self.last_error = None
+
+    def run(self):
+        try:
+            if not self.edit_path:
+                raise ValueError("label_save_path_missing")
+            result = _tif_write_label_slice_snapshots(self.token, self.edit_path, self.slices, self.slice_revisions)
+            result["context"] = self.context
+            self.last_result = result
+            self.finished.emit(result)
+        except Exception as exc:
+            self.last_error = {"token": self.token, "edit_path": self.edit_path, "context": self.context, "error": str(exc)}
+            self.failed.emit(self.last_error)
+
+
+class TifPromoteWorkingEditWorker(QObject):
+    finished = Signal(object)
+    failed = Signal(object)
+
+    def __init__(self, project_manager, request):
+        super().__init__()
+        self.project_manager = project_manager
+        self.request = dict(request or {})
+
+    def run(self):
+        try:
+            scope = str(self.request.get("scope") or "")
+            specimen_id = str(self.request.get("specimen_id") or "")
+            part_id = str(self.request.get("part_id") or "")
+            reslice_id = str(self.request.get("reslice_id") or "")
+            started = time.perf_counter()
+            if scope == "part":
+                report = self.project_manager.evaluate_part_editable_result_review_ready(specimen_id, part_id, reslice_id)
+                if not report.get("review_ready"):
+                    raise ValueError("part_review_not_ready:" + ",".join(str(item) for item in (report.get("reasons") or [])))
+                if reslice_id:
+                    manual = self.project_manager.promote_part_reslice_editable_result_to_manual_truth(specimen_id, part_id, reslice_id)
+                else:
+                    manual = self.project_manager.promote_part_editable_result_to_manual_truth(specimen_id, part_id)
+                result = {
+                    "scope": scope,
+                    "specimen_id": specimen_id,
+                    "part_id": part_id,
+                    "reslice_id": reslice_id,
+                    "manual_truth": manual,
+                    "review_report": report,
+                }
+            else:
+                manual = self.project_manager.promote_working_edit_to_manual_truth(specimen_id)
+                result = {
+                    "scope": scope,
+                    "specimen_id": specimen_id,
+                    "manual_truth": manual,
+                }
+            result["promote_ms"] = max(0.0, (time.perf_counter() - started) * 1000.0)
+            self.finished.emit(result)
+        except Exception as exc:
+            self.failed.emit({"request": self.request, "error": str(exc)})
+
+
+def _tif_write_label_slice_snapshots(token, edit_path, slices, slice_revisions):
+    started = time.perf_counter()
+    if not edit_path:
+        raise ValueError("label_auto_save_path_missing")
+    target = load_volume_sidecar(edit_path, mmap_mode="r+")
+    try:
+        saved = []
+        for z_index, slice_array in sorted((slices or {}).items()):
+            z_index = int(z_index)
+            if 0 <= z_index < int(target.shape[0]):
+                snapshot = np.asarray(slice_array)
+                if tuple(snapshot.shape) != tuple(target[z_index].shape):
+                    raise ValueError(f"label_auto_save_slice_shape_mismatch:{z_index}:{snapshot.shape}:{target[z_index].shape}")
+                target[z_index] = snapshot
+                saved.append(z_index)
+        metadata = flush_volume_array(edit_path, target)
+    finally:
+        mmap_handle = getattr(target, "_mmap", None)
+        if mmap_handle is not None:
+            mmap_handle.close()
+    return {
+        "token": int(token),
+        "edit_path": str(edit_path),
+        "saved_slices": saved,
+        "slice_revisions": {int(key): int(value) for key, value in (slice_revisions or {}).items()},
+        "metadata": metadata,
+        "save_ms": max(0.0, (time.perf_counter() - started) * 1000.0),
+    }
+
+
+class TifConfirmPartRoiWorker(QObject):
+    progress = Signal(int, int, str)
+    finished = Signal(object)
+    failed = Signal(object)
+
+    def __init__(self, project_manager, request):
+        super().__init__()
+        self.project_manager = project_manager
+        self.request = dict(request or {})
+
+    def run(self):
+        try:
+            specimen_id = str(self.request.get("specimen_id") or "")
+            part_id = str(self.request.get("part_id") or "")
+            display_name = str(self.request.get("display_name") or part_id)
+            bbox = self.request.get("bbox_zyx") or []
+            source_shape = tuple(int(value) for value in (self.request.get("source_shape_zyx") or ()))
+            roi_keyframes = list(self.request.get("roi_keyframes") or [])
+            mask_contours = dict(self.request.get("mask_contours") or {})
+            mask_bbox = self.request.get("mask_bbox_zyx") or []
+            accepted_preview_mask = self.request.get("accepted_preview_mask")
+
+            self.progress.emit(0, 0, "Creating part volume...")
+            part = crop_volume_to_part(self.project_manager, specimen_id, part_id, bbox, display_name=display_name)
+            self.progress.emit(60, 100, "Writing part image and empty mask...")
+
+            mask_initialized = False
+            mask_message = ""
+            if mask_bbox:
+                self.progress.emit(75, 100, "Initializing accepted/freehand part mask...")
+                mask_initialized, mask_message = _tif_initialize_part_mask_from_full_volume_contours(
+                    self.project_manager,
+                    specimen_id,
+                    part,
+                    mask_contours,
+                    bbox,
+                    source_shape,
+                    accepted_preview_mask=accepted_preview_mask,
+                )
+            elif roi_keyframes:
+                self.progress.emit(75, 100, "Initializing ROI shell part mask...")
+                mask_initialized, mask_message = _tif_initialize_part_mask_from_roi_shell(
+                    self.project_manager,
+                    specimen_id,
+                    part,
+                    roi_keyframes,
+                    source_shape,
+                )
+            if mask_initialized:
+                part.setdefault("view_settings", {})["volume_mask_mode"] = "masked_image"
+                self.project_manager.save_project()
+
+            roi_id = str(self.request.get("roi_id") or "")
+            roi_metadata = dict(self.request.get("roi_metadata") or {})
+            if roi_id:
+                self.project_manager.update_part_roi(
+                    specimen_id,
+                    roi_id,
+                    bbox_zyx=bbox,
+                    status="part_created",
+                    linked_part_id=part.get("part_id", ""),
+                    metadata=roi_metadata,
+                    save=True,
+                )
+            else:
+                part_roi_id = f"{part.get('part_id', part_id)}_roi"
+                try:
+                    self.project_manager.add_part_roi(
+                        specimen_id,
+                        part_roi_id,
+                        display_name=display_name or part.get("display_name") or part_roi_id,
+                        bbox_zyx=bbox,
+                        status="part_created",
+                        linked_part_id=part.get("part_id", ""),
+                        metadata=roi_metadata,
+                        save=True,
+                    )
+                except ValueError:
+                    pass
+            self.progress.emit(100, 100, "Finalizing ROI...")
+            self.finished.emit(
+                {
+                    "part": part,
+                    "part_id": part.get("part_id", part_id),
+                    "specimen_id": specimen_id,
+                    "bbox_zyx": bbox,
+                    "mask_bbox_zyx": mask_bbox,
+                    "mask_initialized": bool(mask_initialized),
+                    "mask_message": str(mask_message or ""),
+                    "mask_keyframe_count": len((mask_contours.get("keyframes") or []) if isinstance(mask_contours, dict) else []),
+                    "roi_keyframe_count": len(roi_keyframes),
+                }
+            )
+        except Exception as exc:
+            self.failed.emit({"error": str(exc), "request": self.request})
+
+
 class TifLocalAxisResliceExportWorker(QObject):
     progress = Signal(int, int, str)
     finished = Signal(object)
@@ -2099,10 +3368,57 @@ class TifLocalAxisResliceExportWorker(QObject):
     def run(self):
         try:
             self.progress.emit(0, 0, "Preparing Local Axis Reslice export...")
-            result = export_part_reslice(self.project_manager, self.specimen_id, self.part_id, self.payload)
+            result = export_part_reslice(self.project_manager, self.specimen_id, self.part_id, self.payload, progress_callback=self.progress.emit)
             self.progress.emit(100, 100, "Finalizing Local Axis Reslice export...")
         except Exception as exc:
             self.failed.emit(str(exc))
+            return
+        self.finished.emit(result)
+
+
+class TifBackendActionWorker(QObject):
+    progress = Signal(int, int, str)
+    finished = Signal(object)
+    failed = Signal(str, object)
+
+    def __init__(self, project_manager, backend_config, action, part_refs=None, specimen_ids=None, input_scope="auto", model_manifest=""):
+        super().__init__()
+        self.project_manager = project_manager
+        self.backend_config = dict(backend_config or {})
+        self.action = str(action or "")
+        self.part_refs = [dict(ref or {}) for ref in (part_refs or [])]
+        self.specimen_ids = [str(item) for item in (specimen_ids or []) if str(item or "").strip()]
+        self.input_scope = str(input_scope or "auto")
+        self.model_manifest = str(model_manifest or "")
+        self._cancel_requested = False
+
+    def cancel(self):
+        self._cancel_requested = True
+
+    def _is_cancelled(self):
+        return bool(self._cancel_requested)
+
+    def run(self):
+        runner = None
+        try:
+            runner = TifBackendRunner(self.project_manager, self.backend_config)
+            result = runner.run_action(
+                self.action,
+                specimen_ids=self.specimen_ids or None,
+                part_refs=self.part_refs,
+                input_scope=self.input_scope,
+                model_manifest=self.model_manifest,
+                progress_callback=self.progress.emit,
+                cancel_check=self._is_cancelled,
+            )
+        except Exception as exc:
+            context = {
+                "run_id": getattr(runner, "last_run_id", ""),
+                "run_dir": getattr(runner, "last_run_dir", ""),
+                "result_json": getattr(runner, "last_result_json", ""),
+                "action": self.action,
+            }
+            self.failed.emit(str(exc), context)
             return
         self.finished.emit(result)
 
@@ -2141,6 +3457,8 @@ class TifWorkbenchWidget(QWidget):
         self.part_mask_keyframes = []
         self.image_volume = None
         self.label_volume = None
+        self.part_mask_volume = None
+        self._slice_unavailable_override = ""
         self.material_map = {}
         self.material_colors = {}
         self.current_material_id = 0
@@ -2149,6 +3467,8 @@ class TifWorkbenchWidget(QWidget):
         self.edit_volume = None
         self.working_edit_dirty = False
         self._dirty_edit_slices = set()
+        self._edit_slice_revisions = {}
+        self._edit_revision_counter = 0
         self._annotation_stroke_active = False
         self._annotation_stroke_undo_pushed = False
         self._annotation_stroke_z_index = None
@@ -2156,6 +3476,19 @@ class TifWorkbenchWidget(QWidget):
         self._annotation_stroke_changed = False
         self._loading_specimen = False
         self._saving_working_edit = False
+        self._label_auto_save_thread = None
+        self._label_auto_save_worker = None
+        self._label_auto_save_token = 0
+        self._label_auto_save_pending_reason = ""
+        self._label_auto_save_handled_tokens = set()
+        self._label_manual_save_thread = None
+        self._label_manual_save_worker = None
+        self._label_manual_save_token = 0
+        self._pending_manual_save_after_auto = None
+        self._pending_promote_after_save = None
+        self._promote_thread = None
+        self._promote_worker = None
+        self._promote_request = {}
         self._tif_import_thread = None
         self._tif_import_worker = None
         self._tif_import_progress = None
@@ -2168,6 +3501,36 @@ class TifWorkbenchWidget(QWidget):
         self._local_axis_reslice_export_thread = None
         self._local_axis_reslice_export_worker = None
         self._local_axis_reslice_export_progress = None
+        self._local_axis_reslice_export_context = {}
+        self._part_mask_preview_thread = None
+        self._part_mask_preview_worker = None
+        self._part_mask_preview_progress = None
+        self._part_mask_preview_token = 0
+        self._part_mask_preview_context = {}
+        self._confirm_part_roi_thread = None
+        self._confirm_part_roi_worker = None
+        self._confirm_part_roi_progress = None
+        self._confirm_part_roi_request = {}
+        self._tif_backend_thread = None
+        self._tif_backend_worker = None
+        self._tif_backend_action = ""
+        self._tif_backend_started_mono = 0.0
+        self._tif_backend_run_dir = ""
+        self._tif_backend_result_json = ""
+        self._tif_backend_last_result = None
+        self._tif_backend_pending_selection = {}
+        self._pending_backend_action_after_save = None
+        self._tif_backend_progress_value = 0
+        self._tif_training_result_summary = None
+        self._tif_training_result_dialog = None
+        self._tif_training_model_output_dir = ""
+        self._tif_training_model_manifest = ""
+        self._tif_predict_selected_refs = set()
+        self._tif_predict_refreshing = False
+        self._result_compare_refreshing = False
+        self._result_comparison_stale = True
+        self._result_region_mask_cache = {}
+        self._result_region_mask_cache_key = None
         self.undo_stack = []
         self.redo_stack = []
         self.slice_axis = "z"
@@ -2245,6 +3608,12 @@ class TifWorkbenchWidget(QWidget):
         self.label_role_help_label = QLabel("")
         self.label_role_help_label.setObjectName("tifLayerHelpText")
         self.label_role_help_label.setWordWrap(True)
+        self.ai_review_check_title_label = QLabel("AI review check")
+        self.ai_review_check_title_label.setObjectName("tifAiReviewCheckTitle")
+        self.ai_review_check_label = QLabel("")
+        self.ai_review_check_label.setObjectName("tifAiReviewCheckText")
+        self.ai_review_check_label.setWordWrap(True)
+        self.ai_review_check_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
 
         self.opacity_slider = WheelSafeSlider(Qt.Horizontal)
         self.opacity_slider.setRange(0, 100)
@@ -2446,9 +3815,106 @@ class TifWorkbenchWidget(QWidget):
         self.btn_edit_material.clicked.connect(self.edit_selected_material)
         self.btn_delete_material = QPushButton("Delete material")
         self.btn_delete_material.clicked.connect(self.delete_selected_material)
+        self.material_editor_buttons = QWidget()
+        self.material_editor_buttons.setObjectName("tifMaterialEditorButtons")
+
+        self.label_schema_combo = WheelSafeComboBox()
+        self.label_schema_combo.setObjectName("tifLabelSchemaCombo")
+        self.label_schema_combo.currentIndexChanged.connect(self._on_label_schema_selected)
+        self.label_schema_id_edit = QLineEdit()
+        self.label_schema_id_edit.setObjectName("tifLabelSchemaIdEdit")
+        self.label_schema_part_name_edit = QLineEdit()
+        self.label_schema_part_name_edit.setObjectName("tifLabelSchemaPartNameEdit")
+        self.label_schema_table = QTableWidget(0, 4)
+        self.label_schema_table.setObjectName("tifLabelSchemaTable")
+        self.label_schema_table.setMinimumHeight(130)
+        self.label_schema_table.setMaximumHeight(220)
+        self.label_schema_table.setAlternatingRowColors(True)
+        self.label_schema_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.label_schema_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.label_schema_table.verticalHeader().setVisible(False)
+        self.label_schema_table.setShowGrid(False)
+        self.label_schema_table.horizontalHeader().setStretchLastSection(True)
+        self.label_schema_table.itemChanged.connect(self._on_label_schema_table_item_changed)
+        self.label_schema_table.cellDoubleClicked.connect(self._on_label_schema_table_cell_double_clicked)
+        self.btn_new_label_schema = QPushButton("New schema")
+        self.btn_new_label_schema.setObjectName("tifNewLabelSchemaButton")
+        self.btn_new_label_schema.clicked.connect(self.new_label_schema)
+        self.btn_save_label_schema = QPushButton("Save schema")
+        self.btn_save_label_schema.setObjectName("tifSaveLabelSchemaButton")
+        self.btn_save_label_schema.clicked.connect(self.save_current_label_schema)
+        self.btn_bind_label_schema_to_part = QPushButton("Bind to current part")
+        self.btn_bind_label_schema_to_part.setObjectName("tifBindLabelSchemaToPartButton")
+        self.btn_bind_label_schema_to_part.clicked.connect(self.bind_current_part_label_schema)
+        self.btn_add_label_schema_row = QPushButton("Add region label")
+        self.btn_add_label_schema_row.setObjectName("tifAddLabelSchemaRowButton")
+        self.btn_add_label_schema_row.clicked.connect(self.add_label_schema_row)
+        self.btn_remove_label_schema_row = QPushButton("Remove region label")
+        self.btn_remove_label_schema_row.setObjectName("tifRemoveLabelSchemaRowButton")
+        self.btn_remove_label_schema_row.clicked.connect(self.remove_selected_label_schema_row)
+        self.btn_import_label_schema = QPushButton("Import schema")
+        self.btn_import_label_schema.setObjectName("tifImportLabelSchemaButton")
+        self.btn_import_label_schema.clicked.connect(self.import_label_schema_dialog)
+        self.btn_export_label_schema = QPushButton("Export schema")
+        self.btn_export_label_schema.setObjectName("tifExportLabelSchemaButton")
+        self.btn_export_label_schema.clicked.connect(self.export_label_schema_dialog)
+
+        self.part_user_tag_table = QTableWidget(0, 5)
+        self.part_user_tag_table.setObjectName("tifPartUserTagTable")
+        self.part_user_tag_table.setMinimumHeight(130)
+        self.part_user_tag_table.setMaximumHeight(220)
+        self.part_user_tag_table.setAlternatingRowColors(True)
+        self.part_user_tag_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.part_user_tag_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.part_user_tag_table.setDragDropMode(QAbstractItemView.InternalMove)
+        self.part_user_tag_table.setDragEnabled(True)
+        self.part_user_tag_table.setAcceptDrops(True)
+        self.part_user_tag_table.setDropIndicatorShown(True)
+        self.part_user_tag_table.setDefaultDropAction(Qt.MoveAction)
+        self.part_user_tag_table.verticalHeader().setVisible(False)
+        self.part_user_tag_table.setShowGrid(False)
+        self.part_user_tag_table.horizontalHeader().setStretchLastSection(True)
+        self.part_user_tag_table.itemSelectionChanged.connect(self._on_part_user_tag_selected)
+        try:
+            self.part_user_tag_table.model().rowsMoved.connect(lambda *args: QTimer.singleShot(0, self.save_part_user_tag_order_from_table))
+        except Exception:
+            pass
+        self.part_user_tag_id_edit = QLineEdit()
+        self.part_user_tag_id_edit.setObjectName("tifPartUserTagIdEdit")
+        self.part_user_tag_label_edit = QLineEdit()
+        self.part_user_tag_label_edit.setObjectName("tifPartUserTagLabelEdit")
+        self.part_user_tag_color_edit = QLineEdit("#6B8AFD")
+        self.part_user_tag_color_edit.setObjectName("tifPartUserTagColorEdit")
+        self.part_user_tag_color_swatch = QLabel("")
+        self.part_user_tag_color_swatch.setObjectName("tifPartUserTagColorSwatch")
+        self.part_user_tag_color_swatch.setFixedSize(34, 26)
+        self.part_user_tag_color_edit.textChanged.connect(self._update_part_user_tag_color_swatch)
+        self.part_user_tag_color_edit.setVisible(False)
+        self._selected_part_user_tag_id_for_edit = ""
+        self.btn_choose_part_user_tag_color = QPushButton("Choose group color")
+        self.btn_choose_part_user_tag_color.setObjectName("tifChoosePartUserTagColorButton")
+        self.btn_choose_part_user_tag_color.clicked.connect(self.choose_part_user_tag_color)
+        self.btn_new_part_user_tag = QPushButton("Add group tag")
+        self.btn_new_part_user_tag.setObjectName("tifNewPartUserTagButton")
+        self.btn_new_part_user_tag.clicked.connect(self.new_part_user_tag)
+        self.btn_save_part_user_tag = QPushButton("Save group tag")
+        self.btn_save_part_user_tag.setObjectName("tifSavePartUserTagButton")
+        self.btn_save_part_user_tag.clicked.connect(self.save_part_user_tag)
+        self.btn_delete_part_user_tag = QPushButton("Delete group tag")
+        self.btn_delete_part_user_tag.setObjectName("tifDeletePartUserTagButton")
+        self.btn_delete_part_user_tag.clicked.connect(self.delete_selected_part_user_tag)
+        self.btn_move_part_user_tag_up = QPushButton("Move up")
+        self.btn_move_part_user_tag_up.setObjectName("tifMovePartUserTagUpButton")
+        self.btn_move_part_user_tag_up.clicked.connect(lambda: self.move_selected_part_user_tag(-1))
+        self.btn_move_part_user_tag_down = QPushButton("Move down")
+        self.btn_move_part_user_tag_down.setObjectName("tifMovePartUserTagDownButton")
+        self.btn_move_part_user_tag_down.clicked.connect(lambda: self.move_selected_part_user_tag(1))
+        self.btn_apply_part_user_tags = QPushButton("Apply tags to current part")
+        self.btn_apply_part_user_tags.setObjectName("tifApplyPartUserTagsButton")
+        self.btn_apply_part_user_tags.clicked.connect(self.apply_part_user_tags_to_current_part)
 
         self.annotation_tool_label = QLabel("Tool")
-        self.current_material_title_label = QLabel("Current material")
+        self.current_material_title_label = QLabel("Current label")
         self.btn_tool_brush = QPushButton("Brush")
         self.btn_tool_brush.setObjectName("tifToolBrushButton")
         self.btn_tool_brush.setCheckable(True)
@@ -2469,6 +3935,9 @@ class TifWorkbenchWidget(QWidget):
         self.btn_tool_ellipse.setObjectName("tifToolEllipseButton")
         self.btn_tool_ellipse.setCheckable(True)
         self.btn_tool_ellipse.clicked.connect(lambda checked=False: self.set_annotation_tool_mode("ellipse"))
+        self.btn_interpolate_current_label = QPushButton("Interpolate fill")
+        self.btn_interpolate_current_label.setObjectName("tifInterpolateCurrentLabelButton")
+        self.btn_interpolate_current_label.clicked.connect(self.interpolate_current_label_between_key_slices)
         self.btn_tool_picker = QPushButton("Picker")
         self.btn_tool_picker.setObjectName("tifToolPickerButton")
         self.btn_tool_picker.setCheckable(True)
@@ -2486,9 +3955,9 @@ class TifWorkbenchWidget(QWidget):
         self.btn_undo.clicked.connect(self.undo)
         self.btn_redo = QPushButton("Redo")
         self.btn_redo.clicked.connect(self.redo)
-        self.btn_save_edit = QPushButton("Save working edit")
-        self.btn_save_edit.clicked.connect(lambda: self.save_working_edit())
-        self.auto_save_check = QCheckBox("Auto-save edit")
+        self.btn_save_edit = QPushButton("Save current labels")
+        self.btn_save_edit.clicked.connect(self.save_working_edit_async)
+        self.auto_save_check = QCheckBox("Auto-save labels")
         self.auto_save_check.setObjectName("tifAutoSaveEditCheck")
         self.auto_save_check.setChecked(True)
         self.auto_save_check.toggled.connect(self._on_auto_save_toggled)
@@ -2500,17 +3969,21 @@ class TifWorkbenchWidget(QWidget):
         self.save_status_label.setObjectName("tifSaveStatusText")
         self.save_status_label.setWordWrap(True)
         self.save_status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        self.btn_promote = QPushButton("Accept as manual truth")
+        self.btn_promote = QPushButton("Accept as training truth")
         self.btn_promote.clicked.connect(self.promote_working_edit)
-        self.btn_copy_draft = QPushButton("Copy model draft to working edit")
+        self.btn_accept_selected_ai_results = QPushButton("Accept selected AI results")
+        self.btn_accept_selected_ai_results.setObjectName("tifAcceptSelectedAiResultsButton")
+        self.btn_accept_selected_ai_results.clicked.connect(self.accept_selected_ai_results)
+        self.btn_copy_draft = QPushButton("Copy legacy model draft to current labels")
         self.btn_copy_draft.clicked.connect(self.copy_latest_model_draft_to_working_edit)
-        self.btn_copy_material_prev = QPushButton("Copy material to previous slice")
+        self.btn_copy_draft.setVisible(False)
+        self.btn_copy_material_prev = QPushButton("Copy label to previous slice")
         self.btn_copy_material_prev.setObjectName("tifCopyMaterialPrevButton")
         self.btn_copy_material_prev.clicked.connect(lambda: self.copy_current_material_to_adjacent_slice(-1))
-        self.btn_copy_material_next = QPushButton("Copy material to next slice")
+        self.btn_copy_material_next = QPushButton("Copy label to next slice")
         self.btn_copy_material_next.setObjectName("tifCopyMaterialNextButton")
         self.btn_copy_material_next.clicked.connect(lambda: self.copy_current_material_to_adjacent_slice(1))
-        self.btn_clear_current_material = QPushButton("Clear current material")
+        self.btn_clear_current_material = QPushButton("Clear current label")
         self.btn_clear_current_material.setObjectName("tifClearCurrentMaterialButton")
         self.btn_clear_current_material.clicked.connect(self.clear_current_material_on_slice)
         self.btn_import_tif = QPushButton("Import TIF stack")
@@ -2618,6 +4091,13 @@ class TifWorkbenchWidget(QWidget):
         self.backend_train_edit = QLineEdit()
         self.backend_predict_edit = QLineEdit()
         self.backend_manifest_edit = QLineEdit()
+        self.backend_manifest_edit.textChanged.connect(self._on_predict_manifest_text_changed)
+        self.btn_browse_model_manifest = QPushButton("Browse manifest")
+        self.btn_browse_model_manifest.setObjectName("tifBrowseModelManifestButton")
+        self.btn_browse_model_manifest.clicked.connect(self.browse_model_manifest)
+        self.btn_use_nnunet_backend_preset = QPushButton("Use nnU-Net v2 preset")
+        self.btn_use_nnunet_backend_preset.setObjectName("tifUseNnunetV2PresetButton")
+        self.btn_use_nnunet_backend_preset.clicked.connect(self.apply_nnunet_v2_backend_preset)
         self.btn_save_backend = QPushButton("Save backend settings")
         self.btn_save_backend.setObjectName("tifSaveBackendButton")
         self.btn_save_backend.clicked.connect(self.save_backend_settings)
@@ -2630,9 +4110,128 @@ class TifWorkbenchWidget(QWidget):
         self.btn_import_prediction = QPushButton("Import prediction")
         self.btn_import_prediction.setObjectName("tifImportPredictionButton")
         self.btn_import_prediction.clicked.connect(lambda: self.run_backend_action("predict"))
-        self.btn_import_external_prediction_tif = QPushButton("Import external label TIF to draft")
+        self.predict_filter_combo = WheelSafeComboBox()
+        self.predict_filter_combo.setObjectName("tifPredictFilterCombo")
+        self.predict_filter_combo.currentIndexChanged.connect(self.refresh_predict_targets)
+        self.predict_targets_table = QTableWidget(0, 8)
+        self.predict_targets_table.setObjectName("tifPredictTargetsTable")
+        self.predict_targets_table.setMinimumHeight(150)
+        self.predict_targets_table.setMaximumHeight(260)
+        self.predict_targets_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.predict_targets_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.predict_targets_table.setAlternatingRowColors(True)
+        self.predict_targets_table.verticalHeader().setVisible(False)
+        self.predict_targets_table.setShowGrid(False)
+        self.predict_targets_table.horizontalHeader().setStretchLastSection(True)
+        self.predict_targets_table.itemChanged.connect(self._on_predict_target_item_changed)
+        self.btn_refresh_predict_targets = QPushButton("Refresh targets")
+        self.btn_refresh_predict_targets.setObjectName("tifRefreshPredictTargetsButton")
+        self.btn_refresh_predict_targets.clicked.connect(self.refresh_predict_targets)
+        self.btn_select_current_predict_target = QPushButton("Select current part")
+        self.btn_select_current_predict_target.setObjectName("tifSelectCurrentPredictTargetButton")
+        self.btn_select_current_predict_target.clicked.connect(self.select_current_predict_target)
+        self.btn_select_ready_predict_targets = QPushButton("Select all ready")
+        self.btn_select_ready_predict_targets.setObjectName("tifSelectReadyPredictTargetsButton")
+        self.btn_select_ready_predict_targets.clicked.connect(self.select_all_ready_predict_targets)
+        self.btn_clear_predict_targets = QPushButton("Clear selection")
+        self.btn_clear_predict_targets.setObjectName("tifClearPredictTargetsButton")
+        self.btn_clear_predict_targets.clicked.connect(self.clear_predict_target_selection)
+        self.predict_targets_summary_label = QLabel("")
+        self.predict_targets_summary_label.setObjectName("tifPredictTargetsSummaryText")
+        self.predict_targets_summary_label.setWordWrap(True)
+        self.predict_targets_summary_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.btn_stop_backend = QPushButton("Stop run")
+        self.btn_stop_backend.setObjectName("tifStopBackendButton")
+        self.btn_stop_backend.clicked.connect(self.cancel_backend_action)
+        self.btn_stop_backend.setEnabled(False)
+        self.btn_open_backend_run = QPushButton("Open run folder")
+        self.btn_open_backend_run.setObjectName("tifOpenBackendRunButton")
+        self.btn_open_backend_run.clicked.connect(self.open_latest_backend_run_folder)
+        self.btn_open_backend_run.setEnabled(False)
+        self.btn_open_backend_result = QPushButton("Open result JSON")
+        self.btn_open_backend_result.setObjectName("tifOpenBackendResultButton")
+        self.btn_open_backend_result.clicked.connect(self.open_latest_backend_result_json)
+        self.btn_open_backend_result.setEnabled(False)
+        self.training_result_summary_label = QLabel("No training result yet.")
+        self.training_result_summary_label.setObjectName("tifTrainingResultSummaryText")
+        self.training_result_summary_label.setWordWrap(True)
+        self.training_result_summary_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.training_result_summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.btn_show_training_result_summary = QPushButton("Show result summary")
+        self.btn_show_training_result_summary.setObjectName("tifShowTrainingResultSummaryButton")
+        self.btn_show_training_result_summary.clicked.connect(self.show_latest_training_result_summary)
+        self.btn_show_training_result_summary.setEnabled(False)
+        self.btn_open_training_model_output = QPushButton("Open model output")
+        self.btn_open_training_model_output.setObjectName("tifOpenTrainingModelOutputButton")
+        self.btn_open_training_model_output.clicked.connect(self.open_latest_training_model_output)
+        self.btn_open_training_model_output.setEnabled(False)
+        self.btn_open_training_model_manifest = QPushButton("Open model manifest")
+        self.btn_open_training_model_manifest.setObjectName("tifOpenTrainingModelManifestButton")
+        self.btn_open_training_model_manifest.clicked.connect(self.open_latest_training_model_manifest)
+        self.btn_open_training_model_manifest.setEnabled(False)
+        self.btn_batch_predict_entry = QPushButton("Enter batch prediction")
+        self.btn_batch_predict_entry.setObjectName("tifBatchPredictEntryButton")
+        self.btn_batch_predict_entry.clicked.connect(self.enter_batch_prediction_from_training_result)
+        self.btn_batch_predict_entry.setEnabled(False)
+        self.model_library_combo = WheelSafeComboBox()
+        self.model_library_combo.setObjectName("tifModelLibraryCombo")
+        self.model_library_combo.currentIndexChanged.connect(self._on_model_library_selection_changed)
+        self.model_library_notes_edit = QTextEdit()
+        self.model_library_notes_edit.setObjectName("tifModelLibraryNotesEdit")
+        self.model_library_notes_edit.setPlaceholderText("Model notes")
+        self.model_library_notes_edit.setMinimumHeight(58)
+        self.model_library_notes_edit.setMaximumHeight(86)
+        self.model_library_notes_edit.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.model_library_summary_label = QLabel("")
+        self.model_library_summary_label.setObjectName("tifModelLibrarySummaryText")
+        self.model_library_summary_label.setWordWrap(True)
+        self.model_library_summary_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.btn_use_selected_tif_model = QPushButton("Use selected model")
+        self.btn_use_selected_tif_model.setObjectName("tifUseSelectedModelButton")
+        self.btn_use_selected_tif_model.clicked.connect(self.use_selected_tif_model)
+        self.btn_save_tif_model_notes = QPushButton("Save notes")
+        self.btn_save_tif_model_notes.setObjectName("tifSaveModelNotesButton")
+        self.btn_save_tif_model_notes.clicked.connect(self.save_selected_tif_model_notes)
+        self.btn_delete_tif_model_record = QPushButton("Delete registration")
+        self.btn_delete_tif_model_record.setObjectName("tifDeleteModelRecordButton")
+        self.btn_delete_tif_model_record.clicked.connect(self.delete_selected_tif_model_record)
+        self.btn_import_external_prediction_tif = QPushButton("Import external label TIF as review result")
         self.btn_import_external_prediction_tif.setObjectName("tifImportExternalPredictionTifButton")
         self.btn_import_external_prediction_tif.clicked.connect(self.import_external_prediction_tif_dialog)
+        self.result_source_manual_radio = QRadioButton("manual_truth")
+        self.result_source_manual_radio.setObjectName("tifResultSourceManualTruthRadio")
+        self.result_source_manual_radio.setChecked(True)
+        self.result_source_editable_radio = QRadioButton("editable_ai_result")
+        self.result_source_editable_radio.setObjectName("tifResultSourceEditableAiRadio")
+        self.result_region_combo = WheelSafeComboBox()
+        self.result_region_combo.setObjectName("tifResultRegionCombo")
+        self.result_region_combo.currentIndexChanged.connect(self._on_result_comparison_controls_changed)
+        self.result_source_manual_radio.toggled.connect(self._on_result_comparison_controls_changed)
+        self.result_source_editable_radio.toggled.connect(self._on_result_comparison_controls_changed)
+        self.result_compare_table = QTableWidget(0, 8)
+        self.result_compare_table.setObjectName("tifResultComparisonTable")
+        self.result_compare_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.result_compare_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.result_compare_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.result_compare_table.setAlternatingRowColors(True)
+        self.result_compare_table.setShowGrid(False)
+        self.result_compare_table.horizontalHeader().setStretchLastSection(True)
+        self.btn_refresh_result_comparison = QPushButton("Refresh comparison")
+        self.btn_refresh_result_comparison.setObjectName("tifRefreshResultComparisonButton")
+        self.btn_refresh_result_comparison.clicked.connect(self.refresh_result_comparison)
+        self.btn_open_result_comparison_target = QPushButton("Open selected in 3D")
+        self.btn_open_result_comparison_target.setObjectName("tifOpenResultComparisonTargetButton")
+        self.btn_open_result_comparison_target.clicked.connect(self.open_selected_result_comparison_target)
+        self.btn_show_result_region_in_3d = QPushButton("Highlight selected region")
+        self.btn_show_result_region_in_3d.setObjectName("tifShowResultRegionIn3DButton")
+        self.btn_show_result_region_in_3d.clicked.connect(self.show_selected_result_region_in_3d)
+        self.result_compare_summary_label = QLabel("")
+        self.result_compare_summary_label.setObjectName("tifResultComparisonSummaryText")
+        self.result_compare_summary_label.setWordWrap(True)
+        self.result_compare_summary_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.btn_export_current_rendering = QPushButton("Export current rendering screenshot")
+        self.btn_export_current_rendering.setObjectName("tifExportCurrentRenderingButton")
+        self.btn_export_current_rendering.clicked.connect(self.export_current_rendering_screenshot)
         self.btn_start_center = QPushButton("Start Center")
         self.btn_start_center.setObjectName("tifStartCenterButton")
         self.btn_start_center.clicked.connect(self.start_center_requested.emit)
@@ -2651,6 +4250,31 @@ class TifWorkbenchWidget(QWidget):
         self.training_status_label.setWordWrap(True)
         self.training_status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.training_status_label.set_mirror_label(self.operation_status_label)
+        self.backend_run_status_label = QLabel("Idle")
+        self.backend_run_status_label.setObjectName("tifBackendRunStatusText")
+        self.backend_run_status_label.setWordWrap(True)
+        self.backend_run_status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.backend_run_status_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.backend_run_title_label = QLabel("Backend run")
+        self.backend_run_title_label.setObjectName("tifSectionTitle")
+        self.backend_elapsed_label = QLabel("Elapsed: 00:00")
+        self.backend_elapsed_label.setObjectName("tifBackendElapsedText")
+        self.backend_progress_bar = QProgressBar()
+        self.backend_progress_bar.setObjectName("tifBackendProgressBar")
+        self.backend_progress_bar.setRange(0, 100)
+        self.backend_progress_bar.setValue(0)
+        self.backend_progress_bar.setTextVisible(True)
+        self.backend_progress_bar.setFormat("%p%")
+        self.backend_log_tail = QTextEdit()
+        self.backend_log_tail.setObjectName("tifBackendLogTail")
+        self.backend_log_tail.setReadOnly(True)
+        self.backend_log_tail.setLineWrapMode(QTextEdit.WidgetWidth)
+        self.backend_log_tail.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.backend_log_tail.setMinimumHeight(92)
+        self.backend_log_tail.setMaximumHeight(132)
+        self.backend_elapsed_timer = QTimer(self)
+        self.backend_elapsed_timer.setInterval(1000)
+        self.backend_elapsed_timer.timeout.connect(self._update_backend_elapsed_label)
         self.log_console = QTextEdit()
         self.log_console.setObjectName("tifLogConsole")
         self.log_console.setReadOnly(True)
@@ -2663,7 +4287,7 @@ class TifWorkbenchWidget(QWidget):
         self.shortcut_redo_alt = QShortcut(QKeySequence("Ctrl+Shift+Z"), self)
         self.shortcut_redo_alt.activated.connect(self.redo)
         self.shortcut_save_edit = QShortcut(QKeySequence("Ctrl+S"), self)
-        self.shortcut_save_edit.activated.connect(lambda: self.save_working_edit(show_message=True))
+        self.shortcut_save_edit.activated.connect(self.save_working_edit_async)
         self.shortcut_tool_brush = QShortcut(QKeySequence("B"), self)
         self.shortcut_tool_brush.activated.connect(lambda: self.set_annotation_tool_mode("brush"))
         self.shortcut_tool_eraser = QShortcut(QKeySequence("E"), self)
@@ -2716,8 +4340,16 @@ class TifWorkbenchWidget(QWidget):
             self.btn_prepare_dataset,
             self.btn_train_backend,
             self.btn_import_prediction,
+            self.btn_open_backend_run,
+            self.btn_open_backend_result,
+            self.btn_show_training_result_summary,
+            self.btn_open_training_model_output,
+            self.btn_open_training_model_manifest,
+            self.btn_batch_predict_entry,
+            self.btn_use_selected_tif_model,
             self.btn_import_external_prediction_tif,
             self.btn_promote,
+            self.btn_accept_selected_ai_results,
             self.btn_preview_part_mask,
             self.btn_accept_part_mask,
             self.btn_local_axis_reslice,
@@ -2736,6 +4368,7 @@ class TifWorkbenchWidget(QWidget):
             self.btn_tool_lasso,
             self.btn_tool_rectangle,
             self.btn_tool_ellipse,
+            self.btn_interpolate_current_label,
             self.btn_tool_picker,
             self.btn_tool_pan,
             self.btn_copy_material_prev,
@@ -2753,6 +4386,7 @@ class TifWorkbenchWidget(QWidget):
             self.btn_clear_local_axis_draft,
             self.btn_add_material,
             self.btn_edit_material,
+            self.btn_choose_part_user_tag_color,
             self.btn_save_backend,
             self.btn_part_draw_roi,
             self.btn_save_part_roi,
@@ -2761,12 +4395,37 @@ class TifWorkbenchWidget(QWidget):
             self.btn_prev_key_slice,
             self.btn_next_key_slice,
             self.btn_clear_part_preview,
+            self.btn_stop_backend,
+            self.btn_browse_model_manifest,
+            self.btn_refresh_predict_targets,
+            self.btn_select_current_predict_target,
+            self.btn_select_ready_predict_targets,
+            self.btn_clear_predict_targets,
+            self.btn_refresh_result_comparison,
+            self.btn_open_result_comparison_target,
+            self.btn_show_result_region_in_3d,
+            self.btn_new_label_schema,
+            self.btn_save_label_schema,
+            self.btn_bind_label_schema_to_part,
+            self.btn_add_label_schema_row,
+            self.btn_import_label_schema,
+            self.btn_export_label_schema,
+            self.btn_new_part_user_tag,
+            self.btn_save_part_user_tag,
+            self.btn_save_tif_model_notes,
+            self.btn_move_part_user_tag_up,
+            self.btn_move_part_user_tag_down,
+            self.btn_apply_part_user_tags,
         ]
         for button in primary_buttons:
             self._style_button(button, "primary", full_width=True)
         for button in secondary_buttons:
             self._style_button(button, "secondary", full_width=True)
         self._style_button(self.btn_delete_material, "danger", full_width=True)
+        self._style_button(self.btn_remove_label_schema_row, "danger", full_width=True)
+        self._style_button(self.btn_delete_part_user_tag, "danger", full_width=True)
+        self._style_button(self.btn_delete_tif_model_record, "danger", full_width=True)
+        self._style_button(self.btn_stop_backend, "danger", full_width=True)
         self._style_button(self.btn_confirm_part_roi, "primary", full_width=True)
         self._style_button(self.btn_cancel_part_roi, "danger", full_width=True)
         self._style_button(self.btn_delete_part_contour, "danger", full_width=True)
@@ -2776,9 +4435,17 @@ class TifWorkbenchWidget(QWidget):
         current = self.label_role_combo.currentData() if self.label_role_combo.count() else "manual_truth"
         self.label_role_combo.blockSignals(True)
         self.label_role_combo.clear()
-        for role in ("manual_truth", "working_edit", "model_draft"):
+        if self.current_volume_scope == "part":
+            roles = ("manual_truth", "editable_ai_result", "raw_ai_prediction_backup")
+        else:
+            roles = ("working_edit", "manual_truth", "raw_ai_prediction_backup")
+        for role in roles:
             self.label_role_combo.addItem(tt(role, self.lang), role)
         index = self.label_role_combo.findData(current)
+        if self.current_volume_scope == "part" and (index < 0 or current == "manual_truth"):
+            index = self.label_role_combo.findData("editable_ai_result")
+        elif self.current_volume_scope != "part" and index < 0:
+            index = self.label_role_combo.findData("working_edit")
         self.label_role_combo.setCurrentIndex(index if index >= 0 else 0)
         self.label_role_combo.blockSignals(False)
 
@@ -2906,6 +4573,50 @@ class TifWorkbenchWidget(QWidget):
         self.volume_mask_combo.setCurrentIndex(index if index >= 0 else 0)
         self.volume_mask_combo.blockSignals(False)
 
+    def _populate_result_region_combo(self):
+        combo = getattr(self, "result_region_combo", None)
+        if combo is None:
+            return
+        current = combo.currentData() if combo.count() else None
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem(tt("All", self.lang), 0)
+        labels = OrderedDict()
+        schema_ids = []
+        if self.current_volume_scope == "part" and self.current_specimen_id and self.current_part_id:
+            part = self.project.get_part(self.current_specimen_id, self.current_part_id, default=None)
+            schema_id = str(((part or {}).get("training") or {}).get("label_schema_id") or "")
+            if schema_id:
+                schema_ids.append(schema_id)
+        if not schema_ids:
+            for specimen in self.project.project_data.get("specimens", []) or []:
+                for part in (specimen or {}).get("parts", []) or []:
+                    schema_id = str(((part or {}).get("training") or {}).get("label_schema_id") or "")
+                    if schema_id and schema_id not in schema_ids:
+                        schema_ids.append(schema_id)
+        for schema_id in schema_ids:
+            schema = self.project.get_label_schema(schema_id, default={}) if schema_id else {}
+            for item in (schema.get("labels") or []):
+                try:
+                    label_id = int(item.get("id", 0))
+                except (TypeError, ValueError):
+                    continue
+                if label_id > 0 and label_id not in labels:
+                    labels[label_id] = item.get("display_name") or item.get("name") or str(label_id)
+        if not labels:
+            for item in (self.material_map or {}).get("materials", []) or []:
+                try:
+                    label_id = int(item.get("id", 0))
+                except (TypeError, ValueError):
+                    continue
+                if label_id > 0 and bool(item.get("trainable", True)):
+                    labels.setdefault(label_id, item.get("display_name") or item.get("name") or str(label_id))
+        for label_id, label_name in sorted(labels.items(), key=lambda pair: pair[0]):
+            combo.addItem(f"{label_id} · {label_name}", label_id)
+        index = combo.findData(current)
+        combo.setCurrentIndex(index if index >= 0 else 0)
+        combo.blockSignals(False)
+
     def _set_volume_mask_mode(self, mode):
         if not hasattr(self, "volume_mask_combo"):
             return False
@@ -2919,11 +4630,13 @@ class TifWorkbenchWidget(QWidget):
         return True
 
     def _default_volume_mask_mode(self):
+        if self.current_volume_scope == "full" and self._active_part_mask_likely_available():
+            return "masked_image"
         configured = (self._active_volume_view_settings() or {}).get("volume_mask_mode", "")
         if configured in {"image_only", "mask_boundary", "masked_image"}:
-            if configured == "image_only" or self._active_part_mask_has_voxels():
+            if configured == "image_only" or self._active_part_mask_likely_available():
                 return configured
-        if self.current_volume_scope == "part" and self._active_part_mask_has_voxels():
+        if self.current_volume_scope == "part" and self._active_part_mask_likely_available():
             return "masked_image"
         return "image_only"
 
@@ -2974,11 +4687,15 @@ class TifWorkbenchWidget(QWidget):
         self._populate_volume_tint_combo()
         self._populate_volume_shader_quality_combo()
         self._populate_volume_roi_source_combo()
+        self._populate_result_region_combo()
         self._apply_volume_transfer_opacity_setting()
         self._populate_volume_mask_combo()
         if hasattr(self, "task_tabs"):
-            for index, label in enumerate(("Part", "Display", "Annotation", "Train/export")):
+            for index, label in enumerate(("Review", "Part Extraction", "Annotation / training")):
                 self.task_tabs.setTabText(index, tt(label, self.lang))
+        if hasattr(self, "training_mode_tabs"):
+            for index, label in enumerate(("Label review", "Train / predict", "Result comparison")):
+                self.training_mode_tabs.setTabText(index, tt(label, self.lang))
         if self.image_volume is None:
             specimen = self.project.get_specimen(self.current_specimen_id, default=None) if self.current_specimen_id else None
             self.canvas.setText(self._slice_unavailable_message(specimen))
@@ -3030,32 +4747,34 @@ class TifWorkbenchWidget(QWidget):
         self.btn_tool_lasso.setText(tt("Lasso fill", self.lang))
         self.btn_tool_rectangle.setText(tt("Rectangle fill", self.lang))
         self.btn_tool_ellipse.setText(tt("Ellipse fill", self.lang))
+        self.btn_interpolate_current_label.setText(tt("Interpolate fill", self.lang))
         self.btn_tool_picker.setText(tt("Picker", self.lang))
         self.btn_tool_pan.setText(tt("Pan/view", self.lang))
-        self.btn_tool_brush.setToolTip(tt("Brush (B): paint the selected material. Hold Ctrl for temporary erase.", self.lang))
+        self.btn_tool_brush.setToolTip(tt("Brush (B): paint the selected label. Hold Ctrl for temporary erase.", self.lang))
         self.btn_tool_eraser.setToolTip(tt("Eraser (E): write background 0. Ctrl + left drag still works as temporary erase.", self.lang))
-        self.btn_tool_lasso.setToolTip(tt("Lasso fill (L): draw a closed outline and fill it with the selected material.", self.lang))
-        self.btn_tool_rectangle.setToolTip(tt("Rectangle fill (R): drag a box and fill it with the selected material.", self.lang))
-        self.btn_tool_ellipse.setToolTip(tt("Ellipse fill (O): drag an ellipse and fill it with the selected material.", self.lang))
-        self.btn_tool_picker.setToolTip(tt("Picker (I): sample a label under the cursor and select that material.", self.lang))
+        self.btn_tool_lasso.setToolTip(tt("Lasso fill (L): draw a closed outline and fill it with the selected label.", self.lang))
+        self.btn_tool_rectangle.setToolTip(tt("Rectangle fill (R): drag a box and fill it with the selected label.", self.lang))
+        self.btn_tool_ellipse.setToolTip(tt("Ellipse fill (O): drag an ellipse and fill it with the selected label.", self.lang))
+        self.btn_interpolate_current_label.setToolTip(tt("Interpolate fill: use slices where the current label already exists as key slices, then fill the slices between them.", self.lang))
+        self.btn_tool_picker.setToolTip(tt("Picker (I): sample a label under the cursor and select that label.", self.lang))
         self.btn_tool_pan.setToolTip(tt("Pan/view: drag the zoomed slice without changing labels. Right drag also pans when zoomed.", self.lang))
         self._sync_annotation_tool_buttons()
         self.brush_size_label.setText(tt("Brush size", self.lang))
         self.brush_size_slider.setToolTip(f"{tt('Decrease brush size ([)', self.lang)} / {tt('Increase brush size (])', self.lang)}")
         self.btn_undo.setToolTip(tt("Undo last stroke (Ctrl+Z)", self.lang))
         self.btn_redo.setToolTip(tt("Redo stroke (Ctrl+Y / Ctrl+Shift+Z)", self.lang))
-        self.btn_save_edit.setToolTip(tt("Save current edit layer (Ctrl+S)", self.lang))
-        self.btn_copy_material_prev.setText(tt("Copy material to previous slice", self.lang))
-        self.btn_copy_material_next.setText(tt("Copy material to next slice", self.lang))
-        self.btn_clear_current_material.setText(tt("Clear current material", self.lang))
-        self.btn_copy_material_prev.setToolTip(tt("Copy current material mask to the previous slice for refinement.", self.lang))
-        self.btn_copy_material_next.setToolTip(tt("Copy current material mask to the next slice for refinement.", self.lang))
-        self.btn_clear_current_material.setToolTip(tt("Clear the selected material from the current slice. Other materials are kept.", self.lang))
+        self.btn_save_edit.setToolTip(tt("Save current label layer (Ctrl+S)", self.lang))
+        self.btn_copy_material_prev.setText(tt("Copy label to previous slice", self.lang))
+        self.btn_copy_material_next.setText(tt("Copy label to next slice", self.lang))
+        self.btn_clear_current_material.setText(tt("Clear current label", self.lang))
+        self.btn_copy_material_prev.setToolTip(tt("Copy current label mask to the previous slice for refinement.", self.lang))
+        self.btn_copy_material_next.setToolTip(tt("Copy current label mask to the next slice for refinement.", self.lang))
+        self.btn_clear_current_material.setToolTip(tt("Clear the selected label from the current slice. Other labels are kept.", self.lang))
         self.save_status_title_label.setText(tt("Save status", self.lang))
-        self.auto_save_hint_label.setText(tt("Auto-save writes working_edit about 1.2 seconds after edits.", self.lang))
+        self.auto_save_hint_label.setText(tt("Auto-save writes the current label layer about 1.2 seconds after edits.", self.lang))
         self._update_save_status()
         self._sync_undo_redo_buttons()
-        self.current_material_title_label.setText(tt("Current material", self.lang))
+        self.current_material_title_label.setText(tt("Current label", self.lang))
         self._update_current_material_summary()
         self.btn_import_tif.setText(tt("Import TIF stack", self.lang))
         self.btn_import_amira.setText(tt("Import AMIRA directory", self.lang))
@@ -3078,7 +4797,7 @@ class TifWorkbenchWidget(QWidget):
         if hasattr(self, "local_axis_volume_help_label"):
             self.local_axis_volume_help_label.setText(
                 tt(
-                    "Use the 3D part preview as the main workspace. Copy source Z, drag the output axis endpoints, then pick the roll reference points on the observation-side clip plane. Export here when the frame is confirmed.",
+                    "Roll A/B/C picking works on the observation-side clip plane only. Turn on Clip plane in the 3D preview, move it to the target cross-section, then click A, B, and C on that plane.",
                     self.lang,
                 )
             )
@@ -3093,21 +4812,62 @@ class TifWorkbenchWidget(QWidget):
         self.btn_pick_roll_ref_c.setText(tt("Pick plane reference C", self.lang))
         self.btn_align_axis_to_reference_plane.setText(tt("Make Z perpendicular\nto A/B/C plane", self.lang))
         self.btn_clear_roll_refs.setText(tt("Clear roll refs", self.lang))
+        roll_pick_tooltip = tt("Pick roll/reference points on the current observation-side clip plane. If the clip plane is off, it will be enabled first.", self.lang)
+        self.btn_pick_roll_ref_a.setToolTip(roll_pick_tooltip)
+        self.btn_pick_roll_ref_b.setToolTip(roll_pick_tooltip)
+        self.btn_pick_roll_ref_c.setToolTip(roll_pick_tooltip)
+        self.btn_align_axis_to_reference_plane.setToolTip(tt("The A/B/C plane is computed from points picked on the observation-side clip plane; use it after A, B, and C are set.", self.lang))
         self.btn_clear_local_axis_draft.setText(tt("Clear axis draft", self.lang))
         self.local_axis_trainable_check.setText(tt("Record this export as trainable local-axis data", self.lang))
         self.btn_export_local_axis_training_manifest.setText(tt("Export Local Axis training manifest", self.lang))
         self.btn_delete_part_volume.setText(tt("Delete part volume", self.lang))
         self.btn_undo.setText(tt("Undo", self.lang))
         self.btn_redo.setText(tt("Redo", self.lang))
-        self.btn_save_edit.setText(tt("Save working edit", self.lang))
-        self.auto_save_check.setText(tt("Auto-save edit", self.lang))
+        self.btn_save_edit.setText(tt("Save current labels", self.lang))
+        self.auto_save_check.setText(tt("Auto-save labels", self.lang))
         self.show_debug_paths_check.setText(tt("Show debug paths", self.lang))
-        self.btn_promote.setText(tt("Accept as manual truth", self.lang))
-        self.btn_copy_draft.setText(tt("Copy model draft to working edit", self.lang))
+        self.btn_promote.setText(tt("Accept as training truth", self.lang))
+        self.btn_accept_selected_ai_results.setText(tt("Accept selected AI results", self.lang))
+        self.btn_copy_draft.setText(tt("Copy legacy model draft to current labels", self.lang))
         self.btn_add_material.setText(tt("Add material", self.lang))
         self.btn_edit_material.setText(tt("Edit material", self.lang))
         self.btn_delete_material.setText(tt("Delete material", self.lang))
+        self._sync_material_editor_scope()
+        if hasattr(self, "label_schema_id_label"):
+            self.label_schema_id_label.setText(tt("Schema ID", self.lang))
+            self.label_schema_part_name_label.setText(tt("User-defined part name", self.lang))
+            self.label_schema_table.setHorizontalHeaderLabels(["", tt("Label ID", self.lang), tt("Region name", self.lang), tt("Color", self.lang)])
+            self.btn_new_label_schema.setText(tt("New schema", self.lang))
+            self.btn_save_label_schema.setText(tt("Save schema", self.lang))
+            self.btn_bind_label_schema_to_part.setText(tt("Bind to current part", self.lang))
+            self.btn_add_label_schema_row.setText(tt("Add region label", self.lang))
+            self.btn_remove_label_schema_row.setText(tt("Remove region label", self.lang))
+            self.btn_import_label_schema.setText(tt("Import schema", self.lang))
+            self.btn_export_label_schema.setText(tt("Export schema", self.lang))
+            if hasattr(self, "label_schema_help_label"):
+                self.label_schema_help_label.setText(tt("Bind a label schema first so every specimen uses the same numeric labels for annotation, training, prediction import, and result comparison. Import files should be TaxaMask label schema JSON exported from this panel.", self.lang))
+            self._populate_label_schema_combo()
+        if hasattr(self, "part_user_tag_id_label"):
+            self.part_user_tag_id_label.setText(tt("Group tag ID", self.lang))
+            self.part_user_tag_label_label.setText(tt("Group tag label", self.lang))
+            self.part_user_tag_color_label.setText(tt("Color", self.lang))
+            self.btn_choose_part_user_tag_color.setText(tt("Choose group color", self.lang))
+            self.part_user_tag_table.setHorizontalHeaderLabels(["", tt("Group tag ID", self.lang), tt("Group tag label", self.lang), tt("Color", self.lang), tt("Assigned", self.lang)])
+            self.btn_new_part_user_tag.setText(tt("Add group tag", self.lang))
+            self.btn_save_part_user_tag.setText(tt("Save group tag", self.lang))
+            self.btn_delete_part_user_tag.setText(tt("Delete group tag", self.lang))
+            self.btn_move_part_user_tag_up.setText(tt("Move up", self.lang))
+            self.btn_move_part_user_tag_down.setText(tt("Move down", self.lang))
+            self.btn_apply_part_user_tags.setText(tt("Apply tags to current part", self.lang))
+            if hasattr(self, "part_user_tag_help_label"):
+                self.part_user_tag_help_label.setText(tt("Group tags only organize part volumes for prediction rounds or review batches. They are not annotation classes, label schemas, or training labels.", self.lang))
+            self._populate_part_user_tag_table()
         self.btn_export_training.setText(tt("Export train-ready volumes", self.lang))
+        self.result_source_label.setText(tt("Review source", self.lang))
+        self.result_source_manual_radio.setText(tt("manual_truth", self.lang))
+        self.result_source_editable_radio.setText(tt("editable_ai_result", self.lang))
+        self.result_region_label.setText(tt("Region label", self.lang))
+        self.btn_export_current_rendering.setText(tt("Export current rendering screenshot", self.lang))
         self.backend_id_label.setText(tt("Backend ID", self.lang))
         self.backend_display_label.setText(tt("Display name", self.lang))
         self.backend_python_label.setText(tt("Python", self.lang))
@@ -3116,11 +4876,45 @@ class TifWorkbenchWidget(QWidget):
         self.backend_train_label.setText(tt("Train command", self.lang))
         self.backend_predict_label.setText(tt("Predict command", self.lang))
         self.backend_manifest_label.setText(tt("Model manifest", self.lang))
+        self.predict_manifest_label.setText(tt("Model manifest", self.lang))
+        self.predict_filter_label.setText(tt("Predict group", self.lang))
+        self.btn_use_nnunet_backend_preset.setText(tt("Use nnU-Net v2 preset", self.lang))
         self.btn_save_backend.setText(tt("Save backend settings", self.lang))
         self.btn_prepare_dataset.setText(tt("Prepare dataset", self.lang))
         self.btn_train_backend.setText(tt("Train backend", self.lang))
+        self.backend_run_title_label.setText(tt("Backend run", self.lang))
+        self.btn_browse_model_manifest.setText(tt("Browse manifest", self.lang))
+        self.btn_refresh_predict_targets.setText(tt("Refresh targets", self.lang))
+        self.btn_select_current_predict_target.setText(tt("Select current part", self.lang))
+        self.btn_select_ready_predict_targets.setText(tt("Select all ready", self.lang))
+        self.btn_clear_predict_targets.setText(tt("Clear selection", self.lang))
         self.btn_import_prediction.setText(tt("Import prediction", self.lang))
-        self.btn_import_external_prediction_tif.setText(tt("Import external label TIF to draft", self.lang))
+        self.btn_stop_backend.setText(tt("Stop run", self.lang))
+        self.btn_open_backend_run.setText(tt("Open run folder", self.lang))
+        self.btn_open_backend_result.setText(tt("Open result JSON", self.lang))
+        self.btn_show_training_result_summary.setText(tt("Show result summary", self.lang))
+        self.btn_open_training_model_output.setText(tt("Open model output", self.lang))
+        self.btn_open_training_model_manifest.setText(tt("Open model manifest", self.lang))
+        self.btn_batch_predict_entry.setText(tt("Enter batch prediction", self.lang))
+        self.btn_batch_predict_entry.setToolTip(tt("Batch prediction entry will use the selected model manifest in the next phase.", self.lang))
+        if hasattr(self, "model_library_label"):
+            self.model_library_label.setText(tt("Trained model", self.lang))
+            self.model_library_notes_label.setText(tt("Notes", self.lang))
+            self.btn_use_selected_tif_model.setText(tt("Use selected model", self.lang))
+            self.btn_save_tif_model_notes.setText(tt("Save notes", self.lang))
+            self.btn_delete_tif_model_record.setText(tt("Delete registration", self.lang))
+            self.model_library_notes_edit.setPlaceholderText(tt("Model notes", self.lang))
+            self._populate_tif_model_library_combo()
+        self._refresh_training_result_controls()
+        self.refresh_predict_targets()
+        if not self._backend_action_running():
+            self.backend_run_status_label.setText(tt("Idle", self.lang))
+            self.backend_elapsed_label.setText(tt("Elapsed: 00:00", self.lang))
+        self.btn_import_external_prediction_tif.setText(tt("Import external label TIF as review result", self.lang))
+        self.btn_refresh_result_comparison.setText(tt("Refresh comparison", self.lang))
+        self.btn_open_result_comparison_target.setText(tt("Open selected in 3D", self.lang))
+        self.btn_show_result_region_in_3d.setText(tt("Highlight selected region", self.lang))
+        self._refresh_result_comparison_if_visible()
         self.btn_start_center.setText(tt("Start Center", self.lang))
         self.btn_ask_agent.setText(tt("Ask Agent", self.lang))
         self.material_table.setHorizontalHeaderLabels(
@@ -3269,7 +5063,20 @@ class TifWorkbenchWidget(QWidget):
 
         readiness_text = ""
         readiness_reasons = ""
-        if self.current_specimen_id and self.current_volume_scope != "part":
+        if self.current_specimen_id and self.current_volume_scope == "part" and self.current_part_id:
+            try:
+                readiness = self.project.evaluate_part_train_ready(
+                    self.current_specimen_id,
+                    self.current_part_id,
+                    self.current_reslice_id,
+                    validate_label_ids=False,
+                )
+            except Exception:
+                readiness = {}
+            if readiness:
+                readiness_text = "yes" if readiness.get("train_ready") else "no"
+                readiness_reasons = ",".join(str(item) for item in readiness.get("reasons", []) if str(item))
+        elif self.current_specimen_id:
             try:
                 readiness = self.project.evaluate_train_ready(self.current_specimen_id)
             except Exception:
@@ -3289,6 +5096,42 @@ class TifWorkbenchWidget(QWidget):
         if self.image_volume is not None:
             volume_status = self.volume_canvas_overlay_text()
         volume_perf = self.volume_performance_report() if self.image_volume is not None else {}
+        backend_config = self._backend_config_from_ui()
+        train_ready_part_refs = []
+        train_ready_top_level_count = 0
+        if self.project is not None:
+            try:
+                train_ready_part_refs = self._train_ready_part_refs()
+            except Exception:
+                train_ready_part_refs = []
+            try:
+                train_ready_top_level_count = len(self.project.list_train_ready_specimens())
+            except Exception:
+                train_ready_top_level_count = 0
+        if train_ready_part_refs:
+            training_scope = "part_reslice"
+        elif train_ready_top_level_count:
+            training_scope = "top_level_volume"
+        else:
+            training_scope = ""
+        selected_model_record = self._selected_tif_model_record() if hasattr(self, "model_library_combo") else None
+        selected_model_manifest = ""
+        selected_model_id = ""
+        if selected_model_record:
+            selected_model_id = self._tif_model_record_id(selected_model_record)
+            selected_model_manifest = self.project.to_absolute(selected_model_record.get("model_manifest", ""))
+        elif hasattr(self, "backend_manifest_edit"):
+            selected_model_manifest = str(self.backend_manifest_edit.text() or "").strip()
+        model_count = 0
+        try:
+            model_count = len(self._tif_model_records())
+        except Exception:
+            model_count = 0
+        command_presence = {
+            "prepare_dataset": bool(str(backend_config.get("prepare_dataset_command") or "").strip()),
+            "train": bool(str(backend_config.get("train_command") or "").strip()),
+            "predict": bool(str(backend_config.get("predict_command") or "").strip()),
+        }
 
         return {
             "source_workbench": "tif_volume",
@@ -3308,6 +5151,21 @@ class TifWorkbenchWidget(QWidget):
             "active_label_shape_zyx": triplet_text(label_shape),
             "train_ready_status": readiness_text,
             "train_ready_reasons": readiness_reasons,
+            "active_label_schema_id": self._active_part_label_schema_id(),
+            "train_ready_part_sample_count": str(len(train_ready_part_refs)),
+            "train_ready_top_level_sample_count": str(train_ready_top_level_count),
+            "training_selection_scope": training_scope,
+            "training_sample_rule": "prepare/train uses all project train-ready part/reslice manual_truth samples; if none exist, it falls back to train-ready top-level specimen volumes. A label schema alone is not enough.",
+            "registered_tif_model_count": str(model_count),
+            "selected_tif_model_id": selected_model_id,
+            "selected_model_manifest": selected_model_manifest,
+            "tif_backend_id": str(backend_config.get("backend_id") or ""),
+            "tif_backend_python": str(backend_config.get("python_executable") or ""),
+            "tif_backend_command_presence": str(command_presence),
+            "backend_run_active": "yes" if self._backend_action_running() else "no",
+            "backend_action": str(self._tif_backend_action or ""),
+            "backend_run_dir": str(self._tif_backend_run_dir or ""),
+            "backend_result_json": str(self._tif_backend_result_json or ""),
             "volume_renderer": self._volume_canvas_renderer,
             "volume_renderer_label": self._volume_renderer_label(),
             "volume_render_mode": self._volume_render_mode,
@@ -3342,13 +5200,13 @@ class TifWorkbenchWidget(QWidget):
             "volume_uploaded_shape_zyx": triplet_text(volume_perf.get("preview_shape_zyx", ())),
             "volume_texture_sampling": str((getattr(self, "_volume_last_stats", {}) or {}).get("texture_filter", "")),
             "volume_display_scaling": str((getattr(self, "_volume_last_stats", {}) or {}).get("display_scaling", "")),
-            "tif_next_requirement": "local_axis_reslice: define a part-local output axis plus roll reference, preview/export local resliced image and optional mask, and keep accepted records usable as training data.",
-            "tif_requirement_doc": "docs/designs/2026-06-20_AntScan局部轴重切片合并设计稿.md",
+            "tif_next_requirement": "annotation_training_loop: bind a label schema, select label IDs before brush editing, save reviewed editable_ai_result/manual labels, accept manual_truth, mark samples train-ready, then prepare/train/predict through the TIF backend.",
+            "tif_requirement_doc": "docs/designs/2026-07-04_TIF训练回环与切片预览模式隔离设计稿.md; docs/designs/2026-07-04_TIF脑分区训练回环执行清单.md",
             "recent_log_excerpt": recent_log,
         }
 
     def _backend_config_from_ui(self):
-        return sanitize_tif_backend_config(
+        config = sanitize_tif_backend_config(
             {
                 "backend_id": self.backend_id_edit.text(),
                 "display_name": self.backend_display_edit.text(),
@@ -3360,9 +5218,14 @@ class TifWorkbenchWidget(QWidget):
                 "model_manifest": self.backend_manifest_edit.text(),
             }
         )
+        return normalize_tif_backend_runtime_config(config)
+
+    def _on_predict_manifest_text_changed(self, text):
+        self.backend_config["model_manifest"] = str(text or "").strip()
 
     def _load_backend_config_into_ui(self):
-        config = sanitize_tif_backend_config(self.backend_config)
+        config = normalize_tif_backend_runtime_config(self.backend_config)
+        self.backend_config = config
         self.backend_id_edit.setText(config.get("backend_id", ""))
         self.backend_display_edit.setText(config.get("display_name", ""))
         self.backend_python_edit.setText(config.get("python_executable", "python"))
@@ -3371,6 +5234,1492 @@ class TifWorkbenchWidget(QWidget):
         self.backend_train_edit.setText(config.get("train_command", ""))
         self.backend_predict_edit.setText(config.get("predict_command", ""))
         self.backend_manifest_edit.setText(config.get("model_manifest", ""))
+
+    def apply_nnunet_v2_backend_preset(self):
+        self.backend_config = normalize_tif_backend_runtime_config(
+            nnunet_v2_tif_backend_preset(self.backend_python_edit.text().strip() or "python")
+        )
+        self._load_backend_config_into_ui()
+        message = tt("nnU-Net v2 preset filled. Commands remain editable for other 3D backends.", self.lang)
+        self.training_status_label.setText(message)
+        self.log(message)
+
+    def _active_part_label_schema_id(self):
+        if self.current_volume_scope == "part" and self.current_specimen_id and self.current_part_id:
+            part = self.project.get_part(self.current_specimen_id, self.current_part_id, default=None)
+            return str(((part or {}).get("training") or {}).get("label_schema_id") or "")
+        return ""
+
+    def _schema_materials_for_part(self, part=None):
+        part = part if isinstance(part, dict) else self.current_part
+        schema_id = str(((part or {}).get("training") or {}).get("label_schema_id") or "")
+        schema = self.project.get_label_schema(schema_id, default=None) if schema_id else None
+        labels = (schema or {}).get("labels") or []
+        if not labels:
+            return []
+        materials = [
+            {"id": 0, "name": "background", "display_name": tt("Background / erase target", self.lang), "color": "#000000", "trainable": False}
+        ]
+        for item in labels:
+            try:
+                label_id = int(item.get("id", 0))
+            except (TypeError, ValueError):
+                continue
+            if label_id <= 0:
+                continue
+            materials.append(
+                {
+                    "id": label_id,
+                    "name": str(item.get("name") or f"label_{label_id}"),
+                    "display_name": str(item.get("display_name") or item.get("name") or f"Label {label_id}"),
+                    "color": str(item.get("color") or "#F94144"),
+                    "trainable": bool(item.get("trainable", True)),
+                    "source_name": str(item.get("display_name") or item.get("name") or f"Label {label_id}"),
+                }
+            )
+        return materials
+
+    def _active_materials(self):
+        if self.current_volume_scope == "part":
+            schema_materials = self._schema_materials_for_part()
+            if schema_materials:
+                return schema_materials
+        return self.material_map.get("materials", []) if isinstance(self.material_map, dict) else []
+
+    def _sync_material_editor_scope(self):
+        is_part = self.current_volume_scope == "part"
+        if hasattr(self, "material_editor_buttons"):
+            self.material_editor_buttons.setVisible(not is_part)
+        if hasattr(self, "material_help_label"):
+            message = (
+                "Current labels are for selecting the label written by brush/fill tools. For project part volumes and reslices, create or edit labels in the bound schema above."
+                if is_part
+                else "After binding a label schema, select one current label here before using the brush or fill tools."
+            )
+            self.material_help_label.setText(tt(message, self.lang))
+        if hasattr(self, "material_scope_help_label"):
+            self.material_scope_help_label.setText(
+                tt(
+                    "Label IDs are the numeric labels stored in the current volume. For project part volumes and their reslices, this list follows the bound region label schema; for top-level imported volumes, it is the specimen label map.",
+                    self.lang,
+                )
+            )
+
+    def _sync_material_colors_from_active_source(self):
+        self.material_colors = {
+            int(item["id"]): QColor(str(item.get("color", "#000000")))
+            for item in self._active_materials()
+            if isinstance(item, dict) and str(item.get("id", "")).strip() != ""
+        }
+
+    def _refresh_active_part_material_schema(self):
+        self._sync_material_editor_scope()
+        self._sync_material_colors_from_active_source()
+        self._populate_material_table()
+        self._update_current_material_summary()
+        if self.image_volume is not None:
+            self.render_current_slice()
+
+    def _populate_label_schema_combo(self, preferred_id=None):
+        combo = getattr(self, "label_schema_combo", None)
+        if combo is None:
+            return
+        current = str(preferred_id if preferred_id is not None else (combo.currentData() if combo.count() else self._active_part_label_schema_id()) or "")
+        if not current:
+            current = self._active_part_label_schema_id()
+        combo.blockSignals(True)
+        combo.clear()
+        for schema in self.project.project_data.get("label_schemas", []) or []:
+            if not isinstance(schema, dict):
+                continue
+            schema_id = str(schema.get("schema_id") or "")
+            if not schema_id:
+                continue
+            label = str(schema.get("display_name") or schema_id)
+            combo.addItem(f"{label} ({schema_id})", schema_id)
+        index = combo.findData(current)
+        combo.setCurrentIndex(index if index >= 0 else (-1 if combo.count() == 0 else 0))
+        combo.blockSignals(False)
+        self._on_label_schema_selected()
+
+    def _set_label_schema_table_rows(self, labels):
+        table = getattr(self, "label_schema_table", None)
+        if table is None:
+            return
+        table.blockSignals(True)
+        table.setColumnCount(4)
+        table.setHorizontalHeaderLabels(["", tt("Label ID", self.lang), tt("Region name", self.lang), tt("Color", self.lang)])
+        table.setRowCount(0)
+        for item in labels or []:
+            self._append_label_schema_row(item)
+        table.resizeColumnsToContents()
+        table.blockSignals(False)
+
+    def _append_label_schema_row(self, item=None):
+        table = self.label_schema_table
+        item = dict(item or {})
+        try:
+            label_id = int(item.get("id", table.rowCount() + 1))
+        except (TypeError, ValueError):
+            label_id = table.rowCount() + 1
+        color_text = str(item.get("color") or self._default_schema_label_color(label_id))
+        color = QColor(color_text)
+        if not color.isValid():
+            color = QColor(self._default_schema_label_color(label_id))
+            color_text = color.name()
+        row = table.rowCount()
+        table.insertRow(row)
+        swatch = QTableWidgetItem("")
+        swatch.setToolTip(color.name())
+        swatch.setBackground(color)
+        swatch.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+        table.setItem(row, 0, swatch)
+        table.setItem(row, 1, QTableWidgetItem(str(label_id)))
+        name = str(item.get("display_name") or item.get("name") or f"label_{label_id}")
+        table.setItem(row, 2, QTableWidgetItem(name))
+        table.setItem(row, 3, QTableWidgetItem(color.name()))
+        return row
+
+    def _default_schema_label_color(self, label_id):
+        palette = ("#F94144", "#43AA8B", "#577590", "#F9C74F", "#90BE6D", "#F3722C", "#277DA1", "#B56576")
+        try:
+            return palette[(int(label_id) - 1) % len(palette)]
+        except Exception:
+            return palette[0]
+
+    def _on_label_schema_selected(self, *args):
+        schema_id = str(self.label_schema_combo.currentData() or "") if getattr(self, "label_schema_combo", None) else ""
+        schema = self.project.get_label_schema(schema_id, default=None) if schema_id else None
+        self.label_schema_id_edit.setText(schema_id)
+        self.label_schema_part_name_edit.setText(str((schema or {}).get("user_defined_part_name") or ""))
+        self._set_label_schema_table_rows((schema or {}).get("labels") or [])
+
+    def new_label_schema(self):
+        part_name = str(self.current_part_id or "").strip()
+        if not part_name and isinstance(self.current_part, dict):
+            part_name = str(self.current_part.get("part_id") or self.current_part.get("display_name") or "").strip()
+        clean_part = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in part_name).strip("_").lower()
+        base = f"{clean_part}_regions" if clean_part else "generic_regions"
+        existing = {
+            str((schema or {}).get("schema_id") or "")
+            for schema in self.project.project_data.get("label_schemas", []) or []
+            if isinstance(schema, dict)
+        }
+        candidate = base
+        suffix = 2
+        while candidate in existing:
+            candidate = f"{base}_{suffix}"
+            suffix += 1
+        self.label_schema_combo.blockSignals(True)
+        self.label_schema_combo.setCurrentIndex(-1)
+        self.label_schema_combo.blockSignals(False)
+        self.label_schema_id_edit.setText(candidate)
+        self.label_schema_part_name_edit.setText(part_name or "part")
+        self._set_label_schema_table_rows(
+            [
+                {"id": 1, "name": "label_1", "color": "#F94144"},
+                {"id": 2, "name": "label_2", "color": "#43AA8B"},
+            ]
+        )
+        self.label_schema_id_edit.setFocus(Qt.OtherFocusReason)
+        return candidate
+
+    def add_label_schema_row(self):
+        existing_ids = []
+        for row in range(self.label_schema_table.rowCount()):
+            item = self.label_schema_table.item(row, 1)
+            try:
+                existing_ids.append(int(item.text()))
+            except Exception:
+                continue
+        next_id = max(existing_ids or [0]) + 1
+        row = self._append_label_schema_row({"id": next_id, "name": f"label_{next_id}", "color": self._default_schema_label_color(next_id)})
+        self.label_schema_table.selectRow(row)
+        return row
+
+    def remove_selected_label_schema_row(self):
+        table = self.label_schema_table
+        row = table.currentRow()
+        if row < 0 and table.selectedItems():
+            row = table.selectedItems()[0].row()
+        if row >= 0:
+            table.removeRow(row)
+            return True
+        return False
+
+    def _label_schema_rows_from_table(self):
+        labels = []
+        used = set()
+        for row in range(self.label_schema_table.rowCount()):
+            id_item = self.label_schema_table.item(row, 1)
+            name_item = self.label_schema_table.item(row, 2)
+            color_item = self.label_schema_table.item(row, 3)
+            try:
+                label_id = int(str(id_item.text() if id_item is not None else "").strip())
+            except (TypeError, ValueError):
+                continue
+            if label_id <= 0 or label_id in used:
+                continue
+            used.add(label_id)
+            name = str(name_item.text() if name_item is not None else "").strip() or f"label_{label_id}"
+            color = QColor(str(color_item.text() if color_item is not None else "").strip())
+            if not color.isValid():
+                color = QColor(self._default_schema_label_color(label_id))
+            labels.append(
+                {
+                    "id": label_id,
+                    "name": name,
+                    "display_name": name,
+                    "color": color.name(),
+                    "trainable": True,
+                }
+            )
+        labels.sort(key=lambda item: int(item.get("id", 0)))
+        return labels
+
+    def _on_label_schema_table_item_changed(self, item):
+        if item is None or item.column() != 3:
+            return
+        color = QColor(str(item.text() or ""))
+        if not color.isValid():
+            return
+        swatch = self.label_schema_table.item(item.row(), 0)
+        if swatch is not None:
+            swatch.setBackground(color)
+            swatch.setToolTip(color.name())
+
+    def _choose_label_schema_row_color(self, row):
+        if row < 0 or row >= self.label_schema_table.rowCount():
+            return False
+        color_item = self.label_schema_table.item(row, 3)
+        current = QColor(str(color_item.text() if color_item is not None else ""))
+        if not current.isValid():
+            id_item = self.label_schema_table.item(row, 1)
+            try:
+                label_id = int(id_item.text() if id_item is not None else row + 1)
+            except Exception:
+                label_id = row + 1
+            current = QColor(self._default_schema_label_color(label_id))
+        chosen = QColorDialog.getColor(current, self, tt("Choose label color", self.lang))
+        if not chosen.isValid():
+            return False
+        if color_item is None:
+            color_item = QTableWidgetItem(chosen.name())
+            self.label_schema_table.setItem(row, 3, color_item)
+        else:
+            color_item.setText(chosen.name())
+        swatch = self.label_schema_table.item(row, 0)
+        if swatch is not None:
+            swatch.setBackground(chosen)
+            swatch.setToolTip(chosen.name())
+        return True
+
+    def _on_label_schema_table_cell_double_clicked(self, row, column):
+        if column in (0, 3):
+            self._choose_label_schema_row_color(row)
+
+    def save_current_label_schema(self):
+        schema_id = self.label_schema_id_edit.text().strip()
+        if not schema_id:
+            self._set_operation_feedback(tt("Select or create a label schema before saving.", self.lang))
+            return None
+        labels = self._label_schema_rows_from_table()
+        schema = self.project.add_or_update_label_schema(
+            schema_id,
+            labels=labels,
+            user_defined_part_name=self.label_schema_part_name_edit.text().strip(),
+            display_name=schema_id,
+            save=True,
+        )
+        self._populate_label_schema_combo(schema.get("schema_id", schema_id))
+        self._populate_result_region_combo()
+        self._refresh_active_part_material_schema()
+        self._refresh_result_comparison_if_visible()
+        self._set_operation_feedback(tt("Saved label schema {0}.", self.lang).format(schema.get("schema_id", schema_id)))
+        return schema
+
+    def bind_current_part_label_schema(self):
+        if self.current_volume_scope != "part" or not self.current_specimen_id or not self.current_part_id:
+            self._set_operation_feedback(tt("Select a part volume before binding a label schema.", self.lang))
+            return False
+        schema = self.save_current_label_schema()
+        if not schema:
+            return False
+        schema_id = str(schema.get("schema_id") or "")
+        self.project.set_part_training_metadata(
+            self.current_specimen_id,
+            self.current_part_id,
+            user_defined_part_name=str(schema.get("user_defined_part_name") or self.label_schema_part_name_edit.text().strip() or self.current_part_id),
+            label_schema_id=schema_id,
+            save=True,
+        )
+        self.current_part = self.project.get_part(self.current_specimen_id, self.current_part_id, default=self.current_part)
+        self._refresh_active_part_material_schema()
+        self.refresh_project()
+        self._select_volume_tree_item(self.current_specimen_id, "part", self.current_part_id, self.current_reslice_id)
+        self._set_operation_feedback(tt("Bound label schema {0} to current part {1}.", self.lang).format(schema_id, self.current_part_id))
+        return True
+
+    def _selected_label_schema_id(self):
+        schema_id = str(self.label_schema_combo.currentData() or "") if getattr(self, "label_schema_combo", None) else ""
+        return schema_id or str(self.label_schema_id_edit.text() or "").strip()
+
+    def export_label_schema_dialog(self):
+        schema_id = self._selected_label_schema_id()
+        if not schema_id:
+            self._set_operation_feedback(tt("Select a label schema before exporting.", self.lang))
+            return ""
+        default_dir = os.path.join(self.project.project_dir, "exports", "label_schemas")
+        os.makedirs(default_dir, exist_ok=True)
+        default_name = self._safe_export_name_fragment(schema_id, "label_schema") + ".json"
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            tt("Export Label Schema", self.lang),
+            os.path.join(default_dir, default_name),
+            tt("TaxaMask label schema (*.json)", self.lang),
+        )
+        if not file_path:
+            return ""
+        try:
+            self.project.export_label_schema(schema_id, file_path)
+        except Exception as exc:
+            message = tt("Label schema export failed: {0}", self.lang).format(str(exc))
+            self._set_operation_feedback(message)
+            QMessageBox.warning(self, tt("Export Label Schema", self.lang), message)
+            return ""
+        message = tt("Exported label schema {0}: {1}", self.lang).format(schema_id, file_path)
+        self._set_operation_feedback(message)
+        self.log(message)
+        return file_path
+
+    def _label_schema_id_from_import_file(self, file_path):
+        with open(file_path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if not isinstance(payload, dict):
+            return ""
+        source = payload.get("label_schema") if isinstance(payload.get("label_schema"), dict) else payload
+        if not isinstance(source, dict):
+            return ""
+        return str(source.get("schema_id") or source.get("id") or source.get("name") or "").strip()
+
+    def import_label_schema_dialog(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            tt("Import Label Schema", self.lang),
+            self.project.project_dir,
+            tt("TaxaMask label schema (*.json)", self.lang),
+        )
+        if not file_path:
+            return None
+        try:
+            incoming_schema_id = self._label_schema_id_from_import_file(file_path)
+            if incoming_schema_id and self.project.get_label_schema(incoming_schema_id, default=None) is not None:
+                reply = QMessageBox.question(
+                    self,
+                    tt("Import Label Schema", self.lang),
+                    tt("Label schema {0} already exists. Replace it with the imported schema?", self.lang).format(incoming_schema_id),
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                if reply != QMessageBox.Yes:
+                    return None
+            schema = self.project.import_label_schema(file_path, replace=True, save=True)
+        except Exception as exc:
+            message = tt("Label schema import failed: {0}", self.lang).format(str(exc))
+            self._set_operation_feedback(message)
+            QMessageBox.warning(self, tt("Import Label Schema", self.lang), message)
+            return None
+        schema_id = str(schema.get("schema_id") or "")
+        self._populate_label_schema_combo(schema_id)
+        self._populate_result_region_combo()
+        self._refresh_active_part_material_schema()
+        self._refresh_result_comparison_if_visible()
+        message = tt("Imported label schema {0}.", self.lang).format(schema_id)
+        self._set_operation_feedback(message)
+        self.log(message)
+        return schema
+
+    def _part_user_tags_for_current_part(self):
+        if self.current_volume_scope != "part" or not self.current_specimen_id or not self.current_part_id:
+            return []
+        part = self.project.get_part(self.current_specimen_id, self.current_part_id, default={}) or {}
+        return [str(item) for item in (part.get("user_tags") or []) if str(item or "")]
+
+    def _update_part_user_tag_color_swatch(self, *args):
+        if not hasattr(self, "part_user_tag_color_swatch"):
+            return
+        color = QColor(str(self.part_user_tag_color_edit.text() or "#6B8AFD"))
+        if not color.isValid():
+            color = QColor("#6B8AFD")
+        self.part_user_tag_color_swatch.setToolTip(color.name())
+        self.part_user_tag_color_swatch.setStyleSheet(
+            "QLabel#tifPartUserTagColorSwatch {"
+            f"background: {color.name()};"
+            "border: 1px solid #D7E0E4;"
+            "border-radius: 5px;"
+            "}"
+        )
+
+    def choose_part_user_tag_color(self):
+        current = QColor(str(self.part_user_tag_color_edit.text() or "#6B8AFD"))
+        if not current.isValid():
+            current = QColor("#6B8AFD")
+        chosen = QColorDialog.getColor(current, self, tt("Choose group color", self.lang))
+        if not chosen.isValid():
+            return False
+        self.part_user_tag_color_edit.setText(chosen.name())
+        self._update_part_user_tag_color_swatch()
+        return True
+
+    def _populate_part_user_tag_table(self):
+        table = getattr(self, "part_user_tag_table", None)
+        if table is None:
+            return
+        selected_id = self._selected_part_user_tag_id()
+        assigned = set(self._part_user_tags_for_current_part())
+        tags = [tag for tag in self.project.project_data.get("part_user_tags", []) or [] if isinstance(tag, dict)]
+        tags.sort(key=lambda item: int((item or {}).get("order_index", 0)))
+        table.blockSignals(True)
+        table.setColumnCount(5)
+        table.setHorizontalHeaderLabels(["", tt("Group tag ID", self.lang), tt("Group tag label", self.lang), tt("Color", self.lang), tt("Assigned", self.lang)])
+        table.setRowCount(0)
+        for row, tag in enumerate(tags):
+            table.insertRow(row)
+            tag_id = str(tag.get("tag_id") or "")
+            color = QColor(str(tag.get("color") or "#6B8AFD"))
+            if not color.isValid():
+                color = QColor("#6B8AFD")
+            swatch = QTableWidgetItem("")
+            swatch.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            swatch.setToolTip(color.name())
+            swatch.setBackground(color)
+            table.setItem(row, 0, swatch)
+            id_item = QTableWidgetItem(tag_id)
+            id_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            id_item.setData(Qt.UserRole, tag_id)
+            table.setItem(row, 1, id_item)
+            label_item = QTableWidgetItem(str(tag.get("label") or tag_id))
+            label_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            table.setItem(row, 2, label_item)
+            color_item = QTableWidgetItem(color.name())
+            color_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            table.setItem(row, 3, color_item)
+            assigned_item = QTableWidgetItem("")
+            assigned_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+            assigned_item.setCheckState(Qt.Checked if tag_id in assigned else Qt.Unchecked)
+            assigned_item.setData(Qt.UserRole, tag_id)
+            table.setItem(row, 4, assigned_item)
+        table.resizeColumnsToContents()
+        table.blockSignals(False)
+        target_row = -1
+        if selected_id:
+            for row in range(table.rowCount()):
+                item = table.item(row, 1)
+                if item is not None and item.text() == selected_id:
+                    target_row = row
+                    break
+        if target_row >= 0:
+            table.selectRow(target_row)
+        elif table.rowCount() > 0:
+            table.selectRow(0)
+        self._on_part_user_tag_selected()
+        self._update_part_user_tag_color_swatch()
+
+    def _selected_part_user_tag_id(self):
+        table = getattr(self, "part_user_tag_table", None)
+        if table is None:
+            return ""
+        row = table.currentRow()
+        if row < 0 and table.selectedItems():
+            row = table.selectedItems()[0].row()
+        item = table.item(row, 1) if row >= 0 else None
+        return str(item.data(Qt.UserRole) or item.text() or "") if item is not None else ""
+
+    def _on_part_user_tag_selected(self):
+        tag_id = self._selected_part_user_tag_id()
+        tag = None
+        for item in self.project.project_data.get("part_user_tags", []) or []:
+            if isinstance(item, dict) and str(item.get("tag_id") or "") == tag_id:
+                tag = item
+                break
+        self._selected_part_user_tag_id_for_edit = tag_id
+        if tag is None:
+            return
+        self.part_user_tag_id_edit.setText(tag_id)
+        self.part_user_tag_label_edit.setText(str(tag.get("label") or tag_id))
+        color = QColor(str(tag.get("color") or "#6B8AFD"))
+        self.part_user_tag_color_edit.setText(color.name() if color.isValid() else "#6B8AFD")
+        self._update_part_user_tag_color_swatch()
+
+    def new_part_user_tag(self):
+        base = "round_1"
+        existing = {
+            str((tag or {}).get("tag_id") or "")
+            for tag in self.project.project_data.get("part_user_tags", []) or []
+            if isinstance(tag, dict)
+        }
+        candidate = base
+        suffix = 2
+        while candidate in existing:
+            candidate = f"round_{suffix}"
+            suffix += 1
+        self._selected_part_user_tag_id_for_edit = ""
+        self.part_user_tag_id_edit.setText(candidate)
+        self.part_user_tag_label_edit.setText("Round 1" if candidate == base else f"Round {suffix - 1}")
+        self.part_user_tag_color_edit.setText("#6B8AFD")
+        self._update_part_user_tag_color_swatch()
+        self.part_user_tag_id_edit.setFocus(Qt.OtherFocusReason)
+        return candidate
+
+    def save_part_user_tag(self):
+        tag_id = self.part_user_tag_id_edit.text().strip()
+        if not tag_id:
+            return None
+        color = QColor(str(self.part_user_tag_color_edit.text() or "#6B8AFD"))
+        if not color.isValid():
+            color = QColor("#6B8AFD")
+        existing_ids = [
+            str((tag or {}).get("tag_id") or "")
+            for tag in self.project.project_data.get("part_user_tags", []) or []
+            if isinstance(tag, dict)
+        ]
+        order_index = existing_ids.index(tag_id) if tag_id in existing_ids else len(existing_ids)
+        tag = self.project.upsert_part_user_tag(
+            tag_id,
+            self.part_user_tag_label_edit.text().strip() or tag_id,
+            color.name(),
+            order_index=order_index,
+            save=True,
+        )
+        self._populate_part_user_tag_table()
+        self.refresh_predict_targets()
+        self.refresh_project()
+        self._set_operation_feedback(tt("Saved part tag {0}.", self.lang).format(tag.get("label") or tag_id))
+        return tag
+
+    def delete_selected_part_user_tag(self):
+        tag_id = self._selected_part_user_tag_id_for_edit or self._selected_part_user_tag_id()
+        if not tag_id:
+            return False
+        if not self.project.delete_part_user_tag(tag_id, save=True):
+            return False
+        self._selected_part_user_tag_id_for_edit = ""
+        self._populate_part_user_tag_table()
+        self.refresh_predict_targets()
+        self.refresh_project()
+        self._set_operation_feedback(tt("Deleted part tag {0}.", self.lang).format(tag_id))
+        return True
+
+    def _part_user_tag_order_from_table(self):
+        order = []
+        for row in range(self.part_user_tag_table.rowCount()):
+            item = self.part_user_tag_table.item(row, 1)
+            tag_id = str(item.data(Qt.UserRole) or item.text() or "") if item is not None else ""
+            if tag_id and tag_id not in order:
+                order.append(tag_id)
+        return order
+
+    def save_part_user_tag_order_from_table(self):
+        if not hasattr(self, "part_user_tag_table"):
+            return []
+        order = self._part_user_tag_order_from_table()
+        tags = self.project.set_part_user_tag_order(order, save=True)
+        self._populate_part_user_tag_table()
+        self.refresh_predict_targets()
+        return tags
+
+    def move_selected_part_user_tag(self, delta):
+        table = self.part_user_tag_table
+        row = table.currentRow()
+        if row < 0:
+            return False
+        target = max(0, min(table.rowCount() - 1, row + int(delta)))
+        if target == row:
+            return False
+        order = self._part_user_tag_order_from_table()
+        item = order.pop(row)
+        order.insert(target, item)
+        self.project.set_part_user_tag_order(order, save=True)
+        self._populate_part_user_tag_table()
+        table.selectRow(target)
+        self.refresh_predict_targets()
+        return True
+
+    def apply_part_user_tags_to_current_part(self):
+        if self.current_volume_scope != "part" or not self.current_specimen_id or not self.current_part_id:
+            self._set_operation_feedback(tt("Select a part volume before assigning tags.", self.lang))
+            return False
+        selected = []
+        for row in range(self.part_user_tag_table.rowCount()):
+            item = self.part_user_tag_table.item(row, 4)
+            if item is not None and item.checkState() == Qt.Checked:
+                tag_id = str(item.data(Qt.UserRole) or "")
+                if tag_id:
+                    selected.append(tag_id)
+        self.project.set_part_user_tags(self.current_specimen_id, self.current_part_id, selected, save=True)
+        self.current_part = self.project.get_part(self.current_specimen_id, self.current_part_id, default=self.current_part)
+        self._populate_part_user_tag_table()
+        self.refresh_predict_targets()
+        self.refresh_project()
+        self._select_volume_tree_item(self.current_specimen_id, "part", self.current_part_id, self.current_reslice_id)
+        self._set_operation_feedback(tt("Applied {0} user tag(s) to current part.", self.lang).format(len(selected)))
+        return True
+
+    def _part_user_tag_lookup(self):
+        return {
+            str((tag or {}).get("tag_id") or ""): str((tag or {}).get("label") or (tag or {}).get("tag_id") or "")
+            for tag in self.project.project_data.get("part_user_tags", []) or []
+            if isinstance(tag, dict) and str((tag or {}).get("tag_id") or "")
+        }
+
+    def _predict_ref_key(self, ref):
+        if isinstance(ref, dict):
+            return (
+                str(ref.get("specimen_id") or ""),
+                str(ref.get("part_id") or ""),
+                str(ref.get("reslice_id") or ""),
+            )
+        if isinstance(ref, (list, tuple)) and len(ref) >= 3:
+            return (str(ref[0] or ""), str(ref[1] or ""), str(ref[2] or ""))
+        return ("", "", "")
+
+    def _predict_ref_from_key(self, key):
+        specimen_id, part_id, reslice_id = self._predict_ref_key(key)
+        return {"specimen_id": specimen_id, "part_id": part_id, "reslice_id": reslice_id}
+
+    def _result_source_role(self):
+        if getattr(self, "result_source_editable_radio", None) is not None and self.result_source_editable_radio.isChecked():
+            return "editable_ai_result"
+        return "manual_truth"
+
+    def _result_region_id(self):
+        combo = getattr(self, "result_region_combo", None)
+        if combo is None or not combo.count():
+            return 0
+        try:
+            return int(combo.currentData() or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _result_region_name(self):
+        combo = getattr(self, "result_region_combo", None)
+        if combo is None or not combo.count():
+            return tt("All", self.lang)
+        text = str(combo.currentText() or "").strip()
+        if "·" in text:
+            text = text.split("·", 1)[1].strip()
+        return text or tt("All", self.lang)
+
+    def _result_comparison_tab_is_active(self):
+        return bool(
+            hasattr(self, "task_tabs")
+            and hasattr(self, "training_mode_tabs")
+            and hasattr(self, "result_compare_page")
+            and self.task_tabs.currentWidget() is self.training_mode_tabs
+            and self.training_mode_tabs.currentWidget() is self.result_compare_page
+        )
+
+    def _mark_result_comparison_stale(self):
+        self._result_comparison_stale = True
+        if hasattr(self, "result_compare_summary_label") and not self._result_comparison_tab_is_active():
+            self.result_compare_summary_label.setText(tt("Result comparison will refresh when opened.", self.lang))
+
+    def _refresh_result_comparison_if_visible(self):
+        if self._result_comparison_tab_is_active():
+            self.refresh_result_comparison()
+        else:
+            self._mark_result_comparison_stale()
+
+    def _part_comparison_name(self, part):
+        training = (part or {}).get("training") or {}
+        return str(
+            training.get("user_defined_part_name")
+            or (part or {}).get("display_name")
+            or (part or {}).get("part_id")
+            or ""
+        ).strip()
+
+    def _active_comparison_part_name(self):
+        if self.current_volume_scope == "part" and isinstance(self.current_part, dict):
+            return self._part_comparison_name(self.current_part)
+        return ""
+
+    def _preferred_result_reslice_id(self, specimen_id, part):
+        training = (part or {}).get("training") or {}
+        active_reslice_id = str(training.get("active_reslice_id") or "").strip()
+        part_id = str((part or {}).get("part_id") or "")
+        if active_reslice_id:
+            try:
+                if self.project.get_part_reslice(specimen_id, part_id, active_reslice_id, default=None) is not None:
+                    return active_reslice_id
+            except Exception:
+                return active_reslice_id
+        reslices = []
+        try:
+            reslices = self.project.list_part_reslices(specimen_id, part_id)
+        except Exception:
+            reslices = ((part or {}).get("metadata") or {}).get("local_axis_reslices", []) or []
+        if reslices:
+            return str((reslices[-1] or {}).get("reslice_id") or "")
+        return ""
+
+    def _label_volume_counts_for_result(self, record, region_id):
+        path = self.project.to_absolute((record or {}).get("path", ""))
+        if not path:
+            return {"ok": False, "status": tt("Label path missing", self.lang), "path": ""}
+        if not volume_sidecar_exists(path):
+            return {"ok": False, "status": tt("Label file missing", self.lang), "path": path}
+        try:
+            volume = load_volume_sidecar(path, mmap_mode="r")
+            shape = tuple(int(value) for value in getattr(volume, "shape", ()) or ())
+            if len(shape) != 3 or min(shape) <= 0:
+                return {"ok": False, "status": tt("Label read failed: {0}", self.lang).format("empty_or_non_3d"), "path": path}
+            total_labeled = 0
+            region_voxels = 0
+            plane_values = max(1, int(np.prod(shape[1:])))
+            z_chunk = max(1, min(int(shape[0]), int((32 * 1024 * 1024) / (plane_values * max(1, np.dtype(getattr(volume, "dtype", np.uint16)).itemsize)))))
+            for z0 in range(0, int(shape[0]), z_chunk):
+                z1 = min(int(shape[0]), z0 + z_chunk)
+                chunk = np.asarray(volume[z0:z1])
+                total_labeled += int(np.count_nonzero(chunk))
+                if int(region_id) > 0:
+                    region_voxels += int(np.count_nonzero(chunk == int(region_id)))
+                else:
+                    region_voxels += int(np.count_nonzero(chunk))
+            percent = (float(region_voxels) / float(total_labeled) * 100.0) if total_labeled else 0.0
+            return {
+                "ok": True,
+                "status": str((record or {}).get("status") or "available"),
+                "path": path,
+                "shape": shape,
+                "region_voxels": region_voxels,
+                "total_labeled_voxels": total_labeled,
+                "percent": percent,
+            }
+        except Exception as exc:
+            return {"ok": False, "status": tt("Label read failed: {0}", self.lang).format(str(exc)), "path": path}
+
+    def _result_comparison_rows(self):
+        source_role = self._result_source_role()
+        region_id = self._result_region_id()
+        active_part_name = self._active_comparison_part_name()
+        rows = []
+        for specimen in self.project.project_data.get("specimens", []) or []:
+            if not isinstance(specimen, dict):
+                continue
+            specimen_id = str(specimen.get("specimen_id") or "")
+            if not specimen_id:
+                continue
+            specimen_label = str(specimen.get("display_name") or specimen_id)
+            for part in specimen.get("parts", []) or []:
+                if not isinstance(part, dict):
+                    continue
+                part_id = str(part.get("part_id") or "")
+                if not part_id:
+                    continue
+                part_name = self._part_comparison_name(part)
+                if active_part_name and part_name and part_name != active_part_name:
+                    continue
+                labels = part.get("labels") or {}
+                record = labels.get(source_role) or {}
+                ref = {
+                    "specimen_id": specimen_id,
+                    "part_id": part_id,
+                    "reslice_id": self._preferred_result_reslice_id(specimen_id, part),
+                }
+                counts = self._label_volume_counts_for_result(record, region_id) if record and str(record.get("path") or "").strip() else {
+                    "ok": False,
+                    "status": tt("Missing {0}", self.lang).format(source_role),
+                    "path": "",
+                }
+                rows.append(
+                    {
+                        "ref": ref,
+                        "specimen_label": specimen_label,
+                        "part_label": part_name or part_id,
+                        "part_id": part_id,
+                        "reslice_id": ref["reslice_id"],
+                        "source_role": source_role,
+                        "source_status": counts.get("status", ""),
+                        "ok": bool(counts.get("ok")),
+                        "label_path": counts.get("path", ""),
+                        "shape": tuple(counts.get("shape") or (record.get("shape_zyx") or [])),
+                        "region_voxels": int(counts.get("region_voxels") or 0),
+                        "total_labeled_voxels": int(counts.get("total_labeled_voxels") or 0),
+                        "percent": float(counts.get("percent") or 0.0),
+                    }
+                )
+        return rows
+
+    def _make_result_table_item(self, text):
+        item = QTableWidgetItem(str(text or ""))
+        item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+        return item
+
+    def _format_result_shape(self, shape):
+        try:
+            values = tuple(int(value) for value in shape)
+        except (TypeError, ValueError):
+            values = ()
+        if len(values) != 3 or min(values) <= 0:
+            return "-"
+        return " / ".join(str(value) for value in values)
+
+    def _format_count(self, value):
+        try:
+            return f"{int(value):,}"
+        except (TypeError, ValueError):
+            return "0"
+
+    def _update_result_comparison_summary(self, rows):
+        rows = list(rows or [])
+        total = len(rows)
+        ok_rows = [row for row in rows if row.get("ok")]
+        region_voxels = sum(int(row.get("region_voxels") or 0) for row in ok_rows)
+        labeled_voxels = sum(int(row.get("total_labeled_voxels") or 0) for row in ok_rows)
+        percent = (float(region_voxels) / float(labeled_voxels) * 100.0) if labeled_voxels else 0.0
+        part_name = self._active_comparison_part_name() or tt("All comparable parts", self.lang)
+        text = tt(
+            "Listed {0} {1} part result(s); {2} have {3}. Region voxels: {4} / labeled voxels: {5} ({6}%).",
+            self.lang,
+        ).format(
+            total,
+            part_name,
+            len(ok_rows),
+            self._result_source_role(),
+            self._format_count(region_voxels),
+            self._format_count(labeled_voxels),
+            f"{percent:.2f}",
+        )
+        if total == 0:
+            text = tt("No comparable part is selected yet. Select a part volume or use all parts.", self.lang)
+        self.result_compare_summary_label.setText(text)
+
+    def refresh_result_comparison(self):
+        if not hasattr(self, "result_compare_table"):
+            return []
+        self._result_comparison_stale = False
+        rows = self._result_comparison_rows()
+        table = self.result_compare_table
+        self._result_compare_refreshing = True
+        try:
+            table.blockSignals(True)
+            table.setRowCount(0)
+            table.setColumnCount(8)
+            table.setHorizontalHeaderLabels(
+                [
+                    tt("Specimen", self.lang),
+                    tt("Part", self.lang),
+                    tt("Reslice", self.lang),
+                    tt("Region voxels", self.lang),
+                    tt("Labeled voxels", self.lang),
+                    tt("Region %", self.lang),
+                    tt("Source status", self.lang),
+                    tt("Shape Z/Y/X", self.lang),
+                ]
+            )
+            for row_index, row in enumerate(rows):
+                table.insertRow(row_index)
+                first_item = self._make_result_table_item(row["specimen_label"])
+                first_item.setData(Qt.UserRole, dict(row))
+                table.setItem(row_index, 0, first_item)
+                table.setItem(row_index, 1, self._make_result_table_item(f"{row['part_label']} ({row['part_id']})"))
+                table.setItem(row_index, 2, self._make_result_table_item(row.get("reslice_id") or "-"))
+                table.setItem(row_index, 3, self._make_result_table_item(self._format_count(row.get("region_voxels"))))
+                table.setItem(row_index, 4, self._make_result_table_item(self._format_count(row.get("total_labeled_voxels"))))
+                table.setItem(row_index, 5, self._make_result_table_item(f"{float(row.get('percent') or 0.0):.2f}"))
+                table.setItem(row_index, 6, self._make_result_table_item(row.get("source_status") or "-"))
+                table.setItem(row_index, 7, self._make_result_table_item(self._format_result_shape(row.get("shape"))))
+            table.resizeColumnsToContents()
+            if rows and not table.selectedItems():
+                table.selectRow(0)
+        finally:
+            table.blockSignals(False)
+            self._result_compare_refreshing = False
+        self._update_result_comparison_summary(rows)
+        self._sync_result_comparison_controls()
+        return rows
+
+    def _selected_result_comparison_row(self):
+        table = getattr(self, "result_compare_table", None)
+        if table is None:
+            return {}
+        selected = table.selectedItems()
+        row_index = selected[0].row() if selected else table.currentRow()
+        if row_index < 0:
+            return {}
+        item = table.item(row_index, 0)
+        if item is None:
+            return {}
+        row = item.data(Qt.UserRole)
+        return dict(row or {}) if isinstance(row, dict) else {}
+
+    def _set_label_role_if_available(self, role):
+        if not hasattr(self, "label_role_combo"):
+            return False
+        index = self.label_role_combo.findData(role)
+        if index < 0:
+            return False
+        if index == self.label_role_combo.currentIndex():
+            self._reload_label_volume()
+            return True
+        self.label_role_combo.setCurrentIndex(index)
+        return True
+
+    def open_selected_result_comparison_target(self):
+        if getattr(self, "_opening_result_comparison_target", False):
+            return False
+        row = self._selected_result_comparison_row()
+        ref = row.get("ref") or {}
+        specimen_id = str(ref.get("specimen_id") or "")
+        part_id = str(ref.get("part_id") or "")
+        reslice_id = str(ref.get("reslice_id") or "")
+        if not specimen_id or not part_id:
+            self._set_operation_feedback(tt("Select a result row before opening the 3D preview.", self.lang))
+            return False
+        scope = "part_reslice" if reslice_id else "part"
+        start_message = tt("Opening selected result in 3D...", self.lang)
+        self._set_operation_feedback(start_message)
+        if hasattr(self, "display_mode_combo"):
+            display_index = self.display_mode_combo.findData("volume")
+            if display_index >= 0:
+                self.display_mode_combo.setCurrentIndex(display_index)
+            else:
+                self.display_mode = "volume"
+        if hasattr(self, "view_stack"):
+            self.view_stack.setCurrentWidget(self.volume_canvas)
+        self._set_volume_canvas_status_text(start_message, replace_existing=True)
+        self._update_volume_render_status_label(start_message)
+        if hasattr(self, "btn_open_result_comparison_target"):
+            self.btn_open_result_comparison_target.setEnabled(False)
+        QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
+        self._opening_result_comparison_target = True
+        try:
+            if not self._select_volume_tree_item(specimen_id, scope, part_id, reslice_id):
+                self._set_operation_feedback(tt("Select a result row before opening the 3D preview.", self.lang))
+                return False
+            self._set_label_role_if_available(self._result_source_role())
+            display_index = self.display_mode_combo.findData("volume")
+            if display_index >= 0 and display_index != self.display_mode_combo.currentIndex():
+                self.display_mode_combo.setCurrentIndex(display_index)
+            else:
+                self.display_mode = "volume"
+                if hasattr(self, "view_stack"):
+                    self.view_stack.setCurrentWidget(self.volume_canvas)
+            self._invalidate_result_region_mask_cache(clear_active_mask_preview=True)
+            self._reset_active_volume_preview_state()
+            if hasattr(self, "task_tabs") and hasattr(self, "training_mode_tabs"):
+                self.task_tabs.setCurrentWidget(self.training_mode_tabs)
+                self.training_mode_tabs.setCurrentWidget(self.result_compare_page)
+            if self._result_region_id() > 0 and bool(row.get("ok")):
+                self._set_volume_mask_mode("masked_image")
+            elif row and not bool(row.get("ok")):
+                self._set_volume_mask_mode("image_only")
+            self._set_scope_controls_enabled()
+            self.render_volume_preview()
+            message = tt("Opened {0} / {1} for 3D region comparison.", self.lang).format(specimen_id, part_id)
+            self._set_operation_feedback(message)
+            return True
+        finally:
+            self._opening_result_comparison_target = False
+            self._sync_result_comparison_controls()
+
+    def show_selected_result_region_in_3d(self):
+        if self._result_region_id() <= 0:
+            self._set_operation_feedback(tt("Region highlight requires a specific region label.", self.lang))
+            return False
+        row = self._selected_result_comparison_row()
+        ref = row.get("ref") or {}
+        selected_key = (
+            str(ref.get("specimen_id") or ""),
+            str(ref.get("part_id") or ""),
+            str(ref.get("reslice_id") or ""),
+        )
+        current_key = (
+            str(self.current_specimen_id or ""),
+            str(self.current_part_id or ""),
+            str(self.current_reslice_id or ""),
+        )
+        if self.current_volume_scope != "part" or self.image_volume is None or (selected_key[0] and selected_key != current_key):
+            if not self.open_selected_result_comparison_target():
+                return False
+        self._set_label_role_if_available(self._result_source_role())
+        message = tt("Preparing mask preview...", self.lang)
+        self._set_operation_feedback(message)
+        self._set_volume_canvas_status_text(message)
+        self._update_volume_render_status_label(message)
+        QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
+        if self._active_result_region_mask_volume() is None:
+            self._set_operation_feedback(tt("Selected source has no label volume for the current part.", self.lang))
+            return False
+        self._clear_volume_mask_caches(owner=self._active_volume_cache_owner())
+        self._reset_active_volume_preview_state()
+        self._set_volume_mask_mode("masked_image")
+        if self.display_mode_combo.findData("volume") >= 0 and self.display_mode_combo.currentData() != "volume":
+            self.display_mode_combo.setCurrentIndex(self.display_mode_combo.findData("volume"))
+        else:
+            self.display_mode = "volume"
+        self.render_volume_preview()
+        self._set_operation_feedback(tt("Region highlight is ready in 3D preview.", self.lang))
+        return True
+
+    def _on_result_comparison_controls_changed(self, *args):
+        self._invalidate_result_region_mask_cache(clear_active_mask_preview=True)
+        if hasattr(self, "result_compare_table") and not getattr(self, "_result_compare_refreshing", False):
+            self._refresh_result_comparison_if_visible()
+        if self.display_mode == "volume":
+            self.render_volume_preview()
+
+    def _on_task_tab_changed(self, *_args):
+        if self._result_comparison_tab_is_active() and bool(getattr(self, "_result_comparison_stale", True)):
+            self.refresh_result_comparison()
+
+    def _on_training_mode_tab_changed(self, *_args):
+        if self._result_comparison_tab_is_active() and bool(getattr(self, "_result_comparison_stale", True)):
+            self.refresh_result_comparison()
+
+    def _sync_result_comparison_controls(self):
+        if hasattr(self, "btn_refresh_result_comparison"):
+            self.btn_refresh_result_comparison.setEnabled(bool(self.project.project_data.get("specimens", [])))
+        has_result_rows = bool(getattr(self, "result_compare_table", None) and self.result_compare_table.rowCount() > 0)
+        if hasattr(self, "btn_open_result_comparison_target"):
+            self.btn_open_result_comparison_target.setEnabled(has_result_rows)
+        if hasattr(self, "btn_show_result_region_in_3d"):
+            self.btn_show_result_region_in_3d.setEnabled(self._result_region_id() > 0 and has_result_rows)
+
+    def _populate_predict_filter_combo(self):
+        combo = getattr(self, "predict_filter_combo", None)
+        if combo is None:
+            return
+        current = combo.currentData() if combo.count() else "all"
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem(tt("All parts", self.lang), "all")
+        combo.addItem(tt("Current part", self.lang), "current")
+        for tag in self.project.project_data.get("part_user_tags", []) or []:
+            if not isinstance(tag, dict):
+                continue
+            tag_id = str(tag.get("tag_id") or "")
+            if not tag_id:
+                continue
+            combo.addItem(str(tag.get("label") or tag_id), f"tag:{tag_id}")
+        index = combo.findData(current)
+        combo.setCurrentIndex(index if index >= 0 else 0)
+        combo.blockSignals(False)
+
+    def _predict_target_rows(self):
+        selected_filter = str(self.predict_filter_combo.currentData() or "all") if hasattr(self, "predict_filter_combo") else "all"
+        tag_lookup = self._part_user_tag_lookup()
+        rows = []
+        for specimen in self.project.project_data.get("specimens", []) or []:
+            if not isinstance(specimen, dict):
+                continue
+            specimen_id = str(specimen.get("specimen_id") or "")
+            specimen_name = str(specimen.get("display_name") or specimen_id)
+            for part in specimen.get("parts", []) or []:
+                if not isinstance(part, dict):
+                    continue
+                part_id = str(part.get("part_id") or "")
+                if not specimen_id or not part_id:
+                    continue
+                part_tags = [str(item) for item in (part.get("user_tags") or []) if str(item or "")]
+                if selected_filter == "current":
+                    if specimen_id != self.current_specimen_id or part_id != self.current_part_id:
+                        continue
+                elif selected_filter.startswith("tag:"):
+                    wanted_tag = selected_filter.split(":", 1)[1]
+                    if wanted_tag not in part_tags:
+                        continue
+                reslices = self.project.list_part_reslices(specimen_id, part_id)
+                if not reslices:
+                    reslices = [{}]
+                for reslice in reslices:
+                    reslice_id = str((reslice or {}).get("reslice_id") or "")
+                    try:
+                        readiness = self.project.evaluate_part_predict_ready(specimen_id, part_id, reslice_id)
+                    except Exception as exc:
+                        readiness = {
+                            "specimen_id": specimen_id,
+                            "part_id": part_id,
+                            "reslice_id": reslice_id,
+                            "label_schema_id": str(((part.get("training") or {}).get("label_schema_id")) or ""),
+                            "predict_ready": False,
+                            "checks": {},
+                            "reasons": [str(exc)],
+                            "input_shape_zyx": [],
+                        }
+                    effective_reslice_id = str(readiness.get("reslice_id") or reslice_id)
+                    labels = part.get("labels") or {}
+                    editable = labels.get("editable_ai_result") or {}
+                    rows.append(
+                        {
+                            "ref": {"specimen_id": specimen_id, "part_id": part_id, "reslice_id": effective_reslice_id},
+                            "specimen_label": specimen_name,
+                            "part_label": str((part.get("training") or {}).get("user_defined_part_name") or part.get("display_name") or part_id),
+                            "part_id": part_id,
+                            "reslice_id": effective_reslice_id,
+                            "label_schema_id": str(readiness.get("label_schema_id") or ""),
+                            "tags": ", ".join(tag_lookup.get(tag_id, tag_id) for tag_id in part_tags),
+                            "ready": bool(readiness.get("predict_ready")),
+                            "reasons": list(readiness.get("reasons") or []),
+                            "overwrite": bool(str(editable.get("path") or "").strip()),
+                            "shape": list(readiness.get("input_shape_zyx") or []),
+                        }
+                    )
+        return rows
+
+    def _make_predict_table_item(self, text, editable=False):
+        item = QTableWidgetItem(str(text or ""))
+        flags = Qt.ItemIsSelectable | Qt.ItemIsEnabled
+        if editable:
+            flags |= Qt.ItemIsEditable
+        item.setFlags(flags)
+        return item
+
+    def _predict_status_text(self, row):
+        if row.get("ready"):
+            return tt("Ready", self.lang)
+        reasons = row.get("reasons") or []
+        if not reasons:
+            return tt("Not ready", self.lang)
+        return ", ".join(str(item) for item in reasons)
+
+    def _sync_predict_selection_from_table(self):
+        selected = set()
+        table = self.predict_targets_table
+        for row_index in range(table.rowCount()):
+            item = table.item(row_index, 0)
+            if item is None or item.checkState() != Qt.Checked:
+                continue
+            ref = item.data(Qt.UserRole) or {}
+            selected.add(self._predict_ref_key(ref))
+        self._tif_predict_selected_refs = selected
+
+    def _update_predict_target_summary(self):
+        table = getattr(self, "predict_targets_table", None)
+        if table is None:
+            return
+        total = table.rowCount()
+        ready = 0
+        selected = 0
+        overwrite = 0
+        blocked = 0
+        for row_index in range(total):
+            item = table.item(row_index, 0)
+            if item is not None and item.checkState() == Qt.Checked:
+                selected += 1
+            ready_item = table.item(row_index, 6)
+            is_ready = bool(ready_item.data(Qt.UserRole)) if ready_item is not None else False
+            if is_ready:
+                ready += 1
+            else:
+                blocked += 1
+            overwrite_item = table.item(row_index, 7)
+            if overwrite_item is not None and bool(overwrite_item.data(Qt.UserRole)):
+                overwrite += 1
+        text = tt(
+            "Prediction targets: {0} listed, {1} ready, {2} selected, {3} will overwrite editable AI result, {4} incomplete.",
+            self.lang,
+        ).format(total, ready, selected, overwrite, blocked)
+        self.predict_targets_summary_label.setText(text)
+
+    def refresh_predict_targets(self):
+        if not hasattr(self, "predict_targets_table"):
+            return
+        self._populate_predict_filter_combo()
+        table = self.predict_targets_table
+        self._tif_predict_refreshing = True
+        try:
+            rows = self._predict_target_rows()
+            table.blockSignals(True)
+            table.setRowCount(0)
+            table.setColumnCount(8)
+            table.setHorizontalHeaderLabels(
+                [
+                    tt("Use", self.lang),
+                    tt("Specimen", self.lang),
+                    tt("Part", self.lang),
+                    tt("Reslice", self.lang),
+                    tt("Group tags", self.lang),
+                    tt("Label schema", self.lang),
+                    tt("Predict check", self.lang),
+                    tt("Overwrite", self.lang),
+                ]
+            )
+            for row_index, row in enumerate(rows):
+                table.insertRow(row_index)
+                ref = row["ref"]
+                key = self._predict_ref_key(ref)
+                select_item = QTableWidgetItem("")
+                flags = Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsUserCheckable
+                select_item.setFlags(flags)
+                select_item.setCheckState(Qt.Checked if key in self._tif_predict_selected_refs and row.get("ready") else Qt.Unchecked)
+                if not row.get("ready"):
+                    select_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
+                select_item.setData(Qt.UserRole, ref)
+                table.setItem(row_index, 0, select_item)
+                table.setItem(row_index, 1, self._make_predict_table_item(row["specimen_label"]))
+                table.setItem(row_index, 2, self._make_predict_table_item(f"{row['part_label']} ({row['part_id']})"))
+                table.setItem(row_index, 3, self._make_predict_table_item(row["reslice_id"]))
+                table.setItem(row_index, 4, self._make_predict_table_item(row["tags"]))
+                table.setItem(row_index, 5, self._make_predict_table_item(row["label_schema_id"]))
+                status_item = self._make_predict_table_item(self._predict_status_text(row))
+                status_item.setData(Qt.UserRole, bool(row.get("ready")))
+                table.setItem(row_index, 6, status_item)
+                overwrite_item = self._make_predict_table_item(tt("yes", self.lang) if row.get("overwrite") else tt("no", self.lang))
+                overwrite_item.setData(Qt.UserRole, bool(row.get("overwrite")))
+                table.setItem(row_index, 7, overwrite_item)
+            table.resizeColumnsToContents()
+            table.blockSignals(False)
+        finally:
+            self._tif_predict_refreshing = False
+        self._sync_predict_selection_from_table()
+        self._update_predict_target_summary()
+
+    def _on_predict_target_item_changed(self, item):
+        if self._tif_predict_refreshing or item is None or item.column() != 0:
+            return
+        status_item = self.predict_targets_table.item(item.row(), 6)
+        if status_item is not None and not bool(status_item.data(Qt.UserRole)) and item.checkState() == Qt.Checked:
+            self.predict_targets_table.blockSignals(True)
+            item.setCheckState(Qt.Unchecked)
+            self.predict_targets_table.blockSignals(False)
+        self._sync_predict_selection_from_table()
+        self._update_predict_target_summary()
+
+    def select_all_ready_predict_targets(self):
+        table = self.predict_targets_table
+        table.blockSignals(True)
+        for row_index in range(table.rowCount()):
+            item = table.item(row_index, 0)
+            status_item = table.item(row_index, 6)
+            if item is not None and status_item is not None and bool(status_item.data(Qt.UserRole)):
+                item.setCheckState(Qt.Checked)
+        table.blockSignals(False)
+        self._sync_predict_selection_from_table()
+        self._update_predict_target_summary()
+
+    def clear_predict_target_selection(self):
+        table = self.predict_targets_table
+        table.blockSignals(True)
+        for row_index in range(table.rowCount()):
+            item = table.item(row_index, 0)
+            if item is not None:
+                item.setCheckState(Qt.Unchecked)
+        table.blockSignals(False)
+        self._sync_predict_selection_from_table()
+        self._update_predict_target_summary()
+
+    def select_current_predict_target(self):
+        if not self.current_specimen_id or not self.current_part_id:
+            self._set_operation_feedback(tt("Select a part volume before choosing the current prediction target.", self.lang))
+            return False
+        rows = self._predict_target_rows()
+        matched = []
+        for row in rows:
+            ref = row.get("ref") or {}
+            if ref.get("specimen_id") == self.current_specimen_id and ref.get("part_id") == self.current_part_id and row.get("ready"):
+                if self.current_reslice_id and ref.get("reslice_id") != self.current_reslice_id:
+                    continue
+                matched.append(ref)
+        if not matched and self.current_reslice_id:
+            for row in rows:
+                ref = row.get("ref") or {}
+                if ref.get("specimen_id") == self.current_specimen_id and ref.get("part_id") == self.current_part_id and row.get("ready"):
+                    matched.append(ref)
+        if not matched:
+            self._set_operation_feedback(tt("Current part is not ready for prediction.", self.lang))
+            return False
+        for ref in matched[:1]:
+            self._tif_predict_selected_refs.add(self._predict_ref_key(ref))
+        self.refresh_predict_targets()
+        return True
+
+    def browse_model_manifest(self):
+        start_dir = os.path.dirname(str(self.backend_manifest_edit.text() or "").strip())
+        if not start_dir or not os.path.isdir(start_dir):
+            start_dir = self.project.project_dir or os.getcwd()
+        path, _filter = QFileDialog.getOpenFileName(
+            self,
+            tt("Select model manifest", self.lang),
+            start_dir,
+            "JSON (*.json);;All files (*)",
+        )
+        if not path:
+            return False
+        self.backend_manifest_edit.setText(path)
+        self.backend_config["model_manifest"] = path
+        self._set_operation_feedback(tt("Selected model manifest: {0}", self.lang).format(path))
+        return True
+
+    def _tif_model_records(self):
+        if hasattr(self.project, "list_tif_segmentation_models"):
+            return list(self.project.list_tif_segmentation_models())
+        return []
+
+    def _tif_model_record_id(self, record):
+        source = record if isinstance(record, dict) else {}
+        return str(source.get("model_id") or source.get("model_manifest") or "").strip()
+
+    def _tif_model_display_name(self, record):
+        source = record if isinstance(record, dict) else {}
+        model_id = str(source.get("model_id") or source.get("run_id") or source.get("model_manifest") or "model").strip()
+        created = str(source.get("created_at") or "").split("T", 1)[0]
+        samples = source.get("training_samples", 0)
+        suffix = []
+        if samples:
+            suffix.append(tt("{0} sample(s)", self.lang).format(samples))
+        scope = str(source.get("input_scope") or "").strip()
+        if scope:
+            suffix.append(scope)
+        if created:
+            suffix.append(created)
+        return f"{model_id} ({', '.join(suffix)})" if suffix else model_id
+
+    def _format_tif_model_summary(self, record):
+        source = record if isinstance(record, dict) else {}
+        if not source:
+            return tt("No trained model is registered for this project.", self.lang)
+        manifest = self.project.to_absolute(source.get("model_manifest", ""))
+        model_path = self.project.to_absolute(source.get("model_path", ""))
+        schemas = ", ".join(str(item) for item in source.get("label_schema_ids", []) if str(item or "")) or "-"
+        samples = str(source.get("training_samples") or 0)
+        usable = tt("usable", self.lang) if source.get("usable_for_research_prediction", True) else tt("not marked usable", self.lang)
+        lines = [
+            tt("Samples: {0}; schemas: {1}; status: {2}", self.lang).format(samples, schemas, usable),
+            tt("Manifest: {0}", self.lang).format(self._compact_path_for_side_panel(manifest or "-")),
+        ]
+        if model_path:
+            lines.append(tt("Output: {0}", self.lang).format(self._compact_path_for_side_panel(model_path)))
+        return "\n".join(lines)
+
+    def _tif_model_tooltip(self, record):
+        source = record if isinstance(record, dict) else {}
+        if not source:
+            return tt("No trained model is registered for this project.", self.lang)
+        lines = [self._tif_model_display_name(source)]
+        for label, key in (
+            (tt("Model ID", self.lang), "model_id"),
+            (tt("Run ID", self.lang), "run_id"),
+            (tt("Model manifest", self.lang), "model_manifest"),
+            (tt("Model output", self.lang), "model_path"),
+        ):
+            value = str(source.get(key) or "").strip()
+            if value:
+                if key in {"model_manifest", "model_path"}:
+                    value = self.project.to_absolute(value)
+                lines.append(f"{label}: {value}")
+        notes = str(source.get("notes") or "").strip()
+        if notes:
+            lines.append(f"{tt('Notes', self.lang)}: {notes}")
+        return "\n".join(lines)
+
+    def _populate_tif_model_library_combo(self, preferred_id=None):
+        if not hasattr(self, "model_library_combo"):
+            return
+        current = str(preferred_id or self.model_library_combo.currentData() or "").strip()
+        records = self._tif_model_records()
+        self.model_library_combo.blockSignals(True)
+        self.model_library_combo.clear()
+        self.model_library_combo.addItem(tt("No registered model", self.lang), "")
+        for record in sorted(records, key=lambda item: str(item.get("created_at") or item.get("model_id") or ""), reverse=True):
+            model_id = self._tif_model_record_id(record)
+            self.model_library_combo.addItem(self._tif_model_display_name(record), model_id)
+            index = self.model_library_combo.count() - 1
+            self.model_library_combo.setItemData(index, record, Qt.UserRole + 1)
+        index = self.model_library_combo.findData(current)
+        if index < 0 and records:
+            index = 1
+        self.model_library_combo.setCurrentIndex(max(0, index))
+        self.model_library_combo.blockSignals(False)
+        self._on_model_library_selection_changed()
+
+    def _selected_tif_model_record(self):
+        if not hasattr(self, "model_library_combo"):
+            return None
+        record = self.model_library_combo.currentData(Qt.UserRole + 1)
+        return record if isinstance(record, dict) else None
+
+    def _on_model_library_selection_changed(self, *_args):
+        record = self._selected_tif_model_record()
+        if hasattr(self, "model_library_summary_label"):
+            self.model_library_summary_label.setText(self._format_tif_model_summary(record))
+            self.model_library_summary_label.setToolTip(self._tif_model_tooltip(record))
+        if hasattr(self, "model_library_notes_edit"):
+            self.model_library_notes_edit.blockSignals(True)
+            self.model_library_notes_edit.setPlainText(str((record or {}).get("notes") or ""))
+            self.model_library_notes_edit.blockSignals(False)
+        self._refresh_model_library_controls()
+
+    def _refresh_model_library_controls(self):
+        if not hasattr(self, "btn_use_selected_tif_model"):
+            return
+        running = self._backend_action_running()
+        record = self._selected_tif_model_record()
+        manifest = self.project.to_absolute((record or {}).get("model_manifest", ""))
+        has_record = bool(record)
+        self.btn_use_selected_tif_model.setEnabled(has_record and bool(manifest) and os.path.exists(manifest) and not running)
+        self.btn_save_tif_model_notes.setEnabled(has_record and not running)
+        self.btn_delete_tif_model_record.setEnabled(has_record and not running)
+        self.model_library_notes_edit.setEnabled(has_record and not running)
+
+    def use_selected_tif_model(self):
+        record = self._selected_tif_model_record()
+        if not record:
+            QMessageBox.information(self, tt("Trained model", self.lang), tt("No trained model is selected.", self.lang))
+            return False
+        manifest = self.project.to_absolute(record.get("model_manifest", ""))
+        if not manifest or not os.path.exists(manifest):
+            message = tt("Model manifest does not exist: {0}", self.lang).format(manifest or "-")
+            QMessageBox.warning(self, tt("Trained model", self.lang), message)
+            self._set_operation_feedback(message)
+            return False
+        self.backend_manifest_edit.setText(manifest)
+        self.backend_config["model_manifest"] = manifest
+        self._set_operation_feedback(tt("Selected trained model for prediction.", self.lang))
+        return True
+
+    def save_selected_tif_model_notes(self):
+        record = self._selected_tif_model_record()
+        if not record:
+            QMessageBox.information(self, tt("Trained model", self.lang), tt("No trained model is selected.", self.lang))
+            return False
+        model_id = self._tif_model_record_id(record)
+        notes = self.model_library_notes_edit.toPlainText() if hasattr(self, "model_library_notes_edit") else ""
+        try:
+            updated = self.project.update_tif_segmentation_model_notes(model_id, notes, save=True)
+        except Exception as exc:
+            QMessageBox.warning(self, tt("Trained model", self.lang), str(exc))
+            return False
+        self._populate_tif_model_library_combo(self._tif_model_record_id(updated))
+        self._set_operation_feedback(tt("Model notes saved.", self.lang))
+        return True
+
+    def delete_selected_tif_model_record(self):
+        record = self._selected_tif_model_record()
+        if not record:
+            QMessageBox.information(self, tt("Trained model", self.lang), tt("No trained model is selected.", self.lang))
+            return False
+        model_id = self._tif_model_record_id(record)
+        reply = QMessageBox.question(
+            self,
+            tt("Trained model", self.lang),
+            tt("Delete this model registration from the project? The model files on disk will not be deleted.", self.lang),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return False
+        removed = self.project.delete_tif_segmentation_model(model_id, save=True)
+        if removed is None:
+            QMessageBox.warning(self, tt("Trained model", self.lang), tt("No trained model is selected.", self.lang))
+            return False
+        if self.backend_manifest_edit.text().strip() == self.project.to_absolute((record or {}).get("model_manifest", "")):
+            self.backend_manifest_edit.clear()
+            self.backend_config["model_manifest"] = ""
+        self._populate_tif_model_library_combo()
+        self._set_operation_feedback(tt("Model registration deleted. Model files were left on disk.", self.lang))
+        return True
 
     def log(self, message):
         if not hasattr(self, "log_console"):
@@ -3388,9 +6737,16 @@ class TifWorkbenchWidget(QWidget):
         if log:
             self.log(text)
 
+    def _invalidate_result_region_mask_cache(self, clear_active_mask_preview=True):
+        self._result_region_mask_cache = {}
+        self._result_region_mask_cache_key = None
+        if clear_active_mask_preview:
+            self._clear_volume_mask_caches(owner=self._active_volume_cache_owner())
+
     def show_workbench_log(self):
-        if hasattr(self, "task_tabs") and hasattr(self, "training_task_page"):
-            self.task_tabs.setCurrentWidget(self.training_task_page)
+        if hasattr(self, "task_tabs") and hasattr(self, "training_mode_tabs"):
+            self.task_tabs.setCurrentWidget(self.training_mode_tabs)
+            self.training_mode_tabs.setCurrentWidget(self.training_task_page)
 
     def _set_local_axis_status(self, message, tooltip=""):
         label = getattr(self, "local_axis_status_label", None)
@@ -3467,6 +6823,7 @@ class TifWorkbenchWidget(QWidget):
         if is_volume:
             self.part_roi_draw_mode = False
             self.part_contour_draw_mode = False
+            reslice_open_error = ""
             self.btn_part_draw_roi.blockSignals(True)
             self.btn_part_draw_roi.setChecked(False)
             self.btn_part_draw_roi.blockSignals(False)
@@ -3541,7 +6898,8 @@ class TifWorkbenchWidget(QWidget):
                 return
             self._apply_default_volume_mask_mode()
             self._set_scope_controls_enabled()
-            message = tt("Preparing full-volume 3D preview...", self.lang)
+            request = self._volume_preview_request("still")
+            message = (request or {}).get("message") or tt("Preparing full-volume 3D preview...", self.lang)
             show_canvas_status = self._set_volume_canvas_status_text(message)
             self._update_volume_render_status_label(message)
             if show_canvas_status:
@@ -3558,6 +6916,8 @@ class TifWorkbenchWidget(QWidget):
         self._place_local_axis_volume_section(is_volume=is_volume, is_part=is_part)
         if hasattr(self, "slice_display_section"):
             self.slice_display_section.setVisible(not is_volume)
+        if hasattr(self, "material_section"):
+            self.material_section.setVisible(not is_volume)
         if hasattr(self, "annotation_section"):
             self.annotation_section.setVisible(not is_volume)
         if hasattr(self, "volume_render_section"):
@@ -3571,9 +6931,11 @@ class TifWorkbenchWidget(QWidget):
         if hasattr(self, "part_output_section"):
             self.part_output_section.setVisible(is_part and not is_volume)
         if hasattr(self, "task_tabs"):
-            target = self.display_task_page if is_volume else self.part_task_page
-            if self.task_tabs.currentWidget() is not target:
-                self.task_tabs.setCurrentWidget(target)
+            current = self.task_tabs.currentWidget()
+            if current is not getattr(self, "training_mode_tabs", None):
+                target = self.display_task_page if is_volume else self.part_task_page
+                if current is not target:
+                    self.task_tabs.setCurrentWidget(target)
         self._update_local_axis_summary()
 
     def _place_local_axis_volume_section(self, is_volume=None, is_part=None):
@@ -3747,15 +7109,79 @@ class TifWorkbenchWidget(QWidget):
 
     def _label_role_help_text(self, role=None):
         role = role or self.label_role_combo.currentData()
+        if role == "editable_ai_result":
+            return tt("Editable AI result is the review layer for this project part. Brush changes are saved here; only accepted results become training truth.", self.lang)
+        if role == "raw_ai_prediction_backup":
+            return tt("Raw AI prediction backup is read-only and kept for audit. Edit the review result layer instead.", self.lang)
         if role == "working_edit":
-            return tt("Current edit is the editable working copy. Brush changes are saved here first.", self.lang)
+            return tt("Current labels are editable. Brush changes are saved here first; accept them as training truth after review.", self.lang)
         if role == "model_draft":
-            return tt("Model draft is a read-only prediction candidate. Copy it to Current edit before manual correction.", self.lang)
-        return tt("Manual truth is a read-only reference. Switch to Current edit before changing labels.", self.lang)
+            return tt("Model draft is a legacy read-only prediction copy kept for audit. Current prediction results open as Current labels now.", self.lang)
+        return tt("Training truth is the reviewed read-only label used for training. Switch to Current labels before changing labels.", self.lang)
 
     def _update_label_role_help(self):
         if hasattr(self, "label_role_help_label"):
             self.label_role_help_label.setText(self._label_role_help_text())
+        self._update_ai_review_check_label()
+
+    def _format_review_id_list(self, values):
+        clean = []
+        for value in values or []:
+            try:
+                clean.append(str(int(value)))
+            except (TypeError, ValueError):
+                text = str(value or "").strip()
+                if text:
+                    clean.append(text)
+        return ", ".join(clean) if clean else tt("none", self.lang)
+
+    def _format_review_blocker_detail(self, report):
+        label_ids = self._format_review_id_list((report or {}).get("label_ids") or [])
+        unknown_ids = self._format_review_id_list((report or {}).get("unknown_label_ids") or [])
+        schema_id = str((report or {}).get("label_schema_id") or "-")
+        if label_ids == tt("none", self.lang):
+            label_ids = tt("No labels present", self.lang)
+        return tt("Schema {0}; labels present: {1}; unknown labels: {2}", self.lang).format(schema_id, label_ids, unknown_ids)
+
+    def _format_review_reasons(self, report):
+        reasons = [str(item) for item in ((report or {}).get("reasons") or [])]
+        return ", ".join(reasons)
+
+    def _current_ai_review_check_text(self):
+        if self.current_volume_scope != "part" or not self.current_specimen_id or not self.current_part_id:
+            return tt("Select a part editable AI result to see review checks.", self.lang)
+        try:
+            report = self.project.evaluate_part_editable_result_review_ready(
+                self.current_specimen_id,
+                self.current_part_id,
+                self.current_reslice_id,
+            )
+        except Exception as exc:
+            return tt("Review check blocked: {0}", self.lang).format(str(exc))
+        detail = self._format_review_blocker_detail(report)
+        checks = report.get("checks") or {}
+        if not checks.get("editable_ai_result_exists"):
+            return "\n".join([tt("No editable AI result is available for this part.", self.lang), detail])
+        if report.get("review_ready") and report.get("opened_for_review"):
+            return "\n".join([tt("Review check passed. This editable AI result can be accepted as training truth.", self.lang), detail])
+        if report.get("review_ready") and not report.get("opened_for_review"):
+            return "\n".join([tt("Review check passed, but this result has not been opened for review yet.", self.lang), detail])
+        reasons = self._format_review_reasons(report) or "-"
+        return "\n".join([tt("Review check blocked: {0}", self.lang).format(reasons), detail])
+
+    def _update_ai_review_check_label(self):
+        if not hasattr(self, "ai_review_check_label"):
+            return
+        is_part = self.current_volume_scope == "part"
+        self.ai_review_check_title_label.setVisible(is_part)
+        self.ai_review_check_label.setVisible(is_part)
+        if not is_part:
+            self.ai_review_check_label.clear()
+            return
+        text = self._current_ai_review_check_text()
+        self.ai_review_check_title_label.setText(tt("AI review check", self.lang))
+        self.ai_review_check_label.setText(text)
+        self.ai_review_check_label.setToolTip(text)
 
     def _advanced_annotation_tool_specs(self):
         return {
@@ -3813,19 +7239,43 @@ class TifWorkbenchWidget(QWidget):
 
     def _sync_undo_redo_buttons(self):
         if hasattr(self, "btn_undo"):
-            self.btn_undo.setEnabled(bool(self.undo_stack) and self._can_edit_current_label_volume())
+            self.btn_undo.setEnabled(bool(self.undo_stack) and self._can_edit_current_label_volume() and not self._backend_write_lock_active())
         if hasattr(self, "btn_redo"):
-            self.btn_redo.setEnabled(bool(self.redo_stack) and self._can_edit_current_label_volume())
+            self.btn_redo.setEnabled(bool(self.redo_stack) and self._can_edit_current_label_volume() and not self._backend_write_lock_active())
 
     def _dirty_slice_count(self):
         return len(getattr(self, "_dirty_edit_slices", set()) or set())
+
+    def _mark_edit_slice_dirty(self, z_index):
+        try:
+            z_index = int(z_index)
+        except Exception:
+            return
+        self._dirty_edit_slices.add(z_index)
+        self._edit_revision_counter = int(getattr(self, "_edit_revision_counter", 0) or 0) + 1
+        self._edit_slice_revisions[z_index] = int(self._edit_revision_counter)
+
+    def _clear_saved_edit_slices(self, slice_revisions):
+        for z_index, revision in (slice_revisions or {}).items():
+            try:
+                z_index = int(z_index)
+                revision = int(revision)
+            except Exception:
+                continue
+            if int(self._edit_slice_revisions.get(z_index, -1)) == revision:
+                self._dirty_edit_slices.discard(z_index)
+                self._edit_slice_revisions.pop(z_index, None)
+
+    def _reset_edit_dirty_tracking(self):
+        self._dirty_edit_slices = set()
+        self._edit_slice_revisions = {}
 
     def _update_save_status(self, state=None, detail=""):
         if not hasattr(self, "save_status_label"):
             return
         count = self._dirty_slice_count()
-        if state == "saving" or getattr(self, "_saving_working_edit", False):
-            text = tt("Saving part mask...", self.lang) if self._is_editable_part_volume() else tt("Saving working edit...", self.lang)
+        if state == "saving" or getattr(self, "_saving_working_edit", False) or self._label_auto_save_running() or self._label_manual_save_running():
+            text = tt("Saving editable AI result...", self.lang) if self.current_volume_scope == "part" else tt("Saving working edit...", self.lang)
         elif state == "failed":
             text = tt("Save failed: {0}", self.lang).format(detail)
         elif self.working_edit_dirty:
@@ -3864,12 +7314,10 @@ class TifWorkbenchWidget(QWidget):
         elif mode == "picker":
             if self.image_volume is None:
                 block_reason = ""
-            elif self.current_volume_scope == "part" and self.current_reslice_id:
-                block_reason = tt("Selected saved reslice is read-only. Return to the part volume to edit masks.", self.lang)
             elif self.display_mode == "volume":
                 block_reason = tt("3D volume preview is read-only. Switch to Slice review for label editing.", self.lang)
             elif self._current_slice_axis() != "z":
-                block_reason = tt("Material picker is available on Z slices only. Switch back to Z axial view before sampling labels.", self.lang)
+                block_reason = tt("Label picker is available on Z slices only. Switch back to Z axial view before sampling labels.", self.lang)
         else:
             block_reason = tt("Pan/view mode is active. Labels were not changed.", self.lang)
         return {
@@ -3882,10 +7330,10 @@ class TifWorkbenchWidget(QWidget):
     def _on_auto_save_toggled(self, checked):
         if checked:
             message = tt("Auto-save is on. Brush changes are saved shortly after editing.", self.lang)
-        elif self._is_editable_part_volume():
-            message = tt("Auto-save is off. Remember to save the current part mask.", self.lang)
+        elif self.current_volume_scope == "part":
+            message = tt("Auto-save is off. Remember to save the editable AI result.", self.lang)
         else:
-            message = tt("Auto-save is off. Remember to save the current edit layer.", self.lang)
+            message = tt("Auto-save is off. Remember to save the current labels.", self.lang)
         self._set_operation_feedback(message)
         if checked and self.working_edit_dirty:
             self.auto_save_timer.start()
@@ -3893,22 +7341,317 @@ class TifWorkbenchWidget(QWidget):
             self.auto_save_timer.stop()
         self._update_save_status()
 
+    def _current_edit_save_path(self):
+        if self.current_volume_scope == "part":
+            return self._current_part_label_path("editable_ai_result")
+        specimen = self.project.get_specimen(self.current_specimen_id, default=None)
+        if specimen is None:
+            return ""
+        return self.project.to_absolute(((specimen.get("labels") or {}).get("working_edit") or {}).get("path", ""))
+
+    def _can_auto_save_current_edit_volume(self):
+        if self.current_volume_scope == "part":
+            return self.label_role_combo.currentData() == "editable_ai_result"
+        return self.label_role_combo.currentData() == "working_edit"
+
+    def _snapshot_label_save_request(self, reason="auto_save"):
+        if self.edit_volume is None or not self._dirty_edit_slices:
+            return None
+        if not self._can_auto_save_current_edit_volume():
+            return None
+        edit_path = self._current_edit_save_path()
+        if not edit_path:
+            return None
+        slice_indices = sorted(int(z) for z in self._dirty_edit_slices)
+        slices = {}
+        revisions = {}
+        for z_index in slice_indices:
+            if 0 <= z_index < int(self.edit_volume.shape[0]):
+                slices[z_index] = np.asarray(self.edit_volume[z_index]).copy()
+                revisions[z_index] = int(self._edit_slice_revisions.get(z_index, 0))
+        if not slices:
+            return None
+        self._label_auto_save_token += 1
+        return {
+            "token": int(self._label_auto_save_token),
+            "reason": str(reason or "auto_save"),
+            "edit_path": edit_path,
+            "slices": slices,
+            "slice_revisions": revisions,
+            "scope": str(self.current_volume_scope or ""),
+            "specimen_id": str(self.current_specimen_id or ""),
+            "part_id": str(self.current_part_id or ""),
+            "reslice_id": str(self.current_reslice_id or ""),
+        }
+
+    def _snapshot_label_auto_save_request(self, reason="auto_save"):
+        return self._snapshot_label_save_request(reason=reason)
+
+    def _start_label_auto_save(self, reason="auto_save"):
+        if self._label_auto_save_running():
+            self._label_auto_save_pending_reason = str(reason or "auto_save")
+            self._update_save_status(state="saving")
+            return True
+        request = self._snapshot_label_auto_save_request(reason=reason)
+        if request is None:
+            self._update_save_status()
+            return False
+        thread = QThread(self)
+        worker = TifLabelAutoSaveWorker(
+            request["token"],
+            request["edit_path"],
+            request["slices"],
+            request["slice_revisions"],
+        )
+        worker.moveToThread(thread)
+        self._label_auto_save_thread = thread
+        self._label_auto_save_worker = worker
+        self._label_auto_save_pending_reason = ""
+        self.auto_save_timer.stop()
+        self._update_save_status(state="saving")
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_label_auto_save_finished)
+        worker.failed.connect(self._on_label_auto_save_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+        return True
+
+    def _queue_manual_save_after_auto_save(self, show_message=True, promote_request=None):
+        self._pending_manual_save_after_auto = {
+            "show_message": bool(show_message),
+            "promote_request": dict(promote_request or {}),
+        }
+        self.auto_save_timer.stop()
+        self._update_save_status(state="saving")
+        message = (
+            tt("Finishing auto-save before accepting training truth...", self.lang)
+            if promote_request
+            else tt("Finishing auto-save before manual save...", self.lang)
+        )
+        self._set_operation_feedback(message)
+        return True
+
+    def _consume_manual_save_after_auto_save(self):
+        pending = self._pending_manual_save_after_auto
+        self._pending_manual_save_after_auto = None
+        if not pending:
+            return False
+        promote_request = pending.get("promote_request") or None
+        return self.save_working_edit_async(show_message=bool(pending.get("show_message", True)), promote_request=promote_request)
+
+    def _cleanup_label_auto_save_thread(self):
+        self._label_auto_save_thread = None
+        self._label_auto_save_worker = None
+
+    def _cleanup_label_manual_save_thread(self):
+        self._label_manual_save_thread = None
+        self._label_manual_save_worker = None
+        self._saving_working_edit = False
+        self._set_scope_controls_enabled()
+
+    def _label_save_result_matches_current_view(self, result):
+        result = dict(result or {})
+        path = str(result.get("edit_path") or "")
+        if not path:
+            return False
+        try:
+            result_path = os.path.normcase(os.path.abspath(path))
+            current_path = os.path.normcase(os.path.abspath(self._current_edit_save_path()))
+        except Exception:
+            return False
+        return bool(current_path and result_path == current_path)
+
+    def _wait_for_label_auto_save(self):
+        thread = self._label_auto_save_thread
+        if thread is None:
+            return
+        worker = self._label_auto_save_worker
+        if thread.isRunning():
+            thread.quit()
+            thread.wait(30000)
+        if worker is not None:
+            result = getattr(worker, "last_result", None)
+            error = getattr(worker, "last_error", None)
+            self._cleanup_label_auto_save_thread()
+            if result:
+                self._on_label_auto_save_finished(result)
+            elif error:
+                self._on_label_auto_save_failed(error)
+        else:
+            self._cleanup_label_auto_save_thread()
+
+    def _label_auto_save_result_matches_current_view(self, result):
+        return self._label_save_result_matches_current_view(result)
+
+    def _on_label_auto_save_finished(self, result):
+        result = dict(result or {})
+        token = int(result.get("token", 0) or 0)
+        if token in getattr(self, "_label_auto_save_handled_tokens", set()):
+            return
+        self._label_auto_save_handled_tokens.add(token)
+        if token != int(self._label_auto_save_token):
+            return
+        if not self._label_auto_save_result_matches_current_view(result):
+            self._cleanup_label_auto_save_thread()
+            self._pending_manual_save_after_auto = None
+            self._pending_promote_after_save = None
+            self._pending_backend_action_after_save = None
+            return
+        self._clear_saved_edit_slices(result.get("slice_revisions") or {})
+        self.working_edit_dirty = bool(self._dirty_edit_slices)
+        self._cleanup_label_auto_save_thread()
+        if self.current_volume_scope == "part":
+            self._finalize_part_editable_save_metadata(result.get("metadata") or {}, auto_saved=True, refresh_volumes=False)
+        else:
+            self._finalize_full_edit_save_metadata(result.get("metadata") or {}, auto_saved=True, refresh_volumes=False)
+        if self.working_edit_dirty and self.auto_save_check.isChecked():
+            self.auto_save_timer.start()
+        self._update_save_status()
+        self._set_operation_feedback(tt("Auto-saved current labels.", self.lang) if self.current_volume_scope != "part" else tt("Auto-saved editable AI result.", self.lang), log=False)
+        if not self._consume_manual_save_after_auto_save():
+            self._resume_pending_backend_action_after_save()
+
+    def _on_label_auto_save_failed(self, result):
+        result = dict(result or {})
+        token = int(result.get("token", 0) or 0)
+        if token in getattr(self, "_label_auto_save_handled_tokens", set()):
+            return
+        self._label_auto_save_handled_tokens.add(token)
+        if token != int(self._label_auto_save_token):
+            return
+        if not self._label_auto_save_result_matches_current_view(result):
+            self._cleanup_label_auto_save_thread()
+            self._pending_backend_action_after_save = None
+            return
+        self._cleanup_label_auto_save_thread()
+        self.working_edit_dirty = True
+        message = tt("Save failed: {0}", self.lang).format(str(result.get("error", "")))
+        self._set_operation_feedback(message)
+        self._update_save_status(state="failed", detail=str(result.get("error", "")))
+        self._pending_manual_save_after_auto = None
+        self._pending_promote_after_save = None
+        self._pending_backend_action_after_save = None
+
+    def save_working_edit_async(self, show_message=True, promote_request=None):
+        if not self._guard_backend_write_lock():
+            return False
+        if self._saving_working_edit:
+            return True
+        if self._label_auto_save_running():
+            return self._queue_manual_save_after_auto_save(show_message=show_message, promote_request=promote_request)
+        if self.edit_volume is None and not self._ensure_working_edit_volume():
+            return False
+        request = self._snapshot_label_save_request(reason="manual")
+        if request is None:
+            self._update_save_status()
+            if promote_request:
+                self._pending_promote_after_save = None
+                return self._begin_promote_working_edit_async(promote_request)
+            self._resume_pending_backend_action_after_save()
+            return True
+        if promote_request:
+            self._pending_promote_after_save = dict(promote_request or {})
+        self._label_manual_save_token = int(request["token"])
+        thread = QThread(self)
+        worker = TifLabelManualSaveWorker(
+            request["token"],
+            request["edit_path"],
+            request["slices"],
+            request["slice_revisions"],
+            context={
+                "scope": request.get("scope", ""),
+                "specimen_id": request.get("specimen_id", ""),
+                "part_id": request.get("part_id", ""),
+                "reslice_id": request.get("reslice_id", ""),
+            },
+        )
+        worker.moveToThread(thread)
+        self._label_manual_save_thread = thread
+        self._label_manual_save_worker = worker
+        self._saving_working_edit = True
+        self.auto_save_timer.stop()
+        self._update_save_status(state="saving")
+        if show_message:
+            self._set_operation_feedback(tt("Saving labels in background...", self.lang))
+        self._set_scope_controls_enabled()
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_label_manual_save_finished)
+        worker.failed.connect(self._on_label_manual_save_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+        return True
+
+    def _on_label_manual_save_finished(self, result):
+        result = dict(result or {})
+        if int(result.get("token", 0) or 0) != int(self._label_manual_save_token):
+            self._cleanup_label_manual_save_thread()
+            self._pending_backend_action_after_save = None
+            return
+        if not self._label_save_result_matches_current_view(result):
+            self._cleanup_label_manual_save_thread()
+            self._pending_backend_action_after_save = None
+            return
+        self._clear_saved_edit_slices(result.get("slice_revisions") or {})
+        self.working_edit_dirty = bool(self._dirty_edit_slices)
+        if self.current_volume_scope == "part":
+            self._finalize_part_editable_save_metadata(result.get("metadata") or {}, refresh_volumes=True)
+            message = tt("Editable AI result saved.", self.lang)
+        else:
+            self._finalize_full_edit_save_metadata(result.get("metadata") or {}, refresh_volumes=True)
+            message = tt("Current labels saved.", self.lang)
+        self._cleanup_label_manual_save_thread()
+        self._update_save_status()
+        self._set_operation_feedback(message)
+        pending = self._pending_promote_after_save
+        self._pending_promote_after_save = None
+        if pending:
+            self._begin_promote_working_edit_async(pending)
+        else:
+            self._resume_pending_backend_action_after_save()
+
+    def _on_label_manual_save_failed(self, result):
+        result = dict(result or {})
+        self._cleanup_label_manual_save_thread()
+        self.working_edit_dirty = True
+        message = tt("Save failed: {0}", self.lang).format(str(result.get("error", "")))
+        self._set_operation_feedback(message)
+        self._update_save_status(state="failed", detail=str(result.get("error", "")))
+        QMessageBox.warning(self, tt("Unsaved working edit", self.lang), str(result.get("error", "")))
+        self._pending_promote_after_save = None
+        self._pending_backend_action_after_save = None
+
     def _mark_working_edit_dirty(self):
+        if self._backend_write_lock_active():
+            self._set_operation_feedback(self._backend_write_lock_message())
+            return
+        self._invalidate_result_region_mask_cache(clear_active_mask_preview=True)
         self.working_edit_dirty = True
         if self.auto_save_check.isChecked():
             self.auto_save_timer.start()
         self._update_save_status()
 
     def _confirm_discard_or_save_working_edit(self):
+        if self._label_auto_save_running():
+            message = tt("Auto-save is still finishing. Wait a moment, then try again.", self.lang)
+            self._set_operation_feedback(message)
+            self._update_save_status(state="saving")
+            return False
+        self._wait_for_label_auto_save()
         self.auto_save_timer.stop()
         self._update_save_status()
         if not self.working_edit_dirty:
             return True
-        title = tt("Unsaved part mask", self.lang) if self._is_editable_part_volume() else tt("Unsaved working edit", self.lang)
+        title = tt("Unsaved editable AI result", self.lang) if self.current_volume_scope == "part" else tt("Unsaved current labels", self.lang)
         prompt = (
-            tt("Save changes to the current part mask before continuing?", self.lang)
-            if self._is_editable_part_volume()
-            else tt("Save changes to the current working_edit before continuing?", self.lang)
+            tt("Save changes to the current editable AI result before continuing?", self.lang)
+            if self.current_volume_scope == "part"
+            else tt("Save changes to the current labels before continuing?", self.lang)
         )
         reply = QMessageBox.question(
             self,
@@ -3922,7 +7665,7 @@ class TifWorkbenchWidget(QWidget):
         if reply == QMessageBox.Save:
             return self.save_working_edit(show_message=True)
         self.working_edit_dirty = False
-        self._dirty_edit_slices = set()
+        self._reset_edit_dirty_tracking()
         self._update_save_status()
         if self.current_specimen_id:
             self._load_edit_volume()
@@ -3975,6 +7718,327 @@ class TifWorkbenchWidget(QWidget):
     def _local_axis_reslice_export_running(self):
         return self._local_axis_reslice_export_thread is not None
 
+    def _confirm_part_roi_running(self):
+        return self._confirm_part_roi_thread is not None
+
+    def _backend_action_running(self):
+        return self._tif_backend_thread is not None
+
+    def _label_auto_save_running(self):
+        return self._label_auto_save_thread is not None
+
+    def _label_manual_save_running(self):
+        return self._label_manual_save_thread is not None
+
+    def _promote_running(self):
+        return self._promote_thread is not None
+
+    def _backend_write_lock_active(self):
+        return (
+            self._backend_action_running()
+            or self._confirm_part_roi_running()
+            or self._local_axis_reslice_export_running()
+            or self._label_manual_save_running()
+            or self._promote_running()
+        )
+
+    def _backend_write_lock_message(self):
+        if self._promote_running():
+            return tt("Training truth acceptance is running. Wait until it finishes before editing project data.", self.lang)
+        if self._label_manual_save_running():
+            return tt("Label save is running. Wait until it finishes before editing project data.", self.lang)
+        if self._confirm_part_roi_running():
+            return tt("Part volume creation is running. Wait until it finishes before editing project data.", self.lang)
+        if self._local_axis_reslice_export_running():
+            return tt("Local Axis Reslice export is running. Wait until it finishes before editing project data.", self.lang)
+        return tt("Backend run is active. Stop it or wait until it finishes before editing project data.", self.lang)
+
+    def _backend_write_lock_title(self):
+        if self._confirm_part_roi_running():
+            return tt("Part extraction", self.lang)
+        return tt("TIF backend", self.lang)
+
+    def _guard_backend_write_lock(self, show_message=True):
+        if not self._backend_write_lock_active():
+            return True
+        message = self._backend_write_lock_message()
+        if show_message:
+            self._set_operation_feedback(message)
+            QMessageBox.information(self, self._backend_write_lock_title(), message)
+        return False
+
+    def _format_elapsed_seconds(self, seconds):
+        seconds = max(0, int(seconds or 0))
+        minutes, sec = divmod(seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours:
+            return f"{hours:02d}:{minutes:02d}:{sec:02d}"
+        return f"{minutes:02d}:{sec:02d}"
+
+    def _compact_path_for_side_panel(self, path, max_chars=72):
+        text = str(path or "").strip()
+        if not text or text == "-":
+            return "-"
+        max_chars = max(24, int(max_chars or 72))
+        normalized = text.replace("\\", "/")
+        if len(normalized) <= max_chars:
+            return normalized
+        parts = [part for part in normalized.split("/") if part]
+        if len(parts) >= 2:
+            compact = ".../" + "/".join(parts[-2:])
+            if len(compact) <= max_chars:
+                return compact
+        if parts:
+            leaf = parts[-1]
+            if len(leaf) + 4 <= max_chars:
+                return ".../" + leaf
+        return "..." + normalized[-(max_chars - 3):]
+
+    def _training_result_summary_tooltip(self, summary):
+        if not isinstance(summary, dict) or not summary:
+            return tt("No training result yet.", self.lang)
+        lines = [tt("Training result is ready for review.", self.lang)]
+        for label, key in (
+            (tt("Model output", self.lang), "model_output"),
+            (tt("Model manifest", self.lang), "model_manifest"),
+            (tt("Run ID", self.lang), "run_id"),
+        ):
+            value = str(summary.get(key) or "").strip()
+            if value:
+                lines.append(f"{label}: {value}")
+        run_dir = str(summary.get("run_dir") or "").strip()
+        if run_dir:
+            lines.append(f"{tt('Open run folder', self.lang)}: {run_dir}")
+        return "\n".join(lines)
+
+    def _update_backend_elapsed_label(self):
+        if not self._backend_action_running() or not self._tif_backend_started_mono:
+            return
+        elapsed = time.monotonic() - float(self._tif_backend_started_mono)
+        self.backend_elapsed_label.setText(tt("Elapsed: {0}", self.lang).format(self._format_elapsed_seconds(elapsed)))
+
+    def _set_backend_controls_running(self, running):
+        running = bool(running)
+        self.btn_prepare_dataset.setEnabled(not running)
+        self.btn_train_backend.setEnabled(not running)
+        self.btn_import_prediction.setEnabled(not running)
+        self.btn_browse_model_manifest.setEnabled(not running)
+        self.btn_refresh_predict_targets.setEnabled(not running)
+        self.btn_select_current_predict_target.setEnabled(not running)
+        self.btn_select_ready_predict_targets.setEnabled(not running)
+        self.btn_clear_predict_targets.setEnabled(not running)
+        self.btn_accept_selected_ai_results.setEnabled(not running)
+        self.predict_filter_combo.setEnabled(not running)
+        self.predict_targets_table.setEnabled(not running)
+        self.btn_stop_backend.setEnabled(running)
+        self.btn_open_backend_run.setEnabled(bool(self._tif_backend_run_dir) and os.path.isdir(self._tif_backend_run_dir) and not running)
+        self.btn_open_backend_result.setEnabled(bool(self._tif_backend_result_json) and os.path.exists(self._tif_backend_result_json) and not running)
+        self._refresh_training_result_controls()
+        self._refresh_model_library_controls()
+
+    def _format_training_result_summary_text(self, summary):
+        if not isinstance(summary, dict) or not summary:
+            return tt("No training result yet.", self.lang)
+        metrics_count = len(summary.get("metrics") or [])
+        curve_count = len(summary.get("curves") or [])
+        preview_count = len(summary.get("previews") or [])
+        model_output = self._compact_path_for_side_panel(summary.get("model_output") or "-")
+        model_manifest = self._compact_path_for_side_panel(summary.get("model_manifest") or "-")
+        lines = [
+            tt("Training result is ready for review.", self.lang),
+            tt(
+                "Training result: {0} metric(s), {1} curve(s), {2} mask preview(s).\nModel output: {3}\nModel manifest: {4}",
+                self.lang,
+            ).format(metrics_count, curve_count, preview_count, model_output, model_manifest),
+        ]
+        warnings = summary.get("warnings") or []
+        errors = summary.get("errors") or []
+        if warnings:
+            lines.append(f"{tt('Warnings', self.lang)}: {len(warnings)}")
+        if errors:
+            lines.append(f"{tt('Errors', self.lang)}: {len(errors)}")
+        return "\n".join(lines)
+
+    def _set_training_result_summary(self, summary):
+        previous_auto_manifest = str(self._tif_training_model_manifest or "")
+        summary = summary if isinstance(summary, dict) and summary else None
+        self._tif_training_result_summary = summary
+        self._tif_training_model_output_dir = str((summary or {}).get("model_output") or "")
+        self._tif_training_model_manifest = str((summary or {}).get("model_manifest") or "")
+        if self._tif_training_model_manifest:
+            self.backend_manifest_edit.setText(self._tif_training_model_manifest)
+            self.backend_config["model_manifest"] = self._tif_training_model_manifest
+        elif previous_auto_manifest and self.backend_manifest_edit.text().strip() == previous_auto_manifest:
+            self.backend_manifest_edit.clear()
+            self.backend_config["model_manifest"] = ""
+        if hasattr(self, "training_result_summary_label"):
+            self.training_result_summary_label.setText(self._format_training_result_summary_text(summary))
+            self.training_result_summary_label.setToolTip(self._training_result_summary_tooltip(summary))
+        self._refresh_training_result_controls()
+
+    def _register_training_summary_model(self, summary, backend_result=None, contract=None):
+        summary = summary if isinstance(summary, dict) else {}
+        backend_result = backend_result if isinstance(backend_result, dict) else {}
+        contract = contract if isinstance(contract, dict) else {}
+        manifest = str(summary.get("model_manifest") or (backend_result.get("provenance") or {}).get("model_manifest") or "").strip()
+        if not manifest:
+            return None
+        metrics_summary = ((backend_result.get("metrics") or {}).get("summary") or {}) if isinstance(backend_result.get("metrics"), dict) else {}
+        try:
+            record = self.project.register_tif_segmentation_model_from_manifest(
+                manifest,
+                {
+                    "backend_id": backend_result.get("backend_id") or contract.get("backend_id"),
+                    "run_id": backend_result.get("run_id") or contract.get("run_id") or summary.get("run_id"),
+                    "run_dir": summary.get("run_dir") or contract.get("run_dir"),
+                    "result_json": backend_result.get("_result_json") or contract.get("result_json"),
+                    "dataset_manifest": (backend_result.get("provenance") or {}).get("dataset_manifest", ""),
+                    "training_samples": metrics_summary.get("training_samples", 0),
+                    "usable_for_research_prediction": (backend_result.get("provenance") or {}).get("usable_for_research_prediction", True),
+                },
+                save=True,
+            )
+        except Exception as exc:
+            self.log(tt("Model registration skipped: {0}", self.lang).format(str(exc)))
+            return None
+        return record
+
+    def _refresh_training_result_controls(self):
+        if not hasattr(self, "btn_show_training_result_summary"):
+            return
+        running = self._backend_action_running()
+        summary = self._tif_training_result_summary if isinstance(self._tif_training_result_summary, dict) else {}
+        model_output = str(summary.get("model_output") or self._tif_training_model_output_dir or "")
+        model_manifest = str(summary.get("model_manifest") or self._tif_training_model_manifest or "")
+        has_summary = bool(summary)
+        self.btn_show_training_result_summary.setEnabled(has_summary and not running)
+        self.btn_open_training_model_output.setEnabled(bool(model_output) and os.path.isdir(model_output) and not running)
+        self.btn_open_training_model_manifest.setEnabled(bool(model_manifest) and os.path.exists(model_manifest) and not running)
+        self.btn_batch_predict_entry.setEnabled(bool(model_manifest) and os.path.exists(model_manifest) and not running)
+        self._refresh_model_library_controls()
+        if hasattr(self, "training_result_summary_label"):
+            self.training_result_summary_label.setText(self._format_training_result_summary_text(summary))
+            self.training_result_summary_label.setToolTip(self._training_result_summary_tooltip(summary))
+
+    def show_latest_training_result_summary(self, show_message=True):
+        summary = self._tif_training_result_summary if isinstance(self._tif_training_result_summary, dict) else None
+        if not summary:
+            if show_message:
+                QMessageBox.information(self, tt("Training result", self.lang), tt("No training result summary is available yet.", self.lang))
+            return False
+        if self._tif_training_result_dialog is not None:
+            try:
+                self._tif_training_result_dialog.close()
+            except Exception:
+                pass
+        dialog = TifTrainingResultDialog(summary, self.lang, self)
+        dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+        dialog.destroyed.connect(lambda _obj=None: setattr(self, "_tif_training_result_dialog", None))
+        self._tif_training_result_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        return True
+
+    def open_latest_training_model_output(self):
+        path = str(self._tif_training_model_output_dir or "")
+        if not path or not os.path.isdir(path):
+            QMessageBox.information(self, tt("Training result", self.lang), tt("No model output folder is available yet.", self.lang))
+            return False
+        return QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    def open_latest_training_model_manifest(self):
+        path = str(self._tif_training_model_manifest or "")
+        if not path or not os.path.exists(path):
+            QMessageBox.information(self, tt("Training result", self.lang), tt("No model manifest is available yet.", self.lang))
+            return False
+        return QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    def enter_batch_prediction_from_training_result(self):
+        manifest = str(self._tif_training_model_manifest or "")
+        if not manifest or not os.path.exists(manifest):
+            QMessageBox.information(self, tt("Training result", self.lang), tt("No model manifest is available yet.", self.lang))
+            return False
+        self.backend_manifest_edit.setText(manifest)
+        self.backend_config["model_manifest"] = manifest
+        if hasattr(self, "task_tabs") and hasattr(self, "training_mode_tabs"):
+            self.task_tabs.setCurrentWidget(self.training_mode_tabs)
+            self.training_mode_tabs.setCurrentWidget(self.training_task_page)
+        self._populate_predict_filter_combo()
+        if self.current_volume_scope in {"part", "part_reslice"} and self.current_specimen_id and self.current_part_id:
+            index = self.predict_filter_combo.findData("current")
+            if index >= 0:
+                self.predict_filter_combo.setCurrentIndex(index)
+            self.select_current_predict_target()
+        else:
+            self.refresh_predict_targets()
+        self.btn_import_prediction.setFocus(Qt.OtherFocusReason)
+        self._set_operation_feedback(tt("Model manifest filled for batch prediction. Choose target part(s), then run prediction.", self.lang))
+        return True
+
+    def _set_backend_write_locked_controls(self, locked):
+        locked = bool(locked)
+        if not locked:
+            return
+        write_controls = (
+            self.label_role_combo,
+            self.btn_save_edit,
+            self.btn_tool_brush,
+            self.btn_tool_eraser,
+            self.btn_tool_lasso,
+            self.btn_tool_rectangle,
+            self.btn_tool_ellipse,
+            self.btn_interpolate_current_label,
+            self.btn_copy_material_prev,
+            self.btn_copy_material_next,
+            self.btn_clear_current_material,
+            self.btn_promote,
+            self.btn_copy_draft,
+            self.btn_export_training,
+            self.btn_import_external_prediction_tif,
+            self.btn_accept_selected_ai_results,
+            self.auto_save_check,
+            self.btn_add_material,
+            self.btn_edit_material,
+            self.btn_delete_material,
+            self.part_bbox_edit,
+            self.btn_part_draw_roi,
+            self.btn_save_part_roi,
+            self.btn_confirm_part_roi,
+            self.btn_cancel_part_roi,
+            self.btn_create_part,
+            self.btn_add_rect_keyframe,
+            self.btn_draw_part_contour,
+            self.btn_delete_part_contour,
+            self.btn_clear_part_keyframes,
+            self.btn_prev_key_slice,
+            self.btn_next_key_slice,
+            self.btn_preview_part_mask,
+            self.btn_accept_part_mask,
+            self.btn_clear_part_preview,
+            self.btn_copy_source_z_axis,
+            self.btn_pick_roll_ref_a,
+            self.btn_pick_roll_ref_b,
+            self.btn_pick_roll_ref_c,
+            self.btn_align_axis_to_reference_plane,
+            self.btn_clear_roll_refs,
+            self.btn_clear_local_axis_draft,
+            self.btn_local_axis_reslice,
+            self.local_axis_trainable_check,
+            self.btn_export_local_axis_training_manifest,
+            self.btn_export_part_package,
+            self.btn_delete_part_volume,
+            self.btn_import_tif,
+            self.btn_import_amira,
+        )
+        for widget in write_controls:
+            if widget is not None:
+                widget.setEnabled(False)
+        self.btn_tool_picker.setEnabled(False)
+        self.btn_tool_pan.setEnabled(False)
+        self.btn_undo.setEnabled(False)
+        self.btn_redo.setEnabled(False)
+
     def _set_local_axis_reslice_export_controls_enabled(self, enabled):
         enabled = bool(enabled)
         for widget in (
@@ -3999,6 +8063,19 @@ class TifWorkbenchWidget(QWidget):
         self._tif_import_thread = None
         self._tif_import_specimen_id = ""
         self._tif_import_jobs = []
+
+    def _cleanup_tif_backend_thread(self):
+        self.backend_elapsed_timer.stop()
+        self._tif_backend_action = ""
+        self._tif_backend_started_mono = 0.0
+        self._set_backend_controls_running(False)
+        self._set_scope_controls_enabled()
+
+    def _on_tif_backend_thread_finished(self):
+        self._tif_backend_worker = None
+        self._tif_backend_thread = None
+        self._set_backend_controls_running(False)
+        self._set_scope_controls_enabled()
 
     def _on_tif_import_progress(self, current, total, message):
         if self._tif_import_progress is None:
@@ -4068,6 +8145,9 @@ class TifWorkbenchWidget(QWidget):
         )
 
     def _slice_unavailable_message(self, specimen=None):
+        override = str(getattr(self, "_slice_unavailable_override", "") or "").strip()
+        if override:
+            return override
         specimen = specimen if specimen is not None else self.project.get_specimen(self.current_specimen_id, default=None)
         specimen_id = str((specimen or {}).get("specimen_id") or self.current_specimen_id or "")
         if not specimen_id and not self.specimen_list.count():
@@ -4079,6 +8159,9 @@ class TifWorkbenchWidget(QWidget):
         return tt("Working volume missing", self.lang)
 
     def _volume_unavailable_message(self, specimen=None):
+        override = str(getattr(self, "_slice_unavailable_override", "") or "").strip()
+        if override:
+            return override
         specimen = specimen if specimen is not None else self.project.get_specimen(self.current_specimen_id, default=None)
         specimen_id = str((specimen or {}).get("specimen_id") or self.current_specimen_id or "")
         if self._materialize_task_matches(specimen_id):
@@ -4218,7 +8301,188 @@ class TifWorkbenchWidget(QWidget):
         self._local_axis_reslice_export_progress = None
         self._local_axis_reslice_export_worker = None
         self._local_axis_reslice_export_thread = None
+        self._local_axis_reslice_export_context = {}
         self._set_scope_controls_enabled()
+
+    def _part_mask_preview_running(self):
+        return self._part_mask_preview_thread is not None
+
+    def _cleanup_part_mask_preview_thread(self):
+        if self._part_mask_preview_progress is not None:
+            self._part_mask_preview_progress.close()
+            self._part_mask_preview_progress.deleteLater()
+        self._part_mask_preview_progress = None
+        self._part_mask_preview_worker = None
+        self._part_mask_preview_thread = None
+        self._part_mask_preview_context = {}
+        self._set_scope_controls_enabled()
+
+    def _on_part_mask_preview_progress(self, current, total, message):
+        progress = self._part_mask_preview_progress
+        if progress is None:
+            return
+        total = int(total or 0)
+        if total <= 0:
+            progress.setRange(0, 0)
+        else:
+            maximum = max(1, total)
+            progress.setRange(0, maximum)
+            progress.setValue(max(0, min(maximum, int(current or 0))))
+        progress.setLabelText(tt(message, self.lang))
+
+    def _on_part_mask_preview_finished(self, result):
+        result = dict(result or {})
+        token = int(result.get("token") or 0)
+        if token != int(self._part_mask_preview_token):
+            return
+        thread = self._part_mask_preview_thread
+        context = dict(result.get("context") or self._part_mask_preview_context or {})
+        self._cleanup_part_mask_preview_thread()
+        if thread is not None:
+            thread.quit()
+        if result.get("cancelled"):
+            return
+        mask = result.get("mask")
+        if mask is None:
+            return
+        self._apply_part_mask_preview_result(mask, context)
+
+    def _on_part_mask_preview_failed(self, result):
+        result = dict(result or {})
+        token = int(result.get("token") or 0)
+        if token != int(self._part_mask_preview_token):
+            return
+        thread = self._part_mask_preview_thread
+        message = str(result.get("error") or "")
+        self._cleanup_part_mask_preview_thread()
+        if thread is not None:
+            thread.quit()
+        if message:
+            QMessageBox.warning(self, tt("Part extraction", self.lang), message)
+
+    def _start_part_mask_preview_build(self, contours, shape, context):
+        if self._part_mask_preview_thread is not None:
+            QMessageBox.information(
+                self,
+                tt("Part extraction", self.lang),
+                tt("Preview auto fill is already running.", self.lang),
+            )
+            return
+        self._part_mask_preview_token += 1
+        token = int(self._part_mask_preview_token)
+        self._part_mask_preview_context = dict(context or {})
+        self._part_mask_preview_progress = QProgressDialog(
+            tt("Preview auto fill is running...", self.lang),
+            "",
+            0,
+            0,
+            self,
+        )
+        self._part_mask_preview_progress.setWindowTitle(tt("Part extraction", self.lang))
+        self._part_mask_preview_progress.setCancelButton(None)
+        self._part_mask_preview_progress.setAutoClose(False)
+        self._part_mask_preview_progress.setAutoReset(False)
+        self._part_mask_preview_progress.setMinimumDuration(0)
+        self._part_mask_preview_progress.setWindowModality(Qt.WindowModal)
+        self._part_mask_preview_progress.show()
+
+        self._part_mask_preview_thread = QThread(self)
+        self._part_mask_preview_worker = TifPartMaskPreviewWorker(token, contours, shape, context)
+        self._part_mask_preview_worker.moveToThread(self._part_mask_preview_thread)
+        self._part_mask_preview_thread.started.connect(self._part_mask_preview_worker.run)
+        self._part_mask_preview_worker.progress.connect(self._on_part_mask_preview_progress)
+        self._part_mask_preview_worker.finished.connect(self._on_part_mask_preview_finished)
+        self._part_mask_preview_worker.failed.connect(self._on_part_mask_preview_failed)
+        self._part_mask_preview_worker.finished.connect(self._part_mask_preview_thread.quit)
+        self._part_mask_preview_worker.failed.connect(self._part_mask_preview_thread.quit)
+        self._part_mask_preview_thread.finished.connect(self._part_mask_preview_worker.deleteLater)
+        self._part_mask_preview_thread.finished.connect(self._part_mask_preview_thread.deleteLater)
+        self._set_scope_controls_enabled()
+        self._part_mask_preview_thread.start()
+
+    def _cleanup_confirm_part_roi_thread(self):
+        if self._confirm_part_roi_progress is not None:
+            self._confirm_part_roi_progress.close()
+            self._confirm_part_roi_progress.deleteLater()
+        self._confirm_part_roi_progress = None
+        self._confirm_part_roi_worker = None
+        self._confirm_part_roi_thread = None
+        self._confirm_part_roi_request = {}
+        self._set_scope_controls_enabled()
+
+    def _on_confirm_part_roi_progress(self, current, total, message):
+        progress = self._confirm_part_roi_progress
+        if progress is None:
+            return
+        total = int(total or 0)
+        if total <= 0:
+            progress.setRange(0, 0)
+        else:
+            maximum = max(1, total)
+            progress.setRange(0, maximum)
+            progress.setValue(max(0, min(maximum, int(current or 0))))
+        progress.setLabelText(tt(message, self.lang))
+        self.training_status_label.setText(tt(message, self.lang))
+
+    def _on_confirm_part_roi_finished(self, result):
+        result = dict(result or {})
+        thread = self._confirm_part_roi_thread
+        self._cleanup_confirm_part_roi_thread()
+        if thread is not None:
+            thread.quit()
+        self._finish_confirm_part_roi_result(result)
+
+    def _on_confirm_part_roi_failed(self, result):
+        result = dict(result or {})
+        thread = self._confirm_part_roi_thread
+        message = str(result.get("error") or "")
+        self._cleanup_confirm_part_roi_thread()
+        if thread is not None:
+            thread.quit()
+        if message:
+            self.training_status_label.setText(message)
+            self.log(f"Failed to confirm ROI: {message}")
+            QMessageBox.warning(self, tt("Part extraction", self.lang), message)
+
+    def _start_confirm_part_roi_worker(self, request):
+        if self._confirm_part_roi_thread is not None:
+            QMessageBox.information(
+                self,
+                tt("Part extraction", self.lang),
+                tt("Part volume creation is already running.", self.lang),
+            )
+            return False
+        self._confirm_part_roi_request = dict(request or {})
+        self._confirm_part_roi_progress = QProgressDialog(
+            tt("Creating part volume...", self.lang),
+            "",
+            0,
+            0,
+            self,
+        )
+        self._confirm_part_roi_progress.setWindowTitle(tt("Part extraction", self.lang))
+        self._confirm_part_roi_progress.setCancelButton(None)
+        self._confirm_part_roi_progress.setAutoClose(False)
+        self._confirm_part_roi_progress.setAutoReset(False)
+        self._confirm_part_roi_progress.setMinimumDuration(0)
+        self._confirm_part_roi_progress.setWindowModality(Qt.WindowModal)
+        self._confirm_part_roi_progress.show()
+
+        self._confirm_part_roi_thread = QThread(self)
+        self._confirm_part_roi_worker = TifConfirmPartRoiWorker(self.project, request)
+        self._confirm_part_roi_worker.moveToThread(self._confirm_part_roi_thread)
+        self._confirm_part_roi_thread.started.connect(self._confirm_part_roi_worker.run)
+        self._confirm_part_roi_worker.progress.connect(self._on_confirm_part_roi_progress)
+        self._confirm_part_roi_worker.finished.connect(self._on_confirm_part_roi_finished)
+        self._confirm_part_roi_worker.failed.connect(self._on_confirm_part_roi_failed)
+        self._confirm_part_roi_worker.finished.connect(self._confirm_part_roi_thread.quit)
+        self._confirm_part_roi_worker.failed.connect(self._confirm_part_roi_thread.quit)
+        self._confirm_part_roi_thread.finished.connect(self._confirm_part_roi_worker.deleteLater)
+        self._confirm_part_roi_thread.finished.connect(self._confirm_part_roi_thread.deleteLater)
+        self._set_scope_controls_enabled()
+        self.training_status_label.setText(tt("Creating part volume...", self.lang))
+        self._confirm_part_roi_thread.start()
+        return True
 
     def _on_local_axis_reslice_export_progress(self, current, total, message):
         progress = self._local_axis_reslice_export_progress
@@ -4234,7 +8498,41 @@ class TifWorkbenchWidget(QWidget):
             progress.setValue(value)
         progress.setLabelText(tt(message, self.lang))
 
+    def _on_local_axis_reslice_export_finished(self, result):
+        context = dict(getattr(self, "_local_axis_reslice_export_context", {}) or {})
+        self._cleanup_local_axis_reslice_export_thread()
+        if not isinstance(result, dict):
+            message = tt("Local Axis Reslice export did not return a result.", self.lang)
+            self._set_local_axis_status(message)
+            self.log(message)
+            QMessageBox.warning(self, tt("Local Axis Reslice", self.lang), message)
+            return
+        record = result.get("record", {})
+        reslice_id = record.get("reslice_id", "")
+        message = tt("Exported local axis reslice {0}.", self.lang).format(reslice_id)
+        self._set_local_axis_status(message)
+        self.training_status_label.setText(message)
+        self.log(message)
+        self._local_axis_pick_target = ""
+        self._local_axis_roll_pick_target = ""
+        self.refresh_project()
+        self._select_volume_tree_item(
+            context.get("specimen_id") or self.current_specimen_id,
+            "part_reslice",
+            context.get("part_id") or self.current_part_id,
+            reslice_id,
+        )
+
+    def _on_local_axis_reslice_export_failed(self, message):
+        self._cleanup_local_axis_reslice_export_thread()
+        message = str(message or "")
+        self._set_local_axis_status(message)
+        self.log(message)
+        QMessageBox.warning(self, tt("Local Axis Reslice", self.lang), message)
+
     def import_tif_stack_dialog(self):
+        if not self._guard_backend_write_lock():
+            return
         if not self._ensure_tif_project_open():
             return
         if self._tif_import_thread is not None:
@@ -4310,6 +8608,8 @@ class TifWorkbenchWidget(QWidget):
         self._tif_import_thread.start()
 
     def import_amira_directory_dialog(self):
+        if not self._guard_backend_write_lock():
+            return
         if not self._ensure_tif_project_open():
             return
         source_dir = QFileDialog.getExistingDirectory(self, tt("Import AMIRA Directory", self.lang), self.project.project_dir)
@@ -4858,6 +9158,8 @@ class TifWorkbenchWidget(QWidget):
         return f"roi_{existing + 1}"
 
     def save_part_roi_draft(self):
+        if not self._guard_backend_write_lock():
+            return None
         if self.current_volume_scope != "full" or not self.current_specimen_id or self.image_volume is None:
             QMessageBox.information(self, tt("Part extraction", self.lang), tt("Switch to Full volume before saving ROI draft.", self.lang))
             return None
@@ -4908,7 +9210,140 @@ class TifWorkbenchWidget(QWidget):
         self.render_current_slice()
         return roi
 
+    def _confirm_part_roi_request_voxel_count(self, request):
+        try:
+            shape = _tif_bbox_shape(request.get("bbox_zyx") or [])
+            return int(np.prod([max(0, int(value)) for value in shape], dtype=np.int64))
+        except Exception:
+            return 0
+
+    def _should_confirm_part_roi_in_background(self, request):
+        return self._confirm_part_roi_request_voxel_count(request) >= TIF_CONFIRM_PART_BACKGROUND_VOXELS
+
+    def _accepted_full_volume_preview_mask_for_request(self, bbox):
+        if (
+            self.part_mask_preview_accepted
+            and self.part_preview_mask is not None
+            and self.part_mask_preview_bbox == bbox
+        ):
+            shape = _tif_bbox_shape(bbox)
+            if tuple(getattr(self.part_preview_mask, "shape", ()) or ()) == tuple(shape):
+                return self.part_preview_mask
+        return None
+
+    def _build_confirm_part_roi_request(self, roi, bbox, part_id, display_name, roi_keyframes, mask_contours, mask_bbox):
+        bbox = [list(pair) for pair in (bbox or [])]
+        mask_bbox = [list(pair) for pair in (mask_bbox or [])]
+        return {
+            "specimen_id": self.current_specimen_id,
+            "part_id": str(part_id or ""),
+            "display_name": str(display_name or part_id or ""),
+            "bbox_zyx": bbox,
+            "source_shape_zyx": [int(value) for value in getattr(self.image_volume, "shape", ()) or ()],
+            "roi_id": str((roi or {}).get("roi_id") or ""),
+            "roi_metadata": self._roi_keyframe_metadata(),
+            "roi_keyframes": list(roi_keyframes or []),
+            "mask_contours": dict(mask_contours or {}),
+            "mask_bbox_zyx": mask_bbox,
+            "accepted_preview_mask": self._accepted_full_volume_preview_mask_for_request(bbox) if mask_bbox else None,
+        }
+
+    def _confirm_part_roi_request_sync(self, request):
+        part = crop_volume_to_part(
+            self.project,
+            request.get("specimen_id", ""),
+            request.get("part_id", ""),
+            request.get("bbox_zyx", []),
+            display_name=request.get("display_name") or request.get("part_id", ""),
+        )
+        mask_initialized = False
+        mask_message = ""
+        mask_bbox = request.get("mask_bbox_zyx") or []
+        roi_keyframes = request.get("roi_keyframes") or []
+        if mask_bbox:
+            mask_initialized, mask_message = _tif_initialize_part_mask_from_full_volume_contours(
+                self.project,
+                request.get("specimen_id", ""),
+                part,
+                request.get("mask_contours") or {},
+                request.get("bbox_zyx", []),
+                request.get("source_shape_zyx") or [],
+                accepted_preview_mask=request.get("accepted_preview_mask"),
+            )
+            if mask_initialized:
+                part.setdefault("view_settings", {})["volume_mask_mode"] = "masked_image"
+                self.project.save_project()
+        elif roi_keyframes:
+            mask_initialized, mask_message = _tif_initialize_part_mask_from_roi_shell(
+                self.project,
+                request.get("specimen_id", ""),
+                part,
+                roi_keyframes,
+                request.get("source_shape_zyx") or [],
+            )
+            if mask_initialized:
+                part.setdefault("view_settings", {})["volume_mask_mode"] = "masked_image"
+                self.project.save_project()
+        roi_id = str(request.get("roi_id") or "")
+        if roi_id:
+            self.project.update_part_roi(
+                request.get("specimen_id", ""),
+                roi_id,
+                bbox_zyx=request.get("bbox_zyx", []),
+                status="part_created",
+                linked_part_id=part.get("part_id", ""),
+                metadata=request.get("roi_metadata") or {},
+                save=True,
+            )
+        else:
+            self._ensure_roi_for_created_part(part, request.get("bbox_zyx", []), display_name=request.get("display_name") or request.get("part_id", ""))
+        return {
+            "part": part,
+            "part_id": part.get("part_id", request.get("part_id", "")),
+            "specimen_id": request.get("specimen_id", ""),
+            "bbox_zyx": request.get("bbox_zyx", []),
+            "mask_bbox_zyx": mask_bbox,
+            "mask_initialized": bool(mask_initialized),
+            "mask_message": str(mask_message or ""),
+            "mask_keyframe_count": len(((request.get("mask_contours") or {}).get("keyframes") or [])),
+            "roi_keyframe_count": len(roi_keyframes),
+        }
+
+    def _finish_confirm_part_roi_result(self, result):
+        result = dict(result or {})
+        part = result.get("part") if isinstance(result.get("part"), dict) else None
+        specimen_id = str(result.get("specimen_id") or self.current_specimen_id or "")
+        part_id = str(result.get("part_id") or (part or {}).get("part_id") or "")
+        if not specimen_id or not part_id:
+            return
+        self.active_part_roi_id = ""
+        self.part_mask_keyframes = []
+        self.part_mask_preview_bbox = []
+        self.part_mask_preview_accepted = False
+        self.refresh_project()
+        self._populate_volume_roi_source_combo()
+        self._select_volume_tree_item(specimen_id, "part", part_id)
+        part = self.project.get_part(specimen_id, part_id, default=part)
+        message = tt("Confirmed ROI and created part {0}.", self.lang).format((part or {}).get("display_name") or part_id)
+        if result.get("mask_initialized"):
+            if result.get("mask_bbox_zyx"):
+                message = f"{message}\n{tt('Full-volume contour mask initialized from {0} key slice(s).', self.lang).format(int(result.get('mask_keyframe_count') or 0))}"
+            else:
+                message = f"{message}\n{tt('ROI shell mask initialized from {0} key slice(s).', self.lang).format(int(result.get('roi_keyframe_count') or 0))}"
+        elif result.get("mask_message"):
+            if result.get("mask_bbox_zyx"):
+                message = f"{message}\n{tt('Full-volume contour mask not initialized: {0}', self.lang).format(result.get('mask_message'))}"
+            else:
+                message = f"{message}\nROI shell mask not initialized: {result.get('mask_message')}"
+        self.training_status_label.setText(message)
+        self.log(message)
+
     def confirm_part_roi_to_part(self):
+        if not self._guard_backend_write_lock():
+            return
+        if self._confirm_part_roi_running():
+            QMessageBox.information(self, tt("Part extraction", self.lang), tt("Part volume creation is already running.", self.lang))
+            return
         if self.current_volume_scope != "full" or not self.current_specimen_id or self.image_volume is None:
             QMessageBox.information(self, tt("Part extraction", self.lang), tt("Switch to Full volume before confirming ROI.", self.lang))
             return
@@ -4946,53 +9381,16 @@ class TifWorkbenchWidget(QWidget):
         part_id, display_name = dialog.values()
         if not part_id:
             return
-        mask_initialized = False
-        mask_message = ""
+        request = self._build_confirm_part_roi_request(roi, bbox, part_id, display_name or part_id, roi_keyframes, mask_contours, mask_bbox)
+        if self._should_confirm_part_roi_in_background(request):
+            self._start_confirm_part_roi_worker(request)
+            return
         try:
-            part = crop_volume_to_part(self.project, self.current_specimen_id, part_id, bbox, display_name=display_name or part_id)
-            if mask_bbox:
-                mask_initialized, mask_message = self._initialize_part_mask_from_full_volume_contours(part, mask_contours, bbox)
-                if mask_initialized:
-                    part.setdefault("view_settings", {})["volume_mask_mode"] = "masked_image"
-            elif roi_keyframes:
-                mask_initialized, mask_message = self._initialize_part_mask_from_roi_shell(part, roi_keyframes)
-                if mask_initialized:
-                    part.setdefault("view_settings", {})["volume_mask_mode"] = "masked_image"
-            if roi is not None:
-                self.project.update_part_roi(
-                    self.current_specimen_id,
-                    roi.get("roi_id", ""),
-                    bbox_zyx=bbox,
-                    status="part_created",
-                    linked_part_id=part.get("part_id", ""),
-                    metadata=self._roi_keyframe_metadata(),
-                    save=True,
-                )
-            else:
-                self._ensure_roi_for_created_part(part, bbox, display_name=display_name or part_id)
+            result = self._confirm_part_roi_request_sync(request)
         except Exception as exc:
             QMessageBox.warning(self, tt("Part extraction", self.lang), str(exc))
             return
-        self.active_part_roi_id = ""
-        self.part_mask_keyframes = []
-        self.part_mask_preview_bbox = []
-        self.part_mask_preview_accepted = False
-        self.refresh_project()
-        self._populate_volume_roi_source_combo()
-        self._select_volume_tree_item(self.current_specimen_id, "part", part.get("part_id", ""))
-        message = tt("Confirmed ROI and created part {0}.", self.lang).format(part.get("display_name") or part.get("part_id"))
-        if mask_initialized:
-            if mask_bbox:
-                message = f"{message}\n{tt('Full-volume contour mask initialized from {0} key slice(s).', self.lang).format(len(mask_contours.get('keyframes', []) or []))}"
-            else:
-                message = f"{message}\n{tt('ROI shell mask initialized from {0} key slice(s).', self.lang).format(len(roi_keyframes))}"
-        elif mask_message:
-            if mask_bbox:
-                message = f"{message}\n{tt('Full-volume contour mask not initialized: {0}', self.lang).format(mask_message)}"
-            else:
-                message = f"{message}\nROI shell mask not initialized: {mask_message}"
-        self.training_status_label.setText(message)
-        self.log(message)
+        self._finish_confirm_part_roi_result(result)
 
     def _ensure_roi_for_created_part(self, part, bbox, display_name=""):
         if not isinstance(part, dict):
@@ -5028,31 +9426,8 @@ class TifWorkbenchWidget(QWidget):
             return None
 
     def _roi_keyframes_to_part_contours(self, keyframes, parent_bbox):
-        bbox = self._clip_bbox_to_shape(parent_bbox, self.image_volume.shape) if self.image_volume is not None else parent_bbox
-        contours = {
-            "schema_version": "taxamask_tif_part_extraction_v1",
-            "axis": "z",
-            "keyframes": [],
-        }
-        for item in self._normalize_roi_keyframes(keyframes):
-            if item.get("axis") != "z":
-                continue
-            slice_index = int(item.get("slice_index"))
-            if not (int(bbox[0][0]) <= slice_index < int(bbox[0][1])):
-                continue
-            x0, y0, x1, y1 = [int(value) for value in item.get("rect", [])]
-            local_z = slice_index - int(bbox[0][0])
-            local_y0 = y0 - int(bbox[1][0])
-            local_y1 = y1 - int(bbox[1][0])
-            local_x0 = x0 - int(bbox[2][0])
-            local_x1 = x1 - int(bbox[2][0])
-            contours = add_rectangular_keyframe(
-                contours,
-                local_z,
-                [[local_y0, local_y1], [local_x0, local_x1]],
-                author="taxamask_roi_shell",
-            )
-        return contours
+        shape = getattr(self.image_volume, "shape", ()) if self.image_volume is not None else ()
+        return _tif_roi_keyframes_to_part_contours(keyframes, parent_bbox, shape)
 
     def _initialize_part_mask_from_roi_shell(self, part, roi_keyframes):
         if not isinstance(part, dict) or not roi_keyframes:
@@ -5060,36 +9435,14 @@ class TifWorkbenchWidget(QWidget):
         if self.image_volume is None:
             return False, ""
         try:
-            bbox = self._clip_bbox_to_shape(part.get("parent_bbox_zyx", []), self.image_volume.shape)
-            shape = tuple(int(pair[1]) - int(pair[0]) for pair in bbox)
-            if len(shape) != 3 or min(shape) <= 0:
-                return False, ""
-            contours = self._roi_keyframes_to_part_contours(roi_keyframes, bbox)
-            mask = self._roi_shell_mask_from_keyframes(roi_keyframes, bbox)
-            if mask is None or not np.any(np.asarray(mask) > 0):
-                report = validate_contours_for_interpolation(contours, shape, axis="z")
-                if not report.get("ok"):
-                    return False, self._format_contour_quality_report(report)
-                mask = build_preview_mask_from_contours(contours, shape)
-                quality = self._format_contour_quality_report(report)
-            else:
-                quality = "rectangular key-slice shell"
-            metadata = write_part_mask(self.project, part, mask)
-            part["mask"].update(
-                {
-                    "shape_zyx": metadata.get("shape_zyx", []),
-                    "dtype": metadata.get("dtype", ""),
-                    "spacing_zyx": metadata.get("spacing_zyx", []),
-                    "spacing_unit": metadata.get("spacing_unit", "micrometer"),
-                    "orientation": metadata.get("orientation", "unknown"),
-                }
+            initialized, message = _tif_initialize_part_mask_from_roi_shell(
+                self.project,
+                self.current_specimen_id,
+                part,
+                roi_keyframes,
+                self.image_volume.shape,
             )
-            metadata_payload = part.setdefault("metadata", {})
-            metadata_payload["roi_shell_keyframe_count"] = len(self._normalize_roi_keyframes(roi_keyframes))
-            metadata_payload["roi_shell_keyframes"] = self._normalize_roi_keyframes(roi_keyframes)
-            self.project.update_part_status(self.current_specimen_id, part.get("part_id", ""), "mask_preview", save=False)
-            self.project.save_project()
-            return True, quality
+            return initialized, tt(message, self.lang)
         except Exception as exc:
             self.log(f"Failed to initialize ROI shell mask: {exc}")
             return False, str(exc)
@@ -5098,40 +9451,30 @@ class TifWorkbenchWidget(QWidget):
         if not isinstance(part, dict) or not isinstance(contours, dict):
             return False, ""
         try:
-            bbox = self._clip_bbox_to_shape(bbox, self.image_volume.shape)
-            shape = tuple(int(pair[1]) - int(pair[0]) for pair in bbox)
-            if len(shape) != 3 or min(shape) <= 0:
-                return False, "invalid contour bbox"
-            local_contours = self._full_volume_contours_to_local(contours, bbox)
-            report = validate_contours_for_interpolation(local_contours, shape, axis="z")
-            if not report.get("ok"):
-                return False, self._format_contour_quality_report(report)
-            mask = build_preview_mask_from_contours(local_contours, shape)
-            metadata = write_part_mask(self.project, part, mask)
-            part["mask"].update(
-                {
-                    "shape_zyx": metadata.get("shape_zyx", []),
-                    "dtype": metadata.get("dtype", ""),
-                    "spacing_zyx": metadata.get("spacing_zyx", []),
-                    "spacing_unit": metadata.get("spacing_unit", "micrometer"),
-                    "orientation": metadata.get("orientation", "unknown"),
-                }
+            accepted_preview_mask = None
+            if (
+                self.part_mask_preview_accepted
+                and self.part_preview_mask is not None
+                and self.part_mask_preview_bbox == bbox
+            ):
+                accepted_preview_mask = self.part_preview_mask
+            initialized, message = _tif_initialize_part_mask_from_full_volume_contours(
+                self.project,
+                self.current_specimen_id,
+                part,
+                contours,
+                bbox,
+                self.image_volume.shape,
+                accepted_preview_mask=accepted_preview_mask,
             )
-            contours_path = self.project.to_absolute(part.get("contours_path", ""))
-            if contours_path:
-                write_contours_json(contours_path, local_contours)
-            metadata_payload = part.setdefault("metadata", {})
-            metadata_payload["full_volume_mask_keyframe_count"] = len(local_contours.get("keyframes", []) or [])
-            metadata_payload["full_volume_mask_bbox_zyx"] = bbox
-            metadata_payload["full_volume_mask_source"] = "manual_freehand_key_slices"
-            part = self.project.update_part_status(self.current_specimen_id, part.get("part_id", ""), "mask_preview", save=False)
-            self.project.save_project()
-            return True, self._format_contour_quality_report(report)
+            return initialized, tt(message, self.lang)
         except Exception as exc:
             self.log(f"Failed to initialize part mask from full-volume contours: {exc}")
             return False, str(exc)
 
     def cancel_part_roi_draft(self):
+        if not self._guard_backend_write_lock():
+            return
         if not self.active_part_roi_id:
             self.part_bbox_edit.clear()
             self.part_roi_keyframes = []
@@ -5159,12 +9502,24 @@ class TifWorkbenchWidget(QWidget):
         self.render_current_slice()
 
     def delete_current_part_volume(self):
+        if not self._guard_backend_write_lock():
+            return
         if not self._is_editable_part_volume() or not self.current_specimen_id or not self.current_part_id:
             QMessageBox.information(self, tt("Part extraction", self.lang), tt("Select a part volume before exporting a part package.", self.lang))
             return
         self.delete_part_volume(self.current_specimen_id, self.current_part_id)
 
+    def _release_volume_array(self, array):
+        mmap = getattr(array, "_mmap", None)
+        if mmap is not None:
+            try:
+                mmap.close()
+            except Exception:
+                pass
+
     def delete_part_volume(self, specimen_id, part_id):
+        if not self._guard_backend_write_lock():
+            return False
         specimen_id = str(specimen_id or "").strip()
         part_id = str(part_id or "").strip()
         if not specimen_id or not part_id:
@@ -5188,8 +9543,11 @@ class TifWorkbenchWidget(QWidget):
         try:
             deleting_current = specimen_id == self.current_specimen_id and part_id == self.current_part_id
             if deleting_current:
+                for array in (self.image_volume, self.label_volume, self.edit_volume, self.part_mask_volume):
+                    self._release_volume_array(array)
                 self.image_volume = None
                 self.label_volume = None
+                self.part_mask_volume = None
                 self.edit_volume = None
                 self.part_preview_mask = None
                 self._clear_volume_preview_cache()
@@ -5254,6 +9612,8 @@ class TifWorkbenchWidget(QWidget):
         return self._clip_bbox_to_shape(bbox, self.image_volume.shape)
 
     def create_part_from_bbox_dialog(self):
+        if not self._guard_backend_write_lock():
+            return
         if self.current_volume_scope != "full" or not self.current_specimen_id or self.image_volume is None:
             QMessageBox.information(self, tt("Part extraction", self.lang), tt("Switch to Full volume before creating a part.", self.lang))
             return
@@ -5350,6 +9710,57 @@ class TifWorkbenchWidget(QWidget):
         if not problems:
             return tt("Quality check passed", self.lang)
         return f"{tt('Review warnings', self.lang)}: " + " | ".join(problems[:4])
+
+    def _should_build_part_mask_preview_in_background(self, shape):
+        try:
+            voxel_count = int(np.prod([max(0, int(value)) for value in (shape or ())], dtype=np.int64))
+        except Exception:
+            voxel_count = 0
+        return voxel_count >= 1_000_000
+
+    def _apply_part_mask_preview_result(self, mask, context):
+        context = dict(context or {})
+        scope = str(context.get("scope") or self.current_volume_scope or "")
+        preview_contours = dict(context.get("preview_contours") or {})
+        report = dict(context.get("report") or {})
+        bbox = context.get("bbox") or []
+        ignored_legacy = int(context.get("ignored_legacy") or 0)
+        keyframe_count = int(context.get("keyframe_count") or len(preview_contours.get("keyframes", []) or []))
+
+        self.part_preview_mask = mask
+        self.part_mask_preview_accepted = False
+        if scope == "full":
+            self.part_mask_preview_bbox = bbox
+            if bbox:
+                self.part_bbox_edit.setText(self._bbox_text(bbox))
+                self._autosave_active_part_roi_mask_keyframes(bbox)
+        else:
+            self.part_mask_preview_bbox = []
+            part = self.project.update_part_status(self.current_specimen_id, self.current_part_id, "mask_preview")
+            self.current_part = part
+            self._update_status_labels(self.project.get_specimen(self.current_specimen_id), part=part)
+
+        self._clear_volume_preview_cache()
+        self._set_scope_controls_enabled()
+        self.render_current_slice()
+        quality = self._format_contour_quality_report(report)
+        message = (
+            tt("Preview mask generated from {0} key slice(s).", self.lang).format(keyframe_count)
+            + "\n"
+            + tt("Part mask preview quality: {0}", self.lang).format(quality)
+        )
+        if scope == "full":
+            message = (
+                f"{message}\n"
+                + tt("Review the preview, then accept it before creating the part volume.", self.lang)
+            )
+        if ignored_legacy:
+            message = (
+                f"{message}\n"
+                + tt("Ignored {0} legacy ROI shell key slice(s). Use Clear key slices to remove them permanently.", self.lang).format(ignored_legacy)
+            )
+        self.training_status_label.setText(message)
+        self.log(message)
 
     def _dedupe_contour_points(self, points):
         clean = []
@@ -5466,6 +9877,8 @@ class TifWorkbenchWidget(QWidget):
         self.log(message)
 
     def delete_current_part_keyframe(self):
+        if not self._guard_backend_write_lock():
+            return
         if self.current_volume_scope not in {"full", "part"} or self.image_volume is None:
             QMessageBox.information(self, tt("Part extraction", self.lang), tt("Select a full volume or part volume before editing part masks.", self.lang))
             return
@@ -5517,6 +9930,8 @@ class TifWorkbenchWidget(QWidget):
         self.log(message)
 
     def clear_part_mask_keyframes(self):
+        if not self._guard_backend_write_lock():
+            return False
         if self.current_volume_scope not in {"full", "part"} or self.image_volume is None:
             QMessageBox.information(self, tt("Part extraction", self.lang), tt("Select a full volume or part volume before editing part masks.", self.lang))
             return False
@@ -5658,6 +10073,8 @@ class TifWorkbenchWidget(QWidget):
         return [[y_margin, max(y_margin + 1, height - y_margin)], [x_margin, max(x_margin + 1, width - x_margin)]]
 
     def add_current_rect_keyframe(self):
+        if not self._guard_backend_write_lock():
+            return
         if not self._is_editable_part_volume() or self.image_volume is None:
             QMessageBox.information(self, tt("Part extraction", self.lang), tt("Select a part volume before editing part masks.", self.lang))
             return
@@ -5686,6 +10103,11 @@ class TifWorkbenchWidget(QWidget):
         self.log(message)
 
     def preview_part_mask_from_keyframes(self):
+        if not self._guard_backend_write_lock():
+            return
+        if self._part_mask_preview_running():
+            QMessageBox.information(self, tt("Part extraction", self.lang), tt("Preview auto fill is already running.", self.lang))
+            return
         if self.current_volume_scope not in {"full", "part"} or self.image_volume is None:
             QMessageBox.information(self, tt("Part extraction", self.lang), tt("Select a full volume or part volume before previewing masks.", self.lang))
             return
@@ -5702,24 +10124,28 @@ class TifWorkbenchWidget(QWidget):
             if not report.get("ok"):
                 QMessageBox.warning(self, tt("Part extraction", self.lang), self._format_contour_quality_report(report))
                 return
+            context = {
+                "scope": "full",
+                "preview_contours": preview_contours,
+                "report": report,
+                "bbox": bbox,
+                "ignored_legacy": ignored_legacy,
+                "keyframe_count": len(preview_contours.get("keyframes", []) or []),
+            }
+            if self._should_build_part_mask_preview_in_background(shape):
+                self.part_preview_mask = None
+                self.part_mask_preview_bbox = []
+                self.part_mask_preview_accepted = False
+                self._set_scope_controls_enabled()
+                self.training_status_label.setText(tt("Preview auto fill is running...", self.lang))
+                self._start_part_mask_preview_build(preview_contours, shape, context)
+                return
             try:
-                self.part_preview_mask = build_preview_mask_from_contours(preview_contours, shape)
+                mask = build_preview_mask_from_contours(preview_contours, shape)
             except Exception as exc:
                 QMessageBox.warning(self, tt("Part extraction", self.lang), str(exc))
                 return
-            self.part_mask_preview_bbox = bbox
-            self.part_mask_preview_accepted = False
-            self.part_bbox_edit.setText(self._bbox_text(bbox))
-            self._autosave_active_part_roi_mask_keyframes(bbox)
-            self.render_current_slice()
-            quality = self._format_contour_quality_report(report)
-            message = (
-                tt("Preview mask generated from {0} key slice(s).", self.lang).format(len(preview_contours.get("keyframes", [])))
-                + "\n"
-                + tt("Part mask preview quality: {0}", self.lang).format(quality)
-            )
-            self.training_status_label.setText(message)
-            self.log(message)
+            self._apply_part_mask_preview_result(mask, context)
             return
         if not self._is_editable_part_volume():
             return
@@ -5730,36 +10156,42 @@ class TifWorkbenchWidget(QWidget):
         if not report.get("ok"):
             QMessageBox.warning(self, tt("Part extraction", self.lang), self._format_contour_quality_report(report))
             return
+        context = {
+            "scope": "part",
+            "preview_contours": preview_contours,
+            "report": report,
+            "ignored_legacy": ignored_legacy,
+            "keyframe_count": len(preview_contours.get("keyframes", []) or []),
+        }
+        if self._should_build_part_mask_preview_in_background(self.image_volume.shape):
+            self.part_preview_mask = None
+            self.part_mask_preview_bbox = []
+            self.part_mask_preview_accepted = False
+            self._set_scope_controls_enabled()
+            self.training_status_label.setText(tt("Preview auto fill is running...", self.lang))
+            self._start_part_mask_preview_build(preview_contours, self.image_volume.shape, context)
+            return
         try:
-            self.part_preview_mask = build_preview_mask_from_contours(preview_contours, self.image_volume.shape)
+            mask = build_preview_mask_from_contours(preview_contours, self.image_volume.shape)
         except Exception as exc:
             QMessageBox.warning(self, tt("Part extraction", self.lang), str(exc))
             return
-        part = self.project.update_part_status(self.current_specimen_id, self.current_part_id, "mask_preview")
-        self.current_part = part
-        self._update_status_labels(self.project.get_specimen(self.current_specimen_id), part=part)
-        self.render_current_slice()
-        quality = self._format_contour_quality_report(report)
-        message = (
-            tt("Preview mask generated from {0} key slice(s).", self.lang).format(len(preview_contours.get("keyframes", [])))
-            + "\n"
-            + tt("Part mask preview quality: {0}", self.lang).format(quality)
-        )
-        if ignored_legacy:
-            message = (
-                f"{message}\n"
-                + tt("Ignored {0} legacy ROI shell key slice(s). Use Clear key slices to remove them permanently.", self.lang).format(ignored_legacy)
-            )
-        self.training_status_label.setText(message)
-        self.log(message)
+        self._apply_part_mask_preview_result(mask, context)
 
     def accept_part_mask_preview(self):
+        if not self._guard_backend_write_lock():
+            return False
         if self.current_volume_scope == "full":
             if self.part_preview_mask is None:
                 return
             self.part_mask_preview_accepted = True
+            self._set_scope_controls_enabled()
             self.render_current_slice()
-            message = tt("Accepted part mask.", self.lang)
+            message = (
+                tt("Accepted part mask.", self.lang)
+                + "\n"
+                + tt("Use Confirm ROI to create the part volume with this accepted mask.", self.lang)
+            )
             self.training_status_label.setText(message)
             self.log(message)
             return
@@ -5785,6 +10217,7 @@ class TifWorkbenchWidget(QWidget):
             QMessageBox.warning(self, tt("Part extraction", self.lang), str(exc))
             return
         self.part_preview_mask = None
+        self._reload_part_mask_volume()
         self._clear_volume_preview_cache()
         self.current_part = part
         self._reload_label_volume()
@@ -5795,6 +10228,8 @@ class TifWorkbenchWidget(QWidget):
         self.log(message)
 
     def clear_part_mask_preview(self):
+        if not self._guard_backend_write_lock():
+            return
         self.part_preview_mask = None
         self.part_mask_preview_bbox = []
         self.part_mask_preview_accepted = False
@@ -5809,6 +10244,8 @@ class TifWorkbenchWidget(QWidget):
         self.render_current_slice()
 
     def import_external_prediction_tif_dialog(self):
+        if not self._guard_backend_write_lock():
+            return
         if not self._ensure_tif_project_open():
             return
         if not self.current_specimen_id:
@@ -5828,6 +10265,18 @@ class TifWorkbenchWidget(QWidget):
                 tt("Please select a specimen with a working volume first.", self.lang),
             )
             return
+        labels = specimen.get("labels") or {}
+        current_edit = labels.get("working_edit") or {}
+        if str(current_edit.get("path") or "").strip():
+            reply = QMessageBox.question(
+                self,
+                tt("Import External Label TIF", self.lang),
+                tt("This predict run will overwrite the current editable result for selected target(s), but will not overwrite training truth. Continue?", self.lang),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
         tif_path, _ = QFileDialog.getOpenFileName(
             self,
             tt("Import External Label TIF", self.lang),
@@ -5865,12 +10314,12 @@ class TifWorkbenchWidget(QWidget):
             return
         self.refresh_project()
         self._select_specimen_after_import(specimen_id)
-        index = self.label_role_combo.findData("model_draft")
+        index = self.label_role_combo.findData("working_edit")
         if index >= 0:
             self.label_role_combo.setCurrentIndex(index)
         self.load_specimen(specimen_id)
         report_path = result.get("report_path", "")
-        message = tt("Imported external label TIF as model draft for specimen {0}. Report: {1}", self.lang).format(specimen_id, report_path)
+        message = tt("Imported external label TIF as editable review result for specimen {0}. Report: {1}", self.lang).format(specimen_id, report_path)
         self.training_status_label.setText(message)
         self.log(message)
 
@@ -5878,17 +10327,731 @@ class TifWorkbenchWidget(QWidget):
         if action in {"prepare_dataset", "train"}:
             ready = [item.get("specimen_id") for item in self.project.list_train_ready_specimens()]
             if not ready:
-                raise ValueError("No train-ready specimens are available.")
+                raise ValueError(tt("No train-ready top-level volumes are available.", self.lang))
             return ready
         ids = [self.current_specimen_id] if self.current_specimen_id else []
         if not ids:
             ids = [item.get("specimen_id") for item in self.project.project_data.get("specimens", [])]
         if not ids:
-            raise ValueError("No specimen is available for prediction.")
+            raise ValueError(tt("No top-level volume is available for prediction.", self.lang))
         return ids
+
+    def _format_train_ready_reasons(self, reasons):
+        labels = {
+            "manual_truth_missing": "Training truth is missing; accept the current editable labels as training truth first.",
+            "part_not_marked_train_ready": "Part has not been marked as verified train-ready.",
+            "part_record_missing": "Part record is missing.",
+            "part_volume_missing": "Part image is missing.",
+            "reslice_record_missing": "Reslice record is missing.",
+            "reslice_output_missing": "Reslice image is missing.",
+            "label_schema_missing": "Label schema is missing or empty.",
+            "part_label_shape_mismatch": "Part label shape does not match the part/reslice image.",
+            "unknown_label_ids": "Label IDs are not all defined in the bound label schema.",
+            "label_volume_unreadable": "Label volume cannot be read.",
+            "specimen_not_marked_train_ready": "Specimen has not been marked train-ready.",
+            "working_volume_missing": "Working image is missing.",
+            "material_map_missing": "Material map is missing.",
+            "image_label_shape_mismatch": "Image and label shapes do not match.",
+            "no_trainable_material": "No trainable material is defined in the material map.",
+        }
+        readable = []
+        for reason in reasons or []:
+            text = str(reason or "").strip()
+            if not text:
+                continue
+            key = text.split(":", 1)[0]
+            label = tt(labels.get(key, text), self.lang)
+            if ":" in text and key in labels:
+                label = f"{label} ({text.split(':', 1)[1]})"
+            readable.append(label)
+        return readable
+
+    def _part_training_readiness_reports(self, prefer_current=False, limit=4):
+        reports = []
+        if prefer_current and self.current_specimen_id and self.current_part_id:
+            try:
+                readiness = self.project.evaluate_part_train_ready(
+                    self.current_specimen_id,
+                    self.current_part_id,
+                    self.current_reslice_id,
+                    validate_label_ids=False,
+                )
+            except Exception as exc:
+                readiness = {
+                    "specimen_id": self.current_specimen_id,
+                    "part_id": self.current_part_id,
+                    "reslice_id": self.current_reslice_id,
+                    "train_ready": False,
+                    "reasons": [str(exc)],
+                }
+            reports.append(readiness)
+            return reports
+        for specimen in self.project.project_data.get("specimens", []) or []:
+            if not isinstance(specimen, dict):
+                continue
+            specimen_id = str(specimen.get("specimen_id") or "")
+            for part in specimen.get("parts", []) or []:
+                if not isinstance(part, dict):
+                    continue
+                part_id = str(part.get("part_id") or "")
+                if not specimen_id or not part_id:
+                    continue
+                try:
+                    readiness = self.project.evaluate_part_train_ready(specimen_id, part_id, validate_label_ids=False)
+                except Exception as exc:
+                    readiness = {
+                        "specimen_id": specimen_id,
+                        "part_id": part_id,
+                        "reslice_id": "",
+                        "train_ready": False,
+                        "reasons": [str(exc)],
+                    }
+                reports.append(readiness)
+                if len(reports) >= int(limit):
+                    return reports
+        return reports
+
+    def _top_level_training_readiness_reports(self, limit=4):
+        reports = []
+        for specimen in self.project.project_data.get("specimens", []) or []:
+            if not isinstance(specimen, dict):
+                continue
+            specimen_id = str(specimen.get("specimen_id") or "")
+            if not specimen_id:
+                continue
+            try:
+                readiness = self.project.evaluate_train_ready(specimen_id)
+            except Exception as exc:
+                readiness = {
+                    "specimen_id": specimen_id,
+                    "train_ready": False,
+                    "reasons": [str(exc)],
+                }
+            reports.append(readiness)
+            if len(reports) >= int(limit):
+                break
+        return reports
+
+    def _summarize_training_readiness_reports(self, title, reports, empty_message, all_ready_message, scope, limit=4):
+        lines = [tt(title, self.lang)]
+        if not reports:
+            lines.append(f"- {tt(empty_message, self.lang)}")
+            return lines
+        blocked_count = 0
+        for report in reports[: int(limit)]:
+            if report.get("train_ready"):
+                continue
+            blocked_count += 1
+            if scope == "part":
+                label = self._format_part_ref_label(report) or "-"
+            else:
+                label = str(report.get("specimen_id") or "-")
+            reasons = self._format_train_ready_reasons(report.get("reasons") or [])
+            detail = "; ".join(reasons) if reasons else "-"
+            lines.append(f"- {label}: {tt('Missing: {0}', self.lang).format(detail)}")
+        if blocked_count == 0:
+            lines.append(f"- {tt(all_ready_message, self.lang)}")
+        remaining = max(0, len(reports) - int(limit))
+        if remaining:
+            lines.append(f"- {tt('+{0} more', self.lang).format(remaining)}")
+        return lines
+
+    def _training_reports_need_truth_acceptance(self, reports):
+        for report in reports or []:
+            reasons = {str(item).split(":", 1)[0] for item in (report.get("reasons") or [])}
+            if reasons.intersection({"manual_truth_missing", "part_not_marked_train_ready"}):
+                return True
+        return False
+
+    def _training_selection_error(self, prefer_part=False):
+        if prefer_part:
+            part_reports = self._part_training_readiness_reports(prefer_current=True, limit=4)
+            lines = [tt("Current part/reslice is not train-ready yet.", self.lang), ""]
+            lines.extend(
+                self._summarize_training_readiness_reports(
+                    "Part readiness",
+                    part_reports,
+                    "No project part volumes are available.",
+                    "All checked part samples are train-ready.",
+                    "part",
+                )
+            )
+            if self._training_reports_need_truth_acceptance(part_reports):
+                lines.extend(["", tt("Next step: save current labels, then click Accept as training truth in Label review. Training uses reviewed manual_truth only; editable labels are not sent to training directly.", self.lang)])
+            return "\n".join(lines)
+        part_reports = self._part_training_readiness_reports(prefer_current=False, limit=4)
+        top_reports = self._top_level_training_readiness_reports(limit=4)
+        lines = [tt("No train-ready samples are available for training.", self.lang), ""]
+        lines.extend(
+            self._summarize_training_readiness_reports(
+                "Part readiness",
+                part_reports,
+                "No project part volumes are available.",
+                "All checked part samples are train-ready.",
+                "part",
+            )
+        )
+        lines.append("")
+        lines.extend(
+            self._summarize_training_readiness_reports(
+                "Top-level readiness",
+                top_reports,
+                "No top-level volume records are available.",
+                "All checked top-level volumes are train-ready.",
+                "top",
+            )
+        )
+        if self._training_reports_need_truth_acceptance(part_reports):
+            lines.extend(["", tt("Next step: save current labels, then click Accept as training truth in Label review. Training uses reviewed manual_truth only; editable labels are not sent to training directly.", self.lang)])
+        return "\n".join(lines)
+
+    def _selected_backend_samples_for_action(self, action):
+        if action in {"prepare_dataset", "train"}:
+            if self.current_volume_scope == "part" and self.current_specimen_id and self.current_part_id:
+                current_reports = self._part_training_readiness_reports(prefer_current=True, limit=1)
+                if not current_reports or not current_reports[0].get("train_ready"):
+                    raise ValueError(self._training_selection_error(prefer_part=True))
+            part_refs = self._train_ready_part_refs()
+            if part_refs:
+                return {
+                    "input_scope": "part_reslice",
+                    "part_refs": part_refs,
+                    "specimen_ids": [],
+                    "fallback_reason": "",
+                }
+            if self.current_volume_scope == "part":
+                raise ValueError(self._training_selection_error(prefer_part=True))
+            specimen_ids = [item.get("specimen_id") for item in self.project.list_train_ready_specimens()]
+            if specimen_ids:
+                return {
+                    "input_scope": "top_level_volume",
+                    "part_refs": [],
+                    "specimen_ids": specimen_ids,
+                    "fallback_reason": tt("No train-ready parts are available.", self.lang),
+                }
+            raise ValueError(self._training_selection_error(prefer_part=False))
+        try:
+            part_refs = self._selected_part_refs_for_action(action)
+        except Exception as part_exc:
+            if self.current_volume_scope != "part":
+                specimen_ids = self._selected_specimen_ids_for_action(action)
+                return {
+                    "input_scope": "top_level_volume",
+                    "part_refs": [],
+                    "specimen_ids": specimen_ids,
+                    "fallback_reason": str(part_exc),
+                }
+            raise
+        return {
+            "input_scope": "part_reslice",
+            "part_refs": part_refs,
+            "specimen_ids": [],
+            "fallback_reason": "",
+        }
+
+    def _train_ready_part_refs(self):
+        refs = []
+        for specimen in self.project.project_data.get("specimens", []) or []:
+            if not isinstance(specimen, dict):
+                continue
+            specimen_id = str(specimen.get("specimen_id") or "")
+            if not specimen_id:
+                continue
+            for part in specimen.get("parts", []) or []:
+                if not isinstance(part, dict):
+                    continue
+                part_id = str(part.get("part_id") or "")
+                if not part_id:
+                    continue
+                try:
+                    readiness = self.project.evaluate_part_train_ready(
+                        specimen_id,
+                        part_id,
+                        validate_label_ids=False,
+                    )
+                except Exception:
+                    continue
+                if not readiness.get("train_ready"):
+                    continue
+                refs.append(
+                    {
+                        "specimen_id": readiness.get("specimen_id", ""),
+                        "part_id": readiness.get("part_id", ""),
+                        "reslice_id": readiness.get("reslice_id", ""),
+                    }
+                )
+        return refs
+
+    def _selected_part_refs_for_action(self, action):
+        refs = []
+        if action in {"prepare_dataset", "train"}:
+            refs = self._train_ready_part_refs()
+            if not refs:
+                raise ValueError(self._training_selection_error(prefer_part=(self.current_volume_scope == "part")))
+            return refs
+        self._sync_predict_selection_from_table()
+        for key in sorted(self._tif_predict_selected_refs):
+            ref = self._predict_ref_from_key(key)
+            if ref["specimen_id"] and ref["part_id"]:
+                readiness = self.project.evaluate_part_predict_ready(ref["specimen_id"], ref["part_id"], ref.get("reslice_id", ""))
+                if not readiness.get("predict_ready"):
+                    raise ValueError(tt("Selected prediction target is incomplete: {0}", self.lang).format(", ".join(readiness.get("reasons") or [])))
+                ref["reslice_id"] = readiness.get("reslice_id", ref.get("reslice_id", ""))
+                refs.append(ref)
+        if not refs:
+            raise ValueError(tt("Select at least one prediction target.", self.lang))
+        return refs
+
+    def _validated_predict_model_manifest(self):
+        manifest = str(self.backend_config.get("model_manifest") or self.backend_manifest_edit.text() or "").strip()
+        if not manifest:
+            raise ValueError(tt("Select a model manifest before prediction.", self.lang))
+        candidate = manifest
+        if not os.path.isabs(candidate):
+            candidate = self.project.to_absolute(candidate) if self.project.project_dir else os.path.abspath(candidate)
+        candidate = os.path.abspath(candidate)
+        if not os.path.exists(candidate):
+            raise ValueError(tt("Model manifest does not exist: {0}", self.lang).format(manifest))
+        self.backend_manifest_edit.setText(candidate)
+        self.backend_config["model_manifest"] = candidate
+        return candidate
+
+    def _selected_part_refs_for_review_acceptance(self):
+        self._sync_predict_selection_from_table()
+        refs = []
+        for key in sorted(self._tif_predict_selected_refs):
+            ref = self._predict_ref_from_key(key)
+            if ref["specimen_id"] and ref["part_id"]:
+                refs.append(ref)
+        return refs
+
+    def _format_part_ref_label(self, ref):
+        specimen_id = str((ref or {}).get("specimen_id") or "")
+        part_id = str((ref or {}).get("part_id") or "")
+        reslice_id = str((ref or {}).get("reslice_id") or "")
+        label = f"{specimen_id}:{part_id}" if specimen_id or part_id else ""
+        return f"{label}:{reslice_id}" if label and reslice_id else label
+
+    def _summarize_review_blockers(self, blocked, limit=4):
+        parts = []
+        for item in blocked or []:
+            label = self._format_part_ref_label(item)
+            report = item.get("report") if isinstance(item.get("report"), dict) else {}
+            reasons = self._format_review_reasons(report) or ", ".join(str(reason) for reason in (item.get("reasons") or []))
+            detail = self._format_review_blocker_detail(report) if report else ""
+            parts.append(f"{label} [{reasons}; {detail}]" if detail else f"{label} [{reasons}]")
+        if len(parts) > int(limit):
+            parts = parts[: int(limit)] + [f"+{len(blocked) - int(limit)}"]
+        return "; ".join(parts)
+
+    def _split_review_acceptance_refs(self, refs):
+        report = self.project.build_part_review_acceptance_report(
+            refs,
+            require_opened_for_review=False,
+        )
+        ready = list(report.get("ready") or [])
+        not_opened = list(report.get("not_opened") or [])
+        blocked = list(report.get("blocked") or [])
+        return ready, not_opened, blocked
+
+    def accept_selected_ai_results(self):
+        if not self._guard_backend_write_lock():
+            return False
+        if self.current_volume_scope == "part" and self.working_edit_dirty:
+            message = tt("Save current labels before accepting selected AI results.", self.lang)
+            self._set_operation_feedback(message)
+            QMessageBox.information(self, tt("Accept working edit", self.lang), message)
+            return False
+        refs = self._selected_part_refs_for_review_acceptance()
+        if not refs:
+            QMessageBox.warning(self, tt("Accept working edit", self.lang), tt("No selected editable AI result is ready for acceptance.", self.lang))
+            return False
+        try:
+            ready, not_opened, blocked = self._split_review_acceptance_refs(refs)
+        except Exception as exc:
+            QMessageBox.warning(self, tt("Accept working edit", self.lang), str(exc))
+            return False
+        if blocked:
+            message = tt("Selected editable AI result(s) have label/schema problems: {0}", self.lang).format(self._summarize_review_blockers(blocked))
+            QMessageBox.warning(self, tt("Accept working edit", self.lang), message)
+            self._set_operation_feedback(message)
+            return False
+        if not ready:
+            QMessageBox.warning(self, tt("Accept working edit", self.lang), tt("No selected editable AI result is ready for acceptance.", self.lang))
+            return False
+        if not_opened:
+            reply = QMessageBox.question(
+                self,
+                tt("Accept working edit", self.lang),
+                tt("Some selected editable AI result(s) have not been opened for review. Accept them as training truth anyway?", self.lang),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return False
+        reply = QMessageBox.question(
+            self,
+            tt("Accept working edit", self.lang),
+            tt("Accept {0} selected editable AI result(s) as training truth?", self.lang).format(len(ready)),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return False
+        try:
+            result = self.project.promote_reviewed_part_results_to_manual_truth(
+                ready,
+                require_opened_for_review=False,
+                save=True,
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, tt("Accept working edit", self.lang), str(exc))
+            return False
+        self.refresh_project()
+        if self.current_specimen_id and self.current_part_id:
+            self._select_volume_tree_item(
+                self.current_specimen_id,
+                "part_reslice" if self.current_reslice_id else "part",
+                self.current_part_id,
+                self.current_reslice_id,
+            )
+        message = tt("Accepted {0} editable AI result(s) as training truth.", self.lang).format(result.get("count", 0))
+        self._set_operation_feedback(message)
+        return True
+
+    def _predict_will_overwrite_editable_result(self, part_refs=None, specimen_ids=None, input_scope="part_reslice"):
+        if str(input_scope or "") == "top_level_volume":
+            for specimen_id in specimen_ids or []:
+                specimen = self.project.get_specimen(str(specimen_id), default=None)
+                record = (((specimen or {}).get("labels") or {}).get("working_edit") or {})
+                if str(record.get("path") or "").strip():
+                    return True
+            return False
+        for ref in part_refs or []:
+            specimen_id = str((ref or {}).get("specimen_id") or "")
+            part_id = str((ref or {}).get("part_id") or "")
+            record = self.project.part_label_record(
+                specimen_id,
+                part_id,
+                "editable_ai_result",
+                reslice_id=str((ref or {}).get("reslice_id") or ""),
+            )
+            if str(record.get("path") or "").strip():
+                return True
+        return False
+
+    def _confirm_predict_overwrite_if_needed(self, part_refs=None, specimen_ids=None, input_scope="part_reslice"):
+        if not self._predict_will_overwrite_editable_result(part_refs=part_refs, specimen_ids=specimen_ids, input_scope=input_scope):
+            return True
+        reply = QMessageBox.question(
+            self,
+            tt("TIF backend", self.lang),
+            tt("This predict run will overwrite the current editable result for selected target(s), but will not overwrite training truth. Continue?", self.lang),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return reply == QMessageBox.Yes
+
+    def _start_backend_status(self, action, part_refs=None, specimen_ids=None, input_scope="part_reslice"):
+        self._tif_backend_action = str(action or "")
+        self._tif_backend_started_mono = time.monotonic()
+        self._tif_backend_run_dir = ""
+        self._tif_backend_result_json = ""
+        self._tif_backend_last_result = None
+        self._tif_backend_progress_value = 0
+        self.backend_progress_bar.setRange(0, 100)
+        self.backend_progress_bar.setValue(0)
+        self.backend_progress_bar.setFormat("%p%")
+        self.backend_log_tail.clear()
+        if action == "train":
+            self._set_training_result_summary(None)
+        status = tt("Running {0}...", self.lang).format(action)
+        if str(input_scope or "") == "top_level_volume":
+            detail = tt("{0} {1} top-level volume(s).", self.lang).format(status, len(specimen_ids or []))
+        else:
+            detail = tt("{0} {1} part sample(s).", self.lang).format(status, len(part_refs or []))
+        self.backend_run_status_label.setText(detail)
+        self.training_status_label.setText(detail)
+        self.backend_elapsed_label.setText(tt("Elapsed: {0}", self.lang).format("00:00"))
+        self.backend_elapsed_timer.start()
+        self._set_backend_controls_running(True)
+        self._set_backend_write_locked_controls(True)
+        self._sync_undo_redo_buttons()
+        self.log(detail)
+
+    def _on_tif_backend_progress(self, current, total, message):
+        total = int(total or 0)
+        current = int(current or 0)
+        if total <= 0:
+            value = int(getattr(self, "_tif_backend_progress_value", 0) or 0)
+        else:
+            value = int(round(max(0, min(total, current)) * 100.0 / max(1, total)))
+            value = max(int(getattr(self, "_tif_backend_progress_value", 0) or 0), value)
+        value = max(0, min(100, value))
+        self._tif_backend_progress_value = value
+        self.backend_progress_bar.setRange(0, 100)
+        self.backend_progress_bar.setValue(value)
+        self.backend_progress_bar.setFormat("%p%")
+        text = str(message or "")
+        if text:
+            for line in text.splitlines():
+                if line.startswith("Run folder:"):
+                    path = line.split(":", 1)[1].strip()
+                    if path:
+                        self._tif_backend_run_dir = path
+                elif line.startswith("Result JSON:"):
+                    path = line.split(":", 1)[1].strip()
+                    if path:
+                        self._tif_backend_result_json = path
+            first_line = text.splitlines()[0]
+            self.backend_run_status_label.setText(first_line)
+            self.training_status_label.setText(first_line)
+            tail = "\n".join(text.splitlines()[-8:])
+            self.backend_log_tail.setPlainText(tail)
+            self.backend_log_tail.moveCursor(QTextCursor.End)
+            if self._backend_action_running():
+                self.btn_open_backend_run.setEnabled(bool(self._tif_backend_run_dir) and os.path.isdir(self._tif_backend_run_dir))
+                self.btn_open_backend_result.setEnabled(False)
+
+    def _backend_failure_summary(self, text, action=None):
+        raw = str(text or "")
+        lower = raw.lower()
+        action_text = str(action or self._tif_backend_action or "").strip() or tt("backend task", self.lang)
+        if "_cancelled" in lower:
+            return tt("Run cancelled: {0}", self.lang).format(action_text)
+        if "nnunet_training_requires_at_least_2_samples" in lower:
+            count = "0"
+            marker = "nnunet_training_requires_at_least_2_samples:"
+            tail = raw.split(marker, 1)[1] if marker in raw else ""
+            if tail:
+                count = tail.split()[0].split(":")[0].strip() or "0"
+            return tt("Training needs at least 2 accepted training samples; current selection has {0}.", self.lang).format(count)
+        if "nnunet_command_not_found" in lower:
+            return tt("nnU-Net command was not found in the selected backend Python environment.", self.lang)
+        if "nnunet_command_failed" in lower:
+            return tt("nnU-Net command failed. Open the run folder and check nnunet_v2_commands.log.", self.lang)
+        if "tif_backend_train_failed" in lower:
+            return tt("Training failed. Details are kept in the backend log and run folder.", self.lang)
+        if "tif_backend_prepare_dataset_failed" in lower:
+            return tt("Dataset preparation failed. Details are kept in the backend log and run folder.", self.lang)
+        if "tif_backend_predict_failed" in lower:
+            return tt("Prediction failed. Details are kept in the backend log and run folder.", self.lang)
+        return tt("Run failed: {0}", self.lang).format(action_text)
+
+    def _backend_failure_dialog_text(self, summary, detail):
+        lines = [str(summary or tt("Run failed.", self.lang))]
+        run_dir = str(self._tif_backend_run_dir or "").strip()
+        result_json = str(self._tif_backend_result_json or "").strip()
+        if run_dir:
+            lines.append(f"{tt('Run folder', self.lang)}: {run_dir}")
+        if result_json:
+            lines.append(f"{tt('Result JSON', self.lang)}: {result_json}")
+        detail = str(detail or "").strip()
+        if detail and len(detail) < 320:
+            lines.append(detail)
+        return "\n".join(lines)
+
+    def _on_tif_backend_finished(self, result):
+        result = result if isinstance(result, dict) else {}
+        self._tif_backend_last_result = result
+        self._tif_backend_run_dir = str(result.get("run_dir") or "")
+        backend_result = result.get("result") if isinstance(result.get("result"), dict) else {}
+        self._tif_backend_result_json = str(((result.get("contract") or {}).get("result_json")) or backend_result.get("_result_json") or "")
+        self._tif_backend_progress_value = 100
+        self.backend_progress_bar.setRange(0, 100)
+        self.backend_progress_bar.setValue(100)
+        self.backend_progress_bar.setFormat("%p%")
+        action = str(result.get("contract", {}).get("action") or self._tif_backend_action or "")
+        message = tt("Run finished: {0}\nRun: {1}", self.lang).format(action, self._tif_backend_run_dir)
+        self.backend_run_status_label.setText(message)
+        self.training_status_label.setText(message)
+        self.log(message)
+        pending = dict(self._tif_backend_pending_selection or {})
+        self._cleanup_tif_backend_thread()
+        self.refresh_project()
+        if action == "train":
+            backend_result = result.get("result") if isinstance(result.get("result"), dict) else result
+            result_json = str((backend_result or {}).get("_result_json") or self._tif_backend_result_json or "")
+            summary = summarize_tif_training_result(backend_result, result_json=result_json, run_dir=self._tif_backend_run_dir)
+            model_record = self._register_training_summary_model(summary, backend_result, result.get("contract", {}))
+            self._set_training_result_summary(summary)
+            self._populate_tif_model_library_combo(self._tif_model_record_id(model_record) if model_record else None)
+            self.show_latest_training_result_summary(show_message=False)
+        if action == "predict" and pending.get("specimen_id") and pending.get("input_scope") == "top_level_volume":
+            self._select_volume_tree_item(pending.get("specimen_id", ""), "full")
+            index = self.label_role_combo.findData("working_edit")
+            if index >= 0:
+                self.label_role_combo.setCurrentIndex(index)
+            if hasattr(self, "task_tabs") and hasattr(self, "training_mode_tabs"):
+                self.task_tabs.setCurrentWidget(self.training_mode_tabs)
+                self.training_mode_tabs.setCurrentWidget(self.annotation_task_page)
+        elif action == "predict" and pending.get("specimen_id") and pending.get("part_id"):
+            self._select_volume_tree_item(
+                pending.get("specimen_id", ""),
+                "part_reslice" if pending.get("reslice_id") else "part",
+                pending.get("part_id", ""),
+                pending.get("reslice_id", ""),
+            )
+            index = self.label_role_combo.findData("editable_ai_result")
+            if index >= 0:
+                self.label_role_combo.setCurrentIndex(index)
+            if hasattr(self, "task_tabs") and hasattr(self, "training_mode_tabs"):
+                self.task_tabs.setCurrentWidget(self.training_mode_tabs)
+                self.training_mode_tabs.setCurrentWidget(self.annotation_task_page)
+        if action == "predict":
+            self.refresh_predict_targets()
+        self._tif_backend_pending_selection = {}
+
+    def _on_tif_backend_failed(self, message, context=None):
+        text = str(message or "")
+        context = context if isinstance(context, dict) else {}
+        self._tif_backend_run_dir = str(context.get("run_dir") or self._tif_backend_run_dir or "")
+        self._tif_backend_result_json = str(context.get("result_json") or self._tif_backend_result_json or "")
+        action = self._tif_backend_action
+        status = self._backend_failure_summary(text, action=action)
+        self._tif_backend_progress_value = 0
+        self.backend_progress_bar.setRange(0, 100)
+        self.backend_progress_bar.setValue(0)
+        self.backend_progress_bar.setFormat("%p%")
+        self.backend_run_status_label.setText(status)
+        self.training_status_label.setText(status)
+        detail_lines = text.splitlines()
+        detail_tail = "\n".join(detail_lines[-12:]) if detail_lines else text
+        self.backend_log_tail.setPlainText(detail_tail)
+        self.backend_log_tail.setToolTip(text)
+        self.log(status)
+        self._tif_backend_pending_selection = {}
+        self._cleanup_tif_backend_thread()
+        if "_cancelled" not in text:
+            QMessageBox.warning(self, tt("TIF backend", self.lang), self._backend_failure_dialog_text(status, text))
+
+    def cancel_backend_action(self):
+        if not self._backend_action_running() or self._tif_backend_worker is None:
+            return
+        action = self._tif_backend_action
+        self._tif_backend_worker.cancel()
+        message = tt("Cancelling {0}...", self.lang).format(action)
+        self.backend_run_status_label.setText(message)
+        self.training_status_label.setText(message)
+        self.log(message)
+
+    def open_latest_backend_run_folder(self):
+        path = str(self._tif_backend_run_dir or "")
+        if not path or not os.path.isdir(path):
+            QMessageBox.information(self, tt("TIF backend", self.lang), tt("No backend run folder is available yet.", self.lang))
+            return False
+        return QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    def open_latest_backend_result_json(self):
+        path = str(self._tif_backend_result_json or "")
+        if not path or not os.path.exists(path):
+            QMessageBox.information(self, tt("TIF backend", self.lang), tt("No backend result JSON is available yet.", self.lang))
+            return False
+        return QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    def _queue_backend_action_after_save(self, action, selection):
+        self._pending_backend_action_after_save = {
+            "action": str(action or ""),
+            "selection": {
+                "part_refs": [dict(ref or {}) for ref in (selection or {}).get("part_refs", [])],
+                "specimen_ids": [str(item) for item in (selection or {}).get("specimen_ids", [])],
+                "input_scope": str((selection or {}).get("input_scope") or "part_reslice"),
+            },
+        }
+
+    def _resume_pending_backend_action_after_save(self):
+        pending = self._pending_backend_action_after_save
+        if not pending:
+            return False
+        if self.working_edit_dirty:
+            self._set_operation_feedback(tt("Save finished with remaining unsaved labels. Backend run was not started.", self.lang))
+            self._pending_backend_action_after_save = None
+            return False
+        self._pending_backend_action_after_save = None
+        self._start_backend_action_with_selection(pending.get("action", ""), pending.get("selection") or {})
+        return True
+
+    def _confirm_or_queue_save_before_backend_action(self, action, selection):
+        if not self.working_edit_dirty and not self._label_auto_save_running() and not self._label_manual_save_running():
+            return True
+        if self._label_manual_save_running():
+            self._queue_backend_action_after_save(action, selection)
+            self._set_operation_feedback(tt("Label save is running. Backend run will start after saving finishes.", self.lang))
+            return False
+        if not self.working_edit_dirty and self._label_auto_save_running():
+            self._queue_backend_action_after_save(action, selection)
+            self._set_operation_feedback(tt("Finishing auto-save before backend run...", self.lang))
+            return False
+
+        title = tt("Unsaved editable AI result", self.lang) if self.current_volume_scope == "part" else tt("Unsaved current labels", self.lang)
+        prompt = (
+            tt("Save changes to the current editable AI result before continuing?", self.lang)
+            if self.current_volume_scope == "part"
+            else tt("Save changes to the current labels before continuing?", self.lang)
+        )
+        reply = QMessageBox.question(
+            self,
+            title,
+            prompt,
+            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+            QMessageBox.Save,
+        )
+        if reply == QMessageBox.Cancel:
+            return False
+        if reply == QMessageBox.Discard:
+            self.working_edit_dirty = False
+            self._reset_edit_dirty_tracking()
+            self._update_save_status()
+            if self.current_specimen_id:
+                self._load_edit_volume()
+            return True
+
+        self._queue_backend_action_after_save(action, selection)
+        if not self.save_working_edit_async(show_message=True):
+            self._pending_backend_action_after_save = None
+        return False
+
+    def _start_backend_action_with_selection(self, action, selection):
+        part_refs = selection.get("part_refs") or []
+        specimen_ids = selection.get("specimen_ids") or []
+        input_scope = selection.get("input_scope") or "part_reslice"
+        if self._backend_action_running():
+            QMessageBox.information(self, tt("TIF backend", self.lang), tt("Backend task is already running.", self.lang))
+            return
+        self._tif_backend_pending_selection = {
+            "specimen_id": self.current_specimen_id,
+            "part_id": self.current_part_id,
+            "reslice_id": self.current_reslice_id,
+            "input_scope": input_scope,
+        }
+        self._start_backend_status(action, part_refs=part_refs, specimen_ids=specimen_ids, input_scope=input_scope)
+        self._tif_backend_thread = QThread(self)
+        self._tif_backend_worker = TifBackendActionWorker(
+            self.project,
+            self.backend_config,
+            action,
+            part_refs=part_refs,
+            specimen_ids=specimen_ids,
+            input_scope=input_scope,
+            model_manifest=self.backend_config.get("model_manifest", ""),
+        )
+        self._tif_backend_worker.moveToThread(self._tif_backend_thread)
+        self._tif_backend_thread.started.connect(self._tif_backend_worker.run)
+        self._tif_backend_worker.progress.connect(self._on_tif_backend_progress)
+        self._tif_backend_worker.finished.connect(self._on_tif_backend_finished)
+        self._tif_backend_worker.failed.connect(self._on_tif_backend_failed)
+        self._tif_backend_worker.finished.connect(self._tif_backend_thread.quit)
+        self._tif_backend_worker.failed.connect(self._tif_backend_thread.quit)
+        self._tif_backend_thread.finished.connect(self._tif_backend_worker.deleteLater)
+        self._tif_backend_thread.finished.connect(self._on_tif_backend_thread_finished)
+        self._tif_backend_thread.finished.connect(self._tif_backend_thread.deleteLater)
+        self._tif_backend_thread.start()
 
     def run_backend_action(self, action):
         if not self._ensure_tif_project_open():
+            return
+        if self._backend_action_running():
+            QMessageBox.information(self, tt("TIF backend", self.lang), tt("Backend task is already running.", self.lang))
             return
         self.backend_config = self._backend_config_from_ui()
         if self.config_manager is not None:
@@ -5902,38 +11065,31 @@ class TifWorkbenchWidget(QWidget):
         if command_key and not self.backend_config.get(command_key, "").strip():
             QMessageBox.warning(self, tt("TIF backend", self.lang), tt("No command configured for this backend action.", self.lang))
             return
+        if action == "predict":
+            try:
+                self._validated_predict_model_manifest()
+            except Exception as exc:
+                message = tt("Action failed: {0}", self.lang).format(str(exc))
+                self.training_status_label.setText(message)
+                self.log(message)
+                QMessageBox.warning(self, tt("TIF backend", self.lang), str(exc))
+                return
         try:
-            specimen_ids = self._selected_specimen_ids_for_action(action)
-            running_message = tt("Running {0}...", self.lang).format(action)
-            self.training_status_label.setText(running_message)
-            self.log(running_message)
-            runner = TifBackendRunner(self.project, self.backend_config)
-            result = runner.run_action(
-                action,
-                specimen_ids=specimen_ids,
-                model_manifest=self.backend_config.get("model_manifest", ""),
-            )
+            selection = self._selected_backend_samples_for_action(action)
         except Exception as exc:
             message = tt("Action failed: {0}", self.lang).format(str(exc))
             self.training_status_label.setText(message)
             self.log(message)
             QMessageBox.warning(self, tt("TIF backend", self.lang), str(exc))
             return
-        imported_id = self.current_specimen_id
-        self.refresh_project()
-        if action == "predict" and imported_id:
-            self._select_specimen_after_import(imported_id)
-            index = self.label_role_combo.findData("model_draft")
-            if index >= 0:
-                self.label_role_combo.setCurrentIndex(index)
-        message = tt("Action finished: {0}\nRun: {1}", self.lang).format(action, result.get("run_dir", ""))
-        self.training_status_label.setText(message)
-        self.log(message)
-        QMessageBox.information(
-            self,
-            tt("TIF backend", self.lang),
-            message,
-        )
+        part_refs = selection.get("part_refs") or []
+        specimen_ids = selection.get("specimen_ids") or []
+        input_scope = selection.get("input_scope") or "part_reslice"
+        if action == "predict" and not self._confirm_predict_overwrite_if_needed(part_refs=part_refs, specimen_ids=specimen_ids, input_scope=input_scope):
+            return
+        if not self._confirm_or_queue_save_before_backend_action(action, selection):
+            return
+        self._start_backend_action_with_selection(action, selection)
 
     def _make_panel(self, title, object_name):
         panel = QFrame()
@@ -6053,10 +11209,17 @@ class TifWorkbenchWidget(QWidget):
         self.display_task_page, self.display_task_layout = self._make_task_page("tifDisplayTaskPage")
         self.annotation_task_page, self.annotation_task_layout = self._make_task_page("tifAnnotationTaskPage")
         self.training_task_page, self.training_task_layout = self._make_task_page("tifTrainingTaskPage")
-        self.task_tabs.addTab(self.part_task_page, tt("Part", self.lang))
-        self.task_tabs.addTab(self.display_task_page, tt("Display", self.lang))
-        self.task_tabs.addTab(self.annotation_task_page, tt("Annotation", self.lang))
-        self.task_tabs.addTab(self.training_task_page, tt("Train/export", self.lang))
+        self.training_mode_tabs = QTabWidget()
+        self.training_mode_tabs.setObjectName("tifTrainingModeTabs")
+        self.training_mode_tabs.addTab(self.annotation_task_page, tt("Label review", self.lang))
+        self.training_mode_tabs.addTab(self.training_task_page, tt("Train / predict", self.lang))
+        self.result_compare_page, self.result_compare_layout = self._make_task_page("tifResultCompareTaskPage")
+        self.training_mode_tabs.addTab(self.result_compare_page, tt("Result comparison", self.lang))
+        self.task_tabs.addTab(self.display_task_page, tt("Review", self.lang))
+        self.task_tabs.addTab(self.part_task_page, tt("Part Extraction", self.lang))
+        self.task_tabs.addTab(self.training_mode_tabs, tt("Annotation / training", self.lang))
+        self.task_tabs.currentChanged.connect(self._on_task_tab_changed)
+        self.training_mode_tabs.currentChanged.connect(self._on_training_mode_tab_changed)
 
         import_section, import_layout = self._make_section("Data import", "tifImportSection")
         import_button_row = QHBoxLayout()
@@ -6110,7 +11273,7 @@ class TifWorkbenchWidget(QWidget):
         )
         self.local_axis_volume_help_label = QLabel(
             tt(
-                "Use the 3D part preview as the main workspace. Copy source Z, drag the output axis endpoints, then pick the roll reference points on the observation-side clip plane. Export here when the frame is confirmed.",
+                "Roll A/B/C picking works on the observation-side clip plane only. Turn on Clip plane in the 3D preview, move it to the target cross-section, then click A, B, and C on that plane.",
                 self.lang,
             )
         )
@@ -6236,6 +11399,33 @@ class TifWorkbenchWidget(QWidget):
         volume_render_layout.addWidget(self.btn_reset_volume_view)
         self.display_task_layout.addWidget(self.volume_render_section)
 
+        self.material_section, material_layout = self._make_section("Current labels", "tifMaterialSection")
+        self.material_help_label = QLabel(tt("After binding a label schema, select one current label here before using the brush or fill tools.", self.lang))
+        self.material_help_label.setObjectName("tifLayerHelpText")
+        self.material_help_label.setWordWrap(True)
+        material_layout.addWidget(self.material_help_label)
+        current_material_row = QHBoxLayout()
+        current_material_row.setSpacing(10)
+        current_material_row.addWidget(self.current_material_swatch)
+        current_material_text = QVBoxLayout()
+        current_material_text.setSpacing(2)
+        current_material_text.addWidget(self.current_material_title_label)
+        current_material_text.addWidget(self.current_material_label)
+        current_material_row.addLayout(current_material_text, 1)
+        material_layout.addLayout(current_material_row)
+        self.material_scope_help_label = QLabel(tt("Material IDs are the numeric labels stored in the current volume. For part volumes, this list follows the bound region label schema; for full volumes, it is the specimen material map.", self.lang))
+        self.material_scope_help_label.setObjectName("tifLayerHelpText")
+        self.material_scope_help_label.setWordWrap(True)
+        material_layout.addWidget(self.material_scope_help_label)
+        material_button_row = QHBoxLayout(self.material_editor_buttons)
+        material_button_row.setContentsMargins(0, 0, 0, 0)
+        material_button_row.setSpacing(6)
+        material_button_row.addWidget(self.btn_add_material)
+        material_button_row.addWidget(self.btn_edit_material)
+        material_button_row.addWidget(self.btn_delete_material)
+        material_layout.addWidget(self.material_editor_buttons)
+        material_layout.addWidget(self.material_table)
+
         self.annotation_section, annotation_layout = self._make_section("Annotation tools", "tifAnnotationSection")
         controls = QGridLayout()
         controls.setHorizontalSpacing(10)
@@ -6250,7 +11440,8 @@ class TifWorkbenchWidget(QWidget):
         tool_grid.addWidget(self.btn_tool_rectangle, 1, 1)
         tool_grid.addWidget(self.btn_tool_ellipse, 2, 0)
         tool_grid.addWidget(self.btn_tool_picker, 2, 1)
-        tool_grid.addWidget(self.btn_tool_pan, 3, 0, 1, 2)
+        tool_grid.addWidget(self.btn_interpolate_current_label, 3, 0, 1, 2)
+        tool_grid.addWidget(self.btn_tool_pan, 4, 0, 1, 2)
         controls.addWidget(self.annotation_tool_label, 0, 0)
         controls.addLayout(tool_grid, 0, 1)
         controls.addWidget(self.label_layer_label, 1, 0)
@@ -6259,6 +11450,8 @@ class TifWorkbenchWidget(QWidget):
         controls.addWidget(self.brush_size_slider, 2, 1)
         annotation_layout.addLayout(controls)
         annotation_layout.addWidget(self.label_role_help_label)
+        annotation_layout.addWidget(self.ai_review_check_title_label)
+        annotation_layout.addWidget(self.ai_review_check_label)
         button_row = QHBoxLayout()
         button_row.addWidget(self.btn_undo)
         button_row.addWidget(self.btn_redo)
@@ -6282,36 +11475,158 @@ class TifWorkbenchWidget(QWidget):
         annotation_layout.addWidget(self.btn_clear_current_material)
         annotation_layout.addWidget(self.btn_promote)
         annotation_layout.addWidget(self.btn_copy_draft)
-        self.annotation_task_layout.addWidget(self.annotation_section)
 
-        material_section, material_layout = self._make_section("Material map", "tifMaterialSection")
-        current_material_row = QHBoxLayout()
-        current_material_row.setSpacing(10)
-        current_material_row.addWidget(self.current_material_swatch)
-        current_material_text = QVBoxLayout()
-        current_material_text.setSpacing(2)
-        current_material_text.addWidget(self.current_material_title_label)
-        current_material_text.addWidget(self.current_material_label)
-        current_material_row.addLayout(current_material_text, 1)
-        material_layout.addLayout(current_material_row)
-        material_button_row = QHBoxLayout()
-        material_button_row.addWidget(self.btn_add_material)
-        material_button_row.addWidget(self.btn_edit_material)
-        material_button_row.addWidget(self.btn_delete_material)
-        material_layout.addLayout(material_button_row)
-        material_layout.addWidget(self.material_table)
-        self.annotation_task_layout.addWidget(material_section)
+        self.label_schema_section, label_schema_layout = self._make_section("Region label schema", "tifLabelSchemaSection")
+        self.label_schema_help_label = QLabel(tt("Bind a label schema first so every specimen uses the same numeric labels for annotation, training, prediction import, and result comparison. Import files should be TaxaMask label schema JSON exported from this panel.", self.lang))
+        self.label_schema_help_label.setObjectName("tifLayerHelpText")
+        self.label_schema_help_label.setWordWrap(True)
+        label_schema_layout.addWidget(self.label_schema_help_label)
+        label_schema_select_row = QHBoxLayout()
+        label_schema_select_row.setSpacing(6)
+        label_schema_select_row.addWidget(self.label_schema_combo, 1)
+        label_schema_select_row.addWidget(self.btn_new_label_schema)
+        label_schema_layout.addLayout(label_schema_select_row)
+        label_schema_form = QFormLayout()
+        label_schema_form.setHorizontalSpacing(8)
+        label_schema_form.setVerticalSpacing(6)
+        self.label_schema_id_label = QLabel("Schema ID")
+        self.label_schema_part_name_label = QLabel("User-defined part name")
+        label_schema_form.addRow(self.label_schema_id_label, self.label_schema_id_edit)
+        label_schema_form.addRow(self.label_schema_part_name_label, self.label_schema_part_name_edit)
+        label_schema_layout.addLayout(label_schema_form)
+        label_schema_row_buttons = QHBoxLayout()
+        label_schema_row_buttons.setSpacing(6)
+        label_schema_row_buttons.addWidget(self.btn_add_label_schema_row)
+        label_schema_row_buttons.addWidget(self.btn_remove_label_schema_row)
+        label_schema_layout.addLayout(label_schema_row_buttons)
+        label_schema_layout.addWidget(self.label_schema_table)
+        label_schema_save_buttons = QGridLayout()
+        label_schema_save_buttons.setHorizontalSpacing(6)
+        label_schema_save_buttons.setVerticalSpacing(6)
+        label_schema_save_buttons.addWidget(self.btn_save_label_schema, 0, 0)
+        label_schema_save_buttons.addWidget(self.btn_bind_label_schema_to_part, 0, 1)
+        label_schema_save_buttons.addWidget(self.btn_import_label_schema, 1, 0)
+        label_schema_save_buttons.addWidget(self.btn_export_label_schema, 1, 1)
+        label_schema_save_buttons.setColumnStretch(0, 1)
+        label_schema_save_buttons.setColumnStretch(1, 1)
+        label_schema_layout.addLayout(label_schema_save_buttons)
+        self.annotation_task_layout.addWidget(self.label_schema_section)
+        self.annotation_task_layout.addWidget(self.material_section)
+        self.annotation_task_layout.addWidget(self.annotation_section)
 
         training_section, training_layout = self._make_section("Model training", "tifTrainingSection")
         training_layout.addWidget(self.btn_export_training)
         backend_button_row = QHBoxLayout()
         backend_button_row.addWidget(self.btn_prepare_dataset)
         backend_button_row.addWidget(self.btn_train_backend)
-        backend_button_row.addWidget(self.btn_import_prediction)
         training_layout.addLayout(backend_button_row)
+        training_layout.addWidget(self.backend_run_title_label)
+        training_layout.addWidget(self.backend_run_status_label)
+        training_layout.addWidget(self.backend_elapsed_label)
+        training_layout.addWidget(self.backend_progress_bar)
+        backend_run_button_row = QHBoxLayout()
+        backend_run_button_row.setSpacing(6)
+        backend_run_button_row.addWidget(self.btn_stop_backend)
+        backend_run_button_row.addWidget(self.btn_open_backend_run)
+        backend_run_button_row.addWidget(self.btn_open_backend_result)
+        training_layout.addLayout(backend_run_button_row)
+        training_layout.addWidget(self.backend_log_tail)
+        part_user_tags_section, part_user_tags_layout = self._make_section("Part group tags", "tifPartUserTagsSection")
+        self.part_user_tag_help_label = QLabel(tt("Group tags only organize part volumes for prediction rounds or review batches. They are not annotation classes, label schemas, or training labels.", self.lang))
+        self.part_user_tag_help_label.setObjectName("tifLayerHelpText")
+        self.part_user_tag_help_label.setWordWrap(True)
+        part_user_tags_layout.addWidget(self.part_user_tag_help_label)
+        part_tag_form = QFormLayout()
+        part_tag_form.setHorizontalSpacing(8)
+        part_tag_form.setVerticalSpacing(6)
+        self.part_user_tag_id_label = QLabel("Group tag ID")
+        self.part_user_tag_label_label = QLabel("Group tag label")
+        self.part_user_tag_color_label = QLabel("Color")
+        part_tag_form.addRow(self.part_user_tag_id_label, self.part_user_tag_id_edit)
+        part_tag_form.addRow(self.part_user_tag_label_label, self.part_user_tag_label_edit)
+        part_tag_color_row = QHBoxLayout()
+        part_tag_color_row.addWidget(self.part_user_tag_color_swatch)
+        part_tag_color_row.addWidget(self.btn_choose_part_user_tag_color, 1)
+        part_tag_color_row.addWidget(self.part_user_tag_color_edit)
+        part_tag_form.addRow(self.part_user_tag_color_label, part_tag_color_row)
+        part_user_tags_layout.addLayout(part_tag_form)
+        part_tag_edit_buttons = QGridLayout()
+        part_tag_edit_buttons.setHorizontalSpacing(6)
+        part_tag_edit_buttons.setVerticalSpacing(6)
+        part_tag_edit_buttons.addWidget(self.btn_new_part_user_tag, 0, 0)
+        part_tag_edit_buttons.addWidget(self.btn_save_part_user_tag, 0, 1)
+        part_tag_edit_buttons.addWidget(self.btn_delete_part_user_tag, 1, 0)
+        part_tag_edit_buttons.addWidget(self.btn_apply_part_user_tags, 1, 1)
+        part_tag_edit_buttons.setColumnStretch(0, 1)
+        part_tag_edit_buttons.setColumnStretch(1, 1)
+        part_user_tags_layout.addLayout(part_tag_edit_buttons)
+        part_tag_order_buttons = QHBoxLayout()
+        part_tag_order_buttons.setSpacing(6)
+        part_tag_order_buttons.addWidget(self.btn_move_part_user_tag_up)
+        part_tag_order_buttons.addWidget(self.btn_move_part_user_tag_down)
+        part_user_tags_layout.addLayout(part_tag_order_buttons)
+        part_user_tags_layout.addWidget(self.part_user_tag_table)
+        training_layout.addWidget(part_user_tags_section)
+        model_library_section, model_library_layout = self._make_section("Trained models", "tifModelLibrarySection")
+        self.model_library_label = QLabel("Trained model")
+        model_library_layout.addWidget(self.model_library_label)
+        model_library_layout.addWidget(self.model_library_combo)
+        model_library_layout.addWidget(self.model_library_summary_label)
+        self.model_library_notes_label = QLabel("Notes")
+        model_library_layout.addWidget(self.model_library_notes_label)
+        model_library_layout.addWidget(self.model_library_notes_edit)
+        model_library_buttons = QGridLayout()
+        model_library_buttons.setHorizontalSpacing(6)
+        model_library_buttons.setVerticalSpacing(6)
+        model_library_buttons.addWidget(self.btn_use_selected_tif_model, 0, 0)
+        model_library_buttons.addWidget(self.btn_save_tif_model_notes, 0, 1)
+        model_library_buttons.addWidget(self.btn_delete_tif_model_record, 1, 0, 1, 2)
+        model_library_buttons.setColumnStretch(0, 1)
+        model_library_buttons.setColumnStretch(1, 1)
+        model_library_layout.addLayout(model_library_buttons)
+        training_layout.addWidget(model_library_section)
+        predict_section, predict_layout = self._make_section("Batch prediction targets", "tifPredictTargetsSection")
+        manifest_row = QHBoxLayout()
+        manifest_row.setSpacing(6)
+        manifest_row.addWidget(self.backend_manifest_edit, 1)
+        manifest_row.addWidget(self.btn_browse_model_manifest)
+        self.predict_manifest_label = QLabel("Model manifest")
+        predict_layout.addWidget(self.predict_manifest_label)
+        predict_layout.addLayout(manifest_row)
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(6)
+        self.predict_filter_label = QLabel("Predict group")
+        filter_row.addWidget(self.predict_filter_label)
+        filter_row.addWidget(self.predict_filter_combo, 1)
+        filter_row.addWidget(self.btn_refresh_predict_targets)
+        predict_layout.addLayout(filter_row)
+        predict_layout.addWidget(self.predict_targets_table)
+        predict_button_row = QHBoxLayout()
+        predict_button_row.setSpacing(6)
+        predict_button_row.addWidget(self.btn_select_current_predict_target)
+        predict_button_row.addWidget(self.btn_select_ready_predict_targets)
+        predict_button_row.addWidget(self.btn_clear_predict_targets)
+        predict_layout.addLayout(predict_button_row)
+        predict_layout.addWidget(self.predict_targets_summary_label)
+        predict_layout.addWidget(self.btn_import_prediction)
+        predict_layout.addWidget(self.btn_accept_selected_ai_results)
+        training_layout.addWidget(predict_section)
         training_layout.addWidget(self.btn_import_external_prediction_tif)
-        training_layout.addWidget(self.training_status_label)
         self.training_task_layout.addWidget(training_section)
+
+        training_result_section, training_result_layout = self._make_section("Training result", "tifTrainingResultSection")
+        training_result_layout.addWidget(self.training_result_summary_label)
+        training_result_button_grid = QGridLayout()
+        training_result_button_grid.setHorizontalSpacing(6)
+        training_result_button_grid.setVerticalSpacing(6)
+        training_result_button_grid.addWidget(self.btn_show_training_result_summary, 0, 0)
+        training_result_button_grid.addWidget(self.btn_open_training_model_output, 0, 1)
+        training_result_button_grid.addWidget(self.btn_open_training_model_manifest, 1, 0)
+        training_result_button_grid.addWidget(self.btn_batch_predict_entry, 1, 1)
+        training_result_button_grid.setColumnStretch(0, 1)
+        training_result_button_grid.setColumnStretch(1, 1)
+        training_result_layout.addLayout(training_result_button_grid)
+        self.training_task_layout.addWidget(training_result_section)
 
         backend_section, backend_layout = self._make_section("Model configuration", "tifBackendSection")
         backend_form = QFormLayout()
@@ -6332,18 +11647,51 @@ class TifWorkbenchWidget(QWidget):
         backend_form.addRow(self.backend_prepare_label, self.backend_prepare_edit)
         backend_form.addRow(self.backend_train_label, self.backend_train_edit)
         backend_form.addRow(self.backend_predict_label, self.backend_predict_edit)
-        backend_form.addRow(self.backend_manifest_label, self.backend_manifest_edit)
+        self.backend_manifest_label.setVisible(False)
         backend_layout.addLayout(backend_form)
-        backend_layout.addWidget(self.btn_save_backend)
+        backend_button_row = QHBoxLayout()
+        backend_button_row.setSpacing(6)
+        backend_button_row.addWidget(self.btn_use_nnunet_backend_preset)
+        backend_button_row.addWidget(self.btn_save_backend)
+        backend_button_row.addStretch(1)
+        backend_layout.addLayout(backend_button_row)
         self.training_task_layout.addWidget(backend_section)
 
         log_section, log_layout = self._make_section("Workbench log", "tifLogSection")
         log_layout.addWidget(self.log_console)
         self.training_task_layout.addWidget(log_section)
+
+        result_section, result_layout = self._make_section("Result comparison", "tifResultComparisonSection")
+        result_source_row = QHBoxLayout()
+        self.result_source_label = QLabel("Review source")
+        result_source_row.addWidget(self.result_source_label)
+        result_source_row.addWidget(self.result_source_manual_radio)
+        result_source_row.addWidget(self.result_source_editable_radio)
+        result_source_row.addStretch(1)
+        result_layout.addLayout(result_source_row)
+        result_region_row = QHBoxLayout()
+        self.result_region_label = QLabel("Region label")
+        result_region_row.addWidget(self.result_region_label)
+        result_region_row.addWidget(self.result_region_combo, 1)
+        result_layout.addLayout(result_region_row)
+        result_button_grid = QGridLayout()
+        result_button_grid.setHorizontalSpacing(8)
+        result_button_grid.setVerticalSpacing(8)
+        result_button_grid.addWidget(self.btn_refresh_result_comparison, 0, 0)
+        result_button_grid.addWidget(self.btn_open_result_comparison_target, 0, 1)
+        result_button_grid.addWidget(self.btn_show_result_region_in_3d, 1, 0)
+        result_button_grid.addWidget(self.btn_export_current_rendering, 1, 1)
+        result_button_grid.setColumnStretch(0, 1)
+        result_button_grid.setColumnStretch(1, 1)
+        result_layout.addLayout(result_button_grid)
+        result_layout.addWidget(self.result_compare_summary_label)
+        result_layout.addWidget(self.result_compare_table)
+        self.result_compare_layout.addWidget(result_section)
         self.part_task_layout.addStretch(1)
         self.display_task_layout.addStretch(1)
         self.annotation_task_layout.addStretch(1)
         self.training_task_layout.addStretch(1)
+        self.result_compare_layout.addStretch(1)
         splitter.addWidget(right)
 
         splitter.setSizes([230, 900, 420])
@@ -6375,7 +11723,10 @@ class TifWorkbenchWidget(QWidget):
             QFrame#tifOperationStatusSection,
             QFrame#tifAnnotationSection,
             QFrame#tifMaterialSection,
+            QFrame#tifLabelSchemaSection,
             QFrame#tifTrainingSection,
+            QFrame#tifPartUserTagsSection,
+            QFrame#tifTrainingResultSection,
             QFrame#tifBackendSection,
             QFrame#tifStatusSection,
             QFrame#tifLogSection {
@@ -6497,7 +11848,10 @@ class TifWorkbenchWidget(QWidget):
                 border-radius: 12px;
             }
             QTreeWidget#tifSpecimenList,
-            QTableWidget#tifMaterialTable {
+            QTableWidget#tifMaterialTable,
+            QTableWidget#tifPredictTargetsTable,
+            QTableWidget#tifTrainingResultMetricsTable,
+            QTableWidget#tifTrainingResultArtifactTable {
                 background: {t['input']};
                 alternate-background-color: {t['table_alt']};
                 border: 1px solid {t['border']};
@@ -6507,12 +11861,18 @@ class TifWorkbenchWidget(QWidget):
                 selection-color: {t['selection_text']};
             }
             QTableWidget#tifMaterialTable::item,
+            QTableWidget#tifPredictTargetsTable::item,
+            QTableWidget#tifTrainingResultMetricsTable::item,
+            QTableWidget#tifTrainingResultArtifactTable::item,
             QTreeWidget#tifSpecimenList::item {
                 min-height: 24px;
                 padding: 4px;
                 border: none;
             }
-            QTableWidget#tifMaterialTable QHeaderView::section {
+            QTableWidget#tifMaterialTable QHeaderView::section,
+            QTableWidget#tifPredictTargetsTable QHeaderView::section,
+            QTableWidget#tifTrainingResultMetricsTable QHeaderView::section,
+            QTableWidget#tifTrainingResultArtifactTable QHeaderView::section {
                 background: {t['panel_alt']};
                 color: {t['text_soft']};
                 border: none;
@@ -6598,6 +11958,25 @@ class TifWorkbenchWidget(QWidget):
                 border: 1px solid {t['border']};
                 border-radius: 10px;
                 padding: 6px;
+            }
+            QScrollArea#tifTrainingResultPreviewScroll {
+                background: {t['input']};
+                border: 1px solid {t['border']};
+                border-radius: 10px;
+            }
+            QLabel#tifTrainingResultSummaryText {
+                background: {t['input']};
+                color: {t['text_soft']};
+                border: 1px solid {t['border']};
+                border-radius: 8px;
+                padding: 6px 8px;
+            }
+            QLabel#tifPredictTargetsSummaryText {
+                background: {t['input']};
+                color: {t['text_soft']};
+                border: 1px solid {t['border']};
+                border-radius: 8px;
+                padding: 6px 8px;
             }
             QLabel#tifLayerHelpText {
                 color: {t['text_soft']};
@@ -6710,29 +12089,57 @@ class TifWorkbenchWidget(QWidget):
         super().keyPressEvent(event)
 
     def close_project(self, prompt_unsaved=True):
-        if self._tif_import_thread is not None or self._tif_materialize_thread is not None or self._local_axis_reslice_export_thread is not None:
+        if (
+            self._tif_import_thread is not None
+            or self._tif_materialize_thread is not None
+            or self._local_axis_reslice_export_thread is not None
+            or self._part_mask_preview_thread is not None
+            or self._confirm_part_roi_thread is not None
+            or self._tif_backend_thread is not None
+            or self._label_auto_save_thread is not None
+            or self._label_manual_save_thread is not None
+            or self._promote_thread is not None
+        ):
             if prompt_unsaved:
+                if self._label_auto_save_thread is not None or self._label_manual_save_thread is not None or self._promote_thread is not None:
+                    message = self._backend_write_lock_message() if self._backend_write_lock_active() else tt("Auto-save is still finishing. Wait a moment, then try again.", self.lang)
+                    title = self._backend_write_lock_title() if self._backend_write_lock_active() else tt("TIF backend", self.lang)
+                    QMessageBox.information(self, title, message)
+                    return False
                 QMessageBox.information(
                     self,
                     tt("TIF data import", self.lang),
-                    tt("Wait for the current background TIF task to finish before closing the project.", self.lang),
+                    tt("Wait for the current backend task to finish before closing the project.", self.lang)
+                    if self._tif_backend_thread is not None
+                    else tt("Wait for the current background TIF task to finish before closing the project.", self.lang),
                 )
             return False
         self._cancel_and_wait_volume_preview_build()
+        self._wait_for_label_auto_save()
         if prompt_unsaved and not self._confirm_discard_or_save_working_edit():
             return False
         self.release_volume_renderer()
         self.image_volume = None
         self.label_volume = None
+        self.part_mask_volume = None
         self.material_map = {}
         self.material_colors = {}
         self.current_specimen_id = ""
         self.edit_volume = None
+        self._invalidate_result_region_mask_cache(clear_active_mask_preview=False)
         self._clear_volume_preview_cache()
-        self._dirty_edit_slices = set()
+        self._reset_edit_dirty_tracking()
         self.auto_save_timer.stop()
         if hasattr(self, "volume_still_timer"):
             self.volume_still_timer.stop()
+        if getattr(self, "_tif_training_result_dialog", None) is not None:
+            try:
+                self._tif_training_result_dialog.close()
+            except Exception:
+                pass
+            self._tif_training_result_dialog = None
+        if hasattr(self, "training_result_summary_label"):
+            self._set_training_result_summary(None)
         self.working_edit_dirty = False
         self.current_volume_scope = "full"
         self.current_part_id = ""
@@ -6882,6 +12289,12 @@ class TifWorkbenchWidget(QWidget):
             self.canvas.setText(tt("No specimens in this TIF project", self.lang))
             self.status_label.setText("")
             self.metadata_label.setText("")
+        self._populate_label_schema_combo()
+        self._populate_part_user_tag_table()
+        self._populate_tif_model_library_combo()
+        self._sync_material_colors_from_active_source()
+        self.refresh_predict_targets()
+        self._refresh_result_comparison_if_visible()
 
     def _format_specimen_label(self, specimen):
         status = specimen.get("review_status", "not_started")
@@ -6891,7 +12304,12 @@ class TifWorkbenchWidget(QWidget):
     def _format_part_label(self, part):
         status = str((part or {}).get("status", "draft") or "draft")
         name = str((part or {}).get("display_name") or (part or {}).get("part_id") or tt("Part volume", self.lang))
-        return f"{name} ({status})"
+        training = (part or {}).get("training") or {}
+        system_status = str(training.get("system_status") or (part or {}).get("system_status") or status)
+        tag_lookup = self._part_user_tag_lookup()
+        tag_labels = [tag_lookup.get(str(tag_id), str(tag_id)) for tag_id in (part or {}).get("user_tags", []) if str(tag_id or "")]
+        suffix = f" | {', '.join(tag_labels)}" if tag_labels else ""
+        return f"{name} ({system_status}){suffix}"
 
     def _format_reslice_label(self, reslice):
         name = str((reslice or {}).get("display_name") or (reslice or {}).get("reslice_id") or "reslice")
@@ -7036,6 +12454,7 @@ class TifWorkbenchWidget(QWidget):
             self.current_part_id = ""
             self.current_part = None
             self.current_reslice_id = ""
+            self._slice_unavailable_override = ""
             self.local_axis_draft = None
             self.part_preview_mask = None
             self.part_mask_preview_bbox = []
@@ -7056,14 +12475,16 @@ class TifWorkbenchWidget(QWidget):
             self.set_annotation_tool_mode("pan", show_message=False)
             self.image_volume = None
             self.label_volume = None
+            self.part_mask_volume = None
             self.edit_volume = None
             self.working_edit_dirty = False
-            self._dirty_edit_slices = set()
+            self._reset_edit_dirty_tracking()
             self.material_map = {}
             self.material_colors = {}
             self._reset_active_volume_preview_state()
             self.undo_stack = []
             self.redo_stack = []
+            self._populate_label_role_combo()
 
             image_path = self.project.to_absolute((specimen.get("working_volume") or {}).get("path", ""))
             if image_path and volume_sidecar_exists(image_path):
@@ -7085,15 +12506,18 @@ class TifWorkbenchWidget(QWidget):
             material_path = self.project.to_absolute(specimen.get("material_map", ""))
             if material_path and os.path.exists(material_path):
                 self.material_map = read_material_map(material_path)
-                self.material_colors = {
-                    int(item["id"]): QColor(str(item.get("color", "#000000")))
-                    for item in self.material_map.get("materials", [])
-                }
+                self._sync_material_colors_from_active_source()
             self._populate_material_table()
+            self._populate_label_schema_combo()
+            self._populate_part_user_tag_table()
+            self._populate_result_region_combo()
+            self._invalidate_result_region_mask_cache(clear_active_mask_preview=False)
+            self._refresh_result_comparison_if_visible()
             self._populate_volume_tint_combo()
             self._apply_volume_transfer_opacity_setting()
             self._populate_volume_mask_combo()
             self._reload_label_volume()
+            self._reload_part_mask_volume()
             self._load_edit_volume()
             self._update_status_labels(specimen)
             self._apply_default_volume_mask_mode()
@@ -7129,6 +12553,7 @@ class TifWorkbenchWidget(QWidget):
             self.current_part_id = part.get("part_id", "")
             self.current_part = part
             self.current_reslice_id = str(selected_reslice_id or "")
+            self._slice_unavailable_override = ""
             self._clear_local_axis_draft_if_part_changed(specimen_id, self.current_part_id)
             if self.current_reslice_id and self.local_axis_draft is not None:
                 self._set_local_axis_status(tt("Selected saved reslice is read-only. Return to the part volume to edit axes or export another reslice.", self.lang))
@@ -7147,9 +12572,10 @@ class TifWorkbenchWidget(QWidget):
             self.btn_draw_part_contour.blockSignals(False)
             self.image_volume = None
             self.label_volume = None
+            self.part_mask_volume = None
             self.edit_volume = None
             self.working_edit_dirty = False
-            self._dirty_edit_slices = set()
+            self._reset_edit_dirty_tracking()
             self.material_map = {}
             self.material_colors = {}
             self.part_preview_mask = None
@@ -7158,15 +12584,17 @@ class TifWorkbenchWidget(QWidget):
             self._reset_active_volume_preview_state()
             self.undo_stack = []
             self.redo_stack = []
+            self._populate_label_role_combo()
 
             reslice = self._current_part_reslice_record()
             if isinstance(reslice, dict) and reslice.get("image_path"):
                 image_path = self.project.to_absolute(reslice.get("image_path", ""))
                 if image_path and os.path.exists(image_path):
-                    try:
-                        self.image_volume = tifffile.memmap(image_path)
-                    except Exception:
-                        self.image_volume = tifffile.imread(image_path)
+                    self.image_volume, open_error = _tif_open_reslice_volume_for_review(image_path)
+                    if open_error:
+                        reslice_open_error = open_error
+                        self._slice_unavailable_override = tt("Reslice TIF cannot be opened quickly. Re-export the reslice as an uncompressed TaxaMask local-axis TIF before slice review.", self.lang)
+                        self.log(tt("Reslice TIF cannot be opened for immediate slice review: {0}", self.lang).format(open_error))
             else:
                 image_path = self.project.to_absolute((part.get("image") or {}).get("path", ""))
                 if image_path and volume_sidecar_exists(image_path):
@@ -7180,19 +12608,29 @@ class TifWorkbenchWidget(QWidget):
                 self._configure_slice_slider_for_axis(self._current_slice_axis(), preserve_position=True)
                 self._reset_canvas_view_on_next_render = True
             else:
-                self._set_slice_review_unavailable(tt("Working volume missing", self.lang))
+                message = (
+                    tt("Reslice TIF cannot be opened quickly. Re-export the reslice as an uncompressed TaxaMask local-axis TIF before slice review.", self.lang)
+                    if reslice_open_error
+                    else tt("Working volume missing", self.lang)
+                )
+                self._set_slice_review_unavailable(message)
 
             material_path = self.project.to_absolute(specimen.get("material_map", ""))
             if material_path and os.path.exists(material_path):
                 self.material_map = read_material_map(material_path)
-                self.material_colors = {
-                    int(item["id"]): QColor(str(item.get("color", "#000000")))
-                    for item in self.material_map.get("materials", [])
-                }
+                self._sync_material_colors_from_active_source()
+            else:
+                self._sync_material_colors_from_active_source()
             self._populate_material_table()
+            self._populate_label_schema_combo()
+            self._populate_part_user_tag_table()
+            self._populate_result_region_combo()
+            self._invalidate_result_region_mask_cache(clear_active_mask_preview=False)
+            self._refresh_result_comparison_if_visible()
             self._populate_volume_tint_combo()
             self._apply_volume_transfer_opacity_setting()
             self._reload_label_volume()
+            self._reload_part_mask_volume()
             self._load_edit_volume()
             self._update_status_labels(specimen, part=part)
             if self.current_reslice_id:
@@ -7206,7 +12644,8 @@ class TifWorkbenchWidget(QWidget):
             self._loading_specimen = False
 
     def _populate_material_table(self):
-        materials = self.material_map.get("materials", []) if isinstance(self.material_map, dict) else []
+        self._sync_material_editor_scope()
+        materials = self._active_materials()
         self.material_table.setRowCount(len(materials))
         for row, material in enumerate(materials):
             color_text = str(material.get("color", "#000000"))
@@ -7236,7 +12675,7 @@ class TifWorkbenchWidget(QWidget):
             material_id = int(self.material_table.item(row, 1).text())
         except Exception:
             return None
-        for material in self.material_map.get("materials", []):
+        for material in self._active_materials():
             if int(material.get("id", -1)) == material_id:
                 return dict(material)
         return None
@@ -7246,7 +12685,7 @@ class TifWorkbenchWidget(QWidget):
             target_id = int(material_id)
         except Exception:
             target_id = 0
-        for material in self.material_map.get("materials", []) if isinstance(self.material_map, dict) else []:
+        for material in self._active_materials():
             try:
                 if int(material.get("id", -1)) == target_id:
                     return dict(material)
@@ -7291,10 +12730,10 @@ class TifWorkbenchWidget(QWidget):
         if show_message:
             material = self._material_for_id(material_id)
             if material is None:
-                message = tt("Sampled material {0}, but it is not in the material map.", self.lang).format(material_id)
+                message = tt("Sampled label {0}, but it is not in the current label table.", self.lang).format(material_id)
             else:
                 name = self._material_display_name(material_id)
-                template = "Picked material {0}: {1}." if picked else "Selected material {0}: {1}."
+                template = "Picked label {0}: {1}." if picked else "Selected label {0}: {1}."
                 message = tt(template, self.lang).format(material_id, name)
             self._set_operation_feedback(message)
         return material_id
@@ -7306,9 +12745,9 @@ class TifWorkbenchWidget(QWidget):
         name = self._material_display_name(material_id)
         color_text = self._material_color_text(material_id)
         if self.annotation_tool_mode == "eraser":
-            label_text = tt("Eraser writes background 0. Current material remains {0}: {1}.", self.lang).format(material_id, name)
+            label_text = tt("Eraser writes background 0. Current label remains {0}: {1}.", self.lang).format(material_id, name)
         else:
-            label_text = tt("Material {0}: {1}", self.lang).format(material_id, name)
+            label_text = tt("Label {0}: {1}", self.lang).format(material_id, name)
         self.current_material_label.setText(label_text)
         self.current_material_label.setToolTip(label_text)
         self.current_material_swatch.setToolTip(color_text)
@@ -7333,14 +12772,12 @@ class TifWorkbenchWidget(QWidget):
         if not path:
             return
         self.material_map = write_material_map(path, self.material_map, source=self.material_map.get("source", "manual"))
-        self.material_colors = {
-            int(item["id"]): QColor(str(item.get("color", "#000000")))
-            for item in self.material_map.get("materials", [])
-        }
+        self._sync_material_colors_from_active_source()
         specimen = self.project.get_specimen(self.current_specimen_id, default=None)
         if specimen is not None:
             self._update_status_labels(specimen)
             self._populate_material_table()
+            self._populate_result_region_combo()
             self._populate_volume_tint_combo()
         self.render_current_slice()
 
@@ -7348,7 +12785,7 @@ class TifWorkbenchWidget(QWidget):
         if not self.current_specimen_id:
             return
         if self.current_volume_scope == "part":
-            QMessageBox.information(self, tt("Material map", self.lang), tt("Part volumes inherit the parent specimen material map. Switch to Full volume to edit materials.", self.lang))
+            QMessageBox.information(self, tt("Label table", self.lang), tt("Edit the bound label schema above to add, rename, or recolor labels for this part/reslice.", self.lang))
             return
         dialog = MaterialEditorDialog(next_id=next_material_id(self.material_map), parent=self, lang=self.lang)
         if dialog.exec() != QDialog.Accepted:
@@ -7361,7 +12798,7 @@ class TifWorkbenchWidget(QWidget):
 
     def edit_selected_material(self):
         if self.current_volume_scope == "part":
-            QMessageBox.information(self, tt("Material map", self.lang), tt("Part volumes inherit the parent specimen material map. Switch to Full volume to edit materials.", self.lang))
+            QMessageBox.information(self, tt("Label table", self.lang), tt("Edit the bound label schema above to add, rename, or recolor labels for this part/reslice.", self.lang))
             return
         material = self._selected_material()
         if material is None:
@@ -7377,21 +12814,21 @@ class TifWorkbenchWidget(QWidget):
 
     def delete_selected_material(self):
         if self.current_volume_scope == "part":
-            QMessageBox.information(self, tt("Material map", self.lang), tt("Part volumes inherit the parent specimen material map. Switch to Full volume to edit materials.", self.lang))
+            QMessageBox.information(self, tt("Label table", self.lang), tt("Edit the bound label schema above to add, rename, or recolor labels for this part/reslice.", self.lang))
             return
         material = self._selected_material()
         if material is None:
             return
         material_id = int(material.get("id", -1))
         if material_id == 0:
-            QMessageBox.warning(self, tt("Material map", self.lang), tt("Background material cannot be deleted.", self.lang))
+            QMessageBox.warning(self, tt("Label table", self.lang), tt("Background material cannot be deleted.", self.lang))
             return
         if self._material_id_is_used(material_id):
             QMessageBox.warning(self, tt("Material map", self.lang), tt("Material {0} is still used by a label volume.", self.lang).format(material_id))
             return
         reply = QMessageBox.question(
             self,
-            tt("Material map", self.lang),
+            tt("Label table", self.lang),
             tt("Delete material {0} ({1})?", self.lang).format(material_id, material.get("display_name", material.get("name", ""))),
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
@@ -7416,6 +12853,15 @@ class TifWorkbenchWidget(QWidget):
             labels = specimen.get("labels") or {}
             label_records.extend([labels.get("manual_truth") or {}, labels.get("working_edit") or {}])
             label_records.extend(labels.get("model_drafts") or [])
+            if self.current_volume_scope == "part":
+                part_labels = ((self.current_part or {}).get("labels") or {})
+                label_records.extend(
+                    [
+                        part_labels.get("manual_truth") or {},
+                        part_labels.get("editable_ai_result") or {},
+                        part_labels.get("raw_ai_prediction_backup") or {},
+                    ]
+                )
             for record in label_records:
                 path = self.project.to_absolute((record or {}).get("path", ""))
                 if path and volume_sidecar_exists(path):
@@ -7444,24 +12890,55 @@ class TifWorkbenchWidget(QWidget):
             material_id = 0
         self._set_current_material_id(material_id, select_row=False, show_message=not self._loading_specimen)
 
+    def _current_part_training_reslice_record(self):
+        if self.current_volume_scope != "part" or not self.current_specimen_id or not self.current_part_id:
+            return None
+        if self.current_reslice_id:
+            return self.project.get_part_reslice(self.current_specimen_id, self.current_part_id, self.current_reslice_id, default=None)
+        part = self.project.get_part(self.current_specimen_id, self.current_part_id, default=None)
+        training = (part or {}).get("training") or {}
+        active_reslice_id = str(training.get("active_reslice_id") or "").strip()
+        if active_reslice_id:
+            reslice = self.project.get_part_reslice(self.current_specimen_id, self.current_part_id, active_reslice_id, default=None)
+            if reslice is not None:
+                return reslice
+        reslices = self.project.list_part_reslices(self.current_specimen_id, self.current_part_id) if part is not None else []
+        return reslices[-1] if reslices else None
+
+    def _current_part_label_record(self, role=None):
+        if self.current_volume_scope != "part" or not self.current_specimen_id or not self.current_part_id:
+            return {}
+        role = role or self.label_role_combo.currentData() or "editable_ai_result"
+        return self.project.part_label_record(
+            self.current_specimen_id,
+            self.current_part_id,
+            role,
+            reslice_id=self.current_reslice_id,
+        )
+
+    def _current_part_label_path(self, role=None):
+        record = self._current_part_label_record(role)
+        return self.project.to_absolute((record or {}).get("path", ""))
+
+    def _current_part_label_image_path(self):
+        if self.current_volume_scope != "part" or not self.current_specimen_id or not self.current_part_id:
+            return ""
+        reslice = self._current_part_reslice_record()
+        if isinstance(reslice, dict) and reslice.get("image_path"):
+            path = self.project.to_absolute(reslice.get("image_path", ""))
+            return path if path and os.path.exists(path) else ""
+        part = self.project.get_part(self.current_specimen_id, self.current_part_id, default=None)
+        path = self.project.to_absolute(((part or {}).get("image") or {}).get("path", ""))
+        return path if path and volume_sidecar_exists(path) else ""
+
     def _reload_label_volume(self):
         self.label_volume = None
         self._update_label_role_help()
         if self.current_volume_scope == "part":
-            mask_path = ""
-            reslice = self._current_part_reslice_record()
-            if isinstance(reslice, dict) and reslice.get("mask_path"):
-                mask_path = self.project.to_absolute(reslice.get("mask_path", ""))
-                if mask_path and os.path.exists(mask_path):
-                    try:
-                        self.label_volume = tifffile.memmap(mask_path)
-                    except Exception:
-                        self.label_volume = tifffile.imread(mask_path)
-            else:
-                part = self.project.get_part(self.current_specimen_id, self.current_part_id, default=None)
-                mask_path = self.project.to_absolute(((part or {}).get("mask") or {}).get("path", ""))
-                if mask_path and volume_sidecar_exists(mask_path):
-                    self.label_volume = load_volume_sidecar(mask_path, mmap_mode="r")
+            role = self.label_role_combo.currentData() or "editable_ai_result"
+            label_path = self._current_part_label_path(role)
+            if label_path and volume_sidecar_exists(label_path):
+                self.label_volume = load_volume_sidecar(label_path, mmap_mode="r")
             self.render_current_slice()
             return
         specimen = self.project.get_specimen(self.current_specimen_id, default=None)
@@ -7483,11 +12960,9 @@ class TifWorkbenchWidget(QWidget):
     def _load_edit_volume(self):
         self.edit_volume = None
         if self.current_volume_scope == "part":
-            if not self._is_editable_part_volume():
-                return
-            mask_path = self._current_part_mask_path()
-            if mask_path and volume_sidecar_exists(mask_path):
-                self.edit_volume = load_volume_sidecar(mask_path, mmap_mode="c")
+            edit_path = self._current_part_label_path("editable_ai_result")
+            if edit_path and volume_sidecar_exists(edit_path):
+                self.edit_volume = load_volume_sidecar(edit_path, mmap_mode="c")
             return
         specimen = self.project.get_specimen(self.current_specimen_id, default=None)
         if specimen is None:
@@ -7503,15 +12978,95 @@ class TifWorkbenchWidget(QWidget):
         mask_path = self.project.to_absolute(((part or {}).get("mask") or {}).get("path", ""))
         return mask_path if mask_path else ""
 
+    def _reload_part_mask_volume(self):
+        self.part_mask_volume = None
+        if self.current_volume_scope != "part":
+            return
+        mask_path = self._current_part_mask_path()
+        if mask_path and volume_sidecar_exists(mask_path):
+            try:
+                self.part_mask_volume = load_volume_sidecar(mask_path, mmap_mode="r")
+            except Exception:
+                self.part_mask_volume = None
+
     def _ensure_working_edit_volume(self):
+        if not self._guard_backend_write_lock():
+            return False
         if self.current_volume_scope == "part":
-            if not self._is_editable_part_volume():
+            part = self.project.get_part(self.current_specimen_id, self.current_part_id, default=None)
+            if part is None:
                 return False
-            mask_path = self._current_part_mask_path()
-            if not mask_path or not volume_sidecar_exists(mask_path):
+            edit_record = self._current_part_label_record("editable_ai_result")
+            edit_path = self.project.to_absolute((edit_record or {}).get("path", ""))
+            if edit_path and volume_sidecar_exists(edit_path):
+                if self.edit_volume is None:
+                    self.edit_volume = load_volume_sidecar(edit_path, mmap_mode="c")
+                return self.edit_volume is not None
+            image_path = self._current_part_label_image_path()
+            if not image_path:
                 return False
+            if self.current_reslice_id:
+                edit_rel = os.path.join(
+                    self.project.part_dir(self.current_specimen_id, self.current_part_id),
+                    "reslices",
+                    self.current_reslice_id,
+                    "labels",
+                    "editable_ai_result.ome.zarr",
+                ).replace("\\", "/")
+            else:
+                edit_rel = os.path.join(self.project.part_dir(self.current_specimen_id, self.current_part_id), "labels", "editable_ai_result.ome.zarr").replace("\\", "/")
+            edit_abs = self.project.to_absolute(edit_rel)
+            if volume_sidecar_exists(image_path):
+                metadata = create_empty_label_sidecar_like(image_path, edit_abs, role="editable_ai_result", write_ome_zarr=False)
+            else:
+                image_array = tifffile.memmap(image_path) if os.path.exists(image_path) else None
+                if image_array is None:
+                    return False
+                metadata, array = create_volume_sidecar_memmap(
+                    edit_abs,
+                    image_array.shape,
+                    "uint16",
+                    role="editable_ai_result",
+                    orientation="local_axis_reslice" if self.current_reslice_id else "part_volume",
+                    source_format="empty_label_like",
+                    fill_value=0,
+                )
+                if hasattr(array, "_mmap"):
+                    array._mmap.close()
+            if self.current_reslice_id:
+                self.project.register_part_reslice_label_volume(
+                    self.current_specimen_id,
+                    self.current_part_id,
+                    self.current_reslice_id,
+                    "editable_ai_result",
+                    edit_rel,
+                    metadata["shape_zyx"],
+                    metadata["dtype"],
+                    status="empty_edit",
+                    spacing_zyx=metadata.get("spacing_zyx"),
+                    spacing_unit=metadata.get("spacing_unit", "micrometer"),
+                    orientation=metadata.get("orientation", "local_axis_reslice"),
+                    fmt=metadata.get("format", ""),
+                    save=False,
+                )
+            else:
+                self.project.register_part_label_volume(
+                    self.current_specimen_id,
+                    self.current_part_id,
+                    "editable_ai_result",
+                    edit_rel,
+                    metadata["shape_zyx"],
+                    metadata["dtype"],
+                    status="empty_edit",
+                    spacing_zyx=metadata.get("spacing_zyx"),
+                    spacing_unit=metadata.get("spacing_unit", "micrometer"),
+                    orientation=metadata.get("orientation", "unknown"),
+                    fmt=metadata.get("format", ""),
+                    save=False,
+                )
+            self.project.save_project()
             if self.edit_volume is None:
-                self.edit_volume = load_volume_sidecar(mask_path, mmap_mode="c")
+                self.edit_volume = load_volume_sidecar(edit_abs, mmap_mode="c")
             return self.edit_volume is not None
         specimen = self.project.get_specimen(self.current_specimen_id, default=None)
         if specimen is None:
@@ -7568,9 +13123,10 @@ class TifWorkbenchWidget(QWidget):
         is_saved_reslice = is_part and bool(self.current_reslice_id)
         is_editable_part_volume = is_part and not is_saved_reslice
         has_image = self.image_volume is not None
-        label_editable = has_image and (not is_part or is_editable_part_volume)
+        label_editable = has_image
         full_volume_editable = has_image and not is_part
-        self.label_role_combo.setEnabled(full_volume_editable)
+        part_training_available = has_image and is_part
+        self.label_role_combo.setEnabled(has_image)
         self._set_slice_review_available(has_image)
         for widget in (
             self.brush_size_slider,
@@ -7580,6 +13136,7 @@ class TifWorkbenchWidget(QWidget):
             self.btn_tool_lasso,
             self.btn_tool_rectangle,
             self.btn_tool_ellipse,
+            self.btn_interpolate_current_label,
             self.btn_copy_material_prev,
             self.btn_copy_material_next,
             self.btn_clear_current_material,
@@ -7592,23 +13149,46 @@ class TifWorkbenchWidget(QWidget):
             widget.setEnabled(has_image)
         for widget in (
             self.btn_promote,
-            self.btn_copy_draft,
             self.btn_export_training,
             self.btn_prepare_dataset,
             self.btn_train_backend,
             self.btn_import_prediction,
-            self.btn_import_external_prediction_tif,
+            self.btn_accept_selected_ai_results,
         ):
-            widget.setEnabled(full_volume_editable)
+            widget.setEnabled(full_volume_editable or part_training_available)
+        if self._backend_action_running():
+            self.btn_prepare_dataset.setEnabled(False)
+            self.btn_train_backend.setEnabled(False)
+            self.btn_import_prediction.setEnabled(False)
+            self.btn_accept_selected_ai_results.setEnabled(False)
+            self.btn_stop_backend.setEnabled(True)
+        else:
+            self.btn_stop_backend.setEnabled(False)
+            self.btn_open_backend_run.setEnabled(bool(self._tif_backend_run_dir) and os.path.isdir(self._tif_backend_run_dir))
+            self.btn_open_backend_result.setEnabled(bool(self._tif_backend_result_json) and os.path.exists(self._tif_backend_result_json))
+        self._refresh_training_result_controls()
+        self.btn_copy_draft.setEnabled(full_volume_editable)
+        self.btn_import_external_prediction_tif.setEnabled(full_volume_editable)
+        if hasattr(self, "btn_export_current_rendering"):
+            self.btn_export_current_rendering.setEnabled(has_image)
+        if hasattr(self, "btn_refresh_result_comparison"):
+            self._sync_result_comparison_controls()
         self.auto_save_check.setEnabled(label_editable)
         self.btn_add_material.setEnabled(full_volume_editable)
         self.btn_edit_material.setEnabled(full_volume_editable)
         self.btn_delete_material.setEnabled(full_volume_editable)
-        self.part_bbox_edit.setEnabled(not is_part and has_image)
-        self.btn_part_draw_roi.setEnabled(not is_part and has_image and self.display_mode == "slice")
-        self.btn_save_part_roi.setEnabled(not is_part and has_image)
-        self.btn_confirm_part_roi.setEnabled(not is_part and has_image)
-        self.btn_cancel_part_roi.setEnabled(not is_part)
+        if hasattr(self, "btn_bind_label_schema_to_part"):
+            self.btn_bind_label_schema_to_part.setEnabled(is_part and has_image)
+        if hasattr(self, "btn_apply_part_user_tags"):
+            self.btn_apply_part_user_tags.setEnabled(is_part)
+        if hasattr(self, "btn_choose_part_user_tag_color"):
+            self.btn_choose_part_user_tag_color.setEnabled(not self._backend_write_lock_active())
+        confirm_part_busy = self._confirm_part_roi_running()
+        self.part_bbox_edit.setEnabled(not is_part and has_image and not confirm_part_busy)
+        self.btn_part_draw_roi.setEnabled(not is_part and has_image and self.display_mode == "slice" and not confirm_part_busy)
+        self.btn_save_part_roi.setEnabled(not is_part and has_image and not confirm_part_busy)
+        self.btn_confirm_part_roi.setEnabled(not is_part and has_image and not confirm_part_busy)
+        self.btn_cancel_part_roi.setEnabled(not is_part and not confirm_part_busy)
         self.btn_create_part.setEnabled(False)
         self.btn_add_rect_keyframe.setEnabled(False)
         full_volume_mask_editable = full_volume_editable and self.display_mode == "slice" and self._current_slice_axis() == "z"
@@ -7618,9 +13198,10 @@ class TifWorkbenchWidget(QWidget):
         self.btn_clear_part_keyframes.setEnabled((is_editable_part_volume or full_volume_editable) and has_image)
         self.btn_prev_key_slice.setEnabled(contour_enabled)
         self.btn_next_key_slice.setEnabled(contour_enabled)
-        self.btn_preview_part_mask.setEnabled((is_editable_part_volume or full_volume_editable) and has_image)
-        self.btn_accept_part_mask.setEnabled((is_editable_part_volume or full_volume_editable) and self.part_preview_mask is not None)
-        self.btn_clear_part_preview.setEnabled((is_editable_part_volume or full_volume_editable) and self.part_preview_mask is not None)
+        part_mask_preview_busy = self._part_mask_preview_running()
+        self.btn_preview_part_mask.setEnabled((is_editable_part_volume or full_volume_editable) and has_image and not part_mask_preview_busy and not confirm_part_busy)
+        self.btn_accept_part_mask.setEnabled((is_editable_part_volume or full_volume_editable) and self.part_preview_mask is not None and not part_mask_preview_busy and not confirm_part_busy)
+        self.btn_clear_part_preview.setEnabled((is_editable_part_volume or full_volume_editable) and self.part_preview_mask is not None and not part_mask_preview_busy and not confirm_part_busy)
         local_axis_export_busy = self._local_axis_reslice_export_running()
         local_axis_editable = is_editable_part_volume and has_image and not local_axis_export_busy
         self.btn_copy_source_z_axis.setEnabled(local_axis_editable)
@@ -7635,6 +13216,7 @@ class TifWorkbenchWidget(QWidget):
         self.btn_export_local_axis_training_manifest.setEnabled(bool(self.project.project_data.get("specimens", [])))
         self.btn_export_part_package.setEnabled(is_editable_part_volume and has_image)
         self.btn_delete_part_volume.setEnabled(is_editable_part_volume and self.current_part is not None)
+        self._set_backend_write_locked_controls(self._backend_write_lock_active())
         self._update_local_axis_summary()
         self._sync_undo_redo_buttons()
         self._update_save_status()
@@ -7643,10 +13225,22 @@ class TifWorkbenchWidget(QWidget):
         self._set_scope_controls_enabled()
         readiness = self.project.evaluate_train_ready(specimen.get("specimen_id"))
         if part is not None:
+            try:
+                part_readiness = self.project.evaluate_part_train_ready(
+                    specimen.get("specimen_id"),
+                    part.get("part_id", ""),
+                    self.current_reslice_id,
+                    validate_label_ids=False,
+                )
+            except Exception:
+                part_readiness = {"train_ready": False, "reasons": []}
+            training = part.get("training") or {}
             self.status_label.setText(
                 f"{tt('Current view', self.lang)}: {tt('Part volume', self.lang)}\n"
                 f"{tt('Part', self.lang)}: {part.get('display_name') or part.get('part_id')}\n"
-                f"{tt('Status', self.lang)}: {part.get('status', 'draft')}\n"
+                f"{tt('Status', self.lang)}: {training.get('system_status') or part.get('system_status') or part.get('status', 'draft')}\n"
+                f"{tt('Train-ready', self.lang)}: {tt('yes', self.lang) if part_readiness.get('train_ready') else tt('no', self.lang)}\n"
+                f"{tt('Reasons', self.lang)}: {', '.join(part_readiness.get('reasons', [])) if part_readiness.get('reasons') else '-'}\n"
                 f"{tt('Parent specimen', self.lang)}: {specimen.get('display_name') or specimen.get('specimen_id')}"
             )
         else:
@@ -7665,7 +13259,7 @@ class TifWorkbenchWidget(QWidget):
             self._format_tif_path_line("Source TIF", source.get("raw_tif") or (specimen.get("provenance") or {}).get("source_file", "")),
             self._format_tif_path_line("Working volume", working.get("path", "")),
             self._format_tif_path_line("Working edit", (labels.get("working_edit") or {}).get("path", "")),
-            self._format_tif_path_line("Manual truth", (labels.get("manual_truth") or {}).get("path", "")),
+            self._format_tif_path_line("Training truth", (labels.get("manual_truth") or {}).get("path", "")),
             self._format_tif_path_line("Latest model draft", latest_draft.get("path", "")),
             self._format_tif_path_line("Material map", specimen.get("material_map", "")),
             self._format_tif_path_line("Import report", working.get("import_report", "")),
@@ -7673,9 +13267,13 @@ class TifWorkbenchWidget(QWidget):
         if part is not None:
             part_image = part.get("image") or {}
             part_mask = part.get("mask") or {}
+            part_labels = part.get("labels") or {}
             path_lines = [
                 self._format_tif_path_line("Part image", part_image.get("path", "")),
                 self._format_tif_path_line("Part mask", part_mask.get("path", "")),
+                self._format_tif_path_line("Editable AI result", (part_labels.get("editable_ai_result") or {}).get("path", "")),
+                self._format_tif_path_line("Training truth", (part_labels.get("manual_truth") or {}).get("path", "")),
+                self._format_tif_path_line("Raw AI prediction backup", (part_labels.get("raw_ai_prediction_backup") or {}).get("path", "")),
                 self._format_tif_path_line("Contours", part.get("contours_path", "")),
                 self._format_tif_path_line("Extraction", part.get("extraction_path", "")),
                 self._format_tif_path_line("Parent working volume", working.get("path", "")),
@@ -7685,6 +13283,7 @@ class TifWorkbenchWidget(QWidget):
                 f"{tt('dtype', self.lang)}: {part_image.get('dtype', '')}",
                 f"{tt('spacing Z/Y/X', self.lang)}: {part_image.get('spacing_zyx', [])} {part_image.get('spacing_unit', '')}",
                 f"{tt('Parent bbox Z/Y/X', self.lang)}: {part.get('parent_bbox_zyx', [])}",
+                f"{tt('Label schema', self.lang)}: {(part.get('training') or {}).get('label_schema_id', '') or '-'}",
                 f"{tt('modality', self.lang)}: {specimen.get('modality', 'unknown')}",
             ]
             draft = self._current_local_axis_draft()
@@ -7748,7 +13347,10 @@ class TifWorkbenchWidget(QWidget):
         if self.label_volume is not None and self.label_volume.shape == self.image_volume.shape:
             label_slice = self._extract_axis_slice(self.label_volume, axis, slice_index)
         if (
-            (self.current_volume_scope == "part" or self.label_role_combo.currentData() == "working_edit")
+            (
+                (self.current_volume_scope == "part" and self.label_role_combo.currentData() == "editable_ai_result")
+                or (self.current_volume_scope != "part" and self.label_role_combo.currentData() == "working_edit")
+            )
             and self.edit_volume is not None
             and self.edit_volume.shape == self.image_volume.shape
         ):
@@ -7768,7 +13370,7 @@ class TifWorkbenchWidget(QWidget):
                 x0, x1 = int(bbox[2][0]), int(bbox[2][1])
                 overlay[y0:y1, x0:x1] = np.asarray(self.part_preview_mask[local_z])
                 label_slice = overlay
-        if self.current_volume_scope == "part" and self.part_preview_mask is not None and self.part_preview_mask.shape == self.image_volume.shape:
+        if self.current_volume_scope == "part" and not self.current_reslice_id and self.part_preview_mask is not None and self.part_preview_mask.shape == self.image_volume.shape:
             label_slice = self._extract_axis_slice(self.part_preview_mask, axis, slice_index)
         pixmap = self._render_slice_pixmap(image_slice, label_slice)
         reset_view = bool(getattr(self, "_reset_canvas_view_on_next_render", False))
@@ -7800,15 +13402,17 @@ class TifWorkbenchWidget(QWidget):
         )
 
     def _can_edit_current_label_volume(self):
+        if self._backend_write_lock_active():
+            return False
         if self.image_volume is None:
             return False
         if self.display_mode == "volume":
             return False
         if self._current_slice_axis() != "z":
             return False
-        if self._is_editable_part_volume():
-            return True
-        if self.current_volume_scope == "part" or not hasattr(self, "label_role_combo"):
+        if self.current_volume_scope == "part":
+            return self.label_role_combo.currentData() == "editable_ai_result"
+        if not hasattr(self, "label_role_combo"):
             return False
         return self.label_role_combo.currentData() == "working_edit"
 
@@ -7837,6 +13441,8 @@ class TifWorkbenchWidget(QWidget):
         return source_z_axis_for_part(shape)
 
     def copy_source_z_axis_to_local_axis_draft(self):
+        if not self._guard_backend_write_lock():
+            return None
         if self.current_volume_scope != "part" or self.current_reslice_id or not self.current_specimen_id or not self.current_part_id or self.image_volume is None:
             QMessageBox.information(self, tt("Local Axis Reslice", self.lang), tt("Select a part volume before editing Local Axis Reslice.", self.lang))
             return None
@@ -8505,28 +14111,40 @@ class TifWorkbenchWidget(QWidget):
         target = str(target or "")
         legacy_map = {"left_eye": "roll_a", "right_eye": "roll_b"}
         target = legacy_map.get(target, target)
+        if target and self._backend_write_lock_active():
+            self._guard_backend_write_lock()
+            return False
         if target not in {"", "roll_a", "roll_b", "roll_c"}:
             target = ""
         if target and not self._current_local_axis_draft():
             if self.copy_source_z_axis_to_local_axis_draft() is None:
                 return False
-        if target and not (hasattr(self, "volume_clip_plane_check") and self.volume_clip_plane_check.isChecked()):
-            self._local_axis_pick_target = ""
-            self._local_axis_roll_pick_target = ""
-            self._sync_local_axis_pick_buttons()
-            self._set_local_axis_status(tt("Turn on the observation-side clip plane before picking local-axis points.", self.lang))
-            return False
+        if target and hasattr(self, "volume_clip_plane_check") and not self.volume_clip_plane_check.isChecked():
+            self.volume_clip_plane_check.setChecked(True)
+            self._set_local_axis_status(
+                tt(
+                    "Observation-side clip plane is now enabled. Move the clip depth if needed, then click the plane to set {0}.",
+                    self.lang,
+                ).format(target)
+            )
         self._local_axis_pick_target = target
         self._local_axis_roll_pick_target = target if target in {"roll_a", "roll_b", "roll_c"} else ""
         self._sync_local_axis_pick_buttons()
         if target:
-            self._set_local_axis_status(tt("Click the observation-side clip plane to set {0}.", self.lang).format(target))
+            message = tt("Click the observation-side clip plane to set {0}.", self.lang).format(target)
+            if hasattr(self, "volume_clip_plane_check") and self.volume_clip_plane_check.isChecked():
+                self._set_local_axis_status(message)
+            else:
+                self._set_local_axis_status(tt("Turn on the observation-side clip plane before picking local-axis points.", self.lang))
         return bool(target)
 
     def set_local_axis_roll_pick_target(self, target=""):
         return self.set_local_axis_pick_target(target)
 
     def pick_local_axis_roll_reference_at(self, x, y):
+        if not self._guard_backend_write_lock(show_message=False):
+            self._set_local_axis_status(self._backend_write_lock_message())
+            return False
         target = str(getattr(self, "_local_axis_pick_target", "") or getattr(self, "_local_axis_roll_pick_target", "") or "")
         if target not in {"roll_a", "roll_b", "roll_c"}:
             return False
@@ -8567,6 +14185,8 @@ class TifWorkbenchWidget(QWidget):
         return True
 
     def clear_local_axis_roll_references(self):
+        if not self._guard_backend_write_lock():
+            return
         draft = self._current_local_axis_draft()
         if not isinstance(draft, dict):
             return
@@ -8589,6 +14209,8 @@ class TifWorkbenchWidget(QWidget):
         self._request_volume_interaction_render()
 
     def align_local_axis_to_reference_plane(self):
+        if not self._guard_backend_write_lock():
+            return False
         draft = self._current_local_axis_draft()
         if not isinstance(draft, dict):
             if self.copy_source_z_axis_to_local_axis_draft() is None:
@@ -8633,6 +14255,8 @@ class TifWorkbenchWidget(QWidget):
         return True
 
     def clear_local_axis_draft(self):
+        if not self._guard_backend_write_lock():
+            return
         self.local_axis_draft = None
         self._local_axis_pick_target = ""
         self._local_axis_roll_pick_target = ""
@@ -8915,6 +14539,21 @@ class TifWorkbenchWidget(QWidget):
         if mode in {"full", "current_bbox"} or mode.startswith("roi:") or mode.startswith("part:"):
             return mode
         return "full"
+
+    def _active_part_preview_bbox(self):
+        if (
+            self.current_volume_scope == "full"
+            and self.part_preview_mask is not None
+            and self.part_mask_preview_bbox
+            and self.image_volume is not None
+        ):
+            try:
+                bbox = normalize_roi_bbox_zyx(self.part_mask_preview_bbox, self.image_volume.shape)
+                if tuple(getattr(self.part_preview_mask, "shape", ()) or ()) == roi_shape_zyx(bbox):
+                    return bbox
+            except Exception:
+                return None
+        return None
 
     def _selected_volume_roi_source_bbox(self):
         mode = self._volume_roi_source_mode()
@@ -9855,6 +15494,9 @@ class TifWorkbenchWidget(QWidget):
         mode = "drag" if mode == "drag" else "still"
         if mode != "still" or self.current_volume_scope != "full" or self.image_volume is None:
             return None
+        part_preview_bbox = self._active_part_preview_bbox()
+        if part_preview_bbox is not None:
+            return part_preview_bbox
         if not self._volume_roi_inspect_enabled():
             return None
         if self._volume_roi_source_mode() == "full":
@@ -9958,6 +15600,8 @@ class TifWorkbenchWidget(QWidget):
         max_dim = self._active_volume_target_dim(mode)
         mask_algorithm = "nearest" if mode == "drag" else "occupancy"
         roi_bbox = self._active_volume_roi_bbox(mode)
+        if self.current_volume_scope == "full" and mask is self.part_preview_mask:
+            roi_bbox = None
         roi_key = tuple(tuple(int(value) for value in pair) for pair in roi_bbox) if roi_bbox is not None else None
         owner = self._active_volume_cache_owner()
         cache_key = (owner, shape, str(np.dtype(getattr(mask, "dtype", np.uint16))), max_dim, id(mask), mask_algorithm, roi_key)
@@ -10062,6 +15706,37 @@ class TifWorkbenchWidget(QWidget):
             return bytes_estimate >= 32 * 1024 * 1024
         except Exception:
             return True
+
+    def _mask_request_source_bytes(self, mask_request):
+        if not mask_request:
+            return 0
+        mask = self._active_part_mask_volume()
+        if mask is None:
+            return 0
+        try:
+            dtype_size = max(1, int(np.dtype(getattr(mask, "dtype", np.uint8)).itemsize))
+            roi_bbox = mask_request.get("roi_bbox")
+            if roi_bbox is not None:
+                shape = roi_shape_zyx(roi_bbox)
+            else:
+                shape = tuple(int(value) for value in mask_request.get("shape") or getattr(mask, "shape", ()) or ())
+            if len(shape) != 3 or min(shape) <= 0:
+                return 0
+            return int(shape[0]) * int(shape[1]) * int(shape[2]) * dtype_size
+        except Exception:
+            return 0
+
+    def _should_build_mask_preview_in_background(self, mask_request):
+        if not mask_request or self.display_mode != "volume":
+            return False
+        if str(mask_request.get("mode") or "still") != "still":
+            return False
+        if self._volume_mask_preview_cache.get(mask_request.get("cache_key")) is not None:
+            return False
+        source_bytes = self._mask_request_source_bytes(mask_request)
+        if source_bytes <= 0:
+            return False
+        return source_bytes >= TIF_GPU_STREAM_SYNC_MAX_BYTES
 
     def _cancel_volume_preview_build(self):
         worker = getattr(self, "_volume_preview_build_worker", None)
@@ -10229,13 +15904,106 @@ class TifWorkbenchWidget(QWidget):
         return "hybrid"
 
     def _active_part_mask_volume(self):
-        if self.current_volume_scope != "part" or self.image_volume is None:
+        if self.image_volume is None:
+            return None
+        if self.current_volume_scope == "full":
+            if self.part_preview_mask is not None and self._active_part_preview_bbox() is not None:
+                return self.part_preview_mask
+            return None
+        if self.current_volume_scope != "part":
+            return None
+        result_region_mask = self._active_result_region_mask_volume()
+        if result_region_mask is not None:
+            return result_region_mask
+        if self.current_reslice_id:
             return None
         if self.part_preview_mask is not None and self.part_preview_mask.shape == self.image_volume.shape:
             return self.part_preview_mask
-        if self.label_volume is not None and self.label_volume.shape == self.image_volume.shape:
-            return self.label_volume
+        if self.part_mask_volume is not None and self.part_mask_volume.shape == self.image_volume.shape:
+            return self.part_mask_volume
         return None
+
+    def _active_part_mask_likely_available(self):
+        if self.image_volume is None:
+            return False
+        mask = self._active_part_mask_volume()
+        if mask is None:
+            return False
+        shape = tuple(int(value) for value in getattr(mask, "shape", ()) or ())
+        if self.current_volume_scope == "full":
+            part_preview_bbox = self._active_part_preview_bbox()
+            if part_preview_bbox is None:
+                return False
+            try:
+                image_shape = tuple(int(value) for value in roi_shape_zyx(part_preview_bbox))
+            except Exception:
+                return False
+        else:
+            image_shape = tuple(int(value) for value in getattr(self.image_volume, "shape", ()) or ())
+        if shape != image_shape:
+            return False
+        if mask is self.part_preview_mask:
+            return True
+        if isinstance(mask, LazyRegionMaskVolume):
+            return True
+        if mask is self.part_mask_volume:
+            part = self.project.get_part(self.current_specimen_id, self.current_part_id, default=None)
+            if part is None:
+                part = self.current_part if isinstance(self.current_part, dict) else {}
+            status = str((part or {}).get("status") or "").lower()
+            if status in TIF_MASK_PREVIEW_TRUSTED_STATUSES:
+                return True
+        try:
+            source_bytes = int(getattr(mask, "nbytes", 0) or 0)
+        except Exception:
+            source_bytes = TIF_GPU_STREAM_SYNC_MAX_BYTES
+        if source_bytes >= TIF_GPU_STREAM_SYNC_MAX_BYTES:
+            return mask is not self.part_mask_volume
+        return self._active_part_mask_has_voxels()
+
+    def _active_result_region_mask_volume(self):
+        if self.current_volume_scope != "part" or self.image_volume is None:
+            return None
+        if not getattr(self, "result_region_combo", None):
+            return None
+        if hasattr(self, "training_mode_tabs") and self.training_mode_tabs.currentWidget() is not getattr(self, "result_compare_page", None):
+            return None
+        region_id = self._result_region_id()
+        if region_id <= 0:
+            return None
+        role = self._result_source_role()
+        source = None
+        active_role = self.label_role_combo.currentData() if hasattr(self, "label_role_combo") else ""
+        if role == "editable_ai_result" and self.edit_volume is not None and self.edit_volume.shape == self.image_volume.shape:
+            source = self.edit_volume
+        elif active_role == role and self.label_volume is not None and self.label_volume.shape == self.image_volume.shape:
+            source = self.label_volume
+        else:
+            label_path = self._current_part_label_path(role)
+            if label_path and volume_sidecar_exists(label_path):
+                try:
+                    source = load_volume_sidecar(label_path, mmap_mode="r")
+                except Exception:
+                    source = None
+        if source is None or getattr(source, "shape", None) != self.image_volume.shape:
+            return None
+        key = (
+            self.current_specimen_id,
+            self.current_part_id,
+            self.current_reslice_id,
+            role,
+            int(region_id),
+            str(getattr(source, "filename", "") or getattr(source, "path", "") or id(source)),
+            tuple(int(value) for value in getattr(source, "shape", ()) or ()),
+        )
+        if key == self._result_region_mask_cache_key:
+            cached = self._result_region_mask_cache.get(key)
+            if cached is not None:
+                return cached
+        mask = LazyRegionMaskVolume(source, int(region_id))
+        self._result_region_mask_cache = {key: mask}
+        self._result_region_mask_cache_key = key
+        return mask
 
     def _active_part_mask_has_voxels(self):
         mask = self._active_part_mask_volume()
@@ -10466,6 +16234,41 @@ class TifWorkbenchWidget(QWidget):
         except Exception:
             return None, (), None
 
+    def _volume_request_source_bytes(self, volume_request):
+        if self.image_volume is None or not volume_request:
+            return 0
+        try:
+            dtype_size = max(1, int(np.dtype(getattr(self.image_volume, "dtype", np.uint8)).itemsize))
+            roi_bbox = volume_request.get("roi_bbox")
+            if roi_bbox is not None:
+                shape = roi_shape_zyx(roi_bbox)
+            else:
+                shape = tuple(int(value) for value in getattr(self.image_volume, "shape", ()) or ())
+            if len(shape) != 3 or min(shape) <= 0:
+                return 0
+            return int(shape[0]) * int(shape[1]) * int(shape[2]) * dtype_size
+        except Exception:
+            return 0
+
+    def _should_build_volume_preview_in_background(self, volume_request):
+        if not volume_request or self.display_mode != "volume":
+            return False
+        if str(volume_request.get("mode") or "still") != "still":
+            return False
+        if self._volume_preview_cache.get(volume_request.get("cache_key")) is not None:
+            return False
+        if (
+            self.current_volume_scope == "full"
+            and volume_request.get("roi_bbox") is None
+            and self._volume_canvas_renderer == "gpu"
+            and hasattr(self.volume_canvas, "build_volume_texture_from_source")
+        ):
+            return False
+        source_bytes = self._volume_request_source_bytes(volume_request)
+        if source_bytes <= 0:
+            return False
+        return source_bytes >= TIF_GPU_STREAM_SYNC_MAX_BYTES
+
     def _gpu_mask_source_for_request(self, mask_request):
         mask = self._active_part_mask_volume()
         if mask is None:
@@ -10518,14 +16321,15 @@ class TifWorkbenchWidget(QWidget):
         if self._volume_render_mode == "drag" or str(volume_request.get("mode") or "") == "drag":
             return False
         supports_streamed_mask = bool(mask_mode != "image_only" and mask_request is not None and hasattr(self.volume_canvas, "build_mask_texture_from_source"))
-        if mask_mode != "image_only" and not (supports_streamed_mask or hasattr(self.volume_canvas, "set_mask_data")):
+        supports_mask_preview_upload = bool(mask_mode != "image_only" and hasattr(self.volume_canvas, "set_mask_data"))
+        if mask_mode != "image_only" and not (supports_streamed_mask or supports_mask_preview_upload):
             return False
         message = volume_request.get("message") or tt("Preparing full-volume 3D preview...", self.lang)
         self._update_volume_render_status_label(message)
         source, request_source_shape, normalized_roi_bbox = self._gpu_volume_source_for_request(volume_request)
         if source is None:
             return False
-        use_streamed_mask = supports_streamed_mask
+        use_streamed_mask = supports_streamed_mask and (mask_preview is None or not supports_mask_preview_upload)
         if mask_mode != "image_only" and not use_streamed_mask and mask_preview is None and mask_request is not None:
             mask_preview = self._volume_mask_preview_cache.get(mask_request.get("cache_key"))
             if mask_preview is None:
@@ -10570,7 +16374,9 @@ class TifWorkbenchWidget(QWidget):
             if not self._try_build_mask_gpu_texture(mask_request):
                 mask_mode = "image_only"
                 state["mask_mode"] = "image_only"
-        elif hasattr(self.volume_canvas, "set_mask_data"):
+        elif (mask_mode == "image_only" and hasattr(self.volume_canvas, "set_mask_data")) or (
+            supports_mask_preview_upload and mask_preview is not None
+        ):
             try:
                 self.volume_canvas.set_mask_data(
                     mask_preview if mask_mode != "image_only" else None,
@@ -10744,12 +16550,16 @@ class TifWorkbenchWidget(QWidget):
                         if mask_preview_for_gpu is not None:
                             self._volume_mask_preview_cache.move_to_end(mask_request_for_gpu["cache_key"])
                             self._touch_volume_cache_owner(mask_request_for_gpu.get("owner"))
-                        elif (
-                            not hasattr(self.volume_canvas, "build_mask_texture_from_source")
-                            and self._should_show_volume_mask_preview_progress(mode, self._active_part_mask_volume())
-                        ):
-                            self._start_volume_preview_build(mask_request=mask_request_for_gpu)
-                            return
+                if self._should_build_volume_preview_in_background(volume_request):
+                    self._start_volume_preview_build(volume_request=volume_request, mask_request=mask_request_for_gpu)
+                    return
+                if (
+                    mask_request_for_gpu is not None
+                    and mask_preview_for_gpu is None
+                    and self._should_build_mask_preview_in_background(mask_request_for_gpu)
+                ):
+                    self._start_volume_preview_build(mask_request=mask_request_for_gpu)
+                    return
                 if self._try_build_volume_gpu_texture(
                     volume_request,
                     mask_mode=mask_mode_for_gpu,
@@ -10781,7 +16591,7 @@ class TifWorkbenchWidget(QWidget):
                     self._volume_mask_preview_cache.move_to_end(mask_request["cache_key"])
                     self._touch_volume_cache_owner(mask_request.get("owner"))
                 elif mode == "still" and self.display_mode == "volume":
-                    if self._should_show_volume_mask_preview_progress(mode, self._active_part_mask_volume()):
+                    if self._should_build_mask_preview_in_background(mask_request):
                         self._start_volume_preview_build(mask_request=mask_request)
                         return
             if mask_preview is None:
@@ -10921,12 +16731,15 @@ class TifWorkbenchWidget(QWidget):
         if self.image_volume is None:
             return ""
         if self.current_volume_scope == "part":
-            if self.current_reslice_id:
-                return tt("Selected saved reslice is read-only. Return to the part volume to edit masks.", self.lang)
             if self.display_mode == "volume":
                 return tt("3D volume preview is read-only. Switch to Slice review for label editing.", self.lang)
             if self._current_slice_axis() != "z":
                 return tt("Painting is available on Z slices only. Switch back to Z axial view before editing labels.", self.lang)
+            if require_working_edit and self.label_role_combo.currentData() != "editable_ai_result":
+                role = self.label_role_combo.currentData()
+                if role == "raw_ai_prediction_backup":
+                    return tt("Raw AI prediction backup is read-only. Switch to editable AI result before correcting labels.", self.lang)
+                return tt("Cannot paint on this part label layer. Switch to editable AI result first.", self.lang)
             return ""
         if self.display_mode == "volume":
             return tt("3D volume preview is read-only. Switch to Slice review for label editing.", self.lang)
@@ -10937,8 +16750,8 @@ class TifWorkbenchWidget(QWidget):
         role = self.label_role_combo.currentData()
         if role != "working_edit":
             if role == "model_draft":
-                return tt("Cannot paint on model draft. Copy model draft to Current edit first.", self.lang)
-            return tt("Cannot paint on this label layer. Switch to Current edit first.", self.lang)
+                return tt("Cannot paint on the legacy model draft. Switch to Current labels first.", self.lang)
+            return tt("Cannot paint on this label layer. Switch to Current labels first.", self.lang)
         return ""
 
     def _reset_annotation_stroke(self):
@@ -11005,14 +16818,17 @@ class TifWorkbenchWidget(QWidget):
     def paint_at_widget_position(self, x, y, erase=False, continue_stroke=False):
         if self.image_volume is None:
             return
+        if not self._guard_backend_write_lock(show_message=False):
+            self._set_operation_feedback(self._backend_write_lock_message())
+            return
         block_reason = self._editable_label_block_reason(require_working_edit=True)
         if block_reason:
             self._set_operation_feedback(block_reason)
             return
         if self.edit_volume is None:
-            self._set_operation_feedback(tt("Creating working edit layer before painting...", self.lang))
+            self._set_operation_feedback(tt("Creating current label layer before painting...", self.lang))
             if not self._ensure_working_edit_volume():
-                self._set_operation_feedback(tt("Working edit layer is unavailable. Check the working volume path before editing labels.", self.lang))
+                self._set_operation_feedback(tt("Current label layer is unavailable. Check the working volume path before editing labels.", self.lang))
                 return
         z_index = int(self.slice_slider.value())
         height, width = self.image_volume.shape[1], self.image_volume.shape[2]
@@ -11032,13 +16848,13 @@ class TifWorkbenchWidget(QWidget):
             self._annotation_stroke_last_pixel = tuple(pixel)
             self._annotation_stroke_changed = self._annotation_stroke_changed or changed
         if changed:
-            self._dirty_edit_slices.add(z_index)
+            self._mark_edit_slice_dirty(z_index)
             self._mark_working_edit_dirty()
             self.render_current_slice()
         if erase:
             message = tt("Erased labels on slice {0}.", self.lang).format(z_index + 1)
         else:
-            message = tt("Painted material {0} on slice {1}.", self.lang).format(self.current_material_id, z_index + 1)
+            message = tt("Painted label {0} on slice {1}.", self.lang).format(self.current_material_id, z_index + 1)
         self._set_operation_feedback(message, log=False)
 
     def _polygon_fill_mask(self, points, width, height):
@@ -11132,6 +16948,9 @@ class TifWorkbenchWidget(QWidget):
         return (" " + " ".join(warnings)) if warnings else ""
 
     def _apply_mask_to_slice(self, z_index, mask, value, message_template, *, allow_noop=False):
+        if not self._guard_backend_write_lock(show_message=False):
+            self._set_operation_feedback(self._backend_write_lock_message())
+            return False
         if self.edit_volume is None:
             return False
         z_index = int(z_index)
@@ -11161,7 +16980,7 @@ class TifWorkbenchWidget(QWidget):
             return True
         self._push_undo_for_slice(z_index)
         current_slice[mask] = value
-        self._dirty_edit_slices.add(z_index)
+        self._mark_edit_slice_dirty(z_index)
         self._mark_working_edit_dirty()
         if self._current_slice_axis() == "z":
             self.slice_slider.setValue(z_index)
@@ -11173,6 +16992,9 @@ class TifWorkbenchWidget(QWidget):
     def finish_lasso_fill(self, points):
         if self.image_volume is None:
             return False
+        if not self._guard_backend_write_lock(show_message=False):
+            self._set_operation_feedback(self._backend_write_lock_message())
+            return False
         block_reason = self._editable_label_block_reason(require_working_edit=True)
         if block_reason:
             self._set_operation_feedback(block_reason)
@@ -11181,9 +17003,9 @@ class TifWorkbenchWidget(QWidget):
             self._set_operation_feedback(tt("Lasso fill needs at least 3 points.", self.lang))
             return False
         if self.edit_volume is None:
-            self._set_operation_feedback(tt("Creating working edit layer before filling...", self.lang))
+            self._set_operation_feedback(tt("Creating current label layer before filling...", self.lang))
             if not self._ensure_working_edit_volume():
-                self._set_operation_feedback(tt("Working edit layer is unavailable. Check the working volume path before editing labels.", self.lang))
+                self._set_operation_feedback(tt("Current label layer is unavailable. Check the working volume path before editing labels.", self.lang))
                 return False
         z_index = int(self.slice_slider.value())
         height, width = self.image_volume.shape[1], self.image_volume.shape[2]
@@ -11191,19 +17013,22 @@ class TifWorkbenchWidget(QWidget):
         if int(np.count_nonzero(mask)) <= 0:
             self._set_operation_feedback(tt("Lasso fill did not cover any pixels.", self.lang))
             return False
-        return self._apply_mask_to_slice(z_index, mask, int(self.current_material_id), "Filled material {0} on slice {1}: {2} pixel(s).")
+        return self._apply_mask_to_slice(z_index, mask, int(self.current_material_id), "Filled label {0} on slice {1}: {2} pixel(s).")
 
     def finish_shape_fill_drag(self, mode, start_x, start_y, end_x, end_y):
         if self.image_volume is None:
+            return False
+        if not self._guard_backend_write_lock(show_message=False):
+            self._set_operation_feedback(self._backend_write_lock_message())
             return False
         block_reason = self._editable_label_block_reason(require_working_edit=True)
         if block_reason:
             self._set_operation_feedback(block_reason)
             return False
         if self.edit_volume is None:
-            self._set_operation_feedback(tt("Creating working edit layer before filling...", self.lang))
+            self._set_operation_feedback(tt("Creating current label layer before filling...", self.lang))
             if not self._ensure_working_edit_volume():
-                self._set_operation_feedback(tt("Working edit layer is unavailable. Check the working volume path before editing labels.", self.lang))
+                self._set_operation_feedback(tt("Current label layer is unavailable. Check the working volume path before editing labels.", self.lang))
                 return False
         z_index = int(self.slice_slider.value())
         height, width = self.image_volume.shape[1], self.image_volume.shape[2]
@@ -11213,16 +17038,114 @@ class TifWorkbenchWidget(QWidget):
             return False
         if mode == "ellipse":
             mask = self._ellipse_fill_mask(start_pixel, end_pixel, width, height)
-            template = "Filled ellipse material {0} on slice {1}: {2} pixel(s)."
+            template = "Filled ellipse label {0} on slice {1}: {2} pixel(s)."
         else:
             mask = self._rect_fill_mask(start_pixel, end_pixel, width, height)
-            template = "Filled rectangle material {0} on slice {1}: {2} pixel(s)."
+            template = "Filled rectangle label {0} on slice {1}: {2} pixel(s)."
         if int(np.count_nonzero(mask)) <= 0:
             self._set_operation_feedback(tt("Shape fill is too small. Drag a wider area before releasing.", self.lang))
             return False
         return self._apply_mask_to_slice(z_index, mask, int(self.current_material_id), template)
 
+    def _bounding_rect_for_mask(self, mask):
+        if mask is None:
+            return None
+        ys, xs = np.nonzero(np.asarray(mask, dtype=bool))
+        if len(xs) <= 0 or len(ys) <= 0:
+            return None
+        return [int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1]
+
+    def _rect_mask_from_bounds(self, bounds, width, height):
+        if bounds is None:
+            return np.zeros((height, width), dtype=bool)
+        x0, y0, x1, y1 = [int(round(float(value))) for value in bounds]
+        x0 = max(0, min(width, x0))
+        x1 = max(0, min(width, x1))
+        y0 = max(0, min(height, y0))
+        y1 = max(0, min(height, y1))
+        if x1 <= x0 or y1 <= y0:
+            return np.zeros((height, width), dtype=bool)
+        mask = np.zeros((height, width), dtype=bool)
+        mask[y0:y1, x0:x1] = True
+        return mask
+
+    def interpolate_current_label_between_key_slices(self):
+        if not self._ensure_editable_working_edit_for_helper():
+            return False
+        material_id = int(self.current_material_id)
+        if material_id == 0:
+            self._set_operation_feedback(tt("Background label 0 is not supported by this helper.", self.lang))
+            return False
+        volume = self.edit_volume
+        key_slices = []
+        key_masks = {}
+        for z_index in range(int(volume.shape[0])):
+            mask = np.asarray(volume[z_index] == material_id, dtype=bool)
+            if np.any(mask):
+                key_slices.append(int(z_index))
+                key_masks[int(z_index)] = mask.copy()
+        if len(key_slices) < 2:
+            self._set_operation_feedback(tt("Interpolate fill needs the current label on at least two key slices.", self.lang))
+            return False
+        changed_slices = 0
+        changed_pixels = 0
+        undo_snapshots = []
+        changed_indices = []
+        for left, right in zip(key_slices, key_slices[1:]):
+            span = int(right) - int(left)
+            if span <= 1:
+                continue
+            left_dist = signed_distance(key_masks[left])
+            right_dist = signed_distance(key_masks[right])
+            left_rect = self._bounding_rect_for_mask(key_masks[left])
+            right_rect = self._bounding_rect_for_mask(key_masks[right])
+            for z_index in range(int(left) + 1, int(right)):
+                ratio = float(z_index - int(left)) / float(span)
+                mask = ((1.0 - ratio) * left_dist + ratio * right_dist) <= 0.0
+                if int(np.count_nonzero(mask)) <= 0:
+                    if left_rect is None or right_rect is None:
+                        continue
+                    bounds = [
+                        (1.0 - ratio) * float(left_rect[idx]) + ratio * float(right_rect[idx])
+                        for idx in range(4)
+                    ]
+                    mask = self._rect_mask_from_bounds(bounds, int(volume.shape[2]), int(volume.shape[1]))
+                    if int(np.count_nonzero(mask)) <= 0:
+                        continue
+                current_slice = volume[z_index]
+                changed_mask = mask & (current_slice != material_id)
+                count = int(np.count_nonzero(changed_mask))
+                if count <= 0:
+                    continue
+                undo_snapshots.append((int(z_index), current_slice.copy()))
+                current_slice[mask] = material_id
+                self._mark_edit_slice_dirty(z_index)
+                changed_indices.append(int(z_index))
+                changed_slices += 1
+                changed_pixels += count
+        if changed_slices <= 0:
+            self._set_operation_feedback(tt("Interpolate fill found no missing slices between key slices.", self.lang))
+            return False
+        self.undo_stack.append(("multi_slice", undo_snapshots))
+        if len(self.undo_stack) > 20:
+            self.undo_stack.pop(0)
+        self.redo_stack.clear()
+        self._mark_working_edit_dirty()
+        current_z = int(self.slice_slider.value())
+        if current_z not in changed_indices:
+            self.slice_slider.setValue(changed_indices[0])
+        self.render_current_slice()
+        self._sync_undo_redo_buttons()
+        self._set_operation_feedback(
+            tt("Interpolate filled label {0}: {1} slice(s), {2} pixel(s).", self.lang).format(material_id, changed_slices, changed_pixels),
+            log=False,
+        )
+        return True
+
     def _ensure_editable_working_edit_for_helper(self):
+        if not self._guard_backend_write_lock(show_message=False):
+            self._set_operation_feedback(self._backend_write_lock_message())
+            return False
         if self.image_volume is None:
             return False
         block_reason = self._editable_label_block_reason(require_working_edit=True)
@@ -11230,9 +17153,9 @@ class TifWorkbenchWidget(QWidget):
             self._set_operation_feedback(block_reason)
             return False
         if self.edit_volume is None:
-            self._set_operation_feedback(tt("Creating working edit layer before filling...", self.lang))
+            self._set_operation_feedback(tt("Creating current label layer before filling...", self.lang))
             if not self._ensure_working_edit_volume():
-                self._set_operation_feedback(tt("Working edit layer is unavailable. Check the working volume path before editing labels.", self.lang))
+                self._set_operation_feedback(tt("Current label layer is unavailable. Check the working volume path before editing labels.", self.lang))
                 return False
         return True
 
@@ -11241,7 +17164,7 @@ class TifWorkbenchWidget(QWidget):
             return False
         material_id = int(self.current_material_id)
         if material_id == 0:
-            self._set_operation_feedback(tt("Background material 0 is not supported by this helper.", self.lang))
+            self._set_operation_feedback(tt("Background label 0 is not supported by this helper.", self.lang))
             return False
         source_z = int(self.slice_slider.value())
         target_z = source_z + int(delta)
@@ -11254,12 +17177,12 @@ class TifWorkbenchWidget(QWidget):
         source_mask = np.asarray(self.edit_volume[source_z] == material_id)
         source_count = int(np.count_nonzero(source_mask))
         if source_count <= 0:
-            self._set_operation_feedback(tt("No pixels of material {0} on slice {1}.", self.lang).format(material_id, source_z + 1))
+            self._set_operation_feedback(tt("No pixels of label {0} on slice {1}.", self.lang).format(material_id, source_z + 1))
             return False
         reply = QMessageBox.question(
             self,
             tt("Confirm label edit", self.lang),
-            tt("Copy material {0} from slice {1} to slice {2}? Existing pixels of this material on the target slice will be replaced.", self.lang).format(
+            tt("Copy label {0} from slice {1} to slice {2}? Existing pixels of this label on the target slice will be replaced.", self.lang).format(
                 material_id,
                 source_z + 1,
                 target_z + 1,
@@ -11279,11 +17202,11 @@ class TifWorkbenchWidget(QWidget):
             return True
         self._push_undo_for_slice(target_z)
         self.edit_volume[target_z] = next_slice
-        self._dirty_edit_slices.add(target_z)
+        self._mark_edit_slice_dirty(target_z)
         self._mark_working_edit_dirty()
         self.slice_slider.setValue(target_z)
         self.render_current_slice()
-        message = tt("Copied material {0} from slice {1} to slice {2}: {3} changed pixel(s).", self.lang).format(
+        message = tt("Copied label {0} from slice {1} to slice {2}: {3} changed pixel(s).", self.lang).format(
             material_id,
             source_z + 1,
             target_z + 1,
@@ -11297,18 +17220,18 @@ class TifWorkbenchWidget(QWidget):
             return False
         material_id = int(self.current_material_id)
         if material_id == 0:
-            self._set_operation_feedback(tt("Background material 0 is not supported by this helper.", self.lang))
+            self._set_operation_feedback(tt("Background label 0 is not supported by this helper.", self.lang))
             return False
         z_index = int(self.slice_slider.value())
         mask = np.asarray(self.edit_volume[z_index] == material_id)
         count = int(np.count_nonzero(mask))
         if count <= 0:
-            self._set_operation_feedback(tt("No pixels of material {0} on slice {1}.", self.lang).format(material_id, z_index + 1))
+            self._set_operation_feedback(tt("No pixels of label {0} on slice {1}.", self.lang).format(material_id, z_index + 1))
             return False
         reply = QMessageBox.question(
             self,
             tt("Confirm label edit", self.lang),
-            tt("Clear material {0} from slice {1}?", self.lang).format(material_id, z_index + 1),
+            tt("Clear label {0} from slice {1}?", self.lang).format(material_id, z_index + 1),
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -11316,16 +17239,20 @@ class TifWorkbenchWidget(QWidget):
             return False
         self._push_undo_for_slice(z_index)
         self.edit_volume[z_index][mask] = 0
-        self._dirty_edit_slices.add(z_index)
+        self._mark_edit_slice_dirty(z_index)
         self._mark_working_edit_dirty()
         self.render_current_slice()
-        message = tt("Cleared material {0} on slice {1}: {2} pixel(s).", self.lang).format(material_id, z_index + 1, count)
+        message = tt("Cleared label {0} on slice {1}: {2} pixel(s).", self.lang).format(material_id, z_index + 1, count)
         self._set_operation_feedback(message, log=False)
         return True
 
     def _sample_label_volume(self):
-        if self.current_volume_scope == "part" and self.edit_volume is not None and self.edit_volume.shape == self.image_volume.shape:
-            return self.edit_volume
+        if self.current_volume_scope == "part":
+            if self.label_role_combo.currentData() == "editable_ai_result" and self.edit_volume is not None and self.edit_volume.shape == self.image_volume.shape:
+                return self.edit_volume
+            if self.label_volume is not None and self.label_volume.shape == self.image_volume.shape:
+                return self.label_volume
+            return None
         if self.label_role_combo.currentData() == "working_edit" and self.edit_volume is not None and self.edit_volume.shape == self.image_volume.shape:
             return self.edit_volume
         if self.label_volume is not None and self.label_volume.shape == self.image_volume.shape:
@@ -11337,14 +17264,11 @@ class TifWorkbenchWidget(QWidget):
     def pick_material_at_widget_position(self, x, y):
         if self.image_volume is None:
             return
-        if self.current_volume_scope == "part" and self.current_reslice_id:
-            self._set_operation_feedback(tt("Selected saved reslice is read-only. Return to the part volume to edit masks.", self.lang))
-            return
         if self.display_mode == "volume":
             self._set_operation_feedback(tt("3D volume preview is read-only. Switch to Slice review for label editing.", self.lang))
             return
         if self._current_slice_axis() != "z":
-            self._set_operation_feedback(tt("Material picker is available on Z slices only. Switch back to Z axial view before sampling labels.", self.lang))
+            self._set_operation_feedback(tt("Label picker is available on Z slices only. Switch back to Z axial view before sampling labels.", self.lang))
             return
         sample_volume = self._sample_label_volume()
         if sample_volume is None:
@@ -11391,13 +17315,28 @@ class TifWorkbenchWidget(QWidget):
         self._sync_undo_redo_buttons()
 
     def undo(self):
+        if not self._guard_backend_write_lock():
+            return
         if not self.undo_stack or self.edit_volume is None:
             self._sync_undo_redo_buttons()
             return
-        z_index, old_slice = self.undo_stack.pop()
-        self.redo_stack.append((z_index, self.edit_volume[z_index].copy()))
-        self.edit_volume[z_index] = old_slice
-        self._dirty_edit_slices.add(z_index)
+        entry = self.undo_stack.pop()
+        if isinstance(entry, tuple) and len(entry) == 2 and entry[0] == "multi_slice":
+            snapshots = [(int(z_index), np.asarray(slice_array).copy()) for z_index, slice_array in (entry[1] or [])]
+            redo_snapshots = []
+            for z_index, old_slice in snapshots:
+                if 0 <= z_index < int(self.edit_volume.shape[0]):
+                    redo_snapshots.append((z_index, self.edit_volume[z_index].copy()))
+                    self.edit_volume[z_index] = old_slice
+                    self._mark_edit_slice_dirty(z_index)
+            self.redo_stack.append(("multi_slice", redo_snapshots))
+            z_index = snapshots[0][0] if snapshots else int(self.slice_slider.value())
+        else:
+            z_index, old_slice = entry
+            z_index = int(z_index)
+            self.redo_stack.append((z_index, self.edit_volume[z_index].copy()))
+            self.edit_volume[z_index] = old_slice
+            self._mark_edit_slice_dirty(z_index)
         if self._current_slice_axis() == "z":
             self.slice_slider.setValue(z_index)
         self._mark_working_edit_dirty()
@@ -11406,13 +17345,28 @@ class TifWorkbenchWidget(QWidget):
         self._set_operation_feedback(tt("Undo restored slice {0}.", self.lang).format(z_index + 1), log=False)
 
     def redo(self):
+        if not self._guard_backend_write_lock():
+            return
         if not self.redo_stack or self.edit_volume is None:
             self._sync_undo_redo_buttons()
             return
-        z_index, redo_slice = self.redo_stack.pop()
-        self.undo_stack.append((z_index, self.edit_volume[z_index].copy()))
-        self.edit_volume[z_index] = redo_slice
-        self._dirty_edit_slices.add(z_index)
+        entry = self.redo_stack.pop()
+        if isinstance(entry, tuple) and len(entry) == 2 and entry[0] == "multi_slice":
+            snapshots = [(int(z_index), np.asarray(slice_array).copy()) for z_index, slice_array in (entry[1] or [])]
+            undo_snapshots = []
+            for z_index, redo_slice in snapshots:
+                if 0 <= z_index < int(self.edit_volume.shape[0]):
+                    undo_snapshots.append((z_index, self.edit_volume[z_index].copy()))
+                    self.edit_volume[z_index] = redo_slice
+                    self._mark_edit_slice_dirty(z_index)
+            self.undo_stack.append(("multi_slice", undo_snapshots))
+            z_index = snapshots[0][0] if snapshots else int(self.slice_slider.value())
+        else:
+            z_index, redo_slice = entry
+            z_index = int(z_index)
+            self.undo_stack.append((z_index, self.edit_volume[z_index].copy()))
+            self.edit_volume[z_index] = redo_slice
+            self._mark_edit_slice_dirty(z_index)
         if self._current_slice_axis() == "z":
             self.slice_slider.setValue(z_index)
         self._mark_working_edit_dirty()
@@ -11420,11 +17374,86 @@ class TifWorkbenchWidget(QWidget):
         self._sync_undo_redo_buttons()
         self._set_operation_feedback(tt("Redo restored slice {0}.", self.lang).format(z_index + 1), log=False)
 
+    def _finalize_full_edit_save_metadata(self, metadata, auto_saved=False, refresh_volumes=True):
+        specimen = self.project.get_specimen(self.current_specimen_id, default=None)
+        if specimen is None:
+            return False
+        labels = specimen.setdefault("labels", {})
+        labels.setdefault("working_edit", {})
+        if metadata:
+            labels["working_edit"]["dtype"] = metadata.get("dtype", labels["working_edit"].get("dtype", ""))
+            labels["working_edit"]["shape_zyx"] = metadata.get("shape_zyx", labels["working_edit"].get("shape_zyx", []))
+            labels["working_edit"]["spacing_zyx"] = metadata.get("spacing_zyx", labels["working_edit"].get("spacing_zyx", [1.0, 1.0, 1.0]))
+            labels["working_edit"]["spacing_unit"] = metadata.get("spacing_unit", labels["working_edit"].get("spacing_unit", "micrometer"))
+            labels["working_edit"]["orientation"] = metadata.get("orientation", labels["working_edit"].get("orientation", "unknown"))
+            labels["working_edit"]["format"] = metadata.get("format", labels["working_edit"].get("format", ""))
+        labels["working_edit"]["status"] = "in_progress"
+        specimen["review_status"] = "in_progress"
+        specimen["train_ready"] = False
+        self.project.save_project()
+        if refresh_volumes:
+            edit_path = self._current_edit_save_path()
+            self.edit_volume = load_volume_sidecar(edit_path, mmap_mode="c") if edit_path else self.edit_volume
+            if self.label_role_combo.currentData() == "working_edit" and edit_path:
+                self.label_volume = load_volume_sidecar(edit_path, mmap_mode="r")
+            else:
+                self._reload_label_volume()
+            self._update_status_labels(specimen)
+        return True
+
+    def _finalize_part_editable_save_metadata(self, metadata, auto_saved=False, refresh_volumes=True):
+        specimen = self.project.get_specimen(self.current_specimen_id, default=None)
+        part = self.project.get_part(self.current_specimen_id, self.current_part_id, default=None)
+        if specimen is None or part is None:
+            return False
+        if self.current_reslice_id:
+            reslice = self._current_part_reslice_record()
+            label_record = (reslice or {}).setdefault("labels", {}).setdefault("editable_ai_result", {})
+        else:
+            label_record = part.setdefault("labels", {}).setdefault("editable_ai_result", {})
+        if metadata:
+            label_record["dtype"] = metadata.get("dtype", label_record.get("dtype", ""))
+            label_record["shape_zyx"] = metadata.get("shape_zyx", label_record.get("shape_zyx", []))
+            label_record["spacing_zyx"] = metadata.get("spacing_zyx", label_record.get("spacing_zyx", [1.0, 1.0, 1.0]))
+            label_record["spacing_unit"] = metadata.get("spacing_unit", label_record.get("spacing_unit", "micrometer"))
+            label_record["orientation"] = metadata.get("orientation", label_record.get("orientation", "unknown"))
+            label_record["format"] = metadata.get("format", label_record.get("format", ""))
+        label_record["role"] = "editable_ai_result"
+        label_record["status"] = "pending_review"
+        if self.current_reslice_id:
+            label_record["coordinate_space"] = "local_axis_reslice_voxel_zyx"
+            label_record["reslice_id"] = str(self.current_reslice_id or "")
+        self.project.set_part_training_metadata(
+            self.current_specimen_id,
+            self.current_part_id,
+            active_reslice_id=str(self.current_reslice_id or "") if self.current_reslice_id else None,
+            system_status="predicted_pending_review",
+            opened_for_review=True,
+            save=False,
+        )
+        self.project.save_project()
+        self.current_part = part
+        if refresh_volumes:
+            edit_path = self._current_part_label_path("editable_ai_result")
+            self.edit_volume = load_volume_sidecar(edit_path, mmap_mode="c") if edit_path else self.edit_volume
+            if self.label_role_combo.currentData() == "editable_ai_result" and edit_path:
+                self.label_volume = load_volume_sidecar(edit_path, mmap_mode="r")
+            else:
+                self._reload_label_volume()
+            self._update_status_labels(specimen, part=part)
+            self._update_ai_review_check_label()
+        return True
+
     def save_working_edit(self, show_message=True, reason="manual"):
+        if not self._guard_backend_write_lock(show_message=show_message):
+            return False
         if self._saving_working_edit:
             return True
+        if reason == "auto_save":
+            return self._start_label_auto_save(reason=reason)
+        self._wait_for_label_auto_save()
         if self.current_volume_scope == "part":
-            return self._save_part_mask_edit(show_message=show_message, reason=reason)
+            return self._save_part_editable_label(show_message=show_message, reason=reason)
         specimen = self.project.get_specimen(self.current_specimen_id, default=None)
         if specimen is None or self.edit_volume is None:
             return False
@@ -11442,19 +17471,9 @@ class TifWorkbenchWidget(QWidget):
                     if 0 <= int(z_index) < int(target.shape[0]):
                         target[int(z_index)] = self.edit_volume[int(z_index)]
             metadata = flush_volume_array(edit_path, target)
-            specimen["labels"]["working_edit"]["dtype"] = metadata["dtype"]
-            specimen["labels"]["working_edit"]["status"] = "in_progress"
-            specimen["review_status"] = "in_progress"
-            specimen["train_ready"] = False
-            self.project.save_project()
             self.working_edit_dirty = False
-            self._dirty_edit_slices = set()
-            self.edit_volume = load_volume_sidecar(edit_path, mmap_mode="c")
-            if self.label_role_combo.currentData() == "working_edit":
-                self.label_volume = load_volume_sidecar(edit_path, mmap_mode="r")
-            else:
-                self._reload_label_volume()
-            self._update_status_labels(specimen)
+            self._reset_edit_dirty_tracking()
+            self._finalize_full_edit_save_metadata(metadata, refresh_volumes=True)
             self._update_save_status()
         except Exception as exc:
             self.working_edit_dirty = True
@@ -11467,7 +17486,47 @@ class TifWorkbenchWidget(QWidget):
             self._saving_working_edit = False
             self._update_save_status()
         if show_message:
-            message = tt("Auto-saved working edit.", self.lang) if reason == "auto_save" else tt("Working edit saved.", self.lang)
+            message = tt("Auto-saved current labels.", self.lang) if reason == "auto_save" else tt("Current labels saved.", self.lang)
+            self._set_operation_feedback(message)
+        return True
+
+    def _save_part_editable_label(self, show_message=True, reason="manual"):
+        specimen = self.project.get_specimen(self.current_specimen_id, default=None)
+        part = self.project.get_part(self.current_specimen_id, self.current_part_id, default=None)
+        if specimen is None or part is None:
+            return False
+        if self.edit_volume is None and not self._ensure_working_edit_volume():
+            return False
+        edit_path = self._current_part_label_path("editable_ai_result")
+        if not edit_path:
+            return False
+        self._saving_working_edit = True
+        self.auto_save_timer.stop()
+        self._update_save_status(state="saving")
+        try:
+            self.label_volume = None
+            target = load_volume_sidecar(edit_path, mmap_mode="r+")
+            if self._dirty_edit_slices:
+                for z_index in sorted(self._dirty_edit_slices):
+                    if 0 <= int(z_index) < int(target.shape[0]):
+                        target[int(z_index)] = self.edit_volume[int(z_index)]
+            metadata = flush_volume_array(edit_path, target)
+            self.working_edit_dirty = False
+            self._reset_edit_dirty_tracking()
+            self._finalize_part_editable_save_metadata(metadata, refresh_volumes=True)
+            self._update_save_status()
+        except Exception as exc:
+            self.working_edit_dirty = True
+            message = tt("Save failed: {0}", self.lang).format(str(exc))
+            self._set_operation_feedback(message)
+            self._update_save_status(state="failed", detail=str(exc))
+            QMessageBox.warning(self, tt("Unsaved working edit", self.lang), str(exc))
+            return False
+        finally:
+            self._saving_working_edit = False
+            self._update_save_status()
+        if show_message:
+            message = tt("Auto-saved editable AI result.", self.lang) if reason == "auto_save" else tt("Editable AI result saved.", self.lang)
             self._set_operation_feedback(message)
         return True
 
@@ -11502,9 +17561,10 @@ class TifWorkbenchWidget(QWidget):
             part["status"] = "mask_in_progress"
             self.project.save_project()
             self.working_edit_dirty = False
-            self._dirty_edit_slices = set()
+            self._reset_edit_dirty_tracking()
             self.edit_volume = load_volume_sidecar(mask_path, mmap_mode="c")
-            self.label_volume = load_volume_sidecar(mask_path, mmap_mode="r")
+            self.part_mask_volume = load_volume_sidecar(mask_path, mmap_mode="r")
+            self._reload_label_volume()
             self._update_status_labels(specimen, part=part)
             self._update_save_status()
         except Exception as exc:
@@ -11522,30 +17582,109 @@ class TifWorkbenchWidget(QWidget):
             self._set_operation_feedback(message)
         return True
 
-    def promote_working_edit(self):
+    def _current_promote_request(self):
         if not self.current_specimen_id:
-            return
+            return {}
+        return {
+            "scope": "part" if self.current_volume_scope == "part" else "full",
+            "specimen_id": str(self.current_specimen_id or ""),
+            "part_id": str(self.current_part_id or ""),
+            "reslice_id": str(self.current_reslice_id or ""),
+        }
+
+    def _begin_promote_working_edit_async(self, request):
+        request = dict(request or {})
+        if not request.get("specimen_id"):
+            return False
+        if self._promote_running():
+            return False
+        thread = QThread(self)
+        worker = TifPromoteWorkingEditWorker(self.project, request)
+        worker.moveToThread(thread)
+        self._promote_thread = thread
+        self._promote_worker = worker
+        self._promote_request = request
+        self._set_operation_feedback(tt("Accepting training truth in background...", self.lang))
+        self._set_scope_controls_enabled()
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_promote_working_edit_finished)
+        worker.failed.connect(self._on_promote_working_edit_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+        return True
+
+    def _cleanup_promote_thread(self):
+        self._promote_thread = None
+        self._promote_worker = None
+        self._promote_request = {}
+        self._set_scope_controls_enabled()
+
+    def _on_promote_working_edit_finished(self, result):
+        result = dict(result or {})
+        self._cleanup_promote_thread()
+        self.refresh_project()
+        specimen_id = str(result.get("specimen_id") or "")
+        part_id = str(result.get("part_id") or "")
+        reslice_id = str(result.get("reslice_id") or "")
+        if specimen_id and part_id:
+            self._select_volume_tree_item(specimen_id, "part_reslice" if reslice_id else "part", part_id, reslice_id)
+        elif specimen_id:
+            self._select_volume_tree_item(specimen_id, "full")
+        self._reload_label_volume()
+        specimen = self.project.get_specimen(self.current_specimen_id, default=None) if self.current_specimen_id else None
+        if specimen is not None:
+            self._update_status_labels(specimen, part=self.current_part if self.current_volume_scope == "part" else None)
+        self._update_ai_review_check_label()
+        self._set_operation_feedback(tt("Accepted current labels as training truth.", self.lang))
+
+    def _on_promote_working_edit_failed(self, result):
+        result = dict(result or {})
+        self._cleanup_promote_thread()
+        message = str(result.get("error", ""))
+        self._set_operation_feedback(tt("Action failed: {0}", self.lang).format(message))
+        QMessageBox.warning(self, tt("Accept working edit", self.lang), message)
+
+    def promote_working_edit(self):
+        if not self._guard_backend_write_lock():
+            return False
+        if not self.current_specimen_id:
+            return False
         if self.current_volume_scope == "part":
-            QMessageBox.information(self, tt("Accept working edit", self.lang), tt("Part volumes are not promoted to full-volume manual truth in this version.", self.lang))
-            return
-        if not self.save_working_edit(show_message=False):
-            return
+            if not self.current_part_id:
+                return False
+            reply = QMessageBox.question(
+                self,
+                tt("Accept working edit", self.lang),
+                tt("Promote the reviewed editable AI result to part-level training truth?", self.lang),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return False
+            request = self._current_promote_request()
+            if self.working_edit_dirty:
+                return self.save_working_edit_async(promote_request=request)
+            return self._begin_promote_working_edit_async(request)
         reply = QMessageBox.question(
             self,
             tt("Accept working edit", self.lang),
-            tt("Promote the current working_edit layer to manual_truth for training?", self.lang),
+            tt("Promote the current working_edit layer to training truth?", self.lang),
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
-            return
-        self.project.promote_working_edit_to_manual_truth(self.current_specimen_id)
-        self._reload_label_volume()
-        specimen = self.project.get_specimen(self.current_specimen_id)
-        self._update_status_labels(specimen)
-        self.refresh_project()
+            return False
+        request = self._current_promote_request()
+        if self.working_edit_dirty:
+            return self.save_working_edit_async(promote_request=request)
+        return self._begin_promote_working_edit_async(request)
 
     def copy_latest_model_draft_to_working_edit(self):
+        if not self._guard_backend_write_lock():
+            return
         if not self.current_specimen_id:
             return
         if self.current_volume_scope == "part":
@@ -11574,10 +17713,13 @@ class TifWorkbenchWidget(QWidget):
         self.log(message)
 
     def export_training_dataset(self):
+        if not self._guard_backend_write_lock():
+            return
         if not self.project.current_project_path:
             QMessageBox.warning(self, tt("TIF training handoff", self.lang), tt("Please create or open a TIF project first.", self.lang))
             return
-        default_dir = os.path.join(self.project.project_dir, "exports", "train_ready")
+        use_part_training = bool(self.current_volume_scope == "part" or self.project.list_train_ready_parts())
+        default_dir = os.path.join(self.project.project_dir, "exports", "part_train_ready" if use_part_training else "train_ready")
         os.makedirs(default_dir, exist_ok=True)
         output_dir = QFileDialog.getExistingDirectory(self, tt("Export train-ready TIF volumes", self.lang), default_dir)
         if not output_dir:
@@ -11588,12 +17730,22 @@ class TifWorkbenchWidget(QWidget):
             if item.strip()
         ]
         try:
-            result = export_tif_training_dataset(
-                self.project,
-                output_dir,
-                formats=formats or ["ome_tiff", "nrrd", "mha", "nifti"],
-                require_train_ready=True,
-            )
+            if use_part_training:
+                part_refs = self._selected_part_refs_for_action("prepare_dataset")
+                result = export_tif_part_training_dataset(
+                    self.project,
+                    output_dir,
+                    part_refs=part_refs,
+                    formats=formats or ["ome_tiff", "nrrd", "mha", "nifti"],
+                    require_train_ready=True,
+                )
+            else:
+                result = export_tif_training_dataset(
+                    self.project,
+                    output_dir,
+                    formats=formats or ["ome_tiff", "nrrd", "mha", "nifti"],
+                    require_train_ready=True,
+                )
         except Exception as exc:
             QMessageBox.warning(self, tt("TIF training handoff", self.lang), str(exc))
             message = tt("Export failed: {0}", self.lang).format(str(exc))
@@ -11602,7 +17754,10 @@ class TifWorkbenchWidget(QWidget):
             return
         manifest_path = result.get("manifest_path", "")
         exported_count = result.get("exported_count", 0)
-        message = tt("Exported {0} train-ready specimen(s).\nManifest: {1}", self.lang).format(exported_count, manifest_path)
+        if use_part_training:
+            message = tt("Exported {0} train-ready part(s).\nManifest: {1}", self.lang).format(exported_count, manifest_path)
+        else:
+            message = tt("Exported {0} train-ready specimen(s).\nManifest: {1}", self.lang).format(exported_count, manifest_path)
         self.training_status_label.setText(message)
         self.log(message)
         QMessageBox.information(
@@ -11612,6 +17767,8 @@ class TifWorkbenchWidget(QWidget):
         )
 
     def export_current_part_package(self):
+        if not self._guard_backend_write_lock():
+            return
         if not self._is_editable_part_volume() or not self.current_specimen_id or not self.current_part_id:
             QMessageBox.information(self, tt("Part extraction", self.lang), tt("Select a part volume before exporting a part package.", self.lang))
             return
@@ -11635,6 +17792,109 @@ class TifWorkbenchWidget(QWidget):
         self.training_status_label.setToolTip(full_message)
         self.log(full_message)
         QMessageBox.information(self, tt("Part extraction", self.lang), message)
+
+    def _safe_export_name_fragment(self, value, fallback="item"):
+        text = str(value or "").strip() or str(fallback or "item")
+        clean = []
+        for char in text:
+            clean.append(char if char.isalnum() or char in {"-", "_"} else "_")
+        result = "".join(clean).strip("_")
+        return result or str(fallback or "item")
+
+    def _current_result_region_slug(self):
+        combo = getattr(self, "result_region_combo", None)
+        value = combo.currentData() if combo is not None and combo.count() else 0
+        if value in (None, "", 0):
+            return "all"
+        label = self._safe_export_name_fragment(self._result_region_name(), "")
+        suffix = f"_{label}" if label else ""
+        return self._safe_export_name_fragment(f"region_{value}{suffix}", "region")
+
+    def _current_rendering_screenshot_metadata(self, image_path, sidecar_path):
+        selected_row = self._selected_result_comparison_row() if hasattr(self, "result_compare_table") else {}
+        active_part = self.project.get_part(self.current_specimen_id, self.current_part_id, default=None) if self.current_specimen_id and self.current_part_id else None
+        training = (active_part or {}).get("training") or {}
+        label_role = self._result_source_role() if hasattr(self, "result_source_manual_radio") else (self.label_role_combo.currentData() if hasattr(self, "label_role_combo") else "")
+        label_record = self._current_part_label_record(label_role) if self.current_volume_scope == "part" and label_role else {}
+        target = self.volume_canvas if self.display_mode == "volume" else self.canvas
+        region_id = self._result_region_id() if hasattr(self, "result_region_combo") else 0
+        return {
+            "schema_version": "taxamask_tif_render_screenshot_v1",
+            "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "image_path": os.path.abspath(str(image_path)),
+            "sidecar_path": os.path.abspath(str(sidecar_path)),
+            "project_path": os.path.abspath(str(self.project.current_project_path or "")),
+            "project_relative_image_path": self.project.to_relative(image_path),
+            "project_relative_sidecar_path": self.project.to_relative(sidecar_path),
+            "scope": self.current_volume_scope,
+            "specimen_id": str(self.current_specimen_id or ""),
+            "part_id": str(self.current_part_id or ""),
+            "reslice_id": str(self.current_reslice_id or training.get("active_reslice_id") or ""),
+            "user_defined_part_name": str(training.get("user_defined_part_name") or (active_part or {}).get("display_name") or ""),
+            "label_schema_id": str(training.get("label_schema_id") or ""),
+            "region_id": int(region_id),
+            "region_name": self._result_region_name() if region_id > 0 else tt("All", self.lang),
+            "region_slug": self._current_result_region_slug(),
+            "label_role": str(label_role or ""),
+            "label_path": self.project.to_relative((label_record or {}).get("path", "")),
+            "label_status": str((label_record or {}).get("status") or ""),
+            "prediction_id": str((label_record or {}).get("prediction_id") or ""),
+            "source_model": str((label_record or {}).get("source_model") or ""),
+            "display_mode": str(self.display_mode or ""),
+            "volume_mask_mode": str(self.volume_mask_combo.currentData() if hasattr(self, "volume_mask_combo") else ""),
+            "volume_renderer": str(getattr(self, "_volume_canvas_renderer", "")),
+            "slice_axis": str(self._current_slice_axis() if hasattr(self, "_current_slice_axis") else ""),
+            "slice_index": int(getattr(self, "slice_index", 0) or 0),
+            "canvas_size": [int(target.width()), int(target.height())],
+            "selected_result_row": selected_row,
+            "notes": [
+                "This sidecar records the TaxaMask view state for the exported screenshot.",
+                "Use label_role and label_status to distinguish reviewed manual_truth from editable AI results pending review.",
+            ],
+        }
+
+    def export_current_rendering_screenshot(self):
+        if self.image_volume is None:
+            QMessageBox.information(self, tt("Export current rendering", self.lang), tt("Select a TIF volume before exporting the current rendering.", self.lang))
+            return ""
+        default_dir = os.path.join(self.project.project_dir, "exports", "render_screenshots")
+        os.makedirs(default_dir, exist_ok=True)
+        timestamp = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S")
+        specimen_id = self._safe_export_name_fragment(self.current_specimen_id, "specimen")
+        part_id = self._safe_export_name_fragment(self.current_part_id or "full", "full")
+        region = self._current_result_region_slug()
+        mode = "volume" if self.display_mode == "volume" else "slice"
+        default_path = os.path.join(default_dir, f"{specimen_id}_{part_id}_{region}_{mode}_{timestamp}.png")
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            tt("Export current rendering", self.lang),
+            default_path,
+            "PNG image (*.png)",
+        )
+        if not file_path:
+            return ""
+        target = self.volume_canvas if self.display_mode == "volume" else self.canvas
+        pixmap = target.grab()
+        try:
+            if not pixmap.save(file_path, "PNG"):
+                raise ValueError("pixmap_save_failed")
+            sidecar_path = os.path.splitext(file_path)[0] + ".json"
+            atomic_write_json(
+                sidecar_path,
+                self._current_rendering_screenshot_metadata(file_path, sidecar_path),
+                indent=2,
+                ensure_ascii=False,
+            )
+        except Exception as exc:
+            message = tt("Screenshot export failed: {0}", self.lang).format(str(exc))
+            self.training_status_label.setText(message)
+            QMessageBox.warning(self, tt("Export current rendering", self.lang), message)
+            return ""
+        message = tt("Exported current rendering screenshot: {0}", self.lang).format(file_path)
+        self.training_status_label.setText(message)
+        self.training_status_label.setToolTip(file_path)
+        self.log(message)
+        return file_path
 
     def _default_local_axis_reslice_id(self):
         part_id = str(self.current_part_id or "part").strip() or "part"
@@ -11695,6 +17955,8 @@ class TifWorkbenchWidget(QWidget):
         }
 
     def export_current_local_axis_reslice(self):
+        if not self._guard_backend_write_lock():
+            return None
         source_specimen_id = self.current_specimen_id
         source_part_id = self.current_part_id
         if self._local_axis_reslice_export_running():
@@ -11734,57 +17996,29 @@ class TifWorkbenchWidget(QWidget):
         self._local_axis_reslice_export_thread = thread
         self._local_axis_reslice_export_worker = worker
         self._local_axis_reslice_export_progress = progress
+        self._local_axis_reslice_export_context = {
+            "specimen_id": source_specimen_id,
+            "part_id": source_part_id,
+        }
         self._set_local_axis_reslice_export_controls_enabled(False)
-
-        result_holder = {}
-
-        def _on_finished(result):
-            result_holder["result"] = result
-            thread.quit()
-
-        def _on_failed(message):
-            result_holder["error"] = message
-            thread.quit()
 
         thread.started.connect(worker.run)
         worker.progress.connect(self._on_local_axis_reslice_export_progress)
-        worker.finished.connect(_on_finished)
-        worker.failed.connect(_on_failed)
+        worker.finished.connect(self._on_local_axis_reslice_export_finished)
+        worker.failed.connect(self._on_local_axis_reslice_export_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
 
-        loop = QEventLoop()
-        thread.finished.connect(loop.quit)
         thread.start()
-        loop.exec()
-        self._cleanup_local_axis_reslice_export_thread()
-
-        if result_holder.get("error"):
-            message = str(result_holder.get("error") or "")
-            self._set_local_axis_status(message)
-            self.log(message)
-            QMessageBox.warning(self, tt("Local Axis Reslice", self.lang), message)
-            return None
-
-        result = result_holder.get("result")
-        if not isinstance(result, dict):
-            message = tt("Local Axis Reslice export did not return a result.", self.lang)
-            self._set_local_axis_status(message)
-            self.log(message)
-            QMessageBox.warning(self, tt("Local Axis Reslice", self.lang), message)
-            return None
-
-        record = result.get("record", {})
-        reslice_id = record.get("reslice_id", "")
-        message = tt("Exported local axis reslice {0}.", self.lang).format(reslice_id)
-        self._set_local_axis_status(message)
-        self.training_status_label.setText(message)
-        self.log(message)
-        self._local_axis_pick_target = ""
-        self._local_axis_roll_pick_target = ""
-        self.refresh_project()
-        self._select_volume_tree_item(source_specimen_id, "part_reslice", source_part_id, reslice_id)
-        return result
+        self.training_status_label.setText(tt("Exporting confirmed Local Axis Reslice...", self.lang))
+        return {
+            "status": "running",
+            "specimen_id": source_specimen_id,
+            "part_id": source_part_id,
+            "reslice_id": payload.get("reslice_id", ""),
+        }
 
     def export_local_axis_training_manifest_dialog(self):
         if not self._ensure_tif_project_open():

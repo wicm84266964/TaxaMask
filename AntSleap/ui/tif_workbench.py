@@ -4797,9 +4797,23 @@ class TifWorkbenchWidget(QWidget):
     def _promote_running(self):
         return self._promote_thread is not None
 
-    def _backend_write_lock_active(self):
+    def _active_tif_busy_locks(self, ignored_task_types=None):
+        ignored = {str(task_type or "") for task_type in (ignored_task_types or set())}
+        return [
+            task
+            for task in self.task_manager.active_busy_locks()
+            if str(getattr(task, "task_type", "") or "") not in ignored
+        ]
+
+    def _preview_interaction_task_types(self):
+        return {"volume_preview", "mask_preview"}
+
+    def _local_axis_draft_lock_ignored_task_types(self):
+        return self._preview_interaction_task_types()
+
+    def _backend_write_lock_active(self, ignored_task_types=None):
         return bool(
-            self.task_manager.busy_locked()
+            self._active_tif_busy_locks(ignored_task_types)
             or (
             self._backend_action_running()
             or self._confirm_part_roi_running()
@@ -4809,10 +4823,10 @@ class TifWorkbenchWidget(QWidget):
             )
         )
 
-    def _backend_write_lock_message(self):
-        manager_reason = self.task_manager.busy_lock_reason()
-        if manager_reason:
-            task_type = self.task_manager.active_busy_locks()[0].task_type if self.task_manager.active_busy_locks() else ""
+    def _backend_write_lock_message(self, ignored_task_types=None):
+        active_locks = self._active_tif_busy_locks(ignored_task_types)
+        if active_locks:
+            task_type = active_locks[0].task_type
             if task_type == "truth_promotion":
                 return tt("Training truth acceptance is running. Wait until it finishes before editing project data.", self.lang)
             if task_type == "label_auto_save":
@@ -4850,13 +4864,21 @@ class TifWorkbenchWidget(QWidget):
             return tt("Part extraction", self.lang)
         return tt("TIF backend", self.lang)
 
-    def _guard_backend_write_lock(self, show_message=True):
-        if not self._backend_write_lock_active():
+    def _guard_backend_write_lock(self, show_message=True, ignored_task_types=None):
+        if not self._backend_write_lock_active(ignored_task_types=ignored_task_types):
             return True
-        message = self._backend_write_lock_message()
+        message = self._backend_write_lock_message(ignored_task_types=ignored_task_types)
         if show_message:
             self._set_operation_feedback(message)
             QMessageBox.information(self, self._backend_write_lock_title(), message)
+        return False
+
+    def _guard_local_axis_draft_interaction(self, show_message=True):
+        ignored = self._local_axis_draft_lock_ignored_task_types()
+        if self._guard_backend_write_lock(show_message=show_message, ignored_task_types=ignored):
+            return True
+        if not show_message:
+            self._set_local_axis_status(self._backend_write_lock_message(ignored_task_types=ignored))
         return False
 
     def _format_elapsed_seconds(self, seconds):
@@ -8351,14 +8373,78 @@ class TifWorkbenchWidget(QWidget):
         self._section_title_labels[object_name] = (title, title_label)
         return section, layout
 
+    def _relax_right_sidebar_widget_width(self, widget):
+        if widget is None:
+            return
+        current_policy = widget.sizePolicy()
+        vertical_policy = current_policy.verticalPolicy()
+        if isinstance(widget, QLabel):
+            if widget.wordWrap():
+                widget.setSizePolicy(QSizePolicy.Ignored, vertical_policy)
+            return
+        if isinstance(widget, (QPushButton, QCheckBox, QRadioButton)):
+            widget.setMinimumWidth(0)
+            widget.setSizePolicy(QSizePolicy.Ignored, vertical_policy)
+            text = ""
+            try:
+                text = str(widget.text() or "")
+            except Exception:
+                text = ""
+            if text and not widget.toolTip():
+                widget.setToolTip(text)
+            return
+        if isinstance(widget, QComboBox):
+            widget.setMinimumWidth(0)
+            try:
+                widget.setMinimumContentsLength(0)
+                widget.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+            except Exception:
+                pass
+            widget.setSizePolicy(QSizePolicy.Ignored, vertical_policy)
+            return
+        if isinstance(widget, (QLineEdit, QProgressBar)):
+            widget.setMinimumWidth(0)
+            widget.setSizePolicy(QSizePolicy.Ignored, vertical_policy)
+            return
+        if isinstance(widget, (QTableWidget, QTextEdit)):
+            widget.setMinimumWidth(0)
+            widget.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            widget.setSizePolicy(QSizePolicy.Ignored, vertical_policy)
+
+    def _make_right_sidebar_responsive(self, right_panel):
+        right_panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        right_panel.setMinimumWidth(360)
+        right_panel.setMaximumWidth(520)
+        for page in (
+            self.part_task_page,
+            self.display_task_page,
+            self.annotation_task_page,
+            self.training_task_page,
+            self.result_compare_page,
+        ):
+            page.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+            page.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            body = page.widget()
+            if body is not None:
+                body.setMinimumWidth(0)
+                body.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        for section in right_panel.findChildren(QFrame):
+            if str(section.objectName() or "").startswith("tif"):
+                section.setMinimumWidth(0)
+                section.setSizePolicy(QSizePolicy.Ignored, section.sizePolicy().verticalPolicy())
+        for widget in right_panel.findChildren(QWidget):
+            self._relax_right_sidebar_widget_width(widget)
+
     def _make_task_page(self, object_name):
         scroll = QScrollArea()
         scroll.setObjectName("tifInspectorScroll")
         scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         scroll.setFrameShape(QFrame.NoFrame)
         body = QWidget()
         body.setObjectName(object_name)
+        body.setMinimumWidth(0)
+        body.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         layout = QVBoxLayout(body)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
@@ -8922,6 +9008,7 @@ class TifWorkbenchWidget(QWidget):
         self.result_compare_layout.addStretch(1)
         splitter.addWidget(right)
 
+        self._make_right_sidebar_responsive(right)
         splitter.setSizes([230, 900, 420])
 
     def _apply_soft_style(self):
@@ -10451,7 +10538,17 @@ class TifWorkbenchWidget(QWidget):
         self.btn_export_local_axis_training_manifest.setEnabled(bool(self.project.project_data.get("specimens", [])))
         self.btn_export_part_package.setEnabled(is_editable_part_volume and has_image)
         self.btn_delete_part_volume.setEnabled(is_editable_part_volume and self.current_part is not None)
-        self._set_backend_write_locked_controls(self._backend_write_lock_active())
+        write_locked = self._backend_write_lock_active()
+        self._set_backend_write_locked_controls(write_locked)
+        if write_locked and not self._backend_write_lock_active(ignored_task_types=self._local_axis_draft_lock_ignored_task_types()):
+            self.btn_copy_source_z_axis.setEnabled(local_axis_editable)
+            self.btn_pick_roll_ref_a.setEnabled(local_axis_editable)
+            self.btn_pick_roll_ref_b.setEnabled(local_axis_editable)
+            self.btn_pick_roll_ref_c.setEnabled(local_axis_editable)
+            self.btn_align_axis_to_reference_plane.setEnabled(local_axis_editable)
+            self.btn_clear_roll_refs.setEnabled(local_axis_editable)
+            self.btn_clear_local_axis_draft.setEnabled(local_axis_editable)
+            self.local_axis_trainable_check.setEnabled(local_axis_editable)
         self._update_local_axis_summary()
         self._sync_undo_redo_buttons()
         self._update_save_status()
@@ -10679,7 +10776,7 @@ class TifWorkbenchWidget(QWidget):
         return dict(result.payload.get("source_axis") or {})
 
     def copy_source_z_axis_to_local_axis_draft(self):
-        if not self._guard_backend_write_lock():
+        if not self._guard_local_axis_draft_interaction():
             return None
         if self.current_volume_scope != "part" or self.current_reslice_id or not self.current_specimen_id or not self.current_part_id or self.image_volume is None:
             QMessageBox.information(self, tt("Local Axis Reslice", self.lang), tt("Select a part volume before editing Local Axis Reslice.", self.lang))
@@ -11327,8 +11424,9 @@ class TifWorkbenchWidget(QWidget):
         target = str(target or "")
         legacy_map = {"left_eye": "roll_a", "right_eye": "roll_b"}
         target = legacy_map.get(target, target)
-        if target and self._backend_write_lock_active():
-            self._guard_backend_write_lock()
+        ignored_tasks = self._local_axis_draft_lock_ignored_task_types()
+        if target and self._backend_write_lock_active(ignored_task_types=ignored_tasks):
+            self._guard_backend_write_lock(ignored_task_types=ignored_tasks)
             return False
         if target not in {"", "roll_a", "roll_b", "roll_c"}:
             target = ""
@@ -11358,8 +11456,7 @@ class TifWorkbenchWidget(QWidget):
         return self.set_local_axis_pick_target(target)
 
     def pick_local_axis_roll_reference_at(self, x, y):
-        if not self._guard_backend_write_lock(show_message=False):
-            self._set_local_axis_status(self._backend_write_lock_message())
+        if not self._guard_local_axis_draft_interaction(show_message=False):
             return False
         target = str(getattr(self, "_local_axis_pick_target", "") or getattr(self, "_local_axis_roll_pick_target", "") or "")
         if target not in {"roll_a", "roll_b", "roll_c"}:
@@ -11401,7 +11498,7 @@ class TifWorkbenchWidget(QWidget):
         return True
 
     def clear_local_axis_roll_references(self):
-        if not self._guard_backend_write_lock():
+        if not self._guard_local_axis_draft_interaction():
             return
         draft = self._current_local_axis_draft()
         if not isinstance(draft, dict):
@@ -11421,7 +11518,7 @@ class TifWorkbenchWidget(QWidget):
         self._request_volume_interaction_render()
 
     def align_local_axis_to_reference_plane(self):
-        if not self._guard_backend_write_lock():
+        if not self._guard_local_axis_draft_interaction():
             return False
         draft = self._current_local_axis_draft()
         if not isinstance(draft, dict):
@@ -11467,7 +11564,7 @@ class TifWorkbenchWidget(QWidget):
         return True
 
     def clear_local_axis_draft(self):
-        if not self._guard_backend_write_lock():
+        if not self._guard_local_axis_draft_interaction():
             return
         self.local_axis_draft = None
         self._local_axis_pick_target = ""

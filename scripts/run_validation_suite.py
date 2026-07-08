@@ -62,6 +62,7 @@ SUITES: dict[str, list[str]] = {
     "tif_workbench": ["tests.test_tif_workbench"],
     "gui_smoke": ["tests.test_gui_smoke"],
     "ui_polish": ["tests.test_ui_polish_scope"],
+    "tif_layout": ["tests.test_tif_workbench_layout"],
     "pdf_safety": ["tests.test_pdf_profile_deletion_safety"],
     "validation_tooling": ["tests.test_validation_suite_script"],
     "validation_chunk_sample": ["tests.test_safe_io.SafeIoTests.test_atomic_write_json_failure_keeps_existing_file_and_removes_tmp"],

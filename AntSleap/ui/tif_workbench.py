@@ -94,6 +94,7 @@ try:
     from AntSleap.ui.style import get_theme_config, normalize_theme
     from AntSleap.ui.tif_tasks import TifQtTaskAdapter
     from AntSleap.ui.tif_workbench_canvas import LazyRegionMaskVolume, MirroredStatusLabel, TifSliceCanvas, TifSpecimenTree, TifVolumeCanvas, WheelSafeComboBox, WheelSafeSlider, WheelSafeSpinBox, create_tif_volume_canvas
+    from AntSleap.ui.tif_workbench_control_panels import build_right_control_panel
     from AntSleap.ui.tif_workbench_dialogs import MaterialEditorDialog, TifPartNameDialog, TifTrainingResultDialog, summarize_tif_training_result
     from AntSleap.ui.tif_workbench_helpers import (
         _tif_bbox_shape,
@@ -112,6 +113,8 @@ try:
         _tif_shape_from_metadata,
         _tif_write_mask_metadata,
     )
+    from AntSleap.ui.tif_workbench_layout import make_panel, make_right_sidebar_responsive, make_section, make_task_page
+    from AntSleap.ui.tif_workbench_pages import build_task_pages
     from AntSleap.ui.tif_workbench_translations import TIF_TRANSLATIONS, tt
     from AntSleap.ui.tif_workbench_workers import (
         TifBackendActionWorker,
@@ -189,6 +192,7 @@ except ModuleNotFoundError as exc:
     from ui.style import get_theme_config, normalize_theme
     from ui.tif_tasks import TifQtTaskAdapter
     from ui.tif_workbench_canvas import LazyRegionMaskVolume, MirroredStatusLabel, TifSliceCanvas, TifSpecimenTree, TifVolumeCanvas, WheelSafeComboBox, WheelSafeSlider, WheelSafeSpinBox, create_tif_volume_canvas
+    from ui.tif_workbench_control_panels import build_right_control_panel
     from ui.tif_workbench_dialogs import MaterialEditorDialog, TifPartNameDialog, TifTrainingResultDialog, summarize_tif_training_result
     from ui.tif_workbench_helpers import (
         _tif_bbox_shape,
@@ -207,6 +211,8 @@ except ModuleNotFoundError as exc:
         _tif_shape_from_metadata,
         _tif_write_mask_metadata,
     )
+    from ui.tif_workbench_layout import make_panel, make_right_sidebar_responsive, make_section, make_task_page
+    from ui.tif_workbench_pages import build_task_pages
     from ui.tif_workbench_translations import TIF_TRANSLATIONS, tt
     from ui.tif_workbench_workers import (
         TifBackendActionWorker,
@@ -8342,114 +8348,29 @@ class TifWorkbenchWidget(QWidget):
         self._start_backend_action_with_selection(action, selection)
 
     def _make_panel(self, title, object_name):
-        panel = QFrame()
-        panel.setObjectName(object_name)
-        panel.setFrameShape(QFrame.NoFrame)
-        panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(12, 10, 12, 12)
-        layout.setSpacing(8)
-        title_label = QLabel(title)
-        title_label.setObjectName("tifPanelTitle")
-        layout.addWidget(title_label)
         if not hasattr(self, "_panel_title_labels"):
             self._panel_title_labels = {}
-        self._panel_title_labels[object_name] = (title, title_label)
-        return panel, layout
+        return make_panel(title, object_name, self._panel_title_labels)
 
     def _make_section(self, title, object_name):
-        section = QFrame()
-        section.setObjectName(object_name)
-        section.setFrameShape(QFrame.NoFrame)
-        section.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
-        layout = QVBoxLayout(section)
-        layout.setContentsMargins(12, 10, 12, 12)
-        layout.setSpacing(8)
-        title_label = QLabel(title)
-        title_label.setObjectName("tifSectionTitle")
-        layout.addWidget(title_label)
         if not hasattr(self, "_section_title_labels"):
             self._section_title_labels = {}
-        self._section_title_labels[object_name] = (title, title_label)
-        return section, layout
-
-    def _relax_right_sidebar_widget_width(self, widget):
-        if widget is None:
-            return
-        current_policy = widget.sizePolicy()
-        vertical_policy = current_policy.verticalPolicy()
-        if isinstance(widget, QLabel):
-            if widget.wordWrap():
-                widget.setSizePolicy(QSizePolicy.Ignored, vertical_policy)
-            return
-        if isinstance(widget, (QPushButton, QCheckBox, QRadioButton)):
-            widget.setMinimumWidth(0)
-            widget.setSizePolicy(QSizePolicy.Ignored, vertical_policy)
-            text = ""
-            try:
-                text = str(widget.text() or "")
-            except Exception:
-                text = ""
-            if text and not widget.toolTip():
-                widget.setToolTip(text)
-            return
-        if isinstance(widget, QComboBox):
-            widget.setMinimumWidth(0)
-            try:
-                widget.setMinimumContentsLength(0)
-                widget.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
-            except Exception:
-                pass
-            widget.setSizePolicy(QSizePolicy.Ignored, vertical_policy)
-            return
-        if isinstance(widget, (QLineEdit, QProgressBar)):
-            widget.setMinimumWidth(0)
-            widget.setSizePolicy(QSizePolicy.Ignored, vertical_policy)
-            return
-        if isinstance(widget, (QTableWidget, QTextEdit)):
-            widget.setMinimumWidth(0)
-            widget.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-            widget.setSizePolicy(QSizePolicy.Ignored, vertical_policy)
+        return make_section(title, object_name, self._section_title_labels)
 
     def _make_right_sidebar_responsive(self, right_panel):
-        right_panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
-        right_panel.setMinimumWidth(360)
-        right_panel.setMaximumWidth(520)
-        for page in (
+        make_right_sidebar_responsive(
+            right_panel,
+            (
             self.part_task_page,
             self.display_task_page,
             self.annotation_task_page,
             self.training_task_page,
             self.result_compare_page,
-        ):
-            page.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
-            page.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-            body = page.widget()
-            if body is not None:
-                body.setMinimumWidth(0)
-                body.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        for section in right_panel.findChildren(QFrame):
-            if str(section.objectName() or "").startswith("tif"):
-                section.setMinimumWidth(0)
-                section.setSizePolicy(QSizePolicy.Ignored, section.sizePolicy().verticalPolicy())
-        for widget in right_panel.findChildren(QWidget):
-            self._relax_right_sidebar_widget_width(widget)
+            ),
+        )
 
     def _make_task_page(self, object_name):
-        scroll = QScrollArea()
-        scroll.setObjectName("tifInspectorScroll")
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        scroll.setFrameShape(QFrame.NoFrame)
-        body = QWidget()
-        body.setObjectName(object_name)
-        body.setMinimumWidth(0)
-        body.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        layout = QVBoxLayout(body)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(10)
-        scroll.setWidget(body)
-        return scroll, layout
+        return make_task_page(object_name)
 
     def _build_layout(self):
         self._field_labels = {}
@@ -8506,32 +8427,33 @@ class TifWorkbenchWidget(QWidget):
         center_layout.addWidget(slice_bar)
         splitter.addWidget(center)
 
-        right, right_layout = self._make_panel("Volume controls", "tifControlPanel")
-        right.setMinimumWidth(360)
-        right.setMaximumWidth(520)
-
-        self.operation_status_section, operation_status_layout = self._make_section("Recent operation", "tifOperationStatusSection")
+        if not hasattr(self, "_panel_title_labels"):
+            self._panel_title_labels = {}
+        if not hasattr(self, "_section_title_labels"):
+            self._section_title_labels = {}
+        right_panel_parts = build_right_control_panel(self._panel_title_labels, self._section_title_labels)
+        right = right_panel_parts["panel"]
+        right_layout = right_panel_parts["layout"]
+        self.operation_status_section = right_panel_parts["operation_status_section"]
+        operation_status_layout = right_panel_parts["operation_status_layout"]
         operation_status_layout.addWidget(self.operation_status_label)
         operation_status_layout.addWidget(self.btn_show_workbench_log)
         right_layout.addWidget(self.operation_status_section)
 
-        self.task_tabs = QTabWidget()
-        self.task_tabs.setObjectName("tifTaskTabs")
+        task_page_parts = build_task_pages(self.lang, tt)
+        self.task_tabs = task_page_parts["task_tabs"]
+        self.training_mode_tabs = task_page_parts["training_mode_tabs"]
+        self.part_task_page = task_page_parts["part_task_page"]
+        self.part_task_layout = task_page_parts["part_task_layout"]
+        self.display_task_page = task_page_parts["display_task_page"]
+        self.display_task_layout = task_page_parts["display_task_layout"]
+        self.annotation_task_page = task_page_parts["annotation_task_page"]
+        self.annotation_task_layout = task_page_parts["annotation_task_layout"]
+        self.training_task_page = task_page_parts["training_task_page"]
+        self.training_task_layout = task_page_parts["training_task_layout"]
+        self.result_compare_page = task_page_parts["result_compare_page"]
+        self.result_compare_layout = task_page_parts["result_compare_layout"]
         right_layout.addWidget(self.task_tabs, 1)
-
-        self.part_task_page, self.part_task_layout = self._make_task_page("tifPartTaskPage")
-        self.display_task_page, self.display_task_layout = self._make_task_page("tifDisplayTaskPage")
-        self.annotation_task_page, self.annotation_task_layout = self._make_task_page("tifAnnotationTaskPage")
-        self.training_task_page, self.training_task_layout = self._make_task_page("tifTrainingTaskPage")
-        self.training_mode_tabs = QTabWidget()
-        self.training_mode_tabs.setObjectName("tifTrainingModeTabs")
-        self.training_mode_tabs.addTab(self.annotation_task_page, tt("Label review", self.lang))
-        self.training_mode_tabs.addTab(self.training_task_page, tt("Train / predict", self.lang))
-        self.result_compare_page, self.result_compare_layout = self._make_task_page("tifResultCompareTaskPage")
-        self.training_mode_tabs.addTab(self.result_compare_page, tt("Result comparison", self.lang))
-        self.task_tabs.addTab(self.display_task_page, tt("Review", self.lang))
-        self.task_tabs.addTab(self.part_task_page, tt("Part Extraction", self.lang))
-        self.task_tabs.addTab(self.training_mode_tabs, tt("Annotation / training", self.lang))
         self.task_tabs.currentChanged.connect(self._on_task_tab_changed)
         self.training_mode_tabs.currentChanged.connect(self._on_training_mode_tab_changed)
 

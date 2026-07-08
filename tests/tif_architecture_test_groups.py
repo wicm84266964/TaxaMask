@@ -44,6 +44,8 @@ TIF_GUI_KEY_PATH_TESTS = (
     "tests.test_tif_workbench",
     "tests.test_tif_backend_panel_controller",
     "tests.test_tif_local_axis_controller",
+    "tests.test_tif_agent_context",
+    "tests.test_tif_workbench_style",
 )
 
 TIF_RESEARCH_SMOKE_TESTS = (

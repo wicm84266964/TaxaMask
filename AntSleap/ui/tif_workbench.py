@@ -91,7 +91,8 @@ try:
     from AntSleap.services.tif_truth_promotion_service import TifTruthPromotionService
     from AntSleap.services.tif_volume_preview_service import TifVolumePreviewService
     from AntSleap.services.tif_workbench_states import TifBackendState, TifEditState, TifLocalAxisState, TifPreviewState, TifRoiState
-    from AntSleap.ui.style import get_theme_config, normalize_theme
+    from AntSleap.ui.style import normalize_theme
+    from AntSleap.ui.tif_agent_context import TifAgentContextBuilder
     from AntSleap.ui.tif_tasks import TifQtTaskAdapter
     from AntSleap.ui.tif_workbench_canvas import LazyRegionMaskVolume, MirroredStatusLabel, TifSliceCanvas, TifSpecimenTree, TifVolumeCanvas, WheelSafeComboBox, WheelSafeSlider, WheelSafeSpinBox, create_tif_volume_canvas
     from AntSleap.ui.tif_backend_panel_controller import TifBackendPanelController
@@ -116,6 +117,7 @@ try:
     )
     from AntSleap.ui.tif_workbench_layout import make_panel, make_right_sidebar_responsive, make_section, make_task_page
     from AntSleap.ui.tif_workbench_pages import build_task_pages
+    from AntSleap.ui.tif_workbench_style import build_tif_workbench_stylesheet, tif_canvas_background
     from AntSleap.ui.tif_local_axis_controller import TifLocalAxisController
     from AntSleap.ui.tif_preview_controller import TifPreviewController
     from AntSleap.ui.tif_workbench_translations import TIF_TRANSLATIONS, tt
@@ -192,7 +194,8 @@ except ModuleNotFoundError as exc:
     from services.tif_truth_promotion_service import TifTruthPromotionService
     from services.tif_volume_preview_service import TifVolumePreviewService
     from services.tif_workbench_states import TifBackendState, TifEditState, TifLocalAxisState, TifPreviewState, TifRoiState
-    from ui.style import get_theme_config, normalize_theme
+    from ui.style import normalize_theme
+    from ui.tif_agent_context import TifAgentContextBuilder
     from ui.tif_tasks import TifQtTaskAdapter
     from ui.tif_workbench_canvas import LazyRegionMaskVolume, MirroredStatusLabel, TifSliceCanvas, TifSpecimenTree, TifVolumeCanvas, WheelSafeComboBox, WheelSafeSlider, WheelSafeSpinBox, create_tif_volume_canvas
     from ui.tif_backend_panel_controller import TifBackendPanelController
@@ -217,6 +220,7 @@ except ModuleNotFoundError as exc:
     )
     from ui.tif_workbench_layout import make_panel, make_right_sidebar_responsive, make_section, make_task_page
     from ui.tif_workbench_pages import build_task_pages
+    from ui.tif_workbench_style import build_tif_workbench_stylesheet, tif_canvas_background
     from ui.tif_local_axis_controller import TifLocalAxisController
     from ui.tif_preview_controller import TifPreviewController
     from ui.tif_workbench_translations import TIF_TRANSLATIONS, tt
@@ -269,60 +273,13 @@ TIF_MASK_PREVIEW_TRUSTED_STATUSES = {
 
 
 def _tif_canvas_background(theme="dark"):
-    theme = normalize_theme(theme)
-    return "#111A2B" if theme == "light" else "#07101D"
+    return tif_canvas_background(theme)
 
 
 def _tif_overlay_background(alpha=190, theme="dark"):
     color = QColor(_tif_canvas_background(theme))
     color.setAlpha(int(alpha))
     return color
-
-
-def _tif_workbench_theme(theme="dark"):
-    c = get_theme_config(theme)
-    is_light = bool(c["is_light"])
-    canvas_bg = _tif_canvas_background(theme)
-    return {
-        "root": c["bg_main"],
-        "panel": c["bg_surface"],
-        "panel_alt": c["bg_surface_alt"],
-        "section": c["bg_surface_alt"] if is_light else c["bg_panel"],
-        "canvas_shell": "#DCE6F0" if is_light else "#0B1424",
-        "canvas": canvas_bg,
-        "input": c["bg_input"],
-        "table_alt": "#EDF3F8" if is_light else "#122039",
-        "button": "#F8FBFE" if is_light else "#17263C",
-        "button_hover": "#EEF4FA" if is_light else "#213854",
-        "button_pressed": "#E4EDF7" if is_light else "#101B2E",
-        "button_disabled": c["bg_panel"],
-        "primary": c["accent"],
-        "primary_hover": c["accent_hover"],
-        "primary_pressed": "#0369A1" if is_light else "#405F88",
-        "secondary_checked": "#DCEFFA" if is_light else "#243D63",
-        "danger": "#FDE8E8" if is_light else "#3B2528",
-        "danger_hover": "#FBD5D5" if is_light else "#512D33",
-        "danger_pressed": "#F8B4B4" if is_light else "#2D1C20",
-        "danger_border": "#F87171" if is_light else "#8D4B55",
-        "danger_text": "#991B1B" if is_light else "#FFE9EC",
-        "text": c["text_main"],
-        "text_soft": c["text_soft"],
-        "text_dim": c["text_dim"],
-        "canvas_text": "#C8D7EA",
-        "border": c["border"],
-        "border_strong": c["border_strong"],
-        "glow_border": c["glow_border"],
-        "scrollbar_track": "#EEF4FA" if is_light else "#0B1424",
-        "scrollbar_thumb": c["border_strong"],
-        "scrollbar_thumb_hover": "#9FB4C8" if is_light else c["text_dim"],
-        "selection": c["selection"],
-        "selection_text": c["text_main"],
-        "accent": c["accent"],
-        "success": c["success"],
-        "warning": c["warning"],
-        "error": c["error"],
-    }
-
 
 def _now_log_time():
     from datetime import datetime
@@ -354,6 +311,7 @@ class TifWorkbenchWidget(QWidget):
         self.local_axis_service = TifLocalAxisService()
         self.task_manager = TifTaskManager()
         self.task_adapter = TifQtTaskAdapter(self.task_manager)
+        self.agent_context_builder = TifAgentContextBuilder(self)
         self.backend_panel_controller = TifBackendPanelController(self)
         self.local_axis_controller = TifLocalAxisController(self)
         self.preview_controller = TifPreviewController(self)
@@ -1965,170 +1923,7 @@ class TifWorkbenchWidget(QWidget):
         self.btn_reset_volume_view.setToolTip(tt("Restores the external default view and clears inside depth and front cut.", self.lang))
 
     def get_agent_context(self):
-        selected_material = self._selected_material()
-        material_id = ""
-        if isinstance(selected_material, dict):
-            material_id = selected_material.get("id", "")
-        recent_log = ""
-        if hasattr(self, "log_console"):
-            recent_log = "\n".join(self.log_console.toPlainText().splitlines()[-6:])
-
-        source_shape, spacing_zyx = self._volume_source_geometry()
-        active_label_role = self.label_role_combo.currentData() or ""
-        active_label_volume = self.label_volume
-        if active_label_role == "working_edit" and self.edit_volume is not None:
-            active_label_volume = self.edit_volume
-        label_shape = tuple(int(value) for value in getattr(active_label_volume, "shape", ()) or ())
-        axis = self._current_slice_axis()
-        slice_position = ""
-        if self.image_volume is not None:
-            slice_position = f"{int(self.slice_slider.value()) + 1}/{self._slice_count_for_axis(axis)}"
-
-        readiness_text = ""
-        readiness_reasons = ""
-        if self.current_specimen_id and self.current_volume_scope == "part" and self.current_part_id:
-            try:
-                readiness = self.project.evaluate_part_train_ready(
-                    self.current_specimen_id,
-                    self.current_part_id,
-                    self.current_reslice_id,
-                    validate_label_ids=False,
-                )
-            except Exception:
-                readiness = {}
-            if readiness:
-                readiness_text = "yes" if readiness.get("train_ready") else "no"
-                readiness_reasons = ",".join(str(item) for item in readiness.get("reasons", []) if str(item))
-        elif self.current_specimen_id:
-            try:
-                readiness = self.project.evaluate_train_ready(self.current_specimen_id)
-            except Exception:
-                readiness = {}
-            if readiness:
-                readiness_text = "yes" if readiness.get("train_ready") else "no"
-                readiness_reasons = ",".join(str(item) for item in readiness.get("reasons", []) if str(item))
-
-        def triplet_text(values):
-            values = tuple(values or ())
-            if len(values) != 3:
-                return ""
-            return f"{values[0]}/{values[1]}/{values[2]}"
-
-        clarity = "on" if bool(getattr(self, "_volume_clarity_mode", False)) else "off"
-        volume_status = ""
-        if self.image_volume is not None:
-            volume_status = self.volume_canvas_overlay_text()
-        volume_perf = self.volume_performance_report() if self.image_volume is not None else {}
-        backend_config = self._backend_config_from_ui()
-        train_ready_part_refs = []
-        train_ready_top_level_count = 0
-        if self.project is not None:
-            try:
-                train_ready_part_refs = self._train_ready_part_refs()
-            except Exception:
-                train_ready_part_refs = []
-            try:
-                train_ready_top_level_count = len(self.project.list_train_ready_specimens())
-            except Exception:
-                train_ready_top_level_count = 0
-        if train_ready_part_refs:
-            training_scope = "part_reslice"
-        elif train_ready_top_level_count:
-            training_scope = "top_level_volume"
-        else:
-            training_scope = ""
-        selected_model_record = self._selected_tif_model_record() if hasattr(self, "model_library_combo") else None
-        selected_model_manifest = ""
-        selected_model_id = ""
-        if selected_model_record:
-            selected_model_id = self._tif_model_record_id(selected_model_record)
-            selected_model_manifest = self.project.to_absolute(selected_model_record.get("model_manifest", ""))
-        elif hasattr(self, "backend_manifest_edit"):
-            selected_model_manifest = str(self.backend_manifest_edit.text() or "").strip()
-        model_count = 0
-        try:
-            model_count = len(self._tif_model_records())
-        except Exception:
-            model_count = 0
-        command_presence = {
-            "prepare_dataset": bool(str(backend_config.get("prepare_dataset_command") or "").strip()),
-            "train": bool(str(backend_config.get("train_command") or "").strip()),
-            "predict": bool(str(backend_config.get("predict_command") or "").strip()),
-        }
-
-        return {
-            "source_workbench": "tif_volume",
-            "project_type": "tif_volume",
-            "project_path": getattr(self.project, "current_project_path", "") or "",
-            "active_specimen_id": self.current_specimen_id,
-            "active_volume_scope": self.current_volume_scope,
-            "active_part_id": self.current_part_id,
-            "active_part_parent_bbox_zyx": str((self.current_part or {}).get("parent_bbox_zyx", "")),
-            "active_label_role": active_label_role,
-            "selected_material_id": material_id,
-            "display_mode": self.display_mode,
-            "active_slice_axis": axis,
-            "active_slice_position": slice_position,
-            "active_volume_shape_zyx": triplet_text(source_shape),
-            "active_volume_spacing_zyx": triplet_text(spacing_zyx),
-            "active_label_shape_zyx": triplet_text(label_shape),
-            "train_ready_status": readiness_text,
-            "train_ready_reasons": readiness_reasons,
-            "active_label_schema_id": self._active_part_label_schema_id(),
-            "train_ready_part_sample_count": str(len(train_ready_part_refs)),
-            "train_ready_top_level_sample_count": str(train_ready_top_level_count),
-            "training_selection_scope": training_scope,
-            "training_sample_rule": "prepare/train uses all project train-ready part/reslice manual_truth samples; if none exist, it falls back to train-ready top-level specimen volumes. A label schema alone is not enough.",
-            "registered_tif_model_count": str(model_count),
-            "selected_tif_model_id": selected_model_id,
-            "selected_model_manifest": selected_model_manifest,
-            "tif_backend_id": str(backend_config.get("backend_id") or ""),
-            "tif_backend_python": str(backend_config.get("python_executable") or ""),
-            "tif_backend_command_presence": str(command_presence),
-            "backend_run_active": "yes" if self._backend_action_running() else "no",
-            "backend_action": str(self._tif_backend_action or ""),
-            "backend_run_dir": str(self._tif_backend_run_dir or ""),
-            "backend_result_json": str(self._tif_backend_result_json or ""),
-            "tif_task_summary": str(self._task_summary_for_context()),
-            "tif_state_summary": str(self._current_state_summary()),
-            "volume_renderer": self._volume_canvas_renderer,
-            "volume_renderer_label": self._volume_renderer_label(),
-            "volume_render_mode": self._volume_render_mode,
-            "volume_projection_mode": self._volume_projection_mode(),
-            "volume_mask_mode": self._volume_mask_mode(),
-            "volume_density_cutoff": f"{int(self.volume_cutoff_slider.value())}%",
-            "volume_density_opacity": f"{int(self.volume_transfer_opacity_slider.value())}%",
-            "volume_texture_target_dim": str(self._active_volume_target_dim()),
-            "volume_ray_samples": str(self._active_volume_sample_count()),
-            "volume_clarity_mode": clarity,
-            "volume_detail_enhancement": f"{int(self.volume_enhancement_slider.value())}%",
-            "volume_tone_curve": f"{int(self.volume_tone_slider.value())}%",
-            "volume_shader_quality": self._volume_shader_quality_mode(),
-            "volume_surface_refine": "on" if self.volume_surface_refine_check.isChecked() else "off",
-            "volume_clip_plane": "on" if self.volume_clip_plane_check.isChecked() else "off",
-            "volume_clip_plane_depth": f"{int(self.volume_clip_plane_depth_slider.value())}%",
-            "volume_roi_high_detail": "on" if self.volume_roi_detail_check.isChecked() else "off",
-            "volume_roi_inspect": "on" if self._volume_roi_inspect_enabled() else "off",
-            "volume_roi_scale": f"{self._active_volume_roi_scale():.1f}x",
-            "volume_roi_budget": f"{self._roi_texture_budget_bytes() / (1024.0 ** 3):.1f} GB",
-            "volume_inside_depth": f"{int(self.volume_inside_slider.value())}%",
-            "volume_front_cut": f"{int(self.volume_clip_slider.value())}%",
-            "volume_zoom": f"{int(round(float(self._volume_zoom) * 100))}%",
-            "volume_pan": f"x={int(round(float(self._volume_pan_x) * 100))}%, y={int(round(float(self._volume_pan_y) * 100))}%",
-            "volume_yaw_pitch": f"yaw={float(self._volume_yaw):.1f}, pitch={float(self._volume_pitch):.1f}",
-            "volume_gpu_warning": self._volume_renderer_warning,
-            "volume_status_overlay": volume_status,
-            "volume_performance_diagnosis": str(volume_perf.get("diagnosis", "")),
-            "volume_uploaded_gb": f"{float(volume_perf.get('uploaded_gb', 0.0)):.2f}",
-            "volume_upload_ms": f"{float(volume_perf.get('upload_ms', 0.0)):.0f}",
-            "volume_draw_ms": f"{float(volume_perf.get('draw_ms', 0.0)):.1f}",
-            "volume_uploaded_shape_zyx": triplet_text(volume_perf.get("preview_shape_zyx", ())),
-            "volume_texture_sampling": str((getattr(self, "_volume_last_stats", {}) or {}).get("texture_filter", "")),
-            "volume_display_scaling": str((getattr(self, "_volume_last_stats", {}) or {}).get("display_scaling", "")),
-            "tif_next_requirement": "annotation_training_loop: bind a label schema, select label IDs before brush editing, save reviewed editable_ai_result/manual labels, accept manual_truth, mark samples train-ready, then prepare/train/predict through the TIF backend.",
-            "tif_requirement_doc": "docs/designs/2026-07-04_TIF训练回环与切片预览模式隔离设计稿.md; docs/designs/2026-07-04_TIF脑分区训练回环执行清单.md",
-            "recent_log_excerpt": recent_log,
-        }
+        return self.agent_context_builder.build()
 
     def _backend_config_from_ui(self):
         config = sanitize_tif_backend_config(
@@ -8511,350 +8306,7 @@ class TifWorkbenchWidget(QWidget):
         splitter.setSizes([230, 900, 420])
 
     def _apply_soft_style(self):
-        t = _tif_workbench_theme(self.current_theme)
-        stylesheet = """
-            QWidget#tifWorkbenchRoot {
-                background: {t['root']};
-            }
-            QFrame#tifSpecimenPanel,
-            QFrame#tifVolumePanel,
-            QFrame#tifControlPanel,
-            QFrame#tifWorkbenchTopBar {
-                background: {t['panel']};
-                border: 1px solid {t['border']};
-                border-radius: 12px;
-            }
-            QLabel#tifTopContextLabel {
-                color: {t['text']};
-                font-weight: 700;
-                border: none;
-            }
-            QFrame#tifImportSection,
-            QFrame#tifPartExtractionSection,
-            QFrame#tifSliceDisplaySection,
-            QFrame#tifVolumeRenderSection,
-            QFrame#tifLocalAxisVolumeSection,
-            QFrame#tifOperationStatusSection,
-            QFrame#tifAnnotationSection,
-            QFrame#tifMaterialSection,
-            QFrame#tifLabelSchemaSection,
-            QFrame#tifTrainingSection,
-            QFrame#tifPartUserTagsSection,
-            QFrame#tifTrainingResultSection,
-            QFrame#tifBackendSection,
-            QFrame#tifStatusSection,
-            QFrame#tifLogSection {
-                background: {t['section']};
-                border: 1px solid {t['border']};
-                border-radius: 12px;
-            }
-            QWidget#tifInspectorBody {
-                background: transparent;
-            }
-            QScrollArea#tifInspectorScroll {
-                background: transparent;
-                border: none;
-            }
-            QScrollArea#tifInspectorScroll QScrollBar:vertical,
-            QTextEdit#tifLogConsole QScrollBar:vertical {
-                background: {t['scrollbar_track']};
-                border: none;
-                border-radius: 5px;
-                margin: 0px;
-                width: 10px;
-            }
-            QScrollArea#tifInspectorScroll QScrollBar::handle:vertical,
-            QTextEdit#tifLogConsole QScrollBar::handle:vertical {
-                background: {t['scrollbar_thumb']};
-                border: 2px solid {t['scrollbar_track']};
-                border-radius: 5px;
-                min-height: 22px;
-            }
-            QScrollArea#tifInspectorScroll QScrollBar::handle:vertical:hover,
-            QTextEdit#tifLogConsole QScrollBar::handle:vertical:hover {
-                background: {t['scrollbar_thumb_hover']};
-            }
-            QScrollArea#tifInspectorScroll QScrollBar:horizontal,
-            QTextEdit#tifLogConsole QScrollBar:horizontal {
-                background: {t['scrollbar_track']};
-                border: none;
-                border-radius: 5px;
-                height: 10px;
-                margin: 0px;
-            }
-            QScrollArea#tifInspectorScroll QScrollBar::handle:horizontal,
-            QTextEdit#tifLogConsole QScrollBar::handle:horizontal {
-                background: {t['scrollbar_thumb']};
-                border: 2px solid {t['scrollbar_track']};
-                border-radius: 5px;
-                min-width: 22px;
-            }
-            QScrollArea#tifInspectorScroll QScrollBar::handle:horizontal:hover,
-            QTextEdit#tifLogConsole QScrollBar::handle:horizontal:hover {
-                background: {t['scrollbar_thumb_hover']};
-            }
-            QScrollArea#tifInspectorScroll QScrollBar::add-line,
-            QScrollArea#tifInspectorScroll QScrollBar::sub-line,
-            QScrollArea#tifInspectorScroll QScrollBar::add-page,
-            QScrollArea#tifInspectorScroll QScrollBar::sub-page,
-            QTextEdit#tifLogConsole QScrollBar::add-line,
-            QTextEdit#tifLogConsole QScrollBar::sub-line,
-            QTextEdit#tifLogConsole QScrollBar::add-page,
-            QTextEdit#tifLogConsole QScrollBar::sub-page {
-                background: transparent;
-                border: none;
-            }
-            QLabel#tifPanelTitle {
-                color: {t['text']};
-                font-weight: 700;
-                padding-bottom: 4px;
-                border: none;
-            }
-            QLabel#tifSectionTitle {
-                color: {t['text_soft']};
-                font-weight: 700;
-                margin-top: 8px;
-                border: none;
-            }
-            QFrame#tifCanvasShell {
-                background: {t['canvas_shell']};
-                border: 1px solid {t['border_strong']};
-                border-radius: 12px;
-            }
-            QLabel#tifSliceCanvas {
-                background: {t['canvas']};
-                color: {t['canvas_text']};
-                border: none;
-                border-radius: 10px;
-            }
-            #tifVolumeCanvas {
-                background: {t['canvas']};
-                color: {t['canvas_text']};
-                border: none;
-                border-radius: 10px;
-            }
-            QLabel#tifVolumeRenderStatus {
-                background: {t['input']};
-                color: {t['text_soft']};
-                border: 1px solid {t['border']};
-                border-radius: 8px;
-                padding: 5px 8px;
-                font-size: 11px;
-            }
-            QLabel#tifLocalAxisStatusText {
-                background: {t['input']};
-                color: {t['text_soft']};
-                border: 1px solid {t['border']};
-                border-radius: 8px;
-                padding: 5px 8px;
-                font-size: 11px;
-            }
-            QLabel#tifOperationStatusText {
-                background: {t['input']};
-                color: {t['text']};
-                border: 1px solid {t['border_strong']};
-                border-radius: 8px;
-                padding: 7px 9px;
-            }
-            QFrame#tifSliceBar {
-                background: {t['panel_alt']};
-                border: 1px solid {t['border']};
-                border-radius: 12px;
-            }
-            QTreeWidget#tifSpecimenList,
-            QTableWidget#tifMaterialTable,
-            QTableWidget#tifPredictTargetsTable,
-            QTableWidget#tifTrainingResultMetricsTable,
-            QTableWidget#tifTrainingResultArtifactTable {
-                background: {t['input']};
-                alternate-background-color: {t['table_alt']};
-                border: 1px solid {t['border']};
-                border-radius: 10px;
-                padding: 2px;
-                selection-background-color: {t['selection']};
-                selection-color: {t['selection_text']};
-            }
-            QTableWidget#tifMaterialTable::item,
-            QTableWidget#tifPredictTargetsTable::item,
-            QTableWidget#tifTrainingResultMetricsTable::item,
-            QTableWidget#tifTrainingResultArtifactTable::item,
-            QTreeWidget#tifSpecimenList::item {
-                min-height: 24px;
-                padding: 4px;
-                border: none;
-            }
-            QTableWidget#tifMaterialTable QHeaderView::section,
-            QTableWidget#tifPredictTargetsTable QHeaderView::section,
-            QTableWidget#tifTrainingResultMetricsTable QHeaderView::section,
-            QTableWidget#tifTrainingResultArtifactTable QHeaderView::section {
-                background: {t['panel_alt']};
-                color: {t['text_soft']};
-                border: none;
-                border-right: 1px solid {t['border']};
-                padding: 5px 6px;
-                font-weight: 700;
-            }
-            QLineEdit {
-                background: {t['input']};
-                color: {t['text']};
-                border: 1px solid {t['border']};
-                border-radius: 8px;
-                padding: 4px 6px;
-                selection-background-color: {t['selection']};
-            }
-            QPushButton {
-                background: {t['button']};
-                color: {t['text']};
-                border: 1px solid {t['border_strong']};
-                border-radius: 10px;
-                padding: 8px 12px;
-                font-weight: 700;
-                min-height: 18px;
-            }
-            QPushButton:hover {
-                background: {t['button_hover']};
-                border-color: {t['glow_border']};
-            }
-            QPushButton:pressed {
-                background: {t['button_pressed']};
-                border-color: {t['glow_border']};
-                padding-top: 9px;
-                padding-bottom: 7px;
-            }
-            QPushButton:disabled {
-                background: {t['button_disabled']};
-                color: {t['text_dim']};
-                border-color: {t['border']};
-            }
-            QPushButton[tifRole="primary"] {
-                background: {t['primary']};
-                border: 1px solid {t['glow_border']};
-                color: #FFFFFF;
-            }
-            QPushButton[tifRole="primary"]:hover {
-                background: {t['primary_hover']};
-                border-color: {t['glow_border']};
-            }
-            QPushButton[tifRole="primary"]:pressed {
-                background: {t['primary_pressed']};
-                border-color: {t['glow_border']};
-            }
-            QPushButton[tifRole="secondary"] {
-                background: {t['button']};
-                border: 1px solid {t['border_strong']};
-                color: {t['text_soft']};
-            }
-            QPushButton[tifRole="secondary"]:hover {
-                background: {t['button_hover']};
-                border-color: {t['glow_border']};
-            }
-            QPushButton[tifRole="secondary"]:checked {
-                background: {t['secondary_checked']};
-                border: 2px solid {t['glow_border']};
-                color: {t['text']};
-            }
-            QPushButton[tifRole="danger"] {
-                background: {t['danger']};
-                border: 1px solid {t['danger_border']};
-                color: {t['danger_text']};
-            }
-            QPushButton[tifRole="danger"]:hover {
-                background: {t['danger_hover']};
-                border-color: {t['danger_border']};
-            }
-            QPushButton[tifRole="danger"]:pressed {
-                background: {t['danger_pressed']};
-                border-color: {t['danger_border']};
-            }
-            QTextEdit#tifLogConsole {
-                background: {t['input']};
-                color: {t['text_soft']};
-                border: 1px solid {t['border']};
-                border-radius: 10px;
-                padding: 6px;
-            }
-            QScrollArea#tifTrainingResultPreviewScroll {
-                background: {t['input']};
-                border: 1px solid {t['border']};
-                border-radius: 10px;
-            }
-            QLabel#tifTrainingResultSummaryText {
-                background: {t['input']};
-                color: {t['text_soft']};
-                border: 1px solid {t['border']};
-                border-radius: 8px;
-                padding: 6px 8px;
-            }
-            QLabel#tifPredictTargetsSummaryText {
-                background: {t['input']};
-                color: {t['text_soft']};
-                border: 1px solid {t['border']};
-                border-radius: 8px;
-                padding: 6px 8px;
-            }
-            QLabel#tifLayerHelpText {
-                color: {t['text_soft']};
-                background: {t['input']};
-                border: 1px solid {t['border']};
-                border-radius: 8px;
-                padding: 6px 8px;
-            }
-            QLabel#tifCurrentMaterialText {
-                color: {t['text']};
-                border: none;
-                font-weight: 700;
-            }
-            QLabel#tifAutoSaveHintText {
-                color: {t['text_dim']};
-                border: none;
-                font-size: 11px;
-            }
-            QLabel#tifSaveStatusText {
-                background: {t['input']};
-                color: {t['success']};
-                border: 1px solid {t['success']};
-                border-radius: 8px;
-                padding: 5px 8px;
-                font-weight: 700;
-            }
-            QLabel#tifSaveStatusText[tifSaveState="dirty"] {
-                color: {t['warning']};
-                border-color: {t['warning']};
-            }
-            QLabel#tifSaveStatusText[tifSaveState="saving"] {
-                color: {t['accent']};
-                border-color: {t['glow_border']};
-            }
-            QLabel#tifSaveStatusText[tifSaveState="failed"] {
-                color: {t['error']};
-                border-color: {t['error']};
-            }
-            QLabel#tifVolumeRenderStatus {
-                background: {t['input']};
-                color: {t['text_soft']};
-                border: 1px solid {t['border']};
-                border-radius: 6px;
-                padding: 4px 8px;
-            }
-            QLabel#tifStatusText,
-            QLabel#tifMetadataText,
-            QLabel#tifLocalAxisSummaryText,
-            QLabel#tifTrainingStatusText {
-                color: {t['text_soft']};
-                border: none;
-            }
-            QPushButton#tifExportTrainingButton,
-            QPushButton#tifPrepareDatasetButton,
-            QPushButton#tifTrainBackendButton,
-            QPushButton#tifImportPredictionButton,
-            QPushButton#tifImportStackButton,
-            QPushButton#tifImportAmiraButton {
-                font-weight: 700;
-            }
-            """
-        for key, value in t.items():
-            stylesheet = stylesheet.replace("{t['" + key + "']}", str(value))
-        self.setStyleSheet(stylesheet)
+        self.setStyleSheet(build_tif_workbench_stylesheet(self.current_theme))
 
     def set_theme(self, theme):
         self.current_theme = normalize_theme(theme)

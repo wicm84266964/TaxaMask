@@ -17,10 +17,14 @@ from core.blink_training_strategy import (
     BLINK_STRATEGY_FULL_INSIDE_RANDOM,
     BLINK_STRATEGY_TRIVIEW_RANDOM,
     BLINK_STRATEGY_TWO_STAGE_FULL_THEN_INSIDE,
+    DEFAULT_BLINK_TRAINING_STRATEGY,
 )
 
 
 class BlinkTrainingStrategyTests(unittest.TestCase):
+    def test_default_strategy_is_two_stage_full_then_inside(self):
+        self.assertEqual(DEFAULT_BLINK_TRAINING_STRATEGY, BLINK_STRATEGY_TWO_STAGE_FULL_THEN_INSIDE)
+
     def _make_project(self, root):
         image_path = root / "specimen.png"
         Image.new("RGB", (120, 100), color=(160, 160, 160)).save(image_path)

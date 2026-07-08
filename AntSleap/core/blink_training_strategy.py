@@ -8,7 +8,7 @@ BLINK_TRAINING_STRATEGIES = {
     BLINK_STRATEGY_TWO_STAGE_FULL_THEN_INSIDE,
 }
 
-DEFAULT_BLINK_TRAINING_STRATEGY = BLINK_STRATEGY_TRIVIEW_RANDOM
+DEFAULT_BLINK_TRAINING_STRATEGY = BLINK_STRATEGY_TWO_STAGE_FULL_THEN_INSIDE
 
 
 def sanitize_blink_training_strategy(value, fallback=DEFAULT_BLINK_TRAINING_STRATEGY):
@@ -38,12 +38,12 @@ def blink_training_strategy_note(strategy, lang="en"):
     clean = sanitize_blink_training_strategy(strategy)
     if lang == "zh":
         return {
-            BLINK_STRATEGY_TRIVIEW_RANDOM: "保留当前原方案：从收缩轨迹抽取当前帧，随机使用全图/内视角/外视角，并带下一步与最终框监督。",
+            BLINK_STRATEGY_TRIVIEW_RANDOM: "保留历史基线方案：从收缩轨迹抽取当前帧，随机使用全图/内视角/外视角，并带下一步与最终框监督。",
             BLINK_STRATEGY_FULL_INSIDE_RANDOM: "去掉目标被遮掉的外视角，只在父框全图和当前框内视角之间随机训练。",
-            BLINK_STRATEGY_TWO_STAGE_FULL_THEN_INSIDE: "先用父框全图学习粗定位，再用当前框内视角学习继续收紧。",
+            BLINK_STRATEGY_TWO_STAGE_FULL_THEN_INSIDE: "推荐默认方案：先用父框全图学习粗定位，再用当前框内视角学习继续收紧。",
         }.get(clean, "")
     return {
-        BLINK_STRATEGY_TRIVIEW_RANDOM: "Current baseline: sample a shrink trajectory frame, randomly use full/inside/outside views, and supervise next-step plus final boxes.",
+        BLINK_STRATEGY_TRIVIEW_RANDOM: "Legacy baseline: sample a shrink trajectory frame, randomly use full/inside/outside views, and supervise next-step plus final boxes.",
         BLINK_STRATEGY_FULL_INSIDE_RANDOM: "Drops the target-missing outside view; trains with parent full view and current inside view only.",
-        BLINK_STRATEGY_TWO_STAGE_FULL_THEN_INSIDE: "Trains coarse localization on the parent full view first, then refines on the current inside view.",
+        BLINK_STRATEGY_TWO_STAGE_FULL_THEN_INSIDE: "Recommended default: trains coarse localization on the parent full view first, then refines on the current inside view.",
     }.get(clean, "")

@@ -1114,7 +1114,7 @@ TRANSLATIONS = {
         "Batch Size:": "批次大小 (Batch Size):",
         "Blink Expert Training Defaults:": "Blink 专家训练默认值：",
         "Blink Training Strategy:": "Blink 训练方案：",
-        "Choose which Blink training process to use for child-part experts. Plan 1 is the current baseline; Plan 2 removes outside-view training; Plan 3 trains full-view first and inside-view second.": "选择子部位专家使用哪种 Blink 训练流程。方案一是当前基线；方案二去掉外视角训练；方案三先训练全图视角，再训练内视角。",
+        "Choose which Blink training process to use for child-part experts. Plan 1 is the legacy baseline; Plan 2 removes outside-view training; Plan 3 is the recommended default and trains full-view first, then inside-view.": "选择子部位专家使用哪种 Blink 训练流程。方案一是历史基线；方案二去掉外视角训练；方案三是推荐默认方案，先训练全图视角，再训练内视角。",
         "Default Blink Epochs:": "默认 Blink 训练轮数：",
         "Default Blink Batch Size:": "默认 Blink 批次大小：",
         "Default Blink Learning Rate:": "默认 Blink 学习率：",

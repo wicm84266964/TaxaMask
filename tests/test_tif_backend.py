@@ -484,6 +484,48 @@ class TifBackendTests(unittest.TestCase):
             np.testing.assert_array_equal(backup, prediction)
             self.assertTrue(np.all(manual == 1))
 
+    def test_backend_prediction_artifact_cannot_import_as_manual_truth(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = make_top_level_only_project(root)
+            runner = TifBackendRunner(manager, {"backend_id": "mock_volume"})
+            contract = runner.build_contract("predict", specimen_ids=["top-001"], input_scope="top_level_volume")
+            runner.write_contract(contract)
+            prediction_dir = Path(contract["run_dir"]) / "manual_truth_prediction.ome.zarr"
+            write_volume_sidecar(prediction_dir, np.full((2, 3, 4), 7, dtype=np.uint16), role="manual_truth")
+            result_payload = {
+                "schema_version": "ant3d_tif_backend_result_v1",
+                "contract_schema_version": TIF_BACKEND_CONTRACT_SCHEMA_VERSION,
+                "run_id": contract["run_id"],
+                "status": "success",
+                "artifacts": [
+                    {
+                        "type": "prediction_label_volume",
+                        "role": "manual_truth",
+                        "specimen_id": "top-001",
+                        "path": str(prediction_dir),
+                        "prediction_id": "bad_manual_truth",
+                    }
+                ],
+                "metrics": {},
+                "warnings": [],
+                "provenance": {"run_dir": contract["run_dir"]},
+            }
+            with open(contract["result_json"], "w", encoding="utf-8") as handle:
+                json.dump(result_payload, handle)
+            result = runner.read_result(contract["result_json"])
+            before = load_volume_sidecar(manager.to_absolute(manager.get_specimen("top-001")["labels"]["manual_truth"]["path"])).copy()
+
+            imported = runner.import_prediction_result(result)
+
+            self.assertEqual(imported, [])
+            np.testing.assert_array_equal(
+                load_volume_sidecar(manager.to_absolute(manager.get_specimen("top-001")["labels"]["manual_truth"]["path"])),
+                before,
+            )
+            labels = manager.get_specimen("top-001")["labels"]
+            self.assertFalse((labels.get("raw_ai_prediction_backup") or {}).get("path"))
+
     def test_prediction_shape_mismatch_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

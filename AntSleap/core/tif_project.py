@@ -5,8 +5,11 @@ from datetime import datetime
 
 from .safe_io import atomic_write_json, backup_file
 from .sqlite_storage import LEGACY_JSON_BACKEND, PROJECT_MANIFEST_SCHEMA_VERSION, SQLITE_BACKEND, write_project_manifest
+from .tif_label_guard import can_write_label_role
 from .tif_materials import has_trainable_material, read_material_map, write_material_map
+from .tif_truth_policy import can_promote_to_manual_truth, can_use_role_for_training
 from .tif_volume_io import VOLUME_SIDECAR_FORMAT, copy_volume_sidecar, read_volume_metadata, volume_sidecar_exists
+from .tif_write_guard import WriteIntent, ensure_write_allowed
 
 
 TIF_PROJECT_SCHEMA_VERSION = "ant3d_tif_project_v1"
@@ -422,6 +425,38 @@ class TifProjectManager:
             return os.path.normpath(text)
         return os.path.normpath(os.path.join(self.project_dir, text))
 
+    def _require_guard(self, result, prefix):
+        if result:
+            return result
+        reason = getattr(result, "reason", "denied")
+        details = getattr(result, "details", {})
+        raise ValueError(f"{prefix}:{reason}:{details}")
+
+    def _ensure_project_write_allowed(
+        self,
+        target_path,
+        *,
+        source_path="",
+        source_role="",
+        target_role="",
+        operation="",
+        audit_metadata=None,
+        allow_overwrite=False,
+    ):
+        intent = WriteIntent(
+            target_path=str(target_path or ""),
+            project_root=self.project_dir,
+            source_path=str(source_path or ""),
+            source_role=str(source_role or ""),
+            target_role=str(target_role or ""),
+            operation=str(operation or ""),
+            audit_metadata=dict(audit_metadata or {}) if isinstance(audit_metadata, dict) else {},
+            allow_overwrite=bool(allow_overwrite),
+            allowed_roots=(self.project_dir,),
+            protected_paths=(),
+        )
+        return ensure_write_allowed(intent)
+
     def specimen_dir(self, specimen_id):
         return os.path.join("specimens", _safe_path_fragment(specimen_id))
 
@@ -520,9 +555,33 @@ class TifProjectManager:
             self.save_project()
         return specimen["working_volume"]
 
-    def register_label_volume(self, specimen_id, role, path, shape_zyx, dtype, status="available", spacing_zyx=None, spacing_unit="micrometer", orientation="unknown", fmt=VOLUME_SIDECAR_FORMAT, save=True):
+    def register_label_volume(
+        self,
+        specimen_id,
+        role,
+        path,
+        shape_zyx,
+        dtype,
+        status="available",
+        spacing_zyx=None,
+        spacing_unit="micrometer",
+        orientation="unknown",
+        fmt=VOLUME_SIDECAR_FORMAT,
+        save=True,
+        operation="register_existing_label_record",
+        explicit_review=False,
+        audit_metadata=None,
+    ):
         if role not in {"manual_truth", "working_edit"}:
             raise ValueError(f"unsupported_label_role:{role}")
+        guard = can_write_label_role(
+            role,
+            operation=operation or "register_existing_label_record",
+            explicit_review=explicit_review,
+            audit_metadata=audit_metadata,
+            overwrite_existing=bool((path or "").strip()),
+        )
+        self._require_guard(guard, "tif_label_guard_denied")
         specimen = self._require_specimen(specimen_id)
         specimen["labels"][role] = self._volume_payload(path, shape_zyx, dtype, spacing_zyx, spacing_unit, orientation, fmt)
         specimen["labels"][role]["status"] = str(status or "available")
@@ -805,10 +864,21 @@ class TifProjectManager:
         orientation="unknown",
         fmt=VOLUME_SIDECAR_FORMAT,
         save=True,
+        operation="register_existing_label_record",
+        explicit_review=False,
+        audit_metadata=None,
     ):
         role = str(role or "").strip()
         if role not in TIF_PART_LABEL_ROLES:
             raise ValueError(f"unsupported_part_label_role:{role}")
+        guard = can_write_label_role(
+            role,
+            operation=operation or "register_existing_label_record",
+            explicit_review=explicit_review,
+            audit_metadata=audit_metadata,
+            overwrite_existing=bool((path or "").strip()),
+        )
+        self._require_guard(guard, "tif_label_guard_denied")
         part = self._require_part(specimen_id, part_id)
         labels = part.setdefault("labels", self._normalize_part_labels(None))
         record = self._volume_payload(path, shape_zyx, dtype, spacing_zyx, spacing_unit, orientation, fmt)
@@ -878,10 +948,21 @@ class TifProjectManager:
         orientation="local_axis_reslice",
         fmt=VOLUME_SIDECAR_FORMAT,
         save=True,
+        operation="register_existing_label_record",
+        explicit_review=False,
+        audit_metadata=None,
     ):
         role = str(role or "").strip()
         if role not in TIF_PART_LABEL_ROLES:
             raise ValueError(f"unsupported_part_label_role:{role}")
+        guard = can_write_label_role(
+            role,
+            operation=operation or "register_existing_label_record",
+            explicit_review=explicit_review,
+            audit_metadata=audit_metadata,
+            overwrite_existing=bool((path or "").strip()),
+        )
+        self._require_guard(guard, "tif_label_guard_denied")
         labels, part, reslice = self._part_label_container(specimen_id, part_id, reslice_id)
         if reslice is None:
             raise ValueError("reslice_id_required_for_reslice_label")
@@ -921,6 +1002,32 @@ class TifProjectManager:
         labels, part, reslice = self._part_label_container(specimen_id, part_id, reslice_id)
         if reslice is None:
             raise ValueError("reslice_id_required_for_reslice_label")
+        policy = can_promote_to_manual_truth(
+            source_role,
+            explicit_review=True,
+            review_ready=True,
+            opened_for_review=(part.get("training") or {}).get("opened_for_review"),
+            audit_metadata={
+                "review_action": "promote_part_reslice_editable_result_to_manual_truth",
+                "specimen_id": specimen_id,
+                "part_id": part_id,
+                "reslice_id": reslice_id,
+            },
+        )
+        self._require_guard(policy, "tif_truth_policy_denied")
+        write_guard = can_write_label_role(
+            "manual_truth",
+            operation="promote_editable_ai_result_to_manual_truth",
+            source_role=source_role,
+            explicit_review=True,
+            audit_metadata={
+                "review_action": "promote_part_reslice_editable_result_to_manual_truth",
+                "specimen_id": specimen_id,
+                "part_id": part_id,
+                "reslice_id": reslice_id,
+            },
+        )
+        self._require_guard(write_guard, "tif_label_guard_denied")
         if source_role not in {"editable_ai_result", "manual_truth"}:
             raise ValueError(f"unsupported_part_manual_truth_source:{source_role}")
         source = labels.get(source_role) or {}
@@ -939,6 +1046,15 @@ class TifProjectManager:
             if save:
                 self.save_project()
             return labels["manual_truth"]
+        self._ensure_project_write_allowed(
+            target_abs,
+            source_path=source_abs,
+            source_role=source_role,
+            target_role="manual_truth",
+            operation="truth_promotion",
+            allow_overwrite=True,
+            audit_metadata={"review_action": "promote_part_reslice_editable_result_to_manual_truth"},
+        )
         metadata = copy_volume_sidecar(source_abs, target_abs, role="manual_truth")
         labels["manual_truth"] = self._volume_payload(
             target_path,
@@ -964,6 +1080,30 @@ class TifProjectManager:
     def promote_part_editable_result_to_manual_truth(self, specimen_id, part_id, source_role="editable_ai_result", mark_train_ready=True, save=True):
         part = self._require_part(specimen_id, part_id)
         labels = part.setdefault("labels", self._normalize_part_labels(None))
+        policy = can_promote_to_manual_truth(
+            source_role,
+            explicit_review=True,
+            review_ready=True,
+            opened_for_review=(part.get("training") or {}).get("opened_for_review"),
+            audit_metadata={
+                "review_action": "promote_part_editable_result_to_manual_truth",
+                "specimen_id": specimen_id,
+                "part_id": part_id,
+            },
+        )
+        self._require_guard(policy, "tif_truth_policy_denied")
+        write_guard = can_write_label_role(
+            "manual_truth",
+            operation="promote_editable_ai_result_to_manual_truth",
+            source_role=source_role,
+            explicit_review=True,
+            audit_metadata={
+                "review_action": "promote_part_editable_result_to_manual_truth",
+                "specimen_id": specimen_id,
+                "part_id": part_id,
+            },
+        )
+        self._require_guard(write_guard, "tif_label_guard_denied")
         if source_role not in {"editable_ai_result", "manual_truth"}:
             raise ValueError(f"unsupported_part_manual_truth_source:{source_role}")
         source = labels.get(source_role) or {}
@@ -982,6 +1122,15 @@ class TifProjectManager:
             if save:
                 self.save_project()
             return labels["manual_truth"]
+        self._ensure_project_write_allowed(
+            target_abs,
+            source_path=source_abs,
+            source_role=source_role,
+            target_role="manual_truth",
+            operation="truth_promotion",
+            allow_overwrite=True,
+            audit_metadata={"review_action": "promote_part_editable_result_to_manual_truth"},
+        )
         metadata = copy_volume_sidecar(source_abs, target_abs, role="manual_truth")
         labels["manual_truth"] = self._volume_payload(
             target_path,
@@ -1199,6 +1348,23 @@ class TifProjectManager:
         target_abs = self.to_absolute(target_path)
         if os.path.normcase(os.path.abspath(source_abs)) == os.path.normcase(os.path.abspath(target_abs)):
             raise ValueError(f"source_target_label_same:{source_role}")
+        write_guard = can_write_label_role(
+            "working_edit",
+            operation="copy_label_layer_to_working_edit",
+            source_role=source_role,
+            audit_metadata={"source_role": source_role, "specimen_id": specimen_id},
+            overwrite_existing=True,
+        )
+        self._require_guard(write_guard, "tif_label_guard_denied")
+        self._ensure_project_write_allowed(
+            target_abs,
+            source_path=source_abs,
+            source_role=source_role,
+            target_role="working_edit",
+            operation="copy_label_layer_to_working_edit",
+            allow_overwrite=True,
+            audit_metadata={"source_role": source_role},
+        )
         metadata = copy_volume_sidecar(source_abs, target_abs, role="working_edit")
         specimen["labels"]["working_edit"] = self._volume_payload(
             target_path,
@@ -1222,6 +1388,21 @@ class TifProjectManager:
         source_path = working.get("path", "")
         if not source_path:
             raise ValueError("working_edit_missing")
+        policy = can_promote_to_manual_truth(
+            "working_edit",
+            explicit_review=True,
+            review_ready=True,
+            audit_metadata={"review_action": "promote_working_edit_to_manual_truth", "specimen_id": specimen_id},
+        )
+        self._require_guard(policy, "tif_truth_policy_denied")
+        write_guard = can_write_label_role(
+            "manual_truth",
+            operation="promote_working_edit_to_manual_truth",
+            source_role="working_edit",
+            explicit_review=True,
+            audit_metadata={"review_action": "promote_working_edit_to_manual_truth", "specimen_id": specimen_id},
+        )
+        self._require_guard(write_guard, "tif_label_guard_denied")
         target_path = (specimen.get("labels") or {}).get("manual_truth", {}).get("path")
         if not target_path:
             target_path = os.path.join(self.specimen_dir(specimen_id), "labels", "manual_truth.ome.zarr").replace("\\", "/")
@@ -1229,6 +1410,15 @@ class TifProjectManager:
         target_abs = self.to_absolute(target_path)
         if os.path.normcase(os.path.abspath(source_abs)) == os.path.normcase(os.path.abspath(target_abs)):
             raise ValueError("working_edit_manual_truth_same_path")
+        self._ensure_project_write_allowed(
+            target_abs,
+            source_path=source_abs,
+            source_role="working_edit",
+            target_role="manual_truth",
+            operation="truth_promotion",
+            allow_overwrite=True,
+            audit_metadata={"review_action": "promote_working_edit_to_manual_truth"},
+        )
         metadata = copy_volume_sidecar(source_abs, target_abs, role="manual_truth")
         specimen["labels"]["manual_truth"] = self._volume_payload(
             target_path,
@@ -1258,6 +1448,8 @@ class TifProjectManager:
 
         checks["working_volume_exists"] = self._volume_record_exists(working)
         checks["manual_truth_exists"] = self._volume_record_exists(manual)
+        training_guard = can_use_role_for_training("manual_truth", record_exists=checks["manual_truth_exists"], status=manual.get("status", ""))
+        checks["training_role_allowed"] = bool(training_guard)
         checks["material_map_exists"] = bool(material_rel) and os.path.exists(self.to_absolute(material_rel))
 
         working_shape = self._volume_shape(working)
@@ -1276,6 +1468,7 @@ class TifProjectManager:
             "operator_marked_train_ready": "specimen_not_marked_train_ready",
             "working_volume_exists": "working_volume_missing",
             "manual_truth_exists": "manual_truth_missing",
+            "training_role_allowed": training_guard.reason or "training_requires_manual_truth",
             "material_map_exists": "material_map_missing",
             "shape_matches": "image_label_shape_mismatch",
             "has_trainable_material": "no_trainable_material",
@@ -1324,6 +1517,8 @@ class TifProjectManager:
         checks["reslice_output_exists"] = bool((reslice or {}).get("image_path") and os.path.exists(self.to_absolute((reslice or {}).get("image_path", ""))))
         checks["label_schema_exists"] = bool(schema and schema.get("labels"))
         checks["manual_truth_exists"] = self._volume_record_exists(manual)
+        training_guard = can_use_role_for_training("manual_truth", record_exists=checks["manual_truth_exists"], status=manual.get("status", ""))
+        checks["training_role_allowed"] = bool(training_guard)
 
         input_shape = self._path_volume_shape((reslice or {}).get("image_path", "")) if reslice else []
         part_shape = input_shape or self._volume_shape(part_image)
@@ -1350,6 +1545,7 @@ class TifProjectManager:
             "reslice_output_exists": "reslice_output_missing",
             "label_schema_exists": "label_schema_missing",
             "manual_truth_exists": "manual_truth_missing",
+            "training_role_allowed": training_guard.reason or "training_requires_manual_truth",
             "shape_matches": "part_label_shape_mismatch",
             "label_ids_known": "unknown_label_ids",
             "operator_marked_train_ready": "part_not_marked_train_ready",

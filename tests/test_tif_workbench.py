@@ -3454,6 +3454,10 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertEqual(context["train_ready_top_level_sample_count"], "0")
                 self.assertEqual(context["registered_tif_model_count"], "0")
                 self.assertEqual(context["backend_run_active"], "no")
+                self.assertIn("tif_task_summary", context)
+                self.assertIn("tif_state_summary", context)
+                self.assertIn("running_count", context["tif_task_summary"])
+                self.assertIn("selection", context["tif_state_summary"])
                 self.assertIn("annotation_training_loop", context["tif_next_requirement"])
                 self.assertIn("TIF训练回环", context["tif_requirement_doc"])
             finally:
@@ -5908,6 +5912,39 @@ class TifWorkbenchTests(unittest.TestCase):
             widget.close_project()
             widget.deleteLater()
 
+    def test_stale_background_volume_preview_context_is_cancelled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+            try:
+                widget.display_mode = "volume"
+                request = widget._volume_preview_request("still")
+                task = widget._start_tif_task(
+                    "volume_preview",
+                    action="build_preview",
+                    request_key=widget._task_request_key(request["cache_key"]),
+                    message="Preparing preview",
+                )
+                widget._volume_preview_build_task_id = task.task_id
+                widget._volume_preview_pending_token = 8
+                widget._volume_preview_pending_key = request["cache_key"]
+                widget._volume_preview_pending_mask_key = None
+                widget.current_specimen_id = "different_specimen"
+
+                widget._on_volume_preview_build_finished(
+                    {
+                        "token": 8,
+                        "volume_request": request,
+                        "preview": np.ones((4, 16, 16), dtype=np.uint8),
+                    }
+                )
+
+                self.assertEqual(widget.task_manager.task(task.task_id).status, "cancelled")
+                self.assertNotIn(request["cache_key"], widget._volume_preview_cache)
+                self.assertEqual(widget._volume_preview_pending_token, 0)
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
     def test_stale_background_volume_preview_cleanup_keeps_current_task(self):
         manager = TifProjectManager()
         widget = TifWorkbenchWidget(manager, "en")
@@ -6315,14 +6352,14 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.paint_at_widget_position(widget.canvas.width() / 2, widget.canvas.height() / 2)
 
                 np.testing.assert_array_equal(widget.edit_volume, edit_before)
-                self.assertIn("Cannot paint on this label layer", widget.training_status_label.text())
+                self.assertIn("Raw AI prediction backup is read-only", widget.training_status_label.text())
 
                 manual_index = widget.label_role_combo.findData("manual_truth")
                 widget.label_role_combo.setCurrentIndex(manual_index)
                 widget.paint_at_widget_position(widget.canvas.width() / 2, widget.canvas.height() / 2)
 
                 np.testing.assert_array_equal(widget.edit_volume, edit_before)
-                self.assertIn("Cannot paint on this label layer", widget.training_status_label.text())
+                self.assertIn("Cannot paint on training truth directly", widget.training_status_label.text())
             finally:
                 widget.close_project()
                 widget.deleteLater()
@@ -6872,7 +6909,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertFalse(widget.copy_current_material_to_adjacent_slice(1))
                 self.assertFalse(widget.clear_current_material_on_slice())
                 np.testing.assert_array_equal(widget.edit_volume, before)
-                self.assertIn("Cannot paint on this label layer", widget.operation_status_label.text())
+                self.assertIn("Cannot paint on training truth directly", widget.operation_status_label.text())
             finally:
                 widget.close_project(prompt_unsaved=False)
                 widget.deleteLater()
@@ -8069,6 +8106,22 @@ class TifWorkbenchTests(unittest.TestCase):
             finally:
                 widget._tif_backend_thread = None
                 widget._tif_backend_worker = None
+                widget.close_project(prompt_unsaved=False)
+                widget.deleteLater()
+
+    def test_task_manager_preview_lock_blocks_project_mutations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+            try:
+                task = widget._start_tif_task("volume_preview", action="build_preview", message="Preparing preview")
+                self.assertTrue(widget._backend_write_lock_active())
+                self.assertIn("Volume preview", widget._backend_write_lock_message())
+                with patch_message_boxes(), patch("AntSleap.ui.tif_workbench.QFileDialog.getOpenFileNames") as open_files:
+                    widget.import_tif_stack_dialog()
+                    open_files.assert_not_called()
+                widget._finish_tif_task(task.task_id, message="done")
+                self.assertFalse(widget._backend_write_lock_active())
+            finally:
                 widget.close_project(prompt_unsaved=False)
                 widget.deleteLater()
 

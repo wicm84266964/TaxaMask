@@ -52,6 +52,7 @@ try:
     from AntSleap.core.amira_import import import_amira_directory
     from AntSleap.core.tif_backend import DEFAULT_TIF_BACKEND_CONFIG, TifBackendRunner, nnunet_v2_tif_backend_preset, normalize_tif_backend_runtime_config, sanitize_tif_backend_config
     from AntSleap.core.tif_export import export_tif_part_training_dataset, export_tif_training_dataset
+    from AntSleap.core.tif_label_guard import can_write_label_role, require_editable_label_role
     from AntSleap.core.tif_materials import next_material_id, read_material_map, remove_material, upsert_material, write_material_map
     from AntSleap.core.tif_part_extraction import (
         add_rectangular_keyframe,
@@ -81,7 +82,51 @@ try:
     )
     from AntSleap.core.tif_local_axis_ai import export_local_axis_training_manifest
     from AntSleap.core.tif_local_axis_reslice import align_editable_axis_to_reference_plane, compute_local_frame, create_editable_axis_from_source, export_part_reslice, local_axis_output_shape_for_source_bbox, source_point_to_reslice_point, source_z_axis_for_part
+    from AntSleap.services.tif_backend_workflow_service import TifBackendWorkflowService
+    from AntSleap.services.tif_label_edit_service import TifLabelEditService
+    from AntSleap.services.tif_local_axis_service import TifLocalAxisService
+    from AntSleap.services.tif_roi_part_service import TifRoiPartService
+    from AntSleap.services.tif_selection_controller import TifSelectionController
+    from AntSleap.services.tif_task_manager import TifTaskManager
+    from AntSleap.services.tif_truth_promotion_service import TifTruthPromotionService
+    from AntSleap.services.tif_volume_preview_service import TifVolumePreviewService
+    from AntSleap.services.tif_workbench_states import TifBackendState, TifEditState, TifLocalAxisState, TifPreviewState, TifRoiState
     from AntSleap.ui.style import get_theme_config, normalize_theme
+    from AntSleap.ui.tif_tasks import TifQtTaskAdapter
+    from AntSleap.ui.tif_workbench_canvas import LazyRegionMaskVolume, MirroredStatusLabel, TifSliceCanvas, TifSpecimenTree, TifVolumeCanvas, WheelSafeComboBox, WheelSafeSlider, WheelSafeSpinBox, create_tif_volume_canvas
+    from AntSleap.ui.tif_workbench_dialogs import MaterialEditorDialog, TifPartNameDialog, TifTrainingResultDialog, summarize_tif_training_result
+    from AntSleap.ui.tif_workbench_helpers import (
+        _tif_bbox_shape,
+        _tif_clip_bbox_to_shape,
+        _tif_dedupe_contour_points,
+        _tif_empty_contours_payload,
+        _tif_format_contour_quality_report,
+        _tif_full_volume_contours_to_local,
+        _tif_initialize_part_mask_from_full_volume_contours,
+        _tif_initialize_part_mask_from_roi_shell,
+        _tif_normalize_roi_keyframes,
+        _tif_open_reslice_volume_for_review,
+        _tif_roi_keyframes_to_part_contours,
+        _tif_roi_shell_mask_from_keyframes,
+        _tif_safe_contour_slice_index,
+        _tif_shape_from_metadata,
+        _tif_write_mask_metadata,
+    )
+    from AntSleap.ui.tif_workbench_translations import TIF_TRANSLATIONS, tt
+    from AntSleap.ui.tif_workbench_workers import (
+        TifBackendActionWorker,
+        TifBatchImportWorker,
+        TifConfirmPartRoiWorker,
+        TifImportWorker,
+        TifLabelAutoSaveWorker,
+        TifLabelManualSaveWorker,
+        TifLocalAxisResliceExportWorker,
+        TifMaterializeWorker,
+        TifPartMaskPreviewWorker,
+        TifPromoteWorkingEditWorker,
+        TifVolumePreviewBuildWorker,
+        _tif_write_label_slice_snapshots,
+    )
     from AntSleap.ui.tif_gpu_volume_canvas import (
         GPU_VOLUME_MAX_RAY_STEPS,
         GPU_VOLUME_MAX_TEXTURE_DIM,
@@ -102,6 +147,7 @@ except ModuleNotFoundError as exc:
     from core.amira_import import import_amira_directory
     from core.tif_backend import DEFAULT_TIF_BACKEND_CONFIG, TifBackendRunner, nnunet_v2_tif_backend_preset, normalize_tif_backend_runtime_config, sanitize_tif_backend_config
     from core.tif_export import export_tif_part_training_dataset, export_tif_training_dataset
+    from core.tif_label_guard import can_write_label_role, require_editable_label_role
     from core.tif_materials import next_material_id, read_material_map, remove_material, upsert_material, write_material_map
     from core.tif_part_extraction import (
         add_rectangular_keyframe,
@@ -131,7 +177,51 @@ except ModuleNotFoundError as exc:
     )
     from core.tif_local_axis_ai import export_local_axis_training_manifest
     from core.tif_local_axis_reslice import align_editable_axis_to_reference_plane, compute_local_frame, create_editable_axis_from_source, export_part_reslice, local_axis_output_shape_for_source_bbox, source_point_to_reslice_point, source_z_axis_for_part
+    from services.tif_backend_workflow_service import TifBackendWorkflowService
+    from services.tif_label_edit_service import TifLabelEditService
+    from services.tif_local_axis_service import TifLocalAxisService
+    from services.tif_roi_part_service import TifRoiPartService
+    from services.tif_selection_controller import TifSelectionController
+    from services.tif_task_manager import TifTaskManager
+    from services.tif_truth_promotion_service import TifTruthPromotionService
+    from services.tif_volume_preview_service import TifVolumePreviewService
+    from services.tif_workbench_states import TifBackendState, TifEditState, TifLocalAxisState, TifPreviewState, TifRoiState
     from ui.style import get_theme_config, normalize_theme
+    from ui.tif_tasks import TifQtTaskAdapter
+    from ui.tif_workbench_canvas import LazyRegionMaskVolume, MirroredStatusLabel, TifSliceCanvas, TifSpecimenTree, TifVolumeCanvas, WheelSafeComboBox, WheelSafeSlider, WheelSafeSpinBox, create_tif_volume_canvas
+    from ui.tif_workbench_dialogs import MaterialEditorDialog, TifPartNameDialog, TifTrainingResultDialog, summarize_tif_training_result
+    from ui.tif_workbench_helpers import (
+        _tif_bbox_shape,
+        _tif_clip_bbox_to_shape,
+        _tif_dedupe_contour_points,
+        _tif_empty_contours_payload,
+        _tif_format_contour_quality_report,
+        _tif_full_volume_contours_to_local,
+        _tif_initialize_part_mask_from_full_volume_contours,
+        _tif_initialize_part_mask_from_roi_shell,
+        _tif_normalize_roi_keyframes,
+        _tif_open_reslice_volume_for_review,
+        _tif_roi_keyframes_to_part_contours,
+        _tif_roi_shell_mask_from_keyframes,
+        _tif_safe_contour_slice_index,
+        _tif_shape_from_metadata,
+        _tif_write_mask_metadata,
+    )
+    from ui.tif_workbench_translations import TIF_TRANSLATIONS, tt
+    from ui.tif_workbench_workers import (
+        TifBackendActionWorker,
+        TifBatchImportWorker,
+        TifConfirmPartRoiWorker,
+        TifImportWorker,
+        TifLabelAutoSaveWorker,
+        TifLabelManualSaveWorker,
+        TifLocalAxisResliceExportWorker,
+        TifMaterializeWorker,
+        TifPartMaskPreviewWorker,
+        TifPromoteWorkingEditWorker,
+        TifVolumePreviewBuildWorker,
+        _tif_write_label_slice_snapshots,
+    )
     from ui.tif_gpu_volume_canvas import (
         GPU_VOLUME_MAX_RAY_STEPS,
         GPU_VOLUME_MAX_TEXTURE_DIM,
@@ -164,350 +254,6 @@ TIF_MASK_PREVIEW_TRUSTED_STATUSES = {
     "predicted_pending_review",
     "train_ready",
 }
-
-
-def _tif_empty_contours_payload():
-    return {
-        "schema_version": "taxamask_tif_part_extraction_v1",
-        "axis": "z",
-        "keyframes": [],
-    }
-
-
-def _tif_clip_bbox_to_shape(bbox, shape):
-    clean = []
-    shape = tuple(int(value) for value in (shape or ()))
-    if len(shape) != 3:
-        return []
-    for axis, pair in enumerate(bbox or []):
-        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
-            return []
-        size = int(shape[axis])
-        start = max(0, min(size, int(pair[0])))
-        end = max(0, min(size, int(pair[1])))
-        if end < start:
-            start, end = end, start
-        if end == start:
-            end = min(shape[axis], start + 1)
-            start = max(0, end - 1)
-        clean.append([start, end])
-    return clean if len(clean) == 3 else []
-
-
-def _tif_bbox_shape(bbox):
-    return tuple(int(pair[1]) - int(pair[0]) for pair in (bbox or []))
-
-
-def _tif_dedupe_contour_points(points, shape=None):
-    clean = []
-    shape = tuple(int(value) for value in (shape or ()))
-    width = int(shape[2]) if len(shape) == 3 else 0
-    height = int(shape[1]) if len(shape) == 3 else 0
-    for point in points or []:
-        if not isinstance(point, (list, tuple)) or len(point) < 2:
-            continue
-        try:
-            px = float(point[0])
-            py = float(point[1])
-        except (TypeError, ValueError, OverflowError):
-            continue
-        if not math.isfinite(px) or not math.isfinite(py):
-            continue
-        if width > 0:
-            px = max(0.0, min(float(width - 1), px))
-        if height > 0:
-            py = max(0.0, min(float(height - 1), py))
-        next_point = [round(px, 3), round(py, 3)]
-        if not clean or math.hypot(clean[-1][0] - next_point[0], clean[-1][1] - next_point[1]) >= 0.15:
-            clean.append(next_point)
-    if len(clean) > 2 and math.hypot(clean[0][0] - clean[-1][0], clean[0][1] - clean[-1][1]) < 0.15:
-        clean.pop()
-    return clean
-
-
-def _tif_safe_contour_slice_index(keyframe, default=None):
-    try:
-        return int((keyframe or {}).get("slice_index", default))
-    except (TypeError, ValueError, OverflowError):
-        return default
-
-
-def _tif_full_volume_contours_to_local(contours, bbox, source_shape=None):
-    payload = _tif_empty_contours_payload()
-    bbox = _tif_clip_bbox_to_shape(bbox, source_shape) if source_shape else [list(pair) for pair in (bbox or [])]
-    if not bbox or len(bbox) != 3:
-        return payload
-    z0, y0, x0 = int(bbox[0][0]), float(bbox[1][0]), float(bbox[2][0])
-    keyframes = []
-    for keyframe in (contours or {}).get("keyframes", []) or []:
-        if not isinstance(keyframe, dict) or str(keyframe.get("axis", "z")) != "z":
-            continue
-        z_index = _tif_safe_contour_slice_index(keyframe, None)
-        if z_index is None:
-            continue
-        local_polygon = []
-        for point in _tif_dedupe_contour_points(keyframe.get("polygon") or [], source_shape):
-            local_polygon.append([round(float(point[0]) - x0, 3), round(float(point[1]) - y0, 3)])
-        if len(local_polygon) < 3:
-            continue
-        keyframes.append(
-            {
-                "axis": "z",
-                "slice_index": int(z_index) - z0,
-                "polygon": local_polygon,
-                "author": str(keyframe.get("author") or "taxamask_ui_freehand"),
-                "source": str(keyframe.get("source") or "manual_freehand"),
-                "created_at": str(keyframe.get("created_at") or datetime.now().astimezone().isoformat(timespec="seconds")),
-            }
-        )
-    keyframes.sort(key=lambda item: int(item.get("slice_index", 0)))
-    payload["keyframes"] = keyframes
-    return payload
-
-
-def _tif_normalize_roi_keyframes(keyframes, shape=None):
-    shape = tuple(int(value) for value in (shape or ()))
-    normalized = []
-    for item in keyframes or []:
-        if not isinstance(item, dict):
-            continue
-        axis = str(item.get("axis") or "z")
-        if axis not in {"z", "y", "x"}:
-            continue
-        try:
-            slice_index = int(item.get("slice_index"))
-            rect = [int(value) for value in item.get("rect", [])]
-        except Exception:
-            continue
-        if len(rect) != 4:
-            continue
-        x0, y0, x1, y1 = rect
-        if len(shape) == 3:
-            if axis == "z":
-                max_slice, height, width = shape[0], shape[1], shape[2]
-            elif axis == "y":
-                max_slice, height, width = shape[1], shape[0], shape[2]
-            else:
-                max_slice, height, width = shape[2], shape[0], shape[1]
-            if not (0 <= slice_index < max_slice):
-                continue
-            x0, x1 = sorted((max(0, min(width, x0)), max(0, min(width, x1))))
-            y0, y1 = sorted((max(0, min(height, y0)), max(0, min(height, y1))))
-        else:
-            x0, x1 = sorted((x0, x1))
-            y0, y1 = sorted((y0, y1))
-        if x1 <= x0 or y1 <= y0:
-            continue
-        normalized.append(
-            {
-                "axis": axis,
-                "slice_index": slice_index,
-                "rect": [x0, y0, x1, y1],
-                "source": str(item.get("source") or "manual_rectangle"),
-            }
-        )
-    normalized.sort(key=lambda item: (item["axis"], item["slice_index"]))
-    return normalized
-
-
-def _tif_roi_keyframes_to_part_contours(keyframes, parent_bbox, source_shape=None):
-    bbox = _tif_clip_bbox_to_shape(parent_bbox, source_shape) if source_shape else [list(pair) for pair in (parent_bbox or [])]
-    contours = _tif_empty_contours_payload()
-    if not bbox or len(bbox) != 3:
-        return contours
-    for item in _tif_normalize_roi_keyframes(keyframes, source_shape):
-        if item.get("axis") != "z":
-            continue
-        slice_index = int(item.get("slice_index"))
-        if not (int(bbox[0][0]) <= slice_index < int(bbox[0][1])):
-            continue
-        x0, y0, x1, y1 = [int(value) for value in item.get("rect", [])]
-        local_z = slice_index - int(bbox[0][0])
-        local_y0 = y0 - int(bbox[1][0])
-        local_y1 = y1 - int(bbox[1][0])
-        local_x0 = x0 - int(bbox[2][0])
-        local_x1 = x1 - int(bbox[2][0])
-        contours = add_rectangular_keyframe(
-            contours,
-            local_z,
-            [[local_y0, local_y1], [local_x0, local_x1]],
-            author="taxamask_roi_shell",
-        )
-    return contours
-
-
-def _tif_roi_shell_mask_from_keyframes(keyframes, parent_bbox, source_shape):
-    keyframes = _tif_normalize_roi_keyframes(keyframes, source_shape)
-    axes = sorted({item["axis"] for item in keyframes})
-    if len(axes) != 1:
-        return None
-    axis = axes[0]
-    bbox = _tif_clip_bbox_to_shape(parent_bbox, source_shape)
-    shape = _tif_bbox_shape(bbox)
-    if len(shape) != 3 or min(shape) <= 0:
-        return None
-    local_frames = []
-    for item in keyframes:
-        if item["axis"] != axis:
-            continue
-        slice_index = int(item["slice_index"])
-        x0, y0, x1, y1 = [int(value) for value in item["rect"]]
-        if axis == "z":
-            local_slice = slice_index - int(bbox[0][0])
-            rect = [x0 - int(bbox[2][0]), y0 - int(bbox[1][0]), x1 - int(bbox[2][0]), y1 - int(bbox[1][0])]
-            slice_count, height, width = shape[0], shape[1], shape[2]
-        elif axis == "y":
-            local_slice = slice_index - int(bbox[1][0])
-            rect = [x0 - int(bbox[2][0]), y0 - int(bbox[0][0]), x1 - int(bbox[2][0]), y1 - int(bbox[0][0])]
-            slice_count, height, width = shape[1], shape[0], shape[2]
-        else:
-            local_slice = slice_index - int(bbox[2][0])
-            rect = [x0 - int(bbox[1][0]), y0 - int(bbox[0][0]), x1 - int(bbox[1][0]), y1 - int(bbox[0][0])]
-            slice_count, height, width = shape[2], shape[0], shape[1]
-        if not (0 <= local_slice < slice_count):
-            continue
-        rect[0] = max(0, min(width, rect[0]))
-        rect[2] = max(0, min(width, rect[2]))
-        rect[1] = max(0, min(height, rect[1]))
-        rect[3] = max(0, min(height, rect[3]))
-        if rect[2] <= rect[0] or rect[3] <= rect[1]:
-            continue
-        local_frames.append((int(local_slice), rect))
-    if not local_frames:
-        return None
-    local_frames.sort(key=lambda item: item[0])
-    mask = np.zeros(shape, dtype=np.uint16)
-
-    def fill_slice(slice_index, rect_values):
-        x0, y0, x1, y1 = [int(value) for value in rect_values]
-        if x1 <= x0 or y1 <= y0:
-            return
-        if axis == "z":
-            mask[int(slice_index), y0:y1, x0:x1] = 1
-        elif axis == "y":
-            mask[y0:y1, int(slice_index), x0:x1] = 1
-        else:
-            mask[y0:y1, x0:x1, int(slice_index)] = 1
-
-    for idx, (slice_index, rect) in enumerate(local_frames):
-        fill_slice(slice_index, rect)
-        if idx + 1 >= len(local_frames):
-            continue
-        next_slice, next_rect = local_frames[idx + 1]
-        span = int(next_slice) - int(slice_index)
-        if span <= 0:
-            continue
-        for step in range(1, span):
-            weight = float(step) / float(span)
-            interp = []
-            for left_value, right_value in zip(rect, next_rect):
-                interp.append(int(round((1.0 - weight) * float(left_value) + weight * float(right_value))))
-            fill_slice(int(slice_index) + step, interp)
-    return mask
-
-
-def _tif_format_contour_quality_report(report):
-    if not isinstance(report, dict):
-        return ""
-    problems = []
-    for item in report.get("errors", []) or []:
-        problems.append(str(item.get("message") or item.get("code") or "error"))
-    for item in report.get("warnings", []) or []:
-        problems.append(str(item.get("message") or item.get("code") or "warning"))
-    if not problems:
-        return "Quality check passed"
-    return "Review warnings: " + " | ".join(problems[:4])
-
-
-def _tif_shape_from_metadata(path):
-    try:
-        with tifffile.TiffFile(path) as tif:
-            shape = getattr(tif.series[0], "shape", ()) if tif.series else ()
-        return tuple(int(value) for value in shape) if shape else ()
-    except Exception:
-        return ()
-
-
-def _tif_open_reslice_volume_for_review(path):
-    if not path or not os.path.exists(path):
-        return None, ""
-    try:
-        return tifffile.memmap(path), ""
-    except Exception as exc:
-        shape = _tif_shape_from_metadata(path)
-        detail = f"{type(exc).__name__}: {exc}"
-        if shape:
-            return None, f"reslice_tif_not_memory_mappable:{shape}:{detail}"
-        return None, f"reslice_tif_not_memory_mappable:{detail}"
-
-
-def _tif_write_mask_metadata(project_manager, part, mask):
-    metadata = write_part_mask(project_manager, part, mask)
-    part.setdefault("mask", {}).update(
-        {
-            "shape_zyx": metadata.get("shape_zyx", []),
-            "dtype": metadata.get("dtype", ""),
-            "spacing_zyx": metadata.get("spacing_zyx", []),
-            "spacing_unit": metadata.get("spacing_unit", "micrometer"),
-            "orientation": metadata.get("orientation", "unknown"),
-        }
-    )
-    return metadata
-
-
-def _tif_initialize_part_mask_from_roi_shell(project_manager, specimen_id, part, roi_keyframes, source_shape):
-    if not isinstance(part, dict) or not roi_keyframes:
-        return False, ""
-    bbox = _tif_clip_bbox_to_shape(part.get("parent_bbox_zyx", []), source_shape)
-    shape = _tif_bbox_shape(bbox)
-    if len(shape) != 3 or min(shape) <= 0:
-        return False, ""
-    contours = _tif_roi_keyframes_to_part_contours(roi_keyframes, bbox, source_shape)
-    mask = _tif_roi_shell_mask_from_keyframes(roi_keyframes, bbox, source_shape)
-    if mask is None or not np.any(np.asarray(mask) > 0):
-        report = validate_contours_for_interpolation(contours, shape, axis="z")
-        if not report.get("ok"):
-            return False, _tif_format_contour_quality_report(report)
-        mask = build_preview_mask_from_contours(contours, shape)
-        quality = _tif_format_contour_quality_report(report)
-    else:
-        quality = "rectangular key-slice shell"
-    _tif_write_mask_metadata(project_manager, part, mask)
-    metadata_payload = part.setdefault("metadata", {})
-    metadata_payload["roi_shell_keyframe_count"] = len(_tif_normalize_roi_keyframes(roi_keyframes, source_shape))
-    metadata_payload["roi_shell_keyframes"] = _tif_normalize_roi_keyframes(roi_keyframes, source_shape)
-    project_manager.update_part_status(specimen_id, part.get("part_id", ""), "mask_preview", save=False)
-    project_manager.save_project()
-    return True, quality
-
-
-def _tif_initialize_part_mask_from_full_volume_contours(project_manager, specimen_id, part, contours, bbox, source_shape, accepted_preview_mask=None):
-    if not isinstance(part, dict) or not isinstance(contours, dict):
-        return False, ""
-    bbox = _tif_clip_bbox_to_shape(bbox, source_shape)
-    shape = _tif_bbox_shape(bbox)
-    if len(shape) != 3 or min(shape) <= 0:
-        return False, "invalid contour bbox"
-    local_contours = _tif_full_volume_contours_to_local(contours, bbox, source_shape)
-    report = validate_contours_for_interpolation(local_contours, shape, axis="z")
-    if not report.get("ok"):
-        return False, _tif_format_contour_quality_report(report)
-    mask = None
-    if accepted_preview_mask is not None and tuple(getattr(accepted_preview_mask, "shape", ()) or ()) == tuple(shape):
-        mask = accepted_preview_mask
-    if mask is None:
-        mask = build_preview_mask_from_contours(local_contours, shape)
-    _tif_write_mask_metadata(project_manager, part, mask)
-    contours_path = project_manager.to_absolute(part.get("contours_path", ""))
-    if contours_path:
-        write_contours_json(contours_path, local_contours)
-    metadata_payload = part.setdefault("metadata", {})
-    metadata_payload["full_volume_mask_keyframe_count"] = len(local_contours.get("keyframes", []) or [])
-    metadata_payload["full_volume_mask_bbox_zyx"] = bbox
-    metadata_payload["full_volume_mask_source"] = "manual_freehand_key_slices"
-    project_manager.update_part_status(specimen_id, part.get("part_id", ""), "mask_preview", save=False)
-    project_manager.save_project()
-    return True, _tif_format_contour_quality_report(report)
 
 
 def _tif_canvas_background(theme="dark"):
@@ -566,2861 +312,10 @@ def _tif_workbench_theme(theme="dark"):
     }
 
 
-TIF_TRANSLATIONS = {
-    "zh": {
-        "Material": "Material",
-        "ID": "ID",
-        "Name": "名称",
-        "Display name": "显示名称",
-        "Color": "颜色",
-        "Trainable": "可训练",
-        "Choose color": "选择颜色",
-        "No TIF volume loaded": "未加载 TIF 体数据",
-        "TIF metadata registered. Build a working volume before 3D preview.": "TIF metadata 已登记。进入三维预览前请先生成 working volume。",
-        "TIF metadata registered. Build a working volume before slice review.": "TIF metadata 已登记。切片复核需要先生成 working volume。",
-        "Working volume is being built. Slice review will be available when it finishes.": "正在生成 working volume。完成后即可进行切片复核。",
-        "Working volume is being built. 3D preview will open when it finishes.": "正在生成 working volume。完成后会打开三维体预览。",
-        "Building 3D preview...": "正在构建 3D 预览...",
-        "Preparing full-volume 3D preview...": "正在准备顶层导入体数据三维预览...",
-        "Preparing ROI crop preview...": "正在准备 ROI 裁剪块预览...",
-        "Preparing local detail preview...": "正在准备局部结构高清预览...",
-        "Release Render quality to rebuild the 3D preview.": "松开渲染质量滑条后，将按最终值重建三维预览。",
-        "Release ROI scale to update the 3D preview.": "松开 ROI 倍率滑条后，将按最终值更新三维预览。",
-        "Downsampling volume and uploading texture. This can take a moment for large TIF stacks.": "正在降采样体数据并上传纹理。大型 TIF 首次构建可能需要一段时间。",
-        "GPU budget": "GPU 预算",
-        "GPU budget auto-scaled": "GPU 预算自动降级",
-        "GPU budget auto-scaled preview": "GPU 预算已自动降低预览规格",
-        "Preparing mask preview...": "正在准备 mask 预览...",
-        "Downsampling mask labels for 3D overlay. This can take a moment for large label volumes.": "Downsampling mask labels for 3D overlay. This can take a moment for large label volumes.",
-        "Saving labels in background...": "正在后台保存标注...",
-        "Finishing auto-save before manual save...": "正在等待自动保存完成，然后继续手动保存...",
-        "Finishing auto-save before accepting training truth...": "正在等待自动保存完成，然后继续核验为训练真值...",
-        "Auto-save is still finishing. Wait a moment, then try again.": "自动保存正在收尾。请稍等完成后再继续操作。",
-        "Accepting training truth in background...": "正在后台核验为训练真值...",
-        "Label save is running. Wait until it finishes before editing project data.": "标注正在保存中。请等待完成后再修改项目数据。",
-        "Training truth acceptance is running. Wait until it finishes before editing project data.": "正在核验为训练真值。请等待完成后再修改项目数据。",
-        "Specimens": "Specimen",
-        "Volume slices": "体数据切片",
-        "Volume controls": "体数据控制",
-        "Current object": "当前对象",
-        "Recent operation": "最近操作",
-        "Ready. Annotation feedback will appear here.": "就绪。标注、选层和保存反馈会显示在这里。",
-        "Show full log": "查看完整日志",
-        "Display": "显示",
-        "Annotation": "标注",
-        "Train/export": "训练/导出",
-        "Review": "复核预览",
-        "Part Extraction": "部位切分",
-        "Annotation / training": "标注与训练",
-        "Label review": "标注核验",
-        "Train / predict": "训练与预测",
-        "Result comparison": "结果对比",
-        "Region label schema": "结构区域标签表",
-        "Schema ID": "标签表 ID",
-        "User-defined part name": "用户定义部位名",
-        "New schema": "新建标签表",
-        "Save schema": "保存标签表",
-        "Bind to current part": "绑定到当前部位",
-        "Add region label": "新增区域标签",
-        "Remove region label": "删除区域标签",
-        "Import schema": "导入 TaxaMask 标签表 JSON",
-        "Export schema": "导出标签表",
-        "Choose label color": "选择标签颜色",
-        "Choose group color": "选择分组颜色",
-        "Bind a label schema first so every specimen uses the same numeric labels for annotation, training, prediction import, and result comparison. Import files should be TaxaMask label schema JSON exported from this panel.": "请先绑定标签表，让多个个体使用同一套编号方案；标注、训练、预测导入和结果对比都会使用这里的编号。导入文件应是从本面板导出的 TaxaMask 标签表 JSON。",
-        "After binding a label schema, select one current label here before using the brush or fill tools.": "绑定标签表后，请先在这里选择当前标签，再使用画笔或填充工具标注切片。",
-        "Region labels are the structure classes used for painting, training, prediction import, and result comparison. The JSON file is a TaxaMask label schema exported from this panel.": "区域标签是用于标注、训练、预测导入和结果对比的结构类别。导入文件应是从这里导出的 TaxaMask 标签表 JSON。",
-        "The active label list below is what the brush writes. Select a row first, then paint or fill on the slice.": "下面的当前标签列表就是画笔会写入的类别。请先选中一行，再用画笔或填充工具标注切片。",
-        "Current labels are for selecting the label written by brush/fill tools. For project part volumes and reslices, create or edit labels in the bound schema above.": "当前标签只用于选择画笔或填充工具写入的类别。项目内的部位体和重切片请在上方已绑定的标签表中新建或编辑标签。",
-        "Label IDs are the numeric labels stored in the current volume. For project part volumes and their reslices, this list follows the bound region label schema; for top-level imported volumes, it is the specimen label map.": "标签编号是写入当前体数据的实际数值。项目内的部位体及其重切片会跟随已绑定的区域标签表；顶层导入体则使用整只个体的标签表。",
-        "Label IDs are the numeric labels stored in the current volume. For project part volumes, this list follows the bound region label schema; for top-level imported volumes, it is the specimen label map.": "标签编号是当前体数据中实际写入的数字标签。项目内切分的部位体数据会跟随已绑定的区域标签表；顶层导入体数据使用当前个体的标签表。",
-        "Group tags only organize part volumes for prediction rounds or review batches. They are not annotation classes, label schemas, or training labels.": "分组标签只用于把部位体数据按预测轮次或复核批次分组；它不是标注类别、标签表，也不会作为训练标签。",
-        "Export Label Schema": "导出标签表",
-        "Import Label Schema": "导入标签表",
-        "TaxaMask label schema (*.json)": "TaxaMask 标签表 (*.json)",
-        "Exported label schema {0}: {1}": "已导出标签表 {0}：{1}",
-        "Imported label schema {0}.": "已导入标签表 {0}。",
-        "Select a label schema before exporting.": "请先选择一个标签表再导出。",
-        "Label schema {0} already exists. Replace it with the imported schema?": "标签表 {0} 已存在。是否用导入的标签表替换它？",
-        "Label schema export failed: {0}": "标签表导出失败：{0}",
-        "Label schema import failed: {0}": "标签表导入失败：{0}",
-        "Select or create a label schema before saving.": "请先选择或新建一个标签表。",
-        "Edit the bound label schema above to add, rename, or recolor labels for this part/reslice.": "请在上方已绑定的标签表中为当前部位/重切片新增、重命名或修改标签颜色。",
-        "Label ID": "标签编号",
-        "Region name": "区域名称",
-        "Saved label schema {0}.": "已保存标签表 {0}。",
-        "Bound label schema {0} to current part {1}.": "已将标签表 {0} 绑定到当前部位 {1}。",
-        "Select a part volume before binding a label schema.": "请先选择一个部位体数据，再绑定标签表。",
-        "Part group tags": "部位分组标签",
-        "Group tag ID": "分组标签 ID",
-        "Group tag label": "分组标签名称",
-        "Assigned": "已分配",
-        "Add group tag": "新增分组标签",
-        "Save group tag": "保存分组标签",
-        "Delete group tag": "删除分组标签",
-        "Move up": "上移",
-        "Move down": "下移",
-        "Apply tags to current part": "应用到当前部位",
-        "Select a part volume before assigning tags.": "请先选择一个部位体数据，再分配分组标签。",
-        "Saved part tag {0}.": "已保存分组标签 {0}。",
-        "Deleted part tag {0}.": "已删除分组标签 {0}。",
-        "Applied {0} user tag(s) to current part.": "已给当前部位应用 {0} 个分组标签。",
-        "Review source": "复核来源",
-        "Region label": "区域标签",
-        "Refresh comparison": "刷新对比",
-        "Open selected in 3D": "打开选中个体三维预览",
-        "Opening selected result in 3D...": "正在打开选中结果的三维预览...",
-        "Highlight selected region": "高亮所选区域",
-        "Specimen": "个体",
-        "Part": "部位",
-        "Reslice": "重切片",
-        "Region voxels": "区域体素",
-        "Labeled voxels": "已标注体素",
-        "Region %": "区域占比",
-        "Source status": "来源状态",
-        "Shape Z/Y/X": "形状 Z/Y/X",
-        "Missing {0}": "缺少 {0}",
-        "Label path missing": "标签路径缺失",
-        "Label file missing": "标签文件缺失",
-        "Label read failed: {0}": "标签读取失败：{0}",
-        "Shape mismatch with current image": "形状与当前图像不匹配",
-        "Listed {0} {1} part result(s); {2} have {3}. Region voxels: {4} / labeled voxels: {5} ({6}%).": "已列出 {0} 个 {1} 部位结果；{2} 个有 {3}。区域体素：{4} / 已标注体素：{5}（{6}%）。",
-        "Select a result row before opening the 3D preview.": "请先在结果表中选择一个结果，再打开三维预览。",
-        "Opened {0} / {1} for 3D region comparison.": "已打开 {0} / {1} 的三维区域对比预览。",
-        "No comparable part is selected yet. Select a part volume or use all parts.": "还没有选中可对比的部位。请选择一个部位体数据，或查看全部部位。",
-        "Selected source has no label volume for the current part.": "当前部位没有所选来源的标签体。",
-        "Region highlight requires a specific region label.": "高亮区域需要先选择一个具体区域标签。",
-        "Region highlight is ready in 3D preview.": "区域高亮已在三维预览中准备好。",
-        "All comparable parts": "全部可对比部位",
-        "All": "全部",
-        "Export current rendering screenshot": "导出当前渲染截图",
-        "Export current rendering": "导出当前渲染",
-        "Select a TIF volume before exporting the current rendering.": "请先选择一个 TIF 体数据，再导出当前渲染。",
-        "Exported current rendering screenshot: {0}": "已导出当前渲染截图：{0}",
-        "Screenshot export failed: {0}": "截图导出失败：{0}",
-        "Slice display": "切片显示",
-        "3D rendering": "三维体渲染",
-        "Annotation tools": "标注工具",
-        "Tool": "工具",
-        "Brush": "画笔",
-        "Eraser": "橡皮擦",
-        "Lasso fill": "套索填充",
-        "Rectangle fill": "矩形填充",
-        "Ellipse fill": "椭圆填充",
-        "Interpolate fill": "插值自动填充",
-        "Picker": "取样",
-        "Pan/view": "平移查看",
-        "Brush (B): paint the selected label. Hold Ctrl for temporary erase.": "画笔（B）：绘制当前标签。按住 Ctrl 可临时擦除。",
-        "Eraser (E): write background 0. Ctrl + left drag still works as temporary erase.": "橡皮擦（E）：写入背景 0。Ctrl + 左键拖动仍可临时擦除。",
-        "Lasso fill (L): draw a closed outline and fill it with the selected label.": "套索填充（L）：圈出闭合区域，并用当前标签填充。",
-        "Rectangle fill (R): drag a box and fill it with the selected label.": "矩形填充（R）：拖出矩形，并用当前标签填充。",
-        "Ellipse fill (O): drag an ellipse and fill it with the selected label.": "椭圆填充（O）：拖出椭圆，并用当前标签填充。",
-        "Interpolate fill: use slices where the current label already exists as key slices, then fill the slices between them.": "插值自动填充：把已画出当前标签的切片作为关键切片，并补齐它们之间的切片。",
-        "Picker (I): sample a label under the cursor and select that label.": "取样（I）：读取光标下的标签，并切换到对应标签。",
-        "Pan/view: drag the zoomed slice without changing labels. Right drag also pans when zoomed.": "平移查看：拖动放大后的切片，不修改标签。放大后右键拖动也可平移。",
-        "Tool set to Brush.": "已切换到画笔。",
-        "Tool set to Eraser.": "已切换到橡皮擦。",
-        "Tool set to Lasso fill.": "已切换到套索填充。",
-        "Tool set to Rectangle fill.": "已切换到矩形填充。",
-        "Tool set to Ellipse fill.": "已切换到椭圆填充。",
-        "Tool set to Picker.": "已切换到取样。",
-        "Tool set to Pan/view. Labels will not be changed.": "已切换到平移查看。标签不会被修改。",
-        "Pan/view mode is active. Labels were not changed.": "当前是平移查看模式，标签没有被修改。",
-        "Creating current label layer before painting...": "正在创建当前标注层，然后再写入标注...",
-        "Creating current label layer before filling...": "正在创建当前标注层，然后再填充标注...",
-        "Lasso fill needs at least 3 points.": "套索填充至少需要 3 个点。",
-        "Lasso fill did not cover any pixels.": "套索填充没有覆盖任何像素。",
-        "Shape fill is too small. Drag a wider area before releasing.": "填充区域太小。请拖出更大的范围后再松开。",
-        "Filled label {0} on slice {1}: {2} pixel(s).": "已在第 {1} 张切片填充标签 {0}：{2} 个像素。",
-        "Filled rectangle label {0} on slice {1}: {2} pixel(s).": "已在第 {1} 张切片矩形填充标签 {0}：{2} 个像素。",
-        "Filled ellipse label {0} on slice {1}: {2} pixel(s).": "已在第 {1} 张切片椭圆填充标签 {0}：{2} 个像素。",
-        "Interpolate fill needs the current label on at least two key slices.": "插值自动填充需要当前标签至少出现在两个关键切片上。",
-        "Interpolate fill found no missing slices between key slices.": "插值自动填充没有发现需要补齐的中间切片。",
-        "Interpolate filled label {0}: {1} slice(s), {2} pixel(s).": "已插值填充标签 {0}：{1} 个切片，{2} 个像素。",
-        "Large fill area: {0}% of slice.": "填充面积偏大：占当前切片 {0}%。",
-        "Fill touches the image edge.": "填充区域触及图像边缘。",
-        "Copy label to previous slice": "复制到上一张",
-        "Copy label to next slice": "复制到下一张",
-        "Clear current label": "清除当前标签",
-        "Copy current label mask to the previous slice for refinement.": "将当前标签的 mask 复制到上一张切片，便于继续精修。",
-        "Copy current label mask to the next slice for refinement.": "将当前标签的 mask 复制到下一张切片，便于继续精修。",
-        "Clear the selected label from the current slice. Other labels are kept.": "从当前切片清除选中的标签，不影响其他标签。",
-        "Confirm label edit": "确认标注修改",
-        "Copy label {0} from slice {1} to slice {2}? Existing pixels of this label on the target slice will be replaced.": "将标签 {0} 从第 {1} 张复制到第 {2} 张？目标切片上已有的同标签像素会被替换。",
-        "Clear label {0} from slice {1}?": "从第 {1} 张切片清除标签 {0}？",
-        "No previous slice is available.": "没有上一张切片。",
-        "No next slice is available.": "没有下一张切片。",
-        "Background label 0 is not supported by this helper.": "这个辅助操作不支持背景标签 0。",
-        "No pixels of label {0} on slice {1}.": "第 {1} 张切片没有标签 {0} 的像素。",
-        "Copied label {0} from slice {1} to slice {2}: {3} changed pixel(s).": "已将标签 {0} 从第 {1} 张复制到第 {2} 张：改变 {3} 个像素。",
-        "Cleared label {0} on slice {1}: {2} pixel(s).": "已清除第 {1} 张切片的标签 {0}：{2} 个像素。",
-        "No label changes were needed on slice {0}.": "第 {0} 张切片无需修改。",
-        "Save status": "保存状态",
-        "Saved": "已保存",
-        "Unsaved changes: {0} slice(s)": "未保存修改：{0} 张切片",
-        "Auto-save pending: {0} slice(s)": "等待自动保存：{0} 张切片",
-        "Saving current labels...": "正在保存当前标注...",
-        "Saving part mask...": "正在保存部位 mask...",
-        "Saving editable AI result...": "正在保存待核验 AI 结果...",
-        "Save failed: {0}": "保存失败：{0}",
-        "Auto-save writes the current label layer about 1.2 seconds after edits.": "修改后约 1.2 秒写入当前标注层。",
-        "Undo last stroke (Ctrl+Z)": "撤销上一笔（Ctrl+Z）",
-        "Redo stroke (Ctrl+Y / Ctrl+Shift+Z)": "重做（Ctrl+Y / Ctrl+Shift+Z）",
-        "Save current label layer (Ctrl+S)": "保存当前标注层（Ctrl+S）",
-        "Save current labels before accepting selected AI results.": "接受选中的 AI 结果前，请先保存当前标注。",
-        "Decrease brush size ([)": "减小画笔半径（[）",
-        "Increase brush size (])": "增大画笔半径（]）",
-        "Brush size: {0}": "画笔大小：{0}",
-        "Undo restored slice {0}.": "已撤销第 {0} 张切片的上一笔。",
-        "Redo restored slice {0}.": "已重做第 {0} 张切片的一笔。",
-        "Model training": "模型训练",
-        "Model configuration": "模型配置",
-        "Workbench log": "工作台日志",
-        "Display mode": "显示模式",
-        "Slice review": "切片复核",
-        "3D volume": "三维体预览",
-        "Volume render": "体渲染",
-        "Render mode": "渲染模式",
-        "Composite": "透明累积",
-        "MIP": "最大强度",
-        "MinIP": "最小强度",
-        "Average": "平均强度",
-        "Surface": "表面边界",
-        "Density cutoff": "密度阈值",
-        "Render quality": "渲染质量",
-        "Ray samples": "光线采样",
-        "ROI high detail": "ROI 高清",
-        "ROI Inspect": "ROI 原始块检查",
-        "Inspect ROI crop": "检查 ROI 裁剪块",
-        "Current bbox draft": "当前 bbox 草稿",
-        "ROI crop source": "ROI 裁剪源",
-        "ROI scale": "ROI 倍率",
-        "ROI budget": "ROI 预算",
-        "Inside depth": "视点深度",
-        "Front cut": "快速近端裁剪",
-        "Mask display": "Mask 显示",
-        "Image only": "仅图像",
-        "Mask boundary": "Mask 边界",
-        "Masked image": "只看 Mask 内图像",
-        "Mask opacity": "Mask 透明度",
-        "Transfer function": "密度映射",
-        "Density opacity": "密度透明度",
-        "Detail enhancement": "细节增强",
-        "Local detail check": "局部结构检查",
-        "Tone curve": "明暗曲线",
-        "Shader quality": "Shader 质量",
-        "Inspect presets": "检查预设",
-        "Off": "关闭",
-        "All still composite": "全部静止透明累积",
-        "Surface refine": "表面精修",
-        "Clip plane": "观察侧剖切面",
-        "Show local axes": "显示局部轴",
-        "Show source/output axes in 3D preview": "在三维预览显示原始/输出轴",
-        "source Z": "原始 Z",
-        "output Z": "输出 Z",
-        "Clip depth": "切入深度",
-        "View aligned": "按当前视角",
-        "Drag preview": "拖动预览",
-        "Still high quality": "静止高清",
-        "VRAM": "显存",
-        "Upload": "上传",
-        "Draw": "绘制",
-        "actual": "实际",
-        "GPU stats pending": "等待 GPU 统计",
-        "Sampling": "采样",
-        "Renderer": "渲染器",
-        "GPU ray march": "GPU 光线步进",
-        "CPU fallback": "CPU 回退",
-        "GPU renderer unavailable. Using CPU fallback.": "GPU 渲染器不可用，正在使用 CPU 回退。",
-        "GPU renderer failed. Using CPU fallback: {0}": "GPU 渲染器失败，正在使用 CPU 回退：{0}",
-        "GPU fallback active": "GPU 回退中",
-        "bottleneck: texture upload": "瓶颈：纹理上传",
-        "bottleneck: ray rendering": "瓶颈：光线渲染",
-        "large GPU texture": "大体积 GPU 纹理",
-        "GPU failed": "GPU 失败",
-        "Reset 3D view": "重置 3D 视角",
-        "drag rotate / wheel zoom": "左键旋转 / 右键平移 / 滚轮缩放",
-        "Volume view": "体预览",
-        "Texture": "纹理",
-        "Samples": "采样",
-        "Inside": "视点",
-        "Cut": "近端裁剪",
-        "Zoom": "缩放",
-        "Pan X": "横移",
-        "Pan Y": "纵移",
-        "Clarity mode": "清晰模式",
-        "Sharp": "清晰",
-        "Smooth": "平滑",
-        "nearest": "最近邻",
-        "linear": "线性",
-        "smooth": "平滑",
-        "crisp": "清晰",
-        "Data": "数据",
-        "Mode": "模式",
-        "ROI": "ROI",
-        "Filters low-gray background and noise. Raise it for outer shape review; lower it when weak internal structures disappear.": "密度映射的起点。调高会过滤背景和噪声，适合看外轮廓；调低会保留弱信号，适合找内部淡结构。",
-        "Switches how values along the viewing ray are projected. MIP highlights bright structures, MinIP highlights dark gaps, Average shows density trend, and Surface emphasizes boundaries.": "切换视线方向上的体数据投影方式。最大强度适合看亮结构，最小强度适合看暗间隙，平均强度适合看整体密度，表面边界适合看轮廓。",
-        "Controls the maximum edge length of the still GPU volume. Dragging uses a smaller temporary texture, then rebuilds this sharper texture when the view settles.": "控制静止高清时上传到 GPU 的体数据最大边长。拖动时会临时用较小纹理，停下后自动重建这个高清纹理；3090 可尝试 1024 到 2048。",
-        "Controls the number of samples per screen pixel along the viewing ray. Higher values stabilize internal layers and fine lines, mainly increasing GPU compute load.": "控制每个屏幕像素沿视线取样次数。数值越高，内部层次和细线更稳定，但主要增加 GPU 计算负载；如果转动不卡，可继续调高。",
-        "When zoomed in and still, renders the 3D view at a higher offscreen pixel density before scaling it back, improving small-part inspection at the cost of more GPU readback work.": "静止且放大观察时，先用更高离屏像素密度渲染三维体，再缩回当前显示区域。它主要改善抗锯齿和顺滑外观；精确看边界时优先用局部结构检查。",
-        "Controls the offscreen supersampling factor used by ROI high detail. Higher values make still zoomed views smoother but heavier.": "控制 ROI 高清的离屏超采样倍数。数值越高，静止放大视图越平滑，但可能让边界显得更软，负载也更重。",
-        "When full-volume ROI bbox text is present, uploads a read-only high-detail crop from the original bbox for 3D inspection. It never writes TIF, mask, part, or training data.": "当顶层导入体数据存在 ROI bbox 文本时，从原始 bbox 只读上传高清局部块用于三维检查。它不会写入 TIF、Mask、Part 或训练数据。",
-        "Sharp still rendering keeps more source intensity detail and uses crisper sampling. It may upload more data and can look grainier while revealing fine internal structures.": "局部结构检查会在静止时尽量提高部位体纹理，并保留线性采样和 ROI 高清，减少放大时的马赛克感。它可能上传更慢，但更适合判断局部结构边界。",
-        "Controls how strongly dense voxels accumulate in 3D. Lower values make internal layers less blocked; higher values make weak structures more visible.": "控制三维渲染中密度累积的强弱。调低会减少遮挡，更容易看内部层次；调高会让弱信号更明显，但画面可能更厚。",
-        "Enhances fine boundaries while the view is still. It is a display-only aid for checking internal layers and part edges.": "静止观察时增强细小边界。它只是显示辅助，用于检查内部层次和部位边缘，不修改原始数据。",
-        "Adjusts display gamma for 3D rendering. Lower values brighten faint structures; higher values keep dense regions calmer.": "调整三维渲染的显示曲线。调低会提亮弱结构，调高会让高密度区域更克制。",
-        "Controls display-only shader experiments. Inspect presets enables them only for Morphology/Publication, Off disables them, and All still composite applies them broadly while the view is still.": "控制只影响显示的 shader 实验。检查预设只在形态/发表检查中启用；关闭会全部禁用；全部静止透明累积会在静止透明累积视图中广泛启用。",
-        "Refines first surface hits in Surface mode while still. It improves contour stability without affecting Composite rendering.": "静止且使用表面边界模式时精修首次命中位置，让轮廓更稳定；不影响透明累积模式。",
-        "Enables a view-aligned GPU clipping plane. It only cuts the display, not the saved TIF, mask, or training data.": "启用观察侧 GPU 剖切面，并在剖切面上绘制清晰截面。它只切开屏幕显示，不会修改已保存的 TIF、Mask 或训练数据。",
-        "Shows the locked source Z axis and the selected local output axis on the 3D part preview. This is display-only and does not edit data.": "在三维部位预览中显示锁定的原始 Z 轴和当前选中局部输出轴。这个开关只影响显示，不修改数据。",
-        "Moves the clipping plane through the current 3D view. Use it to peel away outer tissue and inspect inside structures.": "从当前观察侧向体数据内部推进剖切面。切面会单独采样显示截面内容，用于观察内部结构。",
-        "Shows accepted or preview part masks in the 3D view. Boundary is best for checking extraction edges; masked image hides voxels outside the mask.": "在三维视图中显示已接受或预览中的部位 Mask。边界模式适合检查切除轮廓，只看 Mask 内图像会隐藏 Mask 外体素。",
-        "Controls how strongly mask boundaries are blended into the 3D inspection view.": "控制 Mask 边界叠加到三维观察视图中的强度。",
-        "Moves the camera into the volume. Use it to enter the specimen and inspect internal structures; keep it at 0 for outer shape review.": "移动观察点。0 在样本外看整体，100 接近样本中心，100 以上继续进入更深内部；它不切掉体数据，只改变你站在哪里看。",
-        "Cuts away the front part of the current view. Use it to remove blocking outer tissue and inspect deeper structures; keep it at 0 for the full outline.": "快速跳过当前视角近端的一段体渲染采样。它不绘制清晰截面，只用于临时减少遮挡；正式观察内部结构优先使用观察侧剖切面。",
-        "Restores the external default view and clears inside depth and front cut.": "恢复外部默认视角，并清空视点深度和快速近端裁剪。",
-        "3D preview uses a downsampled read-only volume. Use Slice review for precise label editing.": "3D 预览使用降采样只读体数据。精确标签修改请使用切片复核。",
-        "3D volume preview is read-only. Switch to Slice review for label editing.": "3D 体预览为只读观察。需要修改标签时请切回切片复核。",
-        "Slice": "切片",
-        "View plane": "切片方向",
-        "Z axial": "Z 轴切片",
-        "Y coronal": "Y 方向切片",
-        "X sagittal": "X 方向切片",
-        "Side-angle slices are read-only in this version. Use Z axial view for label editing.": "当前版本中侧向切片为只读观察。需要修改标签时请切回 Z 轴切片。",
-        "Painting is available on Z slices only. Switch back to Z axial view before editing labels.": "画笔编辑目前只开放在 Z 轴切片上。修改标签前请切回 Z 轴切片。",
-        "Label layer": "标签层",
-        "Training truth is the reviewed read-only label used for training. Switch to Current labels before changing labels.": "训练真值是已经核验通过、用于训练的只读标签层。要修改标注，请先切换到“当前标注”。",
-        "Current labels are editable. Brush changes are saved here first; accept them as training truth after review.": "当前标注可直接编辑。画笔修改会先保存到这一层；复核通过后再核验为训练真值。",
-        "Model draft is a legacy read-only prediction copy kept for audit. Current prediction results open as Current labels now.": "模型草稿是旧流程保留的只读预测副本，仅用于追溯。现在的预测结果会直接打开为“当前标注”。",
-        "Editable AI result is the review layer for this project part. Brush changes are saved here; only accepted results become training truth.": "待核验 AI 结果是当前项目部位的可写复核层。画笔修改会保存到这里；只有核验通过后才会成为训练真值。",
-        "Raw AI prediction backup is read-only and kept for audit. Edit the review result layer instead.": "AI 原始备份只读，用于追溯。请在待核验结果层中修订。",
-        "Cannot paint on this label layer. Switch to Current labels first.": "当前标签层不能直接绘制。请先切换到“当前标注”。",
-        "Cannot paint on the legacy model draft. Switch to Current labels first.": "不能直接在旧版模型草稿上绘制。请先切换到“当前标注”。",
-        "manual_truth": "训练真值",
-        "working_edit": "当前标注",
-        "model_draft": "只读预测副本",
-        "editable_ai_result": "待核验 AI 结果",
-        "raw_ai_prediction_backup": "AI 原始备份",
-        "Overlay": "叠加透明度",
-        "Brightness": "亮度",
-        "Contrast": "对比度",
-        "Brush size": "画笔大小",
-        "Current label": "当前标签",
-        "Background / erase target": "背景 / 擦除目标",
-        "Label {0}: {1}": "标签 {0}：{1}",
-        "Eraser writes background 0. Current label remains {0}: {1}.": "橡皮擦会写入背景 0。当前标签仍为 {0}：{1}。",
-        "Selected label {0}: {1}.": "已选择标签 {0}：{1}。",
-        "Picked label {0}: {1}.": "已取样标签 {0}：{1}。",
-        "Sampled label {0}, but it is not in the current label table.": "取样到标签 {0}，但它不在当前标签表中。",
-        "No label layer is loaded to sample from.": "当前没有可取样的标签层。",
-        "Label picker is available on Z slices only. Switch back to Z axial view before sampling labels.": "取样工具目前只开放在 Z 轴切片上。取样前请切回 Z 轴切片。",
-        "Current label layer is unavailable. Check the working volume path before editing labels.": "当前标注层不可用。请检查工作体数据路径后再修改标签。",
-        "Part mask layer is unavailable. Check the part mask path before editing labels.": "部位 mask 图层不可用。请检查部位 mask 路径后再修改标签。",
-        "Undo": "撤销",
-        "Redo": "重做",
-        "Save current labels": "保存当前标注",
-        "Auto-save labels": "自动保存标注",
-        "Current labels saved.": "当前标注已保存。",
-        "Auto-saved current labels.": "已自动保存当前标注。",
-        "Part mask saved.": "部位 mask 已保存。",
-        "Auto-saved part mask.": "已自动保存部位 mask。",
-        "Painted label {0} on slice {1}.": "已在第 {1} 张切片绘制标签 {0}。",
-        "Erased labels on slice {0}.": "已擦除第 {0} 张切片上的标签。",
-        "Unsaved current labels": "未保存的当前标注",
-        "Unsaved part mask": "未保存的部位 mask",
-        "Save changes to the current labels before continuing?": "继续前是否保存当前标注的修改？",
-        "Save changes to the current part mask before continuing?": "继续前是否保存当前部位 mask 的修改？",
-        "Auto-save is on. Brush changes are saved shortly after editing.": "自动保存已开启。修改后会短延迟保存。",
-        "Auto-save is off. Remember to save the current labels.": "自动保存已关闭。请记得手动保存当前标注。",
-        "Auto-save is off. Remember to save the current part mask.": "自动保存已关闭。请记得手动保存当前部位 mask。",
-        "Accept as training truth": "核验为训练真值",
-        "Copy legacy model draft to current labels": "复制旧版模型草稿到当前标注",
-        "Label table": "标签表",
-        "Add material": "新增标签",
-        "Edit material": "编辑标签",
-        "Delete material": "删除标签",
-        "Data import": "数据导入",
-        "Part extraction": "部位提取",
-        "1. Locate part": "1. 定位部位",
-        "2. Build part mask": "2. 生成部位 mask",
-        "3. Output and manage": "3. 输出与管理",
-        "Full volume": "顶层导入体数据",
-        "Part volume": "项目部位体数据",
-        "Part": "部位",
-        "Reslices": "重切片",
-        "Parent specimen": "父级导入体数据",
-        "Current view": "当前视图",
-        "Parent bbox Z/Y/X": "父体 bbox Z/Y/X",
-        "Part image": "部位图像",
-        "Part mask": "部位 mask",
-        "Contours": "轮廓文件",
-        "Extraction": "提取记录",
-        "Parent working volume": "父工作体数据",
-        "Draw ROI": "手动框选 ROI",
-        "Save ROI draft": "保存 ROI 草稿",
-        "Confirm ROI": "确认 ROI",
-        "Cancel ROI": "取消 ROI",
-        "ROI ID:": "ROI 编号：",
-        "Create part": "新建部位",
-        "Part ID:": "部位编号：",
-        "Display name:": "显示名称：",
-        "z0,z1,y0,y1,x0,x1": "z0,z1,y0,y1,x0,x1",
-        "Add rectangular key slice": "添加矩形关键切片",
-        "Draw contour": "手绘轮廓",
-        "Delete key slice": "删除当前关键切片",
-        "Clear key slices": "清空关键切片",
-        "Previous key slice": "上一关键切片",
-        "Next key slice": "下一关键切片",
-        "Preview auto fill": "预览自动填充",
-        "Preview auto fill is already running.": "预览自动填充正在运行。",
-        "Preview auto fill is running...": "正在预览自动填充...",
-        "Preview auto fill finished": "预览自动填充完成",
-        "Part volume creation is already running.": "部位体数据正在创建中。",
-        "Part volume creation is running. Wait until it finishes before editing project data.": "部位体数据正在创建中。请等待完成后再修改项目数据。",
-        "Local Axis Reslice export is running. Wait until it finishes before editing project data.": "局部轴重切片正在导出中。请等待完成后再修改项目数据。",
-        "Creating part volume...": "正在创建部位体数据...",
-        "Writing part image and empty mask...": "正在写入部位图像和空 mask...",
-        "Initializing accepted/freehand part mask...": "正在初始化已接受/手绘部位 mask...",
-        "Initializing ROI shell part mask...": "正在初始化 ROI 外壳部位 mask...",
-        "Finalizing ROI...": "正在完成 ROI 保存...",
-        "Review the preview, then accept it before creating the part volume.": "请先检查预览，确认可用后接受，再创建部位体数据。",
-        "Accept part mask": "接受部位 mask",
-        "Use Confirm ROI to create the part volume with this accepted mask.": "请用“确认 ROI”创建带有此已接受 mask 的部位体数据。",
-        "Clear preview": "清除预览",
-        "Local Axis Reslice": "局部轴重切片",
-        "Local Axis Reslice / part volume": "局部轴重切片 / 部位体数据",
-        "Local axis status: ready": "局部轴状态：就绪",
-        "Export part package": "导出部位包",
-        "Delete part volume": "删除部位体数据",
-        "Delete part volume?": "删除部位体数据？",
-        "Delete part volume {0}? This removes the cropped image, mask, contours, and extraction files, but keeps the parent TIF volume.": "确认删除部位体数据 {0} 吗？这会删除裁剪图像、mask、轮廓和提取记录，但不会删除父级 TIF 体数据。",
-        "Deleted part volume {0}.": "已删除部位体数据 {0}。",
-        "Switch to Full volume before creating a part.": "请先切回顶层导入体数据，再新建部位。",
-        "Switch to Full volume before saving ROI draft.": "请先切回顶层导入体数据，再保存 ROI 草稿。",
-        "Switch to Full volume before confirming ROI.": "请先切回顶层导入体数据，再确认 ROI。",
-        "Switch to Full volume before drawing ROI.": "请先切回顶层导入体数据，再手动框选 ROI。",
-        "Drag rectangles on one or more key slices in the current view plane. The ROI bbox will expand to include them.": "在当前观察方向的一个或多个关键切片上拖拽矩形；ROI bbox 会自动合并这些框。",
-        "ROI bbox updated: {0}": "ROI bbox 已更新：{0}",
-        "ROI bbox updated and saved to draft {0}: {1}": "ROI bbox 已更新并保存到草稿 {0}：{1}",
-        "ROI key slices use one view plane. Switch back to {0} or save a separate ROI.": "同一个 ROI 外壳只能使用一个观察方向。请切回 {0}，或另存一个独立 ROI。",
-        "ROI shell mask initialized from {0} key slice(s).": "已根据 {0} 个关键切片初始化 ROI 外壳 mask。",
-        "Full-volume contour mask initialized from {0} key slice(s).": "已根据顶层导入体数据中的 {0} 个手绘轮廓关键切片初始化部位 mask。",
-        "Full-volume contour mask not initialized: {0}": "顶层导入体数据手绘轮廓 mask 未初始化：{0}",
-        "Draw an ROI or contour before saving or creating a part.": "请先手动框选 ROI 或手绘轮廓，再保存草稿或创建部位。",
-        "Saved ROI draft {0}.": "已保存 ROI 草稿 {0}。",
-        "Loaded ROI draft {0} for editing.": "已载入 ROI 草稿 {0}，可继续编辑。",
-        "Confirmed ROI and created part {0}.": "已确认 ROI 并创建部位 {0}。",
-        "Cancelled ROI draft {0}.": "已取消 ROI 草稿 {0}。",
-        "This ROI is linked to a created part and cannot be cancelled here.": "这个 ROI 已关联到已创建部位，不能在这里取消。",
-        "Select a full volume or part volume before editing part masks.": "请先选择顶层导入体数据或项目部位体数据，再编辑部位 mask。",
-        "Select a full volume or part volume before previewing masks.": "请先选择顶层导入体数据或项目部位体数据，再预览 mask。",
-        "Select a full volume or part volume before drawing contours.": "请先选择顶层导入体数据或项目部位体数据，再手绘轮廓。",
-        "Select a part volume before editing part masks.": "请先选择一个部位体数据，再编辑部位 mask。",
-        "Select a part volume before previewing masks.": "请先选择一个部位体数据，再预览 mask。",
-        "Key-slice mask preview currently uses Z slices.": "当前关键切片 mask 预览先使用 Z 轴切片。",
-        "Switch to part volume before drawing contours.": "请先选择部位体数据，再手绘轮廓。",
-        "Contour drawing currently uses Z slices.": "当前手绘轮廓先使用 Z 轴切片。",
-        "Drag on the current slice to draw a closed contour.": "请在当前切片上拖拽，画出一个闭合轮廓。",
-        "Drag on the current part slice to draw a closed contour.": "请在当前部位切片上拖拽，画出一个闭合轮廓。",
-        "Contour saved at Z {0}.": "已在 Z={0} 保存轮廓。",
-        "Contour needs at least 3 points.": "轮廓至少需要 3 个点。",
-        "Deleted contour at Z {0}.": "已删除 Z={0} 的轮廓。",
-        "Clear all key slices for the current full-volume part draft? This removes the hand-drawn mask draft but keeps the ROI bbox.": "清空当前顶层导入体数据部位草稿的全部手绘关键切片吗？这会移除精切 mask 草稿，但保留 ROI bbox。",
-        "Clear all key slices for part {0}? This removes saved mask key slices and the current auto-fill preview, but keeps the cropped part image.": "清空部位 {0} 的全部关键切片吗？这会移除已保存的 mask 关键切片和当前自动填充预览，但保留裁出来的部位图像。",
-        "Cleared {0} key slice(s) and reset the part mask draft.": "已清空 {0} 个关键切片，并重置部位 mask 草稿。",
-        "No part key slices to clear.": "当前没有可清空的部位关键切片。",
-        "Ignored {0} legacy ROI shell key slice(s). Use Clear key slices to remove them permanently.": "已忽略 {0} 个旧版 ROI 外壳关键切片。可点击“清空关键切片”永久移除。",
-        "No contour exists at Z {0}.": "Z={0} 没有可删除的轮廓。",
-        "No previous key slice.": "没有上一张关键切片。",
-        "No next key slice.": "没有下一张关键切片。",
-        "Draw at least one contour before previewing masks.": "请先至少手绘一个轮廓，再预览 mask。",
-        "Part mask preview quality: {0}": "部位 mask 预览质量：{0}",
-        "Quality check passed": "质量检查通过",
-        "Review warnings": "有提示，请复核",
-        "Exported part package.\nManifest: {0}": "已导出部位包。\nManifest：{0}",
-        "Exported part package.\nFolder: {0}\nManifest: {1}": "已导出部位包。\n文件夹：{0}\nManifest：{1}",
-        "Define a part-local output axis and roll reference, then export a reviewable local reslice.": "定义部位内输出轴和 roll 参照点，然后导出可复核的局部重切片。",
-        "Work in the 3D part preview first. Source Z is locked; copy it to create an editable output Z draft, then confirm the roll reference on the observation-side clip plane before export.": "优先在三维部位预览中工作。原始 Z 轴是锁定参考；先复制它生成可编辑输出 Z 草稿，再在观察侧剖切面确认 roll 参照后导出。轴中心由输出轴两端自动计算。",
-        "Use the 3D part preview as the main workspace. Copy source Z, drag the output axis endpoints, then enable the observation-side clip plane and pick roll references on that plane.": "以三维部位预览作为主操作区。复制原始 Z，拖动输出轴头尾；打开观察侧剖切面后，直接在剖切面上点选 roll 参照。",
-        "Use the 3D part preview as the main workspace. Copy source Z, drag the output axis endpoints, then pick the roll reference points on the observation-side clip plane. Export here when the frame is confirmed.": "以三维部位预览作为主操作区。复制原始 Z，拖动输出轴头尾，再在观察侧剖切面上点选 roll 参照点。确认后直接在这里导出。",
-        "Roll A/B/C picking works on the observation-side clip plane only. Turn on Clip plane in the 3D preview, move it to the target cross-section, then click A, B, and C on that plane.": "Roll A/B/C 只能在观察侧剖切面上点选。请在三维预览中打开“观察侧剖切面”，把切面移动到目标截面后，再在这张切面上点 A、B、C。",
-        "Pick roll/reference points on the current observation-side clip plane. If the clip plane is off, it will be enabled first.": "在当前观察侧剖切面上点选 roll/平面参照点。如果剖切面未开启，会先自动开启。",
-        "The A/B/C plane is computed from points picked on the observation-side clip plane; use it after A, B, and C are set.": "A/B/C 平面由观察侧剖切面上点选的三个点计算；请在 A、B、C 都设置后使用。",
-        "Composite drag preview is downshifted while rotating; still view keeps the selected quality.": "透明累积在拖动旋转时会临时降档；停止后仍按当前质量参数显示。",
-        "Selected saved reslice is read-only. Return to the part volume to edit axes or export another reslice.": "当前选中的已保存重切片为只读复核状态。请回到部位体数据节点再编辑轴或导出新的重切片。",
-        "Dragging output axis {0}.": "正在拖动输出轴{0}端点。",
-        "Updated output axis {0}.": "已更新输出轴{0}端点。",
-        "Dragging output axis body.": "正在整体移动输出轴。",
-        "Moved output axis body.": "已整体移动输出轴。",
-        "Pick roll reference A": "点选 Roll 参照 A",
-        "Pick roll reference B": "点选 Roll 参照 B",
-        "Pick plane reference C": "点选平面参照 C",
-        "Make Z perpendicular to A/B/C plane": "令 Z 垂直 A/B/C 平面",
-        "Make Z perpendicular\nto A/B/C plane": "令 Z 垂直\nA/B/C 平面",
-        "Clear roll refs": "清除 Roll 参照",
-        "Clear axis draft": "清除轴草稿",
-        "Click the observation-side clip plane to set {0}.": "请在观察侧剖切面上点击，设置 {0}。",
-        "Observation-side clip plane is now enabled. Move the clip depth if needed, then click the plane to set {0}.": "已开启观察侧剖切面。需要时先调整剖切深度，然后在切面上点击设置 {0}。",
-        "Set A/B/C plane reference points before aligning output Z.": "请先设置 A/B/C 三个平面参照点，再对齐输出 Z。",
-        "Aligned output Z perpendicular to the A/B/C reference plane.": "已将输出 Z 对齐为垂直 A/B/C 参照平面。",
-        "Cannot align output Z: {0}": "无法对齐输出 Z：{0}",
-        "Turn on the observation-side clip plane before picking roll references.": "请先打开观察侧剖切面，再点选 roll 参照。",
-        "Turn on the observation-side clip plane before picking local-axis points.": "请先打开观察侧剖切面，再点选局部轴点。",
-        "Set {0}: {1}": "已设置 {0}: {1}",
-        "Cleared roll reference points.": "已清除 roll 参照点。",
-        "Cleared local axis draft.": "已清除局部轴草稿。",
-        "Roll reference": "Roll 参照",
-        "Roll reference: A/B not set": "Roll 参照：A/B 未设置",
-        "Roll reference: {0}": "Roll 参照：{0}",
-        "Plane reference: C {0}": "平面参照：C {0}",
-        "set": "已设置",
-        "not set": "未设置",
-        "Frame status: ready": "坐标系状态：已就绪",
-        "Frame status: waiting for roll reference": "坐标系状态：等待 Roll 参照",
-        "Show axis details": "显示轴参数",
-        "Axis/reference relation": "输出轴与参照点关系",
-        "Roll reference A": "Roll 参照 A",
-        "Roll reference B": "Roll 参照 B",
-        "Plane reference C": "平面参照 C",
-        "Reference plane normal": "参照平面法线",
-        "Roll A projection on output Z": "Roll A 在输出 Z 上的位置",
-        "Roll B projection on output Z": "Roll B 在输出 Z 上的位置",
-        "A/B separation along output Z": "A/B 沿输出 Z 间距",
-        "A/B lateral distance to output Z": "A/B 到输出 Z 横向距离",
-        "A/B projected roll width": "A/B 投影 roll 宽度",
-        "A/B roll direction status": "A/B roll 方向状态",
-        "usable": "可用",
-        "needs two reference points": "需要两个参照点",
-        "parallel to output Z": "接近输出 Z，需重新点选",
-        "voxel": "体素",
-        "Local frame": "局部坐标系",
-        "x_axis": "x_axis",
-        "y_axis": "y_axis",
-        "z_axis": "z_axis",
-        "start": "起点",
-        "end": "终点",
-        "Local axis unavailable. Select a part volume.": "局部轴不可用。请先选择部位体数据。",
-        "Source Z axis: locked reference": "原始 Z 轴：锁定参考",
-        "3D overlay: on": "三维叠加显示：开启",
-        "3D overlay: off": "三维叠加显示：关闭",
-        "Draft output Z: none": "草稿输出 Z：无",
-        "Draft output Z: {0}": "草稿输出 Z：{0}",
-        "Saved reslice: none selected": "已保存重切片：未选中",
-        "Saved reslice: {0}": "已保存重切片：{0}",
-        "Export confirmed reslice": "导出确认重切片",
-        "Copied source Z axis as editable output axis.": "已从原始 Z 轴复制可编辑输出轴。",
-        "Select a part volume before editing Local Axis Reslice.": "请先选择一个部位体数据，再编辑局部轴重切片。",
-        "Select a part volume before exporting Local Axis Reslice.": "请先选择一个部位体数据，再导出局部轴重切片。",
-        "Copy source Z and set roll reference points before exporting.": "导出前请先复制原始 Z 轴，并设置完整 roll 参照点。",
-        "Local frame is not ready: {0}": "局部坐标系尚未就绪：{0}",
-        "Exporting confirmed Local Axis Reslice...": "正在导出已确认的局部轴重切片...",
-        "Preparing Local Axis Reslice export...": "正在准备局部轴重切片导出...",
-        "Finalizing Local Axis Reslice export...": "正在完成局部轴重切片导出...",
-        "Preparing Local Axis Reslice image...": "正在准备局部轴重切片图像...",
-        "Reslicing Local Axis image": "正在分块重切片局部轴图像...",
-        "Reslicing Local Axis mask": "正在分块重切片局部轴 mask...",
-        "Local Axis Reslice export is already running.": "局部轴重切片正在导出中。",
-        "Local Axis Reslice export did not return a result.": "局部轴重切片导出没有返回结果。",
-        "Local Axis data": "局部轴数据",
-        "Copy source Z axis": "复制原始 Z 轴",
-        "Export reslice": "导出重切片",
-        "Export Local Axis training manifest": "导出局部轴训练清单",
-        "Reslice ID": "重切片编号",
-        "Template": "模板",
-        "Origin z,y,x": "输出轴中点 z,y,x",
-        "Output axis start z,y,x": "输出轴起点 z,y,x",
-        "Output axis end z,y,x": "输出轴终点 z,y,x",
-        "Local axis draft": "局部轴草稿",
-        "Roll point A role": "Roll 点 A 角色",
-        "Roll point A z,y,x": "Roll 点 A z,y,x",
-        "Roll point B role": "Roll 点 B 角色",
-        "Roll point B z,y,x": "Roll 点 B z,y,x",
-        "Output shape z,y,x": "输出尺寸 z,y,x",
-        "Image": "图像",
-        "Metadata": "元数据",
-        "Output shape Z/Y/X": "输出尺寸 Z/Y/X",
-        "Human confirmed": "人工已确认",
-        "Usable for training": "可用于训练",
-        "Record this export as trainable local-axis data": "将本次导出记录为可训练局部轴数据",
-        "Hard case flags": "困难样本标记",
-        "Source proposal": "来源建议项",
-        "Model version": "模型版本",
-        "Exported local axis reslice {0}.": "已导出局部轴重切片 {0}。",
-        "Exported Local Axis training manifest: {0} samples\n{1}": "已导出局部轴训练清单：{0} 条样本\n{1}",
-        "Select a part volume before exporting a part package.": "请先选择一个部位体数据，再导出部位包。",
-        "Created part {0} from bbox {1}.": "已按 bbox {1} 新建部位 {0}。",
-        "Added rectangular key slice at Z {0}.": "已在 Z={0} 添加矩形关键切片。",
-        "Preview mask generated from {0} key slice(s).": "已根据 {0} 个关键切片生成预览 mask。",
-        "Accepted part mask.": "已接受部位 mask。",
-        "Part volume is read-only here. Use part mask preview controls for extraction masks.": "当前部位体数据在这里按只读观察处理。请用部位 mask 预览控件生成提取 mask。",
-        "Selected saved reslice is read-only. Return to the part volume to edit masks.": "当前选中的已保存重切片为只读复核状态。请回到部位体数据节点再编辑 mask。",
-        "Part volumes are not promoted to full-volume manual truth in this version.": "当前版本不会把项目部位体数据提升为顶层导入体数据的训练真值。",
-        "Part volumes do not use model draft handoff in this version.": "当前项目部位体数据不走旧版模型草稿交接。",
-        "Raw AI prediction backup is read-only. Switch to editable AI result before correcting labels.": "AI 原始备份只读。请切换到待核验 AI 结果层后再修订。",
-        "Cannot paint on this part label layer. Switch to editable AI result first.": "不能在当前部位标签层绘制。请先切换到待核验 AI 结果层。",
-        "Auto-saved editable AI result.": "已自动保存待核验 AI 结果。",
-        "Editable AI result saved.": "已保存待核验 AI 结果。",
-        "Unsaved editable AI result": "待核验 AI 结果未保存",
-        "Save changes to the current editable AI result before continuing?": "继续前是否保存当前待核验 AI 结果的修改？",
-        "Part label IDs are not in the active label schema: {0}": "部位标签编号不在当前标签表中：{0}",
-        "This editable AI result has not been marked opened for review. Accept it as training truth anyway?": "这个待核验 AI 结果还没有记录为已打开复核。仍然核验为训练真值吗？",
-        "Promote the reviewed editable AI result to part-level training truth?": "将已复核的待核验 AI 结果核验为项目部位训练真值？",
-        "Accepted current labels as training truth.": "已将当前标注核验为训练真值。",
-        "Accept selected AI results": "核验通过所选 AI 结果",
-        "No selected editable AI result is ready for acceptance.": "当前没有可核验通过的已选待核验 AI 结果。",
-        "Selected editable AI result(s) have label/schema problems: {0}": "选中的待核验 AI 结果存在标签表问题：{0}",
-        "AI review check": "AI 复核检查",
-        "Select a part editable AI result to see review checks.": "请选择部位待核验 AI 结果以查看复核检查。",
-        "No editable AI result is available for this part.": "当前部位没有待核验 AI 结果。",
-        "Review check passed. This editable AI result can be accepted as training truth.": "复核检查通过。这个待核验 AI 结果可以核验为训练真值。",
-        "Review check passed, but this result has not been opened for review yet.": "复核检查通过，但这个结果尚未记录为已打开复核。",
-        "Review check blocked: {0}": "复核检查阻断：{0}",
-        "Schema {0}; labels present: {1}; unknown labels: {2}": "标签表 {0}；当前编号：{1}；未知编号：{2}",
-        "No labels present": "未发现标签编号",
-        "none": "无",
-        "Some selected editable AI result(s) have not been opened for review. Accept them as training truth anyway?": "部分选中的待核验 AI 结果还没有打开复核记录。仍然将它们核验为训练真值吗？",
-        "Accept {0} selected editable AI result(s) as training truth?": "将 {0} 个已选待核验 AI 结果核验为训练真值吗？",
-        "Accepted {0} editable AI result(s) as training truth.": "已将 {0} 个待核验 AI 结果核验为训练真值。",
-        "Auto-save is off. Remember to save the editable AI result.": "自动保存已关闭。请记得保存待核验 AI 结果。",
-        "Editable AI result": "待核验 AI 结果",
-        "Raw AI prediction backup": "AI 原始备份",
-        "Label schema": "标签表",
-        "Render color": "渲染颜色",
-        "Amber": "琥珀黄",
-        "Cyan": "青蓝",
-        "White": "灰白",
-        "Morphology Inspect": "形态检查",
-        "Publication Inspect": "发表检查",
-        "Custom": "自定义",
-        "Import TIF stack": "导入 TIF stack",
-        "Import AMIRA directory": "导入 AMIRA 目录",
-        "Start Center": "启动中心",
-        "Ask Agent": "询问 Agent",
-        "Training handoff": "训练交接",
-        "Export train-ready volumes": "导出可训练体数据",
-        "Backend parameters": "后端参数",
-        "Dataset exchange": "训练数据交换",
-        "Use nnU-Net v2 preset": "使用 nnU-Net v2 预设",
-        "nnU-Net v2 preset filled. Commands remain editable for other 3D backends.": "已填入 nnU-Net v2 预设。命令仍可编辑，以便接入其他 3D 后端。",
-        "Backend ID": "后端 ID",
-        "Display name": "显示名称",
-        "Python": "Python",
-        "Export formats": "导出格式",
-        "Prepare command": "Prepare 命令",
-        "Train command": "训练命令",
-        "Predict command": "预测命令",
-        "Model manifest": "模型 manifest",
-        "Save backend settings": "保存后端设置",
-        "Prepare dataset": "准备训练数据",
-        "Train backend": "训练后端",
-        "Import prediction": "运行预测并导入待核验结果",
-        "Batch prediction targets": "批量预测目标",
-        "Browse manifest": "选择 manifest",
-        "Select model manifest": "选择模型 manifest",
-        "Selected model manifest: {0}": "已选择模型 manifest：{0}",
-        "Predict group": "预测分组",
-        "All parts": "全部部位",
-        "Current part": "当前部位",
-        "Refresh targets": "刷新目标",
-        "Select current part": "选择当前部位",
-        "Select all ready": "全选可预测",
-        "Clear selection": "清空选择",
-        "Use": "使用",
-        "Specimen": "个体",
-        "Part": "部位",
-        "Reslice": "重切片",
-        "Group tags": "分组标签",
-        "Predict check": "预测检查",
-        "Overwrite": "覆盖",
-        "Ready": "可预测",
-        "Not ready": "不可预测",
-        "Prediction targets: {0} listed, {1} ready, {2} selected, {3} will overwrite editable AI result, {4} incomplete.": "预测目标：共 {0} 个，{1} 个可预测，已选 {2} 个，{3} 个会覆盖待核验 AI 结果，{4} 个不完整。",
-        "Select a part volume before choosing the current prediction target.": "请先选择一个部位体数据，再选择当前预测目标。",
-        "Current part is not ready for prediction.": "当前部位还不满足预测的客观完整性检查。",
-        "Selected prediction target is incomplete: {0}": "选中的预测目标不完整：{0}",
-        "Select at least one prediction target.": "请至少勾选一个预测目标。",
-        "Select a model manifest before prediction.": "预测前请先选择模型 manifest。",
-        "Model manifest does not exist: {0}": "模型 manifest 不存在：{0}",
-        "Stop run": "停止运行",
-        "Open run folder": "打开运行文件夹",
-        "Open result JSON": "打开 result.json",
-        "Open model output": "打开模型输出",
-        "Open model manifest": "打开模型 manifest",
-        "Show result summary": "查看结果摘要",
-        "Backend run": "后端运行",
-        "Training result": "训练结果",
-        "No training result yet.": "当前还没有训练结果。",
-        "Training result is ready for review.": "训练结果已可复核。",
-        "Training result: {0} metric(s), {1} curve(s), {2} mask preview(s).\nModel output: {3}\nModel manifest: {4}": "训练结果：{0} 个指标、{1} 条曲线、{2} 个 mask 预览。\n模型输出：{3}\n模型 manifest：{4}",
-        "Training result summary": "训练结果摘要",
-        "Training curves": "训练曲线",
-        "Mask previews": "Mask 预览",
-        "Training curves / mask previews": "训练曲线 / Mask 预览",
-        "No training curve artifact declared.": "后端尚未声明训练曲线 artifact。",
-        "No mask preview artifact declared.": "后端尚未声明 mask 预览 artifact。",
-        "Key metrics": "关键指标",
-        "Artifacts": "产物",
-        "Warnings": "警告",
-        "Errors": "错误",
-        "Model manifest": "模型 manifest",
-        "Model output": "模型输出",
-        "No model output folder is available yet.": "当前还没有可打开的模型输出目录。",
-        "No model manifest is available yet.": "当前还没有可打开的模型 manifest。",
-        "No training result summary is available yet.": "当前还没有可查看的训练结果摘要。",
-        "Ready for batch prediction": "可进入批量预测",
-        "Enter batch prediction": "进入批量预测",
-        "Batch prediction entry will use the selected model manifest in the next phase.": "下一阶段批量预测入口会使用当前模型 manifest。",
-        "Batch prediction entry will be enabled in the Predict phase after model manifest selection is finalized.": "批量预测入口会在 Predict 阶段完成模型 manifest 选择后启用。",
-        "Model manifest filled for batch prediction. Choose target part(s), then run prediction.": "已为批量预测填入模型 manifest。请选择目标部位后再运行预测。",
-        "Value": "值",
-        "Type": "类型",
-        "Format": "格式",
-        "Path": "路径",
-        "Close": "关闭",
-        "Run ID": "运行 ID",
-        "exists": "存在",
-        "missing": "缺失",
-        "Idle": "空闲",
-        "Elapsed: 00:00": "已用时：00:00",
-        "Elapsed: {0}": "已用时：{0}",
-        "Running {0}...": "正在运行 {0}...",
-        "Cancelling {0}...": "正在停止 {0}...",
-        "Run cancelled: {0}": "运行已停止：{0}",
-        "Run failed: {0}": "运行失败：{0}",
-        "Run finished: {0}\nRun: {1}": "运行完成：{0}\n运行目录：{1}",
-        "Backend task is already running.": "后端任务正在运行中。",
-        "Backend run is active. Stop it or wait until it finishes before editing project data.": "后端运行中。请先停止或等待完成，再修改项目数据。",
-        "Wait for the current backend task to finish before closing the project.": "请等待当前后端任务结束后再关闭项目。",
-        "No backend run folder is available yet.": "当前还没有可打开的后端运行文件夹。",
-        "No backend result JSON is available yet.": "当前还没有可打开的 result.json。",
-        "This predict run will overwrite the current editable result for selected target(s), but will not overwrite training truth. Continue?": "本次预测会覆盖所选目标的待核验结果，但不会覆盖训练真值。是否继续？",
-        "Import external label TIF as review result": "导入外部标签 TIF 为待核验结果",
-        "Import External Label TIF": "导入外部标签 TIF",
-        "Prediction ID:": "预测编号：",
-        "Source model:": "来源模型：",
-        "Imported external label TIF as editable review result for specimen {0}. Report: {1}": "已为 specimen {0} 将外部标签 TIF 导入为可编辑待核验结果。报告：{1}",
-        "Please select a specimen with a working volume first.": "请先选择一个已有 working volume 的 specimen。",
-        "Specimen status": "Specimen 状态",
-        "Volume metadata": "体数据元数据",
-        "No specimens in this TIF project": "当前 TIF 项目还没有 specimen",
-        "Working volume missing": "缺少 working volume",
-        "Reslice TIF cannot be opened quickly. Re-export the reslice as an uncompressed TaxaMask local-axis TIF before slice review.": "重切片 TIF 不能快速打开。请重新导出未压缩的 TaxaMask 局部轴重切片后再进行切片复核。",
-        "Reslice TIF cannot be opened for immediate slice review: {0}": "重切片 TIF 无法用于即时切片复核：{0}",
-        "yes": "是",
-        "no": "否",
-        "Train": "训练",
-        "train-ready": "可训练",
-        "not train-ready": "不可训练",
-        "Status": "状态",
-        "Train-ready": "可训练",
-        "Reasons": "原因",
-        "Shape Z/Y/X": "Shape Z/Y/X",
-        "dtype": "dtype",
-        "spacing Z/Y/X": "spacing Z/Y/X",
-        "modality": "成像类型",
-        "Source TIF": "原始 TIF",
-        "Working volume": "工作体数据",
-        "Working edit": "当前标注",
-        "Training truth": "训练真值",
-        "Latest model draft": "最新只读预测副本",
-        "Show debug paths": "显示调试路径",
-        "Import report": "导入报告",
-        "TIF data import": "TIF 数据导入",
-        "Please create or open a TIF project first.": "请先新建或打开一个 TIF 项目。",
-        "Please create or open a TIF volume project first.": "请先新建或打开一个 TIF 体数据项目。",
-        "Import TIF Stack": "导入 TIF stack",
-        "Import AMIRA Directory": "导入 AMIRA 目录",
-        "Specimen ID:": "Specimen 编号：",
-        "Imported TIF stack for specimen {0}. Report: {1}": "已为 specimen {0} 导入 TIF stack。报告：{1}",
-        "Importing TIF stack...": "正在导入 TIF stack...",
-        "Reading TIF slices": "正在读取 TIF 切片",
-        "Reading TIF volume": "正在读取 TIF 体数据",
-        "Writing TIF sidecar": "正在写入 TIF sidecar",
-        "Creating editable label layer": "正在创建可编辑标签层",
-        "Saving TIF project": "正在保存 TIF 项目",
-        "Build working volume": "生成 working volume",
-        "Building working volume...": "正在生成 working volume...",
-        "Working volume build is already running.": "已有 working volume 生成任务正在运行。",
-        "Wait for the current background TIF task to finish before closing the project.": "请等待当前后台 TIF 任务完成后再关闭项目。",
-        "Working volume ready": "Working volume 已就绪",
-        "Working volume ready for specimen {0}. Report: {1}": "Specimen {0} 的 working volume 已就绪。报告：{1}",
-        "Reading metadata": "正在读取 metadata",
-        "TIF import is already running.": "已有 TIF 导入正在运行。",
-        "Imported AMIRA directory for specimen {0}. Report: {1}": "已为 specimen {0} 导入 AMIRA 目录。报告：{1}",
-        "TIF training handoff": "TIF 训练交接",
-        "Export train-ready TIF volumes": "导出可训练 TIF 体数据",
-        "Exported {0} train-ready specimen(s).\nManifest: {1}": "已导出 {0} 个可训练 specimen。\nManifest：{1}",
-        "Exported {0} train-ready part(s).\nManifest: {1}": "已导出 {0} 个可训练部位。\nManifest：{1}",
-        "Export failed: {0}": "导出失败：{0}",
-        "TIF backend": "TIF 后端",
-        "Backend settings saved.": "后端设置已保存。",
-        "Running {0}...": "正在运行：{0}...",
-        "Action finished: {0}\nRun: {1}": "动作完成：{0}\n运行目录：{1}",
-        "Action failed: {0}": "动作失败：{0}",
-        "No command configured for this backend action.": "这个后端动作还没有配置命令。",
-        "No train-ready top-level volumes are available.": "当前没有可训练的顶层导入体数据。",
-        "No top-level volume is available for prediction.": "当前没有可用于预测的顶层导入体数据。",
-        "No train-ready parts are available.": "当前没有可训练的部位。",
-        "Current part/reslice is not train-ready yet.": "当前部位/重切片还不能用于训练。",
-        "No train-ready samples are available for training.": "当前没有可用于训练的样本。",
-        "Part readiness": "部位训练检查",
-        "Top-level readiness": "顶层整只训练检查",
-        "No project part volumes are available.": "项目中还没有部位体数据。",
-        "No top-level volume records are available.": "项目中还没有顶层导入体数据。",
-        "All checked part samples are train-ready.": "已检查的部位样本都满足训练条件。",
-        "All checked top-level volumes are train-ready.": "已检查的顶层导入体数据都满足训练条件。",
-        "Missing: {0}": "缺项：{0}",
-        "+{0} more": "另有 {0} 个",
-        "Next step: save current labels, then click Accept as training truth in Label review. Training uses reviewed manual_truth only; editable labels are not sent to training directly.": "下一步：先保存当前标注，再到“标注核验”中点击“核验当前标注/Accept as training truth”。训练只使用已核验的 manual_truth，不会直接把待核验编辑层送入训练。",
-        "Training truth is missing; accept the current editable labels as training truth first.": "缺少训练真值；请先把当前可编辑标注核验为训练真值。",
-        "Part has not been marked as verified train-ready.": "部位还没有标记为已核验可训练。",
-        "Part record is missing.": "部位记录缺失。",
-        "Part image is missing.": "部位图像缺失。",
-        "Reslice record is missing.": "重切片记录缺失。",
-        "Reslice image is missing.": "重切片图像缺失。",
-        "Label schema is missing or empty.": "标签表缺失或为空。",
-        "Part label shape does not match the part/reslice image.": "部位标签体尺寸与部位/重切片图像不一致。",
-        "Label IDs are not all defined in the bound label schema.": "标签体中存在未在当前标签表定义的编号。",
-        "Label volume cannot be read.": "标签体无法读取。",
-        "Specimen has not been marked train-ready.": "顶层整只数据还没有标记为可训练。",
-        "Working image is missing.": "工作体数据缺失。",
-        "Material map is missing.": "材料/标签表缺失。",
-        "Image and label shapes do not match.": "图像与标签体尺寸不一致。",
-        "No trainable material is defined in the material map.": "材料/标签表中没有定义可训练标签。",
-        "No part is available for prediction.": "当前没有可用于预测的部位。",
-        "Copied latest model draft into working_edit.": "已将最新只读预测副本复制到当前标注。",
-        "No model draft is available for this specimen.": "当前 specimen 还没有只读预测副本。",
-        "Background material cannot be deleted.": "不能删除背景标签。",
-        "Material {0} is still used by a label volume.": "标签 {0} 仍被标签体数据使用，不能删除。",
-        "Delete material {0} ({1})?": "删除标签 {0}（{1}）？",
-        "Accept working edit": "核验当前标注",
-        "Promote the current working_edit layer to training truth?": "将当前标注核验为可训练的训练真值？",
-    }
-}
-
-
-def tt(text, lang):
-    return TIF_TRANSLATIONS.get(lang, {}).get(text, text)
-
-
 def _now_log_time():
     from datetime import datetime
 
     return datetime.now().strftime("%H:%M:%S")
-
-
-class MaterialEditorDialog(QDialog):
-    def __init__(self, material=None, next_id=1, parent=None, lang="en"):
-        super().__init__(parent)
-        self.lang = lang
-        self.setWindowTitle(tt("Material", self.lang))
-        material = dict(material or {})
-        self.id_spin = WheelSafeSpinBox()
-        self.id_spin.setRange(0, 65535)
-        self.id_spin.setValue(int(material.get("id", next_id)))
-        self.id_spin.setEnabled(not material)
-        self.name_edit = QLineEdit(str(material.get("name", "")))
-        self.display_edit = QLineEdit(str(material.get("display_name", material.get("name", ""))))
-        self.color_edit = QLineEdit(str(material.get("color", "#f94144")))
-        self.color_edit.setObjectName("tifMaterialColorValue")
-        self.color_edit.setVisible(False)
-        self.color_swatch = QLabel("")
-        self.color_swatch.setObjectName("tifMaterialDialogColorSwatch")
-        self.color_swatch.setFixedSize(44, 24)
-        self.trainable_check = QCheckBox(tt("Trainable", self.lang))
-        self.trainable_check.setChecked(bool(material.get("trainable", self.id_spin.value() != 0)))
-        self.color_button = QPushButton(tt("Choose color", self.lang))
-        self.color_button.clicked.connect(self.choose_color)
-        self._update_color_swatch()
-
-        layout = QVBoxLayout(self)
-        form = QFormLayout()
-        form.addRow(tt("ID", self.lang), self.id_spin)
-        form.addRow(tt("Name", self.lang), self.name_edit)
-        form.addRow(tt("Display name", self.lang), self.display_edit)
-        color_row = QHBoxLayout()
-        color_row.addWidget(self.color_swatch)
-        color_row.addWidget(self.color_button)
-        color_row.addStretch(1)
-        form.addRow(tt("Color", self.lang), color_row)
-        form.addRow("", self.trainable_check)
-        layout.addLayout(form)
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-
-    def choose_color(self):
-        color = QColorDialog.getColor(QColor(self.color_edit.text()), self, "Material color")
-        if color.isValid():
-            self.color_edit.setText(color.name())
-            self._update_color_swatch()
-
-    def _update_color_swatch(self):
-        color = QColor(self.color_edit.text())
-        if not color.isValid():
-            color = QColor("#f94144")
-            self.color_edit.setText(color.name())
-        self.color_swatch.setToolTip(color.name())
-        self.color_swatch.setStyleSheet(
-            f"background-color: {color.name()}; border: 1px solid #D7E0E4; border-radius: 5px;"
-        )
-
-    def get_material(self):
-        material_id = int(self.id_spin.value())
-        name = self.name_edit.text().strip() or f"material_{material_id}"
-        display_name = self.display_edit.text().strip() or name
-        return {
-            "id": material_id,
-            "name": name,
-            "display_name": display_name,
-            "color": self.color_edit.text().strip(),
-            "trainable": bool(self.trainable_check.isChecked() and material_id != 0),
-            "source_name": display_name,
-        }
-
-
-class TifPartNameDialog(QDialog):
-    def __init__(self, title, part_id="", display_name="", parent=None, lang="en", id_label="Part ID:"):
-        super().__init__(parent)
-        self.lang = lang
-        self.setWindowTitle(tt(title, self.lang))
-        layout = QFormLayout(self)
-        self.part_id_edit = QLineEdit(str(part_id or ""))
-        self.display_name_edit = QLineEdit(str(display_name or part_id or ""))
-        layout.addRow(tt(id_label, self.lang), self.part_id_edit)
-        layout.addRow(tt("Display name:", self.lang), self.display_name_edit)
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addRow(buttons)
-
-    def values(self):
-        part_id = self.part_id_edit.text().strip()
-        display_name = self.display_name_edit.text().strip() or part_id
-        return part_id, display_name
-
-
-def _safe_training_result_text(value):
-    if isinstance(value, float):
-        return f"{value:.4g}"
-    if isinstance(value, (int, bool)):
-        return str(value)
-    if value is None:
-        return "-"
-    if isinstance(value, (list, tuple)):
-        return ", ".join(_safe_training_result_text(item) for item in value)
-    if isinstance(value, dict):
-        return json.dumps(value, ensure_ascii=False, sort_keys=True)
-    return str(value)
-
-
-def _flatten_training_metrics(value, prefix=""):
-    rows = []
-    if isinstance(value, dict):
-        for key in sorted(value.keys(), key=lambda item: str(item)):
-            child_prefix = f"{prefix}.{key}" if prefix else str(key)
-            rows.extend(_flatten_training_metrics(value.get(key), child_prefix))
-        return rows
-    rows.append((prefix or "value", _safe_training_result_text(value)))
-    return rows
-
-
-def _artifact_absolute_path(result_json, artifact):
-    path = str((artifact or {}).get("path") or "").strip()
-    if not path:
-        return ""
-    if os.path.isabs(path):
-        return os.path.normpath(path)
-    base = os.path.dirname(os.path.abspath(str(result_json or ""))) if result_json else os.getcwd()
-    return os.path.abspath(os.path.join(base, path))
-
-
-def _result_relative_absolute_path(result_json, path):
-    path = str(path or "").strip()
-    if not path:
-        return ""
-    if os.path.isabs(path):
-        return os.path.normpath(path)
-    if result_json:
-        return os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(result_json)), path))
-    return os.path.abspath(path)
-
-
-def summarize_tif_training_result(result, result_json="", run_dir=""):
-    result = result if isinstance(result, dict) else {}
-    result_json = str(result_json or result.get("_result_json") or "").strip()
-    run_dir = str(run_dir or result.get("run_dir") or "").strip()
-    if not run_dir and result_json:
-        run_dir = os.path.dirname(os.path.abspath(result_json))
-    metrics = result.get("metrics") if isinstance(result.get("metrics"), dict) else {}
-    artifacts = []
-    for artifact in result.get("artifacts", []) or []:
-        if not isinstance(artifact, dict):
-            continue
-        item = dict(artifact)
-        item["absolute_path"] = _artifact_absolute_path(result_json, item)
-        artifacts.append(item)
-    warnings = [str(item) for item in (result.get("warnings") or [])]
-    errors = [str(item) for item in (result.get("errors") or [])]
-    provenance = result.get("provenance") if isinstance(result.get("provenance"), dict) else {}
-    model_manifest = _result_relative_absolute_path(result_json, provenance.get("model_manifest") or "")
-    if not model_manifest:
-        for artifact in artifacts:
-            if str(artifact.get("type") or "") == "model_manifest" and artifact.get("absolute_path"):
-                model_manifest = str(artifact.get("absolute_path") or "")
-                break
-    model_output = ""
-    for artifact in artifacts:
-        artifact_type = str(artifact.get("type") or "")
-        artifact_path = str(artifact.get("absolute_path") or "")
-        if artifact_type in {"model_output_dir", "model_dir", "checkpoint_dir"} and artifact_path:
-            model_output = artifact_path
-            break
-    if not model_output:
-        for artifact in artifacts:
-            artifact_path = str(artifact.get("absolute_path") or "")
-            if artifact_path and os.path.isdir(artifact_path):
-                model_output = artifact_path
-                break
-    if not model_output and run_dir:
-        candidate = os.path.join(run_dir, "outputs")
-        if os.path.isdir(candidate):
-            model_output = candidate
-    curves = []
-    previews = []
-    for artifact in artifacts:
-        artifact_type = str(artifact.get("type") or "").lower()
-        artifact_format = str(artifact.get("format") or "").lower()
-        artifact_path = str(artifact.get("path") or "").lower()
-        is_image_like = artifact_format in {"png", "jpg", "jpeg", "svg", "html"}
-        if artifact_type in {"training_curve", "training_curves", "loss_curve", "metric_curve"} or (is_image_like and "curve" in f"{artifact_type} {artifact_path}"):
-            curves.append(artifact)
-        if artifact_type in {"mask_preview", "sample_mask_preview", "prediction_preview", "validation_preview"} or "preview" in f"{artifact_type} {artifact_path}":
-            previews.append(artifact)
-    summary_metrics = _flatten_training_metrics(metrics)
-    return {
-        "action": str(result.get("action") or ""),
-        "status": str(result.get("status") or ""),
-        "backend_id": str(result.get("backend_id") or ""),
-        "run_id": str(result.get("run_id") or ""),
-        "run_dir": os.path.abspath(run_dir) if run_dir else "",
-        "result_json": os.path.abspath(result_json) if result_json else "",
-        "model_manifest": os.path.abspath(model_manifest) if model_manifest else "",
-        "model_output": os.path.abspath(model_output) if model_output else "",
-        "metrics": summary_metrics,
-        "artifacts": artifacts,
-        "curves": curves,
-        "previews": previews,
-        "warnings": warnings,
-        "errors": errors,
-        "provenance": provenance,
-    }
-
-
-class TifTrainingResultDialog(QDialog):
-    def __init__(self, summary, lang="en", parent=None):
-        super().__init__(parent)
-        self.summary = summary if isinstance(summary, dict) else {}
-        self.lang = lang
-        self.setWindowTitle(tt("Training result summary", self.lang))
-        self.resize(760, 620)
-        layout = QVBoxLayout(self)
-        layout.setSpacing(8)
-
-        header = QLabel(self._header_text())
-        header.setWordWrap(True)
-        layout.addWidget(header)
-
-        self.metrics_table = QTableWidget(0, 2)
-        self.metrics_table.setObjectName("tifTrainingResultMetricsTable")
-        self.metrics_table.setHorizontalHeaderLabels([tt("Key metrics", self.lang), tt("Value", self.lang)])
-        self.metrics_table.horizontalHeader().setStretchLastSection(True)
-        self.metrics_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.metrics_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self._populate_metrics()
-        layout.addWidget(self.metrics_table, 1)
-
-        artifact_label = QLabel(tt("Artifacts", self.lang))
-        layout.addWidget(artifact_label)
-        self.artifact_table = QTableWidget(0, 4)
-        self.artifact_table.setObjectName("tifTrainingResultArtifactTable")
-        self.artifact_table.setHorizontalHeaderLabels([tt("Type", self.lang), tt("Format", self.lang), tt("Path", self.lang), tt("Status", self.lang)])
-        self.artifact_table.horizontalHeader().setStretchLastSection(True)
-        self.artifact_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.artifact_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self._populate_artifacts()
-        layout.addWidget(self.artifact_table, 1)
-
-        preview_header = QHBoxLayout()
-        preview_header.addWidget(QLabel(tt("Training curves / mask previews", self.lang)))
-        self.preview_percent_slider = QSlider(Qt.Horizontal)
-        self.preview_percent_slider.setObjectName("tifTrainingResultPreviewPercentSlider")
-        self.preview_percent_slider.setRange(5, 100)
-        self.preview_percent_slider.setValue(20)
-        self.preview_percent_slider.setTickPosition(QSlider.TicksBelow)
-        self.preview_percent_slider.setTickInterval(10)
-        self.preview_percent_label = QLabel("")
-        self.preview_percent_label.setObjectName("tifTrainingResultPreviewPercentText")
-        self.preview_percent_slider.valueChanged.connect(self._populate_preview_gallery)
-        preview_header.addWidget(self.preview_percent_slider, 1)
-        preview_header.addWidget(self.preview_percent_label)
-        layout.addLayout(preview_header)
-
-        self.preview_scroll = QScrollArea()
-        self.preview_scroll.setObjectName("tifTrainingResultPreviewScroll")
-        self.preview_scroll.setWidgetResizable(True)
-        self.preview_scroll.setMinimumHeight(150)
-        self.preview_body = QWidget()
-        self.preview_body.setObjectName("tifTrainingResultPreviewGallery")
-        self.preview_grid = QGridLayout(self.preview_body)
-        self.preview_grid.setSpacing(10)
-        self.preview_scroll.setWidget(self.preview_body)
-        layout.addWidget(self.preview_scroll, 1)
-        self._populate_preview_gallery()
-
-        detail = QTextEdit()
-        detail.setObjectName("tifTrainingResultDetailText")
-        detail.setReadOnly(True)
-        detail.setMinimumHeight(92)
-        detail.setPlainText(self._detail_text())
-        layout.addWidget(detail)
-
-        button_row = QHBoxLayout()
-        self.btn_open_run = QPushButton(tt("Open run folder", self.lang))
-        self.btn_open_run.clicked.connect(lambda: self._open_path(self.summary.get("run_dir", "")))
-        self.btn_open_run.setEnabled(bool(self.summary.get("run_dir")) and os.path.isdir(self.summary.get("run_dir", "")))
-        self.btn_open_model_output = QPushButton(tt("Open model output", self.lang))
-        self.btn_open_model_output.clicked.connect(lambda: self._open_path(self.summary.get("model_output", "")))
-        self.btn_open_model_output.setEnabled(bool(self.summary.get("model_output")) and os.path.exists(self.summary.get("model_output", "")))
-        self.btn_open_manifest = QPushButton(tt("Open model manifest", self.lang))
-        self.btn_open_manifest.clicked.connect(lambda: self._open_path(self.summary.get("model_manifest", "")))
-        self.btn_open_manifest.setEnabled(bool(self.summary.get("model_manifest")) and os.path.exists(self.summary.get("model_manifest", "")))
-        button_row.addWidget(self.btn_open_run)
-        button_row.addWidget(self.btn_open_model_output)
-        button_row.addWidget(self.btn_open_manifest)
-        button_row.addStretch(1)
-        close_button = QPushButton(tt("Close", self.lang))
-        close_button.clicked.connect(self.accept)
-        button_row.addWidget(close_button)
-        layout.addLayout(button_row)
-
-    def _header_text(self):
-        parts = [
-            f"{tt('Status', self.lang)}: {self.summary.get('status') or '-'}",
-            f"{tt('Backend ID', self.lang)}: {self.summary.get('backend_id') or '-'}",
-            f"{tt('Run ID', self.lang)}: {self.summary.get('run_id') or '-'}",
-        ]
-        model_manifest = self.summary.get("model_manifest") or "-"
-        parts.append(f"{tt('Model manifest', self.lang)}: {model_manifest}")
-        return "\n".join(parts)
-
-    def _populate_metrics(self):
-        rows = list(self.summary.get("metrics") or [])
-        if not rows:
-            rows = [(tt("Key metrics", self.lang), "-")]
-        self.metrics_table.setRowCount(len(rows))
-        for row, (key, value) in enumerate(rows):
-            self.metrics_table.setItem(row, 0, QTableWidgetItem(str(key)))
-            self.metrics_table.setItem(row, 1, QTableWidgetItem(str(value)))
-        self.metrics_table.resizeColumnsToContents()
-
-    def _populate_artifacts(self):
-        artifacts = list(self.summary.get("artifacts") or [])
-        self.artifact_table.setRowCount(len(artifacts))
-        for row, artifact in enumerate(artifacts):
-            path = str(artifact.get("absolute_path") or artifact.get("path") or "")
-            status = tt("exists", self.lang) if path and os.path.exists(path) else tt("missing", self.lang)
-            self.artifact_table.setItem(row, 0, QTableWidgetItem(str(artifact.get("type") or "")))
-            self.artifact_table.setItem(row, 1, QTableWidgetItem(str(artifact.get("format") or "")))
-            self.artifact_table.setItem(row, 2, QTableWidgetItem(path))
-            self.artifact_table.setItem(row, 3, QTableWidgetItem(status))
-        self.artifact_table.resizeColumnsToContents()
-
-    def _clear_preview_gallery(self):
-        while self.preview_grid.count():
-            item = self.preview_grid.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-
-    def _displayable_artifact_rows(self):
-        rows = []
-        for artifact in self.summary.get("curves") or []:
-            rows.append((tt("Training curves", self.lang), artifact))
-        previews = list(self.summary.get("previews") or [])
-        pct = int(self.preview_percent_slider.value()) if hasattr(self, "preview_percent_slider") else 20
-        preview_count = 0
-        if previews:
-            preview_count = max(1, int(len(previews) * (pct / 100.0)))
-        for artifact in previews[:preview_count]:
-            rows.append((tt("Mask previews", self.lang), artifact))
-        if hasattr(self, "preview_percent_label"):
-            self.preview_percent_label.setText(f"{pct}% ({preview_count})")
-        return rows
-
-    def _artifact_preview_path(self, artifact):
-        path = str((artifact or {}).get("absolute_path") or (artifact or {}).get("path") or "")
-        return path if path else ""
-
-    def _artifact_is_pixmap_like(self, artifact, path):
-        fmt = str((artifact or {}).get("format") or "").lower()
-        ext = os.path.splitext(str(path or ""))[1].lower().lstrip(".")
-        return fmt in {"png", "jpg", "jpeg", "bmp"} or ext in {"png", "jpg", "jpeg", "bmp"}
-
-    def _artifact_caption(self, section, artifact, path):
-        name = str((artifact or {}).get("display_name") or (artifact or {}).get("type") or section)
-        if path:
-            tail = os.path.basename(path) or path
-            return f"{section}\n{name}\n{tail}"
-        return f"{section}\n{name}"
-
-    def _add_preview_text(self, row, column, text):
-        label = QLabel(str(text or ""))
-        label.setWordWrap(True)
-        label.setMinimumWidth(180)
-        self.preview_grid.addWidget(label, row, column)
-
-    def _add_preview_artifact(self, index, section, artifact):
-        row = index // 3
-        column = index % 3
-        path = self._artifact_preview_path(artifact)
-        container = QWidget()
-        item_layout = QVBoxLayout(container)
-        item_layout.setContentsMargins(0, 0, 0, 0)
-        item_layout.setSpacing(4)
-        image_label = QLabel()
-        image_label.setAlignment(Qt.AlignCenter)
-        image_label.setMinimumSize(180, 92)
-        if path and os.path.exists(path) and self._artifact_is_pixmap_like(artifact, path):
-            pixmap = QPixmap(path)
-            if not pixmap.isNull():
-                pixmap = pixmap.scaledToWidth(220, Qt.SmoothTransformation)
-                image_label.setPixmap(pixmap)
-            else:
-                image_label.setText(path)
-        elif path:
-            image_label.setText(path)
-        else:
-            image_label.setText("-")
-        image_label.setToolTip(path)
-        caption = QLabel(self._artifact_caption(section, artifact, path))
-        caption.setWordWrap(True)
-        caption.setToolTip(path)
-        item_layout.addWidget(image_label)
-        item_layout.addWidget(caption)
-        self.preview_grid.addWidget(container, row, column)
-
-    def _populate_preview_gallery(self, *_args):
-        self._clear_preview_gallery()
-        rows = self._displayable_artifact_rows()
-        if not rows:
-            self._add_preview_text(0, 0, "\n".join([tt("No training curve artifact declared.", self.lang), tt("No mask preview artifact declared.", self.lang)]))
-            return
-        for index, (section, artifact) in enumerate(rows):
-            self._add_preview_artifact(index, section, artifact)
-
-    def _detail_text(self):
-        lines = []
-        curves = self.summary.get("curves") or []
-        previews = self.summary.get("previews") or []
-        lines.append(f"{tt('Training curves', self.lang)}: {len(curves)}")
-        if not curves:
-            lines.append(tt("No training curve artifact declared.", self.lang))
-        lines.append(f"{tt('Mask previews', self.lang)}: {len(previews)}")
-        if not previews:
-            lines.append(tt("No mask preview artifact declared.", self.lang))
-        warnings = self.summary.get("warnings") or []
-        errors = self.summary.get("errors") or []
-        if warnings:
-            lines.append("")
-            lines.append(tt("Warnings", self.lang))
-            lines.extend(f"- {item}" for item in warnings)
-        if errors:
-            lines.append("")
-            lines.append(tt("Errors", self.lang))
-            lines.extend(f"- {item}" for item in errors)
-        return "\n".join(lines)
-
-    def _open_path(self, path):
-        path = str(path or "")
-        if not path or not os.path.exists(path):
-            return False
-        return QDesktopServices.openUrl(QUrl.fromLocalFile(path))
-
-
-class WheelSafeComboBox(QComboBox):
-    def wheelEvent(self, event):
-        event.ignore()
-
-
-class MirroredStatusLabel(QLabel):
-    def __init__(self, text="", parent=None):
-        super().__init__(text, parent)
-        self._mirror_label = None
-
-    def set_mirror_label(self, label):
-        self._mirror_label = label
-        if label is not None:
-            label.setText(self.text())
-            label.setToolTip(self.toolTip())
-
-    def setText(self, text):
-        super().setText(text)
-        if self._mirror_label is not None:
-            self._mirror_label.setText(str(text or ""))
-            self._mirror_label.setToolTip(str(text or ""))
-
-    def setToolTip(self, text):
-        super().setToolTip(text)
-        if self._mirror_label is not None:
-            self._mirror_label.setToolTip(str(text or ""))
-
-
-class LazyRegionMaskVolume:
-    def __init__(self, source, region_id):
-        self.source = source
-        self.region_id = int(region_id)
-        self.shape = tuple(int(value) for value in getattr(source, "shape", ()) or ())
-        self.dtype = np.dtype(np.uint8)
-        self.ndim = len(self.shape)
-
-    @property
-    def size(self):
-        if not self.shape:
-            return 0
-        return int(np.prod(self.shape))
-
-    @property
-    def nbytes(self):
-        return int(self.size)
-
-    def __getitem__(self, key):
-        return np.asarray(np.asarray(self.source[key]) == self.region_id, dtype=np.uint8)
-
-    def __array__(self, dtype=None, copy=None):
-        array = np.asarray(self.source) == self.region_id
-        if copy is False:
-            return np.asarray(array, dtype=dtype or np.uint8)
-        return np.array(array, dtype=dtype or np.uint8, copy=True)
-
-
-class WheelSafeSlider(QSlider):
-    def wheelEvent(self, event):
-        event.ignore()
-
-    def _tif_shortcut_parent(self):
-        parent = self.parent()
-        while parent is not None:
-            if callable(getattr(parent, "_handle_slice_shortcut_key", None)):
-                return parent
-            parent = parent.parent()
-        return None
-
-    def keyPressEvent(self, event):
-        if event.key() in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down):
-            parent = self._tif_shortcut_parent()
-            handler = getattr(parent, "_handle_slice_shortcut_key", None)
-            if callable(handler) and handler(event.key()):
-                event.accept()
-                return
-        super().keyPressEvent(event)
-
-
-class WheelSafeSpinBox(QSpinBox):
-    def wheelEvent(self, event):
-        event.ignore()
-
-
-class TifSpecimenTree(QTreeWidget):
-    """Tree widget with a tiny QListWidget-like surface for older tests/helpers."""
-
-    def count(self):
-        return self.topLevelItemCount()
-
-    def item(self, row):
-        return self.topLevelItem(row)
-
-    def addItem(self, item):
-        self.addTopLevelItem(item)
-
-    def setCurrentRow(self, row):
-        item = self.topLevelItem(row)
-        if item is not None:
-            child = item.child(0)
-            self.setCurrentItem(child or item)
-
-
-class TifSliceCanvas(QLabel):
-    ZOOM_STEPS = (1.0, 1.25, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 16.0)
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setObjectName("tifSliceCanvas")
-        self.setAlignment(Qt.AlignCenter)
-        self.setMinimumSize(360, 280)
-        self.setFocusPolicy(Qt.StrongFocus)
-        self.setFrameShape(QFrame.NoFrame)
-        self.setMouseTracking(True)
-        self.setText("No TIF volume loaded")
-        self._pixmap = None
-        self._draw_rect = QRectF()
-        self._zoom_index = 0
-        self._pan_x = 0.0
-        self._pan_y = 0.0
-        self._panning = False
-        self._last_pan_pos = None
-        self._hover_pos = None
-        self._last_annotation_preview = {}
-        self._roi_drag_start = None
-        self._roi_drag_current = None
-        self._contour_drag_points = []
-        self._annotation_drag_active = False
-        self._annotation_drag_erase = False
-        self._lasso_drag_points = []
-        self._shape_drag_mode = ""
-        self._shape_drag_start = None
-        self._shape_drag_current = None
-        self.current_theme = "dark"
-        self.workbench = None
-
-    def set_theme(self, theme):
-        self.current_theme = normalize_theme(theme)
-        self._refresh_scaled_pixmap()
-
-    def set_slice_pixmap(self, pixmap, reset_view=False):
-        self._pixmap = pixmap
-        if reset_view:
-            self.reset_view(refresh=False)
-        self._refresh_scaled_pixmap()
-
-    def reset_view(self, refresh=True):
-        self._zoom_index = 0
-        self._pan_x = 0.0
-        self._pan_y = 0.0
-        self._panning = False
-        self._last_pan_pos = None
-        if refresh:
-            self._refresh_scaled_pixmap()
-
-    def zoom_factor(self):
-        return float(self.ZOOM_STEPS[max(0, min(self._zoom_index, len(self.ZOOM_STEPS) - 1))])
-
-    def zoom_in(self):
-        if self._pixmap is None or self._pixmap.isNull():
-            return
-        if self._zoom_index < len(self.ZOOM_STEPS) - 1:
-            self._zoom_index += 1
-            self._refresh_scaled_pixmap()
-
-    def zoom_out(self):
-        if self._pixmap is None or self._pixmap.isNull():
-            return
-        if self._zoom_index > 0:
-            self._zoom_index -= 1
-            if self._zoom_index == 0:
-                self._pan_x = 0.0
-                self._pan_y = 0.0
-            self._refresh_scaled_pixmap()
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._refresh_scaled_pixmap()
-
-    def _refresh_scaled_pixmap(self):
-        if self._pixmap is None or self._pixmap.isNull():
-            return
-        view_w = max(1, int(self.width()))
-        view_h = max(1, int(self.height()))
-        base = self._pixmap.scaled(view_w, view_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        zoom = self.zoom_factor()
-        target_w = max(1, int(round(base.width() * zoom)))
-        target_h = max(1, int(round(base.height() * zoom)))
-        zoomed = self._pixmap.scaled(target_w, target_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        target_w = max(1, int(zoomed.width()))
-        target_h = max(1, int(zoomed.height()))
-        max_pan_x = max(0.0, (target_w - view_w) / 2.0)
-        max_pan_y = max(0.0, (target_h - view_h) / 2.0)
-        self._pan_x = max(-max_pan_x, min(max_pan_x, self._pan_x)) if max_pan_x else 0.0
-        self._pan_y = max(-max_pan_y, min(max_pan_y, self._pan_y)) if max_pan_y else 0.0
-        x = (view_w - target_w) / 2.0 + self._pan_x
-        y = (view_h - target_h) / 2.0 + self._pan_y
-        self._draw_rect = QRectF(x, y, target_w, target_h)
-
-        composed = QPixmap(view_w, view_h)
-        theme = getattr(self.workbench, "current_theme", self.current_theme)
-        composed.fill(QColor(_tif_canvas_background(theme)))
-        painter = QPainter(composed)
-        painter.drawPixmap(int(round(x)), int(round(y)), zoomed)
-        self._draw_roi_overlays(painter)
-        self._draw_contour_overlays(painter)
-        self._draw_lasso_preview(painter)
-        self._draw_shape_fill_preview(painter)
-        self._draw_annotation_cursor_preview(painter)
-        self._draw_status_overlay(painter)
-        painter.end()
-        self.setPixmap(composed)
-
-    def _image_rect_to_widget_rect(self, image_rect):
-        if self._pixmap is None or self._pixmap.isNull() or self._draw_rect.isNull():
-            return QRectF()
-        x0, y0, x1, y1 = [float(value) for value in image_rect]
-        width = max(1.0, float(self._pixmap.width()))
-        height = max(1.0, float(self._pixmap.height()))
-        left = self._draw_rect.x() + (x0 / width) * self._draw_rect.width()
-        right = self._draw_rect.x() + (x1 / width) * self._draw_rect.width()
-        top = self._draw_rect.y() + (y0 / height) * self._draw_rect.height()
-        bottom = self._draw_rect.y() + (y1 / height) * self._draw_rect.height()
-        return QRectF(min(left, right), min(top, bottom), abs(right - left), abs(bottom - top))
-
-    def _draw_roi_overlays(self, painter):
-        if self.workbench is None:
-            return
-        rects = []
-        if callable(getattr(self.workbench, "current_roi_overlay_rects", None)):
-            rects = self.workbench.current_roi_overlay_rects()
-        painter.save()
-        for entry in rects:
-            if isinstance(entry, dict):
-                image_rect = entry.get("rect", [])
-                color = QColor(str(entry.get("color", "#FFD34D")))
-                fill = QColor(color)
-                fill.setAlpha(34)
-            else:
-                image_rect = entry
-                color = QColor("#FFD34D")
-                fill = QColor(255, 211, 77, 34)
-            rect = self._image_rect_to_widget_rect(image_rect)
-            if rect.isNull() or rect.width() <= 0 or rect.height() <= 0:
-                continue
-            painter.fillRect(rect, fill)
-            pen = QPen(color)
-            pen.setWidth(2)
-            painter.setPen(pen)
-            painter.drawRect(rect)
-        if self._roi_drag_start is not None and self._roi_drag_current is not None:
-            start = self._roi_drag_start
-            current = self._roi_drag_current
-            rect = QRectF(
-                min(start.x(), current.x()),
-                min(start.y(), current.y()),
-                abs(current.x() - start.x()),
-                abs(current.y() - start.y()),
-            )
-            if rect.width() > 1 and rect.height() > 1:
-                painter.fillRect(rect, QColor(103, 168, 184, 36))
-                pen = QPen(QColor("#67A8B8"))
-                pen.setWidth(2)
-                painter.setPen(pen)
-                painter.drawRect(rect)
-        painter.restore()
-
-    def _image_point_to_widget_point(self, point):
-        if self._pixmap is None or self._pixmap.isNull() or self._draw_rect.isNull():
-            return None
-        px, py = [float(value) for value in point]
-        width = max(1.0, float(self._pixmap.width()))
-        height = max(1.0, float(self._pixmap.height()))
-        return (
-            self._draw_rect.x() + (px / width) * self._draw_rect.width(),
-            self._draw_rect.y() + (py / height) * self._draw_rect.height(),
-        )
-
-    def _draw_polyline(self, painter, points, color, closed=False, fill_alpha=0):
-        if len(points) < 2:
-            return
-        widget_points = [self._image_point_to_widget_point(point) for point in points]
-        widget_points = [point for point in widget_points if point is not None]
-        if len(widget_points) < 2:
-            return
-        painter.save()
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        polygon = None
-        if closed and fill_alpha > 0 and len(widget_points) >= 3:
-            polygon = QPolygonF([QPointF(float(x), float(y)) for x, y in widget_points])
-            fill = QColor(color)
-            fill.setAlpha(fill_alpha)
-            painter.setBrush(fill)
-        else:
-            painter.setBrush(Qt.NoBrush)
-        pen = QPen(QColor(color))
-        pen.setWidth(2)
-        painter.setPen(pen)
-        if polygon is not None:
-            painter.drawPolygon(polygon)
-        for first, second in zip(widget_points, widget_points[1:]):
-            painter.drawLine(QPointF(float(first[0]), float(first[1])), QPointF(float(second[0]), float(second[1])))
-        if closed and len(widget_points) >= 3:
-            painter.drawLine(
-                QPointF(float(widget_points[-1][0]), float(widget_points[-1][1])),
-                QPointF(float(widget_points[0][0]), float(widget_points[0][1])),
-            )
-        painter.restore()
-
-    def _draw_contour_overlays(self, painter):
-        if self.workbench is None:
-            return
-        contours = []
-        if callable(getattr(self.workbench, "current_contour_overlay_polygons", None)):
-            contours = self.workbench.current_contour_overlay_polygons()
-        for contour in contours:
-            if isinstance(contour, dict):
-                self._draw_polyline(
-                    painter,
-                    contour.get("polygon", []),
-                    str(contour.get("color", "#FF8C42")),
-                    closed=True,
-                    fill_alpha=int(contour.get("fill_alpha", 24)),
-                )
-        if self._contour_drag_points:
-            self._draw_polyline(painter, self._contour_drag_points, "#FF8C42", closed=False, fill_alpha=0)
-
-    def _draw_lasso_preview(self, painter):
-        if len(self._lasso_drag_points) < 2:
-            return
-        closed = len(self._lasso_drag_points) >= 3
-        self._draw_polyline(painter, self._lasso_drag_points, "#8ED2DE", closed=closed, fill_alpha=28 if closed else 0)
-
-    def _draw_shape_fill_preview(self, painter):
-        if not self._shape_drag_mode or self._shape_drag_start is None or self._shape_drag_current is None:
-            return
-        start = self._shape_drag_start
-        current = self._shape_drag_current
-        rect = QRectF(
-            min(start.x(), current.x()),
-            min(start.y(), current.y()),
-            abs(current.x() - start.x()),
-            abs(current.y() - start.y()),
-        )
-        if rect.width() <= 1 or rect.height() <= 1:
-            return
-        painter.save()
-        fill = QColor("#8ED2DE")
-        fill.setAlpha(34)
-        pen = QPen(QColor("#8ED2DE"))
-        pen.setWidth(2)
-        painter.setBrush(fill)
-        painter.setPen(pen)
-        if self._shape_drag_mode == "ellipse":
-            painter.drawEllipse(rect)
-        else:
-            painter.drawRect(rect)
-        painter.restore()
-
-    def _draw_status_overlay(self, painter):
-        if self.workbench is None:
-            return
-        text = self.workbench.canvas_status_text(self.zoom_factor())
-        if not text:
-            return
-        painter.save()
-        font = painter.font()
-        font.setPointSize(9)
-        painter.setFont(font)
-        metrics = painter.fontMetrics()
-        text_w = metrics.horizontalAdvance(text)
-        rect = QRectF(10, 10, text_w + 16, metrics.height() + 8)
-        theme = getattr(self.workbench, "current_theme", self.current_theme)
-        painter.fillRect(rect, _tif_overlay_background(190, theme))
-        painter.setPen(QColor("#DCE4E8"))
-        painter.drawText(rect.adjusted(8, 4, -8, -4), Qt.AlignLeft | Qt.AlignVCenter, text)
-        painter.restore()
-
-    def _draw_annotation_cursor_preview(self, painter):
-        self._last_annotation_preview = {}
-        if self.workbench is None or self._hover_pos is None:
-            return
-        if (
-            callable(getattr(self.workbench, "is_part_contour_draw_mode", None))
-            and self.workbench.is_part_contour_draw_mode()
-        ):
-            return
-        if self._pixmap is None or self._pixmap.isNull() or self._draw_rect.isNull():
-            return
-        pixel = self.widget_to_image_pixel(self._hover_pos.x(), self._hover_pos.y())
-        if pixel is None:
-            return
-        preview = {}
-        if callable(getattr(self.workbench, "annotation_cursor_preview", None)):
-            preview = self.workbench.annotation_cursor_preview(pixel) or {}
-        if not preview:
-            return
-        px, py = pixel
-        center = self._image_point_to_widget_point([float(px) + 0.5, float(py) + 0.5])
-        if center is None:
-            return
-        mode = str(preview.get("mode") or "")
-        disabled = bool(preview.get("disabled"))
-        radius = max(1.0, float(preview.get("radius", 1.0)))
-        scale_x = self._draw_rect.width() / max(1.0, float(self._pixmap.width()))
-        scale_y = self._draw_rect.height() / max(1.0, float(self._pixmap.height()))
-        radius_x = max(3.0, radius * scale_x)
-        radius_y = max(3.0, radius * scale_y)
-        color = QColor("#8ED2DE")
-        if mode == "eraser":
-            color = QColor("#FFB3A6")
-        elif mode in {"lasso", "rectangle", "ellipse"}:
-            color = QColor("#8ED2DE")
-        elif mode == "picker":
-            color = QColor("#F6D365")
-        if disabled:
-            color = QColor("#C9D0D4")
-        painter.save()
-        pen = QPen(color)
-        pen.setWidth(2)
-        if mode == "eraser" or disabled:
-            pen.setStyle(Qt.DashLine)
-        painter.setPen(pen)
-        painter.setBrush(Qt.NoBrush)
-        if mode in {"brush", "eraser"}:
-            rect = QRectF(center[0] - radius_x, center[1] - radius_y, radius_x * 2.0, radius_y * 2.0)
-            painter.drawEllipse(rect)
-            if mode == "eraser":
-                painter.drawLine(int(center[0] - radius_x * 0.55), int(center[1]), int(center[0] + radius_x * 0.55), int(center[1]))
-        elif mode == "lasso":
-            size = 7
-            painter.drawLine(int(center[0] - size), int(center[1]), int(center[0] + size), int(center[1]))
-            painter.drawLine(int(center[0]), int(center[1] - size), int(center[0]), int(center[1] + size))
-            painter.drawEllipse(QRectF(center[0] - size * 0.6, center[1] - size * 0.6, size * 1.2, size * 1.2))
-        elif mode in {"rectangle", "ellipse"}:
-            size = 9
-            rect = QRectF(center[0] - size, center[1] - size, size * 2.0, size * 2.0)
-            if mode == "ellipse":
-                painter.drawEllipse(rect)
-            else:
-                painter.drawRect(rect)
-        elif mode == "picker":
-            size = 8
-            painter.drawLine(int(center[0] - size), int(center[1]), int(center[0] + size), int(center[1]))
-            painter.drawLine(int(center[0]), int(center[1] - size), int(center[0]), int(center[1] + size))
-        if disabled:
-            painter.drawLine(int(center[0] - radius_x * 0.7), int(center[1] - radius_y * 0.7), int(center[0] + radius_x * 0.7), int(center[1] + radius_y * 0.7))
-        painter.restore()
-        self._last_annotation_preview = {
-            "mode": mode,
-            "disabled": disabled,
-            "radius": radius,
-            "pixel": [int(px), int(py)],
-            "widget_radius": [float(radius_x), float(radius_y)],
-        }
-
-    def widget_to_image_point(self, x, y):
-        if self._pixmap is None or self._pixmap.isNull() or self._draw_rect.isNull():
-            return None
-        if not self._draw_rect.contains(float(x), float(y)):
-            return None
-        rel_x = (float(x) - self._draw_rect.x()) / max(1.0, self._draw_rect.width())
-        rel_y = (float(y) - self._draw_rect.y()) / max(1.0, self._draw_rect.height())
-        px = rel_x * float(self._pixmap.width())
-        py = rel_y * float(self._pixmap.height())
-        return (
-            max(0.0, min(float(self._pixmap.width()) - 1.0, px)),
-            max(0.0, min(float(self._pixmap.height()) - 1.0, py)),
-        )
-
-    def widget_to_image_pixel(self, x, y):
-        point = self.widget_to_image_point(x, y)
-        if point is None:
-            return None
-        px, py = point
-        return (
-            max(0, min(int(self._pixmap.width()) - 1, int(px))),
-            max(0, min(int(self._pixmap.height()) - 1, int(py))),
-        )
-
-    def wheelEvent(self, event):
-        if self.workbench is None:
-            event.ignore()
-            return
-        delta = event.angleDelta().y()
-        if delta == 0:
-            event.ignore()
-            return
-        self.setFocus(Qt.MouseFocusReason)
-        self.workbench.move_slice(-1 if delta > 0 else 1)
-        event.accept()
-
-    def keyPressEvent(self, event):
-        key = event.key()
-        if key == Qt.Key_Left:
-            if self.workbench is not None:
-                self.workbench.move_slice(-1)
-            event.accept()
-            return
-        if key == Qt.Key_Right:
-            if self.workbench is not None:
-                self.workbench.move_slice(1)
-            event.accept()
-            return
-        if key == Qt.Key_Up:
-            self.zoom_in()
-            event.accept()
-            return
-        if key == Qt.Key_Down:
-            self.zoom_out()
-            event.accept()
-            return
-        super().keyPressEvent(event)
-
-    def mousePressEvent(self, event):
-        self.setFocus(Qt.MouseFocusReason)
-        self._hover_pos = event.position()
-        if (
-            self.workbench is not None
-            and event.button() == Qt.LeftButton
-            and callable(getattr(self.workbench, "is_part_roi_draw_mode", None))
-            and self.workbench.is_part_roi_draw_mode()
-        ):
-            self._roi_drag_start = event.position()
-            self._roi_drag_current = event.position()
-            self._refresh_scaled_pixmap()
-            event.accept()
-            return
-        if (
-            self.workbench is not None
-            and event.button() == Qt.LeftButton
-            and callable(getattr(self.workbench, "is_part_contour_draw_mode", None))
-            and self.workbench.is_part_contour_draw_mode()
-        ):
-            point = self.widget_to_image_point(event.position().x(), event.position().y())
-            self._contour_drag_points = [list(point)] if point is not None else []
-            self._refresh_scaled_pixmap()
-            event.accept()
-            return
-        if event.button() == Qt.RightButton and self.zoom_factor() > 1.0:
-            self._panning = True
-            self._last_pan_pos = event.position()
-            event.accept()
-            return
-        if self.workbench is not None and event.button() == Qt.LeftButton:
-            mode = getattr(self.workbench, "annotation_tool_mode", "brush")
-            if mode == "pan":
-                if self.zoom_factor() > 1.0:
-                    self._panning = True
-                    self._last_pan_pos = event.position()
-                elif callable(getattr(self.workbench, "_set_operation_feedback", None)):
-                    self.workbench._set_operation_feedback(tt("Pan/view mode is active. Labels were not changed.", self.workbench.lang))
-                event.accept()
-                return
-            if mode == "picker":
-                self.workbench.pick_material_at_widget_position(event.position().x(), event.position().y())
-                event.accept()
-                return
-            if mode == "lasso":
-                pixel = self.widget_to_image_pixel(event.position().x(), event.position().y())
-                if pixel is None:
-                    event.accept()
-                    return
-                block_reason = ""
-                if callable(getattr(self.workbench, "_editable_label_block_reason", None)):
-                    block_reason = self.workbench._editable_label_block_reason(require_working_edit=True)
-                if block_reason:
-                    self.workbench._set_operation_feedback(block_reason)
-                    event.accept()
-                    return
-                self._lasso_drag_points = [list(pixel)]
-                self._refresh_scaled_pixmap()
-                event.accept()
-                return
-            if mode in {"rectangle", "ellipse"}:
-                pixel = self.widget_to_image_pixel(event.position().x(), event.position().y())
-                if pixel is None:
-                    event.accept()
-                    return
-                block_reason = ""
-                if callable(getattr(self.workbench, "_editable_label_block_reason", None)):
-                    block_reason = self.workbench._editable_label_block_reason(require_working_edit=True)
-                if block_reason:
-                    self.workbench._set_operation_feedback(block_reason)
-                    event.accept()
-                    return
-                self._shape_drag_mode = mode
-                self._shape_drag_start = event.position()
-                self._shape_drag_current = event.position()
-                self._refresh_scaled_pixmap()
-                event.accept()
-                return
-            self._annotation_drag_active = True
-            self._annotation_drag_erase = bool(event.modifiers() & Qt.ControlModifier) or mode == "eraser"
-            if callable(getattr(self.workbench, "begin_annotation_stroke", None)):
-                self.workbench.begin_annotation_stroke()
-            self.workbench.paint_at_widget_position(
-                event.position().x(),
-                event.position().y(),
-                erase=self._annotation_drag_erase,
-                continue_stroke=True,
-            )
-            event.accept()
-            return
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):
-        self._hover_pos = event.position()
-        if self._roi_drag_start is not None and event.buttons() & Qt.LeftButton:
-            self._roi_drag_current = event.position()
-            self._refresh_scaled_pixmap()
-            event.accept()
-            return
-        if self._contour_drag_points and event.buttons() & Qt.LeftButton:
-            point = self.widget_to_image_point(event.position().x(), event.position().y())
-            if point is not None:
-                last = self._contour_drag_points[-1] if self._contour_drag_points else None
-                distance = math.hypot(float(point[0]) - float(last[0]), float(point[1]) - float(last[1])) if last else 999.0
-                if distance >= 0.15:
-                    self._contour_drag_points.append(list(point))
-                    self._refresh_scaled_pixmap()
-            event.accept()
-            return
-        if self._lasso_drag_points and event.buttons() & Qt.LeftButton:
-            pixel = self.widget_to_image_pixel(event.position().x(), event.position().y())
-            if pixel is not None:
-                if self._lasso_drag_points[-1] != list(pixel):
-                    self._lasso_drag_points.append(list(pixel))
-                    self._refresh_scaled_pixmap()
-            event.accept()
-            return
-        if self._shape_drag_mode and self._shape_drag_start is not None and event.buttons() & Qt.LeftButton:
-            self._shape_drag_current = event.position()
-            self._refresh_scaled_pixmap()
-            event.accept()
-            return
-        if self._panning and event.buttons() & (Qt.LeftButton | Qt.RightButton) and self._last_pan_pos is not None:
-            current = event.position()
-            self._pan_x += current.x() - self._last_pan_pos.x()
-            self._pan_y += current.y() - self._last_pan_pos.y()
-            self._last_pan_pos = current
-            self._refresh_scaled_pixmap()
-            event.accept()
-            return
-        if self.workbench is not None and event.buttons() & Qt.LeftButton:
-            mode = getattr(self.workbench, "annotation_tool_mode", "brush")
-            if mode in {"picker", "pan"}:
-                event.accept()
-                return
-            if mode in {"lasso", "rectangle", "ellipse"}:
-                event.accept()
-                return
-            self.workbench.paint_at_widget_position(
-                event.position().x(),
-                event.position().y(),
-                erase=self._annotation_drag_erase if self._annotation_drag_active else bool(event.modifiers() & Qt.ControlModifier) or mode == "eraser",
-                continue_stroke=self._annotation_drag_active,
-            )
-            event.accept()
-            return
-        if not event.buttons():
-            self._refresh_scaled_pixmap()
-            event.accept()
-            return
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        self._hover_pos = event.position()
-        if event.button() == Qt.LeftButton and self._roi_drag_start is not None:
-            start = self._roi_drag_start
-            end = event.position()
-            self._roi_drag_start = None
-            self._roi_drag_current = None
-            if self.workbench is not None:
-                self.workbench.finish_part_roi_drag(start.x(), start.y(), end.x(), end.y())
-            self._refresh_scaled_pixmap()
-            event.accept()
-            return
-        if event.button() == Qt.LeftButton and self._contour_drag_points:
-            points = list(self._contour_drag_points)
-            self._contour_drag_points = []
-            if self.workbench is not None:
-                self.workbench.finish_part_contour_drag(points)
-            self._refresh_scaled_pixmap()
-            event.accept()
-            return
-        if event.button() == Qt.LeftButton and self._lasso_drag_points:
-            points = list(self._lasso_drag_points)
-            self._lasso_drag_points = []
-            if self.workbench is not None and callable(getattr(self.workbench, "finish_lasso_fill", None)):
-                self.workbench.finish_lasso_fill(points)
-            self._refresh_scaled_pixmap()
-            event.accept()
-            return
-        if event.button() == Qt.LeftButton and self._shape_drag_mode and self._shape_drag_start is not None:
-            mode = self._shape_drag_mode
-            start = self._shape_drag_start
-            end = event.position()
-            self._shape_drag_mode = ""
-            self._shape_drag_start = None
-            self._shape_drag_current = None
-            if self.workbench is not None and callable(getattr(self.workbench, "finish_shape_fill_drag", None)):
-                self.workbench.finish_shape_fill_drag(mode, start.x(), start.y(), end.x(), end.y())
-            self._refresh_scaled_pixmap()
-            event.accept()
-            return
-        if event.button() == Qt.LeftButton and self._annotation_drag_active:
-            if self.workbench is not None and callable(getattr(self.workbench, "finish_annotation_stroke", None)):
-                self.workbench.finish_annotation_stroke()
-            self._annotation_drag_active = False
-            self._annotation_drag_erase = False
-            event.accept()
-            return
-        if event.button() in (Qt.LeftButton, Qt.RightButton) and self._panning:
-            self._panning = False
-            self._last_pan_pos = None
-            event.accept()
-            return
-        super().mouseReleaseEvent(event)
-
-    def leaveEvent(self, event):
-        self._hover_pos = None
-        self._last_annotation_preview = {}
-        self._refresh_scaled_pixmap()
-        super().leaveEvent(event)
-
-    def mouseDoubleClickEvent(self, event):
-        if self.workbench is not None and event.button() == Qt.LeftButton:
-            if callable(getattr(self.workbench, "open_roi_at_widget_position", None)):
-                if self.workbench.open_roi_at_widget_position(event.position().x(), event.position().y()):
-                    event.accept()
-                    return
-        super().mouseDoubleClickEvent(event)
-
-
-class TifVolumeCanvas(QLabel):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setObjectName("tifVolumeCanvas")
-        self.setAlignment(Qt.AlignCenter)
-        self.setMinimumSize(360, 280)
-        self.setFocusPolicy(Qt.StrongFocus)
-        self.setFrameShape(QFrame.NoFrame)
-        self.setText("No TIF volume loaded")
-        self.workbench = None
-        self._mouse_mode = ""
-        self._last_drag_pos = None
-        self._axis_overlays = []
-        self._volume_pixmap = None
-        self.current_theme = "dark"
-
-    def set_theme(self, theme):
-        self.current_theme = normalize_theme(theme)
-        self._refresh_volume_pixmap()
-
-    def _try_start_local_axis_endpoint_drag(self, event):
-        if self.workbench is None or event.button() != Qt.LeftButton:
-            return False
-        handler = getattr(self.workbench, "start_local_axis_endpoint_drag", None)
-        if not callable(handler):
-            return False
-        if not handler(event.position().x(), event.position().y()):
-            return False
-        self._mouse_mode = "local_axis_endpoint"
-        self._last_drag_pos = event.position()
-        event.accept()
-        return True
-
-    def set_axis_overlays(self, overlays):
-        self._axis_overlays = list(overlays or [])
-        self._refresh_volume_pixmap()
-        self.update()
-
-    def set_volume_pixmap(self, pixmap):
-        if pixmap is None or pixmap.isNull():
-            self._volume_pixmap = None
-            self.clear()
-            return
-        self._volume_pixmap = QPixmap(pixmap)
-        self._refresh_volume_pixmap()
-
-    def _refresh_volume_pixmap(self):
-        if self._volume_pixmap is None or self._volume_pixmap.isNull():
-            return
-        scaled = self._volume_pixmap.scaled(
-            max(1, int(self.width())),
-            max(1, int(self.height())),
-            Qt.KeepAspectRatio,
-            Qt.SmoothTransformation,
-        )
-        composed = QPixmap(max(1, int(self.width())), max(1, int(self.height())))
-        theme = getattr(self.workbench, "current_theme", self.current_theme)
-        composed.fill(QColor(_tif_canvas_background(theme)))
-        painter = QPainter(composed)
-        x = int(round((composed.width() - scaled.width()) / 2.0))
-        y = int(round((composed.height() - scaled.height()) / 2.0))
-        painter.drawPixmap(x, y, scaled)
-        self._draw_status_overlay(painter)
-        self._draw_axis_overlays(painter)
-        painter.end()
-        self.setPixmap(composed)
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._refresh_volume_pixmap()
-        if self.workbench is not None:
-            self.workbench.schedule_volume_preview_render()
-
-    def _draw_status_overlay(self, painter):
-        if self.workbench is None:
-            return
-        text = self.workbench.volume_status_text()
-        if not text:
-            return
-        painter.save()
-        font = painter.font()
-        font.setPointSize(9)
-        painter.setFont(font)
-        metrics = painter.fontMetrics()
-        text_w = metrics.horizontalAdvance(text)
-        rect = QRectF(10, 10, text_w + 16, metrics.height() + 8)
-        theme = getattr(self.workbench, "current_theme", self.current_theme)
-        painter.fillRect(rect, _tif_overlay_background(190, theme))
-        painter.setPen(QColor("#DCE4E8"))
-        painter.drawText(rect.adjusted(8, 4, -8, -4), Qt.AlignLeft | Qt.AlignVCenter, text)
-        painter.restore()
-
-    def _draw_axis_overlays(self, painter):
-        if not self._axis_overlays:
-            return
-        painter.save()
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        font = painter.font()
-        font.setPointSize(9)
-        painter.setFont(font)
-        for overlay in self._axis_overlays:
-            if overlay.get("kind") == "polyline":
-                points = overlay.get("points_xy") if isinstance(overlay.get("points_xy"), (list, tuple)) else []
-                points = [point for point in points if isinstance(point, (list, tuple)) and len(point) >= 2]
-                if len(points) < 2:
-                    continue
-                color = QColor(str(overlay.get("color") or "#FFFFFF"))
-                painter.setPen(QPen(color, int(overlay.get("width", 2))))
-                for first, second in zip(points, points[1:]):
-                    painter.drawLine(int(round(float(first[0]))), int(round(float(first[1]))), int(round(float(second[0]))), int(round(float(second[1]))))
-                label = str(overlay.get("label") or "")
-                anchor = overlay.get("label_anchor_xy") if isinstance(overlay.get("label_anchor_xy"), (list, tuple)) else points[-1]
-                if label and anchor:
-                    dx, dy = overlay.get("label_offset_xy") or (8, -8)
-                    self._draw_axis_label(painter, label, float(anchor[0]) + float(dx), float(anchor[1]) + float(dy), color, str(overlay.get("label_position") or "right"))
-                continue
-            if overlay.get("kind") == "point":
-                point = overlay.get("point_xy")
-                if not point:
-                    continue
-                color = QColor(str(overlay.get("color") or "#FFFFFF"))
-                x, y = float(point[0]), float(point[1])
-                radius = int(overlay.get("radius", 5))
-                painter.setPen(QPen(color, 2))
-                theme = getattr(self.workbench, "current_theme", self.current_theme)
-                painter.setBrush(_tif_overlay_background(150, theme))
-                painter.drawEllipse(int(round(x - radius)), int(round(y - radius)), radius * 2, radius * 2)
-                label = str(overlay.get("label") or "")
-                if label:
-                    dx, dy = overlay.get("label_offset_xy") or (8, -8)
-                    self._draw_axis_label(painter, label, x + float(dx), y + float(dy), color, str(overlay.get("label_position") or "right"))
-                continue
-            start = overlay.get("start_xy")
-            end = overlay.get("end_xy")
-            if not start or not end:
-                continue
-            color = QColor(str(overlay.get("color") or "#FFB84D"))
-            painter.setPen(QPen(color, int(overlay.get("width", 2))))
-            x0, y0 = float(start[0]), float(start[1])
-            x1, y1 = float(end[0]), float(end[1])
-            painter.drawLine(int(round(x0)), int(round(y0)), int(round(x1)), int(round(y1)))
-            role = str(overlay.get("role") or "")
-            handle_radius = 6 if role == "editable_output" else 3
-            if role == "editable_output":
-                theme = getattr(self.workbench, "current_theme", self.current_theme)
-                painter.setBrush(_tif_overlay_background(185, theme))
-            else:
-                painter.setBrush(Qt.NoBrush)
-            painter.drawEllipse(
-                int(round(x0 - handle_radius)),
-                int(round(y0 - handle_radius)),
-                handle_radius * 2,
-                handle_radius * 2,
-            )
-            painter.drawEllipse(
-                int(round(x1 - handle_radius)),
-                int(round(y1 - handle_radius)),
-                handle_radius * 2,
-                handle_radius * 2,
-            )
-            label = str(overlay.get("label") or "")
-            if label:
-                anchor = overlay.get("label_anchor_xy") or end
-                dx, dy = overlay.get("label_offset_xy") or (8, -8)
-                self._draw_axis_label(
-                    painter,
-                    label,
-                    float(anchor[0]) + float(dx),
-                    float(anchor[1]) + float(dy),
-                    color,
-                    str(overlay.get("label_position") or "right"),
-                )
-        painter.restore()
-
-    def _draw_axis_label(self, painter, text, x, y, color, position="right"):
-        metrics = painter.fontMetrics()
-        padding_x = 6
-        padding_y = 3
-        text_w = metrics.horizontalAdvance(text)
-        text_h = metrics.height()
-        rect_x = float(x)
-        rect_y = float(y) - text_h - padding_y
-        if str(position) == "left":
-            rect_x -= text_w + padding_x * 2
-        elif str(position) == "center":
-            rect_x -= (text_w + padding_x * 2) / 2.0
-        rect = QRect(
-            int(round(rect_x)),
-            int(round(rect_y)),
-            int(round(text_w + padding_x * 2)),
-            int(round(text_h + padding_y * 2)),
-        )
-        bounds = self.rect().adjusted(2, 2, -2, -2)
-        if rect.right() > bounds.right():
-            rect.moveRight(bounds.right())
-        if rect.left() < bounds.left():
-            rect.moveLeft(bounds.left())
-        if rect.top() < bounds.top():
-            rect.moveTop(bounds.top())
-        if rect.bottom() > bounds.bottom():
-            rect.moveBottom(bounds.bottom())
-        theme = getattr(self.workbench, "current_theme", self.current_theme)
-        painter.fillRect(rect, _tif_overlay_background(205, theme))
-        painter.setPen(QPen(color, 1))
-        painter.drawRect(rect.adjusted(0, 0, -1, -1))
-        painter.setPen(QColor("#F4F7F9"))
-        painter.drawText(rect.adjusted(padding_x, padding_y, -padding_x, -padding_y), Qt.AlignLeft | Qt.AlignVCenter, text)
-
-    def mousePressEvent(self, event):
-        self.setFocus(Qt.MouseFocusReason)
-        if self.workbench is not None and event.button() == Qt.LeftButton:
-            picker = getattr(self.workbench, "pick_local_axis_roll_reference_at", None)
-            if callable(picker) and picker(event.position().x(), event.position().y()):
-                event.accept()
-                return
-        if self._try_start_local_axis_endpoint_drag(event):
-            return
-        if self.workbench is not None and event.button() in (Qt.LeftButton, Qt.RightButton):
-            self._mouse_mode = "rotate" if event.button() == Qt.LeftButton else "pan"
-            self._last_drag_pos = event.position()
-            event.accept()
-            return
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):
-        buttons = event.buttons()
-        active = (
-            (self._mouse_mode == "rotate" and buttons & Qt.LeftButton)
-            or (self._mouse_mode == "local_axis_endpoint" and buttons & Qt.LeftButton)
-            or (self._mouse_mode == "pan" and buttons & Qt.RightButton)
-        )
-        if self.workbench is not None and active and self._last_drag_pos is not None:
-            current = event.position()
-            dx = current.x() - self._last_drag_pos.x()
-            dy = current.y() - self._last_drag_pos.y()
-            self._last_drag_pos = current
-            if self._mouse_mode == "local_axis_endpoint":
-                self.workbench.drag_local_axis_endpoint(current.x(), current.y())
-            elif self._mouse_mode == "pan":
-                self.workbench.pan_volume_preview(dx, dy)
-            else:
-                self.workbench.rotate_volume_preview(dx, dy)
-            event.accept()
-            return
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        if event.button() in (Qt.LeftButton, Qt.RightButton) and self._mouse_mode:
-            if self._mouse_mode == "local_axis_endpoint" and self.workbench is not None:
-                self.workbench.finish_local_axis_endpoint_drag()
-            self._mouse_mode = ""
-            self._last_drag_pos = None
-            if self.workbench is not None:
-                self.workbench.finish_volume_interaction_debounced()
-            event.accept()
-            return
-        super().mouseReleaseEvent(event)
-
-    def wheelEvent(self, event):
-        if self.workbench is None:
-            event.ignore()
-            return
-        delta = event.angleDelta().y()
-        if delta == 0:
-            event.ignore()
-            return
-        self.workbench.zoom_volume_preview(1 if delta > 0 else -1)
-        event.accept()
-
-
-def create_tif_volume_canvas(parent=None):
-    gpu_flag = os.environ.get("TAXAMASK_TIF_GPU_VOLUME_PREVIEW", "").strip().lower()
-    if gpu_flag in {"0", "false", "no", "off"}:
-        return TifVolumeCanvas(parent), "cpu", "GPU volume preview disabled by TAXAMASK_TIF_GPU_VOLUME_PREVIEW."
-    if gpu_volume_offscreen_available() and TifGpuVolumeOffscreenWidget is not None:
-        try:
-            canvas = TifGpuVolumeOffscreenWidget(parent)
-            if hasattr(canvas, "initialize_renderer"):
-                canvas.initialize_renderer(emit_info=False)
-            canvas.setProperty("tifVolumeRenderer", "gpu-offscreen")
-            return canvas, "gpu", ""
-        except Exception as exc:
-            return TifVolumeCanvas(parent), "cpu", str(exc)
-    legacy_flag = os.environ.get("TAXAMASK_TIF_EMBEDDED_QOPENGLWIDGET", "").strip().lower()
-    if legacy_flag in {"1", "true", "yes", "on"} and gpu_volume_canvas_available() and TifGpuVolumeCanvas is not None:
-        try:
-            canvas = TifGpuVolumeCanvas(parent)
-            canvas.setProperty("tifVolumeRenderer", "gpu-embedded")
-            return canvas, "gpu", ""
-        except Exception as exc:
-            return TifVolumeCanvas(parent), "cpu", str(exc)
-    return TifVolumeCanvas(parent), "cpu", gpu_volume_unavailable_reason()
-
-
-class TifImportWorker(QObject):
-    progress = Signal(int, int, str)
-    finished = Signal(object)
-    failed = Signal(str)
-
-    def __init__(self, project_manager, tif_path, specimen_id):
-        super().__init__()
-        self.project_manager = project_manager
-        self.tif_path = tif_path
-        self.specimen_id = specimen_id
-
-    def run(self):
-        try:
-            result = import_tif_stack(
-                self.project_manager,
-                self.tif_path,
-                self.specimen_id,
-                copy_source=False,
-                create_working_edit=False,
-                progress_callback=self.progress.emit,
-            )
-        except Exception as exc:
-            self.failed.emit(str(exc))
-            return
-        self.finished.emit(result)
-
-
-class TifBatchImportWorker(QObject):
-    progress = Signal(int, int, str)
-    finished = Signal(object)
-
-    def __init__(self, project_manager, jobs):
-        super().__init__()
-        self.project_manager = project_manager
-        self.jobs = [dict(job or {}) for job in jobs]
-
-    def run(self):
-        results = []
-        total_jobs = max(1, len(self.jobs))
-        for job_index, job in enumerate(self.jobs):
-            tif_path = str(job.get("tif_path") or "")
-            specimen_id = str(job.get("specimen_id") or "")
-            base_progress = job_index * 100
-
-            def emit_job_progress(current, total, message):
-                total = max(1, int(total or 100))
-                current = max(0, min(total, int(current or 0)))
-                normalized = int(round((current / float(total)) * 100.0))
-                self.progress.emit(base_progress + normalized, total_jobs * 100, f"{job_index + 1}/{total_jobs} {message}")
-
-            try:
-                emit_job_progress(0, 100, f"Importing {os.path.basename(tif_path)}")
-                result = register_tif_stack_metadata(
-                    self.project_manager,
-                    tif_path,
-                    specimen_id,
-                    progress_callback=emit_job_progress,
-                )
-                results.append(
-                    {
-                        "ok": True,
-                        "tif_path": tif_path,
-                        "specimen_id": specimen_id,
-                        "result": result,
-                        "report_path": result.get("report_path", "") if isinstance(result, dict) else "",
-                    }
-                )
-            except Exception as exc:
-                if specimen_id:
-                    try:
-                        self.project_manager.discard_specimen_scaffold(specimen_id, save=False)
-                    except Exception:
-                        pass
-                results.append(
-                    {
-                        "ok": False,
-                        "tif_path": tif_path,
-                        "specimen_id": specimen_id,
-                        "error": str(exc),
-                    }
-                )
-        self.progress.emit(total_jobs * 100, total_jobs * 100, "Finalizing TIF batch import")
-        self.finished.emit({"results": results})
-
-
-class TifMaterializeWorker(QObject):
-    progress = Signal(int, int, str)
-    finished = Signal(object)
-    failed = Signal(str)
-
-    def __init__(self, project_manager, specimen_id):
-        super().__init__()
-        self.project_manager = project_manager
-        self.specimen_id = str(specimen_id or "")
-
-    def run(self):
-        specimen = self.project_manager.get_specimen(self.specimen_id, default=None)
-        if specimen is None:
-            self.failed.emit(f"unknown_specimen:{self.specimen_id}")
-            return
-        source_path = str((specimen.get("metadata") or {}).get("source_tif") or (specimen.get("source") or {}).get("raw_tif") or "")
-        if not source_path:
-            self.failed.emit(f"metadata_only_source_missing:{self.specimen_id}")
-            return
-        metadata_snapshot = dict(specimen.get("metadata") or {})
-        try:
-            result = materialize_registered_tif_stack(
-                self.project_manager,
-                self.specimen_id,
-                progress_callback=self.progress.emit,
-            )
-            restored = self.project_manager.get_specimen(self.specimen_id, default=None)
-            if restored is not None:
-                restored.setdefault("metadata", {}).update(
-                    {
-                        key: value
-                        for key, value in metadata_snapshot.items()
-                        if key not in {"import_status"}
-                    }
-                )
-                restored.setdefault("metadata", {})["import_status"] = "materialized"
-                self.project_manager.save_project()
-        except Exception as exc:
-            self.failed.emit(str(exc))
-            return
-        self.progress.emit(100, 100, "Working volume ready")
-        self.finished.emit(result)
-
-
-class TifVolumePreviewBuildWorker(QObject):
-    progress = Signal(str)
-    finished = Signal(object)
-    failed = Signal(object)
-
-    def __init__(self, token, volume=None, volume_request=None, mask=None, mask_request=None):
-        super().__init__()
-        self.token = int(token)
-        self.volume = volume
-        self.volume_request = dict(volume_request or {})
-        self.mask = mask
-        self.mask_request = dict(mask_request or {})
-        self._cancelled = False
-
-    def cancel(self):
-        self._cancelled = True
-
-    def run(self):
-        result = {
-            "token": self.token,
-            "cancelled": False,
-            "preview": None,
-            "mask_preview": None,
-            "volume_request": dict(self.volume_request),
-            "mask_request": dict(self.mask_request),
-            "build_ms": 0.0,
-        }
-        started = time.perf_counter()
-        try:
-            if self.volume_request and self.volume is not None:
-                self.progress.emit(str(self.volume_request.get("message") or "Preparing full-volume 3D preview..."))
-                if self._cancelled:
-                    result["cancelled"] = True
-                    self.finished.emit(result)
-                    return
-                roi_bbox = self.volume_request.get("roi_bbox")
-                if roi_bbox is not None:
-                    preview = build_roi_volume_preview(
-                        self.volume,
-                        roi_bbox,
-                        int(self.volume_request.get("max_dim", 1024)),
-                        mode=str(self.volume_request.get("algorithm", "hybrid")),
-                        preserve_source=bool(self.volume_request.get("preserve_source", False)),
-                        texture_budget_bytes=int(self.volume_request.get("texture_budget_bytes", DEFAULT_ROI_TEXTURE_BUDGET_BYTES)),
-                        max_texture_dim=GPU_VOLUME_MAX_TEXTURE_DIM,
-                    )
-                else:
-                    preview = build_volume_preview(
-                        self.volume,
-                        int(self.volume_request.get("max_dim", 1024)),
-                        mode=str(self.volume_request.get("algorithm", "hybrid")),
-                        preserve_source=bool(self.volume_request.get("preserve_source", False)),
-                    )
-                result["preview"] = preview
-            if self.mask_request and self.mask is not None:
-                self.progress.emit(str(self.mask_request.get("message") or "Preparing mask preview..."))
-                if self._cancelled:
-                    result["cancelled"] = True
-                    self.finished.emit(result)
-                    return
-                roi_bbox = self.mask_request.get("roi_bbox")
-                if roi_bbox is not None:
-                    mask_preview = build_roi_mask_preview(
-                        self.mask,
-                        roi_bbox,
-                        int(self.mask_request.get("max_dim", 1024)),
-                        mode=str(self.mask_request.get("algorithm", "occupancy")),
-                        max_texture_dim=GPU_VOLUME_MAX_TEXTURE_DIM,
-                    )
-                else:
-                    mask_preview = build_mask_preview(
-                        self.mask,
-                        int(self.mask_request.get("max_dim", 1024)),
-                        mode=str(self.mask_request.get("algorithm", "occupancy")),
-                    )
-                result["mask_preview"] = mask_preview
-            result["cancelled"] = bool(self._cancelled)
-            result["build_ms"] = max(0.0, (time.perf_counter() - started) * 1000.0)
-            self.finished.emit(result)
-        except Exception as exc:
-            self.failed.emit({"token": self.token, "error": str(exc)})
-
-
-class TifPartMaskPreviewWorker(QObject):
-    progress = Signal(int, int, str)
-    finished = Signal(object)
-    failed = Signal(object)
-
-    def __init__(self, token, contours, shape_zyx, context=None):
-        super().__init__()
-        self.token = int(token)
-        self.contours = dict(contours or {})
-        self.shape_zyx = tuple(int(value) for value in (shape_zyx or ()))
-        self.context = dict(context or {})
-        self._cancelled = False
-
-    def cancel(self):
-        self._cancelled = True
-
-    def run(self):
-        started = time.perf_counter()
-        try:
-            self.progress.emit(0, 0, "Preview auto fill is running...")
-            if self._cancelled:
-                self.finished.emit({"token": self.token, "cancelled": True, "context": self.context})
-                return
-            mask = build_preview_mask_from_contours(self.contours, self.shape_zyx)
-            self.progress.emit(100, 100, "Preview auto fill finished")
-            self.finished.emit(
-                {
-                    "token": self.token,
-                    "cancelled": bool(self._cancelled),
-                    "mask": mask,
-                    "contours": self.contours,
-                    "shape_zyx": self.shape_zyx,
-                    "context": self.context,
-                    "build_ms": max(0.0, (time.perf_counter() - started) * 1000.0),
-                }
-            )
-        except Exception as exc:
-            self.failed.emit({"token": self.token, "error": str(exc), "context": self.context})
-
-
-class TifLabelAutoSaveWorker(QObject):
-    finished = Signal(object)
-    failed = Signal(object)
-
-    def __init__(self, token, edit_path, slices, slice_revisions):
-        super().__init__()
-        self.token = int(token)
-        self.edit_path = str(edit_path or "")
-        self.slices = {int(key): np.asarray(value).copy() for key, value in (slices or {}).items()}
-        self.slice_revisions = {int(key): int(value) for key, value in (slice_revisions or {}).items()}
-        self.last_result = None
-        self.last_error = None
-
-    def run(self):
-        try:
-            if not self.edit_path:
-                raise ValueError("label_auto_save_path_missing")
-            result = _tif_write_label_slice_snapshots(self.token, self.edit_path, self.slices, self.slice_revisions)
-            self.last_result = result
-            self.finished.emit(result)
-        except Exception as exc:
-            self.last_error = {"token": self.token, "edit_path": self.edit_path, "error": str(exc)}
-            self.failed.emit(self.last_error)
-
-
-class TifLabelManualSaveWorker(QObject):
-    finished = Signal(object)
-    failed = Signal(object)
-
-    def __init__(self, token, edit_path, slices, slice_revisions, context=None):
-        super().__init__()
-        self.token = int(token)
-        self.edit_path = str(edit_path or "")
-        self.slices = {int(key): np.asarray(value).copy() for key, value in (slices or {}).items()}
-        self.slice_revisions = {int(key): int(value) for key, value in (slice_revisions or {}).items()}
-        self.context = dict(context or {})
-        self.last_result = None
-        self.last_error = None
-
-    def run(self):
-        try:
-            if not self.edit_path:
-                raise ValueError("label_save_path_missing")
-            result = _tif_write_label_slice_snapshots(self.token, self.edit_path, self.slices, self.slice_revisions)
-            result["context"] = self.context
-            self.last_result = result
-            self.finished.emit(result)
-        except Exception as exc:
-            self.last_error = {"token": self.token, "edit_path": self.edit_path, "context": self.context, "error": str(exc)}
-            self.failed.emit(self.last_error)
-
-
-class TifPromoteWorkingEditWorker(QObject):
-    finished = Signal(object)
-    failed = Signal(object)
-
-    def __init__(self, project_manager, request):
-        super().__init__()
-        self.project_manager = project_manager
-        self.request = dict(request or {})
-
-    def run(self):
-        try:
-            scope = str(self.request.get("scope") or "")
-            specimen_id = str(self.request.get("specimen_id") or "")
-            part_id = str(self.request.get("part_id") or "")
-            reslice_id = str(self.request.get("reslice_id") or "")
-            started = time.perf_counter()
-            if scope == "part":
-                report = self.project_manager.evaluate_part_editable_result_review_ready(specimen_id, part_id, reslice_id)
-                if not report.get("review_ready"):
-                    raise ValueError("part_review_not_ready:" + ",".join(str(item) for item in (report.get("reasons") or [])))
-                if reslice_id:
-                    manual = self.project_manager.promote_part_reslice_editable_result_to_manual_truth(specimen_id, part_id, reslice_id)
-                else:
-                    manual = self.project_manager.promote_part_editable_result_to_manual_truth(specimen_id, part_id)
-                result = {
-                    "scope": scope,
-                    "specimen_id": specimen_id,
-                    "part_id": part_id,
-                    "reslice_id": reslice_id,
-                    "manual_truth": manual,
-                    "review_report": report,
-                }
-            else:
-                manual = self.project_manager.promote_working_edit_to_manual_truth(specimen_id)
-                result = {
-                    "scope": scope,
-                    "specimen_id": specimen_id,
-                    "manual_truth": manual,
-                }
-            result["promote_ms"] = max(0.0, (time.perf_counter() - started) * 1000.0)
-            self.finished.emit(result)
-        except Exception as exc:
-            self.failed.emit({"request": self.request, "error": str(exc)})
-
-
-def _tif_write_label_slice_snapshots(token, edit_path, slices, slice_revisions):
-    started = time.perf_counter()
-    if not edit_path:
-        raise ValueError("label_auto_save_path_missing")
-    target = load_volume_sidecar(edit_path, mmap_mode="r+")
-    try:
-        saved = []
-        for z_index, slice_array in sorted((slices or {}).items()):
-            z_index = int(z_index)
-            if 0 <= z_index < int(target.shape[0]):
-                snapshot = np.asarray(slice_array)
-                if tuple(snapshot.shape) != tuple(target[z_index].shape):
-                    raise ValueError(f"label_auto_save_slice_shape_mismatch:{z_index}:{snapshot.shape}:{target[z_index].shape}")
-                target[z_index] = snapshot
-                saved.append(z_index)
-        metadata = flush_volume_array(edit_path, target)
-    finally:
-        mmap_handle = getattr(target, "_mmap", None)
-        if mmap_handle is not None:
-            mmap_handle.close()
-    return {
-        "token": int(token),
-        "edit_path": str(edit_path),
-        "saved_slices": saved,
-        "slice_revisions": {int(key): int(value) for key, value in (slice_revisions or {}).items()},
-        "metadata": metadata,
-        "save_ms": max(0.0, (time.perf_counter() - started) * 1000.0),
-    }
-
-
-class TifConfirmPartRoiWorker(QObject):
-    progress = Signal(int, int, str)
-    finished = Signal(object)
-    failed = Signal(object)
-
-    def __init__(self, project_manager, request):
-        super().__init__()
-        self.project_manager = project_manager
-        self.request = dict(request or {})
-
-    def run(self):
-        try:
-            specimen_id = str(self.request.get("specimen_id") or "")
-            part_id = str(self.request.get("part_id") or "")
-            display_name = str(self.request.get("display_name") or part_id)
-            bbox = self.request.get("bbox_zyx") or []
-            source_shape = tuple(int(value) for value in (self.request.get("source_shape_zyx") or ()))
-            roi_keyframes = list(self.request.get("roi_keyframes") or [])
-            mask_contours = dict(self.request.get("mask_contours") or {})
-            mask_bbox = self.request.get("mask_bbox_zyx") or []
-            accepted_preview_mask = self.request.get("accepted_preview_mask")
-
-            self.progress.emit(0, 0, "Creating part volume...")
-            part = crop_volume_to_part(self.project_manager, specimen_id, part_id, bbox, display_name=display_name)
-            self.progress.emit(60, 100, "Writing part image and empty mask...")
-
-            mask_initialized = False
-            mask_message = ""
-            if mask_bbox:
-                self.progress.emit(75, 100, "Initializing accepted/freehand part mask...")
-                mask_initialized, mask_message = _tif_initialize_part_mask_from_full_volume_contours(
-                    self.project_manager,
-                    specimen_id,
-                    part,
-                    mask_contours,
-                    bbox,
-                    source_shape,
-                    accepted_preview_mask=accepted_preview_mask,
-                )
-            elif roi_keyframes:
-                self.progress.emit(75, 100, "Initializing ROI shell part mask...")
-                mask_initialized, mask_message = _tif_initialize_part_mask_from_roi_shell(
-                    self.project_manager,
-                    specimen_id,
-                    part,
-                    roi_keyframes,
-                    source_shape,
-                )
-            if mask_initialized:
-                part.setdefault("view_settings", {})["volume_mask_mode"] = "masked_image"
-                self.project_manager.save_project()
-
-            roi_id = str(self.request.get("roi_id") or "")
-            roi_metadata = dict(self.request.get("roi_metadata") or {})
-            if roi_id:
-                self.project_manager.update_part_roi(
-                    specimen_id,
-                    roi_id,
-                    bbox_zyx=bbox,
-                    status="part_created",
-                    linked_part_id=part.get("part_id", ""),
-                    metadata=roi_metadata,
-                    save=True,
-                )
-            else:
-                part_roi_id = f"{part.get('part_id', part_id)}_roi"
-                try:
-                    self.project_manager.add_part_roi(
-                        specimen_id,
-                        part_roi_id,
-                        display_name=display_name or part.get("display_name") or part_roi_id,
-                        bbox_zyx=bbox,
-                        status="part_created",
-                        linked_part_id=part.get("part_id", ""),
-                        metadata=roi_metadata,
-                        save=True,
-                    )
-                except ValueError:
-                    pass
-            self.progress.emit(100, 100, "Finalizing ROI...")
-            self.finished.emit(
-                {
-                    "part": part,
-                    "part_id": part.get("part_id", part_id),
-                    "specimen_id": specimen_id,
-                    "bbox_zyx": bbox,
-                    "mask_bbox_zyx": mask_bbox,
-                    "mask_initialized": bool(mask_initialized),
-                    "mask_message": str(mask_message or ""),
-                    "mask_keyframe_count": len((mask_contours.get("keyframes") or []) if isinstance(mask_contours, dict) else []),
-                    "roi_keyframe_count": len(roi_keyframes),
-                }
-            )
-        except Exception as exc:
-            self.failed.emit({"error": str(exc), "request": self.request})
-
-
-class TifLocalAxisResliceExportWorker(QObject):
-    progress = Signal(int, int, str)
-    finished = Signal(object)
-    failed = Signal(str)
-
-    def __init__(self, project_manager, specimen_id, part_id, payload):
-        super().__init__()
-        self.project_manager = project_manager
-        self.specimen_id = specimen_id
-        self.part_id = part_id
-        self.payload = dict(payload or {})
-
-    def run(self):
-        try:
-            self.progress.emit(0, 0, "Preparing Local Axis Reslice export...")
-            result = export_part_reslice(self.project_manager, self.specimen_id, self.part_id, self.payload, progress_callback=self.progress.emit)
-            self.progress.emit(100, 100, "Finalizing Local Axis Reslice export...")
-        except Exception as exc:
-            self.failed.emit(str(exc))
-            return
-        self.finished.emit(result)
-
-
-class TifBackendActionWorker(QObject):
-    progress = Signal(int, int, str)
-    finished = Signal(object)
-    failed = Signal(str, object)
-
-    def __init__(self, project_manager, backend_config, action, part_refs=None, specimen_ids=None, input_scope="auto", model_manifest=""):
-        super().__init__()
-        self.project_manager = project_manager
-        self.backend_config = dict(backend_config or {})
-        self.action = str(action or "")
-        self.part_refs = [dict(ref or {}) for ref in (part_refs or [])]
-        self.specimen_ids = [str(item) for item in (specimen_ids or []) if str(item or "").strip()]
-        self.input_scope = str(input_scope or "auto")
-        self.model_manifest = str(model_manifest or "")
-        self._cancel_requested = False
-
-    def cancel(self):
-        self._cancel_requested = True
-
-    def _is_cancelled(self):
-        return bool(self._cancel_requested)
-
-    def run(self):
-        runner = None
-        try:
-            runner = TifBackendRunner(self.project_manager, self.backend_config)
-            result = runner.run_action(
-                self.action,
-                specimen_ids=self.specimen_ids or None,
-                part_refs=self.part_refs,
-                input_scope=self.input_scope,
-                model_manifest=self.model_manifest,
-                progress_callback=self.progress.emit,
-                cancel_check=self._is_cancelled,
-            )
-        except Exception as exc:
-            context = {
-                "run_id": getattr(runner, "last_run_id", ""),
-                "run_dir": getattr(runner, "last_run_dir", ""),
-                "result_json": getattr(runner, "last_result_json", ""),
-                "action": self.action,
-            }
-            self.failed.emit(str(exc), context)
-            return
-        self.finished.emit(result)
 
 
 class TifWorkbenchWidget(QWidget):
@@ -3438,6 +333,15 @@ class TifWorkbenchWidget(QWidget):
         self.current_theme = normalize_theme(parent_theme or app_theme or "dark")
         config = self.config_manager.get("tif_backend", DEFAULT_TIF_BACKEND_CONFIG) if self.config_manager is not None else DEFAULT_TIF_BACKEND_CONFIG
         self.backend_config = sanitize_tif_backend_config(config)
+        self.selection_controller = TifSelectionController()
+        self.label_edit_service = TifLabelEditService()
+        self.truth_promotion_service = TifTruthPromotionService(self.project)
+        self.backend_workflow_service = TifBackendWorkflowService(self.project)
+        self.roi_part_service = TifRoiPartService()
+        self.volume_preview_service = TifVolumePreviewService()
+        self.local_axis_service = TifLocalAxisService()
+        self.task_manager = TifTaskManager()
+        self.task_adapter = TifQtTaskAdapter(self.task_manager)
         self.current_specimen_id = ""
         self.current_volume_scope = "full"
         self.current_part_id = ""
@@ -3479,40 +383,49 @@ class TifWorkbenchWidget(QWidget):
         self._label_auto_save_thread = None
         self._label_auto_save_worker = None
         self._label_auto_save_token = 0
+        self._label_auto_save_task_id = ""
         self._label_auto_save_pending_reason = ""
         self._label_auto_save_handled_tokens = set()
         self._label_manual_save_thread = None
         self._label_manual_save_worker = None
         self._label_manual_save_token = 0
+        self._label_manual_save_task_id = ""
         self._pending_manual_save_after_auto = None
         self._pending_promote_after_save = None
         self._promote_thread = None
         self._promote_worker = None
         self._promote_request = {}
+        self._promote_task_id = ""
         self._tif_import_thread = None
         self._tif_import_worker = None
         self._tif_import_progress = None
         self._tif_import_specimen_id = ""
         self._tif_import_jobs = []
+        self._tif_import_task_id = ""
         self._tif_materialize_thread = None
         self._tif_materialize_worker = None
         self._tif_materialize_progress = None
         self._tif_materialize_specimen_id = ""
+        self._tif_materialize_task_id = ""
         self._local_axis_reslice_export_thread = None
         self._local_axis_reslice_export_worker = None
         self._local_axis_reslice_export_progress = None
         self._local_axis_reslice_export_context = {}
+        self._local_axis_reslice_export_task_id = ""
         self._part_mask_preview_thread = None
         self._part_mask_preview_worker = None
         self._part_mask_preview_progress = None
         self._part_mask_preview_token = 0
         self._part_mask_preview_context = {}
+        self._part_mask_preview_task_id = ""
         self._confirm_part_roi_thread = None
         self._confirm_part_roi_worker = None
         self._confirm_part_roi_progress = None
         self._confirm_part_roi_request = {}
+        self._confirm_part_roi_task_id = ""
         self._tif_backend_thread = None
         self._tif_backend_worker = None
+        self._tif_backend_task_id = ""
         self._tif_backend_action = ""
         self._tif_backend_started_mono = 0.0
         self._tif_backend_run_dir = ""
@@ -3564,6 +477,7 @@ class TifWorkbenchWidget(QWidget):
         self._volume_preview_build_worker = None
         self._volume_preview_build_token = 0
         self._volume_preview_pending_token = 0
+        self._volume_preview_build_task_id = ""
         self._volume_preview_pending_key = None
         self._volume_preview_pending_mask_key = None
         self._volume_preview_pending_message = ""
@@ -4435,17 +1349,11 @@ class TifWorkbenchWidget(QWidget):
         current = self.label_role_combo.currentData() if self.label_role_combo.count() else "manual_truth"
         self.label_role_combo.blockSignals(True)
         self.label_role_combo.clear()
-        if self.current_volume_scope == "part":
-            roles = ("manual_truth", "editable_ai_result", "raw_ai_prediction_backup")
-        else:
-            roles = ("working_edit", "manual_truth", "raw_ai_prediction_backup")
+        roles = self.selection_controller.label_roles_for_scope(self.current_volume_scope)
         for role in roles:
             self.label_role_combo.addItem(tt(role, self.lang), role)
-        index = self.label_role_combo.findData(current)
-        if self.current_volume_scope == "part" and (index < 0 or current == "manual_truth"):
-            index = self.label_role_combo.findData("editable_ai_result")
-        elif self.current_volume_scope != "part" and index < 0:
-            index = self.label_role_combo.findData("working_edit")
+        preferred = self.selection_controller.preferred_label_role(current, self.current_volume_scope)
+        index = self.label_role_combo.findData(preferred)
         self.label_role_combo.setCurrentIndex(index if index >= 0 else 0)
         self.label_role_combo.blockSignals(False)
 
@@ -5166,6 +2074,8 @@ class TifWorkbenchWidget(QWidget):
             "backend_action": str(self._tif_backend_action or ""),
             "backend_run_dir": str(self._tif_backend_run_dir or ""),
             "backend_result_json": str(self._tif_backend_result_json or ""),
+            "tif_task_summary": str(self._task_summary_for_context()),
+            "tif_state_summary": str(self._current_state_summary()),
             "volume_renderer": self._volume_canvas_renderer,
             "volume_renderer_label": self._volume_renderer_label(),
             "volume_render_mode": self._volume_render_mode,
@@ -7354,34 +4264,64 @@ class TifWorkbenchWidget(QWidget):
             return self.label_role_combo.currentData() == "editable_ai_result"
         return self.label_role_combo.currentData() == "working_edit"
 
+    def _guard_current_label_save(self, *, role=None, reason="manual", show_message=False):
+        clean_role = str(role or ("editable_ai_result" if self.current_volume_scope == "part" else "working_edit"))
+        scope = "part" if self.current_volume_scope == "part" else "top_level"
+        result = self.label_edit_service.can_save_role(
+            clean_role,
+            scope=scope,
+            reason=reason,
+            context={
+                "scope": scope,
+                "specimen_id": str(self.current_specimen_id or ""),
+                "part_id": str(self.current_part_id or ""),
+                "reslice_id": str(self.current_reslice_id or ""),
+            },
+        )
+        if result:
+            return True
+        reason_text = (result.reasons or [result.message or "blocked"])[0]
+        message = tt("Cannot save this label layer: {0}", self.lang).format(reason_text)
+        self._set_operation_feedback(message)
+        self._update_save_status(state="failed", detail=reason_text)
+        if show_message:
+            QMessageBox.warning(self, tt("Unsaved working edit", self.lang), message)
+        return False
+
     def _snapshot_label_save_request(self, reason="auto_save"):
-        if self.edit_volume is None or not self._dirty_edit_slices:
-            return None
         if not self._can_auto_save_current_edit_volume():
             return None
         edit_path = self._current_edit_save_path()
-        if not edit_path:
+        scope = "part" if self.current_volume_scope == "part" else "top_level"
+        role = "editable_ai_result" if scope == "part" else "working_edit"
+        result = self.label_edit_service.build_save_request(
+            edit_volume=self.edit_volume,
+            dirty_slices=self._dirty_edit_slices,
+            edit_slice_revisions=self._edit_slice_revisions,
+            edit_path=edit_path,
+            scope=scope,
+            specimen_id=self.current_specimen_id,
+            part_id=self.current_part_id,
+            reslice_id=self.current_reslice_id,
+            role=role,
+            reason=reason,
+        )
+        if not result:
+            if result.message not in {"edit_volume_missing", "no_dirty_slices", "edit_path_missing"}:
+                self._set_operation_feedback(tt("Cannot save this label layer: {0}", self.lang).format(result.message), log=False)
             return None
-        slice_indices = sorted(int(z) for z in self._dirty_edit_slices)
-        slices = {}
-        revisions = {}
-        for z_index in slice_indices:
-            if 0 <= z_index < int(self.edit_volume.shape[0]):
-                slices[z_index] = np.asarray(self.edit_volume[z_index]).copy()
-                revisions[z_index] = int(self._edit_slice_revisions.get(z_index, 0))
-        if not slices:
-            return None
+        request_payload = dict(result.payload.get("request") or {})
         self._label_auto_save_token += 1
         return {
             "token": int(self._label_auto_save_token),
             "reason": str(reason or "auto_save"),
-            "edit_path": edit_path,
-            "slices": slices,
-            "slice_revisions": revisions,
-            "scope": str(self.current_volume_scope or ""),
-            "specimen_id": str(self.current_specimen_id or ""),
-            "part_id": str(self.current_part_id or ""),
-            "reslice_id": str(self.current_reslice_id or ""),
+            "edit_path": request_payload.get("edit_path", edit_path),
+            "slices": request_payload.get("slices") or {},
+            "slice_revisions": request_payload.get("slice_revisions") or {},
+            "scope": str(request_payload.get("scope") or self.current_volume_scope or ""),
+            "specimen_id": str(request_payload.get("specimen_id") or self.current_specimen_id or ""),
+            "part_id": str(request_payload.get("part_id") or self.current_part_id or ""),
+            "reslice_id": str(request_payload.get("reslice_id") or self.current_reslice_id or ""),
         }
 
     def _snapshot_label_auto_save_request(self, reason="auto_save"):
@@ -7406,6 +4346,14 @@ class TifWorkbenchWidget(QWidget):
         worker.moveToThread(thread)
         self._label_auto_save_thread = thread
         self._label_auto_save_worker = worker
+        task = self._start_tif_task(
+            "label_auto_save",
+            action=str(reason or "auto_save"),
+            payload={"token": request["token"], "edit_path": request["edit_path"]},
+            label_role=request.get("role") or ("editable_ai_result" if request.get("scope") == "part" else "working_edit"),
+            message=tt("Saving labels in background...", self.lang),
+        )
+        self._label_auto_save_task_id = task.task_id
         self._label_auto_save_pending_reason = ""
         self.auto_save_timer.stop()
         self._update_save_status(state="saving")
@@ -7445,10 +4393,12 @@ class TifWorkbenchWidget(QWidget):
     def _cleanup_label_auto_save_thread(self):
         self._label_auto_save_thread = None
         self._label_auto_save_worker = None
+        self._label_auto_save_task_id = ""
 
     def _cleanup_label_manual_save_thread(self):
         self._label_manual_save_thread = None
         self._label_manual_save_worker = None
+        self._label_manual_save_task_id = ""
         self._saving_working_edit = False
         self._set_scope_controls_enabled()
 
@@ -7475,12 +4425,15 @@ class TifWorkbenchWidget(QWidget):
         if worker is not None:
             result = getattr(worker, "last_result", None)
             error = getattr(worker, "last_error", None)
-            self._cleanup_label_auto_save_thread()
             if result:
                 self._on_label_auto_save_finished(result)
             elif error:
                 self._on_label_auto_save_failed(error)
+            else:
+                self._cancel_tif_task(self._label_auto_save_task_id, "label_auto_save_finished_without_result")
+                self._cleanup_label_auto_save_thread()
         else:
+            self._cancel_tif_task(self._label_auto_save_task_id, "label_auto_save_worker_missing")
             self._cleanup_label_auto_save_thread()
 
     def _label_auto_save_result_matches_current_view(self, result):
@@ -7495,6 +4448,7 @@ class TifWorkbenchWidget(QWidget):
         if token != int(self._label_auto_save_token):
             return
         if not self._label_auto_save_result_matches_current_view(result):
+            self._cancel_tif_task(self._label_auto_save_task_id, "stale_label_auto_save_result")
             self._cleanup_label_auto_save_thread()
             self._pending_manual_save_after_auto = None
             self._pending_promote_after_save = None
@@ -7502,6 +4456,7 @@ class TifWorkbenchWidget(QWidget):
             return
         self._clear_saved_edit_slices(result.get("slice_revisions") or {})
         self.working_edit_dirty = bool(self._dirty_edit_slices)
+        self._finish_tif_task(self._label_auto_save_task_id, payload=result, message="label_auto_save_finished")
         self._cleanup_label_auto_save_thread()
         if self.current_volume_scope == "part":
             self._finalize_part_editable_save_metadata(result.get("metadata") or {}, auto_saved=True, refresh_volumes=False)
@@ -7523,9 +4478,11 @@ class TifWorkbenchWidget(QWidget):
         if token != int(self._label_auto_save_token):
             return
         if not self._label_auto_save_result_matches_current_view(result):
+            self._cancel_tif_task(self._label_auto_save_task_id, "stale_label_auto_save_failure")
             self._cleanup_label_auto_save_thread()
             self._pending_backend_action_after_save = None
             return
+        self._fail_tif_task(self._label_auto_save_task_id, result.get("error", ""), payload=result)
         self._cleanup_label_auto_save_thread()
         self.working_edit_dirty = True
         message = tt("Save failed: {0}", self.lang).format(str(result.get("error", "")))
@@ -7555,6 +4512,15 @@ class TifWorkbenchWidget(QWidget):
         if promote_request:
             self._pending_promote_after_save = dict(promote_request or {})
         self._label_manual_save_token = int(request["token"])
+        save_role = "editable_ai_result" if request.get("scope") == "part" else "working_edit"
+        task = self._start_tif_task(
+            "label_manual_save",
+            action="manual_save",
+            payload={"token": request["token"], "edit_path": request["edit_path"]},
+            label_role=save_role,
+            message=tt("Label save is running. Wait until it finishes before editing project data.", self.lang),
+        )
+        self._label_manual_save_task_id = task.task_id
         thread = QThread(self)
         worker = TifLabelManualSaveWorker(
             request["token"],
@@ -7590,10 +4556,12 @@ class TifWorkbenchWidget(QWidget):
     def _on_label_manual_save_finished(self, result):
         result = dict(result or {})
         if int(result.get("token", 0) or 0) != int(self._label_manual_save_token):
+            self._cancel_tif_task(self._label_manual_save_task_id, "stale_label_manual_save_token")
             self._cleanup_label_manual_save_thread()
             self._pending_backend_action_after_save = None
             return
         if not self._label_save_result_matches_current_view(result):
+            self._cancel_tif_task(self._label_manual_save_task_id, "stale_label_manual_save_context")
             self._cleanup_label_manual_save_thread()
             self._pending_backend_action_after_save = None
             return
@@ -7605,6 +4573,7 @@ class TifWorkbenchWidget(QWidget):
         else:
             self._finalize_full_edit_save_metadata(result.get("metadata") or {}, refresh_volumes=True)
             message = tt("Current labels saved.", self.lang)
+        self._finish_tif_task(self._label_manual_save_task_id, payload=result, message=message)
         self._cleanup_label_manual_save_thread()
         self._update_save_status()
         self._set_operation_feedback(message)
@@ -7617,6 +4586,7 @@ class TifWorkbenchWidget(QWidget):
 
     def _on_label_manual_save_failed(self, result):
         result = dict(result or {})
+        self._fail_tif_task(self._label_manual_save_task_id, result.get("error", ""), payload=result)
         self._cleanup_label_manual_save_thread()
         self.working_edit_dirty = True
         message = tt("Save failed: {0}", self.lang).format(str(result.get("error", "")))
@@ -7715,6 +4685,100 @@ class TifWorkbenchWidget(QWidget):
         for button in (self.btn_import_tif, self.btn_import_amira):
             button.setEnabled(bool(enabled))
 
+    def _task_request_key(self, value):
+        try:
+            if isinstance(value, tuple):
+                return repr(value)
+            if isinstance(value, dict):
+                return repr(sorted(value.items()))
+            return str(value or "")
+        except Exception:
+            return str(id(value))
+
+    def _current_task_context(self, *, request_key="", label_role=""):
+        return self.task_adapter.context_from_widget(self, request_key=request_key, label_role=label_role)
+
+    def _start_tif_task(self, task_type, *, action="", payload=None, request_key="", label_role="", message=""):
+        return self.task_adapter.start_from_widget(
+            self,
+            task_type,
+            action=action,
+            payload=payload,
+            request_key=request_key,
+            label_role=label_role,
+            message=message,
+        )
+
+    def _finish_tif_task(self, task_id, *, payload=None, message=""):
+        return self.task_manager.finish_task(task_id, payload=payload, message=message)
+
+    def _fail_tif_task(self, task_id, error="", *, payload=None, message=""):
+        return self.task_manager.fail_task(task_id, error, payload=payload, message=message)
+
+    def _progress_tif_task(self, task_id, current=0, total=0, message=""):
+        return self.task_manager.progress_task(task_id, current=current, total=total, message=message)
+
+    def _cancel_tif_task(self, task_id, reason=""):
+        return self.task_manager.cancel_task(task_id, reason)
+
+    def _task_context_matches_current(self, task_id, *, fields=None, request_key="", label_role="", ignore_empty=True):
+        return self.task_adapter.current_context_matches(
+            self,
+            task_id,
+            fields=fields,
+            request_key=request_key,
+            label_role=label_role,
+            ignore_empty=ignore_empty,
+        )
+
+    def _current_state_summary(self):
+        role = self.label_role_combo.currentData() if hasattr(self, "label_role_combo") else ""
+        roll = (self.local_axis_draft or {}).get("roll_reference") if isinstance(self.local_axis_draft, dict) else {}
+        preview_key = self._volume_preview_pending_key if self._volume_preview_pending_key is not None else self._volume_preview_pending_mask_key
+        return {
+            "selection": self.selection_controller.state.to_dict() if hasattr(self.selection_controller, "state") else {},
+            "edit": TifEditState(
+                dirty_slice_count=self._dirty_slice_count() if hasattr(self, "_dirty_slice_count") else len(getattr(self, "_dirty_edit_slices", set()) or set()),
+                auto_save_running=self._label_auto_save_running(),
+                manual_save_running=self._label_manual_save_running(),
+                role=role,
+                scope=self.current_volume_scope,
+            ).to_dict(),
+            "preview": TifPreviewState(
+                display_mode=self.display_mode,
+                render_mode=self._volume_render_mode,
+                preview_pending=self._volume_preview_build_thread is not None,
+                preview_token=self._volume_preview_pending_token,
+                request_key=self._task_request_key(preview_key),
+            ).to_dict(),
+            "backend": TifBackendState(
+                running=self._backend_action_running(),
+                action=self._tif_backend_action,
+                run_dir=self._tif_backend_run_dir,
+                result_json=self._tif_backend_result_json,
+                progress_value=self._tif_backend_progress_value,
+            ).to_dict(),
+            "roi": TifRoiState(
+                active_roi_id=self.active_part_roi_id,
+                roi_keyframe_count=len(self.part_roi_keyframes or []),
+                mask_keyframe_count=len(self.part_mask_keyframes or []),
+                confirm_running=self._confirm_part_roi_running(),
+                mask_preview_running=self._part_mask_preview_running(),
+            ).to_dict(),
+            "local_axis": TifLocalAxisState(
+                draft_active=isinstance(self.local_axis_draft, dict),
+                export_running=self._local_axis_reslice_export_running(),
+                pick_target=str(getattr(self, "_local_axis_pick_target", "") or ""),
+                specimen_id=str((self.local_axis_draft or {}).get("specimen_id") or "") if isinstance(self.local_axis_draft, dict) else "",
+                part_id=str((self.local_axis_draft or {}).get("part_id") or "") if isinstance(self.local_axis_draft, dict) else "",
+                reslice_id=self.current_reslice_id,
+                roll_reference_keys=tuple(sorted((roll or {}).keys())) if isinstance(roll, dict) else (),
+            ).to_dict(),
+        }
+
+    def _task_summary_for_context(self):
+        return self.task_manager.summary()
+
     def _local_axis_reslice_export_running(self):
         return self._local_axis_reslice_export_thread is not None
 
@@ -7734,15 +4798,43 @@ class TifWorkbenchWidget(QWidget):
         return self._promote_thread is not None
 
     def _backend_write_lock_active(self):
-        return (
+        return bool(
+            self.task_manager.busy_locked()
+            or (
             self._backend_action_running()
             or self._confirm_part_roi_running()
             or self._local_axis_reslice_export_running()
             or self._label_manual_save_running()
             or self._promote_running()
+            )
         )
 
     def _backend_write_lock_message(self):
+        manager_reason = self.task_manager.busy_lock_reason()
+        if manager_reason:
+            task_type = self.task_manager.active_busy_locks()[0].task_type if self.task_manager.active_busy_locks() else ""
+            if task_type == "truth_promotion":
+                return tt("Training truth acceptance is running. Wait until it finishes before editing project data.", self.lang)
+            if task_type == "label_auto_save":
+                return tt("Label auto-save is running. Wait until it finishes before editing project data.", self.lang)
+            if task_type == "label_manual_save":
+                return tt("Label save is running. Wait until it finishes before editing project data.", self.lang)
+            if task_type == "confirm_part_roi":
+                return tt("Part volume creation is running. Wait until it finishes before editing project data.", self.lang)
+            if task_type == "local_axis_export":
+                return tt("Local Axis Reslice export is running. Wait until it finishes before editing project data.", self.lang)
+            if task_type == "backend_action":
+                return tt("Backend run is active. Stop it or wait until it finishes before editing project data.", self.lang)
+            if task_type == "tif_import":
+                return tt("TIF import is running. Wait until it finishes before editing project data.", self.lang)
+            if task_type == "amira_import":
+                return tt("AMIRA import is running. Wait until it finishes before editing project data.", self.lang)
+            if task_type == "tif_materialize":
+                return tt("Working volume build is running. Wait until it finishes before editing project data.", self.lang)
+            if task_type == "volume_preview":
+                return tt("Volume preview is being rebuilt. Wait until it finishes before editing project data.", self.lang)
+            if task_type == "mask_preview":
+                return tt("Mask preview is being rebuilt. Wait until it finishes before editing project data.", self.lang)
         if self._promote_running():
             return tt("Training truth acceptance is running. Wait until it finishes before editing project data.", self.lang)
         if self._label_manual_save_running():
@@ -8063,6 +5155,7 @@ class TifWorkbenchWidget(QWidget):
         self._tif_import_thread = None
         self._tif_import_specimen_id = ""
         self._tif_import_jobs = []
+        self._tif_import_task_id = ""
 
     def _cleanup_tif_backend_thread(self):
         self.backend_elapsed_timer.stop()
@@ -8078,6 +5171,7 @@ class TifWorkbenchWidget(QWidget):
         self._set_scope_controls_enabled()
 
     def _on_tif_import_progress(self, current, total, message):
+        self._progress_tif_task(self._tif_import_task_id, current, total, str(message or ""))
         if self._tif_import_progress is None:
             return
         maximum = max(1, int(total or 100))
@@ -8103,6 +5197,7 @@ class TifWorkbenchWidget(QWidget):
             for item in failures:
                 self.log(f"TIF import failed [{item.get('specimen_id', '')}]: {item.get('error', '')}")
             thread = self._tif_import_thread
+            self._finish_tif_task(self._tif_import_task_id, payload=result if isinstance(result, dict) else {}, message=message)
             self._cleanup_tif_import_thread()
             if thread is not None:
                 thread.quit()
@@ -8119,12 +5214,14 @@ class TifWorkbenchWidget(QWidget):
         self.training_status_label.setText(message)
         self.log(message)
         thread = self._tif_import_thread
+        self._finish_tif_task(self._tif_import_task_id, payload=result if isinstance(result, dict) else {}, message=message)
         self._cleanup_tif_import_thread()
         if thread is not None:
             thread.quit()
 
     def _on_tif_import_failed(self, message):
         thread = self._tif_import_thread
+        self._fail_tif_task(self._tif_import_task_id, str(message or ""), message=str(message or ""))
         self._cleanup_tif_import_thread()
         if thread is not None:
             thread.quit()
@@ -8197,8 +5294,10 @@ class TifWorkbenchWidget(QWidget):
         self._tif_materialize_worker = None
         self._tif_materialize_thread = None
         self._tif_materialize_specimen_id = ""
+        self._tif_materialize_task_id = ""
 
     def _on_tif_materialize_progress(self, current, total, message):
+        self._progress_tif_task(self._tif_materialize_task_id, current, total, str(message or ""))
         if self._tif_materialize_progress is None:
             return
         maximum = max(1, int(total or 100))
@@ -8211,24 +5310,32 @@ class TifWorkbenchWidget(QWidget):
         specimen_id = self._tif_materialize_specimen_id
         report_path = result.get("report_path", "") if isinstance(result, dict) else ""
         thread = self._tif_materialize_thread
+        task_id = self._tif_materialize_task_id
+        task_current = self._task_context_matches_current(task_id, fields=("specimen_id",))
+        self._finish_tif_task(task_id, payload=result if isinstance(result, dict) else {}, message="tif_materialize_finished")
         self._cleanup_tif_materialize_thread()
         if thread is not None:
             thread.quit()
         self.refresh_project()
-        if specimen_id:
+        if specimen_id and task_current:
             self._select_specimen_after_import(specimen_id)
         message = tt("Working volume ready for specimen {0}. Report: {1}", self.lang).format(specimen_id, report_path)
+        if specimen_id and not task_current:
+            message = f"{message} {tt('Current view was left unchanged because you switched context while it was running.', self.lang)}"
         self.training_status_label.setText(message)
         self.log(message)
 
     def _on_tif_materialize_failed(self, message):
         thread = self._tif_materialize_thread
         specimen_id = self._tif_materialize_specimen_id
+        task_id = self._tif_materialize_task_id
+        task_current = self._task_context_matches_current(task_id, fields=("specimen_id",))
+        self._fail_tif_task(task_id, str(message or ""), message=str(message or ""))
         self._cleanup_tif_materialize_thread()
         if thread is not None:
             thread.quit()
         self.refresh_project()
-        if specimen_id:
+        if specimen_id and task_current:
             self._select_volume_tree_item(specimen_id, "full", "")
         QMessageBox.critical(self, tt("Build working volume", self.lang), message)
 
@@ -8242,6 +5349,14 @@ class TifWorkbenchWidget(QWidget):
             QMessageBox.information(self, tt("Build working volume", self.lang), tt("Working volume build is already running.", self.lang))
             return True
         self._tif_materialize_specimen_id = self.current_specimen_id
+        task = self._start_tif_task(
+            "tif_materialize",
+            action="materialize_working_volume",
+            payload={"specimen_id": self.current_specimen_id},
+            request_key=self.current_specimen_id,
+            message=tt("Building working volume...", self.lang),
+        )
+        self._tif_materialize_task_id = task.task_id
         self._tif_materialize_progress = QProgressDialog(
             tt("Building working volume...", self.lang),
             "",
@@ -8302,6 +5417,7 @@ class TifWorkbenchWidget(QWidget):
         self._local_axis_reslice_export_worker = None
         self._local_axis_reslice_export_thread = None
         self._local_axis_reslice_export_context = {}
+        self._local_axis_reslice_export_task_id = ""
         self._set_scope_controls_enabled()
 
     def _part_mask_preview_running(self):
@@ -8315,6 +5431,7 @@ class TifWorkbenchWidget(QWidget):
         self._part_mask_preview_worker = None
         self._part_mask_preview_thread = None
         self._part_mask_preview_context = {}
+        self._part_mask_preview_task_id = ""
         self._set_scope_controls_enabled()
 
     def _on_part_mask_preview_progress(self, current, total, message):
@@ -8335,16 +5452,35 @@ class TifWorkbenchWidget(QWidget):
         token = int(result.get("token") or 0)
         if token != int(self._part_mask_preview_token):
             return
+        if not self._task_context_matches_current(
+            self._part_mask_preview_task_id,
+            fields=("specimen_id", "volume_scope", "part_id", "reslice_id"),
+        ):
+            thread = self._part_mask_preview_thread
+            self._cancel_tif_task(self._part_mask_preview_task_id, "stale_part_mask_preview_context")
+            self._cleanup_part_mask_preview_thread()
+            if thread is not None:
+                thread.quit()
+            return
         thread = self._part_mask_preview_thread
         context = dict(result.get("context") or self._part_mask_preview_context or {})
-        self._cleanup_part_mask_preview_thread()
-        if thread is not None:
-            thread.quit()
         if result.get("cancelled"):
+            self._cancel_tif_task(self._part_mask_preview_task_id, "part_mask_preview_cancelled")
+            self._cleanup_part_mask_preview_thread()
+            if thread is not None:
+                thread.quit()
             return
         mask = result.get("mask")
         if mask is None:
+            self._fail_tif_task(self._part_mask_preview_task_id, "part_mask_preview_empty_result", payload=result)
+            self._cleanup_part_mask_preview_thread()
+            if thread is not None:
+                thread.quit()
             return
+        self._finish_tif_task(self._part_mask_preview_task_id, payload={"token": token}, message="part_mask_preview_finished")
+        self._cleanup_part_mask_preview_thread()
+        if thread is not None:
+            thread.quit()
         self._apply_part_mask_preview_result(mask, context)
 
     def _on_part_mask_preview_failed(self, result):
@@ -8354,10 +5490,15 @@ class TifWorkbenchWidget(QWidget):
             return
         thread = self._part_mask_preview_thread
         message = str(result.get("error") or "")
+        task_current = self._task_context_matches_current(
+            self._part_mask_preview_task_id,
+            fields=("specimen_id", "volume_scope", "part_id", "reslice_id"),
+        )
+        self._fail_tif_task(self._part_mask_preview_task_id, message, payload=result)
         self._cleanup_part_mask_preview_thread()
         if thread is not None:
             thread.quit()
-        if message:
+        if message and task_current:
             QMessageBox.warning(self, tt("Part extraction", self.lang), message)
 
     def _start_part_mask_preview_build(self, contours, shape, context):
@@ -8371,6 +5512,26 @@ class TifWorkbenchWidget(QWidget):
         self._part_mask_preview_token += 1
         token = int(self._part_mask_preview_token)
         self._part_mask_preview_context = dict(context or {})
+        task = self._start_tif_task(
+            "mask_preview",
+            action="build_mask_preview",
+            payload={"token": token, "shape_zyx": list(shape or [])},
+            request_key=f"part_mask_preview:{token}",
+            message=tt("Preview auto fill is running...", self.lang),
+        )
+        task.context = self._current_task_context(request_key=f"part_mask_preview:{token}")
+        if isinstance(context, dict):
+            task.context = task.context.__class__.from_mapping(
+                {
+                    **task.context.to_dict(),
+                    "specimen_id": context.get("specimen_id", task.context.specimen_id),
+                    "volume_scope": context.get("volume_scope", context.get("scope", task.context.volume_scope)),
+                    "part_id": context.get("part_id", task.context.part_id),
+                    "reslice_id": context.get("reslice_id", task.context.reslice_id),
+                    "request_key": f"part_mask_preview:{token}",
+                }
+            )
+        self._part_mask_preview_task_id = task.task_id
         self._part_mask_preview_progress = QProgressDialog(
             tt("Preview auto fill is running...", self.lang),
             "",
@@ -8408,9 +5569,11 @@ class TifWorkbenchWidget(QWidget):
         self._confirm_part_roi_worker = None
         self._confirm_part_roi_thread = None
         self._confirm_part_roi_request = {}
+        self._confirm_part_roi_task_id = ""
         self._set_scope_controls_enabled()
 
     def _on_confirm_part_roi_progress(self, current, total, message):
+        self._progress_tif_task(self._confirm_part_roi_task_id, current, total, str(message or ""))
         progress = self._confirm_part_roi_progress
         if progress is None:
             return
@@ -8427,19 +5590,37 @@ class TifWorkbenchWidget(QWidget):
     def _on_confirm_part_roi_finished(self, result):
         result = dict(result or {})
         thread = self._confirm_part_roi_thread
+        task_current = self._task_context_matches_current(
+            self._confirm_part_roi_task_id,
+            fields=("specimen_id", "volume_scope", "part_id"),
+        )
+        self._finish_tif_task(self._confirm_part_roi_task_id, payload=result, message="confirm_part_roi_finished")
         self._cleanup_confirm_part_roi_thread()
         if thread is not None:
             thread.quit()
+        if not task_current:
+            self.refresh_project()
+            specimen_id = str(result.get("specimen_id") or "")
+            part_id = str(result.get("part_id") or "")
+            message = tt("Part volume {0} was created, but current view was left unchanged because you switched context while it was running.", self.lang).format(part_id)
+            self.training_status_label.setText(message)
+            self.log(message)
+            return
         self._finish_confirm_part_roi_result(result)
 
     def _on_confirm_part_roi_failed(self, result):
         result = dict(result or {})
         thread = self._confirm_part_roi_thread
         message = str(result.get("error") or "")
+        task_current = self._task_context_matches_current(
+            self._confirm_part_roi_task_id,
+            fields=("specimen_id", "volume_scope", "part_id"),
+        )
+        self._fail_tif_task(self._confirm_part_roi_task_id, message, payload=result)
         self._cleanup_confirm_part_roi_thread()
         if thread is not None:
             thread.quit()
-        if message:
+        if message and task_current:
             self.training_status_label.setText(message)
             self.log(f"Failed to confirm ROI: {message}")
             QMessageBox.warning(self, tt("Part extraction", self.lang), message)
@@ -8453,6 +5634,14 @@ class TifWorkbenchWidget(QWidget):
             )
             return False
         self._confirm_part_roi_request = dict(request or {})
+        task = self._start_tif_task(
+            "confirm_part_roi",
+            action="confirm_part_roi",
+            payload={"request": dict(request or {})},
+            request_key=self._task_request_key((request or {}).get("bbox_zyx") or (request or {}).get("part_id") or ""),
+            message=tt("Part volume creation is running. Wait until it finishes before editing project data.", self.lang),
+        )
+        self._confirm_part_roi_task_id = task.task_id
         self._confirm_part_roi_progress = QProgressDialog(
             tt("Creating part volume...", self.lang),
             "",
@@ -8485,6 +5674,7 @@ class TifWorkbenchWidget(QWidget):
         return True
 
     def _on_local_axis_reslice_export_progress(self, current, total, message):
+        self._progress_tif_task(self._local_axis_reslice_export_task_id, current, total, str(message or ""))
         progress = self._local_axis_reslice_export_progress
         if progress is None:
             return
@@ -8500,33 +5690,46 @@ class TifWorkbenchWidget(QWidget):
 
     def _on_local_axis_reslice_export_finished(self, result):
         context = dict(getattr(self, "_local_axis_reslice_export_context", {}) or {})
-        self._cleanup_local_axis_reslice_export_thread()
+        task_id = self._local_axis_reslice_export_task_id
+        task_current = self._task_context_matches_current(task_id, fields=("specimen_id", "volume_scope", "part_id"))
         if not isinstance(result, dict):
             message = tt("Local Axis Reslice export did not return a result.", self.lang)
-            self._set_local_axis_status(message)
+            self._fail_tif_task(task_id, message, message=message)
+            self._cleanup_local_axis_reslice_export_thread()
+            if task_current:
+                self._set_local_axis_status(message)
             self.log(message)
             QMessageBox.warning(self, tt("Local Axis Reslice", self.lang), message)
             return
         record = result.get("record", {})
         reslice_id = record.get("reslice_id", "")
         message = tt("Exported local axis reslice {0}.", self.lang).format(reslice_id)
-        self._set_local_axis_status(message)
+        self._finish_tif_task(task_id, payload=result, message="local_axis_export_finished")
+        self._cleanup_local_axis_reslice_export_thread()
+        if task_current:
+            self._set_local_axis_status(message)
         self.training_status_label.setText(message)
         self.log(message)
-        self._local_axis_pick_target = ""
-        self._local_axis_roll_pick_target = ""
+        if task_current:
+            self._local_axis_pick_target = ""
+            self._local_axis_roll_pick_target = ""
         self.refresh_project()
-        self._select_volume_tree_item(
-            context.get("specimen_id") or self.current_specimen_id,
-            "part_reslice",
-            context.get("part_id") or self.current_part_id,
-            reslice_id,
-        )
+        if task_current:
+            self._select_volume_tree_item(
+                context.get("specimen_id") or self.current_specimen_id,
+                "part_reslice",
+                context.get("part_id") or self.current_part_id,
+                reslice_id,
+            )
 
     def _on_local_axis_reslice_export_failed(self, message):
+        task_id = self._local_axis_reslice_export_task_id
+        task_current = self._task_context_matches_current(task_id, fields=("specimen_id", "volume_scope", "part_id"))
+        self._fail_tif_task(task_id, str(message or ""), message=str(message or ""))
         self._cleanup_local_axis_reslice_export_thread()
         message = str(message or "")
-        self._set_local_axis_status(message)
+        if task_current:
+            self._set_local_axis_status(message)
         self.log(message)
         QMessageBox.warning(self, tt("Local Axis Reslice", self.lang), message)
 
@@ -8575,6 +5778,14 @@ class TifWorkbenchWidget(QWidget):
         self._set_tif_import_controls_enabled(False)
         self._tif_import_jobs = jobs
         self._tif_import_specimen_id = jobs[0]["specimen_id"] if jobs else ""
+        task = self._start_tif_task(
+            "tif_import",
+            action="import_tif_stack",
+            payload={"jobs": [dict(job) for job in jobs]},
+            request_key=self._tif_import_specimen_id,
+            message=tt("Importing TIF stack...", self.lang),
+        )
+        self._tif_import_task_id = task.task_id
         self._tif_import_progress = QProgressDialog(
             tt("Importing TIF stack...", self.lang) if len(jobs) == 1 else tt("Importing TIF stack batch...", self.lang),
             "",
@@ -8624,11 +5835,20 @@ class TifWorkbenchWidget(QWidget):
         )
         if not ok or not specimen_id:
             return
+        task = self._start_tif_task(
+            "amira_import",
+            action="import_amira_directory",
+            payload={"source_dir": str(source_dir), "specimen_id": str(specimen_id)},
+            request_key=str(specimen_id),
+            message=tt("Importing AMIRA directory...", self.lang),
+        )
         try:
             result = import_amira_directory(self.project, source_dir, specimen_id)
         except Exception as exc:
+            self._fail_tif_task(task.task_id, str(exc), message=str(exc))
             QMessageBox.critical(self, tt("Import AMIRA Directory", self.lang), str(exc))
             return
+        self._finish_tif_task(task.task_id, payload=result if isinstance(result, dict) else {}, message="amira_import_finished")
         self.refresh_project()
         self._select_specimen_after_import(specimen_id)
         report_path = result.get("report_path", "")
@@ -9211,14 +6431,10 @@ class TifWorkbenchWidget(QWidget):
         return roi
 
     def _confirm_part_roi_request_voxel_count(self, request):
-        try:
-            shape = _tif_bbox_shape(request.get("bbox_zyx") or [])
-            return int(np.prod([max(0, int(value)) for value in shape], dtype=np.int64))
-        except Exception:
-            return 0
+        return self.roi_part_service.request_voxel_count(request)
 
     def _should_confirm_part_roi_in_background(self, request):
-        return self._confirm_part_roi_request_voxel_count(request) >= TIF_CONFIRM_PART_BACKGROUND_VOXELS
+        return self.roi_part_service.should_run_in_background(request, threshold=TIF_CONFIRM_PART_BACKGROUND_VOXELS)
 
     def _accepted_full_volume_preview_mask_for_request(self, bbox):
         if (
@@ -9232,21 +6448,22 @@ class TifWorkbenchWidget(QWidget):
         return None
 
     def _build_confirm_part_roi_request(self, roi, bbox, part_id, display_name, roi_keyframes, mask_contours, mask_bbox):
-        bbox = [list(pair) for pair in (bbox or [])]
-        mask_bbox = [list(pair) for pair in (mask_bbox or [])]
-        return {
-            "specimen_id": self.current_specimen_id,
-            "part_id": str(part_id or ""),
-            "display_name": str(display_name or part_id or ""),
-            "bbox_zyx": bbox,
-            "source_shape_zyx": [int(value) for value in getattr(self.image_volume, "shape", ()) or ()],
-            "roi_id": str((roi or {}).get("roi_id") or ""),
-            "roi_metadata": self._roi_keyframe_metadata(),
-            "roi_keyframes": list(roi_keyframes or []),
-            "mask_contours": dict(mask_contours or {}),
-            "mask_bbox_zyx": mask_bbox,
-            "accepted_preview_mask": self._accepted_full_volume_preview_mask_for_request(bbox) if mask_bbox else None,
-        }
+        result = self.roi_part_service.build_confirm_part_roi_request(
+            specimen_id=self.current_specimen_id,
+            part_id=part_id,
+            display_name=display_name,
+            bbox_zyx=bbox,
+            source_shape_zyx=[int(value) for value in getattr(self.image_volume, "shape", ()) or ()],
+            roi_id=str((roi or {}).get("roi_id") or ""),
+            roi_metadata=self._roi_keyframe_metadata(),
+            roi_keyframes=roi_keyframes,
+            mask_contours=mask_contours,
+            mask_bbox_zyx=mask_bbox,
+            accepted_preview_mask=self._accepted_full_volume_preview_mask_for_request(bbox) if mask_bbox else None,
+        )
+        if not result:
+            raise ValueError(result.message or ", ".join(result.reasons or []))
+        return result.payload.get("request") or {}
 
     def _confirm_part_roi_request_sync(self, request):
         part = crop_volume_to_part(
@@ -10324,17 +7541,15 @@ class TifWorkbenchWidget(QWidget):
         self.log(message)
 
     def _selected_specimen_ids_for_action(self, action):
+        result = self.backend_workflow_service.selected_specimen_ids_for_action(
+            action,
+            current_specimen_id=self.current_specimen_id,
+        )
+        if result:
+            return result.payload.get("specimen_ids", [])
         if action in {"prepare_dataset", "train"}:
-            ready = [item.get("specimen_id") for item in self.project.list_train_ready_specimens()]
-            if not ready:
-                raise ValueError(tt("No train-ready top-level volumes are available.", self.lang))
-            return ready
-        ids = [self.current_specimen_id] if self.current_specimen_id else []
-        if not ids:
-            ids = [item.get("specimen_id") for item in self.project.project_data.get("specimens", [])]
-        if not ids:
-            raise ValueError(tt("No top-level volume is available for prediction.", self.lang))
-        return ids
+            raise ValueError(tt("No train-ready top-level volumes are available.", self.lang))
+        raise ValueError(tt("No top-level volume is available for prediction.", self.lang))
 
     def _format_train_ready_reasons(self, reasons):
         labels = {
@@ -10506,6 +7721,31 @@ class TifWorkbenchWidget(QWidget):
         return "\n".join(lines)
 
     def _selected_backend_samples_for_action(self, action):
+        selected_predict_refs = []
+        if action == "predict":
+            self._sync_predict_selection_from_table()
+            for key in sorted(self._tif_predict_selected_refs):
+                selected_predict_refs.append(self._predict_ref_from_key(key))
+        service_result = self.backend_workflow_service.selected_backend_samples_for_action(
+            action,
+            current_volume_scope=self.current_volume_scope,
+            current_specimen_id=self.current_specimen_id,
+            current_part_id=self.current_part_id,
+            current_reslice_id=self.current_reslice_id,
+            selected_predict_refs=selected_predict_refs,
+        )
+        if service_result:
+            return {
+                "input_scope": service_result.payload.get("input_scope") or "part_reslice",
+                "part_refs": service_result.payload.get("part_refs") or [],
+                "specimen_ids": service_result.payload.get("specimen_ids") or [],
+                "fallback_reason": service_result.payload.get("fallback_reason", ""),
+            }
+        if action in {"prepare_dataset", "train"}:
+            raise ValueError(self._training_selection_error(prefer_part=(self.current_volume_scope == "part")))
+        raise ValueError(tt("Selected prediction target is incomplete: {0}", self.lang).format(", ".join(service_result.reasons or [service_result.message])))
+
+    def _selected_backend_samples_for_action_legacy(self, action):
         if action in {"prepare_dataset", "train"}:
             if self.current_volume_scope == "part" and self.current_specimen_id and self.current_part_id:
                 current_reports = self._part_training_readiness_reports(prefer_current=True, limit=1)
@@ -10550,37 +7790,7 @@ class TifWorkbenchWidget(QWidget):
         }
 
     def _train_ready_part_refs(self):
-        refs = []
-        for specimen in self.project.project_data.get("specimens", []) or []:
-            if not isinstance(specimen, dict):
-                continue
-            specimen_id = str(specimen.get("specimen_id") or "")
-            if not specimen_id:
-                continue
-            for part in specimen.get("parts", []) or []:
-                if not isinstance(part, dict):
-                    continue
-                part_id = str(part.get("part_id") or "")
-                if not part_id:
-                    continue
-                try:
-                    readiness = self.project.evaluate_part_train_ready(
-                        specimen_id,
-                        part_id,
-                        validate_label_ids=False,
-                    )
-                except Exception:
-                    continue
-                if not readiness.get("train_ready"):
-                    continue
-                refs.append(
-                    {
-                        "specimen_id": readiness.get("specimen_id", ""),
-                        "part_id": readiness.get("part_id", ""),
-                        "reslice_id": readiness.get("reslice_id", ""),
-                    }
-                )
-        return refs
+        return self.backend_workflow_service.train_ready_part_refs()
 
     def _selected_part_refs_for_action(self, action):
         refs = []
@@ -10645,10 +7855,11 @@ class TifWorkbenchWidget(QWidget):
         return "; ".join(parts)
 
     def _split_review_acceptance_refs(self, refs):
-        report = self.project.build_part_review_acceptance_report(
+        result = self.truth_promotion_service.split_review_acceptance_refs(
             refs,
             require_opened_for_review=False,
         )
+        report = result.payload.get("report", {}) if result else {}
         ready = list(report.get("ready") or [])
         not_opened = list(report.get("not_opened") or [])
         blocked = list(report.get("blocked") or [])
@@ -10699,7 +7910,7 @@ class TifWorkbenchWidget(QWidget):
         if reply != QMessageBox.Yes:
             return False
         try:
-            result = self.project.promote_reviewed_part_results_to_manual_truth(
+            service_result = self.truth_promotion_service.promote_reviewed_refs(
                 ready,
                 require_opened_for_review=False,
                 save=True,
@@ -10707,6 +7918,11 @@ class TifWorkbenchWidget(QWidget):
         except Exception as exc:
             QMessageBox.warning(self, tt("Accept working edit", self.lang), str(exc))
             return False
+        if not service_result:
+            message = service_result.message or ", ".join(service_result.reasons or [])
+            QMessageBox.warning(self, tt("Accept working edit", self.lang), message)
+            return False
+        result = service_result.payload.get("result", {})
         self.refresh_project()
         if self.current_specimen_id and self.current_part_id:
             self._select_volume_tree_item(
@@ -10720,25 +7936,12 @@ class TifWorkbenchWidget(QWidget):
         return True
 
     def _predict_will_overwrite_editable_result(self, part_refs=None, specimen_ids=None, input_scope="part_reslice"):
-        if str(input_scope or "") == "top_level_volume":
-            for specimen_id in specimen_ids or []:
-                specimen = self.project.get_specimen(str(specimen_id), default=None)
-                record = (((specimen or {}).get("labels") or {}).get("working_edit") or {})
-                if str(record.get("path") or "").strip():
-                    return True
-            return False
-        for ref in part_refs or []:
-            specimen_id = str((ref or {}).get("specimen_id") or "")
-            part_id = str((ref or {}).get("part_id") or "")
-            record = self.project.part_label_record(
-                specimen_id,
-                part_id,
-                "editable_ai_result",
-                reslice_id=str((ref or {}).get("reslice_id") or ""),
-            )
-            if str(record.get("path") or "").strip():
-                return True
-        return False
+        result = self.backend_workflow_service.predict_will_overwrite_editable_result(
+            part_refs=part_refs,
+            specimen_ids=specimen_ids,
+            input_scope=input_scope,
+        )
+        return bool(result.payload.get("overwrite"))
 
     def _confirm_predict_overwrite_if_needed(self, part_refs=None, specimen_ids=None, input_scope="part_reslice"):
         if not self._predict_will_overwrite_editable_result(part_refs=part_refs, specimen_ids=specimen_ids, input_scope=input_scope):
@@ -10780,6 +7983,7 @@ class TifWorkbenchWidget(QWidget):
         self.log(detail)
 
     def _on_tif_backend_progress(self, current, total, message):
+        self._progress_tif_task(self._tif_backend_task_id, current, total, str(message or ""))
         total = int(total or 0)
         current = int(current or 0)
         if total <= 0:
@@ -10853,6 +8057,8 @@ class TifWorkbenchWidget(QWidget):
 
     def _on_tif_backend_finished(self, result):
         result = result if isinstance(result, dict) else {}
+        task_id = self._tif_backend_task_id
+        task_current = self._task_context_matches_current(task_id, fields=("specimen_id", "volume_scope", "part_id", "reslice_id"))
         self._tif_backend_last_result = result
         self._tif_backend_run_dir = str(result.get("run_dir") or "")
         backend_result = result.get("result") if isinstance(result.get("result"), dict) else {}
@@ -10867,6 +8073,7 @@ class TifWorkbenchWidget(QWidget):
         self.training_status_label.setText(message)
         self.log(message)
         pending = dict(self._tif_backend_pending_selection or {})
+        self._finish_tif_task(task_id, payload=result, message="backend_action_finished")
         self._cleanup_tif_backend_thread()
         self.refresh_project()
         if action == "train":
@@ -10877,7 +8084,7 @@ class TifWorkbenchWidget(QWidget):
             self._set_training_result_summary(summary)
             self._populate_tif_model_library_combo(self._tif_model_record_id(model_record) if model_record else None)
             self.show_latest_training_result_summary(show_message=False)
-        if action == "predict" and pending.get("specimen_id") and pending.get("input_scope") == "top_level_volume":
+        if action == "predict" and task_current and pending.get("specimen_id") and pending.get("input_scope") == "top_level_volume":
             self._select_volume_tree_item(pending.get("specimen_id", ""), "full")
             index = self.label_role_combo.findData("working_edit")
             if index >= 0:
@@ -10885,7 +8092,7 @@ class TifWorkbenchWidget(QWidget):
             if hasattr(self, "task_tabs") and hasattr(self, "training_mode_tabs"):
                 self.task_tabs.setCurrentWidget(self.training_mode_tabs)
                 self.training_mode_tabs.setCurrentWidget(self.annotation_task_page)
-        elif action == "predict" and pending.get("specimen_id") and pending.get("part_id"):
+        elif action == "predict" and task_current and pending.get("specimen_id") and pending.get("part_id"):
             self._select_volume_tree_item(
                 pending.get("specimen_id", ""),
                 "part_reslice" if pending.get("reslice_id") else "part",
@@ -10901,6 +8108,7 @@ class TifWorkbenchWidget(QWidget):
         if action == "predict":
             self.refresh_predict_targets()
         self._tif_backend_pending_selection = {}
+        self._tif_backend_task_id = ""
 
     def _on_tif_backend_failed(self, message, context=None):
         text = str(message or "")
@@ -10921,7 +8129,13 @@ class TifWorkbenchWidget(QWidget):
         self.backend_log_tail.setToolTip(text)
         self.log(status)
         self._tif_backend_pending_selection = {}
+        task = self.task_manager.task(self._tif_backend_task_id)
+        if task is not None and task.status == "cancelled":
+            self._cancel_tif_task(self._tif_backend_task_id, task.error or status)
+        else:
+            self._fail_tif_task(self._tif_backend_task_id, text, payload=context, message=status)
         self._cleanup_tif_backend_thread()
+        self._tif_backend_task_id = ""
         if "_cancelled" not in text:
             QMessageBox.warning(self, tt("TIF backend", self.lang), self._backend_failure_dialog_text(status, text))
 
@@ -10934,6 +8148,7 @@ class TifWorkbenchWidget(QWidget):
         self.backend_run_status_label.setText(message)
         self.training_status_label.setText(message)
         self.log(message)
+        self._cancel_tif_task(self._tif_backend_task_id, message)
 
     def open_latest_backend_run_folder(self):
         path = str(self._tif_backend_run_dir or "")
@@ -11025,6 +8240,19 @@ class TifWorkbenchWidget(QWidget):
             "input_scope": input_scope,
         }
         self._start_backend_status(action, part_refs=part_refs, specimen_ids=specimen_ids, input_scope=input_scope)
+        task = self._start_tif_task(
+            "backend_action",
+            action=action,
+            payload={
+                "input_scope": input_scope,
+                "part_ref_count": len(part_refs or []),
+                "specimen_count": len(specimen_ids or []),
+                "pending_selection": dict(self._tif_backend_pending_selection or {}),
+            },
+            request_key=self._task_request_key((action, input_scope, part_refs or specimen_ids)),
+            message=tt("Backend run is active. Stop it or wait until it finishes before editing project data.", self.lang),
+        )
+        self._tif_backend_task_id = task.task_id
         self._tif_backend_thread = QThread(self)
         self._tif_backend_worker = TifBackendActionWorker(
             self.project,
@@ -12993,6 +10221,8 @@ class TifWorkbenchWidget(QWidget):
         if not self._guard_backend_write_lock():
             return False
         if self.current_volume_scope == "part":
+            if not self._guard_current_label_save(role="editable_ai_result", reason="manual", show_message=True):
+                return False
             part = self.project.get_part(self.current_specimen_id, self.current_part_id, default=None)
             if part is None:
                 return False
@@ -13047,6 +10277,7 @@ class TifWorkbenchWidget(QWidget):
                     spacing_unit=metadata.get("spacing_unit", "micrometer"),
                     orientation=metadata.get("orientation", "local_axis_reslice"),
                     fmt=metadata.get("format", ""),
+                    operation="create_empty_edit_layer",
                     save=False,
                 )
             else:
@@ -13062,6 +10293,7 @@ class TifWorkbenchWidget(QWidget):
                     spacing_unit=metadata.get("spacing_unit", "micrometer"),
                     orientation=metadata.get("orientation", "unknown"),
                     fmt=metadata.get("format", ""),
+                    operation="create_empty_edit_layer",
                     save=False,
                 )
             self.project.save_project()
@@ -13070,6 +10302,8 @@ class TifWorkbenchWidget(QWidget):
             return self.edit_volume is not None
         specimen = self.project.get_specimen(self.current_specimen_id, default=None)
         if specimen is None:
+            return False
+        if not self._guard_current_label_save(role="working_edit", reason="manual", show_message=True):
             return False
         labels = specimen.setdefault("labels", {})
         edit_record = labels.get("working_edit") or {}
@@ -13095,6 +10329,7 @@ class TifWorkbenchWidget(QWidget):
             spacing_unit=metadata.get("spacing_unit", "micrometer"),
             orientation=metadata.get("orientation", "unknown"),
             fmt=metadata.get("format", ""),
+            operation="create_empty_edit_layer",
             save=False,
         )
         self.project.save_project()
@@ -13438,7 +10673,10 @@ class TifWorkbenchWidget(QWidget):
         shape = tuple(int(value) for value in getattr(self.image_volume, "shape", ()) or ())
         if len(shape) != 3 or min(shape) <= 0:
             return {}
-        return source_z_axis_for_part(shape)
+        result = self.local_axis_service.source_z_axis_for_shape(shape)
+        if not result:
+            return {}
+        return dict(result.payload.get("source_axis") or {})
 
     def copy_source_z_axis_to_local_axis_draft(self):
         if not self._guard_backend_write_lock():
@@ -13449,22 +10687,15 @@ class TifWorkbenchWidget(QWidget):
         source_axis = self._source_z_axis_for_current_part()
         if not source_axis:
             return None
-        editable_axis = create_editable_axis_from_source(source_axis)
-        roll_reference = {}
-        if str(self.current_part_id or "").lower() == "head":
-            roll_reference["pair_id"] = "roll_reference_point_pair"
-        draft = {
-            "specimen_id": self.current_specimen_id,
-            "part_id": self.current_part_id,
-            "template_id": str(self.current_part_id or "generic"),
-            "source_axis": source_axis,
-            "initial_editable_axis": dict(editable_axis),
-            "editable_axis": editable_axis,
-            "origin_zyx": self._local_axis_origin_from_editable_axis(editable_axis),
-            "roll_reference": roll_reference,
-            "local_frame": None,
-            "dirty": True,
-        }
+        result = self.local_axis_service.build_initial_draft(
+            specimen_id=self.current_specimen_id,
+            part_id=self.current_part_id,
+            source_shape_zyx=tuple(int(value) for value in getattr(self.image_volume, "shape", ()) or ()),
+            source_axis=source_axis,
+        )
+        if not result:
+            return None
+        draft = dict(result.payload.get("draft") or {})
         self._refresh_local_axis_frame(draft)
         self.local_axis_draft = draft
         if hasattr(self, "volume_local_axes_check"):
@@ -13582,12 +10813,7 @@ class TifWorkbenchWidget(QWidget):
 
     def _roll_reference_payload(self, draft=None):
         draft = draft if isinstance(draft, dict) else self._current_local_axis_draft()
-        roll = (draft or {}).get("roll_reference") if isinstance((draft or {}).get("roll_reference"), dict) else {}
-        point_a = roll.get("point_a") if isinstance(roll.get("point_a"), dict) else {}
-        point_b = roll.get("point_b") if isinstance(roll.get("point_b"), dict) else {}
-        if not point_a.get("zyx") or not point_b.get("zyx"):
-            return None
-        return roll
+        return self.local_axis_service.roll_reference_payload(draft)
 
     def _local_axis_spacing_zyx(self):
         _, spacing_zyx = self._volume_source_geometry()
@@ -13644,22 +10870,12 @@ class TifWorkbenchWidget(QWidget):
             return None
         editable = draft.get("editable_axis") or {}
         draft["origin_zyx"] = self._local_axis_origin_from_editable_axis(editable)
-        roll = self._roll_reference_payload(draft)
-        if not roll:
+        result = self.local_axis_service.build_local_frame(draft, spacing_zyx=self._local_axis_spacing_zyx())
+        if not result:
             draft["local_frame"] = None
+            draft["local_frame_error"] = result.message
             return None
-        try:
-            frame = compute_local_frame(
-                draft.get("origin_zyx"),
-                editable.get("start_zyx"),
-                editable.get("end_zyx"),
-                roll_reference=roll,
-                spacing_zyx=self._local_axis_spacing_zyx(),
-            )
-        except Exception as exc:
-            draft["local_frame"] = None
-            draft["local_frame_error"] = str(exc)
-            return None
+        frame = dict(result.payload.get("frame") or {})
         draft["local_frame"] = frame
         draft.pop("local_frame_error", None)
         return frame
@@ -14190,14 +11406,10 @@ class TifWorkbenchWidget(QWidget):
         draft = self._current_local_axis_draft()
         if not isinstance(draft, dict):
             return
-        roll = dict(draft.get("roll_reference") or {})
-        roll.pop("point_a", None)
-        roll.pop("point_b", None)
-        roll.pop("point_c", None)
-        roll.pop("reference_plane", None)
-        draft["roll_reference"] = roll
-        draft["local_frame"] = None
-        draft["dirty"] = True
+        result = self.local_axis_service.clear_roll_reference_points(draft)
+        if not result:
+            return
+        draft = dict(result.payload.get("draft") or {})
         self.local_axis_draft = draft
         self._local_axis_pick_target = ""
         self._local_axis_roll_pick_target = ""
@@ -15575,21 +12787,22 @@ class TifWorkbenchWidget(QWidget):
         if roi_bbox is not None:
             preserve_source = mode == "still" and (self._volume_clarity_mode or self.current_volume_scope == "part" or self._active_volume_roi_scale() > 1.0)
         owner = self._active_volume_cache_owner()
-        cache_key = (owner, shape, source_dtype, max_dim, preserve_source, algorithm, roi_key, self._roi_texture_budget_bytes())
-        return {
-            "cache_key": cache_key,
-            "owner": owner,
-            "shape": shape,
-            "source_dtype": source_dtype,
-            "max_dim": max_dim,
-            "preserve_source": preserve_source,
-            "algorithm": algorithm,
-            "roi_bbox": roi_bbox,
-            "roi_key": roi_key,
-            "texture_budget_bytes": self._roi_texture_budget_bytes(),
-            "mode": mode,
-            "message": self._volume_preview_progress_message(mode, roi_bbox),
-        }
+        _ = roi_key
+        result = self.volume_preview_service.build_workbench_preview_request(
+            owner=owner,
+            shape=shape,
+            source_dtype=source_dtype,
+            max_dim=max_dim,
+            preserve_source=preserve_source,
+            algorithm=algorithm,
+            roi_bbox=roi_bbox,
+            texture_budget_bytes=self._roi_texture_budget_bytes(),
+            mode=mode,
+            message=self._volume_preview_progress_message(mode, roi_bbox),
+        )
+        if not result:
+            return None
+        return dict(result.payload.get("request") or {})
 
     def _volume_mask_preview_request(self, mode=None):
         mask = self._active_part_mask_volume()
@@ -15602,20 +12815,21 @@ class TifWorkbenchWidget(QWidget):
         roi_bbox = self._active_volume_roi_bbox(mode)
         if self.current_volume_scope == "full" and mask is self.part_preview_mask:
             roi_bbox = None
-        roi_key = tuple(tuple(int(value) for value in pair) for pair in roi_bbox) if roi_bbox is not None else None
         owner = self._active_volume_cache_owner()
-        cache_key = (owner, shape, str(np.dtype(getattr(mask, "dtype", np.uint16))), max_dim, id(mask), mask_algorithm, roi_key)
-        return {
-            "cache_key": cache_key,
-            "owner": owner,
-            "shape": shape,
-            "max_dim": max_dim,
-            "algorithm": mask_algorithm,
-            "roi_bbox": roi_bbox,
-            "roi_key": roi_key,
-            "mode": mode,
-            "message": tt("Preparing mask preview...", self.lang),
-        }
+        result = self.volume_preview_service.build_mask_preview_request(
+            owner=owner,
+            shape=shape,
+            source_dtype=str(np.dtype(getattr(mask, "dtype", np.uint16))),
+            max_dim=max_dim,
+            mask_identity=id(mask),
+            algorithm=mask_algorithm,
+            roi_bbox=roi_bbox,
+            mode=mode,
+            message=tt("Preparing mask preview...", self.lang),
+        )
+        if not result:
+            return None
+        return dict(result.payload.get("request") or {})
 
     def _cache_volume_preview_result(self, request, preview, build_ms=None):
         if request is None or preview is None:
@@ -15748,6 +12962,8 @@ class TifWorkbenchWidget(QWidget):
         self._volume_preview_pending_token = 0
         self._volume_preview_pending_key = None
         self._volume_preview_pending_mask_key = None
+        self._cancel_tif_task(self._volume_preview_build_task_id, "volume_preview_cancelled")
+        self._volume_preview_build_task_id = ""
         self._set_volume_preview_build_controls_busy(False)
 
     def _cancel_and_wait_volume_preview_build(self, timeout_ms=2000):
@@ -15832,6 +13048,14 @@ class TifWorkbenchWidget(QWidget):
         self._set_volume_canvas_status_text(self._volume_preview_pending_message)
         self._update_volume_render_status_label(self._volume_preview_pending_message)
         self._set_volume_preview_build_controls_busy(True)
+        task = self._start_tif_task(
+            "volume_preview",
+            action="build_preview",
+            payload={"token": token, "preview_key": self._task_request_key(preview_key), "mask_key": self._task_request_key(mask_key)},
+            request_key=self._task_request_key(preview_key or mask_key),
+            message=self._volume_preview_pending_message,
+        )
+        self._volume_preview_build_task_id = task.task_id
         thread = QThread(self)
         worker = TifVolumePreviewBuildWorker(
             token,
@@ -15869,11 +13093,23 @@ class TifWorkbenchWidget(QWidget):
         token = int(result.get("token", 0) or 0)
         if token != int(getattr(self, "_volume_preview_pending_token", 0) or 0):
             return
+        if not self._task_context_matches_current(
+            self._volume_preview_build_task_id,
+            fields=("specimen_id", "volume_scope", "part_id", "reslice_id", "display_mode"),
+        ):
+            self._cancel_tif_task(self._volume_preview_build_task_id, "stale_volume_preview_context")
+            self._volume_preview_pending_token = 0
+            self._volume_preview_pending_key = None
+            self._volume_preview_pending_mask_key = None
+            self._set_volume_preview_build_controls_busy(False)
+            return
         self._volume_preview_pending_token = 0
         self._volume_preview_pending_key = None
         self._volume_preview_pending_mask_key = None
         self._set_volume_preview_build_controls_busy(False)
         if result.get("cancelled"):
+            self._cancel_tif_task(self._volume_preview_build_task_id, "volume_preview_cancelled")
+            self._volume_preview_build_task_id = ""
             return
         volume_request = result.get("volume_request") or {}
         mask_request = result.get("mask_request") or {}
@@ -15881,6 +13117,8 @@ class TifWorkbenchWidget(QWidget):
             self._cache_volume_preview_result(volume_request, result.get("preview"), result.get("build_ms", 0.0))
         if result.get("mask_preview") is not None:
             self._cache_volume_mask_preview_result(mask_request, result.get("mask_preview"))
+        self._finish_tif_task(self._volume_preview_build_task_id, payload={"token": token}, message="volume_preview_finished")
+        self._volume_preview_build_task_id = ""
         if self.display_mode == "volume" and not getattr(self, "_handling_gpu_volume_failure", False):
             self.render_volume_preview()
 
@@ -15894,6 +13132,8 @@ class TifWorkbenchWidget(QWidget):
         self._volume_preview_pending_mask_key = None
         self._set_volume_preview_build_controls_busy(False)
         message = tt("GPU renderer failed. Using CPU fallback: {0}", self.lang).format(str(result.get("error", "")))
+        self._fail_tif_task(self._volume_preview_build_task_id, result.get("error", ""), payload=result, message=message)
+        self._volume_preview_build_task_id = ""
         self._update_volume_render_status_label(message)
         self.log(message)
 
@@ -16737,8 +13977,11 @@ class TifWorkbenchWidget(QWidget):
                 return tt("Painting is available on Z slices only. Switch back to Z axial view before editing labels.", self.lang)
             if require_working_edit and self.label_role_combo.currentData() != "editable_ai_result":
                 role = self.label_role_combo.currentData()
-                if role == "raw_ai_prediction_backup":
+                guard = require_editable_label_role(role, scope="part")
+                if guard.reason == "raw_ai_prediction_backup_is_read_only":
                     return tt("Raw AI prediction backup is read-only. Switch to editable AI result before correcting labels.", self.lang)
+                if guard.reason == "manual_truth_is_not_directly_editable":
+                    return tt("Cannot paint on training truth directly. Switch to editable AI result first.", self.lang)
                 return tt("Cannot paint on this part label layer. Switch to editable AI result first.", self.lang)
             return ""
         if self.display_mode == "volume":
@@ -16749,8 +13992,13 @@ class TifWorkbenchWidget(QWidget):
             return ""
         role = self.label_role_combo.currentData()
         if role != "working_edit":
-            if role == "model_draft":
+            guard = require_editable_label_role(role, scope="top_level")
+            if guard.reason == "model_draft_is_read_only":
                 return tt("Cannot paint on the legacy model draft. Switch to Current labels first.", self.lang)
+            if guard.reason == "raw_ai_prediction_backup_is_read_only":
+                return tt("Raw AI prediction backup is read-only. Switch to Current labels first.", self.lang)
+            if guard.reason == "manual_truth_is_not_directly_editable":
+                return tt("Cannot paint on training truth directly. Switch to Current labels first.", self.lang)
             return tt("Cannot paint on this label layer. Switch to Current labels first.", self.lang)
         return ""
 
@@ -17460,6 +14708,8 @@ class TifWorkbenchWidget(QWidget):
         edit_path = self.project.to_absolute(((specimen.get("labels") or {}).get("working_edit") or {}).get("path", ""))
         if not edit_path:
             return False
+        if not self._guard_current_label_save(role="working_edit", reason=reason, show_message=show_message):
+            return False
         self._saving_working_edit = True
         self.auto_save_timer.stop()
         self._update_save_status(state="saving")
@@ -17499,6 +14749,8 @@ class TifWorkbenchWidget(QWidget):
             return False
         edit_path = self._current_part_label_path("editable_ai_result")
         if not edit_path:
+            return False
+        if not self._guard_current_label_save(role="editable_ai_result", reason=reason, show_message=show_message):
             return False
         self._saving_working_edit = True
         self.auto_save_timer.stop()
@@ -17598,6 +14850,19 @@ class TifWorkbenchWidget(QWidget):
             return False
         if self._promote_running():
             return False
+        task = self._start_tif_task(
+            "truth_promotion",
+            action="promote_working_edit",
+            payload={"request": dict(request or {})},
+            request_key=self._task_request_key((
+                request.get("specimen_id", ""),
+                request.get("scope", ""),
+                request.get("part_id", ""),
+                request.get("reslice_id", ""),
+            )),
+            message=tt("Training truth acceptance is running. Wait until it finishes before editing project data.", self.lang),
+        )
+        self._promote_task_id = task.task_id
         thread = QThread(self)
         worker = TifPromoteWorkingEditWorker(self.project, request)
         worker.moveToThread(thread)
@@ -17620,32 +14885,44 @@ class TifWorkbenchWidget(QWidget):
         self._promote_thread = None
         self._promote_worker = None
         self._promote_request = {}
+        self._promote_task_id = ""
         self._set_scope_controls_enabled()
 
     def _on_promote_working_edit_finished(self, result):
         result = dict(result or {})
+        task_id = self._promote_task_id
+        task_current = self._task_context_matches_current(task_id, fields=("specimen_id", "volume_scope", "part_id", "reslice_id"))
+        self._finish_tif_task(task_id, payload=result, message="truth_promotion_finished")
         self._cleanup_promote_thread()
         self.refresh_project()
         specimen_id = str(result.get("specimen_id") or "")
         part_id = str(result.get("part_id") or "")
         reslice_id = str(result.get("reslice_id") or "")
-        if specimen_id and part_id:
+        if specimen_id and part_id and task_current:
             self._select_volume_tree_item(specimen_id, "part_reslice" if reslice_id else "part", part_id, reslice_id)
-        elif specimen_id:
+        elif specimen_id and task_current:
             self._select_volume_tree_item(specimen_id, "full")
-        self._reload_label_volume()
+        if task_current:
+            self._reload_label_volume()
         specimen = self.project.get_specimen(self.current_specimen_id, default=None) if self.current_specimen_id else None
         if specimen is not None:
             self._update_status_labels(specimen, part=self.current_part if self.current_volume_scope == "part" else None)
         self._update_ai_review_check_label()
-        self._set_operation_feedback(tt("Accepted current labels as training truth.", self.lang))
+        if task_current:
+            self._set_operation_feedback(tt("Accepted current labels as training truth.", self.lang))
+        else:
+            self._set_operation_feedback(tt("Accepted labels as training truth; current view was left unchanged because you switched context while it was running.", self.lang))
 
     def _on_promote_working_edit_failed(self, result):
         result = dict(result or {})
-        self._cleanup_promote_thread()
+        task_id = self._promote_task_id
+        task_current = self._task_context_matches_current(task_id, fields=("specimen_id", "volume_scope", "part_id", "reslice_id"))
         message = str(result.get("error", ""))
-        self._set_operation_feedback(tt("Action failed: {0}", self.lang).format(message))
-        QMessageBox.warning(self, tt("Accept working edit", self.lang), message)
+        self._fail_tif_task(task_id, message, payload=result)
+        self._cleanup_promote_thread()
+        if task_current:
+            self._set_operation_feedback(tt("Action failed: {0}", self.lang).format(message))
+            QMessageBox.warning(self, tt("Accept working edit", self.lang), message)
 
     def promote_working_edit(self):
         if not self._guard_backend_write_lock():
@@ -17912,47 +15189,23 @@ class TifWorkbenchWidget(QWidget):
             raise ValueError(tt("Local frame is not ready: {0}", self.lang).format(draft.get("local_frame_error") or "missing roll reference"))
         spacing = self._local_axis_spacing_zyx()
         source_shape = [int(value) for value in getattr(self.image_volume, "shape", ())]
-        output_shape = local_axis_output_shape_for_source_bbox(source_shape, frame, output_spacing_zyx=spacing)
         trainable = bool(getattr(self, "local_axis_trainable_check", None) and self.local_axis_trainable_check.isChecked())
-        source_proposal_id = str(draft.get("source_proposal_id") or ((draft.get("editable_axis") or {}).get("source_proposal_id") or ""))
-        training_source = "manual_confirmed"
-        if source_proposal_id:
-            training_source = "AI proposed + human confirmed"
-        reference_plane = dict(draft.get("reference_plane") or ((draft.get("roll_reference") or {}).get("reference_plane") if isinstance(draft.get("roll_reference"), dict) else {}) or {})
-        return {
-            "reslice_id": self._default_local_axis_reslice_id(),
-            "display_name": f"{self.current_part_id} local axis",
-            "template_id": str(draft.get("template_id") or self.current_part_id or ""),
-            "source_axis": dict(draft.get("source_axis") or self._source_z_axis_for_current_part()),
-            "initial_editable_axis": dict(draft.get("initial_editable_axis") or draft.get("editable_axis") or {}),
-            "editable_axis": dict(draft.get("editable_axis") or {}),
-            "final_editable_axis": dict(draft.get("editable_axis") or {}),
-            "local_frame": frame,
-            "roll_reference": dict(frame.get("roll_reference") or draft.get("roll_reference") or {}),
-            "reference_plane": reference_plane,
-            "reslice_params": {
-                "output_shape_zyx": output_shape,
-                "output_spacing_zyx": spacing,
-                "image_interpolation": "linear",
-                "coverage": "full_source_part_bbox",
-            },
-            "export_mask": True,
-            "training": {
-                "human_confirmed": True,
-                "usable_for_training": trainable,
-                "source": training_source,
-                "reviewer_notes": "Confirmed in TIF Local Axis 3D part preview.",
-            },
-            "provenance": {
-                "workflow": "tif_local_axis_right_sidebar",
-                "source_proposal_id": source_proposal_id,
-                "source_model_id": str(draft.get("source_model_id") or ""),
-                "source_model_version": str(draft.get("source_model_version") or ""),
-                "source_interaction": "3d_part_preview_clip_plane",
-                "reference_plane_source": "manual_three_point_plane" if reference_plane else "",
-                "reslice_coverage": "full_source_part_bbox",
-            },
-        }
+        draft = dict(draft)
+        draft.setdefault("source_axis", self._source_z_axis_for_current_part())
+        result = self.local_axis_service.build_reslice_payload(
+            specimen_id=self.current_specimen_id,
+            part_id=self.current_part_id,
+            draft=draft,
+            local_frame=frame,
+            source_shape_zyx=source_shape,
+            spacing_zyx=spacing,
+            reslice_id=self._default_local_axis_reslice_id(),
+            trainable=trainable,
+            display_name=f"{self.current_part_id} local axis",
+        )
+        if not result:
+            raise ValueError(tt("Local Axis Reslice export request is not ready: {0}", self.lang).format(result.message or ", ".join(result.reasons or [])))
+        return dict(result.payload.get("payload") or {})
 
     def export_current_local_axis_reslice(self):
         if not self._guard_backend_write_lock():
@@ -18000,6 +15253,18 @@ class TifWorkbenchWidget(QWidget):
             "specimen_id": source_specimen_id,
             "part_id": source_part_id,
         }
+        task = self._start_tif_task(
+            "local_axis_export",
+            action="export_local_axis_reslice",
+            payload={
+                "specimen_id": source_specimen_id,
+                "part_id": source_part_id,
+                "reslice_id": payload.get("reslice_id", ""),
+            },
+            request_key=self._task_request_key((source_specimen_id, source_part_id, payload.get("reslice_id", ""))),
+            message=tt("Local Axis Reslice export is running. Wait until it finishes before editing project data.", self.lang),
+        )
+        self._local_axis_reslice_export_task_id = task.task_id
         self._set_local_axis_reslice_export_controls_enabled(False)
 
         thread.started.connect(worker.run)
@@ -18028,9 +15293,16 @@ class TifWorkbenchWidget(QWidget):
         output_dir = QFileDialog.getExistingDirectory(self, tt("Export Local Axis training manifest", self.lang), default_dir)
         if not output_dir:
             return None
-        filters = {}
-        if self.current_volume_scope == "part" and self.current_part_id:
-            filters["template_id"] = self.current_part_id
+        request = self.local_axis_service.build_manifest_export_request(
+            self.project,
+            output_dir,
+            template_id=self.current_part_id if self.current_volume_scope == "part" else "",
+        )
+        if not request:
+            QMessageBox.warning(self, tt("Local Axis data", self.lang), request.message or ", ".join(request.reasons or []))
+            return None
+        filters = request.payload.get("filters", {})
+        output_dir = request.payload.get("output_dir", output_dir)
         try:
             result = export_local_axis_training_manifest(self.project, output_dir, filters)
         except Exception as exc:

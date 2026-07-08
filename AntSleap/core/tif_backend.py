@@ -9,9 +9,11 @@ from datetime import datetime
 from pathlib import Path
 
 from .safe_io import atomic_write_json
+from .tif_prediction_policy import can_import_prediction_target, validate_prediction_volume
 from .tif_project import TifProjectManager
 from .tif_export import export_tif_part_training_dataset, export_tif_training_dataset
 from .tif_volume_io import copy_volume_sidecar, read_volume_metadata, volume_sidecar_exists
+from .tif_write_guard import WriteIntent, ensure_write_allowed
 
 
 TIF_BACKEND_CONTRACT_SCHEMA_VERSION = "ant3d_tif_backend_contract_v1"
@@ -309,6 +311,14 @@ def _cancel_requested(cancel_check):
         return False
 
 
+def _require_guard(result, prefix):
+    if result:
+        return result
+    reason = getattr(result, "reason", "denied")
+    details = getattr(result, "details", {})
+    raise ValueError(f"{prefix}:{reason}:{details}")
+
+
 def _tail_lines(path, max_lines=8):
     if not path or not os.path.exists(path):
         return []
@@ -554,15 +564,34 @@ class TifBackendRunner:
             if not volume_sidecar_exists(source_path):
                 raise FileNotFoundError(source_path)
             source_meta = read_volume_metadata(source_path)
+            audit_metadata = {
+                "prediction_id": artifact.get("prediction_id") or result.get("run_id") or "",
+                "source_model": result.get("provenance", {}).get("model_manifest", ""),
+                "run_id": result.get("run_id", ""),
+                "result_json": result.get("_result_json", ""),
+            }
             if part_id:
                 part = self.project_manager.get_part(specimen_id, part_id, default=None)
                 if part is None:
                     raise ValueError(f"prediction_unknown_part:{specimen_id}:{part_id}")
                 reslice_id = str(artifact.get("reslice_id") or "").strip()
                 expected_shape = self.project_manager.evaluate_part_predict_ready(specimen_id, part_id, reslice_id).get("input_shape_zyx", [])
-                if list(source_meta.get("shape_zyx", [])) != list(expected_shape):
+                validation = validate_prediction_volume(
+                    prediction_shape_zyx=source_meta.get("shape_zyx", []),
+                    expected_shape_zyx=expected_shape,
+                    dtype=source_meta.get("dtype", ""),
+                    context={
+                        "specimen_id": specimen_id,
+                        "part_id": part_id,
+                        "reslice_id": reslice_id,
+                        "run_id": result.get("run_id", ""),
+                    },
+                )
+                if not validation and validation.reason == "prediction_shape_mismatch":
                     raise ValueError(f"prediction_shape_mismatch:{specimen_id}:{part_id}:{source_meta.get('shape_zyx')}:{expected_shape}")
+                _require_guard(validation, "tif_prediction_policy_denied")
                 prediction_id = artifact.get("prediction_id") or f"{result.get('run_id')}_{specimen_id}_{part_id}"
+                audit_metadata["prediction_id"] = prediction_id
                 if reslice_id:
                     label_root = os.path.join(
                         self.project_manager.part_dir(specimen_id, part_id),
@@ -576,6 +605,32 @@ class TifBackendRunner:
                 editable_rel = os.path.join(label_root, "editable_ai_result.ome.zarr").replace("\\", "/")
                 backup_abs = self.project_manager.to_absolute(backup_rel)
                 editable_abs = self.project_manager.to_absolute(editable_rel)
+                for target_abs, target_role in (
+                    (backup_abs, "raw_ai_prediction_backup"),
+                    (editable_abs, "editable_ai_result"),
+                ):
+                    _require_guard(
+                        can_import_prediction_target(
+                            target_role,
+                            source_role="backend_prediction_result",
+                            overwrite_existing=True,
+                            audit_metadata=audit_metadata,
+                        ),
+                        "tif_prediction_policy_denied",
+                    )
+                    ensure_write_allowed(
+                        WriteIntent(
+                            target_path=target_abs,
+                            project_root=self.project_manager.project_dir,
+                            source_path=source_path,
+                            source_role="backend_prediction_result",
+                            target_role=target_role,
+                            operation="backend_prediction_import",
+                            audit_metadata=audit_metadata,
+                            allow_overwrite=True,
+                            allowed_roots=(self.project_manager.project_dir,),
+                        )
+                    )
                 copy_volume_sidecar(source_path, backup_abs, role="raw_ai_prediction_backup")
                 copy_volume_sidecar(source_path, editable_abs, role="editable_ai_result")
                 register = self.project_manager.register_part_reslice_label_volume if reslice_id else self.project_manager.register_part_label_volume
@@ -594,6 +649,8 @@ class TifBackendRunner:
                         spacing_zyx=source_meta.get("spacing_zyx"),
                         spacing_unit=source_meta.get("spacing_unit", "micrometer"),
                         orientation=source_meta.get("orientation", "local_axis_reslice"),
+                        operation="prediction_raw_backup_import",
+                        audit_metadata=audit_metadata,
                         save=False,
                     )
                     editable = register(
@@ -610,6 +667,8 @@ class TifBackendRunner:
                         spacing_zyx=source_meta.get("spacing_zyx"),
                         spacing_unit=source_meta.get("spacing_unit", "micrometer"),
                         orientation=source_meta.get("orientation", "local_axis_reslice"),
+                        operation="prediction_review_import",
+                        audit_metadata=audit_metadata,
                         save=False,
                     )
                 else:
@@ -626,6 +685,8 @@ class TifBackendRunner:
                         spacing_zyx=source_meta.get("spacing_zyx"),
                         spacing_unit=source_meta.get("spacing_unit", "micrometer"),
                         orientation=source_meta.get("orientation", "unknown"),
+                        operation="prediction_raw_backup_import",
+                        audit_metadata=audit_metadata,
                         save=False,
                     )
                     editable = register(
@@ -641,16 +702,31 @@ class TifBackendRunner:
                         spacing_zyx=source_meta.get("spacing_zyx"),
                         spacing_unit=source_meta.get("spacing_unit", "micrometer"),
                         orientation=source_meta.get("orientation", "unknown"),
+                        operation="prediction_review_import",
+                        audit_metadata=audit_metadata,
                         save=False,
                     )
                 imported.append({"editable_ai_result": editable, "raw_ai_prediction_backup": backup})
                 continue
 
             working_shape = (specimen.get("working_volume") or {}).get("shape_zyx", [])
-            if list(source_meta.get("shape_zyx", [])) != list(working_shape):
+            validation = validate_prediction_volume(
+                prediction_shape_zyx=source_meta.get("shape_zyx", []),
+                expected_shape_zyx=working_shape,
+                dtype=source_meta.get("dtype", ""),
+                context={
+                    "specimen_id": specimen_id,
+                    "part_id": "",
+                    "reslice_id": "",
+                    "run_id": result.get("run_id", ""),
+                },
+            )
+            if not validation and validation.reason == "prediction_shape_mismatch":
                 raise ValueError(f"prediction_shape_mismatch:{specimen_id}:{source_meta.get('shape_zyx')}:{working_shape}")
+            _require_guard(validation, "tif_prediction_policy_denied")
 
             prediction_id = artifact.get("prediction_id") or f"{result.get('run_id')}_{specimen_id}"
+            audit_metadata["prediction_id"] = prediction_id
             backup_rel = os.path.join(
                 self.project_manager.specimen_dir(specimen_id),
                 "labels",
@@ -672,6 +748,33 @@ class TifBackendRunner:
             draft_abs = self.project_manager.to_absolute(draft_rel)
             if os.path.exists(draft_abs):
                 raise FileExistsError(draft_abs)
+            for target_abs, target_role, allow_overwrite in (
+                (backup_abs, "raw_ai_prediction_backup", True),
+                (editable_abs, "working_edit", True),
+                (draft_abs, "model_draft", False),
+            ):
+                _require_guard(
+                    can_import_prediction_target(
+                        target_role,
+                        source_role="backend_prediction_result",
+                        overwrite_existing=allow_overwrite,
+                        audit_metadata=audit_metadata,
+                    ),
+                    "tif_prediction_policy_denied",
+                )
+                ensure_write_allowed(
+                    WriteIntent(
+                        target_path=target_abs,
+                        project_root=self.project_manager.project_dir,
+                        source_path=source_path,
+                        source_role="backend_prediction_result",
+                        target_role=target_role,
+                        operation="backend_prediction_import",
+                        audit_metadata=audit_metadata,
+                        allow_overwrite=allow_overwrite,
+                        allowed_roots=(self.project_manager.project_dir,),
+                    )
+                )
             backup_meta = copy_volume_sidecar(source_path, backup_abs, role="raw_ai_prediction_backup")
             editable_meta = copy_volume_sidecar(source_path, editable_abs, role="working_edit")
             copy_volume_sidecar(source_path, draft_abs, role="model_draft")
@@ -699,6 +802,8 @@ class TifBackendRunner:
                 spacing_unit=editable_meta.get("spacing_unit", "micrometer"),
                 orientation=editable_meta.get("orientation", "unknown"),
                 fmt=editable_meta.get("format", ""),
+                operation="prediction_review_import",
+                audit_metadata=audit_metadata,
                 save=False,
             )
             draft = self.project_manager.add_model_draft(

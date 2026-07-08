@@ -232,6 +232,16 @@ The TIF workbench supports:
 - train-ready sample diagnostics and top-level fallback
 - trained model library selection, notes, model-manifest handoff, and registration-only deletion
 
+Current TIF workbench architecture notes:
+
+- `AntSleap/ui/tif_workbench.py` remains the public PySide workbench entry, but new business rules should preferentially go into `AntSleap/core`, `AntSleap/services`, or the TIF task layer.
+- TIF workbench helper modules now hold canvas/widgets, dialogs, translations, workers, and extracted helper functions.
+- Core guards define label write safety, prediction import policy, truth promotion policy, and source/target write intent checks.
+- Service/controller modules cover selection state, label edit requests, truth promotion, ROI part requests, backend workflow selection, volume preview requests, and Local Axis draft/frame/reslice payloads.
+- `AntSleap/core/tif_task_context.py`, `AntSleap/core/tif_task_state.py`, `AntSleap/services/tif_task_manager.py`, and `AntSleap/ui/tif_tasks.py` provide the unified task lifecycle. TIF import, Amira import, materialize, label save, truth promotion, ROI creation, backend train/predict, Local Axis export, volume preview, and mask preview are tracked with task context/state.
+- `get_agent_context()` exposes `tif_task_summary` and `tif_state_summary`; use these before guessing whether the user is blocked by saving, training, prediction, import, preview, or Local Axis export.
+- TIF architecture regression groups are defined in `tests/tif_architecture_test_groups.py`.
+
 The TIF workbench should remain a specialized TIF route. Do not force its controls into the 2D/STL main labeling workflow.
 
 ## 10. Part ROI And Part Volume Extraction

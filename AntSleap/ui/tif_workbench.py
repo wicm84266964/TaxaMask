@@ -94,6 +94,7 @@ try:
     from AntSleap.ui.style import get_theme_config, normalize_theme
     from AntSleap.ui.tif_tasks import TifQtTaskAdapter
     from AntSleap.ui.tif_workbench_canvas import LazyRegionMaskVolume, MirroredStatusLabel, TifSliceCanvas, TifSpecimenTree, TifVolumeCanvas, WheelSafeComboBox, WheelSafeSlider, WheelSafeSpinBox, create_tif_volume_canvas
+    from AntSleap.ui.tif_backend_panel_controller import TifBackendPanelController
     from AntSleap.ui.tif_workbench_control_panels import build_right_control_panel
     from AntSleap.ui.tif_workbench_dialogs import MaterialEditorDialog, TifPartNameDialog, TifTrainingResultDialog, summarize_tif_training_result
     from AntSleap.ui.tif_workbench_helpers import (
@@ -192,6 +193,7 @@ except ModuleNotFoundError as exc:
     from ui.style import get_theme_config, normalize_theme
     from ui.tif_tasks import TifQtTaskAdapter
     from ui.tif_workbench_canvas import LazyRegionMaskVolume, MirroredStatusLabel, TifSliceCanvas, TifSpecimenTree, TifVolumeCanvas, WheelSafeComboBox, WheelSafeSlider, WheelSafeSpinBox, create_tif_volume_canvas
+    from ui.tif_backend_panel_controller import TifBackendPanelController
     from ui.tif_workbench_control_panels import build_right_control_panel
     from ui.tif_workbench_dialogs import MaterialEditorDialog, TifPartNameDialog, TifTrainingResultDialog, summarize_tif_training_result
     from ui.tif_workbench_helpers import (
@@ -348,6 +350,7 @@ class TifWorkbenchWidget(QWidget):
         self.local_axis_service = TifLocalAxisService()
         self.task_manager = TifTaskManager()
         self.task_adapter = TifQtTaskAdapter(self.task_manager)
+        self.backend_panel_controller = TifBackendPanelController(self)
         self.current_specimen_id = ""
         self.current_volume_scope = "full"
         self.current_part_id = ""
@@ -2789,19 +2792,10 @@ class TifWorkbenchWidget(QWidget):
         }
 
     def _predict_ref_key(self, ref):
-        if isinstance(ref, dict):
-            return (
-                str(ref.get("specimen_id") or ""),
-                str(ref.get("part_id") or ""),
-                str(ref.get("reslice_id") or ""),
-            )
-        if isinstance(ref, (list, tuple)) and len(ref) >= 3:
-            return (str(ref[0] or ""), str(ref[1] or ""), str(ref[2] or ""))
-        return ("", "", "")
+        return self.backend_panel_controller.predict_ref_key(ref)
 
     def _predict_ref_from_key(self, key):
-        specimen_id, part_id, reslice_id = self._predict_ref_key(key)
-        return {"specimen_id": specimen_id, "part_id": part_id, "reslice_id": reslice_id}
+        return self.backend_panel_controller.predict_ref_from_key(key)
 
     def _result_source_role(self):
         if getattr(self, "result_source_editable_radio", None) is not None and self.result_source_editable_radio.isChecked():
@@ -3204,252 +3198,37 @@ class TifWorkbenchWidget(QWidget):
             self.btn_show_result_region_in_3d.setEnabled(self._result_region_id() > 0 and has_result_rows)
 
     def _populate_predict_filter_combo(self):
-        combo = getattr(self, "predict_filter_combo", None)
-        if combo is None:
-            return
-        current = combo.currentData() if combo.count() else "all"
-        combo.blockSignals(True)
-        combo.clear()
-        combo.addItem(tt("All parts", self.lang), "all")
-        combo.addItem(tt("Current part", self.lang), "current")
-        for tag in self.project.project_data.get("part_user_tags", []) or []:
-            if not isinstance(tag, dict):
-                continue
-            tag_id = str(tag.get("tag_id") or "")
-            if not tag_id:
-                continue
-            combo.addItem(str(tag.get("label") or tag_id), f"tag:{tag_id}")
-        index = combo.findData(current)
-        combo.setCurrentIndex(index if index >= 0 else 0)
-        combo.blockSignals(False)
+        return self.backend_panel_controller.populate_predict_filter_combo()
 
     def _predict_target_rows(self):
-        selected_filter = str(self.predict_filter_combo.currentData() or "all") if hasattr(self, "predict_filter_combo") else "all"
-        tag_lookup = self._part_user_tag_lookup()
-        rows = []
-        for specimen in self.project.project_data.get("specimens", []) or []:
-            if not isinstance(specimen, dict):
-                continue
-            specimen_id = str(specimen.get("specimen_id") or "")
-            specimen_name = str(specimen.get("display_name") or specimen_id)
-            for part in specimen.get("parts", []) or []:
-                if not isinstance(part, dict):
-                    continue
-                part_id = str(part.get("part_id") or "")
-                if not specimen_id or not part_id:
-                    continue
-                part_tags = [str(item) for item in (part.get("user_tags") or []) if str(item or "")]
-                if selected_filter == "current":
-                    if specimen_id != self.current_specimen_id or part_id != self.current_part_id:
-                        continue
-                elif selected_filter.startswith("tag:"):
-                    wanted_tag = selected_filter.split(":", 1)[1]
-                    if wanted_tag not in part_tags:
-                        continue
-                reslices = self.project.list_part_reslices(specimen_id, part_id)
-                if not reslices:
-                    reslices = [{}]
-                for reslice in reslices:
-                    reslice_id = str((reslice or {}).get("reslice_id") or "")
-                    try:
-                        readiness = self.project.evaluate_part_predict_ready(specimen_id, part_id, reslice_id)
-                    except Exception as exc:
-                        readiness = {
-                            "specimen_id": specimen_id,
-                            "part_id": part_id,
-                            "reslice_id": reslice_id,
-                            "label_schema_id": str(((part.get("training") or {}).get("label_schema_id")) or ""),
-                            "predict_ready": False,
-                            "checks": {},
-                            "reasons": [str(exc)],
-                            "input_shape_zyx": [],
-                        }
-                    effective_reslice_id = str(readiness.get("reslice_id") or reslice_id)
-                    labels = part.get("labels") or {}
-                    editable = labels.get("editable_ai_result") or {}
-                    rows.append(
-                        {
-                            "ref": {"specimen_id": specimen_id, "part_id": part_id, "reslice_id": effective_reslice_id},
-                            "specimen_label": specimen_name,
-                            "part_label": str((part.get("training") or {}).get("user_defined_part_name") or part.get("display_name") or part_id),
-                            "part_id": part_id,
-                            "reslice_id": effective_reslice_id,
-                            "label_schema_id": str(readiness.get("label_schema_id") or ""),
-                            "tags": ", ".join(tag_lookup.get(tag_id, tag_id) for tag_id in part_tags),
-                            "ready": bool(readiness.get("predict_ready")),
-                            "reasons": list(readiness.get("reasons") or []),
-                            "overwrite": bool(str(editable.get("path") or "").strip()),
-                            "shape": list(readiness.get("input_shape_zyx") or []),
-                        }
-                    )
-        return rows
+        return self.backend_panel_controller.predict_target_rows()
 
     def _make_predict_table_item(self, text, editable=False):
-        item = QTableWidgetItem(str(text or ""))
-        flags = Qt.ItemIsSelectable | Qt.ItemIsEnabled
-        if editable:
-            flags |= Qt.ItemIsEditable
-        item.setFlags(flags)
-        return item
+        return self.backend_panel_controller.make_predict_table_item(text, editable=editable)
 
     def _predict_status_text(self, row):
-        if row.get("ready"):
-            return tt("Ready", self.lang)
-        reasons = row.get("reasons") or []
-        if not reasons:
-            return tt("Not ready", self.lang)
-        return ", ".join(str(item) for item in reasons)
+        return self.backend_panel_controller.predict_status_text(row)
 
     def _sync_predict_selection_from_table(self):
-        selected = set()
-        table = self.predict_targets_table
-        for row_index in range(table.rowCount()):
-            item = table.item(row_index, 0)
-            if item is None or item.checkState() != Qt.Checked:
-                continue
-            ref = item.data(Qt.UserRole) or {}
-            selected.add(self._predict_ref_key(ref))
-        self._tif_predict_selected_refs = selected
+        return self.backend_panel_controller.sync_predict_selection_from_table()
 
     def _update_predict_target_summary(self):
-        table = getattr(self, "predict_targets_table", None)
-        if table is None:
-            return
-        total = table.rowCount()
-        ready = 0
-        selected = 0
-        overwrite = 0
-        blocked = 0
-        for row_index in range(total):
-            item = table.item(row_index, 0)
-            if item is not None and item.checkState() == Qt.Checked:
-                selected += 1
-            ready_item = table.item(row_index, 6)
-            is_ready = bool(ready_item.data(Qt.UserRole)) if ready_item is not None else False
-            if is_ready:
-                ready += 1
-            else:
-                blocked += 1
-            overwrite_item = table.item(row_index, 7)
-            if overwrite_item is not None and bool(overwrite_item.data(Qt.UserRole)):
-                overwrite += 1
-        text = tt(
-            "Prediction targets: {0} listed, {1} ready, {2} selected, {3} will overwrite editable AI result, {4} incomplete.",
-            self.lang,
-        ).format(total, ready, selected, overwrite, blocked)
-        self.predict_targets_summary_label.setText(text)
+        return self.backend_panel_controller.update_predict_target_summary()
 
     def refresh_predict_targets(self):
-        if not hasattr(self, "predict_targets_table"):
-            return
-        self._populate_predict_filter_combo()
-        table = self.predict_targets_table
-        self._tif_predict_refreshing = True
-        try:
-            rows = self._predict_target_rows()
-            table.blockSignals(True)
-            table.setRowCount(0)
-            table.setColumnCount(8)
-            table.setHorizontalHeaderLabels(
-                [
-                    tt("Use", self.lang),
-                    tt("Specimen", self.lang),
-                    tt("Part", self.lang),
-                    tt("Reslice", self.lang),
-                    tt("Group tags", self.lang),
-                    tt("Label schema", self.lang),
-                    tt("Predict check", self.lang),
-                    tt("Overwrite", self.lang),
-                ]
-            )
-            for row_index, row in enumerate(rows):
-                table.insertRow(row_index)
-                ref = row["ref"]
-                key = self._predict_ref_key(ref)
-                select_item = QTableWidgetItem("")
-                flags = Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsUserCheckable
-                select_item.setFlags(flags)
-                select_item.setCheckState(Qt.Checked if key in self._tif_predict_selected_refs and row.get("ready") else Qt.Unchecked)
-                if not row.get("ready"):
-                    select_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
-                select_item.setData(Qt.UserRole, ref)
-                table.setItem(row_index, 0, select_item)
-                table.setItem(row_index, 1, self._make_predict_table_item(row["specimen_label"]))
-                table.setItem(row_index, 2, self._make_predict_table_item(f"{row['part_label']} ({row['part_id']})"))
-                table.setItem(row_index, 3, self._make_predict_table_item(row["reslice_id"]))
-                table.setItem(row_index, 4, self._make_predict_table_item(row["tags"]))
-                table.setItem(row_index, 5, self._make_predict_table_item(row["label_schema_id"]))
-                status_item = self._make_predict_table_item(self._predict_status_text(row))
-                status_item.setData(Qt.UserRole, bool(row.get("ready")))
-                table.setItem(row_index, 6, status_item)
-                overwrite_item = self._make_predict_table_item(tt("yes", self.lang) if row.get("overwrite") else tt("no", self.lang))
-                overwrite_item.setData(Qt.UserRole, bool(row.get("overwrite")))
-                table.setItem(row_index, 7, overwrite_item)
-            table.resizeColumnsToContents()
-            table.blockSignals(False)
-        finally:
-            self._tif_predict_refreshing = False
-        self._sync_predict_selection_from_table()
-        self._update_predict_target_summary()
+        return self.backend_panel_controller.refresh_predict_targets()
 
     def _on_predict_target_item_changed(self, item):
-        if self._tif_predict_refreshing or item is None or item.column() != 0:
-            return
-        status_item = self.predict_targets_table.item(item.row(), 6)
-        if status_item is not None and not bool(status_item.data(Qt.UserRole)) and item.checkState() == Qt.Checked:
-            self.predict_targets_table.blockSignals(True)
-            item.setCheckState(Qt.Unchecked)
-            self.predict_targets_table.blockSignals(False)
-        self._sync_predict_selection_from_table()
-        self._update_predict_target_summary()
+        return self.backend_panel_controller.on_predict_target_item_changed(item)
 
     def select_all_ready_predict_targets(self):
-        table = self.predict_targets_table
-        table.blockSignals(True)
-        for row_index in range(table.rowCount()):
-            item = table.item(row_index, 0)
-            status_item = table.item(row_index, 6)
-            if item is not None and status_item is not None and bool(status_item.data(Qt.UserRole)):
-                item.setCheckState(Qt.Checked)
-        table.blockSignals(False)
-        self._sync_predict_selection_from_table()
-        self._update_predict_target_summary()
+        return self.backend_panel_controller.select_all_ready_predict_targets()
 
     def clear_predict_target_selection(self):
-        table = self.predict_targets_table
-        table.blockSignals(True)
-        for row_index in range(table.rowCount()):
-            item = table.item(row_index, 0)
-            if item is not None:
-                item.setCheckState(Qt.Unchecked)
-        table.blockSignals(False)
-        self._sync_predict_selection_from_table()
-        self._update_predict_target_summary()
+        return self.backend_panel_controller.clear_predict_target_selection()
 
     def select_current_predict_target(self):
-        if not self.current_specimen_id or not self.current_part_id:
-            self._set_operation_feedback(tt("Select a part volume before choosing the current prediction target.", self.lang))
-            return False
-        rows = self._predict_target_rows()
-        matched = []
-        for row in rows:
-            ref = row.get("ref") or {}
-            if ref.get("specimen_id") == self.current_specimen_id and ref.get("part_id") == self.current_part_id and row.get("ready"):
-                if self.current_reslice_id and ref.get("reslice_id") != self.current_reslice_id:
-                    continue
-                matched.append(ref)
-        if not matched and self.current_reslice_id:
-            for row in rows:
-                ref = row.get("ref") or {}
-                if ref.get("specimen_id") == self.current_specimen_id and ref.get("part_id") == self.current_part_id and row.get("ready"):
-                    matched.append(ref)
-        if not matched:
-            self._set_operation_feedback(tt("Current part is not ready for prediction.", self.lang))
-            return False
-        for ref in matched[:1]:
-            self._tif_predict_selected_refs.add(self._predict_ref_key(ref))
-        self.refresh_predict_targets()
-        return True
+        return self.backend_panel_controller.select_current_predict_target()
 
     def browse_model_manifest(self):
         start_dir = os.path.dirname(str(self.backend_manifest_edit.text() or "").strip())
@@ -3469,115 +3248,31 @@ class TifWorkbenchWidget(QWidget):
         return True
 
     def _tif_model_records(self):
-        if hasattr(self.project, "list_tif_segmentation_models"):
-            return list(self.project.list_tif_segmentation_models())
-        return []
+        return self.backend_panel_controller.model_records()
 
     def _tif_model_record_id(self, record):
-        source = record if isinstance(record, dict) else {}
-        return str(source.get("model_id") or source.get("model_manifest") or "").strip()
+        return self.backend_panel_controller.model_record_id(record)
 
     def _tif_model_display_name(self, record):
-        source = record if isinstance(record, dict) else {}
-        model_id = str(source.get("model_id") or source.get("run_id") or source.get("model_manifest") or "model").strip()
-        created = str(source.get("created_at") or "").split("T", 1)[0]
-        samples = source.get("training_samples", 0)
-        suffix = []
-        if samples:
-            suffix.append(tt("{0} sample(s)", self.lang).format(samples))
-        scope = str(source.get("input_scope") or "").strip()
-        if scope:
-            suffix.append(scope)
-        if created:
-            suffix.append(created)
-        return f"{model_id} ({', '.join(suffix)})" if suffix else model_id
+        return self.backend_panel_controller.model_display_name(record)
 
     def _format_tif_model_summary(self, record):
-        source = record if isinstance(record, dict) else {}
-        if not source:
-            return tt("No trained model is registered for this project.", self.lang)
-        manifest = self.project.to_absolute(source.get("model_manifest", ""))
-        model_path = self.project.to_absolute(source.get("model_path", ""))
-        schemas = ", ".join(str(item) for item in source.get("label_schema_ids", []) if str(item or "")) or "-"
-        samples = str(source.get("training_samples") or 0)
-        usable = tt("usable", self.lang) if source.get("usable_for_research_prediction", True) else tt("not marked usable", self.lang)
-        lines = [
-            tt("Samples: {0}; schemas: {1}; status: {2}", self.lang).format(samples, schemas, usable),
-            tt("Manifest: {0}", self.lang).format(self._compact_path_for_side_panel(manifest or "-")),
-        ]
-        if model_path:
-            lines.append(tt("Output: {0}", self.lang).format(self._compact_path_for_side_panel(model_path)))
-        return "\n".join(lines)
+        return self.backend_panel_controller.format_model_summary(record)
 
     def _tif_model_tooltip(self, record):
-        source = record if isinstance(record, dict) else {}
-        if not source:
-            return tt("No trained model is registered for this project.", self.lang)
-        lines = [self._tif_model_display_name(source)]
-        for label, key in (
-            (tt("Model ID", self.lang), "model_id"),
-            (tt("Run ID", self.lang), "run_id"),
-            (tt("Model manifest", self.lang), "model_manifest"),
-            (tt("Model output", self.lang), "model_path"),
-        ):
-            value = str(source.get(key) or "").strip()
-            if value:
-                if key in {"model_manifest", "model_path"}:
-                    value = self.project.to_absolute(value)
-                lines.append(f"{label}: {value}")
-        notes = str(source.get("notes") or "").strip()
-        if notes:
-            lines.append(f"{tt('Notes', self.lang)}: {notes}")
-        return "\n".join(lines)
+        return self.backend_panel_controller.model_tooltip(record)
 
     def _populate_tif_model_library_combo(self, preferred_id=None):
-        if not hasattr(self, "model_library_combo"):
-            return
-        current = str(preferred_id or self.model_library_combo.currentData() or "").strip()
-        records = self._tif_model_records()
-        self.model_library_combo.blockSignals(True)
-        self.model_library_combo.clear()
-        self.model_library_combo.addItem(tt("No registered model", self.lang), "")
-        for record in sorted(records, key=lambda item: str(item.get("created_at") or item.get("model_id") or ""), reverse=True):
-            model_id = self._tif_model_record_id(record)
-            self.model_library_combo.addItem(self._tif_model_display_name(record), model_id)
-            index = self.model_library_combo.count() - 1
-            self.model_library_combo.setItemData(index, record, Qt.UserRole + 1)
-        index = self.model_library_combo.findData(current)
-        if index < 0 and records:
-            index = 1
-        self.model_library_combo.setCurrentIndex(max(0, index))
-        self.model_library_combo.blockSignals(False)
-        self._on_model_library_selection_changed()
+        return self.backend_panel_controller.populate_model_library_combo(preferred_id)
 
     def _selected_tif_model_record(self):
-        if not hasattr(self, "model_library_combo"):
-            return None
-        record = self.model_library_combo.currentData(Qt.UserRole + 1)
-        return record if isinstance(record, dict) else None
+        return self.backend_panel_controller.selected_model_record()
 
     def _on_model_library_selection_changed(self, *_args):
-        record = self._selected_tif_model_record()
-        if hasattr(self, "model_library_summary_label"):
-            self.model_library_summary_label.setText(self._format_tif_model_summary(record))
-            self.model_library_summary_label.setToolTip(self._tif_model_tooltip(record))
-        if hasattr(self, "model_library_notes_edit"):
-            self.model_library_notes_edit.blockSignals(True)
-            self.model_library_notes_edit.setPlainText(str((record or {}).get("notes") or ""))
-            self.model_library_notes_edit.blockSignals(False)
-        self._refresh_model_library_controls()
+        return self.backend_panel_controller.on_model_library_selection_changed(*_args)
 
     def _refresh_model_library_controls(self):
-        if not hasattr(self, "btn_use_selected_tif_model"):
-            return
-        running = self._backend_action_running()
-        record = self._selected_tif_model_record()
-        manifest = self.project.to_absolute((record or {}).get("model_manifest", ""))
-        has_record = bool(record)
-        self.btn_use_selected_tif_model.setEnabled(has_record and bool(manifest) and os.path.exists(manifest) and not running)
-        self.btn_save_tif_model_notes.setEnabled(has_record and not running)
-        self.btn_delete_tif_model_record.setEnabled(has_record and not running)
-        self.model_library_notes_edit.setEnabled(has_record and not running)
+        return self.backend_panel_controller.refresh_model_library_controls()
 
     def use_selected_tif_model(self):
         record = self._selected_tif_model_record()
@@ -4915,21 +4610,7 @@ class TifWorkbenchWidget(QWidget):
         return "..." + normalized[-(max_chars - 3):]
 
     def _training_result_summary_tooltip(self, summary):
-        if not isinstance(summary, dict) or not summary:
-            return tt("No training result yet.", self.lang)
-        lines = [tt("Training result is ready for review.", self.lang)]
-        for label, key in (
-            (tt("Model output", self.lang), "model_output"),
-            (tt("Model manifest", self.lang), "model_manifest"),
-            (tt("Run ID", self.lang), "run_id"),
-        ):
-            value = str(summary.get(key) or "").strip()
-            if value:
-                lines.append(f"{label}: {value}")
-        run_dir = str(summary.get("run_dir") or "").strip()
-        if run_dir:
-            lines.append(f"{tt('Open run folder', self.lang)}: {run_dir}")
-        return "\n".join(lines)
+        return self.backend_panel_controller.training_result_summary_tooltip(summary)
 
     def _update_backend_elapsed_label(self):
         if not self._backend_action_running() or not self._tif_backend_started_mono:
@@ -4938,46 +4619,10 @@ class TifWorkbenchWidget(QWidget):
         self.backend_elapsed_label.setText(tt("Elapsed: {0}", self.lang).format(self._format_elapsed_seconds(elapsed)))
 
     def _set_backend_controls_running(self, running):
-        running = bool(running)
-        self.btn_prepare_dataset.setEnabled(not running)
-        self.btn_train_backend.setEnabled(not running)
-        self.btn_import_prediction.setEnabled(not running)
-        self.btn_browse_model_manifest.setEnabled(not running)
-        self.btn_refresh_predict_targets.setEnabled(not running)
-        self.btn_select_current_predict_target.setEnabled(not running)
-        self.btn_select_ready_predict_targets.setEnabled(not running)
-        self.btn_clear_predict_targets.setEnabled(not running)
-        self.btn_accept_selected_ai_results.setEnabled(not running)
-        self.predict_filter_combo.setEnabled(not running)
-        self.predict_targets_table.setEnabled(not running)
-        self.btn_stop_backend.setEnabled(running)
-        self.btn_open_backend_run.setEnabled(bool(self._tif_backend_run_dir) and os.path.isdir(self._tif_backend_run_dir) and not running)
-        self.btn_open_backend_result.setEnabled(bool(self._tif_backend_result_json) and os.path.exists(self._tif_backend_result_json) and not running)
-        self._refresh_training_result_controls()
-        self._refresh_model_library_controls()
+        return self.backend_panel_controller.set_backend_controls_running(running)
 
     def _format_training_result_summary_text(self, summary):
-        if not isinstance(summary, dict) or not summary:
-            return tt("No training result yet.", self.lang)
-        metrics_count = len(summary.get("metrics") or [])
-        curve_count = len(summary.get("curves") or [])
-        preview_count = len(summary.get("previews") or [])
-        model_output = self._compact_path_for_side_panel(summary.get("model_output") or "-")
-        model_manifest = self._compact_path_for_side_panel(summary.get("model_manifest") or "-")
-        lines = [
-            tt("Training result is ready for review.", self.lang),
-            tt(
-                "Training result: {0} metric(s), {1} curve(s), {2} mask preview(s).\nModel output: {3}\nModel manifest: {4}",
-                self.lang,
-            ).format(metrics_count, curve_count, preview_count, model_output, model_manifest),
-        ]
-        warnings = summary.get("warnings") or []
-        errors = summary.get("errors") or []
-        if warnings:
-            lines.append(f"{tt('Warnings', self.lang)}: {len(warnings)}")
-        if errors:
-            lines.append(f"{tt('Errors', self.lang)}: {len(errors)}")
-        return "\n".join(lines)
+        return self.backend_panel_controller.format_training_result_summary_text(summary)
 
     def _set_training_result_summary(self, summary):
         previous_auto_manifest = str(self._tif_training_model_manifest or "")
@@ -5024,21 +4669,7 @@ class TifWorkbenchWidget(QWidget):
         return record
 
     def _refresh_training_result_controls(self):
-        if not hasattr(self, "btn_show_training_result_summary"):
-            return
-        running = self._backend_action_running()
-        summary = self._tif_training_result_summary if isinstance(self._tif_training_result_summary, dict) else {}
-        model_output = str(summary.get("model_output") or self._tif_training_model_output_dir or "")
-        model_manifest = str(summary.get("model_manifest") or self._tif_training_model_manifest or "")
-        has_summary = bool(summary)
-        self.btn_show_training_result_summary.setEnabled(has_summary and not running)
-        self.btn_open_training_model_output.setEnabled(bool(model_output) and os.path.isdir(model_output) and not running)
-        self.btn_open_training_model_manifest.setEnabled(bool(model_manifest) and os.path.exists(model_manifest) and not running)
-        self.btn_batch_predict_entry.setEnabled(bool(model_manifest) and os.path.exists(model_manifest) and not running)
-        self._refresh_model_library_controls()
-        if hasattr(self, "training_result_summary_label"):
-            self.training_result_summary_label.setText(self._format_training_result_summary_text(summary))
-            self.training_result_summary_label.setToolTip(self._training_result_summary_tooltip(summary))
+        return self.backend_panel_controller.refresh_training_result_controls()
 
     def show_latest_training_result_summary(self, show_message=True):
         summary = self._tif_training_result_summary if isinstance(self._tif_training_result_summary, dict) else None
@@ -7749,29 +7380,7 @@ class TifWorkbenchWidget(QWidget):
         return "\n".join(lines)
 
     def _selected_backend_samples_for_action(self, action):
-        selected_predict_refs = []
-        if action == "predict":
-            self._sync_predict_selection_from_table()
-            for key in sorted(self._tif_predict_selected_refs):
-                selected_predict_refs.append(self._predict_ref_from_key(key))
-        service_result = self.backend_workflow_service.selected_backend_samples_for_action(
-            action,
-            current_volume_scope=self.current_volume_scope,
-            current_specimen_id=self.current_specimen_id,
-            current_part_id=self.current_part_id,
-            current_reslice_id=self.current_reslice_id,
-            selected_predict_refs=selected_predict_refs,
-        )
-        if service_result:
-            return {
-                "input_scope": service_result.payload.get("input_scope") or "part_reslice",
-                "part_refs": service_result.payload.get("part_refs") or [],
-                "specimen_ids": service_result.payload.get("specimen_ids") or [],
-                "fallback_reason": service_result.payload.get("fallback_reason", ""),
-            }
-        if action in {"prepare_dataset", "train"}:
-            raise ValueError(self._training_selection_error(prefer_part=(self.current_volume_scope == "part")))
-        raise ValueError(tt("Selected prediction target is incomplete: {0}", self.lang).format(", ".join(service_result.reasons or [service_result.message])))
+        return self.backend_panel_controller.selected_backend_samples_for_action(action)
 
     def _selected_backend_samples_for_action_legacy(self, action):
         if action in {"prepare_dataset", "train"}:
@@ -8011,39 +7620,7 @@ class TifWorkbenchWidget(QWidget):
         self.log(detail)
 
     def _on_tif_backend_progress(self, current, total, message):
-        self._progress_tif_task(self._tif_backend_task_id, current, total, str(message or ""))
-        total = int(total or 0)
-        current = int(current or 0)
-        if total <= 0:
-            value = int(getattr(self, "_tif_backend_progress_value", 0) or 0)
-        else:
-            value = int(round(max(0, min(total, current)) * 100.0 / max(1, total)))
-            value = max(int(getattr(self, "_tif_backend_progress_value", 0) or 0), value)
-        value = max(0, min(100, value))
-        self._tif_backend_progress_value = value
-        self.backend_progress_bar.setRange(0, 100)
-        self.backend_progress_bar.setValue(value)
-        self.backend_progress_bar.setFormat("%p%")
-        text = str(message or "")
-        if text:
-            for line in text.splitlines():
-                if line.startswith("Run folder:"):
-                    path = line.split(":", 1)[1].strip()
-                    if path:
-                        self._tif_backend_run_dir = path
-                elif line.startswith("Result JSON:"):
-                    path = line.split(":", 1)[1].strip()
-                    if path:
-                        self._tif_backend_result_json = path
-            first_line = text.splitlines()[0]
-            self.backend_run_status_label.setText(first_line)
-            self.training_status_label.setText(first_line)
-            tail = "\n".join(text.splitlines()[-8:])
-            self.backend_log_tail.setPlainText(tail)
-            self.backend_log_tail.moveCursor(QTextCursor.End)
-            if self._backend_action_running():
-                self.btn_open_backend_run.setEnabled(bool(self._tif_backend_run_dir) and os.path.isdir(self._tif_backend_run_dir))
-                self.btn_open_backend_result.setEnabled(False)
+        return self.backend_panel_controller.on_backend_progress(current, total, message)
 
     def _backend_failure_summary(self, text, action=None):
         raw = str(text or "")

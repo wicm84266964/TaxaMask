@@ -59,7 +59,7 @@ SUITES: dict[str, list[str]] = {
         "tests.test_tif_blink_core",
         "tests.test_tif_blink_nnunet_core",
     ],
-    "tif_workbench": ["tests.test_tif_workbench"],
+    "tif_workbench": ["tests.test_tif_workbench", "tests.test_tif_backend_panel_controller"],
     "gui_smoke": ["tests.test_gui_smoke"],
     "ui_polish": ["tests.test_ui_polish_scope"],
     "tif_layout": ["tests.test_tif_workbench_layout"],

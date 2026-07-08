@@ -235,12 +235,13 @@ The TIF workbench supports:
 Current TIF workbench architecture notes:
 
 - `AntSleap/ui/tif_workbench.py` remains the public PySide workbench entry, but new business rules should preferentially go into `AntSleap/core`, `AntSleap/services`, or the TIF task layer.
-- TIF workbench helper modules now hold canvas/widgets, dialogs, translations, workers, and extracted helper functions.
+- TIF workbench helper modules now hold canvas/widgets, dialogs, translations, workers, layout/page builders, control panels, styling, Agent context assembly, and extracted helper functions.
 - Core guards define label write safety, prediction import policy, truth promotion policy, and source/target write intent checks.
-- Service/controller modules cover selection state, label edit requests, truth promotion, ROI part requests, backend workflow selection, volume preview requests, and Local Axis draft/frame/reslice payloads.
+- Service/controller modules cover selection state, label edit requests, truth promotion, ROI part requests, backend workflow selection, preview/resource failure classification, volume preview requests, training/prediction panel state, and Local Axis draft/frame/reslice payloads.
 - `AntSleap/core/tif_task_context.py`, `AntSleap/core/tif_task_state.py`, `AntSleap/services/tif_task_manager.py`, and `AntSleap/ui/tif_tasks.py` provide the unified task lifecycle. TIF import, Amira import, materialize, label save, truth promotion, ROI creation, backend train/predict, Local Axis export, volume preview, and mask preview are tracked with task context/state.
 - `get_agent_context()` exposes `tif_task_summary` and `tif_state_summary`; use these before guessing whether the user is blocked by saving, training, prediction, import, preview, or Local Axis export.
 - TIF architecture regression groups are defined in `tests/tif_architecture_test_groups.py`.
+- Second-round TIF architecture notes are documented in `docs/tif_workbench_architecture_refactor_round2_requirements_zh.md`, `docs/tif_workbench_architecture_refactor_round2_execution_checklist_zh.md`, and the Stage 0-6 review files. The checklist includes mandatory pitfall checks for TaxaMask environment use, right-sidebar overflow, English text leaks, Local Axis three-point picking, resource exhaustion, validation artifacts, and Agent/AntCode context sync.
 
 The TIF workbench should remain a specialized TIF route. Do not force its controls into the 2D/STL main labeling workflow.
 
@@ -479,13 +480,15 @@ Use focused tests when modifying a route.
 Common commands:
 
 ```powershell
-python -m unittest tests.test_agent_context_routes
-python -m unittest tests.test_tif_project tests.test_tif_part_extraction tests.test_tif_local_axis_reslice tests.test_tif_local_axis_batch tests.test_tif_local_axis_ai
-python -m unittest tests.test_tif_workbench tests.test_tif_gpu_volume_canvas
-python -m unittest tests.test_gui_smoke
-python -m compileall AntSleap
+C:\Users\admin\anaconda3\envs\taxamask\python.exe -m unittest tests.test_agent_context_routes
+C:\Users\admin\anaconda3\envs\taxamask\python.exe -m unittest tests.test_tif_project tests.test_tif_part_extraction tests.test_tif_local_axis_reslice tests.test_tif_local_axis_batch tests.test_tif_local_axis_ai
+C:\Users\admin\anaconda3\envs\taxamask\python.exe -m unittest tests.test_tif_workbench tests.test_tif_gpu_volume_canvas
+C:\Users\admin\anaconda3\envs\taxamask\python.exe -m unittest tests.test_gui_smoke
+C:\Users\admin\anaconda3\envs\taxamask\python.exe scripts\run_validation_suite.py --timeout 300
 git diff --check
 ```
+
+Use the TaxaMask environment above for GUI/TIF validation. Do not install PySide6 into the default Python environment to satisfy skipped GUI tests.
 
 For TIF renderer changes, validate both:
 

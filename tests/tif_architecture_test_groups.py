@@ -42,6 +42,8 @@ TIF_PREVIEW_AND_EXPORT_TESTS = (
 
 TIF_GUI_KEY_PATH_TESTS = (
     "tests.test_tif_workbench",
+    "tests.test_tif_backend_panel_controller",
+    "tests.test_tif_local_axis_controller",
 )
 
 TIF_RESEARCH_SMOKE_TESTS = (

@@ -81,7 +81,7 @@ try:
         sample_volume_values,
     )
     from AntSleap.core.tif_local_axis_ai import export_local_axis_training_manifest
-    from AntSleap.core.tif_local_axis_reslice import align_editable_axis_to_reference_plane, compute_local_frame, create_editable_axis_from_source, export_part_reslice, local_axis_output_shape_for_source_bbox, source_point_to_reslice_point, source_z_axis_for_part
+    from AntSleap.core.tif_local_axis_reslice import source_point_to_reslice_point
     from AntSleap.services.tif_backend_workflow_service import TifBackendWorkflowService
     from AntSleap.services.tif_label_edit_service import TifLabelEditService
     from AntSleap.services.tif_local_axis_service import TifLocalAxisService
@@ -116,6 +116,7 @@ try:
     )
     from AntSleap.ui.tif_workbench_layout import make_panel, make_right_sidebar_responsive, make_section, make_task_page
     from AntSleap.ui.tif_workbench_pages import build_task_pages
+    from AntSleap.ui.tif_local_axis_controller import TifLocalAxisController
     from AntSleap.ui.tif_preview_controller import TifPreviewController
     from AntSleap.ui.tif_workbench_translations import TIF_TRANSLATIONS, tt
     from AntSleap.ui.tif_workbench_workers import (
@@ -181,7 +182,7 @@ except ModuleNotFoundError as exc:
         sample_volume_values,
     )
     from core.tif_local_axis_ai import export_local_axis_training_manifest
-    from core.tif_local_axis_reslice import align_editable_axis_to_reference_plane, compute_local_frame, create_editable_axis_from_source, export_part_reslice, local_axis_output_shape_for_source_bbox, source_point_to_reslice_point, source_z_axis_for_part
+    from core.tif_local_axis_reslice import source_point_to_reslice_point
     from services.tif_backend_workflow_service import TifBackendWorkflowService
     from services.tif_label_edit_service import TifLabelEditService
     from services.tif_local_axis_service import TifLocalAxisService
@@ -216,6 +217,7 @@ except ModuleNotFoundError as exc:
     )
     from ui.tif_workbench_layout import make_panel, make_right_sidebar_responsive, make_section, make_task_page
     from ui.tif_workbench_pages import build_task_pages
+    from ui.tif_local_axis_controller import TifLocalAxisController
     from ui.tif_preview_controller import TifPreviewController
     from ui.tif_workbench_translations import TIF_TRANSLATIONS, tt
     from ui.tif_workbench_workers import (
@@ -353,6 +355,7 @@ class TifWorkbenchWidget(QWidget):
         self.task_manager = TifTaskManager()
         self.task_adapter = TifQtTaskAdapter(self.task_manager)
         self.backend_panel_controller = TifBackendPanelController(self)
+        self.local_axis_controller = TifLocalAxisController(self)
         self.preview_controller = TifPreviewController(self)
         self.current_specimen_id = ""
         self.current_volume_scope = "full"
@@ -4523,7 +4526,7 @@ class TifWorkbenchWidget(QWidget):
         return {"volume_preview", "mask_preview"}
 
     def _local_axis_draft_lock_ignored_task_types(self):
-        return self._preview_interaction_task_types()
+        return self.local_axis_controller.ignored_draft_lock_task_types()
 
     def _backend_write_lock_active(self, ignored_task_types=None):
         return bool(
@@ -4588,12 +4591,7 @@ class TifWorkbenchWidget(QWidget):
         return False
 
     def _guard_local_axis_draft_interaction(self, show_message=True):
-        ignored = self._local_axis_draft_lock_ignored_task_types()
-        if self._guard_backend_write_lock(show_message=show_message, ignored_task_types=ignored):
-            return True
-        if not show_message:
-            self._set_local_axis_status(self._backend_write_lock_message(ignored_task_types=ignored))
-        return False
+        return self.local_axis_controller.guard_draft_interaction(show_message=show_message)
 
     def _format_elapsed_seconds(self, seconds):
         seconds = max(0, int(seconds or 0))
@@ -4804,18 +4802,7 @@ class TifWorkbenchWidget(QWidget):
         self.btn_redo.setEnabled(False)
 
     def _set_local_axis_reslice_export_controls_enabled(self, enabled):
-        enabled = bool(enabled)
-        for widget in (
-            self.btn_copy_source_z_axis,
-            self.btn_pick_roll_ref_a,
-            self.btn_pick_roll_ref_b,
-            self.btn_pick_roll_ref_c,
-            self.btn_align_axis_to_reference_plane,
-            self.btn_clear_roll_refs,
-            self.btn_clear_local_axis_draft,
-            self.btn_local_axis_reslice,
-        ):
-            widget.setEnabled(enabled)
+        return self.local_axis_controller.set_export_controls_enabled(enabled)
 
     def _cleanup_tif_import_thread(self):
         self._set_tif_import_controls_enabled(True)
@@ -10275,52 +10262,13 @@ class TifWorkbenchWidget(QWidget):
         return bool(self.current_volume_scope == "part" and not self.current_reslice_id)
 
     def _clear_local_axis_draft_if_part_changed(self, specimen_id="", part_id=""):
-        draft = self.local_axis_draft if isinstance(self.local_axis_draft, dict) else None
-        if draft is None:
-            return
-        if str(draft.get("specimen_id", "")) != str(specimen_id or "") or str(draft.get("part_id", "")) != str(part_id or ""):
-            self.local_axis_draft = None
+        return self.local_axis_controller.clear_draft_if_part_changed(specimen_id, part_id)
 
     def _source_z_axis_for_current_part(self):
-        shape = tuple(int(value) for value in getattr(self.image_volume, "shape", ()) or ())
-        if len(shape) != 3 or min(shape) <= 0:
-            return {}
-        result = self.local_axis_service.source_z_axis_for_shape(shape)
-        if not result:
-            return {}
-        return dict(result.payload.get("source_axis") or {})
+        return self.local_axis_controller.source_z_axis_for_current_part()
 
     def copy_source_z_axis_to_local_axis_draft(self):
-        if not self._guard_local_axis_draft_interaction():
-            return None
-        if self.current_volume_scope != "part" or self.current_reslice_id or not self.current_specimen_id or not self.current_part_id or self.image_volume is None:
-            QMessageBox.information(self, tt("Local Axis Reslice", self.lang), tt("Select a part volume before editing Local Axis Reslice.", self.lang))
-            return None
-        source_axis = self._source_z_axis_for_current_part()
-        if not source_axis:
-            return None
-        result = self.local_axis_service.build_initial_draft(
-            specimen_id=self.current_specimen_id,
-            part_id=self.current_part_id,
-            source_shape_zyx=tuple(int(value) for value in getattr(self.image_volume, "shape", ()) or ()),
-            source_axis=source_axis,
-        )
-        if not result:
-            return None
-        draft = dict(result.payload.get("draft") or {})
-        self._refresh_local_axis_frame(draft)
-        self.local_axis_draft = draft
-        if hasattr(self, "volume_local_axes_check"):
-            self.volume_local_axes_check.setChecked(True)
-        message = tt("Copied source Z axis as editable output axis.", self.lang)
-        self._set_local_axis_status(message)
-        self.log(message)
-        specimen = self.project.get_specimen(self.current_specimen_id, default=None)
-        if specimen is not None:
-            self._update_status_labels(specimen, part=self.current_part)
-        if self.display_mode == "volume":
-            self.render_volume_preview()
-        return draft
+        return self.local_axis_controller.copy_source_z_axis_to_draft()
 
     def _current_part_reslice_record(self):
         if not self.current_specimen_id or not self.current_part_id or not self.current_reslice_id:
@@ -10328,16 +10276,7 @@ class TifWorkbenchWidget(QWidget):
         return self.project.get_part_reslice(self.current_specimen_id, self.current_part_id, self.current_reslice_id, default=None)
 
     def _current_local_axis_draft(self):
-        draft = self.local_axis_draft if isinstance(self.local_axis_draft, dict) else None
-        if draft is None:
-            return None
-        if self.current_reslice_id:
-            return None
-        if str(draft.get("specimen_id", "")) != str(self.current_specimen_id or ""):
-            return None
-        if str(draft.get("part_id", "")) != str(self.current_part_id or ""):
-            return None
-        return draft
+        return self.local_axis_controller.current_draft()
 
     def _format_local_axis_point_pair(self, axis):
         if not isinstance(axis, dict):
@@ -10424,73 +10363,22 @@ class TifWorkbenchWidget(QWidget):
         ]
 
     def _roll_reference_payload(self, draft=None):
-        draft = draft if isinstance(draft, dict) else self._current_local_axis_draft()
-        return self.local_axis_service.roll_reference_payload(draft)
+        return self.local_axis_controller.roll_reference_payload(draft)
 
     def _local_axis_spacing_zyx(self):
-        _, spacing_zyx = self._volume_source_geometry()
-        return list(spacing_zyx or [1.0, 1.0, 1.0])
+        return self.local_axis_controller.spacing_zyx()
 
     def _local_axis_spacing_unit(self):
-        if self.current_volume_scope == "part":
-            record = ((self.current_part or {}).get("image") or {})
-        else:
-            specimen = self.project.get_specimen(self.current_specimen_id, default=None) if self.current_specimen_id else None
-            record = (specimen or {}).get("working_volume") or {}
-        return str((record or {}).get("spacing_unit") or tt("voxel", self.lang))
+        return self.local_axis_controller.spacing_unit()
 
     def _local_axis_origin_from_editable_axis(self, editable_axis):
-        axis = editable_axis if isinstance(editable_axis, dict) else {}
-        start = axis.get("start_zyx") or []
-        end = axis.get("end_zyx") or []
-        if len(start) == 3 and len(end) == 3:
-            try:
-                return [round((float(start[index]) + float(end[index])) * 0.5, 3) for index in range(3)]
-            except (TypeError, ValueError):
-                pass
-        shape = tuple(int(value) for value in getattr(self.image_volume, "shape", ()) or ())
-        return [(float(value) - 1.0) / 2.0 for value in shape] if len(shape) == 3 else []
+        return self.local_axis_controller.origin_from_editable_axis(editable_axis)
 
     def _set_local_axis_draft(self, draft, status_message=""):
-        if not isinstance(draft, dict):
-            self.local_axis_draft = None
-        else:
-            draft.setdefault("specimen_id", self.current_specimen_id)
-            draft.setdefault("part_id", self.current_part_id)
-            draft.setdefault("template_id", str(self.current_part_id or "generic"))
-            self._refresh_local_axis_frame(draft)
-            self.local_axis_draft = draft
-        if hasattr(self, "volume_local_axes_check"):
-            self.volume_local_axes_check.setChecked(True)
-        self._sync_local_axis_pick_buttons()
-        self._update_local_axis_summary()
-        specimen = self.project.get_specimen(self.current_specimen_id, default=None) if self.current_specimen_id else None
-        if specimen is not None:
-            self._update_status_labels(specimen, part=self.current_part if self.current_volume_scope == "part" else None)
-        if hasattr(self.volume_canvas, "set_axis_overlays"):
-            self.volume_canvas.set_axis_overlays(self._local_axis_volume_overlays())
-        if status_message:
-            self._set_local_axis_status(status_message)
-            self.log(status_message)
-        if self.display_mode == "volume":
-            self.render_volume_preview()
-        return self.local_axis_draft
+        return self.local_axis_controller.set_draft(draft, status_message=status_message)
 
     def _refresh_local_axis_frame(self, draft=None):
-        draft = draft if isinstance(draft, dict) else self._current_local_axis_draft()
-        if not isinstance(draft, dict):
-            return None
-        editable = draft.get("editable_axis") or {}
-        draft["origin_zyx"] = self._local_axis_origin_from_editable_axis(editable)
-        result = self.local_axis_service.build_local_frame(draft, spacing_zyx=self._local_axis_spacing_zyx())
-        if not result:
-            draft["local_frame"] = None
-            draft["local_frame_error"] = result.message
-            return None
-        frame = dict(result.payload.get("frame") or {})
-        draft["local_frame"] = frame
-        draft.pop("local_frame_error", None)
-        return frame
+        return self.local_axis_controller.refresh_frame(draft)
 
     def _update_local_axis_summary(self):
         label = getattr(self, "local_axis_summary_label", None)
@@ -10918,179 +10806,28 @@ class TifWorkbenchWidget(QWidget):
         self._update_local_axis_summary()
 
     def _sync_local_axis_roll_buttons(self):
-        target = str(getattr(self, "_local_axis_pick_target", "") or getattr(self, "_local_axis_roll_pick_target", "") or "")
-        if hasattr(self, "btn_pick_roll_ref_a"):
-            self.btn_pick_roll_ref_a.blockSignals(True)
-            self.btn_pick_roll_ref_a.setChecked(target == "roll_a")
-            self.btn_pick_roll_ref_a.blockSignals(False)
-        if hasattr(self, "btn_pick_roll_ref_b"):
-            self.btn_pick_roll_ref_b.blockSignals(True)
-            self.btn_pick_roll_ref_b.setChecked(target == "roll_b")
-            self.btn_pick_roll_ref_b.blockSignals(False)
-        if hasattr(self, "btn_pick_roll_ref_c"):
-            self.btn_pick_roll_ref_c.blockSignals(True)
-            self.btn_pick_roll_ref_c.setChecked(target == "roll_c")
-            self.btn_pick_roll_ref_c.blockSignals(False)
+        return self.local_axis_controller.sync_roll_buttons()
 
     def _sync_local_axis_pick_buttons(self):
-        return self._sync_local_axis_roll_buttons()
+        return self.local_axis_controller.sync_pick_buttons()
 
     def set_local_axis_pick_target(self, target=""):
-        target = str(target or "")
-        legacy_map = {"left_eye": "roll_a", "right_eye": "roll_b"}
-        target = legacy_map.get(target, target)
-        ignored_tasks = self._local_axis_draft_lock_ignored_task_types()
-        if target and self._backend_write_lock_active(ignored_task_types=ignored_tasks):
-            self._guard_backend_write_lock(ignored_task_types=ignored_tasks)
-            return False
-        if target not in {"", "roll_a", "roll_b", "roll_c"}:
-            target = ""
-        if target and not self._current_local_axis_draft():
-            if self.copy_source_z_axis_to_local_axis_draft() is None:
-                return False
-        if target and hasattr(self, "volume_clip_plane_check") and not self.volume_clip_plane_check.isChecked():
-            self.volume_clip_plane_check.setChecked(True)
-            self._set_local_axis_status(
-                tt(
-                    "Observation-side clip plane is now enabled. Move the clip depth if needed, then click the plane to set {0}.",
-                    self.lang,
-                ).format(target)
-            )
-        self._local_axis_pick_target = target
-        self._local_axis_roll_pick_target = target if target in {"roll_a", "roll_b", "roll_c"} else ""
-        self._sync_local_axis_pick_buttons()
-        if target:
-            message = tt("Click the observation-side clip plane to set {0}.", self.lang).format(target)
-            if hasattr(self, "volume_clip_plane_check") and self.volume_clip_plane_check.isChecked():
-                self._set_local_axis_status(message)
-            else:
-                self._set_local_axis_status(tt("Turn on the observation-side clip plane before picking local-axis points.", self.lang))
-        return bool(target)
+        return self.local_axis_controller.set_pick_target(target)
 
     def set_local_axis_roll_pick_target(self, target=""):
         return self.set_local_axis_pick_target(target)
 
     def pick_local_axis_roll_reference_at(self, x, y):
-        if not self._guard_local_axis_draft_interaction(show_message=False):
-            return False
-        target = str(getattr(self, "_local_axis_pick_target", "") or getattr(self, "_local_axis_roll_pick_target", "") or "")
-        if target not in {"roll_a", "roll_b", "roll_c"}:
-            return False
-        draft = self._current_local_axis_draft()
-        if not isinstance(draft, dict):
-            return False
-        if not (hasattr(self, "volume_clip_plane_check") and self.volume_clip_plane_check.isChecked()):
-            self._set_local_axis_status(tt("Turn on the observation-side clip plane before picking local-axis points.", self.lang))
-            return False
-        point = self._volume_xy_to_zyx_on_clip_plane(x, y)
-        if point is None:
-            return False
-        roll = dict(draft.get("roll_reference") or {})
-        if not roll.get("pair_id"):
-            roll["pair_id"] = "roll_reference_point_pair"
-        if target == "roll_a":
-            key = "point_a"
-            role = "roll_reference_a"
-        elif target == "roll_b":
-            key = "point_b"
-            role = "roll_reference_b"
-        else:
-            key = "point_c"
-            role = "reference_plane_c"
-        roll[key] = {"role": role, "zyx": [round(float(value), 3) for value in point]}
-        draft["roll_reference"] = roll
-        draft["dirty"] = True
-        self._refresh_local_axis_frame(draft)
-        self.local_axis_draft = draft
-        self._local_axis_pick_target = ""
-        self._local_axis_roll_pick_target = ""
-        self._sync_local_axis_pick_buttons()
-        self._update_local_axis_summary()
-        if hasattr(self.volume_canvas, "set_axis_overlays"):
-            self.volume_canvas.set_axis_overlays(self._local_axis_volume_overlays())
-        self._set_local_axis_status(tt("Set {0}: {1}", self.lang).format(role, roll[key]["zyx"]))
-        self._request_volume_interaction_render()
-        return True
+        return self.local_axis_controller.pick_roll_reference_at(x, y)
 
     def clear_local_axis_roll_references(self):
-        if not self._guard_local_axis_draft_interaction():
-            return
-        draft = self._current_local_axis_draft()
-        if not isinstance(draft, dict):
-            return
-        result = self.local_axis_service.clear_roll_reference_points(draft)
-        if not result:
-            return
-        draft = dict(result.payload.get("draft") or {})
-        self.local_axis_draft = draft
-        self._local_axis_pick_target = ""
-        self._local_axis_roll_pick_target = ""
-        self._sync_local_axis_pick_buttons()
-        self._update_local_axis_summary()
-        if hasattr(self.volume_canvas, "set_axis_overlays"):
-            self.volume_canvas.set_axis_overlays(self._local_axis_volume_overlays())
-        self._set_local_axis_status(tt("Cleared roll reference points.", self.lang))
-        self._request_volume_interaction_render()
+        return self.local_axis_controller.clear_roll_references()
 
     def align_local_axis_to_reference_plane(self):
-        if not self._guard_local_axis_draft_interaction():
-            return False
-        draft = self._current_local_axis_draft()
-        if not isinstance(draft, dict):
-            if self.copy_source_z_axis_to_local_axis_draft() is None:
-                return False
-            draft = self._current_local_axis_draft()
-        if not isinstance(draft, dict):
-            return False
-        roll = dict(draft.get("roll_reference") or {})
-        if not all(isinstance(roll.get(key), dict) and roll.get(key, {}).get("zyx") for key in ("point_a", "point_b", "point_c")):
-            message = tt("Set A/B/C plane reference points before aligning output Z.", self.lang)
-            self._set_local_axis_status(message)
-            self.log(message)
-            return False
-        shape = tuple(int(value) for value in getattr(self.image_volume, "shape", ()) or ())
-        try:
-            editable_axis, reference_plane = align_editable_axis_to_reference_plane(
-                draft.get("editable_axis") or {},
-                roll,
-                spacing_zyx=self._local_axis_spacing_zyx(),
-                shape_zyx=shape if len(shape) == 3 else None,
-            )
-        except Exception as exc:
-            message = tt("Cannot align output Z: {0}", self.lang).format(str(exc))
-            self._set_local_axis_status(message)
-            self.log(message)
-            return False
-        roll["reference_plane"] = dict(reference_plane)
-        draft["editable_axis"] = editable_axis
-        draft["roll_reference"] = roll
-        draft["reference_plane"] = dict(reference_plane)
-        draft["dirty"] = True
-        self._refresh_local_axis_frame(draft)
-        self.local_axis_draft = draft
-        self._sync_local_axis_pick_buttons()
-        self._update_local_axis_summary()
-        if hasattr(self.volume_canvas, "set_axis_overlays"):
-            self.volume_canvas.set_axis_overlays(self._local_axis_volume_overlays())
-        message = tt("Aligned output Z perpendicular to the A/B/C reference plane.", self.lang)
-        self._set_local_axis_status(message)
-        self.log(message)
-        self._request_volume_interaction_render()
-        return True
+        return self.local_axis_controller.align_to_reference_plane()
 
     def clear_local_axis_draft(self):
-        if not self._guard_local_axis_draft_interaction():
-            return
-        self.local_axis_draft = None
-        self._local_axis_pick_target = ""
-        self._local_axis_roll_pick_target = ""
-        self._sync_local_axis_pick_buttons()
-        self._update_local_axis_summary()
-        if hasattr(self.volume_canvas, "set_axis_overlays"):
-            self.volume_canvas.set_axis_overlays(self._local_axis_volume_overlays())
-        self._set_local_axis_status(tt("Cleared local axis draft.", self.lang))
-        if self.display_mode == "volume":
-            self.render_volume_preview()
+        return self.local_axis_controller.clear_draft()
 
     def _local_axis_volume_overlays(self):
         if not self._local_axis_overlay_enabled():
@@ -14796,38 +14533,10 @@ class TifWorkbenchWidget(QWidget):
         return file_path
 
     def _default_local_axis_reslice_id(self):
-        part_id = str(self.current_part_id or "part").strip() or "part"
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        return f"{part_id}_local_axis_{stamp}"
+        return self.local_axis_controller.default_reslice_id()
 
     def _current_local_axis_reslice_payload(self):
-        if not self._is_editable_part_volume() or not self.current_specimen_id or not self.current_part_id or self.image_volume is None:
-            raise ValueError(tt("Select a part volume before exporting Local Axis Reslice.", self.lang))
-        draft = self._current_local_axis_draft()
-        if not isinstance(draft, dict):
-            raise ValueError(tt("Copy source Z and set roll reference points before exporting.", self.lang))
-        frame = self._refresh_local_axis_frame(draft)
-        if not isinstance(frame, dict):
-            raise ValueError(tt("Local frame is not ready: {0}", self.lang).format(draft.get("local_frame_error") or "missing roll reference"))
-        spacing = self._local_axis_spacing_zyx()
-        source_shape = [int(value) for value in getattr(self.image_volume, "shape", ())]
-        trainable = bool(getattr(self, "local_axis_trainable_check", None) and self.local_axis_trainable_check.isChecked())
-        draft = dict(draft)
-        draft.setdefault("source_axis", self._source_z_axis_for_current_part())
-        result = self.local_axis_service.build_reslice_payload(
-            specimen_id=self.current_specimen_id,
-            part_id=self.current_part_id,
-            draft=draft,
-            local_frame=frame,
-            source_shape_zyx=source_shape,
-            spacing_zyx=spacing,
-            reslice_id=self._default_local_axis_reslice_id(),
-            trainable=trainable,
-            display_name=f"{self.current_part_id} local axis",
-        )
-        if not result:
-            raise ValueError(tt("Local Axis Reslice export request is not ready: {0}", self.lang).format(result.message or ", ".join(result.reasons or [])))
-        return dict(result.payload.get("payload") or {})
+        return self.local_axis_controller.current_reslice_payload()
 
     def export_current_local_axis_reslice(self):
         if not self._guard_backend_write_lock():

@@ -53,6 +53,8 @@ SUITES: dict[str, list[str]] = {
         "tests.test_tif_local_axis_reslice",
         "tests.test_tif_local_axis_ai",
         "tests.test_tif_local_axis_batch",
+        "tests.test_tif_resource_policy",
+        "tests.test_tif_preview_controller",
     ],
     "tif_model_backends": [
         "tests.test_tif_nnunet_v2_backend",

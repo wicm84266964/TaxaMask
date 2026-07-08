@@ -116,6 +116,7 @@ try:
     )
     from AntSleap.ui.tif_workbench_layout import make_panel, make_right_sidebar_responsive, make_section, make_task_page
     from AntSleap.ui.tif_workbench_pages import build_task_pages
+    from AntSleap.ui.tif_preview_controller import TifPreviewController
     from AntSleap.ui.tif_workbench_translations import TIF_TRANSLATIONS, tt
     from AntSleap.ui.tif_workbench_workers import (
         TifBackendActionWorker,
@@ -215,6 +216,7 @@ except ModuleNotFoundError as exc:
     )
     from ui.tif_workbench_layout import make_panel, make_right_sidebar_responsive, make_section, make_task_page
     from ui.tif_workbench_pages import build_task_pages
+    from ui.tif_preview_controller import TifPreviewController
     from ui.tif_workbench_translations import TIF_TRANSLATIONS, tt
     from ui.tif_workbench_workers import (
         TifBackendActionWorker,
@@ -351,6 +353,7 @@ class TifWorkbenchWidget(QWidget):
         self.task_manager = TifTaskManager()
         self.task_adapter = TifQtTaskAdapter(self.task_manager)
         self.backend_panel_controller = TifBackendPanelController(self)
+        self.preview_controller = TifPreviewController(self)
         self.current_specimen_id = ""
         self.current_volume_scope = "full"
         self.current_part_id = ""
@@ -4432,6 +4435,15 @@ class TifWorkbenchWidget(QWidget):
             ignore_empty=ignore_empty,
         )
 
+    def _safe_load_volume_sidecar(self, path, *, mmap_mode="r", operation="load_volume"):
+        return self.preview_controller.safe_load_volume_sidecar(path, mmap_mode=mmap_mode, operation=operation)
+
+    def _clear_preview_resource_issue(self):
+        return self.preview_controller.clear_resource_issue()
+
+    def _preview_resource_summary(self):
+        return self.preview_controller.state_summary()
+
     def _current_state_summary(self):
         role = self.label_role_combo.currentData() if hasattr(self, "label_role_combo") else ""
         roll = (self.local_axis_draft or {}).get("roll_reference") if isinstance(self.local_axis_draft, dict) else {}
@@ -4452,6 +4464,7 @@ class TifWorkbenchWidget(QWidget):
                 preview_token=self._volume_preview_pending_token,
                 request_key=self._task_request_key(preview_key),
             ).to_dict(),
+            "preview_resource": self._preview_resource_summary(),
             "backend": TifBackendState(
                 running=self._backend_action_running(),
                 action=self._tif_backend_action,
@@ -9299,17 +9312,19 @@ class TifWorkbenchWidget(QWidget):
             self.undo_stack = []
             self.redo_stack = []
             self._populate_label_role_combo()
+            self._clear_preview_resource_issue()
 
             image_path = self.project.to_absolute((specimen.get("working_volume") or {}).get("path", ""))
             if image_path and volume_sidecar_exists(image_path):
-                self.image_volume = load_volume_sidecar(image_path, mmap_mode="r")
-                self._slice_positions = {
-                    "z": max(0, min(int(self.slice_slider.value()), int(self.image_volume.shape[0]) - 1)),
-                    "y": max(0, int(self.image_volume.shape[1]) // 2),
-                    "x": max(0, int(self.image_volume.shape[2]) // 2),
-                }
-                self._configure_slice_slider_for_axis(self._current_slice_axis(), preserve_position=True)
-                self._reset_canvas_view_on_next_render = True
+                self.image_volume, _load_issue = self._safe_load_volume_sidecar(image_path, mmap_mode="r", operation="load_specimen_image")
+                if self.image_volume is not None:
+                    self._slice_positions = {
+                        "z": max(0, min(int(self.slice_slider.value()), int(self.image_volume.shape[0]) - 1)),
+                        "y": max(0, int(self.image_volume.shape[1]) // 2),
+                        "x": max(0, int(self.image_volume.shape[2]) // 2),
+                    }
+                    self._configure_slice_slider_for_axis(self._current_slice_axis(), preserve_position=True)
+                    self._reset_canvas_view_on_next_render = True
             else:
                 self._set_slice_review_unavailable(self._slice_unavailable_message(specimen))
                 if self._is_metadata_only_specimen(specimen) or self._materialize_task_matches(specimen_id):
@@ -9399,6 +9414,7 @@ class TifWorkbenchWidget(QWidget):
             self.undo_stack = []
             self.redo_stack = []
             self._populate_label_role_combo()
+            self._clear_preview_resource_issue()
 
             reslice = self._current_part_reslice_record()
             if isinstance(reslice, dict) and reslice.get("image_path"):
@@ -9412,7 +9428,7 @@ class TifWorkbenchWidget(QWidget):
             else:
                 image_path = self.project.to_absolute((part.get("image") or {}).get("path", ""))
                 if image_path and volume_sidecar_exists(image_path):
-                    self.image_volume = load_volume_sidecar(image_path, mmap_mode="r")
+                    self.image_volume, _load_issue = self._safe_load_volume_sidecar(image_path, mmap_mode="r", operation="load_part_image")
             if self.image_volume is not None:
                 self._slice_positions = {
                     "z": max(0, min(int(self.slice_slider.value()), int(self.image_volume.shape[0]) - 1)),
@@ -9752,7 +9768,7 @@ class TifWorkbenchWidget(QWidget):
             role = self.label_role_combo.currentData() or "editable_ai_result"
             label_path = self._current_part_label_path(role)
             if label_path and volume_sidecar_exists(label_path):
-                self.label_volume = load_volume_sidecar(label_path, mmap_mode="r")
+                self.label_volume, _load_issue = self._safe_load_volume_sidecar(label_path, mmap_mode="r", operation=f"load_part_label:{role}")
             self.render_current_slice()
             return
         specimen = self.project.get_specimen(self.current_specimen_id, default=None)
@@ -9768,7 +9784,7 @@ class TifWorkbenchWidget(QWidget):
             label_record = drafts[-1] if drafts else {}
         label_path = self.project.to_absolute((label_record or {}).get("path", ""))
         if label_path and volume_sidecar_exists(label_path):
-            self.label_volume = load_volume_sidecar(label_path, mmap_mode="r")
+            self.label_volume, _load_issue = self._safe_load_volume_sidecar(label_path, mmap_mode="r", operation=f"load_label:{role}")
         self.render_current_slice()
 
     def _load_edit_volume(self):
@@ -9776,14 +9792,14 @@ class TifWorkbenchWidget(QWidget):
         if self.current_volume_scope == "part":
             edit_path = self._current_part_label_path("editable_ai_result")
             if edit_path and volume_sidecar_exists(edit_path):
-                self.edit_volume = load_volume_sidecar(edit_path, mmap_mode="c")
+                self.edit_volume, _load_issue = self._safe_load_volume_sidecar(edit_path, mmap_mode="c", operation="load_part_edit_volume")
             return
         specimen = self.project.get_specimen(self.current_specimen_id, default=None)
         if specimen is None:
             return
         edit_path = self.project.to_absolute(((specimen.get("labels") or {}).get("working_edit") or {}).get("path", ""))
         if edit_path and volume_sidecar_exists(edit_path):
-            self.edit_volume = load_volume_sidecar(edit_path, mmap_mode="c")
+            self.edit_volume, _load_issue = self._safe_load_volume_sidecar(edit_path, mmap_mode="c", operation="load_working_edit_volume")
 
     def _current_part_mask_path(self):
         if self.current_volume_scope != "part" or self.current_reslice_id:
@@ -9798,10 +9814,7 @@ class TifWorkbenchWidget(QWidget):
             return
         mask_path = self._current_part_mask_path()
         if mask_path and volume_sidecar_exists(mask_path):
-            try:
-                self.part_mask_volume = load_volume_sidecar(mask_path, mmap_mode="r")
-            except Exception:
-                self.part_mask_volume = None
+            self.part_mask_volume, _load_issue = self._safe_load_volume_sidecar(mask_path, mmap_mode="r", operation="load_part_mask_volume")
 
     def _ensure_working_edit_volume(self):
         if not self._guard_backend_write_lock():
@@ -9816,7 +9829,7 @@ class TifWorkbenchWidget(QWidget):
             edit_path = self.project.to_absolute((edit_record or {}).get("path", ""))
             if edit_path and volume_sidecar_exists(edit_path):
                 if self.edit_volume is None:
-                    self.edit_volume = load_volume_sidecar(edit_path, mmap_mode="c")
+                    self.edit_volume, _load_issue = self._safe_load_volume_sidecar(edit_path, mmap_mode="c", operation="ensure_part_edit_volume")
                 return self.edit_volume is not None
             image_path = self._current_part_label_image_path()
             if not image_path:
@@ -9884,7 +9897,7 @@ class TifWorkbenchWidget(QWidget):
                 )
             self.project.save_project()
             if self.edit_volume is None:
-                self.edit_volume = load_volume_sidecar(edit_abs, mmap_mode="c")
+                self.edit_volume, _load_issue = self._safe_load_volume_sidecar(edit_abs, mmap_mode="c", operation="open_created_part_edit_volume")
             return self.edit_volume is not None
         specimen = self.project.get_specimen(self.current_specimen_id, default=None)
         if specimen is None:
@@ -9896,7 +9909,7 @@ class TifWorkbenchWidget(QWidget):
         edit_path = self.project.to_absolute(edit_record.get("path", ""))
         if edit_path and volume_sidecar_exists(edit_path):
             if self.edit_volume is None:
-                self.edit_volume = load_volume_sidecar(edit_path, mmap_mode="c")
+                self.edit_volume, _load_issue = self._safe_load_volume_sidecar(edit_path, mmap_mode="c", operation="ensure_working_edit_volume")
             return self.edit_volume is not None
         image_path = self.project.to_absolute((specimen.get("working_volume") or {}).get("path", ""))
         if not image_path or not volume_sidecar_exists(image_path):
@@ -9919,7 +9932,7 @@ class TifWorkbenchWidget(QWidget):
             save=False,
         )
         self.project.save_project()
-        self.edit_volume = load_volume_sidecar(edit_abs, mmap_mode="c")
+        self.edit_volume, _load_issue = self._safe_load_volume_sidecar(edit_abs, mmap_mode="c", operation="open_created_working_edit_volume")
         return self.edit_volume is not None
 
     def _format_tif_path_line(self, label, path_value):
@@ -10222,6 +10235,9 @@ class TifWorkbenchWidget(QWidget):
         return np.asarray(volume[index])
 
     def volume_status_text(self):
+        resource_summary = self._preview_resource_summary()
+        if resource_summary.get("resource_limited"):
+            return str(resource_summary.get("user_message") or "")
         if self.image_volume is None:
             return ""
         return (
@@ -11476,6 +11492,9 @@ class TifWorkbenchWidget(QWidget):
         return " | ".join(parts)
 
     def _volume_status_summary_text(self):
+        resource_summary = self._preview_resource_summary()
+        if resource_summary.get("resource_limited"):
+            return str(resource_summary.get("user_message") or tt("No TIF volume loaded", self.lang))
         if self.image_volume is None:
             return tt("No TIF volume loaded", self.lang)
         parts = [
@@ -12728,6 +12747,11 @@ class TifWorkbenchWidget(QWidget):
         self._volume_preview_pending_mask_key = None
         self._set_volume_preview_build_controls_busy(False)
         message = tt("GPU renderer failed. Using CPU fallback: {0}", self.lang).format(str(result.get("error", "")))
+        issue = self.preview_controller.classify_exception(
+            RuntimeError(str(result.get("error", ""))),
+            operation="volume_preview_build",
+        )
+        self.preview_controller.last_resource_issue = issue
         self._fail_tif_task(self._volume_preview_build_task_id, result.get("error", ""), payload=result, message=message)
         self._volume_preview_build_task_id = ""
         self._update_volume_render_status_label(message)
@@ -13145,6 +13169,7 @@ class TifWorkbenchWidget(QWidget):
         except Exception as exc:
             self._volume_last_stats = dict(getattr(self, "_volume_last_stats", {}) or {})
             self._volume_last_stats["gpu_mask_build_error"] = str(exc)
+            self.preview_controller.last_resource_issue = self.preview_controller.classify_exception(exc, operation="gpu_mask_texture")
             return False
         finally:
             self._end_volume_preview_ui_wait()
@@ -13194,6 +13219,7 @@ class TifWorkbenchWidget(QWidget):
         except Exception as exc:
             self._volume_last_stats = dict(getattr(self, "_volume_last_stats", {}) or {})
             self._volume_last_stats["gpu_preview_build_error"] = str(exc)
+            self.preview_controller.last_resource_issue = self.preview_controller.classify_exception(exc, operation="gpu_volume_texture")
             return False
         finally:
             self._end_volume_preview_ui_wait()

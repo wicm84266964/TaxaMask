@@ -145,6 +145,8 @@ private_docs/
 /LLM_CONTEXT.md
 /开发版整理提交说明_*.md
 docs/ant3d_workbench/
+docs/internal_history/
+docs/internal_history/**
 docs/designs/
 docs/designs/**
 docs/discussions/

@@ -7,7 +7,9 @@ import numpy as np
 import tifffile
 
 from .safe_io import atomic_write_json
+from .tif_prediction_policy import can_import_prediction_target, validate_external_prediction_import
 from .tif_project import TifProjectManager
+from .tif_write_guard import WriteIntent, ensure_write_allowed
 from .tif_volume_io import read_volume_metadata, volume_sidecar_exists, write_volume_sidecar
 
 
@@ -50,6 +52,14 @@ def _read_label_tif(path):
     return volume
 
 
+def _require_guard(result, prefix):
+    if result:
+        return result
+    reason = getattr(result, "reason", "denied")
+    details = getattr(result, "details", {})
+    raise ValueError(f"{prefix}:{reason}:{details}")
+
+
 def import_external_prediction_tif(
     project_manager,
     specimen_id,
@@ -80,10 +90,53 @@ def import_external_prediction_tif(
     working_shape = [int(value) for value in working_meta.get("shape_zyx", working_record.get("shape_zyx", []))]
     volume = _read_label_tif(source_path)
     label_shape = [int(value) for value in volume.shape]
-    if label_shape != working_shape:
-        raise ValueError(f"external_prediction_shape_mismatch:{clean_specimen_id}:{label_shape}:{working_shape}")
+    validation = validate_external_prediction_import(
+        specimen_id=clean_specimen_id,
+        prediction_shape_zyx=label_shape,
+        expected_shape_zyx=working_shape,
+        dtype=volume.dtype,
+    )
+    if not validation:
+        if validation.reason == "external_prediction_shape_mismatch":
+            raise ValueError(f"external_prediction_shape_mismatch:{clean_specimen_id}:{label_shape}:{working_shape}")
+        raise ValueError(f"external_prediction_import_guard_denied:{validation.reason}:{validation.details}")
 
     safe_prediction_id = _safe_prediction_id(prediction_id or default_prediction_id_for_tif(source_path))
+    source_model_text = str(source_model or "external_tif")
+    common_metadata = {
+        "source_path": source_path,
+        "prediction_id": safe_prediction_id,
+        "source_model": source_model_text,
+        "import_adapter": TIF_EXTERNAL_PREDICTION_IMPORT_ADAPTER_VERSION,
+        "note": "External prediction label TIF imported as editable review result; not training truth.",
+    }
+    _require_guard(
+        can_import_prediction_target(
+            "raw_ai_prediction_backup",
+            source_role="external_prediction_tif",
+            overwrite_existing=True,
+            audit_metadata=common_metadata,
+        ),
+        "tif_prediction_policy_denied",
+    )
+    _require_guard(
+        can_import_prediction_target(
+            "working_edit",
+            source_role="external_prediction_tif",
+            overwrite_existing=True,
+            audit_metadata=common_metadata,
+        ),
+        "tif_prediction_policy_denied",
+    )
+    _require_guard(
+        can_import_prediction_target(
+            "model_draft",
+            source_role="external_prediction_tif",
+            overwrite_existing=False,
+            audit_metadata=common_metadata,
+        ),
+        "tif_prediction_policy_denied",
+    )
     backup_rel = os.path.join(
         project_manager.specimen_dir(clean_specimen_id),
         "labels",
@@ -105,6 +158,24 @@ def import_external_prediction_tif(
     draft_abs = project_manager.to_absolute(draft_rel)
     if os.path.exists(draft_abs):
         raise FileExistsError(draft_abs)
+    for target_abs, target_role, allow_overwrite in (
+        (backup_abs, "raw_ai_prediction_backup", True),
+        (editable_abs, "working_edit", True),
+        (draft_abs, "model_draft", False),
+    ):
+        ensure_write_allowed(
+            WriteIntent(
+                target_path=target_abs,
+                project_root=project_manager.project_dir,
+                source_path=source_path,
+                source_role="external_prediction_tif",
+                target_role=target_role,
+                operation="external_prediction_import",
+                audit_metadata=common_metadata,
+                allow_overwrite=allow_overwrite,
+                allowed_roots=(project_manager.project_dir,),
+            )
+        )
 
     report_rel = os.path.join(
         project_manager.specimen_dir(clean_specimen_id),
@@ -116,7 +187,6 @@ def import_external_prediction_tif(
     if os.path.exists(report_abs):
         raise FileExistsError(report_abs)
 
-    source_model_text = str(source_model or "external_tif")
     draft = None
     labels = specimen.setdefault("labels", {})
     previous_train_ready = bool(specimen.get("train_ready"))
@@ -126,13 +196,6 @@ def import_external_prediction_tif(
         editable_abs: os.path.exists(editable_abs),
     }
     try:
-        common_metadata = {
-            "source_path": source_path,
-            "prediction_id": safe_prediction_id,
-            "source_model": source_model_text,
-            "import_adapter": TIF_EXTERNAL_PREDICTION_IMPORT_ADAPTER_VERSION,
-            "note": "External prediction label TIF imported as editable review result; not training truth.",
-        }
         backup_meta = write_volume_sidecar(
             backup_abs,
             volume,
@@ -188,6 +251,8 @@ def import_external_prediction_tif(
             orientation=editable_meta.get("orientation", "unknown"),
             fmt=editable_meta.get("format", ""),
             save=False,
+            operation="prediction_review_import",
+            audit_metadata=common_metadata,
         )
         editable["prediction_id"] = safe_prediction_id
         editable["source_model"] = source_model_text

@@ -38,7 +38,7 @@ Treat this TaxaMask protocol as always active, not as an optional skill:
 2. Keep these boundaries fixed:
    - 2D/STL uses Labeling Workbench, parent-part annotation, child-part annotation, built-in Locator/SAM, Blink route experts, literature trait alignment, and the 2D external backend.
    - STL currently means rendered 2D views imported into Labeling Workbench, not direct 3D mesh painting.
-   - TIF uses independent TIF projects, material-ID labels, `working_edit`, `manual_truth`, `model_draft`, sidecars, and the TIF backend contract.
+   - TIF uses independent TIF projects, material-ID labels, `working_edit`, `manual_truth`, `editable_ai_result`, `raw_ai_prediction_backup`, sidecars, and the TIF backend contract. Legacy top-level `model_draft` records may exist for audit/compatibility, but part/reslice prediction review uses `editable_ai_result`.
    - PDF is evidence/provenance and Agent/headless workflow. PDF candidates are not training truth.
 3. For common TaxaMask tasks, consult `.lab-agent/skills/taxamask-workflows/SKILL.md` as the compact workflow card before loading the full manual.
 4. For PDF source acquisition, first decide whether the user already has PDFs. If they need to find or download taxonomy literature, load `vendor/ant-code/config/skills/taxonomy-pdf-harvest/SKILL.md` as stage 0 before PDF screening. Use only lawful open metadata and legally exposed PDF links; never use Sci-Hub, LibGen, paywall bypasses, CAPTCHA bypasses, or logged-in scraping.
@@ -94,7 +94,7 @@ Treat this TaxaMask protocol as always active, not as an optional skill:
 
 - Never write back to original AMIRA source files in first-stage workflows.
 - Never silently overwrite `manual_truth`.
-- Never automatically promote PDF candidates, model predictions, or `model_draft` into training truth.
+- Never automatically promote PDF candidates, model predictions, `editable_ai_result`, or legacy `model_draft` into training truth.
 - Keep TIF labels independent from 2D/STL morphology labels.
 - Keep large TIF volumes and labels in sidecars, not in project JSON.
 - Do not run GPU-heavy training or long inference unless the user says the GPU is available.
@@ -119,7 +119,7 @@ Treat model-backend adaptation as a three-level workflow:
 For custom models, keep the two backend routes separate:
 
 - 2D/STL custom models use `ExternalBackendRunner` and `taxamask_external_backend_contract_v1`; they should return prediction JSON that imports into review candidates.
-- TIF volume-segmentation custom models use `TifBackendRunner` and `ant3d_tif_backend_contract_v1`; they should return TIF backend results and import prediction label volumes into `model_draft`.
+- TIF volume-segmentation custom models use `TifBackendRunner` and `ant3d_tif_backend_contract_v1`; they should return TIF backend results. Part/reslice prediction label volumes import into `editable_ai_result` with a read-only `raw_ai_prediction_backup`, while legacy top-level prediction records may still keep `model_draft` for audit/compatibility.
 - TIF Local Axis proposal backends use `taxamask_tif_local_axis_backend_contract_v1`; they should return reviewable global ROI or local-frame proposals, not label volumes or final reslice TIFFs.
 
 Default to adapter/config changes first. Escalate to TaxaMask source development only when a concrete missing program capability prevents the custom model from being adapted externally.

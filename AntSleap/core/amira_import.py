@@ -7,9 +7,11 @@ from datetime import datetime
 import numpy as np
 import tifffile
 
+from .tif_label_guard import can_write_label_role
 from .tif_materials import write_material_map
 from .tif_project import TifProjectManager
 from .tif_volume_io import copy_volume_sidecar, write_volume_sidecar
+from .tif_write_guard import WriteIntent, ensure_write_allowed
 
 
 AMIRA_IMPORT_REPORT_SCHEMA_VERSION = "ant3d_amira_import_report_v1"
@@ -36,6 +38,39 @@ def _safe_filename(value):
     text = str(value or "").strip()
     clean = "".join(ch if ch.isalnum() or ch in ("-", "_", ".", " ") else "_" for ch in text)
     return clean.strip("_") or "source"
+
+
+def _require_guard(result, prefix):
+    if result:
+        return result
+    reason = getattr(result, "reason", "denied")
+    details = getattr(result, "details", {})
+    raise ValueError(f"{prefix}:{reason}:{details}")
+
+
+def _guard_import_write(project_manager, target_path, *, source_path="", target_role="", operation="", audit_metadata=None, allow_overwrite=False):
+    _require_guard(
+        can_write_label_role(
+            target_role,
+            operation=operation,
+            audit_metadata=audit_metadata,
+            overwrite_existing=allow_overwrite,
+        ),
+        "tif_label_guard_denied",
+    )
+    ensure_write_allowed(
+        WriteIntent(
+            target_path=target_path,
+            project_root=project_manager.project_dir,
+            source_path=source_path,
+            source_role="amira_import_source",
+            target_role=target_role,
+            operation=operation,
+            audit_metadata=dict(audit_metadata or {}) if isinstance(audit_metadata, dict) else {},
+            allow_overwrite=allow_overwrite,
+            allowed_roots=(project_manager.project_dir,),
+        )
+    )
 
 
 def _read_text(path):
@@ -456,6 +491,29 @@ def import_amira_directory(
         manual_rel = os.path.join(specimen_root_rel, "labels", "manual_truth.ome.zarr").replace("\\", "/")
         edit_rel = os.path.join(specimen_root_rel, "labels", "working_edit.ome.zarr").replace("\\", "/")
         material_map_rel = os.path.join(specimen_root_rel, "material_map.json").replace("\\", "/")
+        import_audit = {
+            "import_adapter": AMIRA_IMPORT_ADAPTER_VERSION,
+            "source_path": os.path.abspath(str(source_dir)),
+            "specimen_id": str(specimen_id),
+        }
+        _guard_import_write(
+            project_manager,
+            project_manager.to_absolute(manual_rel),
+            source_path=files["labels"],
+            target_role="manual_truth",
+            operation="reviewed_truth_import",
+            audit_metadata=import_audit,
+            allow_overwrite=False,
+        )
+        _guard_import_write(
+            project_manager,
+            project_manager.to_absolute(edit_rel),
+            source_path=project_manager.to_absolute(manual_rel),
+            target_role="working_edit",
+            operation="copy_label_layer_to_working_edit",
+            audit_metadata=import_audit,
+            allow_overwrite=False,
+        )
 
         image_meta = write_volume_sidecar(
             project_manager.to_absolute(image_rel),

@@ -276,6 +276,38 @@ class TifProjectTests(unittest.TestCase):
                 manager.promote_working_edit_to_manual_truth("01-0101-16")
             self.assertTrue((project_root / shared_rel / "array.npy").exists())
 
+    def test_raw_backup_cannot_be_promoted_to_manual_truth(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "raw_backup_truth_guard"
+            manager = TifProjectManager()
+            manager.create_project("raw_backup_truth_guard", project_root)
+            manager.create_specimen_scaffold("01-0101-raw")
+            part_image_rel = "specimens/01-0101-raw/parts/brain/image.ome.zarr"
+            backup_rel = "specimens/01-0101-raw/parts/brain/labels/raw_ai_prediction_backup.ome.zarr"
+            part_meta = write_volume_sidecar(project_root / part_image_rel, np.zeros((2, 3, 4), dtype=np.uint8), role="part_image")
+            backup_meta = write_volume_sidecar(project_root / backup_rel, np.ones((2, 3, 4), dtype=np.uint16), role="raw_ai_prediction_backup")
+            manager.add_part("01-0101-raw", "brain", image={"path": part_image_rel, **part_meta}, save=False)
+            manager.register_part_label_volume(
+                "01-0101-raw",
+                "brain",
+                "raw_ai_prediction_backup",
+                backup_rel,
+                backup_meta["shape_zyx"],
+                backup_meta["dtype"],
+                operation="prediction_raw_backup_import",
+                audit_metadata={"prediction_id": "p1"},
+                save=True,
+            )
+
+            with self.assertRaisesRegex(ValueError, "raw_ai_prediction_backup_cannot_be_promoted_to_manual_truth"):
+                manager.promote_part_editable_result_to_manual_truth(
+                    "01-0101-raw",
+                    "brain",
+                    source_role="raw_ai_prediction_backup",
+                )
+
+            self.assertFalse((manager.get_part("01-0101-raw", "brain")["labels"]["manual_truth"] or {}).get("path"))
+
     def test_specimen_ids_cannot_share_the_same_storage_folder(self):
         with tempfile.TemporaryDirectory() as tmp:
             project_root = Path(tmp) / "storage_collision"

@@ -209,6 +209,11 @@ class GuiSmokeTests(unittest.TestCase):
             patcher.start()
 
     def tearDown(self):
+        if QApplication is not None:
+            for widget in QApplication.topLevelWidgets():
+                timer = getattr(widget, "project_save_timer", None)
+                if timer is not None and hasattr(timer, "stop"):
+                    timer.stop()
         for patcher in reversed(getattr(self, "_runtime_patchers", [])):
             patcher.stop()
         self.temp_dir.cleanup()
@@ -728,7 +733,7 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertIn("trustButton.click()", script)
             self.assertIn("postTrust", script)
             self.assertIn("__taxamaskAgentTrustReloaded", script)
-            self.assertIn("sendText === '待信任'", script)
+            self.assertIn("['待信任', 'Trust required'].includes(sendText)", script)
         finally:
             window.deleteLater()
 
@@ -1450,7 +1455,9 @@ class GuiSmokeTests(unittest.TestCase):
                     "active_specimen_id": "ANTSCAN_0001",
                     "active_volume_scope": "part",
                     "active_part_id": "head",
+                    "active_reslice_id": "head_local_axis_001",
                     "active_part_parent_bbox_zyx": "[[1, 3], [2, 4], [5, 7]]",
+                    "active_part_group_tags": "Review batch",
                     "display_mode": "volume",
                     "volume_projection_mode": "mip",
                     "volume_mask_mode": "boundary",
@@ -1468,12 +1475,33 @@ class GuiSmokeTests(unittest.TestCase):
                     "backend_run_active": "no",
                     "backend_run_dir": "C:/taxamask/runs/train/train_1",
                     "backend_result_json": "C:/taxamask/runs/train/train_1/result.json",
+                    "predict_group_filter": "tag:review_batch",
+                    "predict_group_filter_label": "Review batch",
+                    "predict_target_summary": "Prediction targets: 3 listed, 2 ready, 1 selected, 0 will overwrite editable AI result, 1 incomplete.",
+                    "predict_selected_target_count": "1",
+                    "predict_selected_targets": "ANTSCAN_0001/head/head_local_axis_001",
+                    "tif_task_summary": "{'running_count': 1, 'busy_locked': True}",
+                    "tif_state_summary": "{'local_axis': {'reslice_id': 'head_local_axis_001'}}",
+                    "preview_resource_summary": "{'resource_limited': False}",
+                    "local_axis_state_summary": "{'draft_active': True, 'reslice_id': 'head_local_axis_001'}",
+                    "volume_surface_refine": "on",
+                    "volume_clip_plane": "on",
+                    "volume_clip_plane_depth": "45%",
+                    "volume_roi_high_detail": "on",
+                    "volume_roi_inspect": "off",
+                    "volume_roi_scale": "2.5x",
+                    "volume_roi_budget": "1.0 GB",
+                    "volume_uploaded_gb": "0.40",
+                    "volume_upload_ms": "38",
+                    "volume_draw_ms": "7.4",
                     "tif_next_requirement": "annotation_training_loop",
                 }
             )
 
             self.assertEqual(tif_compact["active_volume_scope"], "part")
             self.assertEqual(tif_compact["active_part_id"], "head")
+            self.assertEqual(tif_compact["active_reslice_id"], "head_local_axis_001")
+            self.assertEqual(tif_compact["active_part_group_tags"], "Review batch")
             self.assertEqual(tif_compact["active_label_schema_id"], "head_regions")
             self.assertEqual(tif_compact["train_ready_part_sample_count"], "2")
             self.assertEqual(tif_compact["training_selection_scope"], "part_reslice")
@@ -1482,8 +1510,25 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertIn("result.json", tif_compact["backend_result_json"])
             self.assertEqual(tif_compact["volume_projection_mode"], "mip")
             self.assertEqual(tif_compact["volume_performance_diagnosis"], "gpu_ok")
+            self.assertEqual(tif_compact["predict_group_filter"], "tag:review_batch")
+            self.assertIn("3 listed", tif_compact["predict_target_summary"])
+            self.assertEqual(tif_compact["predict_selected_target_count"], "1")
+            self.assertIn("head_local_axis_001", tif_compact["predict_selected_targets"])
+            self.assertIn("running_count", tif_compact["tif_task_summary"])
+            self.assertIn("local_axis", tif_compact["tif_state_summary"])
+            self.assertIn("resource_limited", tif_compact["preview_resource_summary"])
+            self.assertIn("draft_active", tif_compact["local_axis_state_summary"])
+            self.assertEqual(tif_compact["volume_clip_plane"], "on")
+            self.assertEqual(tif_compact["volume_roi_high_detail"], "on")
+            self.assertEqual(tif_compact["volume_uploaded_gb"], "0.40")
             self.assertIn("ant3d_tif_backend_contract_v1.md", tif_compact["source_code_refs"])
             self.assertIn("tif_local_axis_backend_contract_v1.md", tif_compact["source_code_refs"])
+            self.assertIn("tif_agent_context.py", tif_compact["source_code_refs"])
+
+            prompt = window.agent_panel._context_prompt(tif_compact)
+            self.assertIn("Active reslice: head_local_axis_001", prompt)
+            self.assertIn("TIF task summary", prompt)
+            self.assertIn("TIF preview resource summary", prompt)
 
             pdf_compact = window._compact_agent_context(
                 {
@@ -1727,7 +1772,8 @@ class GuiSmokeTests(unittest.TestCase):
             project_path.write_text(json.dumps(project_payload), encoding="utf-8")
             window.config.set("last_project_path", str(project_path))
 
-            window.open_last_project()
+            with patch.object(main_module, "themed_yes_no_question", return_value=main_module.QMessageBox.Yes):
+                window.open_last_project()
 
             self.assertEqual(window.active_project_kind, "image")
             self.assertEqual(window.tabs.currentWidget(), window.workbench_widget)
@@ -1762,7 +1808,8 @@ class GuiSmokeTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            window.open_project_path(str(large_path))
+            with patch.object(main_module, "themed_yes_no_question", return_value=main_module.QMessageBox.Yes):
+                window.open_project_path(str(large_path))
             self.assertTrue(window.image_list_group_collapsed.get("original"))
             self.assertEqual(window.file_list.count(), 1)
 
@@ -1784,7 +1831,8 @@ class GuiSmokeTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            window.open_project_path(str(small_path))
+            with patch.object(main_module, "themed_yes_no_question", return_value=main_module.QMessageBox.Yes):
+                window.open_project_path(str(small_path))
 
             self.assertFalse(window.image_list_group_collapsed.get("original"))
             self.assertEqual(window.file_list.count(), 2)
@@ -2404,9 +2452,9 @@ class GuiSmokeTests(unittest.TestCase):
             save_calls = []
             original_save = window.project.save_project
 
-            def counted_save():
+            def counted_save(*args, **kwargs):
                 save_calls.append("save")
-                return original_save()
+                return original_save(*args, **kwargs)
 
             window.project.save_project = counted_save
 
@@ -2491,9 +2539,9 @@ class GuiSmokeTests(unittest.TestCase):
             save_calls = []
             original_save = window.project.save_project
 
-            def counted_save():
+            def counted_save(*args, **kwargs):
                 save_calls.append("save")
-                return original_save()
+                return original_save(*args, **kwargs)
 
             window.project.save_project = counted_save
 
@@ -2505,6 +2553,7 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(window.project.project_data["images"], [image_paths[3]])
             self.assertNotIn(image_paths[0], window.project.project_data["labels"])
             self.assertEqual(window.current_image, image_paths[3])
+            window.project_save_timer.stop()
         finally:
             window.deleteLater()
 
@@ -2625,7 +2674,7 @@ class GuiSmokeTests(unittest.TestCase):
             context = window.pdf_widget.get_agent_context()
             self.assertEqual(
                 context["settings_question_focus"],
-                "stage_1_confirm_pdf_keys_models_with_short_requirement_questions_only",
+                "stage_0_confirm_existing_pdf_folder_or_lawful_open_access_harvest_first",
             )
             self.assertEqual(context["text_llm_key_configured"], "no")
             self.assertEqual(context["text_llm_model"], "gpt-5.4")
@@ -2643,14 +2692,15 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertNotIn("vision-secret-not-sent", str(context))
             self.assertEqual(
                 context["settings_question_focus"],
-                "stage_1_confirm_pdf_keys_models_with_short_requirement_questions_only",
+                "stage_0_confirm_existing_pdf_folder_or_lawful_open_access_harvest_first",
             )
             prompt = window._pdf_agent_prompt()
             self.assertIn("key、base URL、model", prompt)
-            self.assertIn("四个阶段", prompt)
+            self.assertIn("五个阶段", prompt)
             self.assertIn("每轮只处理当前阶段", prompt)
             self.assertIn("最多问 3 个问题", prompt)
             self.assertIn("需求确认式交互", prompt)
+            self.assertIn("taxonomy-pdf-harvest", prompt)
             self.assertNotIn("规划时请覆盖这些点", prompt)
         finally:
             window.deleteLater()
@@ -3695,6 +3745,7 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(context["review_project_path"], window.project.current_project_path)
             self.assertIn("STL rendered-view project", window._start_console_project_summary()[0])
             self.assertIn("1 STL rendered 2D view", window._start_console_image_summary()[0])
+            self.assertTrue(self._wait_until(lambda: preload_events == ["preload"]))
             self.assertEqual(preload_events, ["preload"])
             self.assertIsNone(window.sam_worker)
             self.assertIsNone(window.sam_thread)

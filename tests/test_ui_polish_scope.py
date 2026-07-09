@@ -47,7 +47,7 @@ else:
     from AntSleap.ui.blink_lab import BlinkExpertTrainingReportDialog, BlinkLabWidget
     from AntSleap.ui.cropper import ImageCropper
     from AntSleap.ui.pdf_processing_widget import PdfProcessingWidget
-    from AntSleap.ui.style import BUTTON_ROLE_COMMIT, BUTTON_ROLE_NEUTRAL, SCI_THEME, apply_semantic_button_style, build_theme_palette, refresh_themed_buttons
+    from AntSleap.ui.style import BUTTON_ROLE_COMMIT, BUTTON_ROLE_NEUTRAL, SCI_THEME, apply_semantic_button_style, build_theme_palette, get_theme_config, refresh_themed_buttons
 
     has_pyside6 = True
 
@@ -3631,7 +3631,7 @@ class UiPolishScopeTests(unittest.TestCase):
 
             self.assertEqual(window.label_project_images.text(), "PROJECT IMAGES (1/1)")
             color = window.file_list.item(0).foreground().color()
-            self.assertEqual(color, QColor("#8FBC8F"))
+            self.assertEqual(color, QColor(get_theme_config(window.current_theme)["success"]))
         finally:
             window.hide()
             window.deleteLater()
@@ -4065,7 +4065,7 @@ class UiPolishScopeTests(unittest.TestCase):
             self.assertEqual(self.project_manager.save_calls, baseline_save_calls)
             self.assertTrue(window.project_save_pending)
             self.assertEqual(window.label_project_images.text(), "PROJECT IMAGES (1/1)")
-            self.assertEqual(window.file_list.item(0).foreground().color(), QColor("#8FBC8F"))
+            self.assertEqual(window.file_list.item(0).foreground().color(), QColor(get_theme_config(window.current_theme)["success"]))
         finally:
             window.hide()
             window.deleteLater()
@@ -4212,7 +4212,7 @@ class UiPolishScopeTests(unittest.TestCase):
             self.assertEqual(self.project_manager.save_calls, baseline_save_calls)
             self.assertTrue(window.project_save_pending)
             self.assertNotIn("Head", self.project_manager.project_data["labels"][image_key]["descriptions"])
-            self.assertEqual(window.file_list.item(0).foreground().color(), QColor("#8FBC8F"))
+            self.assertEqual(window.file_list.item(0).foreground().color(), QColor(get_theme_config(window.current_theme)["success"]))
         finally:
             window.hide()
             window.deleteLater()
@@ -4517,7 +4517,7 @@ class UiPolishScopeTests(unittest.TestCase):
             self.assertEqual(window.vlm_preannotation_saved_total, 1)
             self.assertIn("Head", self.project_manager.project_data["labels"][image_key]["parts"])
             self.assertEqual(window.label_project_images.text(), "PROJECT IMAGES (1/1)")
-            self.assertEqual(window.file_list.item(0).foreground().color(), QColor("#8FBC8F"))
+            self.assertEqual(window.file_list.item(0).foreground().color(), QColor(get_theme_config(window.current_theme)["success"]))
         finally:
             window.hide()
             window.deleteLater()

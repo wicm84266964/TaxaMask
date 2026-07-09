@@ -293,6 +293,11 @@ class UiLocalizationTests(unittest.TestCase):
             widget.check_isolate_runs.toolTip(),
             "勾选后：每次 V2 运行都会在输出目录下使用独立子文件夹，避免不同运行结果混在一起。",
         )
+        widget.set_theme("light")
+        part_advanced_style = widget.btn_adv_part_description_config.styleSheet()
+        self.assertIn("background-color: #FDFEFF", part_advanced_style)
+        self.assertNotIn("qlineargradient", part_advanced_style)
+        self.assertIn("background-color: #DC2626", widget.btn_delete_part_description_profile.styleSheet())
 
     def test_main_translates_added_common_dialog_strings(self):
         self.assertEqual(main_module.tr("Close", "zh"), "关闭")

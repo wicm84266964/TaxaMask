@@ -69,6 +69,8 @@ def detect_panel_crops(image: str | Image.Image, settings: PanelSplitSettings | 
 
     if len(boxes) <= 1:
         return []
+    if len(boxes) > 2 and not _has_explicit_hard_separator_line(rgb, boxes):
+        return []
     return _panel_detections_from_boxes(boxes, source)
 
 
@@ -427,6 +429,69 @@ def _is_background_dominated_box(mask: np.ndarray, box: tuple[int, int, int, int
     box_height = max(1, y1 - y0)
     is_slender = box_width <= max(6, int(width * 0.12)) or box_height <= max(6, int(height * 0.12))
     return bool(is_slender and float(submask.mean()) >= float(ratio))
+
+
+def _has_explicit_hard_separator_line(rgb: np.ndarray, boxes: list[tuple[int, int, int, int]]) -> bool:
+    height, width = rgb.shape[:2]
+    boundaries: list[tuple[str, int, int, int]] = []
+    for index, first in enumerate(boxes):
+        ax0, ay0, ax1, ay1 = [int(value) for value in first]
+        for second in boxes[index + 1 :]:
+            bx0, by0, bx1, by1 = [int(value) for value in second]
+            if abs(ax1 - bx0) <= 2 or abs(bx1 - ax0) <= 2:
+                x = int(round((ax1 + bx0) / 2.0)) if abs(ax1 - bx0) <= 2 else int(round((bx1 + ax0) / 2.0))
+                y0 = max(ay0, by0)
+                y1 = min(ay1, by1)
+                if y1 - y0 >= max(24, int(height * 0.08)):
+                    boundaries.append(("v", x, y0, y1))
+            if abs(ay1 - by0) <= 2 or abs(by1 - ay0) <= 2:
+                y = int(round((ay1 + by0) / 2.0)) if abs(ay1 - by0) <= 2 else int(round((by1 + ay0) / 2.0))
+                x0 = max(ax0, bx0)
+                x1 = min(ax1, bx1)
+                if x1 - x0 >= max(24, int(width * 0.08)):
+                    boundaries.append(("h", y, x0, x1))
+    return any(_boundary_has_separator_line(rgb, boundary) for boundary in boundaries)
+
+
+def _boundary_has_separator_line(rgb: np.ndarray, boundary: tuple[str, int, int, int]) -> bool:
+    axis, position, start, end = boundary
+    height, width = rgb.shape[:2]
+    if end <= start:
+        return False
+
+    for offset in range(-2, 3):
+        if axis == "v":
+            x = int(position) + offset
+            if x <= 0 or x >= width - 1:
+                continue
+            y0 = max(0, int(start))
+            y1 = min(height, int(end))
+            line = rgb[y0:y1, x : x + 1, :]
+            before = rgb[y0:y1, max(0, x - 8) : max(0, x - 3), :]
+            after = rgb[y0:y1, min(width, x + 3) : min(width, x + 8), :]
+        else:
+            y = int(position) + offset
+            if y <= 0 or y >= height - 1:
+                continue
+            x0 = max(0, int(start))
+            x1 = min(width, int(end))
+            line = rgb[y : y + 1, x0:x1, :]
+            before = rgb[max(0, y - 8) : max(0, y - 3), x0:x1, :]
+            after = rgb[min(height, y + 3) : min(height, y + 8), x0:x1, :]
+        if _line_distinguishes_panels(line, before, after):
+            return True
+    return False
+
+
+def _line_distinguishes_panels(line: np.ndarray, before: np.ndarray, after: np.ndarray) -> bool:
+    if line.size == 0 or before.size == 0 or after.size == 0:
+        return False
+    line_mean = line.reshape(-1, 3).astype(np.float32).mean(axis=0)
+    before_mean = before.reshape(-1, 3).astype(np.float32).mean(axis=0)
+    after_mean = after.reshape(-1, 3).astype(np.float32).mean(axis=0)
+    before_distance = float(np.linalg.norm(line_mean - before_mean))
+    after_distance = float(np.linalg.norm(line_mean - after_mean))
+    return min(before_distance, after_distance) >= 30.0
 
 
 def _panel_detections_from_boxes(boxes: list[tuple[int, int, int, int]], source: str) -> list[dict[str, Any]]:

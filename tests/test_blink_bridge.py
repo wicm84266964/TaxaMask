@@ -22,6 +22,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox, QDialog, QDialogButtonB
 import main as main_module
 from main import BlinkEntryDialog, MainWindow
 from ui.blink_lab import BlinkLabWidget, BlinkTrainingThread, BucketDeletePreviewDialog, BucketDeleteTypeConfirmDialog
+from AntSleap.core.blink_training_strategy import DEFAULT_BLINK_TRAINING_STRATEGY
 from AntSleap.core.blink_trainer import BlinkExpertTrainer
 from AntSleap.core.expert_notes import load_expert_notes, set_expert_note
 
@@ -1126,7 +1127,7 @@ class BlinkBridgeTests(unittest.TestCase):
         self.assertEqual(trainer_kwargs.get("learning_rate"), 0.002)
         self.assertEqual(trainer_kwargs.get("weight_decay"), 0.0003)
         self.assertEqual(trainer_kwargs.get("input_size"), 384)
-        self.assertEqual(trainer_kwargs.get("training_strategy"), "triview_random")
+        self.assertEqual(trainer_kwargs.get("training_strategy"), DEFAULT_BLINK_TRAINING_STRATEGY)
         self.assertEqual(trainer_kwargs.get("device"), "cpu")
         self.assertEqual(trainer_kwargs.get("allowed_image_paths"), [])
         self.assertEqual(trainer_kwargs.get("training_scope"), {})

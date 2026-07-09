@@ -6,9 +6,11 @@ import numpy as np
 import tifffile
 
 from .safe_io import atomic_write_json
+from .tif_label_guard import can_write_label_role
 from .tif_materials import write_material_map
 from .tif_project import TifProjectManager
 from .tif_volume_io import create_empty_label_sidecar_like, create_volume_sidecar_memmap
+from .tif_write_guard import WriteIntent, ensure_write_allowed
 
 
 TIF_STACK_IMPORT_REPORT_SCHEMA_VERSION = "ant3d_tif_stack_import_report_v1"
@@ -24,6 +26,39 @@ def _safe_filename(value):
     text = str(value or "").strip()
     clean = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in text)
     return clean.strip("_") or "source.tif"
+
+
+def _require_guard(result, prefix):
+    if result:
+        return result
+    reason = getattr(result, "reason", "denied")
+    details = getattr(result, "details", {})
+    raise ValueError(f"{prefix}:{reason}:{details}")
+
+
+def _guard_import_edit_write(project_manager, target_path, *, source_path="", audit_metadata=None, allow_overwrite=False):
+    _require_guard(
+        can_write_label_role(
+            "working_edit",
+            operation="create_empty_edit_layer",
+            audit_metadata=audit_metadata,
+            overwrite_existing=allow_overwrite,
+        ),
+        "tif_label_guard_denied",
+    )
+    ensure_write_allowed(
+        WriteIntent(
+            target_path=target_path,
+            project_root=project_manager.project_dir,
+            source_path=source_path,
+            source_role="tif_stack_import_source",
+            target_role="working_edit",
+            operation="create_empty_edit_layer",
+            audit_metadata=dict(audit_metadata or {}) if isinstance(audit_metadata, dict) else {},
+            allow_overwrite=allow_overwrite,
+            allowed_roots=(project_manager.project_dir,),
+        )
+    )
 
 
 def _coerce_tif_array_to_zyx(array):
@@ -267,6 +302,18 @@ def import_tif_stack(
         edit_meta = None
         if create_working_edit:
             _emit_progress(progress_callback, 96, 100, "Creating editable label layer")
+            import_audit = {
+                "import_adapter": TIF_STACK_IMPORT_ADAPTER_VERSION,
+                "source_path": source_path,
+                "specimen_id": str(specimen_id),
+            }
+            _guard_import_edit_write(
+                project_manager,
+                working_edit_abs,
+                source_path=source_path,
+                audit_metadata=import_audit,
+                allow_overwrite=False,
+            )
             edit_meta = create_empty_label_sidecar_like(image_abs, working_edit_abs, role="working_edit", write_ome_zarr=False)
             project_manager.register_label_volume(
                 specimen_id,
@@ -279,6 +326,7 @@ def import_tif_stack(
                 spacing_unit=edit_meta["spacing_unit"],
                 orientation=edit_meta["orientation"],
                 fmt=edit_meta["format"],
+                operation="create_empty_edit_layer",
                 save=False,
             )
         else:

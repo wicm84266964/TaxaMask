@@ -7777,7 +7777,7 @@ class MainWindow(QMainWindow):
     AGENT_CONTEXT_REFERENCE_TEXT_LIMIT = 960
     AGENT_CONTEXT_LOG_LINES = 6
     AGENT_CONTEXT_LOG_LINE_LIMIT = 160
-    AGENT_CONTEXT_TOTAL_LIMIT = 3600
+    AGENT_CONTEXT_TOTAL_LIMIT = 5200
 
     def _recent_text_excerpt(self, widget, line_limit=AGENT_CONTEXT_LOG_LINES):
         if widget is None or not hasattr(widget, "toPlainText"):
@@ -7814,7 +7814,9 @@ class MainWindow(QMainWindow):
             "active_specimen_id",
             "active_volume_scope",
             "active_part_id",
+            "active_reslice_id",
             "active_part_parent_bbox_zyx",
+            "active_part_group_tags",
             "active_image_path",
             "active_label_role",
             "active_slice_axis",
@@ -7842,6 +7844,15 @@ class MainWindow(QMainWindow):
             "backend_action",
             "backend_run_dir",
             "backend_result_json",
+            "predict_group_filter",
+            "predict_group_filter_label",
+            "predict_target_summary",
+            "predict_selected_target_count",
+            "predict_selected_targets",
+            "tif_task_summary",
+            "tif_state_summary",
+            "preview_resource_summary",
+            "local_axis_state_summary",
             "volume_renderer",
             "volume_renderer_label",
             "volume_render_mode",
@@ -7855,6 +7866,13 @@ class MainWindow(QMainWindow):
             "volume_detail_enhancement",
             "volume_tone_curve",
             "volume_shader_quality",
+            "volume_surface_refine",
+            "volume_clip_plane",
+            "volume_clip_plane_depth",
+            "volume_roi_high_detail",
+            "volume_roi_inspect",
+            "volume_roi_scale",
+            "volume_roi_budget",
             "volume_inside_depth",
             "volume_front_cut",
             "volume_zoom",
@@ -7863,6 +7881,9 @@ class MainWindow(QMainWindow):
             "volume_gpu_warning",
             "volume_status_overlay",
             "volume_performance_diagnosis",
+            "volume_uploaded_gb",
+            "volume_upload_ms",
+            "volume_draw_ms",
             "volume_uploaded_shape_zyx",
             "volume_texture_sampling",
             "volume_display_scaling",

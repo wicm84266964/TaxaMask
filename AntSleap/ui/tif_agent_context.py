@@ -18,6 +18,14 @@ class TifAgentContextBuilder:
         material_id = ""
         if isinstance(selected_material, dict):
             material_id = selected_material.get("id", "")
+        current_part = getattr(wb, "current_part", None)
+        current_part = current_part if isinstance(current_part, dict) else {}
+        active_part_tag_ids = [str(item) for item in current_part.get("user_tags", []) if str(item or "")]
+        try:
+            tag_lookup = wb._part_user_tag_lookup()
+        except Exception:
+            tag_lookup = {}
+        active_part_group_tags = ", ".join(str(tag_lookup.get(tag_id, tag_id)) for tag_id in active_part_tag_ids)
         recent_log = ""
         if hasattr(wb, "log_console"):
             recent_log = "\n".join(wb.log_console.toPlainText().splitlines()[-6:])
@@ -98,6 +106,27 @@ class TifAgentContextBuilder:
             "train": bool(str(backend_config.get("train_command") or "").strip()),
             "predict": bool(str(backend_config.get("predict_command") or "").strip()),
         }
+        predict_filter = ""
+        predict_filter_label = ""
+        if hasattr(wb, "predict_filter_combo") and wb.predict_filter_combo.count():
+            predict_filter = str(wb.predict_filter_combo.currentData() or "")
+            predict_filter_label = str(wb.predict_filter_combo.currentText() or "")
+        predict_target_summary = ""
+        if hasattr(wb, "predict_targets_summary_label"):
+            predict_target_summary = str(wb.predict_targets_summary_label.text() or "")
+        selected_predict_targets = []
+        for key in sorted(getattr(wb, "_tif_predict_selected_refs", set()) or set())[:8]:
+            if isinstance(key, (list, tuple)) and len(key) >= 3:
+                selected_predict_targets.append("/".join(str(item or "") for item in key[:3]))
+            else:
+                selected_predict_targets.append(str(key))
+        task_summary = wb._task_summary_for_context()
+        state_summary = wb._current_state_summary()
+        preview_resource_summary = ""
+        local_axis_state_summary = ""
+        if isinstance(state_summary, dict):
+            preview_resource_summary = str(state_summary.get("preview_resource") or "")
+            local_axis_state_summary = str(state_summary.get("local_axis") or "")
 
         return {
             "source_workbench": "tif_volume",
@@ -106,7 +135,9 @@ class TifAgentContextBuilder:
             "active_specimen_id": wb.current_specimen_id,
             "active_volume_scope": wb.current_volume_scope,
             "active_part_id": wb.current_part_id,
+            "active_reslice_id": wb.current_reslice_id,
             "active_part_parent_bbox_zyx": str((wb.current_part or {}).get("parent_bbox_zyx", "")),
+            "active_part_group_tags": active_part_group_tags,
             "active_label_role": active_label_role,
             "selected_material_id": material_id,
             "display_mode": wb.display_mode,
@@ -132,8 +163,15 @@ class TifAgentContextBuilder:
             "backend_action": str(wb._tif_backend_action or ""),
             "backend_run_dir": str(wb._tif_backend_run_dir or ""),
             "backend_result_json": str(wb._tif_backend_result_json or ""),
-            "tif_task_summary": str(wb._task_summary_for_context()),
-            "tif_state_summary": str(wb._current_state_summary()),
+            "predict_group_filter": predict_filter,
+            "predict_group_filter_label": predict_filter_label,
+            "predict_target_summary": predict_target_summary,
+            "predict_selected_target_count": str(len(getattr(wb, "_tif_predict_selected_refs", set()) or set())),
+            "predict_selected_targets": "; ".join(selected_predict_targets),
+            "tif_task_summary": str(task_summary),
+            "tif_state_summary": str(state_summary),
+            "preview_resource_summary": preview_resource_summary,
+            "local_axis_state_summary": local_axis_state_summary,
             "volume_renderer": wb._volume_canvas_renderer,
             "volume_renderer_label": wb._volume_renderer_label(),
             "volume_render_mode": wb._volume_render_mode,

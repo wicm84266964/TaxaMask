@@ -724,6 +724,7 @@ class TifWorkbenchWidget(QWidget):
         self.label_schema_table.horizontalHeader().setStretchLastSection(True)
         self.label_schema_table.itemChanged.connect(self._on_label_schema_table_item_changed)
         self.label_schema_table.cellDoubleClicked.connect(self._on_label_schema_table_cell_double_clicked)
+        self.label_schema_table.itemSelectionChanged.connect(self._on_label_schema_row_selected)
         self.btn_new_label_schema = QPushButton("New schema")
         self.btn_new_label_schema.setObjectName("tifNewLabelSchemaButton")
         self.btn_new_label_schema.clicked.connect(self.new_label_schema)
@@ -2008,16 +2009,21 @@ class TifWorkbenchWidget(QWidget):
 
     def _sync_material_editor_scope(self):
         is_part = self.current_volume_scope == "part"
+        has_bound_schema = bool(self._schema_materials_for_part()) if is_part else False
         if hasattr(self, "material_editor_buttons"):
             self.material_editor_buttons.setVisible(not is_part)
+        if hasattr(self, "material_table"):
+            self.material_table.setVisible(not has_bound_schema)
         if hasattr(self, "material_help_label"):
-            message = (
-                "Current labels are for selecting the label written by brush/fill tools. For project part volumes and reslices, create or edit labels in the bound schema above."
-                if is_part
-                else "After binding a label schema, select one current label here before using the brush or fill tools."
-            )
+            if has_bound_schema:
+                message = "Use the bound region label schema above as the brush label selector. Select a colored row there, then paint or fill on the slice."
+            elif is_part:
+                message = "Bind a region label schema above before painting this part/reslice. The brush uses the bound schema once it is set."
+            else:
+                message = "After binding a label schema, select one current label here before using the brush or fill tools."
             self.material_help_label.setText(tt(message, self.lang))
         if hasattr(self, "material_scope_help_label"):
+            self.material_scope_help_label.setVisible(not has_bound_schema)
             self.material_scope_help_label.setText(
                 tt(
                     "Label IDs are the numeric labels stored in the current volume. For project part volumes and their reslices, this list follows the bound region label schema; for top-level imported volumes, it is the specimen label map.",
@@ -2113,6 +2119,51 @@ class TifWorkbenchWidget(QWidget):
         self.label_schema_id_edit.setText(schema_id)
         self.label_schema_part_name_edit.setText(str((schema or {}).get("user_defined_part_name") or ""))
         self._set_label_schema_table_rows((schema or {}).get("labels") or [])
+        if self.current_volume_scope == "part" and schema_id == self._active_part_label_schema_id():
+            self._select_label_schema_row_for_material(self.current_material_id)
+
+    def _label_schema_row_material_id(self, row):
+        table = getattr(self, "label_schema_table", None)
+        if table is None or row < 0 or row >= table.rowCount():
+            return None
+        item = table.item(row, 1)
+        try:
+            label_id = int(str(item.text() if item is not None else "").strip())
+        except (TypeError, ValueError):
+            return None
+        return label_id if label_id > 0 else None
+
+    def _select_label_schema_row_for_material(self, material_id):
+        if self.current_volume_scope != "part" or not hasattr(self, "label_schema_table"):
+            return False
+        active_schema_id = self._active_part_label_schema_id()
+        selected_schema_id = self._selected_label_schema_id() if hasattr(self, "label_schema_combo") else ""
+        if not active_schema_id or selected_schema_id != active_schema_id:
+            return False
+        try:
+            target_id = int(material_id)
+        except Exception:
+            target_id = 0
+        if target_id <= 0:
+            return False
+        table = self.label_schema_table
+        for row in range(table.rowCount()):
+            if self._label_schema_row_material_id(row) == target_id:
+                table.blockSignals(True)
+                table.selectRow(row)
+                table.blockSignals(False)
+                return True
+        return False
+
+    def _on_label_schema_row_selected(self):
+        if self.current_volume_scope != "part":
+            return
+        if self._selected_label_schema_id() != self._active_part_label_schema_id():
+            return
+        label_id = self._label_schema_row_material_id(self.label_schema_table.currentRow())
+        if label_id is None:
+            return
+        self._set_current_material_id(label_id, select_row=True, show_message=not self._loading_specimen)
 
     def new_label_schema(self):
         part_name = str(self.current_part_id or "").strip()
@@ -2142,6 +2193,8 @@ class TifWorkbenchWidget(QWidget):
             ]
         )
         self.label_schema_id_edit.setFocus(Qt.OtherFocusReason)
+        self.label_schema_id_edit.selectAll()
+        self._set_operation_feedback(tt("Drafted label schema {0}. Edit labels, then save or bind it to the current part.", self.lang).format(candidate))
         return candidate
 
     def add_label_schema_row(self):
@@ -2489,6 +2542,8 @@ class TifWorkbenchWidget(QWidget):
         self.part_user_tag_color_edit.setText("#6B8AFD")
         self._update_part_user_tag_color_swatch()
         self.part_user_tag_id_edit.setFocus(Qt.OtherFocusReason)
+        self.part_user_tag_id_edit.selectAll()
+        self._set_operation_feedback(tt("Drafted group tag {0}. Save it, then check Assigned and apply it to the current part.", self.lang).format(candidate))
         return candidate
 
     def save_part_user_tag(self):
@@ -4739,6 +4794,36 @@ class TifWorkbenchWidget(QWidget):
             self.slice_label.setText("0 / 0")
         self.canvas.reset_view()
         self.canvas.setText(str(message or self._slice_unavailable_message()))
+
+    def _show_volume_selection_loading_feedback(self, payload=None, flush_events=True):
+        payload = payload if isinstance(payload, dict) else {}
+        scope = str(payload.get("scope") or "full")
+        if scope == "part_reslice":
+            message_key = "Loading selected reslice and labels..."
+        elif scope in {"part", "part_reslices"}:
+            message_key = "Loading selected part volume and labels..."
+        else:
+            message_key = "Loading selected TIF volume and labels..."
+        message = tt(message_key, self.lang)
+        self._set_operation_feedback(message, log=False)
+        if hasattr(self, "canvas"):
+            self.canvas.setText(message)
+        if hasattr(self, "status_label"):
+            self.status_label.setText(message)
+        cursor_set = False
+        try:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            cursor_set = True
+            if flush_events:
+                QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
+            return True
+        except Exception:
+            if cursor_set:
+                try:
+                    QApplication.restoreOverrideCursor()
+                except Exception:
+                    pass
+            return False
 
     def _cleanup_tif_materialize_thread(self):
         if self._tif_materialize_progress is not None:
@@ -8690,6 +8775,7 @@ class TifWorkbenchWidget(QWidget):
             previous_payload.get("part_id", ""),
             previous_payload.get("reslice_id", ""),
         )
+        preview_status_flushed = False
         if previous is not None and target_key != previous_key and not bool(getattr(self, "_programmatic_volume_tree_select", False)):
             self._defer_volume_preview_render_once = True
             if self.display_mode == "volume":
@@ -8698,10 +8784,21 @@ class TifWorkbenchWidget(QWidget):
                 self._update_volume_render_status_label(message)
                 if show_canvas_status:
                     QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
-        if payload.get("scope") in {"part", "part_reslices", "part_reslice"}:
-            self.load_part(specimen_id, payload.get("part_id", ""), selected_reslice_id=payload.get("reslice_id", ""))
-        else:
-            self.load_specimen(specimen_id)
+                    preview_status_flushed = True
+        cursor_overridden = False
+        if previous is not None and target_key != previous_key:
+            cursor_overridden = self._show_volume_selection_loading_feedback(payload, flush_events=not preview_status_flushed)
+        try:
+            if payload.get("scope") in {"part", "part_reslices", "part_reslice"}:
+                self.load_part(specimen_id, payload.get("part_id", ""), selected_reslice_id=payload.get("reslice_id", ""))
+            else:
+                self.load_specimen(specimen_id)
+        finally:
+            if cursor_overridden:
+                try:
+                    QApplication.restoreOverrideCursor()
+                except Exception:
+                    pass
 
     def load_specimen(self, specimen_id):
         if specimen_id != self.current_specimen_id and self.working_edit_dirty:
@@ -8995,6 +9092,7 @@ class TifWorkbenchWidget(QWidget):
                         break
                 except Exception:
                     continue
+            self._select_label_schema_row_for_material(material_id)
         self._update_current_material_summary()
         if show_message:
             material = self._material_for_id(material_id)

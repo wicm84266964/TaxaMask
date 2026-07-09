@@ -4333,6 +4333,8 @@ class PdfProcessingWidget(QWidget):
         apply_theme_button_style(self.btn_adv_config, BUTTON_ROLE_NEUTRAL, "padding: 5px;", theme)
         apply_theme_button_style(self.btn_delete_figure_profile, BUTTON_ROLE_DESTRUCTIVE, "", theme)
         apply_theme_button_style(self.btn_adv_figure_config, BUTTON_ROLE_NEUTRAL, "padding: 5px;", theme)
+        apply_theme_button_style(self.btn_delete_part_description_profile, BUTTON_ROLE_DESTRUCTIVE, "", theme)
+        apply_theme_button_style(self.btn_adv_part_description_config, BUTTON_ROLE_NEUTRAL, "padding: 5px;", theme)
         apply_theme_button_style(self.btn_src, BUTTON_ROLE_NEUTRAL, "", theme)
         apply_theme_button_style(self.btn_out, BUTTON_ROLE_NEUTRAL, "", theme)
         apply_theme_button_style(self.btn_restore_interrupted_run, BUTTON_ROLE_NEUTRAL, "", theme)

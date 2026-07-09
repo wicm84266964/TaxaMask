@@ -7811,8 +7811,20 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertGreaterEqual(central_row, 0)
                 self.assertIn("central_complex", widget.material_table.item(central_row, 2).text())
                 self.assertEqual(widget.material_table.item(central_row, 0).background().color().name(), "#123456")
+                self.assertTrue(widget.material_table.isHidden())
+                schema_row = -1
+                for row in range(widget.label_schema_table.rowCount()):
+                    id_item = widget.label_schema_table.item(row, 1)
+                    if id_item is not None and id_item.text() == "3":
+                        schema_row = row
+                        break
+                self.assertGreaterEqual(schema_row, 0)
+                widget.label_schema_table.selectRow(schema_row)
+                self.assertEqual(widget.current_material_id, 3)
+                self.assertIn("central_complex", widget.current_material_label.text())
 
                 widget.new_part_user_tag()
+                self.assertIn("Drafted group tag", widget.training_status_label.text())
                 widget.part_user_tag_id_edit.setText("paper_fig")
                 widget.part_user_tag_label_edit.setText("Paper figure")
                 widget.part_user_tag_color_edit.setText("#abcdef")
@@ -7912,6 +7924,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertEqual(schema_id, "antenna_regions")
                 self.assertEqual(widget.label_schema_part_name_edit.text(), "antenna")
                 self.assertEqual(widget.label_schema_table.item(0, 2).text(), "label_1")
+                self.assertIn("Drafted label schema antenna_regions", widget.training_status_label.text())
                 self.assertNotIn("brain", schema_id)
             finally:
                 widget.close_project(prompt_unsaved=False)

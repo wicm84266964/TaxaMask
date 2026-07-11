@@ -537,7 +537,7 @@ C:\Users\admin\anaconda3\envs\taxamask\python.exe scripts\run_validation_suite.p
 git diff --check
 ```
 
-Current fourth-round full validation inventory: 18 suites and 1,140 tests, with one environment-dependent TIF workbench skip and all remaining tests passing. This covers TIF core/storage/services/preview/backends/workbench, GUI smoke, UI polish, layout, PDF safety/literature, validation tooling, TIF round-three architecture, TaxaMask round-four architecture, 2D SQLite, Agent/SAM, Blink/locator, and generic VLM/STL/export.
+Current fourth-round full validation inventory: 18 suites and 1,141 tests, with one environment-dependent TIF workbench skip and all remaining tests passing. This covers TIF core/storage/services/preview/backends/workbench, GUI smoke, UI polish, layout, PDF safety/literature, validation tooling, TIF round-three architecture, TaxaMask round-four architecture, 2D SQLite, Agent/SAM, Blink/locator, and generic VLM/STL/export.
 
 Use the TaxaMask environment above for GUI/TIF validation. Do not install PySide6 into the default Python environment to satisfy skipped GUI tests.
 

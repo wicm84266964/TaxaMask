@@ -24,12 +24,12 @@
 | tif_architecture_round3 | 4 | 通过 |
 | taxamask_architecture_round4 | 54 | 通过 |
 | sqlite_2d | 38 | 通过 |
-| agentic_misc | 64 | 通过 |
+| agentic_misc | 65 | 通过 |
 | blink_locator | 103 | 通过 |
 | pdf_literature | 44 | 通过 |
 | generic_vlm_stl | 55 | 通过 |
 
-总计 18 个 suite、1,140 条测试；1 条环境相关 skip，其余通过。
+总计 18 个 suite、1,141 条测试；1 条环境相关 skip，其余通过。
 
 ## 2. 静态与文档终验
 

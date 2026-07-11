@@ -10,6 +10,25 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MAIN_PATH = ROOT / "AntSleap" / "main.py"
+ARCHITECTURE_PATHS = (
+    MAIN_PATH,
+    ROOT / "AntSleap" / "ui" / "main_window_workers.py",
+    ROOT / "AntSleap" / "ui" / "main_window_widgets.py",
+    ROOT / "AntSleap" / "ui" / "main_window_dialogs.py",
+    ROOT / "AntSleap" / "ui" / "training_report_dialogs.py",
+    ROOT / "AntSleap" / "ui" / "route_management_panel.py",
+    ROOT / "AntSleap" / "ui" / "settings_dialogs.py",
+    ROOT / "AntSleap" / "ui" / "model_settings_dialog.py",
+    ROOT / "AntSleap" / "ui" / "model_settings_view.py",
+    ROOT / "AntSleap" / "ui" / "model_settings_dataset.py",
+    ROOT / "AntSleap" / "ui" / "model_settings_profile.py",
+    ROOT / "AntSleap" / "ui" / "model_settings_agent.py",
+    ROOT / "AntSleap" / "ui" / "main_window_shell.py",
+    ROOT / "AntSleap" / "ui" / "main_window_start_center.py",
+    ROOT / "AntSleap" / "ui" / "main_window_agent_context.py",
+    ROOT / "AntSleap" / "ui" / "main_window_signal_router.py",
+    ROOT / "AntSleap" / "ui" / "main_window_coordinator.py",
+)
 KEY_TEST_PATHS = (
     ROOT / "tests" / "test_blink_bridge.py",
     ROOT / "tests" / "test_gui_smoke.py",
@@ -149,18 +168,26 @@ def _enclosing_owner(classes: list[ast.ClassDef], line: int) -> tuple[str, str]:
     return "<module>", "<module>"
 
 
-def _connections(tree: ast.Module, classes: list[ast.ClassDef]) -> list[dict[str, object]]:
+def _connections(tree: ast.Module, classes: list[ast.ClassDef], source_path: Path = MAIN_PATH) -> list[dict[str, object]]:
     rows = []
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute) or node.func.attr != "connect":
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute) or node.func.attr not in {"connect", "connect_once"}:
             continue
-        signal = _source_segment(node.func.value)
-        target = _source_segment(node.args[0]) if node.args else ""
+        if node.func.attr == "connect_once":
+            signal = _source_segment(node.args[1]) if len(node.args) > 1 else ""
+            target = _source_segment(node.args[2]) if len(node.args) > 2 else ""
+        else:
+            signal = _source_segment(node.func.value)
+            target = _source_segment(node.args[0]) if node.args else ""
         owner_class, owner_method = _enclosing_owner(classes, node.lineno)
+        if owner_class == "MainWindowSignalRouter" and node.func.attr == "connect":
+            continue
         workflow, stage = _workflow_for(f"{owner_class} {owner_method} {signal} {target}")
         rows.append(
             {
+                "file": source_path.relative_to(ROOT).as_posix(),
                 "line": node.lineno,
+                "binding": node.func.attr,
                 "owner_class": owner_class,
                 "owner_method": owner_method,
                 "signal": signal,
@@ -169,10 +196,10 @@ def _connections(tree: ast.Module, classes: list[ast.ClassDef]) -> list[dict[str
                 "target_stage": stage,
             }
         )
-    return sorted(rows, key=lambda row: int(row["line"]))
+    return sorted(rows, key=lambda row: (str(row["file"]), int(row["line"])))
 
 
-def _async_inventory(tree: ast.Module, classes: list[ast.ClassDef]) -> list[dict[str, object]]:
+def _async_inventory(tree: ast.Module, classes: list[ast.ClassDef], source_path: Path = MAIN_PATH) -> list[dict[str, object]]:
     rows = []
     patterns = {
         "QThread": re.compile(r"(?:^|\.)QThread$"),
@@ -191,6 +218,7 @@ def _async_inventory(tree: ast.Module, classes: list[ast.ClassDef]) -> list[dict
         workflow, stage = _workflow_for(f"{owner_class} {owner_method} {call}")
         rows.append(
             {
+                "file": source_path.relative_to(ROOT).as_posix(),
                 "line": node.lineno,
                 "kind": kind,
                 "call": call,
@@ -200,7 +228,7 @@ def _async_inventory(tree: ast.Module, classes: list[ast.ClassDef]) -> list[dict
                 "target_stage": stage,
             }
         )
-    return sorted(rows, key=lambda row: int(row["line"]))
+    return sorted(rows, key=lambda row: (str(row["file"]), int(row["line"])))
 
 
 def _self_attribute_name(node: ast.AST) -> str:
@@ -278,8 +306,22 @@ def build_report() -> dict[str, object]:
     main_methods = _method_nodes(main_window)
     names = {node.name for node in classes} | {node.name for node in all_methods}
     references = _reference_inventory(names)
-    connections = _connections(tree, classes)
-    async_rows = _async_inventory(tree, classes)
+    architecture_modules = {}
+    for path in ARCHITECTURE_PATHS:
+        if path.exists():
+            module_tree = ast.parse(_read(path))
+            architecture_modules[path] = (module_tree, _class_nodes(module_tree))
+    connections = [
+        row
+        for path, (module_tree, module_classes) in architecture_modules.items()
+        for row in _connections(module_tree, module_classes, path)
+    ]
+    async_rows = [
+        row
+        for path, (module_tree, module_classes) in architecture_modules.items()
+        for row in _async_inventory(module_tree, module_classes, path)
+    ]
+    main_source = MAIN_PATH.relative_to(ROOT).as_posix()
     state_rows, main_window_state_assignments = _state_inventory(main_window)
     import_rows = _main_import_inventory()
     key_test_rows, private_test_refs = _key_test_reference_inventory()
@@ -295,7 +337,10 @@ def build_report() -> dict[str, object]:
                 "end_line": class_node.end_lineno,
                 "size": class_node.end_lineno - class_node.lineno + 1,
                 "method_count": len(methods),
-                "connection_count": sum(class_node.lineno <= int(row["line"]) <= class_node.end_lineno for row in connections),
+                "connection_count": sum(
+                    row["file"] == main_source and class_node.lineno <= int(row["line"]) <= class_node.end_lineno
+                    for row in connections
+                ),
                 "reference_count": len(references.get(class_node.name, [])),
                 "target_stage": stage,
                 "references": references.get(class_node.name, []),
@@ -345,7 +390,10 @@ def build_report() -> dict[str, object]:
         "source_state_assignment_lines": source_state_assignment_lines,
         "main_window_lines": main_window.end_lineno - main_window.lineno + 1,
         "main_window_method_count": len(main_methods),
-        "main_window_connection_count": sum(main_window.lineno <= int(row["line"]) <= main_window.end_lineno for row in connections),
+        "main_window_connection_count": sum(
+            row["file"] == main_source and main_window.lineno <= int(row["line"]) <= main_window.end_lineno
+            for row in connections
+        ),
         "main_window_init_lines": init_method.end_lineno - init_method.lineno + 1,
         "main_window_methods_ge_50": sum(row["size"] >= 50 for row in method_rows),
         "main_window_methods_ge_100": sum(row["size"] >= 100 for row in method_rows),
@@ -456,10 +504,10 @@ def render_signal_inventory(report: dict[str, object]) -> str:
     ]
     lines.extend(
         _markdown_table(
-            ["Line", "Owner", "Signal", "Current target", "Workflow", "Stage", "Target owner", "Unbind", "Contract test"],
+            ["File", "Line", "Binding", "Owner", "Signal", "Current target", "Workflow", "Stage", "Target owner", "Unbind", "Contract test"],
             [
                 [
-                    row["line"], f"`{row['owner_class']}.{row['owner_method']}`", f"`{row['signal']}`", f"`{row['target']}`" if row["target"] else "-",
+                    row["file"], row["line"], row["binding"], f"`{row['owner_class']}.{row['owner_method']}`", f"`{row['signal']}`", f"`{row['target']}`" if row["target"] else "-",
                     row["workflow"], row["target_stage"], "TBD", "TBD", "TBD",
                 ]
                 for row in report["connections"]
@@ -469,10 +517,10 @@ def render_signal_inventory(report: dict[str, object]) -> str:
     lines.extend(["", "## Thread Timer and Async Entries", ""])
     lines.extend(
         _markdown_table(
-            ["Line", "Kind", "Owner", "Call", "Workflow", "Stage", "Cancel/cleanup", "Context guard"],
+            ["File", "Line", "Kind", "Owner", "Call", "Workflow", "Stage", "Cancel/cleanup", "Context guard"],
             [
                 [
-                    row["line"], row["kind"], f"`{row['owner_class']}.{row['owner_method']}`", f"`{row['call']}`",
+                    row["file"], row["line"], row["kind"], f"`{row['owner_class']}.{row['owner_method']}`", f"`{row['call']}`",
                     row["workflow"], row["target_stage"], "TBD", "TBD",
                 ]
                 for row in report["async_entries"]

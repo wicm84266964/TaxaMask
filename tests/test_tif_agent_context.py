@@ -87,7 +87,9 @@ class TifAgentContextBuilderTests(unittest.TestCase):
         return []
 
     def _compact_allowed_keys(self):
-        tree = ast.parse((PROJECT_ROOT / "AntSleap" / "main.py").read_text(encoding="utf-8"))
+        tree = ast.parse(
+            (PROJECT_ROOT / "AntSleap" / "ui" / "main_window_agent_context.py").read_text(encoding="utf-8")
+        )
         for node in ast.walk(tree):
             if isinstance(node, ast.FunctionDef) and node.name == "_compact_agent_context":
                 for stmt in node.body:

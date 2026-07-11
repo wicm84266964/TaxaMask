@@ -22,7 +22,7 @@ AGENT_CONTEXT_ROUTES = {
         ),
         "source_code_refs": (
             "AntSleap/ui/settings_dialogs.py -> GeneralSettingsDialog.get_agent_context",
-            "AntSleap/main.py -> MainWindow._compact_agent_context",
+            "AntSleap/ui/main_window_agent_context.py -> MainWindowAgentContextMixin._compact_agent_context",
             "AntSleap/ui/taxamask_agent_panel.py -> TaxaMaskAgentPanel._context_prompt",
         ),
         "artifact_hints": (
@@ -104,7 +104,7 @@ AGENT_CONTEXT_ROUTES = {
             "TaxaMask使用手册.md -> 7. 2D/STL 标注工作台：从图片列表到正式标注",
         ),
         "source_code_refs": (
-            "AntSleap/main.py -> MainWindow._collect_image_workbench_agent_context",
+            "AntSleap/ui/main_window_agent_context.py -> MainWindowAgentContextMixin._collect_image_workbench_agent_context",
             "AntSleap/main.py -> MainWindow._current_blink_context",
             "AntSleap/core/project.py",
         ),

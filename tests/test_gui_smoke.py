@@ -230,6 +230,12 @@ class GuiSmokeTests(unittest.TestCase):
         return predicate()
 
     def _make_window(self):
+        def build_pdf_widget(lang):
+            with patch.object(PdfProcessingWidget, "load_api_settings", lambda self: None), \
+                 patch.object(PdfProcessingWidget, "refresh_profile_list", lambda self: None), \
+                 patch.object(PdfProcessingWidget, "sync_runtime_controls_from_config", lambda self: None):
+                return PdfProcessingWidget(lang)
+
         with patch.object(main_module, "ConfigManager", SmokeConfigManager), \
              patch.object(main_module, "AntEngine", SmokeEngine), \
              patch.object(main_module, "MultiModalDB", SmokeDatabase), \
@@ -242,6 +248,7 @@ class GuiSmokeTests(unittest.TestCase):
              patch.object(main_module.QTimer, "singleShot", lambda *args, **kwargs: None):
             window = main_module.MainWindow()
             window._default_outputs_root = lambda: str(self.project_dir / "TaxaMask_outputs")
+            window._pdf_widget_factory = build_pdf_widget
             return window
 
     def _create_literature_db(self, db_path, image_path, *, pdf_id=3, figure_id=7, species="Aphaenogaster gamagumayaa"):
@@ -1085,7 +1092,7 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertIn("context_policy", context)
             self.assertEqual(context["diagnostic_route"], "labeling_workbench_context")
             self.assertIn("LLM_CONTEXT_DETAILED.md", context["llm_context_refs"])
-            self.assertIn("MainWindow._collect_image_workbench_agent_context", context["source_code_refs"])
+            self.assertIn("MainWindowAgentContextMixin._collect_image_workbench_agent_context", context["source_code_refs"])
             self.assertIn("[truncated]", context["recent_log_excerpt"])
             self.assertLess(len(str(context)), 5000)
         finally:
@@ -3431,6 +3438,7 @@ class GuiSmokeTests(unittest.TestCase):
 
             window.project.add_images([str(exported_image)])
             window.current_image = str(exported_image)
+            window._ensure_pdf_widget()
             window.pdf_widget.edit_db_path.setText(str(wrong_db))
 
             db_path, context, reason = window._resolve_current_literature_context()
@@ -3453,6 +3461,7 @@ class GuiSmokeTests(unittest.TestCase):
             literature_image.write_bytes(b"literature")
             manual_image.write_bytes(b"manual")
             self._create_literature_db(output_db, literature_image)
+            window._ensure_pdf_widget()
             window.pdf_widget.edit_db_path.setText(str(output_db))
 
             window.project.project_data["images"] = [str(manual_image)]
@@ -3490,6 +3499,7 @@ class GuiSmokeTests(unittest.TestCase):
             manual_image.write_bytes(b"manual")
             self._create_literature_db(literature_db, literature_image)
 
+            window._ensure_pdf_widget()
             window.pdf_widget.edit_db_path.clear()
             window.pdf_widget.edit_db_name.setText("taxamask_literature.db")
             window.project.project_data["images"] = [str(literature_image), str(manual_image)]
@@ -3536,6 +3546,7 @@ class GuiSmokeTests(unittest.TestCase):
             manual_image.write_bytes(b"manual")
             self._create_literature_db(literature_db, literature_image)
 
+            window._ensure_pdf_widget()
             window.pdf_widget.edit_db_path.clear()
             window.pdf_widget.edit_db_name.setText("taxamask_literature.db")
             window.project.project_data["images"] = [str(manual_image)]

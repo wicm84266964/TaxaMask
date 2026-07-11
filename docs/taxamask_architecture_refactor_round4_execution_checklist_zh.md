@@ -2,7 +2,7 @@
 
 日期：2026-07-11
 
-状态：`Gate B review recorded / Stage 2 verified / Stage 3 next`；用户要求 Stage 1-9 连续执行，中间 Gate 继续留证但不暂停，全部完成前不再推送 GitHub
+状态：`Gate B review recorded / Stage 3 verified / Stage 4 next`；用户要求 Stage 1-9 连续执行，中间 Gate 继续留证但不暂停，全部完成前不再推送 GitHub
 
 需求文档：`docs/taxamask_architecture_refactor_round4_requirements_zh.md`
 
@@ -169,16 +169,16 @@
 
 ## 9. Stage 3：Main Window Shell、Start Center 与 Agent
 
-状态：`pending`
+状态：`verified`
 
-- [ ] 分离 MainWindow 状态初始化和顶层 UI 创建。
-- [ ] 建立 shell、受限 view adapter、signal router 和 coordinator 骨架。
-- [ ] 迁移 Start Center、quick panel、project console 和 workflow card。
-- [ ] 迁移最近项目摘要和 Agent 状态摘要。
-- [ ] 迁移 Agent context 收集、压缩、路由增强和中英文 prompt。
-- [ ] 保持 Agent Center、2D/STL、TIF、PDF evidence 导航和返回上下文。
-- [ ] 保持 Agent WebEngine 与 TIF GPU renderer 的隔离策略。
-- [ ] 信号单次触发和重复绑定测试通过。
+- [x] 分离 MainWindow 状态初始化和顶层 UI 创建；`__init__` 从 668 行降到 13 行。
+- [x] 建立 shell、受限 view adapter、signal router 和 coordinator 骨架。
+- [x] 迁移 Start Center、quick panel、project console 和 workflow card。
+- [x] 迁移最近项目摘要和 Agent 状态摘要。
+- [x] 迁移 Agent context 收集、压缩、路由增强和中英文 prompt。
+- [x] 保持 Agent Center、2D/STL、TIF、PDF evidence 导航和返回上下文。
+- [x] 保持 Agent WebEngine 与 TIF GPU renderer 的隔离策略，并按首次进入创建 PDF/TIF 工作台。
+- [x] 信号单次触发和重复绑定测试通过；架构总连接保持 194 条。
 
 ## 10. Stage 4：项目生命周期与存储路由
 

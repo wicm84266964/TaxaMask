@@ -2,7 +2,7 @@
 
 日期：2026-07-11
 
-状态：`Gate C review recorded / Stage 4 verified / Stage 5 next`；用户要求 Stage 1-9 连续执行，中间 Gate 继续留证但不暂停，全部完成前不再推送 GitHub
+状态：`Stage 5 verified / Stage 6 next`；用户要求 Stage 1-9 连续执行，中间 Gate 继续留证但不暂停，全部完成前不再推送 GitHub
 
 需求文档：`docs/taxamask_architecture_refactor_round4_requirements_zh.md`
 
@@ -202,16 +202,17 @@
 
 ## 11. Stage 5：2D 图像导航、Part Tree 与文献桥接
 
-状态：`pending`
+状态：`verified`
 
-- [ ] 迁移 image import 和导入控制状态。
-- [ ] 迁移 panel split、crop provenance 和 manual split review。
-- [ ] 迁移 image group、训练 scope、文件列表和右键动作。
-- [ ] 迁移 part tree、image/part selection 和选择恢复。
-- [ ] 迁移 PDF/STL provenance 和 literature description bridge。
-- [ ] 删除图片、移动分组和清理标签保持确认与保存边界。
-- [ ] 当前图像/部位切换不重复刷新或阻塞主线程。
-- [ ] 文件列表、part tree、文献描述和 SQLite 重开测试通过。
+- [x] 迁移 image import 和导入控制状态。
+- [x] 迁移 panel split、crop provenance 和 manual split review。
+- [x] 迁移 image group、训练 scope、文件列表和右键动作。
+- [x] 迁移 part tree、image/part selection 和选择恢复。
+- [x] 迁移 PDF/STL provenance 和 literature description bridge。
+- [x] 删除图片、移动分组和清理标签保持确认与保存边界。
+- [x] 当前图像/部位切换不重复加载 pixmap；小 fixture 图片/部位切换中位数分别为 0.381/0.249 ms。
+- [x] 文件列表、part tree、文献描述和 SQLite 重开测试通过。
+- [x] Stage 5 review：`docs/taxamask_architecture_refactor_round4_stage5_review_zh.md`。
 
 ## 12. Stage 6：Annotation、SAM 与 Blink
 

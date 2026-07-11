@@ -367,7 +367,7 @@ def _run_parent(runs: int, output: Path, max_attempts: int) -> int:
                     print(f"run {index + 1}/{runs} attempt {attempt}/{max_attempts} timed out", flush=True)
                     continue
                 result_line = next((line for line in reversed(completed.stdout.splitlines()) if line.startswith(RESULT_PREFIX)), "")
-                if completed.returncode != 0 or not result_line:
+                if not result_line:
                     failed_attempts.append(
                         {
                             "run": index + 1,
@@ -384,8 +384,20 @@ def _run_parent(runs: int, output: Path, max_attempts: int) -> int:
                     )
                     continue
                 result = json.loads(result_line[len(RESULT_PREFIX) :])
+                if completed.returncode != 0:
+                    failed_attempts.append(
+                        {
+                            "run": index + 1,
+                            "attempt": attempt,
+                            "reason": "post_result_exit",
+                            "returncode": completed.returncode,
+                            "stdout_tail": completed.stdout[-1000:],
+                            "stderr_tail": completed.stderr[-1000:],
+                        }
+                    )
                 result["process_total_ms"] = process_total_ms
                 result["attempt"] = attempt
+                result["child_returncode"] = completed.returncode
                 raw_runs.append(result)
                 print(
                     f"run {index + 1}/{runs}: start_center={result['start_center_ready_ms']:.1f}ms process={process_total_ms:.1f}ms attempt={attempt}",

@@ -44,6 +44,7 @@ else:
 
     import AntSleap.main as main_module
     import AntSleap.ui.main_window_dialogs as main_window_dialogs_module
+    import AntSleap.ui.main_window_image_navigation as image_navigation_module
     import AntSleap.ui.main_window_project_lifecycle as project_lifecycle_module
     import AntSleap.ui.pdf_processing_widget as pdf_widget_module
     from AntSleap.core.project_templates import PROJECT_TEMPLATE_GENERIC
@@ -2432,7 +2433,7 @@ class GuiSmokeTests(unittest.TestCase):
                 def deleteLater(self):
                     self.deleted = True
 
-            with patch.object(main_module, "ImageImportThread", FakeImportThread):
+            with patch.object(image_navigation_module, "ImageImportThread", FakeImportThread):
                 started = window._start_image_import(image_paths)
 
             self.assertTrue(started)
@@ -2559,7 +2560,7 @@ class GuiSmokeTests(unittest.TestCase):
 
             window.project.save_project = counted_save
 
-            with patch.object(main_module, "themed_yes_no_question", lambda *args, **kwargs: main_module.QMessageBox.Yes):
+            with patch.object(image_navigation_module, "themed_yes_no_question", lambda *args, **kwargs: main_module.QMessageBox.Yes):
                 window.remove_selected_images()
 
             self.assertEqual(save_calls, [])
@@ -3211,7 +3212,7 @@ class GuiSmokeTests(unittest.TestCase):
                 def exec(self, *args, **kwargs):
                     return None
 
-            with patch.object(main_module, "QMenu", FakeMenu):
+            with patch.object(image_navigation_module, "QMenu", FakeMenu):
                 window.show_file_list_context_menu(window.file_list.rect().center())
 
             root_menu = captured_menus[0]
@@ -3282,7 +3283,7 @@ class GuiSmokeTests(unittest.TestCase):
                 save=False,
             )
 
-            with patch.object(main_module, "themed_yes_no_question", lambda *args, **kwargs: main_module.QMessageBox.Yes):
+            with patch.object(image_navigation_module, "themed_yes_no_question", lambda *args, **kwargs: main_module.QMessageBox.Yes):
                 with patch.object(main_module.QMessageBox, "information", lambda *args, **kwargs: None):
                     window.batch_split_panel_images()
 
@@ -3367,7 +3368,7 @@ class GuiSmokeTests(unittest.TestCase):
             image.save(source_image)
             window.project.add_images([str(source_image)])
 
-            with patch.object(main_module, "themed_yes_no_question", lambda *args, **kwargs: main_module.QMessageBox.Yes):
+            with patch.object(image_navigation_module, "themed_yes_no_question", lambda *args, **kwargs: main_module.QMessageBox.Yes):
                 with patch.object(main_module.QMessageBox, "information", lambda *args, **kwargs: None):
                     window.batch_split_panel_images()
 

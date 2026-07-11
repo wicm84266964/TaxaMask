@@ -19,13 +19,13 @@ class MainWindowArchitectureAnalysisTests(unittest.TestCase):
         report = load_analysis_module().build_report()
         metrics = report["metrics"]
 
-        self.assertLess(metrics["main_physical_lines"], 9985)
+        self.assertLessEqual(metrics["main_physical_lines"], 5200)
         self.assertEqual(metrics["top_level_class_count"], 1)
-        self.assertLess(metrics["all_method_count"], 351)
+        self.assertLessEqual(metrics["all_method_count"], 190)
         self.assertEqual(metrics["connection_count"], 194)
-        self.assertLessEqual(metrics["main_window_lines"], 6750)
-        self.assertEqual(metrics["main_window_method_count"], 283)
-        self.assertEqual(metrics["main_window_connection_count"], 51)
+        self.assertLessEqual(metrics["main_window_lines"], 4700)
+        self.assertEqual(metrics["main_window_method_count"], 189)
+        self.assertEqual(metrics["main_window_connection_count"], 44)
         self.assertLessEqual(metrics["main_window_init_lines"], 20)
         self.assertEqual(len(report["connections"]), metrics["connection_count"])
         self.assertGreater(metrics["main_window_unique_state_fields"], 80)
@@ -43,7 +43,7 @@ class MainWindowArchitectureAnalysisTests(unittest.TestCase):
         self.assertNotIn("open_project_path", methods)
         self.assertEqual(methods["launch_blink_from_workbench"]["target_stage"], 6)
         self.assertEqual(methods["run_vlm_preannotation_from_settings"]["target_stage"], 7)
-        self.assertEqual(len(report["main_window_methods"]), 283)
+        self.assertEqual(len(report["main_window_methods"]), 189)
 
     def test_stage1_runtime_workers_and_widgets_leave_main_as_compatibility_facade(self):
         source = (ROOT / "AntSleap" / "main.py").read_text(encoding="utf-8")
@@ -81,6 +81,16 @@ class MainWindowArchitectureAnalysisTests(unittest.TestCase):
         self.assertNotIn("def _flush_pending_project_save", source)
         self.assertNotIn("def backup_current_sqlite_project", source)
         self.assertIn("from AntSleap.ui.main_window_project_lifecycle import", source)
+
+    def test_stage5_navigation_and_literature_methods_leave_main(self):
+        source = (ROOT / "AntSleap" / "main.py").read_text(encoding="utf-8")
+
+        self.assertNotIn("def refresh_file_list", source)
+        self.assertNotIn("def on_file_selected", source)
+        self.assertNotIn("def _resolve_current_literature_context", source)
+        self.assertIn("from AntSleap.ui.main_window_image_navigation import", source)
+        self.assertIn("from AntSleap.ui.main_window_literature_bridge import", source)
+        self.assertIn("from AntSleap.ui.main_window_part_tree import", source)
 
     def test_markdown_contains_stage0_migration_sections(self):
         module = load_analysis_module()

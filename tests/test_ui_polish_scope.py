@@ -42,6 +42,8 @@ except ModuleNotFoundError as exc:
         raise
 else:
     import AntSleap.main as main_module
+    import AntSleap.ui.main_window_image_navigation as image_navigation_module
+    import AntSleap.ui.main_window_part_tree as part_tree_module
     import AntSleap.ui.model_settings_dataset as model_settings_dataset_module
     import AntSleap.ui.route_management_panel as route_management_module
     from AntSleap.core.blink_dataset import BlinkTrajectoryDataset
@@ -2496,7 +2498,7 @@ class UiPolishScopeTests(unittest.TestCase):
             window.part_list.setCurrentItem(mandible_item)
 
             with patch.object(
-                main_module,
+                part_tree_module,
                 "themed_yes_no_question",
                 return_value=main_module.QMessageBox.Yes,
             ), patch.object(self.project_manager, "remove_taxonomy_part", wraps=self.project_manager.remove_taxonomy_part) as remover:
@@ -3689,7 +3691,7 @@ class UiPolishScopeTests(unittest.TestCase):
             self.app.processEvents()
 
             baseline_save_calls = self.project_manager.save_calls
-            with patch.object(main_module, "themed_yes_no_question", lambda *args, **kwargs: main_module.QMessageBox.Yes), \
+            with patch.object(image_navigation_module, "themed_yes_no_question", lambda *args, **kwargs: main_module.QMessageBox.Yes), \
                  patch.object(window, "refresh_file_list", wraps=window.refresh_file_list) as full_refresh:
                 window.remove_selected_images()
                 self.app.processEvents()
@@ -3747,7 +3749,7 @@ class UiPolishScopeTests(unittest.TestCase):
                     break
             self.app.processEvents()
 
-            with patch.object(main_module, "themed_yes_no_question", lambda *args, **kwargs: main_module.QMessageBox.Yes):
+            with patch.object(image_navigation_module, "themed_yes_no_question", lambda *args, **kwargs: main_module.QMessageBox.Yes):
                 window.remove_selected_images()
                 self.app.processEvents()
 
@@ -3799,7 +3801,7 @@ class UiPolishScopeTests(unittest.TestCase):
                     break
             self.app.processEvents()
 
-            with patch.object(main_module, "themed_yes_no_question", lambda *args, **kwargs: main_module.QMessageBox.Yes):
+            with patch.object(image_navigation_module, "themed_yes_no_question", lambda *args, **kwargs: main_module.QMessageBox.Yes):
                 window.remove_selected_images()
                 self.app.processEvents()
 

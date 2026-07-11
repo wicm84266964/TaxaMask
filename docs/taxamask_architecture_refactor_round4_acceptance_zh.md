@@ -43,12 +43,12 @@
 
 ## 5. TIF/CT
 
-- [ ] 打开代表性 TIF SQLite 项目，切换 specimen、part 和 reslice。
-- [ ] 进入三维体预览，旋转、平移、缩放和切回切片模式无崩溃。
-- [ ] 部位绑定的 label schema 重开后仍恢复为该部位保存的标签表。
+- [x] 打开代表性 TIF SQLite 项目，切换 specimen、part 和 reslice。（2026-07-11 至 2026-07-12 真实项目复测）
+- [x] 进入三维体预览，旋转、平移、缩放和切回切片模式无崩溃。（修复 GPU 回调与鼠标交互后，用户确认“都正常了”）
+- [x] 部位绑定的 label schema 重开后仍恢复为该部位保存的标签表。（按部位保存的 `training.label_schema_id` 恢复）
 - [ ] working edit、editable AI result、raw backup 和 manual truth 角色没有混淆。
-- [ ] 检查一个真实 Local Axis reslice，方向和解剖结构符合预期。
-- [ ] 大型已保存 reslice 选择时允许后台准备 preview，但界面不应出现此前的长时间无响应。
+- [x] 检查一个真实 Local Axis reslice，方向和解剖结构符合预期。（用户确认“脑区边界合理”）
+- [x] 大型已保存 reslice 选择时允许后台准备 preview，但界面不应出现此前的长时间无响应。（`GAGA-02-09 / roi_1` 复测后用户确认基本没有卡点）
 
 ## 6. PDF、Agent 与界面
 

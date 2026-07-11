@@ -297,7 +297,7 @@
 - [ ] 导入图像、切换 image/part、完成标注保存并重开确认。
 - [ ] 检查 panel split、image group 和文献描述来源。
 - [ ] 进入 Blink，检查 parent-child context、自动流程和训练入口。
-- [ ] 打开代表性 TIF 项目，切换 specimen/part/reslice 和 3D preview。
+- [x] 打开代表性 TIF 项目，切换 specimen/part/reslice 和 3D preview；真实项目交互、GPU 鼠标操作和大型 reslice 响应已由用户复测通过。
 - [ ] 确认 TIF 标签表、manual truth、AI result 和 Local Axis 行为无回归。
 - [ ] 打开 PDF evidence workflow 并确认候选只作为证据/候选。
 - [ ] 打开 Agent Center，确认各工作流上下文准确。

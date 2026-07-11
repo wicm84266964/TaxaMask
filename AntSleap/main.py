@@ -1,52 +1,36 @@
 import sys
 import os
 
-
-def _is_wsl_runtime():
-    if os.environ.get("WSL_DISTRO_NAME"):
-        return True
-    try:
-        with open("/proc/version", "r", encoding="utf-8", errors="ignore") as handle:
-            return "microsoft" in handle.read().lower()
-    except OSError:
-        return False
-
-
-def _append_env_flag(name, flag):
-    current = os.environ.get(name, "")
-    flags = current.split()
-    if flag not in flags:
-        flags.append(flag)
-        os.environ[name] = " ".join(flags)
-
-
-def _ensure_qtwebengine_quiet_cpu_flags():
-    for flag in (
-        "--disable-gpu",
-        "--disable-gpu-compositing",
-        "--disable-accelerated-2d-canvas",
-        "--disable-es3-gl-context",
-        "--disable-es3-apis",
-        "--disable-webgl",
-        "--disable-3d-apis",
-    ):
-        _append_env_flag("QTWEBENGINE_CHROMIUM_FLAGS", flag)
-    verbose = os.environ.get("TAXAMASK_QTWEBENGINE_VERBOSE", "").strip().lower()
-    if verbose not in {"1", "true", "yes", "on", "verbose", "debug"}:
-        _append_env_flag("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-logging")
-        _append_env_flag("QTWEBENGINE_CHROMIUM_FLAGS", "--log-level=3")
-
-
-def _prepare_qt_runtime_environment():
-    # These must be set before importing cv2/PySide6. WSLg and some Linux
-    # desktops can segfault while Qt WebEngine probes EGL/GPU acceleration.
-    _ensure_qtwebengine_quiet_cpu_flags()
-    linux_runtime = sys.platform == "linux" or _is_wsl_runtime()
-    if linux_runtime:
-        os.environ.setdefault("QT_OPENGL", "software")
-        os.environ.setdefault("QT_QUICK_BACKEND", "software")
-        os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
-        os.environ.setdefault("TAXAMASK_ANTCODE_BROWSER_MODE", "1")
+try:
+    from AntSleap.app_runtime import (
+        _append_env_flag,
+        _ensure_qtwebengine_quiet_cpu_flags,
+        _is_wsl_runtime,
+        _prepare_qt_runtime_environment,
+        _runtime_log_enabled,
+        _runtime_log_filename_timestamp,
+        _runtime_log_prune,
+        _runtime_log_timestamp,
+        _runtime_log_value,
+        _setup_runtime_logging,
+        runtime_log_event,
+        runtime_log_exception,
+    )
+except ImportError:
+    from app_runtime import (
+        _append_env_flag,
+        _ensure_qtwebengine_quiet_cpu_flags,
+        _is_wsl_runtime,
+        _prepare_qt_runtime_environment,
+        _runtime_log_enabled,
+        _runtime_log_filename_timestamp,
+        _runtime_log_prune,
+        _runtime_log_timestamp,
+        _runtime_log_value,
+        _setup_runtime_logging,
+        runtime_log_event,
+        runtime_log_exception,
+    )
 
 
 _prepare_qt_runtime_environment()
@@ -72,114 +56,6 @@ REPO_ROOT = os.path.dirname(PACKAGE_DIR)
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-_RUNTIME_LOG_FILE = None
-_RUNTIME_LOG_PATH = ""
-
-
-def _runtime_log_enabled():
-    return str(os.environ.get("TAXAMASK_RUNTIME_LOG", "1")).strip().lower() not in {"0", "false", "no", "off"}
-
-
-def _runtime_log_timestamp():
-    import time as _time
-
-    return _time.strftime("%Y-%m-%d %H:%M:%S")
-
-
-def _runtime_log_filename_timestamp():
-    import time as _time
-
-    return _time.strftime("%Y%m%d_%H%M%S")
-
-
-def _runtime_log_prune(log_dir):
-    try:
-        keep = int(os.environ.get("TAXAMASK_RUNTIME_LOG_KEEP", "20") or 20)
-    except Exception:
-        keep = 20
-    keep = max(1, keep)
-    try:
-        entries = [
-            os.path.join(log_dir, name)
-            for name in os.listdir(log_dir)
-            if name.startswith("taxamask_runtime_") and name.endswith(".log")
-        ]
-        entries.sort(key=lambda path: os.path.getmtime(path), reverse=True)
-        for old_path in entries[keep:]:
-            try:
-                os.remove(old_path)
-            except OSError:
-                pass
-    except OSError:
-        pass
-
-
-def _setup_runtime_logging():
-    global _RUNTIME_LOG_FILE, _RUNTIME_LOG_PATH
-    if _RUNTIME_LOG_FILE is not None or not _runtime_log_enabled():
-        return _RUNTIME_LOG_PATH
-    try:
-        log_dir = os.path.join(REPO_ROOT, "TaxaMask_outputs", "runtime_logs")
-        os.makedirs(log_dir, exist_ok=True)
-        _runtime_log_prune(log_dir)
-        filename = f"taxamask_runtime_{_runtime_log_filename_timestamp()}_{os.getpid()}.log"
-        _RUNTIME_LOG_PATH = os.path.join(log_dir, filename)
-        _RUNTIME_LOG_FILE = open(_RUNTIME_LOG_PATH, "a", encoding="utf-8", buffering=1)
-        try:
-            import faulthandler
-
-            faulthandler.enable(file=_RUNTIME_LOG_FILE, all_threads=True)
-        except Exception:
-            pass
-        runtime_log_event("startup", python=sys.executable, cwd=os.getcwd(), pid=os.getpid())
-        _runtime_log_prune(log_dir)
-    except Exception:
-        _RUNTIME_LOG_FILE = None
-        _RUNTIME_LOG_PATH = ""
-    return _RUNTIME_LOG_PATH
-
-
-def _runtime_log_value(value, limit=500):
-    text = str(value)
-    text = text.replace("\r", "\\r").replace("\n", "\\n")
-    if len(text) > limit:
-        text = text[:limit] + "...<truncated>"
-    return text
-
-
-def runtime_log_event(event, **fields):
-    handle = _RUNTIME_LOG_FILE
-    if handle is None:
-        return
-    try:
-        parts = [f"[{_runtime_log_timestamp()}]", _runtime_log_value(event, 80)]
-        for key in sorted(fields):
-            value = fields.get(key)
-            if value is None:
-                continue
-            parts.append(f"{key}={_runtime_log_value(value)}")
-        handle.write(" ".join(parts) + "\n")
-        handle.flush()
-    except Exception:
-        pass
-
-
-def runtime_log_exception(event, exc_type, exc_value, exc_tb):
-    handle = _RUNTIME_LOG_FILE
-    if handle is None:
-        return
-    try:
-        import traceback
-
-        runtime_log_event(event, error=repr(exc_value))
-        handle.write("".join(traceback.format_exception(exc_type, exc_value, exc_tb)))
-        if not str(exc_value).endswith("\n"):
-            handle.write("\n")
-        handle.flush()
-    except Exception:
-        pass
-
-
 if __name__ == "__main__":
     _setup_runtime_logging()
 
@@ -198,8 +74,8 @@ from PySide6.QtWidgets import (
     QDialogButtonBox, QGridLayout, QSizePolicy, QFrame, QFormLayout,
     QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView, QSpinBox, QToolButton,
     QAbstractItemView, QTreeWidget, QTreeWidgetItem)
-from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSize, QMimeData, QEvent
-from PySide6.QtGui import QIcon, QAction, QColor, QDrag
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSize, QEvent
+from PySide6.QtGui import QIcon, QAction, QColor
 import numpy as np
 import torch
 from PIL import Image as PILImage
@@ -249,7 +125,6 @@ try:
     from AntSleap.ui.blink_lab import BlinkExpertTrainingReportDialog, BlinkLabWidget
     from AntSleap.ui.tif_workbench import TifWorkbenchWidget
     from AntSleap.ui.taxamask_agent_panel import TaxaMaskAgentPanel
-    from AntSleap.core.dataset import TwoStageDataset
     from AntSleap.core.training_preflight import build_training_preflight, describe_training_preflight, describe_part_coverage, format_size_pair
     from AntSleap.core.cascade_routes import (
         ROUTE_BACKEND_EXTERNAL_BLINK,
@@ -303,10 +178,8 @@ try:
     from AntSleap.core.agent_context_routes import enrich_agent_context
     from AntSleap.core.vlm_preannotation import (
         DEFAULT_VLM_PROMPT_PROFILE_ID,
-        VLM_PREANNOTATION_SCHEMA_VERSION,
         default_vlm_prompt_profile,
         load_vlm_api_config_from_runtime_settings,
-        run_vlm_preannotation,
         sanitize_vlm_prompt_profile,
     )
     from AntSleap.core.project_sqlite_migration import default_sqlite_manifest_path, migrate_legacy_2d_json_to_sqlite
@@ -376,7 +249,6 @@ except ImportError:
     from ui.blink_lab import BlinkExpertTrainingReportDialog, BlinkLabWidget
     from ui.tif_workbench import TifWorkbenchWidget
     from ui.taxamask_agent_panel import TaxaMaskAgentPanel
-    from core.dataset import TwoStageDataset
     from core.training_preflight import build_training_preflight, describe_training_preflight, describe_part_coverage, format_size_pair
     from core.cascade_routes import (
         ROUTE_BACKEND_EXTERNAL_BLINK,
@@ -430,10 +302,8 @@ except ImportError:
     from core.agent_context_routes import enrich_agent_context
     from core.vlm_preannotation import (
         DEFAULT_VLM_PROMPT_PROFILE_ID,
-        VLM_PREANNOTATION_SCHEMA_VERSION,
         default_vlm_prompt_profile,
         load_vlm_api_config_from_runtime_settings,
-        run_vlm_preannotation,
         sanitize_vlm_prompt_profile,
     )
     from core.project_sqlite_migration import default_sqlite_manifest_path, migrate_legacy_2d_json_to_sqlite
@@ -459,254 +329,33 @@ except ImportError:
         resolve_literature_context,
     )
 
-from torch.utils.data import DataLoader
-
 try:
     from AntSleap.core.panel_splitter import detect_panel_crops
 except ImportError:
     from core.panel_splitter import detect_panel_crops
 
-class InferenceThread(QThread):
-    log_signal = Signal(str)
-    progress_signal = Signal(int)
-    result_signal = Signal(str, dict)
-    finished_signal = Signal()
-    
-    def __init__(self, engine, img_paths, taxonomy, locator_scope, inf_params, project_route_manifest=None, model_profile_context=None, lang="en"):
-        super().__init__()
-        self.engine = engine
-        self.img_paths = img_paths
-        self.taxonomy = taxonomy
-        self.locator_scope = locator_scope
-        self.inf_params = inf_params
-        self.project_route_manifest = dict(project_route_manifest or {})
-        self.model_profile_context = dict(model_profile_context or {})
-        self.lang = lang
-
-    def run(self):
-        self.log_signal.emit(tr("Starting batch inference on {0} images...", self.lang).format(len(self.img_paths)))
-        count = 0
-        for img_path in self.img_paths:
-            preds = self.engine.predict_full_pipeline(
-                img_path, 
-                current_taxonomy=self.taxonomy,
-                locator_scope=self.locator_scope,
-                conf_thresh=self.inf_params['conf'],
-                adapt_thresh=self.inf_params['adapt'],
-                box_pad=self.inf_params['pad'],
-                noise_floor=self.inf_params['noise_floor'],
-                poly_epsilon=self.inf_params['poly_epsilon'],
-                project_route_manifest=self.project_route_manifest,
-                model_profile_context=self.model_profile_context,
-            )
-            if preds:
-                self.result_signal.emit(img_path, preds)
-                self.log_signal.emit(tr("Processed {0}", self.lang).format(os.path.basename(img_path)))
-            
-            count += 1
-            self.progress_signal.emit(int(count / len(self.img_paths) * 100))
-            
-        self.finished_signal.emit()
-
-
-class VlmPreannotationThread(QThread):
-    log_signal = Signal(str)
-    image_result_signal = Signal(dict)
-    progress_signal = Signal(int, int, str)
-    error_signal = Signal(str)
-    finished_signal = Signal()
-
-    def __init__(
-        self,
-        image_path,
-        target_parts,
-        artifacts_dir,
-        api_config,
-        run_id,
-        grid_cols=None,
-        grid_rows=None,
-        min_confidence=0.25,
-        prompt_profile=None,
-    ):
-        super().__init__()
-        self.image_path = image_path
-        self.target_parts = list(target_parts or [])
-        self.artifacts_dir = artifacts_dir
-        self.api_config = dict(api_config or {})
-        self.run_id = str(run_id or time.strftime("%Y%m%d_%H%M%S"))
-        self.grid_cols = int(grid_cols) if grid_cols else None
-        self.grid_rows = int(grid_rows) if grid_rows else None
-        self.min_confidence = float(min_confidence)
-        self.prompt_profile = sanitize_vlm_prompt_profile(prompt_profile)
-
-    def run(self):
-        def mark_step(step_name):
-            self.progress_signal.emit(1, 1, str(step_name))
-
-        try:
-            runtime_log_event(
-                "vlm_worker_run_begin",
-                image=os.path.basename(str(self.image_path)),
-                run_id=self.run_id,
-                target_count=len(self.target_parts),
-            )
-            self.log_signal.emit(f"VLM first-mile preannotation started: {os.path.basename(self.image_path)}")
-            result = run_vlm_preannotation(
-                self.image_path,
-                self.target_parts,
-                self.artifacts_dir,
-                api_config=self.api_config,
-                grid_cols=self.grid_cols,
-                grid_rows=self.grid_rows,
-                min_confidence=self.min_confidence,
-                prompt_profile=self.prompt_profile,
-                run_id=self.run_id,
-                progress_callback=mark_step,
-            )
-            runtime_log_event(
-                "vlm_worker_run_ok",
-                image=os.path.basename(str(self.image_path)),
-                run_id=self.run_id,
-                candidate_count=len(result.get("candidates", []) or []),
-                report=result.get("report_path", ""),
-            )
-            self.image_result_signal.emit(result)
-        except Exception as exc:
-            message = str(exc)
-            runtime_log_exception("vlm_worker_run_failed", *sys.exc_info())
-            report_match = re.search(r"report=([^;]+)$", message)
-            raw_match = re.search(r"raw_response=([^;]+);", message)
-            self.image_result_signal.emit(
-                {
-                    "schema_version": VLM_PREANNOTATION_SCHEMA_VERSION,
-                    "status": "failed",
-                    "image_path": self.image_path,
-                    "target_parts": self.target_parts,
-                    "candidates": [],
-                    "rejected": [{"part": "", "reason": message}],
-                    "error": message,
-                    "raw_response_path": raw_match.group(1).strip() if raw_match else "",
-                    "report_path": report_match.group(1).strip() if report_match else "",
-                }
-            )
-        finally:
-            runtime_log_event(
-                "vlm_worker_run_end",
-                image=os.path.basename(str(self.image_path)),
-                run_id=self.run_id,
-            )
-            self.finished_signal.emit()
-
-
-class DatasetExportThread(QThread):
-    progress_signal = Signal(int, int, str)
-    success_signal = Signal(int, str, str)
-    error_signal = Signal(str)
-    finished_signal = Signal()
-
-    def __init__(self, project, output_dir, export_format, lang="en"):
-        super().__init__()
-        self.project = project
-        self.output_dir = output_dir
-        self.export_format = export_format
-        self.lang = lang
-
-    def run(self):
-        def progress(done, total, label):
-            self.progress_signal.emit(int(done), int(total), str(label or ""))
-
-        try:
-            if self.export_format == "multimodal":
-                count = self.project.export_multimodal_dataset(self.output_dir, progress_callback=progress)
-            elif self.export_format == "coco":
-                count = self.project.export_coco(self.output_dir, progress_callback=progress)
-            else:
-                count = self.project.export_yolo(self.output_dir, progress_callback=progress)
-            if hasattr(self.project, "write_model_profile_export_summary"):
-                self.project.write_model_profile_export_summary(self.output_dir, export_format=self.export_format)
-            self.success_signal.emit(int(count), self.output_dir, self.export_format)
-        except Exception as exc:
-            self.error_signal.emit(str(exc))
-        finally:
-            self.finished_signal.emit()
-
-
-class ImageImportThread(QThread):
-    progress_signal = Signal(int, int, str)
-    success_signal = Signal(int, int)
-    error_signal = Signal(str)
-    finished_signal = Signal()
-
-    def __init__(self, project, image_paths):
-        super().__init__()
-        self.project = project
-        self.image_paths = list(image_paths or [])
-
-    def run(self):
-        def progress(done, total, label):
-            self.progress_signal.emit(int(done), int(total), str(label or ""))
-
-        try:
-            added = self.project.add_images(self.image_paths, progress_callback=progress)
-            self.success_signal.emit(int(added), len(self.image_paths))
-        except Exception as exc:
-            self.error_signal.emit(str(exc))
-        finally:
-            self.finished_signal.emit()
-
-
-class ExternalBatchInferenceThread(QThread):
-    log_signal = Signal(str)
-    progress_signal = Signal(int, int, str)
-    result_signal = Signal(str, dict)
-    error_signal = Signal(str)
-    finished_signal = Signal()
-
-    def __init__(self, project, backend_config, image_paths, model_manifest="", lang="en"):
-        super().__init__()
-        self.project = project
-        self.backend_config = sanitize_external_backend_config(backend_config)
-        self.image_paths = list(image_paths or [])
-        self.model_manifest = str(model_manifest or "")
-        self.lang = lang
-
-    def run(self):
-        total = len(self.image_paths)
-        self.log_signal.emit(tr("Starting batch inference on {0} images...", self.lang).format(total))
-        runner = ExternalBackendRunner(self.project, self.backend_config)
-        for index, image_path in enumerate(self.image_paths, start=1):
-            try:
-                self.progress_signal.emit(index - 1, total, str(image_path))
-                result = runner.run_predict(image_path, model_manifest=self.model_manifest)
-                self.result_signal.emit(str(image_path), result)
-                self.log_signal.emit(tr("Processed {0}", self.lang).format(os.path.basename(str(image_path))))
-                self.progress_signal.emit(index, total, str(image_path))
-            except Exception as exc:
-                self.error_signal.emit(str(exc))
-                break
-        self.finished_signal.emit()
-
-
-class ExternalTrainingThread(QThread):
-    log_signal = Signal(str)
-    success_signal = Signal(dict)
-    error_signal = Signal(str)
-    finished_signal = Signal()
-
-    def __init__(self, project, backend_config):
-        super().__init__()
-        self.project = project
-        self.backend_config = sanitize_external_backend_config(backend_config)
-
-    def run(self):
-        try:
-            self.log_signal.emit("External backend training started.")
-            summary = ExternalBackendRunner(self.project, self.backend_config).run_prepare_and_train()
-            self.success_signal.emit(dict(summary or {}))
-        except Exception as exc:
-            self.error_signal.emit(str(exc))
-        finally:
-            self.finished_signal.emit()
+try:
+    from AntSleap.ui.main_window_widgets import ImageGroupListWidget, NoWheelComboBox, NoWheelSlider, NoWheelSpinBox
+    from AntSleap.ui.main_window_workers import (
+        DatasetExportThread,
+        ExternalBatchInferenceThread,
+        ExternalTrainingThread,
+        ImageImportThread,
+        InferenceThread,
+        TrainingThread,
+        VlmPreannotationThread,
+    )
+except ImportError:
+    from ui.main_window_widgets import ImageGroupListWidget, NoWheelComboBox, NoWheelSlider, NoWheelSpinBox
+    from ui.main_window_workers import (
+        DatasetExportThread,
+        ExternalBatchInferenceThread,
+        ExternalTrainingThread,
+        ImageImportThread,
+        InferenceThread,
+        TrainingThread,
+        VlmPreannotationThread,
+    )
 
 # --- Localization ---
 TRANSLATIONS = {
@@ -1884,86 +1533,6 @@ def _env_flag_enabled(name):
     return value in {"1", "true", "yes", "on"}
 
 
-class NoWheelComboBox(QComboBox):
-    """Combo box that ignores mouse-wheel changes to avoid accidental selection changes."""
-
-    def wheelEvent(self, event):
-        event.ignore()
-
-
-class NoWheelSpinBox(QSpinBox):
-    """Spin box that lets scroll areas handle the wheel instead of changing values."""
-
-    def wheelEvent(self, event):
-        event.ignore()
-
-
-class NoWheelSlider(QSlider):
-    """Slider that ignores wheel changes to prevent accidental parameter edits."""
-
-    def wheelEvent(self, event):
-        event.ignore()
-
-
-class ImageGroupListWidget(QListWidget):
-    """Image list with project-internal drag/drop grouping."""
-
-    imagesDroppedToGroup = Signal(list, str)
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setAcceptDrops(True)
-        self.setDragEnabled(True)
-        self.setDragDropMode(QAbstractItemView.InternalMove)
-        self.setDefaultDropAction(Qt.MoveAction)
-
-    def startDrag(self, _supported_actions):
-        paths = [
-            item.data(Qt.UserRole)
-            for item in self.selectedItems()
-            if item and item.data(Qt.UserRole)
-        ]
-        if not paths:
-            return
-        mime = QMimeData()
-        mime.setData("application/x-taxamask-image-paths", json.dumps(paths).encode("utf-8"))
-        drag = QDrag(self)
-        drag.setMimeData(mime)
-        drag.exec(Qt.MoveAction)
-
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasFormat("application/x-taxamask-image-paths"):
-            event.acceptProposedAction()
-            return
-        super().dragEnterEvent(event)
-
-    def dragMoveEvent(self, event):
-        if event.mimeData().hasFormat("application/x-taxamask-image-paths"):
-            event.acceptProposedAction()
-            return
-        super().dragMoveEvent(event)
-
-    def dropEvent(self, event):
-        if not event.mimeData().hasFormat("application/x-taxamask-image-paths"):
-            super().dropEvent(event)
-            return
-        target_item = self.itemAt(event.position().toPoint())
-        if target_item is None:
-            return
-        group_key = target_item.data(Qt.UserRole + 1) or target_item.data(Qt.UserRole + 2)
-        if not group_key:
-            return
-        try:
-            paths = json.loads(bytes(event.mimeData().data("application/x-taxamask-image-paths")).decode("utf-8"))
-        except Exception:
-            paths = []
-        paths = [str(path) for path in paths if str(path or "").strip()]
-        if not paths:
-            return
-        self.imagesDroppedToGroup.emit(paths, str(group_key))
-        event.acceptProposedAction()
-
-
 def _agent_yes_no(value):
     return "yes" if value else "no"
 
@@ -2006,216 +1575,6 @@ def _clean_box(box):
     if clean[2] <= clean[0] or clean[3] <= clean[1]:
         return None
     return clean
-
-class TrainingThread(QThread):
-    log_signal = Signal(str)
-    progress_signal = Signal(int)
-    report_signal = Signal(dict)
-    success_signal = Signal()
-    error_signal = Signal(dict)
-    finished_signal = Signal()
-    
-    def __init__(
-        self,
-        engine,
-        preflight,
-        taxonomy,
-        locator_scope,
-        epochs=5,
-        batch_size=4,
-        lang="en",
-        train_segmenter=True,
-        training_context=None,
-    ):
-        super().__init__()
-        self.engine = engine
-        self.preflight = dict(preflight or {})
-        self.taxonomy = taxonomy
-        self.locator_scope = locator_scope
-        self.epochs = epochs
-        self.batch_size = batch_size
-        self.lang = lang
-        self.train_segmenter = bool(train_segmenter)
-        self.training_context = dict(training_context or {})
-        self.locator_train_data = list(self.preflight.get("locator_train_data", []))
-        self.locator_val_data = list(self.preflight.get("locator_val_data", []))
-        self.parts_train_data = list(self.preflight.get("parts_train_data", []))
-        self.parts_val_data = list(self.preflight.get("parts_val_data", []))
-        self.locator_resolution = tuple(self.preflight.get("selected_locator_size") or (512, 512))
-        self.has_locator_stage = bool(self.locator_train_data and self.locator_val_data)
-        self.has_parts_stage = bool(self.train_segmenter and self.parts_train_data and self.parts_val_data)
-        self.saved_weights_timestamp = None
-         
-    def run(self):
-        try:
-            self.log_signal.emit("Starting training on active compute device...")
-
-            self.engine.locator_resolution = tuple(self.locator_resolution)
-            self.log_signal.emit(
-                tr("Locator training size set to {0}", self.lang).format(format_size_pair(self.engine.locator_resolution))
-            )
-
-            self.engine.history["locator_train"] = []
-            self.engine.history["locator_val"] = []
-            self.engine.history["pixel_error"] = []
-            self.engine.history["parts_train"] = []
-            self.engine.history["parts_val"] = []
-            self.engine.history["iou"] = []
-
-            dl_loc_val = None
-
-            if self.has_locator_stage:
-                locator = self.engine.ensure_locator_loaded()
-                opt_loc = self.engine.opt_loc
-                ds_loc_train = TwoStageDataset(
-                    self.locator_train_data,
-                    self.locator_scope,
-                    mode='locator',
-                    input_size=tuple(self.engine.locator_resolution),
-                )
-                ds_loc_val = TwoStageDataset(
-                    self.locator_val_data,
-                    self.locator_scope,
-                    mode='locator',
-                    input_size=tuple(self.engine.locator_resolution),
-                )
-                dl_loc_train = DataLoader(ds_loc_train, batch_size=max(1, self.batch_size*2), shuffle=True)
-                dl_loc_val = DataLoader(ds_loc_val, batch_size=max(1, self.batch_size*2), shuffle=False)
-
-                self.log_signal.emit("Training Locator...")
-                try:
-                    for epoch in range(self.epochs): 
-                        if self.isInterruptionRequested():
-                            self.log_signal.emit(tr("Training cancelled.", self.lang))
-                            return
-                        loss_t = self.engine.train_epoch(
-                            dl_loc_train,
-                            locator,
-                            opt_loc,
-                            None,
-                            stop_callback=self.isInterruptionRequested,
-                        )
-                        if loss_t is None:
-                            self.log_signal.emit(tr("Training cancelled.", self.lang))
-                            return
-                        if self.isInterruptionRequested():
-                            self.log_signal.emit(tr("Training cancelled.", self.lang))
-                            return
-                        metrics_v = self.engine.validate_epoch(
-                            dl_loc_val,
-                            locator,
-                            stop_callback=self.isInterruptionRequested,
-                        )
-                        if metrics_v is None:
-                            self.log_signal.emit(tr("Training cancelled.", self.lang))
-                            return
-                        self.engine.history["locator_train"].append(loss_t)
-                        self.engine.history["locator_val"].append(metrics_v['loss'])
-                        self.engine.history["pixel_error"].append(metrics_v['pixel_error'])
-                        self.log_signal.emit(
-                            tr("Loc Ep {0}: Train {1:.4f} | Val {2:.4f} | Err {3:.1f}px", self.lang).format(
-                                epoch, loss_t, metrics_v['loss'], metrics_v['pixel_error']
-                            )
-                        )
-                        self.progress_signal.emit(int((epoch+1)/(self.epochs*2) * 100))
-                except RuntimeError as exc:
-                    if "out of memory" in str(exc).lower():
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
-                        self.error_signal.emit(
-                            {
-                                "type": "oom",
-                                "stage": "locator",
-                                "current_resolution": tuple(self.engine.locator_resolution),
-                                "lower_options": list(self.preflight.get("lower_locator_size_options", [])),
-                                "message": str(exc),
-                            }
-                        )
-                        return
-                    raise
-            else:
-                self.log_signal.emit(tr("Locator stage skipped: no eligible locator samples.", self.lang))
-                self.progress_signal.emit(50)
-
-            if self.has_parts_stage:
-                ds_parts_train = TwoStageDataset(self.parts_train_data, self.taxonomy, mode='parts')
-                ds_parts_val = TwoStageDataset(self.parts_val_data, self.taxonomy, mode='parts')
-                dl_parts_train = DataLoader(ds_parts_train, batch_size=1, shuffle=True)
-                dl_parts_val = DataLoader(ds_parts_val, batch_size=1, shuffle=False)
-                parts_model = self.engine.ensure_parts_model_loaded()
-                opt_parts = self.engine.opt_parts
-
-                self.log_signal.emit(tr("Training SAM... (BS=1)", self.lang))
-                for epoch in range(self.epochs):
-                    if self.isInterruptionRequested():
-                        self.log_signal.emit(tr("Training cancelled.", self.lang))
-                        return
-                    loss_t = self.engine.train_epoch(
-                        dl_parts_train,
-                        parts_model,
-                        opt_parts,
-                        self.engine.crit_parts,
-                        stop_callback=self.isInterruptionRequested,
-                    )
-                    if loss_t is None:
-                        self.log_signal.emit(tr("Training cancelled.", self.lang))
-                        return
-                    if self.isInterruptionRequested():
-                        self.log_signal.emit(tr("Training cancelled.", self.lang))
-                        return
-                    metrics_v = self.engine.validate_epoch(
-                        dl_parts_val,
-                        parts_model,
-                        stop_callback=self.isInterruptionRequested,
-                    )
-                    if metrics_v is None:
-                        self.log_signal.emit(tr("Training cancelled.", self.lang))
-                        return
-                    self.engine.history["parts_train"].append(loss_t)
-                    self.engine.history["parts_val"].append(metrics_v['loss'])
-                    self.engine.history["iou"].append(metrics_v['iou'])
-                    self.log_signal.emit(
-                        tr("SAM Ep {0}: Train {1:.4f} | Val {2:.4f} | IoU {3:.2%}", self.lang).format(
-                            epoch, loss_t, metrics_v['loss'], metrics_v['iou']
-                        )
-                    )
-                    self.progress_signal.emit(50 + int((epoch+1)/(self.epochs*2) * 100))
-            else:
-                if self.train_segmenter:
-                    self.log_signal.emit(tr("SAM stage skipped: no eligible SAM/parts samples.", self.lang))
-                else:
-                    self.log_signal.emit(tr("SAM stage skipped: locator-only training is enabled.", self.lang))
-                self.progress_signal.emit(100)
-
-            if self.isInterruptionRequested():
-                self.log_signal.emit(tr("Training cancelled.", self.lang))
-                return
-                
-            self.saved_weights_timestamp = self.engine.save_weights(save_locator=self.has_locator_stage, save_segmenter=self.has_parts_stage)
-            if self.saved_weights_timestamp:
-                self.training_context["saved_weights_timestamp"] = self.saved_weights_timestamp
-                self.training_context["locator_weights"] = (
-                    f"locator_{self.saved_weights_timestamp}.pth" if self.has_locator_stage else ""
-                )
-                self.training_context["segmenter_weights"] = (
-                    f"sam_decoder_lora_{self.saved_weights_timestamp}.pth" if self.has_parts_stage else ""
-                )
-            self.log_signal.emit(tr("Generating Report...", self.lang))
-            
-            # Initial report shows only a small summary (e.g., 6 images)
-            # Detailed inspection is handled by the UI post-training.
-            report = self.engine.generate_report(dl_loc_val, num_samples=6, training_context=self.training_context)
-            
-            self.report_signal.emit(report)
-            self.log_signal.emit(
-                tr("Training Finished! All validation results saved to {0}/val_details", self.lang).format(report['dir'])
-            )
-            self.success_signal.emit()
-        except Exception as exc:
-            self.error_signal.emit({"type": "error", "message": str(exc)})
-        finally:
-            self.finished_signal.emit()
-
 
 class TrainingPreflightDialog(QDialog):
     def __init__(self, preflight, parent=None, lang="en"):
@@ -9201,6 +8560,8 @@ class MainWindow(QMainWindow):
                 },
             },
         )
+        if hasattr(self.trainer, "translate"):
+            self.trainer.translate = tr
         self.trainer.log_signal.connect(self.log)
         self.trainer.progress_signal.connect(lambda value: self._set_training_progress("parent", None, value))
         self.trainer.report_signal.connect(self.show_training_report)
@@ -15697,6 +15058,8 @@ class MainWindow(QMainWindow):
             model_manifest=backend_config.get("model_manifest", ""),
             lang=self.current_lang,
         )
+        if hasattr(thread, "translate"):
+            thread.translate = tr
         self.external_batch_inference_thread = thread
 
         def on_progress(done, total, label):
@@ -15802,6 +15165,8 @@ class MainWindow(QMainWindow):
                 model_profile_context=self._active_model_profile_context(),
                 lang=self.current_lang,
             )
+            if hasattr(self.inf_thread, "translate"):
+                self.inf_thread.translate = tr
             self.inf_thread.log_signal.connect(self.log) # Fix: Connect log signal
             def on_batch_res(p, d):
                 saved, total = self._apply_prediction_to_project(

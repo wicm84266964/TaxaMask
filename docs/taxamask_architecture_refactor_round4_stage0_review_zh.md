@@ -2,7 +2,7 @@
 
 日期：2026-07-11
 
-状态：`verified / Gate A pending`
+状态：`accepted`；用户于 2026-07-11 接受 Gate A，并要求后续 Stage 连续执行、全部完成前不再推送 GitHub
 
 分支：`codex/taxamask-architecture-refactor-round4`
 
@@ -205,14 +205,15 @@ C:\Users\admin\anaconda3\envs\taxamask\python.exe scripts\run_validation_suite.p
 6. **中风险：测试私有依赖**。五个关键测试文件有 142 次、51 种私有引用，第四轮目标至少减少 60%。
 7. **环境风险：offscreen Qt**。10 个成功性能样本需要 5 次额外重试；真实可见窗口和 WebEngine/GPU 行为必须留到后续人工门验证。
 
-## 9. Gate A 待用户确认
+## 9. Gate A 用户确认结果
 
-建议接受 Stage 0，并按原顺序进入 Stage 1：
+用户接受 Stage 0，并按原顺序进入 Stage 1：
 
 1. 接受 AST 正式基线及对旧估算数字的修正。
 2. 接受 390 个 MainWindow 方法的 Stage 1-8 初始分配；31 个 unclassified 方法在 Stage 8 人工收束。
 3. 接受第 5 节建议模块边界。
 4. 接受性能重点优先检查 import/lazy initialization 和 Agent context，而不是承诺每次拆文件都提升速度。
 5. 接受 offscreen 子进程失败作为环境风险保留，不将其误报为研究工作流失败。
-6. Gate A 接受后进入 Stage 1；Stage 1-2 完成并 verified 后在 Gate B 再进行用户确认。
+6. Gate A 接受后进入 Stage 1；Stage 1-2 完成并 verified 后形成 Gate B review，但按用户补充要求不中断执行。
 
+补充执行方式：Gate B/C/D 保留 review 和 `verified` 证据，但不再暂停等待逐次确认；Stage 1-9 连续执行，全部完成前不再推送 GitHub，Stage 9 后统一由用户验收。

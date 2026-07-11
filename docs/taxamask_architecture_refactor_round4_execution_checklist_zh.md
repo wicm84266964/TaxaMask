@@ -2,7 +2,7 @@
 
 日期：2026-07-11
 
-状态：`Stage 0 verified / Gate A pending`；正式基线已完成，业务代码未修改，等待用户确认后进入 Stage 1
+状态：`Gate A accepted / Stage 1 verified / Stage 2 next`；用户要求 Stage 1-9 连续执行，中间 Gate 继续留证但不暂停，全部完成前不再推送 GitHub
 
 需求文档：`docs/taxamask_architecture_refactor_round4_requirements_zh.md`
 
@@ -65,10 +65,10 @@
 
 | 确认门 | 范围 | 状态 |
 | --- | --- | --- |
-| Gate A | 需求与 Stage 0 正式基线 | Stage 0 verified；等待用户 accepted |
-| Gate B | Stage 1-2 Runtime/Worker/Dialog/Settings | 待完成 |
-| Gate C | Stage 3-4 Shell/Agent/项目生命周期 | 待完成 |
-| Gate D | Stage 5-8 全工作流迁移与整体候选 | 待完成 |
+| Gate A | 需求与 Stage 0 正式基线 | accepted（2026-07-11） |
+| Gate B | Stage 1-2 Runtime/Worker/Dialog/Settings | 待完成；verified 后连续执行 |
+| Gate C | Stage 3-4 Shell/Agent/项目生命周期 | 待完成；verified 后连续执行 |
+| Gate D | Stage 5-8 全工作流迁移与整体候选 | 待完成；verified 后连续执行 |
 | Gate E | Stage 9 真实研究流程终验 | 待完成 |
 
 ## 5. 每阶段强制联动交付
@@ -88,7 +88,7 @@
 
 ## 6. Stage 0：正式基线与迁移台账
 
-状态：`verified / Gate A pending`
+状态：`verified / Gate A accepted`
 
 ### 6.1 结构与调用基线
 
@@ -122,28 +122,28 @@
 ### 6.3 Gate A
 
 - [x] Stage 0 review 达到 `verified`。
-- [ ] 用户确认正式基线、最终模块边界和执行顺序。
-- [ ] Gate A 标记 `accepted` 后进入 Stage 1。
+- [x] 用户确认正式基线、最终模块边界和执行顺序。
+- [x] Gate A 标记 `accepted` 后进入 Stage 1。
 
 ## 7. Stage 1：Runtime、Worker 与基础 Widget
 
-状态：`pending`
+状态：`verified`
 
 ### 7.1 Runtime/bootstrap
 
-- [ ] 提取最早期 Qt WebEngine、WSL/Linux 和软件渲染环境准备。
-- [ ] 保证环境变量仍在 `cv2`、PySide6 和 WebEngine 前设置。
-- [ ] 提取 runtime log、日志清理、`faulthandler` 和全局异常入口。
-- [ ] 验证 Windows、Linux/macOS 路径和 package/source 两种导入方式。
+- [x] 提取最早期 Qt WebEngine、WSL/Linux 和软件渲染环境准备到 `AntSleap/app_runtime.py`。
+- [x] 保证环境变量仍在 `cv2`、PySide6 和 WebEngine 前设置。
+- [x] 提取 runtime log、日志清理、`faulthandler` 和全局异常入口。
+- [x] 验证 package/source 两种导入方式；跨平台逻辑保留，最终平台实机验收留在 Stage 9。
 
 ### 7.2 Worker 与基础 Widget
 
-- [ ] 迁移 inference、VLM、training、image import、external inference/training 和 export worker。
-- [ ] 迁移 NoWheel 控件和 ImageGroup drag/drop Widget。
-- [ ] Worker 不直接访问 MainWindow 控件，只通过输入、Signal 和结果 payload 通信。
-- [ ] `main.py` 保留兼容 re-export。
-- [ ] 新模块直接测试、import contract 和 GUI smoke 通过。
-- [ ] 关键启动路径中位数不回退超过 5%，P95 不回退超过 10%。
+- [x] 迁移 inference、VLM、training、image import、external inference/training 和 export worker到 `main_window_workers.py`。
+- [x] 迁移 NoWheel 控件和 ImageGroup drag/drop Widget 到 `main_window_widgets.py`。
+- [x] Worker 不直接访问 MainWindow 控件，只通过输入、Signal、结果 payload 和显式 translator 通信。
+- [x] `main.py` 保留兼容 re-export，旧 worker 构造调用协议保持。
+- [x] 新模块直接测试、import contract、GUI smoke、UI polish、Agent、Blink、VLM 和 SQLite 回归通过。
+- [x] 关键启动路径中位数改善约 5.1%，P95 改善约 11.5%，无性能回退。
 
 ## 8. Stage 2：Dialog、Report、Route 与 Settings
 
@@ -326,3 +326,13 @@
 - [ ] 每个确认门形成可审计 review 文档。
 - [ ] 最终接受前不合并 `main`。
 - [ ] 最终接受前不创建新 Release。
+
+## 18. 连续执行补充确认
+
+2026-07-11，用户明确接受 Gate A，并要求：
+
+- [x] Stage 1-9 连续执行，不在 Gate B/C/D 反复等待人工确认。
+- [x] 每个 Stage 仍需独立本地提交、自动化验证和 review 留档。
+- [x] 涉及研究数据角色或可见行为变化时仍需按既定安全规则处理，但不因普通架构迁移暂停。
+- [x] 全部 Stage 完成前不再推送 GitHub；当前远端停留在 `8969c0d`。
+- [x] Stage 9 完成后统一交给用户做最终人工验收。

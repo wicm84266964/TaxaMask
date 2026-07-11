@@ -88,6 +88,7 @@ SUITES: dict[str, list[str]] = {
     "taxamask_architecture_round4": [
         "tests.test_main_window_architecture_analysis",
         "tests.test_main_window_performance_benchmark",
+        "tests.test_main_window_stage1_modules",
     ],
     "validation_chunk_sample": ["tests.test_safe_io.SafeIoTests.test_atomic_write_json_failure_keeps_existing_file_and_removes_tmp"],
     "sqlite_2d": [

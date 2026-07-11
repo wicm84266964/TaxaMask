@@ -19,11 +19,11 @@ class MainWindowArchitectureAnalysisTests(unittest.TestCase):
         report = load_analysis_module().build_report()
         metrics = report["metrics"]
 
-        self.assertEqual(metrics["main_physical_lines"], 16024)
-        self.assertEqual(metrics["top_level_class_count"], 22)
-        self.assertEqual(metrics["all_method_count"], 592)
+        self.assertLess(metrics["main_physical_lines"], 16024)
+        self.assertLess(metrics["top_level_class_count"], 22)
+        self.assertLess(metrics["all_method_count"], 592)
         self.assertEqual(metrics["connection_count"], 194)
-        self.assertEqual(metrics["main_window_lines"], 9483)
+        self.assertLessEqual(metrics["main_window_lines"], 9500)
         self.assertEqual(metrics["main_window_method_count"], 390)
         self.assertEqual(metrics["main_window_connection_count"], 128)
         self.assertEqual(metrics["main_window_init_lines"], 668)
@@ -37,13 +37,22 @@ class MainWindowArchitectureAnalysisTests(unittest.TestCase):
         classes = {row["name"]: row for row in report["classes"]}
         methods = {row["name"]: row for row in report["main_window_methods"]}
 
-        self.assertEqual(classes["InferenceThread"]["target_stage"], 1)
+        self.assertNotIn("InferenceThread", classes)
         self.assertEqual(classes["ModelSettingsDialog"]["target_stage"], 2)
         self.assertEqual(classes["MainWindow"]["target_stage"], 3)
         self.assertEqual(methods["open_project_path"]["target_stage"], 4)
         self.assertEqual(methods["launch_blink_from_workbench"]["target_stage"], 6)
         self.assertEqual(methods["run_vlm_preannotation_from_settings"]["target_stage"], 7)
         self.assertEqual(len(report["main_window_methods"]), 390)
+
+    def test_stage1_runtime_workers_and_widgets_leave_main_as_compatibility_facade(self):
+        source = (ROOT / "AntSleap" / "main.py").read_text(encoding="utf-8")
+
+        self.assertNotIn("class InferenceThread", source)
+        self.assertNotIn("class TrainingThread", source)
+        self.assertNotIn("class ImageGroupListWidget", source)
+        self.assertIn("from AntSleap.ui.main_window_workers import", source)
+        self.assertIn("from AntSleap.ui.main_window_widgets import", source)
 
     def test_markdown_contains_stage0_migration_sections(self):
         module = load_analysis_module()

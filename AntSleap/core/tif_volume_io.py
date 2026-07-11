@@ -1,11 +1,13 @@
 import json
 import os
 import shutil
+import tempfile
+import uuid
 from datetime import datetime
 
 import numpy as np
 
-from .safe_io import atomic_write_json, copytree_replace_safely, replace_directory_safely
+from .safe_io import atomic_write_json, replace_directory_safely
 
 
 VOLUME_SIDECAR_SCHEMA_VERSION = "ant3d_volume_sidecar_v1"
@@ -444,11 +446,93 @@ def copy_volume_sidecar(source_sidecar_path, target_sidecar_path, role=None):
         raise FileNotFoundError(source)
     if os.path.normcase(source) == os.path.normcase(target):
         raise ValueError(f"source_target_sidecar_same:{source}")
-    copytree_replace_safely(source, target)
-    if role:
-        metadata = read_volume_metadata(target)
-        metadata["role"] = str(role)
-        metadata["updated_at"] = _now_iso()
-        _write_volume_metadata(target, metadata)
+    parent = os.path.dirname(target) or "."
+    os.makedirs(parent, exist_ok=True)
+    staging_root = tempfile.mkdtemp(prefix=".tmp_sidecar_copy_", dir=parent)
+    staged = os.path.join(staging_root, "sidecar")
+    try:
+        shutil.copytree(source, staged)
+        metadata = read_volume_metadata(staged)
+        if role:
+            metadata["role"] = str(role)
+            metadata["updated_at"] = _now_iso()
+            _write_volume_metadata(staged, metadata)
+        replace_directory_safely(staged, target)
         return metadata
-    return read_volume_metadata(target)
+    finally:
+        try:
+            if os.path.exists(staging_root):
+                shutil.rmtree(staging_root)
+        except OSError:
+            pass
+
+
+class VolumeSidecarReplacement:
+    def __init__(self, source_sidecar_path, target_sidecar_path, role=None):
+        self.source = os.path.abspath(str(source_sidecar_path))
+        self.target = os.path.abspath(str(target_sidecar_path))
+        transaction_id = uuid.uuid4().hex
+        self.staged = f"{self.target}.pending_{transaction_id}"
+        self.rollback_path = f"{self.target}.rollback_{transaction_id}"
+        self.rollback_moved = False
+        self.installed = False
+        self.closed = False
+        try:
+            self.metadata = copy_volume_sidecar(self.source, self.staged, role=role)
+            if os.path.exists(self.target):
+                os.replace(self.target, self.rollback_path)
+                self.rollback_moved = True
+            os.replace(self.staged, self.target)
+            self.installed = True
+        except Exception as exc:
+            try:
+                self.rollback()
+            except Exception as rollback_exc:
+                raise RuntimeError(
+                    f"volume_sidecar_replacement_failed:{exc};rollback_failed:{rollback_exc}"
+                ) from exc
+            raise
+
+    def commit(self):
+        if self.closed:
+            return ""
+        cleanup_error = ""
+        if self.rollback_moved and os.path.exists(self.rollback_path):
+            try:
+                shutil.rmtree(self.rollback_path)
+            except OSError as exc:
+                cleanup_error = str(exc)
+        if os.path.exists(self.staged):
+            try:
+                shutil.rmtree(self.staged)
+            except OSError as exc:
+                cleanup_error = cleanup_error or str(exc)
+        self.closed = True
+        return cleanup_error
+
+    def rollback(self):
+        if self.closed:
+            return
+        errors = []
+        if self.installed and os.path.exists(self.target):
+            try:
+                shutil.rmtree(self.target)
+            except OSError as exc:
+                errors.append(f"remove_target:{exc}")
+        if self.rollback_moved and os.path.exists(self.rollback_path):
+            try:
+                os.replace(self.rollback_path, self.target)
+            except OSError as exc:
+                errors.append(f"restore_target:{exc}")
+        if os.path.exists(self.staged):
+            try:
+                shutil.rmtree(self.staged)
+            except OSError as exc:
+                errors.append(f"remove_staged:{exc}")
+        self.closed = not errors
+        if errors:
+            raise RuntimeError("|".join(errors))
+
+
+def begin_volume_sidecar_replacement(source_sidecar_path, target_sidecar_path, role=None):
+    return VolumeSidecarReplacement(source_sidecar_path, target_sidecar_path, role=role)

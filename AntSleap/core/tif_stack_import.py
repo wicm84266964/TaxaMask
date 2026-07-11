@@ -1,3 +1,4 @@
+import copy
 import os
 import shutil
 from datetime import datetime
@@ -569,6 +570,15 @@ def materialize_registered_tif_stack(
     image_rel = os.path.join(specimen_root_rel, "working", "image.ome.zarr").replace("\\", "/")
     image_abs = project_manager.to_absolute(image_rel)
     material_map_rel = specimen.get("material_map", "") or os.path.join(specimen_root_rel, "material_map.json").replace("\\", "/")
+    report_rel = os.path.join(specimen_root_rel, "working", "import_report.json").replace("\\", "/")
+    report_abs = project_manager.to_absolute(report_rel)
+    if os.path.exists(image_abs):
+        raise FileExistsError(f"materialize_target_already_exists:{image_abs}")
+    specimen_snapshot = copy.deepcopy(specimen)
+    report_snapshot = None
+    if os.path.isfile(report_abs):
+        with open(report_abs, "rb") as handle:
+            report_snapshot = handle.read()
     tif_metadata["source_path"] = source_ref
     try:
         _emit_progress(progress_callback, 5, 100, "Preparing sidecar")
@@ -637,18 +647,36 @@ def materialize_registered_tif_stack(
             "warnings": warnings,
             "errors": [],
         }
-        report_rel = os.path.join(specimen_root_rel, "working", "import_report.json").replace("\\", "/")
-        report_abs = project_manager.to_absolute(report_rel)
         atomic_write_json(report_abs, report, indent=2, ensure_ascii=False)
         specimen["working_volume"]["import_report"] = report_rel
         _emit_progress(progress_callback, 100, 100, "Saving TIF project")
         project_manager.save_project()
-    except Exception:
+    except Exception as exc:
+        rollback_errors = []
+        specimen.clear()
+        specimen.update(specimen_snapshot)
         try:
             if os.path.exists(image_abs):
                 shutil.rmtree(image_abs)
-        except Exception:
-            pass
+        except Exception as rollback_exc:
+            rollback_errors.append(f"sidecar:{rollback_exc}")
+        try:
+            if report_snapshot is None:
+                if os.path.exists(report_abs):
+                    os.remove(report_abs)
+            else:
+                report_tmp = f"{report_abs}.rollback.tmp"
+                with open(report_tmp, "wb") as handle:
+                    handle.write(report_snapshot)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(report_tmp, report_abs)
+        except Exception as rollback_exc:
+            rollback_errors.append(f"report:{rollback_exc}")
+        if rollback_errors:
+            raise RuntimeError(
+                f"tif_materialize_failed:{exc};rollback_failed:{'|'.join(rollback_errors)}"
+            ) from exc
         raise
 
     return {

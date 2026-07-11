@@ -2,8 +2,10 @@ import os
 import sys
 import tempfile
 import unittest
+import ast
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -13,7 +15,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 try:
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtCore import QObject
+    from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 except ModuleNotFoundError as exc:
     if exc.name and exc.name.startswith("PySide6"):
         QApplication = None
@@ -25,14 +28,42 @@ else:
     from AntSleap.core.tif_part_extraction import crop_volume_to_part
     from AntSleap.core.tif_project import TifProjectManager
     from AntSleap.core.tif_volume_io import write_volume_sidecar
+    from AntSleap.ui.tif_local_axis_controller import TifLocalAxisController
     from AntSleap.ui.tif_workbench import TifWorkbenchWidget
+    from AntSleap.ui.tif_workbench_signal_router import TifWorkbenchSignalRouter
+    from AntSleap.ui.tif_workbench_view import TifWorkbenchView
 
 
 @unittest.skipUnless(QApplication is not None, "PySide6 is required for TIF Local Axis controller tests")
+class FakeLocalAxisWorkbench(QObject):
+    pass
+
+
 class TifLocalAxisControllerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+
+    def _make_signal_workbench(self):
+        workbench = FakeLocalAxisWorkbench()
+        for name in (
+            "btn_local_axis_reslice",
+            "btn_copy_source_z_axis",
+            "btn_pick_roll_ref_a",
+            "btn_pick_roll_ref_b",
+            "btn_pick_roll_ref_c",
+            "btn_align_axis_to_reference_plane",
+            "btn_clear_roll_refs",
+            "btn_clear_local_axis_draft",
+            "btn_export_local_axis_training_manifest",
+        ):
+            button = QPushButton(name)
+            if "pick_roll_ref" in name:
+                button.setCheckable(True)
+            setattr(workbench, name, button)
+        workbench.signal_router = TifWorkbenchSignalRouter()
+        workbench.workbench_view = TifWorkbenchView(workbench)
+        return workbench
 
     def _make_part_widget(self, root):
         manager = TifProjectManager()
@@ -80,10 +111,10 @@ class TifLocalAxisControllerTests(unittest.TestCase):
             try:
                 task = widget._start_tif_task("volume_preview", action="build_preview", message="Preparing preview")
 
-                with patch.object(widget, "render_volume_preview", return_value=None):
+                with patch.object(widget.volume_render_controller, "render_volume_preview", return_value=None):
                     self.assertTrue(widget.local_axis_controller.set_pick_target("roll_a"))
 
-                self.assertTrue(widget._backend_write_lock_active())
+                self.assertTrue(widget.coordinator.backend_write_lock_active())
                 self.assertEqual(widget._local_axis_pick_target, "roll_a")
                 self.assertEqual(widget._local_axis_roll_pick_target, "roll_a")
                 self.assertIsNotNone(widget.local_axis_controller.current_draft())
@@ -120,6 +151,97 @@ class TifLocalAxisControllerTests(unittest.TestCase):
             finally:
                 widget.close_project(prompt_unsaved=False)
                 widget.deleteLater()
+
+    def test_bind_signals_is_idempotent_and_targets_controller(self):
+        workbench = self._make_signal_workbench()
+        controller = TifLocalAxisController(workbench)
+        controller.copy_source_z_axis_to_draft = Mock()
+
+        controller.bind_signals()
+        controller.bind_signals()
+        workbench.btn_copy_source_z_axis.click()
+
+        self.assertEqual(workbench.signal_router.connection_count("local_axis"), 9)
+        controller.copy_source_z_axis_to_draft.assert_called_once_with()
+
+    def test_stale_export_result_does_not_refresh_or_select(self):
+        workbench = FakeLocalAxisWorkbench()
+        workbench.lang = "en"
+        for name, value in dict(
+            _task_context_matches_current=Mock(return_value=False),
+            _finish_tif_task=Mock(),
+            _fail_tif_task=Mock(),
+            _set_scope_controls_enabled=Mock(),
+            training_status_label=QLabel(),
+            log=Mock(),
+            refresh_project=Mock(),
+            selection_workflow_controller=SimpleNamespace(select_payload=Mock()),
+            current_specimen_id="new-specimen",
+            current_part_id="new-part",
+        ).items():
+            setattr(workbench, name, value)
+        controller = TifLocalAxisController(workbench)
+        controller.state.export_task_id = "old-task"
+        controller.state.export_context = {"specimen_id": "old-specimen", "part_id": "old-part"}
+        workbench.training_status_label.setText("new context status")
+
+        controller.on_export_finished({"record": {"reslice_id": "old-reslice"}})
+
+        workbench.refresh_project.assert_called_once_with(reload_current=False)
+        workbench.selection_workflow_controller.select_payload.assert_not_called()
+        workbench._finish_tif_task.assert_called_once()
+        workbench._task_context_matches_current.assert_called_once_with(
+            "old-task",
+            fields=("specimen_id", "volume_scope", "part_id", "reslice_id"),
+        )
+        self.assertEqual(workbench.training_status_label.text(), "new context status")
+
+    def test_stale_export_failure_does_not_show_dialog_or_replace_status(self):
+        workbench = FakeLocalAxisWorkbench()
+        workbench.lang = "en"
+        for name, value in dict(
+            _task_context_matches_current=Mock(return_value=False),
+            _fail_tif_task=Mock(),
+            training_status_label=QLabel("new context status"),
+            log=Mock(),
+        ).items():
+            setattr(workbench, name, value)
+        controller = TifLocalAxisController(workbench)
+        controller.state.export_task_id = "old-task"
+
+        with patch("AntSleap.ui.tif_local_axis_controller.QMessageBox.warning") as warning:
+            controller.on_export_failed("old export failed")
+
+        warning.assert_not_called()
+        self.assertEqual(workbench.training_status_label.text(), "new context status")
+        workbench._fail_tif_task.assert_called_once()
+
+    def test_shell_does_not_store_local_axis_state_copies(self):
+        root = Path(__file__).resolve().parents[1]
+        shell_source = (root / "AntSleap" / "ui" / "tif_workbench_shell.py").read_text(encoding="utf-8")
+        widget_source = (root / "AntSleap" / "ui" / "tif_workbench.py").read_text(encoding="utf-8")
+
+        for name in (
+            "local_axis_draft",
+            "_local_axis_endpoint_drag",
+            "_local_axis_pick_target",
+            "_local_axis_reslice_export_thread",
+        ):
+            self.assertNotIn(f'"{name}":', shell_source)
+        self.assertIn('local_axis_draft = _local_axis_state_property("draft")', widget_source)
+
+    def test_controller_has_no_duplicate_methods_and_owns_complete_workflow(self):
+        source_path = Path(__file__).resolve().parents[1] / "AntSleap" / "ui" / "tif_local_axis_controller.py"
+        source = source_path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        controller_class = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "TifLocalAxisController")
+        names = [node.name for node in controller_class.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+
+        self.assertEqual(len(names), len(set(names)))
+        self.assertLess(len(source.splitlines()), 3000)
+        for method in ("volume_overlays", "start_endpoint_drag", "export_current_reslice", "export_training_manifest_dialog"):
+            self.assertIn(f"def {method}(", source)
+
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 # TaxaMask LLM Context
 
 > Target: embedded AntCode agents, advanced LLM assistants, and developers maintaining the current TaxaMask `main` / v2.x line.
-> Last synchronized: 2026-07-07.
+> Last synchronized: 2026-07-11.
 
 This file is the current-state handoff document. It is not a changelog. Do not append dated development logs here. Keep it focused on the program state that an agent needs in order to diagnose, modify, and safely operate TaxaMask.
 
@@ -233,6 +233,28 @@ The TIF workbench supports:
 - trained model library selection, notes, model-manifest handoff, and registration-only deletion
 
 Current TIF workbench architecture notes:
+
+Current third-round TIF architecture state (accepted 2026-07-10):
+
+- `AntSleap/ui/tif_workbench.py` is 5,041 physical lines, with 219 Widget methods and 11 direct `.connect(...)` calls. The release baseline was 14,234 lines.
+- Full workflow owners now live in `tif_selection_workflow_controller.py`, `tif_project_lifecycle_controller.py`, `tif_annotation_workflow_controller.py`, `tif_roi_workflow_controller.py`, `tif_part_mask_workflow_controller.py`, `tif_volume_render_controller.py`, `tif_local_axis_controller.py`, `tif_backend_panel_controller.py`, and `tif_result_review_controller.py`.
+- `tif_workbench_view_builder.py`, `tif_workbench_view.py`, `tif_workbench_signal_router.py`, `tif_workbench_coordinator.py`, and `tif_workbench_shell.py` own widget construction, view access, signal contracts, cross-workflow locks/order, and shell lifecycle. Do not move these responsibilities back into the public Widget.
+- Display mode changes must go through `TifWorkbenchWidget.on_display_mode_changed(...)`; direct writes can desynchronize the combo, internal state, stacked canvas, controls, and render request.
+- GPU canvas signals `render_failed`, `render_info_changed`, and `render_stats_changed` must connect directly to `TifVolumeRenderController`. The corresponding Widget wrappers were intentionally removed; do not reconnect signals to `TifWorkbenchWidget` or recreate pass-through methods.
+- GPU canvas mouse interactions also call `TifVolumeRenderController` directly: rotate, pan, interaction-finish scheduling, and wheel zoom. Both offscreen QLabel and embedded QOpenGLWidget paths must follow this rule; Local Axis endpoint interactions remain owned by `TifLocalAxisController`.
+- Selection loading must avoid duplicate work on the GUI thread: load the editable mapping before the visible label layer, reuse that same copy-on-write mapping when the selected role is `working_edit`/`editable_ai_result`, suppress intermediate slice rendering, and render once after all selection state is ready. Shared mappings must be released once by object identity.
+- While specimen/part/reslice selection is loading, every volume-render request must be coalesced rather than executed. After selection state is complete, schedule exactly one render on the next Qt event so large reslices use the existing background preview builder instead of synchronously downsampling on the GUI thread.
+- Large saved reslices must enter the background preview-build route before GPU upload. Do not restore the old synchronous `build_volume_texture_from_source` exception for reslices: a real 765 x 1577 x 1428 GAGA reslice made selection appear unresponsive. Full-volume GPU policy remains separate.
+- Selection-triggered image/label memmaps are detached immediately but closed in a background release thread. The release waits for any previous preview-build thread before closing mappings, so responsiveness must not introduce use-after-close races. CPU background preview loops may yield to the UI, but their numerical output must remain identical.
+- When entering a part or reslice, label-schema UI restoration must prioritize the persisted `part.training.label_schema_id` over the combo box's previous browsing selection. Binding was already persisted; the accepted follow-up fix corrected only restoration priority.
+- Selection loading completion is explicit. A completed part/specimen selection must not leave the operation status saying that loading is still in progress.
+- The visible acceptance machine currently requires the supported CPU 3D fallback because Qt/OpenGL renderer initialization is unstable. Treat this as renderer/driver compatibility, not TIF corruption. CPU fallback was accepted for this round; embedded/offscreen GPU paths remain covered by contracts and tests.
+- Top-level prediction results are `working_edit/pending_review` plus `raw_ai_prediction_backup/raw_backup` and model draft. SQLite migration must preserve all three roles. Never auto-promote a reviewed-looking prediction into `manual_truth`.
+- Train-readiness diagnostics must not report image/label shape mismatch when manual truth is absent. Report shape mismatch only when both records exist.
+- Real acceptance evidence used an isolated 294×294×284 ant head and a Dataset601 647×647×195 ant-brain volume. The researcher accepted the Local Axis anatomy and considered the Dataset601 brain-region boundaries reasonable. This is an ant-domain validation, not a cross-taxon claim.
+- Final post-acceptance audit validation: 777 tests across 11 suites, with one environment-dependent skip; changed/new Python files compile and `git diff --check` passes.
+- The current controllers are workflow owners but are not fully decoupled ports: most still hold the complete Widget, production lifecycle-hook subscriptions remain incomplete, `TifVolumeRenderController` and `TifPartMaskWorkflowController` exceed the suggested 1,500-line review threshold, and 140 tests still reference private implementations. Do not claim complete controller isolation.
+- Detailed requirements, Stage 0-10 evidence, and the post-acceptance risk audit are under `docs/tif_workbench_architecture_refactor_round3_*`, especially `docs/tif_workbench_architecture_refactor_round3_post_acceptance_audit_zh.md`.
 
 - `AntSleap/ui/tif_workbench.py` remains the public PySide workbench entry, but new business rules should preferentially go into `AntSleap/core`, `AntSleap/services`, or the TIF task layer.
 - TIF workbench helper modules now hold canvas/widgets, dialogs, translations, workers, layout/page builders, control panels, styling, Agent context assembly, and extracted helper functions.

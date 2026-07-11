@@ -1,6 +1,8 @@
 import json
+import copy
 import os
 import shutil
+import uuid
 from datetime import datetime
 
 import numpy as np
@@ -189,41 +191,54 @@ def import_external_prediction_tif(
 
     draft = None
     labels = specimen.setdefault("labels", {})
+    specimen_snapshot = copy.deepcopy(specimen)
     previous_train_ready = bool(specimen.get("train_ready"))
     working_edit_existed = bool(str((labels.get("working_edit") or {}).get("path") or "").strip())
-    created_fixed_paths = {
-        backup_abs: os.path.exists(backup_abs),
-        editable_abs: os.path.exists(editable_abs),
-    }
+    transaction_id = uuid.uuid4().hex
+    sidecar_swaps = []
+
+    def write_and_install(target_path, *, role, extra_metadata):
+        staged_path = f"{target_path}.pending_{transaction_id}"
+        rollback_path = f"{target_path}.rollback_{transaction_id}"
+        swap = {
+            "target": target_path,
+            "staged": staged_path,
+            "rollback": rollback_path,
+            "rollback_moved": False,
+            "installed": False,
+        }
+        sidecar_swaps.append(swap)
+        metadata = write_volume_sidecar(
+            staged_path,
+            volume,
+            role=role,
+            spacing_zyx=working_meta.get("spacing_zyx") or working_record.get("spacing_zyx"),
+            spacing_unit=working_meta.get("spacing_unit", working_record.get("spacing_unit", "micrometer")),
+            orientation=working_meta.get("orientation", working_record.get("orientation", "unknown")),
+            source_format="external_prediction_tif",
+            extra_metadata=extra_metadata,
+        )
+        if os.path.exists(target_path):
+            os.replace(target_path, rollback_path)
+            swap["rollback_moved"] = True
+        os.replace(staged_path, target_path)
+        swap["installed"] = True
+        return metadata
+
     try:
-        backup_meta = write_volume_sidecar(
+        backup_meta = write_and_install(
             backup_abs,
-            volume,
             role="raw_ai_prediction_backup",
-            spacing_zyx=working_meta.get("spacing_zyx") or working_record.get("spacing_zyx"),
-            spacing_unit=working_meta.get("spacing_unit", working_record.get("spacing_unit", "micrometer")),
-            orientation=working_meta.get("orientation", working_record.get("orientation", "unknown")),
-            source_format="external_prediction_tif",
             extra_metadata=common_metadata,
         )
-        editable_meta = write_volume_sidecar(
+        editable_meta = write_and_install(
             editable_abs,
-            volume,
             role="working_edit",
-            spacing_zyx=working_meta.get("spacing_zyx") or working_record.get("spacing_zyx"),
-            spacing_unit=working_meta.get("spacing_unit", working_record.get("spacing_unit", "micrometer")),
-            orientation=working_meta.get("orientation", working_record.get("orientation", "unknown")),
-            source_format="external_prediction_tif",
             extra_metadata=common_metadata,
         )
-        draft_meta = write_volume_sidecar(
+        draft_meta = write_and_install(
             draft_abs,
-            volume,
             role="model_draft",
-            spacing_zyx=working_meta.get("spacing_zyx") or working_record.get("spacing_zyx"),
-            spacing_unit=working_meta.get("spacing_unit", working_record.get("spacing_unit", "micrometer")),
-            orientation=working_meta.get("orientation", working_record.get("orientation", "unknown")),
-            source_format="external_prediction_tif",
             extra_metadata={**common_metadata, "note": "Legacy read-only copy of the external prediction label TIF."},
         )
         labels["raw_ai_prediction_backup"] = project_manager._volume_payload(
@@ -310,24 +325,34 @@ def import_external_prediction_tif(
         editable["import_report"] = report_rel
         labels["raw_ai_prediction_backup"]["import_report"] = report_rel
         project_manager.save_project()
-    except Exception:
-        if draft is not None:
-            drafts = ((specimen.get("labels") or {}).get("model_drafts") or [])
-            specimen.setdefault("labels", {})["model_drafts"] = [
-                item
-                for item in drafts
-                if item.get("path") != draft_rel and item.get("prediction_id") != safe_prediction_id
-            ]
-        for path in (draft_abs, backup_abs, editable_abs):
-            if path == draft_abs or not created_fixed_paths.get(path, False):
-                if os.path.exists(path):
-                    shutil.rmtree(path, ignore_errors=True)
+    except Exception as exc:
+        rollback_errors = []
+        specimen.clear()
+        specimen.update(specimen_snapshot)
+        for swap in reversed(sidecar_swaps):
+            try:
+                if swap["installed"] and os.path.exists(swap["target"]):
+                    shutil.rmtree(swap["target"])
+                if swap["rollback_moved"] and os.path.exists(swap["rollback"]):
+                    os.replace(swap["rollback"], swap["target"])
+                if os.path.exists(swap["staged"]):
+                    shutil.rmtree(swap["staged"])
+            except Exception as rollback_exc:
+                rollback_errors.append(f"{swap['target']}:{rollback_exc}")
         if os.path.exists(report_abs):
             try:
                 os.remove(report_abs)
-            except OSError:
-                pass
+            except OSError as rollback_exc:
+                rollback_errors.append(f"{report_abs}:{rollback_exc}")
+        if rollback_errors:
+            raise RuntimeError(
+                f"external_prediction_import_failed:{exc};rollback_failed:{'|'.join(rollback_errors)}"
+            ) from exc
         raise
+
+    for swap in sidecar_swaps:
+        if swap["rollback_moved"] and os.path.exists(swap["rollback"]):
+            shutil.rmtree(swap["rollback"], ignore_errors=True)
 
     return {
         "working_edit": labels.get("working_edit") or {},

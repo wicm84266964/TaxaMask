@@ -14,7 +14,7 @@ class TifAgentContextBuilder:
 
     def build(self):
         wb = self.workbench
-        selected_material = wb._selected_material()
+        selected_material = wb.part_mask_workflow_controller._selected_material()
         material_id = ""
         if isinstance(selected_material, dict):
             material_id = selected_material.get("id", "")
@@ -30,7 +30,7 @@ class TifAgentContextBuilder:
         if hasattr(wb, "log_console"):
             recent_log = "\n".join(wb.log_console.toPlainText().splitlines()[-6:])
 
-        source_shape, spacing_zyx = wb._volume_source_geometry()
+        source_shape, spacing_zyx = wb.volume_render_controller._volume_source_geometry()
         active_label_role = wb.label_role_combo.currentData() or ""
         active_label_volume = wb.label_volume
         if active_label_role == "working_edit" and wb.edit_volume is not None:
@@ -69,13 +69,13 @@ class TifAgentContextBuilder:
         volume_status = ""
         if wb.image_volume is not None:
             volume_status = wb.volume_canvas_overlay_text()
-        volume_perf = wb.volume_performance_report() if wb.image_volume is not None else {}
+        volume_perf = wb.volume_render_controller.volume_performance_report() if wb.image_volume is not None else {}
         backend_config = wb._backend_config_from_ui()
         train_ready_part_refs = []
         train_ready_top_level_count = 0
         if wb.project is not None:
             try:
-                train_ready_part_refs = wb._train_ready_part_refs()
+                train_ready_part_refs = wb.backend_workflow_service.train_ready_part_refs()
             except Exception:
                 train_ready_part_refs = []
             try:
@@ -88,17 +88,17 @@ class TifAgentContextBuilder:
             training_scope = "top_level_volume"
         else:
             training_scope = ""
-        selected_model_record = wb._selected_tif_model_record() if hasattr(wb, "model_library_combo") else None
+        selected_model_record = wb.backend_panel_controller.selected_model_record() if hasattr(wb, "model_library_combo") else None
         selected_model_manifest = ""
         selected_model_id = ""
         if selected_model_record:
-            selected_model_id = wb._tif_model_record_id(selected_model_record)
+            selected_model_id = wb.backend_panel_controller.model_record_id(selected_model_record)
             selected_model_manifest = wb.project.to_absolute(selected_model_record.get("model_manifest", ""))
         elif hasattr(wb, "backend_manifest_edit"):
             selected_model_manifest = str(wb.backend_manifest_edit.text() or "").strip()
         model_count = 0
         try:
-            model_count = len(wb._tif_model_records())
+            model_count = len(wb.backend_panel_controller.model_records())
         except Exception:
             model_count = 0
         command_presence = {
@@ -120,7 +120,7 @@ class TifAgentContextBuilder:
                 selected_predict_targets.append("/".join(str(item or "") for item in key[:3]))
             else:
                 selected_predict_targets.append(str(key))
-        task_summary = wb._task_summary_for_context()
+        task_summary = wb.task_manager.summary()
         state_summary = wb._current_state_summary()
         preview_resource_summary = ""
         local_axis_state_summary = ""
@@ -159,7 +159,7 @@ class TifAgentContextBuilder:
             "tif_backend_id": str(backend_config.get("backend_id") or ""),
             "tif_backend_python": str(backend_config.get("python_executable") or ""),
             "tif_backend_command_presence": str(command_presence),
-            "backend_run_active": "yes" if wb._backend_action_running() else "no",
+            "backend_run_active": "yes" if wb.backend_panel_controller.action_running() else "no",
             "backend_action": str(wb._tif_backend_action or ""),
             "backend_run_dir": str(wb._tif_backend_run_dir or ""),
             "backend_result_json": str(wb._tif_backend_result_json or ""),
@@ -173,25 +173,25 @@ class TifAgentContextBuilder:
             "preview_resource_summary": preview_resource_summary,
             "local_axis_state_summary": local_axis_state_summary,
             "volume_renderer": wb._volume_canvas_renderer,
-            "volume_renderer_label": wb._volume_renderer_label(),
+            "volume_renderer_label": wb.volume_render_controller._volume_renderer_label(),
             "volume_render_mode": wb._volume_render_mode,
-            "volume_projection_mode": wb._volume_projection_mode(),
-            "volume_mask_mode": wb._volume_mask_mode(),
+            "volume_projection_mode": wb.volume_render_controller._volume_projection_mode(),
+            "volume_mask_mode": wb.volume_render_controller._volume_mask_mode(),
             "volume_density_cutoff": f"{int(wb.volume_cutoff_slider.value())}%",
             "volume_density_opacity": f"{int(wb.volume_transfer_opacity_slider.value())}%",
-            "volume_texture_target_dim": str(wb._active_volume_target_dim()),
-            "volume_ray_samples": str(wb._active_volume_sample_count()),
+            "volume_texture_target_dim": str(wb.volume_render_controller._active_volume_target_dim()),
+            "volume_ray_samples": str(wb.volume_render_controller._active_volume_sample_count()),
             "volume_clarity_mode": clarity,
             "volume_detail_enhancement": f"{int(wb.volume_enhancement_slider.value())}%",
             "volume_tone_curve": f"{int(wb.volume_tone_slider.value())}%",
-            "volume_shader_quality": wb._volume_shader_quality_mode(),
+            "volume_shader_quality": wb.volume_render_controller._volume_shader_quality_mode(),
             "volume_surface_refine": "on" if wb.volume_surface_refine_check.isChecked() else "off",
             "volume_clip_plane": "on" if wb.volume_clip_plane_check.isChecked() else "off",
             "volume_clip_plane_depth": f"{int(wb.volume_clip_plane_depth_slider.value())}%",
             "volume_roi_high_detail": "on" if wb.volume_roi_detail_check.isChecked() else "off",
-            "volume_roi_inspect": "on" if wb._volume_roi_inspect_enabled() else "off",
-            "volume_roi_scale": f"{wb._active_volume_roi_scale():.1f}x",
-            "volume_roi_budget": f"{wb._roi_texture_budget_bytes() / (1024.0 ** 3):.1f} GB",
+            "volume_roi_inspect": "on" if wb.volume_render_controller._volume_roi_inspect_enabled() else "off",
+            "volume_roi_scale": f"{wb.volume_render_controller._active_volume_roi_scale():.1f}x",
+            "volume_roi_budget": f"{wb.volume_render_controller._roi_texture_budget_bytes() / (1024.0 ** 3):.1f} GB",
             "volume_inside_depth": f"{int(wb.volume_inside_slider.value())}%",
             "volume_front_cut": f"{int(wb.volume_clip_slider.value())}%",
             "volume_zoom": f"{int(round(float(wb._volume_zoom) * 100))}%",

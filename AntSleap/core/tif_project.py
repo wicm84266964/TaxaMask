@@ -1,6 +1,8 @@
+import copy
 import json
 import os
 import shutil
+import uuid
 from datetime import datetime
 
 from .safe_io import atomic_write_json, backup_file
@@ -8,7 +10,13 @@ from .sqlite_storage import LEGACY_JSON_BACKEND, PROJECT_MANIFEST_SCHEMA_VERSION
 from .tif_label_guard import can_write_label_role
 from .tif_materials import has_trainable_material, read_material_map, write_material_map
 from .tif_truth_policy import can_promote_to_manual_truth, can_use_role_for_training
-from .tif_volume_io import VOLUME_SIDECAR_FORMAT, copy_volume_sidecar, read_volume_metadata, volume_sidecar_exists
+from .tif_volume_io import (
+    VOLUME_SIDECAR_FORMAT,
+    begin_volume_sidecar_replacement,
+    copy_volume_sidecar,
+    read_volume_metadata,
+    volume_sidecar_exists,
+)
 from .tif_write_guard import WriteIntent, ensure_write_allowed
 
 
@@ -456,6 +464,50 @@ class TifProjectManager:
             protected_paths=(),
         )
         return ensure_write_allowed(intent)
+
+    def _apply_project_mutation_transaction(self, callback, *, save=True):
+        project_snapshot = copy.deepcopy(self.project_data)
+        try:
+            result = callback()
+            if save:
+                self.save_project()
+            return result
+        except Exception:
+            self.project_data = project_snapshot
+            raise
+
+    def _apply_volume_replacement_transaction(
+        self,
+        source_path,
+        target_path,
+        callback,
+        *,
+        role,
+        save=True,
+        transactions=None,
+    ):
+        project_snapshot = copy.deepcopy(self.project_data) if transactions is None else None
+        replacement = begin_volume_sidecar_replacement(source_path, target_path, role=role)
+        if transactions is not None:
+            transactions.append(replacement)
+        try:
+            result = callback(replacement.metadata)
+            if save:
+                self.save_project()
+        except Exception as exc:
+            if project_snapshot is not None:
+                self.project_data = project_snapshot
+            if transactions is None:
+                try:
+                    replacement.rollback()
+                except Exception as rollback_exc:
+                    raise RuntimeError(
+                        f"volume_record_update_failed:{exc};rollback_failed:{rollback_exc}"
+                    ) from exc
+            raise
+        if transactions is None:
+            replacement.commit()
+        return result
 
     def specimen_dir(self, specimen_id):
         return os.path.join("specimens", _safe_path_fragment(specimen_id))
@@ -998,7 +1050,16 @@ class TifProjectManager:
             self.save_project()
         return record
 
-    def promote_part_reslice_editable_result_to_manual_truth(self, specimen_id, part_id, reslice_id, source_role="editable_ai_result", mark_train_ready=True, save=True):
+    def promote_part_reslice_editable_result_to_manual_truth(
+        self,
+        specimen_id,
+        part_id,
+        reslice_id,
+        source_role="editable_ai_result",
+        mark_train_ready=True,
+        save=True,
+        _replacement_transactions=None,
+    ):
         labels, part, reslice = self._part_label_container(specimen_id, part_id, reslice_id)
         if reslice is None:
             raise ValueError("reslice_id_required_for_reslice_label")
@@ -1040,12 +1101,13 @@ class TifProjectManager:
         source_abs = self.to_absolute(source_path)
         target_abs = self.to_absolute(target_path)
         if os.path.normcase(os.path.abspath(source_abs)) == os.path.normcase(os.path.abspath(target_abs)):
-            labels["manual_truth"]["status"] = "reviewed"
-            if mark_train_ready:
-                self.set_part_training_metadata(specimen_id, part_id, active_reslice_id=str(reslice_id or ""), system_status="verified_train_ready", save=False)
-            if save:
-                self.save_project()
-            return labels["manual_truth"]
+            def apply_existing_truth():
+                labels["manual_truth"]["status"] = "reviewed"
+                if mark_train_ready:
+                    self.set_part_training_metadata(specimen_id, part_id, active_reslice_id=str(reslice_id or ""), system_status="verified_train_ready", save=False)
+                return labels["manual_truth"]
+
+            return self._apply_project_mutation_transaction(apply_existing_truth, save=save)
         self._ensure_project_write_allowed(
             target_abs,
             source_path=source_abs,
@@ -1055,29 +1117,44 @@ class TifProjectManager:
             allow_overwrite=True,
             audit_metadata={"review_action": "promote_part_reslice_editable_result_to_manual_truth"},
         )
-        metadata = copy_volume_sidecar(source_abs, target_abs, role="manual_truth")
-        labels["manual_truth"] = self._volume_payload(
-            target_path,
-            metadata["shape_zyx"],
-            metadata["dtype"],
-            metadata.get("spacing_zyx"),
-            metadata.get("spacing_unit", "micrometer"),
-            metadata.get("orientation", "local_axis_reslice"),
-            metadata.get("format", VOLUME_SIDECAR_FORMAT),
-        )
-        labels["manual_truth"]["role"] = "manual_truth"
-        labels["manual_truth"]["status"] = "reviewed"
-        labels["manual_truth"]["coordinate_space"] = "local_axis_reslice_voxel_zyx"
-        labels["manual_truth"]["reslice_id"] = str(reslice_id or "")
-        reslice["updated_at"] = _now_iso()
-        part["updated_at"] = _now_iso()
-        if mark_train_ready:
-            self.set_part_training_metadata(specimen_id, part_id, active_reslice_id=str(reslice_id or ""), system_status="verified_train_ready", save=False)
-        if save:
-            self.save_project()
-        return labels["manual_truth"]
+        def apply_replacement(metadata):
+            labels["manual_truth"] = self._volume_payload(
+                target_path,
+                metadata["shape_zyx"],
+                metadata["dtype"],
+                metadata.get("spacing_zyx"),
+                metadata.get("spacing_unit", "micrometer"),
+                metadata.get("orientation", "local_axis_reslice"),
+                metadata.get("format", VOLUME_SIDECAR_FORMAT),
+            )
+            labels["manual_truth"]["role"] = "manual_truth"
+            labels["manual_truth"]["status"] = "reviewed"
+            labels["manual_truth"]["coordinate_space"] = "local_axis_reslice_voxel_zyx"
+            labels["manual_truth"]["reslice_id"] = str(reslice_id or "")
+            reslice["updated_at"] = _now_iso()
+            part["updated_at"] = _now_iso()
+            if mark_train_ready:
+                self.set_part_training_metadata(specimen_id, part_id, active_reslice_id=str(reslice_id or ""), system_status="verified_train_ready", save=False)
+            return labels["manual_truth"]
 
-    def promote_part_editable_result_to_manual_truth(self, specimen_id, part_id, source_role="editable_ai_result", mark_train_ready=True, save=True):
+        return self._apply_volume_replacement_transaction(
+            source_abs,
+            target_abs,
+            apply_replacement,
+            role="manual_truth",
+            save=save,
+            transactions=_replacement_transactions,
+        )
+
+    def promote_part_editable_result_to_manual_truth(
+        self,
+        specimen_id,
+        part_id,
+        source_role="editable_ai_result",
+        mark_train_ready=True,
+        save=True,
+        _replacement_transactions=None,
+    ):
         part = self._require_part(specimen_id, part_id)
         labels = part.setdefault("labels", self._normalize_part_labels(None))
         policy = can_promote_to_manual_truth(
@@ -1116,12 +1193,13 @@ class TifProjectManager:
         source_abs = self.to_absolute(source_path)
         target_abs = self.to_absolute(target_path)
         if os.path.normcase(os.path.abspath(source_abs)) == os.path.normcase(os.path.abspath(target_abs)):
-            labels["manual_truth"]["status"] = "reviewed"
-            if mark_train_ready:
-                self.set_part_training_metadata(specimen_id, part_id, system_status="verified_train_ready", save=False)
-            if save:
-                self.save_project()
-            return labels["manual_truth"]
+            def apply_existing_truth():
+                labels["manual_truth"]["status"] = "reviewed"
+                if mark_train_ready:
+                    self.set_part_training_metadata(specimen_id, part_id, system_status="verified_train_ready", save=False)
+                return labels["manual_truth"]
+
+            return self._apply_project_mutation_transaction(apply_existing_truth, save=save)
         self._ensure_project_write_allowed(
             target_abs,
             source_path=source_abs,
@@ -1131,26 +1209,33 @@ class TifProjectManager:
             allow_overwrite=True,
             audit_metadata={"review_action": "promote_part_editable_result_to_manual_truth"},
         )
-        metadata = copy_volume_sidecar(source_abs, target_abs, role="manual_truth")
-        labels["manual_truth"] = self._volume_payload(
-            target_path,
-            metadata["shape_zyx"],
-            metadata["dtype"],
-            metadata.get("spacing_zyx"),
-            metadata.get("spacing_unit", "micrometer"),
-            metadata.get("orientation", "unknown"),
-            metadata.get("format", VOLUME_SIDECAR_FORMAT),
-        )
-        labels["manual_truth"]["role"] = "manual_truth"
-        labels["manual_truth"]["status"] = "reviewed"
-        if mark_train_ready:
-            self.set_part_training_metadata(specimen_id, part_id, system_status="verified_train_ready", save=False)
-        part["updated_at"] = _now_iso()
-        if save:
-            self.save_project()
-        return labels["manual_truth"]
+        def apply_replacement(metadata):
+            labels["manual_truth"] = self._volume_payload(
+                target_path,
+                metadata["shape_zyx"],
+                metadata["dtype"],
+                metadata.get("spacing_zyx"),
+                metadata.get("spacing_unit", "micrometer"),
+                metadata.get("orientation", "unknown"),
+                metadata.get("format", VOLUME_SIDECAR_FORMAT),
+            )
+            labels["manual_truth"]["role"] = "manual_truth"
+            labels["manual_truth"]["status"] = "reviewed"
+            if mark_train_ready:
+                self.set_part_training_metadata(specimen_id, part_id, system_status="verified_train_ready", save=False)
+            part["updated_at"] = _now_iso()
+            return labels["manual_truth"]
 
-    def evaluate_part_editable_result_review_ready(self, specimen_id, part_id, reslice_id=""):
+        return self._apply_volume_replacement_transaction(
+            source_abs,
+            target_abs,
+            apply_replacement,
+            role="manual_truth",
+            save=save,
+            transactions=_replacement_transactions,
+        )
+
+    def evaluate_part_editable_result_review_ready(self, specimen_id, part_id, reslice_id="", validate_label_ids=True):
         part = self._require_part(specimen_id, part_id)
         training = part.get("training") or {}
         clean_reslice_id = str(reslice_id or "").strip()
@@ -1177,16 +1262,35 @@ class TifProjectManager:
             "label_ids_known": False,
             "opened_for_review": bool(training.get("opened_for_review")),
         }
-        label_report = (
-            self.validate_part_label_ids(specimen_id, part_id, "editable_ai_result", reslice_id=clean_reslice_id)
-            if checks["editable_ai_result_exists"]
-            else {
+        if checks["editable_ai_result_exists"] and validate_label_ids:
+            label_report = self.validate_part_label_ids(
+                specimen_id,
+                part_id,
+                "editable_ai_result",
+                reslice_id=clean_reslice_id,
+            )
+        elif checks["editable_ai_result_exists"] and schema_id and schema_labels:
+            label_report = {
+                "ok": True,
+                "reasons": [],
+                "unknown_label_ids": [],
+                "label_ids": [],
+                "skipped": "label_id_scan_deferred",
+            }
+        elif checks["editable_ai_result_exists"]:
+            label_report = {
+                "ok": False,
+                "reasons": ["label_schema_missing"],
+                "unknown_label_ids": [],
+                "label_ids": [],
+            }
+        else:
+            label_report = {
                 "ok": False,
                 "reasons": ["editable_ai_result_missing"],
                 "unknown_label_ids": [],
                 "label_ids": [],
             }
-        )
         checks["label_ids_known"] = bool(label_report.get("ok"))
         reason_labels = {
             "editable_ai_result_exists": "editable_ai_result_missing",
@@ -1207,6 +1311,7 @@ class TifProjectManager:
             "review_ready": checks["editable_ai_result_exists"] and checks["label_ids_known"],
             "opened_for_review": checks["opened_for_review"],
             "label_report": label_report,
+            "label_ids_checked": bool(checks["editable_ai_result_exists"] and validate_label_ids),
             "label_schema_id": schema_id,
             "label_schema_labels": schema_labels,
             "label_ids": list(label_report.get("label_ids") or []),
@@ -1265,25 +1370,45 @@ class TifProjectManager:
         if blocked:
             raise ValueError(f"part_review_not_ready:{blocked}")
         promoted = []
-        for ref in refs:
-            if ref.get("reslice_id"):
-                manual = self.promote_part_reslice_editable_result_to_manual_truth(
-                    ref["specimen_id"],
-                    ref["part_id"],
-                    ref.get("reslice_id", ""),
-                    mark_train_ready=True,
-                    save=False,
-                )
-            else:
-                manual = self.promote_part_editable_result_to_manual_truth(
-                    ref["specimen_id"],
-                    ref["part_id"],
-                    mark_train_ready=True,
-                    save=False,
-                )
-            promoted.append({**ref, "manual_truth": manual})
-        if save and promoted:
-            self.save_project()
+        project_snapshot = copy.deepcopy(self.project_data)
+        replacements = []
+        try:
+            for ref in refs:
+                if ref.get("reslice_id"):
+                    manual = self.promote_part_reslice_editable_result_to_manual_truth(
+                        ref["specimen_id"],
+                        ref["part_id"],
+                        ref.get("reslice_id", ""),
+                        mark_train_ready=True,
+                        save=False,
+                        _replacement_transactions=replacements,
+                    )
+                else:
+                    manual = self.promote_part_editable_result_to_manual_truth(
+                        ref["specimen_id"],
+                        ref["part_id"],
+                        mark_train_ready=True,
+                        save=False,
+                        _replacement_transactions=replacements,
+                    )
+                promoted.append({**ref, "manual_truth": manual})
+            if save and promoted:
+                self.save_project()
+        except Exception as exc:
+            self.project_data = project_snapshot
+            rollback_errors = []
+            for replacement in reversed(replacements):
+                try:
+                    replacement.rollback()
+                except Exception as rollback_exc:
+                    rollback_errors.append(str(rollback_exc))
+            if rollback_errors:
+                raise RuntimeError(
+                    f"part_truth_batch_failed:{exc};rollback_failed:{'|'.join(rollback_errors)}"
+                ) from exc
+            raise
+        for replacement in replacements:
+            replacement.commit()
         return {"promoted": promoted, "count": len(promoted)}
 
     def validate_part_label_ids(self, specimen_id, part_id, role="manual_truth", reslice_id=""):
@@ -1419,22 +1544,28 @@ class TifProjectManager:
             allow_overwrite=True,
             audit_metadata={"review_action": "promote_working_edit_to_manual_truth"},
         )
-        metadata = copy_volume_sidecar(source_abs, target_abs, role="manual_truth")
-        specimen["labels"]["manual_truth"] = self._volume_payload(
-            target_path,
-            metadata["shape_zyx"],
-            metadata["dtype"],
-            metadata.get("spacing_zyx"),
-            metadata.get("spacing_unit", "micrometer"),
-            metadata.get("orientation", "unknown"),
-            metadata.get("format", VOLUME_SIDECAR_FORMAT),
+        def apply_replacement(metadata):
+            specimen["labels"]["manual_truth"] = self._volume_payload(
+                target_path,
+                metadata["shape_zyx"],
+                metadata["dtype"],
+                metadata.get("spacing_zyx"),
+                metadata.get("spacing_unit", "micrometer"),
+                metadata.get("orientation", "unknown"),
+                metadata.get("format", VOLUME_SIDECAR_FORMAT),
+            )
+            specimen["labels"]["manual_truth"]["status"] = "reviewed"
+            specimen["review_status"] = "train_ready" if mark_train_ready else "reviewed"
+            specimen["train_ready"] = bool(mark_train_ready)
+            return specimen["labels"]["manual_truth"]
+
+        return self._apply_volume_replacement_transaction(
+            source_abs,
+            target_abs,
+            apply_replacement,
+            role="manual_truth",
+            save=save,
         )
-        specimen["labels"]["manual_truth"]["status"] = "reviewed"
-        specimen["review_status"] = "train_ready" if mark_train_ready else "reviewed"
-        specimen["train_ready"] = bool(mark_train_ready)
-        if save:
-            self.save_project()
-        return specimen["labels"]["manual_truth"]
 
     def evaluate_train_ready(self, specimen_id):
         specimen = self._require_specimen(specimen_id)
@@ -1474,8 +1605,13 @@ class TifProjectManager:
             "has_trainable_material": "no_trainable_material",
         }
         for key, passed in checks.items():
-            if not passed:
-                reasons.append(reason_labels[key])
+            if passed:
+                continue
+            if key == "shape_matches" and not (checks["working_volume_exists"] and checks["manual_truth_exists"]):
+                continue
+            reason = reason_labels[key]
+            if reason not in reasons:
+                reasons.append(reason)
 
         return {
             "specimen_id": specimen.get("specimen_id"),
@@ -1551,8 +1687,13 @@ class TifProjectManager:
             "operator_marked_train_ready": "part_not_marked_train_ready",
         }
         for key, passed in checks.items():
-            if not passed:
-                reasons.append(reason_labels[key])
+            if passed:
+                continue
+            if key == "shape_matches" and not (checks["part_volume_exists"] and checks["manual_truth_exists"]):
+                continue
+            reason = reason_labels[key]
+            if reason not in reasons:
+                reasons.append(reason)
         if not checks["label_ids_known"]:
             for reason in label_report.get("reasons", []) or []:
                 if reason not in reasons and reason != "manual_truth_missing":
@@ -2086,8 +2227,11 @@ class TifProjectManager:
                 return record
         return default
 
-    def discard_part(self, specimen_id, part_id, remove_storage=True, save=True):
+    def discard_part(self, specimen_id, part_id, remove_storage=True, save=True, unlink_linked_rois=False):
+        if remove_storage and not save:
+            raise ValueError("discard_part_storage_removal_requires_save")
         specimen = self._require_specimen(specimen_id)
+        specimen_snapshot = copy.deepcopy(specimen)
         wanted = str(part_id or "").strip()
         wanted_safe = _safe_part_id(wanted)
         parts = specimen.setdefault("parts", [])
@@ -2101,7 +2245,18 @@ class TifProjectManager:
                 kept.append(part)
         specimen["parts"] = kept
 
+        if unlink_linked_rois and removed_part is not None:
+            removed_part_id = str(removed_part.get("part_id") or wanted)
+            for roi in specimen.get("part_rois", []) or []:
+                if str((roi or {}).get("linked_part_id") or "") in {wanted, wanted_safe, removed_part_id}:
+                    roi["status"] = "cancelled"
+                    roi["linked_part_id"] = ""
+                    roi["updated_at"] = _now_iso()
+
         removed_storage = False
+        storage_cleanup_error = ""
+        part_root = ""
+        pending_delete_root = ""
         if remove_storage and removed_part is not None:
             part_root = os.path.abspath(self.to_absolute(self.part_dir(specimen_id, removed_part.get("part_id", ""))))
             parts_root = os.path.abspath(self.to_absolute(os.path.join(self.specimen_dir(specimen_id), "parts")))
@@ -2113,12 +2268,41 @@ class TifProjectManager:
             except ValueError:
                 is_safe_storage = False
             if is_safe_storage and os.path.exists(part_root):
-                shutil.rmtree(part_root)
-                removed_storage = True
+                pending_delete_root = f"{part_root}.delete_pending_{uuid.uuid4().hex}"
 
-        if save and (removed_part is not None or removed_storage):
-            self.save_project()
-        return {"removed_part": removed_part is not None, "removed_storage": removed_storage}
+        try:
+            if pending_delete_root:
+                os.replace(part_root, pending_delete_root)
+                removed_storage = True
+            if save and (removed_part is not None or removed_storage):
+                self.save_project()
+        except Exception as exc:
+            rollback_errors = []
+            specimen.clear()
+            specimen.update(specimen_snapshot)
+            if pending_delete_root and os.path.exists(pending_delete_root):
+                try:
+                    if os.path.exists(part_root):
+                        raise FileExistsError(part_root)
+                    os.replace(pending_delete_root, part_root)
+                except Exception as rollback_exc:
+                    rollback_errors.append(str(rollback_exc))
+            if rollback_errors:
+                raise RuntimeError(
+                    f"discard_part_failed:{exc};rollback_failed:{'|'.join(rollback_errors)}"
+                ) from exc
+            raise
+
+        if pending_delete_root and os.path.exists(pending_delete_root):
+            try:
+                shutil.rmtree(pending_delete_root)
+            except OSError as exc:
+                storage_cleanup_error = str(exc)
+        return {
+            "removed_part": removed_part is not None,
+            "removed_storage": removed_storage,
+            "storage_cleanup_error": storage_cleanup_error,
+        }
 
     def _require_specimen(self, specimen_id):
         specimen = self.get_specimen(specimen_id, default=None)
@@ -2135,6 +2319,7 @@ class TifProjectManager:
     def discard_specimen_scaffold(self, specimen_id, save=True):
         clean_id = str(specimen_id or "").strip()
         specimens = self.project_data.setdefault("specimens", [])
+        original_specimens = list(specimens)
         before = len(specimens)
         self.project_data["specimens"] = [item for item in specimens if item.get("specimen_id") != clean_id]
         removed_specimen = len(self.project_data["specimens"]) != before
@@ -2149,13 +2334,47 @@ class TifProjectManager:
             )
         except ValueError:
             is_safe_storage = False
+        pending_delete_root = ""
+        storage_cleanup_error = ""
         if is_safe_storage and os.path.exists(specimen_root):
-            shutil.rmtree(specimen_root)
-            removed_storage = True
+            if save:
+                pending_delete_root = f"{specimen_root}.delete_pending_{uuid.uuid4().hex}"
+            else:
+                shutil.rmtree(specimen_root)
+                removed_storage = True
 
-        if save and (removed_specimen or removed_storage):
-            self.save_project()
-        return {"removed_specimen": removed_specimen, "removed_storage": removed_storage}
+        try:
+            if pending_delete_root:
+                os.replace(specimen_root, pending_delete_root)
+                removed_storage = True
+            if save and (removed_specimen or removed_storage):
+                self.save_project()
+        except Exception as exc:
+            rollback_errors = []
+            self.project_data["specimens"] = original_specimens
+            if pending_delete_root and os.path.exists(pending_delete_root):
+                try:
+                    if os.path.exists(specimen_root):
+                        raise FileExistsError(specimen_root)
+                    os.replace(pending_delete_root, specimen_root)
+                except Exception as rollback_exc:
+                    rollback_errors.append(str(rollback_exc))
+            if rollback_errors:
+                raise RuntimeError(
+                    f"discard_specimen_failed:{exc};rollback_failed:{'|'.join(rollback_errors)}"
+                ) from exc
+            raise
+
+        if pending_delete_root and os.path.exists(pending_delete_root):
+            try:
+                shutil.rmtree(pending_delete_root)
+            except OSError as exc:
+                storage_cleanup_error = str(exc)
+        return {
+            "removed_specimen": removed_specimen,
+            "removed_storage": removed_storage,
+            "storage_cleanup_error": storage_cleanup_error,
+        }
 
     def _validate_new_specimen_id(self, specimen_id, require_storage_available=False):
         clean_id = str(specimen_id or "").strip()

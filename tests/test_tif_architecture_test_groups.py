@@ -19,6 +19,7 @@ class TifArchitectureTestGroupTests(unittest.TestCase):
     def test_regression_groups_reference_importable_modules(self):
         self.assertIn("core_safety", TIF_ARCHITECTURE_REGRESSION_GROUPS)
         self.assertIn("service_task", TIF_ARCHITECTURE_REGRESSION_GROUPS)
+        self.assertIn("round3_architecture", TIF_ARCHITECTURE_REGRESSION_GROUPS)
         self.assertIn("research_smoke", TIF_ARCHITECTURE_REGRESSION_GROUPS)
 
         for group_name, targets in TIF_ARCHITECTURE_REGRESSION_GROUPS.items():

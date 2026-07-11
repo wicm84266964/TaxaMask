@@ -36,6 +36,6 @@ class TifQtTaskAdapter:
             message=message,
         )
 
-    def current_context_matches(self, widget, task_id, *, fields=None, request_key="", label_role="", ignore_empty=True):
+    def current_context_matches(self, widget, task_id, *, fields=None, request_key="", label_role="", ignore_empty=False):
         context = self.context_from_widget(widget, request_key=request_key, label_role=label_role)
         return self.manager.context_matches(task_id, context, fields=fields, ignore_empty=ignore_empty)

@@ -224,6 +224,7 @@ class TifBackendTests(unittest.TestCase):
             self.assertEqual(readiness["reasons"], [])
             self.assertFalse(train_readiness["train_ready"])
             self.assertIn("manual_truth_missing", train_readiness["reasons"])
+            self.assertNotIn("part_label_shape_mismatch", train_readiness["reasons"])
             self.assertIn("part_not_marked_train_ready", train_readiness["reasons"])
             self.assertEqual(contract["part_samples"][0]["label_volume"]["role"], "none")
             self.assertEqual(contract["part_samples"][0]["label_volume"]["path"], "")

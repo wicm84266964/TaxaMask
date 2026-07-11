@@ -56,8 +56,9 @@ def _specimen_with_material_payload(project_manager, specimen):
         return specimen
     try:
         payload = read_material_map(project_manager.to_absolute(material_path))
-    except Exception:
-        return specimen
+    except Exception as exc:
+        specimen_id = str(specimen.get("specimen_id") or "")
+        raise ValueError(f"tif_material_map_read_failed:{specimen_id}:{material_path}:{exc}") from exc
     enriched = dict(specimen)
     enriched["material_map_payload"] = payload
     return enriched

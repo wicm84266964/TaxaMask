@@ -3155,7 +3155,7 @@ if gpu_volume_offscreen_available():
         def _try_start_local_axis_endpoint_drag(self, event):
             if self.workbench is None or event.button() != Qt.LeftButton:
                 return False
-            handler = getattr(self.workbench, "start_local_axis_endpoint_drag", None)
+            handler = getattr(getattr(self.workbench, "local_axis_controller", None), "start_endpoint_drag", None)
             if not callable(handler):
                 return False
             if not handler(event.position().x(), event.position().y()):
@@ -3465,7 +3465,7 @@ if gpu_volume_offscreen_available():
         def mousePressEvent(self, event):
             self.setFocus(Qt.MouseFocusReason)
             if self.workbench is not None and event.button() == Qt.LeftButton:
-                picker = getattr(self.workbench, "pick_local_axis_roll_reference_at", None)
+                picker = getattr(getattr(self.workbench, "local_axis_controller", None), "pick_roll_reference_at", None)
                 if callable(picker) and picker(event.position().x(), event.position().y()):
                     event.accept()
                     return
@@ -3491,11 +3491,11 @@ if gpu_volume_offscreen_available():
                 dy = current.y() - self._last_drag_pos.y()
                 self._last_drag_pos = current
                 if self._mouse_mode == "local_axis_endpoint":
-                    self.workbench.drag_local_axis_endpoint(current.x(), current.y())
+                    self.workbench.local_axis_controller.drag_endpoint(current.x(), current.y())
                 elif self._mouse_mode == "pan":
-                    self.workbench.pan_volume_preview(dx, dy)
+                    self.workbench.volume_render_controller.pan_volume_preview(dx, dy)
                 else:
-                    self.workbench.rotate_volume_preview(dx, dy)
+                    self.workbench.volume_render_controller.rotate_volume_preview(dx, dy)
                 event.accept()
                 return
             super().mouseMoveEvent(event)
@@ -3503,11 +3503,11 @@ if gpu_volume_offscreen_available():
         def mouseReleaseEvent(self, event):
             if event.button() in (Qt.LeftButton, Qt.RightButton) and self._mouse_mode:
                 if self._mouse_mode == "local_axis_endpoint" and self.workbench is not None:
-                    self.workbench.finish_local_axis_endpoint_drag()
+                    self.workbench.local_axis_controller.finish_endpoint_drag()
                 self._mouse_mode = ""
                 self._last_drag_pos = None
                 if self.workbench is not None:
-                    self.workbench.finish_volume_interaction_debounced()
+                    self.workbench.volume_render_controller.finish_volume_interaction_debounced()
                 event.accept()
                 return
             super().mouseReleaseEvent(event)
@@ -3520,7 +3520,7 @@ if gpu_volume_offscreen_available():
             if delta == 0:
                 event.ignore()
                 return
-            self.workbench.zoom_volume_preview(1 if delta > 0 else -1)
+            self.workbench.volume_render_controller.zoom_volume_preview(1 if delta > 0 else -1)
             event.accept()
 
         def release_gl_resources(self):
@@ -4360,7 +4360,7 @@ if gpu_volume_canvas_available():
         def mousePressEvent(self, event):
             self.setFocus(Qt.MouseFocusReason)
             if self.workbench is not None and event.button() == Qt.LeftButton:
-                picker = getattr(self.workbench, "pick_local_axis_roll_reference_at", None)
+                picker = getattr(getattr(self.workbench, "local_axis_controller", None), "pick_roll_reference_at", None)
                 if callable(picker) and picker(event.position().x(), event.position().y()):
                     event.accept()
                     return
@@ -4386,11 +4386,11 @@ if gpu_volume_canvas_available():
                 dy = current.y() - self._last_drag_pos.y()
                 self._last_drag_pos = current
                 if self._mouse_mode == "local_axis_endpoint":
-                    self.workbench.drag_local_axis_endpoint(current.x(), current.y())
+                    self.workbench.local_axis_controller.drag_endpoint(current.x(), current.y())
                 elif self._mouse_mode == "pan":
-                    self.workbench.pan_volume_preview(dx, dy)
+                    self.workbench.volume_render_controller.pan_volume_preview(dx, dy)
                 else:
-                    self.workbench.rotate_volume_preview(dx, dy)
+                    self.workbench.volume_render_controller.rotate_volume_preview(dx, dy)
                 event.accept()
                 return
             super().mouseMoveEvent(event)
@@ -4398,11 +4398,11 @@ if gpu_volume_canvas_available():
         def mouseReleaseEvent(self, event):
             if event.button() in (Qt.LeftButton, Qt.RightButton) and self._mouse_mode:
                 if self._mouse_mode == "local_axis_endpoint" and self.workbench is not None:
-                    self.workbench.finish_local_axis_endpoint_drag()
+                    self.workbench.local_axis_controller.finish_endpoint_drag()
                 self._mouse_mode = ""
                 self._last_drag_pos = None
                 if self.workbench is not None:
-                    self.workbench.finish_volume_interaction_debounced()
+                    self.workbench.volume_render_controller.finish_volume_interaction_debounced()
                 event.accept()
                 return
             super().mouseReleaseEvent(event)
@@ -4415,7 +4415,7 @@ if gpu_volume_canvas_available():
             if delta == 0:
                 event.ignore()
                 return
-            self.workbench.zoom_volume_preview(1 if delta > 0 else -1)
+            self.workbench.volume_render_controller.zoom_volume_preview(1 if delta > 0 else -1)
             event.accept()
 
         def release_gl_resources(self):

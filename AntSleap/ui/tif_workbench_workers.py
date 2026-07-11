@@ -163,6 +163,10 @@ class TifMaterializeWorker(QObject):
         self.finished.emit(result)
 
 
+class _TifVolumePreviewCancelled(RuntimeError):
+    pass
+
+
 class TifVolumePreviewBuildWorker(QObject):
     progress = Signal(str)
     finished = Signal(object)
@@ -176,9 +180,19 @@ class TifVolumePreviewBuildWorker(QObject):
         self.mask = mask
         self.mask_request = dict(mask_request or {})
         self._cancelled = False
+        self._last_ui_yield = time.perf_counter()
 
     def cancel(self):
         self._cancelled = True
+
+    def _yield_for_ui(self):
+        if self._cancelled:
+            raise _TifVolumePreviewCancelled()
+        now = time.perf_counter()
+        if now - self._last_ui_yield < 0.008:
+            return
+        self._last_ui_yield = now
+        time.sleep(0)
 
     def run(self):
         result = {
@@ -208,6 +222,7 @@ class TifVolumePreviewBuildWorker(QObject):
                         preserve_source=bool(self.volume_request.get("preserve_source", False)),
                         texture_budget_bytes=int(self.volume_request.get("texture_budget_bytes", DEFAULT_ROI_TEXTURE_BUDGET_BYTES)),
                         max_texture_dim=GPU_VOLUME_MAX_TEXTURE_DIM,
+                        yield_callback=self._yield_for_ui,
                     )
                 else:
                     preview = build_volume_preview(
@@ -215,6 +230,7 @@ class TifVolumePreviewBuildWorker(QObject):
                         int(self.volume_request.get("max_dim", 1024)),
                         mode=str(self.volume_request.get("algorithm", "hybrid")),
                         preserve_source=bool(self.volume_request.get("preserve_source", False)),
+                        yield_callback=self._yield_for_ui,
                     )
                 result["preview"] = preview
             if self.mask_request and self.mask is not None:
@@ -231,15 +247,21 @@ class TifVolumePreviewBuildWorker(QObject):
                         int(self.mask_request.get("max_dim", 1024)),
                         mode=str(self.mask_request.get("algorithm", "occupancy")),
                         max_texture_dim=GPU_VOLUME_MAX_TEXTURE_DIM,
+                        yield_callback=self._yield_for_ui,
                     )
                 else:
                     mask_preview = build_mask_preview(
                         self.mask,
                         int(self.mask_request.get("max_dim", 1024)),
                         mode=str(self.mask_request.get("algorithm", "occupancy")),
+                        yield_callback=self._yield_for_ui,
                     )
                 result["mask_preview"] = mask_preview
             result["cancelled"] = bool(self._cancelled)
+            result["build_ms"] = max(0.0, (time.perf_counter() - started) * 1000.0)
+            self.finished.emit(result)
+        except _TifVolumePreviewCancelled:
+            result["cancelled"] = True
             result["build_ms"] = max(0.0, (time.perf_counter() - started) * 1000.0)
             self.finished.emit(result)
         except Exception as exc:

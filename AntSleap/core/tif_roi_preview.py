@@ -72,6 +72,7 @@ def build_roi_volume_preview(
     preserve_source=True,
     texture_budget_bytes=DEFAULT_ROI_TEXTURE_BUDGET_BYTES,
     max_texture_dim=4096,
+    yield_callback=None,
 ):
     crop = roi_crop_view(volume, bbox_zyx)
     if crop is None:
@@ -85,15 +86,21 @@ def build_roi_volume_preview(
         max_texture_dim=max_texture_dim,
     )
     target_dim = max(1, min(int(max_dim), int(budget_dim), int(max_texture_dim)))
-    return build_volume_preview(crop, target_dim, mode=mode, preserve_source=preserve_source)
+    return build_volume_preview(
+        crop,
+        target_dim,
+        mode=mode,
+        preserve_source=preserve_source,
+        yield_callback=yield_callback,
+    )
 
 
-def build_roi_mask_preview(mask, bbox_zyx, max_dim, mode="occupancy", max_texture_dim=4096):
+def build_roi_mask_preview(mask, bbox_zyx, max_dim, mode="occupancy", max_texture_dim=4096, yield_callback=None):
     crop = roi_crop_view(mask, bbox_zyx)
     if crop is None:
         return None
     target_dim = max(1, min(int(max_dim), int(max_texture_dim)))
-    return build_mask_preview(crop, target_dim, mode=mode)
+    return build_mask_preview(crop, target_dim, mode=mode, yield_callback=yield_callback)
 
 
 __all__ = [

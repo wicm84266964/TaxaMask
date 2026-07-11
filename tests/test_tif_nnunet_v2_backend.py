@@ -8,6 +8,7 @@ import numpy as np
 
 from AntSleap.core.tif_backend import TifBackendRunner, nnunet_v2_tif_backend_preset
 from AntSleap.core.tif_export import write_nifti_volume
+from AntSleap.core.tif_project import TifProjectManager
 from AntSleap.core.tif_volume_io import load_volume_sidecar
 from AntSleap.tools import tif_nnunet_v2_backend
 from tests.test_tif_backend import make_predict_ready_project, make_top_level_only_project, make_train_ready_project
@@ -379,6 +380,18 @@ class TifNnunetV2BackendTests(unittest.TestCase):
             self.assertTrue(np.all(editable == 1))
             self.assertTrue(np.all(backup == 1))
             self.assertEqual(specimen["review_status"], "pending_review")
+
+            reloaded = TifProjectManager()
+            reloaded.load_project(manager.current_project_path)
+            reloaded_specimen = reloaded.get_specimen("top-001")
+            reloaded_labels = reloaded_specimen["labels"]
+            reloaded_backup = reloaded_labels["raw_ai_prediction_backup"]
+            self.assertEqual(reloaded_backup["status"], "raw_backup")
+            self.assertTrue(reloaded_backup["path"])
+            np.testing.assert_array_equal(
+                load_volume_sidecar(reloaded.to_absolute(reloaded_backup["path"])),
+                backup,
+            )
 
 
 if __name__ == "__main__":

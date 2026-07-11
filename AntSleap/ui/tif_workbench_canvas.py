@@ -354,7 +354,7 @@ class TifSliceCanvas(QLabel):
             return
         contours = []
         if callable(getattr(self.workbench, "current_contour_overlay_polygons", None)):
-            contours = self.workbench.current_contour_overlay_polygons()
+            contours = self.workbench.part_mask_workflow_controller.current_contour_overlay_polygons()
         for contour in contours:
             if isinstance(contour, dict):
                 self._draw_polyline(
@@ -423,8 +423,7 @@ class TifSliceCanvas(QLabel):
         if self.workbench is None or self._hover_pos is None:
             return
         if (
-            callable(getattr(self.workbench, "is_part_contour_draw_mode", None))
-            and self.workbench.is_part_contour_draw_mode()
+            self.workbench.part_mask_workflow_controller.is_part_contour_draw_mode()
         ):
             return
         if self._pixmap is None or self._pixmap.isNull() or self._draw_rect.isNull():
@@ -571,8 +570,8 @@ class TifSliceCanvas(QLabel):
         if (
             self.workbench is not None
             and event.button() == Qt.LeftButton
-            and callable(getattr(self.workbench, "is_part_contour_draw_mode", None))
-            and self.workbench.is_part_contour_draw_mode()
+            and
+            self.workbench.part_mask_workflow_controller.is_part_contour_draw_mode()
         ):
             point = self.widget_to_image_point(event.position().x(), event.position().y())
             self._contour_drag_points = [list(point)] if point is not None else []
@@ -595,7 +594,7 @@ class TifSliceCanvas(QLabel):
                 event.accept()
                 return
             if mode == "picker":
-                self.workbench.pick_material_at_widget_position(event.position().x(), event.position().y())
+                self.workbench.part_mask_workflow_controller.pick_material_at_widget_position(event.position().x(), event.position().y())
                 event.accept()
                 return
             if mode == "lasso":
@@ -634,9 +633,9 @@ class TifSliceCanvas(QLabel):
                 return
             self._annotation_drag_active = True
             self._annotation_drag_erase = bool(event.modifiers() & Qt.ControlModifier) or mode == "eraser"
-            if callable(getattr(self.workbench, "begin_annotation_stroke", None)):
-                self.workbench.begin_annotation_stroke()
-            self.workbench.paint_at_widget_position(
+            if getattr(self.workbench, "annotation_workflow_controller", None) is not None:
+                self.workbench.annotation_workflow_controller.begin_annotation_stroke()
+            self.workbench.annotation_workflow_controller.paint_at_widget_position(
                 event.position().x(),
                 event.position().y(),
                 erase=self._annotation_drag_erase,
@@ -692,7 +691,7 @@ class TifSliceCanvas(QLabel):
             if mode in {"lasso", "rectangle", "ellipse"}:
                 event.accept()
                 return
-            self.workbench.paint_at_widget_position(
+            self.workbench.annotation_workflow_controller.paint_at_widget_position(
                 event.position().x(),
                 event.position().y(),
                 erase=self._annotation_drag_erase if self._annotation_drag_active else bool(event.modifiers() & Qt.ControlModifier) or mode == "eraser",
@@ -714,7 +713,7 @@ class TifSliceCanvas(QLabel):
             self._roi_drag_start = None
             self._roi_drag_current = None
             if self.workbench is not None:
-                self.workbench.finish_part_roi_drag(start.x(), start.y(), end.x(), end.y())
+                self.workbench.roi_workflow_controller.finish_drag(start.x(), start.y(), end.x(), end.y())
             self._refresh_scaled_pixmap()
             event.accept()
             return
@@ -722,7 +721,7 @@ class TifSliceCanvas(QLabel):
             points = list(self._contour_drag_points)
             self._contour_drag_points = []
             if self.workbench is not None:
-                self.workbench.finish_part_contour_drag(points)
+                self.workbench.part_mask_workflow_controller.finish_part_contour_drag(points)
             self._refresh_scaled_pixmap()
             event.accept()
             return
@@ -730,7 +729,7 @@ class TifSliceCanvas(QLabel):
             points = list(self._lasso_drag_points)
             self._lasso_drag_points = []
             if self.workbench is not None and callable(getattr(self.workbench, "finish_lasso_fill", None)):
-                self.workbench.finish_lasso_fill(points)
+                self.workbench.annotation_workflow_controller.finish_lasso_fill(points)
             self._refresh_scaled_pixmap()
             event.accept()
             return
@@ -742,13 +741,13 @@ class TifSliceCanvas(QLabel):
             self._shape_drag_start = None
             self._shape_drag_current = None
             if self.workbench is not None and callable(getattr(self.workbench, "finish_shape_fill_drag", None)):
-                self.workbench.finish_shape_fill_drag(mode, start.x(), start.y(), end.x(), end.y())
+                self.workbench.annotation_workflow_controller.finish_shape_fill_drag(mode, start.x(), start.y(), end.x(), end.y())
             self._refresh_scaled_pixmap()
             event.accept()
             return
         if event.button() == Qt.LeftButton and self._annotation_drag_active:
-            if self.workbench is not None and callable(getattr(self.workbench, "finish_annotation_stroke", None)):
-                self.workbench.finish_annotation_stroke()
+            if self.workbench is not None and getattr(self.workbench, "annotation_workflow_controller", None) is not None:
+                self.workbench.annotation_workflow_controller.finish_annotation_stroke()
             self._annotation_drag_active = False
             self._annotation_drag_erase = False
             event.accept()
@@ -768,10 +767,10 @@ class TifSliceCanvas(QLabel):
 
     def mouseDoubleClickEvent(self, event):
         if self.workbench is not None and event.button() == Qt.LeftButton:
-            if callable(getattr(self.workbench, "open_roi_at_widget_position", None)):
-                if self.workbench.open_roi_at_widget_position(event.position().x(), event.position().y()):
-                    event.accept()
-                    return
+            controller = getattr(self.workbench, "roi_workflow_controller", None)
+            if controller is not None and controller.open_at_widget_position(event.position().x(), event.position().y()):
+                event.accept()
+                return
         super().mouseDoubleClickEvent(event)
 
 
@@ -798,7 +797,7 @@ class TifVolumeCanvas(QLabel):
     def _try_start_local_axis_endpoint_drag(self, event):
         if self.workbench is None or event.button() != Qt.LeftButton:
             return False
-        handler = getattr(self.workbench, "start_local_axis_endpoint_drag", None)
+        handler = getattr(getattr(self.workbench, "local_axis_controller", None), "start_endpoint_drag", None)
         if not callable(handler):
             return False
         if not handler(event.position().x(), event.position().y()):
@@ -846,7 +845,7 @@ class TifVolumeCanvas(QLabel):
         super().resizeEvent(event)
         self._refresh_volume_pixmap()
         if self.workbench is not None:
-            self.workbench.schedule_volume_preview_render()
+            self.workbench.volume_render_controller.schedule_volume_preview_render()
 
     def _draw_status_overlay(self, painter):
         if self.workbench is None:
@@ -986,7 +985,7 @@ class TifVolumeCanvas(QLabel):
     def mousePressEvent(self, event):
         self.setFocus(Qt.MouseFocusReason)
         if self.workbench is not None and event.button() == Qt.LeftButton:
-            picker = getattr(self.workbench, "pick_local_axis_roll_reference_at", None)
+            picker = getattr(getattr(self.workbench, "local_axis_controller", None), "pick_roll_reference_at", None)
             if callable(picker) and picker(event.position().x(), event.position().y()):
                 event.accept()
                 return
@@ -1012,11 +1011,11 @@ class TifVolumeCanvas(QLabel):
             dy = current.y() - self._last_drag_pos.y()
             self._last_drag_pos = current
             if self._mouse_mode == "local_axis_endpoint":
-                self.workbench.drag_local_axis_endpoint(current.x(), current.y())
+                self.workbench.local_axis_controller.drag_endpoint(current.x(), current.y())
             elif self._mouse_mode == "pan":
-                self.workbench.pan_volume_preview(dx, dy)
+                self.workbench.volume_render_controller.pan_volume_preview(dx, dy)
             else:
-                self.workbench.rotate_volume_preview(dx, dy)
+                self.workbench.volume_render_controller.rotate_volume_preview(dx, dy)
             event.accept()
             return
         super().mouseMoveEvent(event)
@@ -1024,11 +1023,11 @@ class TifVolumeCanvas(QLabel):
     def mouseReleaseEvent(self, event):
         if event.button() in (Qt.LeftButton, Qt.RightButton) and self._mouse_mode:
             if self._mouse_mode == "local_axis_endpoint" and self.workbench is not None:
-                self.workbench.finish_local_axis_endpoint_drag()
+                self.workbench.local_axis_controller.finish_endpoint_drag()
             self._mouse_mode = ""
             self._last_drag_pos = None
             if self.workbench is not None:
-                self.workbench.finish_volume_interaction_debounced()
+                self.workbench.volume_render_controller.finish_volume_interaction_debounced()
             event.accept()
             return
         super().mouseReleaseEvent(event)
@@ -1041,7 +1040,7 @@ class TifVolumeCanvas(QLabel):
         if delta == 0:
             event.ignore()
             return
-        self.workbench.zoom_volume_preview(1 if delta > 0 else -1)
+        self.workbench.volume_render_controller.zoom_volume_preview(1 if delta > 0 else -1)
         event.accept()
 
 
@@ -1049,20 +1048,20 @@ def create_tif_volume_canvas(parent=None):
     gpu_flag = os.environ.get("TAXAMASK_TIF_GPU_VOLUME_PREVIEW", "").strip().lower()
     if gpu_flag in {"0", "false", "no", "off"}:
         return TifVolumeCanvas(parent), "cpu", "GPU volume preview disabled by TAXAMASK_TIF_GPU_VOLUME_PREVIEW."
+    embedded_flag = os.environ.get("TAXAMASK_TIF_EMBEDDED_QOPENGLWIDGET", "").strip().lower()
+    if embedded_flag in {"1", "true", "yes", "on"} and gpu_volume_canvas_available() and TifGpuVolumeCanvas is not None:
+        try:
+            canvas = TifGpuVolumeCanvas(parent)
+            canvas.setProperty("tifVolumeRenderer", "gpu-embedded")
+            return canvas, "gpu", ""
+        except Exception as exc:
+            return TifVolumeCanvas(parent), "cpu", str(exc)
     if gpu_volume_offscreen_available() and TifGpuVolumeOffscreenWidget is not None:
         try:
             canvas = TifGpuVolumeOffscreenWidget(parent)
             if hasattr(canvas, "initialize_renderer"):
                 canvas.initialize_renderer(emit_info=False)
             canvas.setProperty("tifVolumeRenderer", "gpu-offscreen")
-            return canvas, "gpu", ""
-        except Exception as exc:
-            return TifVolumeCanvas(parent), "cpu", str(exc)
-    legacy_flag = os.environ.get("TAXAMASK_TIF_EMBEDDED_QOPENGLWIDGET", "").strip().lower()
-    if legacy_flag in {"1", "true", "yes", "on"} and gpu_volume_canvas_available() and TifGpuVolumeCanvas is not None:
-        try:
-            canvas = TifGpuVolumeCanvas(parent)
-            canvas.setProperty("tifVolumeRenderer", "gpu-embedded")
             return canvas, "gpu", ""
         except Exception as exc:
             return TifVolumeCanvas(parent), "cpu", str(exc)

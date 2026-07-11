@@ -51,7 +51,7 @@ def intensity_window_from_sample(volume, lower_percentile=1.0, upper_percentile=
     return low, high
 
 
-def scale_volume_to_uint8(volume, low, high):
+def scale_volume_to_uint8(volume, low, high, yield_callback=None):
     array = np.asarray(volume)
     if array.size == 0:
         return np.ascontiguousarray(array.astype(np.uint8, copy=False))
@@ -70,10 +70,12 @@ def scale_volume_to_uint8(volume, low, high):
         chunk = np.asarray(array[z0:z1], dtype=np.float32)
         chunk = np.clip((chunk - float(low)) * scale, 0.0, 255.0)
         result[z0:z1] = chunk.astype(np.uint8)
+        if yield_callback is not None:
+            yield_callback()
     return np.ascontiguousarray(result)
 
 
-def normalize_preview_intensity(volume, preserve_source=False, intensity_window=None):
+def normalize_preview_intensity(volume, preserve_source=False, intensity_window=None, yield_callback=None):
     if volume is None:
         return None
     source_dtype = np.dtype(getattr(volume, "dtype", np.uint8))
@@ -92,10 +94,10 @@ def normalize_preview_intensity(volume, preserve_source=False, intensity_window=
         low, high = (float(intensity_window[0]), float(intensity_window[1]))
     if high <= low:
         return np.zeros(array.shape, dtype=np.uint8)
-    return scale_volume_to_uint8(array, low, high)
+    return scale_volume_to_uint8(array, low, high, yield_callback=yield_callback)
 
 
-def downsample_volume(volume, factors_zyx, mode="hybrid", percentile=95.0):
+def downsample_volume(volume, factors_zyx, mode="hybrid", percentile=95.0, yield_callback=None):
     array = np.asarray(volume)
     if array.ndim != 3:
         raise ValueError(f"volume_must_be_3d:{array.ndim}")
@@ -108,13 +110,13 @@ def downsample_volume(volume, factors_zyx, mode="hybrid", percentile=95.0):
         return np.ascontiguousarray(array[:: factors[0], :: factors[1], :: factors[2]])
 
     if mode == "mean":
-        result = _block_mean_streaming(array, factors)
+        result = _block_mean_streaming(array, factors, yield_callback=yield_callback)
     elif mode == "max":
-        result = _block_max_streaming(array, factors)
+        result = _block_max_streaming(array, factors, yield_callback=yield_callback)
     elif mode == "percentile":
-        result = _block_percentile_loop(array, factors, percentile)
+        result = _block_percentile_loop(array, factors, percentile, yield_callback=yield_callback)
     elif mode == "hybrid":
-        result = _block_hybrid_streaming(array, factors)
+        result = _block_hybrid_streaming(array, factors, yield_callback=yield_callback)
     else:
         raise ValueError(f"unknown_tif_volume_preview_mode:{mode}")
 
@@ -124,7 +126,7 @@ def downsample_volume(volume, factors_zyx, mode="hybrid", percentile=95.0):
     return np.ascontiguousarray(result)
 
 
-def downsample_mask_preview(mask, factors_zyx, mode="occupancy"):
+def downsample_mask_preview(mask, factors_zyx, mode="occupancy", yield_callback=None):
     array = np.asarray(mask)
     if array.ndim != 3:
         raise ValueError(f"mask_must_be_3d:{array.ndim}")
@@ -138,8 +140,7 @@ def downsample_mask_preview(mask, factors_zyx, mode="occupancy"):
     if mode != "occupancy":
         raise ValueError(f"unknown_tif_mask_preview_mode:{mode}")
 
-    mask = array > 0
-    result = _block_mask_occupancy_streaming(mask, factors)
+    result = _block_mask_occupancy_streaming(array, factors, yield_callback=yield_callback)
     return np.ascontiguousarray(result)
 
 
@@ -147,11 +148,12 @@ def _reduceat_starts(length, factor):
     return np.arange(0, int(length), max(1, int(factor)), dtype=np.int64)
 
 
-def _block_mean_streaming(array, factors):
+def _block_mean_streaming(array, factors, yield_callback=None):
     out_shape = preview_shape_for_factors(array.shape, factors)
     result = np.empty(out_shape, dtype=np.float32)
     zf, yf, xf = factors
     x_starts = _reduceat_starts(array.shape[2], xf)
+    work_units = 0
     for oz, z0 in enumerate(range(0, array.shape[0], zf)):
         z1 = min(array.shape[0], z0 + zf)
         for oy, y0 in enumerate(range(0, array.shape[1], yf)):
@@ -161,30 +163,38 @@ def _block_mean_streaming(array, factors):
             tail_count = int(array.shape[2] - int(x_starts[-1]))
             if tail_count > 0 and tail_count != xf:
                 result[oz, oy, -1] *= float(xf) / float(tail_count)
+            work_units += 1
+            if yield_callback is not None and work_units % 32 == 0:
+                yield_callback()
     return result
 
 
-def _block_max_streaming(array, factors):
+def _block_max_streaming(array, factors, yield_callback=None):
     out_shape = preview_shape_for_factors(array.shape, factors)
     result = np.empty(out_shape, dtype=array.dtype)
     zf, yf, xf = factors
     x_starts = _reduceat_starts(array.shape[2], xf)
+    work_units = 0
     for oz, z0 in enumerate(range(0, array.shape[0], zf)):
         z1 = min(array.shape[0], z0 + zf)
         for oy, y0 in enumerate(range(0, array.shape[1], yf)):
             y1 = min(array.shape[1], y0 + yf)
             block = np.asarray(array[z0:z1, y0:y1])
             result[oz, oy] = np.maximum.reduceat(block, x_starts, axis=2).max(axis=(0, 1))
+            work_units += 1
+            if yield_callback is not None and work_units % 32 == 0:
+                yield_callback()
     return result
 
 
-def _block_hybrid_streaming(array, factors):
+def _block_hybrid_streaming(array, factors, yield_callback=None):
     out_shape = preview_shape_for_factors(array.shape, factors)
     result = np.empty(out_shape, dtype=np.float32)
     zf, yf, xf = factors
     x_starts = _reduceat_starts(array.shape[2], xf)
     tail_count = int(array.shape[2] - int(x_starts[-1]))
     tail_scale = float(xf) / float(tail_count) if tail_count > 0 and tail_count != xf else 1.0
+    work_units = 0
     for oz, z0 in enumerate(range(0, array.shape[0], zf)):
         z1 = min(array.shape[0], z0 + zf)
         for oy, y0 in enumerate(range(0, array.shape[1], yf)):
@@ -195,27 +205,35 @@ def _block_hybrid_streaming(array, factors):
                 mean_row[-1] *= tail_scale
             max_row = np.maximum.reduceat(block, x_starts, axis=2).max(axis=(0, 1))
             result[oz, oy] = mean_row * 0.65 + max_row * 0.35
+            work_units += 1
+            if yield_callback is not None and work_units % 32 == 0:
+                yield_callback()
     return result
 
 
-def _block_mask_occupancy_streaming(mask, factors):
+def _block_mask_occupancy_streaming(mask, factors, yield_callback=None):
     out_shape = preview_shape_for_factors(mask.shape, factors)
     result = np.zeros(out_shape, dtype=np.uint8)
     zf, yf, xf = factors
     x_starts = _reduceat_starts(mask.shape[2], xf)
+    work_units = 0
     for oz, z0 in enumerate(range(0, mask.shape[0], zf)):
         z1 = min(mask.shape[0], z0 + zf)
         for oy, y0 in enumerate(range(0, mask.shape[1], yf)):
             y1 = min(mask.shape[1], y0 + yf)
-            block = np.asarray(mask[z0:z1, y0:y1], dtype=np.uint8)
+            block = (np.asarray(mask[z0:z1, y0:y1]) > 0).astype(np.uint8, copy=False)
             result[oz, oy] = np.maximum.reduceat(block, x_starts, axis=2).max(axis=(0, 1))
+            work_units += 1
+            if yield_callback is not None and work_units % 32 == 0:
+                yield_callback()
     return result
 
 
-def _block_percentile_loop(array, factors, percentile):
+def _block_percentile_loop(array, factors, percentile, yield_callback=None):
     out_shape = preview_shape_for_factors(array.shape, factors)
     result = np.empty(out_shape, dtype=np.float32)
     zf, yf, xf = factors
+    work_units = 0
     for oz, z0 in enumerate(range(0, array.shape[0], zf)):
         z1 = min(array.shape[0], z0 + zf)
         for oy, y0 in enumerate(range(0, array.shape[1], yf)):
@@ -223,6 +241,9 @@ def _block_percentile_loop(array, factors, percentile):
             for ox, x0 in enumerate(range(0, array.shape[2], xf)):
                 x1 = min(array.shape[2], x0 + xf)
                 result[oz, oy, ox] = float(np.percentile(array[z0:z1, y0:y1, x0:x1], float(percentile)))
+                work_units += 1
+                if yield_callback is not None and work_units % 32 == 0:
+                    yield_callback()
     return result
 
 
@@ -233,6 +254,7 @@ def build_volume_preview(
     preserve_source=False,
     intensity_window=None,
     percentile=95.0,
+    yield_callback=None,
 ):
     if volume is None:
         return None
@@ -240,18 +262,23 @@ def build_volume_preview(
     if array.ndim != 3 or min(array.shape) <= 0:
         raise ValueError(f"volume_must_be_non_empty_zyx:{array.shape}")
     factors = preview_factors_for_shape(array.shape, max_dim)
-    reduced = downsample_volume(array, factors, mode=mode, percentile=percentile)
-    return normalize_preview_intensity(reduced, preserve_source=preserve_source, intensity_window=intensity_window)
+    reduced = downsample_volume(array, factors, mode=mode, percentile=percentile, yield_callback=yield_callback)
+    return normalize_preview_intensity(
+        reduced,
+        preserve_source=preserve_source,
+        intensity_window=intensity_window,
+        yield_callback=yield_callback,
+    )
 
 
-def build_mask_preview(mask, max_dim, mode="occupancy"):
+def build_mask_preview(mask, max_dim, mode="occupancy", yield_callback=None):
     if mask is None:
         return None
     array = np.asarray(mask)
     if array.ndim != 3 or min(array.shape) <= 0:
         raise ValueError(f"mask_must_be_non_empty_zyx:{array.shape}")
     factors = preview_factors_for_shape(array.shape, max_dim)
-    return downsample_mask_preview(array, factors, mode=mode)
+    return downsample_mask_preview(array, factors, mode=mode, yield_callback=yield_callback)
 
 
 __all__ = [

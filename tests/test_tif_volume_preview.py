@@ -84,6 +84,21 @@ class TifVolumePreviewTests(unittest.TestCase):
         self.assertEqual(tuple(preview.shape), (2, 4, 4))
         self.assertEqual(preview.dtype, volume.dtype)
 
+    def test_hybrid_downsample_yields_without_changing_preview_values(self):
+        volume = np.arange(4 * 80 * 80, dtype=np.uint16).reshape((4, 80, 80))
+        yields = []
+
+        expected = downsample_volume(volume, (2, 2, 2), mode="hybrid")
+        actual = downsample_volume(
+            volume,
+            (2, 2, 2),
+            mode="hybrid",
+            yield_callback=lambda: yields.append(True),
+        )
+
+        self.assertGreater(len(yields), 0)
+        np.testing.assert_array_equal(actual, expected)
+
     def test_build_volume_preview_normalizes_uint16_when_not_preserving_source(self):
         volume = np.zeros((2, 8, 8), dtype=np.uint16)
         volume[:, 2:6, 2:6] = 1000
@@ -112,6 +127,17 @@ class TifVolumePreviewTests(unittest.TestCase):
         self.assertEqual(int(nearest.max()), 0)
         self.assertEqual(int(occupancy.max()), 1)
         self.assertEqual(occupancy.dtype, np.uint8)
+
+    def test_mask_occupancy_yields_without_changing_preview_values(self):
+        mask = np.zeros((4, 80, 80), dtype=np.uint16)
+        mask[:, 1::3, 2::3] = 9
+        yields = []
+
+        expected = build_mask_preview(mask, 40, mode="occupancy")
+        actual = build_mask_preview(mask, 40, mode="occupancy", yield_callback=lambda: yields.append(True))
+
+        self.assertGreater(len(yields), 0)
+        np.testing.assert_array_equal(actual, expected)
 
 
 if __name__ == "__main__":

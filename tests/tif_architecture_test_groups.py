@@ -43,9 +43,24 @@ TIF_PREVIEW_AND_EXPORT_TESTS = (
 TIF_GUI_KEY_PATH_TESTS = (
     "tests.test_tif_workbench",
     "tests.test_tif_backend_panel_controller",
+    "tests.test_tif_result_review_controller",
     "tests.test_tif_local_axis_controller",
     "tests.test_tif_agent_context",
     "tests.test_tif_workbench_style",
+    "tests.test_tif_workbench_shell",
+    "tests.test_tif_workbench_signal_router",
+    "tests.test_tif_workbench_coordinator",
+    "tests.test_tif_selection_workflow_controller",
+    "tests.test_tif_project_lifecycle_controller",
+    "tests.test_tif_annotation_workflow_controller",
+    "tests.test_tif_roi_workflow_controller",
+    "tests.test_tif_part_mask_workflow_controller",
+    "tests.test_tif_volume_render_controller",
+    "tests.test_tif_round3_real_data_acceptance",
+)
+
+TIF_ROUND3_ARCHITECTURE_TESTS = (
+    "tests.test_tif_workbench_architecture_analysis",
 )
 
 TIF_RESEARCH_SMOKE_TESTS = (
@@ -64,6 +79,7 @@ TIF_ARCHITECTURE_REGRESSION_GROUPS = {
     "service_task": TIF_SERVICE_TASK_TESTS,
     "preview_export": TIF_PREVIEW_AND_EXPORT_TESTS,
     "gui_key_path": TIF_GUI_KEY_PATH_TESTS,
+    "round3_architecture": TIF_ROUND3_ARCHITECTURE_TESTS,
     "research_smoke": TIF_RESEARCH_SMOKE_TESTS,
 }
 

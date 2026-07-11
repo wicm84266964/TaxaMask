@@ -46,7 +46,7 @@ class TifPreviewControllerTests(unittest.TestCase):
             widget = TifWorkbenchWidget(manager, "en")
             try:
                 with patch("AntSleap.ui.tif_preview_controller.load_volume_sidecar", side_effect=_winerror_1455()):
-                    volume, issue = widget._safe_load_volume_sidecar(
+                    volume, issue = widget.preview_controller.safe_load_volume_sidecar(
                         manager.to_absolute("specimens/01-0101-11/labels/working_edit.ome.zarr"),
                         mmap_mode="c",
                         operation="load_working_edit_volume",
@@ -54,7 +54,7 @@ class TifPreviewControllerTests(unittest.TestCase):
 
                 self.assertIsNone(volume)
                 self.assertEqual(issue.kind, "commit_memory")
-                summary = widget._preview_resource_summary()
+                summary = widget.preview_controller.state_summary()
                 self.assertTrue(summary["resource_limited"])
                 self.assertEqual(summary["kind"], "commit_memory")
                 self.assertIn("page file", summary["user_message"])
@@ -92,7 +92,7 @@ class TifPreviewControllerTests(unittest.TestCase):
 
                 self.assertIsNotNone(widget.image_volume)
                 self.assertIsNone(widget.edit_volume)
-                summary = widget._preview_resource_summary()
+                summary = widget.preview_controller.state_summary()
                 self.assertTrue(summary["resource_limited"])
                 self.assertEqual(summary["kind"], "commit_memory")
                 self.assertIn("page file", widget.volume_status_text())

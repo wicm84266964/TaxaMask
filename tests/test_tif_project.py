@@ -1,4 +1,6 @@
+import copy
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -20,13 +22,193 @@ from AntSleap.core.tif_local_axis_reslice import align_editable_axis_to_referenc
 from AntSleap.core.tif_project import TIF_PROJECT_SCHEMA_VERSION, TIF_PROJECT_TYPE, TifProjectManager
 from AntSleap.core.tif_volume_io import (
     VOLUME_SIDECAR_FORMAT,
+    copy_volume_sidecar,
     create_empty_label_sidecar_like,
     load_volume_sidecar,
+    read_volume_metadata,
     write_volume_sidecar,
 )
 
 
 class TifProjectTests(unittest.TestCase):
+    def test_part_delete_save_failure_restores_record_roi_and_storage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project_root = root / "part_delete_rollback"
+            manager = TifProjectManager()
+            manifest_path = manager.create_project("part_delete_rollback", project_root)
+            manager.create_specimen_scaffold("specimen")
+            image_rel = "specimens/specimen/working/image.ome.zarr"
+            image_meta = write_volume_sidecar(
+                project_root / image_rel,
+                np.arange(3 * 4 * 5, dtype=np.uint8).reshape((3, 4, 5)),
+                role="working_image",
+            )
+            manager.register_working_volume(
+                "specimen",
+                image_rel,
+                image_meta["shape_zyx"],
+                image_meta["dtype"],
+            )
+            crop_volume_to_part(manager, "specimen", "head", [[0, 2], [0, 3], [0, 4]])
+            manager.add_part_roi(
+                "specimen",
+                "head-roi",
+                bbox_zyx=[[0, 2], [0, 3], [0, 4]],
+                status="part_created",
+                linked_part_id="head",
+            )
+            specimen_before = copy.deepcopy(manager.get_specimen("specimen"))
+            part_root = Path(manager.to_absolute(manager.part_dir("specimen", "head")))
+
+            with patch.object(manager, "save_project", side_effect=RuntimeError("sqlite write failed")):
+                with self.assertRaisesRegex(RuntimeError, "sqlite write failed"):
+                    manager.discard_part(
+                        "specimen",
+                        "head",
+                        remove_storage=True,
+                        save=True,
+                        unlink_linked_rois=True,
+                    )
+
+            self.assertEqual(manager.get_specimen("specimen"), specimen_before)
+            self.assertTrue(part_root.exists())
+            self.assertFalse(any("delete_pending" in path.name for path in part_root.parent.iterdir()))
+
+            reloaded = TifProjectManager()
+            reloaded.load_project(manifest_path)
+            self.assertIsNotNone(reloaded.get_part("specimen", "head", default=None))
+            roi = reloaded.get_part_roi("specimen", "head-roi")
+            self.assertEqual(roi["linked_part_id"], "head")
+            self.assertEqual(roi["status"], "part_created")
+
+    def test_specimen_discard_save_failure_restores_record_and_storage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = TifProjectManager()
+            manifest_path = manager.create_project("specimen_discard_rollback", root / "specimen_discard_rollback")
+            manager.create_specimen_scaffold("specimen")
+            specimen_root = Path(manager.to_absolute(manager.specimen_dir("specimen")))
+
+            with patch.object(manager, "save_project", side_effect=RuntimeError("sqlite write failed")):
+                with self.assertRaisesRegex(RuntimeError, "sqlite write failed"):
+                    manager.discard_specimen_scaffold("specimen", save=True)
+
+            self.assertIsNotNone(manager.get_specimen("specimen", default=None))
+            self.assertTrue(specimen_root.exists())
+            self.assertFalse(any("delete_pending" in path.name for path in specimen_root.parent.iterdir()))
+
+            reloaded = TifProjectManager()
+            reloaded.load_project(manifest_path)
+            self.assertIsNotNone(reloaded.get_specimen("specimen", default=None))
+
+    def test_sidecar_role_update_failure_preserves_existing_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source.ome.zarr"
+            target = root / "target.ome.zarr"
+            source_array = np.full((2, 3, 4), 9, dtype=np.uint16)
+            target_array = np.full((2, 3, 4), 3, dtype=np.uint16)
+            write_volume_sidecar(source, source_array, role="editable_ai_result")
+            write_volume_sidecar(target, target_array, role="manual_truth")
+
+            with patch("AntSleap.core.tif_volume_io._write_volume_metadata", side_effect=RuntimeError("metadata write failed")):
+                with self.assertRaisesRegex(RuntimeError, "metadata write failed"):
+                    copy_volume_sidecar(source, target, role="manual_truth")
+
+            np.testing.assert_array_equal(load_volume_sidecar(target), target_array)
+            self.assertEqual(read_volume_metadata(target)["role"], "manual_truth")
+            self.assertFalse(any(path.name.startswith(".tmp_sidecar_copy_") for path in root.iterdir()))
+
+    def test_batch_truth_save_failure_restores_all_existing_manual_truth_sidecars(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "truth_batch_rollback"
+            manager = TifProjectManager()
+            manager.create_project("truth_batch_rollback", project_root)
+            manager.create_specimen_scaffold("specimen")
+            manager.add_or_update_label_schema(
+                "regions",
+                labels=[
+                    {"id": 2, "name": "region_2"},
+                    {"id": 3, "name": "region_3"},
+                ],
+                save=False,
+            )
+            expected_manual = {}
+            refs = []
+            for index, part_id in enumerate(("head", "thorax"), start=2):
+                image_rel = f"specimens/specimen/parts/{part_id}/image.ome.zarr"
+                manual_rel = f"specimens/specimen/parts/{part_id}/labels/manual_truth.ome.zarr"
+                edit_rel = f"specimens/specimen/parts/{part_id}/labels/editable_ai_result.ome.zarr"
+                image_meta = write_volume_sidecar(
+                    project_root / image_rel,
+                    np.zeros((2, 3, 4), dtype=np.uint8),
+                    role="part_image",
+                )
+                manual_array = np.full((2, 3, 4), index + 5, dtype=np.uint16)
+                edit_array = np.full((2, 3, 4), index, dtype=np.uint16)
+                manual_meta = write_volume_sidecar(project_root / manual_rel, manual_array, role="manual_truth")
+                edit_meta = write_volume_sidecar(project_root / edit_rel, edit_array, role="editable_ai_result")
+                manager.add_part(
+                    "specimen",
+                    part_id,
+                    image={"path": image_rel, **image_meta},
+                    save=False,
+                )
+                manager.register_part_label_volume(
+                    "specimen",
+                    part_id,
+                    "manual_truth",
+                    manual_rel,
+                    manual_meta["shape_zyx"],
+                    manual_meta["dtype"],
+                    explicit_review=True,
+                    operation="truth_promotion",
+                    audit_metadata={"review_action": "test_existing_truth"},
+                    save=False,
+                )
+                manager.register_part_label_volume(
+                    "specimen",
+                    part_id,
+                    "editable_ai_result",
+                    edit_rel,
+                    edit_meta["shape_zyx"],
+                    edit_meta["dtype"],
+                    status="pending_review",
+                    save=False,
+                )
+                manager.set_part_training_metadata(
+                    "specimen",
+                    part_id,
+                    label_schema_id="regions",
+                    opened_for_review=True,
+                    save=False,
+                )
+                expected_manual[part_id] = manual_array
+                refs.append({"specimen_id": "specimen", "part_id": part_id})
+            manager.save_project()
+            project_snapshot = copy.deepcopy(manager.project_data)
+
+            with patch.object(manager, "save_project", side_effect=RuntimeError("sqlite write failed")):
+                with self.assertRaisesRegex(RuntimeError, "sqlite write failed"):
+                    manager.promote_reviewed_part_results_to_manual_truth(
+                        refs,
+                        require_opened_for_review=True,
+                        save=True,
+                    )
+
+            self.assertEqual(manager.project_data, project_snapshot)
+            for part_id, expected in expected_manual.items():
+                manual_path = project_root / manager.get_part("specimen", part_id)["labels"]["manual_truth"]["path"]
+                np.testing.assert_array_equal(load_volume_sidecar(manual_path), expected)
+                self.assertFalse(
+                    any(
+                        marker in path.name
+                        for path in manual_path.parent.iterdir()
+                        for marker in (".pending_", ".rollback_")
+                    )
+                )
+
     def test_align_editable_axis_to_three_point_reference_plane(self):
         editable_axis = {
             "axis_id": "local_output_z_axis",
@@ -150,9 +332,37 @@ class TifProjectTests(unittest.TestCase):
             readiness = manager.evaluate_train_ready("01-0101-03")
 
             self.assertFalse(readiness["train_ready"])
-            self.assertIn("manual_truth_missing", readiness["reasons"])
-            self.assertIn("image_label_shape_mismatch", readiness["reasons"])
+            self.assertEqual(readiness["reasons"].count("manual_truth_missing"), 1)
+            self.assertNotIn("image_label_shape_mismatch", readiness["reasons"])
             self.assertIn("no_trainable_material", readiness["reasons"])
+
+
+    def test_train_ready_reports_shape_mismatch_only_when_truth_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "shape_mismatch_project"
+            manager = TifProjectManager()
+            manager.create_project("shape_mismatch_project", project_root)
+            manager.create_specimen_scaffold(
+                "01-0101-03b",
+                material_map={
+                    "materials": [
+                        {"id": 0, "name": "background", "display_name": "Background", "trainable": False},
+                        {"id": 1, "name": "brain", "display_name": "Brain", "trainable": True},
+                    ]
+                },
+            )
+            image_rel = "specimens/01-0101-03b/working/image.ome.zarr"
+            truth_rel = "specimens/01-0101-03b/labels/manual_truth.ome.zarr"
+            image_meta = write_volume_sidecar(project_root / image_rel, np.zeros((2, 2, 2), dtype=np.uint8), role="working_image")
+            truth_meta = write_volume_sidecar(project_root / truth_rel, np.zeros((3, 2, 2), dtype=np.uint16), role="manual_truth")
+            manager.register_working_volume("01-0101-03b", image_rel, image_meta["shape_zyx"], image_meta["dtype"], save=False)
+            manager.register_label_volume("01-0101-03b", "manual_truth", truth_rel, truth_meta["shape_zyx"], truth_meta["dtype"], save=False)
+            manager.set_review_status("01-0101-03b", "train_ready", train_ready=True)
+
+            readiness = manager.evaluate_train_ready("01-0101-03b")
+
+            self.assertIn("image_label_shape_mismatch", readiness["reasons"])
+            self.assertNotIn("manual_truth_missing", readiness["reasons"])
 
     def test_empty_working_edit_sidecar_can_be_created_from_image_shape(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -184,6 +394,39 @@ class TifProjectTests(unittest.TestCase):
             self.assertEqual(ids, [0, 3])
             self.assertFalse(material_map["materials"][0]["trainable"])
             self.assertTrue(material_map["materials"][1]["trainable"])
+
+    def test_corrupt_material_map_does_not_erase_last_valid_sqlite_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = TifProjectManager()
+            manager.create_project("material_map_rollback", root / "material_map_rollback")
+            specimen = manager.create_specimen_scaffold(
+                "specimen",
+                material_map={
+                    "source": "manual",
+                    "materials": [
+                        {"id": 0, "name": "background", "trainable": False},
+                        {"id": 2, "name": "brain", "trainable": True},
+                    ],
+                },
+            )
+            material_path = Path(manager.to_absolute(specimen["material_map"]))
+            connection = sqlite3.connect(manager.current_database_path)
+            try:
+                materials_before = connection.execute("SELECT materials_json FROM material_maps").fetchone()[0]
+            finally:
+                connection.close()
+
+            material_path.write_text("{not valid json", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "tif_material_map_read_failed"):
+                manager.save_project()
+
+            connection = sqlite3.connect(manager.current_database_path)
+            try:
+                materials_after = connection.execute("SELECT materials_json FROM material_maps").fetchone()[0]
+            finally:
+                connection.close()
+            self.assertEqual(materials_after, materials_before)
 
     def test_working_edit_promotion_is_explicit(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1029,6 +1272,16 @@ class TifProjectTests(unittest.TestCase):
             self.assertIn("editable_ai_result_not_opened_for_review", report["reasons"])
             self.assertEqual(report["label_schema_id"], "brain_regions")
             self.assertEqual(report["label_ids"], [1, 2])
+            with patch.object(manager, "validate_part_label_ids", side_effect=AssertionError("label scan should be deferred")):
+                deferred_report = manager.evaluate_part_editable_result_review_ready(
+                    "01-0101-review",
+                    "brain",
+                    "brain_axis_001",
+                    validate_label_ids=False,
+                )
+            self.assertTrue(deferred_report["review_ready"])
+            self.assertFalse(deferred_report["label_ids_checked"])
+            self.assertEqual(deferred_report["label_report"]["skipped"], "label_id_scan_deferred")
             acceptance = manager.build_part_review_acceptance_report(
                 [{"specimen_id": "01-0101-review", "part_id": "brain", "reslice_id": "brain_axis_001"}],
                 require_opened_for_review=False,

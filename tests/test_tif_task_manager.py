@@ -1,7 +1,9 @@
 import unittest
+from types import SimpleNamespace
 
 from AntSleap.core.tif_task_context import TifTaskContext
 from AntSleap.services.tif_task_manager import TifTaskManager
+from AntSleap.ui.tif_tasks import TifQtTaskAdapter
 
 
 class TifTaskManagerTests(unittest.TestCase):
@@ -27,6 +29,37 @@ class TifTaskManagerTests(unittest.TestCase):
 
         self.assertTrue(manager.context_matches(task.task_id, {"specimen_id": "s1", "part_id": "head", "request_key": "preview-a"}))
         self.assertFalse(manager.context_matches(task.task_id, {"specimen_id": "s1", "part_id": "thorax", "request_key": "preview-a"}))
+
+    def test_qt_view_context_does_not_treat_empty_part_or_reslice_as_wildcard(self):
+        adapter = TifQtTaskAdapter()
+        widget = SimpleNamespace(
+            current_specimen_id="s1",
+            current_volume_scope="part",
+            current_part_id="head",
+            current_reslice_id="axis-1",
+            display_mode="volume",
+            label_role_combo=None,
+        )
+        task = adapter.start_from_widget(widget, "volume_preview")
+
+        widget.current_reslice_id = ""
+        self.assertFalse(
+            adapter.current_context_matches(
+                widget,
+                task.task_id,
+                fields=("specimen_id", "volume_scope", "part_id", "reslice_id"),
+            )
+        )
+
+        widget.current_reslice_id = "axis-1"
+        widget.current_part_id = ""
+        self.assertFalse(
+            adapter.current_context_matches(
+                widget,
+                task.task_id,
+                fields=("specimen_id", "volume_scope", "part_id", "reslice_id"),
+            )
+        )
 
     def test_summary_is_agent_readable(self):
         manager = TifTaskManager()

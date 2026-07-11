@@ -1,12 +1,13 @@
 import os
 import sys
 import tempfile
+import threading
 import unittest
 import json
 import ast
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 import tifffile
@@ -20,7 +21,7 @@ if str(PROJECT_ROOT) not in sys.path:
 has_pyside6 = False
 
 try:
-    from PySide6.QtCore import QEvent, QPointF, Qt, QThread
+    from PySide6.QtCore import QEvent, QPointF, Qt, QThread, Signal
     from PySide6.QtGui import QColor, QPixmap
     from PySide6.QtOpenGLWidgets import QOpenGLWidget
     from PySide6.QtWidgets import QApplication, QDialog, QLabel, QMessageBox, QSizePolicy, QTextEdit, QTreeWidgetItem, QWidget
@@ -44,12 +45,11 @@ else:
     from AntSleap.core.tif_local_axis_reslice import compute_local_frame, export_part_reslice
     from AntSleap.core.tif_local_axis_ai import LOCAL_AXIS_MODEL_MANIFEST_SCHEMA_VERSION, export_local_axis_training_manifest
     from tests.test_tif_backend import make_predict_ready_project, make_train_ready_project
-    from AntSleap.ui.tif_gpu_volume_canvas import gpu_volume_canvas_available, gpu_volume_offscreen_available, gpu_volume_unavailable_reason
+    from AntSleap.ui.tif_gpu_volume_canvas import TifGpuVolumeCanvas, TifGpuVolumeOffscreenWidget, gpu_volume_canvas_available, gpu_volume_offscreen_available, gpu_volume_unavailable_reason
     from AntSleap.ui.tif_local_axis_model_panel import TifLocalAxisModelPanel
     from AntSleap.ui.tif_local_axis_review_queue import TifLocalAxisReviewQueueWidget
     from AntSleap.ui.tif_workbench import (
         TifBatchImportWorker,
-        TifConfirmPartRoiWorker,
         TifLabelAutoSaveWorker,
         TifMaterializeWorker,
         TifTrainingResultDialog,
@@ -60,6 +60,7 @@ else:
         create_tif_volume_canvas,
         summarize_tif_training_result,
     )
+    from AntSleap.ui.tif_workbench_workers import TifConfirmPartRoiWorker
     from AntSleap.ui.tif_workbench_translations import TIF_TRANSLATIONS
 
     has_pyside6 = True
@@ -257,7 +258,7 @@ class TifWorkbenchTests(unittest.TestCase):
 
     def _wait_for_local_axis_export(self, widget, timeout_ms=10000):
         deadline = datetime.now().timestamp() + (float(timeout_ms) / 1000.0)
-        while widget._local_axis_reslice_export_running():
+        while widget.local_axis_controller.export_running():
             self.app.processEvents()
             if datetime.now().timestamp() > deadline:
                 raise AssertionError("Timed out waiting for local axis reslice export")
@@ -265,7 +266,7 @@ class TifWorkbenchTests(unittest.TestCase):
 
     def _wait_for_label_manual_save(self, widget, timeout_ms=5000):
         deadline = datetime.now().timestamp() + (float(timeout_ms) / 1000.0)
-        while widget._label_manual_save_running():
+        while widget.annotation_workflow_controller.manual_save_thread is not None:
             self.app.processEvents()
             if datetime.now().timestamp() > deadline:
                 raise AssertionError("Timed out waiting for label manual save")
@@ -441,6 +442,76 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.close_project()
                 widget.deleteLater()
 
+    def test_selection_load_reuses_edit_mapping_and_renders_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+            try:
+                crop_volume_to_part(widget.project, "01-0101-21", "head", [[0, 4], [1, 7], [1, 7]], display_name="Head")
+                part_edit_rel = "specimens/01-0101-21/parts/head/labels/editable_ai_result.ome.zarr"
+                part_edit = np.zeros((4, 6, 6), dtype=np.uint16)
+                part_edit_meta = write_volume_sidecar(Path(tmp) / "viewer" / part_edit_rel, part_edit, role="editable_ai_result")
+                widget.project.register_part_label_volume(
+                    "01-0101-21",
+                    "head",
+                    "editable_ai_result",
+                    part_edit_rel,
+                    part_edit_meta["shape_zyx"],
+                    part_edit_meta["dtype"],
+                    status="pending_review",
+                )
+                widget.refresh_project()
+
+                original_loader = widget.preview_controller.safe_load_volume_sidecar
+                operations = []
+
+                def tracking_loader(*args, **kwargs):
+                    operations.append(str(kwargs.get("operation") or ""))
+                    return original_loader(*args, **kwargs)
+
+                role_index = widget.label_role_combo.findData("working_edit")
+                widget.label_role_combo.setCurrentIndex(role_index)
+                with patch.object(widget.preview_controller, "safe_load_volume_sidecar", side_effect=tracking_loader), \
+                     patch.object(widget, "render_current_slice", wraps=widget.render_current_slice) as render_mock:
+                    widget.load_specimen("01-0101-21")
+
+                self.assertEqual(operations.count("load_working_edit_volume"), 1)
+                self.assertNotIn("load_label:working_edit", operations)
+                self.assertIs(widget.label_volume, widget.edit_volume)
+                self.assertEqual(render_mock.call_count, 1)
+
+                operations.clear()
+                with patch.object(widget.preview_controller, "safe_load_volume_sidecar", side_effect=tracking_loader), \
+                     patch.object(widget, "render_current_slice", wraps=widget.render_current_slice) as render_mock:
+                    widget.load_part("01-0101-21", "head")
+
+                self.assertEqual(operations.count("load_part_edit_volume"), 1)
+                self.assertNotIn("load_part_label:editable_ai_result", operations)
+                self.assertIs(widget.label_volume, widget.edit_volume)
+                self.assertEqual(render_mock.call_count, 1)
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_release_loaded_volume_arrays_closes_shared_mapping_once(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+        try:
+            mmap = Mock()
+            shared = Mock(_mmap=mmap)
+            widget.image_volume = None
+            widget.label_volume = shared
+            widget.edit_volume = shared
+            widget.part_mask_workflow_controller.state.part_mask_volume = None
+
+            widget.release_loaded_volume_arrays()
+
+            mmap.close.assert_called_once_with()
+            self.assertIsNone(widget.label_volume)
+            self.assertIsNone(widget.edit_volume)
+        finally:
+            widget.close_project()
+            widget.deleteLater()
+
     def test_specimen_tree_groups_part_reslices_under_part(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -561,14 +632,67 @@ class TifWorkbenchTests(unittest.TestCase):
 
                 self.assertEqual(widget.current_reslice_id, "head_axis_second")
                 np.testing.assert_array_equal(np.asarray(widget.image_volume), tifffile.imread(second_result["image_path"]))
-                overlays = widget._local_axis_volume_overlays()
+                overlays = widget.local_axis_controller.volume_overlays()
                 labels = [item["label"] for item in overlays]
                 self.assertIn("source Z", labels)
                 self.assertIn("output Z", labels)
                 self.assertIn("Roll reference", labels)
                 self.assertIn("Reslice ID: head_axis_second", widget.metadata_label.text())
+
+                with patch.object(widget, "load_part", wraps=widget.load_part) as load_part_mock:
+                    widget.refresh_project(reload_current=False)
+
+                load_part_mock.assert_not_called()
+                self.assertEqual(widget.current_reslice_id, "head_axis_second")
+                self.assertEqual(
+                    widget._tree_item_payload(widget.specimen_list.currentItem()).get("reslice_id"),
+                    "head_axis_second",
+                )
+
+                widget.refresh_project()
+                self.assertEqual(widget.current_reslice_id, "head_axis_second")
+                self.assertIn("Reslice ID: head_axis_second", widget.metadata_label.text())
             finally:
                 widget.close_project()
+                widget.deleteLater()
+
+    def test_stale_batch_import_completion_does_not_select_imported_specimen(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = TifProjectManager()
+            manager.create_project("stale_import", Path(tmp) / "stale_import")
+            manager.create_specimen_scaffold("existing-a")
+            manager.create_specimen_scaffold("existing-b")
+            widget = TifWorkbenchWidget(manager, "en")
+            try:
+                widget._select_volume_tree_item("existing-a", "full")
+                task = widget._start_tif_task("tif_import", action="batch_import")
+                widget._tif_import_task_id = task.task_id
+                widget._tif_import_thread = Mock()
+
+                widget._select_volume_tree_item("existing-b", "full")
+                widget.training_status_label.setText("current specimen status")
+                manager.create_specimen_scaffold("newly-imported")
+
+                widget._on_tif_import_finished(
+                    {
+                        "results": [
+                            {
+                                "ok": True,
+                                "specimen_id": "newly-imported",
+                                "result": {"report_path": "import-report.json"},
+                            }
+                        ]
+                    }
+                )
+
+                self.assertEqual(widget.current_specimen_id, "existing-b")
+                self.assertEqual(widget.training_status_label.text(), "current specimen status")
+                self.assertEqual(
+                    widget._tree_item_payload(widget.specimen_list.currentItem()).get("specimen_id"),
+                    "existing-b",
+                )
+            finally:
+                widget.close_project(prompt_unsaved=False)
                 widget.deleteLater()
 
     def test_select_volume_tree_item_does_not_fallback_to_wrong_reslice(self):
@@ -870,17 +994,17 @@ class TifWorkbenchTests(unittest.TestCase):
             widget = self._make_volume_widget(Path(tmp), z_count=4)
             try:
                 self.assertEqual(widget.part_bbox_edit.text(), "")
-                self.assertEqual(widget.current_roi_overlay_rects(), [])
+                self.assertEqual(widget.roi_workflow_controller.current_overlay_rects(), [])
 
                 widget.part_bbox_edit.setText("1,3,2,6,1,5")
                 widget.slice_slider.setValue(1)
-                rects = widget.current_roi_overlay_rects()
+                rects = widget.roi_workflow_controller.current_overlay_rects()
 
                 self.assertEqual(rects[0]["rect"], [1, 2, 5, 6])
                 self.assertEqual(rects[0]["kind"], "current")
 
                 widget.slice_slider.setValue(0)
-                self.assertEqual(widget.current_roi_overlay_rects(), [])
+                self.assertEqual(widget.roi_workflow_controller.current_overlay_rects(), [])
             finally:
                 widget.close_project()
                 widget.deleteLater()
@@ -916,7 +1040,7 @@ class TifWorkbenchTests(unittest.TestCase):
                     display_name="Head ROI",
                     bbox_zyx=[[1, 3], [1, 7], [1, 7]],
                 )
-                widget.active_part_roi_id = "head_roi"
+                widget.roi_workflow_controller.state.active_roi_id = "head_roi"
                 widget.part_bbox_edit.setText("1,3,1,7,1,7")
                 widget.slice_slider.setValue(3)
                 widget.btn_part_draw_roi.setChecked(True)
@@ -928,7 +1052,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.canvas.mousePressEvent(FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, start.x(), start.y()))
                 widget.canvas.mouseMoveEvent(FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, end.x(), end.y()))
                 widget.canvas.mouseReleaseEvent(FakeMouseEvent(Qt.LeftButton, Qt.NoButton, end.x(), end.y()))
-                roi = widget.save_part_roi_draft()
+                roi = widget.roi_workflow_controller.save_draft()
 
                 self.assertEqual(widget.active_part_roi_id, "head_roi")
                 self.assertEqual(roi["bbox_zyx"], [[1, 4], [0, 8], [0, 8]])
@@ -942,21 +1066,22 @@ class TifWorkbenchTests(unittest.TestCase):
             widget = self._make_volume_widget(Path(tmp), z_count=4)
             try:
                 widget.part_bbox_edit.setText("1,3,2,6,1,5")
-                module_path = "AntSleap.ui.tif_workbench.TifPartNameDialog"
+                roi_dialog_path = "AntSleap.ui.tif_roi_workflow_controller.TifPartNameDialog"
+                module_path = "AntSleap.ui.tif_roi_workflow_controller.TifPartNameDialog"
                 FakePartNameDialog.queue = [("head_roi", "Head ROI", True)]
-                with patch(module_path, FakePartNameDialog):
-                    roi = widget.save_part_roi_draft()
+                with patch(roi_dialog_path, FakePartNameDialog):
+                    roi = widget.roi_workflow_controller.save_draft()
 
                 self.assertIsNotNone(roi)
                 self.assertEqual(roi["status"], "draft")
                 self.assertEqual(widget.project.list_parts(widget.current_specimen_id), [])
                 self.assertEqual(widget.active_part_roi_id, "head_roi")
                 widget.slice_slider.setValue(1)
-                self.assertTrue(widget.current_roi_overlay_rects())
+                self.assertTrue(widget.roi_workflow_controller.current_overlay_rects())
 
                 FakePartNameDialog.queue = [("head", "Head", True)]
                 with patch(module_path, FakePartNameDialog):
-                    widget.confirm_part_roi_to_part()
+                    widget.roi_workflow_controller.confirm_to_part()
 
                 part = widget.project.get_part("01-0101-21", "head")
                 roi = widget.project.get_part_roi("01-0101-21", "head_roi")
@@ -973,16 +1098,17 @@ class TifWorkbenchTests(unittest.TestCase):
             widget = self._make_volume_widget(Path(tmp), z_count=4)
             try:
                 widget.part_bbox_edit.setText("1,2,2,5,2,5")
-                module_path = "AntSleap.ui.tif_workbench.TifPartNameDialog"
+                roi_dialog_path = "AntSleap.ui.tif_roi_workflow_controller.TifPartNameDialog"
+                module_path = "AntSleap.ui.tif_roi_workflow_controller.TifPartNameDialog"
                 FakePartNameDialog.queue = [("head_roi", "Head ROI", True)]
-                with patch(module_path, FakePartNameDialog):
-                    roi = widget.save_part_roi_draft()
+                with patch(roi_dialog_path, FakePartNameDialog):
+                    roi = widget.roi_workflow_controller.save_draft()
                 self.assertEqual(roi["bbox_zyx"], [[1, 2], [2, 5], [2, 5]])
 
                 widget.part_bbox_edit.setText("1,4,1,6,1,7")
                 FakePartNameDialog.queue = [("head", "Head", True)]
                 with patch(module_path, FakePartNameDialog):
-                    widget.confirm_part_roi_to_part()
+                    widget.roi_workflow_controller.confirm_to_part()
 
                 part = widget.project.get_part("01-0101-21", "head")
                 roi = widget.project.get_part_roi("01-0101-21", "head_roi")
@@ -998,10 +1124,10 @@ class TifWorkbenchTests(unittest.TestCase):
             widget = self._make_volume_widget(Path(tmp), z_count=4)
             try:
                 widget.part_bbox_edit.setText("1,2,2,5,2,5")
-                module_path = "AntSleap.ui.tif_workbench.TifPartNameDialog"
+                module_path = "AntSleap.ui.tif_roi_workflow_controller.TifPartNameDialog"
                 FakePartNameDialog.queue = [("head_roi", "Head ROI", True)]
                 with patch(module_path, FakePartNameDialog):
-                    widget.save_part_roi_draft()
+                    widget.roi_workflow_controller.save_draft()
 
                 widget.slice_slider.setValue(3)
                 widget.btn_part_draw_roi.setChecked(True)
@@ -1039,10 +1165,10 @@ class TifWorkbenchTests(unittest.TestCase):
                     widget.canvas.mouseMoveEvent(FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, end.x(), end.y()))
                     widget.canvas.mouseReleaseEvent(FakeMouseEvent(Qt.LeftButton, Qt.NoButton, end.x(), end.y()))
 
-                module_path = "AntSleap.ui.tif_workbench.TifPartNameDialog"
+                module_path = "AntSleap.ui.tif_roi_workflow_controller.TifPartNameDialog"
                 FakePartNameDialog.queue = [("head", "Head", True)]
                 with patch(module_path, FakePartNameDialog):
-                    widget.confirm_part_roi_to_part()
+                    widget.roi_workflow_controller.confirm_to_part()
 
                 part = widget.project.get_part("01-0101-21", "head")
                 self.assertEqual(part["parent_bbox_zyx"], [[0, 5], [1, 7], [1, 7]])
@@ -1065,7 +1191,7 @@ class TifWorkbenchTests(unittest.TestCase):
             widget = self._make_volume_widget(Path(tmp), z_count=5)
             try:
                 widget.part_bbox_edit.setText("0,5,0,8,0,8")
-                widget.part_mask_keyframes = [
+                widget.part_mask_workflow_controller.state.keyframes = [
                     {
                         "axis": "z",
                         "slice_index": 1,
@@ -1080,10 +1206,10 @@ class TifWorkbenchTests(unittest.TestCase):
                     },
                 ]
 
-                module_path = "AntSleap.ui.tif_workbench.TifPartNameDialog"
+                module_path = "AntSleap.ui.tif_roi_workflow_controller.TifPartNameDialog"
                 FakePartNameDialog.queue = [("head", "Head", True)]
                 with patch(module_path, FakePartNameDialog):
-                    widget.confirm_part_roi_to_part()
+                    widget.roi_workflow_controller.confirm_to_part()
 
                 part = widget.project.get_part("01-0101-21", "head")
                 self.assertEqual(part["parent_bbox_zyx"], [[1, 4], [1, 7], [1, 7]])
@@ -1113,7 +1239,7 @@ class TifWorkbenchTests(unittest.TestCase):
             widget = self._make_volume_widget(Path(tmp), z_count=5)
             try:
                 widget.part_bbox_edit.setText("0,5,0,8,0,8")
-                widget.part_mask_keyframes = [
+                widget.part_mask_workflow_controller.state.keyframes = [
                     {
                         "axis": "z",
                         "slice_index": 1,
@@ -1128,19 +1254,19 @@ class TifWorkbenchTests(unittest.TestCase):
                     },
                 ]
 
-                widget.preview_part_mask_from_keyframes()
+                widget.part_mask_workflow_controller.preview_part_mask_from_keyframes()
 
                 self.assertIsNotNone(widget.part_preview_mask)
                 self.assertTrue(widget.btn_accept_part_mask.isEnabled())
-                widget.accept_part_mask_preview()
+                widget.part_mask_workflow_controller.accept_part_mask_preview()
                 self.assertTrue(widget.part_mask_preview_accepted)
                 self.assertIn("Confirm ROI", widget.training_status_label.text())
 
-                module_path = "AntSleap.ui.tif_workbench.TifPartNameDialog"
+                module_path = "AntSleap.ui.tif_roi_workflow_controller.TifPartNameDialog"
                 FakePartNameDialog.queue = [("head", "Head", True)]
                 with patch(module_path, FakePartNameDialog), \
                      patch("AntSleap.ui.tif_workbench.build_preview_mask_from_contours") as build_mock:
-                    widget.confirm_part_roi_to_part()
+                    widget.roi_workflow_controller.confirm_to_part()
 
                 build_mock.assert_not_called()
                 part = widget.project.get_part("01-0101-21", "head")
@@ -1156,7 +1282,7 @@ class TifWorkbenchTests(unittest.TestCase):
             widget = self._make_volume_widget(Path(tmp), z_count=5)
             try:
                 widget.part_bbox_edit.setText("0,5,0,8,0,8")
-                widget.part_mask_keyframes = [
+                widget.part_mask_workflow_controller.state.keyframes = [
                     {
                         "axis": "z",
                         "slice_index": 1,
@@ -1175,12 +1301,12 @@ class TifWorkbenchTests(unittest.TestCase):
 
                 def fake_start(contours, shape, context):
                     starts.append((contours, tuple(shape), context))
-                    widget._part_mask_preview_thread = object()
+                    widget.part_mask_workflow_controller.preview_thread = object()
                     widget._set_scope_controls_enabled()
 
-                with patch.object(widget, "_should_build_part_mask_preview_in_background", return_value=True), \
-                     patch.object(widget, "_start_part_mask_preview_build", side_effect=fake_start):
-                    widget.preview_part_mask_from_keyframes()
+                with patch.object(widget.part_mask_workflow_controller, "_should_build_part_mask_preview_in_background", return_value=True), \
+                     patch.object(widget.part_mask_workflow_controller, "_start_part_mask_preview_build", side_effect=fake_start):
+                    widget.part_mask_workflow_controller.preview_part_mask_from_keyframes()
 
                 self.assertIsNone(widget.part_preview_mask)
                 self.assertEqual(len(starts), 1)
@@ -1188,7 +1314,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertFalse(widget.btn_preview_part_mask.isEnabled())
                 self.assertFalse(widget.btn_accept_part_mask.isEnabled())
             finally:
-                widget._part_mask_preview_thread = None
+                widget.part_mask_workflow_controller.preview_thread = None
                 widget.close_project()
                 widget.deleteLater()
 
@@ -1201,16 +1327,16 @@ class TifWorkbenchTests(unittest.TestCase):
 
                 def fake_start(request):
                     starts.append(dict(request))
-                    widget._confirm_part_roi_thread = object()
+                    widget.roi_workflow_controller.confirm_thread = object()
                     widget._set_scope_controls_enabled()
                     return True
 
-                module_path = "AntSleap.ui.tif_workbench.TifPartNameDialog"
+                module_path = "AntSleap.ui.tif_roi_workflow_controller.TifPartNameDialog"
                 FakePartNameDialog.queue = [("head", "Head", True)]
                 with patch(module_path, FakePartNameDialog), \
-                     patch.object(widget, "_should_confirm_part_roi_in_background", return_value=True), \
-                     patch.object(widget, "_start_confirm_part_roi_worker", side_effect=fake_start):
-                    widget.confirm_part_roi_to_part()
+                     patch.object(widget.roi_workflow_controller, "should_confirm_in_background", return_value=True), \
+                     patch.object(widget.roi_workflow_controller, "start_confirm_worker", side_effect=fake_start):
+                    widget.roi_workflow_controller.confirm_to_part()
 
                 self.assertEqual(len(starts), 1)
                 self.assertEqual(starts[0]["part_id"], "head")
@@ -1219,7 +1345,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertFalse(widget.btn_confirm_part_roi.isEnabled())
                 self.assertFalse(widget.btn_preview_part_mask.isEnabled())
             finally:
-                widget._confirm_part_roi_thread = None
+                widget.roi_workflow_controller.confirm_thread = None
                 widget.close_project()
                 widget.deleteLater()
 
@@ -1228,7 +1354,7 @@ class TifWorkbenchTests(unittest.TestCase):
             widget = self._make_volume_widget(Path(tmp), z_count=5)
             try:
                 widget.part_bbox_edit.setText("0,5,0,8,0,8")
-                widget.part_mask_keyframes = [
+                widget.part_mask_workflow_controller.state.keyframes = [
                     {
                         "axis": "z",
                         "slice_index": 1,
@@ -1242,25 +1368,25 @@ class TifWorkbenchTests(unittest.TestCase):
                         "source": "manual_freehand",
                     },
                 ]
-                widget.preview_part_mask_from_keyframes()
+                widget.part_mask_workflow_controller.preview_part_mask_from_keyframes()
                 preview_mask = widget.part_preview_mask
                 self.assertIsNotNone(preview_mask)
-                widget.accept_part_mask_preview()
+                widget.part_mask_workflow_controller.accept_part_mask_preview()
 
                 starts = []
 
                 def fake_start(request):
                     starts.append(dict(request))
-                    widget._confirm_part_roi_thread = object()
+                    widget.roi_workflow_controller.confirm_thread = object()
                     widget._set_scope_controls_enabled()
                     return True
 
-                module_path = "AntSleap.ui.tif_workbench.TifPartNameDialog"
+                module_path = "AntSleap.ui.tif_roi_workflow_controller.TifPartNameDialog"
                 FakePartNameDialog.queue = [("head", "Head", True)]
                 with patch(module_path, FakePartNameDialog), \
-                     patch.object(widget, "_should_confirm_part_roi_in_background", return_value=True), \
-                     patch.object(widget, "_start_confirm_part_roi_worker", side_effect=fake_start):
-                    widget.confirm_part_roi_to_part()
+                     patch.object(widget.roi_workflow_controller, "should_confirm_in_background", return_value=True), \
+                     patch.object(widget.roi_workflow_controller, "start_confirm_worker", side_effect=fake_start):
+                    widget.roi_workflow_controller.confirm_to_part()
 
                 self.assertEqual(len(starts), 1)
                 self.assertIs(starts[0]["accepted_preview_mask"], preview_mask)
@@ -1268,7 +1394,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertEqual(starts[0]["mask_bbox_zyx"], widget.part_mask_preview_bbox)
                 self.assertEqual(len((starts[0]["mask_contours"] or {}).get("keyframes", [])), 2)
             finally:
-                widget._confirm_part_roi_thread = None
+                widget.roi_workflow_controller.confirm_thread = None
                 widget.close_project()
                 widget.deleteLater()
 
@@ -1277,7 +1403,7 @@ class TifWorkbenchTests(unittest.TestCase):
             widget = self._make_volume_widget(Path(tmp), z_count=5)
             try:
                 widget.part_bbox_edit.setText("0,5,0,8,0,8")
-                widget.part_mask_keyframes = [
+                widget.part_mask_workflow_controller.state.keyframes = [
                     {
                         "axis": "z",
                         "slice_index": 1,
@@ -1291,9 +1417,9 @@ class TifWorkbenchTests(unittest.TestCase):
                         "source": "manual_freehand",
                     },
                 ]
-                widget.preview_part_mask_from_keyframes()
-                widget.accept_part_mask_preview()
-                request = widget._build_confirm_part_roi_request(
+                widget.part_mask_workflow_controller.preview_part_mask_from_keyframes()
+                widget.part_mask_workflow_controller.accept_part_mask_preview()
+                request = widget.roi_workflow_controller.build_confirm_request(
                     None,
                     widget.part_mask_preview_bbox,
                     "head",
@@ -1331,7 +1457,7 @@ class TifWorkbenchTests(unittest.TestCase):
             widget = self._make_volume_widget(Path(tmp), z_count=5)
             try:
                 widget.part_bbox_edit.setText("0,5,0,8,0,8")
-                widget.part_mask_keyframes = [
+                widget.part_mask_workflow_controller.state.keyframes = [
                     {
                         "axis": "z",
                         "slice_index": 2,
@@ -1339,21 +1465,21 @@ class TifWorkbenchTests(unittest.TestCase):
                         "source": "manual_freehand",
                     }
                 ]
-                module_path = "AntSleap.ui.tif_workbench.TifPartNameDialog"
+                module_path = "AntSleap.ui.tif_roi_workflow_controller.TifPartNameDialog"
                 FakePartNameDialog.queue = [("head_roi", "Head ROI", True)]
                 with patch(module_path, FakePartNameDialog):
-                    roi = widget.save_part_roi_draft()
+                    roi = widget.roi_workflow_controller.save_draft()
 
                 self.assertEqual(len((roi.get("metadata") or {}).get("part_mask_keyframes", [])), 1)
                 self.assertEqual((roi.get("metadata") or {}).get("part_mask_bbox_zyx"), [[2, 3], [2, 6], [2, 6]])
 
-                widget.part_mask_keyframes = []
-                widget._load_roi_draft_for_editing(roi)
+                widget.part_mask_workflow_controller.state.keyframes = []
+                widget.roi_workflow_controller.load_draft(roi)
                 widget.slice_slider.setValue(2)
 
                 self.assertEqual(len(widget.part_mask_keyframes), 1)
                 self.assertEqual(widget.part_mask_keyframes[0]["slice_index"], 2)
-                self.assertTrue(widget.current_contour_overlay_polygons())
+                self.assertTrue(widget.part_mask_workflow_controller.current_contour_overlay_polygons())
             finally:
                 widget.close_project()
                 widget.deleteLater()
@@ -1373,18 +1499,18 @@ class TifWorkbenchTests(unittest.TestCase):
                     widget.canvas.mouseMoveEvent(FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, end.x(), end.y()))
                     widget.canvas.mouseReleaseEvent(FakeMouseEvent(Qt.LeftButton, Qt.NoButton, end.x(), end.y()))
 
-                module_path = "AntSleap.ui.tif_workbench.TifPartNameDialog"
+                module_path = "AntSleap.ui.tif_roi_workflow_controller.TifPartNameDialog"
                 FakePartNameDialog.queue = [("head", "Head", True)]
                 with patch(module_path, FakePartNameDialog):
-                    widget.confirm_part_roi_to_part()
+                    widget.roi_workflow_controller.confirm_to_part()
 
                 part = widget.project.get_part("01-0101-21", "head")
                 contours_path = widget.project.to_absolute(part["contours_path"])
                 self.assertEqual(read_contours_json(contours_path)["keyframes"], [])
 
                 widget.slice_slider.setValue(2)
-                widget.add_current_rect_keyframe()
-                widget.preview_part_mask_from_keyframes()
+                widget.part_mask_workflow_controller.add_current_rect_keyframe()
+                widget.part_mask_workflow_controller.preview_part_mask_from_keyframes()
 
                 contours = read_contours_json(contours_path)
                 self.assertEqual(len(contours["keyframes"]), 1)
@@ -1426,9 +1552,9 @@ class TifWorkbenchTests(unittest.TestCase):
                 write_contours_json(contours_path, contours)
 
                 widget.slice_slider.setValue(0)
-                self.assertFalse(widget.current_contour_overlay_polygons())
+                self.assertFalse(widget.part_mask_workflow_controller.current_contour_overlay_polygons())
 
-                widget.preview_part_mask_from_keyframes()
+                widget.part_mask_workflow_controller.preview_part_mask_from_keyframes()
 
                 self.assertIsNotNone(widget.part_preview_mask)
                 self.assertEqual(int(np.count_nonzero(widget.part_preview_mask[0])), 0)
@@ -1474,10 +1600,10 @@ class TifWorkbenchTests(unittest.TestCase):
                     mmap_handle = getattr(mask, "_mmap", None)
                     if mmap_handle is not None:
                         mmap_handle.close()
-                widget.part_preview_mask = np.ones(tuple(widget.image_volume.shape), dtype=np.uint16)
+                widget.part_mask_workflow_controller.state.preview_mask = np.ones(tuple(widget.image_volume.shape), dtype=np.uint16)
 
                 with patch("AntSleap.ui.tif_workbench.QMessageBox.question", return_value=QMessageBox.Yes):
-                    self.assertTrue(widget.clear_part_mask_keyframes())
+                    self.assertTrue(widget.part_mask_workflow_controller.clear_part_mask_keyframes())
 
                 self.assertEqual(read_contours_json(contours_path)["keyframes"], [])
                 reset_source = load_volume_sidecar(widget.project.to_absolute(part["mask"]["path"]), mmap_mode="r")
@@ -1534,7 +1660,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.render_current_slice()
                 point = widget.canvas._image_rect_to_widget_rect([1, 2, 5, 6]).center()
 
-                self.assertTrue(widget.open_roi_at_widget_position(point.x(), point.y()))
+                self.assertTrue(widget.roi_workflow_controller.open_at_widget_position(point.x(), point.y()))
 
                 self.assertEqual(widget.current_volume_scope, "part")
                 self.assertEqual(widget.current_part_id, "head")
@@ -1692,7 +1818,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.refresh_project()
                 widget._select_volume_tree_item("01-0101-21", "part", "head")
                 widget.slice_slider.setValue(1)
-                widget.btn_draw_part_contour.setChecked(True)
+                widget.part_mask_workflow_controller.set_part_contour_draw_mode(True)
                 widget.canvas.resize(480, 360)
                 widget.render_current_slice()
 
@@ -1709,12 +1835,12 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertEqual(contours["keyframes"][0]["slice_index"], 1)
                 self.assertEqual(contours["keyframes"][0]["source"], "manual_freehand")
                 self.assertGreaterEqual(len(contours["keyframes"][0]["polygon"]), 3)
-                self.assertTrue(widget.current_contour_overlay_polygons())
+                self.assertTrue(widget.part_mask_workflow_controller.current_contour_overlay_polygons())
 
-                widget.delete_current_part_keyframe()
+                widget.part_mask_workflow_controller.delete_current_part_keyframe()
                 contours = read_contours_json(contours_path)
                 self.assertEqual(contours["keyframes"], [])
-                self.assertFalse(widget.current_contour_overlay_polygons())
+                self.assertFalse(widget.part_mask_workflow_controller.current_contour_overlay_polygons())
             finally:
                 widget.close_project()
                 widget.deleteLater()
@@ -1728,7 +1854,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget._select_volume_tree_item("01-0101-21", "part", "head")
                 widget.slice_slider.setValue(1)
                 widget.brush_size_slider.setValue(31)
-                widget.btn_draw_part_contour.setChecked(True)
+                widget.part_mask_workflow_controller.set_part_contour_draw_mode(True)
                 widget.canvas.resize(480, 360)
                 widget.render_current_slice()
 
@@ -1769,13 +1895,13 @@ class TifWorkbenchTests(unittest.TestCase):
                 write_contours_json(contours_path, contours)
 
                 widget.slice_slider.setValue(1)
-                widget.jump_part_keyframe("next")
+                widget.part_mask_workflow_controller.jump_part_keyframe("next")
                 self.assertEqual(widget.slice_slider.value(), 3)
-                self.assertTrue(widget.current_contour_overlay_polygons())
+                self.assertTrue(widget.part_mask_workflow_controller.current_contour_overlay_polygons())
 
-                widget.jump_part_keyframe("previous")
+                widget.part_mask_workflow_controller.jump_part_keyframe("previous")
                 self.assertEqual(widget.slice_slider.value(), 0)
-                widget.jump_part_keyframe("previous")
+                widget.part_mask_workflow_controller.jump_part_keyframe("previous")
                 self.assertIn("No previous key slice", widget.training_status_label.text())
             finally:
                 widget.close_project()
@@ -1796,7 +1922,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 )
                 widget.slice_slider.setValue(1)
 
-                overlays = widget.current_contour_overlay_polygons()
+                overlays = widget.part_mask_workflow_controller.current_contour_overlay_polygons()
 
                 self.assertEqual(len(overlays), 1)
                 self.assertEqual(overlays[0]["polygon"], [[1, 1], [4, 1], [4, 4], [1, 4]])
@@ -1820,7 +1946,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 contours = add_polygon_keyframe(contours, 4, polygon_b, axis="z", source="manual_freehand")
                 write_contours_json(contours_path, contours)
 
-                widget.preview_part_mask_from_keyframes()
+                widget.part_mask_workflow_controller.preview_part_mask_from_keyframes()
 
                 self.assertIsNotNone(widget.part_preview_mask)
                 self.assertIn("Part mask preview quality", widget.training_status_label.text())
@@ -1830,14 +1956,14 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.display_mode_combo.setCurrentIndex(mode_index)
                 boundary_index = widget.volume_mask_combo.findData("mask_boundary")
                 widget.volume_mask_combo.setCurrentIndex(boundary_index)
-                widget.render_volume_preview()
+                widget.volume_render_controller.render_volume_preview()
                 self.assertIn("Mask display Mask boundary", widget.volume_canvas_overlay_text())
                 if isinstance(widget.volume_canvas, TifVolumeCanvas):
                     self.assertIsNotNone(widget.volume_canvas.pixmap())
 
                 masked_index = widget.volume_mask_combo.findData("masked_image")
                 widget.volume_mask_combo.setCurrentIndex(masked_index)
-                widget.render_volume_preview()
+                widget.volume_render_controller.render_volume_preview()
                 self.assertIn("Masked image", widget.volume_canvas_overlay_text())
             finally:
                 widget.close_project()
@@ -1858,8 +1984,8 @@ class TifWorkbenchTests(unittest.TestCase):
                 contours = add_polygon_keyframe(contours, 0, [[1, 1], [4, 1], [4, 4], [1, 4]], axis="z", source="manual_freehand")
                 contours = add_polygon_keyframe(contours, 3, [[2, 2], [5, 2], [5, 5], [2, 5]], axis="z", source="manual_freehand")
                 write_contours_json(contours_path, contours)
-                widget.preview_part_mask_from_keyframes()
-                widget.accept_part_mask_preview()
+                widget.part_mask_workflow_controller.preview_part_mask_from_keyframes()
+                widget.part_mask_workflow_controller.accept_part_mask_preview()
 
                 mode_index = widget.display_mode_combo.findData("volume")
                 widget.display_mode_combo.setCurrentIndex(mode_index)
@@ -2038,7 +2164,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.task_tabs.setCurrentWidget(widget.training_mode_tabs)
                 widget.training_mode_tabs.setCurrentWidget(widget.result_compare_page)
                 widget.result_region_combo.setCurrentIndex(widget.result_region_combo.findData(2))
-                rows = widget.refresh_result_comparison()
+                rows = widget.result_review_controller.refresh_comparison()
 
                 self.assertEqual(len(rows), 2)
                 self.assertEqual(widget.result_compare_table.rowCount(), 2)
@@ -2049,19 +2175,19 @@ class TifWorkbenchTests(unittest.TestCase):
 
                 editable_index = widget.result_source_editable_radio
                 editable_index.setChecked(True)
-                editable_rows = widget.refresh_result_comparison()
+                editable_rows = widget.result_review_controller.refresh_comparison()
                 self.assertEqual(sum(row["region_voxels"] for row in editable_rows), 14)
                 self.assertEqual(sum(row["total_labeled_voxels"] for row in editable_rows), 16)
 
                 target_row = next(index for index, row in enumerate(editable_rows) if row["ref"]["specimen_id"] == "01-0101-b")
                 widget.result_compare_table.selectRow(target_row)
-                self.assertTrue(widget.show_selected_result_region_in_3d())
+                self.assertTrue(widget.result_review_controller.show_selected_region_in_3d())
 
                 self.assertEqual(widget.current_specimen_id, "01-0101-b")
                 self.assertEqual(widget.current_part_id, "brain")
                 self.assertEqual(widget.display_mode, "volume")
                 self.assertEqual(widget.volume_mask_combo.currentData(), "masked_image")
-                mask = widget._active_result_region_mask_volume()
+                mask = widget.volume_render_controller._active_result_region_mask_volume()
                 self.assertIsNotNone(mask)
                 self.assertNotIsInstance(mask, np.ndarray)
                 self.assertEqual(tuple(mask.shape), (2, 3, 4))
@@ -2089,13 +2215,13 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.refresh_project()
                 widget.task_tabs.setCurrentWidget(widget.training_mode_tabs)
                 widget.training_mode_tabs.setCurrentWidget(widget.result_compare_page)
-                rows = widget.refresh_result_comparison()
+                rows = widget.result_review_controller.refresh_comparison()
                 self.assertEqual(len(rows), 1)
                 self.assertFalse(rows[0]["ok"])
                 self.assertIn("manual_truth", rows[0]["source_status"])
 
                 widget.result_compare_table.selectRow(0)
-                self.assertTrue(widget.open_selected_result_comparison_target())
+                self.assertTrue(widget.result_review_controller.open_selected_target())
 
                 self.assertEqual(widget.current_specimen_id, "01-0101-21")
                 self.assertEqual(widget.current_part_id, "head")
@@ -2129,12 +2255,12 @@ class TifWorkbenchTests(unittest.TestCase):
                     )
                 widget.project.save_project()
 
-                with patch.object(widget, "_label_volume_counts_for_result", side_effect=AssertionError("counts should be deferred")):
+                with patch.object(widget.result_review_controller, "label_volume_counts_for_result", side_effect=AssertionError("counts should be deferred")):
                     widget.refresh_project()
                     widget._select_volume_tree_item("01-0101-21", "part", "head")
                     widget._select_volume_tree_item("01-0101-21", "part", "thorax")
 
-                self.assertTrue(getattr(widget, "_result_comparison_stale", False))
+                self.assertTrue(widget.result_review_controller.state.stale)
 
                 calls = {"count": 0}
 
@@ -2142,10 +2268,10 @@ class TifWorkbenchTests(unittest.TestCase):
                     calls["count"] += 1
                     return {"ok": False, "status": "deferred-test", "path": ""}
 
-                with patch.object(widget, "_label_volume_counts_for_result", side_effect=fake_counts):
+                with patch.object(widget.result_review_controller, "label_volume_counts_for_result", side_effect=fake_counts):
                     widget.task_tabs.setCurrentWidget(widget.training_mode_tabs)
                     widget.training_mode_tabs.setCurrentWidget(widget.result_compare_page)
-                    self.assertFalse(getattr(widget, "_result_comparison_stale", True))
+                    self.assertFalse(widget.result_review_controller.state.stale)
 
                 self.assertGreater(calls["count"], 0)
             finally:
@@ -2205,13 +2331,13 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.refresh_project()
                 widget._select_volume_tree_item("01-0101-21", "part", "head")
 
-                draft = widget.copy_source_z_axis_to_local_axis_draft()
+                draft = widget.local_axis_controller.copy_source_z_axis_to_draft()
 
                 self.assertIsNotNone(draft)
                 self.assertEqual(draft["part_id"], "head")
                 self.assertEqual(draft["editable_axis"]["role"], "editable_output_axis")
                 self.assertTrue(widget.volume_local_axes_check.isChecked())
-                overlays = widget._local_axis_volume_overlays()
+                overlays = widget.local_axis_controller.volume_overlays()
                 self.assertEqual([item["label"] for item in overlays], ["source Z", "output Z"])
                 self.assertEqual(overlays[0]["label_anchor_xy"], overlays[0]["start_xy"])
                 self.assertEqual(overlays[1]["label_anchor_xy"], overlays[1]["end_xy"])
@@ -2231,10 +2357,10 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget._select_volume_tree_item("01-0101-21", "part", "head")
                 widget.display_mode_combo.setCurrentIndex(widget.display_mode_combo.findData("volume"))
                 widget.volume_canvas.resize(480, 360)
-                draft = widget.copy_source_z_axis_to_local_axis_draft()
+                draft = widget.local_axis_controller.copy_source_z_axis_to_draft()
                 self.assertIsNotNone(draft)
 
-                overlays = widget._local_axis_volume_overlays()
+                overlays = widget.local_axis_controller.volume_overlays()
                 output_overlay = [item for item in overlays if item["label"] == "output Z"][0]
                 end_xy = output_overlay["end_xy"]
                 old_yaw = widget._volume_yaw
@@ -2268,10 +2394,10 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget._select_volume_tree_item("01-0101-21", "part", "head")
                 widget.display_mode_combo.setCurrentIndex(widget.display_mode_combo.findData("volume"))
                 widget.volume_canvas.resize(480, 360)
-                draft = widget.copy_source_z_axis_to_local_axis_draft()
+                draft = widget.local_axis_controller.copy_source_z_axis_to_draft()
                 self.assertIsNotNone(draft)
 
-                overlays = widget._local_axis_volume_overlays()
+                overlays = widget.local_axis_controller.volume_overlays()
                 output_overlay = [item for item in overlays if item["label"] == "output Z"][0]
                 start_xy = output_overlay["start_xy"]
                 end_xy = output_overlay["end_xy"]
@@ -2310,22 +2436,22 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget._select_volume_tree_item("01-0101-21", "part", "head")
                 widget.display_mode_combo.setCurrentIndex(widget.display_mode_combo.findData("volume"))
                 widget.volume_canvas.resize(480, 360)
-                draft = widget.copy_source_z_axis_to_local_axis_draft()
+                draft = widget.local_axis_controller.copy_source_z_axis_to_draft()
                 self.assertIsNotNone(draft)
 
                 self.assertFalse(widget.volume_clip_plane_check.isChecked())
-                self.assertTrue(widget.set_local_axis_pick_target("roll_a"))
+                self.assertTrue(widget.local_axis_controller.set_pick_target("roll_a"))
                 self.assertTrue(widget.volume_clip_plane_check.isChecked())
                 self.assertIn("clip plane", widget.btn_pick_roll_ref_a.toolTip())
 
                 widget.volume_clip_plane_depth_slider.setValue(45)
-                self.assertTrue(widget.set_local_axis_pick_target("roll_a"))
+                self.assertTrue(widget.local_axis_controller.set_pick_target("roll_a"))
                 left_click = FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, 205, 180)
                 widget.volume_canvas.mousePressEvent(left_click)
                 self.assertTrue(left_click.accepted)
                 self.assertIn("roll_reference_a", widget.local_axis_status_label.text())
 
-                self.assertTrue(widget.set_local_axis_pick_target("roll_b"))
+                self.assertTrue(widget.local_axis_controller.set_pick_target("roll_b"))
                 right_click = FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, 275, 180)
                 widget.volume_canvas.mousePressEvent(right_click)
                 self.assertTrue(right_click.accepted)
@@ -2340,7 +2466,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertIn("Local frame x_axis", widget.local_axis_details_label.text())
                 self.assertIn("Axis/reference relation", widget.local_axis_details_label.text())
                 self.assertIn("A/B projected roll width", widget.local_axis_details_label.text())
-                overlays = widget._local_axis_volume_overlays()
+                overlays = widget.local_axis_controller.volume_overlays()
                 self.assertIn("Roll reference A", [item.get("label") for item in overlays])
                 self.assertIn("Roll reference B", [item.get("label") for item in overlays])
                 self.assertIn("Roll reference", [item.get("label") for item in overlays])
@@ -2367,11 +2493,11 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget._select_volume_tree_item("01-0101-21", "part", "head")
                 widget.display_mode_combo.setCurrentIndex(widget.display_mode_combo.findData("volume"))
                 widget.volume_canvas.resize(480, 360)
-                self.assertIsNotNone(widget.copy_source_z_axis_to_local_axis_draft())
+                self.assertIsNotNone(widget.local_axis_controller.copy_source_z_axis_to_draft())
 
                 task = widget._start_tif_task("volume_preview", action="build_preview", message="Preparing preview")
-                self.assertTrue(widget._backend_write_lock_active())
-                self.assertTrue(widget.set_local_axis_pick_target("roll_a"))
+                self.assertTrue(widget.coordinator.backend_write_lock_active())
+                self.assertTrue(widget.local_axis_controller.set_pick_target("roll_a"))
                 click = FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, 205, 180)
                 widget.volume_canvas.mousePressEvent(click)
 
@@ -2398,7 +2524,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 task = widget._start_tif_task("volume_preview", action="build_preview", message="Preparing preview")
                 widget._set_scope_controls_enabled()
 
-                self.assertTrue(widget._backend_write_lock_active())
+                self.assertTrue(widget.coordinator.backend_write_lock_active())
                 self.assertTrue(widget.btn_copy_source_z_axis.isEnabled())
                 self.assertTrue(widget.btn_pick_roll_ref_a.isEnabled())
                 self.assertTrue(widget.btn_pick_roll_ref_b.isEnabled())
@@ -2425,8 +2551,8 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertIsNone(widget.local_axis_draft)
 
                 task = widget._start_tif_task("volume_preview", action="build_preview", message="Preparing preview")
-                with patch.object(widget, "render_volume_preview", return_value=None):
-                    self.assertTrue(widget.set_local_axis_pick_target("roll_a"))
+                with patch.object(widget.volume_render_controller, "render_volume_preview", return_value=None):
+                    self.assertTrue(widget.local_axis_controller.set_pick_target("roll_a"))
 
                 self.assertIsNotNone(widget.local_axis_draft)
                 self.assertEqual(widget._local_axis_pick_target, "roll_a")
@@ -2462,13 +2588,13 @@ class TifWorkbenchTests(unittest.TestCase):
                 for task_type in sorted(preview_task_types | blocking_task_types):
                     task = widget._start_tif_task(task_type, action=f"test_{task_type}", message=f"testing {task_type}")
                     try:
-                        self.assertTrue(widget._backend_write_lock_active(), task_type)
-                        allowed = widget._guard_local_axis_draft_interaction(show_message=False)
+                        self.assertTrue(widget.coordinator.backend_write_lock_active(), task_type)
+                        allowed = widget.local_axis_controller.guard_draft_interaction(show_message=False)
                         self.assertEqual(allowed, task_type in preview_task_types, task_type)
-                        self.assertFalse(widget._guard_backend_write_lock(show_message=False), task_type)
-                        ignored_preview_allowed = widget._guard_backend_write_lock(
+                        self.assertFalse(widget.coordinator.guard_backend_write_lock(show_message=False), task_type)
+                        ignored_preview_allowed = widget.coordinator.guard_backend_write_lock(
                             show_message=False,
-                            ignored_task_types=widget._local_axis_draft_lock_ignored_task_types(),
+                            ignored_task_types=widget.local_axis_controller.ignored_draft_lock_task_types(),
                         )
                         self.assertEqual(ignored_preview_allowed, task_type in preview_task_types, task_type)
                     finally:
@@ -2488,7 +2614,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 crop_volume_to_part(widget.project, "01-0101-21", "head", [[0, 4], [1, 7], [1, 7]], display_name="Head")
                 widget.refresh_project()
                 widget._select_volume_tree_item("01-0101-21", "part", "head")
-                draft = widget.copy_source_z_axis_to_local_axis_draft()
+                draft = widget.local_axis_controller.copy_source_z_axis_to_draft()
                 self.assertIsNotNone(draft)
 
                 roll = {
@@ -2500,7 +2626,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.local_axis_draft["roll_reference"] = roll
                 old_axis = dict(widget.local_axis_draft["editable_axis"])
 
-                self.assertTrue(widget.align_local_axis_to_reference_plane())
+                self.assertTrue(widget.local_axis_controller.align_to_reference_plane())
 
                 aligned_axis = widget.local_axis_draft["editable_axis"]
                 reference_plane = widget.local_axis_draft["reference_plane"]
@@ -2512,17 +2638,17 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.local_axis_details_check.setChecked(True)
                 self.assertIn("Reference plane normal", widget.local_axis_details_label.text())
 
-                overlays = widget._local_axis_volume_overlays()
+                overlays = widget.local_axis_controller.volume_overlays()
                 self.assertIn("Plane reference C", [item.get("label") for item in overlays])
                 self.assertIn("A/B/C reference plane", [item.get("label") for item in overlays])
 
-                payload = widget._current_local_axis_reslice_payload()
+                payload = widget.local_axis_controller.current_reslice_payload()
                 self.assertEqual(payload["roll_reference"]["point_c"]["role"], "reference_plane_c")
                 self.assertEqual(payload["reference_plane"]["plane_id"], "three_point_reference_plane")
 
                 FakeProgressDialog.instances.clear()
-                with patch("AntSleap.ui.tif_workbench.QProgressDialog", FakeProgressDialog):
-                    result = widget.export_current_local_axis_reslice()
+                with patch("AntSleap.ui.tif_local_axis_controller.QProgressDialog", FakeProgressDialog):
+                    result = widget.local_axis_controller.export_current_reslice()
 
                 self.assertIsNotNone(result)
                 self.assertEqual(result["status"], "running")
@@ -2547,11 +2673,11 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.volume_canvas.resize(480, 360)
 
                 widget.volume_clip_plane_depth_slider.setValue(0)
-                front_depth = widget._clip_plane_rotated_depth()
+                front_depth = widget.local_axis_controller.clip_plane_rotated_depth()
                 widget.volume_clip_plane_depth_slider.setValue(50)
-                middle_depth = widget._clip_plane_rotated_depth()
+                middle_depth = widget.local_axis_controller.clip_plane_rotated_depth()
                 widget.volume_clip_plane_depth_slider.setValue(100)
-                back_depth = widget._clip_plane_rotated_depth()
+                back_depth = widget.local_axis_controller.clip_plane_rotated_depth()
 
                 self.assertGreater(front_depth, middle_depth)
                 self.assertGreater(middle_depth, back_depth)
@@ -2571,15 +2697,15 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget._select_volume_tree_item("01-0101-21", "part", "head")
                 widget.display_mode_combo.setCurrentIndex(widget.display_mode_combo.findData("volume"))
                 widget.volume_canvas.resize(480, 360)
-                draft = widget.copy_source_z_axis_to_local_axis_draft()
+                draft = widget.local_axis_controller.copy_source_z_axis_to_draft()
                 self.assertIsNotNone(draft)
 
                 widget.volume_clip_plane_check.setChecked(True)
                 widget.volume_clip_plane_depth_slider.setValue(45)
                 expected_origin = list(widget.local_axis_draft["origin_zyx"])
-                self.assertTrue(widget.set_local_axis_pick_target("roll_a"))
+                self.assertTrue(widget.local_axis_controller.set_pick_target("roll_a"))
                 widget.volume_canvas.mousePressEvent(FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, 205, 180))
-                self.assertTrue(widget.set_local_axis_pick_target("roll_b"))
+                self.assertTrue(widget.local_axis_controller.set_pick_target("roll_b"))
                 widget.volume_canvas.mousePressEvent(FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, 275, 180))
                 self.assertIsNotNone(widget.local_axis_draft["local_frame"])
                 self.assertEqual(widget.local_axis_draft["origin_zyx"], expected_origin)
@@ -2590,12 +2716,12 @@ class TifWorkbenchTests(unittest.TestCase):
                 original_part_contours = dict(original_part.get("contours") or {})
                 original_part_image_path = root / "viewer" / original_part_image["path"]
                 FakeProgressDialog.instances.clear()
-                with patch("AntSleap.ui.tif_workbench.QProgressDialog", FakeProgressDialog):
-                    result = widget.export_current_local_axis_reslice()
+                with patch("AntSleap.ui.tif_local_axis_controller.QProgressDialog", FakeProgressDialog):
+                    result = widget.local_axis_controller.export_current_reslice()
 
                 self.assertIsNotNone(result)
                 self.assertEqual(result["status"], "running")
-                self.assertTrue(widget._local_axis_reslice_export_running())
+                self.assertTrue(widget.local_axis_controller.export_running())
                 self._wait_for_local_axis_export(widget)
                 self.assertEqual(len(FakeProgressDialog.instances), 1)
                 progress = FakeProgressDialog.instances[0]
@@ -2622,7 +2748,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertGreaterEqual(output_shape[1], 6)
                 self.assertGreaterEqual(output_shape[2], 6)
                 self.assertIsNotNone(widget.local_axis_draft)
-                self.assertIsNone(widget._current_local_axis_draft())
+                self.assertIsNone(widget.local_axis_controller.current_draft())
                 self.assertEqual(widget.current_reslice_id, record["reslice_id"])
                 self.assertTrue((root / "viewer" / record["metadata_path"]).exists())
                 self.assertTrue((root / "viewer" / record["image_path"]).exists())
@@ -2662,7 +2788,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertIn("Source Z axis", widget.local_axis_summary_label.text())
                 self.assertIn("Draft output Z: none", widget.local_axis_summary_label.text())
 
-                draft = widget.copy_source_z_axis_to_local_axis_draft()
+                draft = widget.local_axis_controller.copy_source_z_axis_to_draft()
 
                 self.assertIsNotNone(draft)
                 self.assertIn("Draft output Z:", widget.local_axis_summary_label.text())
@@ -2685,6 +2811,42 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.close_project()
                 widget.deleteLater()
 
+
+    def test_part_load_preserves_volume_mode_canvas_and_finishes_loading_feedback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+            try:
+                crop_volume_to_part(widget.project, "01-0101-21", "head", [[0, 4], [1, 7], [1, 7]], display_name="Head")
+                widget.refresh_project()
+                widget.on_display_mode_changed("volume")
+
+                widget._select_volume_tree_item("01-0101-21", "part", "head")
+
+                self.assertEqual(widget.display_mode, "volume")
+                self.assertEqual(widget.display_mode_combo.currentData(), "volume")
+                self.assertIs(widget.view_stack.currentWidget(), widget.volume_canvas)
+                self.assertEqual(widget.operation_status_label.text(), "Loaded selected part volume and labels.")
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_loading_same_part_preserves_local_axis_draft(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+            try:
+                crop_volume_to_part(widget.project, "01-0101-21", "head", [[0, 4], [1, 7], [1, 7]], display_name="Head")
+                widget.refresh_project()
+                widget._select_volume_tree_item("01-0101-21", "part", "head")
+                draft = widget.local_axis_controller.copy_source_z_axis_to_draft()
+
+                widget.load_part("01-0101-21", "head")
+
+                self.assertIs(widget.local_axis_draft, draft)
+                self.assertIs(widget.local_axis_controller.current_draft(), draft)
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
     def test_local_axis_draft_is_scoped_to_current_part(self):
         with tempfile.TemporaryDirectory() as tmp:
             widget = self._make_volume_widget(Path(tmp), z_count=5)
@@ -2693,13 +2855,13 @@ class TifWorkbenchTests(unittest.TestCase):
                 crop_volume_to_part(widget.project, "01-0101-21", "thorax", [[1, 5], [1, 7], [1, 7]], display_name="Thorax")
                 widget.refresh_project()
                 widget._select_volume_tree_item("01-0101-21", "part", "head")
-                self.assertIsNotNone(widget.copy_source_z_axis_to_local_axis_draft())
+                self.assertIsNotNone(widget.local_axis_controller.copy_source_z_axis_to_draft())
 
                 widget._select_volume_tree_item("01-0101-21", "part", "thorax")
 
                 self.assertIsNone(widget.local_axis_draft)
                 widget.volume_local_axes_check.setChecked(True)
-                overlays = widget._local_axis_volume_overlays()
+                overlays = widget.local_axis_controller.volume_overlays()
                 self.assertEqual([item["label"] for item in overlays], ["source Z"])
             finally:
                 widget.close_project()
@@ -2712,7 +2874,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 crop_volume_to_part(widget.project, "01-0101-21", "head", [[0, 4], [1, 7], [1, 7]], display_name="Head")
                 widget.refresh_project()
                 widget._select_volume_tree_item("01-0101-21", "part", "head")
-                draft = widget.copy_source_z_axis_to_local_axis_draft()
+                draft = widget.local_axis_controller.copy_source_z_axis_to_draft()
                 self.assertIsNotNone(draft)
                 saved_axis = dict(draft["editable_axis"])
                 saved_axis["start_zyx"] = [0.0, 1.0, 1.0]
@@ -2749,10 +2911,10 @@ class TifWorkbenchTests(unittest.TestCase):
 
                 widget.load_part("01-0101-21", "head", selected_reslice_id="saved_axis")
                 widget.volume_local_axes_check.setChecked(True)
-                overlays = widget._local_axis_volume_overlays()
+                overlays = widget.local_axis_controller.volume_overlays()
 
                 self.assertIsNotNone(widget.local_axis_draft)
-                self.assertIsNone(widget._current_local_axis_draft())
+                self.assertIsNone(widget.local_axis_controller.current_draft())
                 labels = [item.get("label") for item in overlays]
                 self.assertIn("source Z", labels)
                 self.assertIn("output Z", labels)
@@ -2768,7 +2930,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertFalse(widget.btn_delete_part_volume.isEnabled())
                 self.assertFalse(widget._is_editable_part_volume())
                 with self.assertRaises(ValueError):
-                    widget._current_local_axis_reslice_payload()
+                    widget.local_axis_controller.current_reslice_payload()
                 self.assertIn("read-only", widget.local_axis_status_label.text())
             finally:
                 widget.close_project()
@@ -2782,7 +2944,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.refresh_project()
                 widget._select_volume_tree_item("01-0101-21", "part", "leg_gland")
 
-                draft = widget.copy_source_z_axis_to_local_axis_draft()
+                draft = widget.local_axis_controller.copy_source_z_axis_to_draft()
 
                 self.assertIsNotNone(draft)
                 self.assertEqual(draft["part_id"], "leg_gland")
@@ -2875,9 +3037,9 @@ class TifWorkbenchTests(unittest.TestCase):
                 crop_volume_to_part(widget.project, "01-0101-21", "head", [[0, 5], [1, 7], [1, 7]], display_name="Head")
                 widget.refresh_project()
                 widget._select_volume_tree_item("01-0101-21", "part", "head")
-                widget.part_preview_mask = np.ones(tuple(widget.image_volume.shape), dtype=np.uint16)
+                widget.part_mask_workflow_controller.state.preview_mask = np.ones(tuple(widget.image_volume.shape), dtype=np.uint16)
 
-                widget.add_current_rect_keyframe()
+                widget.part_mask_workflow_controller.add_current_rect_keyframe()
 
                 self.assertIsNone(widget.part_preview_mask)
                 self.assertEqual(widget.project.get_part("01-0101-21", "head")["status"], "draft")
@@ -2945,9 +3107,9 @@ class TifWorkbenchTests(unittest.TestCase):
                 contours = add_polygon_keyframe(contours, 3, polygon_b, axis="z", source="manual_freehand")
                 write_contours_json(contours_path, contours)
 
-                widget.preview_part_mask_from_keyframes()
+                widget.part_mask_workflow_controller.preview_part_mask_from_keyframes()
                 self.assertIsNotNone(widget.part_preview_mask)
-                widget.accept_part_mask_preview()
+                widget.part_mask_workflow_controller.accept_part_mask_preview()
                 self.assertIn("Accepted part mask", widget.training_status_label.text())
             finally:
                 widget.close_project()
@@ -2966,7 +3128,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 part = reloaded_widget.project.get_part("01-0101-21", "head")
                 self.assertTrue(Path(reloaded_widget.project.to_absolute(part["contours_path"])).exists())
                 self.assertTrue(Path(reloaded_widget.project.to_absolute(part["extraction_path"])).exists())
-                self.assertTrue(reloaded_widget.current_contour_overlay_polygons())
+                self.assertTrue(reloaded_widget.part_mask_workflow_controller.current_contour_overlay_polygons())
             finally:
                 reloaded_widget.close_project()
                 reloaded_widget.deleteLater()
@@ -3029,7 +3191,7 @@ class TifWorkbenchTests(unittest.TestCase):
 
                 widget.display_mode_combo.setCurrentIndex(volume_index)
                 widget.task_tabs.setCurrentWidget(widget.display_task_page)
-                widget.copy_source_z_axis_to_local_axis_draft()
+                widget.local_axis_controller.copy_source_z_axis_to_draft()
                 assert_visible_widgets_inside_right_panel("3D review with local axis")
 
                 widget.task_tabs.setCurrentWidget(widget.training_mode_tabs)
@@ -3079,9 +3241,9 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.slice_slider.setValue(0)
                 edit_index = widget.label_role_combo.findData("working_edit")
                 widget.label_role_combo.setCurrentIndex(edit_index)
-                widget.current_material_id = 5
+                widget.part_mask_workflow_controller.state.current_material_id = 5
                 widget.brush_size_slider.setValue(2)
-                widget.paint_at_widget_position(widget.canvas.width() / 2, widget.canvas.height() / 2)
+                widget.annotation_workflow_controller.paint_at_widget_position(widget.canvas.width() / 2, widget.canvas.height() / 2)
                 self.assertEqual(widget._dirty_edit_slices, {0})
                 widget.save_working_edit()
 
@@ -3090,8 +3252,8 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertGreater(int(saved_edit.sum()), 0)
                 self.assertEqual(int(saved_manual.sum()), 0)
                 self.assertFalse(manager.evaluate_train_ready("01-0101-10")["train_ready"])
-                widget.undo()
-                widget.redo()
+                widget.annotation_workflow_controller.undo()
+                widget.annotation_workflow_controller.redo()
                 widget.save_working_edit()
             finally:
                 widget.close_project()
@@ -3124,8 +3286,8 @@ class TifWorkbenchTests(unittest.TestCase):
 
                 edit_index = widget.label_role_combo.findData("working_edit")
                 widget.label_role_combo.setCurrentIndex(edit_index)
-                widget.current_material_id = 7
-                widget.paint_at_widget_position(widget.canvas.width() / 2, widget.canvas.height() / 2)
+                widget.part_mask_workflow_controller.state.current_material_id = 7
+                widget.annotation_workflow_controller.paint_at_widget_position(widget.canvas.width() / 2, widget.canvas.height() / 2)
 
                 specimen = widget.project.get_specimen("01-0101-lazy")
                 self.assertIsInstance(widget.edit_volume, np.memmap)
@@ -3168,11 +3330,11 @@ class TifWorkbenchTests(unittest.TestCase):
             widget = TifWorkbenchWidget(manager, "en")
             try:
                 widget.load_specimen("01-0101-13")
-                widget.material_map = upsert_material(
+                widget.part_mask_workflow_controller.state.material_map = upsert_material(
                     widget.material_map,
                     {"id": 6, "name": "optic_lobe", "display_name": "Optic lobe", "color": "#00ff00", "trainable": True},
                 )
-                widget._save_material_map()
+                widget.part_mask_workflow_controller._save_material_map()
                 self.assertEqual(widget.material_table.rowCount(), 3)
                 self.assertEqual(widget.material_table.horizontalHeaderItem(0).text(), "")
                 self.assertEqual(widget.material_table.item(1, 0).text(), "")
@@ -3187,8 +3349,8 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertEqual(widget.current_material_id, 0)
                 self.assertIn("Background / erase target", widget.current_material_label.text())
                 self.assertIn("no", widget.material_table.item(0, 3).text())
-                self.assertTrue(widget._material_id_is_used(5))
-                self.assertFalse(widget._material_id_is_used(6))
+                self.assertTrue(widget.part_mask_workflow_controller._material_id_is_used(5))
+                self.assertFalse(widget.part_mask_workflow_controller._material_id_is_used(6))
             finally:
                 widget.close_project(prompt_unsaved=False)
                 widget.deleteLater()
@@ -3392,6 +3554,86 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.close_project()
                 widget.deleteLater()
 
+    def test_gpu_volume_canvas_mouse_interactions_use_render_controller(self):
+        class FakeWorkbench:
+            def __init__(self):
+                self.volume_render_controller = Mock()
+
+        for canvas_type in (TifGpuVolumeOffscreenWidget, TifGpuVolumeCanvas):
+            with self.subTest(canvas_type=canvas_type.__name__):
+                canvas = canvas_type()
+                workbench = FakeWorkbench()
+                canvas.workbench = workbench
+                try:
+                    canvas._mouse_mode = "rotate"
+                    canvas._last_drag_pos = QPointF(10.0, 20.0)
+                    rotate_event = FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, 16.0, 28.0)
+                    canvas.mouseMoveEvent(rotate_event)
+                    workbench.volume_render_controller.rotate_volume_preview.assert_called_once_with(6.0, 8.0)
+                    self.assertTrue(rotate_event.accepted)
+
+                    canvas._mouse_mode = "pan"
+                    canvas._last_drag_pos = QPointF(16.0, 28.0)
+                    pan_event = FakeMouseEvent(Qt.RightButton, Qt.RightButton, 20.0, 23.0)
+                    canvas.mouseMoveEvent(pan_event)
+                    workbench.volume_render_controller.pan_volume_preview.assert_called_once_with(4.0, -5.0)
+                    self.assertTrue(pan_event.accepted)
+
+                    release_event = FakeMouseEvent(Qt.RightButton, Qt.NoButton, 20.0, 23.0)
+                    canvas.mouseReleaseEvent(release_event)
+                    workbench.volume_render_controller.finish_volume_interaction_debounced.assert_called_once_with()
+                    self.assertTrue(release_event.accepted)
+
+                    wheel_event = FakeWheelEvent(120)
+                    canvas.wheelEvent(wheel_event)
+                    workbench.volume_render_controller.zoom_volume_preview.assert_called_once_with(1)
+                    self.assertTrue(wheel_event.accepted)
+                finally:
+                    if hasattr(canvas, "release_gl_resources"):
+                        canvas.release_gl_resources()
+                    canvas.deleteLater()
+
+    def test_volume_canvas_gpu_signals_connect_to_render_controller(self):
+        manager = TifProjectManager()
+
+        class FakeGpuCanvas(TifVolumeCanvas):
+            render_failed = Signal(str)
+            render_info_changed = Signal(str)
+            render_stats_changed = Signal()
+
+            def set_volume_data(self, *args, **kwargs):
+                return None
+
+        fake_canvas = FakeGpuCanvas()
+
+        def fake_factory(parent=None):
+            return fake_canvas, "gpu", ""
+
+        with patch("AntSleap.ui.tif_workbench.create_tif_volume_canvas", fake_factory):
+            widget = TifWorkbenchWidget(manager, "en")
+            try:
+                controller = widget.volume_render_controller
+                controller._on_gpu_volume_failed = Mock()
+                controller._on_gpu_volume_info_changed = Mock()
+                controller._on_gpu_volume_stats_changed = Mock()
+
+                mode_index = widget.display_mode_combo.findData("volume")
+                widget.display_mode_combo.setCurrentIndex(mode_index)
+
+                fake_canvas.render_failed.emit("test failure")
+                fake_canvas.render_info_changed.emit("test renderer")
+                fake_canvas.render_stats_changed.emit()
+
+                controller._on_gpu_volume_failed.assert_called_once_with("test failure")
+                controller._on_gpu_volume_info_changed.assert_called_once_with("test renderer")
+                controller._on_gpu_volume_stats_changed.assert_called_once_with()
+                self.assertFalse(hasattr(widget, "_on_gpu_volume_failed"))
+                self.assertFalse(hasattr(widget, "_on_gpu_volume_info_changed"))
+                self.assertFalse(hasattr(widget, "_on_gpu_volume_stats_changed"))
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
     def test_3d_mask_mode_falls_back_from_gpu_canvas_to_cpu_pixmap_canvas(self):
         with tempfile.TemporaryDirectory() as tmp:
             widget = self._make_volume_widget(Path(tmp), z_count=5)
@@ -3412,7 +3654,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 crop_volume_to_part(widget.project, "01-0101-21", "head", [[0, 5], [1, 7], [1, 7]], display_name="Head")
                 widget.refresh_project()
                 widget._select_volume_tree_item("01-0101-21", "part", "head")
-                widget.part_preview_mask = np.ones(tuple(widget.image_volume.shape), dtype=np.uint16)
+                widget.part_mask_workflow_controller.state.preview_mask = np.ones(tuple(widget.image_volume.shape), dtype=np.uint16)
                 widget.display_mode = "volume"
                 widget.view_stack.addWidget(fake_canvas)
                 widget.volume_canvas = fake_canvas
@@ -3421,7 +3663,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 boundary_index = widget.volume_mask_combo.findData("mask_boundary")
                 widget.volume_mask_combo.setCurrentIndex(boundary_index)
 
-                widget.render_volume_preview()
+                widget.volume_render_controller.render_volume_preview()
 
                 self.assertEqual(fake_canvas.release_calls, 1)
                 self.assertEqual(widget._volume_canvas_renderer, "cpu")
@@ -3466,7 +3708,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget._select_volume_tree_item("01-0101-21", "part", "head")
                 mask = np.zeros(tuple(widget.image_volume.shape), dtype=np.uint16)
                 mask[:, 1:4, 1:4] = 1
-                widget.part_preview_mask = mask
+                widget.part_mask_workflow_controller.state.preview_mask = mask
                 widget.display_mode = "volume"
                 widget.view_stack.addWidget(fake_canvas)
                 widget.volume_canvas = fake_canvas
@@ -3475,13 +3717,13 @@ class TifWorkbenchTests(unittest.TestCase):
                 masked_index = widget.volume_mask_combo.findData("masked_image")
                 widget.volume_mask_combo.setCurrentIndex(masked_index)
 
-                widget.render_volume_preview()
+                widget.volume_render_controller.render_volume_preview()
 
                 self.assertEqual(fake_canvas.release_calls, 0)
                 self.assertEqual(widget._volume_canvas_renderer, "gpu")
                 self.assertGreaterEqual(len(fake_canvas.uploads), 1)
                 uploaded = fake_canvas.uploads[-1]
-                self.assertEqual(tuple(uploaded.shape), tuple(widget._ensure_volume_preview("still").shape))
+                self.assertEqual(tuple(uploaded.shape), tuple(widget.volume_render_controller._ensure_volume_preview("still").shape))
                 self.assertGreater(int(uploaded[:, 1:4, 1:4].sum()), 0)
                 outside = uploaded.copy()
                 outside[:, 1:4, 1:4] = 0
@@ -3492,7 +3734,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 mask_outside[:, 1:4, 1:4] = 0
                 self.assertEqual(int(mask_outside.sum()), 0)
                 self.assertIsNotNone(fake_canvas.render_state_kwargs)
-                self.assertEqual(fake_canvas.render_state_kwargs["transfer_preset"], widget._volume_transfer_preset())
+                self.assertEqual(fake_canvas.render_state_kwargs["transfer_preset"], widget.volume_render_controller._volume_transfer_preset())
                 self.assertEqual(fake_canvas.render_state_kwargs["mask_mode"], "masked_image")
                 self.assertEqual(fake_canvas.render_state_kwargs["render_mode"], "still")
             finally:
@@ -3531,7 +3773,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget._select_volume_tree_item("01-0101-21", "part", "head")
                 mask = np.zeros(tuple(widget.image_volume.shape), dtype=np.uint16)
                 mask[:, 1:4, 1:4] = 1
-                widget.part_preview_mask = mask
+                widget.part_mask_workflow_controller.state.preview_mask = mask
                 widget.display_mode = "volume"
                 widget.view_stack.addWidget(fake_canvas)
                 widget.volume_canvas = fake_canvas
@@ -3540,7 +3782,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 boundary_index = widget.volume_mask_combo.findData("mask_boundary")
                 widget.volume_mask_combo.setCurrentIndex(boundary_index)
 
-                widget.render_volume_preview()
+                widget.volume_render_controller.render_volume_preview()
 
                 self.assertEqual(fake_canvas.release_calls, 0)
                 self.assertEqual(widget._volume_canvas_renderer, "gpu")
@@ -3559,7 +3801,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 crop_volume_to_part(widget.project, "01-0101-21", "head", [[0, 5], [1, 7], [1, 7]], display_name="Head")
                 widget.refresh_project()
                 widget._select_volume_tree_item("01-0101-21", "part", "head")
-                widget.part_preview_mask = np.ones(tuple(widget.image_volume.shape), dtype=np.uint16)
+                widget.part_mask_workflow_controller.state.preview_mask = np.ones(tuple(widget.image_volume.shape), dtype=np.uint16)
                 widget.display_mode = "volume"
                 widget._volume_canvas_created = True
                 widget._volume_canvas_renderer = "cpu"
@@ -3579,7 +3821,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 image_index = widget.volume_mask_combo.findData("image_only")
                 widget.volume_mask_combo.setCurrentIndex(image_index)
                 with patch("AntSleap.ui.tif_workbench.create_tif_volume_canvas", fake_factory):
-                    widget.render_volume_preview()
+                    widget.volume_render_controller.render_volume_preview()
 
                 self.assertEqual(widget._volume_canvas_renderer, "gpu")
                 self.assertIs(widget.volume_canvas, gpu_canvas)
@@ -3652,18 +3894,18 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.volume_projection_combo.setCurrentIndex(widget.volume_projection_combo.findData("composite"))
                 widget._volume_render_mode = "drag"
 
-                self.assertEqual(widget._active_volume_target_dim("drag"), 384)
-                self.assertEqual(widget._active_volume_sample_count(), 384)
-                composite_state = widget._volume_render_state("drag")
+                self.assertEqual(widget.volume_render_controller._active_volume_target_dim("drag"), 384)
+                self.assertEqual(widget.volume_render_controller._active_volume_sample_count(), 384)
+                composite_state = widget.volume_render_controller._volume_render_state("drag")
                 self.assertEqual(composite_state["render_quality"], 384)
                 self.assertEqual(composite_state["sample_steps"], 384)
                 self.assertLess(composite_state["transfer_opacity"], 0.7)
                 self.assertEqual(composite_state["adaptive_step_strength"], 0.0)
 
                 widget.volume_projection_combo.setCurrentIndex(widget.volume_projection_combo.findData("mip"))
-                mip_state = widget._volume_render_state("drag")
+                mip_state = widget.volume_render_controller._volume_render_state("drag")
 
-                self.assertEqual(widget._active_volume_target_dim("drag"), 640)
+                self.assertEqual(widget.volume_render_controller._active_volume_target_dim("drag"), 640)
                 self.assertEqual(mip_state["sample_steps"], 768)
                 self.assertEqual(mip_state["adaptive_step_strength"], 0.0)
             finally:
@@ -3681,9 +3923,9 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.volume_roi_detail_check.setChecked(True)
                 widget.volume_roi_scale_slider.setValue(250)
 
-                state = widget._volume_render_state("still")
+                state = widget.volume_render_controller._volume_render_state("still")
 
-                self.assertEqual(widget._active_volume_sample_count(), 3072)
+                self.assertEqual(widget.volume_render_controller._active_volume_sample_count(), 3072)
                 self.assertEqual(state["sample_steps"], 3072)
                 self.assertEqual(state["supersample_scale"], 2.5)
             finally:
@@ -3700,7 +3942,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 def fake_request():
                     calls.append(widget._volume_render_mode)
 
-                widget._request_volume_interaction_render = fake_request
+                widget.volume_render_controller._request_volume_interaction_render = fake_request
                 for slider, value in (
                     (widget.volume_inside_slider, 45),
                     (widget.volume_clip_slider, 28),
@@ -3728,7 +3970,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 def fake_refresh():
                     calls.append(int(widget.volume_quality_slider.value()))
 
-                widget._refresh_volume_preview = fake_refresh
+                widget.volume_render_controller._refresh_volume_preview = fake_refresh
                 widget.volume_quality_slider.setValue(1024)
                 calls.clear()
 
@@ -3736,13 +3978,13 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.volume_quality_slider.sliderMoved.emit(2048)
                 widget.volume_quality_slider.setSliderDown(True)
                 widget.volume_quality_slider.setValue(2048)
-                widget._on_volume_quality_changed()
+                widget.volume_render_controller._on_volume_quality_changed()
                 widget.volume_quality_slider.sliderMoved.emit(3072)
                 widget.volume_quality_slider.setValue(3072)
-                widget._on_volume_quality_changed()
+                widget.volume_render_controller._on_volume_quality_changed()
                 widget.volume_quality_slider.sliderMoved.emit(4096)
                 widget.volume_quality_slider.setValue(4096)
-                widget._on_volume_quality_changed()
+                widget.volume_render_controller._on_volume_quality_changed()
 
                 self.assertEqual(calls, [])
                 self.assertEqual(widget._volume_quality_committed_value, 1024)
@@ -3755,7 +3997,7 @@ class TifWorkbenchTests(unittest.TestCase):
 
                 widget.volume_quality_slider.sliderPressed.emit()
                 widget.volume_quality_slider.setSliderDown(True)
-                widget._on_volume_quality_changed()
+                widget.volume_render_controller._on_volume_quality_changed()
                 widget.volume_quality_slider.setSliderDown(False)
                 widget.volume_quality_slider.sliderReleased.emit()
 
@@ -3774,16 +4016,16 @@ class TifWorkbenchTests(unittest.TestCase):
                 def fake_render():
                     calls.append(int(widget.volume_roi_scale_slider.value()))
 
-                widget.render_volume_preview = fake_render
+                widget.volume_render_controller.render_volume_preview = fake_render
                 widget.volume_roi_scale_slider.setValue(200)
                 calls.clear()
 
                 widget.volume_roi_scale_slider.sliderPressed.emit()
                 widget.volume_roi_scale_slider.setSliderDown(True)
                 widget.volume_roi_scale_slider.setValue(250)
-                widget._on_volume_roi_scale_changed()
+                widget.volume_render_controller._on_volume_roi_scale_changed()
                 widget.volume_roi_scale_slider.setValue(300)
-                widget._on_volume_roi_scale_changed()
+                widget.volume_render_controller._on_volume_roi_scale_changed()
 
                 self.assertEqual(calls, [])
                 self.assertIn("Release ROI scale", widget.volume_render_status_label.text())
@@ -3811,7 +4053,7 @@ class TifWorkbenchTests(unittest.TestCase):
                     renders.append(int(widget.volume_transfer_opacity_slider.value()))
 
                 widget._save_active_volume_view_settings = fake_save
-                widget.render_volume_preview = fake_render
+                widget.volume_render_controller.render_volume_preview = fake_render
 
                 widget.volume_transfer_opacity_slider.sliderPressed.emit()
                 widget.volume_transfer_opacity_slider.setSliderDown(True)
@@ -4021,12 +4263,12 @@ class TifWorkbenchTests(unittest.TestCase):
             try:
                 edit_index = widget.label_role_combo.findData("working_edit")
                 widget.label_role_combo.setCurrentIndex(edit_index)
-                widget.current_material_id = 2
+                widget.part_mask_workflow_controller.state.current_material_id = 2
                 before = widget.edit_volume.copy()
 
                 y_index = widget.slice_axis_combo.findData("y")
                 widget.slice_axis_combo.setCurrentIndex(y_index)
-                widget.paint_at_widget_position(widget.canvas.width() / 2, widget.canvas.height() / 2)
+                widget.annotation_workflow_controller.paint_at_widget_position(widget.canvas.width() / 2, widget.canvas.height() / 2)
 
                 np.testing.assert_array_equal(widget.edit_volume, before)
                 self.assertIn("Painting is available on Z slices only", widget.training_status_label.text())
@@ -4075,8 +4317,8 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.volume_roi_scale_slider.setValue(250)
                 widget.volume_inside_slider.setValue(65)
                 widget.volume_clip_slider.setValue(30)
-                widget.zoom_volume_preview(1)
-                widget._finish_volume_interaction()
+                widget.volume_render_controller.zoom_volume_preview(1)
+                widget.volume_render_controller._finish_volume_interaction()
                 self.assertIn("RTX 3090", widget.volume_status_text())
                 self.assertIn("Volume view | GPU ray march [", widget.volume_canvas_overlay_text())
                 self.assertIn("Local detail check", widget.volume_canvas_overlay_text())
@@ -4107,7 +4349,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertIn("横移 0%", widget.volume_canvas_overlay_text())
                 self.assertIn("纵移 0%", widget.volume_canvas_overlay_text())
                 self.assertIn("静止高清", widget.volume_quality_slider.toolTip())
-                widget._update_volume_render_status_label()
+                widget.volume_render_controller._update_volume_render_status_label()
                 self.assertFalse(widget.volume_render_status_label.wordWrap())
                 self.assertEqual(widget.volume_render_status_label.minimumHeight(), widget.volume_render_status_label.maximumHeight())
                 self.assertNotIn("\n", widget.volume_render_status_label.text())
@@ -4118,18 +4360,18 @@ class TifWorkbenchTests(unittest.TestCase):
 
                 old_yaw = widget._volume_yaw
                 old_pitch = widget._volume_pitch
-                widget.rotate_volume_preview(25, -10)
+                widget.volume_render_controller.rotate_volume_preview(25, -10)
                 self.assertNotEqual(widget._volume_yaw, old_yaw)
                 self.assertGreater(widget._volume_pitch, old_pitch)
                 self.assertEqual(widget._volume_render_mode, "drag")
                 self.assertIn("拖动预览", widget.volume_canvas_overlay_text())
                 self.assertIn("纹理 640", widget.volume_canvas_overlay_text())
                 self.assertIn("采样 768", widget.volume_canvas_overlay_text())
-                widget._finish_volume_interaction()
+                widget.volume_render_controller._finish_volume_interaction()
                 self.assertEqual(widget._volume_render_mode, "still")
 
                 old_pan = (widget._volume_pan_x, widget._volume_pan_y)
-                widget.pan_volume_preview(80, -40)
+                widget.volume_render_controller.pan_volume_preview(80, -40)
                 self.assertNotEqual((widget._volume_pan_x, widget._volume_pan_y), old_pan)
                 self.assertGreater(widget._volume_pan_x, old_pan[0])
                 self.assertGreater(widget._volume_pan_y, old_pan[1])
@@ -4140,19 +4382,19 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget._volume_pan_x = 0.0
                 widget._volume_pan_y = 0.0
                 widget._volume_zoom = 16.0
-                widget.pan_volume_preview(120, -90)
+                widget.volume_render_controller.pan_volume_preview(120, -90)
                 self.assertAlmostEqual(widget._volume_pan_x, 0.7, places=2)
                 self.assertAlmostEqual(widget._volume_pan_y, 0.7, places=2)
                 for _ in range(80):
-                    widget.pan_volume_preview(120, -90)
+                    widget.volume_render_controller.pan_volume_preview(120, -90)
                 self.assertGreater(widget._volume_pan_x, 4.0)
                 self.assertGreater(widget._volume_pan_y, 4.0)
-                self.assertLessEqual(widget._volume_pan_x, widget._volume_pan_limit())
-                self.assertLessEqual(widget._volume_pan_y, widget._volume_pan_limit())
+                self.assertLessEqual(widget._volume_pan_x, widget.volume_render_controller._volume_pan_limit())
+                self.assertLessEqual(widget._volume_pan_y, widget.volume_render_controller._volume_pan_limit())
                 widget._volume_zoom = 1.0
-                widget._clamp_volume_pan()
-                self.assertLessEqual(widget._volume_pan_x, widget._volume_pan_limit())
-                self.assertLessEqual(widget._volume_pan_y, widget._volume_pan_limit())
+                widget.volume_render_controller._clamp_volume_pan()
+                self.assertLessEqual(widget._volume_pan_x, widget.volume_render_controller._volume_pan_limit())
+                self.assertLessEqual(widget._volume_pan_y, widget.volume_render_controller._volume_pan_limit())
                 press = FakeMouseEvent(Qt.RightButton, Qt.RightButton, 220, 170)
                 move = FakeMouseEvent(Qt.RightButton, Qt.RightButton, 260, 140)
                 release = FakeMouseEvent(Qt.RightButton, Qt.NoButton, 260, 140)
@@ -4164,14 +4406,14 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertTrue(release.accepted)
 
                 old_zoom = widget._volume_zoom
-                widget.zoom_volume_preview(1)
+                widget.volume_render_controller.zoom_volume_preview(1)
                 self.assertGreater(widget._volume_zoom, old_zoom)
                 for _ in range(40):
-                    widget.zoom_volume_preview(1)
+                    widget.volume_render_controller.zoom_volume_preview(1)
                 self.assertEqual(widget._volume_zoom, 16.0)
-                widget._finish_volume_interaction()
+                widget.volume_render_controller._finish_volume_interaction()
 
-                widget.reset_volume_view()
+                widget.volume_render_controller.reset_volume_view()
                 self.assertEqual(widget._volume_yaw, -35.0)
                 self.assertEqual(widget._volume_pitch, 20.0)
                 self.assertEqual(widget._volume_zoom, 1.0)
@@ -4191,16 +4433,16 @@ class TifWorkbenchTests(unittest.TestCase):
             widget.image_volume = np.zeros((12, 900, 900), dtype=np.uint8)
             widget.image_volume[:, 250:650, 250:650] = 180
             widget.volume_quality_slider.setValue(1024)
-            still = widget._ensure_volume_preview("still")
-            drag = widget._ensure_volume_preview("drag")
+            still = widget.volume_render_controller._ensure_volume_preview("still")
+            drag = widget.volume_render_controller._ensure_volume_preview("drag")
             self.assertIsNotNone(still)
             self.assertIsNotNone(drag)
             self.assertLessEqual(max(drag.shape), 640)
             self.assertLessEqual(max(still.shape), 1024)
             self.assertGreaterEqual(max(still.shape), max(drag.shape))
             self.assertEqual(len(widget._volume_preview_cache), 2)
-            self.assertEqual(widget._volume_preview_algorithm("still"), "hybrid")
-            self.assertEqual(widget._volume_preview_algorithm("drag"), "stride")
+            self.assertEqual(widget.volume_render_controller._volume_preview_algorithm("still"), "hybrid")
+            self.assertEqual(widget.volume_render_controller._volume_preview_algorithm("drag"), "stride")
         finally:
             widget.close_project()
             widget.deleteLater()
@@ -4217,27 +4459,27 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.current_part_id = ""
                 widget.current_reslice_id = ""
                 widget.image_volume = np.full((4, 16, 16), len(specimen_id), dtype=np.uint8)
-                self.assertIsNotNone(widget._ensure_volume_preview("still"))
+                self.assertIsNotNone(widget.volume_render_controller._ensure_volume_preview("still"))
 
             widget.current_specimen_id = "specimen-a"
             widget.image_volume = np.full((4, 16, 16), 1, dtype=np.uint8)
-            cached_a = widget._ensure_volume_preview("still")
+            cached_a = widget.volume_render_controller._ensure_volume_preview("still")
 
             widget.current_specimen_id = "specimen-d"
             widget.image_volume = np.full((4, 16, 16), 4, dtype=np.uint8)
-            self.assertIsNotNone(widget._ensure_volume_preview("still"))
+            self.assertIsNotNone(widget.volume_render_controller._ensure_volume_preview("still"))
 
             owners = {key[0][0] for key in widget._volume_preview_cache.keys()}
             self.assertEqual(owners, {"specimen-a", "specimen-c", "specimen-d"})
             self.assertNotIn("specimen-b", owners)
-            report = widget.volume_performance_report()
+            report = widget.volume_render_controller.volume_performance_report()
             self.assertEqual(report["cache_specimen_count"], 3)
             self.assertEqual(report["cache_max_specimens"], 3)
             self.assertGreater(report["cache_estimated_bytes"], 0)
 
             widget.current_specimen_id = "specimen-a"
             widget.image_volume = np.full((4, 16, 16), 1, dtype=np.uint8)
-            self.assertIs(widget._ensure_volume_preview("still"), cached_a)
+            self.assertIs(widget.volume_render_controller._ensure_volume_preview("still"), cached_a)
         finally:
             widget.close_project()
             widget.deleteLater()
@@ -4254,11 +4496,11 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.current_part_id = ""
                 widget.current_reslice_id = ""
                 widget.image_volume = np.full((4, 16, 16), len(specimen_id), dtype=np.uint8)
-                self.assertIsNotNone(widget._ensure_volume_preview("still"))
+                self.assertIsNotNone(widget.volume_render_controller._ensure_volume_preview("still"))
 
             owners = {key[0][0] for key in widget._volume_preview_cache.keys()}
             self.assertEqual(owners, {"specimen-c"})
-            report = widget.volume_performance_report()
+            report = widget.volume_render_controller.volume_performance_report()
             self.assertEqual(report["cache_specimen_count"], 1)
             self.assertEqual(report["cache_max_specimens"], 1)
         finally:
@@ -4294,12 +4536,12 @@ class TifWorkbenchTests(unittest.TestCase):
             def fake_refresh():
                 calls.append(int(widget.volume_quality_slider.value()))
 
-            widget._refresh_volume_preview = fake_refresh
+            widget.volume_render_controller._refresh_volume_preview = fake_refresh
             widget.volume_quality_slider.setValue(1024)
             widget._volume_quality_committed_value = 1024
 
             widget.volume_quality_slider.setValue(4096)
-            widget._commit_volume_quality_change()
+            widget.volume_render_controller._commit_volume_quality_change()
 
             self.assertEqual(fake_canvas.release_texture_cache_calls, 0)
             self.assertEqual(calls, [4096])
@@ -4315,10 +4557,10 @@ class TifWorkbenchTests(unittest.TestCase):
             widget._volume_canvas_renderer = "gpu"
             widget.current_specimen_id = "specimen-a"
             widget.image_volume = np.zeros((4, 16, 16), dtype=np.uint8)
-            first = widget._ensure_volume_preview("still")
+            first = widget.volume_render_controller._ensure_volume_preview("still")
 
             widget.current_specimen_id = "specimen-b"
-            widget._reset_active_volume_preview_state()
+            widget.volume_render_controller._reset_active_volume_preview_state()
 
             self.assertIsNone(widget._volume_preview)
             self.assertEqual(len(widget._volume_preview_cache), 1)
@@ -4332,14 +4574,14 @@ class TifWorkbenchTests(unittest.TestCase):
         widget = TifWorkbenchWidget(manager, "en")
         try:
             widget.specimen_list.setEnabled(True)
-            widget._set_volume_preview_build_controls_busy(True)
+            widget.volume_render_controller._set_volume_preview_build_controls_busy(True)
             worker = type("Worker", (), {"cancelled": False, "cancel": lambda self: setattr(self, "cancelled", True)})()
-            widget._volume_preview_build_worker = worker
+            widget.volume_render_controller.preview_build_worker = worker
             widget._volume_preview_pending_token = 9
             widget._volume_preview_pending_key = ("old",)
             widget._volume_preview_pending_mask_key = None
 
-            widget._cancel_volume_preview_build()
+            widget.volume_render_controller._cancel_volume_preview_build()
 
             self.assertTrue(worker.cancelled)
             self.assertEqual(widget._volume_preview_pending_token, 0)
@@ -4348,6 +4590,26 @@ class TifWorkbenchTests(unittest.TestCase):
         finally:
             widget.close_project()
             widget.deleteLater()
+
+    def test_part_load_flushes_deferred_volume_render_after_selection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+            try:
+                crop_volume_to_part(widget.project, "01-0101-21", "head", [[0, 4], [1, 7], [1, 7]], display_name="Head")
+                widget.refresh_project()
+                widget.display_mode = "volume"
+                widget.volume_render_controller.state.selection_render_pending = True
+
+                with patch.object(widget.volume_render_controller, "flush_selection_render", wraps=widget.volume_render_controller.flush_selection_render) as flush_mock, \
+                     patch("AntSleap.ui.tif_volume_render_controller.QTimer.singleShot") as timer_mock:
+                    widget.load_part("01-0101-21", "head")
+
+                flush_mock.assert_called_once_with()
+                timer_mock.assert_called_once_with(0, widget.volume_render_controller.render_volume_preview)
+                self.assertFalse(widget._loading_specimen)
+            finally:
+                widget.close_project()
+                widget.deleteLater()
 
     def test_deferred_specimen_switch_render_keeps_gpu_stream_path(self):
         manager = TifProjectManager()
@@ -4360,11 +4622,11 @@ class TifWorkbenchTests(unittest.TestCase):
             def fake_timer(_delay, callback):
                 calls.append(callback)
 
-            with patch("AntSleap.ui.tif_workbench.QTimer.singleShot", side_effect=fake_timer), \
-                patch.object(widget, "_try_build_volume_gpu_texture") as gpu_build:
-                widget.render_volume_preview()
+            with patch("AntSleap.ui.tif_volume_render_controller.QTimer.singleShot", side_effect=fake_timer), \
+                patch.object(widget.volume_render_controller, "_try_build_volume_gpu_texture") as gpu_build:
+                widget.volume_render_controller.render_volume_preview()
 
-            self.assertEqual(calls, [widget.render_volume_preview])
+            self.assertEqual(calls, [widget.volume_render_controller.render_volume_preview])
             gpu_build.assert_not_called()
             self.assertFalse(widget._defer_volume_preview_render_once)
         finally:
@@ -4382,10 +4644,10 @@ class TifWorkbenchTests(unittest.TestCase):
             current = QTreeWidgetItem(["new"])
             current.setData(0, Qt.UserRole, {"scope": "full", "specimen_id": "new", "part_id": ""})
 
-            with patch.object(widget, "_set_volume_canvas_status_text", return_value=True) as set_status, \
+            with patch.object(widget.volume_render_controller, "_set_volume_canvas_status_text", return_value=True) as set_status, \
                 patch("AntSleap.ui.tif_workbench.QApplication.processEvents") as process_events, \
                 patch.object(widget, "load_specimen") as load_specimen:
-                widget._on_specimen_tree_selected(current, previous)
+                widget.selection_workflow_controller.on_tree_selection_changed(current, previous)
 
             set_status.assert_called_once_with("Preparing full-volume 3D preview...", replace_existing=True)
             process_events.assert_called_once()
@@ -4400,13 +4662,13 @@ class TifWorkbenchTests(unittest.TestCase):
         manager = TifProjectManager()
         widget = TifWorkbenchWidget(manager, "en")
         try:
-            widget._begin_volume_preview_ui_wait()
+            widget.volume_render_controller._begin_volume_preview_ui_wait()
 
             self.assertTrue(widget.eventFilter(widget.specimen_list, QEvent(QEvent.MouseButtonPress)))
             self.assertTrue(widget.eventFilter(widget.specimen_list, QEvent(QEvent.KeyPress)))
             self.assertFalse(widget.eventFilter(widget.specimen_list, QEvent(QEvent.Wheel)))
         finally:
-            widget._end_volume_preview_ui_wait()
+            widget.volume_render_controller._end_volume_preview_ui_wait()
             widget.close_project()
             widget.deleteLater()
 
@@ -4431,7 +4693,7 @@ class TifWorkbenchTests(unittest.TestCase):
             try:
                 widget.load_specimen("specimen-meta")
                 widget.display_mode = "volume"
-                widget.render_volume_preview()
+                widget.volume_render_controller.render_volume_preview()
 
                 self.assertIsNone(widget.image_volume)
                 self.assertEqual(widget.volume_render_status_label.text(), "TIF metadata registered. Build a working volume before 3D preview.")
@@ -4450,7 +4712,7 @@ class TifWorkbenchTests(unittest.TestCase):
             manager.create_project("metadata_slice", root / "metadata_slice")
             widget = TifWorkbenchWidget(manager, "en")
             materialize_calls = []
-            widget.materialize_current_tif_metadata = lambda: materialize_calls.append(True) or True
+            widget.part_mask_workflow_controller.materialize_current_tif_metadata = lambda: materialize_calls.append(True) or True
             manager.create_specimen_scaffold("specimen-meta")
             tif_path = root / "source.tif"
             tifffile.imwrite(tif_path, np.zeros((2, 3, 4), dtype=np.uint8), photometric="minisblack")
@@ -4484,7 +4746,7 @@ class TifWorkbenchTests(unittest.TestCase):
             manager.save_project()
             widget = TifWorkbenchWidget(manager, "en")
             materialize_calls = []
-            widget.materialize_current_tif_metadata = lambda: materialize_calls.append(True) or True
+            widget.part_mask_workflow_controller.materialize_current_tif_metadata = lambda: materialize_calls.append(True) or True
             try:
                 widget.load_specimen("specimen-meta")
                 materialize_calls.clear()
@@ -4506,8 +4768,8 @@ class TifWorkbenchTests(unittest.TestCase):
             widget.image_volume[:, 1:257:2, 1:257:2] = 4000
             widget.volume_quality_slider.setValue(128)
 
-            still = widget._ensure_volume_preview("still")
-            drag = widget._ensure_volume_preview("drag")
+            still = widget.volume_render_controller._ensure_volume_preview("still")
+            drag = widget.volume_render_controller._ensure_volume_preview("drag")
 
             self.assertEqual(tuple(still.shape), (2, 256, 256))
             self.assertEqual(tuple(drag.shape), (2, 256, 256))
@@ -4539,10 +4801,10 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.load_specimen("01-0101-geo")
                 widget._volume_canvas_renderer = "gpu"
                 widget.volume_quality_slider.setValue(1024)
-                still = widget._ensure_volume_preview("still")
-                drag = widget._ensure_volume_preview("drag")
+                still = widget.volume_render_controller._ensure_volume_preview("still")
+                drag = widget.volume_render_controller._ensure_volume_preview("drag")
                 self.assertNotEqual(still.shape, drag.shape)
-                shape, spacing = widget._volume_source_geometry()
+                shape, spacing = widget.volume_render_controller._volume_source_geometry()
                 self.assertEqual(shape, (12, 900, 900))
                 self.assertEqual(spacing, (2.0, 1.0, 1.0))
             finally:
@@ -4600,7 +4862,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 fake_canvas.source_shapes.clear()
                 fake_canvas.render_state_kwargs.clear()
 
-                widget.render_volume_preview()
+                widget.volume_render_controller.render_volume_preview()
 
                 self.assertEqual(len(fake_canvas.uploads), 1)
                 uploaded = fake_canvas.uploads[-1]
@@ -4609,15 +4871,15 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertEqual(int(uploaded.max()), 4000)
                 self.assertEqual(fake_canvas.source_shapes[-1], (3, 16, 16))
                 self.assertEqual(widget._volume_roi_preview_bbox, [[1, 4], [4, 20], [6, 22]])
-                report = widget.volume_performance_report()
+                report = widget.volume_render_controller.volume_performance_report()
                 self.assertTrue(report["roi_inspect_enabled"])
                 self.assertTrue(report["roi_inspect_active"])
                 self.assertEqual(report["roi_source_shape_zyx"], (3, 16, 16))
-                self.assertEqual(report["roi_texture_budget_bytes"], widget._roi_texture_budget_bytes())
+                self.assertEqual(report["roi_texture_budget_bytes"], widget.volume_render_controller._roi_texture_budget_bytes())
                 self.assertEqual(manager.list_parts("01-0101-roi"), [])
 
                 widget._volume_render_mode = "drag"
-                drag = widget._ensure_volume_preview("drag")
+                drag = widget.volume_render_controller._ensure_volume_preview("drag")
                 self.assertEqual(widget._volume_roi_preview_bbox, None)
                 self.assertNotEqual(tuple(drag.shape), (3, 16, 16))
             finally:
@@ -4640,7 +4902,7 @@ class TifWorkbenchTests(unittest.TestCase):
             widget.volume_roi_inspect_check.setChecked(True)
             widget._volume_zoom = 1.0
 
-            request = widget._volume_preview_request("still")
+            request = widget.volume_render_controller._volume_preview_request("still")
 
             self.assertEqual(request["roi_bbox"], [[1, 4], [4, 20], [6, 22]])
             self.assertEqual(request["message"], "正在准备 ROI 裁剪块预览...")
@@ -4665,11 +4927,11 @@ class TifWorkbenchTests(unittest.TestCase):
             widget.volume_roi_scale_slider.setValue(250)
             widget.volume_quality_slider.setValue(4096)
 
-            preview = widget._ensure_volume_preview("still")
+            preview = widget.volume_render_controller._ensure_volume_preview("still")
 
             self.assertNotEqual(tuple(preview.shape), (3, 16, 16))
             self.assertEqual(widget._volume_roi_preview_bbox, None)
-            report = widget.volume_performance_report()
+            report = widget.volume_render_controller.volume_performance_report()
             self.assertFalse(report["roi_inspect_enabled"])
             self.assertFalse(report["roi_inspect_active"])
             self.assertEqual(report["roi_source_shape_zyx"], ())
@@ -4696,11 +4958,11 @@ class TifWorkbenchTests(unittest.TestCase):
             widget.volume_roi_scale_slider.setValue(250)
             widget.volume_quality_slider.setValue(4096)
 
-            preview = widget._ensure_volume_preview("still")
+            preview = widget.volume_render_controller._ensure_volume_preview("still")
 
             self.assertNotEqual(tuple(preview.shape), (3, 16, 16))
             self.assertEqual(widget._volume_roi_preview_bbox, None)
-            report = widget.volume_performance_report()
+            report = widget.volume_render_controller.volume_performance_report()
             self.assertEqual(report["roi_source_mode"], "full")
             self.assertTrue(report["roi_inspect_enabled"])
             self.assertFalse(report["roi_inspect_active"])
@@ -4745,11 +5007,11 @@ class TifWorkbenchTests(unittest.TestCase):
             widget.volume_roi_scale_slider.setValue(250)
             widget.volume_quality_slider.setValue(4096)
 
-            preview = widget._ensure_volume_preview("still")
+            preview = widget.volume_render_controller._ensure_volume_preview("still")
 
             self.assertEqual(tuple(preview.shape), (3, 16, 16))
             self.assertEqual(widget._volume_roi_preview_bbox, [[1, 4], [4, 20], [6, 22]])
-            self.assertEqual(widget.volume_performance_report()["roi_source_mode"], "roi:head_roi")
+            self.assertEqual(widget.volume_render_controller.volume_performance_report()["roi_source_mode"], "roi:head_roi")
         finally:
             widget.close_project()
             widget.deleteLater()
@@ -4798,11 +5060,11 @@ class TifWorkbenchTests(unittest.TestCase):
             widget.volume_roi_scale_slider.setValue(250)
             widget.volume_quality_slider.setValue(4096)
 
-            preview = widget._ensure_volume_preview("still")
+            preview = widget.volume_render_controller._ensure_volume_preview("still")
 
             self.assertEqual(tuple(preview.shape), (3, 16, 16))
             self.assertEqual(widget._volume_roi_preview_bbox, [[2, 5], [8, 24], [10, 26]])
-            self.assertEqual(widget.volume_performance_report()["roi_source_mode"], "part:leg")
+            self.assertEqual(widget.volume_render_controller.volume_performance_report()["roi_source_mode"], "part:leg")
         finally:
             widget.close_project()
             widget.deleteLater()
@@ -4821,19 +5083,19 @@ class TifWorkbenchTests(unittest.TestCase):
             widget.volume_roi_inspect_check.setChecked(True)
             widget.volume_quality_slider.setValue(4096)
 
-            balanced = widget._ensure_volume_preview("still")
+            balanced = widget.volume_render_controller._ensure_volume_preview("still")
             balanced_key = widget._volume_preview_source_shape
-            balanced_budget = widget._roi_texture_budget_bytes()
+            balanced_budget = widget.volume_render_controller._roi_texture_budget_bytes()
             high_index = widget.volume_roi_budget_combo.findData("high")
             self.assertGreaterEqual(high_index, 0)
 
             widget.volume_roi_budget_combo.setCurrentIndex(high_index)
-            high = widget._ensure_volume_preview("still")
+            high = widget.volume_render_controller._ensure_volume_preview("still")
             high_key = widget._volume_preview_source_shape
 
-            self.assertGreater(widget._roi_texture_budget_bytes(), balanced_budget)
+            self.assertGreater(widget.volume_render_controller._roi_texture_budget_bytes(), balanced_budget)
             self.assertNotEqual(balanced_key, high_key)
-            self.assertEqual(high_key[-1], widget._roi_texture_budget_bytes())
+            self.assertEqual(high_key[-1], widget.volume_render_controller._roi_texture_budget_bytes())
             self.assertEqual(tuple(high.shape), tuple(balanced.shape))
             self.assertIn("ROI budget 2.5 GB", widget.volume_canvas_overlay_text())
         finally:
@@ -4845,10 +5107,10 @@ class TifWorkbenchTests(unittest.TestCase):
         widget = TifWorkbenchWidget(manager, "zh")
         try:
             depths = np.asarray([-0.8, -0.2, 0.3, 0.9], dtype=np.float32)
-            keep = widget._viewer_side_front_clip_mask(depths, 0.5)
+            keep = widget.volume_render_controller._viewer_side_front_clip_mask(depths, 0.5)
 
             np.testing.assert_array_equal(keep, np.asarray([True, True, False, False]))
-            np.testing.assert_array_equal(widget._viewer_side_front_clip_mask(depths, 0.0), np.ones(depths.shape, dtype=bool))
+            np.testing.assert_array_equal(widget.volume_render_controller._viewer_side_front_clip_mask(depths, 0.0), np.ones(depths.shape, dtype=bool))
         finally:
             widget.close_project()
             widget.deleteLater()
@@ -4858,7 +5120,7 @@ class TifWorkbenchTests(unittest.TestCase):
         widget = TifWorkbenchWidget(manager, "zh")
         try:
             source = np.arange(2 * 4 * 4, dtype=np.uint8).reshape((2, 4, 4))
-            preview = widget._normalize_volume_preview_to_uint8(source)
+            preview = widget.volume_render_controller._normalize_volume_preview_to_uint8(source)
             self.assertEqual(preview.dtype, np.uint8)
             np.testing.assert_array_equal(preview, source)
             self.assertTrue(preview.flags["C_CONTIGUOUS"])
@@ -4871,7 +5133,7 @@ class TifWorkbenchTests(unittest.TestCase):
         widget = TifWorkbenchWidget(manager, "zh")
         try:
             source = np.array([[[0, 32768], [49152, 65535]]], dtype=np.uint16)
-            preview = widget._normalize_volume_preview_to_uint8(source)
+            preview = widget.volume_render_controller._normalize_volume_preview_to_uint8(source)
             self.assertEqual(preview.dtype, np.uint8)
             self.assertEqual(int(preview.min()), 0)
             self.assertEqual(int(preview.max()), 255)
@@ -4886,7 +5148,7 @@ class TifWorkbenchTests(unittest.TestCase):
             widget._volume_canvas_renderer = "gpu"
             widget.image_volume = np.array([[[0, 32768], [49152, 65535]]], dtype=np.uint16)
             widget.volume_clarity_check.setChecked(True)
-            preview = widget._ensure_volume_preview("still")
+            preview = widget.volume_render_controller._ensure_volume_preview("still")
             self.assertEqual(preview.dtype, np.uint16)
             np.testing.assert_array_equal(preview, widget.image_volume)
         finally:
@@ -4903,19 +5165,19 @@ class TifWorkbenchTests(unittest.TestCase):
             widget.image_volume = np.arange(8 * 16 * 16, dtype=np.uint16).reshape((8, 16, 16))
 
             widget._volume_clarity_mode = False
-            normal_request = widget._volume_preview_request("still")
-            normal_preview = widget._ensure_volume_preview("still")
+            normal_request = widget.volume_render_controller._volume_preview_request("still")
+            normal_preview = widget.volume_render_controller._ensure_volume_preview("still")
             self.assertIn(normal_request["cache_key"], widget._volume_preview_cache)
 
-            widget._on_volume_clarity_toggled(True)
-            clarity_request = widget._volume_preview_request("still")
-            clarity_preview = widget._ensure_volume_preview("still")
+            widget.volume_render_controller._on_volume_clarity_toggled(True)
+            clarity_request = widget.volume_render_controller._volume_preview_request("still")
+            clarity_preview = widget.volume_render_controller._ensure_volume_preview("still")
             self.assertIn(clarity_request["cache_key"], widget._volume_preview_cache)
             self.assertIn(normal_request["cache_key"], widget._volume_preview_cache)
             self.assertIs(widget._volume_preview_cache[normal_request["cache_key"]], normal_preview)
 
-            widget._on_volume_clarity_toggled(False)
-            reused_normal = widget._ensure_volume_preview("still")
+            widget.volume_render_controller._on_volume_clarity_toggled(False)
+            reused_normal = widget.volume_render_controller._ensure_volume_preview("still")
 
             self.assertIs(reused_normal, normal_preview)
             self.assertIn(clarity_request["cache_key"], widget._volume_preview_cache)
@@ -4936,11 +5198,11 @@ class TifWorkbenchTests(unittest.TestCase):
             other_key = (other_owner, (2, 2, 2), "uint8", 128, False, "hybrid", None, 0)
             widget._volume_preview_cache[other_key] = np.ones((1, 1, 1), dtype=np.uint8)
 
-            widget._prune_volume_preview_cache()
+            widget.volume_render_controller._prune_volume_preview_cache()
 
             owner_keys = [
                 key for key in widget._volume_preview_cache.keys()
-                if widget._volume_cache_owner_from_key(key) == owner
+                if widget.volume_render_controller._volume_cache_owner_from_key(key) == owner
             ]
             self.assertLessEqual(len(owner_keys), 8)
             self.assertNotIn((owner, (2, 2, 2), "uint8", 128, False, "hybrid", None, 0), widget._volume_preview_cache)
@@ -4958,8 +5220,8 @@ class TifWorkbenchTests(unittest.TestCase):
             widget.current_part_id = "part"
             widget.current_part = {"view_settings": {"volume_mask_mode": "masked_image"}}
             widget.image_volume = np.zeros((2, 4, 4), dtype=np.uint8)
-            widget.part_preview_mask = np.ones((2, 4, 4), dtype=np.uint8)
-            owner = widget._active_volume_cache_owner()
+            widget.part_mask_workflow_controller.state.preview_mask = np.ones((2, 4, 4), dtype=np.uint8)
+            owner = widget.volume_render_controller._active_volume_cache_owner()
             volume_key = (owner, (2, 4, 4), "uint8", 128, False, "hybrid", None, 0)
             mask_key = (owner, (2, 4, 4), "uint8", 128, 1, "occupancy", None)
             widget._volume_preview_cache[volume_key] = np.zeros((2, 4, 4), dtype=np.uint8)
@@ -4991,7 +5253,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 "texture_cache_misses": 1,
             }
 
-            report = widget.volume_performance_report()
+            report = widget.volume_render_controller.volume_performance_report()
             overlay = widget.volume_canvas_overlay_text()
 
             self.assertEqual(report["gpu_texture_cache_entries"], 3)
@@ -5009,7 +5271,7 @@ class TifWorkbenchTests(unittest.TestCase):
             widget._volume_canvas_renderer = "gpu"
             widget.current_volume_scope = "part"
             widget.image_volume = np.array([[[0, 32768], [49152, 65535]]], dtype=np.uint16)
-            preview = widget._ensure_volume_preview("still")
+            preview = widget.volume_render_controller._ensure_volume_preview("still")
             self.assertEqual(preview.dtype, np.uint16)
             np.testing.assert_array_equal(preview, widget.image_volume)
         finally:
@@ -5026,11 +5288,11 @@ class TifWorkbenchTests(unittest.TestCase):
             widget._volume_zoom = 3.0
             widget.volume_roi_detail_check.setChecked(True)
             widget.volume_roi_scale_slider.setValue(250)
-            self.assertEqual(widget._active_volume_roi_scale(), 2.5)
+            self.assertEqual(widget.volume_render_controller._active_volume_roi_scale(), 2.5)
 
             widget.volume_clarity_check.setChecked(True)
 
-            self.assertEqual(widget._active_volume_roi_scale(), 2.5)
+            self.assertEqual(widget.volume_render_controller._active_volume_roi_scale(), 2.5)
             self.assertIn("局部结构检查", widget.volume_canvas_overlay_text())
             self.assertIn("ROI 2.5x", widget.volume_canvas_overlay_text())
         finally:
@@ -5046,12 +5308,12 @@ class TifWorkbenchTests(unittest.TestCase):
             widget.image_volume = np.zeros((10, 2200, 2200), dtype=np.uint8)
             widget.volume_quality_slider.setValue(1024)
 
-            self.assertEqual(widget._active_volume_target_dim("still"), 1536)
+            self.assertEqual(widget.volume_render_controller._active_volume_target_dim("still"), 1536)
 
             widget.volume_clarity_check.setChecked(True)
 
-            self.assertEqual(widget._active_volume_target_dim("still"), 2200)
-            self.assertEqual(widget._active_volume_target_dim("drag"), 384)
+            self.assertEqual(widget.volume_render_controller._active_volume_target_dim("still"), 2200)
+            self.assertEqual(widget.volume_render_controller._active_volume_target_dim("drag"), 384)
         finally:
             widget.close_project()
             widget.deleteLater()
@@ -5082,7 +5344,7 @@ class TifWorkbenchTests(unittest.TestCase):
             widget.image_volume = np.zeros((8, 96, 96), dtype=np.uint8)
             widget.image_volume[:, 24:72, 24:72] = 180
 
-            widget.render_volume_preview()
+            widget.volume_render_controller.render_volume_preview()
             before_cache_items = [(key, id(value)) for key, value in widget._volume_preview_cache.items()]
             before_upload = fake_canvas.upload_ids[-1]
             cyan_index = widget.volume_tint_combo.findData("cyan")
@@ -5123,7 +5385,7 @@ class TifWorkbenchTests(unittest.TestCase):
             widget.image_volume = np.zeros((8, 96, 96), dtype=np.uint8)
             widget.image_volume[:, 24:72, 24:72] = 180
 
-            widget.render_volume_preview()
+            widget.volume_render_controller.render_volume_preview()
             before_upload = fake_canvas.upload_ids[-1]
             morphology_index = widget.volume_tint_combo.findData("morphology")
             self.assertGreaterEqual(morphology_index, 0)
@@ -5166,7 +5428,7 @@ class TifWorkbenchTests(unittest.TestCase):
             widget.image_volume = np.zeros((8, 96, 96), dtype=np.uint8)
             widget.image_volume[:, 24:72, 24:72] = 180
 
-            widget.render_volume_preview()
+            widget.volume_render_controller.render_volume_preview()
             state = fake_canvas.render_state_kwargs[-1]
             self.assertEqual(state["shader_quality_mode"], "preset")
             self.assertEqual(state["transfer_preset"], "amber")
@@ -5230,9 +5492,9 @@ class TifWorkbenchTests(unittest.TestCase):
             widget.image_volume = np.zeros((8, 96, 96), dtype=np.uint8)
             widget.image_volume[:, 24:72, 24:72] = 180
 
-            widget.render_volume_preview()
+            widget.volume_render_controller.render_volume_preview()
             first_upload = fake_canvas.upload_ids[-1]
-            widget.apply_morphology_inspect_preset()
+            widget.volume_render_controller.apply_morphology_inspect_preset()
 
             self.assertEqual(fake_canvas.upload_ids[-1], first_upload)
             state = fake_canvas.render_state_kwargs[-1]
@@ -5293,12 +5555,12 @@ class TifWorkbenchTests(unittest.TestCase):
             widget.image_volume = np.zeros((8, 96, 96), dtype=np.uint8)
             widget.image_volume[:, 24:72, 24:72] = 180
 
-            widget.render_volume_preview()
+            widget.volume_render_controller.render_volume_preview()
             self.assertEqual(len(fake_canvas.upload_ids), 1)
             first_upload = fake_canvas.upload_ids[-1]
 
-            widget.rotate_volume_preview(20, -5)
-            widget._render_volume_interaction_preview()
+            widget.volume_render_controller.rotate_volume_preview(20, -5)
+            widget.volume_render_controller._render_volume_interaction_preview()
 
             self.assertEqual(fake_canvas.upload_ids, [first_upload])
             self.assertTrue(fake_canvas.interaction_state_kwargs)
@@ -5308,7 +5570,7 @@ class TifWorkbenchTests(unittest.TestCase):
             self.assertEqual(fake_canvas.interaction_state_kwargs[-1]["adaptive_step_strength"], 0.0)
             self.assertEqual(fake_canvas.interaction_state_kwargs[-1]["gradient_opacity"], 0.0)
             self.assertEqual(widget._volume_render_mode, "drag")
-            widget._finish_volume_interaction()
+            widget.volume_render_controller._finish_volume_interaction()
             self.assertEqual(widget._volume_render_mode, "still")
         finally:
             widget.close_project()
@@ -5344,7 +5606,7 @@ class TifWorkbenchTests(unittest.TestCase):
             widget.image_volume = np.zeros((8, 96, 96), dtype=np.uint8)
             widget.image_volume[:, 24:72, 24:72] = 180
 
-            widget.render_volume_preview()
+            widget.volume_render_controller.render_volume_preview()
             before_cache_items = [(key, id(value)) for key, value in widget._volume_preview_cache.items()]
             before_upload = fake_canvas.upload_ids[-1]
             widget.volume_transfer_opacity_slider.setValue(65)
@@ -5392,8 +5654,8 @@ class TifWorkbenchTests(unittest.TestCase):
             preview = np.zeros((33, 1024, 1024), dtype=np.uint8)
 
             FakeProgressDialog.instances.clear()
-            with patch("AntSleap.ui.tif_workbench.QProgressDialog", FakeProgressDialog):
-                self.assertTrue(widget._sync_gpu_volume_canvas(preview))
+            with patch("AntSleap.ui.tif_volume_render_controller.QProgressDialog", FakeProgressDialog):
+                self.assertTrue(widget.volume_render_controller._sync_gpu_volume_canvas(preview))
 
             self.assertEqual(len(fake_canvas.render_inputs), 1)
             self.assertEqual(len(FakeProgressDialog.instances), 0)
@@ -5433,7 +5695,7 @@ class TifWorkbenchTests(unittest.TestCase):
             preview = np.zeros((33, 1024, 1024), dtype=np.uint8)
 
             with patch("AntSleap.ui.tif_workbench.QApplication.processEvents") as process_events:
-                self.assertTrue(widget._sync_gpu_volume_canvas(preview))
+                self.assertTrue(widget.volume_render_controller._sync_gpu_volume_canvas(preview))
 
             self.assertEqual(len(fake_canvas.render_inputs), 1)
             process_events.assert_not_called()
@@ -5481,13 +5743,13 @@ class TifWorkbenchTests(unittest.TestCase):
             widget.image_volume = np.zeros((4, 16, 16), dtype=np.uint8)
             widget.image_volume[:, 4:12, 4:12] = 180
 
-            with patch("AntSleap.ui.tif_workbench.build_volume_preview") as cpu_builder:
-                widget.render_volume_preview()
+            with patch("AntSleap.ui.tif_volume_render_controller.build_volume_preview") as cpu_builder:
+                widget.volume_render_controller.render_volume_preview()
 
             cpu_builder.assert_not_called()
             self.assertEqual(len(fake_canvas.build_calls), 1)
-            self.assertEqual(fake_canvas.build_calls[0][1], widget._active_volume_target_dim("still"))
-            self.assertEqual(fake_canvas.build_calls[0][2]["cache_key"], widget._volume_preview_request("still")["cache_key"])
+            self.assertEqual(fake_canvas.build_calls[0][1], widget.volume_render_controller._active_volume_target_dim("still"))
+            self.assertEqual(fake_canvas.build_calls[0][2]["cache_key"], widget.volume_render_controller._volume_preview_request("still")["cache_key"])
             self.assertEqual(fake_canvas.mask_uploads[-1], None)
             self.assertEqual(fake_canvas.render_states[-1]["mask_mode"], "image_only")
             self.assertEqual(widget._volume_last_stats["preview_provider"]["build_backend"], "gpu_stream")
@@ -5544,15 +5806,15 @@ class TifWorkbenchTests(unittest.TestCase):
             widget.image_volume = ShapeOnlyVolume((120, 1600, 1600), np.uint8)
             widget.volume_quality_slider.setValue(1024)
 
-            with patch.object(widget, "_start_volume_preview_build") as background_start, \
-                patch("AntSleap.ui.tif_workbench.build_volume_preview") as cpu_builder:
-                widget.render_volume_preview()
+            with patch.object(widget.volume_render_controller, "_start_volume_preview_build") as background_start, \
+                patch("AntSleap.ui.tif_volume_render_controller.build_volume_preview") as cpu_builder:
+                widget.volume_render_controller.render_volume_preview()
 
             background_start.assert_not_called()
             cpu_builder.assert_not_called()
             self.assertEqual(len(fake_canvas.build_calls), 1)
             self.assertIs(fake_canvas.build_calls[0][0], widget.image_volume)
-            self.assertEqual(fake_canvas.build_calls[0][2]["cache_key"], widget._volume_preview_request("still")["cache_key"])
+            self.assertEqual(fake_canvas.build_calls[0][2]["cache_key"], widget.volume_render_controller._volume_preview_request("still")["cache_key"])
             self.assertEqual(fake_canvas.mask_uploads[-1], None)
             self.assertEqual(fake_canvas.render_states[-1]["mask_mode"], "image_only")
             self.assertEqual(widget._volume_last_stats["preview_provider"]["build_backend"], "gpu_stream")
@@ -5601,8 +5863,8 @@ class TifWorkbenchTests(unittest.TestCase):
             widget.volume_canvas = fake_canvas
             widget.image_volume = np.zeros((4, 16, 16), dtype=np.uint8)
 
-            with patch("AntSleap.ui.tif_workbench.build_volume_preview") as cpu_builder:
-                widget.render_volume_preview()
+            with patch("AntSleap.ui.tif_volume_render_controller.build_volume_preview") as cpu_builder:
+                widget.volume_render_controller.render_volume_preview()
 
             cpu_builder.assert_not_called()
             self.assertEqual(len(fake_canvas.build_calls), 1)
@@ -5657,13 +5919,13 @@ class TifWorkbenchTests(unittest.TestCase):
             fake_canvas.render_states.clear()
             fake_canvas.mask_uploads.clear()
 
-            with patch("AntSleap.ui.tif_workbench.build_roi_volume_preview") as cpu_roi_builder:
-                widget.render_volume_preview()
+            with patch("AntSleap.ui.tif_volume_render_controller.build_roi_volume_preview") as cpu_roi_builder:
+                widget.volume_render_controller.render_volume_preview()
 
             cpu_roi_builder.assert_not_called()
             self.assertEqual(len(fake_canvas.build_calls), 1)
             self.assertEqual(tuple(fake_canvas.build_calls[0][0].shape), (4, 16, 16))
-            self.assertEqual(fake_canvas.build_calls[0][2]["cache_key"], widget._volume_preview_request("still")["cache_key"])
+            self.assertEqual(fake_canvas.build_calls[0][2]["cache_key"], widget.volume_render_controller._volume_preview_request("still")["cache_key"])
             self.assertEqual(fake_canvas.render_states[-1]["mask_mode"], "image_only")
             self.assertEqual(widget._volume_roi_preview_source_shape, (4, 16, 16))
         finally:
@@ -5713,7 +5975,7 @@ class TifWorkbenchTests(unittest.TestCase):
             widget.view_stack.addWidget(fake_canvas)
             widget.volume_canvas = fake_canvas
             widget.image_volume = np.zeros((4, 32, 32), dtype=np.uint8)
-            widget.part_preview_mask = np.zeros((4, 32, 32), dtype=np.uint8)
+            widget.part_mask_workflow_controller.state.preview_mask = np.zeros((4, 32, 32), dtype=np.uint8)
             widget.part_preview_mask[:, 8:24, 8:24] = 1
             widget.volume_clarity_check.setChecked(True)
             widget.volume_mask_combo.setCurrentIndex(widget.volume_mask_combo.findData("masked_image"))
@@ -5722,9 +5984,9 @@ class TifWorkbenchTests(unittest.TestCase):
             fake_canvas.render_states.clear()
             fake_canvas.mask_uploads.clear()
 
-            with patch("AntSleap.ui.tif_workbench.build_volume_preview") as cpu_builder, \
+            with patch("AntSleap.ui.tif_volume_render_controller.build_volume_preview") as cpu_builder, \
                 patch("AntSleap.ui.tif_workbench.build_mask_preview") as cpu_mask_builder:
-                widget.render_volume_preview()
+                widget.volume_render_controller.render_volume_preview()
 
             cpu_builder.assert_not_called()
             cpu_mask_builder.assert_not_called()
@@ -5732,7 +5994,7 @@ class TifWorkbenchTests(unittest.TestCase):
             self.assertEqual(len(fake_canvas.mask_build_calls), 1)
             self.assertEqual(tuple(fake_canvas.build_calls[0][0].shape), (4, 32, 32))
             self.assertEqual(tuple(fake_canvas.mask_build_calls[0][0].shape), (4, 32, 32))
-            self.assertEqual(fake_canvas.mask_build_calls[0][2]["cache_key"], widget._volume_mask_preview_request("still")["cache_key"])
+            self.assertEqual(fake_canvas.mask_build_calls[0][2]["cache_key"], widget.volume_render_controller._volume_mask_preview_request("still")["cache_key"])
             self.assertEqual(fake_canvas.mask_uploads, [])
             self.assertEqual(fake_canvas.render_states[-1]["mask_mode"], "masked_image")
         finally:
@@ -5777,23 +6039,109 @@ class TifWorkbenchTests(unittest.TestCase):
 
             def fake_start(volume_request=None, mask_request=None):
                 starts.append((volume_request, mask_request))
-                widget._volume_preview_build_thread = object()
+                widget.volume_render_controller.preview_build_thread = object()
                 return True
 
-            with patch.object(widget, "_start_volume_preview_build", side_effect=fake_start), \
-                patch("AntSleap.ui.tif_workbench.build_volume_preview") as cpu_builder:
-                widget.render_volume_preview()
+            with patch.object(widget.volume_render_controller, "_start_volume_preview_build", side_effect=fake_start), \
+                patch("AntSleap.ui.tif_volume_render_controller.build_volume_preview") as cpu_builder:
+                widget.volume_render_controller.render_volume_preview()
 
             self.assertEqual(len(starts), 1)
             self.assertIsNotNone(starts[0][0])
-            self.assertEqual(starts[0][0]["cache_key"], widget._volume_preview_request("still")["cache_key"])
+            self.assertEqual(starts[0][0]["cache_key"], widget.volume_render_controller._volume_preview_request("still")["cache_key"])
             self.assertEqual(fake_canvas.build_calls, [])
             cpu_builder.assert_not_called()
         finally:
-            widget._volume_preview_build_thread = None
+            widget.volume_render_controller.preview_build_thread = None
             widget.close_project()
             widget.deleteLater()
             fake_canvas.deleteLater()
+
+    def test_large_reslice_preview_builds_in_background_before_gpu_upload(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+
+        class FakeGpuStreamCanvas(QLabel):
+            def __init__(self):
+                super().__init__()
+                self.build_calls = []
+                self.render_states = []
+
+            def has_volume(self):
+                return bool(self.build_calls)
+
+            def build_volume_texture_from_source(self, volume, max_dim, **kwargs):
+                self.build_calls.append((volume, int(max_dim), dict(kwargs)))
+                return object()
+
+            def set_mask_data(self, mask, *args, **kwargs):
+                return None
+
+            def set_render_state(self, **kwargs):
+                self.render_states.append(dict(kwargs))
+
+            def render_stats(self):
+                return {"preview_provider": {"kind": "gpu_texture", "build_backend": "gpu_compute"}}
+
+        fake_canvas = FakeGpuStreamCanvas()
+        try:
+            widget._volume_canvas_renderer = "gpu"
+            widget._volume_canvas_created = True
+            widget._volume_render_mode = "still"
+            widget.current_volume_scope = "part"
+            widget.current_reslice_id = "head_axis_001"
+            widget.display_mode = "volume"
+            widget.view_stack.addWidget(fake_canvas)
+            widget.volume_canvas = fake_canvas
+            widget.image_volume = np.zeros((40, 1024, 1024), dtype=np.uint8)
+            widget.volume_quality_slider.setValue(512)
+
+            starts = []
+
+            def fake_start(volume_request=None, mask_request=None):
+                starts.append((volume_request, mask_request))
+                widget.volume_render_controller.preview_build_thread = object()
+                return True
+
+            with patch.object(widget.volume_render_controller, "_start_volume_preview_build", side_effect=fake_start), \
+                 patch("AntSleap.ui.tif_volume_render_controller.build_volume_preview") as cpu_builder:
+                widget.volume_render_controller.render_volume_preview()
+
+            self.assertEqual(len(starts), 1)
+            self.assertIsNotNone(starts[0][0])
+            cpu_builder.assert_not_called()
+            self.assertEqual(fake_canvas.build_calls, [])
+            self.assertEqual(fake_canvas.render_states, [])
+        finally:
+            widget.volume_render_controller.preview_build_thread = None
+            widget.close_project()
+            widget.deleteLater()
+            fake_canvas.deleteLater()
+
+    def test_deferred_volume_array_release_runs_outside_selection_call(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+        released = threading.Event()
+        try:
+            close = Mock(side_effect=lambda: released.set())
+            mmap = Mock(close=close)
+            shared = Mock(_mmap=mmap)
+            widget.image_volume = shared
+            widget.label_volume = shared
+            widget.edit_volume = shared
+            widget.part_mask_workflow_controller.state.part_mask_volume = None
+
+            thread = widget.release_loaded_volume_arrays(defer=True)
+            self.assertIsNone(widget.image_volume)
+            self.assertIsNone(widget.label_volume)
+            self.assertIsNone(widget.edit_volume)
+            self.assertTrue(released.wait(2.0))
+            thread.join(2.0)
+
+            close.assert_called_once_with()
+        finally:
+            widget.close_project()
+            widget.deleteLater()
 
     def test_full_volume_part_mask_preview_uses_roi_background_for_3d(self):
         manager = TifProjectManager()
@@ -5843,20 +6191,20 @@ class TifWorkbenchTests(unittest.TestCase):
             widget.view_stack.addWidget(fake_canvas)
             widget.volume_canvas = fake_canvas
             widget.image_volume = ShapeOnlyVolume((80, 1200, 1200), np.uint8)
-            widget.part_mask_preview_bbox = [[8, 72], [100, 1100], [120, 1120]]
-            widget.part_preview_mask = ShapeOnlyVolume((64, 1000, 1000), np.uint16)
+            widget.part_mask_workflow_controller.state.preview_bbox = [[8, 72], [100, 1100], [120, 1120]]
+            widget.part_mask_workflow_controller.state.preview_mask = ShapeOnlyVolume((64, 1000, 1000), np.uint16)
             starts = []
 
             def fake_start(volume_request=None, mask_request=None):
                 starts.append((volume_request, mask_request))
-                widget._volume_preview_build_thread = object()
+                widget.volume_render_controller.preview_build_thread = object()
                 return True
 
-            with patch.object(widget, "_start_volume_preview_build", side_effect=fake_start), \
-                patch("AntSleap.ui.tif_workbench.build_roi_volume_preview") as cpu_roi_builder, \
+            with patch.object(widget.volume_render_controller, "_start_volume_preview_build", side_effect=fake_start), \
+                patch("AntSleap.ui.tif_volume_render_controller.build_roi_volume_preview") as cpu_roi_builder, \
                 patch("AntSleap.ui.tif_workbench.build_roi_mask_preview") as cpu_mask_builder:
                 widget._apply_default_volume_mask_mode()
-                widget.render_volume_preview()
+                widget.volume_render_controller.render_volume_preview()
 
             self.assertEqual(widget.volume_mask_combo.currentData(), "masked_image")
             self.assertEqual(len(starts), 1)
@@ -5870,7 +6218,7 @@ class TifWorkbenchTests(unittest.TestCase):
             cpu_roi_builder.assert_not_called()
             cpu_mask_builder.assert_not_called()
         finally:
-            widget._volume_preview_build_thread = None
+            widget.volume_render_controller.preview_build_thread = None
             widget.close_project()
             widget.deleteLater()
             fake_canvas.deleteLater()
@@ -5914,9 +6262,9 @@ class TifWorkbenchTests(unittest.TestCase):
             widget.image_volume = np.zeros((4, 32, 32), dtype=np.uint8)
             widget.volume_quality_slider.setValue(512)
 
-            with patch.object(widget, "_start_volume_preview_build") as background_start, \
-                patch("AntSleap.ui.tif_workbench.build_volume_preview") as cpu_builder:
-                widget.render_volume_preview()
+            with patch.object(widget.volume_render_controller, "_start_volume_preview_build") as background_start, \
+                patch("AntSleap.ui.tif_volume_render_controller.build_volume_preview") as cpu_builder:
+                widget.volume_render_controller.render_volume_preview()
 
             background_start.assert_not_called()
             cpu_builder.assert_not_called()
@@ -5933,10 +6281,10 @@ class TifWorkbenchTests(unittest.TestCase):
         try:
             widget.current_volume_scope = "part"
             widget.image_volume = np.zeros((6, 32, 32), dtype=np.uint8)
-            widget.part_preview_mask = np.arange(6 * 32 * 32, dtype=np.uint16).reshape((6, 32, 32))
+            widget.part_mask_workflow_controller.state.preview_mask = np.arange(6 * 32 * 32, dtype=np.uint16).reshape((6, 32, 32))
             request = {"roi_bbox": ((1, 5), (8, 24), (10, 26))}
 
-            source, source_shape, normalized = widget._gpu_mask_source_for_request(request)
+            source, source_shape, normalized = widget.volume_render_controller._gpu_mask_source_for_request(request)
 
             self.assertEqual(source_shape, (4, 16, 16))
             self.assertEqual(normalized, ((1, 5), (8, 24), (10, 26)))
@@ -5965,9 +6313,9 @@ class TifWorkbenchTests(unittest.TestCase):
                 },
             }
 
-            summary = widget._volume_status_summary_text()
-            details = widget._volume_stats_text()
-            report = widget.volume_performance_report()
+            summary = widget.volume_render_controller._volume_status_summary_text()
+            details = widget.volume_render_controller._volume_stats_text()
+            report = widget.volume_render_controller.volume_performance_report()
 
             self.assertIn("GPU budget 128/512", summary)
             self.assertIn("GPU budget auto-scaled preview 128/512", details)
@@ -6003,8 +6351,8 @@ class TifWorkbenchTests(unittest.TestCase):
             widget._volume_quality_committed_value = 512
             widget.volume_quality_slider.setValue(1024)
 
-            with patch.object(widget, "_refresh_volume_preview") as refresh:
-                widget._commit_volume_quality_change()
+            with patch.object(widget.volume_render_controller, "_refresh_volume_preview") as refresh:
+                widget.volume_render_controller._commit_volume_quality_change()
 
             self.assertEqual(fake_canvas.release_calls, 0)
             refresh.assert_called_once()
@@ -6021,11 +6369,11 @@ class TifWorkbenchTests(unittest.TestCase):
             widget._volume_canvas_renderer = "gpu"
             widget.volume_quality_slider.setValue(1024)
 
-            self.assertEqual(widget._volume_cache_owner_limit(), 3)
+            self.assertEqual(widget.volume_render_controller._volume_cache_owner_limit(), 3)
 
             widget._volume_last_stats = {"gpu_stream_build": {"degraded": True}}
 
-            self.assertEqual(widget._volume_cache_owner_limit(), 1)
+            self.assertEqual(widget.volume_render_controller._volume_cache_owner_limit(), 1)
         finally:
             widget.close_project()
             widget.deleteLater()
@@ -6039,25 +6387,25 @@ class TifWorkbenchTests(unittest.TestCase):
             widget.display_mode = "volume"
             widget.current_volume_scope = "part"
             widget.image_volume = np.zeros((4, 32, 32), dtype=np.uint8)
-            widget.part_preview_mask = np.zeros((4, 32, 32), dtype=np.uint8)
+            widget.part_mask_workflow_controller.state.preview_mask = np.zeros((4, 32, 32), dtype=np.uint8)
             widget.part_preview_mask[:, 8:24, 8:24] = 1
             widget.volume_quality_slider.setValue(128)
             widget.volume_mask_combo.setCurrentIndex(widget.volume_mask_combo.findData("masked_image"))
-            volume_request = widget._volume_preview_request("still")
-            widget._cache_volume_preview_result(volume_request, np.zeros((4, 32, 32), dtype=np.uint8), 0.0)
+            volume_request = widget.volume_render_controller._volume_preview_request("still")
+            widget.volume_render_controller._cache_volume_preview_result(volume_request, np.zeros((4, 32, 32), dtype=np.uint8), 0.0)
 
             FakeProgressDialog.instances.clear()
-            with patch("AntSleap.ui.tif_workbench.QProgressDialog", FakeProgressDialog):
-                with patch.object(widget, "_should_show_volume_mask_preview_progress", return_value=True):
-                    widget.render_volume_preview()
+            with patch("AntSleap.ui.tif_volume_render_controller.QProgressDialog", FakeProgressDialog):
+                with patch.object(widget.volume_render_controller, "_should_show_volume_mask_preview_progress", return_value=True):
+                    widget.volume_render_controller.render_volume_preview()
 
             self.assertEqual(len(FakeProgressDialog.instances), 0)
-            mask_request = widget._volume_mask_preview_request("still")
+            mask_request = widget.volume_render_controller._volume_mask_preview_request("still")
             self.assertTrue(
-                widget._volume_preview_build_thread is not None
+                widget.volume_render_controller.preview_build_thread is not None
                 or mask_request["cache_key"] in widget._volume_mask_preview_cache
             )
-            widget._cancel_and_wait_volume_preview_build()
+            widget.volume_render_controller._cancel_and_wait_volume_preview_build()
         finally:
             widget.close_project()
             widget.deleteLater()
@@ -6070,12 +6418,12 @@ class TifWorkbenchTests(unittest.TestCase):
             widget._volume_render_mode = "still"
             widget.display_mode = "volume"
             widget.image_volume = np.zeros((4, 16, 16), dtype=np.uint8)
-            request = widget._volume_preview_request("still")
+            request = widget.volume_render_controller._volume_preview_request("still")
             stale_preview = np.ones((4, 16, 16), dtype=np.uint8)
 
             widget._volume_preview_pending_token = 7
             widget._volume_preview_pending_key = request["cache_key"]
-            widget._on_volume_preview_build_finished(
+            widget.volume_render_controller._on_volume_preview_build_finished(
                 {
                     "token": 6,
                     "preview": stale_preview,
@@ -6095,7 +6443,7 @@ class TifWorkbenchTests(unittest.TestCase):
             widget = self._make_volume_widget(Path(tmp), z_count=5)
             try:
                 widget.display_mode = "volume"
-                request = widget._volume_preview_request("still")
+                request = widget.volume_render_controller._volume_preview_request("still")
                 task = widget._start_tif_task(
                     "volume_preview",
                     action="build_preview",
@@ -6108,7 +6456,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget._volume_preview_pending_mask_key = None
                 widget.current_specimen_id = "different_specimen"
 
-                widget._on_volume_preview_build_finished(
+                widget.volume_render_controller._on_volume_preview_build_finished(
                     {
                         "token": 8,
                         "volume_request": request,
@@ -6131,18 +6479,18 @@ class TifWorkbenchTests(unittest.TestCase):
             old_worker = object()
             current_thread = object()
             current_worker = object()
-            widget._volume_preview_build_thread = current_thread
-            widget._volume_preview_build_worker = current_worker
+            widget.volume_render_controller.preview_build_thread = current_thread
+            widget.volume_render_controller.preview_build_worker = current_worker
 
-            widget._cleanup_volume_preview_build_thread(old_thread, old_worker)
+            widget.volume_render_controller._cleanup_volume_preview_build_thread(old_thread, old_worker)
 
-            self.assertIs(widget._volume_preview_build_thread, current_thread)
-            self.assertIs(widget._volume_preview_build_worker, current_worker)
+            self.assertIs(widget.volume_render_controller.preview_build_thread, current_thread)
+            self.assertIs(widget.volume_render_controller.preview_build_worker, current_worker)
 
-            widget._cleanup_volume_preview_build_thread(current_thread, current_worker)
+            widget.volume_render_controller._cleanup_volume_preview_build_thread(current_thread, current_worker)
 
-            self.assertIsNone(widget._volume_preview_build_thread)
-            self.assertIsNone(widget._volume_preview_build_worker)
+            self.assertIsNone(widget.volume_render_controller.preview_build_thread)
+            self.assertIsNone(widget.volume_render_controller.preview_build_worker)
         finally:
             widget.close_project()
             widget.deleteLater()
@@ -6156,14 +6504,14 @@ class TifWorkbenchTests(unittest.TestCase):
             widget.volume_roi_scale_slider.setEnabled(False)
             widget.specimen_list.setEnabled(True)
 
-            widget._set_volume_preview_build_controls_busy(True)
+            widget.volume_render_controller._set_volume_preview_build_controls_busy(True)
 
             self.assertFalse(widget.volume_quality_slider.isEnabled())
             self.assertFalse(widget.volume_roi_inspect_check.isEnabled())
             self.assertFalse(widget.volume_roi_scale_slider.isEnabled())
             self.assertTrue(widget.specimen_list.isEnabled())
 
-            widget._set_volume_preview_build_controls_busy(False)
+            widget.volume_render_controller._set_volume_preview_build_controls_busy(False)
 
             self.assertTrue(widget.volume_quality_slider.isEnabled())
             self.assertTrue(widget.volume_roi_inspect_check.isEnabled())
@@ -6209,7 +6557,7 @@ class TifWorkbenchTests(unittest.TestCase):
             self.assertEqual(widget.volume_clip_plane_depth_slider.value(), 0)
             widget.volume_clip_plane_check.setChecked(True)
             widget.volume_clip_plane_depth_slider.setValue(62)
-            widget.render_volume_preview()
+            widget.volume_render_controller.render_volume_preview()
 
             state = fake_canvas.render_state_kwargs[-1]
             self.assertAlmostEqual(state["enhancement"], 0.8)
@@ -6226,7 +6574,7 @@ class TifWorkbenchTests(unittest.TestCase):
             self.assertIn("Detail enhancement 80%", widget.volume_canvas_overlay_text())
 
             widget._volume_render_mode = "drag"
-            widget.render_volume_preview()
+            widget.volume_render_controller.render_volume_preview()
             self.assertEqual(fake_canvas.render_state_kwargs[-1]["enhancement"], 0.0)
             self.assertEqual(fake_canvas.render_state_kwargs[-1]["jitter_strength"], 0.0)
             self.assertEqual(fake_canvas.render_state_kwargs[-1]["adaptive_step_strength"], 0.0)
@@ -6244,8 +6592,8 @@ class TifWorkbenchTests(unittest.TestCase):
             mask = np.zeros_like(preview, dtype=np.uint8)
             mask[:, 1:4, 1:4] = 1
 
-            first = widget._masked_volume_preview(preview, mask)
-            second = widget._masked_volume_preview(preview, mask)
+            first = widget.volume_render_controller._masked_volume_preview(preview, mask)
+            second = widget.volume_render_controller._masked_volume_preview(preview, mask)
 
             self.assertIs(first, second)
             self.assertEqual(len(widget._volume_masked_preview_cache), 1)
@@ -6262,12 +6610,12 @@ class TifWorkbenchTests(unittest.TestCase):
             try:
                 edit_index = widget.label_role_combo.findData("working_edit")
                 widget.label_role_combo.setCurrentIndex(edit_index)
-                widget.current_material_id = 2
+                widget.part_mask_workflow_controller.state.current_material_id = 2
                 before = widget.edit_volume.copy()
 
                 mode_index = widget.display_mode_combo.findData("volume")
                 widget.display_mode_combo.setCurrentIndex(mode_index)
-                widget.paint_at_widget_position(widget.canvas.width() / 2, widget.canvas.height() / 2)
+                widget.annotation_workflow_controller.paint_at_widget_position(widget.canvas.width() / 2, widget.canvas.height() / 2)
 
                 np.testing.assert_array_equal(widget.edit_volume, before)
                 self.assertIn("3D volume preview is read-only", widget.training_status_label.text())
@@ -6494,6 +6842,25 @@ class TifWorkbenchTests(unittest.TestCase):
         finally:
             canvas.deleteLater()
 
+
+    def test_tif_volume_canvas_factory_prefers_explicit_embedded_renderer(self):
+        embedded_canvas = TifVolumeCanvas()
+        with patch.dict(os.environ, {"TAXAMASK_TIF_EMBEDDED_QOPENGLWIDGET": "1"}, clear=False), \
+             patch("AntSleap.ui.tif_workbench_canvas.gpu_volume_canvas_available", return_value=True), \
+             patch("AntSleap.ui.tif_workbench_canvas.gpu_volume_offscreen_available", return_value=True), \
+             patch("AntSleap.ui.tif_workbench_canvas.TifGpuVolumeCanvas", return_value=embedded_canvas) as embedded_factory, \
+             patch("AntSleap.ui.tif_workbench_canvas.TifGpuVolumeOffscreenWidget") as offscreen_factory:
+            canvas, renderer, warning = create_tif_volume_canvas()
+        try:
+            self.assertIs(canvas, embedded_canvas)
+            self.assertEqual(renderer, "gpu")
+            self.assertEqual(warning, "")
+            self.assertEqual(canvas.property("tifVolumeRenderer"), "gpu-embedded")
+            embedded_factory.assert_called_once_with(None)
+            offscreen_factory.assert_not_called()
+        finally:
+            canvas.deleteLater()
+
     def test_tif_volume_canvas_factory_can_disable_gpu_preview(self):
         with patch.dict(os.environ, {"TAXAMASK_TIF_GPU_VOLUME_PREVIEW": "0"}, clear=False):
             canvas, renderer, warning = create_tif_volume_canvas()
@@ -6557,14 +6924,14 @@ class TifWorkbenchTests(unittest.TestCase):
                 edit_before = widget.edit_volume.copy()
                 backup_index = widget.label_role_combo.findData("raw_ai_prediction_backup")
                 widget.label_role_combo.setCurrentIndex(backup_index)
-                widget.paint_at_widget_position(widget.canvas.width() / 2, widget.canvas.height() / 2)
+                widget.annotation_workflow_controller.paint_at_widget_position(widget.canvas.width() / 2, widget.canvas.height() / 2)
 
                 np.testing.assert_array_equal(widget.edit_volume, edit_before)
                 self.assertIn("Raw AI prediction backup is read-only", widget.training_status_label.text())
 
                 manual_index = widget.label_role_combo.findData("manual_truth")
                 widget.label_role_combo.setCurrentIndex(manual_index)
-                widget.paint_at_widget_position(widget.canvas.width() / 2, widget.canvas.height() / 2)
+                widget.annotation_workflow_controller.paint_at_widget_position(widget.canvas.width() / 2, widget.canvas.height() / 2)
 
                 np.testing.assert_array_equal(widget.edit_volume, edit_before)
                 self.assertIn("Cannot paint on training truth directly", widget.training_status_label.text())
@@ -6579,15 +6946,15 @@ class TifWorkbenchTests(unittest.TestCase):
             try:
                 edit_index = widget.label_role_combo.findData("working_edit")
                 widget.label_role_combo.setCurrentIndex(edit_index)
-                widget.current_material_id = 2
+                widget.part_mask_workflow_controller.state.current_material_id = 2
                 widget.brush_size_slider.setValue(1)
-                widget.paint_at_widget_position(widget.canvas.width() / 2, widget.canvas.height() / 2)
+                widget.annotation_workflow_controller.paint_at_widget_position(widget.canvas.width() / 2, widget.canvas.height() / 2)
 
                 self.assertTrue(widget.working_edit_dirty)
                 self.assertIn("Painted label 2 on slice", widget.operation_status_label.text())
                 self.assertTrue(widget.auto_save_timer.isActive())
                 widget.auto_save_timer.stop()
-                request = widget._snapshot_label_auto_save_request(reason="auto_save")
+                request = widget.annotation_workflow_controller.snapshot_save_request(reason="auto_save")
                 self.assertIsNotNone(request)
                 result = _tif_write_label_slice_snapshots(
                     request["token"],
@@ -6595,7 +6962,7 @@ class TifWorkbenchTests(unittest.TestCase):
                     request["slices"],
                     request["slice_revisions"],
                 )
-                widget._on_label_auto_save_finished(result)
+                widget.annotation_workflow_controller.on_auto_save_finished(result)
 
                 specimen = widget.project.get_specimen("01-0101-21")
                 edit_path = root / "viewer" / specimen["labels"]["working_edit"]["path"] / "array.npy"
@@ -6614,23 +6981,23 @@ class TifWorkbenchTests(unittest.TestCase):
             try:
                 edit_index = widget.label_role_combo.findData("working_edit")
                 widget.label_role_combo.setCurrentIndex(edit_index)
-                widget.current_material_id = 2
+                widget.part_mask_workflow_controller.state.current_material_id = 2
                 widget.brush_size_slider.setValue(1)
-                widget.paint_at_widget_position(widget.canvas.width() / 2, widget.canvas.height() / 2)
+                widget.annotation_workflow_controller.paint_at_widget_position(widget.canvas.width() / 2, widget.canvas.height() / 2)
 
-                request = widget._snapshot_label_auto_save_request(reason="auto_save")
+                request = widget.annotation_workflow_controller.snapshot_save_request(reason="auto_save")
                 self.assertIsNotNone(request)
                 snapshot_revisions = dict(request["slice_revisions"])
 
                 widget.edit_volume[0, 0, 0] = 2
-                widget._mark_edit_slice_dirty(0)
+                widget.annotation_workflow_controller.mark_slice_dirty(0)
                 result = _tif_write_label_slice_snapshots(
                     request["token"],
                     request["edit_path"],
                     request["slices"],
                     request["slice_revisions"],
                 )
-                widget._on_label_auto_save_finished(result)
+                widget.annotation_workflow_controller.on_auto_save_finished(result)
 
                 self.assertTrue(widget.working_edit_dirty)
                 self.assertIn(0, widget._dirty_edit_slices)
@@ -6649,16 +7016,16 @@ class TifWorkbenchTests(unittest.TestCase):
             try:
                 edit_index = widget.label_role_combo.findData("working_edit")
                 widget.label_role_combo.setCurrentIndex(edit_index)
-                widget.current_material_id = 2
+                widget.part_mask_workflow_controller.state.current_material_id = 2
                 widget.brush_size_slider.setValue(1)
-                widget.paint_at_widget_position(widget.canvas.width() / 2, widget.canvas.height() / 2)
+                widget.annotation_workflow_controller.paint_at_widget_position(widget.canvas.width() / 2, widget.canvas.height() / 2)
 
-                auto_request = widget._snapshot_label_auto_save_request(reason="auto_save")
+                auto_request = widget.annotation_workflow_controller.snapshot_save_request(reason="auto_save")
                 self.assertIsNotNone(auto_request)
                 widget._label_auto_save_thread = object()
                 self.assertTrue(widget.save_working_edit_async())
                 self.assertIsNotNone(widget._pending_manual_save_after_auto)
-                self.assertFalse(widget._label_manual_save_running())
+                self.assertFalse(widget.annotation_workflow_controller.manual_save_thread is not None)
                 self.assertIn("Finishing auto-save", widget.operation_status_label.text())
 
                 widget._label_auto_save_thread = None
@@ -6668,10 +7035,10 @@ class TifWorkbenchTests(unittest.TestCase):
                     auto_request["slices"],
                     auto_request["slice_revisions"],
                 )
-                widget._on_label_auto_save_finished(result)
+                widget.annotation_workflow_controller.on_auto_save_finished(result)
 
                 self.assertIsNone(widget._pending_manual_save_after_auto)
-                if widget._label_manual_save_running():
+                if widget.annotation_workflow_controller.manual_save_thread is not None:
                     self._wait_for_label_manual_save(widget)
                 self.assertFalse(widget.working_edit_dirty)
                 specimen = widget.project.get_specimen("01-0101-21")
@@ -6731,38 +7098,38 @@ class TifWorkbenchTests(unittest.TestCase):
                 x = widget.canvas.width() / 2
                 y = widget.canvas.height() / 2
 
-                widget.set_annotation_tool_mode("brush", show_message=False)
-                widget._set_current_material_id(2)
+                widget.annotation_workflow_controller.set_tool_mode("brush", show_message=False)
+                widget.part_mask_workflow_controller._set_current_material_id(2)
                 widget.canvas.mousePressEvent(FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, x, y))
                 self.assertGreater(int(np.count_nonzero(widget.edit_volume[0] == 2)), 0)
                 painted = widget.edit_volume.copy()
 
-                widget.set_annotation_tool_mode("eraser", show_message=False)
+                widget.annotation_workflow_controller.set_tool_mode("eraser", show_message=False)
                 widget.canvas.mousePressEvent(FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, x, y))
                 self.assertLess(int(np.count_nonzero(widget.edit_volume[0] == 2)), int(np.count_nonzero(painted[0] == 2)))
                 self.assertIn("Erased labels on slice", widget.operation_status_label.text())
 
-                widget.set_annotation_tool_mode("brush", show_message=False)
+                widget.annotation_workflow_controller.set_tool_mode("brush", show_message=False)
                 widget.canvas.mousePressEvent(FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, x, y))
                 widget.canvas.mousePressEvent(FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, x, y, modifiers=Qt.ControlModifier))
                 self.assertEqual(int(widget.edit_volume[0, 4, 4]), 0)
 
-                widget.set_annotation_tool_mode("lasso", show_message=False)
+                widget.annotation_workflow_controller.set_tool_mode("lasso", show_message=False)
                 self.assertTrue(widget.findChild(QWidget, "tifToolLassoButton").isChecked())
-                widget.finish_lasso_fill([[1, 1], [5, 1], [5, 5], [1, 5]])
+                widget.annotation_workflow_controller.finish_lasso_fill([[1, 1], [5, 1], [5, 5], [1, 5]])
                 self.assertGreater(int(np.count_nonzero(widget.edit_volume[0] == 2)), 0)
                 self.assertIn("Filled label 2 on slice", widget.operation_status_label.text())
 
                 widget.edit_volume[0, 4, 4] = 2
                 widget.render_current_slice()
-                widget._set_current_material_id(0)
-                widget.set_annotation_tool_mode("picker", show_message=False)
+                widget.part_mask_workflow_controller._set_current_material_id(0)
+                widget.annotation_workflow_controller.set_tool_mode("picker", show_message=False)
                 widget.canvas.mousePressEvent(FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, x, y))
                 self.assertEqual(widget.current_material_id, 2)
                 self.assertIn("Picked label 2", widget.operation_status_label.text())
 
                 before_pan = widget.edit_volume.copy()
-                widget.set_annotation_tool_mode("pan", show_message=False)
+                widget.annotation_workflow_controller.set_tool_mode("pan", show_message=False)
                 widget.canvas.mousePressEvent(FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, x, y))
                 widget.canvas.mouseMoveEvent(FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, x + 20, y + 10))
                 np.testing.assert_array_equal(widget.edit_volume, before_pan)
@@ -6778,8 +7145,8 @@ class TifWorkbenchTests(unittest.TestCase):
                 edit_index = widget.label_role_combo.findData("working_edit")
                 widget.label_role_combo.setCurrentIndex(edit_index)
                 widget.brush_size_slider.setValue(1)
-                widget._set_current_material_id(2)
-                widget.set_annotation_tool_mode("brush", show_message=False)
+                widget.part_mask_workflow_controller._set_current_material_id(2)
+                widget.annotation_workflow_controller.set_tool_mode("brush", show_message=False)
                 start = self._canvas_xy_for_image_pixel(widget, 1, 4)
                 end = self._canvas_xy_for_image_pixel(widget, 6, 4)
 
@@ -6787,14 +7154,14 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.canvas.mouseMoveEvent(FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, end[0], end[1]))
                 widget.canvas.mouseReleaseEvent(FakeMouseEvent(Qt.LeftButton, Qt.NoButton, end[0], end[1]))
 
-                self.assertEqual(len(widget.undo_stack), 1)
+                self.assertEqual(len(widget.annotation_workflow_controller.state.undo_stack), 1)
                 for x in range(1, 7):
                     self.assertEqual(int(widget.edit_volume[0, 4, x]), 2)
                 painted = widget.edit_volume.copy()
 
-                widget.undo()
+                widget.annotation_workflow_controller.undo()
                 self.assertEqual(int(np.count_nonzero(widget.edit_volume[0])), 0)
-                widget.redo()
+                widget.annotation_workflow_controller.redo()
                 np.testing.assert_array_equal(widget.edit_volume, painted)
             finally:
                 widget.close_project(prompt_unsaved=False)
@@ -6807,8 +7174,8 @@ class TifWorkbenchTests(unittest.TestCase):
             try:
                 edit_index = widget.label_role_combo.findData("working_edit")
                 widget.label_role_combo.setCurrentIndex(edit_index)
-                widget._set_current_material_id(2)
-                widget.set_annotation_tool_mode("lasso", show_message=False)
+                widget.part_mask_workflow_controller._set_current_material_id(2)
+                widget.annotation_workflow_controller.set_tool_mode("lasso", show_message=False)
                 raw_points = [(1, 1), (6, 1), (6, 6), (1, 6), (1, 1)]
                 canvas_points = [self._canvas_xy_for_image_pixel(widget, x, y) for x, y in raw_points]
 
@@ -6817,7 +7184,7 @@ class TifWorkbenchTests(unittest.TestCase):
                     widget.canvas.mouseMoveEvent(FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, point[0], point[1]))
                 widget.canvas.mouseReleaseEvent(FakeMouseEvent(Qt.LeftButton, Qt.NoButton, canvas_points[-1][0], canvas_points[-1][1]))
 
-                self.assertEqual(len(widget.undo_stack), 1)
+                self.assertEqual(len(widget.annotation_workflow_controller.state.undo_stack), 1)
                 self.assertEqual(int(widget.edit_volume[0, 3, 3]), 2)
                 self.assertEqual(int(widget.edit_volume[0, 0, 0]), 0)
                 self.assertTrue(widget.working_edit_dirty)
@@ -6825,9 +7192,9 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertIn("Filled label 2 on slice", widget.operation_status_label.text())
 
                 filled = widget.edit_volume.copy()
-                widget.undo()
+                widget.annotation_workflow_controller.undo()
                 self.assertEqual(int(np.count_nonzero(widget.edit_volume[0])), 0)
-                widget.redo()
+                widget.annotation_workflow_controller.redo()
                 np.testing.assert_array_equal(widget.edit_volume, filled)
 
                 widget.auto_save_timer.stop()
@@ -6846,9 +7213,9 @@ class TifWorkbenchTests(unittest.TestCase):
             try:
                 edit_index = widget.label_role_combo.findData("working_edit")
                 widget.label_role_combo.setCurrentIndex(edit_index)
-                widget._set_current_material_id(2)
+                widget.part_mask_workflow_controller._set_current_material_id(2)
 
-                widget.set_annotation_tool_mode("rectangle", show_message=False)
+                widget.annotation_workflow_controller.set_tool_mode("rectangle", show_message=False)
                 start = self._canvas_xy_for_image_pixel(widget, 0, 0)
                 end = self._canvas_xy_for_image_pixel(widget, 7, 7)
                 widget.canvas.mousePressEvent(FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, start[0], start[1]))
@@ -6856,19 +7223,19 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertEqual(int(np.count_nonzero(widget.edit_volume[0])), 0)
                 widget.canvas.mouseReleaseEvent(FakeMouseEvent(Qt.LeftButton, Qt.NoButton, end[0], end[1]))
 
-                self.assertEqual(len(widget.undo_stack), 1)
+                self.assertEqual(len(widget.annotation_workflow_controller.state.undo_stack), 1)
                 self.assertEqual(int(np.count_nonzero(widget.edit_volume[0] == 2)), 64)
                 self.assertIn("Filled rectangle label 2", widget.operation_status_label.text())
                 self.assertIn("Large fill area", widget.operation_status_label.text())
                 self.assertIn("touches the image edge", widget.operation_status_label.text())
                 self.assertTrue(widget.working_edit_dirty)
 
-                widget.undo()
+                widget.annotation_workflow_controller.undo()
                 self.assertEqual(int(np.count_nonzero(widget.edit_volume[0])), 0)
-                widget.redo()
+                widget.annotation_workflow_controller.redo()
                 self.assertEqual(int(np.count_nonzero(widget.edit_volume[0] == 2)), 64)
 
-                widget.set_annotation_tool_mode("ellipse", show_message=False)
+                widget.annotation_workflow_controller.set_tool_mode("ellipse", show_message=False)
                 small = self._canvas_xy_for_image_pixel(widget, 3, 3)
                 widget.canvas.mousePressEvent(FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, small[0], small[1]))
                 widget.canvas.mouseReleaseEvent(FakeMouseEvent(Qt.LeftButton, Qt.NoButton, small[0], small[1]))
@@ -6883,33 +7250,33 @@ class TifWorkbenchTests(unittest.TestCase):
             try:
                 edit_index = widget.label_role_combo.findData("working_edit")
                 widget.label_role_combo.setCurrentIndex(edit_index)
-                widget._set_current_material_id(2)
+                widget.part_mask_workflow_controller._set_current_material_id(2)
                 widget.edit_volume[1, 2:5, 2:5] = 2
                 widget.slice_slider.setValue(1)
                 widget.render_current_slice()
                 module_path = "AntSleap.ui.tif_workbench.QMessageBox"
 
                 with patch(f"{module_path}.question", return_value=QMessageBox.Yes):
-                    self.assertTrue(widget.copy_current_material_to_adjacent_slice(1))
+                    self.assertTrue(widget.part_mask_workflow_controller.copy_current_material_to_adjacent_slice(1))
 
                 self.assertEqual(int(widget.slice_slider.value()), 2)
-                self.assertEqual(len(widget.undo_stack), 1)
+                self.assertEqual(len(widget.annotation_workflow_controller.state.undo_stack), 1)
                 self.assertEqual(int(np.count_nonzero(widget.edit_volume[2] == 2)), 9)
                 self.assertIn("Copied label 2 from slice 2 to slice 3", widget.operation_status_label.text())
                 self.assertIn(2, widget._dirty_edit_slices)
 
-                widget.undo()
+                widget.annotation_workflow_controller.undo()
                 self.assertEqual(int(np.count_nonzero(widget.edit_volume[2] == 2)), 0)
-                widget.redo()
+                widget.annotation_workflow_controller.redo()
                 self.assertEqual(int(np.count_nonzero(widget.edit_volume[2] == 2)), 9)
 
                 with patch(f"{module_path}.question", return_value=QMessageBox.Yes):
-                    self.assertTrue(widget.clear_current_material_on_slice())
+                    self.assertTrue(widget.part_mask_workflow_controller.clear_current_material_on_slice())
 
                 self.assertEqual(int(np.count_nonzero(widget.edit_volume[2] == 2)), 0)
-                self.assertEqual(len(widget.undo_stack), 2)
+                self.assertEqual(len(widget.annotation_workflow_controller.state.undo_stack), 2)
                 self.assertIn("Cleared label 2 on slice 3", widget.operation_status_label.text())
-                widget.undo()
+                widget.annotation_workflow_controller.undo()
                 self.assertEqual(int(np.count_nonzero(widget.edit_volume[2] == 2)), 9)
             finally:
                 widget.close_project(prompt_unsaved=False)
@@ -6921,17 +7288,17 @@ class TifWorkbenchTests(unittest.TestCase):
             try:
                 edit_index = widget.label_role_combo.findData("working_edit")
                 widget.label_role_combo.setCurrentIndex(edit_index)
-                widget._set_current_material_id(2)
+                widget.part_mask_workflow_controller._set_current_material_id(2)
                 widget.edit_volume[1, 2:4, 2:4] = 2
                 widget.edit_volume[3, 4:7, 4:7] = 2
 
-                self.assertTrue(widget.interpolate_current_label_between_key_slices())
+                self.assertTrue(widget.annotation_workflow_controller.interpolate_current_label_between_key_slices())
 
                 self.assertGreater(int(np.count_nonzero(widget.edit_volume[2] == 2)), 0)
                 self.assertIn(2, widget._dirty_edit_slices)
                 self.assertIn("Interpolate filled label 2", widget.operation_status_label.text())
-                self.assertGreaterEqual(len(widget.undo_stack), 1)
-                widget.undo()
+                self.assertGreaterEqual(len(widget.annotation_workflow_controller.state.undo_stack), 1)
+                widget.annotation_workflow_controller.undo()
                 self.assertEqual(int(np.count_nonzero(widget.edit_volume[2] == 2)), 0)
             finally:
                 widget.close_project(prompt_unsaved=False)
@@ -6980,9 +7347,9 @@ class TifWorkbenchTests(unittest.TestCase):
                 )
                 self.assertEqual(widget.canvas._last_annotation_preview, {})
 
-                widget._set_current_material_id(2)
+                widget.part_mask_workflow_controller._set_current_material_id(2)
                 widget.slice_slider.setValue(0)
-                widget.set_annotation_tool_mode("rectangle", show_message=False)
+                widget.annotation_workflow_controller.set_tool_mode("rectangle", show_message=False)
                 start = self._canvas_xy_for_image_pixel(widget, 1, 1)
                 end = self._canvas_xy_for_image_pixel(widget, 2, 2)
                 widget.canvas.mousePressEvent(FakeMouseEvent(Qt.LeftButton, Qt.LeftButton, start[0], start[1]))
@@ -6990,14 +7357,14 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.canvas.mouseReleaseEvent(FakeMouseEvent(Qt.LeftButton, Qt.NoButton, end[0], end[1]))
 
                 self.assertIsNotNone(widget.edit_volume)
-                self.assertEqual(len(widget.undo_stack), 1)
+                self.assertEqual(len(widget.annotation_workflow_controller.state.undo_stack), 1)
                 self.assertGreater(int(np.count_nonzero(widget.edit_volume[0] == 2)), 0)
                 self.assertTrue(widget.working_edit_dirty)
                 self.assertTrue(widget.btn_undo.isEnabled())
 
-                widget.undo()
+                widget.annotation_workflow_controller.undo()
                 self.assertEqual(int(np.count_nonzero(widget.edit_volume[0] == 2)), 0)
-                widget.redo()
+                widget.annotation_workflow_controller.redo()
                 self.assertGreater(int(np.count_nonzero(widget.edit_volume[0] == 2)), 0)
                 self.assertTrue(widget.save_working_edit(show_message=True))
                 self.assertFalse(widget.working_edit_dirty)
@@ -7053,8 +7420,8 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertIsNone(widget.edit_volume)
                 self.assertEqual(widget.label_role_combo.currentData(), "editable_ai_result")
                 self.assertIsNone(widget.part_mask_volume)
-                self.assertIsNone(widget._active_part_mask_volume())
-                self.assertFalse(widget._active_part_mask_likely_available())
+                self.assertIsNone(widget.volume_render_controller._active_part_mask_volume())
+                self.assertFalse(widget.volume_render_controller._active_part_mask_likely_available())
                 self.assertEqual(widget.volume_mask_combo.currentData(), "image_only")
                 self.assertTrue(widget.btn_bind_label_schema_to_part.isEnabled())
                 self.assertTrue(widget.material_editor_buttons.isHidden())
@@ -7068,10 +7435,10 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertFalse(widget.btn_preview_part_mask.isEnabled())
                 self.assertFalse(widget.btn_local_axis_reslice.isEnabled())
 
-                widget._set_current_material_id(2)
+                widget.part_mask_workflow_controller._set_current_material_id(2)
                 start = self._canvas_xy_for_image_pixel(widget, 1, 1)
                 end = self._canvas_xy_for_image_pixel(widget, 3, 3)
-                self.assertTrue(widget.finish_shape_fill_drag("rectangle", start[0], start[1], end[0], end[1]))
+                self.assertTrue(widget.annotation_workflow_controller.finish_shape_fill_drag("rectangle", start[0], start[1], end[0], end[1]))
                 self.assertIsNotNone(widget.edit_volume)
                 self.assertTrue(widget.working_edit_dirty)
                 self.assertTrue(widget.save_working_edit(show_message=True))
@@ -7108,10 +7475,10 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertEqual(widget.current_part_id, "head")
                 self.assertEqual(widget.label_role_combo.currentData(), "editable_ai_result")
 
-                widget._set_current_material_id(2)
+                widget.part_mask_workflow_controller._set_current_material_id(2)
                 start = self._canvas_xy_for_image_pixel(widget, 1, 1)
                 end = self._canvas_xy_for_image_pixel(widget, 3, 3)
-                self.assertTrue(widget.finish_shape_fill_drag("rectangle", start[0], start[1], end[0], end[1]))
+                self.assertTrue(widget.annotation_workflow_controller.finish_shape_fill_drag("rectangle", start[0], start[1], end[0], end[1]))
                 self.assertTrue(widget.save_working_edit(show_message=True))
                 editable = widget.project.part_label_record("01-0101-21", "head", "editable_ai_result")
                 self.assertIn("editable_ai_result.ome.zarr", editable["path"])
@@ -7123,17 +7490,17 @@ class TifWorkbenchTests(unittest.TestCase):
                     if mmap_handle is not None:
                         mmap_handle.close()
 
-                self.assertIsNotNone(widget.copy_source_z_axis_to_local_axis_draft())
+                self.assertIsNotNone(widget.local_axis_controller.copy_source_z_axis_to_draft())
                 widget.local_axis_draft["roll_reference"] = {
                     "pair_id": "roll_reference_point_pair",
                     "point_a": {"role": "roll_reference_a", "zyx": [1.0, 1.0, 1.0]},
                     "point_b": {"role": "roll_reference_b", "zyx": [1.0, 4.0, 1.0]},
                     "point_c": {"role": "reference_plane_c", "zyx": [3.0, 1.0, 4.0]},
                 }
-                self.assertTrue(widget.align_local_axis_to_reference_plane())
+                self.assertTrue(widget.local_axis_controller.align_to_reference_plane())
 
                 with patch_message_boxes():
-                    result = widget.export_current_local_axis_reslice()
+                    result = widget.local_axis_controller.export_current_reslice()
                 self.assertEqual(result["status"], "running")
                 reslice_id = result["reslice_id"]
                 self._wait_for_local_axis_export(widget)
@@ -7173,22 +7540,22 @@ class TifWorkbenchTests(unittest.TestCase):
             try:
                 edit_index = widget.label_role_combo.findData("working_edit")
                 widget.label_role_combo.setCurrentIndex(edit_index)
-                widget._set_current_material_id(2)
+                widget.part_mask_workflow_controller._set_current_material_id(2)
                 before = widget.edit_volume.copy()
                 x_index = widget.slice_axis_combo.findData("x")
                 widget.slice_axis_combo.setCurrentIndex(x_index)
                 start = self._canvas_xy_for_image_pixel(widget, 1, 1)
                 end = self._canvas_xy_for_image_pixel(widget, 6, 6)
 
-                self.assertFalse(widget.finish_shape_fill_drag("rectangle", start[0], start[1], end[0], end[1]))
+                self.assertFalse(widget.annotation_workflow_controller.finish_shape_fill_drag("rectangle", start[0], start[1], end[0], end[1]))
                 np.testing.assert_array_equal(widget.edit_volume, before)
                 self.assertIn("Painting is available on Z slices only", widget.operation_status_label.text())
 
                 widget.slice_axis_combo.setCurrentIndex(widget.slice_axis_combo.findData("z"))
                 manual_index = widget.label_role_combo.findData("manual_truth")
                 widget.label_role_combo.setCurrentIndex(manual_index)
-                self.assertFalse(widget.copy_current_material_to_adjacent_slice(1))
-                self.assertFalse(widget.clear_current_material_on_slice())
+                self.assertFalse(widget.part_mask_workflow_controller.copy_current_material_to_adjacent_slice(1))
+                self.assertFalse(widget.part_mask_workflow_controller.clear_current_material_on_slice())
                 np.testing.assert_array_equal(widget.edit_volume, before)
                 self.assertIn("Cannot paint on training truth directly", widget.operation_status_label.text())
             finally:
@@ -7205,25 +7572,25 @@ class TifWorkbenchTests(unittest.TestCase):
                 x = widget.canvas.width() / 2
                 y = widget.canvas.height() / 2
 
-                widget.set_annotation_tool_mode("brush", show_message=False)
+                widget.annotation_workflow_controller.set_tool_mode("brush", show_message=False)
                 widget.canvas.mouseMoveEvent(FakeMouseEvent(Qt.NoButton, Qt.NoButton, x, y))
                 self.assertEqual(widget.canvas._last_annotation_preview["mode"], "brush")
                 self.assertEqual(widget.canvas._last_annotation_preview["radius"], 5.0)
                 self.assertFalse(widget.canvas._last_annotation_preview["disabled"])
 
-                widget.set_annotation_tool_mode("eraser", show_message=False)
+                widget.annotation_workflow_controller.set_tool_mode("eraser", show_message=False)
                 widget.brush_size_slider.setValue(9)
                 widget.canvas.mouseMoveEvent(FakeMouseEvent(Qt.NoButton, Qt.NoButton, x, y))
                 self.assertEqual(widget.canvas._last_annotation_preview["mode"], "eraser")
                 self.assertEqual(widget.canvas._last_annotation_preview["radius"], 9.0)
 
-                widget.set_annotation_tool_mode("pan", show_message=False)
+                widget.annotation_workflow_controller.set_tool_mode("pan", show_message=False)
                 widget.canvas.mouseMoveEvent(FakeMouseEvent(Qt.NoButton, Qt.NoButton, x, y))
                 self.assertEqual(widget.canvas._last_annotation_preview, {})
 
                 manual_index = widget.label_role_combo.findData("manual_truth")
                 widget.label_role_combo.setCurrentIndex(manual_index)
-                widget.set_annotation_tool_mode("brush", show_message=False)
+                widget.annotation_workflow_controller.set_tool_mode("brush", show_message=False)
                 widget.canvas.mouseMoveEvent(FakeMouseEvent(Qt.NoButton, Qt.NoButton, x, y))
                 self.assertTrue(widget.canvas._last_annotation_preview["disabled"])
             finally:
@@ -7238,13 +7605,13 @@ class TifWorkbenchTests(unittest.TestCase):
                 edit_index = widget.label_role_combo.findData("working_edit")
                 widget.label_role_combo.setCurrentIndex(edit_index)
                 widget.brush_size_slider.setValue(1)
-                widget._set_current_material_id(2)
+                widget.part_mask_workflow_controller._set_current_material_id(2)
 
                 self.assertFalse(widget.btn_undo.isEnabled())
                 self.assertFalse(widget.btn_redo.isEnabled())
                 self.assertIn("Saved", widget.save_status_label.text())
 
-                widget.paint_at_widget_position(widget.canvas.width() / 2, widget.canvas.height() / 2)
+                widget.annotation_workflow_controller.paint_at_widget_position(widget.canvas.width() / 2, widget.canvas.height() / 2)
                 self.assertTrue(widget.btn_undo.isEnabled())
                 self.assertFalse(widget.btn_redo.isEnabled())
                 self.assertIn("Auto-save pending", widget.save_status_label.text())
@@ -7254,12 +7621,12 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertIn("Unsaved changes", widget.save_status_label.text())
 
                 painted = widget.edit_volume.copy()
-                widget.undo()
+                widget.annotation_workflow_controller.undo()
                 self.assertTrue(widget.btn_redo.isEnabled())
                 self.assertIn("Undo restored slice", widget.operation_status_label.text())
                 self.assertFalse(np.array_equal(widget.edit_volume, painted))
 
-                widget.redo()
+                widget.annotation_workflow_controller.redo()
                 self.assertTrue(widget.btn_undo.isEnabled())
                 self.assertIn("Redo restored slice", widget.operation_status_label.text())
                 np.testing.assert_array_equal(widget.edit_volume, painted)
@@ -7278,7 +7645,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 edit_index = widget.label_role_combo.findData("working_edit")
                 widget.label_role_combo.setCurrentIndex(edit_index)
                 widget.brush_size_slider.setValue(8)
-                widget._set_current_material_id(2)
+                widget.part_mask_workflow_controller._set_current_material_id(2)
 
                 widget.shortcut_tool_eraser.activated.emit()
                 self.assertEqual(widget.annotation_tool_mode, "eraser")
@@ -7298,7 +7665,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.shortcut_brush_larger.activated.emit()
                 self.assertEqual(widget.brush_size_slider.value(), 8)
 
-                widget.paint_at_widget_position(widget.canvas.width() / 2, widget.canvas.height() / 2)
+                widget.annotation_workflow_controller.paint_at_widget_position(widget.canvas.width() / 2, widget.canvas.height() / 2)
                 widget.auto_save_timer.stop()
                 widget.shortcut_undo.activated.emit()
                 self.assertTrue(widget.btn_redo.isEnabled())
@@ -7343,7 +7710,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 before = widget.edit_volume.copy()
                 x_index = widget.slice_axis_combo.findData("x")
                 widget.slice_axis_combo.setCurrentIndex(x_index)
-                widget.paint_at_widget_position(widget.canvas.width() / 2, widget.canvas.height() / 2)
+                widget.annotation_workflow_controller.paint_at_widget_position(widget.canvas.width() / 2, widget.canvas.height() / 2)
 
                 np.testing.assert_array_equal(widget.edit_volume, before)
                 self.assertIn("Painting is available on Z slices only", widget.operation_status_label.text())
@@ -7356,7 +7723,7 @@ class TifWorkbenchTests(unittest.TestCase):
             widget = self._make_volume_widget(Path(tmp), z_count=2)
             try:
                 widget.auto_save_check.setChecked(False)
-                widget.working_edit_dirty = True
+                widget.annotation_workflow_controller.set_dirty(True)
                 module_path = "AntSleap.ui.tif_workbench.QMessageBox"
                 with patch(f"{module_path}.question", return_value=QMessageBox.Cancel):
                     self.assertFalse(widget.close_project(prompt_unsaved=True))
@@ -7365,10 +7732,10 @@ class TifWorkbenchTests(unittest.TestCase):
 
                 with patch(f"{module_path}.question", return_value=QMessageBox.Save):
                     with patch.object(widget, "save_working_edit", return_value=True) as save_mock:
-                        self.assertTrue(widget._confirm_discard_or_save_working_edit())
+                        self.assertTrue(widget.annotation_workflow_controller.confirm_discard_or_save())
                         save_mock.assert_called_once()
             finally:
-                widget.working_edit_dirty = False
+                widget.annotation_workflow_controller.reset_dirty_tracking()
                 widget.close_project()
                 widget.deleteLater()
 
@@ -7464,9 +7831,9 @@ class TifWorkbenchTests(unittest.TestCase):
         manager = TifProjectManager()
         widget = TifWorkbenchWidget(manager, "en")
         try:
-            widget._start_backend_status("train", part_refs=[{"specimen_id": "s1", "part_id": "p1"}])
-            widget._on_tif_backend_progress(40, 100, "Wrote backend contract: C:/very/long/run/contract.json")
-            widget._on_tif_backend_progress(0, 0, "Running train command... 120s")
+            widget.backend_panel_controller._start_backend_status("train", part_refs=[{"specimen_id": "s1", "part_id": "p1"}])
+            widget.backend_panel_controller.on_backend_progress(40, 100, "Wrote backend contract: C:/very/long/run/contract.json")
+            widget.backend_panel_controller.on_backend_progress(0, 0, "Running train command... 120s")
 
             self.assertEqual(widget.backend_progress_bar.minimum(), 0)
             self.assertEqual(widget.backend_progress_bar.maximum(), 100)
@@ -7498,7 +7865,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 "warnings": [],
                 "errors": [],
             }
-            widget._set_training_result_summary(summary)
+            widget.backend_panel_controller._set_training_result_summary(summary)
 
             panel_text = widget.training_result_summary_label.text()
             tooltip = widget.training_result_summary_label.toolTip()
@@ -7668,11 +8035,11 @@ class TifWorkbenchTests(unittest.TestCase):
                     "contract": {"action": "train", "result_json": str(result_json)},
                     "result": backend_result,
                 }
-                with patch.object(widget, "refresh_project"), patch.object(widget, "show_latest_training_result_summary", return_value=True) as show_summary:
-                    widget._on_tif_backend_finished(payload)
+                with patch.object(widget, "refresh_project"), patch.object(widget.backend_panel_controller, "show_latest_training_result_summary", return_value=True) as show_summary:
+                    widget.backend_panel_controller._on_tif_backend_finished(payload)
                 show_summary.assert_called_once_with(show_message=False)
                 widget._tif_backend_thread = None
-                widget._refresh_training_result_controls()
+                widget.backend_panel_controller.refresh_training_result_controls()
                 self.assertIn("Training result is ready", widget.training_result_summary_label.text())
                 self.assertEqual(widget.backend_manifest_edit.text(), str(manifest.resolve()))
                 self.assertTrue(widget.btn_show_training_result_summary.isEnabled())
@@ -7683,13 +8050,13 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertEqual(widget.backend_manifest_edit.text(), str(manifest.resolve()))
                 self.assertIsNotNone(manager.get_tif_segmentation_model("taxamask_tif_nnunet_v2_backend/train_1"))
                 with patch_message_boxes():
-                    self.assertTrue(widget.enter_batch_prediction_from_training_result())
+                    self.assertTrue(widget.backend_panel_controller.enter_batch_prediction_from_training_result())
                 self.assertIn("Model manifest filled", widget.training_status_label.text())
-                widget._set_training_result_summary(None)
+                widget.backend_panel_controller._set_training_result_summary(None)
                 self.assertEqual(widget.backend_manifest_edit.text(), "")
                 widget.backend_manifest_edit.setText("C:/models/manual_manifest.json")
                 widget.backend_config["model_manifest"] = "C:/models/manual_manifest.json"
-                widget._set_training_result_summary(None)
+                widget.backend_panel_controller._set_training_result_summary(None)
                 self.assertEqual(widget.backend_manifest_edit.text(), "C:/models/manual_manifest.json")
             finally:
                 widget._tif_backend_thread = None
@@ -7727,7 +8094,7 @@ class TifWorkbenchTests(unittest.TestCase):
             manager.register_tif_segmentation_model_from_manifest(manifest, {"training_samples": 2}, save=True)
             widget = TifWorkbenchWidget(manager, "en")
             try:
-                widget._populate_tif_model_library_combo("taxamask_tif_nnunet_v2_backend/train_model_library")
+                widget.backend_panel_controller.populate_model_library_combo("taxamask_tif_nnunet_v2_backend/train_model_library")
                 self.assertEqual(widget.model_library_combo.currentData(), "taxamask_tif_nnunet_v2_backend/train_model_library")
 
                 self.assertTrue(widget.use_selected_tif_model())
@@ -7757,7 +8124,7 @@ class TifWorkbenchTests(unittest.TestCase):
             manager.set_part_user_tags("01-0101-11", "brain", ["round_1"], save=True)
             widget = TifWorkbenchWidget(manager, "en")
             try:
-                widget.refresh_predict_targets()
+                widget.backend_panel_controller.refresh_predict_targets()
 
                 self.assertGreaterEqual(widget.predict_targets_table.rowCount(), 1)
                 self.assertIn("Prediction targets:", widget.predict_targets_summary_label.text())
@@ -7772,7 +8139,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertIn("Round 1", tag_item.text())
                 self.assertEqual(select_item.checkState(), Qt.Unchecked)
 
-                widget.select_all_ready_predict_targets()
+                widget.backend_panel_controller.select_all_ready_predict_targets()
                 self.assertEqual(widget.predict_targets_table.item(0, 0).checkState(), Qt.Checked)
                 refs = widget._selected_part_refs_for_action("predict")
                 self.assertEqual(refs, [{"specimen_id": "01-0101-11", "part_id": "brain", "reslice_id": "brain_axis_001"}])
@@ -7841,7 +8208,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 index = widget.predict_filter_combo.findData("tag:paper_fig")
                 self.assertGreaterEqual(index, 0)
                 widget.predict_filter_combo.setCurrentIndex(index)
-                widget.refresh_predict_targets()
+                widget.backend_panel_controller.refresh_predict_targets()
                 self.assertGreaterEqual(widget.predict_targets_table.rowCount(), 1)
                 self.assertIn("Paper figure", widget.predict_targets_table.item(0, 4).text())
 
@@ -7853,7 +8220,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.part_user_tag_table.selectRow(1)
                 self.assertTrue(widget.move_selected_part_user_tag(-1))
                 self.assertEqual([tag["tag_id"] for tag in manager.project_data["part_user_tags"]], ["round_1", "paper_fig"])
-                widget.refresh_predict_targets()
+                widget.backend_panel_controller.refresh_predict_targets()
                 self.assertLess(
                     widget.predict_filter_combo.findData("tag:round_1"),
                     widget.predict_filter_combo.findData("tag:paper_fig"),
@@ -7903,6 +8270,48 @@ class TifWorkbenchTests(unittest.TestCase):
             finally:
                 widget.close_project(prompt_unsaved=False)
                 widget.deleteLater()
+
+
+    def test_bound_label_schema_is_restored_after_project_reopen(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = make_predict_ready_project(root)
+            manager.add_or_update_label_schema(
+                "brain_regions_alt",
+                labels=[{"id": 7, "name": "alternate_region", "display_name": "Alternate region", "color": "#654321", "trainable": True}],
+                user_defined_part_name="brain",
+                display_name="Brain regions alternate",
+                save=True,
+            )
+            widget = TifWorkbenchWidget(manager, "en")
+            project_path = Path(manager.current_project_path)
+            try:
+                widget._select_volume_tree_item("01-0101-11", "part", "brain")
+                widget._populate_label_schema_combo("brain_regions_alt")
+                self.assertEqual(widget.label_schema_combo.currentData(), "brain_regions_alt")
+                self.assertTrue(widget.bind_current_part_label_schema())
+                self.assertEqual(manager.get_part("01-0101-11", "brain")["training"]["label_schema_id"], "brain_regions_alt")
+            finally:
+                widget.close_project(prompt_unsaved=False)
+                widget.deleteLater()
+
+            reopened = TifProjectManager()
+            reopened.load_project(project_path)
+            reopened_widget = TifWorkbenchWidget(reopened, "en")
+            try:
+                reopened_widget._populate_label_schema_combo("brain_regions")
+                self.assertEqual(reopened_widget.label_schema_combo.currentData(), "brain_regions")
+
+                reopened_widget._select_volume_tree_item("01-0101-11", "part", "brain")
+
+                self.assertEqual(reopened.get_part("01-0101-11", "brain")["training"]["label_schema_id"], "brain_regions_alt")
+                self.assertEqual(reopened_widget.label_schema_combo.currentData(), "brain_regions_alt")
+                self.assertEqual(reopened_widget.label_schema_id_edit.text(), "brain_regions_alt")
+                self.assertEqual(reopened_widget.label_schema_table.item(0, 1).text(), "7")
+                self.assertEqual(reopened_widget.label_schema_table.item(0, 2).text(), "Alternate region")
+            finally:
+                reopened_widget.close_project(prompt_unsaved=False)
+                reopened_widget.deleteLater()
 
     def test_new_label_schema_uses_current_part_instead_of_brain_default(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -7986,16 +8395,16 @@ class TifWorkbenchTests(unittest.TestCase):
             widget = TifWorkbenchWidget(manager, "en")
             try:
                 widget.backend_predict_edit.setText(f"{os.sys.executable} missing_predict.py")
-                widget.select_all_ready_predict_targets()
+                widget.backend_panel_controller.select_all_ready_predict_targets()
                 with patch_message_boxes():
-                    widget.run_backend_action("predict")
-                self.assertFalse(widget._backend_action_running())
+                    widget.backend_panel_controller.run_backend_action("predict")
+                self.assertFalse(widget.backend_panel_controller.action_running())
                 self.assertIn("Select a model manifest", widget.training_status_label.text())
 
                 widget.backend_manifest_edit.setText(str(root / "missing_manifest.json"))
                 with patch_message_boxes():
-                    widget.run_backend_action("predict")
-                self.assertFalse(widget._backend_action_running())
+                    widget.backend_panel_controller.run_backend_action("predict")
+                self.assertFalse(widget.backend_panel_controller.action_running())
                 self.assertIn("Model manifest does not exist", widget.training_status_label.text())
             finally:
                 widget.close_project(prompt_unsaved=False)
@@ -8010,9 +8419,9 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget._select_volume_tree_item("01-0101-11", "part_reslice", "brain", "brain_axis_001")
                 widget.backend_train_edit.setText(f"{os.sys.executable} missing_train.py")
                 with patch("AntSleap.ui.tif_workbench.QMessageBox.warning", return_value=None) as warning_mock:
-                    widget.run_backend_action("train")
+                    widget.backend_panel_controller.run_backend_action("train")
 
-                self.assertFalse(widget._backend_action_running())
+                self.assertFalse(widget.backend_panel_controller.action_running())
                 self.assertEqual(warning_mock.call_count, 1)
                 message = str(warning_mock.call_args[0][2])
                 self.assertIn("Current part/reslice is not train-ready yet", message)
@@ -8035,15 +8444,15 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.current_part_id = "brain"
                 widget.current_reslice_id = "brain_axis_001"
                 widget.current_volume_scope = "part"
-                widget.working_edit_dirty = True
+                widget.annotation_workflow_controller.set_dirty(True)
 
-                with patch("AntSleap.ui.tif_workbench.QMessageBox.question", return_value=QMessageBox.Save), \
+                with patch("AntSleap.ui.tif_backend_panel_controller.QMessageBox.question", return_value=QMessageBox.Save), \
                      patch.object(widget, "save_working_edit", side_effect=AssertionError("sync save should not run")), \
                      patch.object(widget, "save_working_edit_async", return_value=True) as async_save:
-                    widget.run_backend_action("prepare_dataset")
+                    widget.backend_panel_controller.run_backend_action("prepare_dataset")
 
                 async_save.assert_called_once()
-                self.assertFalse(widget._backend_action_running())
+                self.assertFalse(widget.backend_panel_controller.action_running())
                 self.assertEqual(widget._pending_backend_action_after_save["action"], "prepare_dataset")
 
                 started = []
@@ -8080,12 +8489,12 @@ class TifWorkbenchTests(unittest.TestCase):
                     def deleteLater(self):
                         pass
 
-                widget.working_edit_dirty = False
-                with patch("AntSleap.ui.tif_workbench.QThread", FakeThread), \
-                     patch("AntSleap.ui.tif_workbench.TifBackendActionWorker", FakeWorker):
-                    self.assertTrue(widget._resume_pending_backend_action_after_save())
+                widget.annotation_workflow_controller.reset_dirty_tracking()
+                with patch("AntSleap.ui.tif_backend_panel_controller.QThread", FakeThread), \
+                     patch("AntSleap.ui.tif_backend_panel_controller.TifBackendActionWorker", FakeWorker):
+                    self.assertTrue(widget.backend_panel_controller._resume_pending_backend_action_after_save())
 
-                self.assertTrue(widget._backend_action_running())
+                self.assertTrue(widget.backend_panel_controller.action_running())
                 self.assertEqual(captured["args"][2], "prepare_dataset")
                 self.assertEqual(captured["kwargs"]["input_scope"], "part_reslice")
                 self.assertEqual(
@@ -8096,7 +8505,7 @@ class TifWorkbenchTests(unittest.TestCase):
             finally:
                 widget._tif_backend_thread = None
                 widget._tif_backend_worker = None
-                widget.working_edit_dirty = False
+                widget.annotation_workflow_controller.reset_dirty_tracking()
                 widget.close_project(prompt_unsaved=False)
                 widget.deleteLater()
 
@@ -8121,9 +8530,9 @@ class TifWorkbenchTests(unittest.TestCase):
             manager.set_part_training_metadata("01-0101-11", "brain", opened_for_review=True, save=True)
             widget = TifWorkbenchWidget(manager, "en")
             try:
-                widget.select_all_ready_predict_targets()
-                with patch("AntSleap.ui.tif_workbench.QMessageBox.question", return_value=QMessageBox.Yes):
-                    self.assertTrue(widget.accept_selected_ai_results())
+                widget.backend_panel_controller.select_all_ready_predict_targets()
+                with patch("AntSleap.ui.tif_backend_panel_controller.QMessageBox.question", return_value=QMessageBox.Yes):
+                    self.assertTrue(widget.result_review_controller.accept_selected_results())
 
                 part = widget.project.get_part("01-0101-11", "brain")
                 reslice = widget.project.get_part_reslice("01-0101-11", "brain", "brain_axis_001")
@@ -8157,19 +8566,19 @@ class TifWorkbenchTests(unittest.TestCase):
             widget = TifWorkbenchWidget(manager, "en")
             try:
                 widget.current_volume_scope = "part"
-                widget.working_edit_dirty = True
-                widget.select_all_ready_predict_targets()
+                widget.annotation_workflow_controller.set_dirty(True)
+                widget.backend_panel_controller.select_all_ready_predict_targets()
                 with patch_message_boxes(), patch.object(widget, "save_working_edit", side_effect=AssertionError("sync save should not run")):
-                    self.assertFalse(widget.accept_selected_ai_results())
+                    self.assertFalse(widget.result_review_controller.accept_selected_results())
 
                 self.assertIn("Save current labels before accepting selected AI results", widget.operation_status_label.text())
                 self.assertFalse(widget.project.evaluate_part_train_ready("01-0101-11", "brain")["train_ready"])
             finally:
-                widget.working_edit_dirty = False
+                widget.annotation_workflow_controller.reset_dirty_tracking()
                 widget.close_project(prompt_unsaved=False)
                 widget.deleteLater()
 
-    def test_ai_review_check_label_reports_unknown_ids(self):
+    def test_ai_review_check_defers_label_scan_until_acceptance(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             manager = make_predict_ready_project(root)
@@ -8189,11 +8598,14 @@ class TifWorkbenchTests(unittest.TestCase):
             manager.set_part_training_metadata("01-0101-11", "brain", opened_for_review=True, save=True)
             widget = TifWorkbenchWidget(manager, "en")
             try:
-                widget._select_volume_tree_item("01-0101-11", "part_reslice", "brain", "brain_axis_001")
+                with patch.object(manager, "validate_part_label_ids", side_effect=AssertionError("selection must not scan the full label volume")):
+                    widget._select_volume_tree_item("01-0101-11", "part_reslice", "brain", "brain_axis_001")
                 text = widget.ai_review_check_label.text()
-                self.assertIn("Review check blocked", text)
-                self.assertIn("unknown labels: 9", text)
+                self.assertIn("Full label-ID validation will run when you accept", text)
                 self.assertIn("Schema brain_regions", text)
+                strict_report = manager.evaluate_part_editable_result_review_ready("01-0101-11", "brain", "brain_axis_001")
+                self.assertFalse(strict_report["review_ready"])
+                self.assertEqual(strict_report["unknown_label_ids"], [9])
             finally:
                 widget.close_project(prompt_unsaved=False)
                 widget.deleteLater()
@@ -8218,14 +8630,14 @@ class TifWorkbenchTests(unittest.TestCase):
             manager.set_part_training_metadata("01-0101-11", "brain", opened_for_review=False, save=True)
             widget = TifWorkbenchWidget(manager, "en")
             try:
-                widget.select_all_ready_predict_targets()
+                widget.backend_panel_controller.select_all_ready_predict_targets()
                 replies = [QMessageBox.No]
 
                 def answer(*args, **kwargs):
                     return replies.pop(0)
 
-                with patch("AntSleap.ui.tif_workbench.QMessageBox.question", side_effect=answer) as question_mock:
-                    self.assertFalse(widget.accept_selected_ai_results())
+                with patch("AntSleap.ui.tif_backend_panel_controller.QMessageBox.question", side_effect=answer) as question_mock:
+                    self.assertFalse(widget.result_review_controller.accept_selected_results())
                 self.assertEqual(question_mock.call_count, 1)
                 self.assertFalse(widget.project.evaluate_part_train_ready("01-0101-11", "brain")["train_ready"])
             finally:
@@ -8252,9 +8664,9 @@ class TifWorkbenchTests(unittest.TestCase):
             manager.set_part_training_metadata("01-0101-11", "brain", opened_for_review=True, save=True)
             widget = TifWorkbenchWidget(manager, "en")
             try:
-                widget.select_all_ready_predict_targets()
+                widget.backend_panel_controller.select_all_ready_predict_targets()
                 with patch_message_boxes():
-                    self.assertFalse(widget.accept_selected_ai_results())
+                    self.assertFalse(widget.result_review_controller.accept_selected_results())
                 self.assertIn("label/schema problems", widget.training_status_label.text())
                 self.assertIn("unknown labels: 9", widget.training_status_label.text())
                 self.assertFalse(widget.project.evaluate_part_train_ready("01-0101-11", "brain")["train_ready"])
@@ -8287,10 +8699,10 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.current_volume_scope = "part"
                 widget.backend_predict_edit.setText(f"{os.sys.executable} missing_predict.py")
                 widget.backend_manifest_edit.setText(str(manifest))
-                widget.select_all_ready_predict_targets()
-                with patch("AntSleap.ui.tif_workbench.QMessageBox.question", return_value=QMessageBox.No):
-                    widget.run_backend_action("predict")
-                self.assertFalse(widget._backend_action_running())
+                widget.backend_panel_controller.select_all_ready_predict_targets()
+                with patch("AntSleap.ui.tif_backend_panel_controller.QMessageBox.question", return_value=QMessageBox.No):
+                    widget.backend_panel_controller.run_backend_action("predict")
+                self.assertFalse(widget.backend_panel_controller.action_running())
                 self.assertNotIn("Running predict", widget.training_status_label.text())
 
                 started = []
@@ -8328,9 +8740,9 @@ class TifWorkbenchTests(unittest.TestCase):
                     def deleteLater(self):
                         pass
 
-                with patch("AntSleap.ui.tif_workbench.QMessageBox.question", return_value=QMessageBox.Yes), patch("AntSleap.ui.tif_workbench.QThread", FakeThread), patch("AntSleap.ui.tif_workbench.TifBackendActionWorker", FakeWorker):
-                    widget.run_backend_action("predict")
-                self.assertTrue(widget._backend_action_running())
+                with patch("AntSleap.ui.tif_backend_panel_controller.QMessageBox.question", return_value=QMessageBox.Yes), patch("AntSleap.ui.tif_backend_panel_controller.QThread", FakeThread), patch("AntSleap.ui.tif_backend_panel_controller.TifBackendActionWorker", FakeWorker):
+                    widget.backend_panel_controller.run_backend_action("predict")
+                self.assertTrue(widget.backend_panel_controller.action_running())
                 self.assertIn("Running predict", widget.training_status_label.text())
                 self.assertIn("start_called", started)
                 self.assertEqual(captured["kwargs"]["model_manifest"], str(manifest))
@@ -8354,7 +8766,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.current_part_id = "brain"
                 widget.current_reslice_id = "brain_axis_001"
                 with patch.object(manager, "validate_part_label_ids", side_effect=AssertionError("label scan should be deferred")):
-                    selection = widget._selected_backend_samples_for_action("prepare_dataset")
+                    selection = widget.backend_panel_controller.selected_backend_samples_for_action("prepare_dataset")
 
                 self.assertEqual(selection["input_scope"], "part_reslice")
                 self.assertEqual(
@@ -8379,7 +8791,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.edit_volume = np.zeros((2, 3, 4), dtype=np.uint16)
                 widget._tif_backend_thread = object()
                 widget._set_scope_controls_enabled()
-                self.assertTrue(widget._backend_write_lock_active())
+                self.assertTrue(widget.coordinator.backend_write_lock_active())
                 self.assertFalse(widget.btn_save_edit.isEnabled())
                 self.assertFalse(widget.btn_promote.isEnabled())
                 self.assertFalse(widget.btn_export_training.isEnabled())
@@ -8388,7 +8800,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 with patch_message_boxes(), patch.object(widget.project, "save_project") as save_mock:
                     self.assertFalse(widget.save_working_edit(show_message=True))
                     self.assertFalse(widget.export_current_part_package())
-                    self.assertIsNone(widget.copy_source_z_axis_to_local_axis_draft())
+                    self.assertIsNone(widget.local_axis_controller.copy_source_z_axis_to_draft())
                     with patch("AntSleap.ui.tif_workbench.QFileDialog.getOpenFileNames") as open_files:
                         widget.import_tif_stack_dialog()
                         open_files.assert_not_called()
@@ -8408,13 +8820,13 @@ class TifWorkbenchTests(unittest.TestCase):
             widget = self._make_volume_widget(Path(tmp), z_count=5)
             try:
                 task = widget._start_tif_task("volume_preview", action="build_preview", message="Preparing preview")
-                self.assertTrue(widget._backend_write_lock_active())
-                self.assertIn("Volume preview", widget._backend_write_lock_message())
+                self.assertTrue(widget.coordinator.backend_write_lock_active())
+                self.assertIn("Volume preview", widget.coordinator.backend_write_lock_message())
                 with patch_message_boxes(), patch("AntSleap.ui.tif_workbench.QFileDialog.getOpenFileNames") as open_files:
                     widget.import_tif_stack_dialog()
                     open_files.assert_not_called()
                 widget._finish_tif_task(task.task_id, message="done")
-                self.assertFalse(widget._backend_write_lock_active())
+                self.assertFalse(widget.coordinator.backend_write_lock_active())
             finally:
                 widget.close_project(prompt_unsaved=False)
                 widget.deleteLater()
@@ -8432,7 +8844,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 "taxamask_tif_nnunet_v2_backend failed: nnunet_command_failed:1:C:/very/long/nnunet_v2_commands.log"
             )
             with patch_message_boxes():
-                widget._on_tif_backend_failed(
+                widget.backend_panel_controller._on_tif_backend_failed(
                     long_error,
                     {"run_dir": run_dir, "result_json": result_json, "action": "train"},
                 )
@@ -8456,7 +8868,7 @@ class TifWorkbenchTests(unittest.TestCase):
             widget._tif_backend_thread = object()
             widget._tif_backend_action = "train"
             with patch_message_boxes():
-                widget._on_tif_backend_failed(
+                widget.backend_panel_controller._on_tif_backend_failed(
                     "tif_backend_train_failed:2:stderr.log\n"
                     "taxamask_tif_nnunet_v2_backend failed: nnunet_training_requires_at_least_2_samples:1",
                     {"action": "train"},

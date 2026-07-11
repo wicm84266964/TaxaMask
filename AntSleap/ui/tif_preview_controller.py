@@ -87,7 +87,7 @@ class TifPreviewController:
         if hasattr(wb, "volume_canvas"):
             wb.volume_canvas.setText(message)
         if hasattr(wb, "volume_render_status_label"):
-            wb._update_volume_render_status_label(message)
+            wb.volume_render_controller._update_volume_render_status_label(message)
         if hasattr(wb, "training_status_label"):
             wb.training_status_label.setText(message)
             wb.training_status_label.setToolTip(str(issue.original_error or ""))

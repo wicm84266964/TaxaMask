@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -33,6 +34,22 @@ class TifBackendPanelControllerTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
+
+    def test_signals_are_idempotent_and_runtime_state_is_controller_owned(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+        try:
+            controller = widget.backend_panel_controller
+            self.assertEqual(widget.signal_router.connection_count("backend_panel"), 21)
+            controller.bind_signals()
+            self.assertEqual(widget.signal_router.connection_count("backend_panel"), 21)
+            controller.state.action = "train"
+            self.assertEqual(widget._tif_backend_action, "train")
+            self.assertNotIn("_tif_backend_action", widget.__dict__)
+            self.assertNotIn("_tif_predict_selected_refs", widget.__dict__)
+        finally:
+            widget.deleteLater()
+
     def test_predict_target_table_uses_service_readiness_and_preserves_tuple_keys(self):
         with tempfile.TemporaryDirectory() as tmp:
             manager = make_predict_ready_project(Path(tmp))
@@ -41,13 +58,13 @@ class TifBackendPanelControllerTests(unittest.TestCase):
             widget = TifWorkbenchWidget(manager, "en")
             try:
                 controller = widget.backend_panel_controller
-                widget.refresh_predict_targets()
+                widget.backend_panel_controller.refresh_predict_targets()
 
                 self.assertGreaterEqual(widget.predict_targets_table.rowCount(), 1)
                 self.assertEqual(widget.predict_targets_table.item(0, 6).text(), "Ready")
                 self.assertIn("Round 1", widget.predict_targets_table.item(0, 4).text())
 
-                widget.select_all_ready_predict_targets()
+                widget.backend_panel_controller.select_all_ready_predict_targets()
 
                 expected_key = ("01-0101-11", "brain", "brain_axis_001")
                 self.assertIn(expected_key, widget._tif_predict_selected_refs)
@@ -77,6 +94,92 @@ class TifBackendPanelControllerTests(unittest.TestCase):
             finally:
                 widget.close_project(prompt_unsaved=False)
                 widget.deleteLater()
+
+    def test_training_result_prediction_entry_routes_inside_controller(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = Path(tmp) / "model_manifest.json"
+            manifest.write_text("{}", encoding="utf-8")
+            widget = TifWorkbenchWidget(TifProjectManager(), "en")
+            try:
+                controller = widget.backend_panel_controller
+                widget._tif_training_model_manifest = str(manifest)
+                widget.current_specimen_id = "GAGA-02-09"
+                widget.current_volume_scope = "part"
+                widget.current_part_id = "roi_1"
+
+                with patch.object(controller, "select_current_predict_target", return_value=True) as select_current:
+                    self.assertTrue(controller.enter_batch_prediction_from_training_result())
+
+                self.assertIs(widget.task_tabs.currentWidget(), widget.training_mode_tabs)
+                self.assertIs(widget.training_mode_tabs.currentWidget(), widget.training_task_page)
+                select_current.assert_called_once_with()
+            finally:
+                widget.close_project(prompt_unsaved=False)
+                widget.deleteLater()
+
+    def test_stale_backend_completion_updates_run_panel_without_reloading_current_specimen(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = TifProjectManager()
+            manager.create_project("stale_backend", Path(tmp) / "stale_backend")
+            manager.create_specimen_scaffold("s1")
+            manager.create_specimen_scaffold("s2")
+            widget = TifWorkbenchWidget(manager, "en")
+            try:
+                widget._select_volume_tree_item("s1", "full")
+                task = widget._start_tif_task("backend_action", action="prepare_dataset")
+                widget._tif_backend_task_id = task.task_id
+                widget._tif_backend_action = "prepare_dataset"
+                widget._tif_backend_thread = object()
+                widget._tif_backend_pending_selection = {
+                    "specimen_id": "s1",
+                    "part_id": "",
+                    "reslice_id": "",
+                    "input_scope": "top_level_volume",
+                }
+
+                widget._select_volume_tree_item("s2", "full")
+                widget.training_status_label.setText("s2 current status")
+                widget.backend_panel_controller.on_backend_progress(1, 2, "Preparing old selection")
+                self.assertEqual(widget.training_status_label.text(), "s2 current status")
+                self.assertEqual(widget.backend_run_status_label.text(), "Preparing old selection")
+                widget.backend_panel_controller._on_tif_backend_finished(
+                    {
+                        "run_dir": str(Path(tmp) / "run"),
+                        "contract": {"action": "prepare_dataset"},
+                        "result": {},
+                    }
+                )
+
+                self.assertEqual(widget.current_specimen_id, "s2")
+                self.assertEqual(widget.training_status_label.text(), "s2 current status")
+                self.assertIn("Run finished", widget.backend_run_status_label.text())
+                self.assertEqual(
+                    widget._tree_item_payload(widget.specimen_list.currentItem()).get("specimen_id"),
+                    "s2",
+                )
+            finally:
+                widget._tif_backend_thread = None
+                widget._tif_backend_worker = None
+                widget.close_project(prompt_unsaved=False)
+                widget.deleteLater()
+
+    def test_backend_failure_without_active_task_does_not_replace_current_status(self):
+        widget = TifWorkbenchWidget(TifProjectManager(), "en")
+        try:
+            widget.training_status_label.setText("current selection status")
+            widget._tif_backend_action = "train"
+
+            with patch("AntSleap.ui.tif_backend_panel_controller.QMessageBox.warning"):
+                widget.backend_panel_controller._on_tif_backend_failed(
+                    "tif_backend_train_failed:2:old_stderr.log",
+                    {"action": "train"},
+                )
+
+            self.assertEqual(widget.training_status_label.text(), "current selection status")
+            self.assertIn("Training failed", widget.backend_run_status_label.text())
+        finally:
+            widget.close_project(prompt_unsaved=False)
+            widget.deleteLater()
 
     def test_model_library_controls_require_existing_manifest_and_not_running(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -108,7 +211,7 @@ class TifBackendPanelControllerTests(unittest.TestCase):
             manager.register_tif_segmentation_model_from_manifest(manifest, {"training_samples": 2}, save=True)
             widget = TifWorkbenchWidget(manager, "en")
             try:
-                widget._populate_tif_model_library_combo("taxamask_tif_nnunet_v2_backend/train_model_library")
+                widget.backend_panel_controller.populate_model_library_combo("taxamask_tif_nnunet_v2_backend/train_model_library")
 
                 self.assertTrue(widget.btn_use_selected_tif_model.isEnabled())
                 self.assertTrue(widget.btn_save_tif_model_notes.isEnabled())
@@ -116,7 +219,7 @@ class TifBackendPanelControllerTests(unittest.TestCase):
                 self.assertIn("Samples: 2", widget.model_library_summary_label.text())
 
                 widget._tif_backend_thread = object()
-                widget._set_backend_controls_running(True)
+                widget.backend_panel_controller.set_backend_controls_running(True)
                 self.assertFalse(widget.btn_use_selected_tif_model.isEnabled())
                 self.assertFalse(widget.btn_save_tif_model_notes.isEnabled())
                 self.assertFalse(widget.btn_delete_tif_model_record.isEnabled())
@@ -136,7 +239,7 @@ class TifBackendPanelControllerTests(unittest.TestCase):
             manager = TifProjectManager()
             widget = TifWorkbenchWidget(manager, "en")
             try:
-                widget._set_training_result_summary(
+                widget.backend_panel_controller._set_training_result_summary(
                     {
                         "model_output": str(model_output),
                         "model_manifest": str(manifest),
@@ -152,7 +255,7 @@ class TifBackendPanelControllerTests(unittest.TestCase):
                 self.assertTrue(widget.btn_batch_predict_entry.isEnabled())
 
                 widget._tif_backend_thread = object()
-                widget._set_backend_controls_running(True)
+                widget.backend_panel_controller.set_backend_controls_running(True)
 
                 self.assertFalse(widget.btn_show_training_result_summary.isEnabled())
                 self.assertFalse(widget.btn_open_training_model_output.isEnabled())

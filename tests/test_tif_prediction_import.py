@@ -1,6 +1,8 @@
+import copy
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import tifffile
@@ -138,6 +140,51 @@ class TifPredictionImportTests(unittest.TestCase):
             specimen = manager.get_specimen("01-0101-20")
             self.assertEqual(specimen["labels"]["model_drafts"], [])
             self.assertEqual((specimen["labels"].get("raw_ai_prediction_backup") or {}).get("path", ""), "")
+
+    def test_sqlite_failure_restores_existing_edit_and_backup_sidecars(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = make_project_with_working_and_truth(root)
+            specimen = manager.get_specimen("01-0101-20")
+            backup_rel = "specimens/01-0101-20/labels/raw_ai_prediction_backup.ome.zarr"
+            backup_before = np.full((3, 4, 5), 6, dtype=np.uint16)
+            backup_meta = write_volume_sidecar(manager.to_absolute(backup_rel), backup_before, role="raw_ai_prediction_backup")
+            specimen["labels"]["raw_ai_prediction_backup"] = manager._volume_payload(
+                backup_rel,
+                backup_meta["shape_zyx"],
+                backup_meta["dtype"],
+                backup_meta.get("spacing_zyx"),
+                backup_meta.get("spacing_unit", "micrometer"),
+                backup_meta.get("orientation", "unknown"),
+                backup_meta.get("format", ""),
+            )
+            specimen["labels"]["raw_ai_prediction_backup"].update(
+                {"role": "raw_ai_prediction_backup", "status": "raw_backup", "prediction_id": "old"}
+            )
+            manager.save_project()
+            specimen_before = copy.deepcopy(manager.get_specimen("01-0101-20"))
+            edit_path = manager.to_absolute(specimen_before["labels"]["working_edit"]["path"])
+            backup_path = manager.to_absolute(specimen_before["labels"]["raw_ai_prediction_backup"]["path"])
+            edit_before = np.asarray(load_volume_sidecar(edit_path)).copy()
+            label_tif = root / "prediction.tif"
+            tifffile.imwrite(label_tif, np.full((3, 4, 5), 2, dtype=np.uint16), photometric="minisblack")
+
+            with patch.object(manager, "save_project", side_effect=RuntimeError("sqlite write failed")):
+                with self.assertRaisesRegex(RuntimeError, "sqlite write failed"):
+                    import_external_prediction_tif(
+                        manager,
+                        "01-0101-20",
+                        label_tif,
+                        prediction_id="failed_prediction",
+                    )
+
+            self.assertEqual(manager.get_specimen("01-0101-20"), specimen_before)
+            np.testing.assert_array_equal(load_volume_sidecar(edit_path), edit_before)
+            np.testing.assert_array_equal(load_volume_sidecar(backup_path), backup_before)
+            self.assertFalse(
+                (Path(manager.project_dir) / "specimens" / "01-0101-20" / "labels" / "model_draft" / "failed_prediction.ome.zarr").exists()
+            )
+            self.assertFalse(any("failed_prediction" in path.name for path in Path(manager.project_dir).rglob("*")))
 
 
 if __name__ == "__main__":

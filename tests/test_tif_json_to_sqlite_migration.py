@@ -45,10 +45,12 @@ def _build_legacy_tif_project(project_root):
     image_rel = "specimens/01-0101-local/working/image.ome.zarr"
     manual_rel = "specimens/01-0101-local/labels/manual_truth.ome.zarr"
     edit_rel = "specimens/01-0101-local/labels/working_edit.ome.zarr"
+    backup_rel = "specimens/01-0101-local/labels/raw_ai_prediction_backup.ome.zarr"
     draft_rel = "specimens/01-0101-local/labels/model_draft/predict_001.ome.zarr"
     image_meta = write_volume_sidecar(project_root / image_rel, np.zeros((2, 3, 4), dtype=np.uint8), role="working_image")
     manual_meta = write_volume_sidecar(project_root / manual_rel, np.ones((2, 3, 4), dtype=np.uint16), role="manual_truth")
     edit_meta = write_volume_sidecar(project_root / edit_rel, np.ones((2, 3, 4), dtype=np.uint16), role="working_edit")
+    backup_meta = write_volume_sidecar(project_root / backup_rel, np.ones((2, 3, 4), dtype=np.uint16), role="raw_ai_prediction_backup")
     draft_meta = write_volume_sidecar(project_root / draft_rel, np.ones((2, 3, 4), dtype=np.uint16), role="model_draft")
 
     manager.register_working_volume(
@@ -82,6 +84,13 @@ def _build_legacy_tif_project(project_root):
         fmt=VOLUME_SIDECAR_FORMAT,
         save=False,
     )
+    manager.get_specimen("01-0101-local")["labels"]["raw_ai_prediction_backup"] = {
+        **_volume_record(backup_rel, dtype="uint16"),
+        "status": "raw_backup",
+        "role": "raw_ai_prediction_backup",
+        "prediction_id": "predict_001",
+        "source_model": "models/head_model.json",
+    }
     manager.add_model_draft(
         "01-0101-local",
         draft_rel,
@@ -231,8 +240,8 @@ class LegacyTifJsonToSQLiteMigrationTests(unittest.TestCase):
 
             expected_stats = {
                 "specimen_count": 1,
-                "volume_asset_count": 6,
-                "label_layer_count": 3,
+                "volume_asset_count": 7,
+                "label_layer_count": 4,
                 "material_map_count": 1,
                 "part_count": 1,
                 "part_roi_count": 1,
@@ -251,12 +260,19 @@ class LegacyTifJsonToSQLiteMigrationTests(unittest.TestCase):
             self.assertEqual(Path(resolve_manifest_database_path(manifest_path, manifest)), db_path)
             self.assertEqual(manifest["project_type"], "tif_volume")
             self.assertEqual(manifest["tif_asset_root"], "legacy_tif")
-            self.assertEqual(manifest["migration_stats"]["label_layer_count"], 3)
+            self.assertEqual(manifest["migration_stats"]["label_layer_count"], 4)
 
             report = json.loads(report_path.read_text(encoding="utf-8"))
             self.assertEqual(report["schema_version"], TIF_MIGRATION_REPORT_SCHEMA_VERSION)
             self.assertEqual(report["stats"], result.stats)
             self.assertEqual(report["integrity_check"], ["ok"])
+
+            reloaded = TifProjectManager()
+            reloaded.load_project(manifest_path)
+            reloaded_backup = reloaded.get_specimen("01-0101-local")["labels"]["raw_ai_prediction_backup"]
+            self.assertEqual(reloaded_backup["status"], "raw_backup")
+            self.assertEqual(reloaded_backup["prediction_id"], "predict_001")
+            self.assertTrue(reloaded_backup["path"])
 
     def test_migrated_rows_preserve_tif_index_records(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -300,7 +316,7 @@ class LegacyTifJsonToSQLiteMigrationTests(unittest.TestCase):
                         (specimen_row[0],),
                     ).fetchall()
                 ]
-                self.assertEqual(label_roles, ["manual_truth", "model_draft", "working_edit"])
+                self.assertEqual(label_roles, ["manual_truth", "model_draft", "raw_ai_prediction_backup", "working_edit"])
 
                 volume_paths = [
                     row[0]

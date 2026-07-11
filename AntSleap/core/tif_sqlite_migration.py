@@ -723,7 +723,7 @@ def _insert_specimen_tree(connection, specimen, stats):
         stats["volume_asset_count"] += 1
 
     labels = _as_dict(specimen.get("labels"))
-    for role in ("manual_truth", "working_edit"):
+    for role in ("manual_truth", "working_edit", "raw_ai_prediction_backup"):
         record = _as_dict(labels.get(role))
         asset_id = _insert_volume_asset(connection, specimen_row_id, record, role=role, asset_key=f"labels.{role}", status=record.get("status", ""))
         if asset_id:

@@ -1,3 +1,4 @@
+import copy
 import os
 import tempfile
 import unittest
@@ -8,7 +9,7 @@ import numpy as np
 import tifffile
 
 from AntSleap.core.tif_project import TifProjectManager
-from AntSleap.core.tif_stack_import import import_tif_stack, register_tif_stack_metadata
+from AntSleap.core.tif_stack_import import import_tif_stack, materialize_registered_tif_stack, register_tif_stack_metadata
 from AntSleap.core.tif_volume_io import load_volume_sidecar, read_volume_metadata
 
 
@@ -147,6 +148,39 @@ class TifStackImportTests(unittest.TestCase):
             self.assertEqual(result["report"]["memory_policy"]["import_mode"], "metadata_only")
             self.assertFalse(result["report"]["memory_policy"]["sidecar_created_on_import"])
             self.assertFalse((Path(manager.project_dir) / "specimens" / "01-0101-meta" / "working" / "image.ome.zarr").exists())
+
+    def test_failed_materialize_restores_metadata_record_and_import_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tif_path = root / "metadata_only.tif"
+            source_volume = np.arange(2 * 3 * 4, dtype=np.uint8).reshape((2, 3, 4))
+            tifffile.imwrite(tif_path, source_volume, photometric="minisblack")
+
+            manager = TifProjectManager()
+            manifest_path = manager.create_project("materialize_rollback", root / "materialize_rollback")
+            result = register_tif_stack_metadata(manager, tif_path, "01-0101-meta")
+            specimen_before = copy.deepcopy(manager.get_specimen("01-0101-meta"))
+            report_path = Path(result["report_path"])
+            report_before = report_path.read_bytes()
+            image_path = Path(manager.project_dir) / "specimens" / "01-0101-meta" / "working" / "image.ome.zarr"
+
+            with patch.object(manager, "save_project", side_effect=RuntimeError("sqlite write failed")):
+                with self.assertRaisesRegex(RuntimeError, "sqlite write failed"):
+                    materialize_registered_tif_stack(manager, "01-0101-meta")
+
+            self.assertEqual(manager.get_specimen("01-0101-meta"), specimen_before)
+            self.assertEqual(report_path.read_bytes(), report_before)
+            self.assertFalse(image_path.exists())
+
+            reloaded = TifProjectManager()
+            reloaded.load_project(manifest_path)
+            reloaded_specimen = reloaded.get_specimen("01-0101-meta")
+            self.assertEqual((reloaded_specimen.get("metadata") or {}).get("import_status"), "metadata_only")
+            self.assertEqual((reloaded_specimen.get("working_volume") or {}).get("path"), "")
+            self.assertEqual(
+                os.path.normcase((reloaded_specimen.get("source") or {}).get("raw_tif", "")),
+                os.path.normcase(str(tif_path.resolve())),
+            )
 
     def test_failed_tif_read_does_not_leave_half_registered_specimen(self):
         with tempfile.TemporaryDirectory() as tmp:

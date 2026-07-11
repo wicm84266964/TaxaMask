@@ -44,6 +44,7 @@ else:
 
     import AntSleap.main as main_module
     import AntSleap.ui.main_window_dialogs as main_window_dialogs_module
+    import AntSleap.ui.main_window_project_lifecycle as project_lifecycle_module
     import AntSleap.ui.pdf_processing_widget as pdf_widget_module
     from AntSleap.core.project_templates import PROJECT_TEMPLATE_GENERIC
     from AntSleap.core.stl_project import StlRenderedProjectManager
@@ -1593,7 +1594,7 @@ class GuiSmokeTests(unittest.TestCase):
             legacy_path = self.project_dir / "legacy_project.json"
             _write_json(legacy_path, _legacy_project_payload())
 
-            with patch.object(main_module, "themed_yes_no_question", return_value=main_module.QMessageBox.Yes):
+            with patch.object(project_lifecycle_module, "themed_yes_no_question", return_value=main_module.QMessageBox.Yes):
                 window.open_project_path(str(legacy_path))
 
             manifest_path = self.project_dir / "legacy_project.sqlite_manifest.json"
@@ -1617,7 +1618,7 @@ class GuiSmokeTests(unittest.TestCase):
             legacy_path = self.project_dir / "legacy_project.json"
             _write_json(legacy_path, _legacy_project_payload())
 
-            with patch.object(main_module, "themed_yes_no_question", return_value=main_module.QMessageBox.Yes):
+            with patch.object(project_lifecycle_module, "themed_yes_no_question", return_value=main_module.QMessageBox.Yes):
                 window.open_project_path(str(legacy_path))
                 manifest_path = Path(window.project.current_project_path)
                 first_db_path = Path(window.project.current_database_path)
@@ -1637,7 +1638,7 @@ class GuiSmokeTests(unittest.TestCase):
             legacy_path = self.project_dir / "legacy_project.json"
             _write_json(legacy_path, _legacy_project_payload())
 
-            with patch.object(main_module, "themed_yes_no_question", return_value=main_module.QMessageBox.Yes):
+            with patch.object(project_lifecycle_module, "themed_yes_no_question", return_value=main_module.QMessageBox.Yes):
                 window.open_project_path(str(legacy_path))
 
             manifest_path = self.project_dir / "legacy_project.sqlite_manifest.json"
@@ -1691,7 +1692,7 @@ class GuiSmokeTests(unittest.TestCase):
             legacy_root = self.project_dir / "legacy_tif"
             legacy_path = _build_legacy_tif_project(legacy_root)
 
-            with patch.object(main_module, "themed_yes_no_question", return_value=main_module.QMessageBox.Yes):
+            with patch.object(project_lifecycle_module, "themed_yes_no_question", return_value=main_module.QMessageBox.Yes):
                 window.open_project_path(str(legacy_path))
 
             manifest_path = legacy_root / "project.tif_sqlite_manifest.json"
@@ -1718,7 +1719,7 @@ class GuiSmokeTests(unittest.TestCase):
             legacy_root = self.project_dir / "legacy_tif"
             legacy_path = _build_legacy_tif_project(legacy_root)
 
-            with patch.object(main_module, "themed_yes_no_question", return_value=main_module.QMessageBox.Yes):
+            with patch.object(project_lifecycle_module, "themed_yes_no_question", return_value=main_module.QMessageBox.Yes):
                 window.open_project_path(str(legacy_path))
                 manifest_path = Path(window.tif_project.current_project_path)
                 first_db_path = Path(window.tif_project.current_database_path)
@@ -1741,7 +1742,7 @@ class GuiSmokeTests(unittest.TestCase):
             legacy_root = self.project_dir / "legacy_tif"
             legacy_path = _build_legacy_tif_project(legacy_root)
 
-            with patch.object(main_module, "themed_yes_no_question", return_value=main_module.QMessageBox.Yes):
+            with patch.object(project_lifecycle_module, "themed_yes_no_question", return_value=main_module.QMessageBox.Yes):
                 window.open_project_path(str(legacy_path))
 
             manifest_path = legacy_root / "project.tif_sqlite_manifest.json"
@@ -1785,7 +1786,7 @@ class GuiSmokeTests(unittest.TestCase):
             project_path.write_text(json.dumps(project_payload), encoding="utf-8")
             window.config.set("last_project_path", str(project_path))
 
-            with patch.object(main_module, "themed_yes_no_question", return_value=main_module.QMessageBox.Yes):
+            with patch.object(project_lifecycle_module, "themed_yes_no_question", return_value=main_module.QMessageBox.Yes):
                 window.open_last_project()
 
             self.assertEqual(window.active_project_kind, "image")
@@ -1821,7 +1822,7 @@ class GuiSmokeTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            with patch.object(main_module, "themed_yes_no_question", return_value=main_module.QMessageBox.Yes):
+            with patch.object(project_lifecycle_module, "themed_yes_no_question", return_value=main_module.QMessageBox.Yes):
                 window.open_project_path(str(large_path))
             self.assertTrue(window.image_list_group_collapsed.get("original"))
             self.assertEqual(window.file_list.count(), 1)
@@ -1844,7 +1845,7 @@ class GuiSmokeTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with patch.object(main_module, "themed_yes_no_question", return_value=main_module.QMessageBox.Yes):
+            with patch.object(project_lifecycle_module, "themed_yes_no_question", return_value=main_module.QMessageBox.Yes):
                 window.open_project_path(str(small_path))
 
             self.assertFalse(window.image_list_group_collapsed.get("original"))

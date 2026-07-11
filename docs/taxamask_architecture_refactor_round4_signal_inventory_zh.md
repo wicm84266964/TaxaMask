@@ -6,57 +6,57 @@
 
 | File | Line | Binding | Owner | Signal | Current target | Workflow | Stage | Target owner | Unbind | Contract test |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| AntSleap/main.py | 1451 | connect | `MainWindow._connect_child_training_progress` | `thread.progress_signal` | `lambda value: self._set_training_progress('child', None, value)` | runtime_worker | 1 | TBD | TBD | TBD |
-| AntSleap/main.py | 1452 | connect | `MainWindow._connect_child_training_progress` | `thread.result_signal` | `self._on_child_training_result` | runtime_worker | 1 | TBD | TBD | TBD |
-| AntSleap/main.py | 1453 | connect | `MainWindow._connect_child_training_progress` | `thread.error_signal` | `self._on_child_training_error` | runtime_worker | 1 | TBD | TBD | TBD |
-| AntSleap/main.py | 1454 | connect | `MainWindow._connect_child_training_progress` | `thread.cancelled_signal` | `self._on_child_training_cancelled` | runtime_worker | 1 | TBD | TBD | TBD |
-| AntSleap/main.py | 1455 | connect | `MainWindow._connect_child_training_progress` | `thread.finished` | `self._on_child_training_finished` | runtime_worker | 1 | TBD | TBD | TBD |
-| AntSleap/main.py | 1559 | connect | `MainWindow._launch_training_with_preflight` | `self.trainer.log_signal` | `self.log` | dialog_settings | 2 | TBD | TBD | TBD |
-| AntSleap/main.py | 1560 | connect | `MainWindow._launch_training_with_preflight` | `self.trainer.progress_signal` | `lambda value: self._set_training_progress('parent', None, value)` | dialog_settings | 2 | TBD | TBD | TBD |
-| AntSleap/main.py | 1561 | connect | `MainWindow._launch_training_with_preflight` | `self.trainer.report_signal` | `self.show_training_report` | dialog_settings | 2 | TBD | TBD | TBD |
-| AntSleap/main.py | 1562 | connect | `MainWindow._launch_training_with_preflight` | `self.trainer.success_signal` | `self._on_training_success` | dialog_settings | 2 | TBD | TBD | TBD |
-| AntSleap/main.py | 1563 | connect | `MainWindow._launch_training_with_preflight` | `self.trainer.error_signal` | `self._on_training_error` | dialog_settings | 2 | TBD | TBD | TBD |
-| AntSleap/main.py | 1564 | connect | `MainWindow._launch_training_with_preflight` | `self.trainer.finished_signal` | `self._on_training_finished` | dialog_settings | 2 | TBD | TBD | TBD |
-| AntSleap/main.py | 2995 | connect | `MainWindow._choose_clear_ai_scope` | `scope_combo.currentIndexChanged` | `lambda _index: refresh_summary()` | shell_start_agent | 3 | TBD | TBD | TBD |
-| AntSleap/main.py | 2996 | connect | `MainWindow._choose_clear_ai_scope` | `clear_button.clicked` | `accept_scope` | shell_start_agent | 3 | TBD | TBD | TBD |
-| AntSleap/main.py | 2997 | connect | `MainWindow._choose_clear_ai_scope` | `cancel_button.clicked` | `dialog.reject` | dialog_settings | 2 | TBD | TBD | TBD |
-| AntSleap/main.py | 3446 | connect | `MainWindow.open_general_settings` | `dlg.agent_requested` | `self.open_agent_from_context` | dialog_settings | 2 | TBD | TBD | TBD |
-| AntSleap/main.py | 3526 | connect | `MainWindow.open_stl_model_settings` | `dlg.agent_requested` | `self.open_agent_from_context` | dialog_settings | 2 | TBD | TBD | TBD |
-| AntSleap/main.py | 3628 | connect | `MainWindow.open_tif_model_settings` | `dlg.agent_requested` | `self.open_agent_from_context` | dialog_settings | 2 | TBD | TBD | TBD |
-| AntSleap/main.py | 3858 | connect | `MainWindow._start_image_import` | `thread.progress_signal` | `on_progress` | runtime_worker | 1 | TBD | TBD | TBD |
-| AntSleap/main.py | 3859 | connect | `MainWindow._start_image_import` | `thread.success_signal` | `on_success` | runtime_worker | 1 | TBD | TBD | TBD |
-| AntSleap/main.py | 3860 | connect | `MainWindow._start_image_import` | `thread.error_signal` | `on_error` | runtime_worker | 1 | TBD | TBD | TBD |
-| AntSleap/main.py | 3861 | connect | `MainWindow._start_image_import` | `thread.finished_signal` | `on_finished` | runtime_worker | 1 | TBD | TBD | TBD |
-| AntSleap/main.py | 6420 | connect | `MainWindow.run_external_training` | `thread.log_signal` | `self.log` | runtime_worker | 1 | TBD | TBD | TBD |
-| AntSleap/main.py | 6421 | connect | `MainWindow.run_external_training` | `thread.success_signal` | `on_success` | runtime_worker | 1 | TBD | TBD | TBD |
-| AntSleap/main.py | 6422 | connect | `MainWindow.run_external_training` | `thread.error_signal` | `on_error` | runtime_worker | 1 | TBD | TBD | TBD |
-| AntSleap/main.py | 6423 | connect | `MainWindow.run_external_training` | `thread.finished_signal` | `on_finished` | runtime_worker | 1 | TBD | TBD | TBD |
-| AntSleap/main.py | 7296 | connect | `MainWindow._start_next_vlm_preannotation_image` | `thread.log_signal` | `self.log` | runtime_worker | 1 | TBD | TBD | TBD |
-| AntSleap/main.py | 7297 | connect | `MainWindow._start_next_vlm_preannotation_image` | `thread.image_result_signal` | `self._on_vlm_preannotation_image_result` | runtime_worker | 1 | TBD | TBD | TBD |
-| AntSleap/main.py | 7298 | connect | `MainWindow._start_next_vlm_preannotation_image` | `thread.progress_signal` | `lambda completed, total, step_name, worker=thread: self._on_vlm_preannotation_thread_step(worker, completed, total, step_name)` | runtime_worker | 1 | TBD | TBD | TBD |
-| AntSleap/main.py | 7299 | connect | `MainWindow._start_next_vlm_preannotation_image` | `thread.error_signal` | `self._on_vlm_preannotation_error` | runtime_worker | 1 | TBD | TBD | TBD |
-| AntSleap/main.py | 7302 | connect | `MainWindow._start_next_vlm_preannotation_image` | `native_finished` | `lambda worker=thread: self._on_vlm_preannotation_qthread_finished(worker)` | runtime_worker | 1 | TBD | TBD | TBD |
-| AntSleap/main.py | 7304 | connect | `MainWindow._start_next_vlm_preannotation_image` | `thread.finished_signal` | `lambda worker=thread: self._on_vlm_preannotation_qthread_finished(worker)` | runtime_worker | 1 | TBD | TBD | TBD |
-| AntSleap/main.py | 7605 | connect | `MainWindow._create_vlm_progress_dialog` | `stop_button.clicked` | `lambda : self.request_stop_vlm_preannotation(confirm=True)` | vlm_prediction_export | 7 | TBD | TBD | TBD |
-| AntSleap/main.py | 8120 | connect | `MainWindow._start_external_batch_inference` | `thread.log_signal` | `self.log` | runtime_worker | 1 | TBD | TBD | TBD |
-| AntSleap/main.py | 8121 | connect | `MainWindow._start_external_batch_inference` | `thread.progress_signal` | `on_progress` | runtime_worker | 1 | TBD | TBD | TBD |
-| AntSleap/main.py | 8122 | connect | `MainWindow._start_external_batch_inference` | `thread.result_signal` | `on_result` | runtime_worker | 1 | TBD | TBD | TBD |
-| AntSleap/main.py | 8123 | connect | `MainWindow._start_external_batch_inference` | `thread.error_signal` | `on_error` | runtime_worker | 1 | TBD | TBD | TBD |
-| AntSleap/main.py | 8124 | connect | `MainWindow._start_external_batch_inference` | `thread.finished_signal` | `on_finished` | runtime_worker | 1 | TBD | TBD | TBD |
-| AntSleap/main.py | 8175 | connect | `MainWindow.run_batch_inference` | `self.inf_thread.log_signal` | `self.log` | runtime_worker | 1 | TBD | TBD | TBD |
-| AntSleap/main.py | 8190 | connect | `MainWindow.run_batch_inference` | `self.inf_thread.result_signal` | `on_batch_res` | runtime_worker | 1 | TBD | TBD | TBD |
-| AntSleap/main.py | 8191 | connect | `MainWindow.run_batch_inference` | `self.inf_thread.finished_signal` | `lambda : [self.project.save_project(), self.btn_batch.setEnabled(True), self.btn_predict.setEnabled(True), self.refresh_file_list(), self._refresh_blink_refine_state()]` | runtime_worker | 1 | TBD | TBD | TBD |
-| AntSleap/main.py | 8281 | connect | `MainWindow._start_dataset_export` | `thread.progress_signal` | `on_progress` | runtime_worker | 1 | TBD | TBD | TBD |
-| AntSleap/main.py | 8282 | connect | `MainWindow._start_dataset_export` | `thread.success_signal` | `on_success` | runtime_worker | 1 | TBD | TBD | TBD |
-| AntSleap/main.py | 8283 | connect | `MainWindow._start_dataset_export` | `thread.error_signal` | `on_error` | runtime_worker | 1 | TBD | TBD | TBD |
-| AntSleap/main.py | 8284 | connect | `MainWindow._start_dataset_export` | `thread.finished_signal` | `on_finished` | runtime_worker | 1 | TBD | TBD | TBD |
-| AntSleap/main.py | 8298 | connect | `MainWindow.init_sam` | `self.sam_thread.started` | `self.sam_worker.load_model` | runtime_worker | 1 | TBD | TBD | TBD |
-| AntSleap/main.py | 8301 | connect | `MainWindow.init_sam` | `self.sam_point_requested` | `self.sam_worker.predict_point` | runtime_worker | 1 | TBD | TBD | TBD |
-| AntSleap/main.py | 8303 | connect | `MainWindow.init_sam` | `self.sam_box_requested` | `self.sam_worker.predict_box` | runtime_worker | 1 | TBD | TBD | TBD |
-| AntSleap/main.py | 8304 | connect | `MainWindow.init_sam` | `self.sam_worker.mask_generated` | `self.on_sam_mask_generated` | runtime_worker | 1 | TBD | TBD | TBD |
-| AntSleap/main.py | 8306 | connect | `MainWindow.init_sam` | `self.sam_worker.prompt_failed` | `self.on_sam_prompt_failed` | runtime_worker | 1 | TBD | TBD | TBD |
-| AntSleap/main.py | 8307 | connect | `MainWindow.init_sam` | `self.sam_worker.model_loaded` | `self._on_sam_model_loaded` | runtime_worker | 1 | TBD | TBD | TBD |
-| AntSleap/main.py | 8308 | connect | `MainWindow.init_sam` | `self.sam_worker.model_load_error` | `lambda message: self.log(str(message))` | runtime_worker | 1 | TBD | TBD | TBD |
+| AntSleap/main.py | 863 | connect | `MainWindow._connect_child_training_progress` | `thread.progress_signal` | `lambda value: self._set_training_progress('child', None, value)` | runtime_worker | 1 | TBD | TBD | TBD |
+| AntSleap/main.py | 864 | connect | `MainWindow._connect_child_training_progress` | `thread.result_signal` | `self._on_child_training_result` | runtime_worker | 1 | TBD | TBD | TBD |
+| AntSleap/main.py | 865 | connect | `MainWindow._connect_child_training_progress` | `thread.error_signal` | `self._on_child_training_error` | runtime_worker | 1 | TBD | TBD | TBD |
+| AntSleap/main.py | 866 | connect | `MainWindow._connect_child_training_progress` | `thread.cancelled_signal` | `self._on_child_training_cancelled` | runtime_worker | 1 | TBD | TBD | TBD |
+| AntSleap/main.py | 867 | connect | `MainWindow._connect_child_training_progress` | `thread.finished` | `self._on_child_training_finished` | runtime_worker | 1 | TBD | TBD | TBD |
+| AntSleap/main.py | 971 | connect | `MainWindow._launch_training_with_preflight` | `self.trainer.log_signal` | `self.log` | dialog_settings | 2 | TBD | TBD | TBD |
+| AntSleap/main.py | 972 | connect | `MainWindow._launch_training_with_preflight` | `self.trainer.progress_signal` | `lambda value: self._set_training_progress('parent', None, value)` | dialog_settings | 2 | TBD | TBD | TBD |
+| AntSleap/main.py | 973 | connect | `MainWindow._launch_training_with_preflight` | `self.trainer.report_signal` | `self.show_training_report` | dialog_settings | 2 | TBD | TBD | TBD |
+| AntSleap/main.py | 974 | connect | `MainWindow._launch_training_with_preflight` | `self.trainer.success_signal` | `self._on_training_success` | dialog_settings | 2 | TBD | TBD | TBD |
+| AntSleap/main.py | 975 | connect | `MainWindow._launch_training_with_preflight` | `self.trainer.error_signal` | `self._on_training_error` | dialog_settings | 2 | TBD | TBD | TBD |
+| AntSleap/main.py | 976 | connect | `MainWindow._launch_training_with_preflight` | `self.trainer.finished_signal` | `self._on_training_finished` | dialog_settings | 2 | TBD | TBD | TBD |
+| AntSleap/main.py | 1808 | connect | `MainWindow._choose_clear_ai_scope` | `scope_combo.currentIndexChanged` | `lambda _index: refresh_summary()` | shell_start_agent | 3 | TBD | TBD | TBD |
+| AntSleap/main.py | 1809 | connect | `MainWindow._choose_clear_ai_scope` | `clear_button.clicked` | `accept_scope` | shell_start_agent | 3 | TBD | TBD | TBD |
+| AntSleap/main.py | 1810 | connect | `MainWindow._choose_clear_ai_scope` | `cancel_button.clicked` | `dialog.reject` | dialog_settings | 2 | TBD | TBD | TBD |
+| AntSleap/main.py | 2259 | connect | `MainWindow.open_general_settings` | `dlg.agent_requested` | `self.open_agent_from_context` | dialog_settings | 2 | TBD | TBD | TBD |
+| AntSleap/main.py | 2339 | connect | `MainWindow.open_stl_model_settings` | `dlg.agent_requested` | `self.open_agent_from_context` | dialog_settings | 2 | TBD | TBD | TBD |
+| AntSleap/main.py | 2441 | connect | `MainWindow.open_tif_model_settings` | `dlg.agent_requested` | `self.open_agent_from_context` | dialog_settings | 2 | TBD | TBD | TBD |
+| AntSleap/main.py | 2671 | connect | `MainWindow._start_image_import` | `thread.progress_signal` | `on_progress` | runtime_worker | 1 | TBD | TBD | TBD |
+| AntSleap/main.py | 2672 | connect | `MainWindow._start_image_import` | `thread.success_signal` | `on_success` | runtime_worker | 1 | TBD | TBD | TBD |
+| AntSleap/main.py | 2673 | connect | `MainWindow._start_image_import` | `thread.error_signal` | `on_error` | runtime_worker | 1 | TBD | TBD | TBD |
+| AntSleap/main.py | 2674 | connect | `MainWindow._start_image_import` | `thread.finished_signal` | `on_finished` | runtime_worker | 1 | TBD | TBD | TBD |
+| AntSleap/main.py | 5233 | connect | `MainWindow.run_external_training` | `thread.log_signal` | `self.log` | runtime_worker | 1 | TBD | TBD | TBD |
+| AntSleap/main.py | 5234 | connect | `MainWindow.run_external_training` | `thread.success_signal` | `on_success` | runtime_worker | 1 | TBD | TBD | TBD |
+| AntSleap/main.py | 5235 | connect | `MainWindow.run_external_training` | `thread.error_signal` | `on_error` | runtime_worker | 1 | TBD | TBD | TBD |
+| AntSleap/main.py | 5236 | connect | `MainWindow.run_external_training` | `thread.finished_signal` | `on_finished` | runtime_worker | 1 | TBD | TBD | TBD |
+| AntSleap/main.py | 6109 | connect | `MainWindow._start_next_vlm_preannotation_image` | `thread.log_signal` | `self.log` | runtime_worker | 1 | TBD | TBD | TBD |
+| AntSleap/main.py | 6110 | connect | `MainWindow._start_next_vlm_preannotation_image` | `thread.image_result_signal` | `self._on_vlm_preannotation_image_result` | runtime_worker | 1 | TBD | TBD | TBD |
+| AntSleap/main.py | 6111 | connect | `MainWindow._start_next_vlm_preannotation_image` | `thread.progress_signal` | `lambda completed, total, step_name, worker=thread: self._on_vlm_preannotation_thread_step(worker, completed, total, step_name)` | runtime_worker | 1 | TBD | TBD | TBD |
+| AntSleap/main.py | 6112 | connect | `MainWindow._start_next_vlm_preannotation_image` | `thread.error_signal` | `self._on_vlm_preannotation_error` | runtime_worker | 1 | TBD | TBD | TBD |
+| AntSleap/main.py | 6115 | connect | `MainWindow._start_next_vlm_preannotation_image` | `native_finished` | `lambda worker=thread: self._on_vlm_preannotation_qthread_finished(worker)` | runtime_worker | 1 | TBD | TBD | TBD |
+| AntSleap/main.py | 6117 | connect | `MainWindow._start_next_vlm_preannotation_image` | `thread.finished_signal` | `lambda worker=thread: self._on_vlm_preannotation_qthread_finished(worker)` | runtime_worker | 1 | TBD | TBD | TBD |
+| AntSleap/main.py | 6418 | connect | `MainWindow._create_vlm_progress_dialog` | `stop_button.clicked` | `lambda : self.request_stop_vlm_preannotation(confirm=True)` | vlm_prediction_export | 7 | TBD | TBD | TBD |
+| AntSleap/main.py | 6933 | connect | `MainWindow._start_external_batch_inference` | `thread.log_signal` | `self.log` | runtime_worker | 1 | TBD | TBD | TBD |
+| AntSleap/main.py | 6934 | connect | `MainWindow._start_external_batch_inference` | `thread.progress_signal` | `on_progress` | runtime_worker | 1 | TBD | TBD | TBD |
+| AntSleap/main.py | 6935 | connect | `MainWindow._start_external_batch_inference` | `thread.result_signal` | `on_result` | runtime_worker | 1 | TBD | TBD | TBD |
+| AntSleap/main.py | 6936 | connect | `MainWindow._start_external_batch_inference` | `thread.error_signal` | `on_error` | runtime_worker | 1 | TBD | TBD | TBD |
+| AntSleap/main.py | 6937 | connect | `MainWindow._start_external_batch_inference` | `thread.finished_signal` | `on_finished` | runtime_worker | 1 | TBD | TBD | TBD |
+| AntSleap/main.py | 6988 | connect | `MainWindow.run_batch_inference` | `self.inf_thread.log_signal` | `self.log` | runtime_worker | 1 | TBD | TBD | TBD |
+| AntSleap/main.py | 7003 | connect | `MainWindow.run_batch_inference` | `self.inf_thread.result_signal` | `on_batch_res` | runtime_worker | 1 | TBD | TBD | TBD |
+| AntSleap/main.py | 7004 | connect | `MainWindow.run_batch_inference` | `self.inf_thread.finished_signal` | `lambda : [self.project.save_project(), self.btn_batch.setEnabled(True), self.btn_predict.setEnabled(True), self.refresh_file_list(), self._refresh_blink_refine_state()]` | runtime_worker | 1 | TBD | TBD | TBD |
+| AntSleap/main.py | 7094 | connect | `MainWindow._start_dataset_export` | `thread.progress_signal` | `on_progress` | runtime_worker | 1 | TBD | TBD | TBD |
+| AntSleap/main.py | 7095 | connect | `MainWindow._start_dataset_export` | `thread.success_signal` | `on_success` | runtime_worker | 1 | TBD | TBD | TBD |
+| AntSleap/main.py | 7096 | connect | `MainWindow._start_dataset_export` | `thread.error_signal` | `on_error` | runtime_worker | 1 | TBD | TBD | TBD |
+| AntSleap/main.py | 7097 | connect | `MainWindow._start_dataset_export` | `thread.finished_signal` | `on_finished` | runtime_worker | 1 | TBD | TBD | TBD |
+| AntSleap/main.py | 7111 | connect | `MainWindow.init_sam` | `self.sam_thread.started` | `self.sam_worker.load_model` | runtime_worker | 1 | TBD | TBD | TBD |
+| AntSleap/main.py | 7114 | connect | `MainWindow.init_sam` | `self.sam_point_requested` | `self.sam_worker.predict_point` | runtime_worker | 1 | TBD | TBD | TBD |
+| AntSleap/main.py | 7116 | connect | `MainWindow.init_sam` | `self.sam_box_requested` | `self.sam_worker.predict_box` | runtime_worker | 1 | TBD | TBD | TBD |
+| AntSleap/main.py | 7117 | connect | `MainWindow.init_sam` | `self.sam_worker.mask_generated` | `self.on_sam_mask_generated` | runtime_worker | 1 | TBD | TBD | TBD |
+| AntSleap/main.py | 7119 | connect | `MainWindow.init_sam` | `self.sam_worker.prompt_failed` | `self.on_sam_prompt_failed` | runtime_worker | 1 | TBD | TBD | TBD |
+| AntSleap/main.py | 7120 | connect | `MainWindow.init_sam` | `self.sam_worker.model_loaded` | `self._on_sam_model_loaded` | runtime_worker | 1 | TBD | TBD | TBD |
+| AntSleap/main.py | 7121 | connect | `MainWindow.init_sam` | `self.sam_worker.model_load_error` | `lambda message: self.log(str(message))` | runtime_worker | 1 | TBD | TBD | TBD |
 | AntSleap/ui/main_window_dialogs.py | 84 | connect | `ExportDialog.__init__` | `btn_browse.clicked` | `self.browse` | runtime_worker | 1 | TBD | TBD | TBD |
 | AntSleap/ui/main_window_dialogs.py | 90 | connect | `ExportDialog.__init__` | `btn_ok.clicked` | `self.accept` | runtime_worker | 1 | TBD | TBD | TBD |
 | AntSleap/ui/main_window_dialogs.py | 93 | connect | `ExportDialog.__init__` | `btn_cancel.clicked` | `self.reject` | runtime_worker | 1 | TBD | TBD | TBD |
@@ -205,19 +205,19 @@
 
 | File | Line | Kind | Owner | Call | Workflow | Stage | Cancel/cleanup | Context guard |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| AntSleap/main.py | 691 | thread_start | `MainWindow._schedule_project_save` | `self.project_save_timer.start` | shell_start_agent | 3 | TBD | TBD |
-| AntSleap/main.py | 697 | thread_start | `MainWindow._defer_project_save_for_active_navigation` | `self.project_save_timer.start` | shell_start_agent | 3 | TBD | TBD |
-| AntSleap/main.py | 718 | thread_start | `MainWindow._flush_pending_project_save` | `self.project_save_timer.start` | shell_start_agent | 3 | TBD | TBD |
-| AntSleap/main.py | 979 | single_shot | `MainWindow._preload_2d_stl_models_after_open` | `QTimer.singleShot` | shell_start_agent | 3 | TBD | TBD |
-| AntSleap/main.py | 1569 | thread_start | `MainWindow._launch_training_with_preflight` | `self.trainer.start` | dialog_settings | 2 | TBD | TBD |
-| AntSleap/main.py | 1623 | single_shot | `MainWindow._on_training_error` | `QTimer.singleShot` | shell_start_agent | 3 | TBD | TBD |
-| AntSleap/main.py | 3862 | thread_start | `MainWindow._start_image_import` | `thread.start` | runtime_worker | 1 | TBD | TBD |
-| AntSleap/main.py | 6424 | thread_start | `MainWindow.run_external_training` | `thread.start` | runtime_worker | 1 | TBD | TBD |
-| AntSleap/main.py | 7305 | thread_start | `MainWindow._start_next_vlm_preannotation_image` | `thread.start` | runtime_worker | 1 | TBD | TBD |
-| AntSleap/main.py | 8125 | thread_start | `MainWindow._start_external_batch_inference` | `thread.start` | runtime_worker | 1 | TBD | TBD |
-| AntSleap/main.py | 8200 | thread_start | `MainWindow.run_batch_inference` | `self.inf_thread.start` | runtime_worker | 1 | TBD | TBD |
-| AntSleap/main.py | 8285 | thread_start | `MainWindow._start_dataset_export` | `thread.start` | runtime_worker | 1 | TBD | TBD |
-| AntSleap/main.py | 8294 | QThread | `MainWindow.init_sam` | `QThread` | runtime_worker | 1 | TBD | TBD |
-| AntSleap/main.py | 8309 | thread_start | `MainWindow.init_sam` | `self.sam_thread.start` | runtime_worker | 1 | TBD | TBD |
-| AntSleap/main.py | 8363 | python_thread | `MainWindow._preload_engine_parts_model_async` | `threading.Thread` | runtime_worker | 1 | TBD | TBD |
-| AntSleap/main.py | 8368 | thread_start | `MainWindow._preload_engine_parts_model_async` | `self.parts_model_preload_thread.start` | runtime_worker | 1 | TBD | TBD |
+| AntSleap/main.py | 981 | thread_start | `MainWindow._launch_training_with_preflight` | `self.trainer.start` | dialog_settings | 2 | TBD | TBD |
+| AntSleap/main.py | 1035 | single_shot | `MainWindow._on_training_error` | `QTimer.singleShot` | shell_start_agent | 3 | TBD | TBD |
+| AntSleap/main.py | 2675 | thread_start | `MainWindow._start_image_import` | `thread.start` | runtime_worker | 1 | TBD | TBD |
+| AntSleap/main.py | 5237 | thread_start | `MainWindow.run_external_training` | `thread.start` | runtime_worker | 1 | TBD | TBD |
+| AntSleap/main.py | 6118 | thread_start | `MainWindow._start_next_vlm_preannotation_image` | `thread.start` | runtime_worker | 1 | TBD | TBD |
+| AntSleap/main.py | 6938 | thread_start | `MainWindow._start_external_batch_inference` | `thread.start` | runtime_worker | 1 | TBD | TBD |
+| AntSleap/main.py | 7013 | thread_start | `MainWindow.run_batch_inference` | `self.inf_thread.start` | runtime_worker | 1 | TBD | TBD |
+| AntSleap/main.py | 7098 | thread_start | `MainWindow._start_dataset_export` | `thread.start` | runtime_worker | 1 | TBD | TBD |
+| AntSleap/main.py | 7107 | QThread | `MainWindow.init_sam` | `QThread` | runtime_worker | 1 | TBD | TBD |
+| AntSleap/main.py | 7122 | thread_start | `MainWindow.init_sam` | `self.sam_thread.start` | runtime_worker | 1 | TBD | TBD |
+| AntSleap/main.py | 7176 | python_thread | `MainWindow._preload_engine_parts_model_async` | `threading.Thread` | runtime_worker | 1 | TBD | TBD |
+| AntSleap/main.py | 7181 | thread_start | `MainWindow._preload_engine_parts_model_async` | `self.parts_model_preload_thread.start` | runtime_worker | 1 | TBD | TBD |
+| AntSleap/ui/main_window_project_lifecycle.py | 201 | thread_start | `MainWindowProjectLifecycleMixin._schedule_project_save` | `self.project_save_timer.start` | shell_start_agent | 3 | TBD | TBD |
+| AntSleap/ui/main_window_project_lifecycle.py | 207 | thread_start | `MainWindowProjectLifecycleMixin._defer_project_save_for_active_navigation` | `self.project_save_timer.start` | shell_start_agent | 3 | TBD | TBD |
+| AntSleap/ui/main_window_project_lifecycle.py | 228 | thread_start | `MainWindowProjectLifecycleMixin._flush_pending_project_save` | `self.project_save_timer.start` | shell_start_agent | 3 | TBD | TBD |
+| AntSleap/ui/main_window_project_lifecycle.py | 327 | single_shot | `MainWindowProjectLifecycleMixin._preload_2d_stl_models_after_open` | `QTimer.singleShot` | shell_start_agent | 3 | TBD | TBD |

@@ -2,7 +2,7 @@
 
 日期：2026-07-11
 
-状态：`Gate B review recorded / Stage 3 verified / Stage 4 next`；用户要求 Stage 1-9 连续执行，中间 Gate 继续留证但不暂停，全部完成前不再推送 GitHub
+状态：`Gate C review recorded / Stage 4 verified / Stage 5 next`；用户要求 Stage 1-9 连续执行，中间 Gate 继续留证但不暂停，全部完成前不再推送 GitHub
 
 需求文档：`docs/taxamask_architecture_refactor_round4_requirements_zh.md`
 
@@ -182,23 +182,23 @@
 
 ## 10. Stage 4：项目生命周期与存储路由
 
-状态：`pending`
+状态：`verified`
 
-- [ ] 迁移默认目录、startup project、最近项目和 open/create 入口。
-- [ ] 迁移 2D SQLite、TIF SQLite、STL 和 legacy JSON 类型识别。
-- [ ] 迁移 database 到 manifest 定位和 legacy migration。
-- [ ] 迁移 backup、legacy export、migration report 和图片路径恢复。
-- [ ] 统一项目关闭、待保存、后台任务停止和陈旧回调规则。
-- [ ] 旧项目任务不能刷新新项目或覆盖当前状态。
-- [ ] 不改变 SQLite schema、manifest、sidecar 和备份目录。
-- [ ] 2D/TIF/STL 新建、打开、迁移、关闭、重开和失败恢复测试通过。
-- [ ] 输出 Stage 3-4 review 和数据安全审计。
+- [x] 迁移默认目录、startup project、最近项目和 open/create 入口。
+- [x] 迁移 2D SQLite、TIF SQLite、STL 和 legacy JSON 类型识别。
+- [x] 迁移 database 到 manifest 定位和 legacy migration。
+- [x] 迁移 backup、legacy export、migration report 和图片路径恢复。
+- [x] 统一项目关闭、待保存、后台任务停止和陈旧回调规则。
+- [x] 旧项目任务不能刷新新项目或覆盖当前状态；延迟保存冻结计划项目路径。
+- [x] 不改变 SQLite schema、manifest、sidecar 和备份目录。
+- [x] 2D/TIF/STL 新建、打开、迁移、关闭、重开和失败恢复测试通过。
+- [x] 输出 Stage 3-4 review 和数据安全审计。
 
 ### 10.1 Gate C
 
-- [ ] Stage 3-4 达到 `verified`。
-- [ ] 用户验收 Start Center、Agent、2D/TIF/STL 项目打开和关闭。
-- [ ] Gate C 标记 `accepted` 后进入 Stage 5。
+- [x] Stage 3-4 达到 `verified`。
+- [ ] 用户验收 Start Center、Agent、2D/TIF/STL 项目打开和关闭；按连续执行授权统一留到 Stage 9。
+- [x] Gate C review 留档完成；按用户连续执行授权进入 Stage 5，不暂停等待 accepted。
 
 ## 11. Stage 5：2D 图像导航、Part Tree 与文献桥接
 

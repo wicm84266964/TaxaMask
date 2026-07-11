@@ -21,10 +21,10 @@ class MainWindowArchitectureAnalysisTests(unittest.TestCase):
 
         self.assertLess(metrics["main_physical_lines"], 9985)
         self.assertEqual(metrics["top_level_class_count"], 1)
-        self.assertLess(metrics["all_method_count"], 390)
+        self.assertLess(metrics["all_method_count"], 351)
         self.assertEqual(metrics["connection_count"], 194)
-        self.assertLessEqual(metrics["main_window_lines"], 7900)
-        self.assertEqual(metrics["main_window_method_count"], 351)
+        self.assertLessEqual(metrics["main_window_lines"], 6750)
+        self.assertEqual(metrics["main_window_method_count"], 283)
         self.assertEqual(metrics["main_window_connection_count"], 51)
         self.assertLessEqual(metrics["main_window_init_lines"], 20)
         self.assertEqual(len(report["connections"]), metrics["connection_count"])
@@ -40,10 +40,10 @@ class MainWindowArchitectureAnalysisTests(unittest.TestCase):
         self.assertNotIn("InferenceThread", classes)
         self.assertNotIn("ModelSettingsDialog", classes)
         self.assertEqual(classes["MainWindow"]["target_stage"], 3)
-        self.assertEqual(methods["open_project_path"]["target_stage"], 4)
+        self.assertNotIn("open_project_path", methods)
         self.assertEqual(methods["launch_blink_from_workbench"]["target_stage"], 6)
         self.assertEqual(methods["run_vlm_preannotation_from_settings"]["target_stage"], 7)
-        self.assertEqual(len(report["main_window_methods"]), 351)
+        self.assertEqual(len(report["main_window_methods"]), 283)
 
     def test_stage1_runtime_workers_and_widgets_leave_main_as_compatibility_facade(self):
         source = (ROOT / "AntSleap" / "main.py").read_text(encoding="utf-8")
@@ -73,6 +73,14 @@ class MainWindowArchitectureAnalysisTests(unittest.TestCase):
         self.assertIn("from AntSleap.ui.main_window_shell import", source)
         self.assertIn("from AntSleap.ui.main_window_start_center import", source)
         self.assertIn("from AntSleap.ui.main_window_agent_context import", source)
+
+    def test_stage4_project_lifecycle_methods_leave_main(self):
+        source = (ROOT / "AntSleap" / "main.py").read_text(encoding="utf-8")
+
+        self.assertNotIn("def open_project_path", source)
+        self.assertNotIn("def _flush_pending_project_save", source)
+        self.assertNotIn("def backup_current_sqlite_project", source)
+        self.assertIn("from AntSleap.ui.main_window_project_lifecycle import", source)
 
     def test_markdown_contains_stage0_migration_sections(self):
         module = load_analysis_module()

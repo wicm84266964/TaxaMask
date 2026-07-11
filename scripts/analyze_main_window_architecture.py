@@ -28,6 +28,7 @@ ARCHITECTURE_PATHS = (
     ROOT / "AntSleap" / "ui" / "main_window_agent_context.py",
     ROOT / "AntSleap" / "ui" / "main_window_signal_router.py",
     ROOT / "AntSleap" / "ui" / "main_window_coordinator.py",
+    ROOT / "AntSleap" / "ui" / "main_window_project_lifecycle.py",
 )
 KEY_TEST_PATHS = (
     ROOT / "tests" / "test_blink_bridge.py",

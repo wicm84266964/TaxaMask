@@ -69,7 +69,7 @@ The TIF workbench status text and renderer overlay should be used to confirm whe
 
 The embedded Agent Center uses the first-party `vendor/ant-code/` runtime.
 
-In the TaxaMask `v2.2.0` line, the embedded runtime is aligned with Ant-Code `1.2.4`. This line includes the v2.1.0 long-task/background-terminal controls, gateway timeout/retry hardening, context-budget recovery fixes, interrupted-draft preservation, the bundled taxonomy PDF harvest skill for the PDF evidence stage 0 acquisition workflow, and the TIF/CT annotation-training-prediction loop described below. It intentionally does not adopt standalone Ant-Code global model configuration as the default; the embedded workspace and configuration boundary remains the TaxaMask repository.
+In the TaxaMask `v2.3.0` line, the embedded runtime is aligned with Ant-Code `1.2.4`. This line includes the v2.1.0 long-task/background-terminal controls, gateway timeout/retry hardening, context-budget recovery fixes, interrupted-draft preservation, the bundled taxonomy PDF harvest skill for the PDF evidence stage 0 acquisition workflow, and the TIF/CT annotation-training-prediction loop described below. It intentionally does not adopt standalone Ant-Code global model configuration as the default; the embedded workspace and configuration boundary remains the TaxaMask repository.
 
 Important files:
 
@@ -89,7 +89,21 @@ Do not send API keys, private gateway URLs, large project JSON, database content
 
 Main source areas:
 
-- `AntSleap/main.py`
+- `AntSleap/main.py` (startup and compatibility facade only)
+- `AntSleap/ui/main_window_shell.py`
+- `AntSleap/ui/main_window_project_lifecycle.py`
+- `AntSleap/ui/main_window_image_navigation.py`
+- `AntSleap/ui/main_window_image_grouping.py`
+- `AntSleap/ui/main_window_part_tree.py`
+- `AntSleap/ui/main_window_annotation.py`
+- `AntSleap/ui/main_window_blink_context.py`
+- `AntSleap/ui/main_window_blink_workflow.py`
+- `AntSleap/ui/main_window_model_management.py`
+- `AntSleap/ui/main_window_training.py`
+- `AntSleap/ui/main_window_prediction.py`
+- `AntSleap/ui/main_window_vlm.py`
+- `AntSleap/ui/main_window_export.py`
+- `AntSleap/ui/main_window_presentation.py`
 - `AntSleap/core/project.py`
 - `AntSleap/ui/canvas.py`
 - `AntSleap/core/vlm_preannotation.py`
@@ -125,6 +139,17 @@ Important semantics:
 - Model predictions may replace unconfirmed AI drafts, but not manual or confirmed labels.
 - Child Expert Session is the user-facing wording. `Blink` remains in code for historical compatibility.
 - Large projects should avoid eager first-image loading, unnecessary model warmup, and repeated full-tree refreshes.
+
+Current fourth-round MainWindow architecture state (verified candidate 2026-07-11):
+
+- `AntSleap/main.py` is 763 physical lines. `MainWindow` has a 36-line class body, one 13-line constructor, no direct writable state assignments, and no direct Qt connections.
+- Workflow behavior is owned by focused mixins listed above. `main.py` keeps historical class/function re-exports for compatibility; do not move workflow implementations back into the facade.
+- The architecture audit scans 30 responsibility modules and records 194 real `connect/connect_once` bindings. The public MainWindow class itself owns zero direct bindings.
+- PDF and TIF workbenches are created on first entry. Re-selecting the same 2D image reuses the loaded pixmap; file-list updates use local row/status updates where possible.
+- Image import, parent/child training, batch prediction, VLM, and dataset export are project-bound tasks. Normal project switching is blocked while they run, and callbacks verify the originating ProjectManager/path before applying or saving results.
+- VLM callbacks also verify worker run ID. Stale run/project results must not write the current SQLite project; they may retain an independent artifacts summary for audit.
+- AI drafts, confirmed labels, manual truth, PDF candidates, STL-rendered evidence, Blink trajectories, and TIF label roles remain distinct.
+- Direct private implementation references to methods defined in MainWindow dropped from 146 to zero. GUI contract tests still call inherited workflow methods through a real window and are tracked separately.
 
 ## 7. PDF Evidence Route
 
@@ -491,6 +516,8 @@ Route hints should point to current sections in this file, source files, and pub
 
 Ask Agent context should stay compact. It should help the agent know what to inspect, not dump project files or private data.
 
+For `labeling`, source hints must point to `main_window_agent_context.py`, `main_window_annotation.py`, `main_window_blink_context.py`, and `main_window_vlm.py`, not to removed implementations in `AntSleap/main.py`. The first project artifacts are the 2D SQLite manifest/database, active image, annotation provenance, route records, project task context, and recent log excerpt.
+
 For `tif_volume`, the context should expose label schema ID, train-ready part/reslice count, train-ready top-level count, selected training scope, selected/registered model-library state, backend command presence, active backend action, run folder, result JSON, recent log excerpt, selection-loading state, background preview state, pending post-selection render state, and deferred volume-array release state. This lets the Agent distinguish a blocked selection callback from normal background preview preparation or old-memory release, and explain whether the user is blocked by missing labels, missing review acceptance, missing nnU-Net commands, insufficient sample count, or prediction model selection. Full label-ID scans must remain deferred during selection and run only at manual-truth acceptance or strict training-readiness validation.
 
 For `pdf_evidence`, Ask Agent routing must preserve the stage 0 acquisition context. If the user has no PDF folder yet, the Agent should load `taxonomy-pdf-harvest` from `vendor/ant-code/config/skills/taxonomy-pdf-harvest/SKILL.md` before the downstream PDF evidence skill; if PDFs already exist, it can continue directly to key/model readiness and screening/extraction setup.
@@ -509,6 +536,8 @@ C:\Users\admin\anaconda3\envs\taxamask\python.exe -m unittest tests.test_gui_smo
 C:\Users\admin\anaconda3\envs\taxamask\python.exe scripts\run_validation_suite.py --timeout 300
 git diff --check
 ```
+
+Current fourth-round full validation inventory: 18 suites and 1,140 tests, with one environment-dependent TIF workbench skip and all remaining tests passing. This covers TIF core/storage/services/preview/backends/workbench, GUI smoke, UI polish, layout, PDF safety/literature, validation tooling, TIF round-three architecture, TaxaMask round-four architecture, 2D SQLite, Agent/SAM, Blink/locator, and generic VLM/STL/export.
 
 Use the TaxaMask environment above for GUI/TIF validation. Do not install PySide6 into the default Python environment to satisfy skipped GUI tests.
 

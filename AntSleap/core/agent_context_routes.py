@@ -105,11 +105,13 @@ AGENT_CONTEXT_ROUTES = {
         ),
         "source_code_refs": (
             "AntSleap/ui/main_window_agent_context.py -> MainWindowAgentContextMixin._collect_image_workbench_agent_context",
-            "AntSleap/main.py -> MainWindow._current_blink_context",
+            "AntSleap/ui/main_window_annotation.py -> MainWindowAnnotationMixin.on_polygon_completed",
+            "AntSleap/ui/main_window_blink_context.py -> MainWindowBlinkContextMixin._current_blink_context",
+            "AntSleap/ui/main_window_vlm.py -> MainWindowVlmMixin._on_vlm_preannotation_image_result",
             "AntSleap/core/project.py",
         ),
         "artifact_hints": (
-            "Current project JSON, active image path, annotations, shrink_loose_boxes, cascade_routes, and recent log excerpt are the first things to inspect.",
+            "Current 2D SQLite manifest/database, active image path, annotation provenance, shrink_loose_boxes, cascade_routes, project task context, and recent log excerpt are the first things to inspect.",
         ),
         "safety_notes": COMMON_SAFETY_NOTES
         + (

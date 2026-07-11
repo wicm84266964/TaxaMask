@@ -120,6 +120,23 @@ class AgentContextRoutesTests(unittest.TestCase):
         original = {"source_workbench": "unknown", "project_type": "settings"}
         self.assertEqual(enrich_agent_context(original), original)
 
+    def test_labeling_route_points_to_current_round4_workflow_owners(self):
+        context = enrich_agent_context(
+            {
+                "source_workbench": "labeling",
+                "project_type": "image",
+                "active_image": "specimen.png",
+                "active_part": "Mandible",
+            }
+        )
+
+        self.assertEqual(context["diagnostic_route"], "labeling_workbench_context")
+        self.assertIn("main_window_annotation.py", context["source_code_refs"])
+        self.assertIn("main_window_blink_context.py", context["source_code_refs"])
+        self.assertIn("main_window_vlm.py", context["source_code_refs"])
+        self.assertNotIn("AntSleap/main.py -> MainWindow._current_blink_context", context["source_code_refs"])
+        self.assertIn("SQLite manifest/database", context["artifact_hints"])
+
 
 if __name__ == "__main__":
     unittest.main()

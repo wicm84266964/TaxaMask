@@ -2,7 +2,7 @@
 
 日期：2026-07-11
 
-状态：`Gate D review recorded / Stage 8 verified / Stage 9 next`；用户要求 Stage 1-9 连续执行，中间 Gate 继续留证但不暂停，全部完成前不再推送 GitHub
+状态：`Stage 9 automation verified / researcher acceptance pending`；Stage 1-9 实施与自动化验证已连续完成，等待统一人工验收；Stage 0 之后未再推送 GitHub
 
 需求文档：`docs/taxamask_architecture_refactor_round4_requirements_zh.md`
 
@@ -28,19 +28,19 @@
 
 | 指标 | 初始快照 | Stage 0 正式值 | 最终值 |
 | --- | ---: | ---: | ---: |
-| `main.py` 物理行 | 16,024 | 16,024 | 待测 |
-| 顶层类 | 22 | 22 | 待测 |
-| 顶层函数 | 35 | 35 | 待测 |
-| 全文件方法 | 592（AST 正式口径） | 592 | 待测 |
-| 全文件 `.connect(...)` | 194 | 194 | 待测 |
-| 私有方法 | 413（Stage 0 纠正初始估算） | 413 | 待测 |
-| 状态赋值行 | 658（Stage 0 纠正初始估算） | 658 | 待测 |
-| `MainWindow` 物理行 | 9,483 | 9,483 | 待测 |
-| `MainWindow` 方法 | 390 | 390 | 待测 |
-| `MainWindow` `.connect(...)` | 128 | 128 | 待测 |
-| `MainWindow.__init__` | 668 行 | 668 行 | 待测 |
-| 不少于 100 行的 MainWindow 方法 | 10 | 10 | 待测 |
-| 五个关键测试文件直接引用 main/MainWindow/Dialog 的行 | 324（Stage 0 完整模式） | 324 | 待测 |
+| `main.py` 物理行 | 16,024 | 16,024 | 763 |
+| 顶层类 | 22 | 22 | 1（MainWindow 兼容外壳） |
+| 顶层函数 | 35 | 35 | 0；启动函数迁入 runtime 模块后 re-export |
+| 全文件方法 | 592（AST 正式口径） | 592 | 1（MainWindow.__init__） |
+| 全文件 `.connect(...)` | 194 | 194 | 0；30 个责任模块合计 194 |
+| 私有方法 | 413（Stage 0 纠正初始估算） | 413 | 0 个实现私有方法 |
+| 状态赋值行 | 658（Stage 0 纠正初始估算） | 658 | MainWindow 直接可写状态 0 |
+| `MainWindow` 物理行 | 9,483 | 9,483 | 36 |
+| `MainWindow` 方法 | 390 | 390 | 1 |
+| `MainWindow` `.connect(...)` | 128 | 128 | 0 |
+| `MainWindow.__init__` | 668 行 | 668 行 | 13 行 |
+| 不少于 100 行的 MainWindow 方法 | 10 | 10 | 0 |
+| 五个关键测试文件直接引用 main/MainWindow/Dialog 的行 | 324（Stage 0 完整模式） | 324 | MainWindow 直接私有引用 0 |
 
 历史修改热度初始快照：2026-04-01 以来 47 个提交修改 `main.py`，累计增删 18,711 行。Stage 0 需记录统计命令、时间范围和结果文件。
 
@@ -66,10 +66,10 @@
 | 确认门 | 范围 | 状态 |
 | --- | --- | --- |
 | Gate A | 需求与 Stage 0 正式基线 | accepted（2026-07-11） |
-| Gate B | Stage 1-2 Runtime/Worker/Dialog/Settings | 待完成；verified 后连续执行 |
-| Gate C | Stage 3-4 Shell/Agent/项目生命周期 | 待完成；verified 后连续执行 |
-| Gate D | Stage 5-8 全工作流迁移与整体候选 | 待完成；verified 后连续执行 |
-| Gate E | Stage 9 真实研究流程终验 | 待完成 |
+| Gate B | Stage 1-2 Runtime/Worker/Dialog/Settings | review recorded；verified 后已连续执行 |
+| Gate C | Stage 3-4 Shell/Agent/项目生命周期 | review recorded；verified 后已连续执行 |
+| Gate D | Stage 5-8 全工作流迁移与整体候选 | review recorded；verified 后已连续执行 |
+| Gate E | Stage 9 真实研究流程终验 | automation verified；等待人工验收 |
 
 ## 5. 每阶段强制联动交付
 
@@ -275,15 +275,18 @@
 
 ## 15. Stage 9：完整回归与真实研究流程终验
 
-状态：`pending`
+状态：`automation verified / researcher acceptance pending`
 
 ### 15.1 自动化终验
 
-- [ ] 完整 unittest/pytest 库存通过并记录环境 skip。
-- [ ] 更新/新增 Python 文件 `py_compile` 通过。
-- [ ] 静态调用、公开导入、信号连接和私有引用审计通过。
-- [ ] `git diff --check` 通过。
-- [ ] `.tmp_validation/` 临时产物清理完成。
+- [x] 完整验证库存通过：18 个 suite、1,140 条测试，1 条环境相关 skip。
+- [x] 全目录 Python `compileall` 通过。
+- [x] 静态调用、公开导入、信号连接、字节码全局依赖和私有引用审计通过。
+- [x] `git diff --check` 通过。
+- [x] `.tmp_validation/` 临时产物清理完成。
+- [x] Agent labeling route 与源码提示对齐当前 round4 workflow owner。
+- [x] Stage 9 review：`docs/taxamask_architecture_refactor_round4_stage9_review_zh.md`。
+- [x] 统一人工验收卡：`docs/taxamask_architecture_refactor_round4_acceptance_zh.md`。
 
 ### 15.2 研究者人工验收
 
@@ -305,9 +308,9 @@
 
 - [ ] 用户确认真实研究流程符合预期。
 - [ ] 第四轮候选标记 `accepted`。
-- [ ] 同步 `LLM_CONTEXT_DETAILED.md`。
-- [ ] 按总结节奏同步本地 `CHANGELOG_zh.md`。
-- [ ] 评估 README 和现有 Release 说明是否需要更新。
+- [x] `LLM_CONTEXT_DETAILED.md` 已同步 verified candidate 当前状态；accepted 状态待用户确认。
+- [x] 本地 `CHANGELOG_zh.md` 已按总结节奏同步。
+- [x] README 的产品定位/安装/入口未变化，无需修改；现有 2.3.0 Release 说明已追加第四轮内容。
 - [ ] 用户决定是否合并 `main`。
 
 ## 16. 最终结构目标
@@ -330,9 +333,9 @@
 - [x] 创建本地分支 `codex/taxamask-architecture-refactor-round4`。
 - [x] 需求文档获得用户接受。
 - [x] 提交需求文档和执行清单（`bcbf6d2`）。
-- [x] 按用户已接受的建议，将第四轮分支推送到 GitHub。
-- [ ] 每个 Stage 使用独立本地提交。
-- [ ] 每个确认门形成可审计 review 文档。
+- [x] Stage 0 基线提交已推送到 GitHub；Stage 1-9 按用户要求仅保留本地提交。
+- [x] 每个 Stage 使用独立本地提交；Stage 9 提交在本清单收尾后创建。
+- [x] Gate B/C/D 已形成可审计 review 文档；Gate E 自动化 review 已完成，人工结论待用户验收。
 - [ ] 最终接受前不合并 `main`。
 - [ ] 最终接受前不创建新 Release。
 

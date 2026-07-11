@@ -85,6 +85,10 @@ SUITES: dict[str, list[str]] = {
     "pdf_safety": ["tests.test_pdf_profile_deletion_safety"],
     "validation_tooling": ["tests.test_validation_suite_script"],
     "tif_architecture_round3": ["tests.test_tif_workbench_architecture_analysis"],
+    "taxamask_architecture_round4": [
+        "tests.test_main_window_architecture_analysis",
+        "tests.test_main_window_performance_benchmark",
+    ],
     "validation_chunk_sample": ["tests.test_safe_io.SafeIoTests.test_atomic_write_json_failure_keeps_existing_file_and_removes_tmp"],
     "sqlite_2d": [
         "tests.test_2d_json_to_sqlite_migration",

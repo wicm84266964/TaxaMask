@@ -2,7 +2,7 @@
 
 日期：2026-07-11
 
-状态：`planned`；需求已接受，Stage 0 尚未开始，业务代码未修改
+状态：`Stage 0 verified / Gate A pending`；正式基线已完成，业务代码未修改，等待用户确认后进入 Stage 1
 
 需求文档：`docs/taxamask_architecture_refactor_round4_requirements_zh.md`
 
@@ -28,19 +28,19 @@
 
 | 指标 | 初始快照 | Stage 0 正式值 | 最终值 |
 | --- | ---: | ---: | ---: |
-| `main.py` 物理行 | 16,024 | 待测 | 待测 |
-| 顶层类 | 22 | 待测 | 待测 |
-| 顶层函数 | 35 | 待测 | 待测 |
-| 全文件方法 | 594 | 待测 | 待测 |
-| 全文件 `.connect(...)` | 194 | 待测 | 待测 |
-| 私有方法 | 414 | 待测 | 待测 |
-| 状态赋值行 | 675 | 待测 | 待测 |
-| `MainWindow` 物理行 | 9,483 | 待测 | 待测 |
-| `MainWindow` 方法 | 390 | 待测 | 待测 |
-| `MainWindow` `.connect(...)` | 128 | 待测 | 待测 |
-| `MainWindow.__init__` | 668 行 | 待测 | 待测 |
-| 不少于 100 行的 MainWindow 方法 | 10 | 待测 | 待测 |
-| 五个关键测试文件直接引用 main/MainWindow/Dialog 的行 | 192 | 待测 | 待测 |
+| `main.py` 物理行 | 16,024 | 16,024 | 待测 |
+| 顶层类 | 22 | 22 | 待测 |
+| 顶层函数 | 35 | 35 | 待测 |
+| 全文件方法 | 592（AST 正式口径） | 592 | 待测 |
+| 全文件 `.connect(...)` | 194 | 194 | 待测 |
+| 私有方法 | 413（Stage 0 纠正初始估算） | 413 | 待测 |
+| 状态赋值行 | 658（Stage 0 纠正初始估算） | 658 | 待测 |
+| `MainWindow` 物理行 | 9,483 | 9,483 | 待测 |
+| `MainWindow` 方法 | 390 | 390 | 待测 |
+| `MainWindow` `.connect(...)` | 128 | 128 | 待测 |
+| `MainWindow.__init__` | 668 行 | 668 行 | 待测 |
+| 不少于 100 行的 MainWindow 方法 | 10 | 10 | 待测 |
+| 五个关键测试文件直接引用 main/MainWindow/Dialog 的行 | 324（Stage 0 完整模式） | 324 | 待测 |
 
 历史修改热度初始快照：2026-04-01 以来 47 个提交修改 `main.py`，累计增删 18,711 行。Stage 0 需记录统计命令、时间范围和结果文件。
 
@@ -65,7 +65,7 @@
 
 | 确认门 | 范围 | 状态 |
 | --- | --- | --- |
-| Gate A | 需求与 Stage 0 正式基线 | 需求 accepted；Stage 0 待完成 |
+| Gate A | 需求与 Stage 0 正式基线 | Stage 0 verified；等待用户 accepted |
 | Gate B | Stage 1-2 Runtime/Worker/Dialog/Settings | 待完成 |
 | Gate C | Stage 3-4 Shell/Agent/项目生命周期 | 待完成 |
 | Gate D | Stage 5-8 全工作流迁移与整体候选 | 待完成 |
@@ -88,40 +88,40 @@
 
 ## 6. Stage 0：正式基线与迁移台账
 
-状态：`planned`
+状态：`verified / Gate A pending`
 
 ### 6.1 结构与调用基线
 
-- [ ] 新增或复用可重复架构统计脚本，不依赖一次性终端输出。
-- [ ] 记录物理行、类、函数、方法、长方法、`.connect()`、状态字段和 import 数量。
-- [ ] 为 390 个 MainWindow 方法登记责任工作流、调用方、信号、测试和目标 Stage。
-- [ ] 为 22 个顶层类登记公开导入、测试调用、外部兼容和目标文件。
-- [ ] 统计 MainWindow 私有字段/方法在生产代码和测试中的引用。
-- [ ] 统计动态 QThread、worker、QTimer、延迟保存和预加载入口。
-- [ ] 统计 `from main import ...`、`from AntSleap.main import ...` 和源码模式 fallback import。
-- [ ] 输出 `docs/taxamask_architecture_refactor_round4_method_inventory.md`。
-- [ ] 输出 `docs/taxamask_architecture_refactor_round4_signal_inventory_zh.md`。
-- [ ] 输出 `docs/taxamask_architecture_refactor_round4_stage0_review_zh.md`。
+- [x] 新增可重复架构统计脚本，不依赖一次性终端输出。
+- [x] 记录物理行、类、函数、方法、长方法、`.connect()`、状态字段和 import 数量。
+- [x] 为 390 个 MainWindow 方法登记责任工作流、调用方、信号、测试和目标 Stage。
+- [x] 为 22 个顶层类登记公开导入、测试调用、外部兼容和目标 Stage。
+- [x] 统计 MainWindow 私有字段/方法在生产代码和测试中的引用。
+- [x] 统计动态 QThread、worker、QTimer、延迟保存和预加载入口。
+- [x] 统计 `from main import ...`、`from AntSleap.main import ...` 和源码模式 fallback import。
+- [x] 输出 `docs/taxamask_architecture_refactor_round4_method_inventory.md`。
+- [x] 输出 `docs/taxamask_architecture_refactor_round4_signal_inventory_zh.md`。
+- [x] 输出 `docs/taxamask_architecture_refactor_round4_stage0_review_zh.md`。
 
 ### 6.2 自动化与性能基线
 
-- [ ] 建立无私有数据的启动和工作流导航 fixture。
-- [ ] 固定 Python：`C:\Users\admin\anaconda3\envs\taxamask\python.exe`。
-- [ ] 每项至少重复 10 次，记录中位数和 P95。
-- [ ] 测量进程启动到 Start Center 可交互。
-- [ ] 测量 Start Center 进入 2D/STL。
-- [ ] 测量 Start Center 进入 TIF 空工作台。
-- [ ] 测量打开小型 2D SQLite 项目并显示首图。
-- [ ] 测量 2D 项目 image/part 切换。
-- [ ] 测量 Model Settings 打开/关闭。
-- [ ] 测量 Agent Center 接受 context。
-- [ ] 记录空闲、2D、TIF 空工作台 RSS。
-- [ ] 记录超过 100 ms 和 250 ms 的主线程阻塞事件。
-- [ ] 运行当前完整自动化测试库存并记录环境 skip。
+- [x] 建立无私有数据的启动和工作流导航 fixture。
+- [x] 固定 Python：`C:\Users\admin\anaconda3\envs\taxamask\python.exe`。
+- [x] 每项重复 10 次，记录中位数和 P95。
+- [x] 测量进程启动到 Start Center 可交互。
+- [x] 测量 Start Center 进入 2D/STL。
+- [x] 测量 Start Center 进入 TIF 空工作台。
+- [x] 测量打开小型 2D SQLite 项目并显示首图。
+- [x] 测量 2D 项目 image/part 切换。
+- [x] 测量 Model Settings 打开/关闭。
+- [x] 测量 Agent Center 接受 context。
+- [x] 记录空闲、2D、TIF 空工作台 RSS。
+- [x] 记录超过 100 ms 和 250 ms 的同步 UI 操作事件。
+- [x] 运行当前完整自动化测试库存：1,091 条，1 条环境相关 skip，其余通过。
 
 ### 6.3 Gate A
 
-- [ ] Stage 0 review 达到 `verified`。
+- [x] Stage 0 review 达到 `verified`。
 - [ ] 用户确认正式基线、最终模块边界和执行顺序。
 - [ ] Gate A 标记 `accepted` 后进入 Stage 1。
 

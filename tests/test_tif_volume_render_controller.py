@@ -100,6 +100,15 @@ class TifVolumeRenderControllerTests(unittest.TestCase):
 
         self.assertEqual(workbench.signal_router.connection_count("volume_render"), 38)
 
+    def test_preview_build_running_tracks_thread_lifecycle_reference(self):
+        controller = TifVolumeRenderController(self.make_workbench())
+
+        self.assertFalse(controller.preview_build_running())
+        controller.preview_build_thread = object()
+        self.assertTrue(controller.preview_build_running())
+        controller.preview_build_thread = None
+        self.assertFalse(controller.preview_build_running())
+
     def test_stale_background_result_is_cancelled_without_cache_write(self):
         workbench = self.make_workbench()
         workbench._task_context_matches_current.return_value = False

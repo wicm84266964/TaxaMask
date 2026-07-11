@@ -7853,6 +7853,7 @@ class MainWindow(QMainWindow):
             "tif_state_summary",
             "preview_resource_summary",
             "local_axis_state_summary",
+            "volume_lifecycle_summary",
             "volume_renderer",
             "volume_renderer_label",
             "volume_render_mode",

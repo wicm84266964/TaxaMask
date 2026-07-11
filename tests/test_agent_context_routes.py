@@ -79,15 +79,20 @@ class AgentContextRoutesTests(unittest.TestCase):
         self.assertIn("12. Local Axis Reslice", context["llm_context_refs"])
         self.assertIn("tif_agent_context.py", context["source_code_refs"])
         self.assertIn("tif_backend_panel_controller.py", context["source_code_refs"])
-        self.assertIn("tif_preview_controller.py", context["source_code_refs"])
+        self.assertIn("tif_selection_workflow_controller.py", context["source_code_refs"])
+        self.assertIn("tif_project_lifecycle_controller.py", context["source_code_refs"])
+        self.assertIn("tif_annotation_workflow_controller.py", context["source_code_refs"])
+        self.assertIn("tif_part_mask_workflow_controller.py", context["source_code_refs"])
+        self.assertIn("tif_volume_render_controller.py", context["source_code_refs"])
+        self.assertIn("tif_result_review_controller.py", context["source_code_refs"])
         self.assertIn("tif_local_axis_controller.py", context["source_code_refs"])
         self.assertIn("tif_task_manager.py", context["source_code_refs"])
-        self.assertIn("tif_workbench_states.py", context["source_code_refs"])
-        self.assertIn("tif_resource_policy.py", context["source_code_refs"])
         self.assertIn("tif_gpu_volume_canvas.py", context["source_code_refs"])
         self.assertIn("ant3d_tif_backend_contract_v1.md", context["source_code_refs"])
         self.assertIn("tif_local_axis_backend_contract_v1.md", context["source_code_refs"])
         self.assertIn("nearest-neighbor", context["safety_notes"])
+        self.assertIn("full label-ID scans", context["safety_notes"])
+        self.assertIn("volume_lifecycle_summary", context["suggested_agent_action"])
 
     def test_pdf_route_keeps_candidate_safety_visible(self):
         context = enrich_agent_context(

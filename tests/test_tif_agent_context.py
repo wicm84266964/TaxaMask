@@ -158,6 +158,10 @@ class TifAgentContextBuilderTests(unittest.TestCase):
                 self.assertIn("volume_clip_plane", context)
                 self.assertIn("volume_roi_high_detail", context)
                 self.assertIn("training_sample_rule", context)
+                self.assertIn("selection_loading=no", context["volume_lifecycle_summary"])
+                self.assertIn("preview_build_active=no", context["volume_lifecycle_summary"])
+                self.assertIn("selection_render_pending=no", context["volume_lifecycle_summary"])
+                self.assertIn("array_release_active=no", context["volume_lifecycle_summary"])
             finally:
                 widget.close_project(prompt_unsaved=False)
                 widget.deleteLater()

@@ -155,7 +155,7 @@ Shell 可以派发 `on_selection_changing`、`on_selection_changed`、`on_workbe
 
 ## 自动化验证证据
 
-最终套件清单共 777 条，1 条按本机环境跳过，其余通过：
+最终套件清单在 Agent context 对齐后共 778 条，1 条按本机环境跳过，其余通过：
 
 | Suite | 数量 | 结果 |
 | --- | ---: | --- |
@@ -164,7 +164,7 @@ Shell 可以派发 `on_selection_changing`、`on_selection_changed`、`on_workbe
 | `tif_services` | 25 | 通过 |
 | `tif_preview_export` | 108 | 通过 |
 | `tif_model_backends` | 31 | 通过 |
-| `tif_workbench` | 317 | 通过，1 skip |
+| `tif_workbench` | 318 | 通过，1 skip |
 | `tif_layout` | 5 | 通过 |
 | `tif_architecture_round3` | 4 | 通过 |
 | `gui_smoke` | 94 | 通过 |

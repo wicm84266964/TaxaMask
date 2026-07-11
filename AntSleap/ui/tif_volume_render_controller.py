@@ -1666,6 +1666,9 @@ class TifVolumeRenderController(QObject):
             return False
         return self.state.volume_preview_pending_key == preview_key and self.state.volume_preview_pending_mask_key == mask_key
 
+    def preview_build_running(self):
+        return self.preview_build_thread is not None
+
     def _start_volume_preview_build(self, volume_request=None, mask_request=None):
         workbench = self.workbench
         if volume_request is None and mask_request is None:

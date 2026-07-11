@@ -172,6 +172,12 @@ class TifAgentContextBuilder:
             "tif_state_summary": str(state_summary),
             "preview_resource_summary": preview_resource_summary,
             "local_axis_state_summary": local_axis_state_summary,
+            "volume_lifecycle_summary": (
+                f"selection_loading={'yes' if wb._loading_specimen else 'no'}, "
+                f"preview_build_active={'yes' if wb.volume_render_controller.preview_build_running() else 'no'}, "
+                f"selection_render_pending={'yes' if wb.volume_render_controller.state.selection_render_pending else 'no'}, "
+                f"array_release_active={'yes' if wb.project_lifecycle_controller.array_release_running() else 'no'}"
+            ),
             "volume_renderer": wb._volume_canvas_renderer,
             "volume_renderer_label": wb.volume_render_controller._volume_renderer_label(),
             "volume_render_mode": wb._volume_render_mode,

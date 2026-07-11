@@ -1484,6 +1484,7 @@ class GuiSmokeTests(unittest.TestCase):
                     "tif_state_summary": "{'local_axis': {'reslice_id': 'head_local_axis_001'}}",
                     "preview_resource_summary": "{'resource_limited': False}",
                     "local_axis_state_summary": "{'draft_active': True, 'reslice_id': 'head_local_axis_001'}",
+                    "volume_lifecycle_summary": "selection_loading=no, preview_build_active=yes, selection_render_pending=no, array_release_active=yes",
                     "volume_surface_refine": "on",
                     "volume_clip_plane": "on",
                     "volume_clip_plane_depth": "45%",
@@ -1518,6 +1519,8 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertIn("local_axis", tif_compact["tif_state_summary"])
             self.assertIn("resource_limited", tif_compact["preview_resource_summary"])
             self.assertIn("draft_active", tif_compact["local_axis_state_summary"])
+            self.assertIn("preview_build_active=yes", tif_compact["volume_lifecycle_summary"])
+            self.assertIn("array_release_active=yes", tif_compact["volume_lifecycle_summary"])
             self.assertEqual(tif_compact["volume_clip_plane"], "on")
             self.assertEqual(tif_compact["volume_roi_high_detail"], "on")
             self.assertEqual(tif_compact["volume_uploaded_gb"], "0.40")
@@ -1529,6 +1532,8 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertIn("Active reslice: head_local_axis_001", prompt)
             self.assertIn("TIF task summary", prompt)
             self.assertIn("TIF preview resource summary", prompt)
+            self.assertIn("Volume loading and preview lifecycle", prompt)
+            self.assertIn("preview_build_active=yes", prompt)
 
             pdf_compact = window._compact_agent_context(
                 {

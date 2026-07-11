@@ -74,7 +74,6 @@ AGENT_CONTEXT_ROUTES = {
         "source_code_refs": (
             "AntSleap/main.py -> TifModelSettingsDialog.get_agent_context",
             "AntSleap/ui/tif_workbench.py -> TifWorkbenchWidget.get_agent_context",
-            "AntSleap/ui/tif_workbench.py -> TifWorkbenchWidget._selected_backend_samples_for_action",
             "AntSleap/ui/tif_agent_context.py -> TifAgentContextBuilder.build",
             "AntSleap/ui/tif_backend_panel_controller.py -> TifBackendPanelController.selected_backend_samples_for_action",
             "AntSleap/core/tif_backend.py",
@@ -143,7 +142,7 @@ AGENT_CONTEXT_ROUTES = {
     },
     "tif_volume": {
         "diagnostic_route": "tif_volume_workbench_context",
-        "diagnostic_focus": "Current TIF specimen, label role, label schema, material ID, sidecar volumes, slice/3D volume view state, GPU preview, Local Axis Reslice, project-wide train-ready sample selection, trained model library, backend run state, and manual_truth safety.",
+        "diagnostic_focus": "Current TIF specimen, label role, label schema, material ID, sidecar volumes, selection/loading lifecycle, slice/3D volume view state, background preview and array release state, GPU preview, Local Axis Reslice, project-wide train-ready sample selection, trained model library, backend run state, and manual_truth safety.",
         "llm_context_refs": (
             "LLM_CONTEXT_DETAILED.md -> 8. TIF/CT Project Model",
             "LLM_CONTEXT_DETAILED.md -> 9. TIF Workbench",
@@ -157,17 +156,17 @@ AGENT_CONTEXT_ROUTES = {
         "source_code_refs": (
             "AntSleap/ui/tif_workbench.py -> TifWorkbenchWidget.get_agent_context",
             "AntSleap/ui/tif_agent_context.py -> TifAgentContextBuilder.build",
+            "AntSleap/ui/tif_selection_workflow_controller.py",
+            "AntSleap/ui/tif_project_lifecycle_controller.py",
+            "AntSleap/ui/tif_annotation_workflow_controller.py",
+            "AntSleap/ui/tif_part_mask_workflow_controller.py",
+            "AntSleap/ui/tif_volume_render_controller.py",
             "AntSleap/ui/tif_backend_panel_controller.py",
-            "AntSleap/ui/tif_preview_controller.py",
+            "AntSleap/ui/tif_result_review_controller.py",
             "AntSleap/ui/tif_local_axis_controller.py",
             "AntSleap/ui/tif_gpu_volume_canvas.py",
             "AntSleap/services/tif_task_manager.py",
-            "AntSleap/services/tif_workbench_states.py",
-            "AntSleap/core/tif_resource_policy.py",
             "AntSleap/core/tif_project.py",
-            "AntSleap/core/tif_backend.py",
-            "AntSleap/core/tif_local_axis_reslice.py",
-            "AntSleap/core/tif_local_axis_ai.py",
             "docs/contracts/ant3d_tif_backend_contract_v1.md",
             "docs/contracts/tif_local_axis_backend_contract_v1.md",
         ),
@@ -177,10 +176,12 @@ AGENT_CONTEXT_ROUTES = {
         "safety_notes": COMMON_SAFETY_NOTES
         + (
             "Do not write predictions or working_edit into manual_truth unless the researcher explicitly confirms that review is complete.",
+            "Do not restore full label-ID scans during specimen/part/reslice selection; strict validation belongs at manual_truth acceptance or training-readiness validation.",
+            "Large saved reslices must use background preview preparation before GPU upload; preview preparation time is not equivalent to a blocked selection callback.",
             "Local Axis Reslice must preserve source provenance and use nearest-neighbor interpolation for label volumes.",
             "Preparing or training TIF data should use reviewed train-ready samples across the project, not just the currently selected part, unless the code path explicitly says otherwise.",
         ),
-        "suggested_agent_action": "Check display_mode, slice axis/position, volume renderer, shape/spacing, label role, label schema, material ID, selected part/reslice item, train-ready sample counts, selected model manifest, backend run state, and Local Axis draft/output state before interpreting a missing overlay, GPU preview issue, training readiness issue, prediction import problem, or reslice request.",
+        "suggested_agent_action": "Check volume_lifecycle_summary, display_mode, slice axis/position, volume renderer, shape/spacing, label role, label schema, material ID, selected part/reslice item, train-ready sample counts, selected model manifest, backend run state, and Local Axis draft/output state before interpreting a stall, missing overlay, GPU preview issue, training readiness issue, prediction import problem, or reslice request.",
     },
     "pdf_evidence": {
         "diagnostic_route": "pdf_evidence_context",

@@ -76,6 +76,10 @@ class TifProjectLifecycleController:
         with self._array_release_lock:
             return not any(thread.is_alive() for thread in self._array_release_threads)
 
+    def array_release_running(self):
+        with self._array_release_lock:
+            return any(thread.is_alive() for thread in self._array_release_threads)
+
     def close_project(self, prompt_unsaved=True):
         workbench = self.workbench
         if self.background_write_running():

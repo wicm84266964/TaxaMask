@@ -31,12 +31,14 @@ class TifProjectLifecycleControllerTests(unittest.TestCase):
                 defer=True,
             )
             self.assertTrue(preview_waiting.wait(2.0))
+            self.assertTrue(controller.array_release_running())
             self.assertFalse(array_closed.is_set())
             allow_preview_finish.set()
             release_thread.join(2.0)
 
         self.assertTrue(array_closed.is_set())
         collect.assert_not_called()
+        self.assertFalse(controller.array_release_running())
         self.assertTrue(controller.wait_for_volume_array_releases())
 
     def test_background_write_running_covers_research_write_tasks(self):

@@ -53,7 +53,7 @@
 
 - [ ] 打开 PDF Evidence Tools，候选图片/描述仍作为证据或候选，不自动写成训练真值。
 - [ ] 从 2D labeling 点击 Ask Agent，context 能看到当前 image/part、SQLite 项目、annotation/Blink/VLM 源码提示和安全说明。
-- [ ] Ask Agent 新会话的第一个问题能返回正常正文；即使检查大型项目目录，也不会立即提示“聊天内容已压缩”或只显示“模型本轮没有返回可展示正文”。
+- [x] Ask Agent 新会话的第一个问题能返回正常正文；即使检查大型项目目录，也不会立即提示“聊天内容已压缩”或只显示“模型本轮没有返回可展示正文”。（2026-07-12 Dashboard 可见复测通过）
 - [ ] 从 TIF 点击 Ask Agent，context 能区分 selection loading、background preview、pending render 和旧数组释放。
 - [ ] 打开 General、2D/STL Model、TIF Model 和 PDF API 设置。
 - [ ] 切换中英文与深浅主题，菜单、按钮和主要状态文本正常。

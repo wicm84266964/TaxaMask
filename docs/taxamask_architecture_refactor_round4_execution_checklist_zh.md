@@ -2,7 +2,7 @@
 
 日期：2026-07-11
 
-状态：`Gate A accepted / Stage 1 verified / Stage 2 next`；用户要求 Stage 1-9 连续执行，中间 Gate 继续留证但不暂停，全部完成前不再推送 GitHub
+状态：`Gate B review recorded / Stage 2 verified / Stage 3 next`；用户要求 Stage 1-9 连续执行，中间 Gate 继续留证但不暂停，全部完成前不再推送 GitHub
 
 需求文档：`docs/taxamask_architecture_refactor_round4_requirements_zh.md`
 
@@ -147,25 +147,25 @@
 
 ## 8. Stage 2：Dialog、Report、Route 与 Settings
 
-状态：`pending`
+状态：`verified`
 
-- [ ] 迁移 TrainingPreflightDialog。
-- [ ] 迁移 TrainingReportDialog 和 TrainingResultBrowserDialog。
-- [ ] 迁移 LiteratureDescriptionDialog。
-- [ ] 迁移 RouteManagementPanel。
-- [ ] 迁移 GeneralSettingsDialog、TifModelSettingsDialog 和 ModelSettingsDialog。
-- [ ] 将 800 行 ModelSettings `__init__` 拆为页面构建、值映射、验证和 Agent context。
-- [ ] 保持设置 schema、默认值、backend contract、主题、语言和 objectName。
-- [ ] 设置 Ask Agent 不暴露 API key 或私有配置内容。
-- [ ] 迁移本地化、UI polish、报告和 GUI smoke 测试到新实现模块。
-- [ ] `AntSleap.main` 兼容导出测试通过。
-- [ ] 输出 Stage 1-2 review 和结构/性能对比。
+- [x] 迁移 TrainingPreflightDialog。
+- [x] 迁移 TrainingReportDialog 和 TrainingResultBrowserDialog。
+- [x] 迁移 LiteratureDescriptionDialog。
+- [x] 迁移 RouteManagementPanel。
+- [x] 迁移 GeneralSettingsDialog、TifModelSettingsDialog 和 ModelSettingsDialog。
+- [x] 将 800 行 ModelSettings `__init__` 拆为页面构建、值映射、验证和 Agent context。
+- [x] 保持设置 schema、默认值、backend contract、主题、语言和 objectName。
+- [x] 设置 Ask Agent 不暴露 API key 或私有配置内容，并更新到新模块源码定位。
+- [x] 迁移本地化、UI polish、报告和 GUI smoke 测试到新实现模块。
+- [x] `AntSleap.main` 兼容导出测试通过。
+- [x] 输出 Stage 1-2 review 和结构/性能对比。
 
 ### 8.1 Gate B
 
-- [ ] Stage 1-2 达到 `verified`。
-- [ ] 用户检查设置、报告、文献和 route UI 无可见回归。
-- [ ] Gate B 标记 `accepted` 后进入 Stage 3。
+- [x] Stage 1-2 达到 `verified`。
+- [ ] 用户检查设置、报告、文献和 route UI 无可见回归；按连续执行授权统一留到 Stage 9。
+- [x] Gate B review 留档完成；按用户连续执行授权进入 Stage 3，不暂停等待 accepted。
 
 ## 9. Stage 3：Main Window Shell、Start Center 与 Agent
 

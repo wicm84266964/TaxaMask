@@ -43,6 +43,7 @@ else:
     from PIL import Image, ImageDraw, ImageFont
 
     import AntSleap.main as main_module
+    import AntSleap.ui.main_window_dialogs as main_window_dialogs_module
     import AntSleap.ui.pdf_processing_widget as pdf_widget_module
     from AntSleap.core.project_templates import PROJECT_TEMPLATE_GENERIC
     from AntSleap.core.stl_project import StlRenderedProjectManager
@@ -3594,8 +3595,8 @@ class GuiSmokeTests(unittest.TestCase):
             }
         ]
 
-        with patch.object(main_module, "query_literature_part_descriptions", return_value=structured), \
-             patch.object(main_module, "query_literature_text_blocks", return_value=raw):
+        with patch.object(main_window_dialogs_module, "query_literature_part_descriptions", return_value=structured), \
+             patch.object(main_window_dialogs_module, "query_literature_text_blocks", return_value=raw):
             dialog = main_module.LiteratureDescriptionDialog(
                 db_path=str(self.project_dir / "literature.db"),
                 context=context,
@@ -3626,8 +3627,8 @@ class GuiSmokeTests(unittest.TestCase):
             "pdf_file": "paper.pdf",
             "species_candidate": "Aphaenogaster gamagumayaa",
         }
-        with patch.object(main_module, "query_literature_part_descriptions", return_value=[]), \
-             patch.object(main_module, "query_literature_text_blocks", return_value=[]):
+        with patch.object(main_window_dialogs_module, "query_literature_part_descriptions", return_value=[]), \
+             patch.object(main_window_dialogs_module, "query_literature_text_blocks", return_value=[]):
             dialog = main_module.LiteratureDescriptionDialog(
                 db_path=str(self.project_dir / "literature.db"),
                 context=context,

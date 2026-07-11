@@ -21,7 +21,7 @@ AGENT_CONTEXT_ROUTES = {
             "TaxaMask使用手册.md -> 3. 首次启动：Agent Center、语言与界面总结构",
         ),
         "source_code_refs": (
-            "AntSleap/main.py -> GeneralSettingsDialog.get_agent_context",
+            "AntSleap/ui/settings_dialogs.py -> GeneralSettingsDialog.get_agent_context",
             "AntSleap/main.py -> MainWindow._compact_agent_context",
             "AntSleap/ui/taxamask_agent_panel.py -> TaxaMaskAgentPanel._context_prompt",
         ),
@@ -41,8 +41,8 @@ AGENT_CONTEXT_ROUTES = {
             "TaxaMask使用手册.md -> 11. 模型设置、训练、推理与 AI 标注清理",
         ),
         "source_code_refs": (
-            "AntSleap/main.py -> ModelSettingsDialog.get_agent_context",
-            "AntSleap/main.py -> ModelSettingsDialog._current_profile_snapshot",
+            "AntSleap/ui/model_settings_agent.py -> ModelSettingsAgentMixin.get_agent_context",
+            "AntSleap/ui/model_settings_profile.py -> ModelSettingsProfileMixin._current_profile_snapshot",
             "docs/contracts/external_backend_contract_v1.md",
             "docs/contracts/external_blink_backend_contract_v1.md",
             "AntSleap/core/model_profiles.py",
@@ -72,7 +72,7 @@ AGENT_CONTEXT_ROUTES = {
             "TaxaMask使用手册.md -> 12.4 TIF 训练体导出",
         ),
         "source_code_refs": (
-            "AntSleap/main.py -> TifModelSettingsDialog.get_agent_context",
+            "AntSleap/ui/settings_dialogs.py -> TifModelSettingsDialog.get_agent_context",
             "AntSleap/ui/tif_workbench.py -> TifWorkbenchWidget.get_agent_context",
             "AntSleap/ui/tif_agent_context.py -> TifAgentContextBuilder.build",
             "AntSleap/ui/tif_backend_panel_controller.py -> TifBackendPanelController.selected_backend_samples_for_action",

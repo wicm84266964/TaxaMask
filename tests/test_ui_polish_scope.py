@@ -42,6 +42,8 @@ except ModuleNotFoundError as exc:
         raise
 else:
     import AntSleap.main as main_module
+    import AntSleap.ui.model_settings_dataset as model_settings_dataset_module
+    import AntSleap.ui.route_management_panel as route_management_module
     from AntSleap.core.blink_dataset import BlinkTrajectoryDataset
     from AntSleap.core.blink_heatmap_dataset import BlinkHeatmapDataset
     from AntSleap.ui.blink_lab import BlinkExpertTrainingReportDialog, BlinkLabWidget
@@ -2621,7 +2623,7 @@ class UiPolishScopeTests(unittest.TestCase):
             with patch.object(main_module.QDialog, "exec", return_value=main_module.QDialog.DialogCode.Accepted) as exec_dialog:
                 dialog._show_blink_dataset_details()
             exec_dialog.assert_called_once()
-            with patch.object(main_module, "themed_yes_no_question", return_value=main_module.QMessageBox.Yes):
+            with patch.object(model_settings_dataset_module, "themed_yes_no_question", return_value=main_module.QMessageBox.Yes):
                 dialog._delete_selected_blink_dataset()
             self.assertEqual(self.project_manager.project_data["labels"][image_a].get("trajectories", {}), {})
             self.assertEqual(self.project_manager.project_data["labels"][image_b].get("trajectories", {}), {})
@@ -2729,7 +2731,7 @@ class UiPolishScopeTests(unittest.TestCase):
             self.assertEqual(route_panel.btn_delete_expert_file.text(), "Delete Expert File")
 
             with patch.object(
-                main_module,
+                route_management_module,
                 "themed_yes_no_question",
                 return_value=main_module.QMessageBox.Yes,
             ):

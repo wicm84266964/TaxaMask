@@ -16,7 +16,7 @@ class AgentContextRoutesTests(unittest.TestCase):
 
         self.assertEqual(context["diagnostic_route"], "general_settings_runtime")
         self.assertIn("LLM_CONTEXT_DETAILED.md", context["llm_context_refs"])
-        self.assertIn("GeneralSettingsDialog.get_agent_context", context["source_code_refs"])
+        self.assertIn("settings_dialogs.py -> GeneralSettingsDialog.get_agent_context", context["source_code_refs"])
         self.assertIn("validation_errors=none", context["health_check_summary"])
         self.assertEqual(context["agent_route_source"], "AntSleap/core/agent_context_routes.py")
 
@@ -37,6 +37,8 @@ class AgentContextRoutesTests(unittest.TestCase):
         self.assertIn("{contract}", context["diagnostic_focus"])
         self.assertIn("contract_placeholder=missing", context["health_check_summary"])
         self.assertIn("external_backend_contract_v1.md", context["source_code_refs"])
+        self.assertIn("model_settings_agent.py", context["source_code_refs"])
+        self.assertIn("model_settings_profile.py", context["source_code_refs"])
         self.assertNotIn("train.py", str(context))
 
     def test_tif_route_keeps_part_prediction_review_safety_visible(self):
@@ -58,6 +60,7 @@ class AgentContextRoutesTests(unittest.TestCase):
         self.assertIn("volume-segmentation", context["diagnostic_focus"])
         self.assertIn("manual_truth", context["safety_notes"])
         self.assertIn("tif_agent_context.py", context["source_code_refs"])
+        self.assertIn("settings_dialogs.py -> TifModelSettingsDialog.get_agent_context", context["source_code_refs"])
         self.assertIn("tif_backend_panel_controller.py", context["source_code_refs"])
         self.assertIn("docs/contracts/ant3d_tif_backend_contract_v1.md", context["source_code_refs"])
         self.assertIn("docs/contracts/tif_local_axis_backend_contract_v1.md", context["source_code_refs"])

@@ -17,6 +17,8 @@ from PIL import Image
 from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
 
 import AntSleap.main as main_module
+import AntSleap.ui.model_settings_profile as model_settings_profile_module
+import AntSleap.ui.route_management_panel as route_management_module
 from AntSleap.main import ExportDialog, BlinkEntryDialog, ModelSettingsDialog, RouteManagementPanel, TrainingPreflightDialog, TrainingReportDialog
 from AntSleap.ui.blink_lab import BlinkLabWidget
 from AntSleap.ui.cropper import ImageCropper
@@ -509,7 +511,7 @@ class UiLocalizationTests(unittest.TestCase):
         self.assertTrue(panel.btn_delete_route.isEnabled())
 
         with patch.object(
-            main_module,
+            route_management_module,
             "themed_yes_no_question",
             return_value=QMessageBox.StandardButton.Yes,
         ) as question_mock:
@@ -601,7 +603,7 @@ class UiLocalizationTests(unittest.TestCase):
             self.assertEqual(values["model_profiles"]["active_profile_id"], DEFAULT_MODEL_PROFILE_ID)
 
             with patch.object(
-                main_module,
+                model_settings_profile_module,
                 "themed_yes_no_question",
                 return_value=QMessageBox.StandardButton.No,
             ) as question_mock:
@@ -612,7 +614,7 @@ class UiLocalizationTests(unittest.TestCase):
 
             dialog.combo_model_profile.setCurrentIndex(dialog.combo_model_profile.findData(new_id))
             with patch.object(
-                main_module,
+                model_settings_profile_module,
                 "themed_yes_no_question",
                 return_value=QMessageBox.StandardButton.Yes,
             ) as question_mock:
@@ -678,7 +680,7 @@ class UiLocalizationTests(unittest.TestCase):
             self.assertNotEqual(values_before_activation["external_backend"]["backend_id"], "external_parent_test")
 
             with patch.object(
-                main_module,
+                model_settings_profile_module,
                 "themed_yes_no_question",
                 return_value=QMessageBox.StandardButton.Yes,
             ):
@@ -808,7 +810,7 @@ class UiLocalizationTests(unittest.TestCase):
         panel.route_tree.setCurrentItem(route_item)
 
         with patch.object(
-            main_module,
+            route_management_module,
             "themed_yes_no_question",
             return_value=QMessageBox.StandardButton.No,
         ) as question_mock:

@@ -22,7 +22,7 @@ class MainWindowArchitectureAnalysisTests(unittest.TestCase):
         self.assertLess(metrics["main_physical_lines"], 16024)
         self.assertLess(metrics["top_level_class_count"], 22)
         self.assertLess(metrics["all_method_count"], 592)
-        self.assertEqual(metrics["connection_count"], 194)
+        self.assertEqual(metrics["connection_count"], 128)
         self.assertLessEqual(metrics["main_window_lines"], 9500)
         self.assertEqual(metrics["main_window_method_count"], 390)
         self.assertEqual(metrics["main_window_connection_count"], 128)
@@ -38,7 +38,7 @@ class MainWindowArchitectureAnalysisTests(unittest.TestCase):
         methods = {row["name"]: row for row in report["main_window_methods"]}
 
         self.assertNotIn("InferenceThread", classes)
-        self.assertEqual(classes["ModelSettingsDialog"]["target_stage"], 2)
+        self.assertNotIn("ModelSettingsDialog", classes)
         self.assertEqual(classes["MainWindow"]["target_stage"], 3)
         self.assertEqual(methods["open_project_path"]["target_stage"], 4)
         self.assertEqual(methods["launch_blink_from_workbench"]["target_stage"], 6)
@@ -53,6 +53,16 @@ class MainWindowArchitectureAnalysisTests(unittest.TestCase):
         self.assertNotIn("class ImageGroupListWidget", source)
         self.assertIn("from AntSleap.ui.main_window_workers import", source)
         self.assertIn("from AntSleap.ui.main_window_widgets import", source)
+
+    def test_stage2_dialogs_leave_main_as_compatibility_facade(self):
+        source = (ROOT / "AntSleap" / "main.py").read_text(encoding="utf-8")
+
+        self.assertNotIn("class ModelSettingsDialog", source)
+        self.assertNotIn("class RouteManagementPanel", source)
+        self.assertNotIn("class LiteratureDescriptionDialog", source)
+        self.assertIn("from AntSleap.ui.model_settings_dialog import", source)
+        self.assertIn("from AntSleap.ui.training_report_dialogs import", source)
+        self.assertIn("from AntSleap.ui.main_window_dialogs import", source)
 
     def test_markdown_contains_stage0_migration_sections(self):
         module = load_analysis_module()

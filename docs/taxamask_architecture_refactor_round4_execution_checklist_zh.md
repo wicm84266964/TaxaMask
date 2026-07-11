@@ -285,7 +285,7 @@
 - [x] `git diff --check` 通过。
 - [x] `.tmp_validation/` 临时产物清理完成。
 - [x] Agent labeling route 与源码提示对齐当前 round4 workflow owner。
-- [x] Gate E 现场修复 Agent 首问超大工具结果触发压缩及空正文未重试问题；同目录运行态复测 `compacted=0` 且返回正常正文。
+- [x] Gate E 现场修复 Agent 首问超大工具结果触发压缩及空正文未重试问题；同目录运行态复测 `compacted=0`，Dashboard 可见首轮显示 `12k / 200k · 6%` 且返回正常正文。
 - [x] Stage 9 review：`docs/taxamask_architecture_refactor_round4_stage9_review_zh.md`。
 - [x] 统一人工验收卡：`docs/taxamask_architecture_refactor_round4_acceptance_zh.md`。
 

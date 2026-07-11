@@ -45,7 +45,10 @@ else:
     import AntSleap.ui.main_window_annotation as annotation_module
     import AntSleap.ui.main_window_blink_workflow as blink_workflow_module
     import AntSleap.ui.main_window_image_navigation as image_navigation_module
+    import AntSleap.ui.main_window_model_management as model_management_module
     import AntSleap.ui.main_window_part_tree as part_tree_module
+    import AntSleap.ui.main_window_prediction as prediction_module
+    import AntSleap.ui.main_window_vlm as vlm_module
     import AntSleap.ui.model_settings_dataset as model_settings_dataset_module
     import AntSleap.ui.route_management_panel as route_management_module
     from AntSleap.core.blink_dataset import BlinkTrajectoryDataset
@@ -3348,7 +3351,7 @@ class UiPolishScopeTests(unittest.TestCase):
 
             window.combo_locator.setCurrentIndex(locator_index)
             with patch.object(
-                main_module,
+                model_management_module,
                 "themed_yes_no_question",
                 return_value=main_module.QMessageBox.Yes,
             ):
@@ -3424,7 +3427,7 @@ class UiPolishScopeTests(unittest.TestCase):
             self.assertTrue(window.btn_del_locator.isEnabled())
 
             with patch.object(
-                main_module,
+                model_management_module,
                 "themed_yes_no_question",
                 return_value=main_module.QMessageBox.Yes,
             ):
@@ -3452,7 +3455,7 @@ class UiPolishScopeTests(unittest.TestCase):
             window.combo_segmenter.setCurrentIndex(segmenter_index)
 
             with patch.object(
-                main_module,
+                model_management_module,
                 "themed_yes_no_question",
                 return_value=main_module.QMessageBox.Yes,
             ):
@@ -4008,7 +4011,7 @@ class UiPolishScopeTests(unittest.TestCase):
             self.app.processEvents()
 
             with patch.object(
-                main_module,
+                vlm_module,
                 "themed_yes_no_question",
                 return_value=main_module.QMessageBox.No,
             ) as confirm:
@@ -4017,7 +4020,7 @@ class UiPolishScopeTests(unittest.TestCase):
             self.assertEqual(self.project_manager.project_data["labels"][image_key]["descriptions"]["Head"], "Auto-Annotated")
 
             with patch.object(
-                main_module,
+                vlm_module,
                 "themed_yes_no_question",
                 return_value=main_module.QMessageBox.Yes,
             ) as confirm:
@@ -4060,7 +4063,7 @@ class UiPolishScopeTests(unittest.TestCase):
 
             baseline_save_calls = self.project_manager.save_calls
             with patch.object(
-                main_module,
+                vlm_module,
                 "themed_yes_no_question",
                 return_value=main_module.QMessageBox.Yes,
             ), patch.object(window, "refresh_file_list", wraps=window.refresh_file_list) as full_refresh:
@@ -4109,7 +4112,7 @@ class UiPolishScopeTests(unittest.TestCase):
             window.vlm_preannotation_concurrency = 1
 
             with patch.object(
-                main_module,
+                vlm_module,
                 "themed_yes_no_question",
                 return_value=main_module.QMessageBox.Yes,
             ) as confirm:
@@ -4166,7 +4169,7 @@ class UiPolishScopeTests(unittest.TestCase):
             window.vlm_preannotation_prompt_profile = main_module.default_vlm_prompt_profile()
 
             DummyVlmPreannotationThread.instances = []
-            with patch.object(main_module, "VlmPreannotationThread", DummyVlmPreannotationThread):
+            with patch.object(vlm_module, "VlmPreannotationThread", DummyVlmPreannotationThread):
                 window._start_vlm_preannotation_workers()
 
             self.assertEqual(len(window.vlm_preannotation_threads), 2)
@@ -4270,7 +4273,7 @@ class UiPolishScopeTests(unittest.TestCase):
             self.app.processEvents()
 
             with patch.object(
-                main_module,
+                vlm_module,
                 "themed_yes_no_question",
                 return_value=main_module.QMessageBox.Yes,
             ) as confirm:
@@ -4331,7 +4334,7 @@ class UiPolishScopeTests(unittest.TestCase):
                 "_choose_clear_ai_scope",
                 return_value={"paths": [split_key], "label": "Split Crops", "count": 1},
             ), patch.object(
-                main_module,
+                prediction_module,
                 "themed_yes_no_question",
                 return_value=main_module.QMessageBox.Yes,
             ):

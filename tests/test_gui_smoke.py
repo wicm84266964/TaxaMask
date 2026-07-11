@@ -46,7 +46,9 @@ else:
     import AntSleap.ui.main_window_annotation as annotation_module
     import AntSleap.ui.main_window_dialogs as main_window_dialogs_module
     import AntSleap.ui.main_window_image_navigation as image_navigation_module
+    import AntSleap.ui.main_window_prediction as prediction_module
     import AntSleap.ui.main_window_project_lifecycle as project_lifecycle_module
+    import AntSleap.ui.main_window_training as training_module
     import AntSleap.ui.pdf_processing_widget as pdf_widget_module
     from AntSleap.core.project_templates import PROJECT_TEMPLATE_GENERIC
     from AntSleap.core.stl_project import StlRenderedProjectManager
@@ -2513,9 +2515,9 @@ class GuiSmokeTests(unittest.TestCase):
                 def deleteLater(self):
                     self.deleted = True
 
-            with patch.object(main_module, "_runtime_parent_backend", lambda *_args, **_kwargs: main_module.EXTERNAL_BACKEND_ID), \
-                 patch.object(main_module, "themed_yes_no_question", lambda *args, **kwargs: main_module.QMessageBox.Yes), \
-                 patch.object(main_module, "ExternalBatchInferenceThread", FakeExternalBatchThread):
+            with patch.object(prediction_module, "_runtime_parent_backend", lambda *_args, **_kwargs: main_module.EXTERNAL_BACKEND_ID), \
+                 patch.object(prediction_module, "themed_yes_no_question", lambda *args, **kwargs: main_module.QMessageBox.Yes), \
+                 patch.object(prediction_module, "ExternalBatchInferenceThread", FakeExternalBatchThread):
                 window.run_batch_inference()
 
             self.assertEqual(window.project.current_project_path, saved_before)
@@ -2611,7 +2613,7 @@ class GuiSmokeTests(unittest.TestCase):
                 def deleteLater(self):
                     self.deleted = True
 
-            with patch.object(main_module, "ExternalTrainingThread", FakeExternalTrainingThread):
+            with patch.object(training_module, "ExternalTrainingThread", FakeExternalTrainingThread):
                 window.run_external_training()
 
             self.assertEqual(len(starts), 1)

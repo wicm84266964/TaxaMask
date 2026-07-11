@@ -94,6 +94,7 @@ SUITES: dict[str, list[str]] = {
         "tests.test_main_window_stage4_project_lifecycle",
         "tests.test_main_window_stage5_navigation",
         "tests.test_main_window_stage6_annotation_blink",
+        "tests.test_main_window_stage7_training_prediction",
     ],
     "validation_chunk_sample": ["tests.test_safe_io.SafeIoTests.test_atomic_write_json_failure_keeps_existing_file_and_removes_tmp"],
     "sqlite_2d": [

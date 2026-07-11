@@ -35,6 +35,11 @@ ARCHITECTURE_PATHS = (
     ROOT / "AntSleap" / "ui" / "main_window_annotation.py",
     ROOT / "AntSleap" / "ui" / "main_window_blink_context.py",
     ROOT / "AntSleap" / "ui" / "main_window_blink_workflow.py",
+    ROOT / "AntSleap" / "ui" / "main_window_model_management.py",
+    ROOT / "AntSleap" / "ui" / "main_window_training.py",
+    ROOT / "AntSleap" / "ui" / "main_window_prediction.py",
+    ROOT / "AntSleap" / "ui" / "main_window_vlm.py",
+    ROOT / "AntSleap" / "ui" / "main_window_export.py",
 )
 KEY_TEST_PATHS = (
     ROOT / "tests" / "test_blink_bridge.py",

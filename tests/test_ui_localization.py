@@ -17,6 +17,7 @@ from PIL import Image
 from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
 
 import AntSleap.main as main_module
+import AntSleap.ui.main_window_prediction as prediction_module
 import AntSleap.ui.model_settings_profile as model_settings_profile_module
 import AntSleap.ui.route_management_panel as route_management_module
 from AntSleap.main import ExportDialog, BlinkEntryDialog, ModelSettingsDialog, RouteManagementPanel, TrainingPreflightDialog, TrainingReportDialog
@@ -1019,7 +1020,7 @@ class UiLocalizationTests(unittest.TestCase):
 
         window = DummyWindow()
         with patch.object(
-            main_module,
+            prediction_module,
             "themed_yes_no_question",
             return_value=QMessageBox.StandardButton.No,
         ) as question_mock:

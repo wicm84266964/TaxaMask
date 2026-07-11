@@ -144,6 +144,15 @@ class MainWindowProjectLifecycleMixin:
             )
             event.ignore()
             return
+        task_label = self._active_project_bound_background_task()
+        if task_label:
+            QMessageBox.information(
+                self,
+                tr("Project is busy", self.current_lang),
+                tr("{0} is still running. Wait for it to finish before closing TaxaMask.", self.current_lang).format(task_label),
+            )
+            event.ignore()
+            return
         self._shutdown_background_workers()
         self._flush_pending_project_save(defer_for_navigation=False)
         recent_project_path = self._active_recent_project_path()
@@ -624,6 +633,8 @@ class MainWindowProjectLifecycleMixin:
             )
 
     def new_project(self):
+        if not self._ensure_project_switch_available():
+            return
         d = QFileDialog.getExistingDirectory(
             self,
             tr("New Project Directory", self.current_lang),
@@ -646,6 +657,8 @@ class MainWindowProjectLifecycleMixin:
                 self.canvas.load_image("") 
 
     def new_tif_project(self):
+        if not self._ensure_project_switch_available():
+            return
         if not self._is_tif_workflow_enabled():
             self._show_tif_workflow_unavailable()
             return
@@ -1007,6 +1020,8 @@ class MainWindowProjectLifecycleMixin:
         return result
 
     def open_project_path(self, path):
+        if not self._ensure_project_switch_available():
+            return
         f = os.path.abspath(str(path))
         runtime_log_event("open_project_begin", path=f)
         self._flush_pending_project_save(defer_for_navigation=False)

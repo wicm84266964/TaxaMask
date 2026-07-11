@@ -2,7 +2,7 @@
 
 日期：2026-07-11
 
-状态：`Stage 6 verified / Stage 7 next`；用户要求 Stage 1-9 连续执行，中间 Gate 继续留证但不暂停，全部完成前不再推送 GitHub
+状态：`Stage 7 verified / Stage 8 next`；用户要求 Stage 1-9 连续执行，中间 Gate 继续留证但不暂停，全部完成前不再推送 GitHub
 
 需求文档：`docs/taxamask_architecture_refactor_round4_requirements_zh.md`
 
@@ -232,17 +232,20 @@
 
 ## 13. Stage 7：Training、Prediction、VLM 与 Export
 
-状态：`pending`
+状态：`verified`
 
-- [ ] 迁移模型列表、preflight、内置/外部训练和停止流程。
-- [ ] 迁移训练报告发现、打开和结果浏览。
-- [ ] 迁移 prediction、external prediction 和 batch inference。
-- [ ] 迁移 VLM scope、worker 队列、进度、取消和 SQLite run 记录。
-- [ ] 迁移 VLM candidate 应用和 AI draft 接受。
-- [ ] 迁移 dataset export worker 和完成/失败总结。
-- [ ] 后台结果验证 project/image/part/run context。
-- [ ] VLM、prediction、manual truth 和 provenance 角色不变。
-- [ ] 训练、预测、VLM、导出和停止/失败恢复测试通过。
+- [x] 迁移模型列表、preflight、内置/外部训练和停止流程。
+- [x] 迁移训练报告发现、打开和结果浏览。
+- [x] 迁移 prediction、external prediction 和 batch inference。
+- [x] 迁移 VLM scope、worker 队列、进度、取消和 SQLite run 记录。
+- [x] 迁移 VLM candidate 应用和 AI draft 接受。
+- [x] 迁移 dataset export worker 和完成/失败总结。
+- [x] 后台结果验证 project/image/part/run context。
+- [x] VLM、prediction、manual truth 和 provenance 角色不变。
+- [x] 训练、预测、VLM、导出和停止/失败恢复测试通过。
+- [x] 图片导入、训练、批量预测、VLM 或导出运行时阻止切换项目。
+- [x] 旧训练/预测/VLM 回调不会保存或更新新项目。
+- [x] Stage 7 review：`docs/taxamask_architecture_refactor_round4_stage7_review_zh.md`。
 
 ## 14. Stage 8：Shell 收束、测试迁移与性能治理
 

@@ -20,6 +20,7 @@ from PySide6.QtCore import QPointF, Qt
 from PySide6.QtWidgets import QApplication, QMessageBox, QDialog, QDialogButtonBox
 
 import main as main_module
+import AntSleap.ui.main_window_blink_context as blink_context_module
 from main import BlinkEntryDialog, MainWindow
 from ui.blink_lab import BlinkLabWidget, BlinkTrainingThread, BucketDeletePreviewDialog, BucketDeleteTypeConfirmDialog
 from AntSleap.core.blink_training_strategy import DEFAULT_BLINK_TRAINING_STRATEGY
@@ -529,7 +530,7 @@ class BlinkBridgeTests(unittest.TestCase):
             preferred_roi_parts=preferred_roi_parts,
         )
 
-        with patch.object(main_module, "BlinkEntryDialog", FakeDialog):
+        with patch.object(blink_context_module, "BlinkEntryDialog", FakeDialog):
             MainWindow.launch_blink_from_workbench(fake_window)
 
         self.assertEqual(self.pm.get_blink_context_parent("Mandible"), "Head")
@@ -597,7 +598,7 @@ class BlinkBridgeTests(unittest.TestCase):
         )
         fake_window._auto_boxes_for_canvas = lambda image_path: self.pm.split_auto_boxes_by_source(image_path)
 
-        with patch.object(main_module, "BlinkEntryDialog", FakeDialog):
+        with patch.object(blink_context_module, "BlinkEntryDialog", FakeDialog):
             MainWindow.launch_blink_from_workbench(fake_window)
 
         self.assertEqual(fake_window.blink_lab.last_auto_boxes, {"Eye": [54.0, 24.0, 66.0, 36.0]})
@@ -657,7 +658,7 @@ class BlinkBridgeTests(unittest.TestCase):
             preferred_roi_parts=preferred_roi_parts,
         )
 
-        with patch.object(main_module, "BlinkEntryDialog", FakeDialog):
+        with patch.object(blink_context_module, "BlinkEntryDialog", FakeDialog):
             MainWindow.launch_blink_from_workbench(fake_window)
 
         self.assertIsNone(self.pm.get_blink_context_parent("Mandible"))

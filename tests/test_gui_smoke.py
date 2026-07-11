@@ -43,6 +43,7 @@ else:
     from PIL import Image, ImageDraw, ImageFont
 
     import AntSleap.main as main_module
+    import AntSleap.ui.main_window_annotation as annotation_module
     import AntSleap.ui.main_window_dialogs as main_window_dialogs_module
     import AntSleap.ui.main_window_image_navigation as image_navigation_module
     import AntSleap.ui.main_window_project_lifecycle as project_lifecycle_module
@@ -205,8 +206,8 @@ class GuiSmokeTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.project_dir = Path(self.temp_dir.name)
         self._runtime_patchers = [
-            patch.object(main_module, "SAMWorker", SmokeSamWorker),
-            patch.object(main_module, "QThread", SmokeThread),
+            patch.object(annotation_module, "SAMWorker", SmokeSamWorker),
+            patch.object(annotation_module, "QThread", SmokeThread),
         ]
         for patcher in self._runtime_patchers:
             patcher.start()
@@ -242,8 +243,8 @@ class GuiSmokeTests(unittest.TestCase):
              patch.object(main_module, "AntEngine", SmokeEngine), \
              patch.object(main_module, "MultiModalDB", SmokeDatabase), \
              patch.object(main_module.MainWindow, "_default_outputs_root", lambda _window: str(self.project_dir / "TaxaMask_outputs")), \
-             patch.object(main_module, "SAMWorker", SmokeSamWorker), \
-             patch.object(main_module, "QThread", SmokeThread), \
+             patch.object(annotation_module, "SAMWorker", SmokeSamWorker), \
+             patch.object(annotation_module, "QThread", SmokeThread), \
              patch.object(PdfProcessingWidget, "load_api_settings", lambda self: None), \
              patch.object(PdfProcessingWidget, "refresh_profile_list", lambda self: None), \
              patch.object(PdfProcessingWidget, "sync_runtime_controls_from_config", lambda self: None), \
@@ -474,8 +475,8 @@ class GuiSmokeTests(unittest.TestCase):
         SmokeSamWorker.created = 0
         window = self._make_window()
         try:
-            with patch.object(main_module, "SAMWorker", SmokeSamWorker), \
-                 patch.object(main_module, "QThread", SmokeThread):
+            with patch.object(annotation_module, "SAMWorker", SmokeSamWorker), \
+                 patch.object(annotation_module, "QThread", SmokeThread):
                 self.assertTrue(main_module.MainWindow.ensure_2d_stl_models_preloaded(window))
                 self.assertFalse(main_module.MainWindow.ensure_2d_stl_models_preloaded(window))
             self.assertEqual(SmokeSamWorker.created, 1)

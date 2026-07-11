@@ -2,7 +2,7 @@
 
 日期：2026-07-11
 
-状态：`Stage 5 verified / Stage 6 next`；用户要求 Stage 1-9 连续执行，中间 Gate 继续留证但不暂停，全部完成前不再推送 GitHub
+状态：`Stage 6 verified / Stage 7 next`；用户要求 Stage 1-9 连续执行，中间 Gate 继续留证但不暂停，全部完成前不再推送 GitHub
 
 需求文档：`docs/taxamask_architecture_refactor_round4_requirements_zh.md`
 
@@ -216,16 +216,19 @@
 
 ## 12. Stage 6：Annotation、SAM 与 Blink
 
-状态：`pending`
+状态：`verified`
 
-- [ ] 迁移 annotation box/polygon、工具状态和 measurement。
-- [ ] 迁移 SAM preload、point/box prompt、成功和失败回调。
-- [ ] 迁移 Blink parent-child context 和 workbench 入口。
-- [ ] 迁移 Blink auto annotate、auto shrink、batch shrink 和专家训练。
-- [ ] 迁移 route expert settings 和 parent model context。
-- [ ] Parent 2D/STL、Blink child、TIF volume、TIF Local Axis 后端保持独立。
-- [ ] AI 草稿、manual annotation 和 prediction 来源角色不变。
-- [ ] Blink bridge、SAM、route、训练策略和 GUI key-path 测试通过。
+- [x] 迁移 annotation box/polygon、工具状态和 measurement。
+- [x] 迁移 SAM preload、point/box prompt、成功和失败回调。
+- [x] 迁移 Blink parent-child context 和 workbench 入口。
+- [x] 迁移 Blink auto annotate、auto shrink、batch shrink 和专家训练。
+- [x] 迁移 route expert settings 和 parent model context。
+- [x] Parent 2D/STL、Blink child、TIF volume、TIF Local Axis 后端保持独立。
+- [x] AI 草稿、manual annotation 和 prediction 来源角色不变。
+- [x] Blink bridge、SAM、route、训练策略和 GUI key-path 测试通过。
+- [x] SAM 回调按 prompt 发起时的 image/part/description 写回；图片切换后不污染新图片。
+- [x] Blink 子训练 progress/result/error/cancelled/finished 信号保持单次连接。
+- [x] Stage 6 review：`docs/taxamask_architecture_refactor_round4_stage6_review_zh.md`。
 
 ## 13. Stage 7：Training、Prediction、VLM 与 Export
 

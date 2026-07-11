@@ -196,6 +196,7 @@ def _child_benchmark(workspace: Path) -> dict[str, object]:
         sys.path.insert(0, str(ROOT))
 
     import AntSleap.main as main_module
+    import AntSleap.ui.main_window_annotation as annotation_module
     from PIL import Image
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication
@@ -209,8 +210,8 @@ def _child_benchmark(workspace: Path) -> dict[str, object]:
         stack.enter_context(patch.object(main_module, "ConfigManager", BenchmarkConfigManager))
         stack.enter_context(patch.object(main_module, "AntEngine", BenchmarkEngine))
         stack.enter_context(patch.object(main_module, "MultiModalDB", BenchmarkDatabase))
-        stack.enter_context(patch.object(main_module, "SAMWorker", BenchmarkSamWorker))
-        stack.enter_context(patch.object(main_module, "QThread", BenchmarkThread))
+        stack.enter_context(patch.object(annotation_module, "SAMWorker", BenchmarkSamWorker))
+        stack.enter_context(patch.object(annotation_module, "QThread", BenchmarkThread))
         stack.enter_context(patch.object(main_module.MainWindow, "_default_outputs_root", lambda _window: str(output_root)))
         stack.enter_context(patch.object(PdfProcessingWidget, "load_api_settings", lambda self: None))
         stack.enter_context(patch.object(PdfProcessingWidget, "refresh_profile_list", lambda self: None))

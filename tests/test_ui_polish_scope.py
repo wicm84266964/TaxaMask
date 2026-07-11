@@ -42,6 +42,8 @@ except ModuleNotFoundError as exc:
         raise
 else:
     import AntSleap.main as main_module
+    import AntSleap.ui.main_window_annotation as annotation_module
+    import AntSleap.ui.main_window_blink_workflow as blink_workflow_module
     import AntSleap.ui.main_window_image_navigation as image_navigation_module
     import AntSleap.ui.main_window_part_tree as part_tree_module
     import AntSleap.ui.model_settings_dataset as model_settings_dataset_module
@@ -986,8 +988,8 @@ class UiPolishScopeTests(unittest.TestCase):
         self.engine = DummyEngine(str(self.weights_dir))
         self.project_manager = DummyProjectManager(self.temp_dir.name)
         self._runtime_patchers = [
-            patch.object(main_module, "SAMWorker", DummySamWorker),
-            patch.object(main_module, "QThread", DummyThread),
+            patch.object(annotation_module, "SAMWorker", DummySamWorker),
+            patch.object(annotation_module, "QThread", DummyThread),
         ]
         for patcher in self._runtime_patchers:
             patcher.start()
@@ -1008,8 +1010,8 @@ class UiPolishScopeTests(unittest.TestCase):
              patch.object(main_module, "ProjectManager", project_factory), \
              patch.object(main_module, "MultiModalDB", DummyDatabase), \
              patch.object(main_module, "AntEngine", engine_factory), \
-             patch.object(main_module, "SAMWorker", DummySamWorker), \
-             patch.object(main_module, "QThread", DummyThread), \
+             patch.object(annotation_module, "SAMWorker", DummySamWorker), \
+             patch.object(annotation_module, "QThread", DummyThread), \
              patch.object(PdfProcessingWidget, "load_api_settings", lambda self: None), \
              patch.object(PdfProcessingWidget, "refresh_profile_list", lambda self: None), \
              patch.object(PdfProcessingWidget, "sync_runtime_controls_from_config", lambda self: None), \
@@ -2136,7 +2138,7 @@ class UiPolishScopeTests(unittest.TestCase):
             window.current_image = first_key
             window._select_part_in_tree("Mandible")
 
-            with patch.object(main_module, "themed_yes_no_question", return_value=main_module.QMessageBox.Yes):
+            with patch.object(blink_workflow_module, "themed_yes_no_question", return_value=main_module.QMessageBox.Yes):
                 window.run_blink_batch_auto_shrink()
 
             self.assertEqual(len(FakeRefiner.calls), 1)

@@ -470,6 +470,9 @@ except ImportError:
 
 try:
     from AntSleap.ui.main_window_agent_context import MainWindowAgentContextMixin
+    from AntSleap.ui.main_window_annotation import MainWindowAnnotationMixin
+    from AntSleap.ui.main_window_blink_context import MainWindowBlinkContextMixin
+    from AntSleap.ui.main_window_blink_workflow import MainWindowBlinkWorkflowMixin
     from AntSleap.ui.main_window_image_navigation import MainWindowImageNavigationMixin
     from AntSleap.ui.main_window_literature_bridge import MainWindowLiteratureBridgeMixin
     from AntSleap.ui.main_window_part_tree import MainWindowPartTreeMixin
@@ -478,6 +481,9 @@ try:
     from AntSleap.ui.main_window_start_center import MainWindowStartCenterMixin
 except ImportError:
     from ui.main_window_agent_context import MainWindowAgentContextMixin
+    from ui.main_window_annotation import MainWindowAnnotationMixin
+    from ui.main_window_blink_context import MainWindowBlinkContextMixin
+    from ui.main_window_blink_workflow import MainWindowBlinkWorkflowMixin
     from ui.main_window_image_navigation import MainWindowImageNavigationMixin
     from ui.main_window_literature_bridge import MainWindowLiteratureBridgeMixin
     from ui.main_window_part_tree import MainWindowPartTreeMixin
@@ -494,6 +500,9 @@ class MainWindow(
     MainWindowPartTreeMixin,
     MainWindowImageNavigationMixin,
     MainWindowLiteratureBridgeMixin,
+    MainWindowAnnotationMixin,
+    MainWindowBlinkContextMixin,
+    MainWindowBlinkWorkflowMixin,
     QMainWindow,
 ):
     sam_point_requested = Signal(str, float, float)
@@ -691,10 +700,6 @@ class MainWindow(
             panel.update_action_buttons()
 
 
-    def appoint_selected_route_expert(self):
-        panel = getattr(self, "route_settings_panel", None)
-        if panel is not None:
-            panel.appoint_selected_route_expert()
 
     def toggle_selected_route_enabled(self):
         panel = getattr(self, "route_settings_panel", None)
@@ -835,10 +840,6 @@ class MainWindow(
         external_thread = getattr(self, "external_training_thread", None)
         return bool((self.trainer and self.trainer.isRunning()) or (external_thread and external_thread.isRunning()))
 
-    def _is_child_training_running(self):
-        blink_lab = getattr(self, "blink_lab", None)
-        thread = getattr(blink_lab, "training_thread", None) if blink_lab is not None else None
-        return bool(thread and thread.isRunning())
 
     def _is_any_training_running(self):
         return self._is_parent_training_running() or self._is_child_training_running()
@@ -863,43 +864,10 @@ class MainWindow(
         if progress_value is not None and hasattr(self, "progress"):
             self.progress.setValue(progress_value)
 
-    def _connect_child_training_progress(self):
-        blink_lab = getattr(self, "blink_lab", None)
-        thread = getattr(blink_lab, "training_thread", None) if blink_lab is not None else None
-        if thread is None or getattr(thread, "_taxamask_shared_progress_connected", False):
-            return
-        thread._taxamask_shared_progress_connected = True
-        thread.progress_signal.connect(lambda value: self._set_training_progress("child", None, value))
-        thread.result_signal.connect(self._on_child_training_result)
-        thread.error_signal.connect(self._on_child_training_error)
-        thread.cancelled_signal.connect(self._on_child_training_cancelled)
-        thread.finished.connect(self._on_child_training_finished)
 
-    def _on_child_training_result(self, save_path):
-        self.child_training_failed = not bool(save_path)
-        if save_path:
-            self._set_training_progress("child", tr("Child-part expert training finished.", self.current_lang), 100)
-        else:
-            self._set_training_progress("child", tr("Child-part expert training failed.", self.current_lang), self.progress.value())
 
-    def _on_child_training_error(self, _error_msg):
-        self.child_training_failed = True
-        self._set_training_progress("child", tr("Child-part expert training failed.", self.current_lang), self.progress.value())
 
-    def _on_child_training_cancelled(self):
-        self.child_training_cancel_requested = True
-        self._set_training_progress("child", tr("Training cancelled.", self.current_lang), self.progress.value())
 
-    def _on_child_training_finished(self):
-        if self.active_training_kind == "child" and not self.child_training_failed and not self.child_training_cancel_requested:
-            self._set_training_progress("child", tr("Child-part expert training finished.", self.current_lang), 100)
-        if hasattr(self, "btn_train"):
-            self.btn_train.setEnabled(True)
-        if hasattr(self, "btn_blink_stop_training"):
-            self.btn_blink_stop_training.setEnabled(False)
-        self.child_training_failed = False
-        self.child_training_cancel_requested = False
-        self._refresh_blink_refine_state()
 
     def _launch_training_with_preflight(self, preflight, tax, locator_scope, train_segmenter=True, training_scope=None):
         if self._is_child_training_running():
@@ -1272,297 +1240,19 @@ class MainWindow(
 
 
 
-    def _route_parents_for_child(self, child_part):
-        clean_child = str(child_part or "").strip()
-        if not clean_child:
-            return []
-        routes = []
-        try:
-            routes = self.project.iter_cascade_routes()
-        except Exception:
-            routes = []
-        parents = []
-        for route in routes or []:
-            if not isinstance(route, dict):
-                continue
-            parent = str(route.get("parent") or "").strip()
-            child = str(route.get("child") or "").strip()
-            if parent and child == clean_child and parent != clean_child and parent not in parents:
-                parents.append(parent)
-        return parents
 
-    def _resolve_child_parent(self, child_part):
-        clean_child = str(child_part or "").strip()
-        if not clean_child:
-            return None, "none"
-        taxonomy = set(str(part).strip() for part in self.project.project_data.get("taxonomy", []) if str(part).strip())
 
-        remembered_parent = None
-        get_parent = getattr(self.project, "get_blink_context_parent", None)
-        if callable(get_parent):
-            try:
-                remembered_parent = get_parent(clean_child)
-            except Exception:
-                remembered_parent = None
-        remembered_parent = str(remembered_parent or "").strip()
-        if remembered_parent and remembered_parent in taxonomy and remembered_parent != clean_child:
-            return remembered_parent, "remembered"
 
-        route_parents = self._route_parents_for_child(clean_child)
-        if len(route_parents) == 1:
-            return route_parents[0], "route"
 
-        tree_parent = self._part_tree_parent_for(clean_child)
-        if tree_parent and tree_parent != clean_child:
-            return tree_parent, "part_tree"
-        return None, "none"
 
-    def _parent_context_box(self, parent_part):
-        if not self.current_image or not parent_part:
-            return None, "none"
-        manual = self.project.get_boxes(self.current_image)
-        box = _clean_box(manual.get(parent_part) if isinstance(manual, dict) else None)
-        if box:
-            return box, "manual"
-        auto, vlm = self._auto_boxes_for_canvas(self.current_image)
-        box = _clean_box(auto.get(parent_part) if isinstance(auto, dict) else None)
-        if box:
-            return box, "auto"
-        box = _clean_box(vlm.get(parent_part) if isinstance(vlm, dict) else None)
-        if box:
-            return box, "vlm"
-        return None, "none"
 
-    def _current_shrink_loose_boxes(self):
-        if not self.current_image or not hasattr(self.project, "get_shrink_loose_boxes"):
-            return {}
-        boxes = self.project.get_shrink_loose_boxes(self.current_image)
-        return boxes if isinstance(boxes, dict) else {}
 
-    def _auto_boxes_for_canvas(self, image_path):
-        splitter = getattr(self.project, "split_auto_boxes_by_source", None)
-        if callable(splitter):
-            try:
-                model_boxes, vlm_boxes = splitter(image_path)
-                return model_boxes if isinstance(model_boxes, dict) else {}, vlm_boxes if isinstance(vlm_boxes, dict) else {}
-            except Exception:
-                pass
-        auto_boxes = self.project.get_auto_boxes(image_path)
-        if not isinstance(auto_boxes, dict):
-            return {}, {}
-        meta = {}
-        get_meta = getattr(self.project, "get_auto_box_meta", None)
-        if callable(get_meta):
-            try:
-                meta = get_meta(image_path)
-            except Exception:
-                meta = {}
-        meta = meta if isinstance(meta, dict) else {}
-        model_boxes = {}
-        vlm_boxes = {}
-        for part_name, box in auto_boxes.items():
-            part_meta = meta.get(part_name, {}) if isinstance(meta.get(part_name), dict) else {}
-            if part_meta.get("source") == AUTO_BOX_SOURCE_VLM:
-                vlm_boxes[part_name] = box
-            else:
-                model_boxes[part_name] = box
-        return model_boxes, vlm_boxes
 
-    def _refresh_current_canvas_boxes(self):
-        if not self.current_image:
-            return
-        model_auto_boxes, vlm_auto_boxes = self._auto_boxes_for_canvas(self.current_image)
-        self.canvas.set_boxes(
-            self.project.get_boxes(self.current_image),
-            model_auto_boxes,
-            self._current_shrink_loose_boxes(),
-            vlm=vlm_auto_boxes,
-        )
 
-    def _route_entry_for_context(self, parent_part, child_part):
-        get_route = getattr(self.project, "get_cascade_route", None)
-        if callable(get_route):
-            try:
-                route = get_route(parent_part, child_part)
-            except Exception:
-                route = None
-            if isinstance(route, dict):
-                return dict(route)
-        for route in self.project.iter_cascade_routes():
-            if not isinstance(route, dict):
-                continue
-            if route.get("parent") == parent_part and route.get("child") == child_part:
-                return dict(route)
-        return None
 
-    def _route_expert_status(self, route_entry):
-        if not isinstance(route_entry, dict):
-            return "missing", tr("Route not configured", self.current_lang), False
-        appointed = get_route_appointed_expert(route_entry)
-        has_appointed = bool(appointed.get("expert_id"))
-        block_reason = None
-        cascade_manager = getattr(getattr(self, "engine", None), "cascade_manager", None)
-        get_block = getattr(cascade_manager, "get_route_block_reason", None)
-        if callable(get_block):
-            try:
-                block_reason = get_block(route_entry)
-            except Exception:
-                block_reason = None
-        if block_reason == "expert_unappointed":
-            return "unappointed", ui_text("Expert not appointed yet", self.current_lang), False
-        if block_reason == "expert_model_missing":
-            if has_appointed:
-                return "ready", tr("Expert file missing", self.current_lang), True
-            return "missing_file", tr("Expert file missing", self.current_lang), False
-        if not has_appointed:
-            return "unappointed", ui_text("Expert not appointed yet", self.current_lang), False
-        if not bool(route_entry.get("enabled", False)):
-            return "disabled", ui_text("Disabled", self.current_lang), has_appointed
-        if has_appointed:
-            return "ready", ui_text("Enabled", self.current_lang), True
-        return "unappointed", ui_text("Expert not appointed yet", self.current_lang), False
 
-    def _current_blink_context(self):
-        selected_part = self._current_part_name()
-        context = {
-            "selected_part": selected_part,
-            "role": "none",
-            "parent_part": None,
-            "child_part": None,
-            "parent_source": "none",
-            "route_label": "",
-            "parent_box": None,
-            "parent_box_source": "none",
-            "has_parent_box": False,
-            "route_entry": None,
-            "route_status": "none",
-            "route_status_text": ui_text("Unknown", self.current_lang),
-            "has_appointed_expert": False,
-            "can_refine": False,
-            "disabled_reason": tr("Select a child structure first.", self.current_lang),
-        }
-        if not selected_part:
-            return context
 
-        if self._is_parent_part(selected_part):
-            box, source = self._parent_context_box(selected_part)
-            context.update(
-                {
-                    "role": "parent",
-                    "parent_part": selected_part,
-                    "parent_box": box,
-                    "parent_box_source": source,
-                    "has_parent_box": bool(box),
-                    "disabled_reason": tr("Select a child structure for refinement.", self.current_lang),
-                }
-            )
-            return context
 
-        parent_part, parent_source = self._resolve_child_parent(selected_part)
-        context.update(
-            {
-                "role": "child",
-                "child_part": selected_part,
-                "parent_part": parent_part,
-                "parent_source": parent_source,
-            }
-        )
-        if parent_part:
-            context["route_label"] = f"{parent_part} -> {selected_part}"
-            parent_box, parent_box_source = self._parent_context_box(parent_part)
-            route_entry = self._route_entry_for_context(parent_part, selected_part)
-            route_status, route_status_text, has_appointed = self._route_expert_status(route_entry)
-            context.update(
-                {
-                    "parent_box": parent_box,
-                    "parent_box_source": parent_box_source,
-                    "has_parent_box": bool(parent_box),
-                    "route_entry": route_entry,
-                    "route_status": route_status,
-                    "route_status_text": route_status_text,
-                    "has_appointed_expert": has_appointed,
-                }
-            )
-        if not parent_part:
-            context["disabled_reason"] = tr("Choose or remember a parent structure for this child first.", self.current_lang)
-        elif not context["has_parent_box"]:
-            context["disabled_reason"] = tr("Draw a parent box before child refinement.", self.current_lang)
-        elif context["route_status"] in {"missing", "unappointed", "missing_file"}:
-            context["disabled_reason"] = tr("Configure a route expert before automatic child annotation.", self.current_lang)
-        elif context["route_status"] == "disabled":
-            context["disabled_reason"] = tr("Enable the current route before automatic child annotation.", self.current_lang)
-        else:
-            context["can_refine"] = True
-            context["disabled_reason"] = ""
-        return context
-
-    def _parent_box_aspect_ratio(self, parent_part):
-        ratios = getattr(self, "parent_box_aspect_ratios", None)
-        if not isinstance(ratios, dict):
-            ratios = self.project.get_parent_box_aspect_ratios() if hasattr(self.project, "get_parent_box_aspect_ratios") else {}
-            self.parent_box_aspect_ratios = dict(ratios)
-        try:
-            ratio = float(ratios.get(parent_part))
-        except Exception:
-            ratio = None
-        return ratio if ratio and ratio > 0 else None
-
-    def _parent_context_options(self, child_part):
-        clean_child = str(child_part or "").strip()
-        if not clean_child:
-            return []
-        taxonomy = {
-            str(part).strip()
-            for part in self.project.project_data.get("taxonomy", [])
-            if str(part).strip()
-        }
-        options = []
-        for parent_part in (
-            list(self._workbench_parent_parts())
-            + list(self._route_parents_for_child(clean_child))
-            + [self._part_tree_parent_for(clean_child)]
-        ):
-            clean_parent = str(parent_part or "").strip()
-            if (
-                clean_parent
-                and clean_parent != clean_child
-                and clean_parent in taxonomy
-                and clean_parent not in options
-            ):
-                options.append(clean_parent)
-        return options
-
-    def _refresh_annotation_box_constraints(self):
-        if not hasattr(self, "canvas"):
-            return
-        context = dict(getattr(self, "current_blink_context", {}) or self._current_blink_context())
-        ratio = None
-        lock_parent_ratio = True
-        if hasattr(self, "check_lock_parent_box_ratio"):
-            lock_parent_ratio = self.check_lock_parent_box_ratio.isChecked()
-        if (
-            self._active_box_tool_role() in {"sam", "annotation"}
-            and lock_parent_ratio
-            and context.get("role") == "parent"
-        ):
-            ratio = self._parent_box_aspect_ratio(context.get("parent_part"))
-        self.canvas.set_annotation_box_aspect_ratio(ratio)
-
-    def _active_box_tool_role(self):
-        if hasattr(self, "radio_loose_shrink_box") and self.radio_loose_shrink_box.isChecked():
-            return "shrink"
-        if hasattr(self, "radio_annotation_box") and self.radio_annotation_box.isChecked():
-            return "annotation"
-        if hasattr(self, "radio_box") and self.radio_box.isChecked():
-            return "sam"
-        return "other"
-
-    def _refresh_blink_refine_state(self):
-        context = self._current_blink_context()
-        self.current_blink_context = dict(context)
-        self._refresh_annotation_box_constraints()
-        self._update_blink_refine_panel(context)
-        return context
 
 
     def clear_ai_labels(self):
@@ -1819,124 +1509,7 @@ class MainWindow(
         self.refresh_route_table()
         self._refresh_blink_refine_state()
 
-    def _update_blink_refine_panel(self, context=None):
-        if not hasattr(self, "blink_refine_panel"):
-            return
-        context = dict(context or getattr(self, "current_blink_context", {}) or {})
-        role = context.get("role") or "none"
-        selected_part = context.get("selected_part") or ""
-        parent_part = context.get("parent_part") or ""
-        child_part = context.get("child_part") or ""
 
-        if role == "parent":
-            role_text = tr("Parent context", self.current_lang)
-            box_status = tr("parent box exists", self.current_lang) if context.get("has_parent_box") else tr("parent box missing", self.current_lang)
-            summary = tr("Current structure: {0} ({1}); {2}.", self.current_lang).format(selected_part, role_text, box_status)
-        elif role == "child":
-            role_text = tr("Child structure", self.current_lang)
-            route_text = context.get("route_label") or tr("Parent not selected", self.current_lang)
-            summary = tr("Current structure: {0} ({1}); route {2}.", self.current_lang).format(selected_part, role_text, route_text)
-        else:
-            summary = tr("Select a structure to see Blink parent-child status.", self.current_lang)
-
-        self.blink_context_status_label.setText(summary)
-        self.label_blink_route.setText(
-            tr("Current route: {0}", self.current_lang).format(context.get("route_label") or tr("Not available", self.current_lang))
-        )
-        self.label_blink_parent_context.setText(tr("Parent context:", self.current_lang))
-        self._update_blink_parent_context_combo(context)
-        parent_box_text = tr("Parent box: {0}", self.current_lang).format(
-            tr("available ({0})", self.current_lang).format(context.get("parent_box_source"))
-            if context.get("has_parent_box")
-            else tr("missing", self.current_lang)
-        )
-        if parent_part and role == "child":
-            parent_box_text = f"{parent_part} · {parent_box_text}"
-        self.label_blink_parent_box.setText(parent_box_text)
-        self.label_blink_expert.setText(
-            tr("Route expert: {0}", self.current_lang).format(context.get("route_status_text") or ui_text("Unknown", self.current_lang))
-        )
-        self.check_lock_parent_box_ratio.setText(tr("Lock parent box ratio", self.current_lang))
-        self.check_lock_parent_box_ratio.setToolTip(
-            tr(
-                "Off by default. Enable when preparing fixed-ratio parent boxes for child-part training; it affects parent SAM box prompts and parent manual ROI boxes.",
-                self.current_lang,
-            )
-        )
-
-        can_open_route = bool(parent_part and child_part)
-        self.btn_configure_route_expert.setEnabled(can_open_route)
-        self.btn_configure_route_expert.setToolTip(
-            tr("Open route expert settings for {0}.", self.current_lang).format(context.get("route_label"))
-            if can_open_route
-            else tr("Select a child structure with a parent context first.", self.current_lang)
-        )
-
-        can_refine = bool(context.get("can_refine"))
-        disabled_reason = str(context.get("disabled_reason") or "")
-        self.btn_blink_auto_annotate.setEnabled(can_refine)
-        self.btn_blink_auto_annotate.setToolTip(disabled_reason)
-        self.btn_blink_auto_shrink.setEnabled(bool(role == "child" and parent_part and context.get("has_parent_box")))
-        self.btn_blink_auto_shrink.setToolTip(disabled_reason if not self.btn_blink_auto_shrink.isEnabled() else "")
-        if hasattr(self, "btn_blink_batch_auto_shrink"):
-            self.btn_blink_batch_auto_shrink.setEnabled(bool(role == "child" and parent_part))
-            self.btn_blink_batch_auto_shrink.setToolTip(disabled_reason if not self.btn_blink_batch_auto_shrink.isEnabled() else "")
-        parent_training_busy = self._is_parent_training_running()
-        child_training_busy = self._is_child_training_running()
-        training_busy = parent_training_busy or child_training_busy
-        can_train_child = bool(role == "child" and parent_part) and not training_busy
-        self.btn_blink_train_expert.setEnabled(can_train_child)
-        if self.btn_blink_train_expert.isEnabled():
-            train_child_tooltip = tr("Training uses saved shrink trajectories for this parent-child route.", self.current_lang)
-        elif parent_training_busy:
-            train_child_tooltip = tr("Parent-part training is running. Wait for it to finish before training a child expert.", self.current_lang)
-        elif child_training_busy:
-            train_child_tooltip = tr("Blink expert training is already running.", self.current_lang)
-        else:
-            train_child_tooltip = tr("Select a child structure with a parent context first.", self.current_lang)
-        self.btn_blink_train_expert.setToolTip(
-            train_child_tooltip
-        )
-
-    def _update_blink_parent_context_combo(self, context):
-        if not hasattr(self, "combo_blink_parent_context"):
-            return
-        context = dict(context or {})
-        combo = self.combo_blink_parent_context
-        self._updating_blink_parent_context = True
-        try:
-            combo.blockSignals(True)
-            combo.clear()
-            role = context.get("role")
-            child_part = context.get("child_part")
-            parent_part = context.get("parent_part")
-            options = self._parent_context_options(child_part) if role == "child" else []
-            prompt_text = tr("Choose parent context", self.current_lang)
-            unavailable_text = tr("Parent context unavailable", self.current_lang)
-            if hasattr(combo, "setPlaceholderText"):
-                combo.setPlaceholderText(prompt_text if role == "child" else unavailable_text)
-            for option in options:
-                combo.addItem(option, option)
-            index = combo.findData(parent_part)
-            if index >= 0:
-                combo.setCurrentIndex(index)
-            elif options:
-                combo.setCurrentIndex(-1)
-            else:
-                combo.addItem(unavailable_text, "")
-                item = combo.model().item(0) if combo.model() is not None else None
-                if item is not None:
-                    item.setEnabled(False)
-                combo.setCurrentIndex(0)
-            combo.setEnabled(role == "child" and bool(options))
-            combo.setToolTip(
-                prompt_text
-                if combo.isEnabled()
-                else unavailable_text
-            )
-        finally:
-            combo.blockSignals(False)
-            self._updating_blink_parent_context = False
 
     def open_general_settings(self):
         params = {
@@ -2268,708 +1841,37 @@ class MainWindow(
             apply_theme_button_style(self.btn_blink_stop_training, BUTTON_ROLE_STOP, "padding: 6px;", self.current_theme)
 
 
-    def launch_blink_from_workbench(self):
-        if not self.current_image:
-            QMessageBox.warning(self, tr("Child Expert Session Entry", self.current_lang), tr("Please select an image first.", self.current_lang))
-            return
-
-        selected_part = self._current_part_name()
-        if not selected_part:
-            QMessageBox.warning(self, tr("Child Expert Session Entry", self.current_lang), tr("Please select a target part first.", self.current_lang))
-            return
-
-        taxonomy = list(self.project.project_data.get("taxonomy", []))
-        remembered_parent_map = self.project.get_blink_context_roi_parents()
-        remembered_parent = remembered_parent_map.get(str(selected_part or "").strip())
-        preferred_roi_parts = _blink_preferred_roi_parts(selected_part, remembered_parent)
-        roi_candidates = self._collect_blink_roi_candidates(
-            self.current_image,
-            selected_part,
-            preferred_roi_parts=preferred_roi_parts,
-        )
-        if not roi_candidates:
-            QMessageBox.information(
-                self,
-                tr("Child Expert Session Entry", self.current_lang),
-                tr("No entry ROI is available yet. Draw a manual box or generate an auto box in the workbench first.", self.current_lang),
-            )
-            return
-
-        dialog = BlinkEntryDialog(
-            self.current_image,
-            taxonomy,
-            selected_part,
-            roi_candidates,
-            self,
-            self.current_lang,
-            remembered_parent_map=remembered_parent_map,
-        )
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-
-        session = dialog.get_session_spec(self.current_image)
-        if not session:
-            QMessageBox.warning(
-                self,
-                tr("Child Expert Session Entry", self.current_lang),
-                tr("Failed to build a child expert session from the selected options.", self.current_lang),
-            )
-            return
-
-        labels = self.project.get_labels(self.current_image)
-        manual_boxes = self.project.get_boxes(self.current_image)
-        box_splitter = getattr(self, "_auto_boxes_for_canvas", None)
-        if callable(box_splitter):
-            auto_boxes, _vlm_boxes = box_splitter(self.current_image)
-        else:
-            project_splitter = getattr(self.project, "split_auto_boxes_by_source", None)
-            if callable(project_splitter):
-                auto_boxes, _vlm_boxes = project_splitter(self.current_image)
-            else:
-                auto_boxes = self.project.get_auto_boxes(self.current_image)
-        started = self.blink_lab.start_session(session, labels, manual_boxes, auto_boxes)
-        if not started:
-            return
-        self.tabs.setCurrentWidget(self.blink_lab)
-
-        focus_roi = session.get("focus_roi", {})
-        if not isinstance(focus_roi, dict):
-            focus_roi = {}
-        remembered_target_part = session.get("target_part")
-        remembered_parent_part = str(focus_roi.get("part") or "").strip()
-        if remembered_parent_part and remembered_target_part:
-            if remembered_parent_part == remembered_target_part:
-                self.project.clear_blink_context_parent(remembered_target_part)
-            else:
-                self.project.remember_blink_context_parent(remembered_target_part, remembered_parent_part)
-                if hasattr(self.project, "register_cascade_route_candidate"):
-                    self.project.register_cascade_route_candidate(
-                        remembered_parent_part,
-                        remembered_target_part,
-                        focus_source=focus_roi.get("source"),
-                        registration_source="blink_candidate",
-                    )
-                    if hasattr(self, "refresh_route_table"):
-                        self.refresh_route_table()
-        focus_label = focus_roi.get("part", "ROI")
-        focus_source = focus_roi.get("source", "manual")
-        self.log(
-            tr("Opened child expert session for {0} via {1} ({2}).", self.current_lang).format(
-                session.get('target_part'), focus_label, focus_source
-            )
-        )
 
 
-    def on_enhancement_changed(self):
-        self.canvas.set_enhancements(0, 1.0)
 
-    def on_tool_changed(self):
-        if self.radio_magic.isChecked():
-            self.canvas.set_mode("MAGIC_WAND")
-            self._refresh_annotation_box_constraints()
-        elif self.radio_box.isChecked():
-            self.canvas.set_mode("BOX_PROMPT")
-            self._refresh_annotation_box_constraints()
-        elif self.radio_annotation_box.isChecked() or self.radio_loose_shrink_box.isChecked():
-            self.canvas.set_mode("ANNOTATION_BOX")
-            self._refresh_annotation_box_constraints()
-        elif self.radio_scale.isChecked():
-            self.canvas.set_mode("SCALE")
-            self._refresh_annotation_box_constraints()
-        else:
-            self.canvas.set_mode("DRAW")
-            self._refresh_annotation_box_constraints()
 
-    def on_blink_parent_context_changed(self, _index=None):
-        if getattr(self, "_updating_blink_parent_context", False):
-            return
-        child_part = self._current_part_name()
-        parent_part = self.combo_blink_parent_context.currentData() if hasattr(self, "combo_blink_parent_context") else None
-        child_part = str(child_part or "").strip()
-        parent_part = str(parent_part or "").strip()
-        if not child_part or not parent_part or child_part == parent_part:
-            return
-        if self._is_parent_part(child_part):
-            return
-        if hasattr(self.project, "remember_blink_context_parent"):
-            self.project.remember_blink_context_parent(child_part, parent_part, save=False)
-        if hasattr(self.project, "register_cascade_route_candidate"):
-            self.project.register_cascade_route_candidate(
-                parent_part,
-                child_part,
-                registration_source="workbench_blink_refine",
-                save=False,
-            )
-        self._schedule_project_save()
-        self.refresh_route_table()
-        self.log(tr("Manual parent context set: {0} -> {1}.", self.current_lang).format(parent_part, child_part))
 
-    def on_magic_wand_clicked(self, x, y):
-        self._request_sam_point(x, y)
 
-    def on_magic_box_completed(self, x1, y1, x2, y2):
-        self._request_sam_box(x1, y1, x2, y2)
 
-    def _sam_worker_ready(self):
-        return bool(self.sam_worker and getattr(self.sam_worker, "model", None) is not None)
 
-    def _on_sam_model_loaded(self):
-        self.log(tr("SAM Model Loaded and Ready!", self.current_lang))
 
-    def _begin_sam_prompt(self):
-        if not self.current_image:
-            return None
-        if not self._sam_worker_ready():
-            self.ensure_sam_preloaded()
-            self.log(tr("SAM is still loading. Try the box again after the ready message.", self.current_lang))
-            return None
-        if self.sam_busy:
-            self.log(tr("SAM is still processing the previous prompt. Please wait a moment.", self.current_lang))
-            return None
-        part = self._current_part_name()
-        if not part:
-            return None
-        self.sam_busy = True
-        self.pending_sam_part = part
-        self.pending_sam_image = self.current_image
-        self.pending_sam_description = self.desc_box.toPlainText()
-        return self.current_image, part
 
-    def _request_sam_point(self, x, y):
-        prompt = self._begin_sam_prompt()
-        if not prompt:
-            return
-        image_path, _part = prompt
-        self.sam_point_requested.emit(image_path, float(x), float(y))
 
-    def _request_sam_box(self, x1, y1, x2, y2):
-        prompt = self._begin_sam_prompt()
-        if not prompt:
-            return
-        image_path, _part = prompt
-        self.sam_box_requested.emit(image_path, float(x1), float(y1), float(x2), float(y2))
 
-    def on_annotation_box_completed(self, x1, y1, x2, y2):
-        part = self._current_part_name()
-        clean_box = _clean_box([x1, y1, x2, y2])
-        if not self.current_image or not part or not clean_box:
-            return
 
-        context = self._current_blink_context()
-        if self._active_box_tool_role() == "shrink":
-            if context.get("role") != "child":
-                self._warn_blink_context(
-                    tr("Blink shrink start boxes are only used for child structures. Select a child structure first.", self.current_lang)
-                )
-                return
-            update_loose_box = getattr(self.project, "update_shrink_loose_box", None)
-            if callable(update_loose_box):
-                update_loose_box(self.current_image, part, clean_box, save=False)
-            self._refresh_current_canvas_boxes()
-            self.log(tr("Saved Blink shrink start box for {0}.", self.current_lang).format(part))
-        else:
-            existing_points = self.project.get_labels(self.current_image).get(part, [])
-            self.project.update_label(
-                self.current_image,
-                part,
-                existing_points,
-                self.desc_box.toPlainText(),
-                box=clean_box,
-                save=False,
-            )
-            self._refresh_current_canvas_boxes()
-            if context.get("role") == "child" and context.get("parent_part"):
-                self.project.remember_blink_context_parent(part, context.get("parent_part"), save=False)
-            self.log(tr("Saved manual ROI box for {0}.", self.current_lang).format(part))
-        self._schedule_project_save()
-        self._refresh_blink_refine_state()
 
-    def _warn_blink_context(self, message):
-        QMessageBox.information(self, tr("Child-part annotation", self.current_lang), message)
 
-    def _active_child_blink_context(self, require_ready=False):
-        context = self._refresh_blink_refine_state()
-        if context.get("role") != "child" or not context.get("child_part") or not context.get("parent_part"):
-            self._warn_blink_context(tr("Select a child structure with a parent context first.", self.current_lang))
-            return None
-        if not context.get("has_parent_box"):
-            self._warn_blink_context(tr("Draw a parent box before child refinement.", self.current_lang))
-            return None
-        if require_ready and not context.get("can_refine"):
-            self._warn_blink_context(context.get("disabled_reason") or tr("Configure the current route before continuing.", self.current_lang))
-            return None
-        return context
 
-    def run_blink_child_auto_annotate(self):
-        context = self._active_child_blink_context(require_ready=True)
-        if not context or not self.current_image:
-            return
-        child_part = context.get("child_part")
-        parent_part = context.get("parent_part")
-        parent_box = context.get("parent_box")
-        self.log(tr("Running child auto-annotation for {0} via {1}.", self.current_lang).format(child_part, parent_part))
-        try:
-            expert_result = self.engine.cascade_manager.infer_child_part(
-                self.current_image,
-                parent_box,
-                child_part,
-                parent_part=parent_part,
-                route_manifest=self.project.get_cascade_routes(),
-            )
-            if not isinstance(expert_result, dict):
-                self._warn_blink_context(tr("No usable route expert result was returned for this child structure.", self.current_lang))
-                return
-            raw_box = _clean_box(expert_result.get("box"))
-            if not raw_box:
-                self._warn_blink_context(tr("The route expert did not return a valid child box.", self.current_lang))
-                return
-            image_bgr = cv2.imread(self.current_image)
-            if image_bgr is None:
-                raise RuntimeError(tr("Could not read the current image.", self.current_lang))
-            image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-            polygon = self.engine.predict_base_sam_polygon(image_rgb, raw_box, poly_epsilon=self.inf_poly_epsilon)
-            if polygon and len(polygon) >= 3:
-                self.project.update_label(self.current_image, child_part, polygon, self.desc_box.toPlainText(), box=raw_box, save=False)
-                self.canvas.set_polygons(self.project.get_labels(self.current_image))
-                self._refresh_current_canvas_boxes()
-                self.log(tr("Generated child draft polygon for {0}.", self.current_lang).format(child_part))
-            else:
-                existing_points = self.project.get_labels(self.current_image).get(child_part, [])
-                self.project.update_label(self.current_image, child_part, existing_points, self.desc_box.toPlainText(), box=raw_box, save=False)
-                self._refresh_current_canvas_boxes()
-                self.log(tr("Route expert produced a child box for {0}; refine polygon manually.", self.current_lang).format(child_part))
-            self.project.remember_blink_context_parent(child_part, parent_part, save=False)
-            self._schedule_project_save()
-            self._refresh_blink_refine_state()
-        except Exception as exc:
-            self._warn_blink_context(tr("Child auto-annotation failed: {0}", self.current_lang).format(str(exc)))
 
-    def _load_blink_refiner_class(self):
-        if "core.blink_refiner" in sys.modules:
-            from core.blink_refiner import BlinkRefiner
-            return BlinkRefiner
-        try:
-            from AntSleap.core.blink_refiner import BlinkRefiner
-        except ImportError:
-            from core.blink_refiner import BlinkRefiner
-        return BlinkRefiner
 
-    def _active_blink_auto_shrink_steps(self):
-        child_defaults = _runtime_child_backend_defaults(self.project)
-        try:
-            value = int(child_defaults.get("auto_shrink_steps", self.blink_auto_shrink_steps))
-        except Exception:
-            value = self.blink_auto_shrink_steps
-        try:
-            value = int(value)
-        except Exception:
-            value = DEFAULT_CHILD_AUTO_SHRINK_STEPS
-        return max(1, min(200, value))
 
-    def _blink_parent_context_for_image(self, image_path, child_part, parent_part):
-        previous_current = self.current_image
-        try:
-            self.current_image = image_path
-            parent_box, parent_box_source = self._parent_context_box(parent_part)
-        finally:
-            self.current_image = previous_current
-        if not parent_box:
-            return None
-        return {
-            "parent_part": parent_part,
-            "parent_box": parent_box,
-            "source": parent_box_source or "workbench",
-        }
 
-    def _prepared_blink_auto_shrink_images(self, child_part, parent_part):
-        prepared = []
-        missing_polygon = 0
-        missing_loose_box = 0
-        missing_parent_box = 0
-        existing_trajectory = 0
-        for image_path in self.project.project_data.get("images", []):
-            if not image_path:
-                continue
-            labels = self.project.project_data.get("labels", {}).get(image_path, {})
-            parts = labels.get("parts", {}) if isinstance(labels.get("parts", {}), dict) else {}
-            polygon = parts.get(child_part, [])
-            if not polygon or len(polygon) < 3:
-                missing_polygon += 1
-                continue
-            loose_boxes = labels.get("shrink_loose_boxes", {}) if isinstance(labels.get("shrink_loose_boxes", {}), dict) else {}
-            loose_box = _clean_box(loose_boxes.get(child_part))
-            if not loose_box:
-                missing_loose_box += 1
-                continue
-            trajectories = labels.get("trajectories", {}) if isinstance(labels.get("trajectories", {}), dict) else {}
-            if child_part in trajectories:
-                existing_trajectory += 1
-                continue
-            parent_context = self._blink_parent_context_for_image(image_path, child_part, parent_part)
-            if not parent_context:
-                missing_parent_box += 1
-                continue
-            prepared.append({
-                "image_path": image_path,
-                "polygon": polygon,
-                "loose_box": loose_box,
-                "parent_context": parent_context,
-            })
-        return {
-            "prepared": prepared,
-            "missing_polygon": missing_polygon,
-            "missing_loose_box": missing_loose_box,
-            "missing_parent_box": missing_parent_box,
-            "existing_trajectory": existing_trajectory,
-        }
 
-    def _generate_blink_shrink_for_image(self, image_path, child_part, polygon, loose_box, parent_context, refiner, steps=None):
-        image_bgr = cv2.imread(image_path)
-        if image_bgr is None:
-            raise RuntimeError(tr("Could not read the current image.", self.current_lang))
-        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-        trajectory = refiner.generate_shrink_trajectory(
-            image_rgb,
-            loose_box,
-            polygon,
-            steps=steps or self._active_blink_auto_shrink_steps(),
-        )
-        if not trajectory:
-            return []
-        self.project.update_trajectory(
-            image_path,
-            child_part,
-            trajectory,
-            parent_context=parent_context,
-            save=False,
-        )
-        best_box = _clean_box(trajectory[-1].get("box") if isinstance(trajectory[-1], dict) else None)
-        if best_box:
-            description = ""
-            if self.current_image and self._same_project_image_path(image_path, self.current_image):
-                description = self.desc_box.toPlainText()
-            else:
-                descriptions = self.project.project_data.get("labels", {}).get(image_path, {}).get("descriptions", {})
-                if isinstance(descriptions, dict):
-                    description = descriptions.get(child_part, "")
-            self.project.update_label(
-                image_path,
-                child_part,
-                polygon,
-                description,
-                box=best_box,
-                save=False,
-            )
-        return trajectory
 
-    def run_blink_auto_shrink(self):
-        context = self._active_child_blink_context(require_ready=False)
-        if not context or not self.current_image:
-            return
-        child_part = context.get("child_part")
-        parent_part = context.get("parent_part")
-        polygon = self.project.get_labels(self.current_image).get(child_part, [])
-        if not polygon or len(polygon) < 3:
-            self._warn_blink_context(tr("Draw or confirm the child polygon before auto-shrink.", self.current_lang))
-            return
-        loose_boxes = self.project.get_shrink_loose_boxes(self.current_image) if hasattr(self.project, "get_shrink_loose_boxes") else {}
-        loose_box = _clean_box(loose_boxes.get(child_part) if isinstance(loose_boxes, dict) else None)
-        if not loose_box:
-            self._warn_blink_context(tr("Select Blink Shrink Start Box on the canvas toolbar and draw one around the child first.", self.current_lang))
-            return
-        try:
-            BlinkRefiner = self._load_blink_refiner_class()
-            parts_model = self.engine.ensure_parts_model_loaded() if hasattr(self.engine, "ensure_parts_model_loaded") else self.engine.parts_model
-            sam_model = getattr(parts_model, "ultralytics_sam", None)
-            refiner = BlinkRefiner(sam_model=sam_model, device=self.runtime_device)
-            trajectory = self._generate_blink_shrink_for_image(
-                self.current_image,
-                child_part,
-                polygon,
-                loose_box,
-                {
-                    "parent_part": parent_part,
-                    "parent_box": context.get("parent_box"),
-                    "source": context.get("parent_box_source") or "workbench",
-                },
-                refiner,
-            )
-            if not trajectory:
-                self._warn_blink_context(tr("Auto-shrink did not generate a trajectory.", self.current_lang))
-                return
-            self.project.remember_blink_context_parent(child_part, parent_part, save=False)
-            self._schedule_project_save()
-            self._refresh_current_canvas_boxes()
-            self._refresh_blink_refine_state()
-            self.log(tr("Saved {0} shrink trajectory frames for {1}.", self.current_lang).format(len(trajectory), child_part))
-        except Exception as exc:
-            self._warn_blink_context(tr("Auto-shrink failed: {0}", self.current_lang).format(str(exc)))
 
-    def run_blink_batch_auto_shrink(self):
-        context = self._active_child_blink_context(require_ready=False)
-        if not context:
-            return
-        child_part = context.get("child_part")
-        parent_part = context.get("parent_part")
-        if not child_part or not parent_part:
-            return
 
-        summary = self._prepared_blink_auto_shrink_images(child_part, parent_part)
-        prepared = list(summary.get("prepared", []) or [])
-        if not prepared:
-            self.log(
-                tr(
-                    "No prepared images for batch auto-shrink. Existing trajectories: {0}; missing polygon: {1}; missing shrink box: {2}; missing parent box: {3}.",
-                    self.current_lang,
-                ).format(
-                    summary.get("existing_trajectory", 0),
-                    summary.get("missing_polygon", 0),
-                    summary.get("missing_loose_box", 0),
-                    summary.get("missing_parent_box", 0),
-                )
-            )
-            return
 
-        reply = themed_yes_no_question(
-            self,
-            tr("Batch auto-shrink", self.current_lang),
-            tr(
-                "Batch auto-shrink prepared {0} image(s) for {1}. Existing trajectories skipped: {2}; missing polygon: {3}; missing shrink box: {4}; missing parent box: {5}.\n\nRun auto-shrink for all prepared images?",
-                self.current_lang,
-            ).format(
-                len(prepared),
-                child_part,
-                summary.get("existing_trajectory", 0),
-                summary.get("missing_polygon", 0),
-                summary.get("missing_loose_box", 0),
-                summary.get("missing_parent_box", 0),
-            ),
-            confirm_role=BUTTON_ROLE_RUN,
-        )
-        if reply != QMessageBox.Yes:
-            return
 
-        try:
-            BlinkRefiner = self._load_blink_refiner_class()
-            parts_model = self.engine.ensure_parts_model_loaded() if hasattr(self.engine, "ensure_parts_model_loaded") else self.engine.parts_model
-            sam_model = getattr(parts_model, "ultralytics_sam", None)
-            refiner = BlinkRefiner(sam_model=sam_model, device=self.runtime_device)
-            success = 0
-            failed = 0
-            for item in prepared:
-                try:
-                    trajectory = self._generate_blink_shrink_for_image(
-                        item["image_path"],
-                        child_part,
-                        item["polygon"],
-                        item["loose_box"],
-                        item["parent_context"],
-                        refiner,
-                    )
-                    if trajectory:
-                        success += 1
-                    else:
-                        failed += 1
-                except Exception as exc:
-                    failed += 1
-                    self.log(
-                        tr("Auto-shrink failed: {0}", self.current_lang).format(
-                            f"{os.path.basename(str(item.get('image_path', '')))} | {exc}"
-                        )
-                    )
-            if success:
-                self.project.remember_blink_context_parent(child_part, parent_part, save=False)
-                self.project.save_project()
-            if self.current_image:
-                self.canvas.set_polygons(self.project.get_labels(self.current_image))
-                self._refresh_current_canvas_boxes()
-            self._refresh_image_list_status_or_rebuild(self.current_image)
-            self._refresh_blink_refine_state()
-            self.log(
-                tr("Batch auto-shrink finished for {0}/{1} image(s) of {2}. Failed: {3}.", self.current_lang).format(
-                    success,
-                    len(prepared),
-                    child_part,
-                    failed,
-                )
-            )
-        except Exception as exc:
-            self._warn_blink_context(tr("Auto-shrink failed: {0}", self.current_lang).format(str(exc)))
 
-    def train_current_blink_expert(self):
-        context = self._active_child_blink_context(require_ready=False)
-        if not context:
-            return
-        if self._is_parent_training_running():
-            self._warn_blink_context(tr("Parent-part training is running. Wait for it to finish before training a child expert.", self.current_lang))
-            return
-        if getattr(self.blink_lab, "training_thread", None) is not None and self.blink_lab.training_thread.isRunning():
-            self._warn_blink_context(tr("Blink expert training is already running.", self.current_lang))
-            return
-        child_part = context.get("child_part")
-        parent_part = context.get("parent_part")
-        scope_payload = self._selected_training_scope_payload()
-        scope_images = list(scope_payload.get("images", []) or [])
-        scope_label = str(scope_payload.get("label") or tr("All Images", self.current_lang))
-        scope_id = str(scope_payload.get("scope_id") or "__all__")
-        if not scope_images:
-            self._warn_blink_context(
-                tr(
-                    "Selected training scope is empty. Choose another image group or add images to this group first.",
-                    self.current_lang,
-                )
-            )
-            return
-        child_training_scope = {
-            "scope_id": scope_id,
-            "label": scope_label,
-            "image_count": len(scope_images),
-        }
-        self.child_training_failed = False
-        self.child_training_cancel_requested = False
-        self.btn_train.setEnabled(False)
-        self._set_training_progress(
-            "child",
-            f"{tr('Child-part expert training', self.current_lang)}: {parent_part} -> {child_part}",
-            0,
-        )
-        self.blink_lab.canvas.current_tool_part = child_part
-        self.blink_lab.session_target_part = child_part
-        self.blink_lab.current_image_path = self.current_image
-        self.blink_lab.active_session = {
-            "image_path": self.current_image,
-            "target_part": child_part,
-            "focus_roi": {
-                "part": parent_part,
-                "source": context.get("parent_box_source") or "workbench",
-                "box": context.get("parent_box"),
-            },
-        }
-        self.blink_lab.training_route_context = self.blink_lab._route_context_for_training(parent_part, child_part)
-        self.blink_lab.train_expert_model(
-            allowed_image_paths=scope_images,
-            training_scope=child_training_scope,
-        )
-        self._connect_child_training_progress()
-        if getattr(self.blink_lab, "training_thread", None) is None:
-            self.btn_train.setEnabled(True)
-            if hasattr(self, "btn_blink_stop_training"):
-                self.btn_blink_stop_training.setEnabled(False)
-            self._set_training_progress(None, tr("No training running.", self.current_lang), 0)
-        else:
-            if hasattr(self, "btn_blink_stop_training"):
-                self.btn_blink_stop_training.setEnabled(True)
-        self._refresh_blink_refine_state()
-        self.log(tr("Started Blink expert training for {0} -> {1}.", self.current_lang).format(parent_part, child_part))
-        self.log(tr("Training scope: {0} ({1} image(s))", self.current_lang).format(scope_label, len(scope_images)))
 
-    def stop_current_blink_expert_training(self):
-        if not self._is_child_training_running():
-            if hasattr(self, "btn_blink_stop_training"):
-                self.btn_blink_stop_training.setEnabled(False)
-            return
-        self.child_training_cancel_requested = True
-        if hasattr(self, "btn_blink_stop_training"):
-            self.btn_blink_stop_training.setEnabled(False)
-        self._set_training_progress("child", tr("Stopping child-part expert training...", self.current_lang), self.progress.value())
-        self.blink_lab.stop_expert_training()
 
-    def open_current_route_expert_settings(self):
-        context = self._refresh_blink_refine_state()
-        parent_part = context.get("parent_part")
-        child_part = context.get("child_part")
-        if not parent_part or not child_part:
-            self._warn_blink_context(tr("Select a child structure with a parent context first.", self.current_lang))
-            return
-        if hasattr(self.project, "register_cascade_route_candidate"):
-            self.project.register_cascade_route_candidate(
-                parent_part,
-                child_part,
-                focus_source=context.get("parent_box_source"),
-                registration_source="workbench_blink_refine",
-                save=False,
-            )
-            self.project.remember_blink_context_parent(child_part, parent_part, save=False)
-            self._schedule_project_save()
-        self.open_stl_model_settings(target_route=(parent_part, child_part))
 
-    def on_sam_mask_generated(self, pts, box=None):
-        image_path = self.pending_sam_image or self.current_image
-        part = self.pending_sam_part or self._current_part_name()
-        description_text = self.pending_sam_description
-        self.sam_busy = False
-        self.pending_sam_part = None
-        self.pending_sam_image = None
-        self.pending_sam_description = ""
-        if image_path and part:
-            self.on_polygon_completed(part, pts, box, image_path=image_path, description_text=description_text)
 
-    def on_sam_prompt_failed(self, message):
-        self.sam_busy = False
-        self.pending_sam_part = None
-        self.pending_sam_image = None
-        self.pending_sam_description = ""
-        if message:
-            self.log(str(message))
-
-    def on_polygon_completed(self, p, pts, box=None, image_path=None, description_text=None):
-        target_image = image_path or self.current_image
-        if target_image:
-            if not pts:
-                # Empty points means DELETE
-                self.project.delete_label(target_image, p, save=False)
-            else:
-                label_description = self.desc_box.toPlainText() if description_text is None else str(description_text)
-                if label_description.strip() == "Auto-Annotated":
-                    label_description = ""
-                self.project.update_label(target_image, p, pts, label_description, box=box, save=False)
-            self._schedule_project_save()
-            is_current_image = bool(self.current_image) and self._same_project_image_path(target_image, self.current_image)
-            if is_current_image:
-                self.canvas.set_polygons(self.project.get_labels(self.current_image))
-                self._refresh_current_canvas_boxes()
-            
-            self._refresh_current_image_list_status(target_image)
-            
-            if is_current_image and self.check_morpho.isChecked():
-                self.update_measurements(p)
-            if is_current_image:
-                self._refresh_blink_refine_state()
-
-    def toggle_morphometrics(self, state):
-        on = self.check_morpho.isChecked()
-        self.radio_scale.setVisible(on)
-        self.group_morpho.setVisible(on)
-        p = self._current_part_name()
-        if on and p:
-            self.update_measurements(p)
-
-    def on_scale_defined(self, lpx):
-        v, ok = QInputDialog.getDouble(self, tr("Scale Tool", self.current_lang), tr("mm:", self.current_lang), 1.0, 0.001, 1000.0, 3)
-        if ok and self.current_image:
-            try:
-                self.project.set_scale(self.current_image, lpx/v, save=False)
-            except TypeError:
-                self.project.set_scale(self.current_image, lpx/v)
-            self._schedule_project_save()
-            self.refresh_ui()
-
-    def update_measurements(self, p):
-        if not self.current_image or not p:
-            return
-        sc = self.project.get_scale(self.current_image)
-        if not sc:
-            self.label_measurements.setText(tr("No Scale.", self.current_lang))
-            return
-        pts = self.project.get_labels(self.current_image).get(p)
-        if pts and len(pts) > 2:
-            import cv2
-            pts_np = np.array(pts, dtype=np.float32)
-            a = cv2.contourArea(pts_np) / (sc*sc)
-            peri = cv2.arcLength(pts_np, True) / sc
-            self.label_measurements.setText(tr("Area: {0:.4f} mm2\nPeri: {1:.4f} mm", self.current_lang).format(a, peri))
-        else:
-            self.label_measurements.setText(tr("No Polygon.", self.current_lang))
 
     def run_training(self):
         self._flush_pending_project_save(defer_for_navigation=False)
@@ -3062,33 +1964,6 @@ class MainWindow(
     def _external_backend_runner(self):
         return ExternalBackendRunner(self.project, self._active_external_backend_config())
 
-    def _sync_blink_lab_model_profile_defaults(self):
-        if not hasattr(self, "blink_lab"):
-            return
-        child_defaults = _runtime_child_backend_defaults(self.project)
-        train_params = child_defaults.get("train_params", {}) if isinstance(child_defaults.get("train_params"), dict) else {}
-        heatmap_params = child_defaults.get("heatmap_params", {}) if isinstance(child_defaults.get("heatmap_params"), dict) else {}
-        backend_type = child_defaults.get("backend_type") or CHILD_BACKEND_VIT_B
-        input_size = child_defaults.get("input_size", self.blink_train_input_size)
-        auto_shrink_steps = child_defaults.get("auto_shrink_steps", self.blink_auto_shrink_steps)
-        training_strategy = sanitize_blink_training_strategy(
-            child_defaults.get("training_strategy"),
-            DEFAULT_BLINK_TRAINING_STRATEGY,
-        )
-        if backend_type == CHILD_BACKEND_HEATMAP:
-            input_size = heatmap_params.get("input_size", input_size)
-        self.blink_lab.set_training_defaults(
-            train_params.get("epochs", self.blink_train_epochs),
-            train_params.get("batch", self.blink_train_batch),
-            train_params.get("lr", self.blink_train_lr),
-            train_params.get("weight_decay", self.blink_train_weight_decay),
-            input_size,
-            self.runtime_device,
-            trainer_backend=backend_type,
-            heatmap_params=heatmap_params,
-            auto_shrink_steps=auto_shrink_steps,
-            training_strategy=training_strategy,
-        )
 
     def run_external_training(self):
         self._flush_pending_project_save(defer_for_navigation=False)
@@ -3390,27 +2265,7 @@ class MainWindow(
         meta = self._auto_box_meta_for_part(image_path, part_name)
         return str(meta.get("review_status") or AUTO_BOX_REVIEW_DRAFT).strip() or AUTO_BOX_REVIEW_DRAFT
 
-    def _auto_annotation_source_meta(self, source=AUTO_BOX_SOURCE_MODEL):
-        return {
-            "source": source,
-            "review_status": AUTO_BOX_REVIEW_DRAFT,
-        }
 
-    def _can_replace_existing_auto_annotation(self, image_path, part_name, new_source):
-        existing_points = self.project.get_labels(image_path).get(part_name, [])
-        if existing_points and not self._is_unconfirmed_ai_draft(image_path, part_name):
-            return False
-        existing_auto_boxes = self.project.get_auto_boxes(image_path)
-        has_auto_box = isinstance(existing_auto_boxes, dict) and part_name in existing_auto_boxes
-        if not existing_points and not has_auto_box:
-            return True
-        existing_status = self._auto_box_review_status_for_part(image_path, part_name)
-        if existing_status == AUTO_BOX_REVIEW_CONFIRMED:
-            return False
-        existing_source = self._auto_box_source_for_part(image_path, part_name)
-        if new_source == AUTO_BOX_SOURCE_VLM:
-            return existing_source == AUTO_BOX_SOURCE_VLM
-        return True
 
     def _apply_prediction_to_project(self, image_path, payload, only_new=True, save=True, source=AUTO_BOX_SOURCE_MODEL):
         polygons, auto_boxes = self._extract_prediction_payload(payload)
@@ -5003,43 +3858,7 @@ class MainWindow(
         thread.finished_signal.connect(on_finished)
         thread.start()
 
-    def init_sam(self):
-        if self.sam_thread and self.sam_thread.isRunning():
-            return
-        if self.sam_worker and getattr(self.sam_worker, "model", None) is not None:
-            return
-        mp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "weights", "sam_b.pt")
-        self.log(tr("Initializing SAM (Segment Anything) on active compute device...", self.current_lang))
-        self.sam_thread = QThread()
-        # Pass current epsilon to worker
-        self.sam_worker = SAMWorker(model_type=mp, poly_epsilon=self.inf_poly_epsilon, device=self.runtime_device)
-        self.sam_worker.moveToThread(self.sam_thread)
-        self.sam_thread.started.connect(self.sam_worker.load_model)
-        queued_connection = Qt.ConnectionType.QueuedConnection
-        if hasattr(self.sam_worker, "predict_point"):
-            self.sam_point_requested.connect(self.sam_worker.predict_point, queued_connection)
-        if hasattr(self.sam_worker, "predict_box"):
-            self.sam_box_requested.connect(self.sam_worker.predict_box, queued_connection)
-        self.sam_worker.mask_generated.connect(self.on_sam_mask_generated)
-        if hasattr(self.sam_worker, "prompt_failed"):
-            self.sam_worker.prompt_failed.connect(self.on_sam_prompt_failed)
-        self.sam_worker.model_loaded.connect(self._on_sam_model_loaded)
-        self.sam_worker.model_load_error.connect(lambda message: self.log(str(message)))
-        self.sam_thread.start()
 
-    def ensure_sam_preloaded(self):
-        started = False
-        if self.sam_thread and self.sam_thread.isRunning():
-            pass
-        elif self.sam_worker and getattr(self.sam_worker, "model", None) is not None:
-            pass
-        else:
-            self.init_sam()
-            started = True
-
-        if self._preload_engine_parts_model_async():
-            started = True
-        return started
 
     def ensure_2d_stl_models_preloaded(self):
         locator_started = self.ensure_locator_preloaded()

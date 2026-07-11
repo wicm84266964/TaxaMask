@@ -26,6 +26,7 @@ const DEFAULT_PROMPT_COMPACT_RATIO = 1;
 const OUTPUT_HEALTH_CHECK_ENABLED = false;
 const OUTPUT_HEALTH_MAX_RETRIES = 1;
 const OUTPUT_HEALTH_RETRY_REQUIRED_REASONS = new Set([
+  "empty_visible_response",
   "repetitive_thinking_loop",
   "reasoning_only_length"
 ]);
@@ -992,13 +993,16 @@ function formatAssistantOutput(data) {
   return "模型本轮没有返回可展示正文。";
 }
 
-function analyzeAssistantOutputHealth(data, finalOutput, thinking) {
+export function analyzeAssistantOutputHealth(data, finalOutput, thinking) {
   const reasons = [];
   const text = String(finalOutput ?? "").trim();
   const stopReason = String(data?.stopReason ?? "").toLowerCase();
   const thinkingText = String(thinking?.text ?? "");
   const thinkingBytes = Number.isFinite(thinking?.bytes) ? thinking.bytes : gatewayThinkingBytes(data);
 
+  if (data?.toolCalls?.length === 0 && dataTextBytes(data) === 0) {
+    reasons.push("empty_visible_response");
+  }
   if (["length", "max_tokens", "token_limit", "context_length_exceeded"].includes(stopReason)) {
     reasons.push(`stop_reason:${stopReason}`);
   }
@@ -1040,11 +1044,15 @@ function shouldRetryOutputHealth(health, retries) {
 
 function buildOutputHealthRepairPrompt(health, finalOutput) {
   const excerpt = truncateForRepairPrompt(finalOutput, 1200);
+  const emptyVisibleResponse = Array.isArray(health.reasons) && health.reasons.includes("empty_visible_response");
   const reasoningOnlyLength = Array.isArray(health.reasons) && health.reasons.includes("reasoning_only_length");
   const repetitiveThinking = Array.isArray(health.reasons) && health.reasons.includes("repetitive_thinking_loop");
   return [
     "Ant Code local output health check caught a likely malformed final response.",
     `Reasons: ${(health.reasons ?? []).join(", ") || "unknown"}.`,
+    emptyVisibleResponse
+      ? "The previous model call returned no visible user-facing text and no tool call."
+      : "",
     reasoningOnlyLength
       ? "The previous model call exhausted its completion budget in reasoning/thinking without producing visible user-facing text."
       : "",
@@ -1078,11 +1086,12 @@ function gatewayThinkingBytes(data = {}) {
 
 function dataTextBytes(data = {}) {
   const raw = data?.raw && typeof data.raw === "object" ? data.raw : {};
-  const reported = Number(raw.textBytes ?? 0);
-  if (Number.isFinite(reported) && reported >= 0) {
-    return reported;
+  const visibleBytes = Buffer.byteLength(String(data?.text ?? ""), "utf8");
+  const reported = Number(raw.textBytes);
+  if (raw.textBytes !== undefined && raw.textBytes !== null && Number.isFinite(reported) && reported >= 0) {
+    return Math.max(reported, visibleBytes);
   }
-  return Buffer.byteLength(String(data?.text ?? ""), "utf8");
+  return visibleBytes;
 }
 
 function looksLikeInternalDraft(text) {
@@ -1455,6 +1464,9 @@ async function executeOneToolCall(call, toolRuntime, options = {}, agentTaskIds 
     toolCallId: call.id,
     name: call.name,
     content: serialized.content,
+    ok: execution.ok === true,
+    blocked: execution.blocked === true,
+    decision: execution.decision?.decision ?? null,
     truncated: serialized.truncated,
     interrupted: execution.interrupted === true
   };
@@ -2742,18 +2754,19 @@ function appendInterruptedDraftMessages(session, prompt, displayPrompt, draft, r
  * @param {import("../model-gateway/protocol.js").GatewayToolCall[]} calls
  * @param {Array<Record<string, any>>} results
  */
-function summarizeToolCalls(calls, results) {
+export function summarizeToolCalls(calls, results) {
   return calls.map((call, index) => {
-    const result = parseToolResult(results[index]?.content);
+    const execution = results[index] ?? {};
+    const result = parseToolResult(execution.content);
     return {
       id: call.id,
       name: call.name,
       inputKeys: Object.keys(call.input ?? {}).sort(),
-      ok: result.ok === true,
-      blocked: result.blocked === true,
-      interrupted: results[index]?.interrupted === true || result.interrupted === true,
-      decision: result.decision?.decision ?? null,
-      truncated: Boolean(results[index]?.truncated)
+      ok: typeof execution.ok === "boolean" ? execution.ok : result.ok === true,
+      blocked: typeof execution.blocked === "boolean" ? execution.blocked : result.blocked === true,
+      interrupted: execution.interrupted === true || result.interrupted === true,
+      decision: execution.decision ?? result.decision?.decision ?? null,
+      truncated: Boolean(execution.truncated)
     };
   });
 }

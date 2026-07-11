@@ -279,12 +279,13 @@
 
 ### 15.1 自动化终验
 
-- [x] 完整验证库存通过：18 个 suite、1,141 条测试，1 条环境相关 skip。
+- [x] 完整验证库存通过：18 个 suite、1,143 条测试，1 条环境相关 skip。
 - [x] 全目录 Python `compileall` 通过。
 - [x] 静态调用、公开导入、信号连接、字节码全局依赖和私有引用审计通过。
 - [x] `git diff --check` 通过。
 - [x] `.tmp_validation/` 临时产物清理完成。
 - [x] Agent labeling route 与源码提示对齐当前 round4 workflow owner。
+- [x] Gate E 现场修复 Agent 首问超大工具结果触发压缩及空正文未重试问题；同目录运行态复测 `compacted=0` 且返回正常正文。
 - [x] Stage 9 review：`docs/taxamask_architecture_refactor_round4_stage9_review_zh.md`。
 - [x] 统一人工验收卡：`docs/taxamask_architecture_refactor_round4_acceptance_zh.md`。
 

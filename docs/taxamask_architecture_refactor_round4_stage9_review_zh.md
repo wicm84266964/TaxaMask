@@ -24,18 +24,20 @@
 | tif_architecture_round3 | 4 | 通过 |
 | taxamask_architecture_round4 | 54 | 通过 |
 | sqlite_2d | 38 | 通过 |
-| agentic_misc | 65 | 通过 |
+| agentic_misc | 67 | 通过 |
 | blink_locator | 103 | 通过 |
 | pdf_literature | 44 | 通过 |
 | generic_vlm_stl | 55 | 通过 |
 
-总计 18 个 suite、1,141 条测试；1 条环境相关 skip，其余通过。
+总计 18 个 suite、1,143 条测试；1 条环境相关 skip，其余通过。
 
 ## 2. 静态与文档终验
 
 - `AntSleap/`、`core/`、`tools/`、`scripts/`、`tests/` 全目录 `compileall` 通过。
 - Stage 1-8 公开 import、方法身份、无 MainWindow 反向导入 contract 共 48 条复核通过。
 - Agent labeling route 已从旧 `main.py` 方法改到 annotation、Blink context 和 VLM workflow owner，并新增回归测试。
+- Gate E 现场发现首轮 `list_files` 返回 3,439,325 字节目录清单，使 8 条消息膨胀到约 3.69 MB 并触发自动压缩；现统一将单次工具结果限制为 256 KiB，并保留截断后的工具成功/失败状态。
+- 相同真实目录运行态复测：工具结果 262,144 字节，会话 70,547 个估算 token，`compacted=0`，两轮完成并返回 161 字节中文正文。真正无正文且无工具调用的网关响应会强制进行一次正文修复重试。
 - 架构连接总数 194；MainWindow 类体直接连接 0。
 - `git diff --check` 通过。
 - `.tmp_validation/` 已清理。

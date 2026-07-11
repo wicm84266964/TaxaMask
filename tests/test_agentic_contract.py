@@ -12,6 +12,22 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class AgenticContractTests(unittest.TestCase):
+    def _run_node_contract(self, script):
+        if shutil.which("node") is None:
+            self.skipTest("Node.js is required for Ant-Code runtime contract tests")
+        with tempfile.TemporaryDirectory() as tmp:
+            script_path = Path(tmp) / "ant_code_contract_check.mjs"
+            script_path.write_text(textwrap.dedent(script), encoding="utf-8")
+            result = subprocess.run(
+                ["node", str(script_path)],
+                cwd=PROJECT_ROOT,
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+
     def test_contract_stage_ids_are_unique(self):
         contract_path = PROJECT_ROOT / "AntSleap" / "config" / "agentic_pipeline_contract.json"
         payload = json.loads(contract_path.read_text(encoding="utf-8"))
@@ -51,8 +67,6 @@ class AgenticContractTests(unittest.TestCase):
         self.assertNotIn("triptych evidence", json.dumps(payload, ensure_ascii=False).lower())
 
     def test_ant_code_source_write_hook_requests_dashboard_approval(self):
-        if shutil.which("node") is None:
-            self.skipTest("Node.js is required for Ant-Code runtime approval test")
         script = textwrap.dedent(
             f"""
             import assert from "node:assert/strict";
@@ -101,18 +115,70 @@ class AgenticContractTests(unittest.TestCase):
             assert.equal(await fs.readFile(path.join(cwd, target), "utf8"), "value = 1\\n");
             """
         )
-        with tempfile.TemporaryDirectory() as tmp:
-            script_path = Path(tmp) / "runtime_approval_check.mjs"
-            script_path.write_text(script, encoding="utf-8")
-            result = subprocess.run(
-                ["node", str(script_path)],
-                cwd=PROJECT_ROOT,
-                capture_output=True,
-                text=True,
-                timeout=20,
-                check=False,
-            )
-        self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+        self._run_node_contract(script)
+
+    def test_ant_code_truncates_oversized_tool_results_before_model_context(self):
+        result_module = (PROJECT_ROOT / "vendor" / "ant-code" / "src" / "tools" / "result.js").resolve().as_uri()
+        self._run_node_contract(
+            f"""
+            import assert from "node:assert/strict";
+            import {{ serializeToolResult }} from {json.dumps(result_module)};
+
+            const small = serializeToolResult({{ ok: true, result: {{ value: "ok" }} }});
+            assert.equal(small.truncated, false);
+            assert.equal(small.omittedBytes, 0);
+
+            const large = serializeToolResult({{ ok: true, result: {{ entries: "x".repeat(600_000) }} }});
+            assert.equal(large.truncated, true);
+            assert.ok(large.bytes <= 256 * 1024);
+            assert.ok(large.originalBytes > large.bytes);
+            assert.ok(large.omittedBytes > 0);
+            assert.match(large.content, /tool result truncated/);
+
+            const tiny = serializeToolResult({{ ok: true, result: "x".repeat(1000) }}, {{ maxBytes: 24 }});
+            assert.equal(tiny.truncated, true);
+            assert.ok(tiny.bytes <= 24);
+            """
+        )
+
+    def test_ant_code_retries_a_gateway_response_without_visible_content(self):
+        session_module = (PROJECT_ROOT / "vendor" / "ant-code" / "src" / "core" / "session.js").resolve().as_uri()
+        self._run_node_contract(
+            f"""
+            import assert from "node:assert/strict";
+            import {{ analyzeAssistantOutputHealth, summarizeToolCalls }} from {json.dumps(session_module)};
+
+            const empty = analyzeAssistantOutputHealth(
+              {{ text: "", content: [], toolCalls: [], stopReason: "stop", raw: {{ textBytes: 0, thinkingBytes: 0 }} }},
+              "模型本轮没有返回可展示正文。",
+              null
+            );
+            assert.equal(empty.ok, false);
+            assert.equal(empty.mustRetry, true);
+            assert.deepEqual(empty.reasons, ["empty_visible_response"]);
+
+            const visible = analyzeAssistantOutputHealth(
+              {{ text: "已完成诊断。", content: [{{ type: "text", text: "已完成诊断。" }}], toolCalls: [], stopReason: "stop", raw: {{}} }},
+              "已完成诊断。",
+              null
+            );
+            assert.equal(visible.ok, true);
+
+            const visibleReasoningFallback = analyzeAssistantOutputHealth(
+              {{ text: "来自兼容网关的可见正文", content: [{{ type: "text", text: "来自兼容网关的可见正文" }}], toolCalls: [], stopReason: "stop", raw: {{ textBytes: 0, thinkingBytes: 120 }} }},
+              "来自兼容网关的可见正文",
+              {{ text: "", bytes: 120 }}
+            );
+            assert.equal(visibleReasoningFallback.ok, true);
+
+            const toolSummary = summarizeToolCalls(
+              [{{ id: "call-1", name: "list_files", input: {{ path: "." }} }}],
+              [{{ content: '{{"ok": true', ok: true, blocked: false, interrupted: false, decision: null, truncated: true }}]
+            );
+            assert.equal(toolSummary[0].ok, true);
+            assert.equal(toolSummary[0].truncated, true);
+            """
+        )
 
     def test_generated_agentic_artifacts_gate_downstream_stages(self):
         contract_path = PROJECT_ROOT / "AntSleap" / "config" / "agentic_pipeline_contract.json"

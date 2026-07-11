@@ -6,9 +6,6 @@
 
 | File | Line | Binding | Owner | Signal | Current target | Workflow | Stage | Target owner | Unbind | Contract test |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| AntSleap/main.py | 851 | connect | `MainWindow.open_general_settings` | `dlg.agent_requested` | `self.open_agent_from_context` | dialog_settings | 2 | TBD | TBD | TBD |
-| AntSleap/main.py | 931 | connect | `MainWindow.open_stl_model_settings` | `dlg.agent_requested` | `self.open_agent_from_context` | dialog_settings | 2 | TBD | TBD | TBD |
-| AntSleap/main.py | 1033 | connect | `MainWindow.open_tif_model_settings` | `dlg.agent_requested` | `self.open_agent_from_context` | dialog_settings | 2 | TBD | TBD | TBD |
 | AntSleap/ui/main_window_dialogs.py | 84 | connect | `ExportDialog.__init__` | `btn_browse.clicked` | `self.browse` | runtime_worker | 1 | TBD | TBD | TBD |
 | AntSleap/ui/main_window_dialogs.py | 90 | connect | `ExportDialog.__init__` | `btn_ok.clicked` | `self.accept` | runtime_worker | 1 | TBD | TBD | TBD |
 | AntSleap/ui/main_window_dialogs.py | 93 | connect | `ExportDialog.__init__` | `btn_cancel.clicked` | `self.reject` | runtime_worker | 1 | TBD | TBD | TBD |
@@ -200,6 +197,9 @@
 | AntSleap/ui/main_window_export.py | 98 | connect | `MainWindowExportMixin._start_dataset_export` | `thread.success_signal` | `on_success` | runtime_worker | 1 | TBD | TBD | TBD |
 | AntSleap/ui/main_window_export.py | 99 | connect | `MainWindowExportMixin._start_dataset_export` | `thread.error_signal` | `on_error` | runtime_worker | 1 | TBD | TBD | TBD |
 | AntSleap/ui/main_window_export.py | 100 | connect | `MainWindowExportMixin._start_dataset_export` | `thread.finished_signal` | `on_finished` | runtime_worker | 1 | TBD | TBD | TBD |
+| AntSleap/ui/main_window_presentation.py | 245 | connect | `MainWindowPresentationMixin.open_general_settings` | `dlg.agent_requested` | `self.open_agent_from_context` | dialog_settings | 2 | TBD | TBD | TBD |
+| AntSleap/ui/main_window_presentation.py | 325 | connect | `MainWindowPresentationMixin.open_stl_model_settings` | `dlg.agent_requested` | `self.open_agent_from_context` | dialog_settings | 2 | TBD | TBD | TBD |
+| AntSleap/ui/main_window_presentation.py | 427 | connect | `MainWindowPresentationMixin.open_tif_model_settings` | `dlg.agent_requested` | `self.open_agent_from_context` | dialog_settings | 2 | TBD | TBD | TBD |
 
 ## Thread Timer and Async Entries
 

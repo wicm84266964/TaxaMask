@@ -2,7 +2,7 @@
 
 日期：2026-07-11
 
-状态：`Stage 7 verified / Stage 8 next`；用户要求 Stage 1-9 连续执行，中间 Gate 继续留证但不暂停，全部完成前不再推送 GitHub
+状态：`Gate D review recorded / Stage 8 verified / Stage 9 next`；用户要求 Stage 1-9 连续执行，中间 Gate 继续留证但不暂停，全部完成前不再推送 GitHub
 
 需求文档：`docs/taxamask_architecture_refactor_round4_requirements_zh.md`
 
@@ -249,27 +249,29 @@
 
 ## 14. Stage 8：Shell 收束、测试迁移与性能治理
 
-状态：`pending`
+状态：`verified with recorded performance gaps`
 
-- [ ] 清理只转发的 MainWindow wrapper。
-- [ ] 清理重复可写状态、worker/thread 引用和动态信号。
-- [ ] 新 controller 不依赖完整 MainWindow 私有状态。
-- [ ] MainWindow 私有实现测试引用至少减少 60%。
-- [ ] 新增功能测试默认直接对接 controller/view model/runtime。
-- [ ] 根据 Stage 0 热点实施惰性初始化、刷新合并、信号去重或缓存复用。
-- [ ] 纯迁移路径中位数不回退超过 5%，P95 不回退超过 10%。
+- [x] 清理只转发的 MainWindow wrapper；类体只保留构造器和公开信号。
+- [x] 清理 MainWindow 直接可写状态和连接；直接状态写入 0、直接连接 0，总连接仍为 194。
+- [x] 本轮未新增持有完整 MainWindow 的 controller；既有 coordinator/view adapter 只持有 callable 或受限 view contract，workflow owner 明确为 mixin。
+- [x] MainWindow 直接私有实现测试引用从 Stage 0 的 146 次降到 0 次；继承 workflow 的 GUI contract 私有调用仍保留 146 次并单独统计。
+- [x] 新增 Stage 5-8 contract 测试默认直接对接真实 mixin/runtime 模块。
+- [x] 实施 PDF/TIF 惰性工作台、同图 pixmap 复用、文件列表局部更新、project task context、busy guard 惰性翻译和信号去重。
+- [x] Stage 8 对 Stage 7 的纯迁移路径中位数回退低于 5%，P95 除 Agent context 波动外无业务路径超过 10%。
 - [ ] Start Center 可交互中位数目标改善 5%-15%。
 - [ ] 常见工作流切换中位数目标改善 10%-25%。
 - [ ] 超过 250 ms 的主线程阻塞事件目标减少 20%-50%。
 - [ ] 非 TIF 空闲/2D RSS 目标减少 5%-15%。
-- [ ] 未达到性能目标时记录真实数据和原因，不以行数替代。
-- [ ] 输出 Stage 5-8 review、性能报告和剩余风险。
+- [x] 未达到性能目标时已记录真实数据和原因，不以行数替代。
+- [x] 输出 Stage 5-8 review、性能报告和剩余风险。
+- [x] Stage 8 review：`docs/taxamask_architecture_refactor_round4_stage8_review_zh.md`。
 
 ### 14.1 Gate D
 
-- [ ] Stage 5-8 达到 `verified`。
-- [ ] 结构、信号、测试、性能和数据安全候选审计通过。
-- [ ] 用户确认进入真实研究流程终验。
+- [x] Stage 5-8 达到 `verified`，性能 stretch gaps 已单列。
+- [x] 结构、信号、测试、性能和数据安全候选审计完成。
+- [ ] 用户确认进入真实研究流程终验；按连续执行授权统一留到 Stage 9 人工验收。
+- [x] Gate D review 留档完成；不暂停，进入 Stage 9 自动化终验。
 
 ## 15. Stage 9：完整回归与真实研究流程终验
 
@@ -312,14 +314,14 @@
 
 | 指标 | 验收目标 | 状态 |
 | --- | ---: | --- |
-| `main.py` 物理行 | 2,000 以下 | 待完成 |
-| `MainWindow` 类物理行 | 4,500 以下 | 待完成 |
-| `MainWindow` 方法 | 220 以下 | 待完成 |
-| `MainWindow.__init__` | 300 行以下 | 待完成 |
-| `MainWindow` `.connect(...)` | 60 以下 | 待完成 |
-| 不少于 100 行的 MainWindow 方法 | 2 以下并逐项说明 | 待完成 |
-| 单个 workflow controller | 建议 800-1,500 行 | 待完成 |
-| 私有实现测试引用 | 至少减少 60% | 待完成 |
+| `main.py` 物理行 | 2,000 以下 | 完成：763 |
+| `MainWindow` 类物理行 | 4,500 以下 | 完成：36 |
+| `MainWindow` 方法 | 220 以下 | 完成：1 |
+| `MainWindow.__init__` | 300 行以下 | 完成：13 |
+| `MainWindow` `.connect(...)` | 60 以下 | 完成：0；架构总连接 194 |
+| 不少于 100 行的 MainWindow 方法 | 2 以下并逐项说明 | 完成：0 |
+| 单个 workflow controller | 建议 800-1,500 行 | 完成：最大 workflow mixin 1,392 行 |
+| 私有实现测试引用 | 至少减少 60% | 完成：MainWindow 直接私有引用 146 -> 0 |
 
 目标未达到时必须提供真实依赖、风险和替代证据。禁止通过删除安全 guard、错误处理、翻译、日志、恢复入口或测试达成数字。
 

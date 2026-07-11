@@ -19,16 +19,17 @@ class MainWindowArchitectureAnalysisTests(unittest.TestCase):
         report = load_analysis_module().build_report()
         metrics = report["metrics"]
 
-        self.assertLessEqual(metrics["main_physical_lines"], 1400)
+        self.assertLessEqual(metrics["main_physical_lines"], 800)
         self.assertEqual(metrics["top_level_class_count"], 1)
-        self.assertLessEqual(metrics["all_method_count"], 13)
+        self.assertEqual(metrics["all_method_count"], 1)
         self.assertEqual(metrics["connection_count"], 194)
-        self.assertLessEqual(metrics["main_window_lines"], 800)
-        self.assertEqual(metrics["main_window_method_count"], 13)
-        self.assertEqual(metrics["main_window_connection_count"], 3)
+        self.assertLessEqual(metrics["main_window_lines"], 40)
+        self.assertEqual(metrics["main_window_method_count"], 1)
+        self.assertEqual(metrics["main_window_connection_count"], 0)
         self.assertLessEqual(metrics["main_window_init_lines"], 20)
         self.assertEqual(len(report["connections"]), metrics["connection_count"])
-        self.assertGreater(metrics["main_window_unique_state_fields"], 20)
+        self.assertEqual(metrics["main_window_unique_state_fields"], 0)
+        self.assertEqual(metrics["key_test_direct_main_private_reference_occurrences"], 0)
         self.assertGreater(metrics["main_import_site_count"], 0)
         self.assertGreater(metrics["key_test_reference_line_count"], 100)
 
@@ -43,7 +44,7 @@ class MainWindowArchitectureAnalysisTests(unittest.TestCase):
         self.assertNotIn("open_project_path", methods)
         self.assertNotIn("launch_blink_from_workbench", methods)
         self.assertNotIn("run_vlm_preannotation_from_settings", methods)
-        self.assertEqual(len(report["main_window_methods"]), 13)
+        self.assertEqual(len(report["main_window_methods"]), 1)
 
     def test_stage1_runtime_workers_and_widgets_leave_main_as_compatibility_facade(self):
         source = (ROOT / "AntSleap" / "main.py").read_text(encoding="utf-8")
@@ -113,6 +114,15 @@ class MainWindowArchitectureAnalysisTests(unittest.TestCase):
         self.assertIn("from AntSleap.ui.main_window_prediction import", source)
         self.assertIn("from AntSleap.ui.main_window_vlm import", source)
         self.assertIn("from AntSleap.ui.main_window_export import", source)
+
+    def test_stage8_presentation_methods_leave_main(self):
+        source = (ROOT / "AntSleap" / "main.py").read_text(encoding="utf-8")
+
+        self.assertNotIn("def refresh_ui", source)
+        self.assertNotIn("def open_general_settings", source)
+        self.assertNotIn("def change_theme", source)
+        self.assertNotIn("def log", source)
+        self.assertIn("from AntSleap.ui.main_window_presentation import", source)
 
     def test_markdown_contains_stage0_migration_sections(self):
         module = load_analysis_module()

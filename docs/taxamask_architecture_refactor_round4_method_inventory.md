@@ -6,93 +6,56 @@
 
 | Metric | Value |
 | --- | --- |
-| main_physical_lines | 1305 |
+| main_physical_lines | 763 |
 | top_level_class_count | 1 |
 | top_level_function_count | 0 |
-| all_method_count | 13 |
+| all_method_count | 1 |
 | private_method_count | 1 |
 | connection_count | 194 |
-| source_state_assignment_lines | 14 |
-| main_window_lines | 779 |
-| main_window_method_count | 13 |
-| main_window_connection_count | 3 |
+| source_state_assignment_lines | 0 |
+| main_window_lines | 36 |
+| main_window_method_count | 1 |
+| main_window_connection_count | 0 |
 | main_window_init_lines | 13 |
-| main_window_methods_ge_50 | 4 |
-| main_window_methods_ge_100 | 2 |
-| main_window_unique_state_fields | 23 |
-| main_window_state_assignment_occurrences | 24 |
-| main_import_site_count | 28 |
+| main_window_methods_ge_50 | 0 |
+| main_window_methods_ge_100 | 0 |
+| main_window_unique_state_fields | 0 |
+| main_window_state_assignment_occurrences | 0 |
+| main_import_site_count | 30 |
 | key_test_reference_line_count | 328 |
 | key_test_private_reference_occurrences | 146 |
 | key_test_unique_private_references | 53 |
+| key_test_direct_main_private_reference_occurrences | 0 |
 | async_entry_count | 16 |
 
 ## Top-level Classes
 
 | Line | Size | Class | Methods | Connects | Refs | Stage |
 | --- | --- | --- | --- | --- | --- | --- |
-| 505 | 779 | `MainWindow` | 13 | 3 | 47 | 3 |
+| 509 | 36 | `MainWindow` | 1 | 0 | 52 | 3 |
 
 ## MainWindow Workflow Counts
 
 | Workflow | Methods |
 | --- | --- |
-| dialog_settings | 4 |
-| shell_start_agent | 5 |
-| unclassified | 4 |
+| unclassified | 1 |
 
 ## Compatibility Counts
 
 | Compatibility | Methods |
 | --- | --- |
-| internal_or_unreferenced | 2 |
-| public_or_source_compatibility | 11 |
+| public_or_source_compatibility | 1 |
 
 ## MainWindow Methods
 
 | Line | Size | Method | Workflow | Stage | Compatibility | Source refs | Test refs | Signal refs |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 526 | 13 | `__init__` | unclassified | 8 | public_or_source_compatibility | 217 | 142 | 0 |
-| 594 | 29 | `create_menus` | shell_start_agent | 3 | public_or_source_compatibility | 3 | 0 | 0 |
-| 642 | 6 | `on_global_labels_updated` | unclassified | 8 | public_or_source_compatibility | 1 | 0 | 1 |
-| 649 | 190 | `refresh_ui` | unclassified | 8 | public_or_source_compatibility | 7 | 0 | 0 |
-| 842 | 51 | `open_general_settings` | dialog_settings | 2 | public_or_source_compatibility | 2 | 0 | 1 |
-| 894 | 129 | `open_stl_model_settings` | dialog_settings | 2 | public_or_source_compatibility | 5 | 0 | 0 |
-| 1024 | 2 | `open_settings` | dialog_settings | 2 | public_or_source_compatibility | 1 | 0 | 0 |
-| 1027 | 15 | `open_tif_model_settings` | dialog_settings | 2 | public_or_source_compatibility | 2 | 0 | 0 |
-| 1043 | 15 | `change_language` | shell_start_agent | 3 | public_or_source_compatibility | 4 | 8 | 0 |
-| 1059 | 28 | `change_theme` | shell_start_agent | 3 | public_or_source_compatibility | 2 | 0 | 0 |
-| 1088 | 15 | `update_widget_themes` | shell_start_agent | 3 | internal_or_unreferenced | 0 | 0 | 0 |
-| 1104 | 66 | `update_button_themes` | shell_start_agent | 3 | internal_or_unreferenced | 0 | 0 | 0 |
-| 1282 | 2 | `log` | unclassified | 8 | public_or_source_compatibility | 311 | 35 | 5 |
+| 532 | 13 | `__init__` | unclassified | 8 | public_or_source_compatibility | 217 | 144 | 0 |
 
 ## MainWindow State Fields
 
 | Field | Assignments | Lines | Target owner | Stage |
 | --- | --- | --- | --- | --- |
-| `blink_auto_shrink_steps` | 1 | 943 | TBD | TBD |
-| `blink_train_batch` | 1 | 939 | TBD | TBD |
-| `blink_train_epochs` | 1 | 939 | TBD | TBD |
-| `blink_train_input_size` | 1 | 942 | TBD | TBD |
-| `blink_train_lr` | 1 | 940 | TBD | TBD |
-| `blink_train_weight_decay` | 1 | 941 | TBD | TBD |
-| `blink_training_strategy` | 1 | 944 | TBD | TBD |
-| `current_lang` | 1 | 1044 | TBD | TBD |
-| `current_theme` | 1 | 1061 | TBD | TBD |
-| `external_backend_config` | 1 | 954 | TBD | TBD |
-| `inf_adapt` | 1 | 948 | TBD | TBD |
-| `inf_conf` | 1 | 948 | TBD | TBD |
-| `inf_noise_floor` | 1 | 949 | TBD | TBD |
-| `inf_pad` | 1 | 949 | TBD | TBD |
-| `inf_poly_epsilon` | 1 | 950 | TBD | TBD |
-| `model_backend` | 1 | 953 | TBD | TBD |
-| `parent_box_aspect_ratios` | 1 | 969 | TBD | TBD |
-| `project_autosave_delay_ms` | 1 | 861 | TBD | TBD |
-| `runtime_device` | 2 | 866, 952 | TBD | TBD |
-| `train_batch` | 1 | 938 | TBD | TBD |
-| `train_epochs` | 1 | 938 | TBD | TBD |
-| `train_lr` | 1 | 947 | TBD | TBD |
-| `train_wd` | 1 | 947 | TBD | TBD |
 
 ## Main Import Compatibility
 
@@ -116,6 +79,8 @@
 | tests/test_main_window_stage6_annotation_blink.py | 50 | `self.assertNotIn("from main import", source)` |
 | tests/test_main_window_stage7_training_prediction.py | 24 | `import AntSleap.main as main_module` |
 | tests/test_main_window_stage7_training_prediction.py | 50 | `self.assertNotIn("from main import", source)` |
+| tests/test_main_window_stage8_architecture.py | 28 | `import AntSleap.main as main_module` |
+| tests/test_main_window_stage8_architecture.py | 40 | `self.assertNotIn("from main import", source)` |
 | tests/test_reporting_routes.py | 45 | `from AntSleap.main import TrainingReportDialog` |
 | tests/test_tif_backend.py | 558 | `"from AntSleap.tools.tif_trainer_backend import main",` |
 | tests/test_tif_backend.py | 599 | `"from AntSleap.tools.tif_trainer_backend import main",` |

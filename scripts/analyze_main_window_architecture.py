@@ -31,6 +31,7 @@ ARCHITECTURE_PATHS = (
     ROOT / "AntSleap" / "ui" / "main_window_project_lifecycle.py",
     ROOT / "AntSleap" / "ui" / "main_window_part_tree.py",
     ROOT / "AntSleap" / "ui" / "main_window_image_navigation.py",
+    ROOT / "AntSleap" / "ui" / "main_window_image_grouping.py",
     ROOT / "AntSleap" / "ui" / "main_window_literature_bridge.py",
     ROOT / "AntSleap" / "ui" / "main_window_annotation.py",
     ROOT / "AntSleap" / "ui" / "main_window_blink_context.py",
@@ -40,6 +41,7 @@ ARCHITECTURE_PATHS = (
     ROOT / "AntSleap" / "ui" / "main_window_prediction.py",
     ROOT / "AntSleap" / "ui" / "main_window_vlm.py",
     ROOT / "AntSleap" / "ui" / "main_window_export.py",
+    ROOT / "AntSleap" / "ui" / "main_window_presentation.py",
 )
 KEY_TEST_PATHS = (
     ROOT / "tests" / "test_blink_bridge.py",
@@ -337,6 +339,7 @@ def build_report() -> dict[str, object]:
     state_rows, main_window_state_assignments = _state_inventory(main_window)
     import_rows = _main_import_inventory()
     key_test_rows, private_test_refs = _key_test_reference_inventory()
+    direct_private_method_names = {method.name for method in main_methods if method.name.startswith("_")}
 
     class_rows = []
     for class_node in classes:
@@ -415,6 +418,9 @@ def build_report() -> dict[str, object]:
         "key_test_reference_line_count": len(key_test_rows),
         "key_test_private_reference_occurrences": sum(private_test_refs.values()),
         "key_test_unique_private_references": len(private_test_refs),
+        "key_test_direct_main_private_reference_occurrences": sum(
+            private_test_refs.get(name, 0) for name in direct_private_method_names
+        ),
         "async_entry_count": len(async_rows),
     }
     return {

@@ -28,18 +28,18 @@ class MainWindowModelManagementMixin:
 
     def _active_project_bound_background_task(self):
         checks = (
-            ("image_import_thread", tr("Image import", self.current_lang)),
-            ("external_batch_inference_thread", tr("Batch Inference", self.current_lang)),
-            ("inf_thread", tr("Batch Inference", self.current_lang)),
-            ("trainer", tr("Training", self.current_lang)),
-            ("external_training_thread", tr("Training", self.current_lang)),
-            ("dataset_export_thread", tr("Export", self.current_lang)),
+            ("image_import_thread", "Image import"),
+            ("external_batch_inference_thread", "Batch Inference"),
+            ("inf_thread", "Batch Inference"),
+            ("trainer", "Training"),
+            ("external_training_thread", "Training"),
+            ("dataset_export_thread", "Export"),
         )
-        for attribute, label in checks:
+        for attribute, label_key in checks:
             thread = getattr(self, attribute, None)
             try:
                 if thread is not None and thread.isRunning():
-                    return label
+                    return tr(label_key, self.current_lang)
             except RuntimeError:
                 continue
         if getattr(self, "vlm_preannotation_run_active", False):

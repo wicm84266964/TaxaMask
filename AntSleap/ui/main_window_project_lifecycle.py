@@ -164,6 +164,8 @@ class MainWindowProjectLifecycleMixin:
 
     def _active_recent_project_path(self):
         active_kind = getattr(self, "active_project_kind", "start")
+        if active_kind == "start":
+            active_kind = getattr(self, "last_workbench_kind", "image")
         source_kind = getattr(self, "active_project_source_kind", active_kind)
         if active_kind == "tif":
             return getattr(self.tif_project, "current_project_path", None) or ""
@@ -649,6 +651,7 @@ class MainWindowProjectLifecycleMixin:
                 self._flush_pending_project_save(defer_for_navigation=False)
                 self.project.create_project(name, d, template_id=template["template_id"])
                 self.active_project_kind = "image"
+                self.last_workbench_kind = "image"
                 self.active_project_source_kind = "image"
                 self.active_project_entry_path = self.project.current_project_path or ""
                 self.config.set("last_project_path", self.active_project_entry_path)
@@ -675,6 +678,7 @@ class MainWindowProjectLifecycleMixin:
         self._flush_pending_project_save(defer_for_navigation=False)
         self.tif_project.create_project(name, d)
         self.active_project_kind = "tif"
+        self.last_workbench_kind = "tif"
         self.active_project_source_kind = "tif"
         self.active_project_entry_path = self.tif_project.current_project_path or ""
         self.config.set("last_project_path", self.tif_project.current_project_path)
@@ -766,6 +770,7 @@ class MainWindowProjectLifecycleMixin:
             QMessageBox.critical(self, tr("Import STL Rendered Views to Labeling Workbench", self.current_lang), str(exc))
             return
         self.active_project_kind = "image"
+        self.last_workbench_kind = "image"
         self.active_project_source_kind = "image"
         self.active_project_entry_path = self.project.current_project_path or ""
         self.config.set("last_project_path", self.active_project_entry_path)
@@ -1130,6 +1135,7 @@ class MainWindowProjectLifecycleMixin:
                     )
             self.tif_project.load_project(f)
             self.active_project_kind = "tif"
+            self.last_workbench_kind = "tif"
             self.active_project_source_kind = "tif"
             self.active_project_entry_path = f
             self.config.set("last_project_path", f)
@@ -1138,6 +1144,7 @@ class MainWindowProjectLifecycleMixin:
             self.stl_project.load_project(f)
             result = register_stl_rendered_views_for_2d_review(self.stl_project, self.project)
             self.active_project_kind = "image"
+            self.last_workbench_kind = "image"
             self.active_project_source_kind = "stl"
             self.active_project_entry_path = f
             self.config.set("last_project_path", f)
@@ -1152,6 +1159,7 @@ class MainWindowProjectLifecycleMixin:
         else:
             self.project.load_project(f)
             self.active_project_kind = "image"
+            self.last_workbench_kind = "image"
             self.active_project_source_kind = "image"
             self.active_project_entry_path = f
             self.config.set("last_project_path", f)

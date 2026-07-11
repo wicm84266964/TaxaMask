@@ -227,6 +227,7 @@ BLINK_TRANSLATIONS = {
         "Training finished. Expert was added as a route candidate for {0} -> {1}. Appoint it manually if the report looks better.": "训练完成。专家模型已作为路由 {0} -> {1} 的候选保存。请根据报告判断更好后再手动指定。",
         "Training finished. Expert saved, but no parent-part route was available to enable.": "训练完成。专家模型已保存，但当前没有可启用的父部位路由。",
         "Training finished. Expert saved, but route auto-link failed: {0}": "训练完成。专家模型已保存，但自动绑定路由失败：{0}",
+        "Training finished for the previous project. The expert file was saved, but it was not linked to the current project's route.": "上一项目的训练已完成。专家模型文件已保存，但不会绑定到当前项目的路由。",
         "Training Error: {0}": "训练错误：{0}",
         "open a new session": "打开新会话",
         "reload from the workbench": "从工作台重新加载",
@@ -845,6 +846,7 @@ class BlinkLabWidget(QWidget):
         self.default_heatmap_params = {}
         self.runtime_device = str(runtime_device or "auto")
         self.training_thread = None
+        self.training_project_path = ""
         self.pending_training_report = None
         self.active_session = None
         self.session_target_part = None
@@ -2417,6 +2419,7 @@ class BlinkLabWidget(QWidget):
                 if isinstance(raw_parent_part, str) and raw_parent_part.strip():
                     parent_part = raw_parent_part.strip()
         self.training_route_context = self._route_context_for_training(parent_part, part)
+        self.training_project_path = os.path.normcase(os.path.abspath(str(self.pm.current_project_path or "")))
         self.training_thread = BlinkTrainingThread(
             project_path=self.pm.current_project_path,
             part_name=part,
@@ -2433,13 +2436,14 @@ class BlinkLabWidget(QWidget):
             allowed_image_paths=allowed_image_paths,
             training_scope=training_scope,
         )
-        self.training_thread.result_signal.connect(self._on_training_result)
-        self.training_thread.report_signal.connect(self._on_training_report)
-        self.training_thread.error_signal.connect(self._on_training_error)
+        thread = self.training_thread
+        self.training_thread.result_signal.connect(lambda save_path, worker=thread: self._on_training_result(save_path, worker=worker))
+        self.training_thread.report_signal.connect(lambda report, worker=thread: self._on_training_report(report, worker=worker))
+        self.training_thread.error_signal.connect(lambda message, worker=thread: self._on_training_error(message, worker=worker))
         self.training_thread.log_signal.connect(self.append_training_log)
         self.training_thread.progress_signal.connect(self.prog_training.setValue)
-        self.training_thread.cancelled_signal.connect(self._on_training_cancelled)
-        self.training_thread.finished.connect(self._on_training_finished)
+        self.training_thread.cancelled_signal.connect(lambda worker=thread: self._on_training_cancelled(worker=worker))
+        self.training_thread.finished.connect(lambda worker=thread: self._on_training_finished(worker=worker))
         self.training_log_console.clear()
         self.pending_training_report = None
         self.prog_training.setValue(0)
@@ -2448,7 +2452,18 @@ class BlinkLabWidget(QWidget):
         self.btn_stop_training.setEnabled(True)
         self.training_thread.start()
 
-    def _on_training_report(self, report_data):
+    def _training_callback_matches_project(self, worker=None):
+        expected_path = str(getattr(worker, "project_path", "") or self.training_project_path or "")
+        current_path = str(getattr(self.pm, "current_project_path", "") or "")
+        if not expected_path:
+            return True
+        if not current_path:
+            return False
+        return os.path.normcase(os.path.abspath(expected_path)) == os.path.normcase(os.path.abspath(current_path))
+
+    def _on_training_report(self, report_data, worker=None):
+        if not self._training_callback_matches_project(worker):
+            return
         if isinstance(report_data, dict) and report_data:
             self.pending_training_report = dict(report_data)
 
@@ -2575,7 +2590,13 @@ class BlinkLabWidget(QWidget):
             "expert_id": expert_id,
         }
 
-    def _on_training_result(self, save_path):
+    def _on_training_result(self, save_path, worker=None):
+        if not self._training_callback_matches_project(worker):
+            if save_path:
+                message = self.tr("Training finished for the previous project. The expert file was saved, but it was not linked to the current project's route.")
+                self.lbl_status.setText(message)
+                self.append_training_log(message)
+            return
         if save_path:
             self.prog_training.setValue(100)
             cascade_manager = getattr(self.engine, "cascade_manager", None)
@@ -2613,21 +2634,28 @@ class BlinkLabWidget(QWidget):
         else:
             self.lbl_status.setText(self.tr("Training failed. Need more data."))
 
-    def _on_training_error(self, error_msg):
+    def _on_training_error(self, error_msg, worker=None):
+        if not self._training_callback_matches_project(worker):
+            return
         self.lbl_status.setText(self.tr("Training Error: {0}").format(error_msg))
         print(f"Training Exception: {error_msg}")
 
-    def _on_training_cancelled(self):
+    def _on_training_cancelled(self, worker=None):
+        if not self._training_callback_matches_project(worker):
+            return
         self.lbl_status.setText(self.tr("Training cancelled."))
         self.append_training_log(self.tr("Training cancelled."))
 
-    def _on_training_finished(self):
-        self.btn_train_expert.setEnabled(True)
-        self.btn_stop_training.setEnabled(False)
-        if self.training_thread:
-            self.training_thread.deleteLater()
+    def _on_training_finished(self, worker=None):
+        finished_thread = worker or self.training_thread
+        if self.training_thread is finished_thread:
+            self.btn_train_expert.setEnabled(True)
+            self.btn_stop_training.setEnabled(False)
             self.training_thread = None
-        if self.pending_training_report:
+            self.training_project_path = ""
+        if finished_thread is not None:
+            finished_thread.deleteLater()
+        if self.pending_training_report and self._training_callback_matches_project(worker):
             QTimer.singleShot(0, self._show_pending_training_report)
 
     def keyPressEvent(self, event):

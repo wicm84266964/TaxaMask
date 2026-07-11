@@ -74,6 +74,28 @@ class MainWindowStage3ShellTests(unittest.TestCase):
         self.assertTrue(coordinator.open_agent({"route": "agent"}))
         self.assertEqual(calls, ["image", "agent"])
 
+    def test_start_center_remembers_last_workbench_for_recent_project(self):
+        from AntSleap.ui.main_window_project_lifecycle import MainWindowProjectLifecycleMixin
+        from AntSleap.ui.main_window_start_center import MainWindowStartCenterMixin
+
+        owner = type(
+            "StartOwner",
+            (MainWindowStartCenterMixin, MainWindowProjectLifecycleMixin),
+            {},
+        )()
+        owner.active_project_kind = "tif"
+        owner.active_project_source_kind = "tif"
+        owner.tif_project = type("TifProject", (), {"current_project_path": "volume.sqlite_manifest.json"})()
+        owner.project = type("ImageProject", (), {"current_project_path": "image.sqlite_manifest.json"})()
+        owner._apply_project_mode_tabs = lambda: None
+        owner._update_start_center_texts = lambda: None
+
+        owner._show_start_center()
+
+        self.assertEqual(owner.active_project_kind, "start")
+        self.assertEqual(owner.last_workbench_kind, "tif")
+        self.assertEqual(owner._active_recent_project_path(), "volume.sqlite_manifest.json")
+
     def test_shell_collaborators_do_not_import_main_window(self):
         for module_name in [
             "main_window_agent_context.py",

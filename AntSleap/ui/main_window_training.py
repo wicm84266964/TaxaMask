@@ -202,6 +202,10 @@ class MainWindowTrainingMixin:
         self._refresh_blink_refine_state()
 
     def _on_training_error(self, payload):
+        task_context = getattr(self, "parent_training_project_context", {})
+        if task_context and not self._project_task_context_matches(task_context):
+            self._log_stale_project_task_result("parent_training_error", task_context)
+            return
         payload = dict(payload or {})
         error_type = payload.get("type")
         self.training_retry_requested = False

@@ -392,6 +392,7 @@ TRANSLATIONS = {
         "Child extension command '{0}' must include {contract} or {contract_json}.": "子部位拓展命令“{0}”必须包含 {contract} 或 {contract_json}。",
         "Child extension ID is required.": "子部位拓展 ID 不能为空。",
         "Training": "训练",
+        "SAM Auto-Annotation": "SAM 自动标注",
         "Inference": "推理",
         "Language": "语言",
         "Theme": "主题",
@@ -971,4 +972,3 @@ def ui_text(text, lang="en"):
     if lang == "zh":
         return SECTION_TRANSLATIONS["zh"].get(text, text)
     return text
-

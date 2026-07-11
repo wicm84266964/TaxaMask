@@ -303,6 +303,9 @@ class MainWindowAgentContextMixin:
 
     def open_agent_for_pdf_workflow(self):
         prompt = self._pdf_agent_prompt()
+        active_kind = getattr(self, "active_project_kind", "start")
+        if active_kind in {"image", "tif"}:
+            self.last_workbench_kind = active_kind
         self.active_project_kind = "start"
         self._apply_project_mode_tabs()
         self._update_start_center_texts()
@@ -331,6 +334,9 @@ class MainWindowAgentContextMixin:
         payload = self._compact_agent_context(payload)
         if source_widget is getattr(self, "tif_workbench", None) and hasattr(self.tif_workbench, "prepare_for_agent_panel"):
             self.tif_workbench.prepare_for_agent_panel()
+        active_kind = getattr(self, "active_project_kind", "start")
+        if active_kind in {"image", "tif"}:
+            self.last_workbench_kind = active_kind
         self.active_project_kind = "start"
         self._apply_project_mode_tabs()
         self._update_start_center_texts()
@@ -368,6 +374,7 @@ class MainWindowAgentContextMixin:
 
     def enter_image_workflow(self):
         self.active_project_kind = "image"
+        self.last_workbench_kind = "image"
         self._refresh_project_bound_views()
         self.tabs.setCurrentWidget(self.workbench_widget)
         self.ensure_2d_stl_models_preloaded()
@@ -379,6 +386,7 @@ class MainWindowAgentContextMixin:
             return
         self._ensure_tif_workbench()
         self.active_project_kind = "tif"
+        self.last_workbench_kind = "tif"
         self._refresh_project_bound_views()
         self.tabs.setCurrentWidget(self.tif_workbench)
         self.log(tr("Opened TIF volume workflow.", self.current_lang))

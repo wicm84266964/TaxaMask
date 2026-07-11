@@ -146,7 +146,9 @@ Current fourth-round MainWindow architecture state (verified candidate 2026-07-1
 - Workflow behavior is owned by focused mixins listed above. `main.py` keeps historical class/function re-exports for compatibility; do not move workflow implementations back into the facade.
 - The architecture audit scans 30 responsibility modules and records 194 real `connect/connect_once` bindings. The public MainWindow class itself owns zero direct bindings.
 - PDF and TIF workbenches are created on first entry. Re-selecting the same 2D image reuses the loaded pixmap; file-list updates use local row/status updates where possible.
-- Image import, parent/child training, batch prediction, VLM, and dataset export are project-bound tasks. Normal project switching is blocked while they run, and callbacks verify the originating ProjectManager/path before applying or saving results.
+- Image import, SAM prompts, parent/child training, batch prediction, VLM, and dataset export are project-bound tasks. Normal project switching is blocked while they run, and callbacks verify the originating ProjectManager/path before applying or saving results.
+- Blink child-training callbacks are bound to the concrete worker and its startup project path. A stale worker may leave its model file as an auditable artifact, but it must not register, appoint, or enable a route in the current project.
+- `active_project_kind` is the visible shell mode. `last_workbench_kind` remembers the most recent `image` or `tif` workbench while Start Center/Agent is visible, so recent-project and shutdown routing must not infer project type from the `start` page alone.
 - VLM callbacks also verify worker run ID. Stale run/project results must not write the current SQLite project; they may retain an independent artifacts summary for audit.
 - AI drafts, confirmed labels, manual truth, PDF candidates, STL-rendered evidence, Blink trajectories, and TIF label roles remain distinct.
 - Direct private implementation references to methods defined in MainWindow dropped from 146 to zero. GUI contract tests still call inherited workflow methods through a real window and are tracked separately.
@@ -537,7 +539,7 @@ C:\Users\admin\anaconda3\envs\taxamask\python.exe scripts\run_validation_suite.p
 git diff --check
 ```
 
-Current fourth-round full validation inventory: 18 suites and 1,143 tests, with one environment-dependent TIF workbench skip and all remaining tests passing. This covers TIF core/storage/services/preview/backends/workbench, GUI smoke, UI polish, layout, PDF safety/literature, validation tooling, TIF round-three architecture, TaxaMask round-four architecture, 2D SQLite, Agent/SAM, Blink/locator, and generic VLM/STL/export.
+Current fourth-round full validation inventory: 18 suites and 1,149 tests, with one environment-dependent TIF workbench skip and all remaining tests passing. This includes strict stale-result coverage for SAM, image import, parent/child training, recent workbench routing, and Blink route ownership, plus TIF core/storage/services/preview/backends/workbench, GUI smoke, UI polish, layout, PDF safety/literature, validation tooling, TIF round-three architecture, TaxaMask round-four architecture, 2D SQLite, Agent, Blink/locator, and generic VLM/STL/export.
 
 Embedded Ant-Code tool results are capped at 256 KiB before they enter model context. A large `list_files` result must be marked `truncated` while preserving its tool success/failure metadata; it must not force a new first-turn TaxaMask context into immediate compaction. A gateway response with no visible text and no tool call is an output-health failure and receives one concise repair retry instead of being accepted as a placeholder-only answer.
 

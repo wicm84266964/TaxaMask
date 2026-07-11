@@ -42,6 +42,15 @@ class MainWindowModelManagementMixin:
                     return tr(label_key, self.current_lang)
             except RuntimeError:
                 continue
+        blink_lab = getattr(self, "blink_lab", None)
+        child_training_thread = getattr(blink_lab, "training_thread", None) if blink_lab is not None else None
+        try:
+            if child_training_thread is not None and child_training_thread.isRunning():
+                return tr("Training", self.current_lang)
+        except RuntimeError:
+            pass
+        if getattr(self, "sam_busy", False):
+            return tr("SAM Auto-Annotation", self.current_lang)
         if getattr(self, "vlm_preannotation_run_active", False):
             return tr("VLM Pre-Annotate", self.current_lang)
         return ""

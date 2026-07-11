@@ -279,7 +279,7 @@
 
 ### 15.1 自动化终验
 
-- [x] 完整验证库存通过：18 个 suite、1,143 条测试，1 条环境相关 skip。
+- [x] 完整验证库存通过：18 个 suite、1,149 条测试，1 条环境相关 skip。
 - [x] 全目录 Python `compileall` 通过。
 - [x] 静态调用、公开导入、信号连接、字节码全局依赖和私有引用审计通过。
 - [x] `git diff --check` 通过。
@@ -288,6 +288,7 @@
 - [x] Gate E 现场修复 Agent 首问超大工具结果触发压缩及空正文未重试问题；同目录运行态复测 `compacted=0`，Dashboard 可见首轮显示 `12k / 200k · 6%` 且返回正常正文。
 - [x] Stage 9 review：`docs/taxamask_architecture_refactor_round4_stage9_review_zh.md`。
 - [x] 统一人工验收卡：`docs/taxamask_architecture_refactor_round4_acceptance_zh.md`。
+- [x] 拆分链路严格复核：SAM、图片导入、parent/child training、Blink route 和最近工作台项目归属均补齐 context guard；`docs/taxamask_architecture_refactor_round4_strict_chain_audit_zh.md`。
 
 ### 15.2 研究者人工验收
 
@@ -324,7 +325,7 @@
 | `MainWindow.__init__` | 300 行以下 | 完成：13 |
 | `MainWindow` `.connect(...)` | 60 以下 | 完成：0；架构总连接 194 |
 | 不少于 100 行的 MainWindow 方法 | 2 以下并逐项说明 | 完成：0 |
-| 单个 workflow controller | 建议 800-1,500 行 | 完成：最大 workflow mixin 1,392 行 |
+| 单个 workflow controller | 建议 800-1,500 行 | 完成：严格复核后最大 workflow mixin 1,396 行 |
 | 私有实现测试引用 | 至少减少 60% | 完成：MainWindow 直接私有引用 146 -> 0 |
 
 目标未达到时必须提供真实依赖、风险和替代证据。禁止通过删除安全 guard、错误处理、翻译、日志、恢复入口或测试达成数字。

@@ -132,6 +132,36 @@ class MainWindowStage7TrainingPredictionTests(unittest.TestCase):
 
         self.assertEqual(owner._active_project_bound_background_task(), "Export")
 
+    def test_child_training_and_sam_block_project_switch(self):
+        from AntSleap.ui.main_window_model_management import MainWindowModelManagementMixin
+
+        owner = type("BusyOwner", (MainWindowModelManagementMixin,), {})()
+        owner.current_lang = "en"
+        owner.blink_lab = type("BlinkLab", (), {"training_thread": FakeRunningThread()})()
+        owner.sam_busy = False
+
+        self.assertEqual(owner._active_project_bound_background_task(), "Training")
+
+        owner.blink_lab.training_thread = None
+        owner.sam_busy = True
+
+        self.assertEqual(owner._active_project_bound_background_task(), "SAM Auto-Annotation")
+
+    def test_stale_training_error_is_ignored(self):
+        from AntSleap.ui.main_window_model_management import MainWindowModelManagementMixin
+        from AntSleap.ui.main_window_training import MainWindowTrainingMixin
+
+        owner = type("TrainingOwner", (MainWindowModelManagementMixin, MainWindowTrainingMixin), {})()
+        owner.project = FakeProject(str(ROOT / "old.sqlite_manifest.json"))
+        owner.parent_training_project_context = owner._capture_project_task_context()
+        owner.project.current_project_path = str(ROOT / "new.sqlite_manifest.json")
+        stale_events = []
+        owner._log_stale_project_task_result = lambda workflow, _context: stale_events.append(workflow)
+
+        owner._on_training_error({"type": "runtime", "message": "old failure"})
+
+        self.assertEqual(stale_events, ["parent_training_error"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -340,6 +340,9 @@ class MainWindowStartCenterMixin:
         return card
 
     def _show_start_center(self):
+        active_kind = getattr(self, "active_project_kind", "start")
+        if active_kind in {"image", "tif"}:
+            self.last_workbench_kind = active_kind
         self.active_project_kind = "start"
         self._apply_project_mode_tabs()
         self._update_start_center_texts()

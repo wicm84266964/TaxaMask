@@ -54,6 +54,8 @@ class MainWindowImageNavigationMixin:
 
         self.image_import_thread = ImageImportThread(self.project, paths)
         thread = self.image_import_thread
+        task_context = self._capture_project_task_context()
+        self.image_import_project_context = task_context
 
         def on_progress(done, total, label):
             total = max(0, int(total))
@@ -73,6 +75,9 @@ class MainWindowImageNavigationMixin:
             progress.setLabelText(message)
 
         def on_success(added, total):
+            if not self._project_task_context_matches(task_context):
+                self._log_stale_project_task_result("image_import_success", task_context)
+                return
             progress.setValue(progress.maximum())
             self._inherit_crop_provenance(crop_records)
             self.refresh_file_list()
@@ -82,6 +87,9 @@ class MainWindowImageNavigationMixin:
                 QMessageBox.information(self, tr("Success", self.current_lang), message)
 
         def on_error(message):
+            if not self._project_task_context_matches(task_context):
+                self._log_stale_project_task_result("image_import_error", task_context)
+                return
             self.log(tr("Image import failed: {0}", self.current_lang).format(message))
             QMessageBox.critical(
                 self,
@@ -93,10 +101,10 @@ class MainWindowImageNavigationMixin:
             progress.close()
             if self.image_import_progress_dialog is progress:
                 self.image_import_progress_dialog = None
-            self._set_image_import_controls_enabled(True)
             thread.deleteLater()
             if self.image_import_thread is thread:
                 self.image_import_thread = None
+                self._set_image_import_controls_enabled(True)
 
         thread.progress_signal.connect(on_progress)
         thread.success_signal.connect(on_success)

@@ -119,6 +119,7 @@ class MainWindowAnnotationMixin:
         self.pending_sam_part = part
         self.pending_sam_image = self.current_image
         self.pending_sam_description = self.desc_box.toPlainText()
+        self.pending_sam_project_context = self._capture_project_task_context()
         return self.current_image, part
 
     def _request_sam_point(self, x, y):
@@ -174,10 +175,15 @@ class MainWindowAnnotationMixin:
         image_path = self.pending_sam_image or self.current_image
         part = self.pending_sam_part or self._current_part_name()
         description_text = self.pending_sam_description
+        task_context = dict(getattr(self, "pending_sam_project_context", {}) or {})
         self.sam_busy = False
         self.pending_sam_part = None
         self.pending_sam_image = None
         self.pending_sam_description = ""
+        self.pending_sam_project_context = {}
+        if task_context and not self._project_task_context_matches(task_context):
+            self._log_stale_project_task_result("sam_mask_result", task_context)
+            return
         if image_path and part:
             self.on_polygon_completed(part, pts, box, image_path=image_path, description_text=description_text)
 
@@ -186,6 +192,7 @@ class MainWindowAnnotationMixin:
         self.pending_sam_part = None
         self.pending_sam_image = None
         self.pending_sam_description = ""
+        self.pending_sam_project_context = {}
         if message:
             self.log(str(message))
 

@@ -60,6 +60,10 @@ class MainWindowStage6AnnotationBlinkTests(unittest.TestCase):
         owner.pending_sam_part = None
         owner.pending_sam_image = None
         owner.pending_sam_description = ""
+        owner.pending_sam_project_context = {}
+        owner._capture_project_task_context = lambda: {"project_path": "first-project"}
+        owner._project_task_context_matches = lambda _context: True
+        owner._log_stale_project_task_result = lambda *_args: None
         owner._current_part_name = lambda: "Mandible"
         owner.desc_box = type("Description", (), {"toPlainText": lambda self: "manual description"})()
         calls = []
@@ -74,6 +78,35 @@ class MainWindowStage6AnnotationBlinkTests(unittest.TestCase):
         self.assertEqual(calls[0][1]["description_text"], "manual description")
         self.assertFalse(owner.sam_busy)
         self.assertIsNone(owner.pending_sam_image)
+
+    def test_stale_sam_result_does_not_write_into_new_project(self):
+        from AntSleap.ui.main_window_annotation import MainWindowAnnotationMixin
+
+        owner = type("AnnotationOwner", (MainWindowAnnotationMixin,), {})()
+        owner.current_image = "first.png"
+        owner.current_lang = "en"
+        owner.sam_worker = type("Worker", (), {"model": object()})()
+        owner.sam_busy = False
+        owner.pending_sam_part = None
+        owner.pending_sam_image = None
+        owner.pending_sam_description = ""
+        owner.pending_sam_project_context = {}
+        owner._current_part_name = lambda: "Mandible"
+        owner.desc_box = type("Description", (), {"toPlainText": lambda self: "manual description"})()
+        owner._capture_project_task_context = lambda: {"project_path": "old-project"}
+        owner._project_task_context_matches = lambda _context: False
+        stale_events = []
+        owner._log_stale_project_task_result = lambda workflow, _context: stale_events.append(workflow)
+        writes = []
+        owner.on_polygon_completed = lambda *args, **kwargs: writes.append((args, kwargs))
+
+        owner._begin_sam_prompt()
+        owner.on_sam_mask_generated([[1, 1], [2, 1], [2, 2]], [1, 1, 2, 2])
+
+        self.assertEqual(writes, [])
+        self.assertEqual(stale_events, ["sam_mask_result"])
+        self.assertFalse(owner.sam_busy)
+        self.assertEqual(owner.pending_sam_project_context, {})
 
     def test_child_training_signals_connect_once(self):
         from AntSleap.ui.main_window_blink_workflow import MainWindowBlinkWorkflowMixin

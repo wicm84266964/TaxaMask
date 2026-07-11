@@ -22,14 +22,14 @@
 | pdf_safety | 4 | 通过 |
 | validation_tooling | 4 | 通过 |
 | tif_architecture_round3 | 4 | 通过 |
-| taxamask_architecture_round4 | 54 | 通过 |
+| taxamask_architecture_round4 | 59 | 通过 |
 | sqlite_2d | 38 | 通过 |
 | agentic_misc | 67 | 通过 |
-| blink_locator | 103 | 通过 |
+| blink_locator | 104 | 通过 |
 | pdf_literature | 44 | 通过 |
 | generic_vlm_stl | 55 | 通过 |
 
-总计 18 个 suite、1,143 条测试；1 条环境相关 skip，其余通过。
+总计 18 个 suite、1,149 条测试；1 条环境相关 skip，其余通过。
 
 ## 2. 静态与文档终验
 
@@ -43,6 +43,7 @@
 - `git diff --check` 通过。
 - `.tmp_validation/` 已清理。
 - `LLM_CONTEXT_DETAILED.md`、`CHANGELOG_zh.md` 和现有 2.3.0 release note 已同步。
+- 2026-07-12 严格复核拆分链路后，新增 SAM、图片导入、parent/child training 和最近工作台归属保护；详见 `docs/taxamask_architecture_refactor_round4_strict_chain_audit_zh.md`。
 - README 的产品定位、安装方式和工作流入口未变化，因此不修改。
 
 ## 3. 候选结构
@@ -53,7 +54,7 @@
 - MainWindow 直接状态写入：0。
 - MainWindow 直接 Qt 连接：0。
 - 真实架构连接：194。
-- 最大 workflow 模块：1,392 行。
+- 最大 workflow 模块：严格复核后 1,396 行。
 - MainWindow 直接私有实现测试引用：0。
 
 ## 4. 剩余风险

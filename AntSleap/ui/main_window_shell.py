@@ -37,6 +37,7 @@ class MainWindowShellMixin:
         self.active_project_kind = "image"
         self.active_project_source_kind = "image"
         self.active_project_entry_path = ""
+        self.last_workbench_kind = "image"
         self.db = database_factory()
         
         self.train_epochs = self.config.get("train_epochs", 5)
@@ -74,6 +75,7 @@ class MainWindowShellMixin:
         self.pending_sam_part = None
         self.pending_sam_image = None
         self.pending_sam_description = ""
+        self.pending_sam_project_context = {}
         self.image_import_thread = None
         self.image_import_progress_dialog = None
         self.external_batch_inference_thread = None

@@ -1076,6 +1076,23 @@ class BlinkBridgeTests(unittest.TestCase):
         self.assertEqual(opened_reports, [report])
         self.assertIsNone(widget.pending_training_report)
 
+    def test_stale_blink_training_result_does_not_link_route_to_new_project(self):
+        widget = BlinkLabWidget(self.engine, self.pm)
+        widget.training_route_context = {
+            "parent_part": "Head",
+            "child_part": "Mandible",
+            "had_appointed_expert": False,
+        }
+        save_path = str(Path(self.engine.weights_dir) / "experts" / "Mandible" / "expert_stale.pth")
+        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(save_path).write_bytes(b"expert")
+        worker = type("Worker", (), {"project_path": str(Path(self.pm.current_project_path).with_name("old_project.json"))})()
+
+        widget._on_training_result(save_path, worker=worker)
+
+        self.assertIsNone(self.pm.get_cascade_route("Head", "Mandible"))
+        self.assertIn("previous project", widget.lbl_status.text())
+
     def test_blink_training_thread_passes_candidate_training_params_to_trainer(self):
         trainer_kwargs = {}
 

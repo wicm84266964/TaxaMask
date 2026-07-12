@@ -10,7 +10,7 @@
 - 统一入口覆盖每日 arXiv/bioRxiv/PubMed 候选发现、Agent 证据筛选、约 5 篇主要推荐、最多 8 篇候选和 3 篇深读、JSON/Markdown/HTML digest 导出、OpenAlex/Crossref/Europe PMC 专题检索，以及合法开放 PDF 的可续跑获取。
 - 新增筛选报告到下载输入的桥接脚本；下载前必须确认，默认只衔接 `deep-reads`，避免把全部候选自动批量下载。
 - TaxaMask 的 PDF Agent 提示、上下文路由、PDF 工具 payload、用户手册和当前大模型上下文已同步到新名称与新流程；旧 `2.1.1` 发布说明保留当时名称作为历史记录。
-- 嵌入版与独立 Skill 的 27 个通用运行文件逐文件哈希一致；唯一宿主适配是把内嵌版默认运行目录改到 `TaxaMask_outputs/taxonomy-paper-finder/`，避免研究产物写进 `vendor` 源码。专项验证覆盖 Ant-Code Skill 注册、Python/JSON 语法、精选文献桥接、PDF Agent GUI 上下文和合法来源边界。本次作为 `main` 后续提交同步，不单独创建 TaxaMask Release。
+- 嵌入版与独立 Skill 的 27 个通用运行文件逐文件哈希一致；唯一宿主适配是把内嵌版默认运行目录改到 `TaxaMask_outputs/taxonomy-paper-finder/`，避免研究产物写进 `vendor` 源码。专项验证覆盖 Ant-Code Skill 注册、Python/JSON 语法、精选文献桥接、PDF Agent GUI 上下文和合法来源边界。本次先作为 `main` 后续提交同步，随后按用户确认纳入 `v2.3.2` 小版本发布。
 
 ### **[2026-07-12] TaxaMask v2.3.1：内嵌 Ant-Code 1.3 与界面稳定性修复**
 
@@ -79,6 +79,16 @@
 ## 🌐 GitHub Release 同步记录 (Online Releases)
 
 > 本节按 GitHub Releases 定期同步，用来归档公开发版日志。发布时间来自线上 release 的 `publishedAt`；为避免跨时区混淆，每条同时记录 UTC 时间和北京时间。后面的“开发阶段记录”保留为更细的中文内部开发脉络，不要求与线上 release 逐条一一对应。
+
+### **[2026-07-12] v2.3.2：Taxonomy Paper Finder 统一文献工作流**
+
+- GitHub 发布时间：2026-07-12；Release 类型：正式小版本；线上链接：[v2.3.2](https://github.com/wicm84266964/TaxaMask/releases/tag/v2.3.2)。
+- 内嵌文献 Skill 由 `taxonomy-pdf-harvest` 升级并更名为 `taxonomy-paper-finder`，统一每日推荐、专题检索、证据筛选、精选文献获取和开放 PDF 批量采集。
+- 推荐流程默认约 5 篇主要文献、最多 8 篇候选和 3 篇深读，不用弱结果凑数；下载前必须确认，从筛选报告进入下载时默认只衔接 `deep-reads`。
+- PDF Agent 提示、上下文路由、PDF 工具 payload、README、用户手册和大模型当前状态文档已同步到新名称和新流程。
+- 内嵌运行产物默认写入 `TaxaMask_outputs/taxonomy-paper-finder/`，不会写入 `vendor` 源码目录；Git 继续排除报告、manifest、PDF、数据库、模型和研究数据。
+- 验证覆盖 12 条相关单元测试、真实 Qt PDF Agent 测试、Ant-Code Skill 注册、Python/JSON 检查、无下载 CLI 干跑，以及 118 个 Ant-Code 文件和 62 个 Dashboard 资源自检。
+- 本版本聚焦文献发现与获取入口，不修改 TaxaMask 项目数据库结构、2D/TIF 标注语义、训练真值边界或模型权重。
 
 ### **[2026-07-12] v2.3.1：内嵌 Ant-Code 1.3 与界面稳定性修复**
 

@@ -82,6 +82,8 @@ Agent Center 设计来自两个现实问题：
 
 ## 当前公开文档策略
 
+2026 年 7 月完成的第三轮 TIF 工作台与第四轮 TaxaMask 主窗口优化，已整理为 `taxamask_refactor_round3_round4_summary_zh.md`。该文档保留需求边界、最终架构、性能、测试和人工验收结论；逐 Stage review、方法表、信号清单和一次性执行卡只保留在 Git 历史中。
+
 历史文档的公开原则：
 
 - 公开设计目标、架构边界、数据安全和验收摘要。

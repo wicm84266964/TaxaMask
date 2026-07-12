@@ -282,7 +282,7 @@ Current third-round TIF architecture state (accepted 2026-07-10):
 - Real acceptance evidence used an isolated 294×294×284 ant head and a Dataset601 647×647×195 ant-brain volume. The researcher accepted the Local Axis anatomy and considered the Dataset601 brain-region boundaries reasonable. This is an ant-domain validation, not a cross-taxon claim.
 - Final post-acceptance validation after Agent-context alignment: 778 tests across 11 suites, with one environment-dependent skip; changed/new Python files compile and `git diff --check` passes.
 - The current controllers are workflow owners but are not fully decoupled ports: most still hold the complete Widget, production lifecycle-hook subscriptions remain incomplete, `TifVolumeRenderController` and `TifPartMaskWorkflowController` exceed the suggested 1,500-line review threshold, and 140 tests still reference private implementations. Do not claim complete controller isolation.
-- Detailed requirements, Stage 0-10 evidence, and the post-acceptance risk audit are under `docs/tif_workbench_architecture_refactor_round3_*`, especially `docs/tif_workbench_architecture_refactor_round3_post_acceptance_audit_zh.md`.
+- The public third/fourth-round architecture record is consolidated in `docs/architecture/taxamask_refactor_round3_round4_summary_zh.md`. Raw Stage reviews, method/signal ledgers, and one-off acceptance cards are historical Git evidence, not current public-tree guidance.
 
 - `AntSleap/ui/tif_workbench.py` remains the public PySide workbench entry, but new business rules should preferentially go into `AntSleap/core`, `AntSleap/services`, or the TIF task layer.
 - TIF workbench helper modules now hold canvas/widgets, dialogs, translations, workers, layout/page builders, control panels, styling, Agent context assembly, and extracted helper functions.
@@ -291,7 +291,7 @@ Current third-round TIF architecture state (accepted 2026-07-10):
 - `AntSleap/core/tif_task_context.py`, `AntSleap/core/tif_task_state.py`, `AntSleap/services/tif_task_manager.py`, and `AntSleap/ui/tif_tasks.py` provide the unified task lifecycle. TIF import, Amira import, materialize, label save, truth promotion, ROI creation, backend train/predict, Local Axis export, volume preview, and mask preview are tracked with task context/state.
 - `get_agent_context()` exposes `tif_task_summary` and `tif_state_summary`; use these before guessing whether the user is blocked by saving, training, prediction, import, preview, or Local Axis export.
 - TIF architecture regression groups are defined in `tests/tif_architecture_test_groups.py`.
-- Second-round TIF architecture notes are documented in `docs/tif_workbench_architecture_refactor_round2_requirements_zh.md`, `docs/tif_workbench_architecture_refactor_round2_execution_checklist_zh.md`, and the Stage 0-6 review files. The checklist includes mandatory pitfall checks for TaxaMask environment use, right-sidebar overflow, English text leaks, Local Axis three-point picking, resource exhaustion, validation artifacts, and Agent/AntCode context sync.
+- Earlier TIF architecture decisions are summarized in `docs/architecture/tif_workbench_refactor_plan_zh.md` and `docs/validation/tif_architecture_refactor_validation_zh.md`; raw stage notes remain available only through Git history.
 
 The TIF workbench should remain a specialized TIF route. Do not force its controls into the 2D/STL main labeling workflow.
 

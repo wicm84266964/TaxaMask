@@ -153,6 +153,9 @@ docs/discussions/
 docs/discussions/**
 docs/handoffs/
 docs/handoffs/**
+# Raw architecture refactor ledgers stay local; publish consolidated summaries.
+/docs/tif_workbench_architecture_refactor_round3_*
+/docs/taxamask_architecture_refactor_round4_*
 docs/concepts/
 docs/concepts/**
 docs/manual_images/

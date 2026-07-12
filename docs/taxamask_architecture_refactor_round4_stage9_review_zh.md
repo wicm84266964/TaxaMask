@@ -2,7 +2,7 @@
 
 日期：2026-07-11
 
-状态：`automation verified / researcher acceptance pending`；不推送 GitHub
+状态：`accepted with recorded manual coverage gaps`；不推送 GitHub
 
 ## 1. 完整自动化
 
@@ -66,4 +66,4 @@
 
 ## 5. 结论
 
-Stage 9 自动化终验达到 `verified`。候选尚未标记 `accepted`，等待研究者按 `docs/taxamask_architecture_refactor_round4_acceptance_zh.md` 完成真实流程验收。验收前不合并 `main`、不推送、不创建新 Release。
+Stage 9 自动化终验达到 `verified`。2026-07-12，研究者确认已测试主要交互项且暂未发现问题，同时明确没有完整测试 TaxaMask 全部内容；因此第四轮候选记为 `accepted with recorded manual coverage gaps`，未逐项人工覆盖的扩展流程继续保留在验收卡中。当前不合并 `main`、不推送、不创建新 Release。

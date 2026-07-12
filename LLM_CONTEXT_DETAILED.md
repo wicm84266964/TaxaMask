@@ -140,7 +140,7 @@ Important semantics:
 - Child Expert Session is the user-facing wording. `Blink` remains in code for historical compatibility.
 - Large projects should avoid eager first-image loading, unnecessary model warmup, and repeated full-tree refreshes.
 
-Current fourth-round MainWindow architecture state (verified candidate 2026-07-11):
+Current fourth-round MainWindow architecture state (accepted candidate 2026-07-12, with recorded manual coverage gaps):
 
 - `AntSleap/main.py` is 763 physical lines. `MainWindow` has a 36-line class body, one 13-line constructor, no direct writable state assignments, and no direct Qt connections.
 - Workflow behavior is owned by focused mixins listed above. `main.py` keeps historical class/function re-exports for compatibility; do not move workflow implementations back into the facade.
@@ -152,6 +152,7 @@ Current fourth-round MainWindow architecture state (verified candidate 2026-07-1
 - VLM callbacks also verify worker run ID. Stale run/project results must not write the current SQLite project; they may retain an independent artifacts summary for audit.
 - AI drafts, confirmed labels, manual truth, PDF candidates, STL-rendered evidence, Blink trajectories, and TIF label roles remain distinct.
 - Direct private implementation references to methods defined in MainWindow dropped from 146 to zero. GUI contract tests still call inherited workflow methods through a real window and are tracked separately.
+- Researcher acceptance covered the primary interactions and found no current issue, including the representative TIF/3D/label-schema/Local-Axis/large-reslice paths. This was not a complete manual pass over every TaxaMask feature; unchecked 2D/Blink/VLM/PDF/export items remain an explicit residual manual-coverage list rather than claimed passes.
 
 ## 7. PDF Evidence Route
 

@@ -2,7 +2,7 @@
 
 日期：2026-07-12
 
-状态：`completed / automation verified / researcher acceptance pending`
+状态：`completed / accepted with recorded manual coverage gaps`
 
 分支：`codex/taxamask-architecture-refactor-round4`
 
@@ -102,4 +102,4 @@
 
 拆分后的跨模块链路在自动化范围内已形成闭环：项目身份在任务启动、结果、错误、完成和项目切换处都有明确边界；研究数据角色和 194 条信号没有因修复而改变。当前没有发现未处理的高风险数据覆盖问题。
 
-候选仍保持 `researcher acceptance pending`，不推送 GitHub、不合并 `main`、不创建新 Release。
+2026-07-12，研究者确认主要交互项暂未发现问题，但未完整测试 TaxaMask 全部内容。候选据此记为 `accepted with recorded manual coverage gaps`；未逐项人工覆盖的扩展流程保留为残余风险。不推送 GitHub、不合并 `main`、不创建新 Release。

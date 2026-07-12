@@ -2,7 +2,7 @@
 
 日期：2026-07-11
 
-状态：`Stage 9 automation verified / researcher acceptance pending`；Stage 1-9 实施与自动化验证已连续完成，等待统一人工验收；Stage 0 之后未再推送 GitHub
+状态：`Stage 9 accepted with recorded manual coverage gaps`；Stage 1-9 实施、自动化验证、主要交互人工验收与严格链路复核均已完成；Stage 0 之后未再推送 GitHub
 
 需求文档：`docs/taxamask_architecture_refactor_round4_requirements_zh.md`
 
@@ -69,7 +69,7 @@
 | Gate B | Stage 1-2 Runtime/Worker/Dialog/Settings | review recorded；verified 后已连续执行 |
 | Gate C | Stage 3-4 Shell/Agent/项目生命周期 | review recorded；verified 后已连续执行 |
 | Gate D | Stage 5-8 全工作流迁移与整体候选 | review recorded；verified 后已连续执行 |
-| Gate E | Stage 9 真实研究流程终验 | automation verified；等待人工验收 |
+| Gate E | Stage 9 真实研究流程终验 | accepted（2026-07-12；主要交互通过，未做全功能逐项人工覆盖） |
 
 ## 5. 每阶段强制联动交付
 
@@ -275,7 +275,7 @@
 
 ## 15. Stage 9：完整回归与真实研究流程终验
 
-状态：`automation verified / researcher acceptance pending`
+状态：`accepted with recorded manual coverage gaps`
 
 ### 15.1 自动化终验
 
@@ -291,6 +291,8 @@
 - [x] 拆分链路严格复核：SAM、图片导入、parent/child training、Blink route 和最近工作台项目归属均补齐 context guard；`docs/taxamask_architecture_refactor_round4_strict_chain_audit_zh.md`。
 
 ### 15.2 研究者人工验收
+
+2026-07-12，用户确认已测试主要交互项，暂未发现问题，同时明确没有完整测试 TaxaMask 全部内容。下列未勾选项继续表示未逐项人工覆盖，不再被解释为阻断第四轮架构候选接受；它们保留为后续日常使用和发布前抽查清单。
 
 - [ ] 启动程序并确认 Start Center 可交互。
 - [ ] 打开、关闭并重开代表性 2D SQLite 项目。
@@ -308,12 +310,12 @@
 
 ### 15.3 Gate E
 
-- [ ] 用户确认真实研究流程符合预期。
-- [ ] 第四轮候选标记 `accepted`。
-- [x] `LLM_CONTEXT_DETAILED.md` 已同步 verified candidate 当前状态；accepted 状态待用户确认。
+- [x] 用户确认主要研究交互流程暂未发现问题；未宣称全功能逐项人工测试完成。
+- [x] 第四轮候选标记 `accepted with recorded manual coverage gaps`。
+- [x] `LLM_CONTEXT_DETAILED.md` 已同步 accepted candidate 当前状态和残余人工覆盖边界。
 - [x] 本地 `CHANGELOG_zh.md` 已按总结节奏同步。
 - [x] README 的产品定位/安装/入口未变化，无需修改；现有 2.3.0 Release 说明已追加第四轮内容。
-- [ ] 用户决定是否合并 `main`。
+- [ ] 用户决定是否合并 `main`；这是接受后的版本管理决定，不阻断 Stage 9 完成。
 
 ## 16. 最终结构目标
 
@@ -337,9 +339,9 @@
 - [x] 提交需求文档和执行清单（`bcbf6d2`）。
 - [x] Stage 0 基线提交已推送到 GitHub；Stage 1-9 按用户要求仅保留本地提交。
 - [x] 每个 Stage 使用独立本地提交；Stage 9 提交在本清单收尾后创建。
-- [x] Gate B/C/D 已形成可审计 review 文档；Gate E 自动化 review 已完成，人工结论待用户验收。
-- [ ] 最终接受前不合并 `main`。
-- [ ] 最终接受前不创建新 Release。
+- [x] Gate B/C/D 已形成可审计 review 文档；Gate E 自动化、主要交互人工验收和严格链路复核均已完成。
+- [x] 最终接受前未合并 `main`。
+- [x] 最终接受前未创建新 Release。
 
 ## 18. 连续执行补充确认
 

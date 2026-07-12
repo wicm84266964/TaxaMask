@@ -1,6 +1,6 @@
 {
   "name": "@ant-code/cli",
-  "version": "1.2.4",
+  "version": "1.3.0-taxamask.1",
   "description": "First-party Ant-Code Agent Center runtime embedded by TaxaMask.",
   "type": "module",
   "private": true,
@@ -13,7 +13,9 @@
     "config/lab-agent.lab-template.json",
     "config/skills/",
     "scripts/build-dashboard-assets.js",
+    "scripts/check-dashboard-assets.js",
     "scripts/check-syntax.js",
+    "scripts/dashboard-assets.js",
     "scripts/mock-gateway.js",
     "scripts/verify-gateway-compat.js",
     "src/",
@@ -25,11 +27,12 @@
     "start": "node src/cli/index.js",
     "doctor": "node src/cli/index.js doctor",
     "mock-gateway": "node scripts/mock-gateway.js",
-    "check": "npm run check:syntax",
+    "check": "npm run check:syntax && npm run check:dashboard-assets",
     "check:syntax": "node scripts/check-syntax.js",
+    "check:dashboard-assets": "node scripts/check-dashboard-assets.js",
     "verify:gateway": "node scripts/verify-gateway-compat.js",
     "build:dashboard-assets": "node scripts/build-dashboard-assets.js",
-    "verify:release": "npm run check:syntax",
+    "verify:release": "npm run check && npm run verify:gateway",
     "test": "node --test"
   },
   "engines": {

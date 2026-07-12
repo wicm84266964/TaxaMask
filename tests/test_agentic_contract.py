@@ -180,6 +180,273 @@ class AgenticContractTests(unittest.TestCase):
             """
         )
 
+    def test_ant_code_can_skip_project_config_without_loading_user_defaults(self):
+        config_module = (PROJECT_ROOT / "vendor" / "ant-code" / "src" / "config" / "load-config.js").resolve().as_uri()
+        self._run_node_contract(
+            f"""
+            import assert from "node:assert/strict";
+            import fs from "node:fs/promises";
+            import os from "node:os";
+            import path from "node:path";
+            import {{ loadConfig }} from {json.dumps(config_module)};
+
+            const root = await fs.mkdtemp(path.join(os.tmpdir(), "taxamask-config-boundary-"));
+            const cwd = path.join(root, "project");
+            const home = path.join(root, "home");
+            await fs.mkdir(path.join(cwd, ".lab-agent"), {{ recursive: true }});
+            await fs.mkdir(path.join(home, ".ant-code"), {{ recursive: true }});
+            await fs.writeFile(
+              path.join(cwd, ".lab-agent", "config.json"),
+              JSON.stringify({{ modelAlias: "project-only-model", models: [{{ id: "project-only-model" }}] }}),
+              "utf8"
+            );
+            await fs.writeFile(
+              path.join(home, ".ant-code", "lab-agent.config.json"),
+              JSON.stringify({{ modelAlias: "user-default-model", models: [{{ id: "user-default-model" }}] }}),
+              "utf8"
+            );
+            const explicitPath = path.join(root, "explicit-config.json");
+            await fs.writeFile(
+              explicitPath,
+              JSON.stringify({{ modelAlias: "explicit-model", models: [{{ id: "explicit-model" }}] }}),
+              "utf8"
+            );
+
+            const project = await loadConfig({{ cwd, env: {{ HOME: home, USERPROFILE: home }} }});
+            assert.equal(project.modelAlias, "project-only-model");
+            assert.equal(project.projectConfigPath, path.join(cwd, ".lab-agent", "config.json"));
+
+            const skipped = await loadConfig({{
+              cwd,
+              env: {{ HOME: home, USERPROFILE: home, LAB_AGENT_SKIP_PROJECT_CONFIG: "true" }}
+            }});
+            assert.notEqual(skipped.modelAlias, "project-only-model");
+            assert.notEqual(skipped.modelAlias, "user-default-model");
+            assert.equal(skipped.projectConfigPath, null);
+            assert.equal(skipped.lab.configPath, null);
+
+            const explicit = await loadConfig({{
+              cwd: path.join(root, "empty-project"),
+              env: {{ LAB_AGENT_CONFIG: explicitPath }}
+            }});
+            assert.equal(explicit.modelAlias, "explicit-model");
+            assert.equal(explicit.lab.configPath, explicitPath);
+
+            const projectOverExplicit = await loadConfig({{
+              cwd,
+              env: {{ LAB_AGENT_CONFIG: explicitPath }}
+            }});
+            assert.equal(projectOverExplicit.modelAlias, "project-only-model");
+            assert.equal(projectOverExplicit.configSources.modelAlias.type, "project");
+            """
+        )
+
+    def test_ant_code_project_config_writes_are_atomic(self):
+        config_store_module = (PROJECT_ROOT / "vendor" / "ant-code" / "src" / "dashboard" / "config-store.js").resolve().as_uri()
+        self._run_node_contract(
+            f"""
+            import assert from "node:assert/strict";
+            import fs from "node:fs/promises";
+            import os from "node:os";
+            import path from "node:path";
+            import {{ atomicWriteJsonConfig, mutateJsonConfig }} from {json.dumps(config_store_module)};
+
+            const root = await fs.mkdtemp(path.join(os.tmpdir(), "taxamask-atomic-config-"));
+            const filePath = path.join(root, ".lab-agent", "config.json");
+            await atomicWriteJsonConfig(filePath, {{ models: [{{ id: "base" }}] }});
+            await Promise.all(Array.from({{ length: 6 }}, (_, index) => mutateJsonConfig(filePath, (config) => ({{
+              ...config,
+              models: [...(config.models ?? []), {{ id: `model-${{index}}` }}]
+            }}))));
+
+            const saved = JSON.parse(await fs.readFile(filePath, "utf8"));
+            assert.equal(saved.models.length, 7);
+            assert.deepEqual(
+              (await fs.readdir(path.dirname(filePath))).filter((name) => name.endsWith(".tmp") || name.endsWith(".lock")),
+              []
+            );
+            """
+        )
+
+    def test_ant_code_project_config_write_failure_preserves_previous_file(self):
+        config_store_module = (PROJECT_ROOT / "vendor" / "ant-code" / "src" / "dashboard" / "config-store.js").resolve().as_uri()
+        self._run_node_contract(
+            f"""
+            import assert from "node:assert/strict";
+            import fs from "node:fs/promises";
+            import os from "node:os";
+            import path from "node:path";
+            import {{ atomicWriteJsonConfig, mutateJsonConfig }} from {json.dumps(config_store_module)};
+
+            const root = await fs.mkdtemp(path.join(os.tmpdir(), "taxamask-config-rollback-"));
+            const filePath = path.join(root, ".lab-agent", "config.json");
+            await atomicWriteJsonConfig(filePath, {{ modelAlias: "stable-model" }});
+            await assert.rejects(mutateJsonConfig(filePath, () => {{
+              throw new Error("fault injection");
+            }}), /fault injection/);
+
+            assert.deepEqual(JSON.parse(await fs.readFile(filePath, "utf8")), {{ modelAlias: "stable-model" }});
+            assert.deepEqual(
+              (await fs.readdir(path.dirname(filePath))).filter((name) => name.endsWith(".tmp") || name.endsWith(".lock")),
+              []
+            );
+            """
+        )
+
+    def test_ant_code_project_config_only_overrides_environment_fields_it_defines(self):
+        sessions_module = (PROJECT_ROOT / "vendor" / "ant-code" / "src" / "dashboard" / "sessions.js").resolve().as_uri()
+        self._run_node_contract(
+            f"""
+            import assert from "node:assert/strict";
+            import fs from "node:fs/promises";
+            import os from "node:os";
+            import path from "node:path";
+            import {{ createDashboardRuntime }} from {json.dumps(sessions_module)};
+
+            const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "taxamask-partial-project-config-"));
+            await fs.mkdir(path.join(cwd, ".lab-agent"), {{ recursive: true }});
+            await fs.writeFile(
+              path.join(cwd, ".lab-agent", "config.json"),
+              JSON.stringify({{ transcript: {{ retentionDays: 7 }} }}),
+              "utf8"
+            );
+            const runtime = createDashboardRuntime({{
+              cwd,
+              env: {{
+                LAB_MODEL_GATEWAY_URL: "https://env.gateway.example/v1/chat/completions",
+                LAB_MODEL_GATEWAY_PROTOCOL: "openai-chat",
+                LAB_MODEL_GATEWAY_API_KEY: "env-key",
+                LAB_AGENT_MODEL: "env-model"
+              }}
+            }});
+
+            const fallback = await runtime.status();
+            assert.equal(fallback.gatewayConfig.gatewayUrl, "https://env.gateway.example/v1/chat/completions");
+            assert.equal(fallback.gatewayConfig.gatewayProtocol, "openai-chat");
+            assert.equal(fallback.gatewayConfig.apiKeyConfigured, true);
+            assert.equal(fallback.sessionStatus.model, "env-model");
+            assert.equal(fallback.gatewayConfig.sources.gatewayUrl.type, "environment");
+
+            await fs.writeFile(
+              path.join(cwd, ".lab-agent", "config.json"),
+              JSON.stringify({{
+                modelAlias: "project-model",
+                models: [{{ id: "project-model" }}],
+                lab: {{
+                  gatewayUrl: "https://project.gateway.example/v1/chat/completions",
+                  gatewayProtocol: "openai-chat"
+                }}
+              }}),
+              "utf8"
+            );
+            const project = await runtime.status();
+            assert.equal(project.gatewayConfig.gatewayUrl, "https://project.gateway.example/v1/chat/completions");
+            assert.equal(project.sessionStatus.model, "project-model");
+            assert.equal(project.gatewayConfig.sources.gatewayUrl.type, "project");
+            assert.equal(project.gatewayConfig.sources.apiKey.type, "environment");
+            """
+        )
+
+    def test_ant_code_file_preview_blocks_link_escape(self):
+        files_module = (PROJECT_ROOT / "vendor" / "ant-code" / "src" / "dashboard" / "files.js").resolve().as_uri()
+        self._run_node_contract(
+            f"""
+            import assert from "node:assert/strict";
+            import fs from "node:fs/promises";
+            import os from "node:os";
+            import path from "node:path";
+            import {{ previewFile, readRawFile }} from {json.dumps(files_module)};
+
+            const root = await fs.mkdtemp(path.join(os.tmpdir(), "taxamask-dashboard-link-"));
+            const cwd = path.join(root, "workspace");
+            const outside = path.join(root, "outside");
+            await fs.mkdir(cwd);
+            await fs.mkdir(outside);
+            await fs.writeFile(path.join(outside, "secret.txt"), "secret", "utf8");
+            await fs.symlink(outside, path.join(cwd, "escape"), process.platform === "win32" ? "junction" : "dir");
+
+            const preview = await previewFile(cwd, path.join("escape", "secret.txt"));
+            const raw = await readRawFile(cwd, path.join("escape", "secret.txt"));
+            assert.equal(preview.ok, false);
+            assert.equal(preview.status, 403);
+            assert.equal(raw.ok, false);
+            assert.equal(raw.status, 403);
+            """
+        )
+
+    def test_ant_code_separates_visible_transcript_from_model_context(self):
+        store_module = (PROJECT_ROOT / "vendor" / "ant-code" / "src" / "storage" / "session-store.js").resolve().as_uri()
+        self._run_node_contract(
+            f"""
+            import assert from "node:assert/strict";
+            import fs from "node:fs/promises";
+            import os from "node:os";
+            import path from "node:path";
+            import {{ createSessionStore }} from {json.dumps(store_module)};
+
+            const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "taxamask-session-archives-"));
+            const store = createSessionStore({{ cwd }});
+            const visible = await store.writeTranscriptChunks("session-a", [
+              {{ role: "user", content: "visible question" }},
+              {{ role: "assistant", content: [{{ type: "text", text: "visible answer" }}] }}
+            ]);
+            const model = await store.writeTranscriptChunks("session-a", [
+              {{ role: "user", content: "internal model context" }}
+            ], {{}}, {{ suffix: "model-context" }});
+
+            assert.ok(visible.chunks[0].file.includes("session-a.transcript"));
+            assert.ok(model.chunks[0].file.includes("session-a.model-context"));
+            assert.notEqual(visible.chunks[0].file, model.chunks[0].file);
+            const sessionsRoot = path.join(cwd, ".lab-agent", "sessions");
+            assert.equal((await fs.stat(path.join(sessionsRoot, "session-a.transcript"))).isDirectory(), true);
+            assert.equal((await fs.stat(path.join(sessionsRoot, "session-a.model-context"))).isDirectory(), true);
+
+            await store.writeMetadata({{ id: "session-a", status: "completed" }});
+            const deleted = await store.deleteSession("session-a");
+            assert.equal(deleted.ok, true);
+            await assert.rejects(fs.stat(path.join(sessionsRoot, "session-a.transcript")), {{ code: "ENOENT" }});
+            await assert.rejects(fs.stat(path.join(sessionsRoot, "session-a.model-context")), {{ code: "ENOENT" }});
+            """
+        )
+
+    def test_ant_code_does_not_compact_without_prior_conversation(self):
+        context_module = (PROJECT_ROOT / "vendor" / "ant-code" / "src" / "core" / "context-window.js").resolve().as_uri()
+        self._run_node_contract(
+            f"""
+            import assert from "node:assert/strict";
+            import {{ compactSessionContextWithModel, createContextWindow }} from {json.dumps(context_module)};
+
+            let gatewayCalls = 0;
+            let compactingSignals = 0;
+            const session = {{
+              id: "first-question",
+              cwd: process.cwd(),
+              config: {{ context: {{ maxMessages: 1, maxBytes: 1, maxTokens: 1 }} }},
+              messages: []
+            }};
+            session.contextWindow = createContextWindow(session.config);
+            const result = await compactSessionContextWithModel(session, {{
+              force: true,
+              reason: "automatic_prompt_budget",
+              gateway: {{
+                configured: true,
+                async sendChat() {{
+                  gatewayCalls += 1;
+                  return {{ ok: true, data: {{ text: "should not run" }} }};
+                }}
+              }},
+              async onBeforeCompact() {{
+                compactingSignals += 1;
+              }}
+            }});
+
+            assert.equal(result.compacted, false);
+            assert.equal(result.reason, "nothing_to_compact");
+            assert.equal(gatewayCalls, 0);
+            assert.equal(compactingSignals, 0);
+            """
+        )
+
     def test_generated_agentic_artifacts_gate_downstream_stages(self):
         contract_path = PROJECT_ROOT / "AntSleap" / "config" / "agentic_pipeline_contract.json"
         payload = json.loads(contract_path.read_text(encoding="utf-8"))

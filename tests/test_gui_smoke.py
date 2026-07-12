@@ -11,6 +11,8 @@ import csv
 import time
 import unittest
 import gc
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
@@ -737,6 +739,95 @@ class GuiSmokeTests(unittest.TestCase):
         finally:
             window.deleteLater()
 
+    def test_agent_panel_preflight_uses_dashboard_cookie_and_csrf(self):
+        requests = []
+
+        class DashboardAuthHandler(BaseHTTPRequestHandler):
+            def log_message(self, _format, *_args):
+                return
+
+            def _send_json(self, payload, status=200, cookies=False):
+                body = json.dumps(payload).encode("utf-8")
+                self.send_response(status)
+                if cookies:
+                    port = self.server.server_port
+                    self.send_header("set-cookie", f"antcode_dashboard_session_{port}=session-token; Path=/; HttpOnly; SameSite=Strict")
+                    self.send_header("set-cookie", f"antcode_dashboard_csrf_{port}=csrf-token; Path=/; SameSite=Strict")
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def _authorized(self, mutation=False):
+                cookie = self.headers.get("cookie", "")
+                if "session-token" not in cookie or "csrf-token" not in cookie:
+                    return False
+                return not mutation or self.headers.get("x-antcode-csrf-token") == "csrf-token"
+
+            def do_GET(self):
+                requests.append(("GET", self.path, self.headers.get("cookie", ""), ""))
+                if self.path == "/":
+                    self._send_json({"ok": True}, cookies=True)
+                elif not self._authorized():
+                    self._send_json({"ok": False, "error": "unauthorized"}, status=401)
+                elif self.path == "/api/status":
+                    self._send_json({"ok": True, "cwd": str(PROJECT_ROOT)})
+                elif self.path == "/api/sessions":
+                    self._send_json({"ok": True, "sessions": []})
+                else:
+                    self._send_json({"ok": False}, status=404)
+
+            def do_POST(self):
+                requests.append((
+                    "POST",
+                    self.path,
+                    self.headers.get("cookie", ""),
+                    self.headers.get("x-antcode-csrf-token", ""),
+                ))
+                if not self._authorized(mutation=True):
+                    self._send_json({"ok": False, "error": "csrf"}, status=403)
+                elif self.path == "/api/trust":
+                    self._send_json({"ok": True, "trust": {"trusted": True}})
+                elif self.path == "/api/shutdown":
+                    self._send_json({"ok": True})
+                else:
+                    self._send_json({"ok": False}, status=404)
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), DashboardAuthHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        window = self._make_window()
+        try:
+            panel = window.agent_panel
+            panel.port = server.server_port
+            panel.dashboard_url = f"http://127.0.0.1:{server.server_port}"
+            panel.process = type("Process", (), {"poll": lambda self: None})()
+            panel._reset_dashboard_http_session()
+
+            ready_events = []
+            panel._on_dashboard_ready = lambda: ready_events.append("ready")
+            panel._health_checks_remaining = 2
+            panel._poll_dashboard_ready()
+
+            self.assertEqual(ready_events, ["ready"])
+            self.assertEqual([item[1] for item in requests], ["/", "/api/status"])
+
+            requests.clear()
+            panel._reset_dashboard_http_session()
+            self.assertTrue(panel._preflight_dashboard())
+            panel._request_dashboard_shutdown()
+
+            self.assertEqual([item[1] for item in requests[:4]], ["/", "/api/status", "/api/trust", "/api/sessions"])
+            mutation_requests = [item for item in requests if item[0] == "POST"]
+            self.assertEqual([item[1] for item in mutation_requests], ["/api/trust", "/api/shutdown"])
+            self.assertTrue(all("session-token" in item[2] for item in mutation_requests))
+            self.assertTrue(all(item[3] == "csrf-token" for item in mutation_requests))
+        finally:
+            window.deleteLater()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
     def test_agent_panel_post_load_script_reconciles_embedded_trust(self):
         window = self._make_window()
         try:
@@ -745,8 +836,22 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertIn("button[data-action=\"trust\"]", script)
             self.assertIn("trustButton.click()", script)
             self.assertIn("postTrust", script)
+            self.assertIn("x-antcode-csrf-token", script)
             self.assertIn("__taxamaskAgentTrustReloaded", script)
             self.assertIn("['待信任', 'Trust required'].includes(sendText)", script)
+        finally:
+            window.deleteLater()
+
+    def test_agent_panel_post_load_script_tracks_ant_code_1_3_labels(self):
+        window = self._make_window()
+        try:
+            window.agent_panel.set_language("en")
+            script = window.agent_panel._web_post_load_source()
+
+            self.assertIn('"中断": "Interrupt"', script)
+            self.assertIn('"当前项目配置": "Current project configuration"', script)
+            self.assertIn("Active sources: gateway from", script)
+            self.assertIn(".model-config-note > div", script)
         finally:
             window.deleteLater()
 
@@ -760,6 +865,8 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertIn("rgba(180, 193, 214, 0.055", script)
             self.assertIn(".sidebar,", script)
             self.assertIn(".preview", script)
+            self.assertIn(".responsive-navigation", script)
+            self.assertIn(".responsive-scrim", script)
             self.assertIn(".taxamask-embed .transcript", script)
             self.assertIn(".taxamask-embed .composer-shell", script)
             self.assertIn(".taxamask-embed #prompt-input", script)
@@ -782,6 +889,17 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertIn(".taxamask-embed .code-preview", css)
             self.assertIn(".taxamask-embed .draft-summary", css)
             self.assertIn(".taxamask-embed .activity-summary", css)
+            self.assertIn(".taxamask-embed .transcript-jump", css)
+            self.assertIn(".taxamask-embed .history-loader", css)
+            self.assertIn(".taxamask-embed .transcript-unloaded", css)
+            self.assertIn(".taxamask-embed .permission-confirm-panel", css)
+            self.assertIn(".taxamask-embed .question-review-bar button", css)
+            self.assertIn(".taxamask-embed .connection-status:hover", css)
+            self.assertIn("background: #FFFFFF !important", css)
+            self.assertIn("color: #102033 !important", css)
+            self.assertIn("color: #08789F !important", css)
+            self.assertIn("color: #5E718A !important", css)
+            self.assertIn("color: #C81E1E !important", css)
             self.assertIn("#F2F6FB", css)
             self.assertIn(".taxamask-embed .progress-track", css)
             self.assertIn("scrollbar-color", css)
@@ -800,6 +918,19 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertIn(".taxamask-embed .md-copy-code", css)
             self.assertNotIn("radial-gradient", css)
             self.assertNotIn("#15191d", css)
+        finally:
+            window.deleteLater()
+
+    def test_agent_panel_embed_long_transcript_controls_follow_dark_theme(self):
+        window = self._make_window()
+        try:
+            window.agent_panel.set_theme("dark")
+            css = window.agent_panel._web_embed_style_source()
+
+            self.assertIn(".taxamask-embed .transcript-jump", css)
+            self.assertIn(".taxamask-embed .history-loader", css)
+            self.assertIn("color: #F4F8FF !important", css)
+            self.assertIn("color: #8FAED4 !important", css)
         finally:
             window.deleteLater()
 

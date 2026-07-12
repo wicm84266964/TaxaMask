@@ -9,6 +9,7 @@ const TOOL_LABELS = Object.freeze({
   edit_file: "编辑文件",
   powershell: "运行 PowerShell",
   bash: "运行 Shell",
+  background_shell: "启动后台终端",
   web_fetch: "访问网页",
   web_search: "搜索网页",
   document_intake: "读取文档",
@@ -23,9 +24,16 @@ const SEVERITY_BY_STATUS = Object.freeze({
   running: "info",
   completed: "success",
   blocked: "warning",
+  interrupted: "warning",
   failed: "danger",
   waiting: "warning"
 });
+
+const BLOCKED_TURN_STATUSES = new Set(["gateway_not_configured", "tool_limit", "vision_unavailable"]);
+const INTERRUPTED_TURN_STATUSES = new Set(["interrupted", "cancelled"]);
+const FAILED_BACKGROUND_STATUSES = new Set(["failed", "error", "lost"]);
+const BLOCKED_BACKGROUND_STATUSES = new Set(["blocked", "partial"]);
+const INTERRUPTED_BACKGROUND_STATUSES = new Set(["interrupted", "cancelled"]);
 
 /**
  * @param {Record<string, any>} event
@@ -40,6 +48,16 @@ export function mapSessionEventToDashboard(event) {
   }
   if (type === "gateway_request_start") {
     return [activity("gateway-request", "正在请求模型", roundDetail(event), "running", "gateway", event, { coalesceKey: "gateway" })];
+  }
+  if (type === "gateway_retry") {
+    return [activity("gateway-retry", "网关重试中", gatewayRetryDetail(event), "running", "gateway", event, {
+      coalesceKey: "gateway",
+      retryAttempt: Number.isFinite(event.attempt) ? event.attempt : null,
+      retryMaxAttempts: Number.isFinite(event.maxAttempts) ? event.maxAttempts : null,
+      retryDelayMs: Number.isFinite(event.delayMs) ? event.delayMs : null,
+      retryStage: event.stage ?? null,
+      retryCode: event.error?.code ?? null
+    })];
   }
   if (type === "gateway_stream_start") {
     return [activity("assistant-stream", "正在生成回复", "模型已开始返回内容", "running", "gateway", event, { coalesceKey: "assistant-stream" })];
@@ -96,10 +114,21 @@ export function mapSessionEventToDashboard(event) {
       detail: backgroundSubagentStartedDetail(event)
     })];
   }
+  if (type === "background_terminal_started") {
+    return [activity("background-terminal-started", "终端后台任务运行中", backgroundTerminalStartedDetail(event), "running", "tool", event, {
+      coalesceKey: `background-terminal:${event.taskId ?? "unknown"}`
+    })];
+  }
+  if (type === "background_terminal_registered") {
+    return [activity("background-terminal-registered", "终端后台任务启动中", backgroundTerminalStartedDetail(event), "running", "tool", event, {
+      coalesceKey: `background-terminal:${event.taskId ?? "unknown"}`
+    })];
+  }
   if (type === "subagent_group_progress") {
+    const status = backgroundProgressStatus(event);
     return [backgroundSubagentActivity(event, {
-      title: event.completed ? "子任务组已完成" : "子任务组仍在运行",
-      status: event.completed ? "completed" : "running",
+      title: backgroundProgressTitle(status),
+      status,
       detail: String(event.summary ?? ""),
       completed: event.completed === true
     })];
@@ -122,13 +151,17 @@ export function mapSessionEventToDashboard(event) {
     }];
   }
   if (type === "turn_complete") {
-    return [activity("turn-complete", "任务已完成", `状态：${event.status ?? "completed"}`, "completed", "session", event, { coalesceKey: "turn" })];
+    const completion = turnCompletionView(event.status);
+    return [activity("turn-complete", completion.title, completion.detail, completion.status, "session", event, {
+      coalesceKey: "turn",
+      terminalStatus: completion.terminalStatus
+    })];
   }
   if (type === "gateway_error" || type === "gateway_not_configured") {
     return [activity("gateway-error", "模型请求失败", event.error?.message ?? "网关未配置或请求失败", "failed", "gateway", event)];
   }
   if (type === "turn_interrupted") {
-    return [activity("turn-interrupted", "任务已中断", event.reason ?? "用户中断", "failed", "session", event)];
+    return [activity("turn-interrupted", "任务已中断", event.reason ?? "用户中断", "interrupted", "session", event)];
   }
   if (type === "context_compacting") {
     return [activity("context-compacting", "正在压缩上下文", contextCompactionStartDetail(event), "running", "session", event, { coalesceKey: "context-compaction" })];
@@ -153,6 +186,45 @@ export function mapSessionEventToDashboard(event) {
     ];
   }
   return [];
+}
+
+function turnCompletionView(value) {
+  const terminalStatus = String(value ?? "completed").trim().toLowerCase() || "completed";
+  if (terminalStatus === "completed") {
+    return { title: "任务已完成", detail: "状态：completed", status: "completed", terminalStatus };
+  }
+  if (INTERRUPTED_TURN_STATUSES.has(terminalStatus)) {
+    return { title: "任务已中断", detail: `状态：${terminalStatus}`, status: "interrupted", terminalStatus };
+  }
+  if (BLOCKED_TURN_STATUSES.has(terminalStatus)) {
+    return { title: "任务未完成", detail: `状态：${terminalStatus}`, status: "blocked", terminalStatus };
+  }
+  return { title: "任务执行失败", detail: `状态：${terminalStatus}`, status: "failed", terminalStatus };
+}
+
+function backgroundProgressStatus(event) {
+  if (event?.completed !== true) {
+    return "running";
+  }
+  const status = String(event.status ?? "completed").trim().toLowerCase();
+  if (FAILED_BACKGROUND_STATUSES.has(status)) {
+    return "failed";
+  }
+  if (BLOCKED_BACKGROUND_STATUSES.has(status)) {
+    return "blocked";
+  }
+  if (INTERRUPTED_BACKGROUND_STATUSES.has(status)) {
+    return "interrupted";
+  }
+  return "completed";
+}
+
+function backgroundProgressTitle(status) {
+  if (status === "running") return "子任务组仍在运行";
+  if (status === "completed") return "子任务组已完成";
+  if (status === "interrupted") return "子任务组已中断";
+  if (status === "blocked") return "子任务组未全部完成";
+  return "子任务组执行失败";
 }
 
 /**
@@ -206,12 +278,32 @@ function roundDetail(event) {
   return parts.join(" · ");
 }
 
+function gatewayRetryDetail(event) {
+  const parts = [
+    Number.isFinite(event.round) ? `round ${event.round}` : null,
+    Number.isFinite(event.attempt) && Number.isFinite(event.maxAttempts) ? `第 ${event.attempt}/${event.maxAttempts} 次` : null,
+    event.error?.code ? String(event.error.code) : null,
+    event.stage ? `阶段 ${event.stage}` : null,
+    Number.isFinite(event.delayMs) ? `${event.delayMs}ms 后重试` : null
+  ].filter(Boolean);
+  return parts.join(" · ") || "网关响应异常，正在自动重试";
+}
+
 function backgroundSubagentStartedDetail(event) {
   const parts = [
     event.profile ? `profile=${event.profile}` : null,
     event.groupId ? `group=${event.groupId}` : null,
     event.waitFor ? `waitFor=${event.waitFor}` : null,
     event.wakeParent === false ? "完成后仅记录结果" : "完成后自动唤醒主控"
+  ].filter(Boolean);
+  return parts.join(" · ");
+}
+
+function backgroundTerminalStartedDetail(event) {
+  const parts = [
+    event.taskId ? `task=${event.taskId}` : null,
+    event.pid ? `pid=${event.pid}` : null,
+    event.stdoutPath ? `stdout=${event.stdoutPath}` : null
   ].filter(Boolean);
   return parts.join(" · ");
 }

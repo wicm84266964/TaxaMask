@@ -219,6 +219,9 @@ class TaxaMaskAgentPanel(QWidget):
         self._json_health_warning = ""
         self._dashboard_log_path = ""
         self._dashboard_log_handle = None
+        self._dashboard_cookie_jar = None
+        self._dashboard_http_opener = None
+        self._dashboard_csrf_token = ""
         self._browser_context_copied = False
         self.current_theme = normalize_theme(getattr(parent, "current_theme", "dark"))
         self.browser_mode = self._resolve_browser_mode()
@@ -683,15 +686,19 @@ exec "$@"
             workspace_border = c["border"]
             soft_border = c["border"]
             text_color = c["text_main"]
-            muted_color = c["text_dim"]
+            muted_color = "#5E718A"
             accent_color = c["accent"]
+            accent_text_color = "#08789F"
+            primary_background = c["accent"]
+            danger_text_color = "#C81E1E"
             send_background = c["accent"]
-            send_text = "#FFFFFF"
+            send_text = c["text_main"]
             code_background = "#F2F6FB"
             code_text = c["text_main"]
             progress_track = "#D8E4EF"
             summary_background = "#F8FBFE"
             summary_item_background = "#FFFFFF"
+            long_control_background = "#FFFFFF"
             scrollbar_track = "#EEF4FA"
             scrollbar_thumb = c["border_strong"]
             scrollbar_thumb_hover = "#9FB4C8"
@@ -734,6 +741,9 @@ exec "$@"
             text_color = c["text_main"]
             muted_color = c["text_dim"]
             accent_color = c["accent"]
+            accent_text_color = "#8FAED4"
+            primary_background = "#405F88"
+            danger_text_color = c["error"]
             send_background = "linear-gradient(135deg, #6F8FB8, #405F88)"
             send_text = "#F4F8FF"
             code_background = "rgba(8, 13, 23, 0.52)"
@@ -741,6 +751,7 @@ exec "$@"
             progress_track = "rgba(125, 149, 183, 0.28)"
             summary_background = "rgba(32, 32, 32, 0.5)"
             summary_item_background = "rgba(24, 24, 24, 0.42)"
+            long_control_background = "#101C2F"
             scrollbar_track = "rgba(7, 12, 22, 0.90)"
             scrollbar_thumb = "rgba(127, 154, 191, 0.55)"
             scrollbar_thumb_hover = "rgba(137, 167, 204, 0.72)"
@@ -768,10 +779,10 @@ exec "$@"
         --text: {text_color} !important;
         --text-soft: {c['text_soft']} !important;
         --text-muted: {muted_color} !important;
-        --accent: {accent_color} !important;
-        --accent-2: {c['accent_hover']} !important;
+        --accent: {accent_text_color} !important;
+        --accent-2: {accent_text_color} !important;
         --warning: {c['warning']} !important;
-        --danger: {c['error']} !important;
+        --danger: {danger_text_color} !important;
         --running: {c['success']} !important;
         --success: {c['success']} !important;
       }}
@@ -824,8 +835,12 @@ exec "$@"
       }}
       .taxamask-embed .sidebar,
       .taxamask-embed .preview,
+      .taxamask-embed .responsive-navigation,
+      .taxamask-embed .responsive-scrim,
       .sidebar,
-      .preview {{
+      .preview,
+      .responsive-navigation,
+      .responsive-scrim {{
         display: none !important;
       }}
       .taxamask-embed .workspace,
@@ -863,6 +878,7 @@ exec "$@"
       .taxamask-embed .approval-panel,
       .taxamask-embed .question-panel,
       .taxamask-embed .trust-panel,
+      .taxamask-embed .permission-confirm-panel,
       .taxamask-embed .context-panel,
       .taxamask-embed .queue-panel,
       .empty-state,
@@ -878,6 +894,39 @@ exec "$@"
       .queue-panel {{
         background: {panel_background} !important;
         border-color: {soft_border} !important;
+      }}
+      .taxamask-embed .transcript-jump,
+      .taxamask-embed .history-loader {{
+        background: {long_control_background} !important;
+        border-color: {workspace_border} !important;
+        color: {text_color} !important;
+        box-shadow: 0 8px 24px rgba(16, 32, 51, 0.18) !important;
+      }}
+      .taxamask-embed .transcript-jump:hover,
+      .taxamask-embed .history-loader:hover {{
+        background: {option_hover_background} !important;
+        border-color: {accent_color} !important;
+        color: {text_color} !important;
+      }}
+      .taxamask-embed .transcript-unloaded {{
+        background: {panel_background} !important;
+        border-color: {soft_border} !important;
+        color: {muted_color} !important;
+      }}
+      .taxamask-embed .transcript-unloaded button {{
+        background: {summary_item_background} !important;
+        border-color: {workspace_border} !important;
+        color: {c['text_soft']} !important;
+      }}
+      .taxamask-embed .connection-status {{
+        background: {panel_background} !important;
+        border: 1px solid {soft_border} !important;
+        color: {c['text_soft']} !important;
+      }}
+      .taxamask-embed .connection-status:hover,
+      .taxamask-embed .connection-status:focus-visible {{
+        background: {option_hover_background} !important;
+        color: {text_color} !important;
       }}
       .taxamask-embed .composer,
       .composer {{
@@ -932,7 +981,7 @@ exec "$@"
       }}
       .taxamask-embed .workflow-strip-toggle strong,
       .taxamask-embed .workflow-percent {{
-        color: {accent_color} !important;
+        color: {accent_text_color} !important;
       }}
       .taxamask-embed .workflow-strip-meter,
       .taxamask-embed .workflow-meter {{
@@ -958,7 +1007,7 @@ exec "$@"
       .taxamask-embed .background-subagent-chip {{
         background: {live_chip_background} !important;
         border-color: {live_chip_border} !important;
-        color: {muted_color} !important;
+        color: {c['text_soft']} !important;
       }}
       .taxamask-embed .live-status.has-background-subagents .live-main,
       .taxamask-embed .live-subagent-head,
@@ -968,12 +1017,12 @@ exec "$@"
       .taxamask-embed .live-status.has-background-subagents .live-main::after,
       .taxamask-embed .live-subagent-meta,
       .taxamask-embed .live-subagent-summary {{
-        color: {muted_color} !important;
+        color: {c['text_soft']} !important;
       }}
       .taxamask-embed .live-subagent-row {{
         background: {live_subagent_background} !important;
         border-color: {live_chip_border} !important;
-        color: {muted_color} !important;
+        color: {c['text_soft']} !important;
       }}
       .taxamask-embed .chip-pulse,
       .taxamask-embed .live-pulse {{
@@ -992,7 +1041,7 @@ exec "$@"
       .taxamask-embed .live-subagent-cancel {{
         background: {live_cancel_background} !important;
         border-color: {live_cancel_border} !important;
-        color: {c['error']} !important;
+        color: {danger_text_color} !important;
       }}
       .taxamask-embed .question-panel {{
         background: {panel_background} !important;
@@ -1010,7 +1059,7 @@ exec "$@"
       .taxamask-embed .trust-title,
       .taxamask-embed .context-title,
       .taxamask-embed .queue-title {{
-        color: {accent_color} !important;
+        color: {accent_text_color} !important;
       }}
       .taxamask-embed .question-copy,
       .taxamask-embed .question-prompt-summary,
@@ -1040,10 +1089,21 @@ exec "$@"
         border-color: {accent_color} !important;
         color: {text_color} !important;
       }}
+      .taxamask-embed .question-review-title {{
+        color: {accent_text_color} !important;
+      }}
+      .taxamask-embed .question-review-summary {{
+        color: {muted_color} !important;
+      }}
+      .taxamask-embed .question-review-bar button {{
+        background: {primary_background} !important;
+        border-color: {primary_background} !important;
+        color: {send_text} !important;
+      }}
       .taxamask-embed .question-choice small,
       .taxamask-embed .queue-item,
       .taxamask-embed .queue-item span {{
-        color: {muted_color} !important;
+        color: {c['text_soft']} !important;
       }}
       .taxamask-embed .question-input {{
         background: {input_background} !important;
@@ -1064,8 +1124,8 @@ exec "$@"
       .taxamask-embed .approval-actions button:not(.danger),
       .taxamask-embed .trust-actions button,
       .taxamask-embed .queue-head button {{
-        background: {accent_color} !important;
-        border-color: {accent_color} !important;
+        background: {primary_background} !important;
+        border-color: {primary_background} !important;
         color: {send_text} !important;
       }}
       .taxamask-embed .approval-panel {{
@@ -1084,10 +1144,11 @@ exec "$@"
       .taxamask-embed .live-subagent-cancel {{
         background: {danger_soft_background} !important;
         border-color: {danger_soft_border} !important;
-        color: {c['error']} !important;
+        color: {danger_text_color} !important;
       }}
       .taxamask-embed .shutdown-panel,
       .taxamask-embed .trust-panel,
+      .taxamask-embed .permission-confirm-panel,
       .taxamask-embed .context-panel,
       .taxamask-embed .queue-panel,
       .taxamask-embed .model-panel,
@@ -1154,11 +1215,11 @@ exec "$@"
       .taxamask-embed .shutdown-actions #shutdown-confirm {{
         background: {danger_soft_background} !important;
         border-color: {danger_soft_border} !important;
-        color: {c['error']} !important;
+        color: {danger_text_color} !important;
       }}
       .taxamask-embed .model-config-actions button[type="submit"] {{
-        background: {accent_color} !important;
-        border-color: {accent_color} !important;
+        background: {primary_background} !important;
+        border-color: {primary_background} !important;
         color: {send_text} !important;
       }}
       .taxamask-embed .model-config-grid input,
@@ -1468,6 +1529,7 @@ exec "$@"
         try:
             self.port = find_free_port(7410)
             self.dashboard_url = f"http://127.0.0.1:{self.port}"
+            self._reset_dashboard_http_session()
             self._load_retries = 0
             self._pending_prompt_attempts = 0
             self._preflight_checks_remaining = 0
@@ -1579,12 +1641,10 @@ exec "$@"
             return
         self._health_checks_remaining -= 1
         try:
-            import urllib.request
-
-            with urllib.request.urlopen(f"{self.dashboard_url}/api/status", timeout=0.5) as response:
-                if response.status == 200:
-                    self.health_timer.stop()
-                    self._on_dashboard_ready()
+            status = self._dashboard_json_request("/api/status", timeout=0.5)
+            if isinstance(status, dict) and status.get("ok") is not False:
+                self.health_timer.stop()
+                self._on_dashboard_ready()
         except Exception:
             return
 
@@ -1697,6 +1757,8 @@ exec "$@"
                 "textMap": {
                     "空闲": "Idle",
                     "发送": "Send",
+                    "中断": "Interrupt",
+                    "点击中断当前任务": "Interrupt the current task",
                     "待信任": "Trust required",
                     "运行中": "Running",
                     "关闭": "Close",
@@ -1715,6 +1777,8 @@ exec "$@"
                     "文本": "Text",
                     "上下文": "context",
                     "本地配置": "Local configuration",
+                    "当前项目配置": "Current project configuration",
+                    "保存到当前项目": "Save to current project",
                     "编辑模型网关": "Edit model gateway",
                     "添加模型网关": "Add model gateway",
                     "关闭模型配置": "Close model configuration",
@@ -1723,6 +1787,20 @@ exec "$@"
                     "保存后切换到这个模型": "Switch to this model after saving",
                     "保存后同步子智能体": "Sync sub-agents after saving",
                     "配置会写入 .lab-agent/config.json；该目录默认不进 Git。Key 不会在这里回显。": "Configuration is written to .lab-agent/config.json. This directory is ignored by Git by default. Keys are not displayed here.",
+                    "保存后写入 .lab-agent/config.json，作为这个项目的默认配置。Key 不会在这里回显。": "Saved to .lab-agent/config.json as this project's default configuration. Keys are not displayed here.",
+                    "模型配置已保存": "Model configuration saved",
+                    "模型已切换": "Model switched",
+                    "本地配置已更新": "Local configuration updated",
+                    "当前项目": "current project",
+                    "全局默认（环境变量）": "global default (environment)",
+                    "LAB_AGENT_CONFIG": "LAB_AGENT_CONFIG",
+                    "内置配置": "bundled configuration",
+                    "默认配置": "default configuration",
+                    "未配置": "not configured",
+                    "项目": "project",
+                    "全局配置": "explicit configuration",
+                    "内置": "bundled",
+                    "默认": "default",
                     "取消": "Cancel",
                     "保存中": "Saving",
                     "保存并使用": "Save and use",
@@ -1766,6 +1844,18 @@ exec "$@"
                 if (match) return `${match[1]} context`;
                 match = translated.match(/^子智能体\\s+(.+)$/);
                 if (match) return `Sub-agent ${match[1]}`;
+                match = translated.match(/^默认：(.+)$/);
+                if (match) return `Default: ${translateTextValue(match[1])}`;
+                match = translated.match(/^当前生效：网关来自(.+)，协议来自(.+)，API Key 来自(.+)。$/);
+                if (match) {
+                  return `Active sources: gateway from ${translateTextValue(match[1])}, protocol from ${translateTextValue(match[2])}, API key from ${translateTextValue(match[3])}.`;
+                }
+                match = translated.match(/^全局默认（环境变量）正在提供：(.+)。在这里保存后，当前项目配置会优先生效。$/);
+                if (match) return `Environment defaults currently provide: ${match[1]}. Saving here makes the current project configuration take priority.`;
+                match = translated.match(/^模型已切换为\\s+(.+)$/);
+                if (match) return `Model switched to ${match[1]}`;
+                match = translated.match(/^当前会话将使用\\s+(.+)$/);
+                if (match) return `The current session will use ${match[1]}`;
                 return translated;
               };
               const setTranslatedText = (node) => {
@@ -1849,10 +1939,11 @@ exec "$@"
                   '.model-config-kicker',
                   '#model-config-title',
                   '.model-config-grid label > span',
-                  '.model-config-note',
+                  '.model-config-note > div',
                   '.model-config-actions button'
                 ].join(',');
                 document.querySelectorAll(dynamicTextSelectors).forEach(setTranslatedText);
+                document.querySelectorAll('.activity-card .activity-title, .activity-card .activity-detail').forEach(setTranslatedText);
                 document.querySelectorAll('.model-config-toggles label').forEach(translateDirectTextNodes);
                 document.querySelectorAll('[title], [aria-label]').forEach(translateAttributes);
                 const trustTitle = document.querySelector('.trust-title');
@@ -1878,9 +1969,15 @@ exec "$@"
               };
               const postTrust = async () => {
                 try {
+                  const port = window.location.port || (window.location.protocol === 'https:' ? '443' : '80');
+                  const csrfCookieName = `antcode_dashboard_csrf_${port}`;
+                  const csrfToken = document.cookie.split(';').map((item) => item.trim()).find((item) => item.startsWith(`${csrfCookieName}=`))?.slice(csrfCookieName.length + 1) || '';
                   const response = await fetch('/api/trust', {
                     method: 'POST',
-                    headers: { 'content-type': 'application/json' },
+                    headers: {
+                      'content-type': 'application/json',
+                      'x-antcode-csrf-token': decodeURIComponent(csrfToken),
+                    },
                     body: '{}'
                   });
                   const result = await response.json();
@@ -2011,15 +2108,7 @@ exec "$@"
         if not self.dashboard_url:
             return False
         try:
-            import urllib.request
-
-            request = urllib.request.Request(f"{self.dashboard_url}/api/trust", data=b"{}", method="POST")
-            request.add_header("content-type", "application/json")
-            with urllib.request.urlopen(request, timeout=2.0) as response:
-                body = response.read().decode("utf-8", errors="replace")
-                if response.status < 200 or response.status >= 300:
-                    return False
-            data = json.loads(body) if body.strip() else {}
+            data = self._dashboard_json_request("/api/trust", payload={}, method="POST", timeout=2.0)
             trust = data.get("trust") if isinstance(data, dict) else {}
             return bool(data.get("ok") is not False and isinstance(trust, dict) and trust.get("trusted") is True)
         except Exception:
@@ -2044,19 +2133,71 @@ exec "$@"
             return False
 
     def _fetch_dashboard_json(self, path, timeout=2.0):
+        return self._dashboard_json_request(path, timeout=timeout)
+
+    def _reset_dashboard_http_session(self):
+        self._dashboard_cookie_jar = None
+        self._dashboard_http_opener = None
+        self._dashboard_csrf_token = ""
+
+    def _ensure_dashboard_http_session(self, timeout=2.0):
         if not self.dashboard_url:
             raise RuntimeError("Ant-Code Dashboard URL is empty")
+        if self._dashboard_http_opener is not None and self._dashboard_csrf_token:
+            return
+        import http.cookiejar
+        import urllib.parse
         import urllib.request
 
-        url = f"{self.dashboard_url}{path}"
-        with urllib.request.urlopen(url, timeout=timeout) as response:
-            body = response.read().decode("utf-8", errors="replace")
+        cookie_jar = http.cookiejar.CookieJar()
+        opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
+        with opener.open(f"{self.dashboard_url}/", timeout=timeout) as response:
+            response.read()
             if response.status < 200 or response.status >= 300:
-                raise RuntimeError(f"{path} returned HTTP {response.status}")
+                raise RuntimeError(f"Dashboard bootstrap returned HTTP {response.status}")
+        port = urllib.parse.urlparse(self.dashboard_url).port
+        csrf_name = f"antcode_dashboard_csrf_{port}"
+        session_name = f"antcode_dashboard_session_{port}"
+        cookies = {cookie.name: cookie.value for cookie in cookie_jar}
+        if not cookies.get(session_name) or not cookies.get(csrf_name):
+            raise RuntimeError("Dashboard bootstrap did not provide authentication cookies")
+        self._dashboard_cookie_jar = cookie_jar
+        self._dashboard_http_opener = opener
+        self._dashboard_csrf_token = cookies[csrf_name]
+
+    def _dashboard_json_request(self, path, payload=None, method=None, timeout=2.0):
+        if not self.dashboard_url:
+            raise RuntimeError("Ant-Code Dashboard URL is empty")
+        import urllib.error
+        import urllib.request
+
+        request_method = method or ("POST" if payload is not None else "GET")
+        body = json.dumps(payload).encode("utf-8") if payload is not None else None
+        for attempt in range(2):
+            self._ensure_dashboard_http_session(timeout=timeout)
+            request = urllib.request.Request(
+                f"{self.dashboard_url}{path}",
+                data=body,
+                method=request_method,
+            )
+            if body is not None:
+                request.add_header("content-type", "application/json")
+                request.add_header("x-antcode-csrf-token", self._dashboard_csrf_token)
+            try:
+                with self._dashboard_http_opener.open(request, timeout=timeout) as response:
+                    response_body = response.read().decode("utf-8", errors="replace")
+                    if response.status < 200 or response.status >= 300:
+                        raise RuntimeError(f"{path} returned HTTP {response.status}")
+                break
+            except urllib.error.HTTPError as exc:
+                if attempt == 0 and exc.code in {401, 403}:
+                    self._reset_dashboard_http_session()
+                    continue
+                raise
         try:
-            data = json.loads(body)
+            data = json.loads(response_body)
         except json.JSONDecodeError as exc:
-            preview = body[max(0, exc.pos - 60): exc.pos + 60].replace("\n", "\\n")
+            preview = response_body[max(0, exc.pos - 60): exc.pos + 60].replace("\n", "\\n")
             raise RuntimeError(
                 f"{path} returned invalid JSON at line {exc.lineno} column {exc.colno}: {preview}"
             ) from exc
@@ -2659,6 +2800,7 @@ exec "$@"
         self._close_dashboard_log(remove=True)
         self._cleanup_owned_dashboard_processes()
         self.dashboard_url = ""
+        self._reset_dashboard_http_session()
         self._update_status_label(at("Ant-Code Dashboard is not running.", self.lang))
         self.stack.setCurrentWidget(self.fallback)
         self._update_fallback()
@@ -2667,11 +2809,7 @@ exec "$@"
         if not self.dashboard_url:
             return
         try:
-            import urllib.request
-
-            request = urllib.request.Request(f"{self.dashboard_url}/api/shutdown", data=b"{}", method="POST")
-            request.add_header("content-type", "application/json")
-            urllib.request.urlopen(request, timeout=1.0).read()
+            self._dashboard_json_request("/api/shutdown", payload={}, method="POST", timeout=1.0)
         except Exception:
             return
 

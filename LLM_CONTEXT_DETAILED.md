@@ -69,7 +69,15 @@ The TIF workbench status text and renderer overlay should be used to confirm whe
 
 The embedded Agent Center uses the first-party `vendor/ant-code/` runtime.
 
-In the TaxaMask `v2.3.0` line, the embedded runtime is aligned with Ant-Code `1.2.4`. This line includes the v2.1.0 long-task/background-terminal controls, gateway timeout/retry hardening, context-budget recovery fixes, interrupted-draft preservation, the bundled taxonomy PDF harvest skill for the PDF evidence stage 0 acquisition workflow, and the TIF/CT annotation-training-prediction loop described below. It intentionally does not adopt standalone Ant-Code global model configuration as the default; the embedded workspace and configuration boundary remains the TaxaMask repository.
+The current embedded runtime is `1.3.0-taxamask.1`, aligned with Ant-Code `v1.3.0` plus the post-tag Windows file validation fix `ca4e005`. It includes the 1.3 Dashboard session lifecycle, responsive/accessible UI, long-transcript paging, atomic model configuration, background subagent/terminal visibility, file safety, and session persistence improvements. It intentionally does not include the standalone EXE/release pipeline, Git first-class tools, or the large TUI input-editor refactor.
+
+Configuration precedence is TaxaMask-specific: bundled defaults < environment defaults < explicit `LAB_AGENT_CONFIG` < current project configuration. The Dashboard always saves to the current project's `.lab-agent/config.json`. Precedence is applied per field: project model and gateway fields override their matching environment defaults, while fields absent from the project continue to fall back to the environment; an environment API key may fill a missing or blank project key. The mere existence of `.lab-agent/config.json` must not suppress unrelated environment model or gateway fields. Do not restore automatic reads from the user's default `.ant-code` configuration directory. `LAB_AGENT_SKIP_PROJECT_CONFIG=1` must continue to disable project config loading when isolation is required.
+
+Visible conversation history and model-resume context use separate transcript archives (`<session>.transcript/` and `<session>.model-context/`). Internal guide prompts must not appear as researcher-visible messages. The Dashboard must keep active background subagent and terminal state visible after the main answer ends, reconnect active sessions, and show the running send action as an interrupt action.
+
+Ant-Code 1.3 Dashboard APIs are cookie-authenticated. TaxaMask startup health polling and preflight must first GET `/` to receive the port-scoped session and CSRF cookies, then reuse that cookie session for `/api/status`, `/api/trust`, `/api/sessions`, and `/api/shutdown`; mutation requests must also send `x-antcode-csrf-token`. Direct unauthenticated API calls fail with HTTP 401 by design.
+
+The standalone Dashboard keeps its responsive sessions/conversation/files navigation, but `taxamask_embed` must hide that navigation because the embedded workspace intentionally omits the standalone sidebars. Qt theme injection must cover both light and dark states for long-transcript controls, connection status, permission/full-access confirmation, question review, queue/background status, shutdown, and model configuration. Do not rely on standalone dark fixed colors inside the light TaxaMask theme.
 
 Important files:
 
@@ -543,6 +551,8 @@ git diff --check
 Current fourth-round full validation inventory: 18 suites and 1,149 tests, with one environment-dependent TIF workbench skip and all remaining tests passing. This includes strict stale-result coverage for SAM, image import, parent/child training, recent workbench routing, and Blink route ownership, plus TIF core/storage/services/preview/backends/workbench, GUI smoke, UI polish, layout, PDF safety/literature, validation tooling, TIF round-three architecture, TaxaMask round-four architecture, 2D SQLite, Agent, Blink/locator, and generic VLM/STL/export.
 
 Embedded Ant-Code tool results are capped at 256 KiB before they enter model context. A large `list_files` result must be marked `truncated` while preserving its tool success/failure metadata; it must not force a new first-turn TaxaMask context into immediate compaction. A gateway response with no visible text and no tool call is an output-health failure and receives one concise repair retry instead of being accepted as a placeholder-only answer.
+
+Ant-Code 1.3 embedded validation currently covers 118 syntax-checked runtime files, 62 byte-matched Dashboard assets, 11 browser tests, 96 Qt GUI smoke tests, 2 TIF Agent tests, and TaxaMask contract/routing tests. The authenticated bootstrap/status/trust/shutdown sequence is also exercised against a real local 1.3 server. The six expected failures in the imported upstream Dashboard/config/session subset assert standalone user-global configuration behavior that TaxaMask deliberately disables; they are not release blockers unless the configuration policy changes.
 
 Use the TaxaMask environment above for GUI/TIF validation. Do not install PySide6 into the default Python environment to satisfy skipped GUI tests.
 

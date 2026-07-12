@@ -2,22 +2,48 @@ import { renderMarkdown } from "./markdown.js";
 import { hydrateRichContent } from "./rich-renderers.js";
 import { visibleTranscriptRole } from "./transcript.js";
 
+/**
+ * @typedef {object} DashboardSessionSummary
+ * @property {string} id
+ * @property {string} [title]
+ * @property {string} [status]
+ * @property {string} [model]
+ * @property {string | number | Date} [modifiedAt]
+ * @property {boolean} [active]
+ * @property {boolean} [running]
+ * @property {number} [queueLength]
+ * @property {boolean} [backgroundVisible]
+ * @property {string[]} [backgroundKinds]
+ * @property {number} [backgroundCount]
+ */
+
 const state = {
   cwd: "",
-  sessions: [],
+  sessions: /** @type {DashboardSessionSummary[]} */ ([]),
   currentSessionId: null,
   eventSource: null,
   eventSourceSessionId: null,
   lastEventSequence: 0,
+  requestScopes: new Map(),
+  connectionState: "idle",
+  eventReconnectAttempt: 0,
+  eventReconnectTimer: null,
+  eventStaleTimer: null,
+  lastEventAt: 0,
   permissionMode: "plan",
   pendingApproval: null,
   pendingQuestion: null,
+  questionReviewMode: false,
+  questionReviewInertEntries: /** @type {{ node: any; inert: boolean }[]} */ ([]),
   trust: null,
   queue: [],
   queueCancelling: new Set(),
   backgroundCancelling: new Set(),
   sessionsLoading: false,
   sessionsStatusTimer: null,
+  sessionsRefreshTimer: null,
+  sessionsRefreshDueAt: 0,
+  sidebarCollapsed: false,
   deletingSessions: new Set(),
   deleteConfirmSessionId: "",
   files: [],
@@ -27,6 +53,8 @@ const state = {
   liveStatusExpanded: false,
   completedActivities: [],
   running: false,
+  turnSubmitting: false,
+  turnRequest: null,
   pendingGuide: null,
   guideSubmitting: false,
   attachments: [],
@@ -54,6 +82,14 @@ const state = {
     total: 0
   },
   transcriptHistoryNode: null,
+  transcriptWindow: {
+    unloadedOlder: 0,
+    unloadedNewer: 0,
+    olderNode: null,
+    newerNode: null
+  },
+  transcriptScrollFrame: null,
+  transcriptScrollForce: false,
   activeTurnId: "",
   processedEventIds: new Set(),
   lastAssistantFinalSignature: "",
@@ -62,18 +98,31 @@ const state = {
   lightboxItems: [],
   lightboxIndex: 0,
   tableLightboxSheetIndex: 0,
-  editingModelId: ""
+  editingModelId: "",
+  responsiveView: "conversation",
+  previewWidth: 360,
+  previewPreferredWidth: 360,
+  previewResizeStartX: /** @type {number | null} */ (null),
+  previewResizeStartWidth: /** @type {number | null} */ (null),
+  transcriptFollowing: true,
+  newReplyAvailable: false,
+  modalContext: null,
+  shutdownActivity: null,
+  shutdownStatusVersion: 0
 };
 
 const els = {
   projectPath: document.querySelector("#project-path"),
   threadList: document.querySelector("#thread-list"),
   refreshSessions: document.querySelector("#refresh-sessions"),
+  collapseSidebar: document.querySelector("#collapse-sidebar"),
   sessionsStatus: document.querySelector("#sessions-status"),
   newTask: document.querySelector("#new-task"),
   runStatus: document.querySelector("#run-status"),
+  connectionStatus: document.querySelector("#connection-status"),
   workflowStrip: document.querySelector("#workflow-strip"),
   transcript: document.querySelector("#transcript"),
+  transcriptJump: document.querySelector("#transcript-jump"),
   emptyState: document.querySelector("#empty-state"),
   promptInput: document.querySelector("#prompt-input"),
   attachmentInput: document.querySelector("#attachment-input"),
@@ -83,6 +132,7 @@ const els = {
   permissionMode: document.querySelector("#permission-mode"),
   modeDescription: document.querySelector("#mode-description"),
   liveStatus: document.querySelector("#live-status"),
+  activityToggle: document.querySelector("#activity-toggle"),
   liveTitle: document.querySelector("#live-title"),
   liveSubtasks: document.querySelector("#live-subtasks"),
   approvalPanel: document.querySelector("#approval-panel"),
@@ -104,9 +154,11 @@ const els = {
   shutdownButton: document.querySelector("#shutdown-button"),
   headerShutdownButton: document.querySelector("#header-shutdown-button"),
   shutdownPanel: document.querySelector("#shutdown-panel"),
+  shutdownCopy: document.querySelector("#shutdown-copy"),
   shutdownCancel: document.querySelector("#shutdown-cancel"),
   shutdownConfirm: document.querySelector("#shutdown-confirm"),
   trustPanel: document.querySelector("#trust-panel"),
+  permissionConfirmPanel: document.querySelector("#permission-confirm-panel"),
   queuePanel: document.querySelector("#queue-panel"),
   contextPanel: document.querySelector("#context-panel"),
   contextClear: document.querySelector("#context-clear"),
@@ -115,13 +167,21 @@ const els = {
   modelConfigPanel: document.querySelector("#model-config-panel"),
   modelStatus: document.querySelector("#model-status"),
   contextStatus: document.querySelector("#context-status"),
-  changeStatus: document.querySelector("#change-status")
+  changeStatus: document.querySelector("#change-status"),
+  contextActionHint: document.querySelector("#context-action-hint"),
+  sidebar: document.querySelector("#session-panel"),
+  workspace: document.querySelector(".workspace"),
+  preview: document.querySelector("#file-panel"),
+  previewResizeHandle: document.querySelector("#preview-resize-handle"),
+  responsiveNavigation: document.querySelector("#responsive-navigation"),
+  responsiveScrim: document.querySelector("#responsive-scrim"),
+  dashboardLiveRegion: document.querySelector("#dashboard-live-region")
 };
 
 const MODE_DESCRIPTIONS = {
   plan: "写入和命令需确认",
   workspace: "工作区常规操作自动同意",
-  fullAccess: "本机工具和网络自动同意"
+  fullAccess: "高风险：本机工具和网络自动同意"
 };
 const LOCAL_FILE_EXTENSIONS = new Set([
   "png", "jpg", "jpeg", "gif", "webp", "svg",
@@ -133,9 +193,17 @@ const LOCAL_FILE_EXTENSIONS = new Set([
   "doc", "docx", "xls", "xlsx", "ppt", "pptx"
 ]);
 const FILE_REFERENCE_PATTERN = /(?:[A-Za-z0-9_.-]+[\\/])*[A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,8}(?::\d+)?/g;
-const DRAFT_RENDER_INTERVAL_MS = 180;
+const TRANSCRIPT_DOM_LIMIT = 300;
+const EVENT_STALE_AFTER_MS = 35_000;
+const EVENT_RECONNECT_MAX_ATTEMPTS = 6;
 const MAX_IMAGE_ATTACHMENTS = 6;
 const MAX_IMAGE_ATTACHMENT_BYTES = 8 * 1024 * 1024;
+const CURRENT_SESSION_STORAGE_KEY = "ant-code-dashboard-current-session";
+const PREVIEW_WIDTH_STORAGE_KEY = "ant-code-dashboard-preview-width";
+const PREVIEW_WIDTH_DEFAULT = 360;
+const PREVIEW_WIDTH_MIN = 300;
+const PREVIEW_WIDTH_MAX = 640;
+const PREVIEW_WORKSPACE_MIN = 520;
 
 applyEmbedMode();
 await init();
@@ -151,21 +219,48 @@ function applyEmbedMode() {
 }
 
 async function init() {
+  restorePreviewWidth();
   bindEvents();
   observeRunStatus();
-  const status = await getJson("/api/status");
-  state.cwd = status.cwd;
-  state.models = normalizeModels(status.models);
-  state.gatewayConfig = normalizeGatewayConfig(status.gatewayConfig);
-  state.gatewayProfiles = normalizeGatewayProfiles(status.gatewayProfiles);
-  state.agentModelTiers = normalizeAgentModelTiers(status.agentModelTiers);
-  state.visionAgent = normalizeVisionAgent(status.visionAgent);
-  updateSessionStatus(status.sessionStatus);
-  els.projectPath.textContent = status.cwd;
-  await loadTrust();
-  await loadSessions();
-  updateSendButton();
-  renderComposerStatus();
+  await bootstrapDashboard();
+}
+
+async function bootstrapDashboard() {
+  const request = beginScopedRequest("bootstrap");
+  renderBootstrapLoading();
+  try {
+    const status = await getJson("/api/status", { signal: request.signal });
+    if (!isCurrentScopedRequest(request)) return;
+    if (!status.ok) {
+      throw new Error(status.error ?? "Dashboard 初始化失败");
+    }
+    state.cwd = status.cwd;
+    state.models = normalizeModels(status.models);
+    state.gatewayConfig = normalizeGatewayConfig(status.gatewayConfig);
+    state.gatewayProfiles = normalizeGatewayProfiles(status.gatewayProfiles);
+    state.agentModelTiers = normalizeAgentModelTiers(status.agentModelTiers);
+    state.visionAgent = normalizeVisionAgent(status.visionAgent);
+    updateSessionStatus(status.sessionStatus);
+    els.projectPath.textContent = status.cwd;
+    const trust = await loadTrust({ signal: request.signal, silent: true });
+    if (!trust?.ok) {
+      throw new Error(trust?.error ?? "无法读取工作区信任状态");
+    }
+    if (!isCurrentScopedRequest(request)) return;
+    await loadSessions();
+    if (!isCurrentScopedRequest(request)) return;
+    await restoreInitialSession();
+    if (!isCurrentScopedRequest(request)) return;
+    updateSendButton();
+    renderComposerStatus();
+    clearBootstrapStatus();
+  } catch (error) {
+    if (!isAbortError(error) && isCurrentScopedRequest(request)) {
+      renderBootstrapFailure(error);
+    }
+  } finally {
+    finishScopedRequest(request);
+  }
 }
 
 function observeRunStatus() {
@@ -190,8 +285,21 @@ function updateRunStatusTone() {
 
 function bindEvents() {
   els.refreshSessions.addEventListener("click", () => loadSessions({ feedback: true }));
-  els.newTask.addEventListener("click", newTask);
+  els.collapseSidebar.addEventListener("click", () => {
+    if (responsiveLayoutMode() === "desktop") {
+      toggleSidebar();
+    } else {
+      setResponsiveView("conversation");
+    }
+  });
+  els.newTask.addEventListener("click", () => {
+    newTask();
+    setResponsiveView("conversation");
+  });
   els.sendButton.addEventListener("click", () => {
+    if (state.turnSubmitting) {
+      return;
+    }
     if (state.running) {
       interruptTurn();
       return;
@@ -204,7 +312,10 @@ function bindEvents() {
       sendPrompt();
     }
   });
-  els.promptInput.addEventListener("input", syncGuideButton);
+  els.promptInput.addEventListener("input", () => {
+    syncGuideButton();
+    resizePromptInput();
+  });
   els.attachButton.addEventListener("click", () => els.attachmentInput.click());
   els.attachmentInput.addEventListener("change", async () => {
     await addAttachmentFiles(Array.from(els.attachmentInput.files ?? []));
@@ -218,28 +329,28 @@ function bindEvents() {
     event.preventDefault();
     await addAttachmentFiles(files);
   });
-  document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") {
-      if (state.modelConfigOpen) {
-        hideModelConfigPanel();
-      } else if (state.modelPanelOpen) {
-        hideModelPanel();
-      } else {
-        hideLightbox();
-      }
-    } else if (event.key === "ArrowLeft") {
-      moveLightbox(-1);
-    } else if (event.key === "ArrowRight") {
-      moveLightbox(1);
-    }
-  });
+  document.addEventListener("keydown", handleGlobalKeydown);
   els.permissionMode.addEventListener("click", (event) => {
     const button = event.target.closest("button[data-mode]");
     if (!button) return;
-    setPermissionMode(button.dataset.mode);
+    requestPermissionMode(button.dataset.mode, button);
   });
+  els.permissionMode.addEventListener("keydown", handlePermissionModeKeydown);
   els.collapsePreview.addEventListener("click", () => {
-    document.body.classList.toggle("preview-collapsed");
+    if (responsiveLayoutMode() === "desktop") {
+      document.body.classList.toggle("preview-collapsed");
+      syncPreviewResizeHandle();
+    } else {
+      setResponsiveView("conversation");
+    }
+  });
+  els.previewResizeHandle?.addEventListener("pointerdown", (event) => beginPreviewResize(/** @type {PointerEvent} */ (event)));
+  els.previewResizeHandle?.addEventListener("pointermove", (event) => updatePreviewResize(/** @type {PointerEvent} */ (event)));
+  els.previewResizeHandle?.addEventListener("pointerup", (event) => finishPreviewResize(/** @type {PointerEvent} */ (event)));
+  els.previewResizeHandle?.addEventListener("pointercancel", (event) => finishPreviewResize(/** @type {PointerEvent} */ (event)));
+  els.previewResizeHandle?.addEventListener("keydown", (event) => handlePreviewResizeKeydown(/** @type {KeyboardEvent} */ (event)));
+  els.previewResizeHandle?.addEventListener("dblclick", () => {
+    setPreviewWidth(PREVIEW_WIDTH_DEFAULT, { persist: true, announce: true });
   });
   els.shutdownButton.addEventListener("click", showShutdownPanel);
   els.headerShutdownButton.addEventListener("click", showShutdownPanel);
@@ -282,62 +393,633 @@ function bindEvents() {
     state.workflowExpanded = !state.workflowExpanded;
     renderWorkflowStrip();
   });
-  els.liveStatus.addEventListener("click", () => toggleLiveStatusDetails());
-  els.liveStatus.addEventListener("keydown", (event) => {
-    if (event.key !== "Enter" && event.key !== " ") {
-      return;
+  els.activityToggle.addEventListener("click", toggleLiveStatusDetails);
+  els.transcriptJump.addEventListener("click", followTranscript);
+  els.responsiveNavigation.querySelectorAll("button[data-dashboard-view]").forEach((button) => {
+    button.addEventListener("click", () => setResponsiveView(button.dataset.dashboardView));
+  });
+  els.responsiveScrim.addEventListener("click", () => setResponsiveView("conversation"));
+  els.threadList.addEventListener("click", (event) => {
+    if (event.target.closest(".thread-open")) {
+      setResponsiveView("conversation");
     }
-    event.preventDefault();
-    toggleLiveStatusDetails();
+  });
+  document.addEventListener("click", handleResponsiveFileNavigation);
+  els.connectionStatus?.addEventListener("click", reconnectEventsManually);
+  window.addEventListener?.("online", () => {
+    if (state.currentSessionId && state.connectionState !== "connected") {
+      reconnectEventsManually();
+    }
+  });
+  window.addEventListener?.("offline", () => {
+    clearEventReconnectTimer();
+    setConnectionState("offline");
+  });
+  window.addEventListener?.("resize", () => {
+    syncResponsiveNavigation();
+    setPreviewWidth(state.previewPreferredWidth, { updatePreference: false });
+  });
+  window.visualViewport?.addEventListener?.("resize", syncVisualViewport);
+  window.visualViewport?.addEventListener?.("scroll", syncVisualViewport);
+  resizePromptInput();
+  syncVisualViewport();
+  syncResponsiveNavigation();
+}
+
+export function normalizedResponsiveView(width, requestedView) {
+  if (Number(width) >= 1200) return "conversation";
+  return ["sessions", "conversation", "files"].includes(requestedView) ? requestedView : "conversation";
+}
+
+export function composerHeightFor(scrollHeight, minimum = 52, maximum = 160) {
+  const measured = Number(scrollHeight);
+  const safeMinimum = Math.max(1, Number(minimum) || 52);
+  const safeMaximum = Math.max(safeMinimum, Number(maximum) || 160);
+  return Math.min(safeMaximum, Math.max(safeMinimum, Number.isFinite(measured) ? measured : safeMinimum));
+}
+
+/**
+ * @param {number} viewportWidth
+ * @param {boolean} [sidebarCollapsed]
+ * @returns {{ min: number; max: number }}
+ */
+export function previewWidthBounds(viewportWidth, sidebarCollapsed = false) {
+  const viewport = Math.max(0, Number(viewportWidth) || 0);
+  const sidebarWidth = sidebarCollapsed ? 56 : 280;
+  const available = viewport - 20 - 20 - sidebarWidth - PREVIEW_WORKSPACE_MIN;
+  return {
+    min: PREVIEW_WIDTH_MIN,
+    max: Math.max(PREVIEW_WIDTH_MIN, Math.min(PREVIEW_WIDTH_MAX, available))
+  };
+}
+
+/**
+ * @param {number} width
+ * @param {{ min?: number; max?: number }} bounds
+ * @returns {number}
+ */
+export function clampedPreviewWidth(width, bounds) {
+  const minimum = Math.max(0, Number(bounds?.min) || PREVIEW_WIDTH_MIN);
+  const maximum = Math.max(minimum, Number(bounds?.max) || PREVIEW_WIDTH_MAX);
+  const value = Number(width);
+  return Math.min(maximum, Math.max(minimum, Number.isFinite(value) ? value : PREVIEW_WIDTH_DEFAULT));
+}
+
+export function permissionIndexForKey(currentIndex, key, length) {
+  const count = Math.max(0, Number(length) || 0);
+  if (count === 0) return -1;
+  if (key === "Home") return 0;
+  if (key === "End") return count - 1;
+  if (key === "ArrowRight" || key === "ArrowDown") return (Math.max(0, currentIndex) + 1) % count;
+  if (key === "ArrowLeft" || key === "ArrowUp") return (Math.max(0, currentIndex) - 1 + count) % count;
+  return currentIndex;
+}
+
+export function focusTrapTarget(focusables, activeElement, shiftKey = false) {
+  const items = Array.from(focusables ?? []);
+  if (items.length === 0) return null;
+  const current = items.indexOf(activeElement);
+  if (current < 0) return shiftKey ? items.at(-1) : items[0];
+  return items[(current + (shiftKey ? -1 : 1) + items.length) % items.length];
+}
+
+export function shouldFollowTranscript({ force = false, following = true, onlyIfNearBottom = false, wasAtBottom = true } = {}) {
+  if (force) return true;
+  if (!following) return false;
+  return !onlyIfNearBottom || wasAtBottom !== false;
+}
+
+export function scheduleAnimationFrameOnce(holder, key, callback, scheduler = requestAnimationFrame) {
+  if (holder?.[key] != null) return false;
+  const frame = scheduler(() => {
+    holder[key] = null;
+    callback();
+  });
+  holder[key] = frame ?? true;
+  return true;
+}
+
+export function cancelScheduledAnimationFrame(holder, key, cancel = cancelAnimationFrame) {
+  const frame = holder?.[key];
+  if (frame == null) return false;
+  holder[key] = null;
+  if (frame !== true) cancel(frame);
+  return true;
+}
+
+export function appendPlainDraftDelta(body, text, renderedLength = 0, createTextNode = (value) => document.createTextNode(value)) {
+  const value = String(text ?? "");
+  const start = Math.min(value.length, Math.max(0, Number(renderedLength) || 0));
+  const pending = value.slice(start);
+  if (pending) {
+    if (typeof body?.append === "function") body.append(createTextNode(pending));
+    else if (body) body.textContent = `${body.textContent ?? ""}${pending}`;
+  }
+  return value.length;
+}
+
+export function renderFinalAssistantBody(body, text, renderer = renderMessageText) {
+  renderer(body, text ?? "", { markdown: true });
+}
+
+export function selectTranscriptNodesToRemove(nodes, limit, direction = "append", isProtected = () => false) {
+  const values = Array.from(nodes ?? []);
+  let overflow = Math.max(0, values.length - Math.max(0, Number(limit) || 0));
+  if (overflow === 0) return [];
+  const ordered = direction === "prepend" ? values.slice().reverse() : values;
+  const selected = [];
+  for (const node of ordered) {
+    if (overflow === 0) break;
+    if (isProtected(node)) continue;
+    selected.push(node);
+    overflow -= 1;
+  }
+  return selected;
+}
+
+function responsiveLayoutMode() {
+  const width = Number(window.innerWidth) || Number(document.documentElement?.clientWidth) || 1200;
+  if (width >= 1200) return "desktop";
+  return width >= 768 ? "tablet" : "mobile";
+}
+
+function restorePreviewWidth() {
+  let saved = PREVIEW_WIDTH_DEFAULT;
+  try {
+    saved = Number(window.localStorage?.getItem(PREVIEW_WIDTH_STORAGE_KEY)) || PREVIEW_WIDTH_DEFAULT;
+  } catch {
+    // Local storage can be unavailable in hardened browser contexts.
+  }
+  setPreviewWidth(saved);
+}
+
+/**
+ * @param {number} width
+ * @param {{ persist?: boolean; announce?: boolean; updatePreference?: boolean }} [options]
+ * @returns {number}
+ */
+function setPreviewWidth(width, options = {}) {
+  const bounds = previewWidthBounds(Number(window.innerWidth) || 1200, state.sidebarCollapsed);
+  if (options.updatePreference !== false) {
+    state.previewPreferredWidth = clampedPreviewWidth(width, { min: PREVIEW_WIDTH_MIN, max: PREVIEW_WIDTH_MAX });
+  }
+  state.previewWidth = clampedPreviewWidth(state.previewPreferredWidth, bounds);
+  document.documentElement?.style?.setProperty("--preview-width", `${state.previewWidth}px`);
+  syncPreviewResizeHandle(bounds);
+  if (options.persist) {
+    try {
+      window.localStorage?.setItem(PREVIEW_WIDTH_STORAGE_KEY, String(state.previewPreferredWidth));
+    } catch {
+      // Local storage can be unavailable in hardened browser contexts.
+    }
+  }
+  if (options.announce) announceStatus(`文件栏宽度 ${state.previewWidth} 像素`);
+  return state.previewWidth;
+}
+
+function syncPreviewResizeHandle(bounds = previewWidthBounds(Number(window.innerWidth) || 1200, state.sidebarCollapsed)) {
+  const handle = els.previewResizeHandle;
+  if (!handle) return;
+  handle.setAttribute("aria-valuemin", String(bounds.min));
+  handle.setAttribute("aria-valuemax", String(bounds.max));
+  handle.setAttribute("aria-valuenow", String(state.previewWidth));
+  handle.setAttribute("aria-valuetext", `${state.previewWidth} 像素`);
+  handle.setAttribute("aria-disabled", responsiveLayoutMode() !== "desktop" || document.body.classList.contains("preview-collapsed") ? "true" : "false");
+}
+
+/** @param {PointerEvent} event */
+function beginPreviewResize(event) {
+  const handle = els.previewResizeHandle;
+  if (!handle) return;
+  if (responsiveLayoutMode() !== "desktop" || document.body.classList.contains("preview-collapsed")) return;
+  event.preventDefault();
+  state.previewResizeStartX = Number(event.clientX);
+  state.previewResizeStartWidth = state.previewWidth;
+  handle.setPointerCapture?.(event.pointerId);
+  document.body.classList.add("preview-resizing");
+}
+
+/** @param {PointerEvent} event */
+function updatePreviewResize(event) {
+  if (state.previewResizeStartX === null || state.previewResizeStartWidth === null) return;
+  const delta = Number(event.clientX) - state.previewResizeStartX;
+  setPreviewWidth(state.previewResizeStartWidth - delta);
+}
+
+/** @param {PointerEvent} event */
+function finishPreviewResize(event) {
+  const handle = els.previewResizeHandle;
+  if (!handle) return;
+  if (state.previewResizeStartX === null) return;
+  handle.releasePointerCapture?.(event.pointerId);
+  state.previewResizeStartX = null;
+  state.previewResizeStartWidth = null;
+  document.body.classList.remove("preview-resizing");
+  setPreviewWidth(state.previewWidth, { persist: true, announce: true });
+}
+
+/** @param {KeyboardEvent} event */
+function handlePreviewResizeKeydown(event) {
+  if (responsiveLayoutMode() !== "desktop" || document.body.classList.contains("preview-collapsed")) return;
+  let next = state.previewWidth;
+  const step = event.shiftKey ? 48 : 16;
+  if (event.key === "ArrowLeft") next += step;
+  else if (event.key === "ArrowRight") next -= step;
+  else if (event.key === "Home") next = previewWidthBounds(Number(window.innerWidth) || 1200, state.sidebarCollapsed).min;
+  else if (event.key === "End") next = previewWidthBounds(Number(window.innerWidth) || 1200, state.sidebarCollapsed).max;
+  else return;
+  event.preventDefault();
+  setPreviewWidth(next, { persist: true, announce: true });
+}
+
+function setResponsiveView(view) {
+  state.responsiveView = normalizedResponsiveView(Number(window.innerWidth) || 1200, view);
+  syncResponsiveNavigation();
+}
+
+function syncResponsiveNavigation() {
+  const width = Number(window.innerWidth) || Number(document.documentElement?.clientWidth) || 1200;
+  const view = normalizedResponsiveView(width, state.responsiveView);
+  state.responsiveView = view;
+  if (width < 1200) {
+    state.sidebarCollapsed = false;
+    document.body.classList.remove("sidebar-collapsed", "preview-collapsed");
+  }
+  document.body.dataset.dashboardView = view;
+  els.responsiveNavigation?.querySelectorAll("button[data-dashboard-view]").forEach((button) => {
+    const active = button.dataset.dashboardView === view;
+    button.classList.toggle("active", active);
+    if (active) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
+  });
+  if (state.modalContext) return;
+  const desktop = width >= 1200;
+  setResponsiveSurfaceInert(els.sidebar, !desktop && view !== "sessions");
+  setResponsiveSurfaceInert(els.workspace, !desktop && view !== "conversation");
+  setResponsiveSurfaceInert(els.preview, !desktop && view !== "files");
+}
+
+function setResponsiveSurfaceInert(element, inert) {
+  if (!element) return;
+  element.inert = Boolean(inert);
+}
+
+function handleResponsiveFileNavigation(event) {
+  if (responsiveLayoutMode() === "desktop") return;
+  if (event.target.closest(".file-item, .file-link, [data-file]")) {
+    setResponsiveView("files");
+  }
+}
+
+function syncVisualViewport() {
+  const viewportHeight = Number(window.visualViewport?.height) || Number(window.innerHeight) || 0;
+  if (viewportHeight > 0) {
+    document.documentElement?.style?.setProperty("--dashboard-viewport-height", `${Math.round(viewportHeight)}px`);
+  }
+  const keyboardVisible = Boolean(window.visualViewport) && Number(window.innerHeight) - viewportHeight > 120;
+  document.body.classList.toggle("keyboard-visible", keyboardVisible);
+}
+
+function resizePromptInput() {
+  if (!els.promptInput) return;
+  els.promptInput.style.height = "auto";
+  const height = composerHeightFor(els.promptInput.scrollHeight);
+  els.promptInput.style.height = `${height}px`;
+  els.promptInput.style.overflowY = Number(els.promptInput.scrollHeight) > height ? "auto" : "hidden";
+}
+
+function handlePermissionModeKeydown(event) {
+  const keys = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"];
+  if (!keys.includes(event.key)) return;
+  const buttons = Array.from(els.permissionMode.querySelectorAll("button[data-mode]"));
+  const current = Math.max(0, buttons.indexOf(event.target.closest("button[data-mode]")));
+  const next = permissionIndexForKey(current, event.key, buttons.length);
+  const button = buttons[next];
+  if (!button) return;
+  event.preventDefault();
+  event.stopPropagation();
+  button.focus();
+  requestPermissionMode(button.dataset.mode, button);
+}
+
+function requestPermissionMode(mode, trigger = document.activeElement) {
+  if (mode === "fullAccess" && state.permissionMode !== "fullAccess") {
+    showPermissionConfirm(trigger);
+    return;
+  }
+  hidePermissionConfirm({ restoreFocus: false });
+  setPermissionMode(mode);
+}
+
+function showPermissionConfirm(trigger) {
+  const panel = els.permissionConfirmPanel;
+  if (!panel) return;
+  panel.classList.remove("hidden");
+  panel.innerHTML = `
+    <div>
+      <div class="context-title" id="permission-confirm-title">启用完全访问？</div>
+      <div class="context-copy">当前会话的本机工具、工作区外文件和网络操作将自动获准，直到你切换权限或离开该会话。</div>
+    </div>
+    <div class="context-confirm-actions">
+      <button type="button" data-action="cancel">取消</button>
+      <button type="button" data-action="confirm" class="danger">确认完全访问</button>
+    </div>
+  `;
+  panel.setAttribute("role", "dialog");
+  panel.setAttribute("aria-modal", "true");
+  panel.setAttribute("aria-labelledby", "permission-confirm-title");
+  panel.setAttribute("tabindex", "-1");
+  panel.querySelector("button[data-action='cancel']")?.addEventListener("click", hidePermissionConfirm);
+  panel.querySelector("button[data-action='confirm']")?.addEventListener("click", () => {
+    hidePermissionConfirm({ restoreFocus: false });
+    setPermissionMode("fullAccess");
+    els.permissionMode.querySelector("button[data-mode='fullAccess']")?.focus();
+  });
+  activateModal(panel, { initialFocus: "button[data-action='cancel']", returnFocus: trigger });
+}
+
+function hidePermissionConfirm(options = {}) {
+  const panel = els.permissionConfirmPanel;
+  if (!panel || panel.classList.contains("hidden")) return;
+  deactivateModal(panel, options);
+  panel.classList.add("hidden");
+  panel.replaceChildren();
+}
+
+function updateContextActions() {
+  const noSession = !state.currentSessionId;
+  const busy = state.running || state.turnSubmitting;
+  const disabled = noSession || busy;
+  const hint = noSession
+    ? "请先打开一个空闲会话"
+    : busy
+      ? "任务运行期间不能清空或压缩上下文"
+      : "可管理当前会话上下文";
+  for (const button of [els.contextClear, els.contextCompact]) {
+    if (!button) continue;
+    button.disabled = disabled;
+    button.title = hint;
+  }
+  if (els.contextActionHint) els.contextActionHint.textContent = hint;
+}
+
+function announceStatus(message) {
+  if (!els.dashboardLiveRegion || !message) return;
+  els.dashboardLiveRegion.textContent = "";
+  requestAnimationFrame(() => {
+    els.dashboardLiveRegion.textContent = String(message);
   });
 }
 
-async function loadTrust() {
-  const result = await getJson("/api/trust").catch((error) => ({ ok: false, error: error.message }));
-  if (!result.ok) {
-    showError(result.error ?? "无法读取工作区信任状态");
+const FOCUSABLE_SELECTOR = [
+  "a[href]",
+  "button:not([disabled])",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  "[tabindex]:not([tabindex='-1'])"
+].join(",");
+
+function modalFocusableElements(modal) {
+  return Array.from(modal?.querySelectorAll?.(FOCUSABLE_SELECTOR) ?? []).filter((node) => (
+    node.getAttribute?.("aria-hidden") !== "true" && !node.closest?.("[inert]")
+  ));
+}
+
+function activateModal(modal, options = {}) {
+  if (!modal) return;
+  if (state.modalContext?.modal === modal) {
+    focusModalInitialTarget(modal, options.initialFocus);
     return;
+  }
+  if (state.modalContext) {
+    deactivateModal(state.modalContext.modal, { restoreFocus: false });
+  }
+  const inertEntries = collectModalBackground(modal);
+  const returnFocus = options.returnFocus ?? document.activeElement;
+  state.modalContext = {
+    modal,
+    returnFocus,
+    inertEntries,
+    previousRole: modal.getAttribute("role"),
+    previousAriaModal: modal.getAttribute("aria-modal"),
+    previousTabIndex: modal.getAttribute("tabindex")
+  };
+  modal.setAttribute("role", "dialog");
+  modal.setAttribute("aria-modal", "true");
+  if (!modal.hasAttribute("tabindex")) modal.setAttribute("tabindex", "-1");
+  if (modal !== els.modelConfigPanel && modal !== els.imageLightbox) {
+    modal.classList.add("modal-interaction");
+  }
+  for (const entry of inertEntries) entry.node.inert = true;
+  focusModalInitialTarget(modal, options.initialFocus);
+}
+
+function collectModalBackground(modal) {
+  const entries = [];
+  const seen = new Set();
+  let branch = modal;
+  while (branch?.parentElement) {
+    const parent = branch.parentElement;
+    for (const node of Array.from(parent.children ?? [])) {
+      if (node === branch || seen.has(node)) continue;
+      seen.add(node);
+      entries.push({ node, inert: Boolean(node.inert) });
+    }
+    branch = parent;
+    if (parent === document.body) break;
+  }
+  return entries;
+}
+
+function focusModalInitialTarget(modal, selector) {
+  requestAnimationFrame(() => {
+    if (state.modalContext?.modal !== modal) return;
+    const target = selector ? modal.querySelector(selector) : modalFocusableElements(modal)[0];
+    (target ?? modal).focus?.({ preventScroll: true });
+  });
+}
+
+function deactivateModal(modal, options = {}) {
+  const context = state.modalContext;
+  if (!context || context.modal !== modal) return;
+  state.modalContext = null;
+  for (const entry of context.inertEntries) entry.node.inert = entry.inert;
+  modal.classList.remove("modal-interaction");
+  restoreModalAttribute(modal, "role", context.previousRole);
+  restoreModalAttribute(modal, "aria-modal", context.previousAriaModal);
+  restoreModalAttribute(modal, "tabindex", context.previousTabIndex);
+  syncResponsiveNavigation();
+  if (options.restoreFocus === false) return;
+  const fallback = typeof options.fallbackFocus === "string"
+    ? document.querySelector(options.fallbackFocus)
+    : options.fallbackFocus;
+  const target = context.returnFocus?.isConnected === false ? fallback : context.returnFocus ?? fallback;
+  requestAnimationFrame(() => target?.focus?.({ preventScroll: true }));
+}
+
+function restoreModalAttribute(element, name, value) {
+  if (value === null || typeof value === "undefined") element.removeAttribute(name);
+  else element.setAttribute(name, value);
+}
+
+function handleGlobalKeydown(event) {
+  const activeModal = state.modalContext?.modal;
+  if (activeModal) {
+    if (event.key === "Tab") {
+      const focusables = modalFocusableElements(activeModal);
+      const target = focusTrapTarget(focusables, document.activeElement, event.shiftKey);
+      event.preventDefault();
+      (target ?? activeModal).focus?.({ preventScroll: true });
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeActiveModal(activeModal);
+      return;
+    }
+    if (activeModal === els.imageLightbox && event.key === "ArrowLeft") {
+      event.preventDefault();
+      moveLightbox(-1);
+    } else if (activeModal === els.imageLightbox && event.key === "ArrowRight") {
+      event.preventDefault();
+      moveLightbox(1);
+    }
+    return;
+  }
+  if (state.questionReviewMode && event.key === "Escape") {
+    event.preventDefault();
+    returnToQuestion();
+    return;
+  }
+  if (event.key === "Escape") {
+    if (state.modelPanelOpen) hideModelPanel();
+    else if (state.responsiveView !== "conversation") setResponsiveView("conversation");
+  }
+}
+
+function closeActiveModal(modal) {
+  if (modal === els.modelConfigPanel) hideModelConfigPanel();
+  else if (modal === els.imageLightbox) hideLightbox();
+  else if (modal === els.shutdownPanel) hideShutdownPanel();
+  else if (modal === els.contextPanel) hideContextConfirm();
+  else if (modal === els.permissionConfirmPanel) hidePermissionConfirm();
+  else if (modal === els.approvalPanel) resolveApproval("cancel");
+  else if (modal === els.questionPanel) cancelQuestion();
+}
+
+async function loadTrust(options = {}) {
+  const result = await getJson("/api/trust", { signal: options.signal })
+    .catch((error) => ({ ok: false, error: error.message, aborted: isAbortError(error) }));
+  if (!result.ok) {
+    if (!options.silent && !result.aborted) {
+      showError(result.error ?? "无法读取工作区信任状态");
+    }
+    return result;
   }
   state.trust = result.trust;
   renderTrustPanel();
+  return result;
 }
 
 async function loadSessions(options = {}) {
   const feedback = options.feedback === true;
+  const request = beginScopedRequest("sessions");
   if (feedback) {
     setSessionsRefreshState("loading", "刷新中");
   }
   try {
-    const result = await getJson("/api/sessions");
+    const result = await getJson("/api/sessions", { signal: request.signal });
+    if (!isCurrentScopedRequest(request)) return result;
+    if (!result.ok) {
+      throw new Error(result.error ?? "刷新会话失败");
+    }
     state.sessions = result.sessions ?? [];
     renderSessions();
+    if (sessionsNeedRefresh()) {
+      scheduleSessionsRefresh(4000);
+    }
     if (feedback) {
       setSessionsRefreshState("success", `已刷新 ${state.sessions.length} 个会话`);
     }
+    return result;
   } catch (error) {
+    if (isAbortError(error) || !isCurrentScopedRequest(request)) return null;
     if (feedback) {
       setSessionsRefreshState("error", "刷新失败");
     }
     showError(error.message ?? "刷新会话失败");
+    return { ok: false, error: error.message };
+  } finally {
+    finishScopedRequest(request);
+  }
+}
+
+async function restoreInitialSession() {
+  if (state.currentSessionId) {
+    return;
+  }
+  const sessionId = initialSessionId() || latestBackgroundSessionId();
+  if (!sessionId || !state.sessions.some((session) => session.id === sessionId)) {
+    return;
+  }
+  await openSession(sessionId);
+}
+
+function latestBackgroundSessionId() {
+  return state.sessions.find((session) => session.backgroundVisible === true)?.id ?? "";
+}
+
+function initialSessionId() {
+  try {
+    const params = new URLSearchParams(window.location?.search ?? "");
+    return params.get("sessionId") || window.localStorage?.getItem(CURRENT_SESSION_STORAGE_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+/** @param {string | null | undefined} sessionId */
+function rememberCurrentSession(sessionId) {
+  try {
+    const id = String(sessionId ?? "").trim();
+    if (id) {
+      window.localStorage?.setItem(CURRENT_SESSION_STORAGE_KEY, id);
+    } else {
+      window.localStorage?.removeItem(CURRENT_SESSION_STORAGE_KEY);
+    }
+  } catch {
+    // Local storage can be unavailable in hardened browser contexts.
   }
 }
 
 function renderSessions() {
-  els.threadList.innerHTML = "";
+  const threadList = els.threadList;
+  if (!threadList) return;
+  threadList.innerHTML = "";
   if (state.sessions.length === 0) {
     const empty = document.createElement("div");
     empty.className = "thread-meta";
     empty.textContent = "暂无历史任务";
-    els.threadList.append(empty);
+    threadList.append(empty);
     return;
   }
   for (const session of state.sessions) {
+    const status = sessionStatusView(session);
+    const showStatusBadge = ["running", "waiting", "warning", "error"].includes(status.tone);
+    const title = session.title || "未命名任务";
+    const meta = sessionMeta(session, status);
     const item = document.createElement("div");
     item.className = `thread-item${session.id === state.currentSessionId ? " active" : ""}`;
+    item.dataset.tone = status.tone;
     item.innerHTML = `
-      <button type="button" class="thread-open">
-        <div class="thread-title">${escapeHtml(session.title || "未命名任务")}</div>
-        <div class="thread-meta">${escapeHtml(sessionMeta(session))}</div>
+      <button type="button" class="thread-open" title="${escapeAttribute(title)}" aria-label="${escapeAttribute(`${title}，${status.label}${meta ? `，${meta}` : ""}`)}">
+        <span class="thread-status-dot" aria-hidden="true"></span>
+        <div class="thread-main">
+          <div class="thread-title">${escapeHtml(title)}</div>
+          <div class="thread-meta">${escapeHtml(meta)}</div>
+        </div>
+        ${showStatusBadge ? `<span class="thread-status-badge" data-tone="${escapeAttribute(status.tone)}">${escapeHtml(status.label)}</span>` : ""}
       </button>
       ${state.deleteConfirmSessionId === session.id
         ? `
@@ -357,24 +1039,100 @@ function renderSessions() {
           </div>
         `}
     `;
-    item.querySelector(".thread-open").addEventListener("click", () => openSession(session.id));
+    item.querySelector(".thread-open")?.addEventListener("click", () => openSession(session.id));
     item.querySelectorAll("button[data-action]").forEach((button) => {
       button.addEventListener("click", (event) => {
         event.stopPropagation();
         handleSessionAction(button.dataset.action, button.dataset.sessionId);
       });
     });
-    els.threadList.append(item);
+    threadList.append(item);
   }
 }
 
-function sessionMeta(session) {
+function sessionMeta(session, status = sessionStatusView(session)) {
   const parts = [
-    session.running ? "运行中" : session.status || "unknown",
     session.queueLength > 0 ? `${session.queueLength} 排队` : null,
+    status.detail,
+    session.model || null,
     formatTime(session.modifiedAt)
   ].filter(Boolean);
   return parts.join(" · ");
+}
+
+function sessionStatusView(session) {
+  const raw = String(session.status ?? "").toLowerCase();
+  if (session.running || raw === "running") {
+    return { label: "运行中", tone: "running", detail: session.queueLength > 0 ? "有排队" : "" };
+  }
+  if (session.backgroundVisible) {
+    const kinds = Array.isArray(session.backgroundKinds) ? session.backgroundKinds : [];
+    if (kinds.includes("terminal") && !kinds.includes("subagent")) {
+      return { label: "终端后台", tone: "running", detail: session.backgroundCount > 1 ? `${session.backgroundCount} 个任务` : "" };
+    }
+    if (kinds.includes("terminal")) {
+      return { label: "后台运行", tone: "running", detail: session.backgroundCount > 1 ? `${session.backgroundCount} 个任务` : "" };
+    }
+    return { label: "子智能体后台", tone: "running", detail: session.backgroundCount > 1 ? `${session.backgroundCount} 个任务` : "" };
+  }
+  if (raw.includes("引导")) {
+    return { label: "引导中", tone: "running", detail: "" };
+  }
+  if (session.queueLength > 0) {
+    return { label: "排队中", tone: "waiting", detail: "" };
+  }
+  if (["failed", "error"].includes(raw) || raw.includes("失败")) {
+    return { label: "失败", tone: "error", detail: "" };
+  }
+  if (["interrupted", "cancelled"].includes(raw) || raw.includes("中断")) {
+    return { label: "已中断", tone: "warning", detail: "" };
+  }
+  if (["completed", "done"].includes(raw) || raw.includes("完成")) {
+    return { label: "完成", tone: "done", detail: "" };
+  }
+  if (session.active) {
+    return { label: "已打开", tone: "active", detail: "" };
+  }
+  return { label: "历史", tone: "idle", detail: raw && raw !== "unknown" ? session.status : "" };
+}
+
+function toggleSidebar() {
+  setSidebarCollapsed(!state.sidebarCollapsed);
+}
+
+function setSidebarCollapsed(collapsed) {
+  state.sidebarCollapsed = Boolean(collapsed);
+  document.body.classList.toggle("sidebar-collapsed", state.sidebarCollapsed);
+  els.collapseSidebar.textContent = state.sidebarCollapsed ? "›" : "‹";
+  els.collapseSidebar.title = state.sidebarCollapsed ? "展开会话栏" : "收起会话栏";
+  els.collapseSidebar.setAttribute("aria-label", els.collapseSidebar.title);
+  setPreviewWidth(state.previewPreferredWidth, { updatePreference: false });
+}
+
+function sessionsNeedRefresh() {
+  return state.sessions.some((session) =>
+    session.running
+    || session.backgroundVisible
+    || Number(session.queueLength) > 0
+    || String(session.status ?? "").toLowerCase() === "running"
+  );
+}
+
+function scheduleSessionsRefresh(delayMs = 800) {
+  const normalizedDelay = Math.max(0, Number(delayMs) || 0);
+  const dueAt = Date.now() + normalizedDelay;
+  if (state.sessionsRefreshTimer && state.sessionsRefreshDueAt <= dueAt) {
+    return;
+  }
+  if (state.sessionsRefreshTimer) {
+    clearTimeout(state.sessionsRefreshTimer);
+  }
+  state.sessionsRefreshDueAt = dueAt;
+  state.sessionsRefreshTimer = setTimeout(() => {
+    state.sessionsRefreshTimer = null;
+    state.sessionsRefreshDueAt = 0;
+    loadSessions().catch(() => null);
+  }, normalizedDelay);
 }
 
 function handleSessionAction(action, sessionId) {
@@ -401,12 +1159,31 @@ function handleSessionAction(action, sessionId) {
 }
 
 async function openSession(id) {
-  const result = await getJson(`/api/sessions/${encodeURIComponent(id)}`);
+  state.turnRequest = null;
+  const request = beginScopedRequest("session", id);
+  cancelScopedRequest("transcript");
+  cancelScopedRequest("file");
+  els.runStatus.textContent = "加载会话";
+  let result;
+  try {
+    result = await getJson(`/api/sessions/${encodeURIComponent(id)}`, { signal: request.signal });
+  } catch (error) {
+    if (!isAbortError(error) && isCurrentScopedRequest(request)) {
+      showError(error.message ?? "无法读取会话");
+    }
+    finishScopedRequest(request);
+    return;
+  }
+  if (!isCurrentScopedRequest(request)) return;
+  finishScopedRequest(request);
   if (!result.ok) {
     showError(result.error?.message ?? result.error ?? "无法读取会话");
     return;
   }
   state.currentSessionId = id;
+  setPermissionMode(result.session.permission?.mode ?? "plan");
+  state.running = result.session.active === true && result.session.running === true;
+  rememberCurrentSession(id);
   disconnectEvents();
   hideApproval();
   hideQuestion();
@@ -431,6 +1208,7 @@ async function openSession(id) {
   setTranscriptPaging(result.session.transcriptPage);
   renderTranscriptMessages(result.session.transcript ?? []);
   scrollTranscript({ force: true });
+  const hasBackground = restoreBackgroundSnapshot(result.session.backgroundSnapshot);
   if (result.session.active && result.session.running) {
     rememberEventCursor(result.session.eventCursor);
     ensureEventsConnected(id);
@@ -438,8 +1216,21 @@ async function openSession(id) {
     setLiveTitle(result.session.status === "引导中" ? "正在按引导继续" : "正在恢复运行中的任务");
     state.running = true;
     updateSendButton();
+  } else if (result.session.active && hasBackground) {
+    rememberEventCursor(result.session.eventCursor);
+    ensureEventsConnected(id);
+    applyIdleRunStatus("完成");
+    updateSendButton();
   }
   renderSessions();
+}
+
+function restoreBackgroundSnapshot(snapshot) {
+  if (!snapshot || !Array.isArray(snapshot.groups)) {
+    return false;
+  }
+  reconcileBackgroundSubagentSnapshot(snapshot.groups);
+  return state.backgroundSubagents.size > 0;
 }
 
 async function deleteSession(sessionId) {
@@ -448,9 +1239,8 @@ async function deleteSession(sessionId) {
   }
   state.deletingSessions.add(sessionId);
   renderSessions();
-  const result = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
-    method: "DELETE"
-  }).then((response) => response.json()).catch((error) => ({ ok: false, error: error.message }));
+  const result = await deleteJson(`/api/sessions/${encodeURIComponent(sessionId)}`)
+    .catch((error) => ({ ok: false, error: error.message }));
   state.deletingSessions.delete(sessionId);
   state.deleteConfirmSessionId = "";
   if (!result.ok) {
@@ -460,6 +1250,7 @@ async function deleteSession(sessionId) {
   }
   if (state.currentSessionId === sessionId) {
     newTask();
+    rememberCurrentSession(null);
   }
   await loadSessions();
 }
@@ -507,7 +1298,14 @@ async function copySessionId(sessionId) {
 }
 
 function newTask() {
+  cancelScopedRequest("session");
+  cancelScopedRequest("transcript");
+  cancelScopedRequest("file");
+  state.turnRequest = null;
   state.currentSessionId = null;
+  setPermissionMode("plan");
+  state.running = false;
+  rememberCurrentSession(null);
   disconnectEvents();
   hideApproval();
   hideQuestion();
@@ -529,6 +1327,8 @@ function newTask() {
   renderFiles();
   resetPreview();
   els.runStatus.textContent = "空闲";
+  updateSendButton();
+  resizePromptInput();
   els.promptInput.focus();
 }
 
@@ -627,6 +1427,9 @@ function clearAttachments() {
 }
 
 async function sendPrompt() {
+  if (state.turnSubmitting) {
+    return;
+  }
   const prompt = els.promptInput.value.trim();
   const attachments = state.attachments.slice();
   if (!prompt && attachments.length === 0) {
@@ -636,16 +1439,29 @@ async function sendPrompt() {
     showTrustPanel();
     return;
   }
-  els.sendButton.disabled = true;
+  state.turnSubmitting = true;
+  updateSendButton();
   els.runStatus.textContent = state.running ? "已排队" : "启动中";
-  const result = await postJson("/api/turns", {
-    prompt,
-    attachments: attachments.map(attachmentPayload),
-    sessionId: state.currentSessionId,
-    permissionMode: state.permissionMode
-  }).catch((error) => ({ ok: false, error: error.message }));
-  els.sendButton.disabled = false;
+  const turnRequest = stableTurnRequest(prompt, attachments);
+  let result;
+  try {
+    result = await postJson("/api/turns", {
+      requestId: turnRequest.id,
+      prompt,
+      attachments: attachments.map(attachmentPayload),
+      sessionId: state.currentSessionId,
+      permissionMode: state.permissionMode
+    });
+  } catch (error) {
+    result = { ok: false, error: error.message };
+  } finally {
+    state.turnSubmitting = false;
+    updateSendButton();
+  }
   if (!result.ok) {
+    if (Number.isFinite(Number(result.status))) {
+      state.turnRequest = null;
+    }
     if (result.trust) {
       state.trust = result.trust;
       renderTrustPanel();
@@ -655,21 +1471,57 @@ async function sendPrompt() {
     updateSendButton();
     return;
   }
+  state.turnRequest = null;
   els.promptInput.value = "";
+  resizePromptInput();
   clearAttachments();
   state.queue = result.queue ?? state.queue;
+  state.running = result.running === true || state.running;
+  setPermissionMode(result.permission?.mode ?? state.permissionMode);
   updateSessionStatus(result.sessionStatus);
   updateTurnChangeStats(result.changeStats, { replace: true });
   renderQueuePanel();
+  if (result.running === true) {
+    els.runStatus.textContent = "运行中";
+    setLiveTitle("正在处理你的任务");
+  }
   updateSendButton();
   const previousSessionId = state.currentSessionId;
   state.currentSessionId = result.sessionId;
+  rememberCurrentSession(result.sessionId);
   if (previousSessionId !== result.sessionId) {
     resetEventReplayState();
   }
   rememberEventCursor(result.eventCursor);
   ensureEventsConnected(result.sessionId);
   await loadSessions();
+}
+
+function stableTurnRequest(prompt, attachments) {
+  const signature = JSON.stringify({
+    prompt,
+    sessionId: state.currentSessionId,
+    permissionMode: state.permissionMode,
+    attachments: attachments.map((item) => [item.id, item.name, item.mimeType, item.size])
+  });
+  if (state.turnRequest?.signature === signature) {
+    return state.turnRequest;
+  }
+  const request = { id: dashboardRequestId(), signature };
+  state.turnRequest = request;
+  return request;
+}
+
+function dashboardRequestId() {
+  if (typeof globalThis.crypto?.randomUUID === "function") {
+    return globalThis.crypto.randomUUID();
+  }
+  if (typeof globalThis.crypto?.getRandomValues === "function") {
+    const bytes = new Uint8Array(16);
+    globalThis.crypto.getRandomValues(bytes);
+    return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
+  }
+  return `turn-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
 async function interruptTurn() {
@@ -770,9 +1622,9 @@ async function cancelBackgroundSubagent(groupId, taskId) {
   }
   state.backgroundCancelling.add(key);
   updateLiveStatus();
-  const item = [...state.backgroundSubagents.values()].find((candidate) =>
-    (groupId && candidate.groupId === groupId) || (taskId && candidate.taskId === taskId)
-  );
+  const item = Array.from(state.backgroundSubagents.values()).find((value) => (
+    (groupId && value.groupId === groupId) || (taskId && value.taskId === taskId)
+  ));
   const endpoint = item?.kind === "terminal" ? "/api/background-terminals/cancel" : "/api/background-subagents/cancel";
   const result = await postJson(endpoint, {
     sessionId: state.currentSessionId,
@@ -790,7 +1642,7 @@ async function cancelBackgroundSubagent(groupId, taskId) {
     if ((groupId && item.groupId === groupId) || (taskId && item.taskId === taskId)) {
       state.backgroundSubagents.set(itemKey, {
         ...item,
-        summary: "已请求回收后台子智能体，等待状态刷新",
+        summary: item.kind === "terminal" ? "已请求回收后台终端任务，等待状态刷新" : "已请求回收后台子智能体，等待状态刷新",
         status: "stale"
       });
     }
@@ -806,20 +1658,53 @@ function backgroundCancelKey(groupId, taskId) {
 }
 
 function connectEvents(sessionId) {
-  disconnectEvents();
+  clearEventReconnectTimer();
+  closeEventSource();
   state.eventSourceSessionId = sessionId;
+  setConnectionState(state.eventReconnectAttempt > 0 ? "reconnecting" : "connecting");
   const params = new URLSearchParams({ sessionId });
   if (state.lastEventSequence > 0) {
     params.set("after", String(state.lastEventSequence));
   }
-  state.eventSource = new EventSource(`/api/events?${params.toString()}`);
-  state.eventSource.addEventListener("dashboard", (event) => {
-    const payload = JSON.parse(event.data);
+  const source = new EventSource(`/api/events?${params.toString()}`, { withCredentials: true });
+  state.eventSource = source;
+  source.addEventListener("open", () => {
+    if (state.eventSource !== source) return;
+    state.eventReconnectAttempt = 0;
+    markEventConnectionAlive();
+    setConnectionState("connected");
+  });
+  source.addEventListener("heartbeat", () => {
+    if (state.eventSource === source) {
+      markEventConnectionAlive();
+    }
+  });
+  source.addEventListener("dashboard", (event) => {
+    if (state.eventSource !== source || state.eventSourceSessionId !== sessionId) return;
+    let payload;
+    try {
+      payload = JSON.parse(event.data);
+    } catch {
+      setConnectionState("stale");
+      return;
+    }
+    markEventConnectionAlive();
     if (shouldSkipDashboardEvent(payload)) {
       return;
     }
     rememberEventCursor(payload.sequence);
     handleDashboardEvent(payload);
+  });
+  source.addEventListener("error", () => {
+    if (state.eventSource !== source) return;
+    source.close();
+    state.eventSource = null;
+    clearEventStaleTimer();
+    if (navigator.onLine === false) {
+      setConnectionState("offline");
+      return;
+    }
+    scheduleEventReconnect(sessionId);
   });
 }
 
@@ -831,11 +1716,108 @@ function ensureEventsConnected(sessionId) {
 }
 
 function disconnectEvents() {
-  if (state.eventSource) {
-    state.eventSource.close();
-    state.eventSource = null;
-  }
+  clearEventReconnectTimer();
+  clearEventStaleTimer();
+  closeEventSource();
   state.eventSourceSessionId = null;
+  state.eventReconnectAttempt = 0;
+  state.lastEventAt = 0;
+  setConnectionState("idle");
+}
+
+function closeEventSource() {
+  state.eventSource?.close();
+  state.eventSource = null;
+}
+
+function markEventConnectionAlive() {
+  state.lastEventAt = Date.now();
+  if (state.connectionState === "stale" || state.connectionState === "reconnecting") {
+    setConnectionState("connected");
+  }
+  clearEventStaleTimer();
+  const sessionId = state.eventSourceSessionId;
+  armEventStaleTimer(sessionId, EVENT_STALE_AFTER_MS);
+}
+
+function armEventStaleTimer(sessionId, delay) {
+  state.eventStaleTimer = setTimeout(() => {
+    if (!sessionId || state.eventSourceSessionId !== sessionId) return;
+    const remaining = EVENT_STALE_AFTER_MS - (Date.now() - state.lastEventAt);
+    if (remaining > 0) {
+      armEventStaleTimer(sessionId, remaining);
+      return;
+    }
+    setConnectionState("stale");
+    closeEventSource();
+    scheduleEventReconnect(sessionId);
+  }, Math.max(1, delay));
+}
+
+function scheduleEventReconnect(sessionId) {
+  if (!sessionId || state.currentSessionId !== sessionId) return;
+  clearEventReconnectTimer();
+  state.eventReconnectAttempt += 1;
+  if (state.eventReconnectAttempt > EVENT_RECONNECT_MAX_ATTEMPTS) {
+    setConnectionState("offline");
+    return;
+  }
+  setConnectionState("reconnecting");
+  const delay = Math.min(15_000, 500 * (2 ** (state.eventReconnectAttempt - 1)));
+  state.eventReconnectTimer = setTimeout(() => {
+    state.eventReconnectTimer = null;
+    if (state.currentSessionId === sessionId && navigator.onLine !== false) {
+      connectEvents(sessionId);
+    }
+  }, delay);
+}
+
+function reconnectEventsManually() {
+  clearEventReconnectTimer();
+  state.eventReconnectAttempt = 0;
+  if (!state.currentSessionId) {
+    bootstrapDashboard();
+    return;
+  }
+  connectEvents(state.currentSessionId);
+}
+
+function clearEventReconnectTimer() {
+  if (state.eventReconnectTimer) {
+    clearTimeout(state.eventReconnectTimer);
+    state.eventReconnectTimer = null;
+  }
+}
+
+function clearEventStaleTimer() {
+  if (state.eventStaleTimer) {
+    clearTimeout(state.eventStaleTimer);
+    state.eventStaleTimer = null;
+  }
+}
+
+function setConnectionState(next) {
+  const previous = state.connectionState;
+  state.connectionState = next;
+  if (!els.connectionStatus) return;
+  const labels = {
+    idle: "未连接",
+    connecting: "连接中",
+    connected: "已连接",
+    reconnecting: `重连 ${Math.max(1, state.eventReconnectAttempt)}/${EVENT_RECONNECT_MAX_ATTEMPTS}`,
+    offline: "离线",
+    stale: "连接过期"
+  };
+  const label = labels[next] ?? labels.idle;
+  els.connectionStatus.dataset.state = next;
+  els.connectionStatus.title = `连接状态：${label}。点击重新连接`;
+  const text = els.connectionStatus.querySelector(".connection-label");
+  if (text) text.textContent = label;
+  if (next !== previous && ["offline", "reconnecting", "stale"].includes(next)) {
+    announceStatus(`Dashboard ${label}`);
+  } else if (next === "connected" && ["offline", "reconnecting", "stale"].includes(previous)) {
+    announceStatus("Dashboard 已重新连接");
+  }
 }
 
 function resetEventReplayState() {
@@ -862,6 +1844,7 @@ function handleDashboardEvent(event) {
     state.lastAssistantFinalSignature = "";
     appendMessage("user", event.queuedKind === "guide" ? "引导" : event.queuedKind === "wakeup" ? "子智能体" : "你", userMessageDisplayText(event.text, event.attachments));
     state.running = true;
+    scheduleSessionsRefresh();
     if (event.queuedKind === "guide") {
       els.runStatus.textContent = "引导中";
       setPendingGuide({
@@ -878,6 +1861,9 @@ function handleDashboardEvent(event) {
     return;
   }
   if (event.type === "run_state") {
+    if (event.permission?.mode) {
+      setPermissionMode(event.permission.mode);
+    }
     if (event.running === true) {
       beginEventTurn(event);
     } else if (event.running === false && event.turnId === state.activeTurnId) {
@@ -885,6 +1871,7 @@ function handleDashboardEvent(event) {
     }
     state.running = event.running === true;
     state.queue = event.queue ?? [];
+    scheduleSessionsRefresh();
     if (state.running && event.current?.kind === "guide") {
       setPendingGuide({
         sessionId: state.currentSessionId,
@@ -906,6 +1893,7 @@ function handleDashboardEvent(event) {
   }
   if (event.type === "guide_queued") {
     state.queue = event.queue ?? [];
+    scheduleSessionsRefresh();
     setPendingGuide({
       sessionId: state.currentSessionId,
       phase: "registered",
@@ -916,6 +1904,7 @@ function handleDashboardEvent(event) {
   }
   if (event.type === "prompt_queued" || event.type === "queue_updated") {
     state.queue = event.queue ?? [];
+    scheduleSessionsRefresh();
     syncPendingGuideFromQueue();
     els.runStatus.textContent = state.pendingGuide ? "引导中" : state.running ? "运行中" : "已排队";
     return;
@@ -934,6 +1923,7 @@ function handleDashboardEvent(event) {
   }
   if (event.type === "wakeup_queued") {
     state.queue = event.queue ?? state.queue;
+    scheduleSessionsRefresh();
     clearBackgroundSubagentStatus(event.groupId);
     renderQueuePanel();
     els.runStatus.textContent = event.running ? "主控续跑已排队" : "主控接续中";
@@ -947,6 +1937,11 @@ function handleDashboardEvent(event) {
   }
   if (event.type === "background_subagent_cancelled") {
     clearBackgroundSubagentStatus(event.groupId || event.taskId);
+    applyIdleRunStatus("空闲");
+    return;
+  }
+  if (event.type === "background_terminal_cancelled") {
+    clearBackgroundSubagentStatus(event.taskId);
     applyIdleRunStatus("空闲");
     return;
   }
@@ -1020,6 +2015,7 @@ function handleDashboardEvent(event) {
     appendAssistantDraft(event);
     els.runStatus.textContent = state.pendingGuide ? "引导中" : "运行中";
     state.running = true;
+    scheduleSessionsRefresh();
     updateSendButton();
     return;
   }
@@ -1047,6 +2043,7 @@ function handleDashboardEvent(event) {
     appendMessage("user", "你", questionResolutionText(event));
     els.runStatus.textContent = "运行中";
     state.running = true;
+    scheduleSessionsRefresh();
     updateSendButton();
     setLiveTitle(event.cancelled ? "继续处理需求核对结果" : "继续处理你的确认");
     return;
@@ -1081,6 +2078,7 @@ function handleDashboardEvent(event) {
     state.activeTurnId = "";
     els.runStatus.textContent = state.backgroundSubagents.size > 0 ? idleRunStatus("收尾中") : "收尾中";
     updateSendButton();
+    scheduleSessionsRefresh();
     return;
   }
   if (event.type === "files_updated") {
@@ -1095,6 +2093,7 @@ function handleDashboardEvent(event) {
       clearPendingGuide();
     }
     updateSendButton();
+    scheduleSessionsRefresh();
     loadSessions();
     return;
   }
@@ -1110,6 +2109,7 @@ function handleDashboardEvent(event) {
     showError(event.message ?? "任务失败");
     applyIdleRunStatus("失败");
     updateSendButton();
+    scheduleSessionsRefresh();
   }
 }
 
@@ -1146,7 +2146,9 @@ function renderTranscriptMessages(messages, options = {}) {
     if (!role) {
       continue;
     }
-    nodes.push(createMessageNode(role, role === "assistant" ? "Ant Code" : "你", messageDisplayText(message.content)));
+    const node = createMessageNode(role, role === "assistant" ? "Ant Code" : "你", messageDisplayText(message.content));
+    node.setAttribute("aria-live", "off");
+    nodes.push(node);
   }
   if (options.prepend) {
     hideEmptyState();
@@ -1154,11 +2156,13 @@ function renderTranscriptMessages(messages, options = {}) {
     for (const node of nodes) {
       els.transcript.insertBefore(node, anchor);
     }
+    trimTranscriptWindow({ direction: "prepend", preserveAnchor: false });
     return nodes;
   }
   for (const node of nodes) {
-    appendTranscriptNode(node);
+    appendTranscriptNode(node, { deferTrim: true });
   }
+  trimTranscriptWindow({ direction: "append", preserveAnchor: !state.transcriptFollowing });
   return nodes;
 }
 
@@ -1207,13 +2211,15 @@ function removeTranscriptHistoryStatus() {
 }
 
 function transcriptFirstContentNode() {
-  if (state.transcriptHistoryNode?.parentElement === els.transcript) {
-    return state.transcriptHistoryNode.nextSibling;
-  }
-  return els.emptyState?.parentElement === els.transcript ? els.emptyState.nextSibling : els.transcript.firstChild;
+  let node = state.transcriptHistoryNode?.parentElement === els.transcript
+    ? state.transcriptHistoryNode.nextSibling
+    : els.transcript.firstChild;
+  if (node === els.emptyState) node = node.nextSibling;
+  return node;
 }
 
 function handleTranscriptScroll() {
+  syncTranscriptFollowState();
   if (els.transcript.scrollTop > 180) {
     return;
   }
@@ -1227,17 +2233,25 @@ async function loadOlderTranscript() {
   if (!state.currentSessionId || !state.transcriptPaging.hasMore || state.transcriptPaging.loading) {
     return;
   }
+  const sessionId = state.currentSessionId;
+  const request = beginScopedRequest("transcript", sessionId);
   const before = state.transcriptPaging.cursor;
   state.transcriptPaging.loading = true;
   state.transcriptPaging.error = "";
   renderTranscriptHistoryStatus();
   const previousHeight = els.transcript.scrollHeight;
   const previousTop = els.transcript.scrollTop;
-  const result = await getJson(`/api/sessions/${encodeURIComponent(state.currentSessionId)}/transcript?${new URLSearchParams({
+  const anchor = transcriptFirstContentNode();
+  const anchorTop = transcriptNodeTop(anchor);
+  const result = await getJson(`/api/sessions/${encodeURIComponent(sessionId)}/transcript?${new URLSearchParams({
     before: before ?? "",
     limit: "100"
-  }).toString()}`).catch((error) => ({ ok: false, error: error.message }));
+  }).toString()}`, { signal: request.signal })
+    .catch((error) => ({ ok: false, error: error.message, aborted: isAbortError(error) }));
+  if (!isCurrentScopedRequest(request) || state.currentSessionId !== sessionId) return;
+  finishScopedRequest(request);
   state.transcriptPaging.loading = false;
+  if (result.aborted) return;
   if (!result.ok) {
     state.transcriptPaging.error = result.error ?? "加载失败";
     renderTranscriptHistoryStatus();
@@ -1249,8 +2263,10 @@ async function loadOlderTranscript() {
   renderTranscriptMessages(result.transcript ?? [], { prepend: true });
   state.transcriptPaging.error = "";
   renderTranscriptHistoryStatus();
-  const delta = els.transcript.scrollHeight - previousHeight;
-  els.transcript.scrollTop = previousTop + delta;
+  if (!restoreTranscriptNodeAnchor(anchor, anchorTop)) {
+    const delta = els.transcript.scrollHeight - previousHeight;
+    els.transcript.scrollTop = previousTop + delta;
+  }
 }
 
 function renderWorkflowPanel(workflow, summary = null) {
@@ -1265,7 +2281,7 @@ function renderWorkflowPanel(workflow, summary = null) {
   if (!state.workflowNode) {
     state.workflowNode = document.createElement("section");
     state.workflowNode.className = "workflow-panel";
-    els.transcript.append(state.workflowNode);
+    appendTranscriptNode(state.workflowNode);
   }
   const totals = summary ?? summarizeWorkflow(workflow);
   const percent = totals.total > 0 ? Math.round((totals.completed / totals.total) * 100) : 0;
@@ -1367,23 +2383,130 @@ function appendMessage(kind, label, text) {
   const node = createMessageNode(kind, label, text);
   appendTranscriptNode(node);
   scrollTranscript({ onlyIfNearBottom: true, wasAtBottom });
+  if (kind === "assistant") announceStatus("收到新的助手回复");
 }
 
 function createMessageNode(kind, label, text) {
   hideEmptyState();
   const node = document.createElement("article");
   node.className = `message ${kind}`;
+  node.setAttribute("aria-live", "off");
   node.innerHTML = `
     <div class="message-label">${escapeHtml(label)}</div>
     <div class="message-body"></div>
   `;
-  renderMessageText(node.querySelector(".message-body"), text ?? "", { markdown: kind === "assistant" });
+  const body = node.querySelector(".message-body");
+  if (kind === "assistant") renderFinalAssistantBody(body, text);
+  else renderMessageText(body, text ?? "", { markdown: false });
   return node;
 }
 
-function appendTranscriptNode(node) {
+function appendTranscriptNode(node, options = {}) {
   hideEmptyState();
   els.transcript.append(node);
+  if (!options.deferTrim) {
+    trimTranscriptWindow({ direction: "append", preserveAnchor: !state.transcriptFollowing });
+  }
+}
+
+function trimTranscriptWindow(options = {}) {
+  const direction = options.direction === "prepend" ? "prepend" : "append";
+  const windowSide = direction === "prepend" ? "newer" : "older";
+  const markerKey = `${windowSide}Node`;
+  const willAddMarker = !state.transcriptWindow[markerKey];
+  const limit = Math.max(1, TRANSCRIPT_DOM_LIMIT - (willAddMarker ? 1 : 0));
+  const nodes = Array.from(els.transcript.children ?? []);
+  const toRemove = selectTranscriptNodesToRemove(nodes, limit, direction, isProtectedTranscriptNode);
+  if (toRemove.length === 0) return 0;
+  const anchor = options.preserveAnchor ? captureTranscriptViewportAnchor(new Set(toRemove)) : null;
+  for (const node of toRemove) node.remove();
+  const countKey = windowSide === "newer" ? "unloadedNewer" : "unloadedOlder";
+  state.transcriptWindow[countKey] += toRemove.length;
+  renderTranscriptWindowMarker(windowSide);
+  restoreTranscriptViewportAnchor(anchor);
+  return toRemove.length;
+}
+
+function isProtectedTranscriptNode(node) {
+  return node === els.emptyState
+    || node === state.transcriptHistoryNode
+    || node === state.workflowNode
+    || node === state.transcriptWindow.olderNode
+    || node === state.transcriptWindow.newerNode
+    || node?.classList?.contains("draft-message");
+}
+
+function renderTranscriptWindowMarker(side) {
+  const countKey = side === "newer" ? "unloadedNewer" : "unloadedOlder";
+  const nodeKey = side === "newer" ? "newerNode" : "olderNode";
+  let node = state.transcriptWindow[nodeKey];
+  if (!node) {
+    node = document.createElement("div");
+    node.className = `transcript-unloaded ${side}`;
+    node.setAttribute("role", "note");
+    node.setAttribute("aria-live", "off");
+    node.innerHTML = `<span></span><button type="button">恢复最近消息</button>`;
+    node.querySelector("button").addEventListener("click", () => {
+      if (state.currentSessionId) openSession(state.currentSessionId);
+    });
+    state.transcriptWindow[nodeKey] = node;
+  }
+  const count = state.transcriptWindow[countKey];
+  node.querySelector("span").textContent = side === "newer"
+    ? `较新的 ${count} 项已从页面卸载`
+    : `较早的 ${count} 项已从页面卸载`;
+  if (side === "newer") {
+    els.transcript.append(node);
+    return;
+  }
+  const before = state.transcriptHistoryNode?.parentElement === els.transcript
+    ? state.transcriptHistoryNode.nextSibling
+    : els.transcript.firstChild;
+  els.transcript.insertBefore(node, before);
+}
+
+function captureTranscriptViewportAnchor(excluded = new Set()) {
+  const transcriptTop = els.transcript.getBoundingClientRect?.().top ?? 0;
+  for (const node of Array.from(els.transcript.children ?? [])) {
+    if (excluded.has(node)) continue;
+    const rect = node.getBoundingClientRect?.();
+    if (rect && rect.height > 0 && rect.bottom >= transcriptTop) {
+      return { node, offset: rect.top - transcriptTop };
+    }
+  }
+  return null;
+}
+
+function restoreTranscriptViewportAnchor(anchor) {
+  if (!anchor || anchor.node?.parentElement !== els.transcript) return false;
+  const transcriptTop = els.transcript.getBoundingClientRect?.().top ?? 0;
+  const nextTop = anchor.node.getBoundingClientRect?.().top;
+  if (!Number.isFinite(nextTop)) return false;
+  els.transcript.scrollTop += nextTop - transcriptTop - anchor.offset;
+  return true;
+}
+
+function transcriptNodeTop(node) {
+  return node?.parentElement === els.transcript ? node.getBoundingClientRect?.().top : null;
+}
+
+function restoreTranscriptNodeAnchor(node, previousTop) {
+  if (!Number.isFinite(previousTop) || node?.parentElement !== els.transcript) return false;
+  const nextTop = node.getBoundingClientRect?.().top;
+  if (!Number.isFinite(nextTop)) return false;
+  els.transcript.scrollTop += nextTop - previousTop;
+  return true;
+}
+
+function resetTranscriptWindow() {
+  state.transcriptWindow.olderNode?.remove();
+  state.transcriptWindow.newerNode?.remove();
+  state.transcriptWindow = {
+    unloadedOlder: 0,
+    unloadedNewer: 0,
+    olderNode: null,
+    newerNode: null
+  };
 }
 
 function appendAssistantDraft(event) {
@@ -1395,22 +2518,22 @@ function appendAssistantDraft(event) {
   if (!draft) {
     const node = document.createElement("article");
     node.className = "message assistant draft-message";
+    node.setAttribute("aria-live", "off");
     const label = Number.isFinite(event.round) ? `思考 · 第 ${event.round} 轮` : "思考";
     node.innerHTML = `
       <div class="message-label">${escapeHtml(label)}</div>
-      <div class="message-body"></div>
+      <div class="message-body draft-plain-text"></div>
     `;
     draft = {
       round: Number.isFinite(event.round) ? event.round : null,
       text: "",
       node,
       body: node.querySelector(".message-body"),
-      renderTimer: null,
-      lastRenderAt: 0,
-      renderedText: ""
+      renderFrame: null,
+      renderedLength: 0
     };
     state.assistantDrafts.set(roundKey, draft);
-    els.transcript.append(node);
+    appendTranscriptNode(node);
   }
   draft.text += String(event.text ?? "");
   scheduleDraftRender(draft);
@@ -1419,32 +2542,16 @@ function appendAssistantDraft(event) {
 }
 
 function scheduleDraftRender(draft) {
-  const elapsed = Date.now() - draft.lastRenderAt;
-  if (elapsed >= DRAFT_RENDER_INTERVAL_MS) {
-    renderAssistantDraft(draft);
-    return;
-  }
-  if (draft.renderTimer) {
-    return;
-  }
-  draft.renderTimer = setTimeout(() => {
-    draft.renderTimer = null;
-    renderAssistantDraft(draft);
-  }, DRAFT_RENDER_INTERVAL_MS - elapsed);
+  scheduleAnimationFrameOnce(draft, "renderFrame", () => renderAssistantDraft(draft));
 }
 
 function renderAssistantDraft(draft, options = {}) {
   const wasAtBottom = isTranscriptNearBottom();
-  if (draft.renderTimer) {
-    clearTimeout(draft.renderTimer);
-    draft.renderTimer = null;
-  }
-  if (!options.force && draft.renderedText === draft.text) {
+  if (options.force) cancelScheduledAnimationFrame(draft, "renderFrame");
+  if (draft.renderedLength === draft.text.length) {
     return;
   }
-  draft.renderedText = draft.text;
-  draft.lastRenderAt = Date.now();
-  renderMessageText(draft.body, draft.text, { markdown: true, lightweight: true });
+  draft.renderedLength = appendPlainDraftDelta(draft.body, draft.text, draft.renderedLength);
   scrollTranscript({ onlyIfNearBottom: true, wasAtBottom });
 }
 
@@ -1453,18 +2560,21 @@ function appendActivity(activity) {
   const node = document.createElement("div");
   node.className = `activity-card ${activity.severity ?? "info"}${activity.collapsed ? "" : " open"}`;
   node.innerHTML = `
-    <div class="activity-head">
+    <button class="activity-head" type="button" aria-expanded="${activity.collapsed ? "false" : "true"}">
       <span class="status-dot"></span>
       <div class="activity-title">${escapeHtml(activity.title)}</div>
       <span class="chevron">⌄</span>
-    </div>
+    </button>
     <div class="activity-detail">${escapeHtml(activity.detail ?? "")}</div>
   `;
-  node.querySelector(".activity-head").addEventListener("click", () => {
+  const toggle = node.querySelector(".activity-head");
+  toggle.addEventListener("click", () => {
     node.classList.toggle("open");
+    toggle.setAttribute("aria-expanded", String(node.classList.contains("open")));
   });
-  els.transcript.append(node);
+  appendTranscriptNode(node);
   scrollTranscript({ onlyIfNearBottom: true, wasAtBottom });
+  if (["danger", "warning"].includes(activity.severity)) announceStatus(activity.title);
 }
 
 function appendContextBoundary(event = {}) {
@@ -1568,7 +2678,8 @@ function reconcileBackgroundSubagentSnapshot(groups) {
       backgroundSubagent: true,
       coalesceKey: key,
       rawType: "background_subagent_snapshot",
-      title: group.status === "waiting" ? "等待子智能体唤醒主控" : "子智能体后台运行中",
+      title: group.kind === "terminal" ? "终端后台运行中" : group.status === "waiting" ? "等待子智能体唤醒主控" : "子智能体后台运行中",
+      kind: group.kind ?? previous.kind ?? "subagent",
       groupId: group.groupId ?? previous.groupId ?? null,
       taskId: group.taskId ?? previous.taskId ?? null,
       profile: group.profile ?? previous.profile ?? null,
@@ -1618,7 +2729,7 @@ function backgroundSubagentDisplayStatus(activity, previous) {
 }
 
 function backgroundSubagentVisible(activity) {
-  return activity.status === "running" || activity.status === "waiting" || activity.status === "stale" || activity.status === "lost";
+  return activity.status === "starting" || activity.status === "running" || activity.status === "waiting" || activity.status === "stale" || activity.status === "lost";
 }
 
 function updateLiveActivity(activity) {
@@ -1656,9 +2767,11 @@ function updateLiveStatus() {
   els.liveStatus.classList.toggle("hidden", !visible);
   els.liveStatus.classList.toggle("has-background-subagents", background.length > 0);
   els.liveStatus.classList.toggle("expanded", state.liveStatusExpanded && background.length > 0);
-  els.liveStatus.tabIndex = background.length > 0 ? 0 : -1;
-  els.liveStatus.setAttribute("role", background.length > 0 ? "button" : "status");
-  els.liveStatus.setAttribute("aria-expanded", background.length > 0 ? String(state.liveStatusExpanded) : "false");
+  els.activityToggle.disabled = background.length === 0;
+  els.activityToggle.setAttribute("aria-expanded", String(state.liveStatusExpanded && background.length > 0));
+  els.activityToggle.setAttribute("aria-label", background.length > 0
+    ? `${state.liveStatusExpanded ? "收起" : "展开"}后台活动详情`
+    : "当前活动");
   if (!visible) {
     els.liveTitle.textContent = "";
     els.liveSubtasks.innerHTML = "";
@@ -1668,6 +2781,12 @@ function updateLiveStatus() {
   const subtasks = active.filter((activity) => activity.toolName === "agent_run");
   els.liveTitle.textContent = liveStatusTitle(primary, subtasks, background);
   els.liveSubtasks.innerHTML = "";
+  if (primary?.rawType === "gateway_retry") {
+    const chip = document.createElement("div");
+    chip.className = "live-chip retry";
+    chip.innerHTML = `<span class="chip-pulse" aria-hidden="true"></span>${escapeHtml(gatewayRetryChipText(primary))}`;
+    els.liveSubtasks.append(chip);
+  }
   for (const task of subtasks.slice(0, 4)) {
     const chip = document.createElement("div");
     chip.className = "live-chip";
@@ -1678,8 +2797,17 @@ function updateLiveStatus() {
 }
 
 function liveStatusTitle(primary, subtasks, background) {
+  if (primary?.rawType === "gateway_retry") {
+    return "网关响应异常，正在自动重试";
+  }
   if (background.length > 0 && (!primary || primary.title === "开始任务")) {
     const counts = backgroundSubagentCounts();
+    if (counts.terminalStarting > 0) {
+      return `${counts.terminalStarting} 个终端后台任务启动中`;
+    }
+    if (counts.terminals > 0) {
+      return `${counts.terminals} 个终端后台任务运行中`;
+    }
     if (counts.running > 0) {
       return `${counts.running} 个子智能体后台运行中`;
     }
@@ -1696,6 +2824,15 @@ function liveStatusTitle(primary, subtasks, background) {
   return primary?.title === "开始任务" && subtasks.length > 0
     ? "子智能体运行中"
     : primary?.title || state.liveTitle || "正在处理";
+}
+
+function gatewayRetryChipText(activity) {
+  const attempt = Number.isFinite(activity.retryAttempt) && Number.isFinite(activity.retryMaxAttempts)
+    ? `${activity.retryAttempt}/${activity.retryMaxAttempts}`
+    : "";
+  const code = activity.retryCode ? String(activity.retryCode) : "gateway";
+  const delay = Number.isFinite(activity.retryDelayMs) ? `${activity.retryDelayMs}ms` : "";
+  return ["重试", attempt, code, delay].filter(Boolean).join(" · ");
 }
 
 function renderBackgroundSubagentStatus(background) {
@@ -1745,6 +2882,11 @@ function renderBackgroundSubagentStatus(background) {
 }
 
 function backgroundSubagentCompactLabel(item) {
+  if (item.kind === "terminal") {
+    if (item.status === "starting") return "终端任务启动中";
+    if (item.status === "stale") return "终端任务回收中";
+    return "终端后台运行";
+  }
   const profile = item.profile ? `${item.profile} ` : "";
   if (item.status === "waiting") return `${profile}等待唤醒`;
   if (item.status === "lost") return `${profile}疑似失联`;
@@ -1753,6 +2895,11 @@ function backgroundSubagentCompactLabel(item) {
 }
 
 function backgroundSubagentTitle(item) {
+  if (item.kind === "terminal") {
+    if (item.status === "starting") return "终端后台任务启动中";
+    if (item.status === "stale") return "终端后台任务回收中";
+    return "终端后台任务运行中";
+  }
   const profile = item.profile ? `${item.profile} ` : "";
   if (item.status === "waiting") return `${profile}等待主控接续`;
   if (item.status === "lost") return `${profile}子智能体疑似失联`;
@@ -1761,6 +2908,14 @@ function backgroundSubagentTitle(item) {
 }
 
 function backgroundSubagentMeta(item) {
+  if (item.kind === "terminal") {
+    return [
+      item.taskId ? `task=${item.taskId}` : null,
+      item.status === "starting" ? "启动中" : null,
+      item.runningCount === 1 ? "运行中" : null,
+      item.lastProgressAt ? `更新 ${formatRelativeTime(item.lastProgressAt)}` : null
+    ].filter(Boolean).join(" · ");
+  }
   return [
     item.groupId ? `group=${item.groupId}` : null,
     item.taskId ? `task=${item.taskId}` : null,
@@ -1773,7 +2928,7 @@ function backgroundSubagentMeta(item) {
 }
 
 function backgroundSubagentCancellable(item) {
-  return item.cancellable !== false && (item.status === "running" || item.status === "stale" || item.status === "lost");
+  return item.cancellable !== false && (item.status === "starting" || item.status === "running" || item.status === "stale" || item.status === "lost");
 }
 
 function resetLiveStatus(options = {}) {
@@ -1790,16 +2945,30 @@ function resetLiveStatus(options = {}) {
 
 function backgroundSubagentCounts() {
   const items = Array.from(state.backgroundSubagents.values()).filter(backgroundSubagentVisible);
+  const subagents = items.filter((item) => item.kind !== "terminal");
+  const terminals = items.filter((item) => item.kind === "terminal");
   return {
-    running: items.filter((item) => item.status === "running").length,
-    stale: items.filter((item) => item.status === "stale").length,
-    lost: items.filter((item) => item.status === "lost").length,
-    waiting: items.filter((item) => item.status === "waiting").length
+    running: subagents.filter((item) => item.status === "running").length,
+    terminalStarting: terminals.filter((item) => item.status === "starting").length,
+    terminals: terminals.filter((item) => item.status === "running").length,
+    terminalStale: terminals.filter((item) => item.status === "stale").length,
+    stale: subagents.filter((item) => item.status === "stale").length,
+    lost: subagents.filter((item) => item.status === "lost").length,
+    waiting: subagents.filter((item) => item.status === "waiting").length
   };
 }
 
 function idleRunStatus(fallback) {
   const counts = backgroundSubagentCounts();
+  if (counts.terminalStarting > 0) {
+    return "终端后台任务启动中";
+  }
+  if (counts.terminals > 0) {
+    return "终端后台任务运行中";
+  }
+  if (counts.terminalStale > 0) {
+    return "终端后台任务回收中";
+  }
   if (counts.running > 0) {
     return "子智能体运行中";
   }
@@ -1827,7 +2996,7 @@ function updateRunStatusForBackground(fallback = "空闲") {
     return;
   }
   const current = els.runStatus.textContent.trim();
-  const base = /子智能体|唤醒/.test(current) ? fallback : current || fallback;
+  const base = /子智能体|终端后台任务|唤醒/.test(current) ? fallback : current || fallback;
   els.runStatus.textContent = idleRunStatus(base);
 }
 
@@ -1898,7 +3067,6 @@ function renderComposerStatus() {
   if (toggle) {
     toggle.disabled = state.running || state.modelSwitching;
   }
-  els.modelStatus.setAttribute("aria-expanded", state.modelPanelOpen ? "true" : "false");
   els.contextStatus.textContent = `上下文 ${formatContextUsage(context)}`;
 
   const stats = state.turnChangeStats ?? {};
@@ -1975,15 +3143,21 @@ function hideModelPanel() {
 }
 
 function showModelConfigPanel(modelId = "") {
+  const returnFocus = document.activeElement;
   state.editingModelId = String(modelId ?? "").trim();
   state.modelConfigOpen = true;
   renderModelConfigPanel();
+  activateModal(els.modelConfigPanel, {
+    initialFocus: "input[name='gatewayUrl']",
+    returnFocus
+  });
 }
 
 function hideModelConfigPanel() {
   if (state.modelConfigSaving) {
     return;
   }
+  deactivateModal(els.modelConfigPanel, { fallbackFocus: "#model-status-toggle" });
   state.modelConfigOpen = false;
   state.editingModelId = "";
   renderModelConfigPanel();
@@ -2041,6 +3215,7 @@ function gatewayProfileOptionHtml(profile) {
 function modelOptionHtml(model) {
   const tags = modelCapabilityLabels(model);
   const context = Number.isFinite(model.contextTokens) ? `${formatTokenCount(model.contextTokens)} 上下文` : "";
+  const defaultSource = model.default ? sourceBadge(model.sources?.modelAlias) : "";
   const agentDefaults = agentModelTiersSummary(model.agentModelTiers);
   const confirmingDelete = state.deleteConfirmModelId === model.id;
   const deleting = state.deletingModelId === model.id;
@@ -2060,6 +3235,7 @@ function modelOptionHtml(model) {
         <span class="model-option-tags">
           ${tags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("")}
           ${context ? `<span>${escapeHtml(context)}</span>` : ""}
+          ${defaultSource ? `<span>默认：${escapeHtml(defaultSource)}</span>` : ""}
         </span>
         ${agentDefaults ? `<span class="model-option-agent">子智能体 ${escapeHtml(agentDefaults)}</span>` : ""}
       </button>
@@ -2132,6 +3308,9 @@ function renderModelConfigPanel() {
   const editing = state.editingModelId ? currentModelInfo(state.editingModelId) : null;
   const current = editing ?? currentModelInfo(state.sessionStatus?.model) ?? state.models.find((model) => model.current) ?? {};
   const gateway = state.gatewayConfig ?? {};
+  const sourceNote = gatewaySourceNote(gateway);
+  const keySource = sourceLabel(gateway.sources?.apiKey);
+  const gatewayDefaultNote = environmentGatewayDefaultNote(gateway);
   const currentAgentTiers = {
     cheap: current.agentModelTiers?.cheap ?? state.agentModelTiers?.cheap ?? "",
     default: current.agentModelTiers?.default ?? state.agentModelTiers?.default ?? "",
@@ -2143,7 +3322,7 @@ function renderModelConfigPanel() {
     <form class="model-config-card" id="model-config-form">
       <div class="model-config-head">
         <div>
-          <div class="model-config-kicker">本地配置</div>
+          <div class="model-config-kicker">${editing ? "当前项目配置" : "保存到当前项目"}</div>
           <h2 id="model-config-title">${editing ? "编辑模型网关" : "添加模型网关"}</h2>
         </div>
         <button class="icon-button" type="button" data-action="close-model-config" title="关闭">×</button>
@@ -2162,7 +3341,7 @@ function renderModelConfigPanel() {
         </label>
         <label>
           <span>API Key</span>
-          <input name="gatewayApiKey" type="password" autocomplete="new-password" spellcheck="false" placeholder="${gateway.apiKeyConfigured ? "已配置，留空则保留" : "可选"}" />
+          <input name="gatewayApiKey" type="password" autocomplete="new-password" spellcheck="false" placeholder="${gateway.apiKeyConfigured ? `已配置，来自${keySource}，留空则保留` : "可选"}" />
         </label>
         <label>
           <span>健康检查 URL</span>
@@ -2190,7 +3369,7 @@ function renderModelConfigPanel() {
         </label>
         <label>
           <span>子智能体 strong</span>
-          <input name="agentStrongModel" spellcheck="false" value="${escapeAttribute(currentAgentTiers.strong)}" placeholder="例如 example-coding-model" />
+          <input name="agentStrongModel" spellcheck="false" value="${escapeAttribute(currentAgentTiers.strong)}" placeholder="例如 example-strong-model" />
         </label>
         <label>
           <span>视觉子智能体</span>
@@ -2204,7 +3383,11 @@ function renderModelConfigPanel() {
         <label><input name="switchToModel" type="checkbox"${editing && !current.current ? "" : " checked"} /> 保存后切换到这个模型</label>
         <label><input name="applyAgentDefaults" type="checkbox" /> 保存后同步子智能体</label>
       </div>
-      <div class="model-config-note">配置会写入 .lab-agent/config.json；该目录默认不进 Git。Key 不会在这里回显。</div>
+      <div class="model-config-note">
+        <div>${escapeHtml(sourceNote)}</div>
+        ${gatewayDefaultNote ? `<div>${escapeHtml(gatewayDefaultNote)}</div>` : ""}
+        <div>保存后写入 .lab-agent/config.json，作为这个项目的默认配置。Key 不会在这里回显。</div>
+      </div>
       <div class="model-config-actions">
         <button type="button" data-action="close-model-config">取消</button>
         <button type="submit" ${state.modelConfigSaving ? "disabled" : ""}>${state.modelConfigSaving ? "保存中" : "保存并使用"}</button>
@@ -2265,7 +3448,12 @@ async function saveModelConfig(event) {
     state.modelConfigSaving = false;
     hideModelConfigPanel();
     hideModelPanel();
-    showNotice("模型配置已保存");
+    if (payload.switchToModel) {
+      const activeModelId = String(result.sessionStatus?.model ?? payload.modelId ?? "").trim();
+      showNotice("模型配置已保存", `模型已切换为 ${modelDisplayName(activeModelId, payload.label || payload.modelId)}`);
+    } else {
+      showNotice("模型配置已保存", "本地配置已更新");
+    }
   } catch (error) {
     showError(error.message ?? "保存模型配置失败");
   } finally {
@@ -2299,6 +3487,7 @@ async function switchModel(modelId) {
     state.visionAgent = normalizeVisionAgent(result.visionAgent);
     updateSessionStatus(result.sessionStatus);
     hideModelPanel();
+    showNotice("模型已切换", `当前会话将使用 ${modelDisplayName(modelId)}`);
   } catch (error) {
     showError(error.message ?? "切换模型失败");
   } finally {
@@ -2380,7 +3569,13 @@ function normalizeGatewayConfig(value) {
     gatewayHealthUrl: String(value?.gatewayHealthUrl ?? ""),
     gatewayProtocol: String(value?.gatewayProtocol ?? "openai-chat"),
     apiKeyConfigured: value?.apiKeyConfigured === true,
-    activeProfileId: String(value?.activeProfileId ?? "")
+    activeProfileId: String(value?.activeProfileId ?? ""),
+    sources: {
+      gatewayUrl: normalizeConfigSource(value?.sources?.gatewayUrl),
+      gatewayHealthUrl: normalizeConfigSource(value?.sources?.gatewayHealthUrl),
+      gatewayProtocol: normalizeConfigSource(value?.sources?.gatewayProtocol),
+      apiKey: normalizeConfigSource(value?.sources?.apiKey)
+    }
   };
 }
 
@@ -2404,6 +3599,13 @@ function normalizeGatewayProfiles(value) {
   })).filter((profile) => profile.id) : [];
 }
 
+function normalizeConfigSource(value) {
+  return {
+    type: String(value?.type ?? "default"),
+    label: String(value?.label ?? value?.type ?? "default")
+  };
+}
+
 function normalizeModels(models) {
   return Array.isArray(models) ? models.map((model) => ({
     id: String(model.id ?? ""),
@@ -2413,7 +3615,12 @@ function normalizeModels(models) {
     modalities: Array.isArray(model.modalities) ? model.modalities.map(String) : ["text"],
     contextTokens: Number.isFinite(Number(model.contextTokens)) ? Number(model.contextTokens) : null,
     agentModelTiers: normalizeAgentModelTiers(model.agentModelTiers),
-    current: model.current === true
+    sources: {
+      modelAlias: normalizeConfigSource(model.sources?.modelAlias),
+      models: normalizeConfigSource(model.sources?.models)
+    },
+    current: model.current === true,
+    default: model.default === true
   })).filter((model) => model.id) : [];
 }
 
@@ -2427,6 +3634,13 @@ function markCurrentModel(models, currentModel) {
 
 function currentModelInfo(modelId) {
   return (state.models ?? []).find((model) => model.id === modelId) ?? null;
+}
+
+function modelDisplayName(modelId, fallback = "") {
+  const id = String(modelId ?? "").trim();
+  const fallbackLabel = String(fallback ?? "").trim();
+  const model = currentModelInfo(id);
+  return model?.label || fallbackLabel || id || "当前模型";
 }
 
 function normalizeAgentModelTiers(value) {
@@ -2468,8 +3682,46 @@ function agentModelTiersSummary(value) {
 function gatewaySummary() {
   const gateway = state.gatewayConfig ?? {};
   const url = gateway.gatewayUrl || "未配置网关";
-  const key = gateway.apiKeyConfigured ? "Key 已配置" : "未配置 Key";
-  return `${url} · ${key}`;
+  const key = gateway.apiKeyConfigured ? `Key ${sourceBadge(gateway.sources?.apiKey)}` : "未配置 Key";
+  const source = sourceBadge(gateway.sources?.gatewayUrl || gateway.sources?.gatewayProtocol);
+  return `${url} · ${key} · ${source}`;
+}
+
+function gatewaySourceNote(gateway) {
+  const urlSource = sourceLabel(gateway.sources?.gatewayUrl);
+  const protocolSource = sourceLabel(gateway.sources?.gatewayProtocol);
+  const keySource = gateway.apiKeyConfigured ? sourceLabel(gateway.sources?.apiKey) : "未配置";
+  return `当前生效：网关来自${urlSource}，协议来自${protocolSource}，API Key 来自${keySource}。`;
+}
+
+function environmentGatewayDefaultNote(gateway) {
+  const sources = gateway.sources ?? {};
+  const envFields = [];
+  if (sources.gatewayUrl?.type === "environment") envFields.push("网关 URL");
+  if (sources.gatewayProtocol?.type === "environment") envFields.push("协议");
+  if (sources.apiKey?.type === "environment") envFields.push("API Key");
+  if (envFields.length === 0) {
+    return "";
+  }
+  return `全局默认（环境变量）正在提供：${envFields.join("、")}。在这里保存后，当前项目配置会优先生效。`;
+}
+
+function sourceBadge(source) {
+  const type = String(source?.type ?? "");
+  if (type === "project") return "项目";
+  if (type === "environment") return "全局默认（环境变量）";
+  if (type === "global") return "全局配置";
+  if (type === "bundled") return "内置";
+  return "默认";
+}
+
+function sourceLabel(source) {
+  const type = String(source?.type ?? "");
+  if (type === "project") return "当前项目";
+  if (type === "environment") return "全局默认（环境变量）";
+  if (type === "global") return "LAB_AGENT_CONFIG";
+  if (type === "bundled") return "内置配置";
+  return "默认配置";
 }
 
 function formatContextUsage(context) {
@@ -2477,16 +3729,23 @@ function formatContextUsage(context) {
     return "-- / --";
   }
   const used = firstFiniteNumber(
-    context.promptTokens,
-    context.providerPromptTokens,
+    context.messageTokens,
     context.promptMessageTokens,
-    context.messageTokens
+    context.promptTokens,
+    context.providerPromptTokens
+  );
+  const latestInput = firstFiniteNumber(
+    context.promptTokens,
+    context.providerPromptTokens
   );
   const limit = firstFiniteNumber(context.maxTokens, context.modelMaxTokens);
   const percent = Number.isFinite(used) && Number.isFinite(limit) && limit > 0
     ? ` · ${Math.min(999, Math.round((used / limit) * 100))}%`
     : "";
-  return `${formatTokenCount(used)} / ${formatTokenCount(limit)}${percent}`;
+  const input = Number.isFinite(latestInput)
+    ? ` · 输入 ${formatTokenCount(latestInput)}`
+    : "";
+  return `${formatTokenCount(used)} / ${formatTokenCount(limit)}${percent}${input}`;
 }
 
 function firstFiniteNumber(...values) {
@@ -2528,6 +3787,7 @@ function collapseCompletedActivities() {
   }
   const node = document.createElement("details");
   node.className = "activity-summary";
+  node.setAttribute("aria-live", "off");
   node.innerHTML = `
     <summary>过程记录 · ${state.completedActivities.length} 项</summary>
     <div class="activity-summary-list"></div>
@@ -2542,17 +3802,14 @@ function collapseCompletedActivities() {
     `;
     list.append(item);
   }
-  els.transcript.append(node);
+  appendTranscriptNode(node);
   state.completedActivities = [];
   scrollTranscript({ onlyIfNearBottom: true });
 }
 
 function clearAssistantDrafts() {
   for (const draft of state.assistantDrafts.values()) {
-    if (draft.renderTimer) {
-      clearTimeout(draft.renderTimer);
-      draft.renderTimer = null;
-    }
+    cancelScheduledAnimationFrame(draft, "renderFrame");
     draft.node.remove();
   }
   state.assistantDrafts.clear();
@@ -2567,6 +3824,7 @@ function collapseAssistantDrafts(finalText = "") {
   const visibleDrafts = capturedDrafts.filter((draft) => !isDuplicateDraftText(draft.text, finalText));
   const node = document.createElement("details");
   node.className = `draft-summary${visibleDrafts.length === 0 ? " compact" : ""}`;
+  node.setAttribute("aria-live", "off");
   const meta = visibleDrafts.length > 0 ? `已收起 · ${visibleDrafts.length} 轮` : "已收起 · 已汇入最终回复";
   node.innerHTML = `
     <summary>
@@ -2586,12 +3844,12 @@ function collapseAssistantDrafts(finalText = "") {
     title.className = "draft-summary-title";
     title.textContent = Number.isFinite(draft.round) ? `第 ${draft.round} 轮` : "思考";
     const body = document.createElement("div");
-    body.className = "message-body";
-    renderMessageText(body, draft.text, { markdown: true, lightweight: true });
+    body.className = "message-body draft-plain-text";
+    body.textContent = draft.text;
     item.append(title, body);
     list.append(item);
   }
-  els.transcript.append(node);
+  appendTranscriptNode(node);
   scrollTranscript({ onlyIfNearBottom: true });
 }
 
@@ -2628,8 +3886,12 @@ function normalizeComparableText(text) {
 function showApproval(approval) {
   state.pendingApproval = approval;
   els.approvalPanel.classList.remove("hidden");
+  els.approvalPanel.setAttribute("tabindex", "-1");
+  els.approvalPanel.setAttribute("role", "dialog");
+  els.approvalPanel.setAttribute("aria-modal", "true");
+  els.approvalPanel.setAttribute("aria-labelledby", "approval-title");
   els.approvalPanel.innerHTML = `
-    <div class="approval-title">需要权限确认 · ${escapeHtml(approval.toolName)}</div>
+    <div class="approval-title" id="approval-title">需要权限确认 · ${escapeHtml(approval.toolName)}</div>
     <div class="approval-preview">${escapeHtml([
       approval.reason,
       approval.sensitive ? "敏感信息强确认：批准后相关内容可能进入模型上下文。" : "",
@@ -2646,6 +3908,9 @@ function showApproval(approval) {
   els.approvalPanel.querySelectorAll("button[data-action]").forEach((button) => {
     button.addEventListener("click", () => resolveApproval(button.dataset.action));
   });
+  activateModal(els.approvalPanel, { initialFocus: "button[data-action='allow-once']" });
+  revealInteractionPanel(els.approvalPanel, "button[data-action]");
+  announceStatus(`需要确认 ${approval.toolName ?? "工具"} 权限`);
 }
 
 async function resolveApproval(action) {
@@ -2655,46 +3920,95 @@ async function resolveApproval(action) {
 }
 
 function hideApproval() {
+  deactivateModal(els.approvalPanel);
   state.pendingApproval = null;
   els.approvalPanel.classList.add("hidden");
   els.approvalPanel.innerHTML = "";
 }
 
 function showQuestion(question) {
+  deactivateQuestionReviewBackground();
+  state.questionReviewMode = false;
   state.pendingQuestion = {
     ...question,
     selectedChoices: new Set((question.choices ?? []).filter((choice) => choice.selected).map((choice) => choice.value ?? choice.label)),
     customDraft: ""
   };
   renderQuestionPanel();
+  activateModal(els.questionPanel, {
+    initialFocus: ".question-input, button[data-choice], button[data-action='submit']"
+  });
+  revealInteractionPanel(els.questionPanel, ".question-input, button[data-choice], button[data-action='submit']");
+  announceStatus("需要核对任务需求");
+}
+
+function revealInteractionPanel(panel, focusSelector) {
+  if (!panel || panel.classList.contains("hidden")) {
+    return;
+  }
+  panel.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+  const target = focusSelector ? panel.querySelector(focusSelector) : null;
+  const focusTarget = target ?? panel;
+  if (typeof focusTarget.focus === "function") {
+    focusTarget.focus({ preventScroll: true });
+  }
 }
 
 function renderQuestionPanel() {
   const question = state.pendingQuestion;
-  if (!question) return;
-  els.questionPanel.classList.remove("hidden");
+  const panel = els.questionPanel;
+  if (!question || !panel) return;
+  panel.classList.remove("hidden");
+  panel.classList.toggle("question-reviewing", state.questionReviewMode);
+  if (state.questionReviewMode) {
+    panel.setAttribute("role", "region");
+    panel.setAttribute("aria-label", "需求确认待处理");
+    panel.removeAttribute("aria-modal");
+    panel.removeAttribute("aria-labelledby");
+    panel.removeAttribute("aria-describedby");
+    panel.setAttribute("tabindex", "-1");
+    panel.innerHTML = `
+      <div class="question-review-bar">
+        <div class="question-review-copy">
+          <div class="question-review-title">需求确认待处理</div>
+          <div class="question-review-summary">${escapeHtml(question.header ?? question.question ?? "返回后继续确认")}</div>
+        </div>
+        <button type="button" data-action="return-to-question">返回确认</button>
+      </div>
+    `;
+    panel.querySelector("button[data-action='return-to-question']")?.addEventListener("click", returnToQuestion);
+    return;
+  }
+  panel.removeAttribute("aria-label");
+  panel.setAttribute("role", "dialog");
+  panel.setAttribute("aria-modal", "true");
+  panel.setAttribute("aria-labelledby", "question-title");
+  panel.setAttribute("aria-describedby", "question-copy");
+  panel.setAttribute("tabindex", "-1");
   const choices = question.choices ?? [];
-  els.questionPanel.innerHTML = `
+  panel.innerHTML = `
     <div class="question-read-pane">
-      <div class="question-title">${escapeHtml(question.header ?? "需求核对")}</div>
-      <div class="question-copy">${escapeHtml(question.question ?? "请确认需求")}</div>
+      <div class="question-title" id="question-title">${escapeHtml(question.header ?? "需求核对")}</div>
+      <div class="question-copy" id="question-copy">${escapeHtml(question.question ?? "请确认需求")}</div>
       ${choices.length ? `<div class="question-choices">${choices.map((choice) => questionChoiceButton(choice, question)).join("")}</div>` : ""}
-      ${question.allowCustom ? `<textarea class="question-input" rows="2" placeholder="${choices.length ? "补充其他要求，可留空" : "输入你的回答"}"></textarea>` : ""}
+      ${question.allowCustom ? `<label class="visually-hidden" for="question-response">补充回答</label><textarea class="question-input" id="question-response" rows="2" aria-describedby="question-copy" placeholder="${choices.length ? "补充其他要求，可留空" : "输入你的回答"}"></textarea>` : ""}
     </div>
     <div class="question-actions">
       <div class="question-prompt-summary">${escapeHtml(question.header ?? "需求核对")}</div>
       <div class="question-action-buttons">
+        <button type="button" data-action="review-conversation">查看对话</button>
         <button type="button" data-action="submit">${escapeHtml(question.confirmLabel ?? "确认")}</button>
         <button type="button" data-action="cancel">取消</button>
       </div>
     </div>
   `;
-  els.questionPanel.querySelectorAll("button[data-choice]").forEach((button) => {
+  /** @type {NodeListOf<HTMLButtonElement>} */ (panel.querySelectorAll("button[data-choice]")).forEach((button) => {
     button.addEventListener("click", () => toggleQuestionChoice(button.dataset.choice));
   });
-  els.questionPanel.querySelector("button[data-action='submit']").addEventListener("click", submitQuestion);
-  els.questionPanel.querySelector("button[data-action='cancel']").addEventListener("click", cancelQuestion);
-  const input = els.questionPanel.querySelector(".question-input");
+  panel.querySelector("button[data-action='review-conversation']")?.addEventListener("click", reviewQuestionConversation);
+  panel.querySelector("button[data-action='submit']")?.addEventListener("click", submitQuestion);
+  panel.querySelector("button[data-action='cancel']")?.addEventListener("click", cancelQuestion);
+  const input = /** @type {HTMLTextAreaElement | null} */ (panel.querySelector(".question-input"));
   if (input) {
     input.value = question.customDraft ?? "";
     input.addEventListener("input", () => {
@@ -2704,6 +4018,47 @@ function renderQuestionPanel() {
       input.focus();
     }
   }
+}
+
+function reviewQuestionConversation() {
+  if (!state.pendingQuestion || state.questionReviewMode) return;
+  rememberQuestionDraft();
+  deactivateModal(els.questionPanel, { restoreFocus: false });
+  state.questionReviewMode = true;
+  renderQuestionPanel();
+  activateQuestionReviewBackground();
+  els.transcript?.focus?.({ preventScroll: true });
+  announceStatus("需求确认已收起，可以查看对话；按 Esc 返回确认");
+}
+
+function returnToQuestion() {
+  if (!state.pendingQuestion || !state.questionReviewMode) return;
+  deactivateQuestionReviewBackground();
+  state.questionReviewMode = false;
+  renderQuestionPanel();
+  activateModal(els.questionPanel, {
+    initialFocus: ".question-input, button[data-choice], button[data-action='submit']"
+  });
+  revealInteractionPanel(els.questionPanel, ".question-input, button[data-choice], button[data-action='submit']");
+  announceStatus("已返回需求确认");
+}
+
+function activateQuestionReviewBackground() {
+  deactivateQuestionReviewBackground();
+  const transcript = els.transcript;
+  const panel = els.questionPanel;
+  if (!transcript || !panel) return;
+  const transcriptStage = transcript.closest?.(".transcript-stage") ?? transcript;
+  const entries = collectModalBackground(panel).filter((entry) => (
+    entry.node !== transcriptStage && !entry.node.contains?.(transcriptStage)
+  ));
+  state.questionReviewInertEntries = entries;
+  for (const entry of entries) entry.node.inert = true;
+}
+
+function deactivateQuestionReviewBackground() {
+  for (const entry of state.questionReviewInertEntries) entry.node.inert = entry.inert;
+  state.questionReviewInertEntries = [];
 }
 
 function questionChoiceButton(choice, question) {
@@ -2731,6 +4086,9 @@ function toggleQuestionChoice(value) {
     question.selectedChoices = new Set([value]);
   }
   renderQuestionPanel();
+  Array.from(els.questionPanel.querySelectorAll("button[data-choice]"))
+    .find((button) => button.dataset.choice === value)
+    ?.focus({ preventScroll: true });
 }
 
 async function submitQuestion() {
@@ -2758,7 +4116,11 @@ async function cancelQuestion() {
 }
 
 function hideQuestion() {
+  deactivateModal(els.questionPanel);
+  deactivateQuestionReviewBackground();
+  state.questionReviewMode = false;
   state.pendingQuestion = null;
+  els.questionPanel.classList.remove("question-reviewing");
   els.questionPanel.classList.add("hidden");
   els.questionPanel.innerHTML = "";
 }
@@ -2998,13 +4360,21 @@ function isInterruptError(message) {
 }
 
 function updateSendButton() {
+  updateContextActions();
+  els.sendButton.setAttribute("aria-busy", String(state.turnSubmitting));
+  if (state.turnSubmitting) {
+    els.sendButton.textContent = "提交中";
+    els.sendButton.title = "正在提交任务";
+    els.sendButton.disabled = true;
+    return;
+  }
   if (!state.trust?.trusted) {
     els.sendButton.textContent = "待信任";
     els.sendButton.disabled = false;
     return;
   }
   if (state.running) {
-    els.sendButton.textContent = "运行中";
+    els.sendButton.textContent = "中断";
     els.sendButton.title = "点击中断当前任务";
   } else {
     els.sendButton.textContent = "发送";
@@ -3015,10 +4385,13 @@ function updateSendButton() {
 
 function showContextConfirm(action) {
   const isClear = action === "clear";
-  els.contextPanel.classList.remove("hidden");
-  els.contextPanel.innerHTML = `
+  const panel = els.contextPanel;
+  if (!panel) return;
+  if (els.contextClear.disabled || els.contextCompact.disabled) return;
+  panel.classList.remove("hidden");
+  panel.innerHTML = `
     <div>
-      <div class="context-title">${isClear ? "清空上下文？" : "压缩上下文？"}</div>
+      <div class="context-title" id="context-confirm-title">${isClear ? "清空上下文？" : "压缩上下文？"}</div>
       <div class="context-copy">${isClear ? "这会清除当前会话的模型上下文，历史记录仍可在左侧查看。" : "这会整理较早上下文，保留近期对话并写入压缩摘要。"}</div>
     </div>
     <div class="context-confirm-actions">
@@ -3026,13 +4399,21 @@ function showContextConfirm(action) {
       <button type="button" data-action="${action}" class="${isClear ? "danger" : ""}">${isClear ? "确认清空" : "确认压缩"}</button>
     </div>
   `;
-  els.contextPanel.querySelector("button[data-action='cancel']").addEventListener("click", hideContextConfirm);
-  els.contextPanel.querySelector(`button[data-action='${action}']`).addEventListener("click", () => runContextAction(action));
+  panel.setAttribute("role", "dialog");
+  panel.setAttribute("aria-modal", "true");
+  panel.setAttribute("aria-labelledby", "context-confirm-title");
+  panel.setAttribute("tabindex", "-1");
+  panel.querySelector("button[data-action='cancel']")?.addEventListener("click", hideContextConfirm);
+  panel.querySelector(`button[data-action='${action}']`)?.addEventListener("click", () => runContextAction(action));
+  activateModal(panel, { initialFocus: "button[data-action='cancel']" });
 }
 
 function hideContextConfirm() {
-  els.contextPanel.classList.add("hidden");
-  els.contextPanel.innerHTML = "";
+  const panel = els.contextPanel;
+  if (!panel) return;
+  deactivateModal(panel);
+  panel.classList.add("hidden");
+  panel.innerHTML = "";
 }
 
 async function runContextAction(action) {
@@ -3098,21 +4479,61 @@ function questionResolutionText(event) {
   return parts.length > 0 ? `需求核对：${parts.join("；")}` : "已确认需求核对";
 }
 
-function showShutdownPanel() {
+async function showShutdownPanel() {
+  const version = ++state.shutdownStatusVersion;
+  state.shutdownActivity = null;
+  els.shutdownCopy.textContent = "正在检查主任务、队列和后台任务，请稍候。";
+  els.shutdownConfirm.disabled = true;
+  els.shutdownConfirm.textContent = "检查中";
   els.shutdownPanel.classList.remove("hidden");
+  activateModal(els.shutdownPanel, { initialFocus: "#shutdown-cancel" });
+  announceStatus("需要确认是否关闭 Dashboard");
+  const result = await getJson("/api/lifecycle/status")
+    .catch((error) => ({ ok: false, error: error.message }));
+  if (version !== state.shutdownStatusVersion || els.shutdownPanel.classList.contains("hidden")) return;
+  if (!result.ok) {
+    els.shutdownCopy.textContent = `无法读取当前活动状态：${result.error?.message ?? result.error ?? "未知错误"}。请返回后重试。`;
+    els.shutdownConfirm.textContent = "无法检查";
+    announceStatus("无法检查 Dashboard 活动状态");
+    return;
+  }
+  state.shutdownActivity = normalizeLifecycleActivity(result.activity);
+  renderShutdownActivity();
 }
 
 function hideShutdownPanel() {
+  state.shutdownStatusVersion += 1;
+  deactivateModal(els.shutdownPanel);
   els.shutdownPanel.classList.add("hidden");
+  els.shutdownConfirm.disabled = false;
+  els.shutdownConfirm.textContent = "确认关闭";
 }
 
 async function shutdownDashboard() {
+  if (!state.shutdownActivity) return;
   els.shutdownConfirm.disabled = true;
   els.shutdownConfirm.textContent = "正在关闭";
+  const result = await postJson("/api/shutdown", shutdownRequestBody(state.shutdownActivity))
+    .catch((error) => ({ ok: false, error: error.message }));
+  if (!shutdownResultIsClosed(result)) {
+    state.shutdownActivity = normalizeLifecycleActivity(result?.activity ?? state.shutdownActivity);
+    els.shutdownCopy.textContent = `${result?.error?.message ?? result?.error ?? "关闭失败"} ${lifecycleActivitySummary(state.shutdownActivity)}。你可以返回继续处理，或重试取消任务并关闭。`;
+    els.shutdownConfirm.disabled = false;
+    els.shutdownConfirm.textContent = state.shutdownActivity.total > 0 ? "重试取消并关闭" : "重试关闭";
+    els.runStatus.textContent = "关闭失败";
+    announceStatus("Dashboard 关闭失败，页面仍可继续使用");
+    els.shutdownConfirm.focus({ preventScroll: true });
+    return;
+  }
   disconnectEvents();
-  await postJson("/api/shutdown", {}).catch(() => null);
+  deactivateModal(els.shutdownPanel, { restoreFocus: false });
+  els.shutdownPanel.classList.add("hidden");
+  state.responsiveView = "conversation";
+  syncResponsiveNavigation();
   document.body.classList.add("dashboard-closed");
   els.runStatus.textContent = "已关闭";
+  cancelTranscriptAnimationFrames();
+  resetTranscriptWindow();
   els.transcript.innerHTML = `
     <div class="empty-state">
       <div class="empty-kicker">Ant Code Dashboard</div>
@@ -3120,6 +4541,62 @@ async function shutdownDashboard() {
       <div class="empty-copy">本机 WebUI 服务已经停止，可以关闭这个页面。再次使用时重新运行 ant-code dashboard。</div>
     </div>
   `;
+  lockClosedDashboard();
+  announceStatus("Dashboard 已关闭");
+}
+
+function lockClosedDashboard() {
+  for (const surface of [
+    els.sidebar,
+    els.preview,
+    els.responsiveNavigation,
+    document.querySelector(".workspace-header"),
+    els.workflowStrip,
+    document.querySelector(".composer-shell")
+  ]) {
+    if (surface) surface.inert = true;
+  }
+}
+
+export function normalizeLifecycleActivity(activity = {}) {
+  const count = (value) => {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 ? Math.floor(number) : 0;
+  };
+  const normalized = {
+    sessions: count(activity.sessions),
+    activeTurns: count(activity.activeTurns),
+    quarantinedTurns: count(activity.quarantinedTurns),
+    queuedTurns: count(activity.queuedTurns),
+    backgroundTasks: count(activity.backgroundTasks),
+    pendingInteractions: count(activity.pendingInteractions)
+  };
+  normalized.total = count(activity.total) || normalized.activeTurns + normalized.quarantinedTurns
+    + normalized.queuedTurns + normalized.backgroundTasks + normalized.pendingInteractions;
+  return normalized;
+}
+
+export function shutdownRequestBody(activity) {
+  return normalizeLifecycleActivity(activity).total > 0 ? { cancel: true } : {};
+}
+
+export function shutdownResultIsClosed(result) {
+  return result?.ok === true;
+}
+
+function lifecycleActivitySummary(activity) {
+  return `活动会话 ${activity.sessions} 个，主任务 ${activity.activeTurns} 个，隔离任务 ${activity.quarantinedTurns} 个，队列 ${activity.queuedTurns} 项，后台任务 ${activity.backgroundTasks} 个，待确认 ${activity.pendingInteractions} 项`;
+}
+
+function renderShutdownActivity() {
+  const activity = state.shutdownActivity;
+  if (!activity) return;
+  const summary = lifecycleActivitySummary(activity);
+  els.shutdownCopy.textContent = activity.total > 0
+    ? `${summary}。关闭会取消这些未完成工作并等待收束；也可以返回继续处理。`
+    : `${summary}。当前没有未完成工作，确认后会停止本机 WebUI。`;
+  els.shutdownConfirm.disabled = false;
+  els.shutdownConfirm.textContent = activity.total > 0 ? "取消任务并关闭" : "确认关闭";
 }
 
 function renderFiles() {
@@ -3156,7 +4633,15 @@ function currentImageFiles() {
 
 async function openFile(filePath) {
   if (!filePath) return;
-  const result = await getJson(filePreviewUrl(filePath));
+  const sessionId = state.currentSessionId;
+  const request = beginScopedRequest("file", `${sessionId ?? "new"}:${filePath}`);
+  els.previewBody.className = "preview-body";
+  els.previewBody.innerHTML = `<div class="preview-placeholder">正在加载文件预览</div>`;
+  const result = await getJson(filePreviewUrl(filePath), { signal: request.signal })
+    .catch((error) => ({ ok: false, error: error.message, aborted: isAbortError(error) }));
+  if (!isCurrentScopedRequest(request) || state.currentSessionId !== sessionId) return;
+  finishScopedRequest(request);
+  if (result.aborted) return;
   els.previewBody.className = "preview-body";
   if (!result.ok) {
     els.previewBody.innerHTML = `<div class="office-card">${escapeHtml(result.error ?? "无法预览文件")}</div>`;
@@ -3182,8 +4667,10 @@ async function openFile(filePath) {
   } else if (file.kind === "table-preview") {
     els.previewBody.classList.add("document-preview-body");
     els.previewBody.replaceChildren(renderTablePreview(file));
-  } else if (file.kind === "office" || file.kind === "binary") {
-    els.previewBody.innerHTML = `<div class="office-card"><strong>${escapeHtml(file.name)}</strong><p>${escapeHtml(file.message ?? "此文件第一版不直接预览。")}</p><p>${escapeHtml(file.relativePath)}</p><a class="open-file" href="${file.rawUrl}" target="_blank" rel="noreferrer">打开文件</a></div>`;
+  } else if (file.kind === "office" || file.kind === "binary" || file.kind === "download") {
+    const download = file.downloadOnly ? ` download="${escapeHtml(file.name)}"` : "";
+    const target = file.downloadOnly ? "" : ` target="_blank"`;
+    els.previewBody.innerHTML = `<div class="office-card"><strong>${escapeHtml(file.name)}</strong><p>${escapeHtml(file.message ?? "此文件第一版不直接预览。")}</p><p>${escapeHtml(file.relativePath)}</p><a class="open-file" href="${file.rawUrl}"${download}${target} rel="noopener noreferrer">${file.downloadOnly ? "下载文件" : "打开文件"}</a></div>`;
   } else if (file.kind === "markdown") {
     els.previewBody.classList.add("document-preview-body");
     const article = document.createElement("article");
@@ -3440,16 +4927,18 @@ function dataLanguageForExtension(extension) {
 }
 
 function showImageLightbox(file, items = null, index = 0) {
+  const returnFocus = document.activeElement;
   const gallery = Array.isArray(items) && items.length > 0 ? items : [file];
   state.lightboxItems = gallery;
   state.lightboxIndex = Math.max(0, Math.min(index, gallery.length - 1));
   renderLightboxImage();
   els.imageLightbox.classList.remove("hidden");
   document.body.classList.add("lightbox-opened");
-  els.lightboxClose.focus();
+  activateModal(els.imageLightbox, { initialFocus: "#lightbox-close", returnFocus });
 }
 
 function showTableLightbox(file) {
+  const returnFocus = document.activeElement;
   state.lightboxItems = [{
     type: "table",
     name: file.name,
@@ -3461,7 +4950,7 @@ function showTableLightbox(file) {
   renderLightboxImage();
   els.imageLightbox.classList.remove("hidden");
   document.body.classList.add("lightbox-opened");
-  els.lightboxClose.focus();
+  activateModal(els.imageLightbox, { initialFocus: "#lightbox-close", returnFocus });
 }
 
 function renderLightboxImage() {
@@ -3510,6 +4999,7 @@ function hideLightbox() {
   if (els.imageLightbox.classList.contains("hidden")) {
     return;
   }
+  deactivateModal(els.imageLightbox);
   els.imageLightbox.classList.add("hidden");
   document.body.classList.remove("lightbox-opened");
   els.lightboxImage.removeAttribute("src");
@@ -3525,13 +5015,19 @@ function hideLightbox() {
 function setPermissionMode(mode) {
   state.permissionMode = mode;
   els.permissionMode.querySelectorAll("button").forEach((button) => {
-    button.classList.toggle("active", button.dataset.mode === mode);
+    const active = button.dataset.mode === mode;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-checked", String(active));
+    button.tabIndex = active ? 0 : -1;
   });
+  document.body.classList.toggle("full-access-active", mode === "fullAccess");
   els.modeDescription.textContent = MODE_DESCRIPTIONS[mode] ?? MODE_DESCRIPTIONS.plan;
+  updateContextActions();
 }
 
 function clearTranscript() {
-  clearAssistantDraftTimers();
+  cancelTranscriptAnimationFrames();
+  resetTranscriptWindow();
   els.transcript.innerHTML = "";
   state.transcriptHistoryNode = null;
   els.transcript.append(els.emptyState);
@@ -3551,14 +5047,20 @@ function clearTranscript() {
   state.activeTurnId = "";
   resetEventReplayState();
   state.lastAssistantFinalSignature = "";
+  state.transcriptFollowing = true;
+  state.newReplyAvailable = false;
+  updateTranscriptJump();
+}
+
+function cancelTranscriptAnimationFrames() {
+  clearAssistantDraftTimers();
+  cancelScheduledAnimationFrame(state, "transcriptScrollFrame");
+  state.transcriptScrollForce = false;
 }
 
 function clearAssistantDraftTimers() {
   for (const draft of state.assistantDrafts.values()) {
-    if (draft.renderTimer) {
-      clearTimeout(draft.renderTimer);
-      draft.renderTimer = null;
-    }
+    cancelScheduledAnimationFrame(draft, "renderFrame");
   }
 }
 
@@ -3576,27 +5078,79 @@ function showError(message) {
   });
 }
 
-function showNotice(message) {
+function showNotice(message, detail = "本地配置已更新") {
   hideEmptyState();
   appendActivity({
     title: message,
-    detail: ".lab-agent/config.json 已更新",
+    detail,
     severity: "info",
     collapsed: false
   });
 }
 
+function renderBootstrapLoading() {
+  els.projectPath.textContent = "正在连接";
+  els.runStatus.textContent = "连接中";
+  els.sendButton.disabled = true;
+  setConnectionState("connecting");
+}
+
+function renderBootstrapFailure(error) {
+  const message = error instanceof Error ? error.message : String(error ?? "Dashboard 初始化失败");
+  setConnectionState(navigator.onLine === false ? "offline" : "stale");
+  els.projectPath.textContent = "连接失败";
+  els.runStatus.textContent = "初始化失败";
+  els.sendButton.disabled = true;
+  cancelTranscriptAnimationFrames();
+  resetTranscriptWindow();
+  els.transcript.innerHTML = `
+    <div class="empty-state bootstrap-error">
+      <div class="empty-kicker">Ant Code Dashboard</div>
+      <div class="empty-title">无法连接本地服务</div>
+      <div class="empty-copy">${escapeHtml(message)}</div>
+      <button type="button" class="bootstrap-retry">重新连接</button>
+    </div>
+  `;
+  els.transcript.querySelector(".bootstrap-retry")?.addEventListener("click", () => {
+    if (typeof window.location?.reload === "function") {
+      window.location.reload();
+    } else {
+      bootstrapDashboard();
+    }
+  });
+}
+
+function clearBootstrapStatus() {
+  if (state.connectionState === "connecting" && !state.currentSessionId) {
+    setConnectionState("idle");
+  }
+}
+
 function scrollTranscript(options = {}) {
-  if (options.onlyIfNearBottom && options.wasAtBottom === false) {
+  if (!shouldFollowTranscript({
+    force: options.force,
+    following: state.transcriptFollowing,
+    onlyIfNearBottom: options.onlyIfNearBottom,
+    wasAtBottom: options.wasAtBottom
+  })) {
+    state.transcriptFollowing = false;
+    state.newReplyAvailable = true;
+    updateTranscriptJump();
     return;
   }
-  const scrollToBottom = () => {
+  state.transcriptFollowing = true;
+  state.newReplyAvailable = false;
+  state.transcriptScrollForce = state.transcriptScrollForce || options.force === true;
+  updateTranscriptJump();
+  scheduleAnimationFrameOnce(state, "transcriptScrollFrame", () => {
+    const force = state.transcriptScrollForce;
+    state.transcriptScrollForce = false;
+    if (!force && !state.transcriptFollowing) {
+      updateTranscriptJump();
+      return;
+    }
     els.transcript.scrollTop = els.transcript.scrollHeight;
-  };
-  scrollToBottom();
-  requestAnimationFrame(() => {
-    scrollToBottom();
-    setTimeout(scrollToBottom, 0);
+    updateTranscriptJump();
   });
 }
 
@@ -3604,27 +5158,124 @@ function isTranscriptNearBottom(threshold = 96) {
   return els.transcript.scrollHeight - els.transcript.scrollTop - els.transcript.clientHeight <= threshold;
 }
 
-async function getJson(url) {
-  const response = await fetch(url);
-  return response.json();
+function syncTranscriptFollowState() {
+  const nearBottom = isTranscriptNearBottom();
+  state.transcriptFollowing = nearBottom;
+  if (nearBottom) state.newReplyAvailable = false;
+  updateTranscriptJump();
 }
 
-async function postJson(url, body) {
+function followTranscript() {
+  state.transcriptFollowing = true;
+  state.newReplyAvailable = false;
+  scrollTranscript({ force: true });
+}
+
+function updateTranscriptJump() {
+  if (!els.transcriptJump) return;
+  const visible = !state.transcriptFollowing;
+  els.transcriptJump.classList.toggle("hidden", !visible);
+  els.transcriptJump.textContent = state.newReplyAvailable ? "有新回复" : "回到底部";
+  els.transcriptJump.setAttribute("aria-label", state.newReplyAvailable ? "有新回复，回到底部" : "回到底部");
+}
+
+function beginScopedRequest(scope, key = "") {
+  cancelScopedRequest(scope);
+  const controller = new AbortController();
+  const request = { scope, key, controller, signal: controller.signal };
+  state.requestScopes.set(scope, request);
+  return request;
+}
+
+function isCurrentScopedRequest(request) {
+  return Boolean(request) && state.requestScopes.get(request.scope) === request && !request.signal.aborted;
+}
+
+function finishScopedRequest(request) {
+  if (state.requestScopes.get(request?.scope) === request) {
+    state.requestScopes.delete(request.scope);
+  }
+}
+
+function cancelScopedRequest(scope) {
+  const request = state.requestScopes.get(scope);
+  if (!request) return;
+  state.requestScopes.delete(scope);
+  if (!request.signal.aborted) {
+    request.controller.abort();
+  }
+}
+
+function isAbortError(error) {
+  return error?.name === "AbortError" || error?.code === "ABORT_ERR";
+}
+
+async function getJson(url, options = {}) {
+  const response = await fetch(url, {
+    credentials: "same-origin",
+    signal: options.signal
+  });
+  return responseJson(response);
+}
+
+async function postJson(url, body, options = {}) {
   const response = await fetch(url, {
     method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body)
+    credentials: "same-origin",
+    headers: dashboardJsonHeaders(),
+    body: JSON.stringify(body),
+    signal: options.signal
   });
-  return response.json();
+  return responseJson(response);
 }
 
-async function deleteJson(url, body = {}) {
+async function deleteJson(url, body = {}, options = {}) {
   const response = await fetch(url, {
     method: "DELETE",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body)
+    credentials: "same-origin",
+    headers: dashboardJsonHeaders(),
+    body: JSON.stringify(body),
+    signal: options.signal
   });
-  return response.json();
+  return responseJson(response);
+}
+
+async function responseJson(response) {
+  const text = await response.text();
+  let payload;
+  try {
+    payload = text ? JSON.parse(text) : {};
+  } catch {
+    payload = { ok: false, error: `服务返回了无效响应（HTTP ${response.status}）` };
+  }
+  if (!response.ok) {
+    return { ...payload, ok: false, status: payload.status ?? response.status, error: payload.error ?? `HTTP ${response.status}` };
+  }
+  return payload;
+}
+
+function dashboardJsonHeaders() {
+  return {
+    "content-type": "application/json",
+    "x-antcode-csrf-token": dashboardCsrfToken()
+  };
+}
+
+function dashboardCsrfToken() {
+  const port = window.location.port || (window.location.protocol === "https:" ? "443" : "80");
+  const cookieName = `antcode_dashboard_csrf_${port}`;
+  for (const cookie of document.cookie.split(";")) {
+    const separator = cookie.indexOf("=");
+    if (separator < 0 || cookie.slice(0, separator).trim() !== cookieName) {
+      continue;
+    }
+    try {
+      return decodeURIComponent(cookie.slice(separator + 1).trim());
+    } catch {
+      return "";
+    }
+  }
+  return "";
 }
 
 function messageText(content) {
@@ -3839,13 +5490,32 @@ function apiFileUrl(endpoint, filePath) {
 
 function imagePreviewUrl(src) {
   const value = String(src ?? "").trim();
-  if (!value || /^data:image\//i.test(value) || /^https?:\/\//i.test(value) || value.startsWith("/api/files/raw?")) {
+  if (!value) {
+    return "";
+  }
+  if (/^data:/i.test(value)) {
+    return isSafeInlineBitmapUrl(value) ? value : "";
+  }
+  if (/^https?:\/\//i.test(value)) {
+    return "";
+  }
+  if (value.startsWith("/api/files/raw?")) {
     return value;
   }
   if (value.startsWith("/")) {
-    return value;
+    return "";
   }
   return rawFileUrl(value.replace(/^\.\//, ""));
+}
+
+function isSafeInlineBitmapUrl(value) {
+  const match = String(value ?? "").match(/^data:image\/(png|jpeg|gif|webp);base64,([a-z0-9+/]+={0,2})$/i);
+  if (!match || match[2].length % 4 !== 0) {
+    return false;
+  }
+  const padding = match[2].endsWith("==") ? 2 : match[2].endsWith("=") ? 1 : 0;
+  const decodedBytes = (match[2].length / 4) * 3 - padding;
+  return decodedBytes > 0 && decodedBytes <= 2 * 1024 * 1024;
 }
 
 function normalizeRelativePath(value) {

@@ -458,4 +458,3 @@ class TifModelSettingsDialog(QDialog):
             "model_manifest_present": _agent_yes_no(bool(self.model_manifest_edit.text().strip())),
             "validation_errors": _agent_error_summary(self._validation_errors()),
         }
-

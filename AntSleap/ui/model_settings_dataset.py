@@ -296,4 +296,3 @@ class ModelSettingsDatasetMixin:
                     route_label,
                 )
             )
-

@@ -811,4 +811,3 @@ class ModelSettingsProfileMixin:
             QMessageBox.warning(self, tr("Model Settings", self.lang), message)
             return
         self.accept()
-

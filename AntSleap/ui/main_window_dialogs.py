@@ -94,7 +94,7 @@ class ExportDialog(QDialog):
         btn_layout.addWidget(btn_ok)
         btn_layout.addWidget(btn_cancel)
         layout.addLayout(btn_layout)
-        
+
     def browse(self):
         start_dir = self.path_edit.text().strip() or self.default_dir
         if start_dir and not os.path.isdir(start_dir):
@@ -102,9 +102,9 @@ class ExportDialog(QDialog):
         d = QFileDialog.getExistingDirectory(self, tr("Select Directory", self.lang), start_dir)
         if d:
             self.path_edit.setText(d)
-    def get_path(self): 
+    def get_path(self):
         return self.path_edit.text()
-    def get_format(self): 
+    def get_format(self):
         return self.format_combo.currentData() or self.format_combo.currentText()
 
 
@@ -557,4 +557,3 @@ class LiteratureDescriptionDialog(QDialog):
         if len(text) <= limit:
             return text
         return text[: limit - 3] + "..."
-

@@ -72,4 +72,3 @@ Start Center P95 从 5,053.232 ms 降到 4,470.789 ms，改善约 11.5%。Stage 
 ## 7. 结论
 
 Stage 1 达到 `verified`。Runtime、worker 和基础 Widget 已有真实责任模块、直接测试、兼容 re-export 和性能非回退证据。按用户连续执行要求，形成独立本地提交后进入 Stage 2，不推送 GitHub。
-

@@ -74,4 +74,3 @@ class ModelSettingsDialog(
         self._build_child_tab(params, child_defaults, form_backend)
         self._build_inference_tab(params, tab_backend)
         self._build_dialog_actions(layout)
-

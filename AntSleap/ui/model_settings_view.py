@@ -239,7 +239,7 @@ class ModelSettingsViewMixin:
         btn_validate_external.clicked.connect(self.validate_external_backend)
         parent_extension_layout.addWidget(btn_validate_external)
         form_backend.addWidget(parent_extension_group)
-        
+
         return tab_backend, form_backend
 
     def _build_parent_tab(self, params):

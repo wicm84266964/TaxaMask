@@ -39,7 +39,7 @@ class MainWindowShellMixin:
         self.active_project_entry_path = ""
         self.last_workbench_kind = "image"
         self.db = database_factory()
-        
+
         self.train_epochs = self.config.get("train_epochs", 5)
         self.train_batch = self.config.get("train_batch", 4)
         self.blink_train_epochs = self.config.get("blink_train_epochs", 5)
@@ -278,7 +278,7 @@ class MainWindowShellMixin:
         self.radio_scale.setObjectName("scaleToolRadio")
         self.radio_scale.toggled.connect(self.on_tool_changed)
         self.tool_group.addButton(self.radio_scale)
-        self.radio_scale.setVisible(False) 
+        self.radio_scale.setVisible(False)
         tool_layout.addWidget(self.radio_scale)
         tool_layout.addStretch(1)
         center_layout.addWidget(self.tool_strip)
@@ -341,13 +341,13 @@ class MainWindowShellMixin:
         self.part_list.setRootIsDecorated(True)
         self.part_list.setSelectionMode(QAbstractItemView.SingleSelection)
         self.part_list.currentItemChanged.connect(self.on_part_selected)
-        self.part_list.setFixedHeight(190) 
+        self.part_list.setFixedHeight(190)
         metadata_layout.addWidget(self.part_list)
         self.blink_context_status_label = QLabel()
         self.blink_context_status_label.setObjectName("mutedLabel")
         self.blink_context_status_label.setWordWrap(True)
         metadata_layout.addWidget(self.blink_context_status_label)
-        
+
         tax_btn_layout = QHBoxLayout()
         self.btn_add_part = QPushButton("+")
         self.btn_add_part.clicked.connect(self.add_taxonomy_part)
@@ -362,8 +362,8 @@ class MainWindowShellMixin:
         tax_btn_layout.addWidget(self.btn_rename_part)
         tax_btn_layout.addWidget(self.btn_del_part)
         metadata_layout.addLayout(tax_btn_layout)
-        
-        self.check_morpho = QCheckBox() 
+
+        self.check_morpho = QCheckBox()
         self.check_morpho.stateChanged.connect(self.toggle_morphometrics)
         metadata_layout.addWidget(self.check_morpho)
         self.group_morpho = QGroupBox()
@@ -433,7 +433,7 @@ class MainWindowShellMixin:
         models_form.setHorizontalSpacing(8)
         models_form.setVerticalSpacing(5)
         models_form.setColumnStretch(1, 1)
-        
+
         # Locator Selection
         self.lbl_locator = QLabel("Locator:")
         models_form.addWidget(self.lbl_locator, 0, 0)
@@ -442,7 +442,7 @@ class MainWindowShellMixin:
         self.combo_locator.activated.connect(self.on_locator_changed)
         self.combo_locator.currentIndexChanged.connect(self.update_model_delete_button_states)
         models_form.addWidget(self.combo_locator, 0, 1)
-        
+
         self.btn_del_locator = QPushButton("Del")
         self.btn_del_locator.setEnabled(False)
         self.btn_del_locator.clicked.connect(self.delete_locator_model)
@@ -453,7 +453,7 @@ class MainWindowShellMixin:
         apply_semantic_button_style(self.btn_note_locator, BUTTON_ROLE_NEUTRAL)
         models_form.addWidget(self.btn_note_locator, 0, 2)
         models_form.addWidget(self.btn_del_locator, 0, 3)
-        
+
         # Segmenter Selection
         self.lbl_segmenter = QLabel("Segmenter:")
         models_form.addWidget(self.lbl_segmenter, 1, 0)
@@ -462,7 +462,7 @@ class MainWindowShellMixin:
         self.combo_segmenter.activated.connect(self.on_segmenter_changed)
         self.combo_segmenter.currentIndexChanged.connect(self.update_model_delete_button_states)
         models_form.addWidget(self.combo_segmenter, 1, 1)
-        
+
         self.btn_del_segmenter = QPushButton("Del")
         self.btn_del_segmenter.setEnabled(False)
         self.btn_del_segmenter.clicked.connect(self.delete_segmenter_model)
@@ -473,7 +473,7 @@ class MainWindowShellMixin:
         apply_semantic_button_style(self.btn_note_segmenter, BUTTON_ROLE_NEUTRAL)
         models_form.addWidget(self.btn_note_segmenter, 1, 2)
         models_form.addWidget(self.btn_del_segmenter, 1, 3)
-        
+
         parent_annotation_layout.addWidget(self.ai_model_panel)
 
         self.ai_action_panel = QWidget()

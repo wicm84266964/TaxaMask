@@ -242,9 +242,9 @@ class TrainingReportDialog(QDialog):
         self.validation_rows = self._load_validation_rows()
         self.filtered_validation_rows = list(self.validation_rows)
         self.report_summary = self._load_report_summary()
-        
+
         layout = QVBoxLayout(self)
-        
+
         tabs = QTabWidget()
 
         tab_summary = QWidget()
@@ -254,7 +254,7 @@ class TrainingReportDialog(QDialog):
         self.summary_box.setPlainText(self._build_summary_text())
         summary_layout.addWidget(self.summary_box)
         tabs.addTab(tab_summary, tr("Summary", self.lang))
-        
+
         # Tab 1: Metrics Plot
         tab_metrics = QWidget()
         layout_m = QVBoxLayout(tab_metrics)
@@ -266,24 +266,24 @@ class TrainingReportDialog(QDialog):
             self.lbl_metrics.setPixmap(pix.scaled(1000, 700, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         layout_m.addWidget(self.lbl_metrics)
         tabs.addTab(tab_metrics, tr("Training Metrics", self.lang))
-        
+
         # Tab 2: Validation Samples
         tab_val = QWidget()
         layout_v = QVBoxLayout(tab_val)
-        
+
         # Controls for deterministic browsing
         ctrl_layout = QHBoxLayout()
         ctrl_layout.addWidget(QLabel(tr("Show Validation Set %:", self.lang)))
-        
+
         self.slider_pct = NoWheelSlider(Qt.Horizontal)
         self.slider_pct.setRange(5, 100)
         self.slider_pct.setValue(20)
         self.slider_pct.setTickPosition(QSlider.TicksBelow)
         self.slider_pct.setTickInterval(10)
-        
+
         self.lbl_pct = QLabel("20%")
         self.slider_pct.valueChanged.connect(lambda v: self.lbl_pct.setText(f"{v}%"))
-        
+
         ctrl_layout.addWidget(self.slider_pct)
         ctrl_layout.addWidget(self.lbl_pct)
 
@@ -292,20 +292,20 @@ class TrainingReportDialog(QDialog):
         self.validation_filter.addItem(tr("Macro locator", self.lang), "macro_locator")
         self.validation_filter.currentIndexChanged.connect(self.load_gallery)
         ctrl_layout.addWidget(self.validation_filter)
-        
+
         btn_load = QPushButton(tr("Load Samples", self.lang))
         btn_load.clicked.connect(self.load_gallery)
         ctrl_layout.addWidget(btn_load)
         ctrl_layout.addStretch()
-        
+
         layout_v.addLayout(ctrl_layout)
-        
+
         # Scroll Area
         scroll_v = QScrollArea()
         scroll_v.setWidgetResizable(True)
         self.content_v = QWidget()
         self.layout_gallery = QVBoxLayout(self.content_v) # Main layout for scroll content
-        
+
         # 1. Initial Summary Image
         self.lbl_val = QLabel(tr("No Validation Summary", self.lang))
         self.lbl_val.setAlignment(Qt.AlignCenter)
@@ -315,7 +315,7 @@ class TrainingReportDialog(QDialog):
             self.lbl_val.setPixmap(pix)
             self.layout_gallery.addWidget(QLabel(tr("--- Initial Summary (Top 6) ---", self.lang)))
             self.layout_gallery.addWidget(self.lbl_val)
-        
+
         self.validation_index_table = QTableWidget(0, 5)
         self.validation_index_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.validation_index_table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -340,20 +340,20 @@ class TrainingReportDialog(QDialog):
         self.layout_gallery.addWidget(QLabel(tr("--- Detailed Inspection ---", self.lang)))
         self.layout_gallery.addWidget(self.grid_widget)
         self.layout_gallery.addStretch()
-        
+
         scroll_v.setWidget(self.content_v)
         layout_v.addWidget(scroll_v)
         tabs.addTab(tab_val, tr("Validation Inspection", self.lang))
-        
+
         layout.addWidget(tabs)
-        
+
         # Bottom Buttons
         btn_layout = QHBoxLayout()
         btn_open = QPushButton(tr("Open Report Folder", self.lang))
         btn_open.clicked.connect(self.open_folder)
         btn_close = QPushButton(tr("Close", self.lang))
         btn_close.clicked.connect(self.accept)
-        
+
         btn_layout.addWidget(btn_open)
         btn_layout.addStretch()
         btn_layout.addWidget(btn_close)
@@ -530,7 +530,7 @@ class TrainingReportDialog(QDialog):
         if selected_rows:
             self.validation_index_table.setCurrentCell(0, 0)
         self.lbl_pct.setText(tr("{0}% ({1} images)", self.lang).format(pct, count))
-        
+
     def open_folder(self):
         d = self.report_data.get('dir')
         if d:
@@ -648,4 +648,3 @@ class TrainingResultBrowserDialog(QDialog):
     def refresh_reports(self):
         if callable(self.refresh_callback):
             self.populate(self.refresh_callback() or [])
-

@@ -544,7 +544,7 @@ TRANSLATIONS = {
         "Remapped {0} project image path(s).": "已重定位 {0} 条项目图片路径。",
         "Head": "头部 (Head)",
         "Mesosoma": "胸部 (Mesosoma)",
-        "Thorax": "胸部 (Thorax)", 
+        "Thorax": "胸部 (Thorax)",
         "Gaster": "腹部 (Gaster)",
         "Mandible": "上颚 (Mandible)",
         "Eye": "复眼 (Eye)",

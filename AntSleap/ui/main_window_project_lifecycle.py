@@ -657,7 +657,7 @@ class MainWindowProjectLifecycleMixin:
                 self.config.set("last_project_path", self.active_project_entry_path)
                 self._refresh_project_bound_views()
                 self.ensure_2d_stl_models_preloaded()
-                self.canvas.load_image("") 
+                self.canvas.load_image("")
 
     def new_tif_project(self):
         if not self._ensure_project_switch_available():

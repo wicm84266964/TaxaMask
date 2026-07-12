@@ -235,4 +235,3 @@ class ModelSettingsAgentMixin:
                 'external_backend': self._external_backend_from_profile(active_profile),
             }
         except: return None
-

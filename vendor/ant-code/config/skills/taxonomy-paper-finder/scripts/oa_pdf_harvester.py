@@ -25,6 +25,8 @@ import html
 import json
 import os
 import re
+import socket
+import ssl
 import sys
 import time
 import urllib.error
@@ -35,7 +37,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-USER_AGENT = "oa-pdf-harvester/0.1 (mailto:please-set-email@example.com)"
+USER_AGENT = "taxonomy-paper-finder/1.0 (mailto:please-set-email@example.com)"
 OPENALEX_ENDPOINT = "https://api.openalex.org/works"
 CROSSREF_ENDPOINT = "https://api.crossref.org/works"
 EUROPEPMC_ENDPOINT = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
@@ -112,19 +114,39 @@ def safe_filename(value: str, max_len: int = 140) -> str:
     return (value[:max_len] or "record")
 
 
-def request_json(url: str, params: dict[str, Any], timeout: int, email: str = "") -> dict[str, Any]:
+def request_json(
+    url: str,
+    params: dict[str, Any],
+    timeout: int,
+    email: str = "",
+    retries: int = 3,
+    retry_base_delay: float = 2.0,
+) -> dict[str, Any]:
     encoded = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
     full_url = f"{url}?{encoded}"
     headers = {"User-Agent": build_user_agent(email)}
-    req = urllib.request.Request(full_url, headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        data = resp.read()
-    return json.loads(data.decode("utf-8"))
+    for attempt in range(retries + 1):
+        req = urllib.request.Request(full_url, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = resp.read()
+            return json.loads(data.decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code not in {429, 500, 502, 503, 504} or attempt >= retries:
+                raise
+            retry_after = exc.headers.get("Retry-After")
+            delay = float(retry_after) if retry_after and retry_after.isdigit() else retry_base_delay * (2**attempt)
+            time.sleep(delay)
+        except (urllib.error.URLError, TimeoutError, socket.timeout, ssl.SSLError):
+            if attempt >= retries:
+                raise
+            time.sleep(retry_base_delay * (2**attempt))
+    raise RuntimeError("request retry loop exhausted")
 
 
 def build_user_agent(email: str = "") -> str:
     if email:
-        return f"oa-pdf-harvester/0.1 (mailto:{email})"
+        return f"taxonomy-paper-finder/1.0 (mailto:{email})"
     return USER_AGENT
 
 
@@ -170,6 +192,7 @@ def openalex_records(
     year_from: str = "",
     year_to: str = "",
     per_page: int = 200,
+    page_delay: float = 0.1,
 ) -> list[Record]:
     records: list[Record] = []
     cursor = "*"
@@ -222,7 +245,7 @@ def openalex_records(
         if not next_cursor or next_cursor == cursor:
             break
         cursor = next_cursor
-        time.sleep(0.1)
+        time.sleep(page_delay)
     return records
 
 
@@ -234,6 +257,7 @@ def crossref_records(
     year_from: str = "",
     year_to: str = "",
     per_page: int = 100,
+    page_delay: float = 0.1,
 ) -> list[Record]:
     records: list[Record] = []
     cursor = "*"
@@ -285,7 +309,7 @@ def crossref_records(
         if not next_cursor or next_cursor == cursor:
             break
         cursor = next_cursor
-        time.sleep(0.1)
+        time.sleep(page_delay)
     return records
 
 
@@ -297,6 +321,7 @@ def europepmc_records(
     year_from: str = "",
     year_to: str = "",
     per_page: int = 100,
+    page_delay: float = 0.1,
 ) -> list[Record]:
     records: list[Record] = []
     cursor = "*"
@@ -350,7 +375,7 @@ def europepmc_records(
         if not next_cursor or next_cursor == cursor:
             break
         cursor = next_cursor
-        time.sleep(0.1)
+        time.sleep(page_delay)
     return records
 
 
@@ -377,6 +402,9 @@ def extract_pdf_links_from_html(base_url: str, data: bytes, limit: int = 8) -> l
     patterns = [
         r"""href=["']([^"']+?\.pdf(?:\?[^"']*)?)["']""",
         r"""href=["']([^"']*?/download/pdf/?(?:\?[^"']*)?)["']""",
+        r"""href=["']([^"']*?/article/download/[^"']+)["']""",
+        r"""name=["']citation_pdf_url["'][^>]+content=["']([^"']+)["']""",
+        r"""content=["']([^"']+)["'][^>]+name=["']citation_pdf_url["']""",
         r"""content=["']([^"']+?\.pdf(?:\?[^"']*)?)["']""",
     ]
     for pattern in patterns:
@@ -428,64 +456,103 @@ def download_pdf(
     min_bytes: int = 1024,
     max_bytes: int = 0,
     follow_html: bool = True,
+    retries: int = 2,
 ) -> tuple[bool, str]:
     headers = {"User-Agent": build_user_agent(email), "Accept": "application/pdf,*/*;q=0.8"}
-    req = urllib.request.Request(url, headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            content_type = str(resp.headers.get("Content-Type") or "").lower()
-            first = resp.read(8192)
-            probe = first[:2048].lstrip()
-            is_pdf = probe.startswith(b"%PDF") or ("application/pdf" in content_type and b"%PDF" in first[:4096])
-            if not is_pdf:
-                if follow_html and ("html" in content_type or probe.startswith(b"<!DOCTYPE") or probe.startswith(b"<html")):
-                    for pdf_url in extract_pdf_links_from_html(resp.geturl(), first):
-                        success, message = download_pdf(
-                            pdf_url,
-                            dest,
-                            timeout,
-                            email,
-                            min_bytes=min_bytes,
-                            max_bytes=max_bytes,
-                            follow_html=False,
-                        )
-                        if success:
-                            return True, f"{message}; followed_html={pdf_url}"
-                return False, f"not_pdf content_type={content_type[:80]}"
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            tmp = dest.with_suffix(dest.suffix + ".part")
-            size = 0
-            too_large = False
-            with tmp.open("wb") as f:
-                f.write(first)
-                size += len(first)
-                if max_bytes and size > max_bytes:
-                    too_large = True
-                while True:
-                    if too_large:
-                        break
-                    chunk = resp.read(1024 * 128)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    size += len(chunk)
-                    if max_bytes and size > max_bytes:
-                        too_large = True
-                        break
+    for attempt in range(retries + 1):
+        req = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return download_pdf_response(
+                    resp,
+                    url,
+                    dest,
+                    timeout,
+                    email,
+                    min_bytes=min_bytes,
+                    max_bytes=max_bytes,
+                    follow_html=follow_html,
+                    retries=retries,
+                )
+        except urllib.error.HTTPError as exc:
+            if exc.code not in {429, 500, 502, 503, 504} or attempt >= retries:
+                return False, f"http_{exc.code}"
+            retry_after = exc.headers.get("Retry-After")
+            delay = float(retry_after) if retry_after and retry_after.isdigit() else 1.5 * (2**attempt)
+            time.sleep(delay)
+        except (urllib.error.URLError, TimeoutError, socket.timeout, ssl.SSLError) as exc:
+            if attempt >= retries:
+                if isinstance(exc, urllib.error.URLError):
+                    return False, f"url_error {exc.reason}"
+                return False, f"url_error {exc}"
+            time.sleep(1.5 * (2**attempt))
+        except Exception as exc:
+            return False, f"error {type(exc).__name__}: {exc}"
+    return False, "error retry_loop_exhausted"
+
+
+def download_pdf_response(
+    resp: Any,
+    original_url: str,
+    dest: Path,
+    timeout: int,
+    email: str,
+    min_bytes: int = 1024,
+    max_bytes: int = 0,
+    follow_html: bool = True,
+    retries: int = 2,
+) -> tuple[bool, str]:
+    content_type = str(resp.headers.get("Content-Type") or "").lower()
+    first = resp.read(8192)
+    probe = first[:2048].lstrip()
+    is_pdf = probe.startswith(b"%PDF") or ("application/pdf" in content_type and b"%PDF" in first[:4096])
+    if not is_pdf:
+        if follow_html and ("html" in content_type or probe.startswith(b"<!DOCTYPE") or probe.startswith(b"<html")):
+            html_data = first
+            if len(html_data) < 256 * 1024:
+                html_data += resp.read(256 * 1024 - len(html_data))
+            for pdf_url in extract_pdf_links_from_html(resp.geturl(), html_data):
+                success, message = download_pdf(
+                    pdf_url,
+                    dest,
+                    timeout,
+                    email,
+                    min_bytes=min_bytes,
+                    max_bytes=max_bytes,
+                    follow_html=False,
+                    retries=retries,
+                )
+                if success:
+                    return True, f"{message}; followed_html={pdf_url}"
+        return False, f"not_pdf content_type={content_type[:80]}"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    size = 0
+    too_large = False
+    with tmp.open("wb") as f:
+        f.write(first)
+        size += len(first)
+        if max_bytes and size > max_bytes:
+            too_large = True
+        while True:
             if too_large:
-                tmp.unlink(missing_ok=True)
-                return False, f"too_large bytes>{max_bytes}"
-            if size < min_bytes:
-                tmp.unlink(missing_ok=True)
-                return False, f"too_small bytes={size}"
-            tmp.replace(dest)
-            return True, f"bytes={size}"
-    except urllib.error.HTTPError as exc:
-        return False, f"http_{exc.code}"
-    except urllib.error.URLError as exc:
-        return False, f"url_error {exc.reason}"
-    except Exception as exc:
-        return False, f"error {type(exc).__name__}: {exc}"
+                break
+            chunk = resp.read(1024 * 128)
+            if not chunk:
+                break
+            f.write(chunk)
+            size += len(chunk)
+            if max_bytes and size > max_bytes:
+                too_large = True
+                break
+    if too_large:
+        tmp.unlink(missing_ok=True)
+        return False, f"too_large bytes>{max_bytes}"
+    if size < min_bytes:
+        tmp.unlink(missing_ok=True)
+        return False, f"too_small bytes={size}"
+    tmp.replace(dest)
+    return True, f"bytes={size}"
 
 
 def write_records_csv(path: Path, records: list[Record]) -> None:
@@ -607,21 +674,45 @@ def run(args: argparse.Namespace) -> int:
             print(f"[search] {query}", flush=True)
             if "openalex" in sources:
                 try:
-                    recs = openalex_records(query, per_source_limit, args.timeout, args.email, args.year_from, args.year_to)
+                    recs = openalex_records(
+                        query,
+                        per_source_limit,
+                        args.timeout,
+                        args.email,
+                        args.year_from,
+                        args.year_to,
+                        page_delay=args.page_delay,
+                    )
                     print(f"  openalex: {len(recs)}", flush=True)
                     all_records.extend(recs)
                 except Exception as exc:
                     print(f"  openalex failed: {exc}", file=sys.stderr, flush=True)
             if "crossref" in sources:
                 try:
-                    recs = crossref_records(query, per_source_limit, args.timeout, args.email, args.year_from, args.year_to)
+                    recs = crossref_records(
+                        query,
+                        per_source_limit,
+                        args.timeout,
+                        args.email,
+                        args.year_from,
+                        args.year_to,
+                        page_delay=args.page_delay,
+                    )
                     print(f"  crossref: {len(recs)}", flush=True)
                     all_records.extend(recs)
                 except Exception as exc:
                     print(f"  crossref failed: {exc}", file=sys.stderr, flush=True)
             if "europepmc" in sources:
                 try:
-                    recs = europepmc_records(query, per_source_limit, args.timeout, args.email, args.year_from, args.year_to)
+                    recs = europepmc_records(
+                        query,
+                        per_source_limit,
+                        args.timeout,
+                        args.email,
+                        args.year_from,
+                        args.year_to,
+                        page_delay=args.page_delay,
+                    )
                     print(f"  europepmc: {len(recs)}", flush=True)
                     all_records.extend(recs)
                 except Exception as exc:
@@ -698,7 +789,14 @@ def run(args: argparse.Namespace) -> int:
                     last_message = "dry_run"
                     break
                 max_bytes = int(args.max_pdf_mb * 1024 * 1024) if args.max_pdf_mb else 0
-                success, message = download_pdf(url, dest, args.timeout, args.email, max_bytes=max_bytes)
+                success, message = download_pdf(
+                    url,
+                    dest,
+                    args.timeout,
+                    args.email,
+                    max_bytes=max_bytes,
+                    retries=args.download_retries,
+                )
                 last_message = message
                 if success:
                     ok = True
@@ -763,6 +861,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--use-unpaywall", action="store_true", help="Use Unpaywall PDF lookup for DOI records.")
     parser.add_argument("--timeout", type=int, default=30, help="HTTP timeout in seconds.")
     parser.add_argument("--delay", type=float, default=0.2, help="Delay between download attempts.")
+    parser.add_argument("--page-delay", type=float, default=0.1, help="Delay between metadata result pages.")
+    parser.add_argument("--download-retries", type=int, default=2, help="Retries for transient PDF download failures.")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing PDFs.")
     parser.add_argument("--resume", action="store_true", help="Append to an existing manifest and skip records already marked downloaded/exists/dry_run.")
     parser.add_argument("--reset-manifest", action="store_true", help="Ignore any previous manifest and start a new one.")

@@ -42,7 +42,9 @@ TaxaMask now has four connected research routes:
 
 ```text
 PDF evidence
-  -> lawful open-access PDF harvest
+  -> daily monitoring or focused topic search
+  -> evidence-based shortlist and deep reads
+  -> selected-paper or batch open-access acquisition
   -> figure/caption extraction
   -> candidate review
   -> traceable literature evidence
@@ -98,7 +100,9 @@ TaxaMask includes a literature evidence route so morphology datasets can stay co
 
 Current PDF and evidence capabilities include:
 
-- Lawful open-access taxonomy PDF harvesting through an embedded Agent skill, with metadata and download manifests for source audit.
+- Daily literature monitoring, focused topic searches, evidence-based shortlists, and lawful open-access PDF acquisition through the embedded `taxonomy-paper-finder` Agent skill.
+- Metadata-first discovery with confirmation before download; reviewed selections default to deep-read papers instead of downloading every candidate.
+- Search, screening, digest, metadata, and download manifests that preserve both recommendation evidence and source audit.
 - PDF literature screening with editable taxonomy profiles.
 - Figure and caption extraction with accepted and needs-review output folders.
 - Literature trait-description extraction into provenance-backed `taxon -> part -> description` records.
@@ -344,7 +348,7 @@ The internal package name `AntSleap` is kept for runtime stability and as a trib
 
 PDF evidence route:
 
-1. Start from an existing PDF folder, or harvest lawful open-access PDFs with metadata/download manifests.
+1. Start from an existing PDF folder, or use `taxonomy-paper-finder` for daily monitoring, a focused topic search, selected-paper acquisition, or lawful batch harvest.
 2. Configure or adapt a PDF screening profile.
 3. Extract figures, captions, and literature trait descriptions.
 4. Review accepted and needs-review outputs.

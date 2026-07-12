@@ -61,6 +61,9 @@ AntSleap/specimens/
 !part_description_configs/*.json
 !vendor/ant-code/**/*.json
 !skills/**/*.json
+vendor/ant-code/config/skills/**/runtime/
+vendor/ant-code/config/skills/**/runs/
+vendor/ant-code/config/skills/**/outputs/
 screener_configs/api_runtime_settings.json
 
 # Large model weights and training outputs
@@ -200,6 +203,8 @@ build/
 release/
 release_staging/
 publish_staging/
+!tools/release/
+!tools/release/sync_public_release.ps1
 *.egg-info/
 
 # OS files

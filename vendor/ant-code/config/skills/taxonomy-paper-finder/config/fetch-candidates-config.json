@@ -1,0 +1,44 @@
+{
+  "limits": {
+    "max_per_source": 25,
+    "request_timeout_seconds": 20,
+    "retries": 2,
+    "retry_pause_seconds": 1.5,
+    "between_source_pause_seconds": 0.6
+  },
+  "watch_groups": [
+    {
+      "name": "taxonomy_x_ai_core",
+      "query_terms": [
+        "taxonomy machine learning",
+        "species classification deep learning",
+        "biodiversity foundation model",
+        "insect image recognition"
+      ]
+    },
+    {
+      "name": "ai_frontier_transfer",
+      "query_terms": [
+        "multimodal model biology",
+        "vision language model scientific dataset",
+        "foundation model transfer ecology"
+      ]
+    }
+  ],
+  "sources": {
+    "arxiv": {
+      "enabled": true,
+      "url": "https://export.arxiv.org/api/query"
+    },
+    "biorxiv": {
+      "enabled": true,
+      "url": "https://api.biorxiv.org/details/biorxiv"
+    },
+    "pubmed": {
+      "enabled": true,
+      "esearch_url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
+      "esummary_url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi",
+      "efetch_url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+    }
+  }
+}

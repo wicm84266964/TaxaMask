@@ -9,7 +9,7 @@ PDF Evidence 是 TaxaMask 的文献证据路线。它帮助研究者从分类学
 ## 工作流
 
 ```text
-PDF acquisition or existing PDF folder
+Paper discovery, selected acquisition, batch harvest, or existing PDF folder
 -> PDF screening
 -> figure and caption extraction
 -> candidate review
@@ -17,15 +17,23 @@ PDF acquisition or existing PDF folder
 -> optional import into annotation workflow
 ```
 
-### Stage 0：合法 PDF 获取
+### Stage 0：文献发现与合法 PDF 获取
 
-当研究者还没有 PDF 文件夹时，Agent 可以辅助规划开放元数据搜索和合法 PDF 链接收集。
+当研究者还没有 PDF 文件夹时，Agent 先确认任务是每日文献推荐、专题检索、获取已经筛选的文献，还是批量采集。统一入口是内嵌 `taxonomy-paper-finder` Skill。
+
+默认策略：
+
+- 发现和推荐先检查元数据、摘要和证据，不自动下载全部候选。
+- 每日推荐约 5 篇主要文献、最多 8 篇候选和 3 篇深读，不用弱结果凑数。
+- 从筛选报告进入下载时先征得确认，默认只衔接 `deep-reads`。
+- 批量采集先导出并复核 `records.csv`，再开始有边界、可续跑的下载。
 
 边界：
 
 - 不使用付费墙绕过、验证码绕过或非法来源。
 - 保存 DOI、URL、下载状态和来源记录。
 - 下载失败也应记录原因，方便人工补全。
+- 保存筛选决定和证据 URL，使“为何推荐”和“从哪里获得”都可以复核。
 
 ### PDF 筛选
 
@@ -92,7 +100,8 @@ PDF Evidence 可以为 2D/STL 或 TIF 研究提供：
 Ask Agent 在 PDF route 中应先判断当前阶段：
 
 - 用户是否已有 PDF 文件夹。
-- 是否需要合法获取 PDF。
+- 是否需要每日推荐、专题检索、精选文献获取或批量采集。
+- 下载是否已经得到用户确认，精选下载是否保持默认 `deep-reads` 范围。
 - 是否已配置筛选/多模态模型。
 - 当前输出目录和数据库是否存在。
 - 当前任务是筛选、提取、复核还是导入。

@@ -1,0 +1,7 @@
+{
+  "runtime_root": "../../../../../../TaxaMask_outputs/taxonomy-paper-finder",
+  "candidates_dir": "candidates",
+  "reports_dir": "reports",
+  "digests_dir": "digests",
+  "papers_dir": "papers"
+}

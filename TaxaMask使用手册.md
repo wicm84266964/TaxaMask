@@ -538,11 +538,14 @@ File -> Check / Relocate Project Images
 
 在进入 PDF Screener 之前，先确认一件事：你已经有一批待筛选 PDF，还是需要先根据目标类群去合法采集开放 PDF。
 
-如果你还没有 PDF，可以从 Agent Center 或 PDF Evidence Tools 点 `Ask Agent / 询问 Agent`，让内嵌 AntCode 先使用默认 skill `taxonomy-pdf-harvest`：
+如果你还没有 PDF，可以从 Agent Center 或 PDF Evidence Tools 点 `Ask Agent / 询问 Agent`，让内嵌 AntCode 先使用统一 skill `taxonomy-paper-finder`：
 
-- skill 位置：`vendor/ant-code/config/skills/taxonomy-pdf-harvest/SKILL.md`
-- 作用：根据类群、关键词和年份范围检索开放元数据，导出 DOI/记录，并可下载合法暴露的 PDF 链接
-- 典型产物：`records.csv`、`doi_list.txt`、`summary.json`、`download_manifest.csv`、`pdfs/`
+- skill 位置：`vendor/ant-code/config/skills/taxonomy-paper-finder/SKILL.md`
+- 作用：做每日新文献推荐、专题检索、证据筛选、精选文献获取或批量开放 PDF 采集
+- 推荐边界：每日通常约 5 篇主要文献、最多 8 篇候选和 3 篇深读，不用弱结果凑数
+- 下载边界：发现阶段默认只看元数据和证据；下载前先确认，从筛选报告衔接时默认只处理 `deep-reads`
+- 默认运行目录：`TaxaMask_outputs/taxonomy-paper-finder/`，与内嵌 Skill 源码分开并默认排除在 Git 之外
+- 典型产物：paper records、screening report、JSON/Markdown/HTML digest、`records.csv`、`doi_list.txt`、`summary.json`、`download_manifest.csv`、`pdfs/`
 
 这里的 `download_manifest.csv` 很重要。它记录哪些文献被检查过、哪些 PDF 下载成功、哪些没有合法 PDF 链接或下载失败。以后你回看某张候选图来自哪里时，它和下游 evidence database 一起构成可审计来源链。
 
@@ -2650,14 +2653,18 @@ PDF 侧 accepted 更多表示：
 
 1. 如果你已经有 PDF 文件夹，记下它的位置，后面直接作为 `Input PDFs`
 2. 如果你还没有 PDF，从启动中心或 PDF 工具点击 `Ask Agent / 询问 Agent`
-3. 让 Agent 先使用 `taxonomy-pdf-harvest`，按目标类群、时间范围和文献目标生成检索/下载计划
-4. 采集完成后，保留本次运行目录里的：
+3. 让 Agent 先使用 `taxonomy-paper-finder`，确认是每日推荐、专题检索、获取精选文献还是批量采集
+4. 先复核推荐理由和候选范围；需要下载时再确认，精选文献默认只衔接深读项
+5. 运行完成后，按实际模式保留本次运行目录里的：
+   - paper records
+   - screening report
+   - JSON/Markdown/HTML digest
    - `records.csv`
    - `doi_list.txt`
    - `summary.json`
    - `download_manifest.csv`
    - `pdfs/`
-5. 后续 PDF Screener 的输入目录通常就是这次 harvest 输出里的 `pdfs/`
+6. 后续 PDF Screener 的输入目录通常就是这次获取结果里的 `pdfs/`
 
 **为什么先做这一步**
 

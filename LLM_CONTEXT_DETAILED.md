@@ -171,15 +171,17 @@ Main source areas:
 - `tools/agentic/`
 - `screener_configs/`
 - `part_description_configs/`
-- `vendor/ant-code/config/skills/taxonomy-pdf-harvest/`
+- `vendor/ant-code/config/skills/taxonomy-paper-finder/`
 
 PDF processing creates evidence, candidates, captions, figure clips, and provenance. It does not create training truth automatically.
 
 Expected Agent behavior:
 
-- Work one stage at a time: stage 0 PDF/literature source readiness, key/model readiness, screening criteria, figure-review criteria, then run/result diagnosis.
-- At stage 0, first ask whether the researcher already has a PDF folder. If not, use `vendor/ant-code/config/skills/taxonomy-pdf-harvest/SKILL.md` to plan lawful open-access taxonomy PDF harvest before screening.
-- Stage 0 harvest outputs are `records.csv`, `doi_list.txt`, `summary.json`, `download_manifest.csv`, and `pdfs/`. Treat `download_manifest.csv` and metadata records as source/provenance audit artifacts.
+- Work one stage at a time: stage 0 literature/PDF source readiness and discovery mode, key/model readiness, screening criteria, figure-review criteria, then run/result diagnosis.
+- At stage 0, first ask whether the researcher already has a PDF folder. If not, use `vendor/ant-code/config/skills/taxonomy-paper-finder/SKILL.md` for daily monitoring, focused topic search, selected-paper acquisition, or lawful batch harvest before screening.
+- Discovery is metadata-first and must not automatically download all candidates. Ask before downloading; the bridge from a reviewed screening report defaults to the `deep-reads` selection.
+- The embedded runtime defaults to `TaxaMask_outputs/taxonomy-paper-finder/`, outside vendored source and ignored by Git. Do not redirect runtime reports, manifests, or PDFs into tracked Skill directories.
+- Stage 0 outputs may include normalized paper records, a screening report, JSON/Markdown/HTML digests, `records.csv`, `doi_list.txt`, `summary.json`, `download_manifest.csv`, and `pdfs/`. Treat decisions, `download_manifest.csv`, and metadata records as source/provenance audit artifacts.
 - Harvest boundaries: use only open metadata and legally exposed PDF links. Do not use Sci-Hub, LibGen, paywall bypasses, CAPTCHA bypasses, or logged-in website scraping.
 - Keep provenance visible: PDF path, page, caption, nearby text, profile, and extraction status.
 - Do not merge PDF output into labels without researcher review.
@@ -531,7 +533,7 @@ For `labeling`, source hints must point to `main_window_agent_context.py`, `main
 
 For `tif_volume`, the context should expose label schema ID, train-ready part/reslice count, train-ready top-level count, selected training scope, selected/registered model-library state, backend command presence, active backend action, run folder, result JSON, recent log excerpt, selection-loading state, background preview state, pending post-selection render state, and deferred volume-array release state. This lets the Agent distinguish a blocked selection callback from normal background preview preparation or old-memory release, and explain whether the user is blocked by missing labels, missing review acceptance, missing nnU-Net commands, insufficient sample count, or prediction model selection. Full label-ID scans must remain deferred during selection and run only at manual-truth acceptance or strict training-readiness validation.
 
-For `pdf_evidence`, Ask Agent routing must preserve the stage 0 acquisition context. If the user has no PDF folder yet, the Agent should load `taxonomy-pdf-harvest` from `vendor/ant-code/config/skills/taxonomy-pdf-harvest/SKILL.md` before the downstream PDF evidence skill; if PDFs already exist, it can continue directly to key/model readiness and screening/extraction setup.
+For `pdf_evidence`, Ask Agent routing must preserve the stage 0 discovery/acquisition context. If the user has no PDF folder yet, the Agent should load `taxonomy-paper-finder` from `vendor/ant-code/config/skills/taxonomy-paper-finder/SKILL.md`, confirm whether the need is daily monitoring, topic search, selected-paper acquisition, or batch harvest, and ask before downloading. If PDFs already exist, it can continue directly to key/model readiness and screening/extraction setup.
 
 ## 17. Validation Expectations
 

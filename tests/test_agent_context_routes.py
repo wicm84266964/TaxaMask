@@ -111,8 +111,11 @@ class AgentContextRoutesTests(unittest.TestCase):
         self.assertIn("key/model readiness", context["diagnostic_focus"])
         self.assertIn("one stage per reply", context["diagnostic_focus"])
         self.assertIn("taxamask-pdf-evidence", context["llm_context_refs"])
+        self.assertIn("taxonomy-paper-finder", context["llm_context_refs"])
         self.assertIn("candidates/provenance", context["safety_notes"])
         self.assertIn("requirement-confirmation questions", context["suggested_agent_action"])
+        self.assertIn("metadata-first", context["suggested_agent_action"])
+        self.assertIn("deep reads", context["suggested_agent_action"])
         self.assertIn("at most three items", context["suggested_agent_action"])
         self.assertIn("do not dump the full workflow", context["suggested_agent_action"])
 

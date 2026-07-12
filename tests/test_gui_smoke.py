@@ -2823,8 +2823,10 @@ class GuiSmokeTests(unittest.TestCase):
             context = window.pdf_widget.get_agent_context()
             self.assertEqual(
                 context["settings_question_focus"],
-                "stage_0_confirm_existing_pdf_folder_or_lawful_open_access_harvest_first",
+                "stage_0_confirm_existing_pdfs_or_discovery_mode",
             )
+            self.assertEqual(context["harvest_skill"], "taxonomy-paper-finder")
+            self.assertIn("screening-report.json", context["harvest_outputs"])
             self.assertEqual(context["text_llm_key_configured"], "no")
             self.assertEqual(context["text_llm_model"], "gpt-5.4")
             self.assertEqual(context["extract_db_name"], "taxamask_literature.db")
@@ -2841,7 +2843,7 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertNotIn("vision-secret-not-sent", str(context))
             self.assertEqual(
                 context["settings_question_focus"],
-                "stage_0_confirm_existing_pdf_folder_or_lawful_open_access_harvest_first",
+                "stage_0_confirm_existing_pdfs_or_discovery_mode",
             )
             prompt = window._pdf_agent_prompt()
             self.assertIn("key、base URL、model", prompt)
@@ -2849,7 +2851,10 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertIn("每轮只处理当前阶段", prompt)
             self.assertIn("最多问 3 个问题", prompt)
             self.assertIn("需求确认式交互", prompt)
-            self.assertIn("taxonomy-pdf-harvest", prompt)
+            self.assertIn("taxonomy-paper-finder", prompt)
+            self.assertIn("每日推荐、专题检索、精选获取还是批量采集", prompt)
+            self.assertIn("下载前必须确认", prompt)
+            self.assertNotIn("taxonomy-pdf-harvest", prompt)
             self.assertNotIn("规划时请覆盖这些点", prompt)
         finally:
             window.deleteLater()

@@ -4,6 +4,14 @@
 
 ## 开发阶段记录
 
+### **[2026-07-12] Taxonomy Paper Finder 统一文献发现与获取入口**
+
+- 将原内嵌 `taxonomy-pdf-harvest` 升级并更名为 `taxonomy-paper-finder`，不再维护“每日文献推荐”和“开放 PDF 批量获取”两套分离 Skill。
+- 统一入口覆盖每日 arXiv/bioRxiv/PubMed 候选发现、Agent 证据筛选、约 5 篇主要推荐、最多 8 篇候选和 3 篇深读、JSON/Markdown/HTML digest 导出、OpenAlex/Crossref/Europe PMC 专题检索，以及合法开放 PDF 的可续跑获取。
+- 新增筛选报告到下载输入的桥接脚本；下载前必须确认，默认只衔接 `deep-reads`，避免把全部候选自动批量下载。
+- TaxaMask 的 PDF Agent 提示、上下文路由、PDF 工具 payload、用户手册和当前大模型上下文已同步到新名称与新流程；旧 `2.1.1` 发布说明保留当时名称作为历史记录。
+- 嵌入版与独立 Skill 的 27 个通用运行文件逐文件哈希一致；唯一宿主适配是把内嵌版默认运行目录改到 `TaxaMask_outputs/taxonomy-paper-finder/`，避免研究产物写进 `vendor` 源码。专项验证覆盖 Ant-Code Skill 注册、Python/JSON 语法、精选文献桥接、PDF Agent GUI 上下文和合法来源边界。本次作为 `main` 后续提交同步，不单独创建 TaxaMask Release。
+
 ### **[2026-07-12] TaxaMask v2.3.1：内嵌 Ant-Code 1.3 与界面稳定性修复**
 
 - TaxaMask 内嵌运行时由 Ant-Code `1.2.4` 对齐到 `1.3.0-taxamask.1`，包含 `v1.3.0` Dashboard/会话能力和标签后的 Windows 文件校验修复 `ca4e005`；未整包复制独立版，也未引入 EXE、Git 一等工具或 TUI 大规模重构。

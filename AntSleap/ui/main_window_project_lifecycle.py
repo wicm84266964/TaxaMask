@@ -8,7 +8,7 @@ except ImportError:
 
 class MainWindowProjectLifecycleMixin:
     def _default_outputs_root(self):
-        return os.path.abspath(os.path.join(REPO_ROOT, DEFAULT_OUTPUTS_DIR_NAME))
+        return canonical_path(os.path.join(REPO_ROOT, DEFAULT_OUTPUTS_DIR_NAME))
 
     def _ensure_default_output_subdir(self, *parts):
         path = os.path.join(self._default_outputs_root(), *parts)
@@ -53,7 +53,7 @@ class MainWindowProjectLifecycleMixin:
     def _current_2d_project_dir(self):
         project_path = getattr(self.project, "current_project_path", "") or ""
         if project_path:
-            return os.path.dirname(os.path.abspath(project_path))
+            return os.path.dirname(canonical_path(project_path))
         return self._default_2d_stl_projects_root()
 
     def _default_2d_export_dir(self):
@@ -77,7 +77,7 @@ class MainWindowProjectLifecycleMixin:
         for candidate in candidates:
             if not candidate:
                 continue
-            path = os.path.abspath(str(candidate))
+            path = canonical_path(candidate)
             if self._path_is_startup_project(path):
                 continue
             folder = path if os.path.isdir(path) else os.path.dirname(path)
@@ -87,16 +87,19 @@ class MainWindowProjectLifecycleMixin:
 
     def _path_is_startup_project(self, path_text):
         try:
-            startup_dir = self._default_startup_project_dir()
-            path = os.path.abspath(str(path_text))
+            startup_dir = path_identity(self._default_startup_project_dir())
+            path = canonical_path(path_text)
             folder = path if os.path.isdir(path) else os.path.dirname(path)
-            return os.path.commonpath([startup_dir, folder]) == startup_dir
+            folder = path_identity(folder)
+            return os.path.normcase(os.path.commonpath([startup_dir, folder])) == startup_dir
         except (TypeError, ValueError):
             return False
 
     def _path_is_inside_program_package(self, path_text):
         try:
-            return os.path.commonpath([PACKAGE_DIR, os.path.abspath(str(path_text))]) == PACKAGE_DIR
+            package_dir = path_identity(PACKAGE_DIR)
+            candidate = path_identity(path_text)
+            return os.path.normcase(os.path.commonpath([package_dir, candidate])) == package_dir
         except (TypeError, ValueError):
             return False
 

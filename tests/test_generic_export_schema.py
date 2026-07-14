@@ -17,14 +17,15 @@ class GenericExportSchemaTests(unittest.TestCase):
 
         manager = ProjectManager()
         manager.create_project("generic_export_demo", work_dir, template_id=PROJECT_TEMPLATE_GENERIC)
+        manager.add_images([str(image_path)], save=False)
+        image_key = manager.project_data["images"][0]
         manager.project_data.update(
             {
                 "name": "generic_export_demo",
                 "taxonomy": ["Leaf blade", "Flower:petal"],
                 "locator_scope": ["Leaf blade"],
-                "images": [str(image_path)],
                 "labels": {
-                    str(image_path): {
+                    image_key: {
                         "parts": {"Leaf blade": [[10, 10], [50, 10], [50, 40], [10, 40]]},
                         "boxes": {"Leaf blade": [10, 10, 50, 40]},
                         "descriptions": {"Leaf blade": "manual plant annotation"},

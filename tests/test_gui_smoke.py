@@ -2075,7 +2075,7 @@ class GuiSmokeTests(unittest.TestCase):
 
             self.assertFalse(window.image_list_group_collapsed.get("original"))
             self.assertEqual(window.file_list.count(), 2)
-            self.assertEqual(window.current_image, small_paths[0])
+            self.assertTrue(_same_path(window.current_image, small_paths[0]))
             self.assertTrue(self._wait_until(lambda: preload_events == ["preload"]))
         finally:
             window.deleteLater()

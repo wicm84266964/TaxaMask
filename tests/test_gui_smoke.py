@@ -24,11 +24,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from AntSleap.core.path_identity import paths_refer_to_same_file
+
 has_pyside6 = False
 
 
 def _same_path(left, right):
-    return os.path.normcase(os.path.abspath(str(left))) == os.path.normcase(os.path.abspath(str(right)))
+    return paths_refer_to_same_file(left, right)
 
 
 try:
@@ -351,9 +353,11 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(window.engine.ensure_parts_model_loaded_calls, 0)
             self.assertEqual(SmokeSamWorker.created, 0)
             startup_path = Path(window.project.current_project_path)
-            self.assertEqual(
-                startup_path,
-                self.project_dir / "TaxaMask_outputs" / "2d_stl_projects" / "_startup" / "TaxaMask_Project.sqlite_manifest.json",
+            self.assertTrue(
+                _same_path(
+                    startup_path,
+                    self.project_dir / "TaxaMask_outputs" / "2d_stl_projects" / "_startup" / "TaxaMask_Project.sqlite_manifest.json",
+                )
             )
             self.assertTrue(startup_path.exists())
             self.assertTrue((startup_path.parent / "TaxaMask_Project.taxamask.sqlite").exists())
@@ -2097,7 +2101,7 @@ class GuiSmokeTests(unittest.TestCase):
 
             self.assertEqual(calls[0][1], image_root)
             self.assertEqual(len(calls), 1)
-            self.assertEqual(Path(window.project.current_project_path), created_image_dir / "review.sqlite_manifest.json")
+            self.assertTrue(_same_path(window.project.current_project_path, created_image_dir / "review.sqlite_manifest.json"))
             self.assertTrue((created_image_dir / "review.sqlite_manifest.json").exists())
             self.assertTrue((created_image_dir / "review.taxamask.sqlite").exists())
             self.assertEqual(preload_events, ["preload"])
@@ -2110,16 +2114,16 @@ class GuiSmokeTests(unittest.TestCase):
         try:
             ant_project_dir = Path(main_module.PACKAGE_DIR)
             window.config.set("last_project_path", str(ant_project_dir / "TaxaMask_Project.json"))
-            self.assertEqual(Path(window._default_open_project_dir()), self.project_dir / "TaxaMask_outputs")
+            self.assertTrue(_same_path(window._default_open_project_dir(), self.project_dir / "TaxaMask_outputs"))
 
             project_dir = self.project_dir / "TaxaMask_outputs" / "2d_stl_projects" / "review"
             window.project.create_project("review", str(project_dir), template_id=PROJECT_TEMPLATE_GENERIC)
-            self.assertEqual(Path(window._default_2d_export_dir()), project_dir / "exports")
-            self.assertEqual(Path(window._vlm_preannotation_artifacts_dir()), project_dir / "vlm_preannotation")
+            self.assertTrue(_same_path(window._default_2d_export_dir(), project_dir / "exports"))
+            self.assertTrue(_same_path(window._vlm_preannotation_artifacts_dir(), project_dir / "vlm_preannotation"))
 
             dialog = main_module.ExportDialog(window, "en", default_dir=window._default_2d_export_dir())
             try:
-                self.assertEqual(Path(dialog.path_edit.text()), project_dir / "exports")
+                self.assertTrue(_same_path(dialog.path_edit.text(), project_dir / "exports"))
             finally:
                 dialog.deleteLater()
         finally:
@@ -2658,7 +2662,8 @@ class GuiSmokeTests(unittest.TestCase):
 
             self.assertTrue(started)
             self.assertEqual(len(starts), 1)
-            self.assertEqual(starts[0].paths, image_paths)
+            self.assertEqual(len(starts[0].paths), len(image_paths))
+            self.assertTrue(all(_same_path(actual, expected) for actual, expected in zip(starts[0].paths, image_paths)))
             self.assertTrue(starts[0].deleted)
             self.assertIsNone(window.image_import_thread)
             self.assertIsNone(window.image_import_progress_dialog)
@@ -2739,14 +2744,15 @@ class GuiSmokeTests(unittest.TestCase):
 
             self.assertEqual(window.project.current_project_path, saved_before)
             self.assertEqual(len(starts), 1)
-            self.assertEqual(starts[0].paths, image_paths)
+            self.assertEqual(len(starts[0].paths), len(image_paths))
+            self.assertTrue(all(_same_path(actual, expected) for actual, expected in zip(starts[0].paths, image_paths)))
             self.assertTrue(starts[0].deleted)
             self.assertIsNone(window.external_batch_inference_thread)
             self.assertIsNone(window.external_batch_inference_progress_dialog)
             self.assertEqual(save_calls, ["save"])
             for image_path in image_paths:
                 self.assertIn("Head", window.project.get_labels(image_path))
-                self.assertEqual(window.project.project_data["labels"][image_path]["descriptions"]["Head"], "Auto-Annotated")
+                self.assertEqual(window.project.get_part_description(image_path, "Head"), "Auto-Annotated")
         finally:
             window.deleteLater()
 
@@ -2768,7 +2774,7 @@ class GuiSmokeTests(unittest.TestCase):
             for index in range(window.file_list.count()):
                 item = window.file_list.item(index)
                 path = item.data(main_module.Qt.UserRole)
-                if path in image_paths[:3]:
+                if any(_same_path(path, candidate) for candidate in image_paths[:3]):
                     item.setSelected(True)
 
             save_calls = []
@@ -2785,9 +2791,10 @@ class GuiSmokeTests(unittest.TestCase):
 
             self.assertEqual(save_calls, [])
             self.assertTrue(window.project_save_pending)
-            self.assertEqual(window.project.project_data["images"], [image_paths[3]])
-            self.assertNotIn(image_paths[0], window.project.project_data["labels"])
-            self.assertEqual(window.current_image, image_paths[3])
+            self.assertEqual(len(window.project.project_data["images"]), 1)
+            self.assertTrue(_same_path(window.project.project_data["images"][0], image_paths[3]))
+            self.assertFalse(any(_same_path(path, image_paths[0]) for path in window.project.project_data["labels"]))
+            self.assertTrue(_same_path(window.current_image, image_paths[3]))
             window.project_save_timer.stop()
         finally:
             window.deleteLater()
@@ -3981,11 +3988,11 @@ class GuiSmokeTests(unittest.TestCase):
             provenance = window.project.get_image_provenance(image_path)
             self.assertEqual(provenance["source_type"], "stl_rendered_view")
             self.assertEqual(window.project.project_data["labels"][image_path]["review_mode"], "stl_rendered_view")
-            self.assertEqual(window._active_recent_project_path(), os.path.abspath(stl_path))
-            self.assertEqual(window.config.values["last_project_path"], os.path.abspath(stl_path))
+            self.assertTrue(_same_path(window._active_recent_project_path(), stl_path))
+            self.assertTrue(_same_path(window.config.values["last_project_path"], stl_path))
             context = window._collect_image_workbench_agent_context()
             self.assertEqual(context["project_source_kind"], "stl")
-            self.assertEqual(context["project_path"], os.path.abspath(stl_path))
+            self.assertTrue(_same_path(context["project_path"], stl_path))
             self.assertEqual(context["review_project_path"], window.project.current_project_path)
             self.assertIn("STL rendered-view project", window._start_console_project_summary()[0])
             self.assertIn("1 STL rendered 2D view", window._start_console_image_summary()[0])

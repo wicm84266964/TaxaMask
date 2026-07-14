@@ -776,10 +776,12 @@ class ProjectManager:
         if not abs_path:
             return abs_path
         try:
-            project_dir = os.path.dirname(os.path.abspath(project_path or self.current_project_path or ""))
+            project_dir = os.path.dirname(canonical_path(project_path or self.current_project_path or ""))
             normalized_path = str(abs_path)
             if normalized_path and not os.path.isabs(normalized_path):
                 normalized_path = self._to_absolute(normalized_path)
+            else:
+                normalized_path = canonical_path(normalized_path)
             return os.path.relpath(normalized_path, project_dir).replace("\\", "/")
         except (ValueError, TypeError):
             return abs_path
@@ -800,35 +802,35 @@ class ProjectManager:
             return ""
 
         if os.path.isabs(path):
-            abs_path = os.path.abspath(os.path.normpath(path))
+            abs_path = canonical_path(path)
             if os.path.exists(abs_path):
                 return abs_path
             relocated = self._resolve_known_relocated_output(abs_path)
             if relocated:
-                return os.path.abspath(os.path.normpath(relocated))
+                return canonical_path(relocated)
             return abs_path
 
         project_abs_path = ""
         if self.current_project_path:
-            project_dir = os.path.dirname(os.path.abspath(self.current_project_path))
-            project_abs_path = os.path.abspath(os.path.normpath(os.path.join(project_dir, path)))
+            project_dir = os.path.dirname(canonical_path(self.current_project_path))
+            project_abs_path = canonical_path(os.path.join(project_dir, path))
             if os.path.exists(project_abs_path):
                 return project_abs_path
             relocated = self._resolve_known_relocated_output(project_abs_path)
             if relocated:
-                return os.path.abspath(os.path.normpath(relocated))
+                return canonical_path(relocated)
 
-        cwd_abs_path = os.path.abspath(os.path.normpath(path))
+        cwd_abs_path = canonical_path(path)
         if os.path.exists(cwd_abs_path):
             return cwd_abs_path
 
         relocated = self._resolve_known_relocated_output(cwd_abs_path)
         if relocated:
-            return os.path.abspath(os.path.normpath(relocated))
+            return canonical_path(relocated)
 
         relocated = self._resolve_known_relocated_output(path)
         if relocated:
-            return os.path.abspath(os.path.normpath(relocated))
+            return canonical_path(relocated)
 
         return project_abs_path or cwd_abs_path
 
@@ -854,6 +856,10 @@ class ProjectManager:
             if self._path_identity(image_path) == target:
                 return image_path
         return ""
+
+    def _image_data_key(self, path):
+        """Return the stored image key, accepting equivalent platform path spellings."""
+        return self._to_absolute(path)
 
     def _merge_loaded_label_entry(self, existing, incoming):
         merged = self._normalize_label_taxon_fields(dict(existing or {}))
@@ -1175,7 +1181,7 @@ class ProjectManager:
             pass
 
     def legacy_json_payload(self, project_path=None):
-        target_project_path = os.path.abspath(str(project_path or self.current_project_path or "project.json"))
+        target_project_path = canonical_path(project_path or self.current_project_path or "project.json")
         self._sync_active_model_profile_from_project_fields()
         data_to_save = {
             "name": self.project_data["name"],
@@ -1314,7 +1320,7 @@ class ProjectManager:
         return removed_count
 
     def set_image_provenance(self, image_path, provenance, save=True):
-        abs_path = self._to_absolute(image_path)
+        abs_path = self._image_data_key(image_path)
         if "image_provenance" not in self.project_data:
             self.project_data["image_provenance"] = {}
         self.project_data["image_provenance"][abs_path] = dict(provenance or {})
@@ -1323,12 +1329,12 @@ class ProjectManager:
             self.save_project()
 
     def get_image_provenance(self, image_path):
-        abs_path = self._to_absolute(image_path)
+        abs_path = self._image_data_key(image_path)
         provenance = self.project_data.get("image_provenance", {}).get(abs_path, {})
         return dict(provenance) if isinstance(provenance, dict) else {}
 
     def set_description_source(self, image_path, part_name, source_meta, save=True):
-        abs_path = self._to_absolute(image_path)
+        abs_path = self._image_data_key(image_path)
         clean_part = str(part_name or "").strip()
         if not abs_path or not clean_part:
             return
@@ -1342,7 +1348,7 @@ class ProjectManager:
             self.save_project()
 
     def get_description_source(self, image_path, part_name):
-        abs_path = self._to_absolute(image_path)
+        abs_path = self._image_data_key(image_path)
         clean_part = str(part_name or "").strip()
         entry = self.project_data.get("labels", {}).get(abs_path, {})
         sources = entry.get("description_sources", {}) if isinstance(entry, dict) else {}
@@ -1352,7 +1358,7 @@ class ProjectManager:
         return dict(source) if isinstance(source, dict) else {}
 
     def set_part_description(self, image_path, part_name, description_text, source_meta=None, save=True):
-        abs_path = self._to_absolute(image_path)
+        abs_path = self._image_data_key(image_path)
         clean_part = str(part_name or "").strip()
         if not abs_path or not clean_part:
             return
@@ -1375,7 +1381,7 @@ class ProjectManager:
             self.save_project()
 
     def get_part_description(self, image_path, part_name):
-        abs_path = self._to_absolute(image_path)
+        abs_path = self._image_data_key(image_path)
         clean_part = str(part_name or "").strip()
         entry = self.project_data.get("labels", {}).get(abs_path, {})
         descriptions = entry.get("descriptions", {}) if isinstance(entry, dict) else {}
@@ -1384,12 +1390,14 @@ class ProjectManager:
         return str(descriptions.get(clean_part, "") or "")
 
     def set_scale(self, image_path, pixels_per_mm, save=True):
+        image_path = self._image_data_key(image_path)
         self.project_data["scales"][image_path] = pixels_per_mm
         self._mark_sqlite_image_dirty(image_path)
         if save:
             self.save_project()
 
     def get_scale(self, image_path):
+        image_path = self._image_data_key(image_path)
         return self.project_data.get("scales", {}).get(image_path)
 
     def get_blink_context_roi_parents(self):
@@ -2014,9 +2022,11 @@ class ProjectManager:
         return True
 
     def get_shrink_loose_boxes(self, image_path):
+        image_path = self._image_data_key(image_path)
         return self.project_data["labels"].get(image_path, {}).get("shrink_loose_boxes", {})
 
     def update_shrink_loose_box(self, image_path, part_name, box, save=True):
+        image_path = self._image_data_key(image_path)
         clean_part = str(part_name or "").strip()
         clean_box = None
         if isinstance(box, (list, tuple)) and len(box) == 4:
@@ -2041,6 +2051,7 @@ class ProjectManager:
         Updates polygon points AND potentially the associated text description.
         Optionally stores the source bounding box [x1,y1,x2,y2].
         """
+        image_path = self._image_data_key(image_path)
         # Auto-Repair: Ensure entry exists
         if image_path not in self.project_data["labels"]:
              self.project_data["labels"][image_path] = self._default_label_entry()
@@ -2099,6 +2110,7 @@ class ProjectManager:
             self.save_project()
 
     def update_auto_box(self, image_path, part_name, box, description_text=None, source_meta=None, save=True):
+        image_path = self._image_data_key(image_path)
         clean_part = str(part_name or "").strip()
         clean_box = None
         if isinstance(box, (list, tuple)) and len(box) == 4:
@@ -2126,6 +2138,7 @@ class ProjectManager:
         return True
 
     def set_auto_box_review_status(self, image_path, part_name, review_status, save=True):
+        image_path = self._image_data_key(image_path)
         clean_part = str(part_name or "").strip()
         clean_status = str(review_status or "").strip() or "draft"
         if not clean_part or image_path not in self.project_data["labels"]:
@@ -2142,6 +2155,7 @@ class ProjectManager:
         return True
 
     def summarize_image_ai_drafts(self, image_path):
+        image_path = self._image_data_key(image_path)
         if image_path not in self.project_data["labels"]:
             return {
                 "reviewable_polygon_parts": [],
@@ -2211,6 +2225,7 @@ class ProjectManager:
         }
 
     def remove_auto_box(self, image_path, part_name, save=True):
+        image_path = self._image_data_key(image_path)
         clean_part = str(part_name or "").strip()
         if not clean_part or image_path not in self.project_data["labels"]:
             return False
@@ -2230,15 +2245,19 @@ class ProjectManager:
         return removed
     
     def get_boxes(self, image_path):
+        image_path = self._image_data_key(image_path)
         return self.project_data["labels"].get(image_path, {}).get("boxes", {})
 
     def get_auto_boxes(self, image_path):
+        image_path = self._image_data_key(image_path)
         return self.project_data["labels"].get(image_path, {}).get("auto_boxes", {})
 
     def get_auto_box_meta(self, image_path):
+        image_path = self._image_data_key(image_path)
         return self.project_data["labels"].get(image_path, {}).get("auto_box_meta", {})
 
     def split_auto_boxes_by_source(self, image_path):
+        image_path = self._image_data_key(image_path)
         entry = self.project_data["labels"].get(image_path, {})
         auto_boxes = entry.get("auto_boxes", {}) if isinstance(entry.get("auto_boxes", {}), dict) else {}
         meta = entry.get("auto_box_meta", {}) if isinstance(entry.get("auto_box_meta", {}), dict) else {}
@@ -2273,6 +2292,7 @@ class ProjectManager:
         Stores the blink shrink trajectory data for a specific part.
         This is the core training material for the Stage 3 Expert Models.
         """
+        image_path = self._image_data_key(image_path)
         if image_path not in self.project_data["labels"]:
              self.project_data["labels"][image_path] = self._default_label_entry()
         
@@ -2344,6 +2364,7 @@ class ProjectManager:
             self.save_project()
         
     def get_trajectories(self, image_path):
+        image_path = self._image_data_key(image_path)
         return self.project_data["labels"].get(image_path, {}).get("trajectories", {})
 
     def summarize_blink_trajectory_datasets(self):
@@ -2434,6 +2455,7 @@ class ProjectManager:
         """
         Completely removes a label and all its associated data (boxes, descriptions, etc.)
         """
+        image_path = self._image_data_key(image_path)
         if image_path in self.project_data["labels"]:
             entry = self.project_data["labels"][image_path]
             
@@ -2475,6 +2497,7 @@ class ProjectManager:
         self.set_taxon(image_path, genus, save=save)
 
     def set_taxon(self, image_path, taxon, taxon_rank=None, taxon_metadata=None, save=True):
+        image_path = self._image_data_key(image_path)
         if image_path in self.project_data["labels"]:
             entry = self._normalize_label_taxon_fields(self.project_data["labels"][image_path])
             clean_taxon = str(taxon or "Unknown").strip() or "Unknown"
@@ -2490,12 +2513,14 @@ class ProjectManager:
                 self.save_project()
 
     def get_labels(self, image_path):
+        image_path = self._image_data_key(image_path)
         return self.project_data["labels"].get(image_path, {}).get("parts", {})
 
     def get_genus(self, image_path):
         return self.get_taxon(image_path)
 
     def get_taxon(self, image_path):
+        image_path = self._image_data_key(image_path)
         return self._label_taxon_payload(self.project_data["labels"].get(image_path, {})).get("taxon", "Unknown")
 
     def list_taxa(self):
@@ -2736,6 +2761,7 @@ class ProjectManager:
 
     def verify_image_labels(self, image_path, save=True):
         """Removes 'Auto-Annotated' only from labels with a saved polygon."""
+        image_path = self._image_data_key(image_path)
         if image_path not in self.project_data["labels"]: return 0
         
         labels = self.project_data["labels"][image_path]

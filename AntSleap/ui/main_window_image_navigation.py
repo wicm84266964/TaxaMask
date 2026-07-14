@@ -1,7 +1,9 @@
 try:
     from AntSleap.ui.main_window_navigation_dependencies import *
+    from AntSleap.core.path_identity import path_identity
 except ImportError:
     from ui.main_window_navigation_dependencies import *
+    from core.path_identity import path_identity
 
 
 class MainWindowImageNavigationMixin:
@@ -172,13 +174,13 @@ class MainWindowImageNavigationMixin:
         base_name = os.path.basename(str(image_path))
         if not re.search(r"__(?:panel|crop)_\d{3}(?:_\d+)?\.(?:png|jpe?g|tif|tiff)$", base_name, re.IGNORECASE):
             return False
-        crop_dir = os.path.normcase(os.path.abspath(os.path.dirname(str(image_path))))
-        crop_abs = os.path.normcase(os.path.abspath(str(image_path)))
+        crop_dir = path_identity(os.path.dirname(str(image_path)))
+        crop_abs = path_identity(image_path)
         crop_stem = os.path.splitext(base_name)[0]
         source_stem = re.sub(r"__(?:panel|crop)_\d{3}(?:_\d+)?$", "", crop_stem, flags=re.IGNORECASE)
         return any(
-            os.path.normcase(os.path.abspath(path)) != crop_abs
-            and os.path.normcase(os.path.abspath(os.path.dirname(path))) == crop_dir
+            path_identity(path) != crop_abs
+            and path_identity(os.path.dirname(path)) == crop_dir
             and os.path.normcase(os.path.splitext(os.path.basename(path))[0]) == os.path.normcase(source_stem)
             for path in self.project.project_data.get("images", [])
         )
@@ -186,24 +188,24 @@ class MainWindowImageNavigationMixin:
     def _has_split_crops_from_image(self, image_path):
         if not image_path or not hasattr(self.project, "get_image_provenance"):
             return False
-        source_abs = os.path.normcase(os.path.abspath(str(image_path)))
-        source_dir = os.path.normcase(os.path.abspath(os.path.dirname(str(image_path))))
+        source_abs = path_identity(image_path)
+        source_dir = path_identity(os.path.dirname(str(image_path)))
         source_stem = os.path.normcase(os.path.splitext(os.path.basename(str(image_path)))[0])
         for path in self.project.project_data.get("images", []):
             if not path:
                 continue
-            crop_abs = os.path.normcase(os.path.abspath(str(path)))
+            crop_abs = path_identity(path)
             if crop_abs == source_abs:
                 continue
             provenance = self.project.get_image_provenance(path)
             derived_from = provenance.get("derived_from") if isinstance(provenance, dict) else {}
             if isinstance(derived_from, dict) and derived_from.get("image_path"):
-                derived_abs = os.path.normcase(os.path.abspath(str(derived_from.get("image_path"))))
+                derived_abs = path_identity(derived_from.get("image_path"))
                 if derived_abs == source_abs:
                     return True
             if not self._looks_like_panel_crop_path(path):
                 continue
-            crop_dir = os.path.normcase(os.path.abspath(os.path.dirname(str(path))))
+            crop_dir = path_identity(os.path.dirname(str(path)))
             crop_stem = os.path.splitext(os.path.basename(str(path)))[0]
             parent_stem = re.sub(r"__(?:panel|crop)_\d{3}(?:_\d+)?$", "", crop_stem, flags=re.IGNORECASE)
             if crop_dir == source_dir and os.path.normcase(parent_stem) == source_stem:
@@ -1051,7 +1053,7 @@ class MainWindowImageNavigationMixin:
         if not path:
             return ""
         try:
-            return os.path.normcase(os.path.normpath(os.path.abspath(str(path))))
+            return path_identity(path)
         except Exception:
             return str(path)
 

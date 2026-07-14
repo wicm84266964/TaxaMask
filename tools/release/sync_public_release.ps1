@@ -193,7 +193,10 @@ Assert-CleanWorktree -Repo $release -Role "Public release"
 
 $sourceMap = Get-TrackedFileMap -Repo $source
 $releaseMap = Get-TrackedFileMap -Repo $release
-$sourceFiles = @($sourceMap.Keys | Sort-Object)
+$publicExcludedFiles = @(
+    "CHANGELOG_zh.md"
+)
+$sourceFiles = @($sourceMap.Keys | Where-Object { $_ -notin $publicExcludedFiles } | Sort-Object)
 $releaseFiles = @($releaseMap.Keys | Sort-Object)
 Assert-PublicFileSet -Repo $source -Files $sourceFiles
 
@@ -216,6 +219,7 @@ $releaseCommit = (Invoke-Git -Repo $release -Arguments @("rev-parse", "HEAD") | 
 Write-Host "Development: $sourceCommit"
 Write-Host "Public release: $releaseCommit"
 Write-Host "Tracked allowlist: $($sourceFiles.Count) files"
+Write-Host "Public exclusions: $($publicExcludedFiles -join ', ')"
 Write-Host "Changes: add=$($added.Count), modify=$($modified.Count), delete=$($deleted.Count)"
 
 foreach ($file in $added) { Write-Host "ADD     $file" }

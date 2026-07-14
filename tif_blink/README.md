@@ -31,4 +31,6 @@ Boundary bands are generated from human labels. They are used for Blink-style ma
 
 Grouped-view training is opt-in through `TifBlinkTrainConfig(use_grouped_views=True)` or the CLI `--grouped-views` flag. The simple single-view training path remains available for smoke tests and baseline comparisons.
 
-See `TRAINING_DESIGN_zh.md` for the current implementation plan.
+This README documents the public experimental surface. Detailed development
+plans, execution checklists, and test handoffs remain in the local development
+repository rather than the public release tree.

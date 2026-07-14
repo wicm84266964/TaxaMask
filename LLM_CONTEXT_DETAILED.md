@@ -22,10 +22,11 @@ TIF/CT is now integrated into the maintained branch, but it remains less broadly
 ## 2. Documentation Roles
 
 - `README.md`: public GitHub landing page and installation entrypoint.
-- `CHANGELOG_zh.md`: Chinese historical changelog-style document.
+- `docs/releases/`: public release notes for shipped milestones.
 - `TaxaMask使用手册.md`: researcher-facing Chinese operating manual.
 - `LLM_CONTEXT_DETAILED.md`: current technical handoff for Agent/LLM/developer use.
 - `docs/contracts/`: backend contracts that are safe to expose publicly.
+- Detailed development changelogs, raw design drafts, execution checklists, test handoffs, and one-off validation logs stay in the local development repository and must not be assumed to exist in the public release tree.
 - Internal design drafts, task handoffs, local agent sessions, local runtime configs, generated data, model weights, private projects, databases, and CT/TIF stacks must not be published.
 
 Do not recreate older duplicate root context/readme files. Keep this file as the current technical handoff rather than a dated development log.
@@ -542,11 +543,11 @@ Use focused tests when modifying a route.
 Common commands:
 
 ```powershell
-C:\Users\admin\anaconda3\envs\taxamask\python.exe -m unittest tests.test_agent_context_routes
-C:\Users\admin\anaconda3\envs\taxamask\python.exe -m unittest tests.test_tif_project tests.test_tif_part_extraction tests.test_tif_local_axis_reslice tests.test_tif_local_axis_batch tests.test_tif_local_axis_ai
-C:\Users\admin\anaconda3\envs\taxamask\python.exe -m unittest tests.test_tif_workbench tests.test_tif_gpu_volume_canvas
-C:\Users\admin\anaconda3\envs\taxamask\python.exe -m unittest tests.test_gui_smoke
-C:\Users\admin\anaconda3\envs\taxamask\python.exe scripts\run_validation_suite.py --timeout 300
+python -m unittest tests.test_agent_context_routes
+python -m unittest tests.test_tif_project tests.test_tif_part_extraction tests.test_tif_local_axis_reslice tests.test_tif_local_axis_batch tests.test_tif_local_axis_ai
+python -m unittest tests.test_tif_workbench tests.test_tif_gpu_volume_canvas
+python -m unittest tests.test_gui_smoke
+python scripts\run_validation_suite.py --timeout 300
 git diff --check
 ```
 

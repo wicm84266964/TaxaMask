@@ -86,18 +86,21 @@ git diff --check
 
 ## 提交与发布
 
-1. 在正式版复核 staged 文件清单和敏感信息扫描结果。
-2. 只在正式版创建公开 commit。
-3. 推送 `main` 前再次运行同步脚本预览；开发版与正式版应显示零文件差异。
-4. 先推送 `main`，等待 Cross-platform smoke 的 Windows、Ubuntu、macOS 矩阵全部通过。
-5. 只有矩阵全绿后，才根据版本级别创建 tag 和 GitHub Release。
-6. 发布后核对远端 `main`、tag、Release 和本地提交哈希一致。
+1. 应用同步后，在正式版复核变更清单和敏感信息扫描结果。
+2. 在正式版从 `main` 创建公开候选分支，不直接提交或推送 `main`。
+3. 只在候选分支创建公开 commit，推送候选分支并创建 Pull Request。
+4. 等待 Cross-platform smoke 的 Windows、Ubuntu、macOS 矩阵全部通过，再合并 Pull Request。
+5. 合并后更新本地正式版 `main`，再次运行同步脚本预览；开发版与正式版应显示零文件差异。
+6. 需要发布版本时，在 GitHub Actions 页面运行 `Create release`，选择 `main` 并填写新的版本号。
+7. 发布工作流会复核 CI、创建不可变 tag 和 GitHub Release；不要手工创建、移动或覆盖公开 tag。
+8. 发布后核对远端 `main`、tag、Release 和本地提交哈希一致。
 
 如直连 GitHub 被重置，可仅对单次命令使用 `http://127.0.0.1:7897`，不要写入全局代理配置。
 
 ## 禁止事项
 
 - 不在开发版配置 GitHub `origin` 或直接 push。
+- 不直接推送正式版 `main`，也不绕过必需的 CI。
 - 不在正式版开展未同步回开发版的功能开发。
 - 不通过整目录复制、压缩包覆盖或资源管理器拖拽完成发布。
 - 不在正式版提交 `.lab-agent`、本地配置、数据库、模型、研究数据或运行输出。

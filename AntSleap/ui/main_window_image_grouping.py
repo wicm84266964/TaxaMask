@@ -1,7 +1,9 @@
 try:
     from AntSleap.ui.main_window_navigation_dependencies import *
+    from AntSleap.core.path_identity import path_identity, paths_refer_to_same_file
 except ImportError:
     from ui.main_window_navigation_dependencies import *
+    from core.path_identity import path_identity, paths_refer_to_same_file
 
 
 class MainWindowImageGroupingMixin:
@@ -16,12 +18,12 @@ class MainWindowImageGroupingMixin:
             if not img:
                 continue
             try:
-                identity = os.path.normcase(os.path.normpath(os.path.abspath(str(img))))
+                identity = path_identity(img)
             except Exception:
                 identity = str(img)
             image_identities[img] = identity
             try:
-                directory = os.path.normcase(os.path.abspath(os.path.dirname(str(img))))
+                directory = path_identity(os.path.dirname(str(img)))
                 stem = os.path.normcase(os.path.splitext(os.path.basename(str(img)))[0])
                 stem_dir_index.add((directory, stem))
                 stem_identity_index.setdefault((directory, stem), identity)
@@ -37,9 +39,7 @@ class MainWindowImageGroupingMixin:
             if isinstance(derived_from, dict) and bool(derived_from.get("image_path")):
                 split_crop_identities.add(identity)
                 try:
-                    source_identity = os.path.normcase(
-                        os.path.normpath(os.path.abspath(str(derived_from.get("image_path"))))
-                    )
+                    source_identity = path_identity(derived_from.get("image_path"))
                     source_with_crops.add(source_identity)
                 except Exception:
                     pass
@@ -49,7 +49,7 @@ class MainWindowImageGroupingMixin:
             if not re.search(r"__(?:panel|crop)_\d{3}(?:_\d+)?\.(?:png|jpe?g|tif|tiff)$", base_name, re.IGNORECASE):
                 continue
             try:
-                crop_dir = os.path.normcase(os.path.abspath(os.path.dirname(str(img))))
+                crop_dir = path_identity(os.path.dirname(str(img)))
                 crop_stem = os.path.splitext(base_name)[0]
                 source_stem = re.sub(r"__(?:panel|crop)_\d{3}(?:_\d+)?$", "", crop_stem, flags=re.IGNORECASE)
                 source_key = (crop_dir, os.path.normcase(source_stem))
@@ -131,7 +131,7 @@ class MainWindowImageGroupingMixin:
         except Exception:
             left_path = str(left)
             right_path = str(right)
-        return os.path.normcase(os.path.normpath(left_path)) == os.path.normcase(os.path.normpath(right_path))
+        return paths_refer_to_same_file(left_path, right_path)
 
     def _project_image_key_for_path(self, image_path):
         for candidate in self.project.project_data.get("images", []):

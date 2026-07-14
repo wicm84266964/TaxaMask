@@ -110,7 +110,7 @@ class AgentContextRoutesTests(unittest.TestCase):
         self.assertEqual(context["diagnostic_route"], "pdf_evidence_context")
         self.assertIn("key/model readiness", context["diagnostic_focus"])
         self.assertIn("one stage per reply", context["diagnostic_focus"])
-        self.assertIn("taxamask-pdf-evidence", context["llm_context_refs"])
+        self.assertIn("vendor/ant-code/config/skills/taxamask-pdf-evidence/SKILL.md", context["llm_context_refs"])
         self.assertIn("taxonomy-paper-finder", context["llm_context_refs"])
         self.assertIn("candidates/provenance", context["safety_notes"])
         self.assertIn("requirement-confirmation questions", context["suggested_agent_action"])

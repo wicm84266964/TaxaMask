@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from .safe_io import atomic_write_json
 from .sqlite_storage import ensure_integrity_ok, write_project_manifest
 from .tif_project import TIF_PROJECT_SCHEMA_VERSION, TIF_PROJECT_TYPE, TifProjectManager
+from .path_identity import canonical_path
 from .tif_sqlite_schema import TIF_SQLITE_PROJECT_TYPE, create_tif_project_database, json_text
 
 
@@ -858,13 +859,13 @@ def migrate_legacy_tif_json_to_sqlite(
     report_path=None,
     progress_callback=None,
 ):
-    source_json = os.path.abspath(str(json_project_path))
+    source_json = canonical_path(json_project_path)
     if not os.path.exists(source_json):
         raise FileNotFoundError(source_json)
 
-    target_db = os.path.abspath(str(database_path or default_tif_sqlite_database_path(source_json)))
-    target_manifest = os.path.abspath(str(manifest_path or default_tif_sqlite_manifest_path(source_json)))
-    target_report = os.path.abspath(str(report_path or default_tif_migration_report_path(source_json)))
+    target_db = canonical_path(database_path or default_tif_sqlite_database_path(source_json))
+    target_manifest = canonical_path(manifest_path or default_tif_sqlite_manifest_path(source_json))
+    target_report = canonical_path(report_path or default_tif_migration_report_path(source_json))
     _validate_output_paths(source_json, target_db, target_manifest, target_report)
 
     _emit_progress(progress_callback, 0, 0, "读取旧 TIF JSON 项目")

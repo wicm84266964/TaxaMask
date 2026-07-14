@@ -94,6 +94,15 @@ function Assert-PublicFileSet {
         throw "Tracked files include blocked public-release paths:`n$($riskyFiles -join "`n")"
     }
 
+    $requiredProductFiles = @(
+        "vendor/ant-code/config/skills/taxamask-pdf-evidence/SKILL.md",
+        "vendor/ant-code/config/skills/taxonomy-paper-finder/SKILL.md"
+    )
+    $missingProductFiles = @($requiredProductFiles | Where-Object { $_ -notin $Files })
+    if ($missingProductFiles.Count -gt 0) {
+        throw "Required public product files are missing:`n$($missingProductFiles -join "`n")"
+    }
+
     $symlinks = @(
         Invoke-Git -Repo $Repo -Arguments @("-c", "core.quotepath=false", "ls-files", "-s") |
             Where-Object { $_ -match '^120000\s' }

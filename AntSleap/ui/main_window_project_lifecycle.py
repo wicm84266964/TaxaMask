@@ -1,7 +1,9 @@
 try:
     from AntSleap.ui.main_window_project_dependencies import *
+    from AntSleap.core.path_identity import canonical_path, path_identity
 except ImportError:
     from ui.main_window_project_dependencies import *
+    from core.path_identity import canonical_path, path_identity
 
 
 class MainWindowProjectLifecycleMixin:
@@ -183,7 +185,12 @@ class MainWindowProjectLifecycleMixin:
             except Exception:
                 pass
         agent_panel = getattr(self, "agent_panel", None)
-        if agent_panel is not None and hasattr(agent_panel, "stop_dashboard"):
+        if agent_panel is not None and hasattr(agent_panel, "shutdown"):
+            try:
+                agent_panel.shutdown()
+            except Exception:
+                pass
+        elif agent_panel is not None and hasattr(agent_panel, "stop_dashboard"):
             try:
                 agent_panel.stop_dashboard()
             except Exception:
@@ -464,15 +471,15 @@ class MainWindowProjectLifecycleMixin:
         seen = set()
         unique = []
         for candidate in candidates:
-            norm = os.path.normcase(os.path.normpath(os.path.abspath(str(candidate))))
+            norm = path_identity(candidate)
             if norm not in seen:
                 seen.add(norm)
-                unique.append(os.path.abspath(str(candidate)))
+                unique.append(canonical_path(candidate))
         return unique
 
     def _manifest_for_sqlite_database_file(self, path):
-        database_path = os.path.abspath(str(path))
-        database_norm = os.path.normcase(os.path.normpath(database_path))
+        database_path = canonical_path(path)
+        database_norm = path_identity(database_path)
         for manifest_path in self._candidate_manifest_paths_for_sqlite_database(database_path):
             if not os.path.exists(manifest_path):
                 continue
@@ -481,9 +488,9 @@ class MainWindowProjectLifecycleMixin:
                 resolved_db = resolve_manifest_database_path(manifest_path, payload)
             except Exception:
                 continue
-            resolved_norm = os.path.normcase(os.path.normpath(os.path.abspath(resolved_db)))
+            resolved_norm = path_identity(resolved_db)
             if resolved_norm == database_norm:
-                return os.path.abspath(manifest_path)
+                return canonical_path(manifest_path)
         return ""
 
     def _is_project_sqlite_database_file(self, path):
@@ -1027,7 +1034,7 @@ class MainWindowProjectLifecycleMixin:
     def open_project_path(self, path):
         if not self._ensure_project_switch_available():
             return
-        f = os.path.abspath(str(path))
+        f = canonical_path(path)
         runtime_log_event("open_project_begin", path=f)
         self._flush_pending_project_save(defer_for_navigation=False)
         if self._is_project_sqlite_database_file(f):
@@ -1074,7 +1081,7 @@ class MainWindowProjectLifecycleMixin:
                         tr("2D project migration failed. The old JSON was not modified.\n\n{0}", self.current_lang).format(str(exc)),
                     )
                     return
-                f = os.path.abspath(str(migration_result.manifest_path))
+                f = canonical_path(migration_result.manifest_path)
                 runtime_log_event(
                     "open_project_legacy_json_migrated",
                     source=migration_result.source_json_path,
@@ -1118,7 +1125,7 @@ class MainWindowProjectLifecycleMixin:
                             tr("TIF project migration failed. The old JSON was not modified.\n\n{0}", self.current_lang).format(str(exc)),
                         )
                         return
-                    f = os.path.abspath(str(migration_result.manifest_path))
+                    f = canonical_path(migration_result.manifest_path)
                     runtime_log_event(
                         "open_tif_legacy_json_migrated",
                         source=migration_result.source_json_path,

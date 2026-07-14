@@ -72,6 +72,7 @@ npm ci
 npm run verify:release
 cd ..\..
 C:\Users\admin\anaconda3\envs\taxamask\python.exe -m unittest tests.test_agentic_contract tests.test_tif_agent_context
+C:\Users\admin\anaconda3\envs\taxamask\python.exe -m unittest tests.test_config_cleanup tests.test_platform_open tests.test_poppler_discovery tests.test_runtime_device tests.test_generic_export_schema tests.test_window_geometry tests.test_path_identity tests.test_agent_context_routes tests.test_embedded_taxonomy_paper_finder tests.test_gui_smoke
 ```
 
 同时运行本次改动直接相关的 GUI、TIF、2D、Blink、VLM、PDF 或导出测试。涉及共享架构、数据存储或跨项目任务时，应扩大到完整相关测试组。
@@ -88,8 +89,9 @@ git diff --check
 1. 在正式版复核 staged 文件清单和敏感信息扫描结果。
 2. 只在正式版创建公开 commit。
 3. 推送 `main` 前再次运行同步脚本预览；开发版与正式版应显示零文件差异。
-4. 根据版本级别创建 tag 和 GitHub Release。
-5. 发布后核对远端 `main`、tag、Release 和本地提交哈希一致。
+4. 先推送 `main`，等待 Cross-platform smoke 的 Windows、Ubuntu、macOS 矩阵全部通过。
+5. 只有矩阵全绿后，才根据版本级别创建 tag 和 GitHub Release。
+6. 发布后核对远端 `main`、tag、Release 和本地提交哈希一致。
 
 如直连 GitHub 被重置，可仅对单次命令使用 `http://127.0.0.1:7897`，不要写入全局代理配置。
 

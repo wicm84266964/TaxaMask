@@ -16,6 +16,7 @@ from .project_sqlite_schema import (
 )
 from .safe_io import atomic_write_json
 from .sqlite_storage import ensure_integrity_ok, write_project_manifest
+from .path_identity import canonical_path
 
 
 MIGRATION_REPORT_SCHEMA_VERSION = "taxamask-2d-json-to-sqlite-migration-v1"
@@ -902,13 +903,13 @@ def migrate_legacy_2d_json_to_sqlite(
     report_path=None,
     progress_callback=None,
 ):
-    source_json = os.path.abspath(str(json_project_path))
+    source_json = canonical_path(json_project_path)
     if not os.path.exists(source_json):
         raise FileNotFoundError(source_json)
 
-    target_db = os.path.abspath(str(database_path or default_sqlite_database_path(source_json)))
-    target_manifest = os.path.abspath(str(manifest_path or default_sqlite_manifest_path(source_json)))
-    target_report = os.path.abspath(str(report_path or default_migration_report_path(source_json)))
+    target_db = canonical_path(database_path or default_sqlite_database_path(source_json))
+    target_manifest = canonical_path(manifest_path or default_sqlite_manifest_path(source_json))
+    target_report = canonical_path(report_path or default_migration_report_path(source_json))
 
     if _same_file_path(source_json, target_manifest):
         raise ValueError("sqlite_manifest_must_not_overwrite_legacy_json")

@@ -193,7 +193,7 @@ AGENT_CONTEXT_ROUTES = {
             "LLM_CONTEXT_DETAILED.md -> 5. Agent Center",
             "TaxaMask使用手册.md -> 5. PDF 处理模块：从原始 PDF 到候选数据库",
             "vendor/ant-code/config/skills/taxonomy-paper-finder/SKILL.md",
-            ".lab-agent/skills/taxamask-pdf-evidence/SKILL.md",
+            "vendor/ant-code/config/skills/taxamask-pdf-evidence/SKILL.md",
         ),
         "source_code_refs": (
             "AntSleap/ui/pdf_processing_widget.py",

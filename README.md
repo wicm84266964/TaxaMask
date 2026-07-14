@@ -206,6 +206,8 @@ Grayscale image reslicing uses linear interpolation. Mask and label reslicing us
 
 TaxaMask includes the first-party Ant-Code Agent Center under `vendor/ant-code/`. It helps inspect project state, explain errors, review profiles, and make code changes after confirmation.
 
+On Windows, the Dashboard is embedded in the TaxaMask window. Linux, macOS, and WSL use the same local Dashboard in the system browser by default, avoiding platform-specific Qt WebEngine/OpenGL shutdown problems while keeping projects, sessions, and Agent context on the local machine.
+
 Agent model credentials and private gateway settings are local runtime configuration. They are not included in this repository. The embedded runtime is pointed at:
 
 ```text
@@ -233,7 +235,7 @@ Prerequisites:
 - Git, or a GitHub ZIP download.
 - Conda or another Python environment manager.
 - Python 3.12.
-- Node.js 20 or newer for the embedded Agent Center dashboard.
+- Node.js 20 or newer for the Agent Center dashboard.
 
 Clone the maintained main branch:
 

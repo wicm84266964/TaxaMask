@@ -214,6 +214,7 @@ class TaxaMaskAgentPanel(QWidget):
         self._last_console_error = ""
         self._embedded_page_error = ""
         self._web_profile = None
+        self._web_page = None
         self._web_profile_storage_dir = ""
         self._json_health_error = ""
         self._json_health_warning = ""
@@ -240,7 +241,7 @@ class TaxaMaskAgentPanel(QWidget):
             return False
         if value in {"1", "true", "yes", "on", "browser", "external"}:
             return True
-        return sys.platform == "linux" or _is_wsl_runtime()
+        return sys.platform in {"linux", "darwin"} or _is_wsl_runtime()
 
     def _default_ant_code_root(self):
         repo_root = Path(__file__).resolve().parents[2]
@@ -616,9 +617,9 @@ exec "$@"
         self.web_view = QWebEngineView()
         self.web_view.setObjectName("taxamaskAntCodeWebView")
         web_page_class = _ensure_agent_web_page_class()
-        if web_page_class is not None:
-            self.web_view.setPage(web_page_class(self, parent=self.web_view))
-        self._configure_web_profile()
+        if not self._configure_web_profile(web_page_class) and web_page_class is not None:
+            self._web_page = web_page_class(self, parent=self.web_view)
+            self.web_view.setPage(self._web_page)
         self._install_web_bootstrap_script()
         self.web_view.loadFinished.connect(self._on_web_load_finished)
         self.stack.addWidget(self.web_view)
@@ -636,25 +637,38 @@ exec "$@"
         self.fallback_mark.setPixmap(pixmap.scaled(280, 280, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         self.fallback_mark.setMinimumHeight(280)
 
-    def _configure_web_profile(self):
+    def _configure_web_profile(self, web_page_class=None):
         if self.web_view is None or QWebEngineProfile is None:
-            return
+            return False
+        profile = None
         try:
-            profile = QWebEngineProfile(self.web_view)
+            # The profile must outlive every page that uses it. Previously it
+            # was parented to the view and could be destroyed before the page.
+            profile = QWebEngineProfile(self)
             self._web_profile = profile
             self._web_profile_storage_dir = tempfile.mkdtemp(prefix="taxamask_antcode_web_")
             if hasattr(profile, "setPersistentStoragePath"):
                 profile.setPersistentStoragePath(self._web_profile_storage_dir)
             if hasattr(profile, "setCachePath"):
                 profile.setCachePath(self._web_profile_storage_dir)
-            if TaxaMaskAgentWebPage is not None:
-                self.web_view.setPage(TaxaMaskAgentWebPage(self, profile=profile, parent=self.web_view))
+            page_class = web_page_class or TaxaMaskAgentWebPage
+            if page_class is not None:
+                self._web_page = page_class(self, profile=profile, parent=self.web_view)
+                self.web_view.setPage(self._web_page)
             cache_type_enum = getattr(QWebEngineProfile, "HttpCacheType", QWebEngineProfile)
             no_cache = getattr(cache_type_enum, "NoCache")
             profile.setHttpCacheType(no_cache)
             profile.clearHttpCache()
         except Exception:
-            return
+            self._web_profile = None
+            self._web_page = None
+            if profile is not None:
+                try:
+                    profile.deleteLater()
+                except Exception:
+                    pass
+            return False
+        return True
 
     def _install_web_bootstrap_script(self):
         if self.web_view is None or QWebEngineScript is None:
@@ -2910,9 +2924,44 @@ exec "$@"
         return str(value or "").replace("/", "\\").replace('"', "").lower()
 
     def closeEvent(self, event):
-        self.stop_dashboard()
-        self._cleanup_web_profile_storage()
+        self.shutdown()
         super().closeEvent(event)
+
+    def shutdown(self):
+        self.stop_dashboard()
+        self._dispose_web_view()
+        self._cleanup_web_profile_storage()
+
+    def _dispose_web_view(self):
+        view = self.web_view
+        profile = self._web_profile
+        self.web_view = None
+        self._web_page = None
+        self._web_profile = None
+
+        if view is not None:
+            try:
+                if self.stack.currentWidget() is view:
+                    self.stack.setCurrentWidget(self.fallback)
+                self.stack.removeWidget(view)
+            except Exception:
+                pass
+            try:
+                view.stop()
+            except Exception:
+                pass
+            try:
+                view.deleteLater()
+            except Exception:
+                pass
+
+        # Queue the profile after the view. Deleting the view first also
+        # deletes its page, satisfying QWebEngineProfile's lifetime contract.
+        if profile is not None:
+            try:
+                profile.deleteLater()
+            except Exception:
+                pass
 
     def _cleanup_web_profile_storage(self):
         self._close_dashboard_log(remove=True)
@@ -2935,7 +2984,7 @@ exec "$@"
     def _update_fallback(self):
         lines = []
         if self.browser_mode:
-            lines.append("Browser mode is active for this Linux/WSL session. If the dashboard did not open automatically, open the URL below.")
+            lines.append("Browser mode is active for this Linux/macOS/WSL session. If the dashboard did not open automatically, open the URL below.")
             if self._browser_context_copied:
                 lines.append(at("Agent context copied to clipboard. Paste it into the browser prompt.", self.lang))
         elif _QTWEBENGINE_IMPORT_ATTEMPTED and QWebEngineView is None:

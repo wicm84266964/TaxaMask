@@ -35,6 +35,7 @@ from .model_profiles import (
 )
 from .vlm_preannotation import DEFAULT_VLM_PROMPT_PROFILE_ID, sanitize_vlm_prompt_profile
 from .sqlite_storage import LEGACY_JSON_BACKEND, PROJECT_MANIFEST_SCHEMA_VERSION, SQLITE_BACKEND, write_project_manifest
+from .path_identity import canonical_path, path_identity
 
 DEFAULT_CATEGORY_SUPERCATEGORY = "biological_structure"
 MULTIMODAL_SAMPLE_SCHEMA_VERSION = "taxamask-multimodal-sample-v1"
@@ -690,7 +691,7 @@ class ProjectManager:
 
     def _default_sqlite_paths_for_new_project(self, name, save_dir):
         stem = str(name or "project").strip() or "project"
-        directory = os.path.abspath(str(save_dir))
+        directory = canonical_path(save_dir)
         return (
             os.path.join(directory, f"{stem}.sqlite_manifest.json"),
             os.path.join(directory, f"{stem}.taxamask.sqlite"),
@@ -722,8 +723,8 @@ class ProjectManager:
                 },
             )
             manifest_created = True
-            self.current_project_path = os.path.abspath(manifest_path)
-            self.current_database_path = os.path.abspath(database_path)
+            self.current_project_path = canonical_path(manifest_path)
+            self.current_database_path = canonical_path(database_path)
             self.current_storage_backend = SQLITE_BACKEND
             self._sqlite_project_dirty = True
             self.flush_sqlite_changes(project_dirty=True, integrity_check=True)
@@ -767,7 +768,7 @@ class ProjectManager:
         self.current_storage_backend = LEGACY_JSON_BACKEND
         self.current_database_path = ""
         self._legacy_json_write_enabled = True
-        self.current_project_path = os.path.join(save_dir, f"{name}.json")
+        self.current_project_path = canonical_path(os.path.join(save_dir, f"{name}.json"))
         self.save_project()
         return self.current_project_path
 
@@ -843,7 +844,7 @@ class ProjectManager:
     def _absolute_path_identity(self, path):
         if not path:
             return ""
-        return os.path.normcase(os.path.normpath(os.path.abspath(str(path))))
+        return path_identity(path)
 
     def _registered_image_key_for_path(self, path):
         target = self._path_identity(path)
@@ -1021,7 +1022,7 @@ class ProjectManager:
     def _apply_loaded_project_data(self, loaded_data, project_path):
         self.clear() # Ensure clean state
 
-        self.current_project_path = os.path.abspath(project_path)
+        self.current_project_path = canonical_path(project_path)
 
         # FIX: Strictly use loaded taxonomy if present.
         # This prevents the system from overriding custom empty taxonomies with defaults.
@@ -1128,7 +1129,7 @@ class ProjectManager:
             loaded_sqlite = load_2d_sqlite_project_manifest(path)
             self._apply_loaded_project_data(loaded_sqlite["project_data"], path)
             self.current_storage_backend = SQLITE_BACKEND
-            self.current_database_path = loaded_sqlite.get("database_path", "")
+            self.current_database_path = canonical_path(loaded_sqlite.get("database_path", ""))
             self._sqlite_dirty_images = set()
             self._sqlite_deleted_images = set()
             self._sqlite_project_dirty = False
@@ -1237,14 +1238,14 @@ class ProjectManager:
         images = self.project_data.setdefault("images", [])
         labels = self.project_data.setdefault("labels", {})
         existing = {
-            os.path.normcase(os.path.normpath(os.path.abspath(str(path))))
+            path_identity(path)
             for path in images
             if path
         }
         added = 0
         for index, img in enumerate(paths, start=1):
-            abs_img = os.path.abspath(str(img))
-            identity = os.path.normcase(os.path.normpath(abs_img))
+            abs_img = canonical_path(img)
+            identity = path_identity(abs_img)
             if identity not in existing:
                 images.append(abs_img)
                 labels.setdefault(abs_img, self._default_label_entry())

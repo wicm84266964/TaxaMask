@@ -548,7 +548,15 @@ class MainWindowStartCenterMixin:
         return summary, detail
 
     def _start_console_pdf_summary(self):
-        skill_path = os.path.join(REPO_ROOT, ".lab-agent", "skills", "taxamask-pdf-evidence", "SKILL.md")
+        skill_path = os.path.join(
+            REPO_ROOT,
+            "vendor",
+            "ant-code",
+            "config",
+            "skills",
+            "taxamask-pdf-evidence",
+            "SKILL.md",
+        )
         if not os.path.exists(skill_path):
             return tr("PDF evidence skill missing", self.current_lang), skill_path
         candidates = 0

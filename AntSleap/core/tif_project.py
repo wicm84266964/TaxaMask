@@ -6,6 +6,7 @@ import uuid
 from datetime import datetime
 
 from .safe_io import atomic_write_json, backup_file
+from .path_identity import canonical_path
 from .sqlite_storage import LEGACY_JSON_BACKEND, PROJECT_MANIFEST_SCHEMA_VERSION, SQLITE_BACKEND, write_project_manifest
 from .tif_label_guard import can_write_label_role
 from .tif_materials import has_trainable_material, read_material_map, write_material_map
@@ -115,7 +116,7 @@ class TifProjectManager:
     @property
     def project_dir(self):
         if self.current_asset_root:
-            return os.path.abspath(self.current_asset_root)
+            return canonical_path(self.current_asset_root)
         if not self.current_project_path:
             return os.getcwd()
         return os.path.dirname(os.path.abspath(self.current_project_path))
@@ -162,10 +163,10 @@ class TifProjectManager:
                 },
             )
             manifest_created = True
-            self.current_project_path = os.path.abspath(manifest_path)
-            self.current_database_path = os.path.abspath(database_path)
+            self.current_project_path = canonical_path(manifest_path)
+            self.current_database_path = canonical_path(database_path)
             self.current_storage_backend = SQLITE_BACKEND
-            self.current_asset_root = os.path.abspath(str(project_dir))
+            self.current_asset_root = canonical_path(project_dir)
             self.save_project()
             return self.current_project_path
         except Exception:
@@ -193,7 +194,7 @@ class TifProjectManager:
             return self._create_sqlite_project_storage(name, project_dir)
         if storage_backend not in (LEGACY_JSON_BACKEND, "json"):
             raise ValueError(f"unsupported_tif_project_storage_backend:{storage_backend}")
-        self.current_project_path = os.path.join(os.path.abspath(project_dir), DEFAULT_TIF_PROJECT_FILENAME)
+        self.current_project_path = canonical_path(os.path.join(project_dir, DEFAULT_TIF_PROJECT_FILENAME))
         self.current_storage_backend = LEGACY_JSON_BACKEND
         self.current_database_path = ""
         self.current_asset_root = ""
@@ -210,20 +211,20 @@ class TifProjectManager:
             from .tif_sqlite_loader import load_tif_sqlite_project_manifest
 
             loaded_sqlite = load_tif_sqlite_project_manifest(path)
-            self.current_project_path = os.path.abspath(path)
+            self.current_project_path = canonical_path(path)
             self.project_data = self._normalize_loaded_project_data(loaded_sqlite["project_data"])
             self.current_storage_backend = SQLITE_BACKEND
-            self.current_database_path = loaded_sqlite.get("database_path", "")
+            self.current_database_path = canonical_path(loaded_sqlite.get("database_path", ""))
             self._legacy_json_write_enabled = False
             manifest = loaded_sqlite.get("manifest", {}) if isinstance(loaded_sqlite.get("manifest"), dict) else {}
             asset_root = str(manifest.get("tif_asset_root") or "").strip()
             if asset_root:
                 if os.path.isabs(asset_root):
-                    self.current_asset_root = os.path.normpath(asset_root)
+                    self.current_asset_root = canonical_path(asset_root)
                 else:
-                    self.current_asset_root = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(path)), asset_root))
+                    self.current_asset_root = canonical_path(os.path.join(os.path.dirname(canonical_path(path)), asset_root))
             else:
-                self.current_asset_root = os.path.dirname(os.path.abspath(path))
+                self.current_asset_root = os.path.dirname(canonical_path(path))
             return self.project_data
         self.current_storage_backend = LEGACY_JSON_BACKEND
         self.current_database_path = ""
@@ -233,7 +234,7 @@ class TifProjectManager:
             raise ValueError(f"unsupported_tif_project_schema:{payload.get('schema_version')}")
         if payload.get("project_type") != TIF_PROJECT_TYPE:
             raise ValueError(f"not_tif_volume_project:{payload.get('project_type')}")
-        self.current_project_path = os.path.abspath(path)
+        self.current_project_path = canonical_path(path)
         self.project_data = self._normalize_loaded_project_data(payload)
         return self.project_data
 

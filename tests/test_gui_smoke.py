@@ -35,6 +35,8 @@ try:
     from PySide6.QtWidgets import QApplication
 except ModuleNotFoundError as exc:
     if exc.name and exc.name.startswith("PySide6"):
+        if os.environ.get("TAXAMASK_REQUIRE_GUI_TESTS", "").strip() == "1":
+            raise
         QApplication = None
         main_module = None
         PROJECT_TEMPLATE_GENERIC = "generic_taxonomy"
@@ -218,6 +220,10 @@ class GuiSmokeTests(unittest.TestCase):
 
     def tearDown(self):
         if QApplication is not None:
+            for widget in QApplication.allWidgets():
+                dispose_web_view = getattr(widget, "_dispose_web_view", None)
+                if callable(dispose_web_view):
+                    dispose_web_view()
             for widget in QApplication.topLevelWidgets():
                 timer = getattr(widget, "project_save_timer", None)
                 if timer is not None and hasattr(timer, "stop"):
@@ -369,6 +375,11 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(rail_scroll.verticalScrollBarPolicy(), main_module.Qt.ScrollBarAsNeeded)
             self.assertIsNotNone(window.findChild(main_module.QWidget, "taxamaskAgentPanel"))
             self.assertIn("PDF evidence skill ready", window.start_console_pdf_value.text())
+            self.assertIn(
+                "vendor/ant-code/config/skills/taxamask-pdf-evidence/SKILL.md",
+                window.start_console_pdf_value.toolTip().replace("\\", "/"),
+            )
+            self.assertNotIn(".lab-agent", window.start_console_pdf_value.toolTip())
             self.assertIn("STL", window.start_console_stl_note.text())
             self.assertIn("2D views", window.start_console_stl_note.text())
             self.assertNotIn("3D mesh annotation", window.start_console_stl_note.text())
@@ -611,6 +622,67 @@ class GuiSmokeTests(unittest.TestCase):
         finally:
             panel.deleteLater()
 
+    def test_agent_panel_disposes_web_profile_after_its_view(self):
+        panel = main_module.TaxaMaskAgentPanel("en", workspace_dir=str(PROJECT_ROOT))
+        events = []
+
+        class FakeProfile:
+            class HttpCacheType:
+                NoCache = "no-cache"
+
+            def __init__(self, parent):
+                self.parent = parent
+
+            def setPersistentStoragePath(self, _path):
+                return None
+
+            def setCachePath(self, _path):
+                return None
+
+            def setHttpCacheType(self, _value):
+                return None
+
+            def clearHttpCache(self):
+                return None
+
+            def deleteLater(self):
+                events.append("profile")
+
+        class FakePage:
+            def __init__(self, _panel, profile=None, parent=None):
+                self.profile = profile
+                self.parent = parent
+
+        class FakeView:
+            def __init__(self):
+                self.assigned_page = None
+
+            def setPage(self, page):
+                self.assigned_page = page
+
+            def stop(self):
+                events.append("stop")
+
+            def deleteLater(self):
+                events.append("view")
+
+        try:
+            panel.web_view = FakeView()
+            with patch("AntSleap.ui.taxamask_agent_panel.QWebEngineProfile", FakeProfile):
+                self.assertTrue(panel._configure_web_profile(FakePage))
+
+            profile = panel._web_profile
+            self.assertIs(profile.parent, panel)
+            self.assertIs(panel.web_view.assigned_page.profile, profile)
+            panel._dispose_web_view()
+
+            self.assertLess(events.index("view"), events.index("profile"))
+            self.assertIsNone(panel.web_view)
+            self.assertIsNone(panel._web_profile)
+        finally:
+            panel._cleanup_web_profile_storage()
+            panel.deleteLater()
+
     def test_qtwebengine_flags_disable_agent_gpu_logging_by_default(self):
         flags = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
         self.assertIn("--disable-gpu", flags)
@@ -623,6 +695,7 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertIn("--disable-logging", flags)
         self.assertIn("--log-level=3", flags)
 
+    @unittest.skipUnless(sys.platform == "win32", "WSL dashboard launch is Windows-only")
     def test_agent_panel_can_launch_dashboard_through_wsl(self):
         with patch.dict(
             os.environ,
@@ -670,6 +743,17 @@ class GuiSmokeTests(unittest.TestCase):
     def test_agent_panel_uses_browser_mode_on_linux(self):
         with patch.dict(os.environ, {}, clear=True), \
              patch("AntSleap.ui.taxamask_agent_panel.sys.platform", "linux"):
+            panel = main_module.TaxaMaskAgentPanel("en", workspace_dir=str(PROJECT_ROOT))
+        try:
+            self.assertTrue(panel.browser_mode)
+            self.assertIsNone(panel.web_view)
+            self.assertIn("Browser mode is active", panel.fallback_detail.text())
+        finally:
+            panel.deleteLater()
+
+    def test_agent_panel_uses_browser_mode_on_macos(self):
+        with patch.dict(os.environ, {}, clear=True), \
+             patch("AntSleap.ui.taxamask_agent_panel.sys.platform", "darwin"):
             panel = main_module.TaxaMaskAgentPanel("en", workspace_dir=str(PROJECT_ROOT))
         try:
             self.assertTrue(panel.browser_mode)
@@ -726,6 +810,8 @@ class GuiSmokeTests(unittest.TestCase):
         try:
             panel = window.agent_panel
             events = []
+            panel.browser_mode = False
+            panel._ensure_web_view = lambda: True
             panel.dashboard_url = "http://127.0.0.1:7410"
             panel.process = type("Process", (), {"poll": lambda self: None})()
             panel._preflight_dashboard = lambda report_error=False: events.append(("preflight", report_error)) or True

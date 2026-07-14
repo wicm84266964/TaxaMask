@@ -16,6 +16,10 @@ jobs:
 
     env:
       QT_QPA_PLATFORM: offscreen
+      QT_OPENGL: software
+      QT_QUICK_BACKEND: software
+      TAXAMASK_ANTCODE_BROWSER_MODE: "1"
+      TAXAMASK_REQUIRE_GUI_TESTS: "1"
       PYTHONUNBUFFERED: "1"
 
     steps:
@@ -25,6 +29,12 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Install Linux Qt runtime dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libegl1 libgl1 libopengl0 libxkbcommon-x11-0 libxcb-cursor0
+
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
@@ -33,4 +43,4 @@ jobs:
 
       - name: Run lightweight tests
         run: |
-          python -m unittest tests.test_config_cleanup tests.test_platform_open tests.test_poppler_discovery tests.test_runtime_device tests.test_generic_export_schema tests.test_window_geometry tests.test_gui_smoke
+          python -m unittest tests.test_config_cleanup tests.test_platform_open tests.test_poppler_discovery tests.test_runtime_device tests.test_generic_export_schema tests.test_window_geometry tests.test_path_identity tests.test_agent_context_routes tests.test_embedded_taxonomy_paper_finder tests.test_gui_smoke

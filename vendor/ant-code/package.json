@@ -19,6 +19,7 @@
     "scripts/mock-gateway.js",
     "scripts/verify-gateway-compat.js",
     "src/",
+    "tests/",
     "npm-shrinkwrap.json",
     "package-lock.json",
     "tsconfig.json"
@@ -33,7 +34,7 @@
     "verify:gateway": "node scripts/verify-gateway-compat.js",
     "build:dashboard-assets": "node scripts/build-dashboard-assets.js",
     "verify:release": "npm run check && npm run verify:gateway",
-    "test": "node --test"
+    "test": "node --test tests/embedded-runtime.test.js"
   },
   "engines": {
     "node": ">=20"

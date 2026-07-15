@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "paper-distill-skill-bundle"
-version = "0.2.0"
+version = "0.2.0+taxamask.zh1"
 description = "Standalone paper-distill skill bundle with Chinese-first distillation outputs."
 readme = "README.md"
 requires-python = ">=3.12"
-authors = [{ name = "OpenAI" }]
+authors = [{ name = "Paper Distill contributors" }]
 dependencies = [
     "httpx>=0.27,<1.0",
 ]

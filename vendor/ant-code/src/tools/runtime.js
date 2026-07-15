@@ -14,6 +14,7 @@ import { loadSkills, readSkill, runSkill } from "../skills/registry.js";
 import { BUILT_IN_TOOLS } from "./definitions.js";
 import { documentIntakeTool } from "./document-tools.js";
 import { editFileTool, globTool, grepTool, listFilesTool, readFileTool, writeFileTool } from "./file-tools.js";
+import { gitDiffTool, gitStatusTool } from "./git-tools.js";
 import { rgCountTool, rgFilesTool, rgFilesWithMatchesTool, rgSearchTool } from "./rg-tools.js";
 import { backgroundShellTool, bashTool, powershellTool } from "./shell-tools.js";
 import { networkHostsForWebTool, webFetchTool, webSearchTool } from "./web-tools.js";
@@ -28,6 +29,8 @@ const HANDLERS = Object.freeze({
   rg_files: rgFilesTool,
   rg_files_with_matches: rgFilesWithMatchesTool,
   rg_count: rgCountTool,
+  git_status: gitStatusTool,
+  git_diff: gitDiffTool,
   web_fetch: webFetchTool,
   web_search: webSearchTool,
   document_intake: documentIntakeTool,

@@ -7778,12 +7778,18 @@ class TifWorkbenchTests(unittest.TestCase):
         try:
             widget.backend_python_edit.setText("C:/TaxaMask/python.exe")
             with patch("AntSleap.ui.tif_workbench.normalize_tif_backend_runtime_config") as normalize_mock:
-                normalize_mock.side_effect = lambda config: {**config, "python_executable": "C:/Users/admin/anaconda3/envs/3d-brain/python.exe"}
+                normalize_mock.side_effect = lambda config: {
+                    **config,
+                    "python_executable": "C:/Users/researcher/miniconda3/envs/taxamask-3d/python.exe",
+                }
                 widget.apply_nnunet_v2_backend_preset()
 
             self.assertEqual(widget.btn_use_nnunet_backend_preset.text(), "使用 nnU-Net v2 预设")
             self.assertEqual(widget.backend_id_edit.text(), "taxamask_tif_nnunet_v2_backend")
-            self.assertEqual(widget.backend_python_edit.text(), "C:/Users/admin/anaconda3/envs/3d-brain/python.exe")
+            self.assertEqual(
+                widget.backend_python_edit.text(),
+                "C:/Users/researcher/miniconda3/envs/taxamask-3d/python.exe",
+            )
             self.assertIn("AntSleap.tools.tif_nnunet_v2_backend", widget.backend_train_edit.text())
             self.assertIn("{contract_json}", widget.backend_predict_edit.text())
 

@@ -40,9 +40,9 @@ Treat this TaxaMask protocol as always active, not as an optional skill:
    - STL currently means rendered 2D views imported into Labeling Workbench, not direct 3D mesh painting.
    - TIF uses independent TIF projects, material-ID labels, `working_edit`, `manual_truth`, `editable_ai_result`, `raw_ai_prediction_backup`, sidecars, and the TIF backend contract. Legacy top-level `model_draft` records may exist for audit/compatibility, but part/reslice prediction review uses `editable_ai_result`.
    - PDF is evidence/provenance and Agent/headless workflow. PDF candidates are not training truth.
-3. For common TaxaMask tasks, consult `.lab-agent/skills/taxamask-workflows/SKILL.md` as the compact workflow card before loading the full manual.
+3. For common TaxaMask tasks, use this file as the compact public workflow card before loading the full manual. Developer-local `.lab-agent/skills` may add private overlays, but public behavior must not depend on them.
 4. For literature discovery and PDF acquisition, first decide whether the user already has PDFs or needs daily monitoring, a focused topic search, selected-paper acquisition, or a batch harvest. Load `vendor/ant-code/config/skills/taxonomy-paper-finder/SKILL.md` as stage 0 before PDF screening. Keep discovery metadata-first, ask before downloading, default selected-paper handoff to deep reads, and use only lawful open metadata and legally exposed PDF links; never use Sci-Hub, LibGen, paywall bypasses, CAPTCHA bypasses, or logged-in scraping.
-5. For PDF literature screening, figure/caption extraction, PDF evidence indexes, PDF-derived candidate images, or PDF processing failures after PDFs exist, load `.lab-agent/skills/taxamask-pdf-evidence/SKILL.md` before planning commands or imports.
+5. For PDF literature screening, figure/caption extraction, PDF evidence indexes, PDF-derived candidate images, or PDF processing failures after PDFs exist, load `vendor/ant-code/config/skills/taxamask-pdf-evidence/SKILL.md` before planning commands or imports.
 6. Use `TaxaMask使用手册.md` for user-facing operation detail and `LLM_CONTEXT_DETAILED.md` for current architecture handoff. Treat `LLM_CONTEXT_DETAILED.md` as current state, not as a changelog.
 
 ## Current Program State
@@ -50,7 +50,8 @@ Treat this TaxaMask protocol as always active, not as an optional skill:
 - Current maintained line: **TaxaMask `main` / v2.x**, integrating Agent Center, PDF evidence, 2D/STL morphology, and the newer TIF/CT workbench in one branch.
 - Startup defaults to TaxaMask Agent Center.
 - The start center main area embeds Ant-Code Dashboard through `AntSleap/ui/taxamask_agent_panel.py`.
-- The embedded Agent Center runtime is aligned with Ant-Code `1.2.4` in the TaxaMask `v2.1.1` line. TaxaMask intentionally keeps its embedded workspace/config boundary and does not adopt standalone Ant-Code global model configuration as the default.
+- The embedded Agent Center runtime is `1.3.0-taxamask.1`. TaxaMask keeps its embedded workspace/config boundary, read-only Git review tools, source guard, and selectively adapted Skill set rather than mirroring standalone Ant-Code wholesale.
+- The default registry exposes 14 maintained Skills, including `paper-distill` and `unsloth-studio-finetune`. Their source commit, local variant, license, sync policy, and test command are recorded in `skills/EMBEDDED_SKILLS.json`.
 - Long-running terminal work should use registered background terminal tasks: prefer `background_shell`, check existing tasks with `background_terminal_list` before restarting servers/viewers/downloads/renders/training jobs, and cancel stale tasks with `background_terminal_cancel` when appropriate. Dashboard recycle actions can also cancel registered terminal tasks.
 - The start center right rail contains recent/open/general settings controls followed by `PDF evidence workflow`, `2D/STL Morphology`, and `TIF Volume` cards. PDF evidence should remain visible near the top because it is often the first screening/review step before candidate import.
 - Normal Windows launch uses `启动TaxaMask.bat`, which discovers a usable Python environment instead of assuming a maintainer-specific Conda path. `TAXAMASK_PYTHON_EXE` can point to a custom `python.exe`.
@@ -66,7 +67,7 @@ Treat this TaxaMask protocol as always active, not as an optional skill:
   - entering/importing ordinary 2D/STL workflow preloads Locator/SAM
   - opening or continuing a very large 2D/STL project first collapses image groups and defers Locator/SAM preload until annotation/training is requested
   - returning to Agent Center keeps already loaded 2D/STL models alive
-- PDF evidence is a first-class Agent skill route. Its stage 0 uses `vendor/ant-code/config/skills/taxonomy-paper-finder/SKILL.md` for daily literature review, focused searches, evidence-based shortlists, selected-paper acquisition, or lawful batch harvest when the researcher does not already have PDFs; the downstream screening/extraction/review route uses `.lab-agent/skills/taxamask-pdf-evidence/SKILL.md`. Discovery is metadata-first, downloads require confirmation, and selected-paper handoff defaults to deep reads. PDF outputs are literature evidence and candidate images; they must remain reviewable and must not become 2D/STL training truth or TIF `manual_truth` automatically.
+- PDF evidence is a first-class Agent skill route. Its stage 0 uses `vendor/ant-code/config/skills/taxonomy-paper-finder/SKILL.md` for daily literature review, focused searches, evidence-based shortlists, selected-paper acquisition, or lawful batch harvest when the researcher does not already have PDFs; the downstream screening/extraction/review route uses `vendor/ant-code/config/skills/taxamask-pdf-evidence/SKILL.md`. Discovery is metadata-first, downloads require confirmation, and selected-paper handoff defaults to deep reads. PDF outputs are literature evidence and candidate images; they must remain reviewable and must not become 2D/STL training truth or TIF `manual_truth` automatically.
 - Current default PDF figure review uses the broad ant taxonomy profile `multimodal_configs/蚂蚁分类学图版宽松复核_示例.json`: accept single-ant-taxon morphology plates, useful views, and local diagnostic structures; reject multi-species or multi-taxon comparison figures. Other taxa should adapt copied figure profiles in the same way.
 - Current default PDF part-description extraction uses `part_description_configs/蚂蚁分类学部位描述抽取_示例.json`: structure PDF text into `taxon -> part -> description` records with file/page/block provenance. It is a Text LLM profile, not a multimodal image reviewer, and other taxa should adapt copied part-description profiles rather than editing runtime/API secrets into profiles.
 - PDF extraction databases and artifacts default to `TaxaMask_outputs/`; accepted images, needs-review images, raw extracted figures, review batches, raw LLM responses, and text-description tables are separate evidence artifacts.
@@ -133,7 +134,7 @@ Default to adapter/config changes first. Escalate to TaxaMask source development
 - Do not publish private changelogs or development-process logs in the root public developer-preview branch.
 - Do not recreate `LLM_CONTEXT.md` or duplicate root context/readme files unless explicitly requested.
 - Do not update the manual/context after every tiny change. Sync them when the user requests it, at a coherent milestone, or when behavior changed enough that stale docs would mislead users or agents.
-- Keep `.lab-agent/memory.md` and `.lab-agent/skills/taxamask-workflows/SKILL.md` concise. They are context-saving entrypoints, not replacements for the full manual.
+- Keep developer-local `.lab-agent/memory.md` and optional private Skill overlays concise. They are context-saving entrypoints, not public replacements for `ANTCODE.md`, the bundled Skills, or the full manual.
 
 ## Git And Artifact Hygiene
 

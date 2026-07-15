@@ -184,7 +184,8 @@ vendor/ant-code/docs/
 vendor/ant-code/docs/handoff/
 vendor/ant-code/docs/plans/
 vendor/ant-code/docs/phase-0/
-vendor/ant-code/tests/
+vendor/ant-code/tests/*
+!vendor/ant-code/tests/embedded-runtime.test.js
 vendor/ant-code/scripts/audit-common.js
 vendor/ant-code/scripts/build-windows-exe.js
 vendor/ant-code/scripts/dependency-audit-common.js

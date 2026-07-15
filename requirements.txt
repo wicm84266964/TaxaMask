@@ -11,7 +11,7 @@
 # --- Core GUI & Logic ---
 PySide6>=6.0.0
 PyOpenGL>=3.1.7
-numpy>=1.26.0
+numpy>=2.4.4
 pandas>=2.1.0
 
 # --- Image Processing & CV ---

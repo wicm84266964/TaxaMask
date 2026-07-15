@@ -2,6 +2,8 @@
 
 这个目录是给 **其他机器上的智能体** 直接接入使用的可迁移包。
 
+这是 TaxaMask 维护的 Windows 扩展变体，版本为 `1.0.0-taxamask.windows1`。来源与同步策略记录在 `../EMBEDDED_SKILLS.json`，许可证见本目录 `LICENSE`。
+
 ## 包内文件
 
 - `SKILL.md`：技能定义与运行边界
@@ -33,6 +35,7 @@
 2. 目标机器是 Windows，并且有 2 张可见 NVIDIA GPU（如果要双卡）
 3. 如果训练 Qwen3.5，Studio venv 中的 `transformers` 必须满足 `>= 5.2.0`
 4. 本地数据必须是 **UTF-8 JSONL**，不能直接拿坏编码的原始文件训练
+5. API key 和 Hugging Face/W&B token 只保存在本机运行环境，不写入模板、日志、Agent 对话或仓库
 
 ## 已验证的成功路径
 

@@ -2,7 +2,7 @@
 name: paper-distill
 description: Distill one markdown paper into structured QA records by wrapping the existing standalone paper-distill CLI.
 allowed-tools: powershell, read_file, list_files, glob, document_intake
-version: 0.2.0
+version: 0.2.0-taxamask.zh1
 ---
 
 # Paper Distill Skill
@@ -176,6 +176,8 @@ Optional environment variables already supported by the CLI:
 - `PAPER_DISTILL_MODEL`
 - `PAPER_DISTILL_BASE_URL`
 - `PAPER_DISTILL_API_KEY`
+
+Prefer `PAPER_DISTILL_API_KEY` from the local shell or an ignored local config file. Do not put a real key directly on the command line, in a Skill file, in a tracked `.env` file, or in an Agent transcript.
 
 ## Host adaptation notes
 

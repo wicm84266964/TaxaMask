@@ -11,7 +11,14 @@ const DEFAULT_PROJECT_SKILL_DIRS = Object.freeze([
 const MAX_SKILLS = 120;
 const MAX_SKILL_BYTES = 64 * 1024;
 const MAX_SKILL_CONTENT_CHARS = 48 * 1024;
-const BUNDLED_SKILL_ROOT = path.join(resolvePackageRoot(), "config", "skills");
+const PACKAGE_ROOT = resolvePackageRoot();
+const TAXAMASK_ROOT = path.resolve(PACKAGE_ROOT, "..", "..");
+const BUNDLED_SKILL_ROOTS = Object.freeze([
+  path.join(PACKAGE_ROOT, "config", "skills"),
+  path.join(TAXAMASK_ROOT, "skills", "unsloth-studio-finetune-portable"),
+  path.join(TAXAMASK_ROOT, "skills", "paper_distill_skill_bundle_v6_zh", "skills")
+]);
+const BUNDLED_SKILL_ROOT_KEYS = new Set(BUNDLED_SKILL_ROOTS.map(rootKey));
 
 function resolvePackageRoot() {
   if (process.env.LAB_AGENT_PACKAGE_ROOT) {
@@ -237,7 +244,7 @@ function skillRoots(options) {
 
   const roots = [
     ...(includeProjectDefaults ? DEFAULT_PROJECT_SKILL_DIRS.map((item) => path.resolve(cwd, item)) : []),
-    BUNDLED_SKILL_ROOT,
+    ...BUNDLED_SKILL_ROOTS,
     ...configuredRoots,
     ...envRoots
   ];
@@ -249,7 +256,7 @@ function skillRoots(options) {
       return false;
     }
     seen.add(key);
-    return root === BUNDLED_SKILL_ROOT || isInside(cwd, root) || configuredRootKeys.has(key) || envRootKeys.has(key);
+    return BUNDLED_SKILL_ROOT_KEYS.has(key) || isInside(cwd, root) || configuredRootKeys.has(key) || envRootKeys.has(key);
   });
 }
 

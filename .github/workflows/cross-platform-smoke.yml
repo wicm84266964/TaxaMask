@@ -54,4 +54,42 @@ jobs:
 
       - name: Run lightweight tests
         run: |
-          python -m unittest tests.test_config_cleanup tests.test_platform_open tests.test_poppler_discovery tests.test_runtime_device tests.test_generic_export_schema tests.test_window_geometry tests.test_path_identity tests.test_agent_context_routes tests.test_embedded_taxonomy_paper_finder tests.test_gui_smoke
+          python -m unittest tests.test_config_cleanup tests.test_platform_open tests.test_poppler_discovery tests.test_runtime_device tests.test_generic_export_schema tests.test_window_geometry tests.test_path_identity tests.test_agent_context_routes tests.test_embedded_taxonomy_paper_finder tests.test_embedded_skill_bundles tests.test_gui_smoke
+
+  embedded-agent:
+    name: Embedded Agent Center
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: vendor/ant-code/package-lock.json
+      - name: Install embedded Agent Center dependencies
+        working-directory: vendor/ant-code
+        run: npm ci --no-audit --no-fund
+      - name: Verify embedded Agent Center and Skill registry
+        working-directory: vendor/ant-code
+        run: |
+          npm run verify:release
+          npm test
+
+  paper-distill-skill:
+    name: Paper Distill Skill bundle
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: skills/paper_distill_skill_bundle_v6_zh/pyproject.toml
+      - name: Install Paper Distill Skill bundle
+        working-directory: skills/paper_distill_skill_bundle_v6_zh
+        run: python -m pip install -e .
+      - name: Test Paper Distill Skill bundle
+        working-directory: skills/paper_distill_skill_bundle_v6_zh
+        run: python -m unittest discover -s tests -p "test_*.py"

@@ -24,6 +24,10 @@ Scope of included materials:
   TaxaMask source code. The directory name is retained for runtime/package
   layout compatibility and should not be interpreted as third-party vendored
   code or excluded from TaxaMask attribution.
+- The embedded Taxonomy Paper Finder, Paper Distill, and Unsloth Studio Trainer
+  Skill payloads retain their MIT license notices in their respective Skill
+  directories. TaxaMask-specific routing, output, and safety adaptations are
+  documented in `skills/EMBEDDED_SKILLS.json`.
 - User documentation, tutorials, profile guides, and explanatory materials are
   provided under the same repository license unless a file states otherwise.
 - Model weights, local user projects, API keys, databases, and generated

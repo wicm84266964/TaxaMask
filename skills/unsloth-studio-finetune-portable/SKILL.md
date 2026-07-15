@@ -3,6 +3,7 @@ name: unsloth-studio-finetune
 description: Operate local Unsloth Studio fine-tuning on Windows. Default to single-GPU CLI, and use the Studio API path for Qwen3.5 dual-GPU runs. On Windows, the proven dual-GPU default for Qwen3.5 is non-4bit via Studio API gpu_ids.
 allowed-tools: powershell, read_file, list_files, glob
 user-invocable: true
+version: 1.0.0-taxamask.windows1
 metadata: {"openclaw":{"os":["win32"],"requires":{"bins":["python"]}}}
 ---
 
@@ -128,6 +129,13 @@ Ant Code may start from an arbitrary project cwd. Treat the path above as relati
 5. 输出目录父目录可写
 6. 双卡模式下，Studio health 可达：`GET /api/health`
 7. 双卡模式下，API key 可创建
+
+## 凭证与模型安全
+
+- API key、Hugging Face token 和 W&B token 只能保存在本机运行环境或被 Git 忽略的本地配置中。
+- 不要把 token 写进训练模板、Skill、命令日志、Agent 对话或仓库文件。
+- `trust_remote_code` 默认保持 `false`；只有确认模型仓库及其自定义代码可信后才能启用。
+- 训练数据、模型权重、检查点和 TensorBoard 输出必须写到用户指定的仓库外目录。
 
 ## 推荐工作流
 

@@ -141,6 +141,31 @@ export const BUILT_IN_TOOLS = Object.freeze([
     }
   },
   {
+    name: "git_status",
+    description: "Show local git status without shell interpolation.",
+    risk: "read",
+    supportsAbort: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        pathspecs: { type: "array" }
+      }
+    }
+  },
+  {
+    name: "git_diff",
+    description: "Show local git diff or diff stat without shell interpolation.",
+    risk: "read",
+    supportsAbort: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        pathspecs: { type: "array" },
+        stat: { type: "boolean" }
+      }
+    }
+  },
+  {
     name: "write_file",
     description: "Create or replace a text file after policy approval; approved/full-access mode allows paths outside the workspace.",
     risk: "write",

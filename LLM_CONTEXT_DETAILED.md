@@ -70,7 +70,7 @@ The TIF workbench status text and renderer overlay should be used to confirm whe
 
 The embedded Agent Center uses the first-party `vendor/ant-code/` runtime.
 
-The current embedded runtime is `1.3.0-taxamask.1`, aligned with Ant-Code `v1.3.0` plus the post-tag Windows file validation fix `ca4e005`. It includes the 1.3 Dashboard session lifecycle, responsive/accessible UI, long-transcript paging, atomic model configuration, background subagent/terminal visibility, file safety, and session persistence improvements. It intentionally does not include the standalone EXE/release pipeline, Git first-class tools, or the large TUI input-editor refactor.
+The current embedded runtime is `1.3.0-taxamask.1`, aligned with Ant-Code `v1.3.0` plus TaxaMask-specific integration changes. It includes the 1.3 Dashboard session lifecycle, responsive/accessible UI, long-transcript paging, atomic model configuration, background subagent/terminal visibility, file safety, session persistence improvements, and read-only `git_status` / `git_diff` tools used by bundled review Skills. It intentionally does not include the standalone EXE/release pipeline, broader standalone Git mutation toolset, or the large TUI input-editor refactor.
 
 Configuration precedence is TaxaMask-specific: bundled defaults < environment defaults < explicit `LAB_AGENT_CONFIG` < current project configuration. The Dashboard always saves to the current project's `.lab-agent/config.json`. Precedence is applied per field: project model and gateway fields override their matching environment defaults, while fields absent from the project continue to fall back to the environment; an environment API key may fill a missing or blank project key. The mere existence of `.lab-agent/config.json` must not suppress unrelated environment model or gateway fields. Do not restore automatic reads from the user's default `.ant-code` configuration directory. `LAB_AGENT_SKIP_PROJECT_CONFIG=1` must continue to disable project config loading when isolation is required.
 
@@ -85,6 +85,11 @@ Important files:
 - `AntSleap/ui/taxamask_agent_panel.py`
 - `AntSleap/core/agent_context_routes.py`
 - `vendor/ant-code/`
+- `skills/EMBEDDED_SKILLS.json`
+
+The embedded registry automatically exposes 14 maintained Skills: 10 general Agent Center Skills, `taxamask-pdf-evidence`, `taxonomy-paper-finder`, the Chinese-first `paper-distill` variant, and the Windows-oriented `unsloth-studio-finetune` variant. Paper Distill and Unsloth remain independently adapted TaxaMask variants rather than byte-for-byte mirrors of their standalone repositories. Keep their source commit, local version, license, sync policy, and test command current in `skills/EMBEDDED_SKILLS.json`.
+
+The embedded Node gate must run `npm run verify:release` and `npm test`; a zero-test result is not acceptable. CI also runs the Paper Distill bundle tests separately. Every `allowed-tools` entry declared by a bundled Skill must exist in `BUILT_IN_TOOLS`, and the registry test must fail when a Skill references an unavailable tool.
 
 Normal Ask Agent behavior sends compact workbench context, not full private project data. It should include diagnostic route, focused source references, artifact hints, and safety notes.
 

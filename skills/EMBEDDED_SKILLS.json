@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "reviewed_on": "2026-07-15",
+  "components": [
+    {
+      "name": "ant-code-generic-skills",
+      "path": "vendor/ant-code/config/skills",
+      "default_enabled": true,
+      "source_kind": "first-party-specialized",
+      "source_repository": "https://github.com/wicm84266964/Ant-Code",
+      "reviewed_source_commit": "6c4b0e968e63b8155583bde0758d6359fd0c70d5",
+      "sync_policy": "selective; preserve TaxaMask release and context adaptations",
+      "license": "AGPL-3.0-only",
+      "license_file": "LICENSE",
+      "test_command": "npm test --prefix vendor/ant-code"
+    },
+    {
+      "name": "taxamask-pdf-evidence",
+      "path": "vendor/ant-code/config/skills/taxamask-pdf-evidence",
+      "default_enabled": true,
+      "source_kind": "TaxaMask-native",
+      "source_repository": null,
+      "reviewed_source_commit": null,
+      "sync_policy": "maintained with TaxaMask PDF evidence routes",
+      "license": "AGPL-3.0-only",
+      "license_file": "LICENSE",
+      "test_command": "python -m unittest tests.test_embedded_taxonomy_paper_finder tests.test_agent_context_routes"
+    },
+    {
+      "name": "taxonomy-paper-finder",
+      "path": "vendor/ant-code/config/skills/taxonomy-paper-finder",
+      "default_enabled": true,
+      "source_kind": "adapted",
+      "source_repository": "https://github.com/wicm84266964/taxonomy-paper-finder",
+      "reviewed_source_commit": "758d0f142886cef3f156cdc47b627a7bc9de54c5",
+      "sync_policy": "payload sync; keep TaxaMask_outputs runtime-root adaptation",
+      "license": "MIT",
+      "license_file": "vendor/ant-code/config/skills/taxonomy-paper-finder/LICENSE",
+      "test_command": "python -m unittest tests.test_embedded_taxonomy_paper_finder"
+    },
+    {
+      "name": "paper-distill",
+      "path": "skills/paper_distill_skill_bundle_v6_zh",
+      "default_enabled": true,
+      "source_kind": "adapted",
+      "source_repository": "https://github.com/wicm84266964/paper-distill",
+      "reviewed_source_commit": "02f8f842e89a2ebc1dc75ec48b3a88e9872737eb",
+      "local_version": "0.2.0+taxamask.zh1",
+      "sync_policy": "selective; preserve Chinese-first output behavior",
+      "license": "MIT",
+      "license_file": "skills/paper_distill_skill_bundle_v6_zh/LICENSE",
+      "test_command": "python -m unittest discover -s tests -p test_*.py"
+    },
+    {
+      "name": "unsloth-studio-finetune",
+      "path": "skills/unsloth-studio-finetune-portable",
+      "default_enabled": true,
+      "source_kind": "adapted",
+      "source_repository": "https://github.com/wicm84266964/unsloth-studio-trainer",
+      "reviewed_source_commit": "3d0447179fad72344bf05b0ebdaacb822192d812",
+      "local_version": "1.0.0-taxamask.windows1",
+      "sync_policy": "selective; preserve validated Windows operational guidance",
+      "license": "MIT",
+      "license_file": "skills/unsloth-studio-finetune-portable/LICENSE",
+      "test_command": "python -m unittest tests.test_embedded_skill_bundles"
+    }
+  ]
+}

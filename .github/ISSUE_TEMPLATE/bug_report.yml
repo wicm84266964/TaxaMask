@@ -1,0 +1,78 @@
+name: Bug report
+description: Report a reproducible TaxaMask problem
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Prefer a minimal synthetic project. Do not upload private PDFs, specimen images, TIF volumes, project databases, annotation exports, model weights, API keys, agent transcripts, unpublished locality data, or personal information.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: "For example: v2.1.0 or abc1234"
+    validations:
+      required: true
+  - type: dropdown
+    id: workflow
+    attributes:
+      label: Affected workflow
+      options:
+        - Project and data management
+        - PDF evidence
+        - Candidate review
+        - 2D or STL morphology
+        - TIF or CT volume
+        - Annotation and label tables
+        - Training or prediction
+        - Agent Center
+        - Export
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Runtime environment
+      description: Include the operating system, Python version, installation method, and GPU information only when relevant.
+      placeholder: "Windows 11, Python 3.12, source install, CPU rendering"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Provide the smallest reliable sequence using a synthetic or publishable project.
+      placeholder: |
+        1. Open...
+        2. Select...
+        3. Observe...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Redacted logs
+      description: Include only the minimum relevant output after replacing project names, paths, specimen identifiers, and credentials.
+      render: shell
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmations
+      options:
+        - label: I searched existing issues for the same problem.
+          required: true
+        - label: I used synthetic or publishable data and removed PDFs, images, TIF files, databases, weights, credentials, transcripts, locality data, and personal information.
+          required: true

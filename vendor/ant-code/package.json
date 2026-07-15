@@ -47,7 +47,7 @@
     "yaml": "^2.9.0"
   },
   "devDependencies": {
-    "esbuild": "^0.28.0",
+    "esbuild": "^0.28.1",
     "postject": "^1.0.0-alpha.6"
   }
 }

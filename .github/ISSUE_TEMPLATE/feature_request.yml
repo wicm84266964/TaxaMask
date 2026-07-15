@@ -1,0 +1,53 @@
+name: Feature request
+description: Propose a TaxaMask research workflow improvement
+title: "[Feature]: "
+body:
+  - type: dropdown
+    id: workflow
+    attributes:
+      label: Research workflow
+      options:
+        - Project and data management
+        - PDF evidence
+        - Candidate review
+        - 2D or STL morphology
+        - TIF or CT volume
+        - Annotation and label tables
+        - Training or prediction
+        - Agent Center
+        - Export
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Research problem to solve
+      description: Explain the repeated task, review gap, or traceability problem and who it affects.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the result you expect without including private research materials.
+    validations:
+      required: true
+  - type: textarea
+    id: trust
+    attributes:
+      label: Review and traceability needs
+      description: Explain how a researcher should verify, correct, audit, or recover the result.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmations
+      options:
+        - label: I searched existing issues for a similar request.
+          required: true
+        - label: This request contains no private PDFs, specimen data, TIF volumes, databases, model weights, credentials, transcripts, locality data, or personal information.
+          required: true

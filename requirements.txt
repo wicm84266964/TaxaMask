@@ -16,7 +16,7 @@ pandas>=2.1.0
 
 # --- Image Processing & CV ---
 opencv-python>=4.5.0
-Pillow>=10.2.0
+Pillow>=12.2.0
 matplotlib>=3.5.0
 pdf2image>=1.17.0
 

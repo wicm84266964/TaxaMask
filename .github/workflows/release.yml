@@ -12,6 +12,11 @@ on:
         required: true
         default: false
         type: boolean
+      manual_validation_confirmed:
+        description: Confirm relevant local GUI, GPU, and research workflow checks are complete
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -30,8 +35,12 @@ jobs:
       - name: Validate release request
         env:
           VERSION: ${{ inputs.version }}
+          MANUAL_VALIDATION_CONFIRMED: ${{ inputs.manual_validation_confirmed }}
           GH_TOKEN: ${{ github.token }}
         run: |
+          if [[ "$MANUAL_VALIDATION_CONFIRMED" != "true" ]]; then
+            echo "Confirm the relevant local GUI, GPU, and research workflow checks before release." >&2; exit 1
+          fi
           if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
             echo "Version must look like v1.2.3 or v1.2.3-rc.1" >&2; exit 1
           fi

@@ -768,6 +768,10 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertTrue(widget.btn_local_axis_reslice.isEnabled())
                 self.assertEqual(widget.btn_local_axis_reslice.text(), "Export confirmed reslice")
                 self.assertTrue(widget.btn_export_local_axis_training_manifest.isEnabled())
+                self.assertEqual(
+                    widget.btn_export_local_axis_training_manifest.text(),
+                    "Export confirmed Local Axis training manifest",
+                )
                 self.assertIsNone(widget.findChild(QWidget, "tifLocalAxisModelsButton"))
                 self.assertIsNone(widget.findChild(QWidget, "tifLocalAxisModelsInlineButton"))
                 self.assertIsNone(widget.findChild(QWidget, "tifPredictLocalAxisGlobalButton"))
@@ -810,10 +814,18 @@ class TifWorkbenchTests(unittest.TestCase):
             queue = TifLocalAxisReviewQueueWidget(manager, lang="en")
             try:
                 self.assertEqual(len(queue.rows), 1)
+                skipped = queue.batch_export_accepted()
+                self.assertEqual(len(skipped["skipped"]), 1)
+                self.assertIn("frame_001:not_accepted", queue.status_label.text())
                 queue.table.selectRow(0)
                 queue.update_selected_status("accepted")
 
-                self.assertEqual(manager.get_local_frame_proposal("01-0101-queue", "head", "frame_001")["status"], "accepted")
+                accepted = manager.get_local_frame_proposal("01-0101-queue", "head", "frame_001")
+                self.assertEqual(accepted["status"], "accepted")
+                self.assertEqual(
+                    accepted["review_audit"]["action"],
+                    "local_axis_review_queue_accepted",
+                )
                 result = queue.batch_export_accepted()
 
                 self.assertEqual(len(result["exported"]), 1)
@@ -851,10 +863,39 @@ class TifWorkbenchTests(unittest.TestCase):
                         "hard_case_flags": flags,
                     },
                 )
+            manager.register_local_axis_model(
+                {
+                    "model_id": "active_queue_model",
+                    "model_version": "v3",
+                    "model_type": "local_frame",
+                },
+                save=False,
+            )
+            manager.project_data.setdefault("view_settings", {})[
+                "local_axis_active_model_id"
+            ] = "active_queue_model"
+            manager.save_project()
 
             queue = TifLocalAxisReviewQueueWidget(manager, lang="en")
             opened = []
             try:
+                self.assertEqual(queue.sort_combo.currentData(), "risk_priority")
+                self.assertEqual(queue.rows[0]["proposal_id"], "frame_low")
+                self.assertEqual(queue.table.horizontalHeaderItem(7).text(), "Risk")
+                self.assertEqual(queue.table.horizontalHeaderItem(8).text(), "Risk reasons")
+                self.assertEqual(queue.table.horizontalHeaderItem(11).text(), "Model version")
+                self.assertIn("twisted_pose", queue.table.item(0, 8).text())
+                self.assertIn("v2!=v3", queue.table.item(0, 8).text())
+                self.assertEqual(queue.table.item(0, 11).text(), "v2")
+                risk_audit = queue.table.item(0, 7).data(Qt.UserRole)
+                self.assertEqual(
+                    risk_audit["ranking_version"],
+                    "taxamask_local_axis_risk_v2",
+                )
+                self.assertEqual(risk_audit["reference_model_version"], "v3")
+                queue.table.selectRow(0)
+                queue.refresh()
+                self.assertEqual(queue.selected_row()["proposal_id"], "frame_low")
                 queue.sort_combo.setCurrentIndex(queue.sort_combo.findData("confidence_asc"))
                 queue.refresh()
                 self.assertEqual(queue.rows[0]["proposal_id"], "frame_low")
@@ -879,6 +920,12 @@ class TifWorkbenchTests(unittest.TestCase):
             manager = self._make_local_axis_panel_project(root)
             panel = TifLocalAxisModelPanel(manager, lang="en", specimen_id="01-0101-local-axis", part_id="head")
             try:
+                self.assertFalse(hasattr(panel, "include_unconfirmed_check"))
+                self.assertEqual(panel.btn_export_training.text(), "Export confirmed training manifest")
+                self.assertEqual(
+                    panel._training_filters(),
+                    {"include_unconfirmed": False, "template_id": "head"},
+                )
                 export = panel.export_training_manifest_to_dir(root / "training_export")
 
                 self.assertEqual(export["sample_count"], 1)
@@ -936,6 +983,24 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertEqual(panel.models_table.rowCount(), 1)
                 self.assertIn("Registered model", panel.status_label.text())
                 self.assertEqual(panel.save_active_model_profile(), "external_local_axis/head_frame_panel_v1")
+                self.assertEqual(
+                    panel._selected_part_map("train"),
+                    {"01-0101-local-axis": ["head"]},
+                )
+                from AntSleap.core.training_run_recorder import TrainingRunRecorder
+
+                recorder = TrainingRunRecorder(
+                    Path(manager.project_dir) / "runs" / "local_axis",
+                    database_path=manager.current_database_path,
+                )
+                failed = recorder.create_pending("local_axis_external")
+                failed.fail(RuntimeError("test failure"), stage="test")
+                panel.refresh_tables()
+                statuses = [
+                    panel.runs_table.item(row, 2).text()
+                    for row in range(panel.runs_table.rowCount())
+                ]
+                self.assertIn("failed", statuses)
             finally:
                 panel.deleteLater()
 
@@ -8148,7 +8213,13 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.backend_panel_controller.select_all_ready_predict_targets()
                 self.assertEqual(widget.predict_targets_table.item(0, 0).checkState(), Qt.Checked)
                 refs = widget._selected_part_refs_for_action("predict")
-                self.assertEqual(refs, [{"specimen_id": "01-0101-11", "part_id": "brain", "reslice_id": "brain_axis_001"}])
+                self.assertEqual(
+                    refs,
+                    [
+                        {"specimen_id": "01-0101-11", "part_id": "brain", "reslice_id": "brain_axis_001"},
+                        {"specimen_id": "01-0101-12", "part_id": "brain", "reslice_id": "brain_axis_001"},
+                    ],
+                )
             finally:
                 widget.close_project(prompt_unsaved=False)
                 widget.deleteLater()
@@ -8505,7 +8576,10 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertEqual(captured["kwargs"]["input_scope"], "part_reslice")
                 self.assertEqual(
                     captured["kwargs"]["part_refs"],
-                    [{"specimen_id": "01-0101-11", "part_id": "brain", "reslice_id": "brain_axis_001"}],
+                    [
+                        {"specimen_id": "01-0101-11", "part_id": "brain", "reslice_id": "brain_axis_001"},
+                        {"specimen_id": "01-0101-12", "part_id": "brain", "reslice_id": "brain_axis_001"},
+                    ],
                 )
                 self.assertIn("start_called", started)
             finally:
@@ -8531,20 +8605,89 @@ class TifWorkbenchTests(unittest.TestCase):
                 edit_meta["shape_zyx"],
                 edit_meta["dtype"],
                 status="pending_review",
+                prediction_id="prediction_selected_001",
+                source_model="segmenter_selected",
                 save=False,
             )
+            selected_source = manager.part_label_record(
+                "01-0101-11",
+                "brain",
+                "editable_ai_result",
+                reslice_id="brain_axis_001",
+            )
+            selected_source["model_id"] = "segmenter_selected"
+            selected_source["model_version"] = "v7"
             manager.set_part_training_metadata("01-0101-11", "brain", opened_for_review=True, save=True)
+            unselected_manual_before = dict(
+                manager.get_part_reslice(
+                    "01-0101-12",
+                    "brain",
+                    "brain_axis_001",
+                )["labels"]["manual_truth"]
+                or {}
+            )
+            other_rel = "specimens/01-0101-12/parts/brain/reslices/brain_axis_001/labels/editable_ai_result.ome.zarr"
+            other_meta = write_volume_sidecar(root / "backend" / other_rel, np.full((4, 4, 4), 1, dtype=np.uint16), role="editable_ai_result")
+            manager.register_part_reslice_label_volume(
+                "01-0101-12",
+                "brain",
+                "brain_axis_001",
+                "editable_ai_result",
+                other_rel,
+                other_meta["shape_zyx"],
+                other_meta["dtype"],
+                status="pending_review",
+                prediction_id="prediction_unselected_002",
+                source_model="segmenter_other",
+                save=False,
+            )
+            manager.set_part_training_metadata("01-0101-12", "brain", opened_for_review=True, save=True)
             widget = TifWorkbenchWidget(manager, "en")
             try:
                 widget.backend_panel_controller.select_all_ready_predict_targets()
-                with patch("AntSleap.ui.tif_backend_panel_controller.QMessageBox.question", return_value=QMessageBox.Yes):
-                    self.assertTrue(widget.result_review_controller.accept_selected_results())
+                with patch(
+                    "AntSleap.ui.tif_backend_panel_controller.QMessageBox.question",
+                    return_value=QMessageBox.Yes,
+                ), patch.object(
+                    widget.result_review_controller,
+                    "selected_part_refs_for_review_acceptance",
+                    return_value=[
+                        {
+                            "specimen_id": "01-0101-11",
+                            "part_id": "brain",
+                            "reslice_id": "brain_axis_001",
+                        }
+                    ],
+                ), patch(
+                    "AntSleap.ui.tif_result_review_controller.QMessageBox.warning",
+                    return_value=None,
+                ) as warning:
+                    accepted = widget.result_review_controller.accept_selected_results()
+                self.assertTrue(accepted, str(warning.call_args))
 
                 part = widget.project.get_part("01-0101-11", "brain")
                 reslice = widget.project.get_part_reslice("01-0101-11", "brain", "brain_axis_001")
                 self.assertFalse((part["labels"]["manual_truth"] or {}).get("path"))
                 self.assertEqual(reslice["labels"]["manual_truth"]["status"], "reviewed")
+                audit = reslice["labels"]["manual_truth"]["review_audit"]
+                self.assertEqual(audit["action"], "accept_selected_ai_results")
+                self.assertEqual(audit["specimen_id"], "01-0101-11")
+                self.assertEqual(audit["part_id"], "brain")
+                self.assertEqual(audit["reslice_id"], "brain_axis_001")
+                self.assertEqual(audit["model_id"], "segmenter_selected")
+                self.assertEqual(audit["model_version"], "v7")
+                self.assertEqual(audit["prediction_id"], "prediction_selected_001")
+                self.assertTrue(audit["reviewed_at"])
                 self.assertEqual(part["training"]["system_status"], "verified_train_ready")
+                unselected = widget.project.get_part_reslice(
+                    "01-0101-12",
+                    "brain",
+                    "brain_axis_001",
+                )
+                self.assertEqual(
+                    dict(unselected["labels"]["manual_truth"] or {}),
+                    unselected_manual_before,
+                )
                 self.assertIn("Accepted 1 editable AI result", widget.training_status_label.text())
                 np.testing.assert_array_equal(load_volume_sidecar(root / "backend" / reslice["labels"]["manual_truth"]["path"]), edit_array)
             finally:
@@ -8642,7 +8785,20 @@ class TifWorkbenchTests(unittest.TestCase):
                 def answer(*args, **kwargs):
                     return replies.pop(0)
 
-                with patch("AntSleap.ui.tif_backend_panel_controller.QMessageBox.question", side_effect=answer) as question_mock:
+                with patch.object(
+                    widget.result_review_controller,
+                    "selected_part_refs_for_review_acceptance",
+                    return_value=[
+                        {
+                            "specimen_id": "01-0101-11",
+                            "part_id": "brain",
+                            "reslice_id": "brain_axis_001",
+                        }
+                    ],
+                ), patch(
+                    "AntSleap.ui.tif_backend_panel_controller.QMessageBox.question",
+                    side_effect=answer,
+                ) as question_mock:
                     self.assertFalse(widget.result_review_controller.accept_selected_results())
                 self.assertEqual(question_mock.call_count, 1)
                 self.assertFalse(widget.project.evaluate_part_train_ready("01-0101-11", "brain")["train_ready"])
@@ -8754,7 +8910,13 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertEqual(captured["kwargs"]["model_manifest"], str(manifest))
                 self.assertEqual(captured["kwargs"]["input_scope"], "part_reslice")
                 self.assertEqual(captured["kwargs"]["specimen_ids"], [])
-                self.assertEqual(captured["kwargs"]["part_refs"], [{"specimen_id": "01-0101-11", "part_id": "brain", "reslice_id": "brain_axis_001"}])
+                self.assertEqual(
+                    captured["kwargs"]["part_refs"],
+                    [
+                        {"specimen_id": "01-0101-11", "part_id": "brain", "reslice_id": "brain_axis_001"},
+                        {"specimen_id": "01-0101-12", "part_id": "brain", "reslice_id": "brain_axis_001"},
+                    ],
+                )
             finally:
                 widget._tif_backend_thread = None
                 widget._tif_backend_worker = None
@@ -8777,7 +8939,10 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertEqual(selection["input_scope"], "part_reslice")
                 self.assertEqual(
                     selection["part_refs"],
-                    [{"specimen_id": "01-0101-11", "part_id": "brain", "reslice_id": "brain_axis_001"}],
+                    [
+                        {"specimen_id": "01-0101-11", "part_id": "brain", "reslice_id": "brain_axis_001"},
+                        {"specimen_id": "01-0101-12", "part_id": "brain", "reslice_id": "brain_axis_001"},
+                    ],
                 )
             finally:
                 widget.close_project(prompt_unsaved=False)

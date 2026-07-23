@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 import os
 import shlex
 import shutil
@@ -66,7 +67,7 @@ def _result_base(contract, started_at, artifacts=None, metrics=None, warnings=No
             "finished_at": _now_iso(),
             "adapter_id": ADAPTER_ID,
             "adapter_mode": "nnunet_v2",
-            "run_dir": os.path.abspath(contract.get("run_dir", "")),
+            "run_dir": ".",
             **(provenance if isinstance(provenance, dict) else {}),
         },
     }
@@ -81,6 +82,27 @@ def _as_run_relative(contract, path):
         return os.path.relpath(os.path.abspath(text), base).replace("\\", "/")
     except ValueError:
         return os.path.abspath(text)
+
+
+def _as_manifest_relative(manifest_path, path):
+    text = str(path or "").strip()
+    if not text:
+        return ""
+    base = Path(manifest_path).resolve().parent
+    try:
+        return os.path.relpath(Path(text).resolve(), base).replace("\\", "/")
+    except ValueError:
+        raise ValueError("model_artifact_must_share_manifest_filesystem")
+
+
+def _resolve_manifest_path(manifest_path, value):
+    text = str(value or "").strip()
+    if not text:
+        return None
+    candidate = Path(text)
+    if candidate.is_absolute():
+        return candidate.resolve()
+    return (Path(manifest_path).resolve().parent / candidate).resolve()
 
 
 def _ensure_contract(contract):
@@ -317,6 +339,184 @@ def _validate_train_sample_count(export, dry_run=False):
     return count
 
 
+def _apply_contract_training_split(contract, dataset_dir, dataset_manifest):
+    split = contract.get("training_split")
+    assignments = (split or {}).get("assignments") if isinstance(split, dict) else None
+    if not isinstance(assignments, list) or not assignments:
+        raise ValueError("contract_training_split_missing")
+    partition_by_sample = {}
+    for item in assignments:
+        if not isinstance(item, dict):
+            raise ValueError("contract_training_split_assignment_invalid")
+        sample_id = str(item.get("sample_id") or "")
+        partition = str(item.get("partition") or "")
+        if not sample_id or partition not in {"train", "validation"}:
+            raise ValueError(f"contract_training_split_assignment_invalid:{sample_id}")
+        if sample_id in partition_by_sample:
+            raise ValueError(f"contract_training_split_sample_duplicate:{sample_id}")
+        partition_by_sample[sample_id] = partition
+
+    cases = list(dataset_manifest.get("training") or [])
+    if not cases:
+        raise ValueError("nnunet_training_cases_missing")
+    resolved = {"train": [], "val": []}
+    seen = set()
+    for case in cases:
+        sample_id = str(case.get("sample_id") or case.get("specimen_id") or "")
+        case_id = str(case.get("case_id") or "")
+        if sample_id not in partition_by_sample or not case_id:
+            raise ValueError(f"nnunet_split_case_unresolved:{sample_id}")
+        seen.add(sample_id)
+        target = "train" if partition_by_sample[sample_id] == "train" else "val"
+        resolved[target].append(case_id)
+    missing = sorted(set(partition_by_sample) - seen)
+    if missing:
+        raise ValueError(f"nnunet_split_sample_not_exported:{missing[0]}")
+    if not resolved["train"] or not resolved["val"]:
+        raise ValueError("nnunet_split_requires_train_and_validation")
+    _write_json(Path(dataset_dir) / "splits_final.json", [resolved])
+    return resolved
+
+
+def _split_seed(contract):
+    strategy = ((contract.get("training_split") or {}).get("strategy") or {})
+    seed = strategy.get("seed")
+    if not isinstance(seed, int) or isinstance(seed, bool) or seed < 0:
+        raise ValueError("contract_training_split_seed_invalid")
+    return seed
+
+
+def _first_input_resolution(contract):
+    samples = contract.get("part_samples") or contract.get("specimens") or []
+    if samples:
+        shape = ((samples[0].get("input_volume") or {}).get("shape_zyx") or [])
+        if len(shape) in {2, 3} and all(isinstance(value, int) and value > 0 for value in shape):
+            return list(shape)
+    return [1, 1, 1]
+
+
+def _dry_run_effective_config(contract, args, split):
+    return {
+        "epochs": 0,
+        "batch_size": 0,
+        "learning_rate": 0.0,
+        "weight_decay": 0.0,
+        "random_seed": _split_seed(contract),
+        "input_resolution": _first_input_resolution(contract),
+        "preprocessing": {
+            "configuration": args.configuration,
+            "plans": args.plans,
+            "split": split,
+            "split_source": "taxamask_verified_training_split",
+            "dataset_integrity_check": bool(args.verify_dataset_integrity),
+        },
+        "model": {
+            "family": MODEL_FAMILY,
+            "version": "nnunet_v2_dry_run",
+            "trainer": args.trainer,
+        },
+        "loss_weights": {},
+        "execution_kind": "backend_dry_run",
+        "persist_weights": False,
+    }
+
+
+def _first_finite_number(values, *, positive=False):
+    for value in values:
+        if isinstance(value, (list, tuple)):
+            found = _first_finite_number(value, positive=positive)
+            if found is not None:
+                return found
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            number = float(value)
+            if math.isfinite(number) and (number > 0 if positive else number >= 0):
+                return number
+    return None
+
+
+def _load_checkpoint_payload(checkpoint_path):
+    try:
+        import torch
+    except ImportError as exc:
+        raise RuntimeError("torch_required_to_resolve_nnunet_effective_config") from exc
+    try:
+        payload = torch.load(str(checkpoint_path), map_location="cpu", weights_only=True)
+    except TypeError:
+        payload = torch.load(str(checkpoint_path), map_location="cpu")
+    if not isinstance(payload, dict):
+        raise ValueError("nnunet_checkpoint_payload_invalid")
+    return payload
+
+
+def _resolved_effective_config(contract, args, checkpoint_path, split):
+    checkpoint = _load_checkpoint_payload(checkpoint_path)
+    init_args = checkpoint.get("init_args") if isinstance(checkpoint.get("init_args"), dict) else {}
+    plans = init_args.get("plans") if isinstance(init_args.get("plans"), dict) else {}
+    configurations = plans.get("configurations") if isinstance(plans.get("configurations"), dict) else {}
+    plan = configurations.get(args.configuration) if isinstance(configurations.get(args.configuration), dict) else {}
+    batch_size = plan.get("batch_size")
+    patch_size = plan.get("patch_size")
+    epochs = checkpoint.get("current_epoch")
+    optimizer = checkpoint.get("optimizer_state") if isinstance(checkpoint.get("optimizer_state"), dict) else {}
+    parameter_groups = optimizer.get("param_groups") if isinstance(optimizer.get("param_groups"), list) else []
+    learning_rate_candidates = []
+    weight_decay_candidates = []
+    for group in parameter_groups:
+        if not isinstance(group, dict):
+            continue
+        learning_rate_candidates.extend([group.get("initial_lr"), group.get("lr")])
+        weight_decay_candidates.append(group.get("weight_decay"))
+    logging_payload = checkpoint.get("logging") if isinstance(checkpoint.get("logging"), dict) else {}
+    learning_rate_candidates = list(logging_payload.get("lrs") or []) + learning_rate_candidates
+    learning_rate = _first_finite_number(learning_rate_candidates, positive=True)
+    weight_decay = _first_finite_number(weight_decay_candidates)
+    if not isinstance(epochs, int) or isinstance(epochs, bool) or epochs <= 0:
+        raise ValueError("nnunet_checkpoint_epochs_missing")
+    if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size <= 0:
+        raise ValueError("nnunet_plans_batch_size_missing")
+    if not isinstance(patch_size, (list, tuple)) or len(patch_size) not in {2, 3}:
+        raise ValueError("nnunet_plans_patch_size_missing")
+    input_resolution = [int(value) for value in patch_size]
+    if any(value <= 0 for value in input_resolution):
+        raise ValueError("nnunet_plans_patch_size_invalid")
+    if learning_rate is None:
+        raise ValueError("nnunet_checkpoint_learning_rate_missing")
+    if weight_decay is None:
+        raise ValueError("nnunet_checkpoint_weight_decay_missing")
+    return {
+        "epochs": epochs,
+        "batch_size": batch_size,
+        "learning_rate": learning_rate,
+        "weight_decay": weight_decay,
+        "random_seed": _split_seed(contract),
+        "input_resolution": input_resolution,
+        "preprocessing": {
+            "configuration": args.configuration,
+            "plans": args.plans,
+            "split": split,
+            "split_source": "taxamask_verified_training_split",
+            "dataset_integrity_check": bool(args.verify_dataset_integrity),
+        },
+        "model": {
+            "family": MODEL_FAMILY,
+            "version": "nnunet_v2",
+            "trainer": str(checkpoint.get("trainer_name") or args.trainer),
+        },
+        "loss_weights": {},
+        "continue_training": bool(args.continue_training),
+        "checkpoint": args.checkpoint,
+        "parameter_sources": {
+            "epochs": "checkpoint.current_epoch",
+            "batch_size": "checkpoint.init_args.plans.configurations",
+            "input_resolution": "checkpoint.init_args.plans.configurations",
+            "learning_rate": "checkpoint.logging.lrs_or_optimizer_state",
+            "weight_decay": "checkpoint.optimizer_state",
+            "random_seed": "taxamask_verified_training_split",
+        },
+        "persist_weights": True,
+    }
+
+
 def _export_training_dataset(contract, args, raw_root):
     manager = _project_from_contract(contract)
     dataset_folder = _dataset_folder_name(args.dataset_id, args.dataset_name)
@@ -374,6 +574,7 @@ def _write_model_manifest(contract, args, raw_root, preprocessed_root, results_r
         raise FileNotFoundError(f"nnunet_checkpoint_missing:{checkpoint}")
     manifest_path = _model_manifest_path(contract)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    relative = lambda value: _as_manifest_relative(manifest_path, value)
     manifest = {
         "schema_version": TIF_MODEL_MANIFEST_SCHEMA_VERSION,
         "model_id": f"{contract.get('backend_id') or ADAPTER_ID}/{contract.get('run_id')}",
@@ -396,20 +597,20 @@ def _write_model_manifest(contract, args, raw_root, preprocessed_root, results_r
             "trainer": args.trainer,
             "plans": args.plans,
             "checkpoint": args.checkpoint,
-            "raw_root": str(raw_root),
-            "preprocessed_root": str(preprocessed_root),
-            "results_root": str(results_root),
-            "dataset_dir": str(dataset_dir),
-            "model_output_dir": str(_model_output_dir(args, results_root)),
-            "checkpoint_path": str(checkpoint),
+            "raw_root": relative(raw_root),
+            "preprocessed_root": relative(preprocessed_root),
+            "results_root": relative(results_root),
+            "dataset_dir": relative(dataset_dir),
+            "model_output_dir": relative(_model_output_dir(args, results_root)),
+            "checkpoint_path": relative(checkpoint),
             "file_ending": args.file_ending,
             "label_id_mode": args.label_id_mode,
             "label_id_mapping": dataset_manifest.get("label_id_mapping", {}),
         },
-        "weights": {"main": str(checkpoint)},
+        "weights": {"main": relative(checkpoint)},
         "training_mode": "nnunet_v2_real" if not dry_run else "nnunet_v2_dry_run",
         "usable_for_research_prediction": not dry_run,
-        "command_log": str(command_log),
+        "command_log": relative(command_log),
         "notes": [
             "Predictions from this model must be imported as editable_ai_result and reviewed before promotion to manual_truth.",
             "TaxaMask stores nnU-Net label remapping in this manifest so compact nnU-Net class IDs can be restored to research label IDs.",
@@ -574,11 +775,11 @@ def run_prepare_dataset(contract, args):
         artifacts=artifacts,
         metrics={"summary": {"training_samples": export["exported_count"]}, "by_material": {}},
         provenance={
-            "dataset_manifest": os.path.abspath(export["manifest_path"]),
-            "dataset_dir": str(dataset_dir),
-            "nnunet_raw": str(raw_root),
-            "nnunet_preprocessed": str(preprocessed_root),
-            "nnunet_results": str(results_root),
+            "dataset_manifest": _as_run_relative(contract, export["manifest_path"]),
+            "dataset_dir": _as_run_relative(contract, dataset_dir),
+            "nnunet_raw": _as_run_relative(contract, raw_root),
+            "nnunet_preprocessed": _as_run_relative(contract, preprocessed_root),
+            "nnunet_results": _as_run_relative(contract, results_root),
             "input_label_role": "manual_truth",
             "input_part_samples": _part_refs_from_contract(contract, require_label=True) if contract.get("input_scope") == "part_reslice" else [],
             "input_specimens": _specimen_ids_from_contract(contract, require_label=True) if contract.get("input_scope") == "top_level_volume" else [],
@@ -598,6 +799,9 @@ def run_train(contract, args):
     train_prefix = _command_prefix(args.train_command, env, require_exists=require_commands)
     dataset_dir, export = _export_training_dataset(contract, args, raw_root)
     _validate_train_sample_count(export, dry_run=args.dry_run_commands)
+    actual_split = _apply_contract_training_split(
+        contract, dataset_dir, export["manifest"]
+    )
     preprocessed_dataset_dir = preprocessed_root / _dataset_folder_name(args.dataset_id, args.dataset_name)
     copied_split = ""
     plan_cmd = plan_prefix + [
@@ -642,9 +846,21 @@ def run_train(contract, args):
         command_log,
         dry_run=args.dry_run_commands,
     )
+    effective_config = (
+        _dry_run_effective_config(contract, args, actual_split)
+        if args.dry_run_commands
+        else _resolved_effective_config(
+            contract,
+            args,
+            _checkpoint_path(args, results_root),
+            actual_split,
+        )
+    )
+    manifest["effective_config"] = effective_config
+    _write_json(manifest_path, manifest)
     artifacts = [
         {"type": "model_manifest", "path": _as_run_relative(contract, manifest_path), "format": "json"},
-        {"type": "model_output_dir", "path": _as_run_relative(contract, manifest["nnunet"]["model_output_dir"]), "format": "directory"},
+        {"type": "model_output_dir", "path": _as_run_relative(contract, _model_output_dir(args, results_root)), "format": "directory"},
         {"type": "nnunet_command_log", "path": _as_run_relative(contract, command_log), "format": "text"},
         {"type": "nnunet_dataset_dir", "path": _as_run_relative(contract, dataset_dir), "format": "directory"},
     ]
@@ -656,30 +872,39 @@ def run_train(contract, args):
         metrics={"summary": {"training_samples": export["exported_count"], "usable_for_research_prediction": int(not args.dry_run_commands)}, "by_material": {}},
         warnings=warnings,
         provenance={
-            "model_manifest": str(manifest_path),
-            "model_output_dir": manifest["nnunet"]["model_output_dir"],
-            "dataset_manifest": os.path.abspath(export["manifest_path"]),
-            "dataset_dir": str(dataset_dir),
+            "model_manifest": _as_run_relative(contract, manifest_path),
+            "model_output_dir": _as_run_relative(contract, _model_output_dir(args, results_root)),
+            "dataset_manifest": _as_run_relative(contract, export["manifest_path"]),
+            "dataset_dir": _as_run_relative(contract, dataset_dir),
             "input_label_role": "manual_truth",
             "input_part_samples": manifest.get("trained_parts", []),
             "input_specimens": [item.get("specimen_id", "") for item in manifest.get("trained_top_level_volumes", []) or []],
             "usable_for_research_prediction": not args.dry_run_commands,
-            "nnunet_raw": str(raw_root),
-            "nnunet_preprocessed": str(preprocessed_root),
-            "nnunet_results": str(results_root),
+            "nnunet_raw": _as_run_relative(contract, raw_root),
+            "nnunet_preprocessed": _as_run_relative(contract, preprocessed_root),
+            "nnunet_results": _as_run_relative(contract, results_root),
         },
     )
+    result["effective_config"] = effective_config
+    result["training_split"] = {
+        "status": "not_executed" if args.dry_run_commands else "applied",
+        "assignments": list(
+            (contract.get("training_split") or {}).get("assignments") or []
+        ),
+        "backend_partitions": actual_split,
+    }
     _write_json(contract["result_json"], result)
     return result
 
 
 def run_predict(contract, args):
     started_at = _now_iso()
-    manifest = _load_model_manifest(contract.get("model_manifest"))
+    manifest_path = Path(contract.get("model_manifest") or "").resolve()
+    manifest = _load_model_manifest(manifest_path)
     nnunet_meta = manifest.get("nnunet") if isinstance(manifest.get("nnunet"), dict) else {}
-    raw_root = Path(args.nnunet_raw or nnunet_meta.get("raw_root") or Path(contract["run_dir"]) / "nnunet" / "nnUNet_raw").resolve()
-    preprocessed_root = Path(args.nnunet_preprocessed or nnunet_meta.get("preprocessed_root") or Path(contract["run_dir"]) / "nnunet" / "nnUNet_preprocessed").resolve()
-    results_root = Path(args.nnunet_results or nnunet_meta.get("results_root") or Path(contract["run_dir"]) / "nnunet" / "nnUNet_results").resolve()
+    raw_root = Path(args.nnunet_raw).resolve() if args.nnunet_raw else (_resolve_manifest_path(manifest_path, nnunet_meta.get("raw_root")) or Path(contract["run_dir"]) / "nnunet" / "nnUNet_raw").resolve()
+    preprocessed_root = Path(args.nnunet_preprocessed).resolve() if args.nnunet_preprocessed else (_resolve_manifest_path(manifest_path, nnunet_meta.get("preprocessed_root")) or Path(contract["run_dir"]) / "nnunet" / "nnUNet_preprocessed").resolve()
+    results_root = Path(args.nnunet_results).resolve() if args.nnunet_results else (_resolve_manifest_path(manifest_path, nnunet_meta.get("results_root")) or Path(contract["run_dir"]) / "nnunet" / "nnUNet_results").resolve()
     for path in (raw_root, preprocessed_root, results_root):
         path.mkdir(parents=True, exist_ok=True)
     if not args.dataset_id_from_cli and nnunet_meta.get("dataset_id") is not None:
@@ -733,8 +958,8 @@ def run_predict(contract, args):
         ],
         metrics={"summary": {"prediction_samples": len(artifacts)}, "by_material": {}},
         provenance={
-            "model_manifest": os.path.abspath(contract.get("model_manifest") or ""),
-            "nnunet_prediction_dir": str(predictions_dir),
+            "model_manifest": _as_run_relative(contract, manifest_path),
+            "nnunet_prediction_dir": _as_run_relative(contract, predictions_dir),
             "input_label_role": "none",
             "input_part_samples": [
                 {"specimen_id": item["specimen_id"], "part_id": item["part_id"], "reslice_id": item["reslice_id"]}

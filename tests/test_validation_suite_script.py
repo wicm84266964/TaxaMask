@@ -25,6 +25,10 @@ class ValidationSuiteScriptTests(unittest.TestCase):
         self.assertIn("tif_storage_safety:", result.stdout)
         self.assertIn("pdf_safety:", result.stdout)
         self.assertIn("validation_tooling:", result.stdout)
+        self.assertIn("round5_traceability:", result.stdout)
+        self.assertIn("round5_inference:", result.stdout)
+        self.assertIn("round5_mesh:", result.stdout)
+        self.assertIn("round5_local_axis_risk:", result.stdout)
 
     def test_default_suites_cover_every_test_module(self):
         spec = importlib.util.spec_from_file_location("run_validation_suite_for_test", SCRIPT)
@@ -56,6 +60,28 @@ class ValidationSuiteScriptTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("invalid choice", result.stderr)
+
+    def test_round5_ci_smoke_covers_each_safety_boundary(self):
+        spec = importlib.util.spec_from_file_location("run_validation_suite_for_smoke", SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        smoke = "\n".join(module.SUITES["round5_ci_smoke"])
+        for keyword in (
+            "manifest",
+            "training_snapshot",
+            "full_pipeline",
+            "physical_xyz_mesh",
+            "in_sqlite",
+            "incomplete_recoverable",
+            "no_partial_file",
+            "risk_components",
+            "manual_truth_gate",
+            "accept_selected",
+            "training_uses_manual_truth_only",
+        ):
+            self.assertIn(keyword, smoke)
+        self.assertNotIn("round5_ci_smoke", module.DEFAULT_ORDER)
 
     def test_chunked_suite_runs_single_fast_tooling_test(self):
         result = subprocess.run(

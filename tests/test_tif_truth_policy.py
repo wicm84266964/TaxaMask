@@ -55,6 +55,34 @@ class TifTruthPolicyTests(unittest.TestCase):
         self.assertFalse(missing.allowed)
         self.assertEqual(missing.reason, "manual_truth_missing")
 
+    def test_review_or_queue_status_never_substitutes_for_manual_truth_role(self):
+        for role in ("editable_ai_result", "working_edit", "model_draft", "raw_ai_prediction_backup"):
+            for status in ("accepted", "reviewed", "high_confidence", "sorted_first"):
+                with self.subTest(role=role, status=status):
+                    decision = can_use_role_for_training(role, status=status, record_exists=True)
+                    self.assertFalse(decision.allowed)
+                    self.assertEqual(decision.reason, "training_requires_manual_truth")
+
+    def test_manual_truth_policy_reports_audit_metadata_key_names(self):
+        decision = can_promote_to_manual_truth(
+            "editable_ai_result",
+            explicit_review=True,
+            review_ready=True,
+            opened_for_review=True,
+            audit_metadata={
+                "review_action": "accept_selected_ai_results",
+                "specimen_id": "specimen_001",
+                "part_id": "head",
+            },
+        )
+
+        self.assertTrue(decision.allowed)
+        self.assertTrue(decision.details["explicit_review"])
+        self.assertEqual(
+            decision.details["audit_keys"],
+            ["part_id", "review_action", "specimen_id"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

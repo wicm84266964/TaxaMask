@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 
 from AntSleap.core.tif_export import export_monai_dataset, export_nnunet_dataset, export_tif_part_nnunet_dataset, export_tif_part_training_dataset, export_tif_training_dataset, read_nifti_volume_with_metadata, write_nifti_volume
+from AntSleap.core.tif_local_axis_batch import accept_local_frame_proposal
 from AntSleap.core.tif_local_axis_reslice import compute_local_frame, export_part_reslice
 from AntSleap.core.tif_part_extraction import crop_volume_to_part, export_part_package
 from AntSleap.core.tif_project import TifProjectManager
@@ -171,6 +172,37 @@ class TifExportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             manager = self._make_part_training_project(root)
+            reslice = manager.get_part_reslice("01-0101-brain", "brain", "brain_axis_001")
+            manual_record = manager.part_label_record(
+                "01-0101-brain",
+                "brain",
+                "manual_truth",
+                "brain_axis_001",
+            )
+            editable_rel = "specimens/01-0101-brain/parts/brain/reslices/brain_axis_001/labels/editable_ai_result.ome.zarr"
+            editable_meta = write_volume_sidecar(
+                root / "part_project" / editable_rel,
+                np.full(manual_record["shape_zyx"], 9, dtype=np.uint16),
+                role="editable_ai_result",
+            )
+            manager.register_part_reslice_label_volume(
+                "01-0101-brain",
+                "brain",
+                reslice["reslice_id"],
+                "editable_ai_result",
+                editable_rel,
+                editable_meta["shape_zyx"],
+                editable_meta["dtype"],
+                status="accepted",
+                save=True,
+            )
+            manager.set_part_training_metadata(
+                "01-0101-brain",
+                "brain",
+                active_reslice_id="brain_axis_001",
+                system_status="verified_train_ready",
+                save=True,
+            )
 
             result = export_tif_part_training_dataset(manager, root / "part_export", formats=["tiff", "nifti"])
 
@@ -189,6 +221,117 @@ class TifExportTests(unittest.TestCase):
             self.assertTrue((root / "part_export" / sample["image_exports"]["tiff"]).exists())
             self.assertTrue((root / "part_export" / sample["label_exports"]["tiff"]).exists())
             self.assertTrue((root / "part_export" / sample["label_schema"]).exists())
+            import tifffile
+
+            np.testing.assert_array_equal(
+                tifffile.imread(root / "part_export" / sample["label_exports"]["tiff"]),
+                np.ones(manual_record["shape_zyx"], dtype=np.uint16),
+            )
+
+    def test_accepted_ai_and_local_axis_do_not_replace_missing_manual_truth(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = self._make_part_training_project(root)
+            specimen_id = "01-0101-brain"
+            part_id = "brain"
+            reslice_id = "brain_axis_001"
+            reslice = manager.get_part_reslice(specimen_id, part_id, reslice_id)
+            manual_record = manager.part_label_record(specimen_id, part_id, "manual_truth", reslice_id)
+
+            editable_rel = (
+                "specimens/01-0101-brain/parts/brain/reslices/brain_axis_001/"
+                "labels/editable_ai_result.ome.zarr"
+            )
+            editable_meta = write_volume_sidecar(
+                root / "part_project" / editable_rel,
+                np.full(manual_record["shape_zyx"], 1, dtype=np.uint16),
+                role="editable_ai_result",
+            )
+            manager.register_part_reslice_label_volume(
+                specimen_id,
+                part_id,
+                reslice_id,
+                "editable_ai_result",
+                editable_rel,
+                editable_meta["shape_zyx"],
+                editable_meta["dtype"],
+                status="accepted",
+                save=False,
+            )
+            reslice["labels"]["manual_truth"] = {}
+            manager.set_part_training_metadata(
+                specimen_id,
+                part_id,
+                active_reslice_id=reslice_id,
+                system_status="verified_train_ready",
+                save=False,
+            )
+            manager.add_local_frame_proposal(
+                specimen_id,
+                part_id,
+                {
+                    "frame_proposal_id": "accepted_axis_without_truth",
+                    "template_id": part_id,
+                    "origin_zyx": [0.5, 1.5, 2.0],
+                    "output_axis_start_zyx": [0.0, 1.5, 2.0],
+                    "output_axis_end_zyx": [1.0, 1.5, 2.0],
+                    "status": "proposed",
+                },
+                save=False,
+            )
+            accepted_axis = accept_local_frame_proposal(
+                manager,
+                specimen_id,
+                part_id,
+                "accepted_axis_without_truth",
+            )
+            manager.save_project()
+
+            readiness = manager.evaluate_part_train_ready(specimen_id, part_id, reslice_id)
+            editable_label_report = manager.validate_part_label_ids(
+                specimen_id,
+                part_id,
+                "editable_ai_result",
+                reslice_id,
+            )
+
+            self.assertEqual(accepted_axis["status"], "accepted")
+            self.assertEqual(reslice["labels"]["editable_ai_result"]["status"], "accepted")
+            self.assertTrue(editable_label_report["ok"])
+            self.assertEqual(editable_label_report["unknown_label_ids"], [])
+            for check_name in (
+                "part_record_exists",
+                "part_volume_exists",
+                "reslice_record_exists",
+                "reslice_output_exists",
+                "label_schema_exists",
+                "operator_marked_train_ready",
+            ):
+                self.assertTrue(readiness["checks"][check_name], check_name)
+            self.assertFalse(readiness["train_ready"])
+            self.assertFalse(readiness["checks"]["manual_truth_exists"])
+            self.assertFalse(readiness["checks"]["training_role_allowed"])
+            self.assertEqual(readiness["label_report"]["reasons"], ["manual_truth_missing"])
+            self.assertEqual(
+                [reason for reason in readiness["reasons"] if reason != "unknown_label_ids"],
+                ["manual_truth_missing"],
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                r"part_not_train_ready:01-0101-brain:brain:.*manual_truth_missing",
+            ):
+                export_tif_part_training_dataset(
+                    manager,
+                    root / "part_export_without_truth",
+                    part_refs=[
+                        {
+                            "specimen_id": specimen_id,
+                            "part_id": part_id,
+                            "reslice_id": reslice_id,
+                        }
+                    ],
+                    formats=["tiff"],
+                )
 
     def test_part_nnunet_export_uses_label_schema_mapping(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -22,7 +22,7 @@ class MainWindowArchitectureAnalysisTests(unittest.TestCase):
         self.assertLessEqual(metrics["main_physical_lines"], 800)
         self.assertEqual(metrics["top_level_class_count"], 1)
         self.assertEqual(metrics["all_method_count"], 1)
-        self.assertEqual(metrics["connection_count"], 194)
+        self.assertEqual(metrics["connection_count"], 198)
         self.assertLessEqual(metrics["main_window_lines"], 40)
         self.assertEqual(metrics["main_window_method_count"], 1)
         self.assertEqual(metrics["main_window_connection_count"], 0)

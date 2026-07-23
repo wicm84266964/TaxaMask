@@ -1,5 +1,17 @@
 import json
 
+from .project_integrity_registry import (
+    initialize_project_integrity_registry_schema,
+    validate_project_integrity_registry_schema,
+)
+from .training_run_recorder import (
+    initialize_training_run_ledger_schema,
+    validate_training_run_ledger_schema,
+)
+from .mesh_export_ledger import (
+    initialize_mesh_export_schema,
+    validate_mesh_export_schema,
+)
 from .sqlite_storage import (
     connect_sqlite_database,
     get_schema_version,
@@ -235,6 +247,9 @@ def validate_tif_project_schema(connection):
         missing_columns = sorted(required_columns - existing_columns)
         if missing_columns:
             raise ValueError(f"missing_tif_sqlite_columns:{table_name}:{','.join(missing_columns)}")
+    validate_project_integrity_registry_schema(connection)
+    validate_training_run_ledger_schema(connection)
+    validate_mesh_export_schema(connection)
     return True
 
 
@@ -244,6 +259,10 @@ def initialize_tif_project_schema(connection):
     if current_version > TIF_SQLITE_SCHEMA_VERSION:
         raise ValueError(f"unsupported_tif_sqlite_schema_version:{current_version}")
     if current_version == TIF_SQLITE_SCHEMA_VERSION:
+        with connection:
+            initialize_project_integrity_registry_schema(connection)
+            initialize_training_run_ledger_schema(connection)
+            initialize_mesh_export_schema(connection)
         validate_tif_project_schema(connection)
         return current_version
 
@@ -533,6 +552,9 @@ def initialize_tif_project_schema(connection):
             CREATE INDEX IF NOT EXISTS idx_tif_events_run ON tif_events(run_id);
             """
         )
+        initialize_project_integrity_registry_schema(connection)
+        initialize_training_run_ledger_schema(connection)
+        initialize_mesh_export_schema(connection)
         connection.execute(
             """
             INSERT OR IGNORE INTO tif_projects (id, name, project_type, schema_version)

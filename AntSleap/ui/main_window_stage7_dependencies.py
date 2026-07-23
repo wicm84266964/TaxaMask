@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QProgressDialog,
     QPushButton,
     QSizePolicy,
+    QTextEdit,
     QVBoxLayout,
 )
 
@@ -45,6 +46,17 @@ try:
     )
     from AntSleap.core.project_sqlite_writer import finish_vlm_run, record_vlm_image_result
     from AntSleap.core.training_preflight import build_training_preflight, describe_training_preflight, format_size_pair
+    from AntSleap.core.training_run_2d import (
+        DEFAULT_TRAINING_SEED,
+        prepare_2d_training_run,
+    )
+    from AntSleap.core.training_run_recorder import TrainingRunRecorder
+    from AntSleap.core.training_run_notes import TrainingRunNoteStore
+    from AntSleap.core.training_initial_weights import (
+        inspect_initial_weight_registration,
+        register_initial_weight_version,
+    )
+    from AntSleap.core.training_weight_publisher import TrainingWeightPublisher
     from AntSleap.core.vlm_preannotation import (
         default_vlm_prompt_profile,
         load_vlm_api_config_from_runtime_settings,
@@ -79,7 +91,9 @@ try:
         TrainingPreflightDialog,
         TrainingReportDialog,
         TrainingResultBrowserDialog,
+        TrainingRunNoteDialog,
     )
+    from AntSleap.ui.training_integrity_recovery_dialog import TrainingIntegrityRecoveryDialog
 except ImportError:
     from app_runtime import runtime_log_event, runtime_log_exception
     from core.blink_training_strategy import blink_training_strategy_label
@@ -94,6 +108,11 @@ except ImportError:
     )
     from core.project_sqlite_writer import finish_vlm_run, record_vlm_image_result
     from core.training_preflight import build_training_preflight, describe_training_preflight, format_size_pair
+    from core.training_run_2d import DEFAULT_TRAINING_SEED, prepare_2d_training_run
+    from core.training_run_recorder import TrainingRunRecorder
+    from core.training_run_notes import TrainingRunNoteStore
+    from core.training_initial_weights import inspect_initial_weight_registration, register_initial_weight_version
+    from core.training_weight_publisher import TrainingWeightPublisher
     from core.vlm_preannotation import (
         default_vlm_prompt_profile,
         load_vlm_api_config_from_runtime_settings,
@@ -119,7 +138,8 @@ except ImportError:
         apply_semantic_button_style,
         themed_yes_no_question,
     )
-    from ui.training_report_dialogs import TrainingPreflightDialog, TrainingReportDialog, TrainingResultBrowserDialog
+    from ui.training_report_dialogs import TrainingPreflightDialog, TrainingReportDialog, TrainingResultBrowserDialog, TrainingRunNoteDialog
+    from ui.training_integrity_recovery_dialog import TrainingIntegrityRecoveryDialog
 
 
 PACKAGE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

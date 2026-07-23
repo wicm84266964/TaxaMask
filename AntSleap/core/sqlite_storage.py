@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import time
+from pathlib import Path
 
 from .safe_io import atomic_write_json
 
@@ -19,6 +20,18 @@ def connect_sqlite_database(db_path):
     connection.execute("PRAGMA foreign_keys = ON")
     connection.execute("PRAGMA journal_mode = WAL")
     connection.execute("PRAGMA synchronous = NORMAL")
+    return connection
+
+
+def connect_sqlite_database_readonly(db_path):
+    """Open an existing SQLite database without creating files or changing WAL state."""
+
+    path = os.path.abspath(os.fspath(db_path))
+    if not os.path.isfile(path):
+        raise FileNotFoundError(path)
+    connection = sqlite3.connect(f"{Path(path).as_uri()}?mode=ro", uri=True)
+    connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute("PRAGMA query_only = ON")
     return connection
 
 

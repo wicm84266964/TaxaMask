@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,6 +12,53 @@ from AntSleap.core.project_templates import PROJECT_TEMPLATE_ANT, PROJECT_TEMPLA
 
 
 class GenericExportSchemaTests(unittest.TestCase):
+    def _external_training_runner(self, work_dir, script_lines, backend_id):
+        script_path = work_dir / f"{backend_id}.py"
+        script_path.write_text("\n".join(script_lines), encoding="utf-8")
+        project_dir = work_dir / "project"
+        project_dir.mkdir()
+        manager = ProjectManager()
+        manager.create_project(
+            "external_train_demo",
+            project_dir,
+            template_id=PROJECT_TEMPLATE_GENERIC,
+        )
+        manager.project_data["taxonomy"] = ["Leaf"]
+        manager.project_data["locator_scope"] = ["Leaf"]
+        image_paths = []
+        for index in range(2):
+            image_path = project_dir / f"leaf_{index}.png"
+            Image.new("RGB", (32, 24), color=(80, 140, 90)).save(image_path)
+            image_paths.append(str(image_path))
+        manager.add_images(image_paths, save=True)
+        for image_path in image_paths:
+            manager.update_label(
+                image_path,
+                "Leaf",
+                [[2, 2], [20, 2], [10, 18]],
+                box=[2, 2, 20, 18],
+                save=True,
+            )
+        manager.initialize_integrity_baseline()
+        runner = ExternalBackendRunner(
+            manager,
+            {
+                "backend_id": backend_id,
+                "train_command": f"python {script_path} --contract {{contract_json}}",
+            },
+            runs_root=str(work_dir / "external_runs"),
+        )
+        return manager, runner
+
+    def _latest_training_record(self, manager):
+        with sqlite3.connect(manager.current_database_path) as connection:
+            row = connection.execute(
+                "SELECT status, record_json FROM training_runs "
+                "ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()
+        self.assertIsNotNone(row)
+        return row[0], json.loads(row[1])
+
     def _build_project(self, work_dir: Path) -> ProjectManager:
         image_path = work_dir / "plant specimen.png"
         Image.new("RGB", (100, 80), color=(90, 140, 90)).save(image_path)
@@ -283,6 +331,7 @@ class GenericExportSchemaTests(unittest.TestCase):
                         "    json.dump({'prepared': True}, open(os.path.join(contract['dataset_dir'], 'dataset_manifest.json'), 'w', encoding='utf-8'))",
                         "elif contract['action'] == 'train':",
                         "    os.makedirs(os.path.dirname(contract['model_manifest']), exist_ok=True)",
+                        "    open(os.path.join(os.path.dirname(contract['model_manifest']), 'dummy.pt'), 'wb').write(b'weights')",
                         "    json.dump({",
                         "      'schema_version': 'taxamask_model_manifest_v1',",
                         "      'model_id': 'dummy/train',",
@@ -290,14 +339,34 @@ class GenericExportSchemaTests(unittest.TestCase):
                         "      'taxonomy': contract['taxonomy'],",
                         "      'locator_scope': contract['locator_scope'],",
                         "      'weights': {'main': 'dummy.pt'},",
+                        "      'effective_config': contract['effective_config'],",
                         "    }, open(contract['model_manifest'], 'w', encoding='utf-8'))",
                     ]
                 ),
                 encoding="utf-8",
             )
 
+            project_dir = work_dir / "project"
+            project_dir.mkdir()
             manager = ProjectManager()
-            manager.create_project("external_train_demo", tmp, template_id=PROJECT_TEMPLATE_GENERIC)
+            manager.create_project("external_train_demo", project_dir, template_id=PROJECT_TEMPLATE_GENERIC)
+            manager.project_data["taxonomy"] = ["Leaf"]
+            manager.project_data["locator_scope"] = ["Leaf"]
+            images = []
+            for index in range(2):
+                image_path = project_dir / f"leaf_{index}.png"
+                Image.new("RGB", (32, 24), color=(80, 140, 90)).save(image_path)
+                images.append(str(image_path))
+            manager.add_images(images, save=True)
+            for image_path in images:
+                manager.update_label(
+                    image_path,
+                    "Leaf",
+                    [[2, 2], [20, 2], [10, 18]],
+                    box=[2, 2, 20, 18],
+                    save=True,
+                )
+            manager.initialize_integrity_baseline()
             runner = ExternalBackendRunner(
                 manager,
                 {
@@ -312,9 +381,103 @@ class GenericExportSchemaTests(unittest.TestCase):
             self.assertTrue(Path(summary["contract_json"]).exists())
             self.assertTrue(Path(summary["model_manifest"]).exists())
             self.assertEqual(summary["manifest"]["schema_version"], "taxamask_model_manifest_v1")
+            contract = json.loads(Path(summary["contract_json"]).read_text(encoding="utf-8"))
+            self.assertEqual(contract["project_json"], "")
+            self.assertTrue(Path(contract["training_snapshot_sqlite"]).is_file())
             run_dir = Path(summary["run_dir"])
             self.assertFalse(list(run_dir.rglob("locator_*.pth")))
             self.assertFalse(list(run_dir.rglob("sam_decoder_lora_*.pth")))
+
+    def test_external_training_snapshot_modification_is_failed_in_project_sqlite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager, runner = self._external_training_runner(
+                root,
+                [
+                    "import argparse, json, pathlib",
+                    "parser=argparse.ArgumentParser()",
+                    "parser.add_argument('--contract', required=True)",
+                    "args=parser.parse_args()",
+                    "contract=json.load(open(args.contract, encoding='utf-8'))",
+                    "snapshot=pathlib.Path(contract['training_snapshot_sqlite']).parent",
+                    "next(snapshot.joinpath('images').iterdir()).write_bytes(b'tampered')",
+                    "model=pathlib.Path(contract['model_manifest'])",
+                    "model.parent.mkdir(parents=True, exist_ok=True)",
+                    "model.with_name('dummy.pt').write_bytes(b'weights')",
+                    "json.dump({'schema_version':'taxamask_model_manifest_v1','weights':{'main':'dummy.pt'},'effective_config':contract['effective_config']}, open(model, 'w', encoding='utf-8'))",
+                ],
+                "snapshot_tamper_backend",
+            )
+
+            with self.assertRaisesRegex(ValueError, "external_training_snapshot_modified"):
+                runner.run_prepare_and_train()
+
+            status, record = self._latest_training_record(manager)
+            self.assertEqual(status, "failed")
+            self.assertEqual(record["error"]["stage"], "external_training")
+            self.assertFalse(any(item["role"] == "output_weights" for item in record["artifacts"]))
+
+    def test_external_training_command_failure_is_failed_in_project_sqlite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager, runner = self._external_training_runner(
+                root,
+                [
+                    "import argparse",
+                    "parser=argparse.ArgumentParser()",
+                    "parser.add_argument('--contract', required=True)",
+                    "parser.parse_args()",
+                    "raise SystemExit(7)",
+                ],
+                "command_failure_backend",
+            )
+
+            with self.assertRaises(RuntimeError):
+                runner.run_prepare_and_train()
+
+            status, record = self._latest_training_record(manager)
+            self.assertEqual(status, "failed")
+            self.assertEqual(record["error"]["stage"], "external_training")
+
+    def test_external_training_rejects_incomplete_model_manifests(self):
+        cases = (
+            (
+                "missing_effective_config",
+                "{'schema_version':'taxamask_model_manifest_v1','weights':{'main':'dummy.pt'}}",
+                "external_effective_config_missing_or_mismatch",
+            ),
+            (
+                "missing_weights",
+                "{'schema_version':'taxamask_model_manifest_v1','weights':{},'effective_config':contract['effective_config']}",
+                "external_model_weights_missing",
+            ),
+        )
+        for backend_id, manifest_expression, expected_error in cases:
+            with self.subTest(backend_id=backend_id), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                manager, runner = self._external_training_runner(
+                    root,
+                    [
+                        "import argparse, json, pathlib",
+                        "parser=argparse.ArgumentParser()",
+                        "parser.add_argument('--contract', required=True)",
+                        "args=parser.parse_args()",
+                        "contract=json.load(open(args.contract, encoding='utf-8'))",
+                        "model=pathlib.Path(contract['model_manifest'])",
+                        "model.parent.mkdir(parents=True, exist_ok=True)",
+                        "model.with_name('dummy.pt').write_bytes(b'weights')",
+                        f"manifest={manifest_expression}",
+                        "json.dump(manifest, open(model, 'w', encoding='utf-8'))",
+                    ],
+                    backend_id,
+                )
+
+                with self.assertRaisesRegex(ValueError, expected_error):
+                    runner.run_prepare_and_train()
+
+                status, record = self._latest_training_record(manager)
+                self.assertEqual(status, "failed")
+                self.assertEqual(record["error"]["stage"], "external_training")
 
 
 if __name__ == "__main__":

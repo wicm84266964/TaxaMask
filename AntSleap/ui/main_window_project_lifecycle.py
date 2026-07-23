@@ -1247,11 +1247,39 @@ class MainWindowProjectLifecycleMixin:
             return
 
         self._flush_pending_project_save(defer_for_navigation=False)
-        changed = self.project.apply_image_path_remap(matches, save=True)
+        registry_ready = (
+            self.project.is_sqlite_project()
+            and self.project.integrity_registry_state().get("status") == "ready"
+        )
+        relocation = (
+            self.project.relocate_registered_images(matches)
+            if registry_ready
+            else {"relocated": list(matches), "rejected": []}
+        )
+        verified_matches = [
+            {
+                "old_path": item.get("old_path"),
+                "new_path": item.get("new_path"),
+            }
+            for item in relocation.get("relocated", [])
+        ]
+        changed = self.project.apply_image_path_remap(
+            verified_matches, save=True
+        )
         self.refresh_file_list()
         if self.current_image and not os.path.exists(self.current_image):
             self.current_image = None
             self.canvas.load_image("")
+        rejected = relocation.get("rejected", [])
         result = tr("Remapped {0} project image path(s).", self.current_lang).format(changed)
+        if rejected:
+            reasons = ", ".join(
+                f"{os.path.basename(str(item.get('old_path') or ''))}: {item.get('reason')}"
+                for item in rejected[:8]
+            )
+            result += "\n\n" + tr(
+                "Rejected {0} path(s) because the selected files did not match the registered content: {1}. Use Register New Version only when the files were intentionally changed.",
+                self.current_lang,
+            ).format(len(rejected), reasons)
         self.log(result)
         QMessageBox.information(self, tr("Project Image Health", self.current_lang), result)

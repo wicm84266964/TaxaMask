@@ -80,6 +80,11 @@ class MainWindowModelManagementMixin:
 
         import glob
         parent_model_notes = load_parent_model_notes(self.engine.weights_dir)
+        managed = self._verified_managed_parent_weights()
+        active_profile = _active_profile_from_manager(self.project)
+        parent_backend = active_profile.get("parent_backend", {}) if isinstance(active_profile, dict) else {}
+        preferred_locator = str(parent_backend.get("locator_weights") or "")
+        preferred_segmenter = str(parent_backend.get("segmenter_weights") or "")
         # 1. Populate Locators
         loc_files = glob.glob(os.path.join(self.engine.weights_dir, "locator_*.pth"))
         # Format: "20260105_1105"
@@ -88,10 +93,16 @@ class MainWindowModelManagementMixin:
         if loc_timestamps:
             for ts in loc_timestamps:
                 self.combo_locator.addItem(self._build_locator_combo_label(ts, parent_model_notes), ts)
-            locator_index = self.combo_locator.findData(current_locator)
-            if locator_index < 0:
-                locator_index = 0
-            self.combo_locator.setCurrentIndex(locator_index)
+        for item in managed["locator"]:
+            self.combo_locator.addItem(
+                f"{item['run_id']} [verified]", item["relative_path"]
+            )
+        if self.combo_locator.count():
+            locator_choice = current_locator
+            if preferred_locator and self.combo_locator.findData(preferred_locator) >= 0:
+                locator_choice = preferred_locator
+            locator_index = self.combo_locator.findData(locator_choice)
+            self.combo_locator.setCurrentIndex(max(0, locator_index))
         else:
             self.combo_locator.addItem(tr("No Locators Found", self.current_lang), "__no_locator__")
 
@@ -104,10 +115,17 @@ class MainWindowModelManagementMixin:
         if seg_timestamps:
             for ts in seg_timestamps:
                 self.combo_segmenter.addItem(self._build_segmenter_combo_label(ts, parent_model_notes), ts)
+        for item in managed["segmenter"]:
+            self.combo_segmenter.addItem(
+                f"{item['run_id']} [verified]", item["relative_path"]
+            )
 
         # Default to Base SAM (Index 0) for safety/compatibility, or latest if user prefers?
         # User strategy: "配合原始的sam模型，先达到一个很好的效果". So default to Base SAM.
-        segmenter_index = self.combo_segmenter.findData(current_segmenter)
+        segmenter_choice = current_segmenter
+        if preferred_segmenter and self.combo_segmenter.findData(preferred_segmenter) >= 0:
+            segmenter_choice = preferred_segmenter
+        segmenter_index = self.combo_segmenter.findData(segmenter_choice)
         if segmenter_index < 0:
             segmenter_index = 0
         self.combo_segmenter.setCurrentIndex(segmenter_index)
@@ -118,6 +136,79 @@ class MainWindowModelManagementMixin:
             self._apply_locator_selection_to_runtime()
             self._apply_segmenter_selection_to_runtime()
         self.update_model_delete_button_states()
+
+    def _verified_managed_parent_weights(self):
+        result = {"locator": [], "segmenter": []}
+        is_sqlite_project = getattr(self.project, "is_sqlite_project", None)
+        if (
+            not self.engine
+            or not self.project
+            or not callable(is_sqlite_project)
+            or not is_sqlite_project()
+        ):
+            return result
+        project_path = str(self.project.current_project_path or "")
+        if not project_path:
+            return result
+        runs_root = os.path.join(
+            os.path.dirname(os.path.abspath(project_path)), "runs", "train"
+        )
+        try:
+            recorder = TrainingRunRecorder(
+                runs_root,
+                database_path=self.project.current_database_path,
+                recover_on_startup=False,
+            )
+            discovery = TrainingWeightPublisher(
+                self.engine.weights_dir
+            ).list_active(recorder.load)
+        except Exception:
+            runtime_log_exception("managed_model_discovery_failed", *sys.exc_info())
+            return result
+        for publication in discovery.get("publications", []):
+            run_id = str(publication.get("run_id") or "")
+            for artifact in publication.get("artifacts", []):
+                if artifact.get("role") != "output_weights":
+                    continue
+                relative = str(artifact.get("relative_path") or "")
+                filename = os.path.basename(relative)
+                item = {
+                    "run_id": run_id,
+                    "relative_path": relative,
+                    "expected": {
+                        key: artifact.get(key)
+                        for key in (
+                            "entry_kind",
+                            "size_bytes",
+                            "hash_algorithm",
+                            "digest",
+                        )
+                    },
+                }
+                if filename.startswith("locator_") and filename.endswith(".pth"):
+                    result["locator"].append(item)
+                elif filename.startswith("sam_decoder_lora_") and filename.endswith(".pth"):
+                    result["segmenter"].append(item)
+        for values in result.values():
+            values.sort(key=lambda item: item["run_id"], reverse=True)
+        return result
+
+    def _verified_managed_model_path(self, reference, model_kind):
+        clean_reference = str(reference or "").replace("\\", "/")
+        if "/" not in clean_reference:
+            return None
+        group = "locator" if model_kind == "locator" else "segmenter"
+        verified = self._verified_managed_parent_weights().get(group, [])
+        if not any(
+            item.get("relative_path") == clean_reference for item in verified
+        ):
+            return None
+        resolver = (
+            self._locator_model_path
+            if model_kind == "locator"
+            else self._segmenter_model_path
+        )
+        return resolver(clean_reference)
 
     def _selected_locator_timestamp(self):
         item_data = self.combo_locator.currentData() if self.combo_locator.count() else None
@@ -134,6 +225,8 @@ class MainWindowModelManagementMixin:
         ts = str(timestamp or "").strip()
         if not ts:
             return ""
+        if "/" in ts or "\\" in ts:
+            return os.path.basename(ts.replace("\\", "/"))
         if model_kind == "locator":
             return f"locator_{ts}.pth"
         if model_kind == "segmenter":
@@ -285,11 +378,25 @@ class MainWindowModelManagementMixin:
     def _locator_model_path(self, timestamp):
         if not self.engine or not timestamp:
             return None
+        if "/" in str(timestamp) or "\\" in str(timestamp):
+            path = os.path.abspath(
+                os.path.join(self.engine.weights_dir, *str(timestamp).replace("\\", "/").split("/"))
+            )
+            if os.path.normcase(os.path.commonpath([self.engine.weights_dir, path])) != os.path.normcase(os.path.abspath(self.engine.weights_dir)):
+                return None
+            return path
         return os.path.join(self.engine.weights_dir, f"locator_{timestamp}.pth")
 
     def _segmenter_model_path(self, timestamp):
         if not self.engine or not timestamp:
             return None
+        if "/" in str(timestamp) or "\\" in str(timestamp):
+            path = os.path.abspath(
+                os.path.join(self.engine.weights_dir, *str(timestamp).replace("\\", "/").split("/"))
+            )
+            if os.path.normcase(os.path.commonpath([self.engine.weights_dir, path])) != os.path.normcase(os.path.abspath(self.engine.weights_dir)):
+                return None
+            return path
         return os.path.join(self.engine.weights_dir, f"sam_decoder_lora_{timestamp}.pth")
 
     def _apply_locator_selection_to_runtime(self, *, log_change=False):
@@ -306,7 +413,20 @@ class MainWindowModelManagementMixin:
                 self.log(tr("Locator reset to base (untrained).", self.current_lang))
             return
 
-        self.engine.load_locator(ts)
+        checkpoint_path = self._locator_model_path(ts)
+        if "/" in ts or "\\" in ts:
+            checkpoint_path = self._verified_managed_model_path(ts, "locator")
+            if not checkpoint_path:
+                QMessageBox.critical(
+                    self,
+                    tr("Model verification failed", self.current_lang),
+                    tr(
+                        "This managed Locator no longer matches its successful training record and was not loaded.",
+                        self.current_lang,
+                    ),
+                )
+                return
+        self.engine.load_locator(ts, checkpoint_path=checkpoint_path)
         if log_change:
             locator_label = self._selected_locator_display_text() or ts
             self.log(tr("Locator switched to: {0}", self.current_lang).format(locator_label))
@@ -349,7 +469,20 @@ class MainWindowModelManagementMixin:
                 self.log(tr("Segmenter switched to: Base SAM (Original)", self.current_lang))
             return
 
-        self.engine.load_sam_decoder(ts)
+        checkpoint_path = self._segmenter_model_path(ts)
+        if "/" in ts or "\\" in ts:
+            checkpoint_path = self._verified_managed_model_path(ts, "segmenter")
+            if not checkpoint_path:
+                QMessageBox.critical(
+                    self,
+                    tr("Model verification failed", self.current_lang),
+                    tr(
+                        "This managed SAM decoder no longer matches its successful training record and was not loaded.",
+                        self.current_lang,
+                    ),
+                )
+                return
+        self.engine.load_sam_decoder(ts, checkpoint_path=checkpoint_path)
         if self.sam_worker:
             weights_path = self._segmenter_model_path(ts)
             if weights_path:
@@ -360,13 +493,13 @@ class MainWindowModelManagementMixin:
     def update_model_delete_button_states(self, *_):
         locator_ts = self._selected_locator_timestamp()
         locator_path = self._locator_model_path(locator_ts)
-        can_edit_locator = bool(locator_path and os.path.exists(locator_path))
+        can_edit_locator = bool(locator_path and os.path.exists(locator_path) and "/" not in str(locator_ts) and "\\" not in str(locator_ts))
         self.btn_del_locator.setEnabled(can_edit_locator)
         self.btn_note_locator.setEnabled(can_edit_locator)
 
         segmenter_ts = self._selected_segmenter_timestamp()
         segmenter_path = self._segmenter_model_path(segmenter_ts)
-        can_edit_segmenter = bool(segmenter_path and os.path.exists(segmenter_path))
+        can_edit_segmenter = bool(segmenter_path and os.path.exists(segmenter_path) and "/" not in str(segmenter_ts) and "\\" not in str(segmenter_ts))
         self.btn_del_segmenter.setEnabled(can_edit_segmenter)
         self.btn_note_segmenter.setEnabled(can_edit_segmenter)
 
@@ -530,7 +663,12 @@ class MainWindowModelManagementMixin:
             self.engine.loaded_locator_is_legacy_512 = False
         ts = self._selected_locator_timestamp()
         if ts:
-            self.engine.load_locator(ts)
+            checkpoint_path = self._locator_model_path(ts)
+            if "/" in ts or "\\" in ts:
+                checkpoint_path = self._verified_managed_model_path(ts, "locator")
+                if not checkpoint_path:
+                    return False
+            self.engine.load_locator(ts, checkpoint_path=checkpoint_path)
         else:
             self.engine.ensure_locator_loaded()
         return True

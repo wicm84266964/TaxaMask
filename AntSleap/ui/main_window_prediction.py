@@ -150,7 +150,17 @@ class MainWindowPredictionMixin:
                 if xs and ys:
                     auto_box = [float(min(xs)), float(min(ys)), float(max(xs)), float(max(ys))]
 
-            self.project.update_label(image_path, part_name, points, "Auto-Annotated", auto_box=auto_box, save=False)
+            self.project.update_label(
+                image_path,
+                part_name,
+                points,
+                "Auto-Annotated",
+                auto_box=auto_box,
+                save=False,
+                training_source=source,
+                training_review_status="draft",
+                training_accepted_via="",
+            )
             if auto_box:
                 update_auto_box = getattr(self.project, "update_auto_box", None)
                 if callable(update_auto_box):
@@ -181,6 +191,12 @@ class MainWindowPredictionMixin:
         self.log(tr("Running inference on: {0}...", self.current_lang).format(os.path.basename(self.current_image)))
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
+            prediction_context = dict(self._active_model_profile_context() or {})
+            get_image_uid = getattr(self.project, "get_image_uid", None)
+            if callable(get_image_uid):
+                prediction_context["image_uid"] = str(
+                    get_image_uid(self.current_image) or ""
+                )
             ps = self.engine.predict_full_pipeline(
                 image_path=self.current_image,
                 current_taxonomy=self.project.project_data["taxonomy"],
@@ -191,7 +207,7 @@ class MainWindowPredictionMixin:
                 noise_floor=self.inf_noise_floor,
                 poly_epsilon=self.inf_poly_epsilon,
                 project_route_manifest=self._active_project_route_manifest(),
-                model_profile_context=self._active_model_profile_context(),
+                model_profile_context=prediction_context,
             )
             count, total_detected = self._apply_prediction_to_project(
                 self.current_image,
@@ -212,6 +228,14 @@ class MainWindowPredictionMixin:
             self._refresh_blink_refine_state()
             self._log_route_usage_summary(ps, self.current_image)
             self.log(tr("Inference complete. Detected {0} parts, saved {1} new labels.", self.current_lang).format(total_detected, count))
+        except Exception as exc:
+            message = tr("Inference failed: {0}", self.current_lang).format(str(exc))
+            self.log(message)
+            QMessageBox.critical(
+                self,
+                tr("Error", self.current_lang),
+                message,
+            )
         finally:
             QApplication.restoreOverrideCursor()
 
@@ -449,6 +473,24 @@ class MainWindowPredictionMixin:
                 self.btn_batch.setEnabled(True)
                 self.btn_predict.setEnabled(True)
 
+            def on_batch_error(image_path, error_message):
+                if not self._project_task_context_matches(task_context):
+                    self._log_stale_project_task_result(
+                        "batch_inference_error", task_context
+                    )
+                    return
+                message = tr(
+                    "Batch inference failed for {0}: {1}",
+                    self.current_lang,
+                ).format(os.path.basename(image_path), error_message)
+                self.log(message)
+                QMessageBox.critical(
+                    self,
+                    tr("Error", self.current_lang),
+                    message,
+                )
+
             self.inf_thread.result_signal.connect(on_batch_res)
+            self.inf_thread.error_signal.connect(on_batch_error)
             self.inf_thread.finished_signal.connect(on_batch_finished)
             self.inf_thread.start()

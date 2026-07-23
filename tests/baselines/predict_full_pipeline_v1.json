@@ -1,0 +1,264 @@
+{
+  "schema_version": "taxamask_predict_full_pipeline_baseline_v1",
+  "status": "frozen",
+  "fixture": {
+    "kind": "synthetic_rgb_image_and_fixed_mocks",
+    "contains_private_data": false,
+    "locator_size": [64, 64]
+  },
+  "tolerances": {
+    "float_abs": 0.000001,
+    "geometry_abs": 0.0001,
+    "relative": 0.0
+  },
+  "measurement_protocol": {
+    "scenario": "normal_locator_weak_peak_expert_accepted_sam_success",
+    "warmup_runs": 1,
+    "measured_runs": 5,
+    "timing_statistic": "median_elapsed_ms",
+    "log_metrics": ["line_count", "utf8_bytes", "lines"],
+    "performance_gate": "comparison_only",
+    "note": "Timing is recorded for before/after comparison. It is not an absolute pass/fail threshold across machines."
+  },
+  "reference_observation": {
+    "captured_on": "2026-07-18",
+    "environment": "taxamask conda environment, CPU, synthetic image and fixed mocks",
+    "elapsed_samples_ms": [
+      0.5529000045498833,
+      0.5118999979458749,
+      0.4920000064885244,
+      0.5778000049758703,
+      0.5053000058978796
+    ],
+    "median_elapsed_ms": 0.5118999979458749,
+    "log": {
+      "line_count": 1,
+      "utf8_bytes": 53,
+      "lines": ["DEBUG: Part 'Mesosoma' skipped. Peak 0.0500 < 0.1500"]
+    },
+    "absolute_performance_gate": false
+  },
+  "scenarios": {
+    "normal_locator_weak_peak_expert_accepted_sam_success": {
+      "result": {
+        "polygons": {
+          "Head": [[2.0, 3.0], [12.0, 3.0], [12.0, 13.0], [2.0, 13.0]],
+          "Mandible": [[37.0, 19.0], [47.0, 19.0], [47.0, 29.0], [37.0, 29.0]]
+        },
+        "auto_boxes": {
+          "Head": [35.99999979138374, 16.875, 64.00000020861626, 51.875],
+          "Mandible": [40.0, 25.0, 58.0, 45.0]
+        },
+        "scores": {"Head": 0.875, "Mandible": 0.82},
+        "meta": {
+          "image_size": [100.0, 80.0],
+          "conf_thresh": 0.1,
+          "adapt_thresh": 0.4,
+          "noise_floor": 0.15,
+          "locator_size": [64, 64],
+          "locator_resolution_label": "64x64",
+          "project_taxonomy": ["Head", "Mesosoma", "Mandible"],
+          "locator_scope": ["Head", "Mesosoma"],
+          "cascade_requested": true,
+          "cascade_enabled": true,
+          "cascade_routes_ready": true,
+          "cascade_route_source": "project",
+          "cascade_route_manifest_version": "pipeline-baseline-v1",
+          "model_profile_id": "pipeline-baseline-profile",
+          "parent_backend": "builtin_locator_sam",
+          "cascade_applied_count": 1,
+          "cascade_attempted_routes": ["Head->Mandible [Mandible/baseline-v1.pth]"],
+          "cascade_applied_routes": ["Head->Mandible [Mandible/baseline-v1.pth]"],
+          "cascade_block_reasons": {},
+          "cascade_route_backends": ["Head->Mandible:vit_b_blink"],
+          "cascade_route_manifests": ["experts/mandible_v1.json"]
+        }
+      },
+      "polygon_summary": {
+        "Head": {"vertex_count": 4, "bounds": [2.0, 3.0, 12.0, 13.0], "area": 100.0},
+        "Mandible": {"vertex_count": 4, "bounds": [37.0, 19.0, 47.0, 29.0], "area": 100.0}
+      },
+      "sam_calls": [
+        {
+          "crop_size": [100, 80],
+          "prompt_box": [35.99999979138374, 16.875, 64.00000020861626, 51.875],
+          "raw_mask_summary": {"vertex_count": 4, "bounds": [2.0, 3.0, 12.0, 13.0], "area": 100.0}
+        },
+        {
+          "crop_size": [30, 36],
+          "prompt_box": [5.0, 9.0, 23.0, 29.0],
+          "raw_mask_summary": {"vertex_count": 4, "bounds": [2.0, 3.0, 12.0, 13.0], "area": 100.0}
+        }
+      ],
+      "expert_calls": [
+        {
+          "image_name": "synthetic_specimen.png",
+          "parent_box": [35.99999979138374, 16.875, 64.00000020861626, 51.875],
+          "parent_part": "Head",
+          "child_part": "Mandible"
+        }
+      ]
+    },
+    "expert_rejected": {
+      "result": {
+        "polygons": {"Head": [[2.0, 3.0], [12.0, 3.0], [12.0, 13.0], [2.0, 13.0]]},
+        "auto_boxes": {"Head": [35.99999979138374, 16.875, 64.00000020861626, 51.875]},
+        "scores": {"Head": 0.875},
+        "meta": {
+          "image_size": [100.0, 80.0],
+          "conf_thresh": 0.1,
+          "adapt_thresh": 0.4,
+          "noise_floor": 0.15,
+          "locator_size": [64, 64],
+          "locator_resolution_label": "64x64",
+          "project_taxonomy": ["Head", "Mandible"],
+          "locator_scope": ["Head"],
+          "cascade_requested": true,
+          "cascade_enabled": true,
+          "cascade_routes_ready": true,
+          "cascade_route_source": "project",
+          "cascade_route_manifest_version": "pipeline-baseline-v1",
+          "model_profile_id": "pipeline-baseline-profile",
+          "parent_backend": "builtin_locator_sam",
+          "cascade_applied_count": 0,
+          "cascade_attempted_routes": ["Head->Mandible [Mandible/baseline-v1.pth]"],
+          "cascade_applied_routes": [],
+          "cascade_block_reasons": {"Mandible": "confidence_below_gate"},
+          "cascade_route_backends": ["Head->Mandible:vit_b_blink"],
+          "cascade_route_manifests": ["experts/mandible_v1.json"]
+        }
+      },
+      "polygon_summary": {
+        "Head": {"vertex_count": 4, "bounds": [2.0, 3.0, 12.0, 13.0], "area": 100.0}
+      },
+      "sam_calls": [
+        {
+          "crop_size": [100, 80],
+          "prompt_box": [35.99999979138374, 16.875, 64.00000020861626, 51.875],
+          "raw_mask_summary": {"vertex_count": 4, "bounds": [2.0, 3.0, 12.0, 13.0], "area": 100.0}
+        }
+      ],
+      "expert_calls": [
+        {
+          "image_name": "synthetic_specimen.png",
+          "parent_box": [35.99999979138374, 16.875, 64.00000020861626, 51.875],
+          "parent_part": "Head",
+          "child_part": "Mandible"
+        }
+      ]
+    },
+    "sam_failure": {
+      "result": {
+        "polygons": {},
+        "auto_boxes": {"Head": [35.99999979138374, 16.875, 64.00000020861626, 51.875]},
+        "scores": {"Head": 0.875},
+        "meta": {
+          "image_size": [100.0, 80.0],
+          "conf_thresh": 0.1,
+          "adapt_thresh": 0.4,
+          "noise_floor": 0.15,
+          "locator_size": [64, 64],
+          "locator_resolution_label": "64x64",
+          "project_taxonomy": ["Head"],
+          "locator_scope": ["Head"],
+          "cascade_requested": false,
+          "cascade_enabled": false,
+          "cascade_routes_ready": false,
+          "cascade_route_source": "none",
+          "cascade_route_manifest_version": "",
+          "model_profile_id": "pipeline-baseline-profile",
+          "parent_backend": "builtin_locator_sam",
+          "cascade_applied_count": 0,
+          "cascade_attempted_routes": [],
+          "cascade_applied_routes": [],
+          "cascade_block_reasons": {},
+          "cascade_route_backends": [],
+          "cascade_route_manifests": []
+        }
+      },
+      "polygon_summary": {},
+      "sam_calls": [
+        {
+          "crop_size": [100, 80],
+          "prompt_box": [35.99999979138374, 16.875, 64.00000020861626, 51.875],
+          "raw_mask_summary": null
+        }
+      ],
+      "expert_calls": []
+    },
+    "invalid_locator_box_size_is_sanitized": {
+      "result": {
+        "polygons": {"Head": [[2.0, 3.0], [12.0, 3.0], [12.0, 13.0], [2.0, 13.0]]},
+        "auto_boxes": {"Head": [39.0625, 23.4375, 60.9375, 45.3125]},
+        "scores": {"Head": 0.75},
+        "meta": {
+          "image_size": [100.0, 80.0],
+          "conf_thresh": 0.1,
+          "adapt_thresh": 0.4,
+          "noise_floor": 0.15,
+          "locator_size": [64, 64],
+          "locator_resolution_label": "64x64",
+          "project_taxonomy": ["Head"],
+          "locator_scope": ["Head"],
+          "cascade_requested": false,
+          "cascade_enabled": false,
+          "cascade_routes_ready": false,
+          "cascade_route_source": "none",
+          "cascade_route_manifest_version": "",
+          "model_profile_id": "pipeline-baseline-profile",
+          "parent_backend": "builtin_locator_sam",
+          "cascade_applied_count": 0,
+          "cascade_attempted_routes": [],
+          "cascade_applied_routes": [],
+          "cascade_block_reasons": {},
+          "cascade_route_backends": [],
+          "cascade_route_manifests": []
+        }
+      },
+      "polygon_summary": {
+        "Head": {"vertex_count": 4, "bounds": [2.0, 3.0, 12.0, 13.0], "area": 100.0}
+      },
+      "sam_calls": [
+        {
+          "crop_size": [100, 80],
+          "prompt_box": [39.0625, 23.4375, 60.9375, 45.3125],
+          "raw_mask_summary": {"vertex_count": 4, "bounds": [2.0, 3.0, 12.0, 13.0], "area": 100.0}
+        }
+      ],
+      "expert_calls": []
+    },
+    "crop_too_small": {
+      "result": {
+        "polygons": {},
+        "auto_boxes": {},
+        "scores": {},
+        "meta": {
+          "image_size": [1.0, 1.0],
+          "conf_thresh": 0.1,
+          "adapt_thresh": 0.4,
+          "noise_floor": 0.15,
+          "locator_size": [64, 64],
+          "locator_resolution_label": "64x64",
+          "project_taxonomy": ["Head"],
+          "locator_scope": ["Head"],
+          "cascade_requested": false,
+          "cascade_enabled": false,
+          "cascade_routes_ready": false,
+          "cascade_route_source": "none",
+          "cascade_route_manifest_version": "",
+          "model_profile_id": "pipeline-baseline-profile",
+          "parent_backend": "builtin_locator_sam",
+          "cascade_applied_count": 0,
+          "cascade_attempted_routes": [],
+          "cascade_applied_routes": [],
+          "cascade_block_reasons": {},
+          "cascade_route_backends": [],
+          "cascade_route_manifests": []
+        }
+      },
+      "polygon_summary": {},
+      "sam_calls": [],
+      "expert_calls": []
+    }
+  }
+}

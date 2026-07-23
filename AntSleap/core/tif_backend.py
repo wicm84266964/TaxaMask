@@ -14,6 +14,11 @@ from .tif_project import TifProjectManager
 from .tif_export import export_tif_part_training_dataset, export_tif_training_dataset
 from .tif_volume_io import copy_volume_sidecar, read_volume_metadata, volume_sidecar_exists
 from .tif_write_guard import WriteIntent, ensure_write_allowed
+from .training_run_recorder import TrainingRunRecorder
+from .training_run_tif import (
+    DEFAULT_TIF_TRAINING_SEED,
+    attach_tif_training_evidence,
+)
 
 
 TIF_BACKEND_CONTRACT_SCHEMA_VERSION = "ant3d_tif_backend_contract_v1"
@@ -59,6 +64,29 @@ def _strip_shell_quotes(value):
     if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
         return text[1:-1]
     return text
+
+
+def _validate_training_split_receipt(contract, result, effective_config):
+    expected = ((contract.get("training_split") or {}).get("assignments") or [])
+    receipt = result.get("training_split")
+    actual = (receipt or {}).get("assignments") if isinstance(receipt, dict) else None
+    if not isinstance(actual, list):
+        raise ValueError("tif_backend_training_split_receipt_missing")
+
+    def canonical(items):
+        return sorted(
+            [json.dumps(item, ensure_ascii=False, sort_keys=True) for item in items]
+        )
+
+    if canonical(actual) != canonical(expected):
+        raise ValueError("tif_backend_training_split_receipt_mismatch")
+    execution_kind = str((effective_config or {}).get("execution_kind") or "")
+    status = str(receipt.get("status") or "")
+    if execution_kind in {"contract_smoke", "backend_dry_run"}:
+        if status not in {"applied", "not_executed"}:
+            raise ValueError("tif_backend_training_split_receipt_status_invalid")
+    elif status != "applied":
+        raise ValueError("tif_backend_training_split_not_applied")
 
 
 def _is_generic_python_command(value):
@@ -456,6 +484,16 @@ class TifBackendRunner:
 
     def run_action(self, action, specimen_ids=None, dataset_dir="", model_manifest="", part_refs=None, input_scope="auto", progress_callback=None, cancel_check=None):
         self.backend_config = normalize_tif_backend_runtime_config(self.backend_config, action=action)
+        if action == "train":
+            return self._run_training_action(
+                specimen_ids=specimen_ids,
+                dataset_dir=dataset_dir,
+                model_manifest=model_manifest,
+                part_refs=part_refs,
+                input_scope=input_scope,
+                progress_callback=progress_callback,
+                cancel_check=cancel_check,
+            )
         run_id, run_dir = self.create_run_dir(action)
         self.last_run_id = run_id
         self.last_run_dir = os.path.abspath(run_dir)
@@ -536,6 +574,211 @@ class TifBackendRunner:
             "imported": imported,
         }
 
+    def _training_sample_specs(self, contract):
+        specs = []
+        if contract.get("input_scope") == "part_reslice":
+            for sample in contract.get("part_samples", []) or []:
+                specimen_id = str(sample.get("specimen_id") or "")
+                part_id = str(sample.get("part_id") or "")
+                reslice_id = str(sample.get("reslice_id") or "")
+                specs.append(
+                    {
+                        "sample_id": str(sample.get("sample_id") or ""),
+                        "group_id": specimen_id,
+                        "owner_keys": [
+                            f"reslice.{specimen_id}.{part_id}.{reslice_id}.image",
+                            f"reslice.{specimen_id}.{part_id}.{reslice_id}.manual_truth",
+                        ],
+                    }
+                )
+        else:
+            for sample in contract.get("specimens", []) or []:
+                specimen_id = str(sample.get("specimen_id") or "")
+                specs.append(
+                    {
+                        "sample_id": specimen_id,
+                        "group_id": specimen_id,
+                        "owner_keys": [
+                            f"specimen.{specimen_id}.working",
+                            f"specimen.{specimen_id}.manual_truth",
+                        ],
+                    }
+                )
+        return specs
+
+    def _training_backend_facts(self):
+        backend_id = str(self.backend_config.get("backend_id") or "custom_tif_backend")
+        return {
+            "backend_id": (
+                "tif_external_nnunet"
+                if backend_id == TIF_NNUNET_V2_BACKEND_ID
+                else "tif_external"
+            ),
+            "backend_version": "1.0",
+            "adapter_id": _safe_id(backend_id),
+            "adapter_version": "1.0",
+        }
+
+    def _pending_training_config(self, contract):
+        backend_id = str(contract.get("backend_id") or "")
+        return {
+            "resolution_status": "pending_external",
+            "adapter_invocation": {
+                "backend_id": _safe_id(backend_id),
+                "input_scope": str(contract.get("input_scope") or ""),
+                "sample_count": len(self._training_sample_specs(contract)),
+                "random_seed": DEFAULT_TIF_TRAINING_SEED,
+            },
+            "persist_weights": backend_id != "taxamask_tif_trainer_backend",
+        }
+
+    def _index_training_artifacts(self, run, contract_path, contract, result):
+        candidates = [
+            ("backend_contract", "backend_contract", contract_path, "application/json"),
+            ("backend_result", "backend_result", contract["result_json"], "application/json"),
+        ]
+        for name in ("train_stdout.log", "train_stderr.log"):
+            path = os.path.join(contract["run_dir"], "logs", name)
+            if os.path.isfile(path):
+                candidates.append(
+                    (f"training_{name.split('.')[0]}", "training_log", path, "text/plain")
+                )
+        persist_weights = bool((result.get("effective_config") or {}).get("persist_weights", True))
+        type_counts = {}
+        for artifact in result.get("artifacts", []) or []:
+            if not isinstance(artifact, dict) or not artifact.get("path"):
+                continue
+            artifact_type = _safe_id(artifact.get("type") or "backend_artifact")
+            type_counts[artifact_type] = type_counts.get(artifact_type, 0) + 1
+            artifact_id = f"{artifact_type}_{type_counts[artifact_type]:03d}"
+            role = {
+                "model_manifest": "model_manifest",
+                "model_output_dir": "output_weights" if persist_weights else "model_output",
+                "dataset_manifest": "training_dataset_manifest",
+                "nnunet_dataset_dir": "training_dataset_snapshot",
+                "nnunet_command_log": "training_log",
+            }.get(artifact_type, "backend_artifact")
+            media_type = {
+                "json": "application/json",
+                "text": "text/plain",
+                "directory": "application/x-directory",
+            }.get(str(artifact.get("format") or ""), "application/octet-stream")
+            candidates.append(
+                (artifact_id, role, self._artifact_abs_path(result, artifact["path"]), media_type)
+            )
+        seen = set()
+        run_root = os.path.abspath(contract["run_dir"])
+        for artifact_id, role, path, media_type in candidates:
+            path = os.path.abspath(path)
+            if path in seen or not os.path.exists(path):
+                continue
+            seen.add(path)
+            try:
+                inside = os.path.normcase(os.path.commonpath([run_root, path])) == os.path.normcase(run_root)
+            except ValueError:
+                inside = False
+            if not inside:
+                raise ValueError(f"tif_training_artifact_outside_run:{artifact_id}")
+            run.add_artifact(
+                artifact_id=artifact_id,
+                role=role,
+                path=path,
+                path_base="run_root",
+                media_type=media_type,
+            )
+
+    def _run_training_action(self, *, specimen_ids, dataset_dir, model_manifest, part_refs, input_scope, progress_callback, cancel_check):
+        recorder = TrainingRunRecorder(
+            self.runs_root,
+            database_path=self.project_manager.current_database_path,
+        )
+        entrypoint = (
+            "tif_external_nnunet"
+            if self.backend_config.get("backend_id") == TIF_NNUNET_V2_BACKEND_ID
+            else "tif_external"
+        )
+        run = recorder.create_pending(entrypoint)
+        run_id, run_dir = run.run_id, run.run_dir
+        self.last_run_id = run_id
+        self.last_run_dir = run_dir
+        self.last_result_json = os.path.join(run_dir, "result.json")
+        for child in ("outputs", "logs"):
+            os.makedirs(os.path.join(run_dir, child), exist_ok=True)
+        try:
+            _emit_progress(progress_callback, 0, 100, f"Creating train run...\nRun folder: {run_dir}")
+            if _cancel_requested(cancel_check):
+                raise RuntimeError("tif_backend_train_cancelled")
+            contract = self.build_contract(
+                "train",
+                specimen_ids,
+                run_id,
+                run_dir,
+                dataset_dir,
+                model_manifest,
+                part_refs=part_refs,
+                input_scope=input_scope,
+            )
+            pending_config = self._pending_training_config(contract)
+            contract["training_config"] = dict(pending_config)
+            attach_tif_training_evidence(
+                run,
+                self.project_manager,
+                sample_specs=self._training_sample_specs(contract),
+                effective_config=pending_config,
+                backend=self._training_backend_facts(),
+                compute_device="external_backend",
+                deferred_effective_config=True,
+            )
+            split_payload = _read_json(
+                os.path.join(run_dir, "split_manifest.json")
+            )
+            contract["training_split"] = {
+                "schema_version": split_payload.get("schema_version"),
+                "strategy": split_payload.get("strategy"),
+                "assignments": split_payload.get("assignments"),
+            }
+            contract_path = self.write_contract(contract)
+            command = self.backend_config.get("train_command", "").strip()
+            if not command:
+                raise ValueError("tif_backend_train_command_missing")
+            self._run_command(
+                command,
+                contract_path,
+                run_dir,
+                "train",
+                progress_callback=progress_callback,
+                cancel_check=cancel_check,
+            )
+            result = self.read_result(contract["result_json"])
+            effective_config = result.get("effective_config")
+            if not isinstance(effective_config, dict):
+                raise ValueError("tif_backend_effective_config_missing")
+            _validate_training_split_receipt(
+                contract, result, effective_config
+            )
+            run.resolve_external_effective_config(effective_config)
+            self._index_training_artifacts(run, contract_path, contract, result)
+            self._register_run(contract, result)
+            run.succeed()
+            _emit_progress(progress_callback, 100, 100, f"Finished train run: {run_dir}")
+            return {
+                "run_id": run_id,
+                "run_dir": run_dir,
+                "contract_json": contract_path,
+                "contract": contract,
+                "result": result,
+                "imported": [],
+            }
+        except BaseException as exc:
+            if run.status in {"pending", "running"}:
+                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                    run.interrupt(stage="tif_external_training")
+                elif "cancelled" in str(exc).lower():
+                    run.cancel(stage="tif_external_training")
+                else:
+                    run.fail(exc, stage="tif_external_training")
+            raise
+
     def read_result(self, result_json):
         result = _read_json(result_json)
         result["_result_json"] = os.path.abspath(result_json)
@@ -564,9 +807,17 @@ class TifBackendRunner:
             if not volume_sidecar_exists(source_path):
                 raise FileNotFoundError(source_path)
             source_meta = read_volume_metadata(source_path)
+            source_model_ref = result.get("provenance", {}).get("model_manifest", "")
+            source_model = (
+                self.project_manager.to_relative(
+                    self._artifact_abs_path(result, source_model_ref)
+                )
+                if source_model_ref
+                else ""
+            )
             audit_metadata = {
                 "prediction_id": artifact.get("prediction_id") or result.get("run_id") or "",
-                "source_model": result.get("provenance", {}).get("model_manifest", ""),
+                "source_model": source_model,
                 "run_id": result.get("run_id", ""),
                 "result_json": result.get("_result_json", ""),
             }
@@ -645,7 +896,7 @@ class TifBackendRunner:
                         source_meta["dtype"],
                         status="raw_backup",
                         prediction_id=prediction_id,
-                        source_model=result.get("provenance", {}).get("model_manifest", ""),
+                        source_model=source_model,
                         spacing_zyx=source_meta.get("spacing_zyx"),
                         spacing_unit=source_meta.get("spacing_unit", "micrometer"),
                         orientation=source_meta.get("orientation", "local_axis_reslice"),
@@ -663,7 +914,7 @@ class TifBackendRunner:
                         source_meta["dtype"],
                         status="pending_review",
                         prediction_id=prediction_id,
-                        source_model=result.get("provenance", {}).get("model_manifest", ""),
+                        source_model=source_model,
                         spacing_zyx=source_meta.get("spacing_zyx"),
                         spacing_unit=source_meta.get("spacing_unit", "micrometer"),
                         orientation=source_meta.get("orientation", "local_axis_reslice"),
@@ -681,7 +932,7 @@ class TifBackendRunner:
                         source_meta["dtype"],
                         status="raw_backup",
                         prediction_id=prediction_id,
-                        source_model=result.get("provenance", {}).get("model_manifest", ""),
+                        source_model=source_model,
                         spacing_zyx=source_meta.get("spacing_zyx"),
                         spacing_unit=source_meta.get("spacing_unit", "micrometer"),
                         orientation=source_meta.get("orientation", "unknown"),
@@ -698,7 +949,7 @@ class TifBackendRunner:
                         source_meta["dtype"],
                         status="pending_review",
                         prediction_id=prediction_id,
-                        source_model=result.get("provenance", {}).get("model_manifest", ""),
+                        source_model=source_model,
                         spacing_zyx=source_meta.get("spacing_zyx"),
                         spacing_unit=source_meta.get("spacing_unit", "micrometer"),
                         orientation=source_meta.get("orientation", "unknown"),
@@ -812,7 +1063,7 @@ class TifBackendRunner:
                 source_meta["shape_zyx"],
                 source_meta["dtype"],
                 prediction_id=prediction_id,
-                source_model=result.get("provenance", {}).get("model_manifest", ""),
+                source_model=source_model,
                 spacing_zyx=source_meta.get("spacing_zyx"),
                 spacing_unit=source_meta.get("spacing_unit", "micrometer"),
                 orientation=source_meta.get("orientation", "unknown"),
@@ -1008,6 +1259,10 @@ class TifBackendRunner:
         if contract.get("action") == "train":
             manifest = result.get("provenance", {}).get("model_manifest") or contract.get("model_manifest")
             if manifest:
+                manifest = self._artifact_abs_path(result, manifest)
+                dataset_manifest = result.get("provenance", {}).get("dataset_manifest", "")
+                if dataset_manifest:
+                    dataset_manifest = self._artifact_abs_path(result, dataset_manifest)
                 self.project_manager.register_tif_segmentation_model_from_manifest(
                     manifest,
                     {
@@ -1015,7 +1270,7 @@ class TifBackendRunner:
                         "run_id": contract.get("run_id"),
                         "run_dir": contract.get("run_dir"),
                         "result_json": contract.get("result_json"),
-                        "dataset_manifest": result.get("provenance", {}).get("dataset_manifest", ""),
+                        "dataset_manifest": dataset_manifest,
                         "training_samples": ((result.get("metrics") or {}).get("summary") or {}).get("training_samples", 0),
                         "usable_for_research_prediction": result.get("provenance", {}).get("usable_for_research_prediction", True),
                     },
@@ -1183,5 +1438,28 @@ def write_mock_tif_backend_result(contract, prediction_arrays=None):
             "input_label_role": "manual_truth" if action in {"prepare_dataset", "train"} else "none",
         },
     }
+    if action == "train":
+        samples = list(contract.get("part_samples") or contract.get("specimens") or [])
+        shape = list((samples[0].get("input_volume") or {}).get("shape_zyx") or []) if samples else []
+        invocation = (contract.get("training_config") or {}).get("adapter_invocation") or {}
+        result["effective_config"] = {
+            "epochs": 0,
+            "batch_size": 0,
+            "learning_rate": 0.0,
+            "weight_decay": 0.0,
+            "random_seed": int(invocation.get("random_seed", 0)),
+            "input_resolution": shape if len(shape) in {2, 3} else [1, 1, 1],
+            "preprocessing": {"adapter": "mock_tif_backend", "optimization_performed": False},
+            "model": {"family": "mock_tif_backend", "version": "1"},
+            "loss_weights": {},
+            "persist_weights": False,
+            "execution_kind": "contract_smoke",
+        }
+        result["training_split"] = {
+            "status": "not_executed",
+            "assignments": list(
+                (contract.get("training_split") or {}).get("assignments") or []
+            ),
+        }
     _write_json(contract["result_json"], result)
     return result

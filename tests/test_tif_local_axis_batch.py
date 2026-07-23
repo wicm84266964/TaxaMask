@@ -4,15 +4,19 @@ from pathlib import Path
 
 import numpy as np
 
+from AntSleap.core.tif_export import export_tif_part_training_dataset
 from AntSleap.core.tif_local_axis_baseline import (
     add_baseline_local_frame_proposal,
     add_baseline_local_frame_proposals,
 )
 from AntSleap.core.tif_local_axis_batch import (
+    LOCAL_AXIS_RISK_RANKING_VERSION,
     accept_local_frame_proposal,
     batch_export_accepted_reslices,
+    compare_local_axis_review_orders,
     list_local_axis_queue,
     proposal_to_reslice_payload,
+    update_proposal_status,
 )
 from AntSleap.core.tif_local_axis_reslice import compute_local_frame
 from AntSleap.core.tif_part_extraction import crop_volume_to_part
@@ -122,12 +126,184 @@ class TifLocalAxisBatchTests(unittest.TestCase):
             )
 
             hard_rows = list_local_axis_queue(manager, {"status": "hard_cases", "model_version": "v2"})
+            risk_rows = list_local_axis_queue(manager, {"status": "all"})
             sorted_rows = list_local_axis_queue(manager, {"status": "all", "sort": "confidence_asc"})
             version_rows = list_local_axis_queue(manager, {"status": "all", "model_version": "v2"})
 
             self.assertEqual([row["proposal_id"] for row in hard_rows], ["frame_002"])
+            self.assertEqual(risk_rows[0]["proposal_id"], "frame_002")
+            self.assertEqual(risk_rows[0]["risk_tier"], "high")
+            self.assertGreater(risk_rows[0]["risk_score"], risk_rows[1]["risk_score"])
             self.assertEqual(sorted_rows[0]["proposal_id"], "frame_002")
             self.assertEqual([row["kind"] for row in version_rows], ["local_frame_proposal"])
+
+    def test_risk_components_include_active_model_version_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = make_project_with_frame_proposal(Path(tmp))
+            manager.register_local_axis_model(
+                {
+                    "model_id": "active_axis_model",
+                    "model_version": "v3",
+                    "model_type": "local_frame",
+                },
+                save=False,
+            )
+            manager.project_data.setdefault("view_settings", {})[
+                "local_axis_active_model_id"
+            ] = "active_axis_model"
+            proposal = manager.get_local_frame_proposal(
+                "01-0101-batch",
+                "head",
+                "frame_001",
+            )
+            proposal["model_version"] = "v2"
+            manager.save_project()
+
+            row = list_local_axis_queue(
+                manager,
+                {"status": "proposed", "sort": "risk_priority"},
+            )[0]
+
+            self.assertEqual(
+                row["risk_ranking_version"],
+                LOCAL_AXIS_RISK_RANKING_VERSION,
+            )
+            self.assertEqual(
+                row["risk_score_interpretation"],
+                "review_priority_not_error_probability",
+            )
+            self.assertIn(
+                "model_version_mismatch:v2!=v3",
+                row["risk_reasons"],
+            )
+            self.assertEqual(
+                row["risk_components"]["model_version_mismatch_weight"],
+                20.0,
+            )
+            self.assertEqual(row["risk_reference_model_id"], "active_axis_model")
+
+    def test_sorting_and_accepting_selected_axis_do_not_bypass_manual_truth_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = make_project_with_frame_proposal(root)
+            manager.add_local_frame_proposal(
+                "01-0101-batch",
+                "head",
+                {
+                    "frame_proposal_id": "frame_002",
+                    "template_id": "head",
+                    "origin_zyx": [1.5, 1.5, 2.0],
+                    "output_axis_start_zyx": [0.0, 1.5, 2.0],
+                    "output_axis_end_zyx": [3.0, 1.5, 2.0],
+                    "confidence": 0.1,
+                    "model_version": "v2",
+                    "hard_case_flags": ["low_confidence"],
+                },
+            )
+
+            sorted_rows = list_local_axis_queue(manager, {"status": "all", "sort": "confidence_asc"})
+            self.assertEqual(sorted_rows[0]["proposal_id"], "frame_002")
+            self.assertEqual(
+                manager.get_local_frame_proposal("01-0101-batch", "head", "frame_001")["status"],
+                "proposed",
+            )
+            self.assertEqual(
+                manager.get_local_frame_proposal("01-0101-batch", "head", "frame_002")["status"],
+                "proposed",
+            )
+
+            accepted = update_proposal_status(
+                manager,
+                "frame_002",
+                "accepted",
+                reviewer_notes="user_selected_for_acceptance",
+                specimen_id="01-0101-batch",
+                part_id="head",
+            )
+
+            self.assertEqual(accepted["status"], "accepted")
+            self.assertEqual(accepted["reviewer_notes"], "user_selected_for_acceptance")
+            self.assertTrue(accepted.get("updated_at"))
+            self.assertEqual(
+                accepted["review_audit"]["action"],
+                "local_axis_review_queue_status_update",
+            )
+            self.assertEqual(accepted["review_audit"]["proposal_id"], "frame_002")
+            self.assertTrue(accepted["review_audit"]["explicit_review"])
+            self.assertEqual(
+                manager.get_local_frame_proposal("01-0101-batch", "head", "frame_001")["status"],
+                "proposed",
+            )
+            self.assertEqual(manager.list_train_ready_parts(), [])
+            with self.assertRaisesRegex(ValueError, "no_part_training_samples"):
+                export_tif_part_training_dataset(manager, root / "training_export", formats=["tiff"])
+
+            reloaded = TifProjectManager()
+            reloaded.load_project(manager.current_project_path)
+            reloaded_accepted = reloaded.get_local_frame_proposal("01-0101-batch", "head", "frame_002")
+            self.assertEqual(reloaded_accepted["status"], "accepted")
+            self.assertEqual(reloaded_accepted["reviewer_notes"], "user_selected_for_acceptance")
+            self.assertTrue(reloaded_accepted.get("updated_at"))
+            self.assertEqual(
+                reloaded_accepted["review_history"][-1]["new_status"],
+                "accepted",
+            )
+
+    def test_controlled_review_order_comparison_does_not_change_rows(self):
+        rows = [
+            {
+                "kind": "local_frame_proposal",
+                "proposal_id": "correct_a",
+                "specimen_id": "a",
+                "part_id": "head",
+                "status": "proposed",
+                "confidence": 0.9,
+                "risk_score": 13.0,
+            },
+            {
+                "kind": "local_frame_proposal",
+                "proposal_id": "correct_b",
+                "specimen_id": "b",
+                "part_id": "head",
+                "status": "proposed",
+                "confidence": 0.8,
+                "risk_score": 16.0,
+            },
+            {
+                "kind": "local_frame_proposal",
+                "proposal_id": "error_z1",
+                "specimen_id": "z1",
+                "part_id": "head",
+                "status": "proposed",
+                "confidence": 0.2,
+                "risk_score": 79.0,
+            },
+            {
+                "kind": "local_frame_proposal",
+                "proposal_id": "error_z2",
+                "specimen_id": "z2",
+                "part_id": "head",
+                "status": "proposed",
+                "confidence": 0.3,
+                "risk_score": 91.0,
+            },
+        ]
+        before = [dict(row) for row in rows]
+
+        report = compare_local_axis_review_orders(
+            rows,
+            {"error_z1", "error_z2"},
+            review_budget=2,
+        )
+
+        self.assertEqual(rows, before)
+        self.assertEqual(report["results"]["risk_priority"]["known_error_count"], 2)
+        self.assertEqual(report["results"]["status_specimen"]["known_error_count"], 0)
+        self.assertEqual(report["risk_vs_original_error_gain"], 2)
+        self.assertEqual(
+            report["risk_ranking_version"],
+            LOCAL_AXIS_RISK_RANKING_VERSION,
+        )
 
     def test_unaccepted_proposal_cannot_be_converted_to_reslice_payload(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -77,13 +77,33 @@ class MainWindowBlinkWorkflowMixin:
             image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
             polygon = self.engine.predict_base_sam_polygon(image_rgb, raw_box, poly_epsilon=self.inf_poly_epsilon)
             if polygon and len(polygon) >= 3:
-                self.project.update_label(self.current_image, child_part, polygon, self.desc_box.toPlainText(), box=raw_box, save=False)
+                self.project.update_label(
+                    self.current_image,
+                    child_part,
+                    polygon,
+                    self.desc_box.toPlainText(),
+                    box=raw_box,
+                    save=False,
+                    training_source="blink_expert",
+                    training_review_status="draft",
+                    training_accepted_via="",
+                )
                 self.canvas.set_polygons(self.project.get_labels(self.current_image))
                 self._refresh_current_canvas_boxes()
                 self.log(tr("Generated child draft polygon for {0}.", self.current_lang).format(child_part))
             else:
                 existing_points = self.project.get_labels(self.current_image).get(child_part, [])
-                self.project.update_label(self.current_image, child_part, existing_points, self.desc_box.toPlainText(), box=raw_box, save=False)
+                self.project.update_label(
+                    self.current_image,
+                    child_part,
+                    existing_points,
+                    self.desc_box.toPlainText(),
+                    box=raw_box,
+                    save=False,
+                    training_source="blink_expert",
+                    training_review_status="draft",
+                    training_accepted_via="",
+                )
                 self._refresh_current_canvas_boxes()
                 self.log(tr("Route expert produced a child box for {0}; refine polygon manually.", self.current_lang).format(child_part))
             self.project.remember_blink_context_parent(child_part, parent_part, save=False)
@@ -207,6 +227,7 @@ class MainWindowBlinkWorkflowMixin:
                 description,
                 box=best_box,
                 save=False,
+                preserve_training_truth=True,
             )
         return trajectory
 

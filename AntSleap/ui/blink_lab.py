@@ -7,6 +7,7 @@ import os
 import shutil
 import sys
 import csv
+import tempfile
 from PySide6.QtCore import Qt, Signal, QPointF, QRectF, QThread, QTimer
 from PySide6.QtGui import QColor, QPainter, QBrush, QPen, QPainterPath, QPixmap
 try:
@@ -25,6 +26,12 @@ try:
         blink_training_strategy_label,
         sanitize_blink_training_strategy,
     )
+    from AntSleap.core.model_profiles import DEFAULT_BLINK_OUTER_LOSS_WEIGHTS, sanitize_loss_weights
+    from AntSleap.core.training_weight_publisher import TrainingWeightPublisher
+    from AntSleap.core.training_run_2d import (
+        DEFAULT_TRAINING_SEED,
+        prepare_blink_training_run,
+    )
 except ImportError:
     from core.project import AUTO_BOX_SOURCE_VLM
     from core.taxonomy_defaults import is_safe_part_name
@@ -41,6 +48,9 @@ except ImportError:
         blink_training_strategy_label,
         sanitize_blink_training_strategy,
     )
+    from core.model_profiles import DEFAULT_BLINK_OUTER_LOSS_WEIGHTS, sanitize_loss_weights
+    from core.training_weight_publisher import TrainingWeightPublisher
+    from core.training_run_2d import DEFAULT_TRAINING_SEED, prepare_blink_training_run
 from .canvas import AnnotationCanvas
 from .style import (
     BUTTON_ROLE_COMMIT,
@@ -335,10 +345,15 @@ class BlinkTrainingThread(QThread):
         input_size=224,
         trainer_backend=BLINK_EXPERT_BACKEND_VIT_B,
         heatmap_params=None,
+        outer_loss_weights=None,
         training_strategy=DEFAULT_BLINK_TRAINING_STRATEGY,
         device="auto",
         allowed_image_paths=None,
         training_scope=None,
+        training_run=None,
+        training_records=None,
+        validation_records=None,
+        model_output_root=None,
     ):
         super().__init__()
         self.project_path = project_path
@@ -351,13 +366,103 @@ class BlinkTrainingThread(QThread):
         self.input_size = input_size
         self.trainer_backend = str(trainer_backend or BLINK_EXPERT_BACKEND_VIT_B)
         self.heatmap_params = dict(heatmap_params or {})
+        self.outer_loss_weights = sanitize_loss_weights(
+            outer_loss_weights,
+            DEFAULT_BLINK_OUTER_LOSS_WEIGHTS,
+        )
         self.training_strategy = sanitize_blink_training_strategy(training_strategy)
         self.device = device
         self.allowed_image_paths = [str(path) for path in (allowed_image_paths or []) if str(path or "").strip()]
         self.training_scope = dict(training_scope or {})
+        self.training_run = training_run
+        self.training_records = list(training_records or [])
+        self.validation_records = list(validation_records or [])
+        self.model_output_root = os.path.abspath(
+            model_output_root
+            or os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "weights",
+                "experts",
+            )
+        )
+
+    def _publish_training_result(self, staging_root, save_path, report):
+        if not save_path or not os.path.isfile(save_path):
+            raise ValueError("blink_output_weights_missing")
+        manifest_path = str((report or {}).get("manifest_path") or "")
+        if not manifest_path or not os.path.isfile(manifest_path):
+            raise ValueError("blink_model_manifest_missing")
+        publisher = TrainingWeightPublisher(self.model_output_root)
+        weight_relative = os.path.relpath(save_path, staging_root).replace(os.sep, "/")
+        manifest_relative = os.path.relpath(manifest_path, staging_root).replace(os.sep, "/")
+        publication = publisher.publish_pending(
+            self.training_run.run_id,
+            staging_root,
+            [
+                {
+                    "artifact_id": "blink_checkpoint",
+                    "role": "output_weights",
+                    "relative_path": weight_relative,
+                    "media_type": "application/octet-stream",
+                },
+                {
+                    "artifact_id": "blink_model_manifest",
+                    "role": "model_manifest",
+                    "relative_path": manifest_relative,
+                    "media_type": "application/json",
+                },
+            ],
+        )
+        self.training_run.register_path_base(
+            "managed_model_root", self.model_output_root
+        )
+        published_path = ""
+        for artifact in publication["artifacts"]:
+            artifact_path = os.path.join(
+                self.model_output_root, *artifact["relative_path"].split("/")
+            )
+            observed = self.training_run.add_artifact(
+                artifact_id=artifact["artifact_id"],
+                role=artifact["role"],
+                path=artifact_path,
+                path_base="managed_model_root",
+                media_type=artifact["media_type"],
+            )
+            if observed.get("digest") != artifact.get("digest"):
+                raise ValueError("published_blink_artifact_mismatch")
+            if artifact["artifact_id"] == "blink_checkpoint":
+                published_path = artifact_path
+        report_dir = str((report or {}).get("dir") or "")
+        if report_dir and os.path.isdir(report_dir):
+            self.training_run.register_path_base(
+                "export_root", os.path.dirname(report_dir)
+            )
+            self.training_run.add_artifact(
+                artifact_id="training_report",
+                role="training_report",
+                path=report_dir,
+                path_base="export_root",
+                media_type="application/x-directory",
+            )
+        successful = self.training_run.succeed()
+        try:
+            publisher.activate(self.training_run.run_id, successful)
+        except Exception:
+            if isinstance(report, dict):
+                report["weight_publication_status"] = "pending_recovery"
+        return published_path
 
     def run(self):
+        staging = None
         try:
+            trainer_save_dir = None
+            if self.training_run is not None:
+                output_root = os.path.join(self.training_run.run_dir, "outputs")
+                os.makedirs(output_root, exist_ok=True)
+                staging = tempfile.TemporaryDirectory(
+                    prefix=".blink-staging-", dir=output_root
+                )
+                trainer_save_dir = staging.name
             if self.trainer_backend == BLINK_EXPERT_BACKEND_HEATMAP:
                 try:
                     from AntSleap.core.blink_heatmap_trainer import BlinkHeatmapTrainer
@@ -365,6 +470,9 @@ class BlinkTrainingThread(QThread):
                     from core.blink_heatmap_trainer import BlinkHeatmapTrainer
 
                 trainer = BlinkHeatmapTrainer(
+                    save_dir=trainer_save_dir,
+                    training_records=self.training_records,
+                    validation_records=self.validation_records,
                     project_path=self.project_path,
                     part_name=self.part_name,
                     parent_part=self.parent_part,
@@ -374,28 +482,37 @@ class BlinkTrainingThread(QThread):
                     heatmap_sigma=self.heatmap_params.get("heatmap_sigma", 2.0),
                     wh_loss_weight=self.heatmap_params.get("wh_loss_weight", 1.0),
                     center_loss_weight=self.heatmap_params.get("center_loss_weight", 1.0),
+                    outer_loss_weights=self.outer_loss_weights,
                     training_strategy=self.training_strategy,
                     device=self.device,
                     allowed_image_paths=self.allowed_image_paths,
                     training_scope=self.training_scope,
                 )
-            else:
+            elif self.trainer_backend == BLINK_EXPERT_BACKEND_VIT_B:
                 try:
                     from AntSleap.core.blink_trainer import BlinkExpertTrainer
                 except ImportError:
                     from core.blink_trainer import BlinkExpertTrainer
 
                 trainer = BlinkExpertTrainer(
+                    save_dir=trainer_save_dir,
+                    training_records=self.training_records,
+                    validation_records=self.validation_records,
                     project_path=self.project_path,
                     part_name=self.part_name,
                     parent_part=self.parent_part,
                     learning_rate=self.learning_rate,
                     weight_decay=self.weight_decay,
                     input_size=self.input_size,
+                    outer_loss_weights=self.outer_loss_weights,
                     training_strategy=self.training_strategy,
                     device=self.device,
                     allowed_image_paths=self.allowed_image_paths,
                     training_scope=self.training_scope,
+                )
+            else:
+                raise ValueError(
+                    f"blink_training_backend_unsupported:{self.trainer_backend}"
                 )
             save_path = trainer.train(
                 epochs=self.epochs,
@@ -404,15 +521,27 @@ class BlinkTrainingThread(QThread):
                 progress_callback=self.progress_signal.emit,
                 stop_callback=self.isInterruptionRequested,
             )
-            if self.isInterruptionRequested() and not save_path:
+            if self.isInterruptionRequested():
+                if self.training_run is not None and self.training_run.status in {"pending", "running"}:
+                    self.training_run.cancel(stage="training")
                 self.cancelled_signal.emit()
             else:
-                self.result_signal.emit(save_path or "")
                 report = getattr(trainer, "last_report", None)
+                published_path = save_path or ""
+                if self.training_run is not None:
+                    published_path = self._publish_training_result(
+                        staging.name, save_path, report
+                    )
+                self.result_signal.emit(published_path)
                 if isinstance(report, dict) and report:
                     self.report_signal.emit(report)
         except Exception as exc:
+            if self.training_run is not None and self.training_run.status in {"pending", "running"}:
+                self.training_run.fail(exc, stage="training")
             self.error_signal.emit(str(exc))
+        finally:
+            if staging is not None:
+                staging.cleanup()
 
 
 class BlinkExpertTrainingReportDialog(QDialog):
@@ -844,6 +973,7 @@ class BlinkLabWidget(QWidget):
         self.default_training_strategy = sanitize_blink_training_strategy(blink_training_strategy)
         self.default_trainer_backend = BLINK_EXPERT_BACKEND_VIT_B
         self.default_heatmap_params = {}
+        self.default_outer_loss_weights = dict(DEFAULT_BLINK_OUTER_LOSS_WEIGHTS)
         self.runtime_device = str(runtime_device or "auto")
         self.training_thread = None
         self.training_project_path = ""
@@ -919,6 +1049,7 @@ class BlinkLabWidget(QWidget):
         runtime_device=None,
         trainer_backend=None,
         heatmap_params=None,
+        outer_loss_weights=None,
         auto_shrink_steps=None,
         training_strategy=None,
         apply_to_controls=True,
@@ -943,6 +1074,10 @@ class BlinkLabWidget(QWidget):
             self.default_trainer_backend = str(trainer_backend or BLINK_EXPERT_BACKEND_VIT_B)
         if isinstance(heatmap_params, dict):
             self.default_heatmap_params = dict(heatmap_params)
+        self.default_outer_loss_weights = sanitize_loss_weights(
+            outer_loss_weights,
+            DEFAULT_BLINK_OUTER_LOSS_WEIGHTS,
+        )
         if apply_to_controls and hasattr(self, "spin_epochs") and hasattr(self, "spin_batch"):
             self.spin_epochs.setValue(self.default_training_epochs)
             self.spin_batch.setValue(self.default_training_batch)
@@ -2389,12 +2524,64 @@ class BlinkLabWidget(QWidget):
         self.lbl_status.setText(self.tr("Saved {0} trajectory frames for {1}.").format(steps, part))
         print(f"[Data Factory] Stored {steps} training frames for {part}.")
 
+    def _ensure_blink_training_baseline(self):
+        if not self.pm.is_sqlite_project():
+            QMessageBox.warning(
+                self,
+                self.tr("Training"),
+                self.tr("Blink training requires a SQLite project."),
+            )
+            return False
+        if self.pm.integrity_registry_state().get("status") == "ready":
+            return True
+        answer = QMessageBox.question(
+            self,
+            self.tr("Training data baseline"),
+            self.tr(
+                "Register the current reviewed labels and Blink trajectories as the trusted training baseline now?"
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return False
+        try:
+            self.pm.initialize_integrity_baseline(
+                note="Researcher approved the initial Blink training baseline."
+            )
+        except Exception as exc:
+            if getattr(exc, "code", "") != "legacy_truth_attestation_required":
+                QMessageBox.critical(self, self.tr("Training"), str(exc))
+                return False
+            confirm = QMessageBox.question(
+                self,
+                self.tr("Confirm historical labels"),
+                self.tr(
+                    "Historical polygons have no saved review source. Confirm only if you reviewed them and accept them as training truth."
+                ),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if confirm != QMessageBox.StandardButton.Yes:
+                return False
+            try:
+                self.pm.initialize_integrity_baseline(
+                    legacy_truth_attestation=True,
+                    note="Researcher attested historical Blink training labels.",
+                )
+            except Exception as retry_exc:
+                QMessageBox.critical(self, self.tr("Training"), str(retry_exc))
+                return False
+        return True
+
     def train_expert_model(self, allowed_image_paths=None, training_scope=None):
         """
         阶段三核心：利用积攒的轨迹数据，训练轻量级微观专家。
         """
         if not self.canvas.current_tool_part:
             self.lbl_status.setText(self.tr("Error: Select a part to train!"))
+            return
+        if not self._ensure_blink_training_baseline():
             return
             
         part = self.session_target_part or self.canvas.current_tool_part
@@ -2420,6 +2607,105 @@ class BlinkLabWidget(QWidget):
                     parent_part = raw_parent_part.strip()
         self.training_route_context = self._route_context_for_training(parent_part, part)
         self.training_project_path = os.path.normcase(os.path.abspath(str(self.pm.current_project_path or "")))
+        if self.default_trainer_backend not in {
+            BLINK_EXPERT_BACKEND_VIT_B,
+            BLINK_EXPERT_BACKEND_HEATMAP,
+        }:
+            QMessageBox.critical(
+                self,
+                self.tr("Training"),
+                f"blink_training_backend_unsupported:{self.default_trainer_backend}",
+            )
+            return
+        allowed_uids = (
+            [self.pm.get_image_uid(path) for path in allowed_image_paths]
+            if allowed_image_paths
+            else None
+        )
+        entrypoint = (
+            "blink_heatmap"
+            if self.default_trainer_backend == BLINK_EXPERT_BACKEND_HEATMAP
+            else "blink_vit_b"
+        )
+        component_weights = {
+            "center": float(self.default_heatmap_params.get("center_loss_weight", 1.0)),
+            "wh": float(self.default_heatmap_params.get("wh_loss_weight", 1.0)),
+        }
+        effective_config = {
+            "epochs": max(1, int(epochs)),
+            "batch_size": max(1, int(batch_size)),
+            "learning_rate": float(learning_rate),
+            "weight_decay": float(weight_decay),
+            "random_seed": DEFAULT_TRAINING_SEED,
+            "input_resolution": [int(input_size), int(input_size)],
+            "preprocessing": {
+                "dataset_adapter": (
+                    "BlinkHeatmapDataset"
+                    if entrypoint == "blink_heatmap"
+                    else "BlinkTrajectoryDataset"
+                ),
+                "training_strategy": str(self.default_training_strategy),
+                "target_part": str(part),
+                "parent_part": str(parent_part or ""),
+            },
+            "model": {
+                "family": (
+                    "HeatmapBlinkNet"
+                    if entrypoint == "blink_heatmap"
+                    else "MicroExpertLocator"
+                ),
+                "version": "1",
+                "locator": "disabled",
+                "parts": str(part),
+            },
+            "loss_weights": {
+                "outer": dict(self.default_outer_loss_weights),
+                "components": component_weights if entrypoint == "blink_heatmap" else {},
+            },
+            "heatmap_params": (
+                dict(self.default_heatmap_params)
+                if entrypoint == "blink_heatmap"
+                else {}
+            ),
+        }
+        runs_root = os.path.join(
+            os.path.dirname(os.path.abspath(self.pm.current_project_path)),
+            "runs",
+            "train",
+        )
+        try:
+            prepared_run = prepare_blink_training_run(
+                self.pm,
+                runs_root=runs_root,
+                entrypoint=entrypoint,
+                target_part=part,
+                parent_part=parent_part,
+                effective_config=effective_config,
+                backend={
+                    "backend_id": entrypoint,
+                    "backend_version": "1.0",
+                    "adapter_id": "blink_training_thread",
+                    "adapter_version": "1.0",
+                },
+                allowed_image_uids=allowed_uids,
+                seed=DEFAULT_TRAINING_SEED,
+                compute_device=str(self.runtime_device),
+            )
+        except Exception as exc:
+            self.btn_train_expert.setEnabled(True)
+            QMessageBox.critical(
+                self,
+                self.tr("Training preflight"),
+                self.tr(
+                    "Blink training did not start because the registered trajectories or files could not be verified: {0}"
+                ).format(str(exc)),
+            )
+            return
+        model_output_root = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "weights",
+            "experts",
+        )
         self.training_thread = BlinkTrainingThread(
             project_path=self.pm.current_project_path,
             part_name=part,
@@ -2431,10 +2717,15 @@ class BlinkLabWidget(QWidget):
             input_size=input_size,
             trainer_backend=self.default_trainer_backend,
             heatmap_params=self.default_heatmap_params,
+            outer_loss_weights=self.default_outer_loss_weights,
             training_strategy=self.default_training_strategy,
             device=self.runtime_device,
             allowed_image_paths=allowed_image_paths,
             training_scope=training_scope,
+            training_run=prepared_run.run,
+            training_records=prepared_run.training_records,
+            validation_records=prepared_run.validation_records,
+            model_output_root=model_output_root,
         )
         thread = self.training_thread
         self.training_thread.result_signal.connect(lambda save_path, worker=thread: self._on_training_result(save_path, worker=worker))

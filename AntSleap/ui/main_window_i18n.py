@@ -455,6 +455,8 @@ TRANSLATIONS = {
         "Batch inference is already running.": "批量推理正在进行中。",
         "Batch inference is running. Please wait for it to finish before closing TaxaMask.": "批量推理正在进行中，请等待完成后再关闭 TaxaMask。",
         "External batch inference failed: {0}": "外部批量推理失败：{0}",
+        "Inference failed: {0}": "推理失败：{0}",
+        "Batch inference failed for {0}: {1}": "批量推理在 {0} 失败：{1}",
         "External batch inference finished.": "外部批量推理已结束。",
         "External backend training is running. Please wait for it to finish before closing TaxaMask.": "外部后端训练正在进行中，请等待完成后再关闭 TaxaMask。",
         "Browse": "浏览",

@@ -214,6 +214,9 @@ def _apply_payload(
                     "Auto-Annotated",
                     auto_box=clean_box,
                     save=False,
+                    training_source=AUTO_BOX_SOURCE_MODEL,
+                    training_review_status=AUTO_BOX_REVIEW_DRAFT,
+                    training_accepted_via="",
                 )
         else:
             manager.update_label(
@@ -223,6 +226,9 @@ def _apply_payload(
                 "Auto-Annotated",
                 auto_box=clean_box,
                 save=False,
+                training_source=AUTO_BOX_SOURCE_MODEL,
+                training_review_status=AUTO_BOX_REVIEW_DRAFT,
+                training_accepted_via="",
             )
             update_auto_box = getattr(manager, "update_auto_box", None)
             if callable(update_auto_box) and clean_box is not None:

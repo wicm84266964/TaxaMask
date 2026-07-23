@@ -8,6 +8,7 @@ import torch
 from torch.utils.data import Dataset
 
 from .projection import CoordinateMapper
+from .training_truth import resolve_part_training_trust
 try:
     from .blink_training_strategy import (
         BLINK_STRATEGY_FULL_INSIDE_RANDOM,
@@ -52,6 +53,7 @@ class BlinkHeatmapDataset(Dataset):
         training_strategy=BLINK_STRATEGY_TRIVIEW_RANDOM,
         stage_view_mode=None,
         allowed_image_paths=None,
+        training_records=None,
     ):
         self.project_json_path = str(project_json_path or "")
         self.child_part = str(child_part or "").strip()
@@ -62,6 +64,7 @@ class BlinkHeatmapDataset(Dataset):
         self.training_strategy = sanitize_blink_training_strategy(training_strategy)
         self.stage_view_mode = str(stage_view_mode or "").strip().lower()
         self.allowed_image_paths = self._normalize_allowed_image_paths(allowed_image_paths)
+        self.training_records = list(training_records or [])
         self.samples = []
         self._load_samples()
         self.sequence_count = len(self.samples)
@@ -86,19 +89,28 @@ class BlinkHeatmapDataset(Dataset):
         return raw_key in self.allowed_image_paths or abs_key in self.allowed_image_paths
 
     def _load_samples(self):
-        if not self.project_json_path or not os.path.exists(self.project_json_path):
-            return
-        with open(self.project_json_path, "r", encoding="utf-8") as handle:
-            project_data = json.load(handle)
-        if not isinstance(project_data, dict):
+        if (
+            not self.training_records
+            and (not self.project_json_path or not os.path.exists(self.project_json_path))
+        ):
             return
         project_dir = os.path.dirname(os.path.abspath(self.project_json_path))
-        labels = project_data.get("labels", {})
-        if not isinstance(labels, dict):
-            return
+        if self.training_records:
+            label_items = list(self.training_records)
+        else:
+            with open(self.project_json_path, "r", encoding="utf-8") as handle:
+                project_data = json.load(handle)
+            if not isinstance(project_data, dict):
+                return
+            labels = project_data.get("labels", {})
+            if not isinstance(labels, dict):
+                return
+            label_items = list(labels.items())
 
-        for image_path, label_data in labels.items():
+        for image_path, label_data in label_items:
             if not isinstance(label_data, dict):
+                continue
+            if not resolve_part_training_trust(label_data, self.child_part).get("eligible"):
                 continue
             trajectories = label_data.get("trajectories", {})
             if not isinstance(trajectories, dict) or self.child_part not in trajectories:

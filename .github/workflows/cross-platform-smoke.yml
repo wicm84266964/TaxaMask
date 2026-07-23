@@ -55,6 +55,7 @@ jobs:
       - name: Run lightweight tests
         run: |
           python -m unittest tests.test_config_cleanup tests.test_platform_open tests.test_poppler_discovery tests.test_runtime_device tests.test_generic_export_schema tests.test_window_geometry tests.test_path_identity tests.test_agent_context_routes tests.test_embedded_taxonomy_paper_finder tests.test_embedded_skill_bundles tests.test_gui_smoke
+          python scripts/run_validation_suite.py --suite round5_ci_smoke --timeout 300
 
   embedded-agent:
     name: Embedded Agent Center

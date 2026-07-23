@@ -36,6 +36,24 @@ from .model_profiles import (
 from .vlm_preannotation import DEFAULT_VLM_PROMPT_PROFILE_ID, sanitize_vlm_prompt_profile
 from .sqlite_storage import LEGACY_JSON_BACKEND, PROJECT_MANIFEST_SCHEMA_VERSION, SQLITE_BACKEND, write_project_manifest
 from .path_identity import canonical_path, path_identity
+from .training_truth import (
+    LABEL_PART_METADATA_FIELD,
+    TRAINING_ACCEPT_MANUAL_EDIT,
+    TRAINING_ACCEPT_SELECTED_AI,
+    TRAINING_REVIEW_CONFIRMED,
+    TRAINING_SOURCE_LEGACY_AI_UNKNOWN,
+    TRAINING_SOURCE_MANUAL,
+    get_part_training_truth,
+    remove_part_training_truth,
+    resolve_part_training_trust,
+    set_part_training_truth,
+)
+from .project_traceability import (
+    PROJECT_KIND_2D,
+    ensure_project_traceability,
+    new_project_data_version_id,
+    new_project_traceability,
+)
 
 DEFAULT_CATEGORY_SUPERCATEGORY = "biological_structure"
 MULTIMODAL_SAMPLE_SCHEMA_VERSION = "taxamask-multimodal-sample-v1"
@@ -59,9 +77,12 @@ LABEL_JOURNAL_SCHEMA_VERSION = "taxamask-label-journal-v1"
 
 class ProjectManager:
     def __init__(self):
+        traceability = new_project_traceability(PROJECT_KIND_2D)
         self.project_data = {
+            **traceability,
             "name": "Untitled",
             "images": [], 
+            "image_uids": {},
             "labels": {}, # Map: image_path -> { "parts": { "Head": [[x,y], [x,y]...] }, ... } 
             "taxonomy": list(DEFAULT_PROJECT_TAXONOMY),
             "locator_scope": list(DEFAULT_LOCATOR_SCOPE),
@@ -94,7 +115,10 @@ class ProjectManager:
         self.current_database_path = ""
         self._sqlite_dirty_images = set()
         self._sqlite_deleted_images = set()
+        self._sqlite_label_dirty_images = set()
         self._sqlite_project_dirty = False
+        self._pending_project_data_version_id = ""
+        self._traceability_backfill_needed = False
         self._legacy_json_write_enabled = False
         self.known_relocated_roots = []
         self._last_label_journal_fsync = 0.0
@@ -339,6 +363,7 @@ class ProjectManager:
             "auto_box_meta",
             "descriptions",
             "description_sources",
+            LABEL_PART_METADATA_FIELD,
             "shrink_loose_boxes",
             "trajectories",
         ):
@@ -448,7 +473,10 @@ class ProjectManager:
             return ""
 
     def _append_label_journal_entry(self, image_path, action):
-        if self.is_sqlite_project() or not getattr(self, "_legacy_json_write_enabled", False):
+        if self.is_sqlite_project():
+            self._mark_sqlite_label_dirty(image_path)
+            return False
+        if not getattr(self, "_legacy_json_write_enabled", False):
             return False
         journal_path = self._label_journal_path()
         if not journal_path or not image_path:
@@ -524,7 +552,7 @@ class ProjectManager:
                 self.project_data.setdefault("images", []).append(image_path)
 
         if latest_by_image and save:
-            self._mark_sqlite_images_dirty(latest_by_image.keys())
+            self._mark_sqlite_labels_dirty(latest_by_image.keys())
             self._mark_sqlite_project_dirty()
             self.save_project()
 
@@ -660,7 +688,7 @@ class ProjectManager:
                 remapped_images.append(image_path)
         self.project_data["images"] = remapped_images
 
-        for key in ("labels", "scales", "image_provenance"):
+        for key in ("image_uids", "labels", "scales", "image_provenance"):
             source = self.project_data.get(key, {})
             if not isinstance(source, dict):
                 continue
@@ -679,6 +707,13 @@ class ProjectManager:
             if save:
                 self.save_project()
         return changed
+
+    def relocate_registered_images(self, remap_matches):
+        if not self.is_sqlite_project():
+            raise ValueError("sqlite_project_required")
+        from .project_integrity_bridge import relocate_2d_project_images
+
+        return relocate_2d_project_images(self, remap_matches)
 
     def _remove_sqlite_artifacts(self, database_path):
         base = os.path.abspath(str(database_path or ""))
@@ -857,8 +892,62 @@ class ProjectManager:
                 return image_path
         return ""
 
+    def get_image_uid(self, image_path, *, create=True):
+        """Return the stable identity used for split and integrity records."""
+
+        from .project_sqlite_schema import new_image_uid, validate_image_uid
+
+        image_key = self._registered_image_key_for_path(image_path) or image_path
+        if not image_key:
+            return ""
+        mapping = self.project_data.setdefault("image_uids", {})
+        image_uid = str(mapping.get(image_key) or "").strip()
+        if image_uid:
+            return validate_image_uid(image_uid)
+        if not create:
+            return ""
+        image_uid = new_image_uid()
+        mapping[image_key] = image_uid
+        self._mark_sqlite_image_dirty(image_key)
+        return image_uid
+
+    def iter_image_records(self):
+        for image_path in self.project_data.get("images", []) or []:
+            image_key = self._registered_image_key_for_path(image_path) or image_path
+            yield {
+                "image_uid": self.get_image_uid(image_key),
+                "image_path": image_key,
+                "labels": self.project_data.get("labels", {}).get(image_key, {}),
+                "scale": self.project_data.get("scales", {}).get(image_key),
+                "provenance": self.project_data.get("image_provenance", {}).get(
+                    image_key, {}
+                ),
+            }
+
     def _image_data_key(self, path):
         """Return the stored image key, accepting equivalent platform path spellings."""
+        if path is None:
+            return ""
+        raw = str(path)
+        normalized = raw.replace("\\", "/")
+        labels = self.project_data.get("labels", {})
+        if isinstance(labels, dict):
+            if raw in labels:
+                return raw
+            if normalized in labels:
+                return normalized
+            for key in labels:
+                if str(key).replace("\\", "/") == normalized:
+                    return key
+        stored = self._registered_image_key_for_path(raw)
+        if stored:
+            return stored
+        if isinstance(labels, dict):
+            target = self._path_identity(raw)
+            if target:
+                for key in labels:
+                    if self._path_identity(key) == target:
+                        return key
         return self._to_absolute(path)
 
     def _merge_loaded_label_entry(self, existing, incoming):
@@ -890,9 +979,12 @@ class ProjectManager:
 
     def clear(self):
         """Resets the project data to a clean state."""
+        traceability = new_project_traceability(PROJECT_KIND_2D)
         self.project_data = {
+            **traceability,
             "name": "Untitled",
             "images": [],
+            "image_uids": {},
             "labels": {},
             "taxonomy": list(DEFAULT_PROJECT_TAXONOMY),
             "locator_scope": list(DEFAULT_LOCATOR_SCOPE),
@@ -925,7 +1017,10 @@ class ProjectManager:
         self.current_database_path = ""
         self._sqlite_dirty_images = set()
         self._sqlite_deleted_images = set()
+        self._sqlite_label_dirty_images = set()
         self._sqlite_project_dirty = False
+        self._pending_project_data_version_id = ""
+        self._traceability_backfill_needed = False
         self._legacy_json_write_enabled = False
         self.known_relocated_roots = list(getattr(self, "known_relocated_roots", []))
 
@@ -944,6 +1039,19 @@ class ProjectManager:
             return
         self._sqlite_dirty_images.add(self._registered_image_key_for_path(image_path) or image_path)
 
+    def _mark_sqlite_label_dirty(self, image_path):
+        if not self.is_sqlite_project() or not image_path:
+            return
+        image_key = self._registered_image_key_for_path(image_path) or image_path
+        self._sqlite_dirty_images.add(image_key)
+        self._sqlite_label_dirty_images.add(image_key)
+        if not self._pending_project_data_version_id:
+            self._pending_project_data_version_id = new_project_data_version_id()
+
+    def _mark_sqlite_labels_dirty(self, image_paths):
+        for image_path in image_paths or []:
+            self._mark_sqlite_label_dirty(image_path)
+
     def _mark_sqlite_images_dirty(self, image_paths):
         for image_path in image_paths or []:
             self._mark_sqlite_image_dirty(image_path)
@@ -959,6 +1067,37 @@ class ProjectManager:
 
     def mark_sqlite_project_dirty(self):
         self._mark_sqlite_project_dirty()
+
+    def integrity_registry_state(self):
+        if not self.is_sqlite_project():
+            return {"status": "legacy_read_only"}
+        from .project_integrity_registry import registry_state
+        from .sqlite_storage import connect_sqlite_database
+
+        connection = connect_sqlite_database(self.current_database_path)
+        try:
+            return registry_state(connection)
+        finally:
+            connection.close()
+
+    def initialize_integrity_baseline(
+        self,
+        *,
+        legacy_truth_attestation=False,
+        note="",
+        progress_callback=None,
+        cancel_check=None,
+    ):
+        from .project_integrity_bridge import register_2d_project_baseline
+
+        self.flush_sqlite_changes(project_dirty=True)
+        return register_2d_project_baseline(
+            self,
+            legacy_truth_attestation=legacy_truth_attestation,
+            note=note,
+            progress_callback=progress_callback,
+            cancel_check=cancel_check,
+        )
 
     def mark_sqlite_images_dirty(self, image_paths):
         self._mark_sqlite_images_dirty(image_paths)
@@ -985,16 +1124,39 @@ class ProjectManager:
         if not image_paths and not deleted_image_paths and not project_dirty:
             return False
 
-        flush_project_changes(
+        flushed_image_set = set(image_paths)
+        pending_label_images = set(self._sqlite_label_dirty_images)
+        publish_data_version = bool(
+            self._pending_project_data_version_id
+            and pending_label_images
+            and pending_label_images.issubset(flushed_image_set)
+        )
+        pending_data_version_id = (
+            self._pending_project_data_version_id if publish_data_version else None
+        )
+
+        flush_result = flush_project_changes(
             self,
             image_paths=image_paths,
             deleted_image_paths=deleted_image_paths,
             integrity_check=integrity_check,
+            project_data_version_id=pending_data_version_id,
         )
         flushed_images = set(image_paths)
         deleted_images = set(deleted_image_paths)
         self._sqlite_dirty_images.difference_update(flushed_images)
         self._sqlite_deleted_images.difference_update(deleted_images)
+        self._sqlite_label_dirty_images.difference_update(flushed_images)
+        image_uids = self.project_data.setdefault("image_uids", {})
+        for deleted_image in deleted_images:
+            image_uids.pop(deleted_image, None)
+        resolved_data_version_id = str(
+            (flush_result or {}).get("data_version_id") or ""
+        )
+        if resolved_data_version_id:
+            self.project_data["project_data_version_id"] = resolved_data_version_id
+        if publish_data_version:
+            self._pending_project_data_version_id = ""
         if project_dirty:
             self._sqlite_project_dirty = False
         return True
@@ -1029,6 +1191,14 @@ class ProjectManager:
         self.clear() # Ensure clean state
 
         self.current_project_path = canonical_path(project_path)
+        traceability = {
+            "project_id": loaded_data.get("project_id"),
+            "project_data_version_id": loaded_data.get("project_data_version_id"),
+        }
+        self._traceability_backfill_needed = ensure_project_traceability(
+            traceability, PROJECT_KIND_2D
+        )
+        self.project_data.update(traceability)
 
         # FIX: Strictly use loaded taxonomy if present.
         # This prevents the system from overriding custom empty taxonomies with defaults.
@@ -1078,6 +1248,9 @@ class ProjectManager:
             or DEFAULT_CATEGORY_SUPERCATEGORY
         )
         self.project_data["taxon_label"] = str(loaded_data.get("taxon_label", "Taxon") or "Taxon").strip() or "Taxon"
+        loaded_image_uids = loaded_data.get("image_uids", {})
+        if not isinstance(loaded_image_uids, dict):
+            loaded_image_uids = {}
 
         image_keys_seen = set()
         image_key_by_identity = {}
@@ -1091,6 +1264,9 @@ class ProjectManager:
             image_keys_seen.add(identity)
             self.project_data["images"].append(img_abs)
             image_key_by_identity[identity] = img_abs
+            raw_uid = loaded_image_uids.get(img_rel)
+            if raw_uid:
+                self.project_data["image_uids"][img_abs] = str(raw_uid)
 
         # Handle Labels
         for img_rel, label_data in loaded_data.get("labels", {}).items():
@@ -1138,8 +1314,14 @@ class ProjectManager:
             self.current_database_path = canonical_path(loaded_sqlite.get("database_path", ""))
             self._sqlite_dirty_images = set()
             self._sqlite_deleted_images = set()
+            self._sqlite_label_dirty_images = set()
             self._sqlite_project_dirty = False
+            self._pending_project_data_version_id = ""
             self._legacy_json_write_enabled = False
+            if self._traceability_backfill_needed:
+                self._sqlite_project_dirty = True
+                self.flush_sqlite_changes(project_dirty=True)
+                self._traceability_backfill_needed = False
             return
 
         self._apply_loaded_project_data(loaded_data, path)
@@ -1295,7 +1477,7 @@ class ProjectManager:
             if should_remove(stored_path):
                 self._mark_sqlite_image_deleted(stored_path)
 
-        for key in ("labels", "scales", "image_provenance"):
+        for key in ("image_uids", "labels", "scales", "image_provenance"):
             mapping = self.project_data.get(key)
             if not isinstance(mapping, dict):
                 continue
@@ -2046,7 +2228,21 @@ class ProjectManager:
             self.save_project()
         return True
 
-    def update_label(self, image_path, part_name, points, description_text=None, box=None, auto_box=None, save=True):
+    def update_label(
+        self,
+        image_path,
+        part_name,
+        points,
+        description_text=None,
+        box=None,
+        auto_box=None,
+        save=True,
+        *,
+        training_source=None,
+        training_review_status=None,
+        training_accepted_via=None,
+        preserve_training_truth=False,
+    ):
         """
         Updates polygon points AND potentially the associated text description.
         Optionally stores the source bounding box [x1,y1,x2,y2].
@@ -2103,6 +2299,22 @@ class ProjectManager:
             entry["descriptions"][part_name] = description_text
         elif not auto_box and entry.get("descriptions", {}).get(part_name) == "Auto-Annotated":
             del entry["descriptions"][part_name]
+
+        if not preserve_training_truth:
+            auto_draft = str(description_text or "") == "Auto-Annotated" or auto_box is not None
+            set_part_training_truth(
+                entry,
+                part_name,
+                source=training_source
+                or (TRAINING_SOURCE_LEGACY_AI_UNKNOWN if auto_draft else TRAINING_SOURCE_MANUAL),
+                review_status=training_review_status
+                or ("draft" if auto_draft else TRAINING_REVIEW_CONFIRMED),
+                accepted_via=(
+                    training_accepted_via
+                    if training_accepted_via is not None
+                    else ("" if auto_draft else TRAINING_ACCEPT_MANUAL_EDIT)
+                ),
+            )
             
         self._append_label_journal_entry(image_path, "update_label")
         self._mark_sqlite_image_dirty(image_path)
@@ -2131,6 +2343,19 @@ class ProjectManager:
             clean_meta.setdefault("source", AUTO_BOX_SOURCE_MODEL)
             clean_meta.setdefault("review_status", AUTO_BOX_REVIEW_DRAFT)
             entry.setdefault("auto_box_meta", {})[clean_part] = clean_meta
+            descriptions = entry.get("descriptions", {})
+            parts = entry.get("parts", {})
+            if (
+                isinstance(descriptions, dict)
+                and descriptions.get(clean_part) == "Auto-Annotated"
+            ) or not (isinstance(parts, dict) and parts.get(clean_part)):
+                set_part_training_truth(
+                    entry,
+                    clean_part,
+                    source=clean_meta.get("source") or TRAINING_SOURCE_LEGACY_AI_UNKNOWN,
+                    review_status=clean_meta.get("review_status") or "draft",
+                    accepted_via="",
+                )
         self._append_label_journal_entry(image_path, "update_auto_box")
         self._mark_sqlite_image_dirty(image_path)
         if save:
@@ -2164,11 +2389,26 @@ class ProjectManager:
         entry = self.project_data["labels"][image_path]
         parts = entry.get("parts", {}) if isinstance(entry.get("parts", {}), dict) else {}
         auto_boxes = entry.get("auto_boxes", {}) if isinstance(entry.get("auto_boxes", {}), dict) else {}
-        descriptions = entry.get("descriptions", {}) if isinstance(entry.get("descriptions", {}), dict) else {}
         reviewable = []
         box_only = []
-        for part_name, desc in descriptions.items():
-            if desc != "Auto-Annotated":
+        conflicts = []
+        part_names = set(parts) | set(auto_boxes)
+        part_names.update(
+            entry.get("descriptions", {}).keys()
+            if isinstance(entry.get("descriptions"), dict)
+            else []
+        )
+        part_names.update(
+            entry.get(LABEL_PART_METADATA_FIELD, {}).keys()
+            if isinstance(entry.get(LABEL_PART_METADATA_FIELD), dict)
+            else []
+        )
+        for part_name in sorted(part_names):
+            decision = resolve_part_training_trust(entry, part_name)
+            if decision.get("state") == "conflict":
+                conflicts.append(part_name)
+                continue
+            if decision.get("state") != "draft":
                 continue
             has_polygon = bool(parts.get(part_name))
             has_auto_box = part_name in auto_boxes
@@ -2179,6 +2419,7 @@ class ProjectManager:
         return {
             "reviewable_polygon_parts": reviewable,
             "box_only_parts": box_only,
+            "conflicting_parts": conflicts,
         }
 
     def summarize_ai_drafts_for_images(self, image_paths):
@@ -2480,6 +2721,8 @@ class ProjectManager:
             if "auto_box_meta" in entry and part_name in entry["auto_box_meta"]:
                 del entry["auto_box_meta"][part_name]
 
+            remove_part_training_truth(entry, part_name)
+
             # Remove Blink Trajectory
             if "trajectories" in entry and part_name in entry["trajectories"]:
                 del entry["trajectories"][part_name]
@@ -2550,6 +2793,7 @@ class ProjectManager:
             "auto_box_meta",
             "descriptions",
             "description_sources",
+            LABEL_PART_METADATA_FIELD,
             "shrink_loose_boxes",
             "trajectories",
         ):
@@ -2665,7 +2909,7 @@ class ProjectManager:
         self._rename_part_in_routes(old_part, new_part)
         self._sync_active_model_profile_from_project_fields()
         self._mark_sqlite_project_dirty()
-        self._mark_sqlite_images_dirty(self.project_data.get("labels", {}).keys())
+        self._mark_sqlite_labels_dirty(self.project_data.get("labels", {}).keys())
 
         if save:
             self.save_project()
@@ -2728,21 +2972,39 @@ class ProjectManager:
             parts_to_remove = []
             labels = self.project_data["labels"][img_path]
             
-            if "descriptions" in labels:
-                for part, desc in labels["descriptions"].items():
-                    if desc == "Auto-Annotated":
-                        parts_to_remove.append(part)
+            part_names = set(labels.get("parts", {})) | set(labels.get("auto_boxes", {}))
+            part_names.update(
+                labels.get("descriptions", {}).keys()
+                if isinstance(labels.get("descriptions"), dict)
+                else []
+            )
+            part_names.update(
+                labels.get(LABEL_PART_METADATA_FIELD, {}).keys()
+                if isinstance(labels.get(LABEL_PART_METADATA_FIELD), dict)
+                else []
+            )
+            for part in sorted(part_names):
+                if resolve_part_training_trust(labels, part).get("state") == "draft":
+                    parts_to_remove.append(part)
             
             for part in parts_to_remove:
                 if part in labels["parts"]:
                     del labels["parts"][part]
-                del labels["descriptions"][part]
+                if "descriptions" in labels and part in labels["descriptions"]:
+                    del labels["descriptions"][part]
                 if "description_sources" in labels and part in labels["description_sources"]:
                     del labels["description_sources"][part]
                 if "auto_boxes" in labels and part in labels["auto_boxes"]:
                     del labels["auto_boxes"][part]
                 if "auto_box_meta" in labels and part in labels["auto_box_meta"]:
                     del labels["auto_box_meta"][part]
+                if "boxes" in labels and part in labels["boxes"]:
+                    del labels["boxes"][part]
+                if "shrink_loose_boxes" in labels and part in labels["shrink_loose_boxes"]:
+                    del labels["shrink_loose_boxes"][part]
+                if "trajectories" in labels and part in labels["trajectories"]:
+                    del labels["trajectories"][part]
+                remove_part_training_truth(labels, part)
                 removed_count += 1
                 
             if not labels["parts"]:
@@ -2767,11 +3029,42 @@ class ProjectManager:
         labels = self.project_data["labels"][image_path]
         parts = labels.get("parts", {}) if isinstance(labels.get("parts", {}), dict) else {}
         count = 0
-        if "descriptions" in labels:
-            for part in list(labels["descriptions"].keys()):
-                if labels["descriptions"][part] == "Auto-Annotated" and parts.get(part):
-                    del labels["descriptions"][part]
+        part_names = set(parts)
+        part_names.update(
+            labels.get("descriptions", {}).keys()
+            if isinstance(labels.get("descriptions"), dict)
+            else []
+        )
+        part_names.update(
+            labels.get(LABEL_PART_METADATA_FIELD, {}).keys()
+            if isinstance(labels.get(LABEL_PART_METADATA_FIELD), dict)
+            else []
+        )
+        for part in sorted(part_names):
+            decision = resolve_part_training_trust(labels, part)
+            if decision.get("state") == "draft" and parts.get(part):
+                    auto_meta = labels.get("auto_box_meta", {})
+                    part_auto_meta = (
+                        auto_meta.get(part, {})
+                        if isinstance(auto_meta, dict)
+                        and isinstance(auto_meta.get(part), dict)
+                        else {}
+                    )
+                    source = (
+                        str(part_auto_meta.get("source") or "").strip()
+                        or str(decision.get("source") or "").strip()
+                        or TRAINING_SOURCE_LEGACY_AI_UNKNOWN
+                    )
+                    if labels.get("descriptions", {}).get(part) == "Auto-Annotated":
+                        del labels["descriptions"][part]
                     self.set_auto_box_review_status(image_path, part, "confirmed", save=False)
+                    set_part_training_truth(
+                        labels,
+                        part,
+                        source=source,
+                        review_status=TRAINING_REVIEW_CONFIRMED,
+                        accepted_via=TRAINING_ACCEPT_SELECTED_AI,
+                    )
                     count += 1
         
         if count > 0:

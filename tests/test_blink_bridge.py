@@ -24,6 +24,8 @@ import AntSleap.ui.main_window_blink_context as blink_context_module
 from main import BlinkEntryDialog, MainWindow
 from ui.blink_lab import BlinkLabWidget, BlinkTrainingThread, BucketDeletePreviewDialog, BucketDeleteTypeConfirmDialog
 from AntSleap.core.blink_training_strategy import DEFAULT_BLINK_TRAINING_STRATEGY
+from AntSleap.core.blink_expert_manifest import BLINK_EXPERT_BACKEND_HEATMAP
+from AntSleap.core.model_profiles import DEFAULT_BLINK_OUTER_LOSS_WEIGHTS
 from AntSleap.core.blink_trainer import BlinkExpertTrainer
 from AntSleap.core.expert_notes import load_expert_notes, set_expert_note
 
@@ -1120,6 +1122,7 @@ class BlinkBridgeTests(unittest.TestCase):
             learning_rate=0.002,
             weight_decay=0.0003,
             input_size=384,
+            outer_loss_weights={"final": 1.2, "step": 0.4, "view": 0.3, "consistency": 0.2},
             device="cpu",
         )
         with patch("AntSleap.core.blink_trainer.BlinkExpertTrainer", FakeTrainer):
@@ -1136,19 +1139,66 @@ class BlinkBridgeTests(unittest.TestCase):
                 "learning_rate",
                 "weight_decay",
                 "input_size",
+                "outer_loss_weights",
                 "training_strategy",
                 "device",
                 "allowed_image_paths",
                 "training_scope",
+                "save_dir",
+                "training_records",
+                "validation_records",
             },
         )
         self.assertEqual(trainer_kwargs.get("learning_rate"), 0.002)
         self.assertEqual(trainer_kwargs.get("weight_decay"), 0.0003)
         self.assertEqual(trainer_kwargs.get("input_size"), 384)
+        self.assertEqual(
+            trainer_kwargs.get("outer_loss_weights"),
+            {"final": 1.2, "step": 0.4, "view": 0.3, "consistency": 0.2},
+        )
         self.assertEqual(trainer_kwargs.get("training_strategy"), DEFAULT_BLINK_TRAINING_STRATEGY)
         self.assertEqual(trainer_kwargs.get("device"), "cpu")
         self.assertEqual(trainer_kwargs.get("allowed_image_paths"), [])
         self.assertEqual(trainer_kwargs.get("training_scope"), {})
+
+    def test_heatmap_blink_training_thread_passes_outer_loss_weights_to_trainer(self):
+        trainer_kwargs = {}
+
+        class FakeTrainer:
+            def __init__(self, **kwargs):
+                trainer_kwargs.update(kwargs)
+
+            def train(self, **_kwargs):
+                return "saved_heatmap_expert.pth"
+
+        custom_weights = {"final": 1.3, "step": 0.45, "view": 0.25, "consistency": 0.15}
+        thread = BlinkTrainingThread(
+            project_path=self.pm.current_project_path,
+            part_name="Mandible",
+            parent_part="Head",
+            epochs=2,
+            batch_size=1,
+            trainer_backend=BLINK_EXPERT_BACKEND_HEATMAP,
+            outer_loss_weights=custom_weights,
+            device="cpu",
+        )
+        with patch("AntSleap.core.blink_heatmap_trainer.BlinkHeatmapTrainer", FakeTrainer):
+            thread.start()
+            thread.wait()
+            self.app.processEvents()
+
+        self.assertEqual(trainer_kwargs.get("outer_loss_weights"), custom_weights)
+
+    def test_blink_training_thread_without_profile_weights_uses_legacy_defaults(self):
+        thread = BlinkTrainingThread(
+            project_path=self.pm.current_project_path,
+            part_name="Mandible",
+            parent_part="Head",
+            epochs=1,
+            batch_size=1,
+        )
+
+        self.assertEqual(thread.outer_loss_weights, DEFAULT_BLINK_OUTER_LOSS_WEIGHTS)
 
     def test_blink_training_thread_passes_selected_training_strategy(self):
         trainer_kwargs = {}

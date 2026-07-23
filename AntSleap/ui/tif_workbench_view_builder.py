@@ -460,11 +460,14 @@ class TifWorkbenchViewBuilder:
         self.local_axis_trainable_check = QCheckBox("Record this export as trainable local-axis data")
         self.local_axis_trainable_check.setObjectName("tifLocalAxisTrainableCheck")
         self.local_axis_trainable_check.setChecked(True)
-        self.btn_export_local_axis_training_manifest = QPushButton("Export Local Axis training manifest")
+        self.btn_export_local_axis_training_manifest = QPushButton("Export confirmed Local Axis training manifest")
         self.btn_export_local_axis_training_manifest.setObjectName("tifExportLocalAxisTrainingManifestButton")
         self.btn_export_part_package = QPushButton("Export part package")
         self.btn_export_part_package.setObjectName("tifExportPartPackageButton")
         self.btn_export_part_package.clicked.connect(self.export_current_part_package)
+        self.btn_export_reviewed_mesh = QPushButton("Export reviewed label STL")
+        self.btn_export_reviewed_mesh.setObjectName("tifExportReviewedMeshButton")
+        self.btn_export_reviewed_mesh.clicked.connect(self.open_reviewed_mesh_export_dialog)
         self.btn_delete_part_volume = QPushButton("Delete part volume")
         self.btn_delete_part_volume.setObjectName("tifDeletePartVolumeButton")
         self.btn_delete_part_volume.clicked.connect(self.delete_current_part_volume)
@@ -836,6 +839,7 @@ class TifWorkbenchViewBuilder:
 
         self.part_output_section, part_output_layout = self._make_section("3. Output and manage", "tifPartOutputSection")
         part_output_layout.addWidget(self.btn_export_part_package)
+        part_output_layout.addWidget(self.btn_export_reviewed_mesh)
         part_output_layout.addWidget(self.btn_delete_part_volume)
         self.part_task_layout.addWidget(self.part_output_section)
 

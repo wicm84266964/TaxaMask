@@ -1326,7 +1326,7 @@ class TifLocalAxisController(QObject):
             return None
         default_dir = os.path.join(wb.project.project_dir, "exports", "local_axis_training")
         os.makedirs(default_dir, exist_ok=True)
-        output_dir = QFileDialog.getExistingDirectory(wb, tt("Export Local Axis training manifest", wb.lang), default_dir)
+        output_dir = QFileDialog.getExistingDirectory(wb, tt("Export confirmed Local Axis training manifest", wb.lang), default_dir)
         if not output_dir:
             return None
         request = wb.local_axis_service.build_manifest_export_request(
@@ -1344,7 +1344,7 @@ class TifLocalAxisController(QObject):
         except Exception as exc:
             QMessageBox.warning(wb, tt("Local Axis data", wb.lang), str(exc))
             return None
-        message = tt("Exported Local Axis training manifest: {0} samples\n{1}", wb.lang).format(
+        message = tt("Exported confirmed Local Axis training manifest: {0} samples\n{1}", wb.lang).format(
             result.get("sample_count", 0),
             result.get("manifest_path", ""),
         )

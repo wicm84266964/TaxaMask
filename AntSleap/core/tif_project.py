@@ -19,6 +19,12 @@ from .tif_volume_io import (
     volume_sidecar_exists,
 )
 from .tif_write_guard import WriteIntent, ensure_write_allowed
+from .project_traceability import (
+    PROJECT_KIND_TIF,
+    ensure_project_traceability,
+    new_project_data_version_id,
+    new_project_traceability,
+)
 
 
 TIF_PROJECT_SCHEMA_VERSION = "ant3d_tif_project_v1"
@@ -88,10 +94,11 @@ def _tif_shape_from_metadata(path):
 
 def _default_project_data(name="Untitled TIF Project", project_id=None):
     now = _now_iso()
+    traceability = new_project_traceability(PROJECT_KIND_TIF, project_id=project_id)
     return {
+        **traceability,
         "schema_version": TIF_PROJECT_SCHEMA_VERSION,
         "project_type": TIF_PROJECT_TYPE,
-        "project_id": project_id or f"tif_project_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
         "name": str(name or "Untitled TIF Project"),
         "created_at": now,
         "updated_at": now,
@@ -112,6 +119,8 @@ class TifProjectManager:
         self.current_database_path = ""
         self.current_asset_root = ""
         self._legacy_json_write_enabled = False
+        self._pending_project_data_version_id = ""
+        self._traceability_backfill_needed = False
 
     @property
     def project_dir(self):
@@ -190,6 +199,8 @@ class TifProjectManager:
     def create_project(self, name, project_dir, project_id=None, storage_backend=SQLITE_BACKEND):
         os.makedirs(project_dir, exist_ok=True)
         self.project_data = _default_project_data(name=name, project_id=project_id)
+        self._pending_project_data_version_id = ""
+        self._traceability_backfill_needed = False
         if storage_backend == SQLITE_BACKEND:
             return self._create_sqlite_project_storage(name, project_dir)
         if storage_backend not in (LEGACY_JSON_BACKEND, "json"):
@@ -225,6 +236,9 @@ class TifProjectManager:
                     self.current_asset_root = canonical_path(os.path.join(os.path.dirname(canonical_path(path)), asset_root))
             else:
                 self.current_asset_root = os.path.dirname(canonical_path(path))
+            if self._traceability_backfill_needed:
+                self.save_project()
+                self._traceability_backfill_needed = False
             return self.project_data
         self.current_storage_backend = LEGACY_JSON_BACKEND
         self.current_database_path = ""
@@ -252,6 +266,9 @@ class TifProjectManager:
         self._legacy_json_write_enabled = bool(enabled)
 
     def _normalize_loaded_project_data(self, payload):
+        self._traceability_backfill_needed = ensure_project_traceability(
+            payload, PROJECT_KIND_TIF
+        )
         specimens = payload.get("specimens", [])
         if not isinstance(specimens, list):
             raise ValueError("tif_project_specimens_not_list")
@@ -287,17 +304,75 @@ class TifProjectManager:
     def save_project(self):
         if not self.current_project_path:
             raise ValueError("tif_project_path_not_set")
+        pending_data_version_id = self._pending_project_data_version_id
         self.project_data["updated_at"] = _now_iso()
-        if self.is_sqlite_project():
-            from .tif_sqlite_writer import flush_tif_project_changes
+        try:
+            if self.is_sqlite_project():
+                from .tif_sqlite_writer import flush_tif_project_changes
 
-            return flush_tif_project_changes(self)
-        if not getattr(self, "_legacy_json_write_enabled", False):
-            raise RuntimeError("legacy_tif_json_project_is_read_only; migrate to SQLite or export a legacy JSON copy")
-        project_path = os.path.abspath(self.current_project_path)
-        os.makedirs(os.path.dirname(project_path), exist_ok=True)
-        self._backup_current_project_file(project_path)
-        atomic_write_json(project_path, self.legacy_json_payload(project_path), indent=2, ensure_ascii=False)
+                result = flush_tif_project_changes(
+                    self, project_data_version_id=pending_data_version_id or None
+                )
+            else:
+                if not getattr(self, "_legacy_json_write_enabled", False):
+                    raise RuntimeError("legacy_tif_json_project_is_read_only; migrate to SQLite or export a legacy JSON copy")
+                project_path = os.path.abspath(self.current_project_path)
+                os.makedirs(os.path.dirname(project_path), exist_ok=True)
+                self._backup_current_project_file(project_path)
+                result = atomic_write_json(
+                    project_path,
+                    self.legacy_json_payload(project_path),
+                    indent=2,
+                    ensure_ascii=False,
+                )
+        except Exception:
+            raise
+        resolved_data_version_id = str(
+            (result or {}).get("data_version_id")
+            if isinstance(result, dict)
+            else ""
+        )
+        if resolved_data_version_id:
+            self.project_data["project_data_version_id"] = resolved_data_version_id
+        if pending_data_version_id:
+            self._pending_project_data_version_id = ""
+        return result
+
+    def _mark_manual_truth_data_changed(self):
+        if not self._pending_project_data_version_id:
+            self._pending_project_data_version_id = new_project_data_version_id()
+        return self._pending_project_data_version_id
+
+    def integrity_registry_state(self):
+        if not self.is_sqlite_project():
+            return {"status": "legacy_read_only"}
+        from .project_integrity_registry import registry_state
+        from .sqlite_storage import connect_sqlite_database
+
+        connection = connect_sqlite_database(self.current_database_path)
+        try:
+            return registry_state(connection)
+        finally:
+            connection.close()
+
+    def initialize_integrity_baseline(
+        self,
+        *,
+        legacy_truth_attestation=False,
+        note="",
+        progress_callback=None,
+        cancel_check=None,
+    ):
+        from .tif_integrity_bridge import register_tif_project_baseline
+
+        self.save_project()
+        return register_tif_project_baseline(
+            self,
+            legacy_truth_attestation=legacy_truth_attestation,
+            note=note,
+            progress_callback=progress_callback,
+            cancel_check=cancel_check,
+        )
 
     def _relative_to_project_path(self, path, project_path):
         text = str(path or "").strip()
@@ -468,13 +543,16 @@ class TifProjectManager:
 
     def _apply_project_mutation_transaction(self, callback, *, save=True):
         project_snapshot = copy.deepcopy(self.project_data)
+        pending_version_snapshot = self._pending_project_data_version_id
         try:
             result = callback()
+            self._mark_manual_truth_data_changed()
             if save:
                 self.save_project()
             return result
         except Exception:
             self.project_data = project_snapshot
+            self._pending_project_data_version_id = pending_version_snapshot
             raise
 
     def _apply_volume_replacement_transaction(
@@ -488,16 +566,19 @@ class TifProjectManager:
         transactions=None,
     ):
         project_snapshot = copy.deepcopy(self.project_data) if transactions is None else None
+        pending_version_snapshot = self._pending_project_data_version_id
         replacement = begin_volume_sidecar_replacement(source_path, target_path, role=role)
         if transactions is not None:
             transactions.append(replacement)
         try:
             result = callback(replacement.metadata)
+            self._mark_manual_truth_data_changed()
             if save:
                 self.save_project()
         except Exception as exc:
             if project_snapshot is not None:
                 self.project_data = project_snapshot
+            self._pending_project_data_version_id = pending_version_snapshot
             if transactions is None:
                 try:
                     replacement.rollback()
@@ -575,6 +656,7 @@ class TifProjectManager:
             "part_rois": [],
         }
         self.project_data.setdefault("specimens", []).append(specimen)
+        self._mark_manual_truth_data_changed()
         if save:
             self.save_project()
         return specimen
@@ -597,6 +679,7 @@ class TifProjectManager:
             specimen["train_ready"] = True
         else:
             specimen["train_ready"] = False
+        self._mark_manual_truth_data_changed()
         if save:
             self.save_project()
         return specimen
@@ -604,6 +687,7 @@ class TifProjectManager:
     def register_working_volume(self, specimen_id, path, shape_zyx, dtype, spacing_zyx=None, spacing_unit="micrometer", orientation="unknown", fmt=VOLUME_SIDECAR_FORMAT, save=True):
         specimen = self._require_specimen(specimen_id)
         specimen["working_volume"] = self._volume_payload(path, shape_zyx, dtype, spacing_zyx, spacing_unit, orientation, fmt)
+        self._mark_manual_truth_data_changed()
         if save:
             self.save_project()
         return specimen["working_volume"]
@@ -638,6 +722,18 @@ class TifProjectManager:
         specimen = self._require_specimen(specimen_id)
         specimen["labels"][role] = self._volume_payload(path, shape_zyx, dtype, spacing_zyx, spacing_unit, orientation, fmt)
         specimen["labels"][role]["status"] = str(status or "available")
+        if role == "manual_truth":
+            if explicit_review:
+                specimen["labels"][role]["review_audit"] = (
+                    self._manual_truth_review_audit(
+                        specimen["labels"][role],
+                        review_action=operation,
+                        source_role="registered_manual_truth",
+                        specimen_id=specimen_id,
+                        part_id="",
+                    )
+                )
+            self._mark_manual_truth_data_changed()
         if save:
             self.save_project()
         return specimen["labels"][role]
@@ -682,6 +778,7 @@ class TifProjectManager:
             existing.clear()
             existing.update(record)
             record = existing
+        self._mark_manual_truth_data_changed()
         if save:
             self.save_project()
         return record
@@ -897,6 +994,16 @@ class TifProjectManager:
             training["opened_for_review"] = bool(opened_for_review)
         training["updated_at"] = _now_iso()
         part["updated_at"] = _now_iso()
+        if any(
+            value is not None
+            for value in (
+                user_defined_part_name,
+                label_schema_id,
+                active_reslice_id,
+                system_status,
+            )
+        ):
+            self._mark_manual_truth_data_changed()
         if save:
             self.save_project()
         return training
@@ -943,6 +1050,15 @@ class TifProjectManager:
             record["source_model"] = str(source_model)
         if role == "manual_truth":
             labels["manual_truth"] = record
+            if explicit_review:
+                record["review_audit"] = self._manual_truth_review_audit(
+                    record,
+                    review_action=operation,
+                    source_role="registered_manual_truth",
+                    specimen_id=specimen_id,
+                    part_id=part_id,
+                )
+            self._mark_manual_truth_data_changed()
             self.set_part_training_metadata(
                 specimen_id,
                 part_id,
@@ -1051,6 +1167,37 @@ class TifProjectManager:
             self.save_project()
         return record
 
+    def _manual_truth_review_audit(
+        self,
+        source_record,
+        *,
+        review_action,
+        source_role,
+        specimen_id,
+        part_id,
+        reslice_id="",
+    ):
+        source = source_record if isinstance(source_record, dict) else {}
+        audit = {
+            "action": str(review_action or "").strip() or "manual_truth_promotion",
+            "explicit_review": True,
+            "reviewed_at": _now_iso(),
+            "source_role": str(source_role or ""),
+            "specimen_id": str(specimen_id or ""),
+            "part_id": str(part_id or ""),
+            "reslice_id": str(reslice_id or ""),
+        }
+        for key in (
+            "model_id",
+            "model_version",
+            "source_model",
+            "prediction_id",
+        ):
+            value = str(source.get(key) or "").strip()
+            if value:
+                audit[key] = value
+        return audit
+
     def promote_part_reslice_editable_result_to_manual_truth(
         self,
         specimen_id,
@@ -1059,18 +1206,20 @@ class TifProjectManager:
         source_role="editable_ai_result",
         mark_train_ready=True,
         save=True,
+        review_action="promote_part_reslice_editable_result_to_manual_truth",
         _replacement_transactions=None,
     ):
         labels, part, reslice = self._part_label_container(specimen_id, part_id, reslice_id)
         if reslice is None:
             raise ValueError("reslice_id_required_for_reslice_label")
+        clean_review_action = str(review_action or "").strip() or "promote_part_reslice_editable_result_to_manual_truth"
         policy = can_promote_to_manual_truth(
             source_role,
             explicit_review=True,
             review_ready=True,
             opened_for_review=(part.get("training") or {}).get("opened_for_review"),
             audit_metadata={
-                "review_action": "promote_part_reslice_editable_result_to_manual_truth",
+                "review_action": clean_review_action,
                 "specimen_id": specimen_id,
                 "part_id": part_id,
                 "reslice_id": reslice_id,
@@ -1083,7 +1232,7 @@ class TifProjectManager:
             source_role=source_role,
             explicit_review=True,
             audit_metadata={
-                "review_action": "promote_part_reslice_editable_result_to_manual_truth",
+                "review_action": clean_review_action,
                 "specimen_id": specimen_id,
                 "part_id": part_id,
                 "reslice_id": reslice_id,
@@ -1096,6 +1245,14 @@ class TifProjectManager:
         source_path = source.get("path", "")
         if not source_path:
             raise ValueError(f"part_reslice_label_source_missing:{source_role}")
+        review_audit = self._manual_truth_review_audit(
+            source,
+            review_action=clean_review_action,
+            source_role=source_role,
+            specimen_id=specimen_id,
+            part_id=part_id,
+            reslice_id=reslice_id,
+        )
         target_path = (labels.get("manual_truth") or {}).get("path")
         if not target_path:
             target_path = os.path.join(self.part_dir(specimen_id, part_id), "reslices", _safe_record_id(reslice_id, "reslice"), "labels", "manual_truth.ome.zarr").replace("\\", "/")
@@ -1104,6 +1261,7 @@ class TifProjectManager:
         if os.path.normcase(os.path.abspath(source_abs)) == os.path.normcase(os.path.abspath(target_abs)):
             def apply_existing_truth():
                 labels["manual_truth"]["status"] = "reviewed"
+                labels["manual_truth"]["review_audit"] = dict(review_audit)
                 if mark_train_ready:
                     self.set_part_training_metadata(specimen_id, part_id, active_reslice_id=str(reslice_id or ""), system_status="verified_train_ready", save=False)
                 return labels["manual_truth"]
@@ -1116,7 +1274,7 @@ class TifProjectManager:
             target_role="manual_truth",
             operation="truth_promotion",
             allow_overwrite=True,
-            audit_metadata={"review_action": "promote_part_reslice_editable_result_to_manual_truth"},
+            audit_metadata={"review_action": clean_review_action},
         )
         def apply_replacement(metadata):
             labels["manual_truth"] = self._volume_payload(
@@ -1132,6 +1290,7 @@ class TifProjectManager:
             labels["manual_truth"]["status"] = "reviewed"
             labels["manual_truth"]["coordinate_space"] = "local_axis_reslice_voxel_zyx"
             labels["manual_truth"]["reslice_id"] = str(reslice_id or "")
+            labels["manual_truth"]["review_audit"] = dict(review_audit)
             reslice["updated_at"] = _now_iso()
             part["updated_at"] = _now_iso()
             if mark_train_ready:
@@ -1154,17 +1313,19 @@ class TifProjectManager:
         source_role="editable_ai_result",
         mark_train_ready=True,
         save=True,
+        review_action="promote_part_editable_result_to_manual_truth",
         _replacement_transactions=None,
     ):
         part = self._require_part(specimen_id, part_id)
         labels = part.setdefault("labels", self._normalize_part_labels(None))
+        clean_review_action = str(review_action or "").strip() or "promote_part_editable_result_to_manual_truth"
         policy = can_promote_to_manual_truth(
             source_role,
             explicit_review=True,
             review_ready=True,
             opened_for_review=(part.get("training") or {}).get("opened_for_review"),
             audit_metadata={
-                "review_action": "promote_part_editable_result_to_manual_truth",
+                "review_action": clean_review_action,
                 "specimen_id": specimen_id,
                 "part_id": part_id,
             },
@@ -1176,7 +1337,7 @@ class TifProjectManager:
             source_role=source_role,
             explicit_review=True,
             audit_metadata={
-                "review_action": "promote_part_editable_result_to_manual_truth",
+                "review_action": clean_review_action,
                 "specimen_id": specimen_id,
                 "part_id": part_id,
             },
@@ -1188,6 +1349,13 @@ class TifProjectManager:
         source_path = source.get("path", "")
         if not source_path:
             raise ValueError(f"part_label_source_missing:{source_role}")
+        review_audit = self._manual_truth_review_audit(
+            source,
+            review_action=clean_review_action,
+            source_role=source_role,
+            specimen_id=specimen_id,
+            part_id=part_id,
+        )
         target_path = (labels.get("manual_truth") or {}).get("path")
         if not target_path:
             target_path = os.path.join(self.part_dir(specimen_id, part_id), "labels", "manual_truth.ome.zarr").replace("\\", "/")
@@ -1196,6 +1364,7 @@ class TifProjectManager:
         if os.path.normcase(os.path.abspath(source_abs)) == os.path.normcase(os.path.abspath(target_abs)):
             def apply_existing_truth():
                 labels["manual_truth"]["status"] = "reviewed"
+                labels["manual_truth"]["review_audit"] = dict(review_audit)
                 if mark_train_ready:
                     self.set_part_training_metadata(specimen_id, part_id, system_status="verified_train_ready", save=False)
                 return labels["manual_truth"]
@@ -1208,7 +1377,7 @@ class TifProjectManager:
             target_role="manual_truth",
             operation="truth_promotion",
             allow_overwrite=True,
-            audit_metadata={"review_action": "promote_part_editable_result_to_manual_truth"},
+            audit_metadata={"review_action": clean_review_action},
         )
         def apply_replacement(metadata):
             labels["manual_truth"] = self._volume_payload(
@@ -1222,6 +1391,7 @@ class TifProjectManager:
             )
             labels["manual_truth"]["role"] = "manual_truth"
             labels["manual_truth"]["status"] = "reviewed"
+            labels["manual_truth"]["review_audit"] = dict(review_audit)
             if mark_train_ready:
                 self.set_part_training_metadata(specimen_id, part_id, system_status="verified_train_ready", save=False)
             part["updated_at"] = _now_iso()
@@ -1361,7 +1531,13 @@ class TifProjectManager:
             "blocked_count": len(blocked),
         }
 
-    def promote_reviewed_part_results_to_manual_truth(self, part_refs, require_opened_for_review=True, save=True):
+    def promote_reviewed_part_results_to_manual_truth(
+        self,
+        part_refs,
+        require_opened_for_review=True,
+        save=True,
+        review_action="promote_reviewed_part_results_to_manual_truth",
+    ):
         report = self.build_part_review_acceptance_report(
             part_refs,
             require_opened_for_review=require_opened_for_review,
@@ -1372,6 +1548,7 @@ class TifProjectManager:
             raise ValueError(f"part_review_not_ready:{blocked}")
         promoted = []
         project_snapshot = copy.deepcopy(self.project_data)
+        pending_version_snapshot = self._pending_project_data_version_id
         replacements = []
         try:
             for ref in refs:
@@ -1382,6 +1559,7 @@ class TifProjectManager:
                         ref.get("reslice_id", ""),
                         mark_train_ready=True,
                         save=False,
+                        review_action=review_action,
                         _replacement_transactions=replacements,
                     )
                 else:
@@ -1390,6 +1568,7 @@ class TifProjectManager:
                         ref["part_id"],
                         mark_train_ready=True,
                         save=False,
+                        review_action=review_action,
                         _replacement_transactions=replacements,
                     )
                 promoted.append({**ref, "manual_truth": manual})
@@ -1397,6 +1576,7 @@ class TifProjectManager:
                 self.save_project()
         except Exception as exc:
             self.project_data = project_snapshot
+            self._pending_project_data_version_id = pending_version_snapshot
             rollback_errors = []
             for replacement in reversed(replacements):
                 try:
@@ -1810,6 +1990,7 @@ class TifProjectManager:
             "view_settings": {},
         }
         specimen.setdefault("parts", []).append(part)
+        self._mark_manual_truth_data_changed()
         if save:
             self.save_project()
         return part
@@ -2102,6 +2283,11 @@ class TifProjectManager:
                 source[key] = value
 
         nnunet = manifest.get("nnunet") if isinstance(manifest.get("nnunet"), dict) else {}
+        model_output = str(nnunet.get("model_output_dir") or "").strip()
+        if model_output and not os.path.isabs(model_output) and manifest_abs:
+            model_output = os.path.abspath(
+                os.path.join(os.path.dirname(manifest_abs), model_output)
+            )
         fill("model_id", manifest.get("model_id"))
         fill("backend_id", manifest.get("backend_id"))
         fill("model_family", manifest.get("model_family"))
@@ -2110,7 +2296,7 @@ class TifProjectManager:
         fill("trained_specimens", manifest.get("trained_specimens"))
         fill("trained_parts", manifest.get("trained_parts"))
         fill("trained_top_level_volumes", manifest.get("trained_top_level_volumes"))
-        fill("model_path", nnunet.get("model_output_dir"))
+        fill("model_path", model_output)
         fill("model_manifest", manifest_abs or manifest_path)
         fill("training_manifest_path", source.get("dataset_manifest"))
         fill("usable_for_research_prediction", manifest.get("usable_for_research_prediction"))
@@ -2842,6 +3028,20 @@ class TifProjectManager:
             "input_data": dict(source.get("input_data") or {}),
             "failure_reason": str(source.get("failure_reason") or ""),
             "reviewer_notes": str(source.get("reviewer_notes") or ""),
+            "review_audit": dict(
+                source.get("review_audit")
+                or (source.get("provenance") or {}).get("review_audit")
+                or {}
+            ),
+            "review_history": [
+                dict(item)
+                for item in (
+                    source.get("review_history")
+                    or (source.get("provenance") or {}).get("review_history")
+                    or []
+                )
+                if isinstance(item, dict)
+            ],
             "provenance": dict(source.get("provenance") or {}),
             "created_at": created_at,
             "updated_at": str(source.get("updated_at") or created_at),
@@ -2874,6 +3074,20 @@ class TifProjectManager:
             "input_data": dict(source.get("input_data") or {}),
             "failure_reason": str(source.get("failure_reason") or ""),
             "reviewer_notes": str(source.get("reviewer_notes") or ""),
+            "review_audit": dict(
+                source.get("review_audit")
+                or (source.get("provenance") or {}).get("review_audit")
+                or {}
+            ),
+            "review_history": [
+                dict(item)
+                for item in (
+                    source.get("review_history")
+                    or (source.get("provenance") or {}).get("review_history")
+                    or []
+                )
+                if isinstance(item, dict)
+            ],
             "provenance": dict(source.get("provenance") or {}),
             "created_at": created_at,
             "updated_at": str(source.get("updated_at") or created_at),

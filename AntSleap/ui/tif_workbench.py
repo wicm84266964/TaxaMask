@@ -98,6 +98,7 @@ try:
     from AntSleap.ui.tif_backend_panel_controller import TifBackendPanelController
     from AntSleap.ui.tif_workbench_control_panels import build_right_control_panel
     from AntSleap.ui.tif_workbench_dialogs import MaterialEditorDialog, TifPartNameDialog, TifTrainingResultDialog, summarize_tif_training_result
+    from AntSleap.ui.tif_mesh_export_dialog import TifMeshExportDialog
     from AntSleap.ui.tif_workbench_helpers import (
         _tif_bbox_shape,
         _tif_clip_bbox_to_shape,
@@ -202,6 +203,7 @@ except ModuleNotFoundError as exc:
     from ui.tif_backend_panel_controller import TifBackendPanelController
     from ui.tif_workbench_control_panels import build_right_control_panel
     from ui.tif_workbench_dialogs import MaterialEditorDialog, TifPartNameDialog, TifTrainingResultDialog, summarize_tif_training_result
+    from ui.tif_mesh_export_dialog import TifMeshExportDialog
     from ui.tif_workbench_helpers import (
         _tif_bbox_shape,
         _tif_clip_bbox_to_shape,
@@ -511,6 +513,7 @@ class TifWorkbenchWidget(QWidget):
             self.btn_local_axis_reslice,
             self.btn_export_local_axis_training_manifest,
             self.btn_export_part_package,
+            self.btn_export_reviewed_mesh,
         ]
         secondary_buttons = [
             self.btn_start_center,
@@ -944,6 +947,13 @@ class TifWorkbenchWidget(QWidget):
         self.btn_accept_part_mask.setText(tt("Accept part mask", self.lang))
         self.btn_clear_part_preview.setText(tt("Clear preview", self.lang))
         self.btn_export_part_package.setText(tt("Export part package", self.lang))
+        self.btn_export_reviewed_mesh.setText(tt("Export reviewed label STL", self.lang))
+        self.btn_export_reviewed_mesh.setToolTip(
+            tt(
+                "Create Blender-ready STL only from the current reviewed manual truth.",
+                self.lang,
+            )
+        )
         if hasattr(self, "local_axis_volume_help_label"):
             self.local_axis_volume_help_label.setText(
                 tt(
@@ -969,7 +979,7 @@ class TifWorkbenchWidget(QWidget):
         self.btn_align_axis_to_reference_plane.setToolTip(tt("The A/B/C plane is computed from points picked on the observation-side clip plane; use it after A, B, and C are set.", self.lang))
         self.btn_clear_local_axis_draft.setText(tt("Clear axis draft", self.lang))
         self.local_axis_trainable_check.setText(tt("Record this export as trainable local-axis data", self.lang))
-        self.btn_export_local_axis_training_manifest.setText(tt("Export Local Axis training manifest", self.lang))
+        self.btn_export_local_axis_training_manifest.setText(tt("Export confirmed Local Axis training manifest", self.lang))
         self.btn_delete_part_volume.setText(tt("Delete part volume", self.lang))
         self.btn_undo.setText(tt("Undo", self.lang))
         self.btn_redo.setText(tt("Redo", self.lang))
@@ -4285,6 +4295,24 @@ class TifWorkbenchWidget(QWidget):
         self.local_axis_trainable_check.setEnabled(local_axis_editable)
         self.btn_export_local_axis_training_manifest.setEnabled(bool(self.project.project_data.get("specimens", [])))
         self.btn_export_part_package.setEnabled(is_editable_part_volume and has_image)
+        mesh_export_available = bool(
+            has_image and self._current_reviewed_mesh_truth()
+        )
+        self.btn_export_reviewed_mesh.setEnabled(mesh_export_available)
+        if mesh_export_available:
+            self.btn_export_reviewed_mesh.setToolTip(
+                tt(
+                    "Create Blender-ready STL only from the current reviewed manual truth.",
+                    self.lang,
+                )
+            )
+        else:
+            self.btn_export_reviewed_mesh.setToolTip(
+                tt(
+                    "The current object has no reviewed training truth. Use Accept as training truth after review, then export STL.",
+                    self.lang,
+                )
+            )
         self.btn_delete_part_volume.setEnabled(is_editable_part_volume and self.current_part is not None)
         write_locked = self.coordinator.backend_write_lock_active()
         self._set_backend_write_locked_controls(write_locked)
@@ -4874,6 +4902,76 @@ class TifWorkbenchWidget(QWidget):
             tt("TIF training handoff", self.lang),
             message,
         )
+
+    def _current_reviewed_mesh_truth(self):
+        if not self.current_specimen_id:
+            return {}
+        try:
+            if self.current_volume_scope == "part":
+                record = self.project.part_label_record(
+                    self.current_specimen_id,
+                    self.current_part_id,
+                    "manual_truth",
+                    reslice_id=self.current_reslice_id,
+                )
+            else:
+                specimen = self.project.get_specimen(
+                    self.current_specimen_id,
+                    default=None,
+                )
+                record = ((specimen or {}).get("labels") or {}).get(
+                    "manual_truth"
+                ) or {}
+            if (
+                not record.get("path")
+                or str(record.get("status") or "reviewed")
+                not in {"reviewed", "verified", "train_ready"}
+            ):
+                return {}
+            path = self.project.to_absolute(record["path"])
+            return dict(record) if volume_sidecar_exists(path) else {}
+        except Exception:
+            return {}
+
+    def open_reviewed_mesh_export_dialog(self):
+        if not self.current_specimen_id or self.image_volume is None:
+            QMessageBox.information(
+                self,
+                tt("Mesh export", self.lang),
+                tt(
+                    "Select a TIF volume before exporting reviewed label meshes.",
+                    self.lang,
+                ),
+            )
+            return None
+        if not self._current_reviewed_mesh_truth():
+            QMessageBox.information(
+                self,
+                tt("Mesh export", self.lang),
+                tt(
+                    "The current object has no reviewed training truth. Use Accept as training truth after review, then export STL.",
+                    self.lang,
+                ),
+            )
+            return None
+        try:
+            dialog = TifMeshExportDialog(
+                self.project,
+                self.current_specimen_id,
+                part_id=self.current_part_id if self.current_volume_scope == "part" else "",
+                reslice_id=self.current_reslice_id if self.current_volume_scope == "part" else "",
+                lang=self.lang,
+                parent=self,
+            )
+            dialog.exec()
+            return dialog
+        except Exception as exc:
+            message = tt("Mesh export could not be opened: {0}", self.lang).format(
+                str(exc)
+            )
+            self.log(message)
+            QMessageBox.warning(self, tt("Mesh export", self.lang), message)
+            return None
 
     def export_current_part_package(self):
         if not self.coordinator.guard_backend_write_lock():

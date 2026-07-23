@@ -1306,6 +1306,8 @@ class GuiSmokeTests(unittest.TestCase):
     def test_ask_agent_carries_compact_context_only(self):
         window = self._make_window()
         try:
+            # This test validates context shaping, not the embedded Dashboard lifecycle.
+            window.agent_panel.start_dashboard = lambda: None
             window.project.current_project_path = str(self.project_dir / "image_project.json")
             window.current_image = str(self.project_dir / "head.png")
             window.log("x" * 1200)

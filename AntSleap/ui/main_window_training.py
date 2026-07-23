@@ -5,6 +5,217 @@ except ImportError:
 
 
 class MainWindowTrainingMixin:
+    def _offer_training_integrity_recovery(self, error):
+        code = str(getattr(error, "code", "") or error)
+        markers = (
+            "integrity",
+            "digest",
+            "fingerprint",
+            "source_missing",
+            "opaque_location",
+            "initial_weight",
+            "managed_locator_publication",
+            "managed_segmenter_publication",
+        )
+        if not any(marker in code for marker in markers):
+            return
+        dialog = TrainingIntegrityRecoveryDialog(self.project, self)
+        dialog.exec()
+
+    def _current_training_initial_weights(self, train_segmenter):
+        entries = []
+        managed = self._verified_managed_parent_weights()
+        managed_by_path = {
+            item["relative_path"]: item
+            for group in managed.values()
+            for item in group
+        }
+        locator_ref = self._selected_locator_timestamp()
+        if locator_ref:
+            locator_path = self._locator_model_path(locator_ref)
+            if ("/" in locator_ref or "\\" in locator_ref) and locator_ref not in managed_by_path:
+                raise ValueError("managed_locator_publication_not_verified")
+            item = {
+                "slot": "parent.locator",
+                "path": locator_path,
+            }
+            if locator_ref in managed_by_path:
+                item["expected"] = managed_by_path[locator_ref]["expected"]
+            entries.append(item)
+        if train_segmenter:
+            entries.append(
+                {
+                    "slot": "parent.sam_base",
+                    "path": self.engine.base_sam_path,
+                }
+            )
+            segmenter_ref = self._selected_segmenter_timestamp()
+            if segmenter_ref:
+                segmenter_path = self._segmenter_model_path(segmenter_ref)
+                if ("/" in segmenter_ref or "\\" in segmenter_ref) and segmenter_ref not in managed_by_path:
+                    raise ValueError("managed_segmenter_publication_not_verified")
+                item = {
+                    "slot": "parent.sam_decoder",
+                    "path": segmenter_path,
+                }
+                if segmenter_ref in managed_by_path:
+                    item["expected"] = managed_by_path[segmenter_ref]["expected"]
+                entries.append(item)
+        return entries
+
+    def _ensure_training_initial_weights_registered(self, train_segmenter):
+        try:
+            entries = self._current_training_initial_weights(train_segmenter)
+            if not entries:
+                return True
+            status = inspect_initial_weight_registration(self.project, entries)
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                tr("Starting model verification", self.current_lang),
+                str(exc),
+            )
+            return False
+        if status.get("verified"):
+            return True
+        by_slot = {item["slot"]: item for item in entries}
+        needs_researcher_attestation = [
+            item
+            for item in status["items"]
+            if not by_slot[item["slot"]].get("expected")
+        ]
+        if needs_researcher_attestation:
+            details = ", ".join(
+                f"{item['slot']}: {item['status']}"
+                for item in needs_researcher_attestation
+            )
+            answer = QMessageBox.question(
+                self,
+                tr("Register starting model version", self.current_lang),
+                tr(
+                    "The starting model files are not yet registered for this project, or no longer match the registered version: {0}. Register the current files as a new trusted version? Training will not start if you choose No.",
+                    self.current_lang,
+                ).format(details),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return False
+        observed_by_slot = {
+            item["slot"]: item.get("observed") for item in status["items"]
+        }
+        registration_entries = []
+        for item in entries:
+            clean = dict(item)
+            if clean.get("expected") is None:
+                clean["expected"] = observed_by_slot[item["slot"]]
+            registration_entries.append(clean)
+        try:
+            register_initial_weight_version(
+                self.project,
+                registration_entries,
+                note=(
+                    "Researcher approved current starting model files."
+                    if needs_researcher_attestation
+                    else "Verified active training publication registered for this project."
+                ),
+            )
+            return inspect_initial_weight_registration(
+                self.project, registration_entries
+            ).get("verified", False)
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                tr("Starting model verification", self.current_lang),
+                str(exc),
+            )
+            return False
+
+    def _ensure_training_integrity_baseline(self):
+        if not self.project.is_sqlite_project():
+            QMessageBox.warning(
+                self,
+                tr("Training", self.current_lang),
+                tr(
+                    "Training now requires a SQLite project with a registered data baseline. Migrate this project to SQLite first.",
+                    self.current_lang,
+                ),
+            )
+            return False
+        state = self.project.integrity_registry_state()
+        if state.get("status") == "ready":
+            return True
+        answer = QMessageBox.question(
+            self,
+            tr("Training data baseline", self.current_lang),
+            tr(
+                "Before the first training run, TaxaMask must register the current source images, reviewed labels, and label schema as the trusted baseline. This reads the files to calculate hashes and does not modify them. Register the baseline now?",
+                self.current_lang,
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return False
+        progress = QProgressDialog(
+            tr("Registering the trusted training baseline...", self.current_lang),
+            tr("Cancel", self.current_lang),
+            0,
+            100,
+            self,
+        )
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+
+        def on_progress(current, total, _item):
+            progress.setMaximum(max(1, int(total)))
+            progress.setValue(int(current))
+            QApplication.processEvents()
+
+        try:
+            self.project.initialize_integrity_baseline(
+                note="Researcher approved the initial training baseline.",
+                progress_callback=on_progress,
+                cancel_check=progress.wasCanceled,
+            )
+        except Exception as exc:
+            if getattr(exc, "code", "") == "legacy_truth_attestation_required":
+                confirm = QMessageBox.question(
+                    self,
+                    tr("Confirm historical labels", self.current_lang),
+                    tr(
+                        "Some historical polygons have no saved review source. Confirm only if you have reviewed these labels and accept them as training truth.",
+                        self.current_lang,
+                    ),
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if confirm != QMessageBox.StandardButton.Yes:
+                    return False
+                try:
+                    self.project.initialize_integrity_baseline(
+                        legacy_truth_attestation=True,
+                        note="Researcher attested that historical polygons were reviewed.",
+                        progress_callback=on_progress,
+                        cancel_check=progress.wasCanceled,
+                    )
+                except Exception as retry_exc:
+                    QMessageBox.critical(
+                        self,
+                        tr("Training data baseline", self.current_lang),
+                        str(retry_exc),
+                    )
+                    return False
+            else:
+                QMessageBox.critical(
+                    self,
+                    tr("Training data baseline", self.current_lang),
+                    str(exc),
+                )
+                return False
+        finally:
+            progress.close()
+        return self.project.integrity_registry_state().get("status") == "ready"
+
     def _show_structured_training_preflight(self, preflight):
         dialog = TrainingPreflightDialog(preflight, self, self.current_lang)
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -73,7 +284,15 @@ class MainWindowTrainingMixin:
         if progress_value is not None and hasattr(self, "progress"):
             self.progress.setValue(progress_value)
 
-    def _launch_training_with_preflight(self, preflight, tax, locator_scope, train_segmenter=True, training_scope=None):
+    def _launch_training_with_preflight(
+        self,
+        preflight,
+        tax,
+        locator_scope,
+        train_segmenter=True,
+        training_scope=None,
+        retry_of=None,
+    ):
         if self._is_child_training_running():
             self.log(tr("Child-part expert training is running. Wait for it to finish before training parent models.", self.current_lang))
             QMessageBox.information(
@@ -83,6 +302,9 @@ class MainWindowTrainingMixin:
             )
             return
         active_preflight = dict(preflight or {})
+        if not self._ensure_training_initial_weights_registered(train_segmenter):
+            self.parent_training_failed = True
+            return
         active_training_scope = dict(training_scope or {})
         scope_label = str(
             active_training_scope.get("label")
@@ -126,6 +348,91 @@ class MainWindowTrainingMixin:
         self.engine.locator_resolution = tuple(active_preflight.get("selected_locator_size") or (512, 512))
         active_profile = _active_profile_from_manager(self.project)
         parent_backend = active_profile.get("parent_backend", {}) if isinstance(active_profile.get("parent_backend"), dict) else {}
+        effective_loss_config = self.engine.set_locator_loss_weights(parent_backend.get("loss_weights"))
+        allowed_uids = [
+            self.project.get_image_uid(path)
+            for path in active_training_scope.get("images", []) or []
+        ]
+        effective_config = {
+            "epochs": max(1, int(self.train_epochs)),
+            "batch_size": max(1, int(self.train_batch)),
+            "learning_rate": float(self.train_lr),
+            "weight_decay": float(self.train_wd),
+            "random_seed": DEFAULT_TRAINING_SEED,
+            "input_resolution": list(self.engine.locator_resolution),
+            "preprocessing": {
+                "dataset_adapter": "TwoStageDataset",
+                "locator_batch_multiplier": 2,
+                "parts_batch_size": 1,
+                "parts_mask_resolution": [256, 256],
+            },
+            "model": {
+                "family": "AntEngine",
+                "version": "1",
+                "locator": "TraitRegressor",
+                "parts": "TrainableSAM" if train_segmenter else "disabled",
+            },
+            "loss_weights": dict(effective_loss_config),
+            "train_segmenter": bool(train_segmenter),
+            "active_profile_id": str(active_profile.get("profile_id") or ""),
+            "training_scope_id": scope_id,
+        }
+        runs_root = os.path.join(
+            os.path.dirname(os.path.abspath(self.project.current_project_path)),
+            "runs",
+            "train",
+        )
+        try:
+            initial_weight_slots = [
+                item["slot"]
+                for item in self._current_training_initial_weights(train_segmenter)
+            ]
+            prepared_run = prepare_2d_training_run(
+                self.project,
+                runs_root=runs_root,
+                entrypoint="builtin_locator_sam",
+                effective_config=effective_config,
+                backend={
+                    "backend_id": "builtin_locator_sam",
+                    "backend_version": "1.0",
+                    "adapter_id": "gui_training_thread",
+                    "adapter_version": "1.0",
+                },
+                include_parts=bool(train_segmenter),
+                allowed_image_uids=allowed_uids,
+                seed=DEFAULT_TRAINING_SEED,
+                compute_device=str(getattr(self.engine, "device", "not_recorded")),
+                cuda=str(torch.version.cuda or "not_available"),
+                initial_weight_slots=initial_weight_slots,
+                retry_of=retry_of,
+            )
+        except Exception as exc:
+            self.parent_training_failed = True
+            QMessageBox.critical(
+                self,
+                tr("Training preflight", self.current_lang),
+                tr(
+                    "Training did not start because the registered files or data version could not be verified: {0}",
+                    self.current_lang,
+                ).format(str(exc)),
+            )
+            self._offer_training_integrity_recovery(exc)
+            return
+        frozen = prepared_run.dataset
+        active_preflight.update(
+            {
+                "taxonomy": list(frozen["taxonomy"]),
+                "locator_scope": list(frozen["locator_scope"]),
+                "locator_samples": list(frozen["locator_records"]),
+                "parts_samples": list(frozen["parts_records"]),
+                "locator_train_data": list(prepared_run.locator_train_records),
+                "locator_val_data": list(prepared_run.locator_validation_records),
+                "parts_train_data": list(prepared_run.parts_train_records),
+                "parts_val_data": list(prepared_run.parts_validation_records),
+            }
+        )
+        tax = list(frozen["taxonomy"])
+        locator_scope = list(frozen["locator_scope"])
         self.trainer = TrainingThread(
             self.engine,
             active_preflight,
@@ -141,12 +448,15 @@ class MainWindowTrainingMixin:
                 "locator_scope": list(locator_scope or []),
                 "train_segmenter": bool(train_segmenter),
                 "locator_resolution": list(self.engine.locator_resolution),
+                "loss_config": effective_loss_config,
                 "training_scope": {
                     "scope_id": scope_id,
                     "label": scope_label,
                     "image_count": scope_image_count,
                 },
             },
+            training_run=prepared_run.run,
+            model_output_root=self.engine.weights_dir,
         )
         if hasattr(self.trainer, "translate"):
             self.trainer.translate = tr
@@ -217,6 +527,14 @@ class MainWindowTrainingMixin:
                 payload.get("lower_options", []),
             )
             if retry_resolution is not None and self.pending_training_preflight:
+                retry_of = str(
+                    getattr(
+                        getattr(self.trainer, "training_run", None),
+                        "run_id",
+                        "",
+                    )
+                    or ""
+                )
                 self.training_retry_requested = True
                 updated_preflight = dict(self.pending_training_preflight.get("preflight") or {})
                 updated_preflight["selected_locator_size"] = tuple(retry_resolution)
@@ -235,6 +553,7 @@ class MainWindowTrainingMixin:
                         self.pending_training_preflight.get("locator_scope", []),
                         self.pending_training_preflight.get("train_segmenter", True),
                         self.pending_training_preflight.get("training_scope", {}),
+                        retry_of=retry_of or None,
                     ),
                 )
                 return
@@ -264,6 +583,8 @@ class MainWindowTrainingMixin:
                 tr("Training", self.current_lang),
                 tr("Child-part expert training is running. Wait for it to finish before training parent models.", self.current_lang),
             )
+            return
+        if not self._ensure_training_integrity_baseline():
             return
         scope_payload = self._selected_training_scope_payload()
         scope_id = str(scope_payload.get("scope_id", "__all__") or "__all__")
@@ -545,17 +866,100 @@ class MainWindowTrainingMixin:
                     continue
                 seen_dirs.add(report_dir)
                 reports.append(report)
+        reports.extend(self._discover_training_run_records())
         reports.sort(key=lambda item: item.get("time_label", ""), reverse=True)
         return reports
 
+    def _training_run_stores(self):
+        project_path = str(self.project.current_project_path or "")
+        root = os.path.join(
+            os.path.dirname(os.path.abspath(project_path)), "runs", "train"
+        )
+        return (
+            TrainingRunRecorder(
+                root,
+                database_path=self.project.current_database_path,
+                recover_on_startup=False,
+            ),
+            TrainingRunNoteStore(
+                root, database_path=self.project.current_database_path
+            ),
+        )
+
+    def _discover_training_run_records(self):
+        is_sqlite_project = getattr(self.project, "is_sqlite_project", None)
+        if not callable(is_sqlite_project) or not is_sqlite_project():
+            return []
+        try:
+            recorder, notes = self._training_run_stores()
+            records = recorder.list_records()
+        except Exception:
+            runtime_log_exception("training_run_browser_load_failed", *sys.exc_info())
+            return []
+        results = []
+        for record in records:
+            note = notes.load(record["run_id"])
+            config = record.get("effective_config") or {}
+            model = config.get("model") or {}
+            results.append(
+                {
+                    "report_type": "run",
+                    "type_label": tr("Training run", self.current_lang),
+                    "target_label": str(model.get("family") or record.get("entrypoint") or ""),
+                    "backend_label": str((record.get("backend") or {}).get("backend_id") or ""),
+                    "strategy_label": str(record.get("entrypoint") or ""),
+                    "samples_label": str(len((record.get("artifacts") or []))),
+                    "time_label": str(record.get("created_at") or ""),
+                    "status_label": str(record.get("status") or ""),
+                    "note_label": str(note.get("importance") or ("Yes" if note.get("has_content") else "")),
+                    "dir": "",
+                    "run_id": record["run_id"],
+                    "run_record": record,
+                }
+            )
+        return results
+
     def open_training_report_payload(self, report):
         if not isinstance(report, dict):
+            return
+        if report.get("report_type") == "run":
+            dialog = QDialog(self)
+            dialog.setWindowTitle(tr("Training run details", self.current_lang))
+            layout = QVBoxLayout(dialog)
+            details = QTextEdit(dialog)
+            details.setReadOnly(True)
+            details.setPlainText(json.dumps(report.get("run_record") or {}, ensure_ascii=False, indent=2))
+            layout.addWidget(details)
+            dialog.resize(820, 620)
+            dialog.exec()
             return
         if report.get("report_type") == "child":
             dlg = BlinkExpertTrainingReportDialog(report, self.current_lang, self)
         else:
             dlg = TrainingReportDialog(report, self, self.current_lang)
         dlg.exec()
+
+    def edit_training_run_note(self, report):
+        run_id = str((report or {}).get("run_id") or "")
+        if not run_id:
+            return
+        try:
+            _recorder, store = self._training_run_stores()
+            existing = store.load(run_id)
+            dialog = TrainingRunNoteDialog(
+                run_id,
+                existing,
+                parent=self,
+                lang=self.current_lang,
+            )
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                store.save(
+                    run_id,
+                    **dialog.values(),
+                    expected_updated_at=existing.get("updated_at"),
+                )
+        except Exception as exc:
+            QMessageBox.critical(self, tr("Training Run Note", self.current_lang), str(exc))
 
     def open_training_results_browser(self):
         reports = self.discover_training_reports()
@@ -572,5 +976,6 @@ class MainWindowTrainingMixin:
             lang=self.current_lang,
             preview_callback=self.open_training_report_payload,
             refresh_callback=self.discover_training_reports,
+            note_callback=self.edit_training_run_note,
         )
         dlg.exec()

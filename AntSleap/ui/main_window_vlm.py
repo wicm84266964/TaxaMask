@@ -483,6 +483,9 @@ class MainWindowVlmMixin:
                 "Auto-Annotated",
                 auto_box=box,
                 save=False,
+                training_source="vlm_first_mile",
+                training_review_status="draft",
+                training_accepted_via="",
             )
             update_auto_box = getattr(self.project, "update_auto_box", None)
             if callable(update_auto_box):
@@ -506,7 +509,17 @@ class MainWindowVlmMixin:
                 save=False,
             )
         else:
-            self.project.update_label(image_path, part_name, [], "Auto-Annotated", auto_box=box, save=False)
+            self.project.update_label(
+                image_path,
+                part_name,
+                [],
+                "Auto-Annotated",
+                auto_box=box,
+                save=False,
+                training_source="vlm_first_mile",
+                training_review_status="draft",
+                training_accepted_via="",
+            )
         return True, "box_only"
 
     def _refresh_vlm_canvas_if_current(self, image_path):

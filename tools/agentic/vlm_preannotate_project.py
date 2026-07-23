@@ -157,7 +157,17 @@ def _apply_candidates(manager: ProjectManager, image_path: str, candidates: list
             ):
                 saved += 1
         else:
-            manager.update_label(image_path, part_name, [], note, auto_box=box, save=False)
+            manager.update_label(
+                image_path,
+                part_name,
+                [],
+                note,
+                auto_box=box,
+                save=False,
+                training_source=AUTO_BOX_SOURCE_VLM,
+                training_review_status=AUTO_BOX_REVIEW_DRAFT,
+                training_accepted_via="",
+            )
             saved += 1
     return saved
 

@@ -6,6 +6,7 @@ import torch
 from torch.utils.data import Dataset
 import random
 from .projection import CoordinateMapper
+from .training_truth import resolve_part_training_trust
 try:
     from .blink_training_strategy import (
         BLINK_STRATEGY_FULL_INSIDE_RANDOM,
@@ -41,6 +42,7 @@ class BlinkTrajectoryDataset(Dataset):
         training_strategy=BLINK_STRATEGY_TRIVIEW_RANDOM,
         stage_view_mode=None,
         allowed_image_paths=None,
+        training_records=None,
     ):
         """
         :param project_json_path: project.json 的路径
@@ -56,6 +58,7 @@ class BlinkTrajectoryDataset(Dataset):
         self.training_strategy = sanitize_blink_training_strategy(training_strategy)
         self.stage_view_mode = str(stage_view_mode or "").strip().lower()
         self.allowed_image_paths = self._normalize_allowed_image_paths(allowed_image_paths)
+        self.training_records = list(training_records or [])
         self.samples = []
         
         self._load_data()
@@ -89,17 +92,23 @@ class BlinkTrajectoryDataset(Dataset):
         return torch.from_numpy(img_resized.copy()).permute(2, 0, 1).float() / 255.0
         
     def _load_data(self):
-        if not os.path.exists(self.project_path):
+        if not self.training_records and not os.path.exists(self.project_path):
             print(f"Dataset Error: {self.project_path} not found.")
             return
-            
-        with open(self.project_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            
         proj_dir = os.path.dirname(self.project_path)
+        if self.training_records:
+            label_items = list(self.training_records)
+        else:
+            with open(self.project_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            label_items = list(data.get("labels", {}).items())
         
         # 遍历所有图片，寻找包含目标部位轨迹的数据
-        for rel_img_path, label_data in data.get("labels", {}).items():
+        for rel_img_path, label_data in label_items:
+            if not isinstance(label_data, dict):
+                continue
+            if not resolve_part_training_trust(label_data, self.part_name).get("eligible"):
+                continue
             trajectories = label_data.get("trajectories", {})
             if self.part_name in trajectories:
                 traj_payload = trajectories[self.part_name]
@@ -117,7 +126,11 @@ class BlinkTrajectoryDataset(Dataset):
                 if self.parent_part and sample_parent_part != self.parent_part:
                     continue
                 # 原始大图的绝对路径
-                abs_img_path = os.path.normpath(os.path.join(proj_dir, rel_img_path))
+                abs_img_path = (
+                    os.path.normpath(rel_img_path)
+                    if os.path.isabs(str(rel_img_path))
+                    else os.path.normpath(os.path.join(proj_dir, rel_img_path))
+                )
                 if not self._is_allowed_image_path(rel_img_path, abs_img_path):
                     continue
                 

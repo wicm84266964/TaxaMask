@@ -5,6 +5,8 @@ import torch.optim as optim
 import torch.nn as nn
 from torch.utils.data import DataLoader
 import os
+import re
+import secrets
 import threading
 import numpy as np
 import cv2 
@@ -26,6 +28,60 @@ from .taxonomy_defaults import DEFAULT_LOCATOR_SCOPE, DEFAULT_PROJECT_TAXONOMY, 
 from .training_preflight import format_size_pair
 from .cascade_routes import route_manifest_has_routes
 from .runtime_device import normalize_device_preference, resolve_torch_device
+from .model_profiles import DEFAULT_LOCATOR_LOSS_WEIGHTS, sanitize_loss_weights
+
+
+_WEIGHT_ARTIFACT_KEY_RE = re.compile(r"^[A-Za-z0-9._-]{1,240}$")
+
+
+def _fsync_directory(path):
+    try:
+        descriptor = os.open(os.fspath(path), os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError:
+        pass
+
+
+def _atomic_torch_save(payload, path):
+    """Write a PyTorch payload without exposing a partial final checkpoint."""
+
+    target = os.path.abspath(os.fspath(path))
+    directory = os.path.dirname(target) or "."
+    os.makedirs(directory, exist_ok=True)
+    temp_path = f"{target}.tmp_{secrets.token_hex(8)}"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= int(getattr(os, "O_BINARY", 0))
+    flags |= int(getattr(os, "O_NOFOLLOW", 0))
+    descriptor = None
+    try:
+        descriptor = os.open(temp_path, flags, 0o600)
+        with os.fdopen(descriptor, "wb", closefd=True) as handle:
+            descriptor = None
+            torch.save(payload, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if os.path.lexists(target):
+            raise FileExistsError(f"weight_checkpoint_exists:{os.path.basename(target)}")
+        try:
+            os.link(temp_path, target, follow_symlinks=False)
+        except (NotImplementedError, TypeError):
+            os.rename(temp_path, target)
+        else:
+            os.unlink(temp_path)
+        _fsync_directory(directory)
+        return target
+    except Exception:
+        if descriptor is not None:
+            os.close(descriptor)
+        try:
+            if os.path.lexists(temp_path):
+                os.unlink(temp_path)
+        except OSError:
+            pass
+        raise
 
 class DiceLoss(nn.Module):
     def __init__(self, smooth=1):
@@ -94,7 +150,14 @@ class FocalMSELoss(nn.Module):
         return loss.mean()
 
 class AntEngine:
-    def __init__(self, learning_rate=1e-4, weight_decay=1e-4, num_classes=None, device="auto"):
+    def __init__(
+        self,
+        learning_rate=1e-4,
+        weight_decay=1e-4,
+        num_classes=None,
+        device="auto",
+        locator_loss_weights=None,
+    ):
         self.device_preference = normalize_device_preference(device)
         self.device = resolve_torch_device(device)
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -106,8 +169,11 @@ class AntEngine:
         self.current_num_classes = num_classes
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
+        self.set_locator_loss_weights(locator_loss_weights)
         self.locator_resolution = (512, 512)
         self.loaded_locator_timestamp = None
+        self.loaded_locator_reference = ""
+        self.loaded_sam_decoder_reference = ""
         self.loaded_locator_requires_legacy_confirmation = False
         self.loaded_locator_is_legacy_512 = False
 
@@ -135,6 +201,24 @@ class AntEngine:
         
         self.history = {"locator": [], "parts": []}
         self.load_weights()
+
+    @property
+    def loss_config_snapshot(self):
+        weights = sanitize_loss_weights(
+            getattr(self, "_locator_loss_weights", None),
+            DEFAULT_LOCATOR_LOSS_WEIGHTS,
+        )
+        return {"locator": weights}
+
+    def get_loss_config_snapshot(self):
+        return self.loss_config_snapshot
+
+    def set_locator_loss_weights(self, loss_weights=None):
+        self._locator_loss_weights = sanitize_loss_weights(
+            loss_weights,
+            DEFAULT_LOCATOR_LOSS_WEIGHTS,
+        )
+        return self.loss_config_snapshot
 
     def ensure_locator_loaded(self):
         if not hasattr(self, "_locator_lock"):
@@ -200,6 +284,7 @@ class AntEngine:
         else:
             self.opt_loc = None
         self.loaded_locator_timestamp = None
+        self.loaded_locator_reference = ""
         self.loaded_locator_requires_legacy_confirmation = False
         self.loaded_locator_is_legacy_512 = False
 
@@ -209,6 +294,7 @@ class AntEngine:
         self.opt_loc = optim.Adam(self.locator.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
         self.locator_resolution = (512, 512)
         self.loaded_locator_timestamp = None
+        self.loaded_locator_reference = ""
         self.loaded_locator_requires_legacy_confirmation = False
         self.loaded_locator_is_legacy_512 = False
 
@@ -350,7 +436,8 @@ class AntEngine:
         wh_loss_tensor = self.crit_wh(wh_pred, wh_target)
         loss_hm = self._masked_locator_average(heatmap_loss_tensor, valid_parts_mask)
         loss_wh = self._masked_locator_average(wh_loss_tensor, valid_parts_mask)
-        total_loss = loss_hm + 0.5 * loss_wh
+        weights = self.loss_config_snapshot["locator"]
+        total_loss = weights["heatmap"] * loss_hm + weights["wh"] * loss_wh
         return loss_hm, loss_wh, total_loss
 
     def _compute_locator_pixel_error(self, hm_pred, hm_target, valid_parts_mask):
@@ -437,9 +524,19 @@ class AntEngine:
         if timestamp:
             self.load_sam_decoder(timestamp)
 
-    def load_locator(self, timestamp):
+    def load_locator(self, timestamp, *, checkpoint_path=None):
         suffix = f"_{timestamp}" if timestamp else ""
-        loc_path = os.path.join(self.weights_dir, f"locator{suffix}.pth")
+        loc_path = os.path.abspath(
+            checkpoint_path
+            or os.path.join(self.weights_dir, f"locator{suffix}.pth")
+        )
+        weights_root = os.path.abspath(self.weights_dir)
+        try:
+            inside = os.path.normcase(os.path.commonpath([weights_root, loc_path])) == os.path.normcase(weights_root)
+        except ValueError:
+            inside = False
+        if not inside:
+            raise ValueError("locator_checkpoint_outside_managed_model_root")
         
         # If specific timestamp not found, try to find latest? No, strict loading for specific selection.
         if os.path.exists(loc_path):
@@ -483,20 +580,36 @@ class AntEngine:
                     self.loaded_locator_requires_legacy_confirmation = False
                     self.loaded_locator_is_legacy_512 = False
                 self.loaded_locator_timestamp = timestamp
+                self.loaded_locator_reference = os.path.relpath(
+                    loc_path, weights_root
+                ).replace("\\", "/")
                 print(f"Loaded Locator: {os.path.basename(loc_path)}")
             except Exception as e:
                 print(f"ERROR loading Locator {loc_path}: {e}")
         else:
             print(f"Locator weights not found: {loc_path}")
 
-    def load_sam_decoder(self, timestamp):
+    def load_sam_decoder(self, timestamp, *, checkpoint_path=None):
         suffix = f"_{timestamp}" if timestamp else ""
-        sam_path = os.path.join(self.weights_dir, f"sam_decoder_lora{suffix}.pth")
+        sam_path = os.path.abspath(
+            checkpoint_path
+            or os.path.join(self.weights_dir, f"sam_decoder_lora{suffix}.pth")
+        )
+        weights_root = os.path.abspath(self.weights_dir)
+        try:
+            inside = os.path.normcase(os.path.commonpath([weights_root, sam_path])) == os.path.normcase(weights_root)
+        except ValueError:
+            inside = False
+        if not inside:
+            raise ValueError("segmenter_checkpoint_outside_managed_model_root")
         
         if os.path.exists(sam_path):
             try:
                 parts_model = self.ensure_parts_model_loaded()
                 parts_model.sam_model.mask_decoder.load_state_dict(torch.load(sam_path, map_location=self.device))
+                self.loaded_sam_decoder_reference = os.path.relpath(
+                    sam_path, weights_root
+                ).replace("\\", "/")
                 print(f"Loaded Segmenter (Fine-tuned): {os.path.basename(sam_path)}")
             except Exception as e:
                 print(f"ERROR loading SAM Decoder {sam_path}: {e}")
@@ -518,6 +631,7 @@ class AntEngine:
             # Ideally, we should have saved the "initial_state" of the decoder.
             # For now, let's just re-create the wrapper. It's fast enough (~1-2s).
             self.parts_model = TrainableSAM(model_path=self.base_sam_path, device=self.device)
+            self.loaded_sam_decoder_reference = ""
             
             # We also need to re-create the optimizer because parameters changed objects
             trainable_params = [p for p in self.parts_model.parameters() if p.requires_grad]
@@ -532,9 +646,37 @@ class AntEngine:
         self.reset_locator_to_base()
         self.reset_sam_to_base()
 
-    def save_weights(self, save_locator=True, save_segmenter=True):
+    def save_weights(
+        self,
+        save_locator=True,
+        save_segmenter=True,
+        *,
+        output_dir=None,
+        artifact_key=None,
+    ):
         import datetime
-        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M")
+
+        if artifact_key is None:
+            artifact_key = (
+                datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                + f"_{secrets.token_hex(4)}"
+            )
+        artifact_key = str(artifact_key or "").strip()
+        if not _WEIGHT_ARTIFACT_KEY_RE.fullmatch(artifact_key):
+            raise ValueError("invalid_weight_artifact_key")
+        target_dir = os.path.abspath(os.fspath(output_dir or self.weights_dir))
+        os.makedirs(target_dir, exist_ok=True)
+        locator_path = os.path.join(target_dir, f"locator_{artifact_key}.pth")
+        segmenter_path = os.path.join(
+            target_dir, f"sam_decoder_lora_{artifact_key}.pth"
+        )
+        requested_paths = []
+        if save_locator:
+            requested_paths.append(locator_path)
+        if save_segmenter:
+            requested_paths.append(segmenter_path)
+        if any(os.path.lexists(path) for path in requested_paths):
+            raise FileExistsError("weight_checkpoint_exists")
         if save_locator:
             locator = self.ensure_locator_loaded()
             locator_payload = {
@@ -543,16 +685,19 @@ class AntEngine:
                     "locator_size": [int(self.locator_resolution[0]), int(self.locator_resolution[1])],
                     "locator_resolution": int(self.locator_resolution[0]),
                     "num_classes": int(self.current_num_classes),
+                    "loss_config": self.loss_config_snapshot,
                 },
             }
-            torch.save(locator_payload, os.path.join(self.weights_dir, f"locator_{ts}.pth"))
-            self.loaded_locator_timestamp = ts
+            _atomic_torch_save(locator_payload, locator_path)
+            self.loaded_locator_timestamp = artifact_key
             self.loaded_locator_requires_legacy_confirmation = False
             self.loaded_locator_is_legacy_512 = False
         if save_segmenter:
             parts_model = self.ensure_parts_model_loaded()
-            torch.save(parts_model.sam_model.mask_decoder.state_dict(), os.path.join(self.weights_dir, f"sam_decoder_lora_{ts}.pth"))
-        return ts
+            _atomic_torch_save(
+                parts_model.sam_model.mask_decoder.state_dict(), segmenter_path
+            )
+        return artifact_key
 
     def generate_report(self, val_dataloader=None, num_samples=4, training_context=None):
         """Generates plots and CSVs for the current training session."""
@@ -599,6 +744,7 @@ class AntEngine:
             "validation_count": int(validation_count_value),
             "validation_preview_count": int(validation_preview_value),
             "validation_provenance_counts": provenance_counts,
+            "loss_config": self.loss_config_snapshot,
         }
         if isinstance(training_context, dict) and training_context:
             report_summary_payload["training_context"] = dict(training_context)
@@ -668,406 +814,18 @@ class AntEngine:
         project_route_manifest=None,
         model_profile_context=None,
     ):
-        locator = self.ensure_locator_loaded()
-        locator.eval()
-        parts_model = self.ensure_parts_model_loaded()
-        parts_model.sam_model.eval()
+        from .prediction_pipeline import predict_full_pipeline
 
-        try:
-            img_pil = Image.open(image_path).convert('RGB')
-        except Exception:
-            return {"polygons": {}, "auto_boxes": {}, "scores": {}, "meta": {}}
-
-        w_orig, h_orig = img_pil.size
-
-        locator_size = getattr(self, "locator_resolution", (512, 512)) or (512, 512)
-        try:
-            locator_width = max(1, int(locator_size[0]))
-            locator_height = max(1, int(locator_size[1]))
-        except Exception:
-            locator_width, locator_height = 512, 512
-
-        # Resize to locator size with Letterbox
-        scale = min(float(locator_width) / w_orig, float(locator_height) / h_orig)
-        new_w, new_h = int(w_orig * scale), int(h_orig * scale)
-        pad_w, pad_h = (locator_width - new_w) // 2, (locator_height - new_h) // 2
-
-        bilinear_mode = Image.Resampling.BILINEAR if hasattr(Image, "Resampling") else getattr(Image, "BILINEAR", 2)
-        img_resized = img_pil.resize((new_w, new_h), bilinear_mode)
-        img_loc = Image.new('RGB', (locator_width, locator_height), (0, 0, 0))
-        img_loc.paste(img_resized, (pad_w, pad_h))
-        t_loc = torch.from_numpy(np.array(img_loc)).permute(2, 0, 1).float().unsqueeze(0).to(self.device) / 255.0
-
-        with torch.no_grad():
-            hm_all, wh_all = locator(t_loc)
-            hm_all = hm_all.cpu().numpy()[0]
-            wh_all = wh_all.cpu().numpy()[0]
-
-        current_taxonomy, active_locator_scope = self._resolve_taxonomy_scopes(current_taxonomy, locator_scope)
-        if len(active_locator_scope) != hm_all.shape[0]:
-            print(f"WARNING: Mismatch! Locator scope {len(active_locator_scope)} vs Model {hm_all.shape[0]}")
-
-        cascade_block_reasons = {}
-        cascade_attempted_routes = []
-        cascade_applied_routes = []
-        cascade_applied_count = 0
-        cascade_manager = getattr(self, "cascade_manager", None)
-        get_runtime_route_manifest = getattr(cascade_manager, "get_runtime_route_manifest", None)
-        if callable(get_runtime_route_manifest):
-            runtime_route_manifest = get_runtime_route_manifest(project_route_manifest)
-        else:
-            runtime_route_manifest = project_route_manifest if isinstance(project_route_manifest, dict) else {}
-        runtime_route_source = "project" if route_manifest_has_routes(project_route_manifest or {}) else "legacy_global"
-        routes_ready = getattr(cascade_manager, "routes_ready", None)
-        if callable(routes_ready):
-            try:
-                cascade_routes_ready = bool(routes_ready(runtime_route_manifest))
-            except TypeError:
-                cascade_routes_ready = bool(routes_ready())
-        else:
-            cascade_routes_ready = False
-        if not cascade_routes_ready and runtime_route_source != "project":
-            runtime_route_source = "none"
-
-        def _routes_for_child(child_part):
-            route_list = runtime_route_manifest.get("routes", []) if isinstance(runtime_route_manifest, dict) else []
-            if not isinstance(route_list, list):
-                return []
-            clean_child = str(child_part or "").strip()
-            return [
-                route
-                for route in route_list
-                if isinstance(route, dict) and str(route.get("child") or "").strip() == clean_child
-            ]
-
-        predictions = {
-            "polygons": {},
-            "auto_boxes": {},
-            "scores": {},
-            "meta": {
-                "image_size": [float(w_orig), float(h_orig)],
-                "conf_thresh": float(conf_thresh),
-                "adapt_thresh": float(adapt_thresh),
-                "noise_floor": float(noise_floor),
-                "locator_size": [int(locator_width), int(locator_height)],
-                "locator_resolution_label": format_size_pair((locator_width, locator_height)),
-                "project_taxonomy": list(current_taxonomy),
-                "locator_scope": list(active_locator_scope),
-                "cascade_requested": bool(cascade_routes_ready),
-                "cascade_enabled": bool(cascade_routes_ready),
-                "cascade_routes_ready": bool(cascade_routes_ready),
-                "cascade_route_source": runtime_route_source,
-                "cascade_route_manifest_version": str(runtime_route_manifest.get("version") or ""),
-                "model_profile_id": str((model_profile_context or {}).get("active_profile_id") or ""),
-                "parent_backend": str((model_profile_context or {}).get("parent_backend") or ""),
-                "cascade_applied_count": 0,
-                "cascade_attempted_routes": cascade_attempted_routes,
-                "cascade_applied_routes": cascade_applied_routes,
-                "cascade_block_reasons": cascade_block_reasons,
-                "cascade_route_backends": [],
-                "cascade_route_manifests": [],
-            },
-        }
-
-        predictions["meta"]["cascade_routes_ready"] = cascade_routes_ready
-
-        for i, part_name in enumerate(active_locator_scope):
-            if i >= hm_all.shape[0]:
-                break
-
-            hm = hm_all[i]
-            wh = wh_all[i]
-
-            max_val = float(hm.max())
-            min_required_peak = max(float(conf_thresh), float(noise_floor))
-            if max_val < min_required_peak:
-                print(f"DEBUG: Part '{part_name}' skipped. Peak {max_val:.4f} < {min_required_peak:.4f}")
-                continue
-
-            # 让 adapt_thresh / noise_floor 真实参与定位点筛选
-            effective_thresh = max(float(noise_floor), float(adapt_thresh) * max_val)
-            hm_filtered = np.where(hm >= effective_thresh, hm, 0.0)
-            if hm_filtered.max() <= 0:
-                print(f"DEBUG: Part '{part_name}' skipped. No activation above effective threshold {effective_thresh:.4f}")
-                continue
-
-            y_loc, x_loc = np.unravel_index(hm_filtered.argmax(), hm_filtered.shape)
-            cx, cy = float(x_loc), float(y_loc)
-
-            pred_w = max(float(wh[0]) * float(locator_width), 10.0)
-            pred_h = max(float(wh[1]) * float(locator_height), 10.0)
-
-            w_box = pred_w * (1.0 + float(box_pad))
-            h_box = pred_h * (1.0 + float(box_pad))
-
-            center_x = (cx - pad_w) / scale
-            center_y = (cy - pad_h) / scale
-            half_w, half_h = (w_box / scale) / 2.0, (h_box / scale) / 2.0
-
-            crop_w, crop_h = max(half_w * 2 + 200, 512), max(half_h * 2 + 200, 512)
-            left = max(0, int(center_x - crop_w / 2))
-            top = max(0, int(center_y - crop_h / 2))
-            right = min(w_orig, int(center_x + crop_w / 2))
-            bottom = min(h_orig, int(center_y + crop_h / 2))
-            img_crop = img_pil.crop((left, top, right, bottom))
-
-            if img_crop.width < 2 or img_crop.height < 2:
-                print(f"DEBUG: Part '{part_name}' skipped. Crop too small.")
-                continue
-
-            rel_x, rel_y = center_x - left, center_y - top
-            p_x1 = max(0.0, rel_x - half_w)
-            p_y1 = max(0.0, rel_y - half_h)
-            p_x2 = min(float(img_crop.width), rel_x + half_w)
-            p_y2 = min(float(img_crop.height), rel_y + half_h)
-
-            p_x1 = max(0.0, min(p_x1, float(img_crop.width - 1)))
-            p_y1 = max(0.0, min(p_y1, float(img_crop.height - 1)))
-            p_x2 = max(p_x1 + 1.0, min(p_x2, float(img_crop.width)))
-            p_y2 = max(p_y1 + 1.0, min(p_y2, float(img_crop.height)))
-
-            prompt_box = [p_x1, p_y1, p_x2, p_y2]
-            if p_x2 <= p_x1 or p_y2 <= p_y1:
-                print(f"DEBUG: Invalid prompt box for {part_name}: {prompt_box}")
-                continue
-
-            # 将 prompt_box 映射回原图坐标，并作为 auto_box 初值
-            orig_bx1 = p_x1 + left
-            orig_by1 = p_y1 + top
-            orig_bx2 = p_x2 + left
-            orig_by2 = p_y2 + top
-
-            # --- CASCADE ROUTE INTERCEPTION (manifest-driven) ---
-            if cascade_routes_ready:
-                parent_part = "macro_locator"
-                route = self.cascade_manager._find_route(parent_part, part_name, route_manifest=runtime_route_manifest)
-                if route is not None:
-                    route_block_reason = self.cascade_manager.get_route_block_reason(route)
-                    if route_block_reason:
-                        cascade_block_reasons[part_name] = route_block_reason
-                    else:
-                        cascade_attempted_routes.append(self.cascade_manager.describe_route(route))
-                        expert_result = self.cascade_manager.infer_child_part(
-                            image_path,
-                            parent_box=[orig_bx1, orig_by1, orig_bx2, orig_by2],
-                            child_part_name=part_name,
-                            parent_part=parent_part,
-                            route_manifest=runtime_route_manifest,
-                        )
-
-                        expert_box = None
-                        expert_conf = 0.0
-                        if isinstance(expert_result, dict):
-                            raw_box = expert_result.get("box")
-                            if isinstance(raw_box, (list, tuple)) and len(raw_box) == 4:
-                                expert_box = list(raw_box)
-
-                            raw_conf = expert_result.get("confidence", 0.0)
-                            if isinstance(raw_conf, (int, float)):
-                                expert_conf = float(raw_conf)
-                        elif isinstance(expert_result, (list, tuple)) and len(expert_result) == 4:
-                            expert_box = list(expert_result)
-                            expert_conf = 1.0
-
-                        if expert_box:
-                            expert_box = CoordinateMapper.clamp_bbox_to_size(expert_box, w_orig, h_orig)
-
-                            route_min_conf = self.cascade_manager.get_route_min_conf(parent_part, part_name, route_manifest=runtime_route_manifest)
-                            conf_gate = float(conf_thresh)
-                            if isinstance(route_min_conf, (int, float)):
-                                conf_gate = max(conf_gate, float(route_min_conf))
-
-                            if expert_conf >= conf_gate:
-                                orig_bx1, orig_by1, orig_bx2, orig_by2 = expert_box
-                                cascade_applied_count += 1
-                                cascade_applied_routes.append(self.cascade_manager.describe_route(route))
-                                print(f"[{part_name}] Macro box overridden by Micro-Expert (conf={expert_conf:.3f}).")
-
-                                px1 = max(0.0, orig_bx1 - left)
-                                py1 = max(0.0, orig_by1 - top)
-                                px2 = min(float(img_crop.width), orig_bx2 - left)
-                                py2 = min(float(img_crop.height), orig_by2 - top)
-                                if px2 > px1 and py2 > py1:
-                                    prompt_box = [px1, py1, px2, py2]
-                            else:
-                                cascade_block_reasons[part_name] = "confidence_below_gate"
-                                print(f"[{part_name}] Expert suggestion ignored (conf={expert_conf:.3f} < gate={conf_gate:.3f}).")
-                        else:
-                            cascade_block_reasons[part_name] = "expert_unavailable"
-
-            final_box = CoordinateMapper.clamp_bbox_to_size(
-                [orig_bx1, orig_by1, orig_bx2, orig_by2],
-                w_orig,
-                h_orig,
-            )
-            predictions["auto_boxes"][part_name] = [float(v) for v in final_box]
-            predictions["scores"][part_name] = max_val
-
-            polygon = self._run_sam_polygon(img_crop, prompt_box, left, top, poly_epsilon, (w_orig, h_orig))
-            if polygon:
-                predictions["polygons"][part_name] = polygon
-            else:
-                print(f"DEBUG: Part '{part_name}' SAM returned NO valid polygon.")
-
-        if cascade_routes_ready:
-            available_parents = list(predictions["auto_boxes"].keys())
-            for child_part in current_taxonomy:
-                if child_part in active_locator_scope or child_part in predictions["auto_boxes"]:
-                    continue
-
-                route = self.cascade_manager.resolve_route_for_child(
-                    child_part,
-                    available_parents,
-                    route_manifest=runtime_route_manifest,
-                )
-                if not route:
-                    configured_child_routes = _routes_for_child(child_part)
-                    if configured_child_routes:
-                        enabled_child_routes = [
-                            candidate
-                            for candidate in configured_child_routes
-                            if bool(candidate.get("enabled", False))
-                        ]
-                        if not enabled_child_routes:
-                            cascade_block_reasons[child_part] = "route_disabled"
-                        else:
-                            cascade_block_reasons[child_part] = "parent_box_missing"
-                    continue
-
-                route_block_reason = self.cascade_manager.get_route_block_reason(route)
-                if route_block_reason:
-                    cascade_block_reasons[child_part] = route_block_reason
-                    continue
-
-                cascade_attempted_routes.append(self.cascade_manager.describe_route(route))
-
-                parent_part = str(route.get("parent", "")).strip()
-                parent_box = predictions["auto_boxes"].get(parent_part)
-                if not parent_box:
-                    cascade_block_reasons[child_part] = "parent_box_missing"
-                    continue
-
-                expert_result = self.cascade_manager.infer_child_part(
-                    image_path,
-                    parent_box=parent_box,
-                    child_part_name=child_part,
-                    parent_part=parent_part,
-                    route_manifest=runtime_route_manifest,
-                )
-
-                expert_box = None
-                expert_conf = 0.0
-                if isinstance(expert_result, dict):
-                    raw_box = expert_result.get("box")
-                    if isinstance(raw_box, (list, tuple)) and len(raw_box) == 4:
-                        expert_box = list(raw_box)
-
-                    raw_conf = expert_result.get("confidence", 0.0)
-                    if isinstance(raw_conf, (int, float)):
-                        expert_conf = float(raw_conf)
-                elif isinstance(expert_result, (list, tuple)) and len(expert_result) == 4:
-                    expert_box = list(expert_result)
-                    expert_conf = 1.0
-
-                if not expert_box:
-                    cascade_block_reasons[child_part] = "expert_unavailable"
-                    continue
-
-                expert_box = CoordinateMapper.clamp_bbox_to_size(expert_box, w_orig, h_orig)
-                route_min_conf = self.cascade_manager.get_route_min_conf(parent_part, child_part, route_manifest=runtime_route_manifest)
-                conf_gate = float(conf_thresh)
-                if isinstance(route_min_conf, (int, float)):
-                    conf_gate = max(conf_gate, float(route_min_conf))
-                if expert_conf < conf_gate:
-                    cascade_block_reasons[child_part] = "confidence_below_gate"
-                    continue
-
-                parent_box = CoordinateMapper.clamp_bbox_to_size(parent_box, w_orig, h_orig)
-                p_x1, p_y1, p_x2, p_y2 = CoordinateMapper.sanitize_bbox_xyxy(parent_box)
-                crop_left = max(0, int(np.floor(p_x1)))
-                crop_top = max(0, int(np.floor(p_y1)))
-                crop_right = min(w_orig, int(np.ceil(p_x2)))
-                crop_bottom = min(h_orig, int(np.ceil(p_y2)))
-                if crop_right <= crop_left or crop_bottom <= crop_top:
-                    cascade_block_reasons[child_part] = "parent_crop_invalid"
-                    continue
-
-                parent_crop = img_pil.crop((crop_left, crop_top, crop_right, crop_bottom))
-                local_prompt_box = [
-                    expert_box[0] - crop_left,
-                    expert_box[1] - crop_top,
-                    expert_box[2] - crop_left,
-                    expert_box[3] - crop_top,
-                ]
-                local_prompt_box = CoordinateMapper.clamp_bbox_to_size(
-                    local_prompt_box,
-                    parent_crop.width,
-                    parent_crop.height,
-                )
-
-                predictions["auto_boxes"][child_part] = [float(v) for v in expert_box]
-                predictions["scores"][child_part] = expert_conf
-                cascade_applied_count += 1
-                cascade_applied_routes.append(self.cascade_manager.describe_route(route))
-
-                polygon = self._run_sam_polygon(
-                    parent_crop,
-                    local_prompt_box,
-                    crop_left,
-                    crop_top,
-                    poly_epsilon,
-                    (w_orig, h_orig),
-                )
-                if polygon:
-                    predictions["polygons"][child_part] = polygon
-                else:
-                    cascade_block_reasons[child_part] = "sam_polygon_missing"
-
-        elif runtime_route_source == "project":
-            raw_route_list = runtime_route_manifest.get("routes", []) if isinstance(runtime_route_manifest, dict) else []
-            route_list = raw_route_list if isinstance(raw_route_list, list) else []
-            for route in route_list:
-                if not isinstance(route, dict):
-                    continue
-                child_part = str(route.get("child") or "").strip()
-                if not child_part or child_part in active_locator_scope or child_part in predictions["auto_boxes"]:
-                    continue
-                if child_part in cascade_block_reasons:
-                    continue
-                route_block_reason = self.cascade_manager.get_route_block_reason(route)
-                cascade_block_reasons[child_part] = route_block_reason or "route_disabled"
-
-        unique_attempted = []
-        seen_attempted = set()
-        for label in cascade_attempted_routes:
-            if label in seen_attempted:
-                continue
-            seen_attempted.add(label)
-            unique_attempted.append(label)
-
-        unique_applied = []
-        seen_applied = set()
-        for label in cascade_applied_routes:
-            if label in seen_applied:
-                continue
-            seen_applied.add(label)
-            unique_applied.append(label)
-
-        predictions["meta"]["cascade_attempted_routes"] = unique_attempted
-        predictions["meta"]["cascade_applied_routes"] = unique_applied
-        predictions["meta"]["cascade_applied_count"] = cascade_applied_count
-        route_backends = []
-        route_manifests = []
-        for route in runtime_route_manifest.get("routes", []) if isinstance(runtime_route_manifest, dict) else []:
-            if not isinstance(route, dict):
-                continue
-            backend = str(route.get("expert_backend") or "vit_b_blink").strip() or "vit_b_blink"
-            label = f"{route.get('parent', '?')}->{route.get('child', '?')}:{backend}"
-            if label not in route_backends:
-                route_backends.append(label)
-            manifest_path = str(route.get("expert_manifest") or "").strip()
-            if manifest_path and manifest_path not in route_manifests:
-                route_manifests.append(manifest_path)
-        predictions["meta"]["cascade_route_backends"] = route_backends
-        predictions["meta"]["cascade_route_manifests"] = route_manifests
-        return predictions
+        return predict_full_pipeline(
+            self,
+            image_path,
+            current_taxonomy=current_taxonomy,
+            locator_scope=locator_scope,
+            conf_thresh=conf_thresh,
+            adapt_thresh=adapt_thresh,
+            box_pad=box_pad,
+            noise_floor=noise_floor,
+            poly_epsilon=poly_epsilon,
+            project_route_manifest=project_route_manifest,
+            model_profile_context=model_profile_context,
+        )

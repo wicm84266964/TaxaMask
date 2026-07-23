@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import os
 import re
+import secrets
 import sys
+import tempfile
 import time
 
 import torch
@@ -14,6 +16,7 @@ try:
     from AntSleap.core.dataset import TwoStageDataset
     from AntSleap.core.external_backend import ExternalBackendRunner, sanitize_external_backend_config
     from AntSleap.core.training_preflight import format_size_pair
+    from AntSleap.core.training_weight_publisher import TrainingWeightPublisher
     from AntSleap.core.vlm_preannotation import (
         VLM_PREANNOTATION_SCHEMA_VERSION,
         run_vlm_preannotation,
@@ -24,6 +27,7 @@ except ImportError:
     from core.dataset import TwoStageDataset
     from core.external_backend import ExternalBackendRunner, sanitize_external_backend_config
     from core.training_preflight import format_size_pair
+    from core.training_weight_publisher import TrainingWeightPublisher
     from core.vlm_preannotation import VLM_PREANNOTATION_SCHEMA_VERSION, run_vlm_preannotation, sanitize_vlm_prompt_profile
 
 
@@ -35,6 +39,7 @@ class InferenceThread(QThread):
     log_signal = Signal(str)
     progress_signal = Signal(int)
     result_signal = Signal(str, dict)
+    error_signal = Signal(str, str)
     finished_signal = Signal()
 
     def __init__(self, engine, img_paths, taxonomy, locator_scope, inf_params, project_route_manifest=None, model_profile_context=None, lang="en", translate=None):
@@ -46,31 +51,42 @@ class InferenceThread(QThread):
         self.inf_params = inf_params
         self.project_route_manifest = dict(project_route_manifest or {})
         self.model_profile_context = dict(model_profile_context or {})
+        self.prediction_batch_id = f"batch_{secrets.token_hex(6)}"
         self.lang = lang
         self.translate = translate or _identity_translate
 
     def run(self):
         self.log_signal.emit(self.translate("Starting batch inference on {0} images...", self.lang).format(len(self.img_paths)))
         count = 0
-        for img_path in self.img_paths:
-            preds = self.engine.predict_full_pipeline(
-                img_path,
-                current_taxonomy=self.taxonomy,
-                locator_scope=self.locator_scope,
-                conf_thresh=self.inf_params["conf"],
-                adapt_thresh=self.inf_params["adapt"],
-                box_pad=self.inf_params["pad"],
-                noise_floor=self.inf_params["noise_floor"],
-                poly_epsilon=self.inf_params["poly_epsilon"],
-                project_route_manifest=self.project_route_manifest,
-                model_profile_context=self.model_profile_context,
-            )
-            if preds:
-                self.result_signal.emit(img_path, preds)
-                self.log_signal.emit(self.translate("Processed {0}", self.lang).format(os.path.basename(img_path)))
-            count += 1
-            self.progress_signal.emit(int(count / len(self.img_paths) * 100))
-        self.finished_signal.emit()
+        try:
+            for index, img_path in enumerate(self.img_paths, start=1):
+                prediction_context = dict(self.model_profile_context)
+                prediction_context["prediction_run_id"] = (
+                    f"{self.prediction_batch_id}_{index:06d}"
+                )
+                try:
+                    preds = self.engine.predict_full_pipeline(
+                        img_path,
+                        current_taxonomy=self.taxonomy,
+                        locator_scope=self.locator_scope,
+                        conf_thresh=self.inf_params["conf"],
+                        adapt_thresh=self.inf_params["adapt"],
+                        box_pad=self.inf_params["pad"],
+                        noise_floor=self.inf_params["noise_floor"],
+                        poly_epsilon=self.inf_params["poly_epsilon"],
+                        project_route_manifest=self.project_route_manifest,
+                        model_profile_context=prediction_context,
+                    )
+                except Exception as exc:
+                    self.error_signal.emit(str(img_path), str(exc))
+                    break
+                if preds:
+                    self.result_signal.emit(img_path, preds)
+                    self.log_signal.emit(self.translate("Processed {0}", self.lang).format(os.path.basename(img_path)))
+                count += 1
+                self.progress_signal.emit(int(count / len(self.img_paths) * 100))
+        finally:
+            self.finished_signal.emit()
 
 
 class VlmPreannotationThread(QThread):
@@ -256,7 +272,7 @@ class TrainingThread(QThread):
     error_signal = Signal(dict)
     finished_signal = Signal()
 
-    def __init__(self, engine, preflight, taxonomy, locator_scope, epochs=5, batch_size=4, lang="en", train_segmenter=True, training_context=None, translate=None):
+    def __init__(self, engine, preflight, taxonomy, locator_scope, epochs=5, batch_size=4, lang="en", train_segmenter=True, training_context=None, translate=None, training_run=None, model_output_root=None):
         super().__init__()
         self.engine = engine
         self.preflight = dict(preflight or {})
@@ -276,6 +292,80 @@ class TrainingThread(QThread):
         self.has_locator_stage = bool(self.locator_train_data and self.locator_val_data)
         self.has_parts_stage = bool(self.train_segmenter and self.parts_train_data and self.parts_val_data)
         self.saved_weights_timestamp = None
+        self.training_run = training_run
+        self.model_output_root = os.path.abspath(
+            model_output_root or getattr(engine, "weights_dir", "")
+        )
+
+    def _run_active(self):
+        return self.training_run is not None and self.training_run.status in {
+            "pending",
+            "running",
+        }
+
+    def _cancel_run(self):
+        if self._run_active():
+            self.training_run.cancel(stage="training")
+
+    def _fail_run(self, exc):
+        if self._run_active():
+            self.training_run.fail(exc, stage="training")
+
+    def _publish_weights(self):
+        run = self.training_run
+        if run is None:
+            return self.engine.save_weights(
+                save_locator=self.has_locator_stage,
+                save_segmenter=self.has_parts_stage,
+            )
+        publisher = TrainingWeightPublisher(self.model_output_root)
+        specs = []
+        if self.has_locator_stage:
+            specs.append(
+                {
+                    "artifact_id": "locator_checkpoint",
+                    "role": "output_weights",
+                    "relative_path": f"locator_{run.run_id}.pth",
+                    "media_type": "application/octet-stream",
+                }
+            )
+        if self.has_parts_stage:
+            specs.append(
+                {
+                    "artifact_id": "sam_decoder_checkpoint",
+                    "role": "output_weights",
+                    "relative_path": f"sam_decoder_lora_{run.run_id}.pth",
+                    "media_type": "application/octet-stream",
+                }
+            )
+        output_root = os.path.join(run.run_dir, "outputs")
+        os.makedirs(output_root, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix=".weight-staging-", dir=output_root
+        ) as staging_dir:
+            self.engine.save_weights(
+                save_locator=self.has_locator_stage,
+                save_segmenter=self.has_parts_stage,
+                output_dir=staging_dir,
+                artifact_key=run.run_id,
+            )
+            publication = publisher.publish_pending(run.run_id, staging_dir, specs)
+        run.register_path_base("managed_model_root", self.model_output_root)
+        for artifact in publication.get("artifacts", []):
+            path = os.path.join(
+                self.model_output_root,
+                *artifact["relative_path"].split("/"),
+            )
+            observed = run.add_artifact(
+                artifact_id=artifact["artifact_id"],
+                role="output_weights",
+                path=path,
+                path_base="managed_model_root",
+                media_type=artifact["media_type"],
+            )
+            if observed.get("digest") != artifact.get("digest"):
+                raise ValueError("published_weight_artifact_mismatch")
+        return run.run_id, publisher
 
     def _tr(self, text):
         return self.translate(text, self.lang)
@@ -305,14 +395,17 @@ class TrainingThread(QThread):
                     for epoch in range(self.epochs):
                         if self.isInterruptionRequested():
                             self.log_signal.emit(self._tr("Training cancelled."))
+                            self._cancel_run()
                             return
                         loss_t = self.engine.train_epoch(dl_loc_train, locator, opt_loc, None, stop_callback=self.isInterruptionRequested)
                         if loss_t is None or self.isInterruptionRequested():
                             self.log_signal.emit(self._tr("Training cancelled."))
+                            self._cancel_run()
                             return
                         metrics_v = self.engine.validate_epoch(dl_loc_val, locator, stop_callback=self.isInterruptionRequested)
                         if metrics_v is None:
                             self.log_signal.emit(self._tr("Training cancelled."))
+                            self._cancel_run()
                             return
                         self.engine.history["locator_train"].append(loss_t)
                         self.engine.history["locator_val"].append(metrics_v["loss"])
@@ -323,6 +416,7 @@ class TrainingThread(QThread):
                     if "out of memory" in str(exc).lower():
                         if torch.cuda.is_available():
                             torch.cuda.empty_cache()
+                        self._fail_run(exc)
                         self.error_signal.emit({"type": "oom", "stage": "locator", "current_resolution": tuple(self.engine.locator_resolution), "lower_options": list(self.preflight.get("lower_locator_size_options", [])), "message": str(exc)})
                         return
                     raise
@@ -341,14 +435,17 @@ class TrainingThread(QThread):
                 for epoch in range(self.epochs):
                     if self.isInterruptionRequested():
                         self.log_signal.emit(self._tr("Training cancelled."))
+                        self._cancel_run()
                         return
                     loss_t = self.engine.train_epoch(dl_parts_train, parts_model, opt_parts, self.engine.crit_parts, stop_callback=self.isInterruptionRequested)
                     if loss_t is None or self.isInterruptionRequested():
                         self.log_signal.emit(self._tr("Training cancelled."))
+                        self._cancel_run()
                         return
                     metrics_v = self.engine.validate_epoch(dl_parts_val, parts_model, stop_callback=self.isInterruptionRequested)
                     if metrics_v is None:
                         self.log_signal.emit(self._tr("Training cancelled."))
+                        self._cancel_run()
                         return
                     self.engine.history["parts_train"].append(loss_t)
                     self.engine.history["parts_val"].append(metrics_v["loss"])
@@ -362,18 +459,49 @@ class TrainingThread(QThread):
 
             if self.isInterruptionRequested():
                 self.log_signal.emit(self._tr("Training cancelled."))
+                self._cancel_run()
                 return
-            self.saved_weights_timestamp = self.engine.save_weights(save_locator=self.has_locator_stage, save_segmenter=self.has_parts_stage)
+            publication = self._publish_weights()
+            publisher = None
+            if self.training_run is None:
+                self.saved_weights_timestamp = publication
+            else:
+                self.saved_weights_timestamp, publisher = publication
             if self.saved_weights_timestamp:
                 self.training_context["saved_weights_timestamp"] = self.saved_weights_timestamp
-                self.training_context["locator_weights"] = f"locator_{self.saved_weights_timestamp}.pth" if self.has_locator_stage else ""
-                self.training_context["segmenter_weights"] = f"sam_decoder_lora_{self.saved_weights_timestamp}.pth" if self.has_parts_stage else ""
+                if self.training_run is None:
+                    self.training_context["locator_weights"] = f"locator_{self.saved_weights_timestamp}.pth" if self.has_locator_stage else ""
+                    self.training_context["segmenter_weights"] = f"sam_decoder_lora_{self.saved_weights_timestamp}.pth" if self.has_parts_stage else ""
+                else:
+                    bundle = f"training_runs/{self.training_run.run_id}"
+                    self.training_context["locator_weights"] = f"{bundle}/locator_{self.training_run.run_id}.pth" if self.has_locator_stage else ""
+                    self.training_context["segmenter_weights"] = f"{bundle}/sam_decoder_lora_{self.training_run.run_id}.pth" if self.has_parts_stage else ""
             self.log_signal.emit(self._tr("Generating Report..."))
             report = self.engine.generate_report(dl_loc_val, num_samples=6, training_context=self.training_context)
+            if self.training_run is not None:
+                report_dir = str(report.get("dir") or "")
+                if report_dir and os.path.isdir(report_dir):
+                    self.training_run.register_path_base(
+                        "export_root", os.path.dirname(report_dir)
+                    )
+                    self.training_run.add_artifact(
+                        artifact_id="training_report",
+                        role="training_report",
+                        path=report_dir,
+                        path_base="export_root",
+                        media_type="application/x-directory",
+                    )
+                successful = self.training_run.succeed()
+                try:
+                    publisher.activate(self.training_run.run_id, successful)
+                    self.training_context["weight_publication_status"] = "active"
+                except Exception:
+                    self.training_context["weight_publication_status"] = "pending_recovery"
             self.report_signal.emit(report)
             self.log_signal.emit(self._tr("Training Finished! All validation results saved to {0}/val_details").format(report["dir"]))
             self.success_signal.emit()
         except Exception as exc:
+            self._fail_run(exc)
             self.error_signal.emit({"type": "error", "message": str(exc)})
         finally:
             self.finished_signal.emit()

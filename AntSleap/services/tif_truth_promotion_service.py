@@ -29,6 +29,7 @@ class TifTruthPromotionService:
         result = self.project.promote_reviewed_part_results_to_manual_truth(
             ready,
             require_opened_for_review=False,
+            review_action="accept_selected_ai_results",
             save=save,
         )
         return service_ok("reviewed_refs_promoted", result=result, count=int(result.get("count", 0) or 0), ready=ready)

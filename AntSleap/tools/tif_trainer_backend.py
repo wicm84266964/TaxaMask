@@ -119,9 +119,30 @@ def _result_base(contract, started_at, artifacts=None, metrics=None, warnings=No
             "finished_at": _now_iso(),
             "adapter_id": ADAPTER_ID,
             "adapter_mode": "smoke_or_export",
-            "run_dir": os.path.abspath(contract.get("run_dir", "")),
+            "run_dir": ".",
             **(provenance if isinstance(provenance, dict) else {}),
         },
+    }
+
+
+def _smoke_effective_config(contract):
+    samples = list(contract.get("part_samples") or contract.get("specimens") or [])
+    shape = []
+    if samples and isinstance(samples[0], dict):
+        shape = list((samples[0].get("input_volume") or {}).get("shape_zyx") or [])
+    invocation = (contract.get("training_config") or {}).get("adapter_invocation") or {}
+    return {
+        "epochs": 0,
+        "batch_size": 0,
+        "learning_rate": 0.0,
+        "weight_decay": 0.0,
+        "random_seed": int(invocation.get("random_seed", 0)),
+        "input_resolution": shape if len(shape) in {2, 3} else [1, 1, 1],
+        "preprocessing": {"adapter": ADAPTER_ID, "optimization_performed": False},
+        "model": {"family": "tif_contract_smoke", "version": "1"},
+        "loss_weights": {},
+        "persist_weights": False,
+        "execution_kind": "contract_smoke",
     }
 
 
@@ -179,8 +200,8 @@ def run_prepare_dataset(contract):
         artifacts=artifacts,
         metrics={"summary": {"training_samples": export["exported_count"]}, "by_material": {}},
         provenance={
-            "dataset_manifest": os.path.abspath(manifest_path),
-            "dataset_dir": dataset_dir,
+            "dataset_manifest": _as_run_relative(contract, manifest_path),
+            "dataset_dir": _as_run_relative(contract, dataset_dir),
             "input_label_role": "manual_truth",
             "input_part_samples": refs,
             "input_specimens": specimen_ids,
@@ -274,14 +295,21 @@ def run_train(contract):
         metrics={"summary": {"training_samples": len(contract.get("part_samples", []) or contract.get("specimens", []) or []), "smoke_model": 1}, "by_material": {}},
         warnings=["smoke_model_manifest_only"],
         provenance={
-            "model_manifest": os.path.abspath(manifest_path),
-            "model_output_dir": os.path.abspath(model_dir),
+            "model_manifest": _as_run_relative(contract, manifest_path),
+            "model_output_dir": _as_run_relative(contract, model_dir),
             "usable_for_research_prediction": False,
             "input_label_role": "manual_truth",
             "input_part_samples": manifest.get("trained_parts", []),
             "input_specimens": [item.get("specimen_id", "") for item in manifest.get("trained_top_level_volumes", []) or []],
         },
     )
+    result["effective_config"] = _smoke_effective_config(contract)
+    result["training_split"] = {
+        "status": "not_executed",
+        "assignments": list(
+            (contract.get("training_split") or {}).get("assignments") or []
+        ),
+    }
     _write_json(contract["result_json"], result)
     return result
 
@@ -336,7 +364,7 @@ def run_predict(contract):
         metrics={"summary": {"prediction_samples": len(artifacts), "smoke_prediction": 1}, "by_material": {}},
         warnings=["smoke_zero_predictions"],
         provenance={
-            "model_manifest": os.path.abspath(contract.get("model_manifest") or "") if contract.get("model_manifest") else "",
+            "model_manifest": _as_run_relative(contract, contract.get("model_manifest")) if contract.get("model_manifest") else "",
             "usable_for_research_prediction": False,
             "input_label_role": "none",
                 "input_part_samples": [

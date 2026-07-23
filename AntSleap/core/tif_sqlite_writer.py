@@ -64,7 +64,14 @@ def _specimen_with_material_payload(project_manager, specimen):
     return enriched
 
 
-def flush_tif_project_changes(project_manager, *, integrity_check=False):
+def flush_tif_project_changes(
+    project_manager,
+    *,
+    integrity_check=False,
+    project_data_version_id=None,
+):
+    from .tif_integrity_bridge import commit_tif_project_integrity_changes
+
     connection = _connect_project(project_manager)
     stats = _empty_stats()
     try:
@@ -82,8 +89,23 @@ def flush_tif_project_changes(project_manager, *, integrity_check=False):
                     run_id, inserted = _insert_run(connection, run)
                     stats["run_count"] += int(bool(inserted))
                     stats["run_artifact_count"] += _insert_run_artifacts(connection, run_id, run)
+            integrity_result = commit_tif_project_integrity_changes(
+                connection,
+                project_manager,
+                candidate_data_version_id=project_data_version_id,
+            )
+            resolved_data_version_id = str(
+                integrity_result.get("data_version_id")
+                or project_manager.project_data.get("project_data_version_id")
+                or ""
+            )
+            project_payload = dict(project_manager.project_data)
+            project_payload["project_data_version_id"] = resolved_data_version_id
+            _insert_project_row(connection, project_payload)
         if integrity_check:
             ensure_integrity_ok(connection)
+        stats["data_version_id"] = resolved_data_version_id
+        stats["integrity"] = integrity_result
         return stats
     finally:
         connection.close()

@@ -4,6 +4,7 @@ import os
 from .project import DEFAULT_CATEGORY_SUPERCATEGORY
 from .project_sqlite_schema import PROJECT_2D_PROJECT_TYPE, validate_2d_project_schema
 from .sqlite_storage import connect_sqlite_database, ensure_integrity_ok, read_project_manifest, resolve_manifest_database_path
+from .training_truth import LABEL_PART_METADATA_FIELD
 
 
 SQLITE_PROJECT_STORAGE_BACKEND = "sqlite"
@@ -72,9 +73,10 @@ def _load_project_row(connection):
 def _load_image_rows(connection, project_dir):
     image_paths = []
     image_id_to_path = {}
+    image_uids = {}
     rows = connection.execute(
         """
-        SELECT id, path
+        SELECT id, image_uid, path
         FROM images
         WHERE status != 'deleted'
         ORDER BY id
@@ -86,7 +88,8 @@ def _load_image_rows(connection, project_dir):
             continue
         image_paths.append(image_path)
         image_id_to_path[int(row["id"])] = image_path
-    return image_paths, image_id_to_path
+        image_uids[image_path] = str(row["image_uid"] or "")
+    return image_paths, image_id_to_path, image_uids
 
 
 def _load_image_groups(connection, image_id_to_path):
@@ -181,6 +184,34 @@ def _load_polygons(connection, labels, label_id_to_image_path):
                 multi_polygons[part_name] = polygons
         if multi_polygons:
             entry["part_polygons"] = multi_polygons
+
+
+def _load_label_part_metadata(connection, labels, label_id_to_image_path):
+    rows = connection.execute(
+        """
+        SELECT label_id, part_name, metadata_json
+        FROM label_parts
+        ORDER BY label_id, part_name, id
+        """
+    ).fetchall()
+    for row in rows:
+        image_path = label_id_to_image_path.get(int(row["label_id"]))
+        if not image_path:
+            continue
+        part_name = str(row["part_name"] or "").strip()
+        if not part_name:
+            continue
+        raw_metadata = row["metadata_json"]
+        try:
+            metadata = json.loads(raw_metadata or "{}")
+        except Exception as exc:
+            raise ValueError(f"label_part_metadata_invalid:{part_name}") from exc
+        if not isinstance(metadata, dict):
+            raise ValueError(f"label_part_metadata_invalid:{part_name}")
+        if not metadata:
+            continue
+        entry = labels.setdefault(image_path, _default_label_entry())
+        entry.setdefault(LABEL_PART_METADATA_FIELD, {})[part_name] = metadata
 
 
 def _load_label_boxes(connection, labels, label_id_to_image_path):
@@ -343,9 +374,10 @@ def load_2d_sqlite_project_data(database_path, *, project_dir=None):
         connection.row_factory = lambda cursor, row: {column[0]: row[index] for index, column in enumerate(cursor.description)}
         project_row = _load_project_row(connection)
         settings = _as_dict(_json_loads(project_row["settings_json"], {}))
-        image_paths, image_id_to_path = _load_image_rows(connection, base_dir)
+        image_paths, image_id_to_path, image_uids = _load_image_rows(connection, base_dir)
         image_groups = _load_image_groups(connection, image_id_to_path)
         labels, label_id_to_image_path = _load_labels(connection, image_id_to_path)
+        _load_label_part_metadata(connection, labels, label_id_to_image_path)
         _load_polygons(connection, labels, label_id_to_image_path)
         _load_label_boxes(connection, labels, label_id_to_image_path)
         _load_auto_boxes(connection, labels, image_id_to_path)
@@ -358,8 +390,11 @@ def load_2d_sqlite_project_data(database_path, *, project_dir=None):
             labels.setdefault(image_path, _default_label_entry())
 
         project_data = {
+            "project_id": str(settings.get("project_id") or ""),
+            "project_data_version_id": str(settings.get("project_data_version_id") or ""),
             "name": str(project_row["name"] or "Untitled"),
             "images": image_paths,
+            "image_uids": image_uids,
             "labels": labels,
             "taxonomy": _as_list(_json_loads(project_row["taxonomy_json"], [])),
             "locator_scope": _as_list(_json_loads(project_row["locator_scope_json"], [])),

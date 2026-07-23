@@ -11,6 +11,10 @@ from PySide6.QtWidgets import QMessageBox, QTableWidgetItem
 from .tif_workbench_dialogs import TifTrainingResultDialog, summarize_tif_training_result
 from .tif_workbench_translations import tt
 from .tif_workbench_workers import TifBackendActionWorker
+from .training_integrity_recovery_dialog import (
+    TrainingIntegrityRecoveryDialog,
+    is_training_integrity_error,
+)
 
 
 @dataclass
@@ -981,7 +985,13 @@ class TifBackendPanelController(QObject):
         self._cleanup_tif_backend_thread()
         wb._tif_backend_task_id = ""
         if "_cancelled" not in text:
-            QMessageBox.warning(wb, tt("TIF backend", wb.lang), self._backend_failure_dialog_text(status, text))
+            if action == "train" and is_training_integrity_error(text):
+                wb._training_integrity_recovery_dialog = (
+                    TrainingIntegrityRecoveryDialog(wb.project, wb)
+                )
+                wb._training_integrity_recovery_dialog.open()
+            else:
+                QMessageBox.warning(wb, tt("TIF backend", wb.lang), self._backend_failure_dialog_text(status, text))
 
     def cancel_backend_action(self):
         wb = self.workbench

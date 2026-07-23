@@ -1,7 +1,7 @@
 # TaxaMask LLM Context
 
 > Target: embedded AntCode agents, advanced LLM assistants, and developers maintaining the current TaxaMask `main` / v2.x line.
-> Last synchronized: 2026-07-11.
+> Last synchronized: 2026-07-20.
 
 This file is the current-state handoff document. It is not a changelog. Do not append dated development logs here. Keep it focused on the program state that an agent needs in order to diagnose, modify, and safely operate TaxaMask.
 
@@ -47,6 +47,10 @@ Do not let automated tools overwrite:
 For TIF part labels, model predictions should land in `editable_ai_result` with a `raw_ai_prediction_backup`, not `manual_truth`.
 
 For Local Axis automation, future model outputs should be proposals that require review. They should not directly create final reslice outputs without explicit researcher confirmation.
+
+All maintained training entrypoints use verified researcher truth and a SQLite-backed run ledger. Unreviewed 2D drafts, TIF predictions, or Local Axis proposals cannot enter training. There is no separate formal/temporary training mode; editable run notes express purpose and importance without changing immutable configuration, split, hash, artifact, or status facts.
+
+When a required source, reviewed label, configuration snapshot, or model weight is missing or has a different fingerprint, training stops. Recovery must recheck, relocate identical content, restore a verified copy, or register intentional changed content as a new version with a note. There is no bypass that silently accepts current bytes as the old version.
 
 ## 4. Launch And Runtime
 
@@ -145,6 +149,7 @@ Storage state:
 - Opening an old 2D JSON project prompts for migration to SQLite, creates a migration report and legacy JSON backup, then opens the manifest.
 - Opening the same old JSON again should reuse the existing migrated manifest instead of rerunning migration.
 - If a user accidentally selects the SQLite database file itself, the GUI tries to locate the matching manifest and opens that entry file.
+- Project SQLite is also authoritative for integrity versions, training runs, effective configurations, actual train/validation assignments, artifacts, terminal status, recovery state, and run-note links. JSON reports and manifests remain atomic readable artifacts or projections, not a second project-state backend.
 
 Important semantics:
 
@@ -164,6 +169,7 @@ Current fourth-round MainWindow architecture state (accepted candidate 2026-07-1
 - Blink child-training callbacks are bound to the concrete worker and its startup project path. A stale worker may leave its model file as an auditable artifact, but it must not register, appoint, or enable a route in the current project.
 - `active_project_kind` is the visible shell mode. `last_workbench_kind` remembers the most recent `image` or `tif` workbench while Start Center/Agent is visible, so recent-project and shutdown routing must not infer project type from the `start` page alone.
 - VLM callbacks also verify worker run ID. Stale run/project results must not write the current SQLite project; they may retain an independent artifacts summary for audit.
+- `predict_full_pipeline` is split into testable input, Locator, crop, expert-route, SAM, and assembly stages without changing its public result contract. Stage decisions and timing are emitted through the existing `TaxaMask_outputs/runtime_logs/` logger; detailed diagnostics remain opt-in and must not include source images, full masks, large arrays, credentials, or private absolute paths.
 - AI drafts, confirmed labels, manual truth, PDF candidates, STL-rendered evidence, Blink trajectories, and TIF label roles remain distinct.
 - Direct private implementation references to methods defined in MainWindow dropped from 146 to zero. GUI contract tests still call inherited workflow methods through a real window and are tracked separately.
 - Researcher acceptance covered the primary interactions and found no current issue, including the representative TIF/3D/label-schema/Local-Axis/large-reslice paths. This was not a complete manual pass over every TaxaMask feature; unchecked 2D/Blink/VLM/PDF/export items remain an explicit residual manual-coverage list rather than claimed passes.
@@ -226,6 +232,8 @@ Core records:
 - extraction metadata
 - Local Axis reslice records
 - TIF segmentation model library records
+- integrity versions and training-run ledgers
+- mesh export runs, items, and later verification reviews
 
 Legacy TIF project JSON is now a migration source rather than the preferred active project store. Large volumes live in project sidecar directories.
 
@@ -275,6 +283,9 @@ The TIF workbench supports:
 - TIF backend prepare/train/predict controls
 - train-ready sample diagnostics and top-level fallback
 - trained model library selection, notes, model-manifest handoff, and registration-only deletion
+- reviewed-label STL export with separate raw measurement and optional smoothed preview artifacts
+- SQLite-backed mesh export history, verification, retry, interrupted-run recovery, and explicit safe cleanup
+- explainable high-risk ordering in the existing Local Axis proposal queue, with original and confidence ordering retained
 
 Current TIF workbench architecture notes:
 
@@ -406,6 +417,10 @@ Critical semantics:
 - Grayscale image reslicing uses linear interpolation.
 - Mask/label reslicing uses nearest-neighbor interpolation.
 - Export writes a new reslice item. It must not delete or overwrite source TIFF, original part volume, part mask, contours, or extraction metadata.
+- High-risk ordering is a review priority, not a calibrated error probability. It uses status, hard flag, missing landmarks, confidence uncertainty, and active-model-version mismatch, and stores the rule version and component reasons.
+- Sorting never accepts a proposal. Only the explicitly selected Local Axis proposal can be accepted, batch export reads accepted proposals only, and Local Axis acceptance itself does not create segmentation `manual_truth`.
+
+Reviewed TIF labels can be exported as Blender 5.0-compatible STL through `AntSleap/core/mesh_export.py` and `AntSleap/ui/tif_mesh_export_dialog.py`. Export reads current `manual_truth`, converts ZYX voxel spacing to XYZ millimeters, preserves raw components without smoothing/hole filling/removal, and may create a separately marked smoothed preview copy. Project SQLite is the only authoritative export ledger; default mesh export does not create a JSON sidecar. A run is complete only after source and every published STL hash verify. Interrupted or mismatched runs remain incomplete and expose verify, retry, and explicit record-scoped cleanup paths.
 
 Reslice outputs:
 
@@ -552,11 +567,13 @@ python -m unittest tests.test_agent_context_routes
 python -m unittest tests.test_tif_project tests.test_tif_part_extraction tests.test_tif_local_axis_reslice tests.test_tif_local_axis_batch tests.test_tif_local_axis_ai
 python -m unittest tests.test_tif_workbench tests.test_tif_gpu_volume_canvas
 python -m unittest tests.test_gui_smoke
+python scripts\run_validation_suite.py --suite round5_traceability --timeout 900
+python scripts\run_validation_suite.py --suite round5_inference --suite round5_mesh --suite round5_local_axis_risk --timeout 900
 python scripts\run_validation_suite.py --timeout 300
 git diff --check
 ```
 
-Current fourth-round full validation inventory: 18 suites and 1,149 tests, with one environment-dependent TIF workbench skip and all remaining tests passing. This includes strict stale-result coverage for SAM, image import, parent/child training, recent workbench routing, and Blink route ownership, plus TIF core/storage/services/preview/backends/workbench, GUI smoke, UI polish, layout, PDF safety/literature, validation tooling, TIF round-three architecture, TaxaMask round-four architecture, 2D SQLite, Agent, Blink/locator, and generic VLM/STL/export.
+Current fifth-round maintained validation inventory: 22 default suites and 1,471 tests, with 14 platform/environment-dependent skips and all remaining tests passing. The fifth-round groups are traceability (232), inference (9), mesh export (18), and Local Axis risk review (25). The existing core inventory still covers TIF core/storage/services/preview/backends/workbench, GUI smoke, UI polish, layout, PDF safety/literature, validation tooling, TIF round-three architecture, TaxaMask round-four architecture, 2D SQLite, Agent, Blink/locator, and generic VLM/STL/export. A separate 12-test CPU-only `round5_ci_smoke` runs on Windows, macOS, and Linux without real weights, network, Blender, GPU, or private research data.
 
 Embedded Ant-Code tool results are capped at 256 KiB before they enter model context. A large `list_files` result must be marked `truncated` while preserving its tool success/failure metadata; it must not force a new first-turn TaxaMask context into immediate compaction. A gateway response with no visible text and no tool call is an output-health failure and receives one concise repair retry instead of being accepted as a placeholder-only answer.
 

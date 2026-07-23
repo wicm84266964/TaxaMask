@@ -336,7 +336,14 @@ class MainWindowLiteratureBridgeMixin:
             set_part_description(self.current_image, clean_part, final_text, source_meta=source_meta, save=False)
         else:
             existing_points = self.project.get_labels(self.current_image).get(clean_part, [])
-            self.project.update_label(self.current_image, clean_part, existing_points, final_text, save=False)
+            self.project.update_label(
+                self.current_image,
+                clean_part,
+                existing_points,
+                final_text,
+                save=False,
+                preserve_training_truth=True,
+            )
             if source_meta and hasattr(self.project, "set_description_source"):
                 self.project.set_description_source(self.current_image, clean_part, source_meta, save=False)
         self._set_current_image_taxon_from_literature(source_meta)

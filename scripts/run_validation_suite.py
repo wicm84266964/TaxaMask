@@ -154,9 +154,72 @@ SUITES: dict[str, list[str]] = {
         "tests.test_stl_review_bridge",
         "tests.test_vlm_preannotation",
     ],
+    "round5_traceability": [
+        "tests.test_agentic_train_project",
+        "tests.test_blink_reproducibility",
+        "tests.test_blink_training_backend_guard",
+        "tests.test_blink_training_run_lifecycle",
+        "tests.test_embedded_skill_bundles",
+        "tests.test_embedded_taxonomy_paper_finder",
+        "tests.test_engine_weight_staging",
+        "tests.test_file_integrity",
+        "tests.test_gui_training_run_lifecycle",
+        "tests.test_integrity_manifest_service",
+        "tests.test_location_registry",
+        "tests.test_loss_weight_config",
+        "tests.test_loss_weight_profile_wiring",
+        "tests.test_path_identity",
+        "tests.test_project_integrity_bridge",
+        "tests.test_project_integrity_recovery",
+        "tests.test_project_integrity_registry",
+        "tests.test_tif_blink_training_lifecycle",
+        "tests.test_tif_integrity_bridge",
+        "tests.test_training_initial_weights",
+        "tests.test_training_integrity_recovery_dialog",
+        "tests.test_training_run_2d",
+        "tests.test_training_run_notes",
+        "tests.test_training_run_recorder",
+        "tests.test_training_run_setup",
+        "tests.test_training_run_tif",
+        "tests.test_training_truth",
+        "tests.test_training_weight_publisher",
+    ],
+    "round5_inference": [
+        "tests.test_predict_full_pipeline_baseline",
+        "tests.test_inference_thread_runtime",
+    ],
+    "round5_mesh": [
+        "tests.test_mesh_export",
+        "tests.test_mesh_export_ledger",
+        "tests.test_tif_mesh_export_dialog",
+    ],
+    "round5_local_axis_risk": [
+        "tests.test_tif_local_axis_batch",
+        "tests.test_tif_result_review_controller",
+        "tests.test_tif_truth_policy",
+        "tests.test_tif_truth_promotion_service",
+    ],
+    "round5_ci_smoke": [
+        "tests.test_integrity_manifest_service.IntegrityManifestServiceTests.test_create_and_verify_manifest_atomically",
+        "tests.test_integrity_manifest_service.IntegrityManifestServiceTests.test_pending_started_record_recovers_to_incomplete",
+        "tests.test_project_integrity_bridge.ProjectIntegrityBridgeTests.test_training_snapshot_uses_current_registered_version",
+        "tests.test_predict_full_pipeline_baseline.PredictFullPipelineBaselineTests.test_frozen_scenarios_match_public_result_and_diagnostic_baseline",
+        "tests.test_mesh_export.MeshExportTests.test_non_isotropic_zyx_volume_becomes_physical_xyz_mesh",
+        "tests.test_mesh_export.MeshExportTests.test_export_records_raw_and_preview_stl_in_sqlite",
+        "tests.test_mesh_export.MeshExportTests.test_cancel_after_first_item_leaves_incomplete_recoverable_run",
+        "tests.test_mesh_export.MeshExportTests.test_temporary_stl_validation_failure_leaves_no_partial_file",
+        "tests.test_tif_local_axis_batch.TifLocalAxisBatchTests.test_risk_components_include_active_model_version_mismatch",
+        "tests.test_tif_local_axis_batch.TifLocalAxisBatchTests.test_sorting_and_accepting_selected_axis_do_not_bypass_manual_truth_gate",
+        "tests.test_tif_result_review_controller.TifResultReviewControllerTests.test_accept_selected_results_uses_truth_promotion_service",
+        "tests.test_tif_truth_policy.TifTruthPolicyTests.test_training_uses_manual_truth_only",
+    ],
 }
 
-DEFAULT_ORDER = [name for name in SUITES if name != "validation_chunk_sample"]
+DEFAULT_ORDER = [
+    name
+    for name in SUITES
+    if name not in {"validation_chunk_sample", "round5_ci_smoke"}
+]
 SUITE_CHOICES = list(SUITES)
 SUITE_DEFAULT_CHUNK_SIZES = {
     "gui_smoke": 3,
@@ -169,6 +232,8 @@ def _test_count(modules: list[str]) -> int:
     for module in modules:
         path = ROOT / (module.replace(".", os.sep) + ".py")
         if not path.exists():
+            if module.startswith("tests.") and ".test_" in module:
+                total += 1
             continue
         with path.open("r", encoding="utf-8") as handle:
             total += sum(1 for line in handle if line.lstrip().startswith("def test_"))

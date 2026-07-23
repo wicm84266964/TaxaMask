@@ -673,7 +673,15 @@ class TifResultReviewController(QObject):
                 save=True,
             )
         except Exception as exc:
-            QMessageBox.warning(wb, tt("Accept working edit", wb.lang), str(exc))
+            failed = ", ".join(
+                self.format_part_ref_label(ref) for ref in ready
+            )
+            message = tt(
+                "No selected AI results were accepted. Failed: {0}. Cause: {1}",
+                wb.lang,
+            ).format(failed or "-", str(exc))
+            wb._set_operation_feedback(message)
+            QMessageBox.warning(wb, tt("Accept working edit", wb.lang), message)
             return False
         if not service_result:
             message = service_result.message or ", ".join(service_result.reasons or [])

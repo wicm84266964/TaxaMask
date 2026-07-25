@@ -78,6 +78,10 @@ class MainWindowShellMixin:
         self.pending_sam_project_context = {}
         self.image_import_thread = None
         self.image_import_progress_dialog = None
+        self.batch_panel_split_thread = None
+        self.batch_panel_split_progress_dialog = None
+        self.batch_panel_split_project_context = {}
+        self.batch_panel_split_state = {}
         self.external_batch_inference_thread = None
         self.external_batch_inference_progress_dialog = None
         self.external_batch_inference_failed = False

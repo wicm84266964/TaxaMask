@@ -56,6 +56,7 @@ class PathIdentityTests(unittest.TestCase):
             manager = ProjectManager()
             manager.current_project_path = canonical_path(target_dir / "project.json")
             manager.add_images([str(alias_image)], save=False)
+            self.assertEqual(manager.add_images([str(target_image)], save=False), 0)
             manager.set_image_provenance(str(alias_image), {"source_type": "test"}, save=False)
             manager.update_label(str(alias_image), "Head", [[1, 1], [2, 1], [2, 2]], save=False)
 
@@ -65,6 +66,26 @@ class PathIdentityTests(unittest.TestCase):
             self.assertEqual(manager.get_image_provenance(str(target_image))["source_type"], "test")
             self.assertIn("Head", manager.get_labels(str(target_image)))
             self.assertIn("specimen.png", manager.legacy_json_payload(alias_dir / "project.json")["labels"])
+
+    def test_project_image_identity_cache_rebuilds_after_list_replacement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = root / "first.png"
+            second = root / "second.png"
+            first.write_bytes(b"first")
+            second.write_bytes(b"second")
+
+            manager = ProjectManager()
+            manager.add_images([str(first)], save=False)
+            second_path = canonical_path(second)
+            manager.project_data["images"] = [second_path]
+            manager.project_data["labels"] = {second_path: manager._default_label_entry()}
+
+            self.assertEqual(manager.add_images([str(first)], save=False), 1)
+            self.assertEqual(
+                {path_identity(path) for path in manager.project_data["images"]},
+                {path_identity(first), path_identity(second)},
+            )
 
 
 if __name__ == "__main__":

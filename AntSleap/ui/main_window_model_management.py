@@ -29,6 +29,7 @@ class MainWindowModelManagementMixin:
     def _active_project_bound_background_task(self):
         checks = (
             ("image_import_thread", "Image import"),
+            ("batch_panel_split_thread", "Batch Split Plates"),
             ("external_batch_inference_thread", "Batch Inference"),
             ("inf_thread", "Batch Inference"),
             ("trainer", "Training"),
@@ -40,6 +41,8 @@ class MainWindowModelManagementMixin:
         )
         for attribute, label_key in checks:
             thread = getattr(self, attribute, None)
+            if attribute == "batch_panel_split_thread" and thread is not None:
+                return tr(label_key, self.current_lang)
             try:
                 if thread is not None and thread.isRunning():
                     return tr(label_key, self.current_lang)

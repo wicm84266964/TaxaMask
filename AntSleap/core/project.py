@@ -138,6 +138,8 @@ class ProjectManager:
         self._legacy_json_write_enabled = False
         self.known_relocated_roots = []
         self._last_label_journal_fsync = 0.0
+        self._image_path_identity_cache = set()
+        self._image_path_identity_cache_signature = None
 
     def set_known_relocated_roots(self, root_mappings):
         clean_mappings = []
@@ -1098,6 +1100,8 @@ class ProjectManager:
         self._traceability_backfill_needed = False
         self._legacy_json_write_enabled = False
         self.known_relocated_roots = list(getattr(self, "known_relocated_roots", []))
+        self._image_path_identity_cache = set()
+        self._image_path_identity_cache_signature = None
 
     def _is_sqlite_manifest_payload(self, payload):
         return (
@@ -1112,12 +1116,16 @@ class ProjectManager:
     def _mark_sqlite_image_dirty(self, image_path):
         if not self.is_sqlite_project() or not image_path:
             return
-        self._sqlite_dirty_images.add(self._registered_image_key_for_path(image_path) or image_path)
+        labels = self.project_data.get("labels", {})
+        image_key = image_path if isinstance(labels, dict) and image_path in labels else ""
+        self._sqlite_dirty_images.add(image_key or self._registered_image_key_for_path(image_path) or image_path)
 
     def _mark_sqlite_label_dirty(self, image_path):
         if not self.is_sqlite_project() or not image_path:
             return
-        image_key = self._registered_image_key_for_path(image_path) or image_path
+        labels = self.project_data.get("labels", {})
+        image_key = image_path if isinstance(labels, dict) and image_path in labels else ""
+        image_key = image_key or self._registered_image_key_for_path(image_path) or image_path
         self._sqlite_dirty_images.add(image_key)
         self._sqlite_label_dirty_images.add(image_key)
         if not self._pending_project_data_version_id:
@@ -1500,15 +1508,21 @@ class ProjectManager:
 
         images = self.project_data.setdefault("images", [])
         labels = self.project_data.setdefault("labels", {})
-        existing = {
-            path_identity(path)
-            for path in images
-            if path
-        }
+        cache_signature = (id(images), len(images))
+        if getattr(self, "_image_path_identity_cache_signature", None) != cache_signature:
+            # Project paths are canonicalized on load and below on insert. Reusing
+            # that invariant avoids resolving thousands of files every checkpoint.
+            self._image_path_identity_cache = {
+                os.path.normcase(os.path.normpath(str(path)))
+                for path in images
+                if path
+            }
+            self._image_path_identity_cache_signature = cache_signature
+        existing = self._image_path_identity_cache
         added = 0
         for index, img in enumerate(paths, start=1):
             abs_img = canonical_path(img)
-            identity = path_identity(abs_img)
+            identity = os.path.normcase(os.path.normpath(abs_img))
             if identity not in existing:
                 images.append(abs_img)
                 labels.setdefault(abs_img, self._default_label_entry())
@@ -1520,6 +1534,7 @@ class ProjectManager:
 
         if save:
             self.save_project()
+        self._image_path_identity_cache_signature = (id(images), len(images))
         return added
 
     def remove_image(self, image_path, save=True):

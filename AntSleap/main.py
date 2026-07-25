@@ -333,6 +333,7 @@ except ImportError:
 try:
     from AntSleap.ui.main_window_widgets import ImageGroupListWidget, NoWheelComboBox, NoWheelSlider, NoWheelSpinBox
     from AntSleap.ui.main_window_workers import (
+        BatchPanelSplitThread,
         DatasetExportThread,
         ExternalBatchInferenceThread,
         ExternalTrainingThread,
@@ -344,6 +345,7 @@ try:
 except ImportError:
     from ui.main_window_widgets import ImageGroupListWidget, NoWheelComboBox, NoWheelSlider, NoWheelSpinBox
     from ui.main_window_workers import (
+        BatchPanelSplitThread,
         DatasetExportThread,
         ExternalBatchInferenceThread,
         ExternalTrainingThread,
@@ -476,6 +478,7 @@ try:
     from AntSleap.ui.main_window_export import MainWindowExportMixin
     from AntSleap.ui.main_window_image_grouping import MainWindowImageGroupingMixin
     from AntSleap.ui.main_window_image_navigation import MainWindowImageNavigationMixin
+    from AntSleap.ui.main_window_panel_split import MainWindowPanelSplitMixin
     from AntSleap.ui.main_window_literature_bridge import MainWindowLiteratureBridgeMixin
     from AntSleap.ui.main_window_model_management import MainWindowModelManagementMixin
     from AntSleap.ui.main_window_part_tree import MainWindowPartTreeMixin
@@ -494,6 +497,7 @@ except ImportError:
     from ui.main_window_export import MainWindowExportMixin
     from ui.main_window_image_grouping import MainWindowImageGroupingMixin
     from ui.main_window_image_navigation import MainWindowImageNavigationMixin
+    from ui.main_window_panel_split import MainWindowPanelSplitMixin
     from ui.main_window_literature_bridge import MainWindowLiteratureBridgeMixin
     from ui.main_window_model_management import MainWindowModelManagementMixin
     from ui.main_window_part_tree import MainWindowPartTreeMixin
@@ -513,6 +517,7 @@ class MainWindow(
     MainWindowProjectLifecycleMixin,
     MainWindowPartTreeMixin,
     MainWindowImageNavigationMixin,
+    MainWindowPanelSplitMixin,
     MainWindowImageGroupingMixin,
     MainWindowLiteratureBridgeMixin,
     MainWindowAnnotationMixin,

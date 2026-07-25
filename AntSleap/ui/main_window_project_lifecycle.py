@@ -204,6 +204,11 @@ class MainWindowProjectLifecycleMixin:
         thread = getattr(self, "image_import_thread", None)
         if thread is not None and thread.isRunning():
             thread.wait(30000)
+        thread = getattr(self, "batch_panel_split_thread", None)
+        if thread is not None and thread.isRunning():
+            if hasattr(thread, "cancel"):
+                thread.cancel()
+            thread.wait(30000)
         thread = getattr(self, "parts_model_preload_thread", None)
         if thread is not None and thread.is_alive():
             thread.join(timeout=1.0)

@@ -31,6 +31,7 @@ ARCHITECTURE_PATHS = (
     ROOT / "AntSleap" / "ui" / "main_window_project_lifecycle.py",
     ROOT / "AntSleap" / "ui" / "main_window_part_tree.py",
     ROOT / "AntSleap" / "ui" / "main_window_image_navigation.py",
+    ROOT / "AntSleap" / "ui" / "main_window_panel_split.py",
     ROOT / "AntSleap" / "ui" / "main_window_image_grouping.py",
     ROOT / "AntSleap" / "ui" / "main_window_literature_bridge.py",
     ROOT / "AntSleap" / "ui" / "main_window_annotation.py",

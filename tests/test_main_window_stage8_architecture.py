@@ -42,6 +42,7 @@ class MainWindowStage8ArchitectureTests(unittest.TestCase):
     def test_workflow_modules_stay_within_reviewable_size(self):
         filenames = (
             "main_window_image_navigation.py",
+            "main_window_panel_split.py",
             "main_window_image_grouping.py",
             "main_window_project_lifecycle.py",
             "main_window_vlm.py",

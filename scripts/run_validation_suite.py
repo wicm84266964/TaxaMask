@@ -214,12 +214,42 @@ SUITES: dict[str, list[str]] = {
         "tests.test_tif_result_review_controller.TifResultReviewControllerTests.test_accept_selected_results_uses_truth_promotion_service",
         "tests.test_tif_truth_policy.TifTruthPolicyTests.test_training_uses_manual_truth_only",
     ],
+    "round5_path_safety": [
+        "tests.test_file_integrity.FileIntegrityTests.test_tree_rejects_symlink_instead_of_following_it",
+        "tests.test_file_integrity.FileIntegrityTests.test_root_symlink_is_rejected",
+        "tests.test_integrity_manifest_service.IntegrityManifestServiceTests.test_managed_root_symlink_is_rejected_even_when_target_is_contained",
+        "tests.test_integrity_manifest_service.IntegrityManifestServiceTests.test_managed_parent_symlink_is_rejected_before_fingerprinting",
+        "tests.test_location_registry.LocationRegistryTests.test_target_and_parent_symlinks_are_rejected",
+        "tests.test_location_registry.LocationRegistryTests.test_windows_reparse_path_is_rejected_without_os_privileges",
+        "tests.test_project_integrity_recovery.ProjectIntegrityRecoveryTests.test_inspection_and_registration_reject_linked_parent",
+        "tests.test_tif_integrity_bridge.TifIntegrityBridgeTests.test_baseline_rejects_asset_below_symlinked_parent",
+        "tests.test_project_integrity_registry.ProjectIntegrityRegistryTests.test_resolver_rejects_symlink_root_and_leaves_no_temp_files",
+        "tests.test_project_integrity_registry.ProjectIntegrityRegistryTests.test_resolver_rejects_windows_reparse_root_without_os_privileges",
+        "tests.test_mesh_export.MeshExportTests.test_manual_truth_path_rejects_symlink_components",
+        "tests.test_mesh_export.MeshExportTests.test_export_target_rejects_symlink_components",
+        "tests.test_mesh_export.MeshExportTests.test_safe_cleanup_rejects_linked_export_root",
+        "tests.test_mesh_export.MeshExportTests.test_safe_cleanup_rejects_linked_descendant",
+        "tests.test_mesh_export.MeshExportTests.test_verify_rejects_linked_export_root",
+        "tests.test_training_run_recorder.TrainingRunRecorderTests.test_external_directory_symlink_root_is_rejected",
+        "tests.test_training_run_recorder.TrainingRunRecorderTests.test_registered_path_base_rejects_symlinked_parent",
+        "tests.test_training_run_recorder.TrainingRunRecorderTests.test_artifact_symlink_is_rejected",
+        "tests.test_training_run_notes.TrainingRunNoteStoreTests.test_note_projection_symlink_is_ignored",
+        "tests.test_training_weight_publisher.TrainingWeightPublisherTests.test_source_file_and_parent_symlinks_are_rejected",
+        "tests.test_training_weight_publisher.TrainingWeightPublisherTests.test_managed_root_and_training_runs_links_are_rejected",
+        "tests.test_training_weight_publisher.TrainingWeightPublisherTests.test_unsafe_hidden_directory_is_preserved_for_manual_review",
+        "tests.test_path_identity.PathIdentityTests.test_realpath_resolves_directory_aliases_when_supported",
+        "tests.test_path_identity.PathIdentityTests.test_project_image_state_uses_one_key_across_directory_aliases",
+    ],
 }
 
 DEFAULT_ORDER = [
     name
     for name in SUITES
-    if name not in {"validation_chunk_sample", "round5_ci_smoke"}
+    if name not in {
+        "validation_chunk_sample",
+        "round5_ci_smoke",
+        "round5_path_safety",
+    }
 ]
 SUITE_CHOICES = list(SUITES)
 SUITE_DEFAULT_CHUNK_SIZES = {

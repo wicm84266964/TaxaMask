@@ -10,6 +10,7 @@ TRAINING_TRUTH_METADATA_KEY = "training_truth_v1"
 
 TRAINING_SOURCE_MANUAL = "manual"
 TRAINING_SOURCE_LEGACY_MANUAL = "legacy_manual"
+TRAINING_SOURCE_LEGACY_JOURNAL_RECOVERY = "legacy_journal_recovery"
 TRAINING_SOURCE_LEGACY_AI_UNKNOWN = "legacy_ai_unknown"
 TRAINING_SOURCE_BLINK_EXPERT = "blink_expert"
 TRAINING_SOURCE_MODEL = "model_prediction"
@@ -31,6 +32,7 @@ _VALID_REVIEW_STATUSES = frozenset(
 _MANUAL_SOURCES = frozenset(
     {TRAINING_SOURCE_MANUAL, TRAINING_SOURCE_LEGACY_MANUAL}
 )
+_RECOVERY_SOURCES = frozenset({TRAINING_SOURCE_LEGACY_JOURNAL_RECOVERY})
 _AI_SOURCES = frozenset(
     {
         TRAINING_SOURCE_LEGACY_AI_UNKNOWN,
@@ -41,7 +43,9 @@ _AI_SOURCES = frozenset(
     }
 )
 _DERIVED_SOURCES = frozenset({TRAINING_SOURCE_AUTO_SHRINK})
-_VALID_SOURCES = _MANUAL_SOURCES | _AI_SOURCES | _DERIVED_SOURCES
+_VALID_SOURCES = (
+    _MANUAL_SOURCES | _RECOVERY_SOURCES | _AI_SOURCES | _DERIVED_SOURCES
+)
 _VALID_ACCEPTED_VIA = frozenset(
     {
         TRAINING_ACCEPT_MANUAL_EDIT,
@@ -74,7 +78,10 @@ def sanitize_training_truth_record(value):
     if review_status == TRAINING_REVIEW_DRAFT and accepted_via:
         return None
     if review_status == TRAINING_REVIEW_CONFIRMED:
-        if source in _MANUAL_SOURCES and accepted_via != TRAINING_ACCEPT_MANUAL_EDIT:
+        if (
+            source in (_MANUAL_SOURCES | _RECOVERY_SOURCES)
+            and accepted_via != TRAINING_ACCEPT_MANUAL_EDIT
+        ):
             return None
         if source in _AI_SOURCES and accepted_via != TRAINING_ACCEPT_SELECTED_AI:
             return None
@@ -306,6 +313,7 @@ __all__ = [
     "TRAINING_SOURCE_AUTO_SHRINK",
     "TRAINING_SOURCE_EXTERNAL_MODEL",
     "TRAINING_SOURCE_LEGACY_AI_UNKNOWN",
+    "TRAINING_SOURCE_LEGACY_JOURNAL_RECOVERY",
     "TRAINING_SOURCE_LEGACY_MANUAL",
     "TRAINING_SOURCE_MANUAL",
     "TRAINING_SOURCE_MODEL",

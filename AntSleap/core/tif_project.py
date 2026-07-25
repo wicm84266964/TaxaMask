@@ -709,9 +709,18 @@ class TifProjectManager:
             self.save_project()
         return specimen
 
-    def register_working_volume(self, specimen_id, path, shape_zyx, dtype, spacing_zyx=None, spacing_unit="micrometer", orientation="unknown", fmt=VOLUME_SIDECAR_FORMAT, save=True):
+    def register_working_volume(self, specimen_id, path, shape_zyx, dtype, spacing_zyx=None, spacing_unit="unknown", orientation="unknown", fmt=VOLUME_SIDECAR_FORMAT, save=True, scale_verified=None):
         specimen = self._require_specimen(specimen_id)
-        specimen["working_volume"] = self._volume_payload(path, shape_zyx, dtype, spacing_zyx, spacing_unit, orientation, fmt)
+        specimen["working_volume"] = self._volume_payload(
+            path,
+            shape_zyx,
+            dtype,
+            spacing_zyx,
+            spacing_unit,
+            orientation,
+            fmt,
+            scale_verified=scale_verified,
+        )
         self._mark_integrity_asset_dirty(
             f"specimen.{specimen_id}.working", "source_volume"
         )
@@ -728,13 +737,14 @@ class TifProjectManager:
         dtype,
         status="available",
         spacing_zyx=None,
-        spacing_unit="micrometer",
+        spacing_unit="unknown",
         orientation="unknown",
         fmt=VOLUME_SIDECAR_FORMAT,
         save=True,
         operation="register_existing_label_record",
         explicit_review=False,
         audit_metadata=None,
+        scale_verified=None,
     ):
         if role not in {"manual_truth", "working_edit"}:
             raise ValueError(f"unsupported_label_role:{role}")
@@ -747,7 +757,16 @@ class TifProjectManager:
         )
         self._require_guard(guard, "tif_label_guard_denied")
         specimen = self._require_specimen(specimen_id)
-        specimen["labels"][role] = self._volume_payload(path, shape_zyx, dtype, spacing_zyx, spacing_unit, orientation, fmt)
+        specimen["labels"][role] = self._volume_payload(
+            path,
+            shape_zyx,
+            dtype,
+            spacing_zyx,
+            spacing_unit,
+            orientation,
+            fmt,
+            scale_verified=scale_verified,
+        )
         specimen["labels"][role]["status"] = str(status or "available")
         if role == "manual_truth":
             if explicit_review:
@@ -767,9 +786,18 @@ class TifProjectManager:
             self.save_project()
         return specimen["labels"][role]
 
-    def add_model_draft(self, specimen_id, path, shape_zyx, dtype, prediction_id, source_model="", spacing_zyx=None, spacing_unit="micrometer", orientation="unknown", fmt=VOLUME_SIDECAR_FORMAT, save=True):
+    def add_model_draft(self, specimen_id, path, shape_zyx, dtype, prediction_id, source_model="", spacing_zyx=None, spacing_unit="unknown", orientation="unknown", fmt=VOLUME_SIDECAR_FORMAT, save=True, scale_verified=None):
         specimen = self._require_specimen(specimen_id)
-        draft = self._volume_payload(path, shape_zyx, dtype, spacing_zyx, spacing_unit, orientation, fmt)
+        draft = self._volume_payload(
+            path,
+            shape_zyx,
+            dtype,
+            spacing_zyx,
+            spacing_unit,
+            orientation,
+            fmt,
+            scale_verified=scale_verified,
+        )
         draft.update(
             {
                 "prediction_id": str(prediction_id or ""),
@@ -1049,13 +1077,14 @@ class TifProjectManager:
         prediction_id="",
         source_model="",
         spacing_zyx=None,
-        spacing_unit="micrometer",
+        spacing_unit="unknown",
         orientation="unknown",
         fmt=VOLUME_SIDECAR_FORMAT,
         save=True,
         operation="register_existing_label_record",
         explicit_review=False,
         audit_metadata=None,
+        scale_verified=None,
     ):
         role = str(role or "").strip()
         if role not in TIF_PART_LABEL_ROLES:
@@ -1070,7 +1099,16 @@ class TifProjectManager:
         self._require_guard(guard, "tif_label_guard_denied")
         part = self._require_part(specimen_id, part_id)
         labels = part.setdefault("labels", self._normalize_part_labels(None))
-        record = self._volume_payload(path, shape_zyx, dtype, spacing_zyx, spacing_unit, orientation, fmt)
+        record = self._volume_payload(
+            path,
+            shape_zyx,
+            dtype,
+            spacing_zyx,
+            spacing_unit,
+            orientation,
+            fmt,
+            scale_verified=scale_verified,
+        )
         record["role"] = role
         record["status"] = str(status or "available")
         if prediction_id:
@@ -1144,13 +1182,14 @@ class TifProjectManager:
         prediction_id="",
         source_model="",
         spacing_zyx=None,
-        spacing_unit="micrometer",
+        spacing_unit="unknown",
         orientation="local_axis_reslice",
         fmt=VOLUME_SIDECAR_FORMAT,
         save=True,
         operation="register_existing_label_record",
         explicit_review=False,
         audit_metadata=None,
+        scale_verified=None,
     ):
         role = str(role or "").strip()
         if role not in TIF_PART_LABEL_ROLES:
@@ -1166,7 +1205,16 @@ class TifProjectManager:
         labels, part, reslice = self._part_label_container(specimen_id, part_id, reslice_id)
         if reslice is None:
             raise ValueError("reslice_id_required_for_reslice_label")
-        record = self._volume_payload(path, shape_zyx, dtype, spacing_zyx, spacing_unit, orientation, fmt)
+        record = self._volume_payload(
+            path,
+            shape_zyx,
+            dtype,
+            spacing_zyx,
+            spacing_unit,
+            orientation,
+            fmt,
+            scale_verified=scale_verified,
+        )
         record["role"] = role
         record["status"] = str(status or "available")
         record["coordinate_space"] = "local_axis_reslice_voxel_zyx"
@@ -2693,6 +2741,7 @@ class TifProjectManager:
                 "dtype": "",
                 "spacing_zyx": [],
                 "spacing_unit": "unknown",
+                "scale_verified": False,
                 "orientation": "unknown",
             }
         clean = dict(record)
@@ -2702,6 +2751,7 @@ class TifProjectManager:
         clean.setdefault("dtype", "")
         clean.setdefault("spacing_zyx", [])
         clean.setdefault("spacing_unit", "unknown")
+        clean["scale_verified"] = clean.get("scale_verified") is True
         clean.setdefault("orientation", "unknown")
         return clean
 
@@ -2911,9 +2961,25 @@ class TifProjectManager:
             return []
         return clean
 
-    def _volume_payload(self, path, shape_zyx, dtype, spacing_zyx=None, spacing_unit="micrometer", orientation="unknown", fmt=VOLUME_SIDECAR_FORMAT):
+    def _volume_payload(self, path, shape_zyx, dtype, spacing_zyx=None, spacing_unit="unknown", orientation="unknown", fmt=VOLUME_SIDECAR_FORMAT, scale_verified=None):
         shape = [int(value) for value in (shape_zyx or [])]
         spacing = [float(value) for value in (spacing_zyx or [])] if spacing_zyx else []
+        verified_scale = scale_verified is True
+        if scale_verified is None and str(fmt or "") == VOLUME_SIDECAR_FORMAT:
+            try:
+                metadata = read_volume_metadata(self.to_absolute(path))
+                metadata_spacing = [
+                    float(value) for value in metadata.get("spacing_zyx", [])
+                ]
+                metadata_unit = str(metadata.get("spacing_unit") or "unknown")
+                verified_scale = (
+                    metadata.get("scale_verified") is True
+                    and metadata_spacing == spacing
+                    and metadata_unit.strip().lower()
+                    == str(spacing_unit or "unknown").strip().lower()
+                )
+            except (OSError, TypeError, ValueError):
+                verified_scale = False
         return {
             "path": self.to_relative(path),
             "format": str(fmt or ""),
@@ -2921,6 +2987,7 @@ class TifProjectManager:
             "dtype": str(dtype or ""),
             "spacing_zyx": spacing,
             "spacing_unit": str(spacing_unit or "unknown"),
+            "scale_verified": verified_scale,
             "orientation": str(orientation or "unknown"),
         }
 

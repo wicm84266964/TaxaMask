@@ -41,8 +41,15 @@ from .training_truth import (
     TRAINING_ACCEPT_MANUAL_EDIT,
     TRAINING_ACCEPT_SELECTED_AI,
     TRAINING_REVIEW_CONFIRMED,
+    TRAINING_REVIEW_DRAFT,
+    TRAINING_TRUTH_METADATA_KEY,
+    TRAINING_SOURCE_BLINK_EXPERT,
+    TRAINING_SOURCE_EXTERNAL_MODEL,
     TRAINING_SOURCE_LEGACY_AI_UNKNOWN,
+    TRAINING_SOURCE_LEGACY_JOURNAL_RECOVERY,
     TRAINING_SOURCE_MANUAL,
+    TRAINING_SOURCE_MODEL,
+    TRAINING_SOURCE_VLM,
     get_part_training_truth,
     remove_part_training_truth,
     resolve_part_training_trust,
@@ -70,6 +77,15 @@ AUTO_BOX_SOURCE_MODEL = "model_prediction"
 AUTO_BOX_SOURCE_EXTERNAL_MODEL = "external_model_prediction"
 AUTO_BOX_REVIEW_DRAFT = "draft"
 AUTO_BOX_REVIEW_CONFIRMED = "confirmed"
+AI_TRAINING_TRUTH_SOURCES = frozenset(
+    {
+        TRAINING_SOURCE_BLINK_EXPERT,
+        TRAINING_SOURCE_EXTERNAL_MODEL,
+        TRAINING_SOURCE_LEGACY_AI_UNKNOWN,
+        TRAINING_SOURCE_MODEL,
+        TRAINING_SOURCE_VLM,
+    }
+)
 PROJECT_BACKUP_LIMIT = 30
 PROJECT_BACKUP_MIN_INTERVAL_SECONDS = 300
 LABEL_JOURNAL_SCHEMA_VERSION = "taxamask-label-journal-v1"
@@ -505,12 +521,18 @@ class ProjectManager:
             return False
 
     def recover_labels_from_journal(self, journal_path=None, save=True):
+        """Restore journal data and report labels awaiting recovery review."""
         path = journal_path or self._label_journal_path()
         if not path or not os.path.exists(path):
             return {
                 "recovered_images": 0,
                 "records_read": 0,
                 "records_skipped": 0,
+                "pending_recovery": {
+                    "image_count": 0,
+                    "part_count": 0,
+                    "images": [],
+                },
             }
 
         latest_by_image = {}
@@ -543,11 +565,57 @@ class ProjectManager:
                 "recovered_images": 0,
                 "records_read": records_read,
                 "records_skipped": records_skipped,
+                "pending_recovery": {
+                    "image_count": 0,
+                    "part_count": 0,
+                    "images": [],
+                },
             }
 
         labels = self.project_data.setdefault("labels", {})
+        pending_recovery_images = []
         for image_path, label_entry in latest_by_image.items():
-            labels[image_path] = self._normalize_label_taxon_fields(label_entry)
+            recovered_entry = self._normalize_label_taxon_fields(label_entry)
+            parts = (
+                recovered_entry.get("parts", {})
+                if isinstance(recovered_entry.get("parts"), dict)
+                else {}
+            )
+            metadata_by_part = recovered_entry.get(LABEL_PART_METADATA_FIELD)
+            if not isinstance(metadata_by_part, dict):
+                metadata_by_part = {}
+                recovered_entry[LABEL_PART_METADATA_FIELD] = metadata_by_part
+            for part_name in sorted(str(name) for name in parts):
+                part_metadata = metadata_by_part.get(part_name)
+                if (
+                    isinstance(part_metadata, dict)
+                    and TRAINING_TRUTH_METADATA_KEY in part_metadata
+                ):
+                    continue
+                set_part_training_truth(
+                    recovered_entry,
+                    part_name,
+                    source=TRAINING_SOURCE_LEGACY_JOURNAL_RECOVERY,
+                    review_status=TRAINING_REVIEW_DRAFT,
+                )
+            pending_parts = []
+            for part_name in sorted(str(name) for name in parts):
+                decision = resolve_part_training_trust(recovered_entry, part_name)
+                if (
+                    decision.get("source")
+                    == TRAINING_SOURCE_LEGACY_JOURNAL_RECOVERY
+                    and decision.get("state") == "draft"
+                ):
+                    pending_parts.append(part_name)
+            if pending_parts:
+                pending_recovery_images.append(
+                    {
+                        "image_path": image_path,
+                        "parts": pending_parts,
+                        "part_count": len(pending_parts),
+                    }
+                )
+            labels[image_path] = recovered_entry
             if image_path not in self.project_data.get("images", []):
                 self.project_data.setdefault("images", []).append(image_path)
 
@@ -560,6 +628,13 @@ class ProjectManager:
             "recovered_images": len(latest_by_image),
             "records_read": records_read,
             "records_skipped": records_skipped,
+            "pending_recovery": {
+                "image_count": len(pending_recovery_images),
+                "part_count": sum(
+                    item["part_count"] for item in pending_recovery_images
+                ),
+                "images": pending_recovery_images,
+            },
         }
 
     def _normalize_label_taxon_fields(self, label_data):
@@ -2408,6 +2483,8 @@ class ProjectManager:
             if decision.get("state") == "conflict":
                 conflicts.append(part_name)
                 continue
+            if decision.get("source") not in AI_TRAINING_TRUTH_SOURCES:
+                continue
             if decision.get("state") != "draft":
                 continue
             has_polygon = bool(parts.get(part_name))
@@ -2984,7 +3061,11 @@ class ProjectManager:
                 else []
             )
             for part in sorted(part_names):
-                if resolve_part_training_trust(labels, part).get("state") == "draft":
+                decision = resolve_part_training_trust(labels, part)
+                if (
+                    decision.get("state") == "draft"
+                    and decision.get("source") in AI_TRAINING_TRUTH_SOURCES
+                ):
                     parts_to_remove.append(part)
             
             for part in parts_to_remove:
@@ -3022,7 +3103,7 @@ class ProjectManager:
         return self.remove_auto_labels_for_images(self.project_data.get("labels", {}).keys(), save=save)
 
     def verify_image_labels(self, image_path, save=True):
-        """Removes 'Auto-Annotated' only from labels with a saved polygon."""
+        """Confirm saved polygon drafts whose recorded source is AI."""
         image_path = self._image_data_key(image_path)
         if image_path not in self.project_data["labels"]: return 0
         
@@ -3042,30 +3123,36 @@ class ProjectManager:
         )
         for part in sorted(part_names):
             decision = resolve_part_training_trust(labels, part)
-            if decision.get("state") == "draft" and parts.get(part):
-                    auto_meta = labels.get("auto_box_meta", {})
-                    part_auto_meta = (
-                        auto_meta.get(part, {})
-                        if isinstance(auto_meta, dict)
-                        and isinstance(auto_meta.get(part), dict)
-                        else {}
-                    )
-                    source = (
-                        str(part_auto_meta.get("source") or "").strip()
-                        or str(decision.get("source") or "").strip()
-                        or TRAINING_SOURCE_LEGACY_AI_UNKNOWN
-                    )
-                    if labels.get("descriptions", {}).get(part) == "Auto-Annotated":
-                        del labels["descriptions"][part]
-                    self.set_auto_box_review_status(image_path, part, "confirmed", save=False)
-                    set_part_training_truth(
-                        labels,
-                        part,
-                        source=source,
-                        review_status=TRAINING_REVIEW_CONFIRMED,
-                        accepted_via=TRAINING_ACCEPT_SELECTED_AI,
-                    )
-                    count += 1
+            if (
+                decision.get("state") == "draft"
+                and decision.get("source") in AI_TRAINING_TRUTH_SOURCES
+                and parts.get(part)
+            ):
+                auto_meta = labels.get("auto_box_meta", {})
+                part_auto_meta = (
+                    auto_meta.get(part, {})
+                    if isinstance(auto_meta, dict)
+                    and isinstance(auto_meta.get(part), dict)
+                    else {}
+                )
+                decision_source = str(decision.get("source") or "").strip()
+                auto_source = str(part_auto_meta.get("source") or "").strip()
+                source = (
+                    auto_source
+                    if auto_source in AI_TRAINING_TRUTH_SOURCES
+                    else decision_source
+                )
+                if labels.get("descriptions", {}).get(part) == "Auto-Annotated":
+                    del labels["descriptions"][part]
+                self.set_auto_box_review_status(image_path, part, "confirmed", save=False)
+                set_part_training_truth(
+                    labels,
+                    part,
+                    source=source,
+                    review_status=TRAINING_REVIEW_CONFIRMED,
+                    accepted_via=TRAINING_ACCEPT_SELECTED_AI,
+                )
+                count += 1
         
         if count > 0:
             self._append_label_journal_entry(image_path, "verify_image_labels")
@@ -3073,6 +3160,55 @@ class ProjectManager:
         if count > 0 and save:
             self.save_project()
         return count
+
+    def confirm_journal_recovery_labels(self, image_path, part_names=None, save=True):
+        """Maintenance API: accept journal polygons after researcher review."""
+        image_path = self._image_data_key(image_path)
+        labels = self.project_data.get("labels", {}).get(image_path)
+        if not isinstance(labels, dict):
+            return 0
+        parts = labels.get("parts", {})
+        if not isinstance(parts, dict):
+            return 0
+        if part_names is None:
+            selected_parts = set(parts)
+        elif isinstance(part_names, str):
+            selected_parts = {part_names.strip()} if part_names.strip() else set()
+        else:
+            selected_parts = {
+                str(part).strip() for part in part_names if str(part).strip()
+            }
+        confirmed_count = 0
+        for part in sorted(selected_parts):
+            decision = resolve_part_training_trust(labels, part)
+            if (
+                decision.get("state") != "draft"
+                or decision.get("source")
+                != TRAINING_SOURCE_LEGACY_JOURNAL_RECOVERY
+                or not parts.get(part)
+            ):
+                continue
+            if labels.get("descriptions", {}).get(part) == "Auto-Annotated":
+                del labels["descriptions"][part]
+            self.set_auto_box_review_status(
+                image_path, part, TRAINING_REVIEW_CONFIRMED, save=False
+            )
+            set_part_training_truth(
+                labels,
+                part,
+                source=TRAINING_SOURCE_LEGACY_JOURNAL_RECOVERY,
+                review_status=TRAINING_REVIEW_CONFIRMED,
+                accepted_via=TRAINING_ACCEPT_MANUAL_EDIT,
+            )
+            confirmed_count += 1
+        if confirmed_count:
+            self._append_label_journal_entry(
+                image_path, "confirm_journal_recovery_labels"
+            )
+            self._mark_sqlite_image_dirty(image_path)
+        if confirmed_count and save:
+            self.save_project()
+        return confirmed_count
 
     def export_coco(self, output_dir, progress_callback=None):
         if not os.path.exists(output_dir):

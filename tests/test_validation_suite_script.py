@@ -83,6 +83,27 @@ class ValidationSuiteScriptTests(unittest.TestCase):
             self.assertIn(keyword, smoke)
         self.assertNotIn("round5_ci_smoke", module.DEFAULT_ORDER)
 
+    def test_round5_path_safety_covers_link_and_reparse_boundaries(self):
+        spec = importlib.util.spec_from_file_location("run_validation_suite_for_paths", SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        path_tests = module.SUITES["round5_path_safety"]
+        joined = "\n".join(path_tests)
+        self.assertEqual(len(path_tests), 24)
+        for keyword in (
+            "root_symlink",
+            "parent_symlink",
+            "linked_export_root",
+            "artifact_symlink",
+            "note_projection_symlink",
+            "training_runs_links",
+            "windows_reparse",
+            "directory_aliases",
+        ):
+            self.assertIn(keyword, joined)
+        self.assertNotIn("round5_path_safety", module.DEFAULT_ORDER)
+
     def test_chunked_suite_runs_single_fast_tooling_test(self):
         result = subprocess.run(
             [

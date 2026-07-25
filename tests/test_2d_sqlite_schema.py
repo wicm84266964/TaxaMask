@@ -66,7 +66,7 @@ class Project2DSQLiteSchemaTests(unittest.TestCase):
         finally:
             connection.close()
 
-    def test_v1_database_migrates_on_a_copy_and_keeps_research_rows(self):
+    def test_v1_database_migrates_atomically_and_keeps_research_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "legacy.taxamask.sqlite"
             self._make_v1_database(db_path)
@@ -89,6 +89,54 @@ class Project2DSQLiteSchemaTests(unittest.TestCase):
                 validate_2d_project_schema(connection)
             finally:
                 connection.close()
+
+    def test_concurrent_save_is_blocked_during_migration_and_succeeds_afterward(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "legacy.taxamask.sqlite"
+            self._make_v1_database(db_path)
+            original_initializer = initialize_2d_project_schema
+            blocked_errors = []
+
+            def initialize_while_another_connection_saves(connection):
+                competing = sqlite3.connect(db_path, timeout=0)
+                try:
+                    competing.execute(
+                        "INSERT INTO images (path, filename) VALUES (?, ?)",
+                        ("images/concurrent.jpg", "concurrent.jpg"),
+                    )
+                    competing.commit()
+                except sqlite3.OperationalError as exc:
+                    blocked_errors.append(str(exc))
+                    competing.rollback()
+                finally:
+                    competing.close()
+                return original_initializer(connection)
+
+            with patch(
+                "AntSleap.core.project_sqlite_schema.initialize_2d_project_schema",
+                side_effect=initialize_while_another_connection_saves,
+            ):
+                result = migrate_2d_project_database(db_path)
+
+            self.assertTrue(result["migrated"])
+            self.assertEqual(len(blocked_errors), 1)
+            self.assertIn("locked", blocked_errors[0].lower())
+
+            competing = sqlite3.connect(db_path)
+            try:
+                competing.execute(
+                    "INSERT INTO images (path, filename) VALUES (?, ?)",
+                    ("images/concurrent.jpg", "concurrent.jpg"),
+                )
+                competing.commit()
+                row = competing.execute(
+                    "SELECT filename FROM images WHERE path = ?",
+                    ("images/concurrent.jpg",),
+                ).fetchone()
+                self.assertEqual(row[0], "concurrent.jpg")
+                validate_2d_project_schema(competing)
+            finally:
+                competing.close()
 
     def test_failed_v1_migration_leaves_original_database_unchanged(self):
         with tempfile.TemporaryDirectory() as tmp:

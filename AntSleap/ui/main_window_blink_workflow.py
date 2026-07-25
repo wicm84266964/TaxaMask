@@ -54,12 +54,6 @@ class MainWindowBlinkWorkflowMixin:
 
     def _connect_child_training_progress(self, *, prefer_preflight=False):
         blink_lab = getattr(self, "blink_lab", None)
-        state_signal = getattr(blink_lab, "training_state_changed", None)
-        if state_signal is not None and not getattr(
-            blink_lab, "_taxamask_training_state_connected", False
-        ):
-            state_signal.connect(self._on_child_training_state_changed)
-            blink_lab._taxamask_training_state_connected = True
         thread = (
             getattr(blink_lab, "training_thread", None)
             if blink_lab is not None and not prefer_preflight

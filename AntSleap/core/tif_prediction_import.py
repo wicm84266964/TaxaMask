@@ -196,6 +196,18 @@ def import_external_prediction_tif(
     working_edit_existed = bool(str((labels.get("working_edit") or {}).get("path") or "").strip())
     transaction_id = uuid.uuid4().hex
     sidecar_swaps = []
+    source_spacing = working_meta.get("spacing_zyx") or working_record.get("spacing_zyx") or [1.0, 1.0, 1.0]
+    sidecar_unit = str(working_meta.get("spacing_unit") or "unknown")
+    record_unit = str(working_record.get("spacing_unit") or "unknown")
+    source_scale_verified = (
+        working_meta.get("scale_verified") is True
+        and working_record.get("scale_verified") is True
+        and sidecar_unit.strip().lower() == record_unit.strip().lower()
+        and sidecar_unit.strip().lower() not in {"", "unknown", "unknown_unit", "unitless"}
+        and [float(value) for value in source_spacing]
+        == [float(value) for value in (working_record.get("spacing_zyx") or [])]
+    )
+    source_spacing_unit = sidecar_unit if source_scale_verified else "unknown"
 
     def write_and_install(target_path, *, role, extra_metadata):
         staged_path = f"{target_path}.pending_{transaction_id}"
@@ -212,11 +224,12 @@ def import_external_prediction_tif(
             staged_path,
             volume,
             role=role,
-            spacing_zyx=working_meta.get("spacing_zyx") or working_record.get("spacing_zyx"),
-            spacing_unit=working_meta.get("spacing_unit", working_record.get("spacing_unit", "micrometer")),
+            spacing_zyx=source_spacing,
+            spacing_unit=source_spacing_unit,
             orientation=working_meta.get("orientation", working_record.get("orientation", "unknown")),
             source_format="external_prediction_tif",
             extra_metadata=extra_metadata,
+            scale_verified=source_scale_verified,
         )
         if os.path.exists(target_path):
             os.replace(target_path, rollback_path)
@@ -246,9 +259,10 @@ def import_external_prediction_tif(
             backup_meta["shape_zyx"],
             backup_meta["dtype"],
             backup_meta.get("spacing_zyx"),
-            backup_meta.get("spacing_unit", "micrometer"),
+            backup_meta.get("spacing_unit", "unknown"),
             backup_meta.get("orientation", "unknown"),
             backup_meta.get("format", ""),
+            scale_verified=backup_meta.get("scale_verified") is True,
         )
         labels["raw_ai_prediction_backup"]["role"] = "raw_ai_prediction_backup"
         labels["raw_ai_prediction_backup"]["status"] = "raw_backup"
@@ -262,12 +276,13 @@ def import_external_prediction_tif(
             editable_meta["dtype"],
             status="pending_review",
             spacing_zyx=editable_meta.get("spacing_zyx"),
-            spacing_unit=editable_meta.get("spacing_unit", "micrometer"),
+            spacing_unit=editable_meta.get("spacing_unit", "unknown"),
             orientation=editable_meta.get("orientation", "unknown"),
             fmt=editable_meta.get("format", ""),
             save=False,
             operation="prediction_review_import",
             audit_metadata=common_metadata,
+            scale_verified=editable_meta.get("scale_verified") is True,
         )
         editable["prediction_id"] = safe_prediction_id
         editable["source_model"] = source_model_text
@@ -279,9 +294,10 @@ def import_external_prediction_tif(
             prediction_id=safe_prediction_id,
             source_model=source_model_text,
             spacing_zyx=draft_meta.get("spacing_zyx"),
-            spacing_unit=draft_meta.get("spacing_unit", "micrometer"),
+            spacing_unit=draft_meta.get("spacing_unit", "unknown"),
             orientation=draft_meta.get("orientation", "unknown"),
             fmt=draft_meta.get("format", ""),
+            scale_verified=draft_meta.get("scale_verified") is True,
             save=False,
         )
         specimen["review_status"] = "pending_review"

@@ -307,7 +307,8 @@ def _tif_write_mask_metadata(project_manager, part, mask):
             "shape_zyx": metadata.get("shape_zyx", []),
             "dtype": metadata.get("dtype", ""),
             "spacing_zyx": metadata.get("spacing_zyx", []),
-            "spacing_unit": metadata.get("spacing_unit", "micrometer"),
+            "spacing_unit": metadata.get("spacing_unit", "unknown"),
+            "scale_verified": metadata.get("scale_verified") is True,
             "orientation": metadata.get("orientation", "unknown"),
         }
     )

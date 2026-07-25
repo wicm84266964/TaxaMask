@@ -14,7 +14,9 @@ from AntSleap.core.training_truth import (
     TRAINING_ACCEPT_SELECTED_AI,
     TRAINING_REVIEW_CONFIRMED,
     TRAINING_REVIEW_DRAFT,
+    TRAINING_SOURCE_AUTO_SHRINK,
     TRAINING_SOURCE_BLINK_EXPERT,
+    TRAINING_SOURCE_LEGACY_JOURNAL_RECOVERY,
     get_part_training_truth,
     remove_part_training_truth,
     resolve_part_training_trust,
@@ -142,6 +144,27 @@ class TrainingTruthTests(unittest.TestCase):
             {"operator": "reviewer"},
         )
 
+    def test_ai_summary_still_reports_malformed_truth_conflicts(self):
+        manager = ProjectManager()
+        image_path = manager._image_data_key("conflict.png")
+        entry = manager._default_label_entry()
+        entry["parts"]["Head"] = self._polygon()
+        entry.setdefault("label_part_metadata", {}).setdefault("Head", {})[
+            "training_truth_v1"
+        ] = {
+            "source": "unknown_plugin",
+            "review_status": "confirmed",
+            "accepted_via": "manual_edit",
+        }
+        manager.project_data["images"] = [image_path]
+        manager.project_data["labels"] = {image_path: entry}
+
+        summary = manager.summarize_image_ai_drafts(image_path)
+
+        self.assertEqual(summary["reviewable_polygon_parts"], [])
+        self.assertEqual(summary["box_only_parts"], [])
+        self.assertEqual(summary["conflicting_parts"], ["Head"])
+
     def test_blink_draft_without_marker_can_be_accepted_and_removed(self):
         manager = ProjectManager()
         image_path = manager._image_data_key("blink.png")
@@ -176,6 +199,100 @@ class TrainingTruthTests(unittest.TestCase):
         )
         self.assertEqual(manager.remove_auto_labels_for_images([image_path], save=False), 1)
         self.assertNotIn("Mandible", manager.project_data["labels"][image_path]["parts"])
+
+    def test_ai_batch_acceptance_skips_recovered_journal_drafts(self):
+        manager = ProjectManager()
+        image_path = manager._image_data_key("mixed-review.png")
+        manager.project_data["images"] = [image_path]
+        manager.project_data["labels"] = {
+            image_path: manager._default_label_entry()
+        }
+        manager.update_label(
+            image_path,
+            "Head",
+            self._polygon(),
+            save=False,
+            training_source=TRAINING_SOURCE_LEGACY_JOURNAL_RECOVERY,
+            training_review_status=TRAINING_REVIEW_DRAFT,
+            training_accepted_via="",
+        )
+        manager.update_label(
+            image_path,
+            "Eye",
+            self._polygon(),
+            save=False,
+            training_source=TRAINING_SOURCE_BLINK_EXPERT,
+            training_review_status=TRAINING_REVIEW_DRAFT,
+            training_accepted_via="",
+        )
+
+        summary = manager.summarize_ai_drafts_for_images([image_path])
+        self.assertEqual(summary["reviewable_polygon_count"], 1)
+        self.assertEqual(
+            summary["images_with_drafts"][0]["reviewable_polygon_parts"],
+            ["Eye"],
+        )
+        self.assertEqual(
+            manager.verify_ai_drafts_for_images([image_path]),
+            {"accepted_count": 1, "accepted_images": 1},
+        )
+        entry = manager.project_data["labels"][image_path]
+        self.assertEqual(
+            get_part_training_truth(entry, "Eye")["review_status"],
+            TRAINING_REVIEW_CONFIRMED,
+        )
+        self.assertEqual(
+            get_part_training_truth(entry, "Head")["review_status"],
+            TRAINING_REVIEW_DRAFT,
+        )
+
+        self.assertEqual(
+            manager.confirm_journal_recovery_labels(
+                image_path, part_names="Head", save=False
+            ),
+            1,
+        )
+        self.assertEqual(
+            get_part_training_truth(entry, "Head")["review_status"],
+            TRAINING_REVIEW_CONFIRMED,
+        )
+
+    def test_ai_batch_removal_skips_non_ai_drafts(self):
+        manager = ProjectManager()
+        image_path = manager._image_data_key("mixed-removal.png")
+        manager.project_data["images"] = [image_path]
+        manager.project_data["labels"] = {
+            image_path: manager._default_label_entry()
+        }
+        for part_name, source in (
+            ("Head", TRAINING_SOURCE_LEGACY_JOURNAL_RECOVERY),
+            ("Eye", TRAINING_SOURCE_AUTO_SHRINK),
+            ("Mandible", TRAINING_SOURCE_BLINK_EXPERT),
+        ):
+            manager.update_label(
+                image_path,
+                part_name,
+                self._polygon(),
+                save=False,
+                training_source=source,
+                training_review_status=TRAINING_REVIEW_DRAFT,
+                training_accepted_via="",
+            )
+
+        self.assertEqual(
+            manager.remove_auto_labels_for_images([image_path], save=False),
+            1,
+        )
+        entry = manager.project_data["labels"][image_path]
+        self.assertEqual(set(entry["parts"]), {"Head", "Eye"})
+        self.assertEqual(
+            get_part_training_truth(entry, "Head")["review_status"],
+            TRAINING_REVIEW_DRAFT,
+        )
+        self.assertEqual(
+            get_part_training_truth(entry, "Eye")["source"],
+            TRAINING_SOURCE_AUTO_SHRINK,
+        )
 
     def test_preflight_excludes_explicit_draft_and_reports_conflict(self):
         with tempfile.TemporaryDirectory() as tmp:

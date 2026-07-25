@@ -9,6 +9,7 @@ from datetime import datetime
 from .safe_io import atomic_write_json
 from .tif_project import TifProjectManager
 from .tif_local_axis_reslice import source_z_axis_for_part
+from .tif_volume_io import read_volume_metadata, volume_sidecar_exists
 from .tif_local_axis_validation import (
     require_valid_global_roi_proposal_geometry,
     require_valid_local_frame_proposal_geometry,
@@ -37,6 +38,76 @@ GLOBAL_ROI_PROPOSALS_SCHEMA_VERSION = "taxamask_tif_local_axis_global_roi_propos
 LOCAL_FRAME_PROPOSALS_SCHEMA_VERSION = "taxamask_tif_local_axis_frame_proposals_v1"
 
 LOCAL_AXIS_BACKEND_ACTIONS = {"prepare_dataset", "train", "predict_global_roi", "predict_local_frame", "predict"}
+
+
+def _canonical_scale_unit(value):
+    text = str(value or "unknown").strip().lower()
+    text = text.replace("µ", "u").replace("μ", "u")
+    aliases = {
+        "um": "micrometer",
+        "micron": "micrometer",
+        "microns": "micrometer",
+        "micrometer": "micrometer",
+        "micrometers": "micrometer",
+        "mm": "millimeter",
+        "millimeter": "millimeter",
+        "millimeters": "millimeter",
+        "m": "meter",
+        "meter": "meter",
+        "meters": "meter",
+    }
+    return aliases.get(text, "unknown")
+
+
+def _spacing_values_match(left, right):
+    try:
+        left_values = [float(value) for value in (left or [])]
+        right_values = [float(value) for value in (right or [])]
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        len(left_values) == 3
+        and len(right_values) == 3
+        and all(
+            math.isfinite(a)
+            and math.isfinite(b)
+            and a > 0
+            and b > 0
+            and math.isclose(a, b, rel_tol=1e-6, abs_tol=1e-9)
+            for a, b in zip(left_values, right_values)
+        )
+    )
+
+
+def _volume_scale_contract(project_manager, record):
+    record = record if isinstance(record, dict) else {}
+    record_spacing = record.get("spacing_zyx") or [1.0, 1.0, 1.0]
+    result = {
+        "spacing_zyx": [float(value) for value in record_spacing],
+        "spacing_unit": "unknown",
+        "scale_verified": False,
+    }
+    path = project_manager.to_absolute(record.get("path", ""))
+    if not path or not volume_sidecar_exists(path):
+        return result
+    try:
+        metadata = read_volume_metadata(path)
+    except (OSError, TypeError, ValueError):
+        return result
+    metadata_spacing = metadata.get("spacing_zyx") or [1.0, 1.0, 1.0]
+    result["spacing_zyx"] = [float(value) for value in metadata_spacing]
+    metadata_unit = _canonical_scale_unit(metadata.get("spacing_unit"))
+    record_unit = _canonical_scale_unit(record.get("spacing_unit"))
+    verified = (
+        metadata.get("scale_verified") is True
+        and record.get("scale_verified") is True
+        and metadata_unit != "unknown"
+        and metadata_unit == record_unit
+        and _spacing_values_match(metadata_spacing, record.get("spacing_zyx"))
+    )
+    result["spacing_unit"] = metadata_unit if verified else "unknown"
+    result["scale_verified"] = bool(verified)
+    return result
 
 DEFAULT_LOCAL_AXIS_BACKEND_CONFIG = {
     "backend_id": "external_local_axis",
@@ -934,6 +1005,7 @@ class TifLocalAxisBackendRunner:
             if specimen is None:
                 raise KeyError(f"unknown_specimen_id:{specimen_id}")
             working = specimen.get("working_volume") or {}
+            working_scale = _volume_scale_contract(self.project_manager, working)
             part_ids = part_map.get(specimen_id)
             parts = []
             for part in specimen.get("parts", []) or []:
@@ -948,8 +1020,7 @@ class TifLocalAxisBackendRunner:
                         "format": working.get("format", ""),
                         "shape_zyx": working.get("shape_zyx", []),
                         "dtype": working.get("dtype", ""),
-                        "spacing_zyx": working.get("spacing_zyx") or [1.0, 1.0, 1.0],
-                        "spacing_unit": working.get("spacing_unit", "micrometer"),
+                        **working_scale,
                         "orientation": working.get("orientation", "unknown"),
                     },
                     "parts": parts,
@@ -960,6 +1031,7 @@ class TifLocalAxisBackendRunner:
     def _contract_part(self, part):
         image = part.get("image") or {}
         mask = part.get("mask") or {}
+        image_scale = _volume_scale_contract(self.project_manager, image)
         return {
             "part_id": part.get("part_id"),
             "part_name": part.get("display_name") or part.get("part_id"),
@@ -968,7 +1040,7 @@ class TifLocalAxisBackendRunner:
                 "format": image.get("format", ""),
                 "shape_zyx": image.get("shape_zyx", []),
                 "dtype": image.get("dtype", ""),
-                "spacing_zyx": image.get("spacing_zyx") or [1.0, 1.0, 1.0],
+                **image_scale,
             },
             "source_axis": source_z_axis_for_part(image.get("shape_zyx") or [1, 1, 1]),
             "part_mask": {

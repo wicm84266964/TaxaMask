@@ -17,7 +17,7 @@ from AntSleap.core.tif_backend import (
     TIF_BACKEND_RESULT_SCHEMA_VERSION,
     TIF_MODEL_MANIFEST_SCHEMA_VERSION,
 )
-from AntSleap.core.tif_export import export_nnunet_dataset, export_tif_part_nnunet_dataset, read_nifti_volume, remap_label_ids, write_nifti_volume
+from AntSleap.core.tif_export import _sanitize_exchange_metadata, export_nnunet_dataset, export_tif_part_nnunet_dataset, read_nifti_volume, read_nifti_volume_with_metadata, remap_label_ids, write_nifti_volume
 from AntSleap.core.tif_project import TifProjectManager
 from AntSleap.core.tif_volume_io import load_volume_sidecar, read_volume_metadata, volume_sidecar_exists, write_volume_sidecar
 
@@ -667,24 +667,19 @@ def _export_prediction_inputs(contract, args):
         if volume_sidecar_exists(image_path):
             array = load_volume_sidecar(image_path, mmap_mode="r")
             sidecar_meta = read_volume_metadata(image_path)
-            metadata = {
-                "spacing_zyx": sidecar_meta.get("spacing_zyx") or input_volume.get("spacing_zyx") or [1.0, 1.0, 1.0],
-                "spacing_unit": sidecar_meta.get("spacing_unit", input_volume.get("spacing_unit", "micrometer")),
-            }
+            metadata = _sanitize_exchange_metadata(sidecar_meta, input_volume)
         elif str(image_path).lower().endswith((".nii", ".nii.gz")):
-            array = read_nifti_volume(image_path)
-            metadata = {
-                "spacing_zyx": input_volume.get("spacing_zyx") or [1.0, 1.0, 1.0],
-                "spacing_unit": input_volume.get("spacing_unit", "micrometer"),
-            }
+            array, nifti_metadata = read_nifti_volume_with_metadata(image_path)
+            metadata = _sanitize_exchange_metadata(nifti_metadata, input_volume)
         else:
             import tifffile
 
             array = tifffile.imread(image_path)
-            metadata = {
+            metadata = _sanitize_exchange_metadata({
                 "spacing_zyx": input_volume.get("spacing_zyx") or [1.0, 1.0, 1.0],
-                "spacing_unit": input_volume.get("spacing_unit", "micrometer"),
-            }
+                "spacing_unit": input_volume.get("spacing_unit", "unknown"),
+                "scale_verified": False,
+            })
         write_nifti_volume(out_path, array, metadata)
         cases.append(
             {
@@ -693,6 +688,7 @@ def _export_prediction_inputs(contract, args):
                 "part_id": part_id,
                 "reslice_id": reslice_id,
                 "input_volume": input_volume,
+                "exchange_metadata": metadata,
                 "image_path": str(out_path),
                 "shape_zyx": [int(value) for value in np.asarray(array).shape],
             }
@@ -732,14 +728,16 @@ def _write_prediction_sidecars(contract, cases, predictions_dir, manifest):
             prediction_id = f"{prediction_id}_{_safe_id(case['part_id'])}"
         sidecar_path = output_dir / f"{prediction_id}.ome.zarr"
         input_volume = case.get("input_volume") if isinstance(case.get("input_volume"), dict) else {}
+        exchange_metadata = case.get("exchange_metadata") if isinstance(case.get("exchange_metadata"), dict) else {}
         meta = write_volume_sidecar(
             sidecar_path,
             prediction.astype(np.uint16, copy=False),
             role="editable_ai_result",
-            spacing_zyx=input_volume.get("spacing_zyx") or [1.0, 1.0, 1.0],
-            spacing_unit=input_volume.get("spacing_unit", "micrometer"),
+            spacing_zyx=exchange_metadata.get("spacing_zyx") or [1.0, 1.0, 1.0],
+            spacing_unit=exchange_metadata.get("spacing_unit", "unknown"),
             orientation=input_volume.get("orientation", "part_reslice" if case.get("part_id") else "top_level_volume"),
             source_format="nnunet_v2_prediction",
+            scale_verified=exchange_metadata.get("scale_verified") is True,
             extra_metadata={
                 "nnunet_case_id": case["case_id"],
                 "label_id_mapping": (manifest.get("nnunet") or {}).get("label_id_mapping", {}),

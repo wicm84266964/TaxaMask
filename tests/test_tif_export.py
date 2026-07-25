@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import tifffile
 
-from AntSleap.core.tif_export import _read_any_volume, export_monai_dataset, export_nnunet_dataset, export_tif_part_nnunet_dataset, export_tif_part_training_dataset, export_tif_training_dataset, read_nifti_volume_with_metadata, write_nifti_volume
+from AntSleap.core.tif_export import _read_any_volume, _reslice_exchange_metadata, _sanitize_exchange_metadata, export_monai_dataset, export_nnunet_dataset, export_tif_part_nnunet_dataset, export_tif_part_training_dataset, export_tif_training_dataset, read_nifti_volume_with_metadata, write_nifti_volume
 from AntSleap.core.tif_local_axis_batch import accept_local_frame_proposal
 from AntSleap.core.tif_local_axis_reslice import compute_local_frame, export_part_reslice
 from AntSleap.core.tif_part_extraction import crop_volume_to_part, export_part_package
@@ -83,6 +83,83 @@ class TifExportTests(unittest.TestCase):
             self.assertTrue((sidecar / "0" / "0.0.0").exists())
             reloaded = read_volume_metadata(sidecar)
             self.assertEqual(reloaded["zarr_array_path"], "0")
+            self.assertEqual(reloaded["spacing_unit"], "unknown")
+            self.assertFalse(reloaded["scale_verified"])
+            zattrs = json.loads((sidecar / ".zattrs").read_text(encoding="utf-8"))
+            axes = zattrs["multiscales"][0]["axes"]
+            self.assertTrue(all("unit" not in axis for axis in axes))
+
+    def test_explicitly_verified_sidecar_preserves_physical_unit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sidecar = Path(tmp) / "verified.ome.zarr"
+            metadata = write_volume_sidecar(
+                sidecar,
+                np.zeros((2, 3, 4), dtype=np.uint8),
+                role="working_image",
+                spacing_zyx=[2.0, 3.0, 5.0],
+                spacing_unit="micrometer",
+                scale_verified=True,
+            )
+
+            self.assertTrue(metadata["scale_verified"])
+            zattrs = json.loads((sidecar / ".zattrs").read_text(encoding="utf-8"))
+            axes = zattrs["multiscales"][0]["axes"]
+            self.assertTrue(all(axis.get("unit") == "micrometer" for axis in axes))
+
+    def test_exchange_metadata_rejects_verified_but_conflicting_registry_scale(self):
+        metadata = {
+            "spacing_zyx": [2.0, 1.0, 0.5],
+            "spacing_unit": "micrometer",
+            "scale_verified": True,
+        }
+
+        unit_conflict = _sanitize_exchange_metadata(
+            metadata,
+            {
+                "spacing_zyx": [2.0, 1.0, 0.5],
+                "spacing_unit": "millimeter",
+                "scale_verified": True,
+            },
+        )
+        spacing_conflict = _sanitize_exchange_metadata(
+            metadata,
+            {
+                "spacing_zyx": [3.0, 1.0, 0.5],
+                "spacing_unit": "micrometer",
+                "scale_verified": True,
+            },
+        )
+
+        self.assertEqual(unit_conflict["spacing_unit"], "unknown")
+        self.assertFalse(unit_conflict["scale_verified"])
+        self.assertEqual(spacing_conflict["spacing_unit"], "unknown")
+        self.assertFalse(spacing_conflict["scale_verified"])
+
+    def test_reslice_exchange_metadata_requires_matching_audit_file(self):
+        record = {
+            "reslice_params": {"output_spacing_zyx": [2.0, 1.0, 0.5]},
+            "source": {
+                "part_spacing_unit": "micrometer",
+                "part_scale_verified": True,
+            },
+        }
+        audit = {
+            "reslice_params": {"output_spacing_zyx": [3.0, 1.0, 0.5]},
+            "source": {
+                "part_spacing_unit": "micrometer",
+                "part_scale_verified": True,
+            },
+            "outputs": {"image_shape_zyx": [2, 3, 4]},
+        }
+
+        metadata = _reslice_exchange_metadata(
+            record,
+            {"shape_zyx": [2, 3, 4], "spacing_zyx": [1.0, 1.0, 1.0]},
+            audit,
+        )
+
+        self.assertEqual(metadata["spacing_unit"], "unknown")
+        self.assertFalse(metadata["scale_verified"])
 
     def test_training_export_writes_exchange_formats_and_manifest(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -104,9 +181,32 @@ class TifExportTests(unittest.TestCase):
             label = np.ones((2, 3, 4), dtype=np.uint16)
             image_rel = "specimens/01-0101-12/working/image.ome.zarr"
             label_rel = "specimens/01-0101-12/labels/manual_truth.ome.zarr"
-            image_meta = write_volume_sidecar(project_root / image_rel, image, role="working_image")
-            label_meta = write_volume_sidecar(project_root / label_rel, label, role="manual_truth")
-            manager.register_working_volume("01-0101-12", image_rel, image_meta["shape_zyx"], image_meta["dtype"], save=False)
+            image_meta = write_volume_sidecar(
+                project_root / image_rel,
+                image,
+                role="working_image",
+                spacing_zyx=[2.0, 1.0, 1.0],
+                spacing_unit="micrometer",
+                scale_verified=False,
+            )
+            label_meta = write_volume_sidecar(
+                project_root / label_rel,
+                label,
+                role="manual_truth",
+                spacing_zyx=[2.0, 1.0, 1.0],
+                spacing_unit="micrometer",
+                scale_verified=False,
+            )
+            manager.register_working_volume(
+                "01-0101-12",
+                image_rel,
+                image_meta["shape_zyx"],
+                image_meta["dtype"],
+                spacing_zyx=image_meta["spacing_zyx"],
+                spacing_unit=image_meta["spacing_unit"],
+                scale_verified=False,
+                save=False,
+            )
             manager.register_label_volume(
                 "01-0101-12",
                 "manual_truth",
@@ -114,6 +214,9 @@ class TifExportTests(unittest.TestCase):
                 label_meta["shape_zyx"],
                 label_meta["dtype"],
                 status="reviewed",
+                spacing_zyx=label_meta["spacing_zyx"],
+                spacing_unit=label_meta["spacing_unit"],
+                scale_verified=False,
                 save=False,
             )
             specimen["train_ready"] = True
@@ -129,6 +232,10 @@ class TifExportTests(unittest.TestCase):
             manifest = result["manifest"]
             self.assertEqual(manifest["schema_version"], "ant3d_tif_training_export_v1")
             exported = manifest["specimens"][0]
+            self.assertEqual(exported["spacing_unit"], "unknown")
+            self.assertFalse(exported["scale_verified"])
+            self.assertEqual(exported["label_scale"]["spacing_unit"], "unknown")
+            self.assertNotIn("micrometer", json.dumps(manifest))
             for key in ["ome_tiff", "nrrd", "mha", "nifti"]:
                 self.assertIn(key, exported["image_exports"])
                 self.assertIn(key, exported["label_exports"])
@@ -140,6 +247,11 @@ class TifExportTests(unittest.TestCase):
                 self.assertIn(b"ObjectType = Image", handle.read(64))
             with open(root / "export" / exported["image_exports"]["nifti"], "rb") as handle:
                 self.assertEqual(handle.read(4), (348).to_bytes(4, "little", signed=True))
+            _image, nifti_metadata = read_nifti_volume_with_metadata(
+                root / "export" / exported["image_exports"]["nifti"]
+            )
+            self.assertEqual(nifti_metadata["spacing_unit"], "unknown")
+            self.assertFalse(nifti_metadata["scale_verified"])
 
     def test_nnunet_and_monai_exports_create_backend_layouts(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -229,6 +341,8 @@ class TifExportTests(unittest.TestCase):
             self.assertEqual(manifest["safety"]["input_scope"], "part_reslice")
             self.assertFalse(manifest["safety"]["allow_editable_ai_result_as_training_label"])
             sample = manifest["samples"][0]
+            self.assertEqual(sample["spacing_unit"], "unknown")
+            self.assertFalse(sample["scale_verified"])
             self.assertEqual(sample["specimen_id"], "01-0101-brain")
             self.assertEqual(sample["part_id"], "brain")
             self.assertEqual(sample["reslice_id"], "brain_axis_001")
@@ -244,6 +358,58 @@ class TifExportTests(unittest.TestCase):
                 tifffile.imread(root / "part_export" / sample["label_exports"]["tiff"]),
                 np.ones(manual_record["shape_zyx"], dtype=np.uint16),
             )
+
+    def test_part_training_export_recovers_verified_local_axis_scale(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = self._make_part_training_project(root)
+            reslice = manager.get_part_reslice("01-0101-brain", "brain", "brain_axis_001")
+            reslice.setdefault("source", {})["part_spacing_unit"] = "micrometer"
+            reslice["source"]["part_scale_verified"] = True
+            reslice.setdefault("reslice_params", {})["output_spacing_zyx"] = [2.0, 1.0, 0.5]
+            reslice_audit_path = Path(manager.to_absolute(reslice["metadata_path"]))
+            reslice_audit = json.loads(reslice_audit_path.read_text(encoding="utf-8"))
+            reslice_audit.setdefault("source", {})["part_spacing_unit"] = "micrometer"
+            reslice_audit["source"]["part_scale_verified"] = True
+            reslice_audit.setdefault("reslice_params", {})["output_spacing_zyx"] = [2.0, 1.0, 0.5]
+            reslice_audit_path.write_text(
+                json.dumps(reslice_audit, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            manual_record = manager.part_label_record(
+                "01-0101-brain",
+                "brain",
+                "manual_truth",
+                "brain_axis_001",
+            )
+            write_volume_sidecar(
+                manager.to_absolute(manual_record["path"]),
+                np.ones(manual_record["shape_zyx"], dtype=np.uint16),
+                role="manual_truth",
+                spacing_zyx=[2.0, 1.0, 0.5],
+                spacing_unit="micrometer",
+                scale_verified=True,
+            )
+            manual_record["spacing_zyx"] = [2.0, 1.0, 0.5]
+            manual_record["spacing_unit"] = "micrometer"
+            manual_record["scale_verified"] = True
+            manager.save_project()
+
+            result = export_tif_part_training_dataset(
+                manager,
+                root / "verified_part_export",
+                formats=["nifti"],
+            )
+
+            sample = result["manifest"]["samples"][0]
+            self.assertEqual(sample["spacing_zyx"], [2.0, 1.0, 0.5])
+            self.assertEqual(sample["spacing_unit"], "micrometer")
+            self.assertTrue(sample["scale_verified"])
+            _image, image_metadata = read_nifti_volume_with_metadata(
+                root / "verified_part_export" / sample["image_exports"]["nifti"]
+            )
+            self.assertEqual(image_metadata["spacing_unit"], "micrometer")
+            self.assertTrue(image_metadata["scale_verified"])
 
     def test_accepted_ai_and_local_axis_do_not_replace_missing_manual_truth(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -428,7 +594,7 @@ class TifExportTests(unittest.TestCase):
             self.assertEqual(manifest["label_id_mapping"]["source_to_nnunet"]["5"], 2)
             self.assertTrue((root / "part_nnunet" / "splits_final.json").exists())
 
-    def test_nifti_round_trip_preserves_spacing_metadata(self):
+    def test_nifti_unverified_physical_unit_is_downgraded(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / "volume.nii.gz"
@@ -439,7 +605,29 @@ class TifExportTests(unittest.TestCase):
 
             np.testing.assert_array_equal(loaded, array)
             self.assertEqual(metadata["spacing_zyx"], [2.5, 1.5, 0.75])
+            self.assertEqual(metadata["spacing_unit"], "unknown")
+            self.assertFalse(metadata["scale_verified"])
+
+    def test_nifti_round_trip_preserves_verified_spacing_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "verified_volume.nii.gz"
+            array = np.zeros((2, 3, 4), dtype=np.uint16)
+
+            write_nifti_volume(
+                path,
+                array,
+                {
+                    "spacing_zyx": [2.5, 1.5, 0.75],
+                    "spacing_unit": "micrometer",
+                    "scale_verified": True,
+                },
+            )
+            loaded, metadata = read_nifti_volume_with_metadata(path)
+
+            np.testing.assert_array_equal(loaded, array)
+            self.assertEqual(metadata["spacing_zyx"], [2.5, 1.5, 0.75])
             self.assertEqual(metadata["spacing_unit"], "micrometer")
+            self.assertTrue(metadata["scale_verified"])
 
     def test_unknown_spacing_is_not_written_as_millimeter(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -455,6 +643,7 @@ class TifExportTests(unittest.TestCase):
             _roundtrip, roundtrip_metadata = read_nifti_volume_with_metadata(nifti_path)
 
             self.assertEqual(roundtrip_metadata["spacing_unit"], "unknown")
+            self.assertFalse(roundtrip_metadata["scale_verified"])
 
     def test_nifti_round_trip_preserves_meter_spacing_unit(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -464,11 +653,16 @@ class TifExportTests(unittest.TestCase):
             write_nifti_volume(
                 path,
                 array,
-                {"spacing_zyx": [0.002, 0.001, 0.0005], "spacing_unit": "meter"},
+                {
+                    "spacing_zyx": [0.002, 0.001, 0.0005],
+                    "spacing_unit": "meter",
+                    "scale_verified": True,
+                },
             )
             _loaded, metadata = read_nifti_volume_with_metadata(path)
 
             self.assertEqual(metadata["spacing_unit"], "meter")
+            self.assertTrue(metadata["scale_verified"])
             np.testing.assert_allclose(
                 metadata["spacing_zyx"], [0.002, 0.001, 0.0005], rtol=1e-6, atol=1e-9
             )

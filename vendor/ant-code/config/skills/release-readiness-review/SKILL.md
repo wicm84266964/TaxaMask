@@ -8,10 +8,11 @@ context: instruction
 agent: verifier
 paths:
   - README.md
-  - README_zh.md
+  - LLM_CONTEXT_DETAILED.md
   - TaxaMask使用手册.md
   - scripts/
-  - package.json
+  - requirements.txt
+  - vendor/ant-code/package.json
 ---
 # Release Readiness Review
 

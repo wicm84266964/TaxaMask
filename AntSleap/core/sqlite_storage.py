@@ -1,6 +1,5 @@
 import os
 import sqlite3
-import tempfile
 import time
 from pathlib import Path
 
@@ -218,6 +217,50 @@ def read_database_schema_version(db_path, schema_name):
         connection.close()
 
 
+def _execute_script_in_transaction(connection, sql_script):
+    """Execute a SQL script without sqlite3.executescript's implicit commit."""
+
+    statement = ""
+    for character in str(sql_script or ""):
+        statement += character
+        if character == ";" and sqlite3.complete_statement(statement):
+            if statement.strip():
+                connection.execute(statement)
+            statement = ""
+    if statement.strip():
+        if not sqlite3.complete_statement(statement):
+            raise sqlite3.OperationalError("sqlite_migration_incomplete_sql_statement")
+        connection.execute(statement)
+
+
+class _MigrationTransactionConnection:
+    """Keep migration callbacks inside the transaction owned by the caller."""
+
+    def __init__(self, connection):
+        self._connection = connection
+
+    def __getattr__(self, name):
+        return getattr(self._connection, name)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return False
+
+    def commit(self):
+        # Schema initializers commit during normal database creation. During a
+        # migration, only the outer transaction may make changes durable.
+        return None
+
+    def rollback(self):
+        # Let the outer migration handler roll back the complete operation.
+        return None
+
+    def executescript(self, sql_script):
+        return _execute_script_in_transaction(self._connection, sql_script)
+
+
 def migrate_sqlite_database_atomically(
     db_path,
     *,
@@ -229,71 +272,60 @@ def migrate_sqlite_database_atomically(
     validate_source_schema,
     unsupported_version_error,
 ):
-    """Migrate a validated copy, then atomically replace the original database."""
+    """Migrate in one writer transaction so concurrent saves cannot be lost."""
 
     source = os.path.abspath(os.fspath(db_path))
     if not os.path.isfile(source):
         raise FileNotFoundError(source)
-    current_version = read_database_schema_version(source, schema_name)
     target_version = int(target_version)
-    if current_version == target_version:
-        return {"migrated": False, "backup_path": ""}
-    if current_version not in {int(value) for value in source_versions}:
-        raise ValueError(f"{unsupported_version_error}:{current_version}")
-
-    backup_path = backup_sqlite_database(source, min_interval_seconds=0)
-    backup_connection = connect_sqlite_database_readonly(backup_path)
+    allowed_source_versions = {int(value) for value in source_versions}
+    migration_connection = sqlite3.connect(source, timeout=30.0, isolation_level=None)
+    migration_connection.execute("PRAGMA foreign_keys = ON")
+    migration_connection.execute("PRAGMA busy_timeout = 30000")
+    transaction_started = False
+    backup_path = ""
     try:
-        ensure_integrity_ok(backup_connection)
-    finally:
-        backup_connection.close()
-
-    descriptor, temporary_path = tempfile.mkstemp(
-        prefix=f".{os.path.basename(source)}.migrate_",
-        suffix=".sqlite",
-        dir=os.path.dirname(source) or ".",
-    )
-    os.close(descriptor)
-    os.remove(temporary_path)
-    temporary_sidecars = (f"{temporary_path}-wal", f"{temporary_path}-shm")
-    try:
-        original_connection = connect_sqlite_database_readonly(source)
-        migrated_connection = connect_sqlite_database(temporary_path)
         try:
-            original_connection.backup(migrated_connection)
-            validate_source_schema(migrated_connection, current_version)
-            initialize_schema(migrated_connection)
-            validate_schema(migrated_connection)
-            ensure_integrity_ok(migrated_connection)
-            migrated_connection.commit()
-            migrated_connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            mode = migrated_connection.execute("PRAGMA journal_mode = DELETE").fetchone()
-            if not mode or str(mode[0]).lower() != "delete":
-                raise sqlite3.OperationalError("sqlite_migration_journal_mode_failed")
-        finally:
-            migrated_connection.close()
-            original_connection.close()
+            migration_connection.execute("BEGIN IMMEDIATE")
+            transaction_started = True
+        except sqlite3.OperationalError as exc:
+            if "busy" in str(exc).lower() or "locked" in str(exc).lower():
+                raise sqlite3.OperationalError("sqlite_migration_source_busy") from exc
+            raise
 
-        # Normal application connections use WAL, so remove only inactive WAL
-        # sidecars before replacing the main file with its complete snapshot.
-        source_connection = sqlite3.connect(source, timeout=30.0)
+        table = migration_connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"
+        ).fetchone()
+        current_version = (
+            get_schema_version(migration_connection, schema_name) if table else 0
+        )
+        if current_version == target_version:
+            migration_connection.rollback()
+            transaction_started = False
+            return {"migrated": False, "backup_path": ""}
+        if current_version not in allowed_source_versions:
+            raise ValueError(f"{unsupported_version_error}:{current_version}")
+
+        # BEGIN IMMEDIATE keeps every other writer waiting from before this
+        # snapshot until the schema transaction commits or rolls back.
+        backup_path = backup_sqlite_database(source, min_interval_seconds=0)
+        backup_connection = connect_sqlite_database_readonly(backup_path)
         try:
-            checkpoint = source_connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
-            if checkpoint and int(checkpoint[0] or 0) != 0:
-                raise sqlite3.OperationalError("sqlite_migration_source_busy")
-            mode = source_connection.execute("PRAGMA journal_mode = DELETE").fetchone()
-            if not mode or str(mode[0]).lower() != "delete":
-                raise sqlite3.OperationalError("sqlite_migration_source_busy")
+            ensure_integrity_ok(backup_connection)
         finally:
-            source_connection.close()
-        os.chmod(temporary_path, os.stat(source).st_mode)
-        os.replace(temporary_path, source)
+            backup_connection.close()
+
+        transactional_connection = _MigrationTransactionConnection(migration_connection)
+        validate_source_schema(transactional_connection, current_version)
+        initialize_schema(transactional_connection)
+        validate_schema(transactional_connection)
+        ensure_integrity_ok(transactional_connection)
+        migration_connection.commit()
+        transaction_started = False
     except Exception:
-        for path in (temporary_path,) + temporary_sidecars:
-            try:
-                if os.path.exists(path):
-                    os.remove(path)
-            except OSError:
-                pass
+        if transaction_started:
+            migration_connection.rollback()
         raise
+    finally:
+        migration_connection.close()
     return {"migrated": True, "backup_path": backup_path}

@@ -25,7 +25,9 @@ from AntSleap.core.tif_project import TifProjectManager
 from AntSleap.core.tif_volume_io import load_volume_sidecar, write_volume_sidecar
 
 
-def _project(root, *, spacing_unit="micrometer"):
+def _project(root, *, spacing_unit="micrometer", scale_verified=None):
+    if scale_verified is None:
+        scale_verified = spacing_unit == "micrometer"
     project_root = root / "project"
     manager = TifProjectManager()
     manager.location_registry_database_path = root / "locations.sqlite"
@@ -49,6 +51,7 @@ def _project(root, *, spacing_unit="micrometer"):
         role="manual_truth",
         spacing_zyx=[2.0, 3.0, 5.0],
         spacing_unit=spacing_unit,
+        scale_verified=scale_verified,
     )
     manager.register_label_volume(
         "ant_001",
@@ -123,11 +126,18 @@ def _fake_incomplete_export(manager, target):
 class MeshExportTests(unittest.TestCase):
     def test_spacing_conversion_and_unknown_scale_status(self):
         spacing, status, factor = spacing_to_millimeters(
-            [2.0, 3.0, 5.0], "micrometer"
+            [2.0, 3.0, 5.0], "micrometer", scale_verified=True
         )
         self.assertEqual(spacing, [0.002, 0.003, 0.005])
         self.assertEqual(status, "verified")
         self.assertEqual(factor, 0.001)
+
+        spacing, status, factor = spacing_to_millimeters(
+            [2.0, 3.0, 5.0], "micrometer"
+        )
+        self.assertEqual(spacing, [2.0, 3.0, 5.0])
+        self.assertEqual(status, "scale_unverified")
+        self.assertEqual(factor, 1.0)
 
         spacing, status, factor = spacing_to_millimeters(
             [2.0, 3.0, 5.0], "unknown_unit"
@@ -144,6 +154,31 @@ class MeshExportTests(unittest.TestCase):
         for invalid in invalid_spacings:
             with self.assertRaisesRegex(MeshExportError, "mesh_spacing_invalid"):
                 spacing_to_millimeters(invalid, "millimeter")
+
+    def test_supported_unit_name_without_scale_evidence_stays_observation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = _project(Path(tmp), scale_verified=False)
+
+            summary = reviewed_mesh_source_summary(manager, "ant_001")
+
+            self.assertEqual(summary["spacing_unit"], "micrometer")
+            self.assertFalse(summary["scale_verified"])
+            self.assertEqual(summary["scale_status"], "scale_unverified")
+            self.assertEqual(summary["mesh_purpose"], "observation")
+            self.assertEqual(summary["output_unit"], "unitless")
+
+    def test_conflicting_verified_scale_records_stay_observation_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = _project(Path(tmp), scale_verified=True)
+            truth = manager.get_specimen("ant_001")["labels"]["manual_truth"]
+            truth["spacing_zyx"] = [3.0, 3.0, 5.0]
+
+            summary = reviewed_mesh_source_summary(manager, "ant_001")
+
+            self.assertFalse(summary["scale_verified"])
+            self.assertEqual(summary["scale_status"], "scale_unverified")
+            self.assertEqual(summary["mesh_purpose"], "observation")
+            self.assertEqual(summary["output_unit"], "unitless")
 
     def test_manual_truth_path_rejects_symlink_components(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -291,6 +291,51 @@ def _validate_tif_v1_schema(connection, version):
         raise ValueError("invalid_tif_v1_project_schema_version")
 
 
+def _migrate_v1_volume_scale_trust(connection):
+    rows = connection.execute(
+        "SELECT id, spacing_unit, metadata_json FROM volume_assets ORDER BY id"
+    ).fetchall()
+    for asset_id, spacing_unit, metadata_json in rows:
+        try:
+            metadata = json.loads(metadata_json or "{}")
+        except (TypeError, ValueError):
+            metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+
+        if metadata.get("scale_verified") is True:
+            metadata["scale_verified"] = True
+            normalized_unit = str(spacing_unit or "unknown")
+        else:
+            legacy_unit = str(spacing_unit or "unknown")
+            if legacy_unit.strip().lower() not in {
+                "",
+                "unknown",
+                "unknown_unit",
+                "unitless",
+            }:
+                metadata.setdefault("legacy_unverified_spacing_unit", legacy_unit)
+            metadata["scale_verified"] = False
+            metadata.setdefault(
+                "scale_trust_status",
+                "unverified_legacy_v1_default",
+            )
+            normalized_unit = "unknown"
+
+        connection.execute(
+            """
+            UPDATE volume_assets
+            SET spacing_unit = ?, metadata_json = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                normalized_unit,
+                json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+                int(asset_id),
+            ),
+        )
+
+
 def migrate_tif_project_database(db_path):
     return migrate_sqlite_database_atomically(
         db_path,
@@ -606,6 +651,8 @@ def initialize_tif_project_schema(connection):
         initialize_project_integrity_registry_schema(connection)
         initialize_training_run_ledger_schema(connection)
         initialize_mesh_export_schema(connection)
+        if current_version == 1:
+            _migrate_v1_volume_scale_trust(connection)
         connection.execute(
             """
             INSERT OR IGNORE INTO tif_projects (id, name, project_type, schema_version)

@@ -95,7 +95,7 @@ def _release_mapped_volume(volume):
             pass
 
 
-def spacing_to_millimeters(spacing_zyx, spacing_unit):
+def spacing_to_millimeters(spacing_zyx, spacing_unit, *, scale_verified=False):
     try:
         spacing = [float(value) for value in spacing_zyx]
     except (TypeError, ValueError) as exc:
@@ -106,27 +106,58 @@ def spacing_to_millimeters(spacing_zyx, spacing_unit):
         raise MeshExportError("mesh_spacing_invalid")
     unit = str(spacing_unit or "").strip().lower().replace("µ", "u").replace("μ", "u")
     factor = _UNIT_TO_MM.get(unit)
-    if factor is None:
+    if factor is None or scale_verified is not True:
         return spacing, "scale_unverified", 1.0
     return [value * factor for value in spacing], "verified", factor
 
 
-def _mesh_coordinate_context(spacing_zyx, spacing_unit):
+def _mesh_coordinate_context(spacing_zyx, spacing_unit, *, scale_verified=False):
     mesh_spacing, scale_status, conversion_factor = spacing_to_millimeters(
         spacing_zyx,
         spacing_unit,
+        scale_verified=scale_verified,
     )
     verified = scale_status == "verified"
     context = {
         "mesh_spacing_zyx": mesh_spacing,
         "scale_status": scale_status,
         "unit_conversion_factor": conversion_factor,
+        "scale_verified": verified,
         "mesh_purpose": "measurement" if verified else "observation",
         "output_unit": "millimeter" if verified else "unitless",
     }
     if verified:
         context["spacing_zyx_mm"] = mesh_spacing
     return context
+
+
+def _source_scale_verified(metadata, record):
+    if not isinstance(metadata, dict) or not isinstance(record, dict):
+        return False
+    metadata_unit = str(metadata.get("spacing_unit") or "").strip().lower().replace("µ", "u").replace("μ", "u")
+    record_unit = str(record.get("spacing_unit") or "").strip().lower().replace("µ", "u").replace("μ", "u")
+    try:
+        metadata_spacing = [float(value) for value in (metadata.get("spacing_zyx") or [])]
+        record_spacing = [float(value) for value in (record.get("spacing_zyx") or [])]
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        metadata.get("scale_verified") is True
+        and record.get("scale_verified") is True
+        and metadata_unit in _UNIT_TO_MM
+        and record_unit in _UNIT_TO_MM
+        and math.isclose(_UNIT_TO_MM[metadata_unit], _UNIT_TO_MM[record_unit], rel_tol=0.0, abs_tol=0.0)
+        and len(metadata_spacing) == 3
+        and len(record_spacing) == 3
+        and all(
+            math.isfinite(left)
+            and math.isfinite(right)
+            and left > 0
+            and right > 0
+            and math.isclose(left, right, rel_tol=1e-6, abs_tol=1e-9)
+            for left, right in zip(metadata_spacing, record_spacing)
+        )
+    )
 
 
 def _manual_truth_record(project_manager, specimen_id, part_id="", reslice_id=""):
@@ -430,6 +461,7 @@ def reviewed_mesh_source_summary(
     coordinates = _mesh_coordinate_context(
         metadata.get("spacing_zyx") or record.get("spacing_zyx"),
         metadata.get("spacing_unit") or record.get("spacing_unit"),
+        scale_verified=_source_scale_verified(metadata, record),
     )
     return {
         "specimen_id": str(specimen_id),
@@ -870,6 +902,7 @@ def export_reviewed_label_meshes(
     coordinate_context = _mesh_coordinate_context(
         metadata.get("spacing_zyx") or source_record.get("spacing_zyx"),
         metadata.get("spacing_unit") or source_record.get("spacing_unit"),
+        scale_verified=_source_scale_verified(metadata, source_record),
     )
     mesh_spacing = coordinate_context["mesh_spacing_zyx"]
     scale_status = coordinate_context["scale_status"]

@@ -192,6 +192,20 @@ def make_top_level_only_project(root):
 
 
 class TifBackendTests(unittest.TestCase):
+    def test_public_contract_documents_verified_and_unknown_scale_rules(self):
+        contract_path = (
+            Path(__file__).resolve().parents[1]
+            / "docs"
+            / "contracts"
+            / "ant3d_tif_backend_contract_v1.md"
+        )
+        contract_text = contract_path.read_text(encoding="utf-8")
+
+        self.assertIn('"scale_verified": true', contract_text)
+        self.assertIn('"scale_verified": false', contract_text)
+        self.assertIn('"spacing_unit": "unknown"', contract_text)
+        self.assertIn("must not infer a unit", contract_text)
+
     def test_nnunet_runtime_config_autodetects_backend_python(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -230,6 +244,8 @@ class TifBackendTests(unittest.TestCase):
             self.assertEqual(contract["part_samples"][0]["label_volume"]["role"], "manual_truth")
             self.assertEqual(contract["part_samples"][0]["part_id"], "brain")
             self.assertTrue(contract["part_samples"][0]["input_volume"]["path"].endswith("image.tif"))
+            self.assertEqual(contract["part_samples"][0]["input_volume"]["spacing_unit"], "unknown")
+            self.assertFalse(contract["part_samples"][0]["input_volume"]["scale_verified"])
             self.assertEqual(contract["part_samples"][0]["label_schema_id"], "brain_regions")
             self.assertEqual(contract["part_samples"][0]["label_schema"]["labels"][0]["name"], "mushroom_body")
 
@@ -255,6 +271,8 @@ class TifBackendTests(unittest.TestCase):
             self.assertEqual(contract["specimens"][0]["specimen_id"], "top-001")
             self.assertEqual(contract["specimens"][0]["label_volume"]["role"], "manual_truth")
             self.assertTrue(contract["specimens"][0]["input_volume"]["path"].endswith("image.ome.zarr"))
+            self.assertEqual(contract["specimens"][0]["input_volume"]["spacing_unit"], "unknown")
+            self.assertFalse(contract["specimens"][0]["input_volume"]["scale_verified"])
 
     def test_predict_contract_accepts_objectively_ready_part_without_manual_truth(self):
         with tempfile.TemporaryDirectory() as tmp:

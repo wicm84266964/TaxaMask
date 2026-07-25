@@ -341,9 +341,10 @@ def run_predict(contract):
             np.zeros(tuple(shape), dtype=np.uint16),
             role="editable_ai_result",
             spacing_zyx=input_volume.get("spacing_zyx") or [1.0, 1.0, 1.0],
-            spacing_unit=input_volume.get("spacing_unit", "micrometer"),
+            spacing_unit=input_volume.get("spacing_unit", "unknown"),
             orientation=input_volume.get("orientation", "part_reslice" if part_id else "top_level_volume"),
             source_format="taxamask_tif_trainer_backend_smoke",
+            scale_verified=input_volume.get("scale_verified") is True,
         )
         artifacts.append(
             {

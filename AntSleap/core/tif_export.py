@@ -102,6 +102,113 @@ def _spacing_xyz(metadata):
     return [spacing_zyx[2], spacing_zyx[1], spacing_zyx[0]]
 
 
+def _canonical_spacing_unit(value):
+    text = str(value or "unknown").strip().lower()
+    text = text.replace("µ", "u").replace("μ", "u")
+    aliases = {
+        "micrometer": "micrometer",
+        "micrometers": "micrometer",
+        "micron": "micrometer",
+        "microns": "micrometer",
+        "um": "micrometer",
+        "millimeter": "millimeter",
+        "millimeters": "millimeter",
+        "mm": "millimeter",
+        "meter": "meter",
+        "meters": "meter",
+        "m": "meter",
+    }
+    return aliases.get(text, "unknown")
+
+
+def _normalized_spacing(value):
+    try:
+        spacing = [float(item) for item in (value or [])]
+    except (TypeError, ValueError):
+        return [1.0, 1.0, 1.0], False
+    valid = len(spacing) == 3 and all(np.isfinite(item) and item > 0 for item in spacing)
+    return (spacing if valid else [1.0, 1.0, 1.0]), bool(valid)
+
+
+def _spacing_matches(left, right):
+    left_spacing, left_valid = _normalized_spacing(left)
+    right_spacing, right_valid = _normalized_spacing(right)
+    return bool(
+        left_valid
+        and right_valid
+        and np.allclose(left_spacing, right_spacing, rtol=1e-6, atol=1e-9)
+    )
+
+
+def _sanitize_exchange_metadata(metadata=None, registry_record=None):
+    """Return only the physical scale that every authoritative record verifies."""
+    clean = dict(metadata) if isinstance(metadata, dict) else {}
+    unit = _canonical_spacing_unit(clean.get("spacing_unit"))
+    spacing, spacing_valid = _normalized_spacing(clean.get("spacing_zyx"))
+    verified = clean.get("scale_verified") is True and unit != "unknown" and spacing_valid
+    if registry_record is not None:
+        record_unit = _canonical_spacing_unit(
+            registry_record.get("spacing_unit") if isinstance(registry_record, dict) else None
+        )
+        verified = (
+            verified
+            and isinstance(registry_record, dict)
+            and registry_record.get("scale_verified") is True
+            and record_unit == unit
+            and _spacing_matches(spacing, registry_record.get("spacing_zyx"))
+        )
+    clean["spacing_zyx"] = spacing
+    clean["spacing_unit"] = unit if verified else "unknown"
+    clean["scale_verified"] = bool(verified)
+    return clean
+
+
+def _manifest_scale_metadata(metadata):
+    clean = _sanitize_exchange_metadata(metadata)
+    return {
+        "spacing_zyx": list(clean["spacing_zyx"]),
+        "spacing_unit": clean["spacing_unit"],
+        "scale_verified": clean["scale_verified"],
+    }
+
+
+def _reslice_exchange_metadata(reslice, fallback_metadata=None, audit_metadata=None):
+    """Recover Local Axis TIFF geometry from its audited reslice record."""
+    clean = dict(fallback_metadata) if isinstance(fallback_metadata, dict) else {}
+    reslice = reslice if isinstance(reslice, dict) else {}
+    audit_metadata = audit_metadata if isinstance(audit_metadata, dict) else {}
+    params = reslice.get("reslice_params") if isinstance(reslice.get("reslice_params"), dict) else {}
+    source = reslice.get("source") if isinstance(reslice.get("source"), dict) else {}
+    audit_params = audit_metadata.get("reslice_params") if isinstance(audit_metadata.get("reslice_params"), dict) else {}
+    audit_source = audit_metadata.get("source") if isinstance(audit_metadata.get("source"), dict) else {}
+    clean["spacing_zyx"] = (
+        params.get("output_spacing_zyx")
+        or clean.get("spacing_zyx")
+        or source.get("part_spacing_zyx")
+        or [1.0, 1.0, 1.0]
+    )
+    record_unit = _canonical_spacing_unit(source.get("part_spacing_unit"))
+    audit_unit = _canonical_spacing_unit(audit_source.get("part_spacing_unit"))
+    audit_spacing = (
+        audit_params.get("output_spacing_zyx")
+        or audit_source.get("part_spacing_zyx")
+    )
+    outputs = audit_metadata.get("outputs") if isinstance(audit_metadata.get("outputs"), dict) else {}
+    fallback_shape = clean.get("shape_zyx")
+    audit_shape = outputs.get("image_shape_zyx")
+    shape_matches = not audit_shape or [int(value) for value in audit_shape] == [int(value) for value in (fallback_shape or [])]
+    clean["spacing_unit"] = record_unit
+    clean["scale_verified"] = (
+        source.get("part_scale_verified") is True
+        and audit_source.get("part_scale_verified") is True
+        and record_unit != "unknown"
+        and record_unit == audit_unit
+        and _spacing_matches(clean.get("spacing_zyx"), audit_spacing)
+        and shape_matches
+    )
+    return _sanitize_exchange_metadata(clean)
+
+
 def _shape_xyz(array):
     return [int(array.shape[2]), int(array.shape[1]), int(array.shape[0])]
 
@@ -140,29 +247,56 @@ def _little_endian_array(array):
 def write_ome_tiff_volume(path, array, metadata=None):
     _ensure_dir(os.path.dirname(os.path.abspath(path)))
     volume = np.asarray(array)
+    exchange_metadata = _sanitize_exchange_metadata(metadata)
+    ome_metadata = {"axes": "ZYX"} if volume.ndim == 3 else None
+    if ome_metadata is not None and exchange_metadata["scale_verified"]:
+        spacing_x, spacing_y, spacing_z = _spacing_xyz(exchange_metadata)
+        ome_unit = {
+            "micrometer": "µm",
+            "millimeter": "mm",
+            "meter": "m",
+        }[exchange_metadata["spacing_unit"]]
+        ome_metadata.update(
+            {
+                "PhysicalSizeX": spacing_x,
+                "PhysicalSizeXUnit": ome_unit,
+                "PhysicalSizeY": spacing_y,
+                "PhysicalSizeYUnit": ome_unit,
+                "PhysicalSizeZ": spacing_z,
+                "PhysicalSizeZUnit": ome_unit,
+            }
+        )
     tifffile.imwrite(
         path,
         volume,
         ome=True,
         photometric="minisblack",
-        metadata={"axes": "ZYX"} if volume.ndim == 3 else None,
+        metadata=ome_metadata,
     )
     return path
 
 
 def write_tiff_volume(path, array, metadata=None):
     _ensure_dir(os.path.dirname(os.path.abspath(path)))
-    tifffile.imwrite(path, np.asarray(array), photometric="minisblack")
+    exchange_metadata = _sanitize_exchange_metadata(metadata)
+    tifffile.imwrite(
+        path,
+        np.asarray(array),
+        photometric="minisblack",
+        metadata={
+            "axes": "ZYX",
+            **_manifest_scale_metadata(exchange_metadata),
+        },
+    )
     return path
 
 
 def write_nrrd_volume(path, array, metadata=None):
-    metadata = metadata or {}
+    metadata = _sanitize_exchange_metadata(metadata)
     volume = _little_endian_array(array)
     spacing_x, spacing_y, spacing_z = _spacing_xyz(metadata)
     size_x, size_y, size_z = _shape_xyz(volume)
-    header = "\n".join(
-        [
+    header_lines = [
             "NRRD0005",
             "# Complete NRRD file written by AntSleap.",
             f"type: {_dtype_to_nrrd_type(volume.dtype)}",
@@ -171,12 +305,17 @@ def write_nrrd_volume(path, array, metadata=None):
             "space: right-anterior-superior",
             f"space directions: ({spacing_x},0,0) (0,{spacing_y},0) (0,0,{spacing_z})",
             "kinds: domain domain domain",
+            f"TaxaMask_scale_verified:={'true' if metadata['scale_verified'] else 'false'}",
+            f"TaxaMask_spacing_unit:={metadata['spacing_unit']}",
             "encoding: raw",
             "endian: little",
             "",
             "",
-        ]
-    )
+    ]
+    if metadata["scale_verified"]:
+        nrrd_unit = {"micrometer": "um", "millimeter": "mm", "meter": "m"}[metadata["spacing_unit"]]
+        header_lines.insert(8, f'space units: "{nrrd_unit}" "{nrrd_unit}" "{nrrd_unit}"')
+    header = "\n".join(header_lines)
     _ensure_dir(os.path.dirname(os.path.abspath(path)))
     with open(path, "wb") as handle:
         handle.write(header.encode("ascii"))
@@ -185,7 +324,7 @@ def write_nrrd_volume(path, array, metadata=None):
 
 
 def write_mha_volume(path, array, metadata=None):
-    metadata = metadata or {}
+    metadata = _sanitize_exchange_metadata(metadata)
     volume = _little_endian_array(array)
     spacing_x, spacing_y, spacing_z = _spacing_xyz(metadata)
     size_x, size_y, size_z = _shape_xyz(volume)
@@ -201,6 +340,8 @@ def write_mha_volume(path, array, metadata=None):
             "CenterOfRotation = 0 0 0",
             "AnatomicalOrientation = RAI",
             f"ElementSpacing = {spacing_x} {spacing_y} {spacing_z}",
+            f"TaxaMaskScaleVerified = {'True' if metadata['scale_verified'] else 'False'}",
+            f"TaxaMaskSpacingUnit = {metadata['spacing_unit']}",
             f"DimSize = {size_x} {size_y} {size_z}",
             f"ElementType = {_dtype_to_mha_type(volume.dtype)}",
             "ElementDataFile = LOCAL",
@@ -215,7 +356,7 @@ def write_mha_volume(path, array, metadata=None):
 
 
 def write_nifti_volume(path, array, metadata=None):
-    metadata = metadata or {}
+    metadata = _sanitize_exchange_metadata(metadata)
     volume = _little_endian_array(array)
     datatype, bitpix = _dtype_to_nifti(volume.dtype)
     size_x, size_y, size_z = _shape_xyz(volume)
@@ -234,13 +375,12 @@ def write_nifti_volume(path, array, metadata=None):
     struct.pack_into("<4f", header, 280, spacing_x, 0.0, 0.0, 0.0)
     struct.pack_into("<4f", header, 296, 0.0, spacing_y, 0.0, 0.0)
     struct.pack_into("<4f", header, 312, 0.0, 0.0, spacing_z, 0.0)
-    spacing_unit = str(metadata.get("spacing_unit") or "unknown").strip().lower()
-    spacing_unit = spacing_unit.replace("µ", "u").replace("μ", "u")
-    if spacing_unit in {"micrometer", "micrometers", "micron", "microns", "um"}:
+    spacing_unit = metadata["spacing_unit"]
+    if spacing_unit == "micrometer":
         header[123] = 3
-    elif spacing_unit in {"millimeter", "millimeters", "mm"}:
+    elif spacing_unit == "millimeter":
         header[123] = 2
-    elif spacing_unit in {"meter", "meters", "m"}:
+    elif spacing_unit == "meter":
         header[123] = 1
     else:
         header[123] = 0
@@ -320,6 +460,7 @@ def read_nifti_volume_with_metadata(path):
         "dtype": str(np.asarray(array).dtype),
         "spacing_zyx": [spacing_xyz[2], spacing_xyz[1], spacing_xyz[0]],
         "spacing_unit": spacing_unit,
+        "scale_verified": spacing_unit != "unknown",
         "orientation": "local_axis_reslice",
         "format": "nifti",
     }
@@ -382,8 +523,14 @@ def export_tif_training_dataset(project_manager, output_dir, specimen_ids=None, 
         label = load_volume_sidecar(label_path)
         if list(image.shape) != list(label.shape):
             raise ValueError(f"image_label_shape_mismatch:{specimen_id}:{image.shape}:{label.shape}")
-        image_meta = read_volume_metadata(image_path)
-        label_meta = read_volume_metadata(label_path)
+        image_meta = _sanitize_exchange_metadata(
+            read_volume_metadata(image_path),
+            working_record,
+        )
+        label_meta = _sanitize_exchange_metadata(
+            read_volume_metadata(label_path),
+            label_record,
+        )
         safe = _safe_id(specimen_id)
 
         material_rel = specimen.get("material_map", "")
@@ -410,6 +557,12 @@ def export_tif_training_dataset(project_manager, output_dir, specimen_ids=None, 
                 "specimen_id": specimen_id,
                 "modality": specimen.get("modality", "unknown"),
                 "shape_zyx": [int(value) for value in image.shape],
+                **_manifest_scale_metadata(image_meta),
+                "label_scale": _manifest_scale_metadata(label_meta),
+                "exchange_metadata": {
+                    "image": _manifest_scale_metadata(image_meta),
+                    "label": _manifest_scale_metadata(label_meta),
+                },
                 "image_exports": image_exports,
                 "label_exports": label_exports,
                 "label_role": "manual_truth",
@@ -502,6 +655,18 @@ def export_tif_part_training_dataset(project_manager, output_dir, part_refs=None
         label, label_meta = _read_any_volume(label_path)
         if list(image.shape) != list(label.shape):
             raise ValueError(f"part_image_label_shape_mismatch:{specimen_id}:{part_id}:{image.shape}:{label.shape}")
+        reslice_audit = {}
+        reslice_metadata_path = project_manager.to_absolute(reslice.get("metadata_path", ""))
+        if reslice_metadata_path and os.path.isfile(reslice_metadata_path):
+            try:
+                with open(reslice_metadata_path, "r", encoding="utf-8") as handle:
+                    loaded_audit = json.load(handle)
+                if isinstance(loaded_audit, dict):
+                    reslice_audit = loaded_audit
+            except (OSError, ValueError, TypeError):
+                reslice_audit = {}
+        image_meta = _reslice_exchange_metadata(reslice, image_meta, reslice_audit)
+        label_meta = _sanitize_exchange_metadata(label_meta, label_record)
 
         safe = _safe_id(f"{specimen_id}_{part_id}_{reslice.get('reslice_id', '')}")
         image_exports = {}
@@ -538,6 +703,12 @@ def export_tif_part_training_dataset(project_manager, output_dir, part_refs=None
                     "reslice_params": reslice.get("reslice_params", {}),
                 },
                 "shape_zyx": [int(value) for value in image.shape],
+                **_manifest_scale_metadata(image_meta),
+                "label_scale": _manifest_scale_metadata(label_meta),
+                "exchange_metadata": {
+                    "image": _manifest_scale_metadata(image_meta),
+                    "label": _manifest_scale_metadata(label_meta),
+                },
                 "image_exports": image_exports,
                 "label_exports": label_exports,
                 "label_role": "manual_truth",
@@ -597,6 +768,9 @@ def export_nnunet_dataset(project_manager, output_dir, specimen_ids=None, datase
                 "specimen_id": specimen["specimen_id"],
                 "image": os.path.relpath(image_dst, root).replace("\\", "/"),
                 "label": os.path.relpath(label_dst, root).replace("\\", "/"),
+                "spacing_zyx": specimen.get("spacing_zyx", []),
+                "spacing_unit": specimen.get("spacing_unit", "unknown"),
+                "scale_verified": specimen.get("scale_verified") is True,
             }
         )
     dataset_json = {
@@ -852,6 +1026,9 @@ def export_tif_part_nnunet_dataset(
                 "image": os.path.relpath(image_dst, root).replace("\\", "/"),
                 "label": os.path.relpath(label_dst, root).replace("\\", "/"),
                 "shape_zyx": sample.get("shape_zyx", []),
+                "spacing_zyx": sample.get("spacing_zyx", []),
+                "spacing_unit": sample.get("spacing_unit", "unknown"),
+                "scale_verified": sample.get("scale_verified") is True,
             }
         )
 
@@ -931,6 +1108,9 @@ def export_monai_dataset(project_manager, output_dir, specimen_ids=None, require
                 "image_mha": specimen["image_exports"]["mha"],
                 "label_mha": specimen["label_exports"]["mha"],
                 "material_map": specimen.get("material_map", ""),
+                "spacing_zyx": specimen.get("spacing_zyx", []),
+                "spacing_unit": specimen.get("spacing_unit", "unknown"),
+                "scale_verified": specimen.get("scale_verified") is True,
             }
         )
     datalist = {"training": training, "validation": []}

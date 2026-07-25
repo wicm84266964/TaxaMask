@@ -199,6 +199,8 @@ Materials {
             self.assertTrue(readiness["train_ready"])
             self.assertEqual(specimen["working_volume"]["shape_zyx"], [2, 3, 4])
             self.assertEqual(specimen["labels"]["manual_truth"]["shape_zyx"], [2, 3, 4])
+            self.assertTrue(specimen["working_volume"]["scale_verified"])
+            self.assertTrue(specimen["labels"]["manual_truth"]["scale_verified"])
             self.assertEqual(result["report"]["alignment"]["labels_aligned_to"], "resampled")
             self.assertIn("raw_tif_shape_differs_from_labels_shape", result["report"]["warnings"])
             np.testing.assert_array_equal(load_volume_sidecar(manager.to_absolute(specimen["working_volume"]["path"])), resampled)
@@ -246,6 +248,8 @@ Materials {
 
             self.assertEqual(unknown_header["spacing_unit"], "unknown")
             self.assertEqual(millimeter_header["spacing_unit"], "millimeter")
+            self.assertEqual(unknown_header["spacing_source"], "amira_bounding_box")
+            self.assertEqual(millimeter_header["spacing_source"], "amira_bounding_box")
 
     def test_failed_amira_decode_does_not_leave_half_registered_specimen(self):
         with tempfile.TemporaryDirectory() as tmp:

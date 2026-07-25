@@ -150,6 +150,31 @@ class MainWindowStage6AnnotationBlinkTests(unittest.TestCase):
         self.assertEqual(len(thread.cancelled_signal.callbacks), 1)
         self.assertEqual(len(thread.finished.callbacks), 1)
 
+    def test_child_progress_does_not_duplicate_shell_training_state_connection(self):
+        from AntSleap.ui.main_window_blink_workflow import MainWindowBlinkWorkflowMixin
+
+        state_signal = FakeSignal()
+        preflight = FakePreflightWorker()
+        owner = type("BlinkOwner", (MainWindowBlinkWorkflowMixin,), {})()
+        owner.blink_lab = type(
+            "BlinkLab",
+            (),
+            {
+                "training_thread": None,
+                "training_preflight_thread": preflight,
+                "training_state_changed": state_signal,
+            },
+        )()
+        state_events = []
+        owner._on_child_training_state_changed = state_events.append
+        state_signal.connect(owner._on_child_training_state_changed)
+
+        owner._connect_child_training_progress(prefer_preflight=True)
+
+        self.assertEqual(len(state_signal.callbacks), 1)
+        state_signal.callbacks[0]("preflight_started")
+        self.assertEqual(state_events, ["preflight_started"])
+
     def test_child_preflight_counts_as_busy_and_handoffs_to_training_thread(self):
         from AntSleap.ui.main_window_blink_workflow import MainWindowBlinkWorkflowMixin
 

@@ -648,6 +648,18 @@ def export_part_reslice(project_manager, specimen_id, part_id, reslice_payload, 
     image_meta = read_volume_metadata(image_path)
     part_image_shape = _shape_payload(image_meta.get("shape_zyx") or part_image.get("shape_zyx"), image.shape)
     part_spacing = _spacing_payload(image_meta.get("spacing_zyx") or (part_image.get("spacing_zyx") or [1.0, 1.0, 1.0]))
+    image_unit = str(image_meta.get("spacing_unit") or "unknown")
+    record_unit = str(part_image.get("spacing_unit") or "unknown")
+    image_spacing = _normalize_spacing(image_meta.get("spacing_zyx") or [1.0, 1.0, 1.0])
+    record_spacing = _normalize_spacing(part_image.get("spacing_zyx") or [1.0, 1.0, 1.0])
+    part_scale_verified = (
+        image_meta.get("scale_verified") is True
+        and part_image.get("scale_verified") is True
+        and image_unit.strip().lower() == record_unit.strip().lower()
+        and image_unit.strip().lower() not in {"", "unknown", "unknown_unit", "unitless"}
+        and np.allclose(image_spacing, record_spacing, rtol=1e-6, atol=1e-9)
+    )
+    part_spacing_unit = image_unit if part_scale_verified else "unknown"
     part_image_dtype = str(image_meta.get("dtype") or part_image.get("dtype") or image.dtype)
     mask_record = part.get("mask") or {}
     mask_path = project_manager.to_absolute(mask_record.get("path", ""))
@@ -737,7 +749,8 @@ def export_part_reslice(project_manager, specimen_id, part_id, reslice_payload, 
         "part_image_shape_zyx": part_image_shape,
         "part_image_dtype": part_image_dtype,
         "part_spacing_zyx": part_spacing,
-        "part_spacing_unit": str(image_meta.get("spacing_unit") or part_image.get("spacing_unit") or "micrometer"),
+        "part_spacing_unit": part_spacing_unit,
+        "part_scale_verified": part_scale_verified,
         "part_mask_path": mask_record.get("path", ""),
         "part_mask_available": part_mask_available,
         "parent_bbox_zyx": part.get("parent_bbox_zyx", []),
@@ -770,6 +783,7 @@ def export_part_reslice(project_manager, specimen_id, part_id, reslice_payload, 
             "dtype": part_image_dtype,
             "spacing_zyx": part_spacing,
             "spacing_unit": source_payload["part_spacing_unit"],
+            "scale_verified": part_scale_verified,
         },
         "part_mask": {
             "path": mask_record.get("path", ""),

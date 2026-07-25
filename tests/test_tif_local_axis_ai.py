@@ -35,15 +35,31 @@ from AntSleap.core.training_initial_weights import (
 )
 
 
-def make_local_axis_project(root):
+def make_local_axis_project(root, *, verified_scale=False):
     project_root = root / "local_axis_project"
     manager = TifProjectManager()
     manager.create_project("local_axis_project", project_root)
     manager.create_specimen_scaffold("01-0101-ai")
     image = np.arange(5 * 6 * 7, dtype=np.uint16).reshape((5, 6, 7))
     image_rel = "specimens/01-0101-ai/working/image.ome.zarr"
-    image_meta = write_volume_sidecar(project_root / image_rel, image, role="working_image")
-    manager.register_working_volume("01-0101-ai", image_rel, image_meta["shape_zyx"], image_meta["dtype"], save=False)
+    image_meta = write_volume_sidecar(
+        project_root / image_rel,
+        image,
+        role="working_image",
+        spacing_zyx=[2.0, 1.0, 0.5] if verified_scale else None,
+        spacing_unit="micrometer" if verified_scale else "unknown",
+        scale_verified=verified_scale,
+    )
+    manager.register_working_volume(
+        "01-0101-ai",
+        image_rel,
+        image_meta["shape_zyx"],
+        image_meta["dtype"],
+        spacing_zyx=image_meta["spacing_zyx"],
+        spacing_unit=image_meta["spacing_unit"],
+        scale_verified=verified_scale,
+        save=False,
+    )
     manager.save_project()
     crop_volume_to_part(manager, "01-0101-ai", "head", [[1, 5], [1, 5], [1, 6]], display_name="Head")
     frame = compute_local_frame(
@@ -101,6 +117,20 @@ def make_two_specimen_local_axis_project(root):
 
 
 class TifLocalAxisAiTests(unittest.TestCase):
+    def test_public_contract_documents_verified_and_unknown_scale_rules(self):
+        contract_path = (
+            Path(__file__).resolve().parents[1]
+            / "docs"
+            / "contracts"
+            / "tif_local_axis_backend_contract_v1.md"
+        )
+        contract_text = contract_path.read_text(encoding="utf-8")
+
+        self.assertIn('"scale_verified": true', contract_text)
+        self.assertIn('"scale_verified": false', contract_text)
+        self.assertIn('"spacing_unit": "unknown"', contract_text)
+        self.assertIn("不得把未核验输入升级为可信尺度", contract_text)
+
     def test_backend_command_validation_requires_contract_placeholder(self):
         self.assertTrue(validate_local_axis_backend_command(""))
         self.assertTrue(validate_local_axis_backend_command("python train.py --contract {contract}"))
@@ -302,6 +332,43 @@ class TifLocalAxisAiTests(unittest.TestCase):
             self.assertEqual(contract["specimens"][0]["parts"][0]["part_id"], "head")
             self.assertTrue(contract["specimens"][0]["parts"][0]["part_image"]["path"].endswith("image.ome.zarr"))
             self.assertEqual(contract["specimens"][0]["parts"][0]["source_axis"]["role"], "source_direction_reference")
+            self.assertEqual(contract["specimens"][0]["input_volume"]["spacing_unit"], "unknown")
+            self.assertFalse(contract["specimens"][0]["input_volume"]["scale_verified"])
+            self.assertEqual(contract["specimens"][0]["parts"][0]["part_image"]["spacing_unit"], "unknown")
+            self.assertFalse(contract["specimens"][0]["parts"][0]["part_image"]["scale_verified"])
+
+    def test_backend_contract_preserves_only_matching_verified_scale(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = make_local_axis_project(Path(tmp), verified_scale=True)
+            runner = TifLocalAxisBackendRunner(manager, {"backend_id": "mock_local_axis"})
+
+            trusted = runner.build_contract(
+                "predict",
+                ["01-0101-ai"],
+                {"01-0101-ai": ["head"]},
+                template_id="head",
+            )
+            input_volume = trusted["specimens"][0]["input_volume"]
+            part_image = trusted["specimens"][0]["parts"][0]["part_image"]
+            self.assertEqual(input_volume["spacing_unit"], "micrometer")
+            self.assertTrue(input_volume["scale_verified"])
+            self.assertEqual(part_image["spacing_unit"], "micrometer")
+            self.assertTrue(part_image["scale_verified"])
+
+            manager.get_specimen("01-0101-ai")["working_volume"]["spacing_zyx"] = [3.0, 1.0, 0.5]
+            manager.get_part("01-0101-ai", "head")["image"]["spacing_unit"] = "millimeter"
+            conflicted = runner.build_contract(
+                "predict",
+                ["01-0101-ai"],
+                {"01-0101-ai": ["head"]},
+                template_id="head",
+            )
+            input_volume = conflicted["specimens"][0]["input_volume"]
+            part_image = conflicted["specimens"][0]["parts"][0]["part_image"]
+            self.assertEqual(input_volume["spacing_unit"], "unknown")
+            self.assertFalse(input_volume["scale_verified"])
+            self.assertEqual(part_image["spacing_unit"], "unknown")
+            self.assertFalse(part_image["scale_verified"])
 
     def test_train_contract_prepares_training_manifest_like_prepare_dataset(self):
         with tempfile.TemporaryDirectory() as tmp:

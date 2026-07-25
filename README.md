@@ -2,8 +2,6 @@
 
 [![DOI](https://zenodo.org/badge/1264598942.svg)](https://doi.org/10.5281/zenodo.20619867)
 
-[中文 README](README_zh.md)
-
 **TaxaMask** is an open-source desktop workbench for mask annotation of external and internal biological morphological structures. It brings literature evidence, human review, AI-assisted annotation, model training, and result feedback into a traceable loop, allowing models to keep improving on real research data and gradually take on more repetitive annotation work.
 
 ## A Note From The Author
@@ -408,7 +406,6 @@ The TIF volume-segmentation contract covers label-volume dataset preparation, tr
 
 ## Documentation
 
-- [Chinese README](README_zh.md)
 - [Chinese user manual](TaxaMask使用手册.md)
 - [Platform setup](docs/platform_setup.md)
 - [PDF screening profile guide](docs/PDF筛选profile适配说明.md)

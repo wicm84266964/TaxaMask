@@ -10,6 +10,10 @@ import test from "node:test";
 import { loadSkills, readSkill } from "../src/skills/registry.js";
 import { BUILT_IN_TOOLS } from "../src/tools/definitions.js";
 import { createToolRuntime } from "../src/tools/runtime.js";
+import {
+  createMockVerificationEnv,
+  verifyMockGateway
+} from "../scripts/verify-gateway-compat.js";
 
 const execFileAsync = promisify(execFile);
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -50,6 +54,19 @@ test("TaxaMask loads every bundled skill and exposes only registered tools", asy
     }
   }
 
+  const releaseReview = skills.find((skill) => skill.name === "release-readiness-review");
+  assert.deepEqual(releaseReview.paths, [
+    "README.md",
+    "LLM_CONTEXT_DETAILED.md",
+    "TaxaMask使用手册.md",
+    "scripts/",
+    "requirements.txt",
+    "vendor/ant-code/package.json"
+  ]);
+  for (const declaredPath of releaseReview.paths) {
+    await fs.access(path.join(TAXAMASK_ROOT, declaredPath));
+  }
+
   for (const name of ["paper-distill", "unsloth-studio-finetune", "taxonomy-paper-finder"]) {
     const loaded = await readSkill({ cwd: TAXAMASK_ROOT, config, env: {}, name });
     assert.equal(loaded.ok, true, name);
@@ -86,4 +103,78 @@ test("embedded git status and diff tools execute through the permission runtime"
   assert.match(status.result.stdout, /notes\.txt/);
   assert.equal(diff.ok, true);
   assert.match(diff.result.stdout, /\+after/);
+});
+
+test("mock gateway verification ignores user config and credentials", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "ant-code-mock-isolation-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const realSecret = "real-user-gateway-secret-must-not-leak";
+  const providerSecret = "real-provider-secret-must-not-leak";
+  const configPath = path.join(root, "user-lab-agent.config.json");
+  await fs.writeFile(configPath, JSON.stringify({
+    modelAlias: "user-private-model",
+    networkMode: "offline",
+    lab: {
+      gatewayUrl: "http://127.0.0.1:1/v1/chat",
+      gatewayHealthUrl: "http://127.0.0.1:1/health",
+      gatewayApiKey: realSecret
+    }
+  }), "utf8");
+
+  const polluted = {
+    LAB_AGENT_CONFIG: configPath,
+    LAB_AGENT_MODEL: "user-shell-model",
+    LAB_MODEL_GATEWAY_URL: "http://127.0.0.1:1/v1/chat",
+    LAB_MODEL_GATEWAY_HEALTH_URL: "http://127.0.0.1:1/health",
+    LAB_MODEL_GATEWAY_API_KEY: realSecret,
+    OPENAI_API_KEY: providerSecret
+  };
+  const previous = new Map(
+    Object.keys(polluted).map((key) => [key, process.env[key]])
+  );
+  Object.assign(process.env, polluted);
+
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.fetch = async (input, init = {}) => {
+    requests.push({
+      url: String(input),
+      authorization: new Headers(init.headers).get("authorization"),
+      body: init.body ? String(init.body) : ""
+    });
+    return originalFetch(input, init);
+  };
+
+  try {
+    const mockEnv = createMockVerificationEnv("http://127.0.0.1:54321");
+    assert.equal(Object.hasOwn(mockEnv, "LAB_AGENT_CONFIG"), false);
+    assert.equal(Object.hasOwn(mockEnv, "LAB_MODEL_GATEWAY_API_KEY"), false);
+    assert.equal(Object.hasOwn(mockEnv, "OPENAI_API_KEY"), false);
+
+    const result = await verifyMockGateway();
+
+    assert.equal(result.ok, true);
+    assert.equal(result.mode, "mock");
+    assert.equal(result.evidence.modelAlias, "compatibility-mock");
+    assert.equal(requests.length, 2);
+    const urls = requests.map((request) => new URL(request.url));
+    assert.deepEqual(urls.map((url) => url.pathname).sort(), ["/health", "/v1/chat"]);
+    assert.equal(new Set(urls.map((url) => url.origin)).size, 1);
+    assert.equal(urls.every((url) => url.hostname === "127.0.0.1"), true);
+    assert.equal(urls.every((url) => url.port !== "1"), true);
+    assert.equal(requests.every((request) => request.authorization === null), true);
+    const chatRequest = requests.find((request) => new URL(request.url).pathname === "/v1/chat");
+    assert.equal(JSON.parse(chatRequest.body).model, "compatibility-mock");
+    assert.equal(JSON.stringify(result).includes(realSecret), false);
+    assert.equal(JSON.stringify(result).includes(providerSecret), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+    for (const [key, value] of previous) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
 });

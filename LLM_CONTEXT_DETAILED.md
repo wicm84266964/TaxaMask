@@ -35,6 +35,8 @@ Do not recreate older duplicate root context/readme files. Keep this file as the
 
 AI outputs are draft material until a researcher confirms them.
 
+Labels restored from the legacy 2D label journal are also drafts. They use the distinct `legacy_journal_recovery` source, are excluded from AI one-click acceptance, and cannot enter training until the researcher explicitly confirms the recovered polygons through the maintenance recovery action.
+
 Do not let automated tools overwrite:
 
 - manual 2D polygons or confirmed masks
@@ -152,6 +154,7 @@ Storage state:
 - Opening the same old JSON again should reuse the existing migrated manifest instead of rerunning migration.
 - If a user accidentally selects the SQLite database file itself, the GUI tries to locate the matching manifest and opens that entry file.
 - Project SQLite is also authoritative for integrity versions, training runs, effective configurations, actual train/validation assignments, artifacts, terminal status, recovery state, and run-note links. JSON reports and manifests remain atomic readable artifacts or projections, not a second project-state backend.
+- Supported 2D and TIF schema upgrades create a verified database backup, hold one writer transaction through migration and validation, and commit only after integrity checks pass. Failed upgrades roll back the complete transaction. TIF v1 upgrades explicitly to v2; code must reject a newer unknown schema instead of rewriting its version.
 
 Important semantics:
 
@@ -240,6 +243,8 @@ Core records:
 Legacy TIF project JSON is now a migration source rather than the preferred active project store. Large volumes live in project sidecar directories.
 
 Plain TIFF stack import creates an image volume but not trusted training truth. AMIRA-style imports can provide label volumes, but label shape/material consistency must be checked before treating a specimen as train-ready.
+
+Physical scale is trusted only when the actual volume metadata and the project SQLite record both set `scale_verified: true` and their normalized `spacing_unit` and `spacing_zyx` values match. Missing, legacy, or conflicting evidence keeps the numeric voxel spacing for array operations but sets the unit to `unknown` and derived geometry to `unitless`. NIfTI/NRRD/MHA/OME-TIFF exchange, nnU-Net/MONAI, TIF-Blink, Local Axis, prediction import, and STL export must preserve this downgrade and must never infer millimeters from positive spacing or a historical default.
 
 Current TIF volume-segmentation training semantics:
 
@@ -575,11 +580,11 @@ python scripts\run_validation_suite.py --timeout 300
 git diff --check
 ```
 
-Current fifth-round maintained validation inventory: 22 default suites and 1,471 tests, with 14 platform/environment-dependent skips and all remaining tests passing. The fifth-round groups are traceability (232), inference (9), mesh export (18), and Local Axis risk review (25). The existing core inventory still covers TIF core/storage/services/preview/backends/workbench, GUI smoke, UI polish, layout, PDF safety/literature, validation tooling, TIF round-three architecture, TaxaMask round-four architecture, 2D SQLite, Agent, Blink/locator, and generic VLM/STL/export. A separate 12-test CPU-only `round5_ci_smoke` runs on Windows, macOS, and Linux without real weights, network, Blender, GPU, or private research data.
+Current fifth-round maintained validation inventory: 22 default suites and 1,587 tests. The accepted local run has 1,564 passes and 23 platform/environment-dependent skips. The fifth-round groups are traceability (274), inference (9), mesh export (41), and Local Axis risk review (27). The existing core inventory still covers TIF core/storage/services/preview/backends/workbench, GUI smoke, UI polish, layout, PDF safety/literature, validation tooling, TIF round-three architecture, TaxaMask round-four architecture, 2D SQLite, Agent, Blink/locator, and generic VLM/STL/export. A separate 12-test CPU-only `round5_ci_smoke` runs on Windows, macOS, and Linux without real weights, network, Blender, GPU, or private research data. The separate 24-test `round5_path_safety` group exercises junction/symlink/reparse rejection; link-creation cases may skip on restricted Windows accounts, while non-Windows CI first proves link support and then requires the real checks.
 
 Embedded Ant-Code tool results are capped at 256 KiB before they enter model context. A large `list_files` result must be marked `truncated` while preserving its tool success/failure metadata; it must not force a new first-turn TaxaMask context into immediate compaction. A gateway response with no visible text and no tool call is an output-health failure and receives one concise repair retry instead of being accepted as a placeholder-only answer.
 
-Ant-Code 1.3 embedded validation currently covers 118 syntax-checked runtime files, 62 byte-matched Dashboard assets, 11 browser tests, 96 Qt GUI smoke tests, 2 TIF Agent tests, and TaxaMask contract/routing tests. The authenticated bootstrap/status/trust/shutdown sequence is also exercised against a real local 1.3 server. The six expected failures in the imported upstream Dashboard/config/session subset assert standalone user-global configuration behavior that TaxaMask deliberately disables; they are not release blockers unless the configuration policy changes.
+Ant-Code 1.3 embedded validation currently covers 119 syntax-checked runtime files, 62 byte-matched Dashboard assets, 3 embedded Node tests, 11 browser tests, 96 Qt GUI smoke tests, 2 TIF Agent tests, and TaxaMask contract/routing tests. Offline mock gateway verification is isolated from user configuration, endpoints, and credentials. The authenticated bootstrap/status/trust/shutdown sequence is also exercised against a real local 1.3 server. The six expected failures in the imported upstream Dashboard/config/session subset assert standalone user-global configuration behavior that TaxaMask deliberately disables; they are not release blockers unless the configuration policy changes.
 
 Use the TaxaMask environment above for GUI/TIF validation. Do not install PySide6 into the default Python environment to satisfy skipped GUI tests.
 

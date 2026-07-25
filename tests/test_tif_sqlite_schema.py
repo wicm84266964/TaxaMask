@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from AntSleap.core.mesh_export import _mesh_coordinate_context
 from AntSleap.core.sqlite_storage import get_schema_version, run_integrity_check
 from AntSleap.core.tif_sqlite_schema import (
     TIF_SQLITE_PROJECT_TYPE,
@@ -25,6 +26,29 @@ class TifSQLiteSchemaTests(unittest.TestCase):
         "global_axis_proposals", "local_frame_proposals", "tif_models", "tif_runs",
         "tif_run_artifacts", "tif_events", "sqlite_sequence",
     }
+    LEGACY_V1_VOLUME_ASSETS_DDL = """
+        CREATE TABLE volume_assets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            specimen_id INTEGER NOT NULL,
+            part_id INTEGER,
+            asset_key TEXT NOT NULL DEFAULT '',
+            role TEXT NOT NULL DEFAULT 'unknown',
+            path TEXT NOT NULL DEFAULT '',
+            format TEXT NOT NULL DEFAULT '',
+            shape_zyx_json TEXT NOT NULL DEFAULT '[]',
+            dtype TEXT NOT NULL DEFAULT '',
+            spacing_zyx_json TEXT NOT NULL DEFAULT '[]',
+            spacing_unit TEXT NOT NULL DEFAULT 'micrometer',
+            orientation TEXT NOT NULL DEFAULT 'unknown',
+            status TEXT NOT NULL DEFAULT '',
+            source_format TEXT NOT NULL DEFAULT '',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (specimen_id) REFERENCES specimens(id) ON DELETE CASCADE,
+            FOREIGN KEY (part_id) REFERENCES parts(id) ON DELETE CASCADE
+        )
+    """
 
     def test_v1_database_migrates_explicitly_to_v2_with_backup(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -53,6 +77,53 @@ class TifSQLiteSchemaTests(unittest.TestCase):
                 ).fetchall():
                     if name not in self.LEGACY_TABLES:
                         connection.execute(f'DROP TABLE "{name}"')
+                connection.execute("DROP TABLE volume_assets")
+                connection.execute(self.LEGACY_V1_VOLUME_ASSETS_DDL)
+                specimen_row_id = connection.execute(
+                    "SELECT id FROM specimens WHERE specimen_id = '01-legacy'"
+                ).fetchone()[0]
+                connection.execute(
+                    """
+                    INSERT INTO volume_assets (
+                        specimen_id, asset_key, role, path, format,
+                        shape_zyx_json, dtype, spacing_zyx_json
+                    )
+                    VALUES (?, 'legacy_default', 'manual_truth', ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        specimen_row_id,
+                        "specimens/01-legacy/labels/default.ome.zarr",
+                        "ant3d_volume_sidecar",
+                        json_text([2, 3, 4]),
+                        "uint16",
+                        json_text([2.0, 3.0, 5.0]),
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO volume_assets (
+                        specimen_id, asset_key, role, path, format,
+                        shape_zyx_json, dtype, spacing_zyx_json,
+                        spacing_unit, metadata_json
+                    )
+                    VALUES (?, 'explicit_verified', 'manual_truth', ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        specimen_row_id,
+                        "specimens/01-legacy/labels/verified.ome.zarr",
+                        "ant3d_volume_sidecar",
+                        json_text([2, 3, 4]),
+                        "uint16",
+                        json_text([0.2, 0.3, 0.5]),
+                        "millimeter",
+                        json_text(
+                            {
+                                "scale_verified": True,
+                                "scale_verification_source": "scanner_header",
+                            }
+                        ),
+                    ),
+                )
                 connection.execute(
                     "DELETE FROM schema_migrations WHERE schema_name = ?",
                     (TIF_SQLITE_SCHEMA_NAME,),
@@ -95,6 +166,47 @@ class TifSQLiteSchemaTests(unittest.TestCase):
                     ).fetchall()],
                     [1, 2],
                 )
+                scale_rows = {
+                    row[0]: row[1:]
+                    for row in connection.execute(
+                        """
+                        SELECT asset_key, spacing_zyx_json, spacing_unit, metadata_json
+                        FROM volume_assets
+                        ORDER BY asset_key
+                        """
+                    ).fetchall()
+                }
+                default_spacing, default_unit, default_metadata_json = scale_rows[
+                    "legacy_default"
+                ]
+                default_metadata = json.loads(default_metadata_json)
+                self.assertEqual(default_unit, "unknown")
+                self.assertFalse(default_metadata["scale_verified"])
+                self.assertEqual(
+                    default_metadata["legacy_unverified_spacing_unit"],
+                    "micrometer",
+                )
+                default_context = _mesh_coordinate_context(
+                    json.loads(default_spacing),
+                    default_unit,
+                    scale_verified=default_metadata["scale_verified"],
+                )
+                self.assertEqual(default_context["mesh_purpose"], "observation")
+                self.assertEqual(default_context["output_unit"], "unitless")
+
+                verified_spacing, verified_unit, verified_metadata_json = scale_rows[
+                    "explicit_verified"
+                ]
+                verified_metadata = json.loads(verified_metadata_json)
+                self.assertEqual(verified_unit, "millimeter")
+                self.assertTrue(verified_metadata["scale_verified"])
+                verified_context = _mesh_coordinate_context(
+                    json.loads(verified_spacing),
+                    verified_unit,
+                    scale_verified=verified_metadata["scale_verified"],
+                )
+                self.assertEqual(verified_context["mesh_purpose"], "measurement")
+                self.assertEqual(verified_context["output_unit"], "millimeter")
                 validate_tif_project_schema(connection)
             finally:
                 connection.close()

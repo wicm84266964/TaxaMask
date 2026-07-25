@@ -6,12 +6,19 @@ from pathlib import Path
 
 from PIL import Image
 
-from AntSleap.core.project import ProjectManager
+from AntSleap.core.project import LABEL_JOURNAL_SCHEMA_VERSION, ProjectManager
 from AntSleap.core.project_integrity_registry import (
     ProjectIntegrityRegistryError,
     get_training_baseline_snapshot,
 )
-from AntSleap.core.training_truth import LABEL_PART_METADATA_FIELD
+from AntSleap.core.training_preflight import build_training_preflight
+from AntSleap.core.training_truth import (
+    LABEL_PART_METADATA_FIELD,
+    TRAINING_ACCEPT_MANUAL_EDIT,
+    TRAINING_SOURCE_LEGACY_JOURNAL_RECOVERY,
+    get_part_training_truth,
+    resolve_part_training_trust,
+)
 
 
 class ProjectIntegrityBridgeTests(unittest.TestCase):
@@ -196,6 +203,184 @@ class ProjectIntegrityBridgeTests(unittest.TestCase):
                 note="Researcher reviewed the legacy polygon source.",
             )
             self.assertEqual(snapshot["status"], "registered")
+
+    def test_legacy_journal_recovery_requires_review_before_training(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager, image_path = self._manager(root)
+            manager.initialize_integrity_baseline()
+            journal_path = root / "legacy.label_journal.jsonl"
+            journal_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": LABEL_JOURNAL_SCHEMA_VERSION,
+                        "image_path": str(image_path),
+                        "label": {
+                            "parts": {
+                                "Head": [[1, 1], [10, 1], [8, 8]],
+                            },
+                            "descriptions": {"Head": "Auto-Annotated"},
+                            "status": "labeled",
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = manager.recover_labels_from_journal(journal_path, save=True)
+
+            self.assertEqual(result["recovered_images"], 1)
+            self.assertEqual(
+                result["pending_recovery"],
+                {
+                    "image_count": 1,
+                    "part_count": 1,
+                    "images": [
+                        {
+                            "image_path": str(image_path),
+                            "parts": ["Head"],
+                            "part_count": 1,
+                        }
+                    ],
+                },
+            )
+            label = manager.project_data["labels"][str(image_path)]
+            pending = get_part_training_truth(label, "Head")
+            self.assertEqual(
+                pending,
+                {
+                    "source": TRAINING_SOURCE_LEGACY_JOURNAL_RECOVERY,
+                    "review_status": "draft",
+                },
+            )
+            self.assertFalse(resolve_part_training_trust(label, "Head")["eligible"])
+            self.assertEqual(
+                manager.remove_auto_labels_for_images([str(image_path)], save=False),
+                0,
+            )
+            self.assertIn("Head", label["parts"])
+            blocked_snapshot = get_training_baseline_snapshot(
+                manager.current_database_path
+            )
+            self.assertNotIn(
+                "human_confirmed_label",
+                {item["role"] for item in blocked_snapshot["files"]},
+            )
+            blocked_preflight = build_training_preflight(
+                manager.project_data["images"],
+                manager.project_data["labels"],
+                manager.project_data["taxonomy"],
+                manager.get_locator_scope(),
+            )
+            self.assertEqual(blocked_preflight["locator_samples"], [])
+            self.assertEqual(blocked_preflight["parts_samples"], [])
+
+            reloaded = ProjectManager()
+            reloaded.load_project(manager.current_project_path)
+            reloaded.location_registry_database_path = root / "locations.sqlite"
+            self.assertEqual(
+                reloaded.summarize_image_ai_drafts(str(image_path))[
+                    "reviewable_polygon_parts"
+                ],
+                [],
+            )
+            recovery_summary = reloaded.summarize_ai_drafts_for_images(
+                [str(image_path)]
+            )
+            self.assertEqual(recovery_summary["reviewable_polygon_count"], 0)
+            self.assertEqual(recovery_summary["image_count"], 0)
+            self.assertEqual(reloaded.verify_image_labels(str(image_path), save=False), 0)
+            self.assertEqual(
+                reloaded.verify_ai_drafts_for_images([str(image_path)]),
+                {"accepted_count": 0, "accepted_images": 0},
+            )
+            still_pending = get_part_training_truth(
+                reloaded.project_data["labels"][str(image_path)], "Head"
+            )
+            self.assertEqual(still_pending["review_status"], "draft")
+
+            self.assertEqual(
+                reloaded.confirm_journal_recovery_labels(
+                    str(image_path), save=True
+                ),
+                1,
+            )
+
+            confirmed = get_part_training_truth(
+                reloaded.project_data["labels"][str(image_path)], "Head"
+            )
+            self.assertEqual(confirmed["review_status"], "confirmed")
+            self.assertEqual(confirmed["accepted_via"], TRAINING_ACCEPT_MANUAL_EDIT)
+            allowed_snapshot = get_training_baseline_snapshot(
+                reloaded.current_database_path
+            )
+            self.assertIn(
+                "human_confirmed_label",
+                {item["role"] for item in allowed_snapshot["files"]},
+            )
+            allowed_preflight = build_training_preflight(
+                reloaded.project_data["images"],
+                reloaded.project_data["labels"],
+                reloaded.project_data["taxonomy"],
+                reloaded.get_locator_scope(),
+            )
+            self.assertEqual(len(allowed_preflight["locator_samples"]), 1)
+            self.assertEqual(len(allowed_preflight["parts_samples"]), 1)
+
+    def test_ready_registry_does_not_promote_new_ambiguous_legacy_truth(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager, image_path = self._manager(Path(tmp))
+            manager.initialize_integrity_baseline()
+            label = manager.project_data["labels"][str(image_path)]
+            label.pop(LABEL_PART_METADATA_FIELD, None)
+            manager._mark_sqlite_label_dirty(str(image_path))
+
+            manager.save_project()
+
+            snapshot = get_training_baseline_snapshot(
+                manager.current_database_path
+            )
+            self.assertNotIn(
+                "human_confirmed_label",
+                {item["role"] for item in snapshot["files"]},
+            )
+
+    def test_journal_recovery_preserves_explicitly_confirmed_truth(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager, image_path = self._manager(root)
+            manager.initialize_integrity_baseline()
+            original_label = manager.project_data["labels"][str(image_path)]
+            original_truth = get_part_training_truth(original_label, "Head")
+            journal_path = root / "confirmed.label_journal.jsonl"
+            journal_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": LABEL_JOURNAL_SCHEMA_VERSION,
+                        "image_path": str(image_path),
+                        "label": original_label,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = manager.recover_labels_from_journal(journal_path, save=True)
+
+            recovered_truth = get_part_training_truth(
+                manager.project_data["labels"][str(image_path)], "Head"
+            )
+            self.assertEqual(recovered_truth, original_truth)
+            self.assertEqual(result["pending_recovery"]["image_count"], 0)
+            self.assertEqual(result["pending_recovery"]["part_count"], 0)
+            snapshot = get_training_baseline_snapshot(
+                manager.current_database_path
+            )
+            self.assertIn(
+                "human_confirmed_label",
+                {item["role"] for item in snapshot["files"]},
+            )
 
     def test_training_snapshot_uses_current_registered_version(self):
         with tempfile.TemporaryDirectory() as tmp:

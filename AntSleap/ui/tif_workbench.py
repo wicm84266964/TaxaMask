@@ -51,7 +51,7 @@ try:
     from AntSleap.core.safe_io import atomic_write_json
     from AntSleap.core.amira_import import import_amira_directory
     from AntSleap.core.tif_backend import DEFAULT_TIF_BACKEND_CONFIG, TifBackendRunner, nnunet_v2_tif_backend_preset, normalize_tif_backend_runtime_config, sanitize_tif_backend_config
-    from AntSleap.core.tif_export import export_tif_part_training_dataset, export_tif_training_dataset
+    from AntSleap.core.tif_export import _reslice_exchange_metadata, export_tif_part_training_dataset, export_tif_training_dataset
     from AntSleap.core.tif_label_guard import can_write_label_role, require_editable_label_role
     from AntSleap.core.tif_materials import next_material_id, read_material_map, remove_material, upsert_material, write_material_map
     from AntSleap.core.tif_part_extraction import (
@@ -157,7 +157,7 @@ except ModuleNotFoundError as exc:
     from core.safe_io import atomic_write_json
     from core.amira_import import import_amira_directory
     from core.tif_backend import DEFAULT_TIF_BACKEND_CONFIG, TifBackendRunner, nnunet_v2_tif_backend_preset, normalize_tif_backend_runtime_config, sanitize_tif_backend_config
-    from core.tif_export import export_tif_part_training_dataset, export_tif_training_dataset
+    from core.tif_export import _reslice_exchange_metadata, export_tif_part_training_dataset, export_tif_training_dataset
     from core.tif_label_guard import can_write_label_role, require_editable_label_role
     from core.tif_materials import next_material_id, read_material_map, remove_material, upsert_material, write_material_map
     from core.tif_part_extraction import (
@@ -4094,19 +4094,69 @@ class TifWorkbenchWidget(QWidget):
                 edit_rel = os.path.join(self.project.part_dir(self.current_specimen_id, self.current_part_id), "labels", "editable_ai_result.ome.zarr").replace("\\", "/")
             edit_abs = self.project.to_absolute(edit_rel)
             if volume_sidecar_exists(image_path):
-                metadata = create_empty_label_sidecar_like(image_path, edit_abs, role="editable_ai_result", write_ome_zarr=False)
+                part = self.project.get_part(
+                    self.current_specimen_id,
+                    self.current_part_id,
+                    default=None,
+                ) or {}
+                metadata = create_empty_label_sidecar_like(
+                    image_path,
+                    edit_abs,
+                    role="editable_ai_result",
+                    write_ome_zarr=False,
+                    source_record=part.get("image") or {},
+                )
             else:
                 image_array = tifffile.memmap(image_path) if os.path.exists(image_path) else None
                 if image_array is None:
                     return False
+                spacing_zyx = None
+                spacing_unit = "unknown"
+                scale_verified = False
+                if self.current_reslice_id:
+                    reslice = self.project.get_part_reslice(
+                        self.current_specimen_id,
+                        self.current_part_id,
+                        self.current_reslice_id,
+                        default=None,
+                    ) or {}
+                    source = reslice.get("source") or {}
+                    reslice_audit = {}
+                    metadata_path = self.project.to_absolute(
+                        reslice.get("metadata_path", "")
+                    )
+                    if metadata_path and os.path.isfile(metadata_path):
+                        try:
+                            with open(metadata_path, "r", encoding="utf-8") as handle:
+                                loaded_audit = json.load(handle)
+                            if isinstance(loaded_audit, dict):
+                                reslice_audit = loaded_audit
+                        except (OSError, ValueError, TypeError):
+                            reslice_audit = {}
+                    scale_metadata = _reslice_exchange_metadata(
+                        reslice,
+                        {
+                            "shape_zyx": [int(value) for value in image_array.shape],
+                            "spacing_zyx": (reslice.get("reslice_params") or {}).get("output_spacing_zyx")
+                            or source.get("part_spacing_zyx")
+                            or [1.0, 1.0, 1.0],
+                        },
+                        reslice_audit,
+                    )
+                    spacing_zyx = scale_metadata.get("spacing_zyx")
+                    spacing_unit = scale_metadata.get("spacing_unit", "unknown")
+                    scale_verified = scale_metadata.get("scale_verified") is True
                 metadata, array = create_volume_sidecar_memmap(
                     edit_abs,
                     image_array.shape,
                     "uint16",
                     role="editable_ai_result",
+                    spacing_zyx=spacing_zyx,
+                    spacing_unit=spacing_unit,
                     orientation="local_axis_reslice" if self.current_reslice_id else "part_volume",
                     source_format="empty_label_like",
                     fill_value=0,
+                    scale_verified=scale_verified,
                 )
                 if hasattr(array, "_mmap"):
                     array._mmap.close()
@@ -4121,10 +4171,11 @@ class TifWorkbenchWidget(QWidget):
                     metadata["dtype"],
                     status="empty_edit",
                     spacing_zyx=metadata.get("spacing_zyx"),
-                    spacing_unit=metadata.get("spacing_unit", "micrometer"),
+                    spacing_unit=metadata.get("spacing_unit", "unknown"),
                     orientation=metadata.get("orientation", "local_axis_reslice"),
                     fmt=metadata.get("format", ""),
                     operation="create_empty_edit_layer",
+                    scale_verified=metadata.get("scale_verified") is True,
                     save=False,
                 )
             else:
@@ -4137,10 +4188,11 @@ class TifWorkbenchWidget(QWidget):
                     metadata["dtype"],
                     status="empty_edit",
                     spacing_zyx=metadata.get("spacing_zyx"),
-                    spacing_unit=metadata.get("spacing_unit", "micrometer"),
+                    spacing_unit=metadata.get("spacing_unit", "unknown"),
                     orientation=metadata.get("orientation", "unknown"),
                     fmt=metadata.get("format", ""),
                     operation="create_empty_edit_layer",
+                    scale_verified=metadata.get("scale_verified") is True,
                     save=False,
                 )
             self.project.save_project()
@@ -4164,7 +4216,13 @@ class TifWorkbenchWidget(QWidget):
             return False
         edit_rel = os.path.join(self.project.specimen_dir(self.current_specimen_id), "labels", "working_edit.ome.zarr").replace("\\", "/")
         edit_abs = self.project.to_absolute(edit_rel)
-        metadata = create_empty_label_sidecar_like(image_path, edit_abs, role="working_edit", write_ome_zarr=False)
+        metadata = create_empty_label_sidecar_like(
+            image_path,
+            edit_abs,
+            role="working_edit",
+            write_ome_zarr=False,
+            source_record=specimen.get("working_volume") or {},
+        )
         self.project.register_label_volume(
             self.current_specimen_id,
             "working_edit",
@@ -4173,10 +4231,11 @@ class TifWorkbenchWidget(QWidget):
             metadata["dtype"],
             status="empty_edit",
             spacing_zyx=metadata.get("spacing_zyx"),
-            spacing_unit=metadata.get("spacing_unit", "micrometer"),
+            spacing_unit=metadata.get("spacing_unit", "unknown"),
             orientation=metadata.get("orientation", "unknown"),
             fmt=metadata.get("format", ""),
             operation="create_empty_edit_layer",
+            scale_verified=metadata.get("scale_verified") is True,
             save=False,
         )
         self.project.save_project()
@@ -4670,7 +4729,8 @@ class TifWorkbenchWidget(QWidget):
             labels["working_edit"]["dtype"] = metadata.get("dtype", labels["working_edit"].get("dtype", ""))
             labels["working_edit"]["shape_zyx"] = metadata.get("shape_zyx", labels["working_edit"].get("shape_zyx", []))
             labels["working_edit"]["spacing_zyx"] = metadata.get("spacing_zyx", labels["working_edit"].get("spacing_zyx", [1.0, 1.0, 1.0]))
-            labels["working_edit"]["spacing_unit"] = metadata.get("spacing_unit", labels["working_edit"].get("spacing_unit", "micrometer"))
+            labels["working_edit"]["spacing_unit"] = metadata.get("spacing_unit", labels["working_edit"].get("spacing_unit", "unknown"))
+            labels["working_edit"]["scale_verified"] = metadata.get("scale_verified") is True
             labels["working_edit"]["orientation"] = metadata.get("orientation", labels["working_edit"].get("orientation", "unknown"))
             labels["working_edit"]["format"] = metadata.get("format", labels["working_edit"].get("format", ""))
         labels["working_edit"]["status"] = "in_progress"
@@ -4701,7 +4761,8 @@ class TifWorkbenchWidget(QWidget):
             label_record["dtype"] = metadata.get("dtype", label_record.get("dtype", ""))
             label_record["shape_zyx"] = metadata.get("shape_zyx", label_record.get("shape_zyx", []))
             label_record["spacing_zyx"] = metadata.get("spacing_zyx", label_record.get("spacing_zyx", [1.0, 1.0, 1.0]))
-            label_record["spacing_unit"] = metadata.get("spacing_unit", label_record.get("spacing_unit", "micrometer"))
+            label_record["spacing_unit"] = metadata.get("spacing_unit", label_record.get("spacing_unit", "unknown"))
+            label_record["scale_verified"] = metadata.get("scale_verified") is True
             label_record["orientation"] = metadata.get("orientation", label_record.get("orientation", "unknown"))
             label_record["format"] = metadata.get("format", label_record.get("format", ""))
         label_record["role"] = "editable_ai_result"

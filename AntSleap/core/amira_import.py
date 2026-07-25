@@ -195,6 +195,7 @@ def read_amira_header(path):
         "encoding": _parse_encoding(header_text),
         "spacing_zyx": _parse_spacing_zyx(header_text),
         "spacing_unit": _parse_spacing_unit(header_text),
+        "spacing_source": _parse_spacing_source(header_text),
         "orientation": "unknown",
         "materials": parse_materials_from_labels_header(header_text),
     }
@@ -259,6 +260,14 @@ def _parse_spacing_unit(header_text):
         "nanometers": "nanometer",
     }
     return aliases.get(value, "unknown")
+
+
+def _parse_spacing_source(header_text):
+    if re.search(r'Parameter:voxelSize\s+"0\s+[0-9eE+\-.]+\s+1\s+[0-9eE+\-.]+\s+2\s+[0-9eE+\-.]+', header_text):
+        return "amira_voxel_size"
+    if re.search(r"BoundingBox\s+(?:[0-9eE+\-.]+\s+){5}[0-9eE+\-.]+", header_text):
+        return "amira_bounding_box"
+    return ""
 
 
 def _parse_spacing_zyx(header_text):
@@ -507,6 +516,10 @@ def import_amira_directory(
 
     image_volume, image_header = read_amira_volume(files["resampled"])
     label_volume, label_header = read_amira_volume(files["labels"])
+    scale_verified = bool(
+        image_header.get("spacing_source")
+        and str(image_header.get("spacing_unit") or "unknown") != "unknown"
+    )
 
     project_manager.create_specimen_scaffold(
         specimen_id,
@@ -555,8 +568,10 @@ def import_amira_directory(
             spacing_unit=image_header["spacing_unit"],
             orientation=image_header["orientation"],
             source_format="amira_resampled",
+            scale_verified=scale_verified,
             extra_metadata={
                 "import_adapter": AMIRA_IMPORT_ADAPTER_VERSION,
+                "scale_verification_source": image_header.get("spacing_source", ""),
                 "note": "Lightweight recoverable sidecar; not complete OME-NGFF metadata.",
             },
         )
@@ -568,9 +583,11 @@ def import_amira_directory(
             spacing_unit=image_header["spacing_unit"],
             orientation=image_header["orientation"],
             source_format="amira_labels",
+            scale_verified=scale_verified,
             extra_metadata={
                 "import_adapter": AMIRA_IMPORT_ADAPTER_VERSION,
                 "encoding": label_header["encoding"],
+                "scale_verification_source": image_header.get("spacing_source", ""),
             },
         )
         edit_meta = copy_volume_sidecar(project_manager.to_absolute(manual_rel), project_manager.to_absolute(edit_rel), role="working_edit")

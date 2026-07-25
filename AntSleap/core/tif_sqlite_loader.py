@@ -37,6 +37,7 @@ def _volume_record(row):
             "dtype": "",
             "spacing_zyx": [],
             "spacing_unit": "unknown",
+            "scale_verified": False,
             "orientation": "unknown",
         }
     if "shape_zyx_json" not in row and isinstance(row, dict):
@@ -47,6 +48,7 @@ def _volume_record(row):
         record.setdefault("dtype", "")
         record.setdefault("spacing_zyx", [])
         record.setdefault("spacing_unit", "unknown")
+        record["scale_verified"] = record.get("scale_verified") is True
         record.setdefault("orientation", "unknown")
         return record
     record = {
@@ -65,6 +67,7 @@ def _volume_record(row):
     for key, value in metadata.items():
         if key not in record:
             record[key] = value
+    record["scale_verified"] = record.get("scale_verified") is True
     return record
 
 

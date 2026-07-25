@@ -11,7 +11,7 @@ from pathlib import Path
 from .safe_io import atomic_write_json
 from .tif_prediction_policy import can_import_prediction_target, validate_prediction_volume
 from .tif_project import TifProjectManager
-from .tif_export import export_tif_part_training_dataset, export_tif_training_dataset
+from .tif_export import _reslice_exchange_metadata, _sanitize_exchange_metadata, export_tif_part_training_dataset, export_tif_training_dataset
 from .tif_volume_io import copy_volume_sidecar, read_volume_metadata, volume_sidecar_exists
 from .tif_write_guard import WriteIntent, ensure_write_allowed
 from .training_run_recorder import TrainingRunRecorder
@@ -898,7 +898,7 @@ class TifBackendRunner:
                         prediction_id=prediction_id,
                         source_model=source_model,
                         spacing_zyx=source_meta.get("spacing_zyx"),
-                        spacing_unit=source_meta.get("spacing_unit", "micrometer"),
+                        spacing_unit=source_meta.get("spacing_unit", "unknown"),
                         orientation=source_meta.get("orientation", "local_axis_reslice"),
                         operation="prediction_raw_backup_import",
                         audit_metadata=audit_metadata,
@@ -916,7 +916,7 @@ class TifBackendRunner:
                         prediction_id=prediction_id,
                         source_model=source_model,
                         spacing_zyx=source_meta.get("spacing_zyx"),
-                        spacing_unit=source_meta.get("spacing_unit", "micrometer"),
+                        spacing_unit=source_meta.get("spacing_unit", "unknown"),
                         orientation=source_meta.get("orientation", "local_axis_reslice"),
                         operation="prediction_review_import",
                         audit_metadata=audit_metadata,
@@ -934,7 +934,7 @@ class TifBackendRunner:
                         prediction_id=prediction_id,
                         source_model=source_model,
                         spacing_zyx=source_meta.get("spacing_zyx"),
-                        spacing_unit=source_meta.get("spacing_unit", "micrometer"),
+                        spacing_unit=source_meta.get("spacing_unit", "unknown"),
                         orientation=source_meta.get("orientation", "unknown"),
                         operation="prediction_raw_backup_import",
                         audit_metadata=audit_metadata,
@@ -951,7 +951,7 @@ class TifBackendRunner:
                         prediction_id=prediction_id,
                         source_model=source_model,
                         spacing_zyx=source_meta.get("spacing_zyx"),
-                        spacing_unit=source_meta.get("spacing_unit", "micrometer"),
+                        spacing_unit=source_meta.get("spacing_unit", "unknown"),
                         orientation=source_meta.get("orientation", "unknown"),
                         operation="prediction_review_import",
                         audit_metadata=audit_metadata,
@@ -1035,7 +1035,7 @@ class TifBackendRunner:
                 backup_meta["shape_zyx"],
                 backup_meta["dtype"],
                 backup_meta.get("spacing_zyx"),
-                backup_meta.get("spacing_unit", "micrometer"),
+                backup_meta.get("spacing_unit", "unknown"),
                 backup_meta.get("orientation", "unknown"),
                 backup_meta.get("format", ""),
             )
@@ -1050,7 +1050,7 @@ class TifBackendRunner:
                 editable_meta["dtype"],
                 status="pending_review",
                 spacing_zyx=editable_meta.get("spacing_zyx"),
-                spacing_unit=editable_meta.get("spacing_unit", "micrometer"),
+                spacing_unit=editable_meta.get("spacing_unit", "unknown"),
                 orientation=editable_meta.get("orientation", "unknown"),
                 fmt=editable_meta.get("format", ""),
                 operation="prediction_review_import",
@@ -1065,7 +1065,7 @@ class TifBackendRunner:
                 prediction_id=prediction_id,
                 source_model=source_model,
                 spacing_zyx=source_meta.get("spacing_zyx"),
-                spacing_unit=source_meta.get("spacing_unit", "micrometer"),
+                spacing_unit=source_meta.get("spacing_unit", "unknown"),
                 orientation=source_meta.get("orientation", "unknown"),
                 save=False,
             )
@@ -1153,6 +1153,27 @@ class TifBackendRunner:
         training = part.get("training") or {}
         label_schema_id = str(readiness.get("label_schema_id") or "")
         label_schema = self.project_manager.get_label_schema(label_schema_id, default={}) if label_schema_id else {}
+        reslice_audit = {}
+        reslice_metadata_path = self.project_manager.to_absolute(reslice.get("metadata_path", ""))
+        if reslice_metadata_path and os.path.isfile(reslice_metadata_path):
+            try:
+                with open(reslice_metadata_path, "r", encoding="utf-8") as handle:
+                    loaded_audit = json.load(handle)
+                if isinstance(loaded_audit, dict):
+                    reslice_audit = loaded_audit
+            except (OSError, ValueError, TypeError):
+                reslice_audit = {}
+        input_scale = _reslice_exchange_metadata(
+            reslice,
+            {
+                "shape_zyx": readiness.get("input_shape_zyx", []),
+                "spacing_zyx": (reslice.get("reslice_params") or {}).get("output_spacing_zyx")
+                or (reslice.get("local_frame") or {}).get("spacing_zyx")
+                or (reslice.get("source") or {}).get("part_spacing_zyx")
+                or [1.0, 1.0, 1.0],
+            },
+            reslice_audit,
+        )
         return {
             "sample_id": _safe_id(f"{specimen.get('specimen_id')}_{part.get('part_id')}_{reslice_id}"),
             "specimen_id": specimen.get("specimen_id"),
@@ -1166,11 +1187,9 @@ class TifBackendRunner:
                 "format": "tiff",
                 "shape_zyx": readiness.get("input_shape_zyx", []),
                 "dtype": str(((reslice.get("outputs") or {}).get("image_dtype")) or ""),
-                "spacing_zyx": (reslice.get("reslice_params") or {}).get("output_spacing_zyx")
-                or (reslice.get("local_frame") or {}).get("spacing_zyx")
-                or (reslice.get("source") or {}).get("part_spacing_zyx")
-                or [1.0, 1.0, 1.0],
-                "spacing_unit": str((reslice.get("source") or {}).get("part_spacing_unit") or "micrometer"),
+                "spacing_zyx": input_scale.get("spacing_zyx", [1.0, 1.0, 1.0]),
+                "spacing_unit": input_scale.get("spacing_unit", "unknown"),
+                "scale_verified": input_scale.get("scale_verified") is True,
                 "orientation": "local_axis_reslice",
                 "orientation_record": reslice,
             },
@@ -1205,16 +1224,25 @@ class TifBackendRunner:
     def _contract_specimen(self, specimen, include_label):
         working = specimen.get("working_volume") or {}
         manual = (specimen.get("labels") or {}).get("manual_truth") or {}
+        working_path = self.project_manager.to_absolute(working.get("path", ""))
+        working_metadata = {}
+        if volume_sidecar_exists(working_path):
+            try:
+                working_metadata = read_volume_metadata(working_path)
+            except (OSError, TypeError, ValueError):
+                working_metadata = {}
+        input_scale = _sanitize_exchange_metadata(working_metadata, working)
         return {
             "specimen_id": specimen.get("specimen_id"),
             "modality": specimen.get("modality", "unknown"),
             "input_volume": {
-                "path": self.project_manager.to_absolute(working.get("path", "")),
+                "path": working_path,
                 "format": working.get("format", ""),
                 "shape_zyx": working.get("shape_zyx", []),
                 "dtype": working.get("dtype", ""),
-                "spacing_zyx": working.get("spacing_zyx") or [1.0, 1.0, 1.0],
-                "spacing_unit": working.get("spacing_unit", "micrometer"),
+                "spacing_zyx": input_scale.get("spacing_zyx", [1.0, 1.0, 1.0]),
+                "spacing_unit": input_scale.get("spacing_unit", "unknown"),
+                "scale_verified": input_scale.get("scale_verified") is True,
                 "orientation": working.get("orientation", "unknown"),
             },
             "label_volume": {
@@ -1397,7 +1425,7 @@ def write_mock_tif_backend_result(contract, prediction_arrays=None):
             if part_id:
                 prediction_id = f"{prediction_id}_{_safe_id(part_id)}"
             out_path = os.path.join(contract["output_dir"], f"{prediction_id}.ome.zarr")
-            meta = write_volume_sidecar(out_path, array, role="model_draft", spacing_zyx=input_volume.get("spacing_zyx"), spacing_unit=input_volume.get("spacing_unit", "micrometer"), orientation=input_volume.get("orientation", "unknown"), source_format="mock_tif_backend")
+            meta = write_volume_sidecar(out_path, array, role="model_draft", spacing_zyx=input_volume.get("spacing_zyx"), spacing_unit=input_volume.get("spacing_unit", "unknown"), orientation=input_volume.get("orientation", "unknown"), source_format="mock_tif_backend", scale_verified=input_volume.get("scale_verified") is True)
             artifacts.append(
                 {
                     "type": "prediction_label_volume",

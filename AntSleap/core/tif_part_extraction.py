@@ -6,7 +6,7 @@ from datetime import datetime
 import numpy as np
 
 from .safe_io import atomic_write_json, copytree_replace_safely
-from .tif_volume_io import flush_volume_array, load_volume_sidecar, write_volume_sidecar
+from .tif_volume_io import flush_volume_array, load_volume_sidecar, read_volume_metadata, write_volume_sidecar
 
 
 TIF_PART_EXTRACTION_VERSION = "taxamask_tif_part_extraction_v1"
@@ -78,9 +78,19 @@ def crop_volume_to_part(project_manager, specimen_id, part_id, bbox_zyx, display
     contours_abs = project_manager.to_absolute(contours_rel)
     extraction_abs = project_manager.to_absolute(extraction_rel)
 
-    spacing = working.get("spacing_zyx") or [1.0, 1.0, 1.0]
-    spacing_unit = working.get("spacing_unit", "micrometer")
-    orientation = working.get("orientation", "unknown")
+    source_metadata = read_volume_metadata(image_path)
+    spacing = source_metadata.get("spacing_zyx") or working.get("spacing_zyx") or [1.0, 1.0, 1.0]
+    source_unit = str(source_metadata.get("spacing_unit") or "unknown")
+    record_unit = str(working.get("spacing_unit") or "unknown")
+    scale_verified = (
+        source_metadata.get("scale_verified") is True
+        and working.get("scale_verified") is True
+        and source_unit.strip().lower() == record_unit.strip().lower()
+        and [float(value) for value in spacing]
+        == [float(value) for value in (working.get("spacing_zyx") or [])]
+    )
+    spacing_unit = source_unit if scale_verified else "unknown"
+    orientation = source_metadata.get("orientation") or working.get("orientation", "unknown")
     image_meta = write_volume_sidecar(
         image_abs,
         crop,
@@ -89,6 +99,7 @@ def crop_volume_to_part(project_manager, specimen_id, part_id, bbox_zyx, display
         spacing_unit=spacing_unit,
         orientation=orientation,
         source_format=TIF_PART_EXTRACTION_VERSION,
+        scale_verified=scale_verified,
         extra_metadata={
             "parent_specimen_id": specimen_id,
             "parent_volume_role": "working_volume",
@@ -104,6 +115,7 @@ def crop_volume_to_part(project_manager, specimen_id, part_id, bbox_zyx, display
         spacing_unit=spacing_unit,
         orientation=orientation,
         source_format=TIF_PART_EXTRACTION_VERSION,
+        scale_verified=scale_verified,
         extra_metadata={
             "parent_specimen_id": specimen_id,
             "parent_volume_role": "working_volume",
@@ -121,7 +133,8 @@ def crop_volume_to_part(project_manager, specimen_id, part_id, bbox_zyx, display
         "source_shape_zyx": [int(value) for value in source.shape],
         "part_shape_zyx": bbox_shape_zyx(bbox),
         "spacing_zyx": [float(value) for value in spacing],
-        "spacing_unit": str(spacing_unit or "micrometer"),
+        "spacing_unit": str(spacing_unit or "unknown"),
+        "scale_verified": scale_verified,
         "orientation": str(orientation or "unknown"),
         "status": "roi_confirmed",
         "created_at": _now_iso(),

@@ -68,7 +68,9 @@ def _source_location(project_manager, image_path):
     return {"location_kind": "opaque_ref", "opaque_ref": opaque_ref}
 
 
-def _confirmed_label_snapshot(project_manager, image_path, image_uid):
+def _confirmed_label_snapshot(
+    project_manager, image_path, image_uid, *, allow_legacy_truth=True
+):
     label_entry = project_manager.project_data.get("labels", {}).get(image_path, {})
     if not isinstance(label_entry, Mapping):
         label_entry = {}
@@ -94,13 +96,15 @@ def _confirmed_label_snapshot(project_manager, image_path, image_uid):
         polygon = sanitize_polygon(raw_parts.get(part_name))
         if len(polygon) < 3:
             continue
+        truth = get_part_training_truth(label_entry, part_name)
+        if truth is None:
+            legacy_count += 1
+            if not allow_legacy_truth:
+                continue
         parts[part_name] = polygon
         box = sanitize_box(raw_boxes.get(part_name))
         if box is not None:
             boxes[part_name] = box
-        truth = get_part_training_truth(label_entry, part_name)
-        if truth is None:
-            legacy_count += 1
         review[part_name] = {
             "source": str(decision.get("source") or ""),
             "review_status": str(decision.get("review_status") or ""),
@@ -166,9 +170,14 @@ def _source_entry(project_manager, image_path, image_uid):
     }
 
 
-def _label_entry(project_manager, image_path, image_uid):
+def _label_entry(
+    project_manager, image_path, image_uid, *, allow_legacy_truth=True
+):
     snapshot_text, legacy_count = _confirmed_label_snapshot(
-        project_manager, image_path, image_uid
+        project_manager,
+        image_path,
+        image_uid,
+        allow_legacy_truth=allow_legacy_truth,
     )
     if snapshot_text is None:
         return None, legacy_count
@@ -350,7 +359,10 @@ def commit_2d_project_integrity_changes(
                 changes.append(source_change)
 
         label_change, _legacy_count = _label_entry(
-            project_manager, image_key, image_uid
+            project_manager,
+            image_key,
+            image_uid,
+            allow_legacy_truth=not bool(candidate_data_version_id),
         )
         current_label = _active_asset(
             connection, "image", image_uid, "human_confirmed_label"

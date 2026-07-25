@@ -1,7 +1,7 @@
 # TaxaMask LLM Context
 
 > Target: embedded AntCode agents, advanced LLM assistants, and developers maintaining the current TaxaMask `main` / v2.x line.
-> Last synchronized: 2026-07-20.
+> Last synchronized: 2026-07-26.
 
 This file is the current-state handoff document. It is not a changelog. Do not append dated development logs here. Keep it focused on the program state that an agent needs in order to diagnose, modify, and safely operate TaxaMask.
 
@@ -55,6 +55,8 @@ All maintained training entrypoints use verified researcher truth and a SQLite-b
 When a required source, reviewed label, configuration snapshot, or model weight is missing or has a different fingerprint, training stops. Recovery must recheck, relocate identical content, restore a verified copy, or register intentional changed content as a new version with a note. There is no bypass that silently accepts current bytes as the old version.
 
 The maintained 2D and Blink GUI paths perform both Registry verification and the final pre-training content recheck in a background worker. Progress includes current file, percentage, read rate, and ETA. Cancellation must prevent training startup and close any created active run as `cancelled`. Selected image-group runs bind and verify only their selected source/label UIDs plus shared schema, effective config, and selected starting weights. The first-pass capability is single-use and bound to the project, data version, run, revisions, and verification events. Before success and weight activation, the bound Registry inputs receive a completion recheck; persistent changes fail the run and leave pending weights inactive. This reduces but does not eliminate TOCTOU without immutable snapshots. Do not replace byte-level rechecks with size/mtime/inode caching unless a future snapshot mechanism provides equivalent guarantees.
+
+Batch panel splitting prepares its source inventory without repeated per-image project lookups, then performs detection and JPEG encoding in a background worker. The user must confirm the pending source count before work starts. Progress, cancellation, per-image checkpoints, atomic temporary-file promotion, project-task guards, and rollback keep completed crops recoverable without registering partial JPEGs or writing results into a different project.
 
 ## 4. Launch And Runtime
 

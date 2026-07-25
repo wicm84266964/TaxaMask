@@ -1,5 +1,6 @@
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,6 +18,14 @@ class FakeProject:
 class FakeRunningThread:
     def isRunning(self):
         return True
+
+
+class FakeButton:
+    def __init__(self):
+        self.enabled = None
+
+    def setEnabled(self, enabled):
+        self.enabled = bool(enabled)
 
 
 class MainWindowStage7TrainingPredictionTests(unittest.TestCase):
@@ -147,6 +156,79 @@ class MainWindowStage7TrainingPredictionTests(unittest.TestCase):
 
         self.assertEqual(owner._active_project_bound_background_task(), "SAM Auto-Annotation")
 
+    def test_parent_and_blink_preflight_block_project_switch(self):
+        from AntSleap.ui.main_window_model_management import MainWindowModelManagementMixin
+
+        owner = type("BusyOwner", (MainWindowModelManagementMixin,), {})()
+        owner.current_lang = "en"
+        owner.training_preflight_thread = FakeRunningThread()
+
+        self.assertEqual(owner._active_project_bound_background_task(), "Training")
+
+        owner.training_preflight_thread = None
+        owner.blink_lab = type(
+            "BlinkLab",
+            (),
+            {
+                "training_thread": None,
+                "training_preflight_thread": FakeRunningThread(),
+            },
+        )()
+
+        self.assertEqual(owner._active_project_bound_background_task(), "Training")
+
+    def test_stale_parent_preflight_restores_training_controls(self):
+        from AntSleap.ui.main_window_model_management import MainWindowModelManagementMixin
+        from AntSleap.ui.main_window_training import MainWindowTrainingMixin
+
+        owner = type(
+            "TrainingOwner",
+            (MainWindowModelManagementMixin, MainWindowTrainingMixin),
+            {},
+        )()
+        owner.current_lang = "en"
+        owner.project = FakeProject(str(ROOT / "new.sqlite_manifest.json"))
+        worker = object()
+        owner.training_preflight_thread = worker
+        owner.training_preflight_dialog = None
+        owner.btn_train = FakeButton()
+        owner.btn_stop_training = FakeButton()
+        owner.parent_training_failed = False
+        owner.progress_updates = []
+        owner.stale_events = []
+        owner._set_training_progress = (
+            lambda *args: owner.progress_updates.append(args)
+        )
+        owner._refresh_blink_refine_state = lambda: None
+        owner._log_stale_project_task_result = (
+            lambda workflow, _context: owner.stale_events.append(workflow)
+        )
+        interrupted = []
+        run = type(
+            "PreparedRun",
+            (),
+            {
+                "status": "running",
+                "interrupt": lambda self, **kwargs: interrupted.append(kwargs),
+            },
+        )()
+        prepared = type("Prepared", (), {"run": run})()
+        request = {
+            "project_context": {
+                "project": FakeProject(str(ROOT / "old.sqlite_manifest.json")),
+                "project_path": str(ROOT / "old.sqlite_manifest.json"),
+            }
+        }
+
+        owner._on_parent_preflight_ready(prepared, request, worker)
+
+        self.assertTrue(owner.parent_training_failed)
+        self.assertTrue(owner.btn_train.enabled)
+        self.assertFalse(owner.btn_stop_training.enabled)
+        self.assertEqual(interrupted, [{"stage": "stale_project_context"}])
+        self.assertEqual(owner.stale_events, ["parent_training_preflight"])
+        self.assertEqual(owner.progress_updates[-1][0], "parent")
+
     def test_stale_training_error_is_ignored(self):
         from AntSleap.ui.main_window_model_management import MainWindowModelManagementMixin
         from AntSleap.ui.main_window_training import MainWindowTrainingMixin
@@ -161,6 +243,263 @@ class MainWindowStage7TrainingPredictionTests(unittest.TestCase):
         owner._on_training_error({"type": "runtime", "message": "old failure"})
 
         self.assertEqual(stale_events, ["parent_training_error"])
+
+    def test_final_integrity_recovery_retries_once_with_original_configuration(self):
+        from AntSleap.ui.main_window_training import MainWindowTrainingMixin
+
+        owner = type("TrainingOwner", (MainWindowTrainingMixin,), {})()
+        owner.current_lang = "en"
+        owner.project = FakeProject(str(ROOT / "project.sqlite_manifest.json"))
+        owner.parent_training_project_context = {}
+        owner.training_retry_requested = False
+        owner.integrity_recovery_retry_used = False
+        owner.parent_training_failed = False
+        owner.progress = type("Progress", (), {"value": lambda self: 70})()
+        owner.pending_training_preflight = {
+            "preflight": {"selected_locator_size": (512, 512)},
+            "taxonomy": ["Head"],
+            "locator_scope": ["Head"],
+            "train_segmenter": True,
+            "training_scope": {
+                "scope_id": "__all__",
+                "label": "All Images",
+                "images": ["ant.png"],
+            },
+        }
+        owner.trainer = type(
+            "Trainer",
+            (),
+            {
+                "training_run": type(
+                    "Run", (), {"run_id": "training_run_failed_integrity"}
+                )()
+            },
+        )()
+        owner._set_training_progress = lambda *_args: None
+        owner.log_messages = []
+        owner.log = owner.log_messages.append
+        owner._offer_training_integrity_recovery = lambda _message: True
+        launched = []
+        owner._launch_training_with_preflight = (
+            lambda *args, **kwargs: launched.append((args, kwargs))
+        )
+
+        with patch(
+            "AntSleap.ui.main_window_training.QMessageBox.critical"
+        ), patch(
+            "AntSleap.ui.main_window_training.QTimer.singleShot",
+            side_effect=lambda _delay, callback: callback(),
+        ):
+            owner._on_training_error(
+                {
+                    "type": "error",
+                    "message": "registry_verified_source_changed",
+                }
+            )
+            owner._on_training_error(
+                {
+                    "type": "error",
+                    "message": "registry_verified_source_changed",
+                }
+            )
+
+        self.assertTrue(owner.integrity_recovery_retry_used)
+        self.assertEqual(len(launched), 1)
+        args, kwargs = launched[0]
+        self.assertEqual(args[1], ["Head"])
+        self.assertEqual(args[2], ["Head"])
+        self.assertTrue(args[3])
+        self.assertEqual(kwargs["retry_of"], "training_run_failed_integrity")
+        self.assertTrue(owner.parent_training_failed)
+
+    def test_preflight_integrity_recovery_keeps_failed_run_id(self):
+        from AntSleap.ui.main_window_training import MainWindowTrainingMixin
+
+        owner = type("TrainingOwner", (MainWindowTrainingMixin,), {})()
+        owner.current_lang = "en"
+        owner.btn_train = FakeButton()
+        owner.btn_stop_training = FakeButton()
+        owner._clear_parent_preflight = lambda _worker: True
+        owner._set_training_progress = lambda *_args: None
+        owner._offer_training_integrity_recovery = lambda _error: True
+        owner._refresh_blink_refine_state = lambda: None
+        launched = []
+        owner._launch_training_with_preflight = (
+            lambda *args, **kwargs: launched.append((args, kwargs))
+        )
+        request = {
+            "preflight": {"selected_locator_size": (512, 512)},
+            "taxonomy": ["Head"],
+            "locator_scope": ["Head"],
+            "train_segmenter": True,
+            "training_scope": {"scope_id": "__all__", "images": ["ant.png"]},
+        }
+        error = RuntimeError("registry_verified_source_changed")
+        error.training_run_id = "preflight_failed_run"
+
+        with patch(
+            "AntSleap.ui.main_window_training.QMessageBox.critical"
+        ), patch(
+            "AntSleap.ui.main_window_training.QTimer.singleShot",
+            side_effect=lambda _delay, callback: callback(),
+        ):
+            owner._on_parent_preflight_error(error, request, object())
+
+        self.assertEqual(len(launched), 1)
+        self.assertEqual(launched[0][1]["retry_of"], "preflight_failed_run")
+
+    def test_training_recovery_uses_shared_integrity_error_markers(self):
+        from AntSleap.ui.main_window_training import MainWindowTrainingMixin
+
+        owner = type("TrainingOwner", (MainWindowTrainingMixin,), {})()
+        owner.project = FakeProject(str(ROOT / "project.sqlite_manifest.json"))
+
+        class FakeRecovery:
+            instances = []
+
+            def __init__(self, *_args, **_kwargs):
+                self.report = {"status": "verified"}
+                self.exec_calls = 0
+                self.instances.append(self)
+
+            def exec(self):
+                self.exec_calls += 1
+
+        with patch(
+            "AntSleap.ui.main_window_training.TrainingIntegrityRecoveryDialog",
+            FakeRecovery,
+        ):
+            self.assertTrue(owner._offer_training_integrity_recovery("source_read_denied"))
+            self.assertTrue(owner._offer_training_integrity_recovery("manual_truth_not_reviewed"))
+            self.assertTrue(owner._offer_training_integrity_recovery("runtime_target_outside_root"))
+            self.assertFalse(owner._offer_training_integrity_recovery("network_timeout"))
+
+        self.assertEqual(len(FakeRecovery.instances), 3)
+        self.assertTrue(all(item.exec_calls == 1 for item in FakeRecovery.instances))
+
+    def test_stale_parent_finished_signal_does_not_clear_replacement_worker(self):
+        from AntSleap.ui.main_window_training import MainWindowTrainingMixin
+
+        owner = type("TrainingOwner", (MainWindowTrainingMixin,), {})()
+        old_worker = object()
+        replacement = object()
+        owner.trainer = replacement
+        owner.btn_train = FakeButton()
+        owner.btn_stop_training = FakeButton()
+        refreshes = []
+        owner._refresh_blink_refine_state = lambda: refreshes.append(True)
+
+        owner._on_training_finished(worker=old_worker)
+
+        self.assertIs(owner.trainer, replacement)
+        self.assertIsNone(owner.btn_train.enabled)
+        self.assertIsNone(owner.btn_stop_training.enabled)
+        self.assertEqual(refreshes, [])
+
+    def test_integrity_retry_keeps_run_id_when_modal_dialog_finishes_worker(self):
+        from AntSleap.ui.main_window_training import MainWindowTrainingMixin
+
+        owner = type("TrainingOwner", (MainWindowTrainingMixin,), {})()
+        owner.current_lang = "en"
+        owner.parent_training_project_context = {}
+        owner.training_retry_requested = False
+        owner.integrity_recovery_retry_used = False
+        owner.parent_training_failed = False
+        owner.progress = type("Progress", (), {"value": lambda self: 70})()
+        owner.pending_training_preflight = {
+            "preflight": {"selected_locator_size": (512, 512)},
+            "taxonomy": ["Head"],
+            "locator_scope": ["Head"],
+            "train_segmenter": True,
+            "training_scope": {"scope_id": "__all__", "images": ["ant.png"]},
+        }
+        worker = type(
+            "Trainer",
+            (),
+            {
+                "training_run": type(
+                    "Run", (), {"run_id": "run_before_modal_finish"}
+                )()
+            },
+        )()
+        owner.trainer = worker
+        owner._set_training_progress = lambda *_args: None
+        owner.log = lambda *_args: None
+
+        def recover(_message):
+            owner.trainer = None
+            return True
+
+        owner._offer_training_integrity_recovery = recover
+        launched = []
+        owner._launch_training_with_preflight = (
+            lambda *args, **kwargs: launched.append((args, kwargs))
+        )
+
+        with patch(
+            "AntSleap.ui.main_window_training.QMessageBox.critical"
+        ), patch(
+            "AntSleap.ui.main_window_training.QTimer.singleShot",
+            side_effect=lambda _delay, callback: callback(),
+        ):
+            owner._on_training_error(
+                {"type": "error", "message": "registry_verified_source_changed"},
+                worker=worker,
+            )
+
+        self.assertEqual(len(launched), 1)
+        self.assertEqual(launched[0][1]["retry_of"], "run_before_modal_finish")
+
+    def test_oom_retry_keeps_run_id_when_resolution_dialog_finishes_worker(self):
+        from AntSleap.ui.main_window_training import MainWindowTrainingMixin
+
+        owner = type("TrainingOwner", (MainWindowTrainingMixin,), {})()
+        owner.parent_training_project_context = {}
+        owner.training_retry_requested = False
+        owner.parent_training_failed = False
+        owner.pending_training_preflight = {
+            "preflight": {
+                "selected_locator_size": (512, 512),
+                "lower_locator_size_options": [(256, 256)],
+            },
+            "taxonomy": ["Head"],
+            "locator_scope": ["Head"],
+            "train_segmenter": False,
+            "training_scope": {"scope_id": "__all__"},
+        }
+        worker = type(
+            "Trainer",
+            (),
+            {"training_run": type("Run", (), {"run_id": "oom_run"})()},
+        )()
+        owner.trainer = worker
+
+        def choose_resolution(*_args):
+            owner.trainer = None
+            return (256, 256)
+
+        owner._ask_locator_oom_retry_resolution = choose_resolution
+        launched = []
+        owner._launch_training_with_preflight = (
+            lambda *args, **kwargs: launched.append((args, kwargs))
+        )
+
+        with patch(
+            "AntSleap.ui.main_window_training.QTimer.singleShot",
+            side_effect=lambda _delay, callback: callback(),
+        ):
+            owner._on_training_error(
+                {
+                    "type": "oom",
+                    "stage": "locator",
+                    "current_resolution": (512, 512),
+                    "lower_options": [(256, 256)],
+                },
+                worker=worker,
+            )
+
+        self.assertEqual(len(launched), 1)
+        self.assertEqual(launched[0][1]["retry_of"], "oom_run")
 
 
 if __name__ == "__main__":

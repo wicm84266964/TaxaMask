@@ -13,18 +13,56 @@ from AntSleap.core.integrity_manifest_service import (
     build_file_entry,
 )
 from AntSleap.core.training_run_recorder import (
+    TRAINING_RUN_LEDGER_SCHEMA_VERSION,
     IncompleteSuccessfulRun,
     InvalidRunTransition,
     TerminalRunImmutable,
     TrainingRunRecordError,
     TrainingRunRecorder,
     UnsafeRunFact,
+    initialize_training_run_ledger_schema,
     utc_now,
     validate_split_assignments,
 )
 
 
 class TrainingRunRecorderTests(unittest.TestCase):
+    def test_future_ledger_version_is_rejected_without_downgrade(self):
+        connection = sqlite3.connect(":memory:")
+        try:
+            connection.execute(
+                """
+                CREATE TABLE training_run_ledger_meta (
+                    id INTEGER PRIMARY KEY,
+                    schema_version INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            future_version = TRAINING_RUN_LEDGER_SCHEMA_VERSION + 1
+            connection.execute(
+                "INSERT INTO training_run_ledger_meta VALUES (1, ?, 'future')",
+                (future_version,),
+            )
+            connection.commit()
+
+            with self.assertRaisesRegex(
+                TrainingRunRecordError, "training_run_ledger_schema_too_new"
+            ):
+                initialize_training_run_ledger_schema(connection)
+
+            stored = connection.execute(
+                "SELECT schema_version FROM training_run_ledger_meta WHERE id = 1"
+            ).fetchone()[0]
+            self.assertEqual(stored, future_version)
+            self.assertIsNone(
+                connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name = 'training_runs'"
+                ).fetchone()
+            )
+        finally:
+            connection.close()
+
     def _make_run(self, root):
         recorder = TrainingRunRecorder(root, recover_on_startup=False)
         return recorder, recorder.create_pending(
@@ -562,6 +600,28 @@ class TrainingRunRecorderTests(unittest.TestCase):
             try:
                 with self.assertRaisesRegex(UnsafeRunFact, "filesystem_link_not_allowed"):
                     run.register_external_location("location_ref_link", link)
+            finally:
+                run.cancel()
+
+    def test_registered_path_base_rejects_symlinked_parent(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            _recorder, run = self._make_run(root / "runs")
+            actual_parent = root / "actual-parent"
+            actual_parent.mkdir()
+            linked_parent = root / "linked-parent"
+            try:
+                linked_parent.symlink_to(actual_parent, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                run.cancel()
+                self.skipTest("This workstation cannot create directory symlinks")
+            artifact_root = linked_parent / "exports"
+            artifact_root.mkdir()
+            try:
+                with self.assertRaisesRegex(
+                    UnsafeRunFact, "filesystem_link_not_allowed"
+                ):
+                    run.register_path_base("export_root", artifact_root)
             finally:
                 run.cancel()
 

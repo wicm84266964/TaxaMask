@@ -1,26 +1,18 @@
 try:
     from AntSleap.ui.main_window_stage7_dependencies import *
+    from AntSleap.ui.training_integrity_recovery_dialog import is_training_integrity_error
 except ImportError:
     from ui.main_window_stage7_dependencies import *
+    from ui.training_integrity_recovery_dialog import is_training_integrity_error
 
 
 class MainWindowTrainingMixin:
     def _offer_training_integrity_recovery(self, error):
-        code = str(getattr(error, "code", "") or error)
-        markers = (
-            "integrity",
-            "digest",
-            "fingerprint",
-            "source_missing",
-            "opaque_location",
-            "initial_weight",
-            "managed_locator_publication",
-            "managed_segmenter_publication",
-        )
-        if not any(marker in code for marker in markers):
-            return
+        if not is_training_integrity_error(error):
+            return False
         dialog = TrainingIntegrityRecoveryDialog(self.project, self)
         dialog.exec()
+        return dialog.report.get("status") == "verified"
 
     def _current_training_initial_weights(self, train_segmenter):
         entries = []
@@ -259,7 +251,12 @@ class MainWindowTrainingMixin:
 
     def _is_parent_training_running(self):
         external_thread = getattr(self, "external_training_thread", None)
-        return bool((self.trainer and self.trainer.isRunning()) or (external_thread and external_thread.isRunning()))
+        preflight_thread = getattr(self, "training_preflight_thread", None)
+        return bool(
+            (self.trainer and self.trainer.isRunning())
+            or (external_thread and external_thread.isRunning())
+            or (preflight_thread and preflight_thread.isRunning())
+        )
 
     def _is_any_training_running(self):
         return self._is_parent_training_running() or self._is_child_training_running()
@@ -329,8 +326,9 @@ class MainWindowTrainingMixin:
         active_preflight["training_scope_id"] = scope_id
         active_preflight["training_scope_label"] = scope_label
         active_preflight["training_scope_image_count"] = scope_image_count
+        scope_images = list(active_training_scope.get("images", []) or [])
         self.pending_training_preflight = {
-            "preflight": active_preflight,
+            "preflight": dict(active_preflight),
             "taxonomy": list(tax or []),
             "locator_scope": list(locator_scope or []),
             "train_segmenter": bool(train_segmenter),
@@ -338,6 +336,7 @@ class MainWindowTrainingMixin:
                 "scope_id": scope_id,
                 "label": scope_label,
                 "image_count": scope_image_count,
+                "images": scope_images,
             },
         }
         self.training_retry_requested = False
@@ -351,7 +350,7 @@ class MainWindowTrainingMixin:
         effective_loss_config = self.engine.set_locator_loss_weights(parent_backend.get("loss_weights"))
         allowed_uids = [
             self.project.get_image_uid(path)
-            for path in active_training_scope.get("images", []) or []
+            for path in scope_images
         ]
         effective_config = {
             "epochs": max(1, int(self.train_epochs)),
@@ -387,8 +386,34 @@ class MainWindowTrainingMixin:
                 item["slot"]
                 for item in self._current_training_initial_weights(train_segmenter)
             ]
-            prepared_run = prepare_2d_training_run(
-                self.project,
+        except Exception as exc:
+            self.parent_training_failed = True
+            QMessageBox.critical(
+                self,
+                tr("Starting model verification", self.current_lang),
+                str(exc),
+            )
+            return
+
+        request = {
+            "preflight": dict(active_preflight),
+            "taxonomy": list(tax or []),
+            "locator_scope": list(locator_scope or []),
+            "train_segmenter": bool(train_segmenter),
+            "training_scope": dict(self.pending_training_preflight["training_scope"]),
+            "scope_id": scope_id,
+            "scope_label": scope_label,
+            "scope_image_count": scope_image_count,
+            "active_profile": dict(active_profile),
+            "parent_backend": dict(parent_backend),
+            "effective_loss_config": dict(effective_loss_config),
+            "project_context": dict(self.parent_training_project_context or {}),
+        }
+        project_manager = self.project
+
+        def operation(detail_callback, cancel_check):
+            return prepare_2d_training_run(
+                project_manager,
                 runs_root=runs_root,
                 entrypoint="builtin_locator_sam",
                 effective_config=effective_config,
@@ -405,19 +430,178 @@ class MainWindowTrainingMixin:
                 cuda=str(torch.version.cuda or "not_available"),
                 initial_weight_slots=initial_weight_slots,
                 retry_of=retry_of,
+                detail_progress_callback=detail_callback,
+                cancel_check=cancel_check,
             )
-        except Exception as exc:
-            self.parent_training_failed = True
-            QMessageBox.critical(
-                self,
-                tr("Training preflight", self.current_lang),
-                tr(
-                    "Training did not start because the registered files or data version could not be verified: {0}",
-                    self.current_lang,
-                ).format(str(exc)),
+
+        if not callable(getattr(self, "metaObject", None)):
+            prepared_run = operation(lambda _detail: None, lambda: False)
+            MainWindowTrainingMixin._start_parent_training_thread(
+                self, prepared_run, request
             )
-            self._offer_training_integrity_recovery(exc)
             return
+
+        worker = TrainingPreflightWorker(operation)
+        dialog = QProgressDialog(
+            tr("Preparing training input verification...", self.current_lang),
+            tr("Cancel", self.current_lang),
+            0,
+            100,
+            self,
+        )
+        dialog.setWindowTitle(tr("Training preflight", self.current_lang))
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        dialog.setMinimumDuration(0)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        dialog.canceled.connect(worker.cancel)
+        worker.progress_signal.connect(
+            lambda payload, active=worker: self._on_parent_preflight_progress(
+                payload, active
+            )
+        )
+        worker.prepared_signal.connect(
+            lambda prepared, active=worker, saved=request: self._on_parent_preflight_ready(
+                prepared, saved, active
+            )
+        )
+        worker.error_signal.connect(
+            lambda error, active=worker, saved=request: self._on_parent_preflight_error(
+                error, saved, active
+            )
+        )
+        worker.cancelled_signal.connect(
+            lambda active=worker: self._on_parent_preflight_cancelled(active)
+        )
+        worker.finished.connect(worker.deleteLater)
+        self.training_preflight_thread = worker
+        self.training_preflight_dialog = dialog
+        self.btn_train.setEnabled(False)
+        self.btn_stop_training.setEnabled(True)
+        self._set_training_progress(
+            "parent",
+            tr("Preparing training input verification...", self.current_lang),
+            0,
+        )
+        self._refresh_blink_refine_state()
+        dialog.show()
+        worker.start()
+
+    def _on_parent_preflight_progress(self, payload, worker):
+        if getattr(self, "training_preflight_thread", None) is not worker:
+            return
+        detail = dict(payload or {})
+        file_index = int(detail.get("file_index") or 0)
+        file_count = int(detail.get("file_count") or 0)
+        display_name = str(detail.get("display_name") or "-")
+        rate = format_byte_rate(detail.get("bytes_per_second"))
+        eta_value = detail.get("eta_seconds")
+        eta = format_eta(eta_value) if eta_value is not None else "--:--"
+        percent = max(0, min(99, int(detail.get("percent") or 0)))
+        text = tr(
+            "Verifying training inputs: {0}/{1} | {2} | {3} | ETA {4}",
+            self.current_lang,
+        ).format(file_index, file_count, display_name, rate, eta)
+        dialog = getattr(self, "training_preflight_dialog", None)
+        if dialog is not None:
+            dialog.setLabelText(text)
+            dialog.setValue(percent)
+        self._set_training_progress("parent", text, percent)
+
+    def _clear_parent_preflight(self, worker):
+        if getattr(self, "training_preflight_thread", None) is not worker:
+            return False
+        dialog = getattr(self, "training_preflight_dialog", None)
+        self.training_preflight_thread = None
+        self.training_preflight_dialog = None
+        if dialog is not None:
+            try:
+                dialog.canceled.disconnect(worker.cancel)
+            except (RuntimeError, TypeError):
+                pass
+            dialog.close()
+            dialog.deleteLater()
+        return True
+
+    def _on_parent_preflight_ready(self, prepared_run, request, worker):
+        if not self._clear_parent_preflight(worker):
+            return
+        context = dict(request.get("project_context") or {})
+        if context and not self._project_task_context_matches(context):
+            if prepared_run.run.status == "running":
+                prepared_run.run.interrupt(stage="stale_project_context")
+            self._log_stale_project_task_result("parent_training_preflight", context)
+            # The worker belonged to the previous project.  Its result must
+            # not start training in the newly opened project, but the UI must
+            # still leave the controls usable for the current one.
+            self.parent_training_failed = True
+            self.btn_train.setEnabled(True)
+            self.btn_stop_training.setEnabled(False)
+            self._set_training_progress(
+                "parent",
+                tr("Training input verification cancelled.", self.current_lang),
+                0,
+            )
+            self._refresh_blink_refine_state()
+            return
+        self._start_parent_training_thread(prepared_run, request)
+
+    def _on_parent_preflight_error(self, error, request, worker):
+        if not self._clear_parent_preflight(worker):
+            return
+        # Preparation creates a ledger row before it verifies the inputs. The
+        # worker only transports the exception, so recover the failed row ID
+        # from its metadata when the researcher chooses to retry.
+        retry_of = str(getattr(error, "training_run_id", "") or "")
+        self.parent_training_failed = True
+        self.btn_train.setEnabled(True)
+        self.btn_stop_training.setEnabled(False)
+        self._set_training_progress(
+            "parent", tr("Training input verification failed.", self.current_lang), 0
+        )
+        QMessageBox.critical(
+            self,
+            tr("Training preflight", self.current_lang),
+            tr(
+                "Training did not start because the registered files or data version could not be verified: {0}",
+                self.current_lang,
+            ).format(str(error)),
+        )
+        if self._offer_training_integrity_recovery(error):
+            self.parent_training_failed = False
+            QTimer.singleShot(
+                0,
+                lambda saved=request, prior_run=retry_of: self._launch_training_with_preflight(
+                    saved["preflight"],
+                    saved["taxonomy"],
+                    saved["locator_scope"],
+                    saved["train_segmenter"],
+                    saved["training_scope"],
+                    retry_of=prior_run or None,
+                ),
+            )
+        self._refresh_blink_refine_state()
+
+    def _on_parent_preflight_cancelled(self, worker):
+        if not self._clear_parent_preflight(worker):
+            return
+        self.parent_training_cancel_requested = True
+        self.btn_train.setEnabled(True)
+        self.btn_stop_training.setEnabled(False)
+        self._set_training_progress(
+            "parent", tr("Training input verification cancelled.", self.current_lang), 0
+        )
+        self._refresh_blink_refine_state()
+
+    def _start_parent_training_thread(self, prepared_run, request):
+        active_preflight = dict(request["preflight"])
+        train_segmenter = bool(request["train_segmenter"])
+        active_profile = dict(request["active_profile"])
+        parent_backend = dict(request["parent_backend"])
+        effective_loss_config = dict(request["effective_loss_config"])
+        scope_id = str(request["scope_id"])
+        scope_label = str(request["scope_label"])
+        scope_image_count = int(request["scope_image_count"])
         frozen = prepared_run.dataset
         active_preflight.update(
             {
@@ -463,9 +647,16 @@ class MainWindowTrainingMixin:
         self.trainer.log_signal.connect(self.log)
         self.trainer.progress_signal.connect(lambda value: self._set_training_progress("parent", None, value))
         self.trainer.report_signal.connect(self.show_training_report)
-        self.trainer.success_signal.connect(self._on_training_success)
-        self.trainer.error_signal.connect(self._on_training_error)
-        self.trainer.finished_signal.connect(self._on_training_finished)
+        trainer = self.trainer
+        trainer.success_signal.connect(self._on_training_success)
+        trainer.error_signal.connect(
+            lambda payload, worker=trainer: self._on_training_error(
+                payload, worker=worker
+            )
+        )
+        trainer.finished_signal.connect(
+            lambda worker=trainer: self._on_training_finished(worker=worker)
+        )
         self.btn_train.setEnabled(False)
         self.btn_stop_training.setEnabled(True)
         self._set_training_progress("parent", tr("Parent-part model training", self.current_lang), 0)
@@ -492,7 +683,12 @@ class MainWindowTrainingMixin:
             )
         self.refresh_model_list()
 
-    def _on_training_finished(self):
+    def _on_training_finished(self, worker=None):
+        if worker is not None and getattr(self, "trainer", None) is not worker:
+            # A previous worker may finish after a recovery retry has already
+            # installed a replacement. It must not clear the replacement's
+            # controls or thread reference.
+            return
         task_context = getattr(self, "parent_training_project_context", {})
         context_matches = not task_context or self._project_task_context_matches(task_context)
         self.btn_train.setEnabled(False if self.training_retry_requested else True)
@@ -511,12 +707,20 @@ class MainWindowTrainingMixin:
                 finished_trainer.deleteLater()
         self._refresh_blink_refine_state()
 
-    def _on_training_error(self, payload):
+    def _on_training_error(self, payload, worker=None):
+        if worker is not None:
+            current = getattr(self, "trainer", None)
+            if current is not None and current is not worker:
+                return
         task_context = getattr(self, "parent_training_project_context", {})
         if task_context and not self._project_task_context_matches(task_context):
             self._log_stale_project_task_result("parent_training_error", task_context)
             return
         payload = dict(payload or {})
+        retry_of = str(
+            getattr(getattr(worker or getattr(self, "trainer", None), "training_run", None), "run_id", "")
+            or ""
+        )
         error_type = payload.get("type")
         self.training_retry_requested = False
         self.parent_training_failed = True
@@ -527,14 +731,6 @@ class MainWindowTrainingMixin:
                 payload.get("lower_options", []),
             )
             if retry_resolution is not None and self.pending_training_preflight:
-                retry_of = str(
-                    getattr(
-                        getattr(self.trainer, "training_run", None),
-                        "run_id",
-                        "",
-                    )
-                    or ""
-                )
                 self.training_retry_requested = True
                 updated_preflight = dict(self.pending_training_preflight.get("preflight") or {})
                 updated_preflight["selected_locator_size"] = tuple(retry_resolution)
@@ -562,8 +758,48 @@ class MainWindowTrainingMixin:
         self._set_training_progress("parent", tr("Parent-part model training failed.", self.current_lang), self.progress.value())
         self.log(tr("Training aborted: {0}", self.current_lang).format(message))
         QMessageBox.critical(self, tr("Error", self.current_lang), message)
+        recovered = self._offer_training_integrity_recovery(message)
+        if (
+            recovered
+            and self.pending_training_preflight
+            and not getattr(self, "integrity_recovery_retry_used", False)
+        ):
+            saved = dict(self.pending_training_preflight)
+            self.integrity_recovery_retry_used = True
+            self.training_retry_requested = True
+            self.parent_training_failed = False
+            self.log(
+                tr(
+                    "Recovered training inputs verified. Retrying with the previous configuration.",
+                    self.current_lang,
+                )
+            )
+            QTimer.singleShot(
+                0,
+                lambda request=saved, prior_run=retry_of: (
+                    self._launch_training_with_preflight(
+                        request.get("preflight", {}),
+                        request.get("taxonomy", []),
+                        request.get("locator_scope", []),
+                        request.get("train_segmenter", True),
+                        request.get("training_scope", {}),
+                        retry_of=prior_run or None,
+                    )
+                ),
+            )
 
     def stop_training(self):
+        preflight = getattr(self, "training_preflight_thread", None)
+        if preflight and preflight.isRunning():
+            preflight.cancel()
+            self.btn_stop_training.setEnabled(False)
+            self.parent_training_cancel_requested = True
+            self._set_training_progress(
+                "parent",
+                tr("Cancelling training input verification...", self.current_lang),
+                self.progress.value(),
+            )
+            return
         if self.trainer and self.trainer.isRunning():
             self.trainer.requestInterruption()
             self.btn_stop_training.setEnabled(False)
@@ -584,6 +820,7 @@ class MainWindowTrainingMixin:
                 tr("Child-part expert training is running. Wait for it to finish before training parent models.", self.current_lang),
             )
             return
+        self.integrity_recovery_retry_used = False
         if not self._ensure_training_integrity_baseline():
             return
         scope_payload = self._selected_training_scope_payload()

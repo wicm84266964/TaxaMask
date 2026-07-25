@@ -5,8 +5,9 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+import tifffile
 
-from AntSleap.core.tif_export import export_monai_dataset, export_nnunet_dataset, export_tif_part_nnunet_dataset, export_tif_part_training_dataset, export_tif_training_dataset, read_nifti_volume_with_metadata, write_nifti_volume
+from AntSleap.core.tif_export import _read_any_volume, export_monai_dataset, export_nnunet_dataset, export_tif_part_nnunet_dataset, export_tif_part_training_dataset, export_tif_training_dataset, read_nifti_volume_with_metadata, write_nifti_volume
 from AntSleap.core.tif_local_axis_batch import accept_local_frame_proposal
 from AntSleap.core.tif_local_axis_reslice import compute_local_frame, export_part_reslice
 from AntSleap.core.tif_part_extraction import crop_volume_to_part, export_part_package
@@ -106,7 +107,15 @@ class TifExportTests(unittest.TestCase):
             image_meta = write_volume_sidecar(project_root / image_rel, image, role="working_image")
             label_meta = write_volume_sidecar(project_root / label_rel, label, role="manual_truth")
             manager.register_working_volume("01-0101-12", image_rel, image_meta["shape_zyx"], image_meta["dtype"], save=False)
-            manager.register_label_volume("01-0101-12", "manual_truth", label_rel, label_meta["shape_zyx"], label_meta["dtype"], save=False)
+            manager.register_label_volume(
+                "01-0101-12",
+                "manual_truth",
+                label_rel,
+                label_meta["shape_zyx"],
+                label_meta["dtype"],
+                status="reviewed",
+                save=False,
+            )
             specimen["train_ready"] = True
             specimen["review_status"] = "train_ready"
             manager.save_project()
@@ -152,7 +161,15 @@ class TifExportTests(unittest.TestCase):
             image_meta = write_volume_sidecar(project_root / image_rel, np.zeros((2, 3, 4), dtype=np.uint8), role="working_image")
             label_meta = write_volume_sidecar(project_root / label_rel, np.ones((2, 3, 4), dtype=np.uint16), role="manual_truth")
             manager.register_working_volume("01-0101-14", image_rel, image_meta["shape_zyx"], image_meta["dtype"], save=False)
-            manager.register_label_volume("01-0101-14", "manual_truth", label_rel, label_meta["shape_zyx"], label_meta["dtype"], save=False)
+            manager.register_label_volume(
+                "01-0101-14",
+                "manual_truth",
+                label_rel,
+                label_meta["shape_zyx"],
+                label_meta["dtype"],
+                status="reviewed",
+                save=False,
+            )
             specimen["train_ready"] = True
             specimen["review_status"] = "train_ready"
             manager.save_project()
@@ -423,6 +440,38 @@ class TifExportTests(unittest.TestCase):
             np.testing.assert_array_equal(loaded, array)
             self.assertEqual(metadata["spacing_zyx"], [2.5, 1.5, 0.75])
             self.assertEqual(metadata["spacing_unit"], "micrometer")
+
+    def test_unknown_spacing_is_not_written_as_millimeter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tiff_path = root / "unitless.tif"
+            nifti_path = root / "unitless.nii.gz"
+            array = np.zeros((2, 3, 4), dtype=np.uint16)
+            tifffile.imwrite(tiff_path, array, photometric="minisblack")
+
+            loaded, metadata = _read_any_volume(tiff_path)
+            self.assertEqual(metadata["spacing_unit"], "unknown")
+            write_nifti_volume(nifti_path, loaded, metadata)
+            _roundtrip, roundtrip_metadata = read_nifti_volume_with_metadata(nifti_path)
+
+            self.assertEqual(roundtrip_metadata["spacing_unit"], "unknown")
+
+    def test_nifti_round_trip_preserves_meter_spacing_unit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "meter_volume.nii.gz"
+            array = np.zeros((2, 3, 4), dtype=np.uint8)
+
+            write_nifti_volume(
+                path,
+                array,
+                {"spacing_zyx": [0.002, 0.001, 0.0005], "spacing_unit": "meter"},
+            )
+            _loaded, metadata = read_nifti_volume_with_metadata(path)
+
+            self.assertEqual(metadata["spacing_unit"], "meter")
+            np.testing.assert_allclose(
+                metadata["spacing_zyx"], [0.002, 0.001, 0.0005], rtol=1e-6, atol=1e-9
+            )
 
     def test_part_nnunet_export_rejects_mixed_incompatible_label_schemas(self):
         with tempfile.TemporaryDirectory() as tmp:

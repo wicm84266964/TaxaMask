@@ -16,6 +16,7 @@ from .sqlite_storage import (
     connect_sqlite_database,
     get_schema_version,
     initialize_schema_migrations,
+    migrate_sqlite_database_atomically,
     record_schema_version,
 )
 
@@ -159,9 +160,61 @@ def _validate_2d_base_schema(connection):
 
 def validate_2d_project_schema(connection):
     _validate_2d_base_schema(connection)
+    row = connection.execute(
+        "SELECT schema_version FROM projects WHERE id = 1"
+    ).fetchone()
+    if row is None:
+        raise ValueError("missing_2d_sqlite_project_row")
+    try:
+        project_schema_version = int(row[0])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid_2d_sqlite_project_schema_version") from exc
+    if project_schema_version != PROJECT_2D_SCHEMA_VERSION:
+        raise ValueError(
+            "inconsistent_2d_sqlite_schema_version:"
+            f"{project_schema_version}!={PROJECT_2D_SCHEMA_VERSION}"
+        )
     validate_project_integrity_registry_schema(connection)
     validate_training_run_ledger_schema(connection)
     return True
+
+
+def _validate_2d_v1_schema(connection, version):
+    if int(version) != 1:
+        raise ValueError(f"unsupported_2d_sqlite_schema_version:{version}")
+    legacy_tables = set(REQUIRED_2D_TABLES) - set(REQUIRED_REGISTRY_TABLES)
+    missing = sorted(legacy_tables - _existing_tables(connection))
+    if missing:
+        raise ValueError(f"missing_2d_v1_sqlite_tables:{','.join(missing)}")
+    for table_name, required_columns in sorted(REQUIRED_2D_COLUMNS.items()):
+        expected = set(required_columns)
+        if table_name == "images":
+            expected.discard("image_uid")
+        existing = {
+            str(row[1])
+            for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+        }
+        missing_columns = sorted(expected - existing)
+        if missing_columns:
+            raise ValueError(
+                f"missing_2d_v1_sqlite_columns:{table_name}:{','.join(missing_columns)}"
+            )
+    row = connection.execute("SELECT schema_version FROM projects WHERE id = 1").fetchone()
+    if row is None or int(row[0]) != 1:
+        raise ValueError("invalid_2d_v1_project_schema_version")
+
+
+def migrate_2d_project_database(db_path):
+    return migrate_sqlite_database_atomically(
+        db_path,
+        schema_name=PROJECT_2D_SCHEMA_NAME,
+        target_version=PROJECT_2D_SCHEMA_VERSION,
+        source_versions=(1,),
+        initialize_schema=initialize_2d_project_schema,
+        validate_schema=validate_2d_project_schema,
+        validate_source_schema=_validate_2d_v1_schema,
+        unsupported_version_error="unsupported_2d_sqlite_schema_version",
+    )
 
 
 def initialize_2d_project_schema(connection):

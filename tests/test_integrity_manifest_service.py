@@ -169,6 +169,25 @@ class IntegrityManifestServiceTests(unittest.TestCase):
         self.assertEqual(recovered["error"]["code"], "process_interrupted")
         self.assertEqual(service.resume_incomplete()["status"], "verified")
 
+    def test_recovery_recomputes_verified_top_level_status(self):
+        self._write_source()
+        service = self._service()
+        service.create_manifest("train_run_05_verified", [self._entry()])
+        verified = service.capture_expected_fingerprints()
+        verified = service.verify_manifest()
+
+        # Simulate a crash after the final entry write but before the caller
+        # persisted the top-level terminal status.
+        verified["status"] = "pending"
+        verified["started_at"] = verified["created_at"]
+        verified["finished_at"] = None
+        verified["error"] = None
+        service._write(verified)
+
+        recovered = service.recover_pending_as_incomplete()
+        self.assertEqual(recovered["status"], "verified")
+        self.assertIsNone(recovered["error"])
+
     def test_relocate_requires_same_digest_and_preserves_old_record(self):
         old_source = self._write_source(payload=b"same bytes")
         entry = self._entry_with_expected_fingerprint("data/source.bin", old_source)
@@ -301,6 +320,26 @@ class IntegrityManifestServiceTests(unittest.TestCase):
         service = self._service()
         service.create_manifest("train_run_10", [self._entry("data/link.bin")])
         result = service.capture_expected_fingerprints()
+        self.assertEqual(result["status"], "incomplete")
+        self.assertEqual(
+            result["files"][0]["error"]["code"], "unsupported_entry_type"
+        )
+
+    def test_managed_parent_symlink_is_rejected_before_fingerprinting(self):
+        target = self._write_source("real/source.bin", b"target")
+        linked_parent = self.project_root / "linked"
+        try:
+            linked_parent.symlink_to(target.parent, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("This workstation cannot create directory symlinks")
+
+        service = self._service()
+        service.create_manifest(
+            "train_run_linked_parent",
+            [self._entry("linked/source.bin")],
+        )
+        result = service.capture_expected_fingerprints()
+
         self.assertEqual(result["status"], "incomplete")
         self.assertEqual(
             result["files"][0]["error"]["code"], "unsupported_entry_type"

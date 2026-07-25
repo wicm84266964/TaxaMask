@@ -94,6 +94,11 @@ try:
         TrainingRunNoteDialog,
     )
     from AntSleap.ui.training_integrity_recovery_dialog import TrainingIntegrityRecoveryDialog
+    from AntSleap.ui.training_preflight_worker import (
+        TrainingPreflightWorker,
+        format_byte_rate,
+        format_eta,
+    )
 except ImportError:
     from app_runtime import runtime_log_event, runtime_log_exception
     from core.blink_training_strategy import blink_training_strategy_label
@@ -140,6 +145,7 @@ except ImportError:
     )
     from ui.training_report_dialogs import TrainingPreflightDialog, TrainingReportDialog, TrainingResultBrowserDialog, TrainingRunNoteDialog
     from ui.training_integrity_recovery_dialog import TrainingIntegrityRecoveryDialog
+    from ui.training_preflight_worker import TrainingPreflightWorker, format_byte_rate, format_eta
 
 
 PACKAGE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

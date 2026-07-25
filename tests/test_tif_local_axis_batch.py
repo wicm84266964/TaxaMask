@@ -137,7 +137,7 @@ class TifLocalAxisBatchTests(unittest.TestCase):
             self.assertEqual(sorted_rows[0]["proposal_id"], "frame_002")
             self.assertEqual([row["kind"] for row in version_rows], ["local_frame_proposal"])
 
-    def test_risk_components_include_active_model_version_mismatch(self):
+    def test_risk_components_compare_active_model_id_and_version(self):
         with tempfile.TemporaryDirectory() as tmp:
             manager = make_project_with_frame_proposal(Path(tmp))
             manager.register_local_axis_model(
@@ -156,6 +156,7 @@ class TifLocalAxisBatchTests(unittest.TestCase):
                 "head",
                 "frame_001",
             )
+            proposal["model_id"] = "older_axis_model"
             proposal["model_version"] = "v2"
             manager.save_project()
 
@@ -173,8 +174,16 @@ class TifLocalAxisBatchTests(unittest.TestCase):
                 "review_priority_not_error_probability",
             )
             self.assertIn(
+                "model_id_mismatch:older_axis_model!=active_axis_model",
+                row["risk_reasons"],
+            )
+            self.assertIn(
                 "model_version_mismatch:v2!=v3",
                 row["risk_reasons"],
+            )
+            self.assertEqual(
+                row["risk_components"]["model_id_mismatch_weight"],
+                20.0,
             )
             self.assertEqual(
                 row["risk_components"]["model_version_mismatch_weight"],
@@ -182,10 +191,81 @@ class TifLocalAxisBatchTests(unittest.TestCase):
             )
             self.assertEqual(row["risk_reference_model_id"], "active_axis_model")
 
+    def test_invalid_legacy_geometry_can_be_rejected_but_not_accepted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = make_project_with_frame_proposal(Path(tmp))
+            proposal = manager.get_local_frame_proposal(
+                "01-0101-batch",
+                "head",
+                "frame_001",
+            )
+            proposal["output_axis_end_zyx"] = [99.0, 1.5, 2.0]
+            manager.save_project()
+
+            row = list_local_axis_queue(manager, {"status": "proposed"})[0]
+            self.assertFalse(row["accept_allowed"])
+            self.assertEqual(row["risk_score"], 100.0)
+            self.assertIn(
+                "output_axis_end_zyx_out_of_bounds",
+                row["validation_errors"],
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "invalid_local_frame_proposal_geometry",
+            ):
+                accept_local_frame_proposal(
+                    manager,
+                    "01-0101-batch",
+                    "head",
+                    "frame_001",
+                )
+
+            rejected = update_proposal_status(
+                manager,
+                "frame_001",
+                "rejected",
+                specimen_id="01-0101-batch",
+                part_id="head",
+            )
+            snapshot = rejected["review_audit"]["risk_snapshot"]
+            self.assertEqual(rejected["status"], "rejected")
+            self.assertEqual(snapshot["score"], 100.0)
+            self.assertEqual(
+                snapshot["score_interpretation"],
+                "review_priority_not_error_probability",
+            )
+            self.assertIn(
+                "output_axis_end_zyx_out_of_bounds",
+                snapshot["proposal_validation_errors"],
+            )
+
+            reloaded = TifProjectManager()
+            reloaded.load_project(manager.current_project_path)
+            persisted = reloaded.get_local_frame_proposal(
+                "01-0101-batch",
+                "head",
+                "frame_001",
+            )
+            self.assertEqual(
+                persisted["review_audit"]["risk_snapshot"],
+                snapshot,
+            )
+
     def test_sorting_and_accepting_selected_axis_do_not_bypass_manual_truth_gate(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             manager = make_project_with_frame_proposal(root)
+            manager.register_local_axis_model(
+                {
+                    "model_id": "active_axis_model",
+                    "model_version": "v3",
+                    "model_type": "local_frame",
+                },
+                save=False,
+            )
+            manager.project_data.setdefault("view_settings", {})[
+                "local_axis_active_model_id"
+            ] = "active_axis_model"
             manager.add_local_frame_proposal(
                 "01-0101-batch",
                 "head",
@@ -196,6 +276,7 @@ class TifLocalAxisBatchTests(unittest.TestCase):
                     "output_axis_start_zyx": [0.0, 1.5, 2.0],
                     "output_axis_end_zyx": [3.0, 1.5, 2.0],
                     "confidence": 0.1,
+                    "model_id": "older_axis_model",
                     "model_version": "v2",
                     "hard_case_flags": ["low_confidence"],
                 },
@@ -230,6 +311,23 @@ class TifLocalAxisBatchTests(unittest.TestCase):
             )
             self.assertEqual(accepted["review_audit"]["proposal_id"], "frame_002")
             self.assertTrue(accepted["review_audit"]["explicit_review"])
+            accepted_snapshot = accepted["review_audit"]["risk_snapshot"]
+            self.assertEqual(
+                accepted_snapshot["ranking_version"],
+                LOCAL_AXIS_RISK_RANKING_VERSION,
+            )
+            self.assertEqual(
+                accepted_snapshot["reference_model_id"],
+                "active_axis_model",
+            )
+            self.assertEqual(
+                accepted_snapshot["reference_model_version"],
+                "v3",
+            )
+            self.assertIn(
+                "model_id_mismatch:older_axis_model!=active_axis_model",
+                accepted_snapshot["reasons"],
+            )
             self.assertEqual(
                 manager.get_local_frame_proposal("01-0101-batch", "head", "frame_001")["status"],
                 "proposed",
@@ -247,6 +345,10 @@ class TifLocalAxisBatchTests(unittest.TestCase):
             self.assertEqual(
                 reloaded_accepted["review_history"][-1]["new_status"],
                 "accepted",
+            )
+            self.assertEqual(
+                reloaded_accepted["review_audit"]["risk_snapshot"],
+                accepted_snapshot,
             )
 
     def test_controlled_review_order_comparison_does_not_change_rows(self):

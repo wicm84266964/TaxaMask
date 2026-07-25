@@ -2,7 +2,7 @@
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                               QPushButton, QLabel, QSplitter, QListWidget,
-                              QGroupBox, QSlider, QProgressBar, QRadioButton, QButtonGroup, QSpinBox, QTreeWidget, QTreeWidgetItem, QMessageBox, QTextEdit, QCheckBox, QDialog, QDialogButtonBox, QLineEdit, QHeaderView, QSizePolicy, QScrollArea, QFrame, QComboBox, QTabWidget, QInputDialog, QTableWidget, QTableWidgetItem, QAbstractItemView)
+                              QGroupBox, QSlider, QProgressBar, QProgressDialog, QRadioButton, QButtonGroup, QSpinBox, QTreeWidget, QTreeWidgetItem, QMessageBox, QTextEdit, QCheckBox, QDialog, QDialogButtonBox, QLineEdit, QHeaderView, QSizePolicy, QScrollArea, QFrame, QComboBox, QTabWidget, QInputDialog, QTableWidget, QTableWidgetItem, QAbstractItemView)
 import os
 import shutil
 import sys
@@ -32,6 +32,15 @@ try:
         DEFAULT_TRAINING_SEED,
         prepare_blink_training_run,
     )
+    from AntSleap.ui.training_integrity_recovery_dialog import (
+        TrainingIntegrityRecoveryDialog,
+        is_training_integrity_error,
+    )
+    from AntSleap.ui.training_preflight_worker import (
+        TrainingPreflightWorker,
+        format_byte_rate,
+        format_eta,
+    )
 except ImportError:
     from core.project import AUTO_BOX_SOURCE_VLM
     from core.taxonomy_defaults import is_safe_part_name
@@ -51,6 +60,8 @@ except ImportError:
     from core.model_profiles import DEFAULT_BLINK_OUTER_LOSS_WEIGHTS, sanitize_loss_weights
     from core.training_weight_publisher import TrainingWeightPublisher
     from core.training_run_2d import DEFAULT_TRAINING_SEED, prepare_blink_training_run
+    from ui.training_integrity_recovery_dialog import TrainingIntegrityRecoveryDialog, is_training_integrity_error
+    from ui.training_preflight_worker import TrainingPreflightWorker, format_byte_rate, format_eta
 from .canvas import AnnotationCanvas
 from .style import (
     BUTTON_ROLE_COMMIT,
@@ -139,6 +150,13 @@ BLINK_TRANSLATIONS = {
         "STOP TRAINING": "停止训练",
         "Training Progress": "训练进度",
         "Training cancelled.": "训练已取消。",
+        "Preparing training input verification...": "正在准备训练文件复验...",
+        "Verifying training inputs: {0}/{1} | {2} | {3} | ETA {4}": "正在复验训练文件：{0}/{1} | {2} | {3} | 预计剩余 {4}",
+        "Training input verification failed.": "训练文件复验失败。",
+        "Training input verification cancelled.": "训练文件复验已取消。",
+        "Cancelling training input verification...": "正在安全取消训练文件复验...",
+        "Training preflight": "训练预检",
+        "Blink training did not start because the registered trajectories or files could not be verified: {0}": "Blink 训练未启动，因为登记的轨迹或文件未能通过复验：{0}",
         "Stopping training after the current batch...": "将在当前批次结束后停止训练...",
         "Discard Blink Edits?": "放弃 Blink 编辑？",
         "The current Blink session has unapplied edits. Discard them and {0}?": "当前 Blink 会话有未应用的修改。要放弃这些修改并{0}吗？",
@@ -375,6 +393,7 @@ class BlinkTrainingThread(QThread):
         self.allowed_image_paths = [str(path) for path in (allowed_image_paths or []) if str(path or "").strip()]
         self.training_scope = dict(training_scope or {})
         self.training_run = training_run
+        self._weight_publisher = None
         self.training_records = list(training_records or [])
         self.validation_records = list(validation_records or [])
         self.model_output_root = os.path.abspath(
@@ -386,6 +405,30 @@ class BlinkTrainingThread(QThread):
             )
         )
 
+    def _cleanup_terminal_publication(self):
+        """Best-effort cleanup after the run record is terminally failed."""
+
+        run = self.training_run
+        publisher = self._weight_publisher
+        if run is None or publisher is None:
+            return
+        try:
+            record = run.record
+            if record.get("status") not in {"failed", "cancelled", "interrupted"}:
+                return
+            report = publisher.cleanup_terminal_run(run.run_id, record)
+            if report.get("manual_review"):
+                self.log_signal.emit(
+                    "Training weight cleanup needs manual review: "
+                    + str(report["manual_review"])
+                )
+        except Exception as cleanup_exc:
+            # Preserve the original training error and leave the bundle for recovery.
+            self.log_signal.emit(
+                "Training weight cleanup failed; manual recovery is required: "
+                + str(cleanup_exc)
+            )
+
     def _publish_training_result(self, staging_root, save_path, report):
         if not save_path or not os.path.isfile(save_path):
             raise ValueError("blink_output_weights_missing")
@@ -393,6 +436,7 @@ class BlinkTrainingThread(QThread):
         if not manifest_path or not os.path.isfile(manifest_path):
             raise ValueError("blink_model_manifest_missing")
         publisher = TrainingWeightPublisher(self.model_output_root)
+        self._weight_publisher = publisher
         weight_relative = os.path.relpath(save_path, staging_root).replace(os.sep, "/")
         manifest_relative = os.path.relpath(manifest_path, staging_root).replace(os.sep, "/")
         publication = publisher.publish_pending(
@@ -524,6 +568,7 @@ class BlinkTrainingThread(QThread):
             if self.isInterruptionRequested():
                 if self.training_run is not None and self.training_run.status in {"pending", "running"}:
                     self.training_run.cancel(stage="training")
+                    self._cleanup_terminal_publication()
                 self.cancelled_signal.emit()
             else:
                 report = getattr(trainer, "last_report", None)
@@ -538,6 +583,7 @@ class BlinkTrainingThread(QThread):
         except Exception as exc:
             if self.training_run is not None and self.training_run.status in {"pending", "running"}:
                 self.training_run.fail(exc, stage="training")
+                self._cleanup_terminal_publication()
             self.error_signal.emit(str(exc))
         finally:
             if staging is not None:
@@ -943,6 +989,7 @@ class BlinkLabWidget(QWidget):
     route_registry_refresh_requested = Signal()
     start_center_requested = Signal()
     agent_requested = Signal(dict)
+    training_state_changed = Signal(str)
 
     def __init__(
         self,
@@ -976,6 +1023,11 @@ class BlinkLabWidget(QWidget):
         self.default_outer_loss_weights = dict(DEFAULT_BLINK_OUTER_LOSS_WEIGHTS)
         self.runtime_device = str(runtime_device or "auto")
         self.training_thread = None
+        self.training_preflight_thread = None
+        self.training_preflight_dialog = None
+        self.pending_training_request = None
+        self.pending_blink_retry_request = None
+        self.integrity_recovery_retry_used = False
         self.training_project_path = ""
         self.pending_training_report = None
         self.active_session = None
@@ -2583,9 +2635,18 @@ class BlinkLabWidget(QWidget):
             return
         if not self._ensure_blink_training_baseline():
             return
+
+        self.integrity_recovery_retry_used = False
+        self.pending_blink_retry_request = None
             
         part = self.session_target_part or self.canvas.current_tool_part
-        if self.training_thread and self.training_thread.isRunning():
+        if (
+            self.training_thread
+            and self.training_thread.isRunning()
+        ) or (
+            self.training_preflight_thread
+            and self.training_preflight_thread.isRunning()
+        ):
             self.lbl_status.setText(self.tr("Training already running..."))
             return
 
@@ -2673,55 +2734,242 @@ class BlinkLabWidget(QWidget):
             "runs",
             "train",
         )
-        try:
-            prepared_run = prepare_blink_training_run(
-                self.pm,
-                runs_root=runs_root,
-                entrypoint=entrypoint,
-                target_part=part,
-                parent_part=parent_part,
-                effective_config=effective_config,
+        request = {
+            "project_manager": self.pm,
+            "project_path": str(self.pm.current_project_path or ""),
+            "runs_root": runs_root,
+            "entrypoint": entrypoint,
+            "part": part,
+            "parent_part": parent_part,
+            "effective_config": effective_config,
+            "allowed_uids": allowed_uids,
+            "allowed_image_paths": list(allowed_image_paths or []),
+            "training_scope": dict(training_scope or {}),
+            "epochs": epochs,
+            "batch_size": batch_size,
+            "learning_rate": learning_rate,
+            "weight_decay": weight_decay,
+            "input_size": input_size,
+            "trainer_backend": self.default_trainer_backend,
+            "heatmap_params": dict(self.default_heatmap_params),
+            "outer_loss_weights": dict(self.default_outer_loss_weights),
+            "training_strategy": self.default_training_strategy,
+            "runtime_device": self.runtime_device,
+        }
+        self.pending_training_request = request
+        self._start_blink_training_preflight(request)
+
+    def _start_blink_training_preflight(self, request):
+        saved = dict(request or {})
+        # Keep recovery requests compatible with older callers that only
+        # retained the project path and part settings.
+        project_manager = saved.get("project_manager") or self.pm
+
+        def operation(detail_callback, cancel_check):
+            return prepare_blink_training_run(
+                project_manager,
+                runs_root=saved["runs_root"],
+                entrypoint=saved["entrypoint"],
+                target_part=saved["part"],
+                parent_part=saved["parent_part"],
+                effective_config=saved["effective_config"],
                 backend={
-                    "backend_id": entrypoint,
+                    "backend_id": saved["entrypoint"],
                     "backend_version": "1.0",
                     "adapter_id": "blink_training_thread",
                     "adapter_version": "1.0",
                 },
-                allowed_image_uids=allowed_uids,
+                allowed_image_uids=saved["allowed_uids"],
                 seed=DEFAULT_TRAINING_SEED,
-                compute_device=str(self.runtime_device),
+                compute_device=str(saved["runtime_device"]),
+                retry_of=saved.get("retry_of") or None,
+                detail_progress_callback=detail_callback,
+                cancel_check=cancel_check,
             )
-        except Exception as exc:
-            self.btn_train_expert.setEnabled(True)
-            QMessageBox.critical(
-                self,
-                self.tr("Training preflight"),
-                self.tr(
-                    "Blink training did not start because the registered trajectories or files could not be verified: {0}"
-                ).format(str(exc)),
+
+        worker = TrainingPreflightWorker(operation)
+        worker.project_path = saved["project_path"]
+        dialog = QProgressDialog(
+            self.tr("Preparing training input verification..."),
+            self.tr("Cancel"),
+            0,
+            100,
+            self,
+        )
+        dialog.setWindowTitle(self.tr("Training preflight"))
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        dialog.setMinimumDuration(0)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        dialog.canceled.connect(worker.cancel)
+        worker.progress_signal.connect(
+            lambda payload, active=worker: self._on_blink_preflight_progress(
+                payload, active
             )
+        )
+        worker.prepared_signal.connect(
+            lambda prepared, active=worker, pending=saved: self._on_blink_preflight_ready(
+                prepared, pending, active
+            )
+        )
+        worker.error_signal.connect(
+            lambda error, active=worker, pending=saved: self._on_blink_preflight_error(
+                error, pending, active
+            )
+        )
+        worker.cancelled_signal.connect(
+            lambda active=worker: self._on_blink_preflight_cancelled(active)
+        )
+        worker.finished.connect(worker.deleteLater)
+        self.training_preflight_thread = worker
+        self.training_preflight_dialog = dialog
+        self.training_state_changed.emit("preflight_started")
+        self.btn_train_expert.setEnabled(False)
+        self.btn_stop_training.setEnabled(True)
+        self.prog_training.setValue(0)
+        self.lbl_status.setText(self.tr("Preparing training input verification..."))
+        dialog.show()
+        worker.start()
+
+    def _on_blink_preflight_progress(self, payload, worker):
+        if self.training_preflight_thread is not worker:
             return
+        detail = dict(payload or {})
+        percent = max(0, min(99, int(detail.get("percent") or 0)))
+        eta_value = detail.get("eta_seconds")
+        eta = format_eta(eta_value) if eta_value is not None else "--:--"
+        text = self.tr(
+            "Verifying training inputs: {0}/{1} | {2} | {3} | ETA {4}"
+        ).format(
+            int(detail.get("file_index") or 0),
+            int(detail.get("file_count") or 0),
+            str(detail.get("display_name") or "-"),
+            format_byte_rate(detail.get("bytes_per_second")),
+            eta,
+        )
+        self.training_preflight_dialog.setLabelText(text)
+        self.training_preflight_dialog.setValue(percent)
+        self.prog_training.setValue(percent)
+        self.lbl_status.setText(text)
+
+    def _clear_blink_preflight(self, worker):
+        if self.training_preflight_thread is not worker:
+            return False
+        dialog = self.training_preflight_dialog
+        self.training_preflight_thread = None
+        self.training_preflight_dialog = None
+        if dialog is not None:
+            try:
+                dialog.canceled.disconnect(worker.cancel)
+            except (RuntimeError, TypeError):
+                pass
+            dialog.close()
+            dialog.deleteLater()
+        return True
+
+    def _queue_blink_integrity_retry(self, request=None, *, retry_of=None):
+        """Allow one recovery retry while retaining the original run settings."""
+        if self.integrity_recovery_retry_used:
+            return False
+        saved = dict(request or self.pending_training_request or {})
+        if not saved:
+            return False
+        if retry_of:
+            saved["retry_of"] = str(retry_of)
+        self.integrity_recovery_retry_used = True
+        self.pending_blink_retry_request = saved
+        return True
+
+    def _start_queued_blink_integrity_retry(self):
+        request = self.pending_blink_retry_request
+        self.pending_blink_retry_request = None
+        if not request:
+            return False
+        self.btn_train_expert.setEnabled(False)
+        self.training_state_changed.emit("retry_queued")
+        QTimer.singleShot(
+            0,
+            lambda pending=request: self._start_blink_training_preflight(pending),
+        )
+        return True
+
+    def _on_blink_preflight_ready(self, prepared_run, request, worker):
+        if not self._clear_blink_preflight(worker):
+            return
+        if not self._training_callback_matches_project(worker):
+            if prepared_run.run.status == "running":
+                prepared_run.run.interrupt(stage="stale_project_context")
+            self.btn_train_expert.setEnabled(True)
+            self.btn_stop_training.setEnabled(False)
+            self.training_state_changed.emit("training_idle")
+            return
+        self._start_blink_training_thread(prepared_run, request)
+
+    def _on_blink_preflight_error(self, error, request, worker):
+        if not self._clear_blink_preflight(worker):
+            return
+        retry_of = str(getattr(error, "training_run_id", "") or "")
+        if not self._training_callback_matches_project(worker):
+            self.btn_train_expert.setEnabled(True)
+            self.btn_stop_training.setEnabled(False)
+            self.training_state_changed.emit("training_idle")
+            return
+        self.btn_train_expert.setEnabled(True)
+        self.btn_stop_training.setEnabled(False)
+        self.lbl_status.setText(self.tr("Training input verification failed."))
+        QMessageBox.critical(
+            self,
+            self.tr("Training preflight"),
+            self.tr(
+                "Blink training did not start because the registered trajectories or files could not be verified: {0}"
+            ).format(str(error)),
+        )
+        if not is_training_integrity_error(error):
+            self.training_state_changed.emit("training_idle")
+            return
+        recovery = TrainingIntegrityRecoveryDialog(self.pm, self)
+        recovery.exec()
+        if (
+            recovery.report.get("status") == "verified"
+            and self._queue_blink_integrity_retry(
+                request, retry_of=retry_of or None
+            )
+        ):
+            self._start_queued_blink_integrity_retry()
+            return
+        self.training_state_changed.emit("training_idle")
+
+    def _on_blink_preflight_cancelled(self, worker):
+        if not self._clear_blink_preflight(worker):
+            return
+        self.btn_train_expert.setEnabled(True)
+        self.btn_stop_training.setEnabled(False)
+        self.lbl_status.setText(self.tr("Training input verification cancelled."))
+        self.append_training_log(self.tr("Training input verification cancelled."))
+        self.training_state_changed.emit("training_idle")
+
+    def _start_blink_training_thread(self, prepared_run, request):
         model_output_root = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             "weights",
             "experts",
         )
         self.training_thread = BlinkTrainingThread(
-            project_path=self.pm.current_project_path,
-            part_name=part,
-            parent_part=parent_part,
-            epochs=epochs,
-            batch_size=batch_size,
-            learning_rate=learning_rate,
-            weight_decay=weight_decay,
-            input_size=input_size,
-            trainer_backend=self.default_trainer_backend,
-            heatmap_params=self.default_heatmap_params,
-            outer_loss_weights=self.default_outer_loss_weights,
-            training_strategy=self.default_training_strategy,
-            device=self.runtime_device,
-            allowed_image_paths=allowed_image_paths,
-            training_scope=training_scope,
+            project_path=request["project_path"],
+            part_name=request["part"],
+            parent_part=request["parent_part"],
+            epochs=request["epochs"],
+            batch_size=request["batch_size"],
+            learning_rate=request["learning_rate"],
+            weight_decay=request["weight_decay"],
+            input_size=request["input_size"],
+            trainer_backend=request["trainer_backend"],
+            heatmap_params=request["heatmap_params"],
+            outer_loss_weights=request["outer_loss_weights"],
+            training_strategy=request["training_strategy"],
+            device=request["runtime_device"],
+            allowed_image_paths=request["allowed_image_paths"],
+            training_scope=request["training_scope"],
             training_run=prepared_run.run,
             training_records=prepared_run.training_records,
             validation_records=prepared_run.validation_records,
@@ -2738,10 +2986,11 @@ class BlinkLabWidget(QWidget):
         self.training_log_console.clear()
         self.pending_training_report = None
         self.prog_training.setValue(0)
-        self.append_training_log(self.tr("Training Expert for {0}...").format(part))
+        self.append_training_log(self.tr("Training Expert for {0}...").format(request["part"]))
         self.append_training_log(f"Blink training strategy: {self.default_training_strategy} ({blink_training_strategy_label(self.default_training_strategy, self.lang)})")
         self.btn_stop_training.setEnabled(True)
         self.training_thread.start()
+        self.training_state_changed.emit("training_started")
 
     def _training_callback_matches_project(self, worker=None):
         expected_path = str(getattr(worker, "project_path", "") or self.training_project_path or "")
@@ -2767,6 +3016,14 @@ class BlinkLabWidget(QWidget):
         dlg.exec()
 
     def stop_expert_training(self):
+        preflight = self.training_preflight_thread
+        if preflight and preflight.isRunning():
+            preflight.cancel()
+            self.btn_stop_training.setEnabled(False)
+            self.lbl_status.setText(
+                self.tr("Cancelling training input verification...")
+            )
+            return
         if self.training_thread and self.training_thread.isRunning():
             self.training_thread.requestInterruption()
             self.btn_stop_training.setEnabled(False)
@@ -2930,15 +3187,45 @@ class BlinkLabWidget(QWidget):
             return
         self.lbl_status.setText(self.tr("Training Error: {0}").format(error_msg))
         print(f"Training Exception: {error_msg}")
+        if not is_training_integrity_error(error_msg):
+            return
+        retry_of = str(
+            getattr(getattr(worker, "training_run", None), "run_id", "")
+            or ""
+        )
+        recovery = TrainingIntegrityRecoveryDialog(self.pm, self)
+        recovery.exec()
+        if (
+            recovery.report.get("status") == "verified"
+            and self._queue_blink_integrity_retry(
+                retry_of=retry_of or None
+            )
+        ):
+            # The worker may finish while the modal recovery dialog is
+            # open. If so, its finished callback already ran and cannot
+            # consume the queued retry for us.
+            running_checker = getattr(worker, "isRunning", None)
+            worker_known_finished = False
+            if callable(running_checker):
+                try:
+                    worker_known_finished = not bool(running_checker())
+                except RuntimeError:
+                    worker_known_finished = True
+            if worker_known_finished:
+                self._start_queued_blink_integrity_retry()
 
     def _on_training_cancelled(self, worker=None):
         if not self._training_callback_matches_project(worker):
             return
+        self.pending_blink_retry_request = None
         self.lbl_status.setText(self.tr("Training cancelled."))
         self.append_training_log(self.tr("Training cancelled."))
+        self.training_state_changed.emit("training_idle")
 
     def _on_training_finished(self, worker=None):
         finished_thread = worker or self.training_thread
+        queued_retry = self.pending_blink_retry_request
+        self.pending_blink_retry_request = None
         if self.training_thread is finished_thread:
             self.btn_train_expert.setEnabled(True)
             self.btn_stop_training.setEnabled(False)
@@ -2948,6 +3235,11 @@ class BlinkLabWidget(QWidget):
             finished_thread.deleteLater()
         if self.pending_training_report and self._training_callback_matches_project(worker):
             QTimer.singleShot(0, self._show_pending_training_report)
+        if queued_retry and self._training_callback_matches_project(worker):
+            self.pending_blink_retry_request = queued_retry
+            self._start_queued_blink_integrity_retry()
+        else:
+            self.training_state_changed.emit("training_idle")
 
     def keyPressEvent(self, event):
         super().keyPressEvent(event)

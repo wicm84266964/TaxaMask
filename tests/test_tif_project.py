@@ -480,7 +480,15 @@ class TifProjectTests(unittest.TestCase):
             image_meta = write_volume_sidecar(project_root / image_rel, np.zeros((2, 3, 4), dtype=np.uint8), role="working_image")
             manual_meta = write_volume_sidecar(project_root / manual_rel, np.ones((2, 3, 4), dtype=np.uint16), role="manual_truth")
             manager.register_working_volume("01-0101-15", image_rel, image_meta["shape_zyx"], image_meta["dtype"], save=False)
-            manager.register_label_volume("01-0101-15", "manual_truth", manual_rel, manual_meta["shape_zyx"], manual_meta["dtype"], save=False)
+            manager.register_label_volume(
+                "01-0101-15",
+                "manual_truth",
+                manual_rel,
+                manual_meta["shape_zyx"],
+                manual_meta["dtype"],
+                status="reviewed",
+                save=False,
+            )
 
             manager.set_review_status("01-0101-15", "train_ready")
             self.assertTrue(manager.evaluate_train_ready("01-0101-15")["train_ready"])

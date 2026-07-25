@@ -21,6 +21,27 @@ class FakeTrainingThread:
         self.cancelled_signal = FakeSignal()
         self.finished = FakeSignal()
 
+    def isRunning(self):
+        return True
+
+
+class FakePreflightWorker:
+    def __init__(self):
+        self.prepared_signal = FakeSignal()
+        self.error_signal = FakeSignal()
+        self.cancelled_signal = FakeSignal()
+
+    def isRunning(self):
+        return True
+
+
+class FakeButton:
+    def __init__(self):
+        self.enabled = None
+
+    def setEnabled(self, value):
+        self.enabled = bool(value)
+
 
 class MainWindowStage6AnnotationBlinkTests(unittest.TestCase):
     def test_main_window_inherits_stage6_workflow_contracts(self):
@@ -128,6 +149,80 @@ class MainWindowStage6AnnotationBlinkTests(unittest.TestCase):
         self.assertEqual(len(thread.error_signal.callbacks), 1)
         self.assertEqual(len(thread.cancelled_signal.callbacks), 1)
         self.assertEqual(len(thread.finished.callbacks), 1)
+
+    def test_child_preflight_counts_as_busy_and_handoffs_to_training_thread(self):
+        from AntSleap.ui.main_window_blink_workflow import MainWindowBlinkWorkflowMixin
+
+        preflight = FakePreflightWorker()
+        formal_thread = FakeTrainingThread()
+        owner = type("BlinkOwner", (MainWindowBlinkWorkflowMixin,), {})()
+        owner.blink_lab = type(
+            "BlinkLab",
+            (),
+            {"training_thread": None, "training_preflight_thread": preflight},
+        )()
+        owner.btn_blink_stop_training = FakeButton()
+        owner._set_training_progress = lambda *args: None
+        owner._refresh_blink_refine_state = lambda: None
+        owner._on_child_training_result = lambda *args: None
+        owner._on_child_training_error = lambda *args: None
+        owner._on_child_training_cancelled = lambda *args: None
+        owner._on_child_training_finished = lambda *args: None
+
+        self.assertTrue(owner._is_child_training_running())
+        owner._connect_child_training_progress()
+        self.assertEqual(len(preflight.prepared_signal.callbacks), 1)
+
+        owner.blink_lab.training_thread = formal_thread
+        preflight.prepared_signal.callbacks[0](object())
+
+        self.assertEqual(len(formal_thread.progress_signal.callbacks), 1)
+        self.assertEqual(len(formal_thread.finished.callbacks), 1)
+        self.assertTrue(owner.btn_blink_stop_training.enabled)
+
+    def test_child_preflight_error_restores_outer_controls(self):
+        from AntSleap.ui.main_window_blink_workflow import MainWindowBlinkWorkflowMixin
+
+        preflight = FakePreflightWorker()
+        owner = type("BlinkOwner", (MainWindowBlinkWorkflowMixin,), {})()
+        owner.blink_lab = type(
+            "BlinkLab",
+            (),
+            {"training_thread": None, "training_preflight_thread": preflight},
+        )()
+        owner.btn_train = FakeButton()
+        owner.btn_blink_stop_training = FakeButton()
+        owner.current_lang = "en"
+        owner.child_training_failed = False
+        owner.child_training_cancel_requested = False
+        owner.progress = type("Progress", (), {"value": lambda self: 20})()
+        owner._set_training_progress = lambda *args: None
+        owner._refresh_blink_refine_state = lambda: None
+
+        owner._connect_child_training_progress()
+        preflight.error_signal.callbacks[0](RuntimeError("failed"))
+
+        self.assertTrue(owner.btn_train.enabled)
+        self.assertFalse(owner.btn_blink_stop_training.enabled)
+        self.assertTrue(owner.child_training_failed)
+
+    def test_child_retry_state_keeps_outer_controls_busy(self):
+        from AntSleap.ui.main_window_blink_workflow import MainWindowBlinkWorkflowMixin
+
+        owner = type("BlinkOwner", (MainWindowBlinkWorkflowMixin,), {})()
+        owner.blink_lab = type(
+            "BlinkLab",
+            (),
+            {"training_thread": None, "training_preflight_thread": None},
+        )()
+        owner.btn_train = FakeButton()
+        owner.btn_blink_stop_training = FakeButton()
+        owner._refresh_blink_refine_state = lambda: None
+
+        owner._on_child_training_state_changed("retry_queued")
+
+        self.assertFalse(owner.btn_train.enabled)
+        self.assertTrue(owner.btn_blink_stop_training.enabled)
 
 
 if __name__ == "__main__":

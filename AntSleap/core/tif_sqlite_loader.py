@@ -3,7 +3,11 @@ import os
 
 from .sqlite_storage import connect_sqlite_database, ensure_integrity_ok, read_project_manifest, resolve_manifest_database_path
 from .tif_project import TIF_PROJECT_SCHEMA_VERSION, TIF_PROJECT_TYPE
-from .tif_sqlite_schema import TIF_SQLITE_PROJECT_TYPE, validate_tif_project_schema
+from .tif_sqlite_schema import (
+    TIF_SQLITE_PROJECT_TYPE,
+    migrate_tif_project_database,
+    validate_tif_project_schema,
+)
 
 
 def _json_loads(value, fallback):
@@ -32,7 +36,7 @@ def _volume_record(row):
             "shape_zyx": [],
             "dtype": "",
             "spacing_zyx": [],
-            "spacing_unit": "micrometer",
+            "spacing_unit": "unknown",
             "orientation": "unknown",
         }
     if "shape_zyx_json" not in row and isinstance(row, dict):
@@ -42,7 +46,7 @@ def _volume_record(row):
         record.setdefault("shape_zyx", [])
         record.setdefault("dtype", "")
         record.setdefault("spacing_zyx", [])
-        record.setdefault("spacing_unit", "micrometer")
+        record.setdefault("spacing_unit", "unknown")
         record.setdefault("orientation", "unknown")
         return record
     record = {
@@ -51,7 +55,7 @@ def _volume_record(row):
         "shape_zyx": _as_list(_json_loads(row["shape_zyx_json"], [])),
         "dtype": str(row["dtype"] or ""),
         "spacing_zyx": _as_list(_json_loads(row["spacing_zyx_json"], [])),
-        "spacing_unit": str(row["spacing_unit"] or "micrometer"),
+        "spacing_unit": str(row["spacing_unit"] or "unknown"),
         "orientation": str(row["orientation"] or "unknown"),
     }
     status = str(row.get("status") or "")
@@ -455,6 +459,7 @@ def _load_run_artifacts(connection, run_id):
 
 def load_tif_sqlite_project_data(database_path):
     db_abs = os.path.abspath(str(database_path))
+    migrate_tif_project_database(db_abs)
     connection = connect_sqlite_database(db_abs)
     try:
         validate_tif_project_schema(connection)

@@ -131,6 +131,12 @@ def _require_safe_existing_path(path, *, expected_kind=None):
     return absolute
 
 
+def require_safe_existing_path(path, *, expected_kind=None):
+    """Reject links or reparse points in every component of an existing path."""
+
+    return _require_safe_existing_path(path, expected_kind=expected_kind)
+
+
 def _ensure_safe_directory(path):
     absolute = _absolute_path(path)
     for current in _absolute_chain(absolute):
@@ -393,7 +399,7 @@ def register_location(
         connection.close()
 
 
-def _resolve_records(location_refs, database_path=None):
+def _resolve_records(location_refs, database_path=None, *, require_existing=True):
     clean_refs = [_safe_location_ref(value) for value in location_refs]
     if not clean_refs:
         return {}
@@ -416,8 +422,12 @@ def _resolve_records(location_refs, database_path=None):
                 _raise("stored_location_path_invalid")
             if _path_key(stored_path) != str(row[2] or ""):
                 _raise("stored_location_path_invalid")
-            absolute = _require_safe_existing_path(
-                stored_path, expected_kind=entry_kind
+            absolute = (
+                _require_safe_existing_path(
+                    stored_path, expected_kind=entry_kind
+                )
+                if require_existing
+                else _absolute_path(stored_path)
             )
             resolved[location_ref] = {
                 "entry_kind": entry_kind,
@@ -442,6 +452,19 @@ def resolve_location(
     return record["path"]
 
 
+def read_registered_locations(location_refs, *, database_path=None):
+    """Read machine-local path records without requiring targets to exist."""
+
+    if isinstance(location_refs, (str, bytes)):
+        _raise("invalid_location_ref_collection")
+    records = _resolve_records(
+        list(location_refs),
+        database_path,
+        require_existing=False,
+    )
+    return {location_ref: dict(record) for location_ref, record in records.items()}
+
+
 def resolve_locations(location_refs, *, database_path=None):
     """Resolve opaque IDs for runtime use without serialising their paths."""
 
@@ -458,6 +481,8 @@ __all__ = [
     "LocationRegistryError",
     "connect_location_registry",
     "default_location_registry_path",
+    "read_registered_locations",
+    "require_safe_existing_path",
     "register_location",
     "resolve_location",
     "resolve_locations",

@@ -78,6 +78,21 @@ _LEDGER_REQUIRED_TRIGGERS = {
 def initialize_training_run_ledger_schema(connection):
     """Install the authoritative SQLite ledger used by every training entrypoint."""
 
+    meta_exists = connection.execute(
+        """
+        SELECT 1 FROM sqlite_master
+        WHERE type = 'table' AND name = 'training_run_ledger_meta'
+        """
+    ).fetchone()
+    if meta_exists is not None:
+        row = connection.execute(
+            "SELECT schema_version FROM training_run_ledger_meta WHERE id = 1"
+        ).fetchone()
+        if row is not None and int(row[0]) > TRAINING_RUN_LEDGER_SCHEMA_VERSION:
+            raise TrainingRunRecordError(
+                f"training_run_ledger_schema_too_new:{int(row[0])}"
+            )
+
     connection.executescript(
         """
         CREATE TABLE IF NOT EXISTS training_run_ledger_meta (
@@ -131,11 +146,8 @@ def initialize_training_run_ledger_schema(connection):
     )
     connection.execute(
         """
-        INSERT INTO training_run_ledger_meta (id, schema_version, updated_at)
+        INSERT OR IGNORE INTO training_run_ledger_meta (id, schema_version, updated_at)
         VALUES (1, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-            schema_version = excluded.schema_version,
-            updated_at = excluded.updated_at
         """,
         (TRAINING_RUN_LEDGER_SCHEMA_VERSION, utc_now()),
     )
@@ -395,19 +407,51 @@ def _is_reparse_point(stat_result: os.stat_result) -> bool:
     return bool(attributes & flag)
 
 
+def _absolute_path_chain(path):
+    absolute = os.path.abspath(os.fspath(path))
+    drive, tail = os.path.splitdrive(absolute)
+    anchor = f"{drive}{os.sep}" if drive else os.sep
+    current = anchor
+    yield current
+    for part in [item for item in tail.replace("\\", "/").split("/") if item]:
+        current = os.path.join(current, part)
+        yield current
+
+
 def _require_safe_filesystem_entry(path, *, expected_kind=None):
-    result = os.lstat(os.fspath(path))
-    if stat.S_ISLNK(result.st_mode) or _is_reparse_point(result):
-        raise UnsafeRunFact("filesystem_link_not_allowed")
+    chain = list(_absolute_path_chain(path))
+    target_result = None
+    for index, current in enumerate(chain):
+        result = os.lstat(current)
+        if stat.S_ISLNK(result.st_mode) or _is_reparse_point(result):
+            raise UnsafeRunFact("filesystem_link_not_allowed")
+        is_target = index == len(chain) - 1
+        if not is_target and not stat.S_ISDIR(result.st_mode):
+            raise UnsafeRunFact("filesystem_parent_not_directory")
+        if is_target:
+            target_result = result
     if expected_kind is None and not (
-        stat.S_ISDIR(result.st_mode) or stat.S_ISREG(result.st_mode)
+        stat.S_ISDIR(target_result.st_mode)
+        or stat.S_ISREG(target_result.st_mode)
     ):
         raise UnsafeRunFact("safe_file_or_directory_required")
-    if expected_kind == "directory" and not stat.S_ISDIR(result.st_mode):
+    if expected_kind == "directory" and not stat.S_ISDIR(target_result.st_mode):
         raise UnsafeRunFact("safe_directory_required")
-    if expected_kind == "file" and not stat.S_ISREG(result.st_mode):
+    if expected_kind == "file" and not stat.S_ISREG(target_result.st_mode):
         raise UnsafeRunFact("safe_regular_file_required")
-    return result
+    return target_result
+
+
+def _ensure_safe_directory(path):
+    absolute = os.path.abspath(os.fspath(path))
+    for current in _absolute_path_chain(absolute):
+        if not os.path.lexists(current):
+            try:
+                os.mkdir(current)
+            except FileExistsError:
+                pass
+        _require_safe_filesystem_entry(current, expected_kind="directory")
+    return absolute
 
 
 def _canonical_relative_path(value) -> str:
@@ -809,16 +853,20 @@ class TrainingRunRecorder:
         database_path=None,
         recover_on_startup=True,
     ):
-        requested_root = os.path.abspath(str(runs_root))
-        os.makedirs(requested_root, exist_ok=True)
-        self.runs_root = str(Path(requested_root).resolve(strict=True))
+        requested_root = _ensure_safe_directory(runs_root)
+        self.runs_root = requested_root
         requested_database = os.path.abspath(
             os.fspath(
                 database_path
                 or os.path.join(self.runs_root, TRAINING_RUN_LEDGER_FILENAME)
             )
         )
-        os.makedirs(os.path.dirname(requested_database), exist_ok=True)
+        _ensure_safe_directory(os.path.dirname(requested_database) or ".")
+        if os.path.lexists(requested_database):
+            _require_safe_filesystem_entry(
+                requested_database,
+                expected_kind="file",
+            )
         self.database_path = requested_database
         self._mutex = threading.RLock()
         self._locks = {}
@@ -1177,6 +1225,7 @@ class TrainingRun:
         self._path_bases = {"run_root": self.run_dir}
         self._external_paths = {}
         self._external_locations = {}
+        self._registry_verified_inputs = ()
         self._closed = False
 
     @property
@@ -1216,9 +1265,9 @@ class TrainingRun:
         clean_base = _validate_id(path_base, "path_base")
         if clean_base not in PATH_BASES:
             raise UnsafeRunFact(f"path_base_not_allowed:{clean_base}")
-        resolved = str(Path(base_dir).resolve(strict=True))
-        _require_safe_filesystem_entry(resolved, expected_kind="directory")
-        self._path_bases[clean_base] = resolved
+        requested = os.path.abspath(os.fspath(base_dir))
+        _require_safe_filesystem_entry(requested, expected_kind="directory")
+        self._path_bases[clean_base] = requested
         return clean_base
 
     def register_external_location(self, external_location_ref, path):
@@ -1448,6 +1497,143 @@ class TrainingRun:
                 current, expected_status=previous_status
             )
 
+    def mark_running_from_registry_verification(
+        self,
+        receipt,
+        *,
+        detail_progress_callback=None,
+        cancel_check=None,
+    ):
+        """Start from a run-bound Registry receipt after a final content recheck."""
+
+        with self._mutex:
+            current = self.record
+            self._require_mutable(current)
+            if current["status"] != STATUS_PENDING:
+                raise InvalidRunTransition(
+                    f"invalid_transition:{current['status']}->{STATUS_RUNNING}"
+                )
+            self._validate_dataset_policy(current)
+            integrity = self._validate_integrity_manifest(
+                current, require_recheck=True
+            )
+            self._validate_split_reference(current, integrity)
+            self._validate_effective_config(current, allow_pending_external=True)
+            self._validate_backend(current)
+            self._validate_code_environment(current)
+
+            project_ref = current.get("project_ref") or {}
+            dataset_ref = current.get("dataset_ref") or {}
+            from AntSleap.core.project_integrity_registry import (
+                claim_registry_verification_receipt,
+                registry_verification_audit_payload,
+            )
+
+            audit_artifacts = [
+                item
+                for item in current.get("artifacts") or []
+                if item.get("artifact_id") == "registry_verification_receipt"
+            ]
+            if len(audit_artifacts) != 1 or audit_artifacts[0].get("role") != (
+                "integrity_verification_receipt"
+            ):
+                raise IncompleteSuccessfulRun(
+                    "registry_verification_audit_missing"
+                )
+            audit_artifact = audit_artifacts[0]
+            self._verify_artifact(audit_artifact)
+            audit_payload = _read_json_object(
+                self._resolve_artifact(audit_artifact)
+            )
+
+            claim = claim_registry_verification_receipt(
+                receipt,
+                database_path=self.recorder.database_path,
+                run_dir=self.run_dir,
+                project_id=project_ref.get("project_id"),
+                data_version_id=dataset_ref.get("data_version_id"),
+                detail_progress_callback=detail_progress_callback,
+                cancel_check=cancel_check,
+            )
+            if audit_payload != registry_verification_audit_payload(
+                claim, run_id=self.run_id
+            ):
+                raise IncompleteSuccessfulRun(
+                    "registry_verification_audit_mismatch"
+                )
+            verified_files = claim.files
+            manifest_by_id = {
+                str(item.get("file_id") or ""): item
+                for item in integrity["files"]
+            }
+            registry_ids = {item.file_id for item in verified_files}
+            if set(manifest_by_id) != registry_ids | {"effective_config"}:
+                raise IncompleteSuccessfulRun(
+                    "registry_verified_manifest_file_set_mismatch"
+                )
+            for evidence in verified_files:
+                entry = manifest_by_id.get(evidence.file_id) or {}
+                expected_role = (
+                    "training_image"
+                    if evidence.role == "source_image"
+                    else evidence.role
+                )
+                comparable = {
+                    "role": expected_role,
+                    "entry_kind": evidence.manifest_entry_kind,
+                    "size_bytes": evidence.observed_size_bytes,
+                    "mtime_ns": evidence.observed_mtime_ns,
+                    "hash_algorithm": evidence.observed_hash_algorithm,
+                    "digest": evidence.observed_digest,
+                    "data_version_id": evidence.data_version_id,
+                }
+                if evidence.locator_kind == "opaque_ref":
+                    comparable["external_location_ref"] = (
+                        evidence.external_location_ref
+                    )
+                else:
+                    comparable.update(
+                        {
+                            "path_base": evidence.path_base,
+                            "relative_path": evidence.relative_path,
+                        }
+                    )
+                for field, expected_value in comparable.items():
+                    if entry.get(field) != expected_value:
+                        raise IncompleteSuccessfulRun(
+                            f"registry_verified_manifest_mismatch:{evidence.file_id}:{field}"
+                        )
+
+            config_entry = manifest_by_id["effective_config"]
+            if (
+                config_entry.get("role") != "training_config"
+                or config_entry.get("path_base") != "run_root"
+            ):
+                raise IncompleteSuccessfulRun(
+                    "registry_verified_training_config_invalid"
+                )
+            self._verify_artifact(
+                {
+                    "artifact_id": "effective_config",
+                    "role": config_entry["role"],
+                    "path_base": config_entry["path_base"],
+                    "relative_path": config_entry["relative_path"],
+                    "entry_kind": config_entry["entry_kind"],
+                    "size_bytes": config_entry["size_bytes"],
+                    "hash_algorithm": config_entry["hash_algorithm"],
+                    "digest": config_entry["digest"],
+                }
+            )
+            previous_status = current["status"]
+            current["status"] = STATUS_RUNNING
+            current["started_at"] = utc_now()
+            current["error"] = None
+            updated = self.recorder._update_record(
+                current, expected_status=previous_status
+            )
+            self._registry_verified_inputs = tuple(verified_files)
+            return updated
+
     def succeed(self):
         with self._mutex:
             current = self.record
@@ -1456,6 +1642,12 @@ class TrainingRun:
                 raise InvalidRunTransition(
                     f"invalid_transition:{current['status']}->{STATUS_SUCCEEDED}"
                 )
+            if self._registry_verified_inputs:
+                from AntSleap.core.project_integrity_registry import (
+                    recheck_registry_verified_files,
+                )
+
+                recheck_registry_verified_files(self._registry_verified_inputs)
             self._validate_success(current)
             return self._finish(current, STATUS_SUCCEEDED, error=None)
 

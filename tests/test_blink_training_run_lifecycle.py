@@ -132,7 +132,12 @@ class BlinkTrainingRunLifecycleTests(unittest.TestCase):
             self.assertEqual(record["status"], "succeeded", errors or record.get("error"))
             self.assertEqual(
                 {item["role"] for item in record["artifacts"]},
-                {"output_weights", "model_manifest", "training_report"},
+                {
+                    "integrity_verification_receipt",
+                    "output_weights",
+                    "model_manifest",
+                    "training_report",
+                },
             )
             publication = json.loads(
                 (
@@ -157,6 +162,41 @@ class BlinkTrainingRunLifecycleTests(unittest.TestCase):
             "blink_heatmap",
             "AntSleap.core.blink_heatmap_trainer.BlinkHeatmapTrainer",
         )
+
+    def test_artifact_registration_failure_cleans_pending_publication(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prepared = self._prepared(root, "blink_vit_b")
+            _FakeTrainer.report_root = root / "reports"
+            model_root = root / "models"
+            thread = BlinkTrainingThread(
+                project_path=str(root / "unused.json"),
+                part_name="Mandible",
+                parent_part="Head",
+                epochs=1,
+                batch_size=1,
+                trainer_backend=BLINK_EXPERT_BACKEND_VIT_B,
+                training_run=prepared.run,
+                training_records=prepared.training_records,
+                validation_records=prepared.validation_records,
+                model_output_root=model_root,
+            )
+            errors = []
+            thread.error_signal.connect(errors.append)
+            with patch.object(
+                prepared.run,
+                "add_artifact",
+                side_effect=RuntimeError("artifact registration exploded"),
+            ), patch("AntSleap.core.blink_trainer.BlinkExpertTrainer", _FakeTrainer):
+                thread.run()
+
+            record = prepared.run.recorder.load(prepared.run.run_id)
+            self.assertEqual(record["status"], "failed")
+            self.assertTrue(errors)
+            self.assertIn("artifact registration exploded", errors[0])
+            self.assertFalse(
+                (model_root / "training_runs" / prepared.run.run_id).exists()
+            )
 
 
 if __name__ == "__main__":

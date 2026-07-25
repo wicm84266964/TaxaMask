@@ -25,6 +25,10 @@ from .file_integrity import (
     FingerprintError,
     compute_fingerprint,
 )
+from .location_registry import (
+    LocationRegistryError,
+    require_safe_existing_path,
+)
 from .safe_io import atomic_write_json
 
 
@@ -736,6 +740,44 @@ def _safe_commonpath_contains(base: str, target: str) -> bool:
     return os.path.normcase(common) == os.path.normcase(base)
 
 
+def _require_safe_managed_component_chain(path) -> None:
+    candidate = os.path.abspath(os.fspath(path))
+    probe = candidate
+    target_exists = os.path.lexists(probe)
+    while not os.path.lexists(probe):
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            _raise_manifest_error(
+                "managed_path_unresolvable",
+                "The managed relative path could not be resolved safely.",
+                stage="integrity_verify",
+                recoverable=True,
+            )
+        probe = parent
+    try:
+        require_safe_existing_path(
+            probe,
+            expected_kind=None if target_exists else "directory",
+        )
+    except LocationRegistryError as exc:
+        if exc.code in {
+            "location_link_not_allowed",
+            "location_special_entry_not_allowed",
+        }:
+            _raise_manifest_error(
+                "unsupported_entry_type",
+                "The managed path contains a link, reparse point, or special entry.",
+                stage="integrity_verify",
+                recoverable=False,
+            )
+        _raise_manifest_error(
+            "managed_path_unresolvable",
+            "The managed relative path could not be resolved safely.",
+            stage="integrity_verify",
+            recoverable=True,
+        )
+
+
 def _resolve_managed_path(
     path_base: str,
     relative_path: str,
@@ -750,8 +792,21 @@ def _resolve_managed_path(
         )
     relative_path = validate_relative_path(relative_path)
     try:
-        base = str(Path(os.fspath(roots[path_base])).resolve(strict=True))
-    except (OSError, TypeError) as exc:
+        base = require_safe_existing_path(
+            os.path.abspath(os.fspath(roots[path_base])),
+            expected_kind="directory",
+        )
+    except (LocationRegistryError, OSError, TypeError) as exc:
+        if isinstance(exc, LocationRegistryError) and exc.code in {
+            "location_link_not_allowed",
+            "location_special_entry_not_allowed",
+        }:
+            _raise_manifest_error(
+                "unsupported_entry_type",
+                "The managed path base contains a link, reparse point, or special entry.",
+                stage="integrity_verify",
+                recoverable=False,
+            )
         raise IntegrityManifestError(
             _error(
                 "path_base_unavailable",
@@ -760,6 +815,7 @@ def _resolve_managed_path(
             )
         ) from exc
     candidate = Path(base).joinpath(*relative_path.split("/"))
+    _require_safe_managed_component_chain(candidate)
     try:
         resolved = str(candidate.resolve(strict=False))
     except OSError as exc:
@@ -777,8 +833,6 @@ def _resolve_managed_path(
             stage="integrity_verify",
             recoverable=False,
         )
-    # Hash the lexical path so the fingerprint layer can reject a symlink or
-    # junction at the artifact root. ``resolved`` is used only for containment.
     return str(candidate)
 
 
@@ -1433,12 +1487,19 @@ class IntegrityManifestService:
                     "The application stopped before this integrity check finished.",
                     stage="recovery_check",
                 )
-        payload["status"] = "incomplete"
+        # A process can stop after the last file was written but before the
+        # top-level status update. Recompute from the file states so recovery
+        # does not downgrade an already complete verification to incomplete.
+        payload["status"] = _top_status(payload["files"])
         payload["finished_at"] = _now_iso()
-        payload["error"] = _error(
-            "process_interrupted",
-            "The application stopped before the integrity manifest finished.",
-            stage="recovery_check",
+        payload["error"] = (
+            _error(
+                "process_interrupted",
+                "The application stopped before the integrity manifest finished.",
+                stage="recovery_check",
+            )
+            if payload["status"] == "incomplete"
+            else _top_error(payload["status"])
         )
         return self._write(payload)
 

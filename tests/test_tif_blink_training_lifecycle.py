@@ -190,6 +190,41 @@ class TifBlinkTrainingLifecycleTests(unittest.TestCase):
             self.assertEqual(records[-1]["entrypoint"], "tif_blink_project")
             self.assertEqual(records[-1]["error"]["stage"], "project_load")
 
+    def test_project_training_without_ready_samples_reports_the_real_cause(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = make_top_level_only_project(root)
+            for specimen_id in ("top-001", "top-002"):
+                manager.set_review_status(
+                    specimen_id,
+                    "reviewed",
+                    train_ready=False,
+                    save=False,
+                )
+            manager.save_project()
+            args = _args(
+                project=manager.current_project_path,
+                output_dir=str(Path(manager.project_dir) / "runs" / "tif_blink"),
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "^tif_blink_no_train_ready_samples$",
+            ):
+                train_from_project(args)
+
+            records = TrainingRunRecorder(
+                Path(manager.project_dir) / "runs" / "tif_blink",
+                database_path=manager.current_database_path,
+                recover_on_startup=False,
+            ).list_records()
+            self.assertEqual(records[-1]["status"], "failed")
+            self.assertEqual(records[-1]["error"]["stage"], "tif_blink_project")
+            self.assertEqual(
+                records[-1]["error"]["code"],
+                "tif_blink_no_train_ready_samples",
+            )
+
     def test_project_training_keyboard_interrupt_is_recorded(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

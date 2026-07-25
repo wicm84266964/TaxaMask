@@ -685,6 +685,70 @@ class TrainingWeightPublisher:
                     )
         return report
 
+    def cleanup_terminal_run(self, run_id, run_record):
+        """Remove only the unfinished publication owned by one failed run.
+
+        This is the narrow cleanup path used by a training worker after it has
+        durably recorded a terminal failure.  It deliberately does not scan or
+        resolve any other run, so a project-local recorder cannot make a
+        decision about publications owned by another project.
+        """
+
+        clean_run_id = _validate_id(run_id, "run_id")
+        status = self._resolved_run_status(clean_run_id, run_record)
+        if status not in _TERMINAL_FAILURE_STATUSES:
+            raise PublicationIntegrityError(
+                "terminal_failure_run_required",
+                "Only a matching failed, cancelled, or interrupted run can be cleaned.",
+                recoverable=False,
+            )
+        report = {"cleaned": [], "manual_review": []}
+        with self._mutex, self._exclusive_process_operation():
+            try:
+                children = sorted(
+                    os.scandir(self.training_runs_root), key=lambda item: item.name
+                )
+            except OSError as exc:
+                raise UnsafePublicationEntry(
+                    "publication_root_unreadable",
+                    "The managed publication root cannot be inspected.",
+                ) from exc
+
+            for child in children:
+                is_final = child.name == clean_run_id
+                is_hidden = self._run_id_from_temp_name(child.name) == clean_run_id
+                if not (is_final or is_hidden):
+                    continue
+                try:
+                    _require_directory(child.path)
+                    if is_final:
+                        payload = self._load_manifest(
+                            child.path, expected_run_id=clean_run_id
+                        )
+                        self._verify_bundle(
+                            child.path, payload, allow_stale_tmp=True
+                        )
+                        if payload["status"] != PUBLICATION_STATUS_PENDING:
+                            raise ActivePublicationImmutable(
+                                "active_publication_for_terminal_run",
+                                "An active publication conflicts with a failed training run and requires manual review.",
+                                recoverable=False,
+                            )
+                    else:
+                        _scan_safe_tree(child.path)
+                    _remove_safe_tree(child.path)
+                except (OSError, TrainingWeightPublicationError) as exc:
+                    report["manual_review"].append(
+                        {
+                            "entry": child.name,
+                            "run_id": clean_run_id,
+                            "reason": getattr(exc, "code", "cleanup_failed"),
+                        }
+                    )
+                else:
+                    report["cleaned"].append(child.name)
+        return report
+
     def list_active(self, run_record_resolver):
         """Return only active bundles that still match a succeeded SQLite run."""
 

@@ -10,6 +10,7 @@ from .file_integrity import FULL_FILE_ALGORITHM, compute_fingerprint
 from .location_registry import register_location
 from .project_integrity_registry import (
     LABEL_SNAPSHOT_SCHEMA_ID,
+    ProjectIntegrityRegistryError,
     REGISTRY_READY,
     canonical_snapshot_text,
     commit_project_data_version,
@@ -315,15 +316,38 @@ def commit_2d_project_integrity_changes(
                 "relative_path": str(current_source[7] or ""),
                 "opaque_ref": str(current_source[8] or ""),
             }
-        if current_source is None or any(
+        location_changed = current_source is None or any(
             str(current_location.get(key) or "") != str(new_location.get(key) or "")
             for key in ("location_kind", "path_base", "relative_path", "opaque_ref")
-        ):
+        )
+        if location_changed or candidate_data_version_id:
             source_change = _source_entry(
                 project_manager, image_key, image_uid
             )
+            if current_source is not None:
+                observed = source_change["expected"]
+                registered = {
+                    "digest": str(current_source[1] or ""),
+                    "size_bytes": int(current_source[2] or 0),
+                    "hash_algorithm": str(current_source[3] or ""),
+                    "entry_kind": str(current_source[4] or ""),
+                }
+                if any(
+                    observed.get(key) != registered.get(key)
+                    for key in (
+                        "digest",
+                        "size_bytes",
+                        "hash_algorithm",
+                        "entry_kind",
+                    )
+                ):
+                    raise ProjectIntegrityRegistryError(
+                        "unregistered_source_image_change",
+                        f"unregistered_source_image_change:{image_uid}",
+                    )
             source_change["runtime_path"] = os.path.abspath(image_key)
-            changes.append(source_change)
+            if location_changed:
+                changes.append(source_change)
 
         label_change, _legacy_count = _label_entry(
             project_manager, image_key, image_uid

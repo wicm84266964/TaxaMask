@@ -149,6 +149,31 @@ class ProjectIntegrityBridgeTests(unittest.TestCase):
                 manager.project_data["project_data_version_id"], initial
             )
 
+    def test_label_save_rejects_externally_changed_source_image(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager, image_path = self._manager(root)
+            manager.initialize_integrity_baseline()
+            version = manager.project_data["project_data_version_id"]
+            Image.new("RGB", (16, 12), color=(1, 2, 3)).save(image_path)
+
+            with self.assertRaises(ProjectIntegrityRegistryError) as raised:
+                manager.update_label(
+                    str(image_path),
+                    "Head",
+                    [[1, 1], [11, 1], [8, 9]],
+                    box=[1, 1, 11, 9],
+                    save=True,
+                )
+
+            self.assertEqual(
+                raised.exception.code, "unregistered_source_image_change"
+            )
+            self.assertEqual(
+                manager.integrity_registry_state()["current_data_version_id"],
+                version,
+            )
+
     def test_legacy_truth_requires_explicit_attestation(self):
         with tempfile.TemporaryDirectory() as tmp:
             manager, image_path = self._manager(Path(tmp))

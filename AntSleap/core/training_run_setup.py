@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import os
+import uuid
 from collections.abc import Mapping
 
 from AntSleap.core.file_integrity import DEFAULT_CHUNK_SIZE
@@ -12,10 +13,14 @@ from AntSleap.core.integrity_manifest_service import (
     build_external_file_entry,
     build_file_entry,
     require_verified_training_inputs,
+    write_manifest,
 )
 from AntSleap.core.safe_io import atomic_write_json
 from AntSleap.core.project_integrity_registry import (
+    consume_registry_verification_batch,
     get_training_baseline_snapshot,
+    inspect_registry_verification_receipt,
+    registry_verification_audit_payload,
     resolve_training_baseline_inputs,
 )
 from AntSleap.core.training_run_recorder import (
@@ -25,6 +30,8 @@ from AntSleap.core.training_run_recorder import (
 
 
 INTEGRITY_MANIFEST_FILENAME = "integrity_manifest.json"
+REGISTRY_EXPECTATIONS_FILENAME = "integrity_registry_expectations.json"
+REGISTRY_VERIFICATION_RECEIPT_FILENAME = "integrity_registry_receipt.json"
 SPLIT_MANIFEST_FILENAME = "split_manifest.json"
 
 _COMMON_FILE_SPEC_FIELDS = frozenset(
@@ -186,6 +193,212 @@ def build_and_attach_verified_training_inputs(
     }
 
 
+def build_and_attach_registry_verified_training_inputs(
+    run,
+    *,
+    verification_batch,
+    resolved_inputs,
+    registry_file_specs,
+    local_file_specs,
+    assignments,
+    dataset_id,
+    data_version_id,
+    strategy,
+    path_bases=None,
+):
+    """Bind initial Registry evidence to a run while preserving the final recheck."""
+
+    if not isinstance(resolved_inputs, Mapping):
+        raise TypeError("resolved_registry_inputs_not_object")
+    if resolved_inputs.get("status") != "verified":
+        raise ValueError("resolved_registry_inputs_not_verified")
+    registry_specs = list(registry_file_specs or [])
+    local_specs = list(local_file_specs or [])
+    if not registry_specs:
+        raise ValueError("registry_training_file_specs_missing")
+    registry_file_ids = [str(item.get("file_id") or "") for item in registry_specs]
+    if any(not file_id for file_id in registry_file_ids):
+        raise ValueError("registry_training_file_id_missing")
+    local_file_ids = [str(item.get("file_id") or "") for item in local_specs]
+    if set(registry_file_ids) & set(local_file_ids):
+        raise ValueError("registry_local_training_file_id_conflict")
+
+    managed_bases = {"run_root": run.run_dir}
+    for path_base, base_dir in dict(path_bases or {}).items():
+        if path_base == "run_root":
+            if os.path.normcase(os.path.abspath(os.fspath(base_dir))) != os.path.normcase(
+                os.path.abspath(run.run_dir)
+            ):
+                raise ValueError("run_root_override_not_allowed")
+            continue
+        run.register_path_base(path_base, base_dir)
+        managed_bases[path_base] = os.path.abspath(os.fspath(base_dir))
+
+    receipt = consume_registry_verification_batch(
+        verification_batch,
+        database_path=run.recorder.database_path,
+        run_dir=run.run_dir,
+        project_id=resolved_inputs.get("project_id"),
+        data_version_id=resolved_inputs.get("data_version_id"),
+        selected_file_ids=registry_file_ids,
+    )
+    claim_preview = inspect_registry_verification_receipt(
+        receipt,
+        database_path=run.recorder.database_path,
+        run_dir=run.run_dir,
+        project_id=resolved_inputs.get("project_id"),
+        data_version_id=resolved_inputs.get("data_version_id"),
+    )
+    evidence_by_file = {item.file_id: item for item in claim_preview.files}
+    for spec in registry_specs:
+        if not isinstance(spec, Mapping):
+            raise TypeError("training_file_spec_not_object")
+        file_id = str(spec.get("file_id") or "")
+        evidence = evidence_by_file.get(file_id)
+        if evidence is None:
+            raise ValueError(f"registry_verification_file_missing:{file_id}")
+        expected_role = (
+            "training_image" if evidence.role == "source_image" else evidence.role
+        )
+        if spec.get("role") != expected_role:
+            raise ValueError(f"registry_manifest_evidence_mismatch:{file_id}:role")
+        if evidence.locator_kind == "opaque_ref":
+            if spec.get("external_location_ref") != evidence.external_location_ref:
+                raise ValueError(
+                    f"registry_manifest_evidence_mismatch:{file_id}:external_location_ref"
+                )
+            runtime_path = spec.get("runtime_path")
+            if runtime_path is None or os.path.normcase(
+                os.path.abspath(os.fspath(runtime_path))
+            ) != os.path.normcase(evidence.runtime_path):
+                raise ValueError(
+                    f"registry_manifest_evidence_mismatch:{file_id}:runtime_path"
+                )
+        else:
+            if spec.get("path_base") != evidence.path_base:
+                raise ValueError(
+                    f"registry_manifest_evidence_mismatch:{file_id}:path_base"
+                )
+            if spec.get("relative_path") != evidence.relative_path:
+                raise ValueError(
+                    f"registry_manifest_evidence_mismatch:{file_id}:relative_path"
+                )
+    entries = [
+        _build_integrity_entry(run, spec, data_version_id)
+        for spec in registry_specs + local_specs
+    ]
+    stamp = utc_now()
+    for entry in entries:
+        evidence = evidence_by_file.get(entry["file_id"])
+        if evidence is not None:
+            expected_role = (
+                "training_image" if evidence.role == "source_image" else evidence.role
+            )
+            comparable = {
+                "role": expected_role,
+                "entry_kind": evidence.manifest_entry_kind,
+                "size_bytes": evidence.observed_size_bytes,
+                "hash_algorithm": evidence.observed_hash_algorithm,
+                "digest": evidence.observed_digest,
+                "data_version_id": evidence.data_version_id,
+            }
+            if evidence.locator_kind == "opaque_ref":
+                comparable["external_location_ref"] = (
+                    evidence.external_location_ref
+                )
+            else:
+                comparable.update(
+                    {
+                        "path_base": evidence.path_base,
+                        "relative_path": evidence.relative_path,
+                    }
+                )
+            for field, expected_value in comparable.items():
+                if entry.get(field) != expected_value:
+                    raise ValueError(
+                        f"registry_manifest_evidence_mismatch:{entry['file_id']}:{field}"
+                    )
+            entry["mtime_ns"] = evidence.observed_mtime_ns
+            entry["verified_at"] = evidence.verified_at
+        else:
+            entry["verified_at"] = stamp
+        entry["status"] = "verified"
+        entry["error"] = None
+
+    expectations_path = os.path.join(run.run_dir, REGISTRY_EXPECTATIONS_FILENAME)
+    expectations_service = IntegrityManifestService(
+        expectations_path,
+        managed_bases,
+        external_locations=run._external_locations,
+    )
+    expectations = expectations_service.create_manifest(run.run_id, entries)
+    verified_payload = copy.deepcopy(expectations)
+    verified_payload.update(
+        {
+            "manifest_id": f"integrity_{uuid.uuid4().hex}",
+            "status": "verified",
+            "phase": "verification",
+            "created_at": stamp,
+            "started_at": stamp,
+            "finished_at": stamp,
+            "attempt": 2,
+            "recheck_of": expectations["manifest_id"],
+            "files": entries,
+            "error": None,
+        }
+    )
+    integrity_path = os.path.join(run.run_dir, INTEGRITY_MANIFEST_FILENAME)
+    verified_payload = write_manifest(integrity_path, verified_payload)
+    require_verified_training_inputs(
+        verified_payload,
+        required_file_ids=[entry["file_id"] for entry in entries],
+    )
+    integrity_ref = run.attach_integrity_manifest(integrity_path)
+
+    clean_assignments = copy.deepcopy(list(assignments or []))
+    validate_split_assignments(clean_assignments)
+    if not isinstance(strategy, Mapping):
+        raise TypeError("split_strategy_not_object")
+    split_payload = {
+        "schema_version": "taxamask_training_split_v1",
+        "split_id": f"split_{run.run_id}",
+        "run_id": run.run_id,
+        "status": "verified",
+        "created_at": stamp,
+        "started_at": stamp,
+        "finished_at": stamp,
+        "dataset_id": dataset_id,
+        "strategy": copy.deepcopy(dict(strategy)),
+        "assignments": clean_assignments,
+        "error": None,
+    }
+    split_path = os.path.join(run.run_dir, SPLIT_MANIFEST_FILENAME)
+    atomic_write_json(split_path, split_payload, indent=2)
+    split_ref = run.attach_split_manifest(split_path)
+
+    audit_payload = registry_verification_audit_payload(
+        claim_preview, run_id=run.run_id
+    )
+    audit_path = os.path.join(
+        run.run_dir, REGISTRY_VERIFICATION_RECEIPT_FILENAME
+    )
+    atomic_write_json(audit_path, audit_payload, indent=2)
+    audit_ref = run.add_artifact(
+        artifact_id="registry_verification_receipt",
+        role="integrity_verification_receipt",
+        path=audit_path,
+        media_type="application/json",
+    )
+    return {
+        "integrity_manifest": integrity_ref,
+        "split_manifest": split_ref,
+        "verified_file_count": len(entries),
+        "assignment_count": len(clean_assignments),
+        "registry_verification_receipt": receipt,
+        "registry_verification_audit": audit_ref,
+    }
+
+
 def _resolved_file_spec(entry):
     run_role = {
         "source_image": "training_image",
@@ -300,8 +513,11 @@ def build_and_attach_registry_training_inputs(
 
 __all__ = [
     "INTEGRITY_MANIFEST_FILENAME",
+    "REGISTRY_EXPECTATIONS_FILENAME",
+    "REGISTRY_VERIFICATION_RECEIPT_FILENAME",
     "SPLIT_MANIFEST_FILENAME",
     "build_and_attach_registry_training_inputs",
+    "build_and_attach_registry_verified_training_inputs",
     "build_and_attach_verified_training_inputs",
     "resolved_registry_file_specs",
 ]

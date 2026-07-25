@@ -71,6 +71,7 @@ try:
     from AntSleap.core.tif_prediction_import import default_prediction_id_for_tif, import_external_prediction_tif
     from AntSleap.core.tif_project import TifProjectManager
     from AntSleap.core.tif_stack_import import import_tif_stack, materialize_registered_tif_stack, register_tif_stack_metadata
+    from AntSleap.core.tif_truth_policy import can_use_role_for_training
     from AntSleap.core.tif_roi_preview import DEFAULT_ROI_TEXTURE_BUDGET_BYTES, HIGH_ROI_TEXTURE_BUDGET_BYTES, build_roi_mask_preview, build_roi_volume_preview, normalize_roi_bbox_zyx, roi_shape_zyx
     from AntSleap.core.tif_volume_io import create_empty_label_sidecar_like, create_volume_sidecar_memmap, flush_volume_array, load_volume_sidecar, volume_sidecar_exists
     from AntSleap.core.tif_volume_preview import (
@@ -176,6 +177,7 @@ except ModuleNotFoundError as exc:
     from core.tif_prediction_import import default_prediction_id_for_tif, import_external_prediction_tif
     from core.tif_project import TifProjectManager
     from core.tif_stack_import import import_tif_stack, materialize_registered_tif_stack, register_tif_stack_metadata
+    from core.tif_truth_policy import can_use_role_for_training
     from core.tif_roi_preview import DEFAULT_ROI_TEXTURE_BUDGET_BYTES, HIGH_ROI_TEXTURE_BUDGET_BYTES, build_roi_mask_preview, build_roi_volume_preview, normalize_roi_bbox_zyx, roi_shape_zyx
     from core.tif_volume_io import create_empty_label_sidecar_like, create_volume_sidecar_memmap, flush_volume_array, load_volume_sidecar, volume_sidecar_exists
     from core.tif_volume_preview import (
@@ -4922,11 +4924,16 @@ class TifWorkbenchWidget(QWidget):
                 record = ((specimen or {}).get("labels") or {}).get(
                     "manual_truth"
                 ) or {}
-            if (
-                not record.get("path")
-                or str(record.get("status") or "reviewed")
-                not in {"reviewed", "verified", "train_ready"}
-            ):
+            if not record.get("path"):
+                return {}
+            truth_policy = can_use_role_for_training(
+                str(record.get("role") or "manual_truth"),
+                status=record.get("status"),
+                record_exists=True,
+                review_audit=record.get("review_audit"),
+                training=record.get("training"),
+            )
+            if not truth_policy:
                 return {}
             path = self.project.to_absolute(record["path"])
             return dict(record) if volume_sidecar_exists(path) else {}

@@ -143,7 +143,17 @@ class TifBlinkCoreTests(unittest.TestCase):
             image_meta = write_volume_sidecar(root / "project" / image_rel, image, role="working_image")
             manual_meta = write_volume_sidecar(root / "project" / manual_rel, manual, role="manual_truth")
             manager.register_working_volume("brain-01", image_rel, image_meta["shape_zyx"], image_meta["dtype"], save=False)
-            manager.register_label_volume("brain-01", "manual_truth", manual_rel, manual_meta["shape_zyx"], manual_meta["dtype"], save=False)
+            manager.register_label_volume(
+                "brain-01",
+                "manual_truth",
+                manual_rel,
+                manual_meta["shape_zyx"],
+                manual_meta["dtype"],
+                status="reviewed",
+                explicit_review=True,
+                operation="truth_promotion",
+                save=False,
+            )
             manager.set_review_status("brain-01", "train_ready", train_ready=True)
 
             samples = load_train_ready_samples(manager, ["brain-01"])

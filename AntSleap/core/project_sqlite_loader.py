@@ -2,7 +2,11 @@ import json
 import os
 
 from .project import DEFAULT_CATEGORY_SUPERCATEGORY
-from .project_sqlite_schema import PROJECT_2D_PROJECT_TYPE, validate_2d_project_schema
+from .project_sqlite_schema import (
+    PROJECT_2D_PROJECT_TYPE,
+    migrate_2d_project_database,
+    validate_2d_project_schema,
+)
 from .sqlite_storage import connect_sqlite_database, ensure_integrity_ok, read_project_manifest, resolve_manifest_database_path
 from .training_truth import LABEL_PART_METADATA_FIELD
 
@@ -367,6 +371,7 @@ def _load_model_profiles(connection, settings):
 def load_2d_sqlite_project_data(database_path, *, project_dir=None):
     db_abs = os.path.abspath(str(database_path))
     base_dir = os.path.abspath(str(project_dir or os.path.dirname(db_abs) or "."))
+    migrate_2d_project_database(db_abs)
     connection = connect_sqlite_database(db_abs)
     try:
         validate_2d_project_schema(connection)

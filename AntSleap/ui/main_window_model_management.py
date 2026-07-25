@@ -33,6 +33,9 @@ class MainWindowModelManagementMixin:
             ("inf_thread", "Batch Inference"),
             ("trainer", "Training"),
             ("external_training_thread", "Training"),
+            # Input verification reads the active project's files and creates
+            # a run record, so it must be treated as project-bound work too.
+            ("training_preflight_thread", "Training"),
             ("dataset_export_thread", "Export"),
         )
         for attribute, label_key in checks:
@@ -46,6 +49,16 @@ class MainWindowModelManagementMixin:
         child_training_thread = getattr(blink_lab, "training_thread", None) if blink_lab is not None else None
         try:
             if child_training_thread is not None and child_training_thread.isRunning():
+                return tr("Training", self.current_lang)
+        except RuntimeError:
+            pass
+        child_preflight_thread = (
+            getattr(blink_lab, "training_preflight_thread", None)
+            if blink_lab is not None
+            else None
+        )
+        try:
+            if child_preflight_thread is not None and child_preflight_thread.isRunning():
                 return tr("Training", self.current_lang)
         except RuntimeError:
             pass

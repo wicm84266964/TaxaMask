@@ -1,6 +1,6 @@
 # TaxaMask 第五轮训练入口矩阵
 
-状态：M1 实现后当前状态，更新于 2026-07-20。
+状态：专业复审收口后的当前状态，更新于 2026-07-23。
 
 本文件回答三个问题：有哪些真实训练入口、哪些数据可以训练、每次训练事实写到哪里。字段契约见 `taxamask_round5_artifact_contract_v1.md`。
 
@@ -10,6 +10,9 @@
 - JSON 报告、模型 manifest 和历史文件只是可读投影或受索引产物，不是平级后端。
 - 项目内入口只接受 Registry 复验通过的人工确认标签；未确认样本没有绕过开关。
 - 每次训练先建 `pending`，预检通过后转 `running`，最后写 `succeeded`、`failed`、`cancelled` 或 `interrupted`。
+- 2D/Blink GUI 的两轮完整内容复验都在后台执行，显示当前文件、进度、读取速度和 ETA；取消后不启动训练，已创建 run 收敛为 `cancelled`。
+- 第二轮是 `pending -> running` 前的内容复验，不用 size/mtime 缓存代替；第一轮凭据绑定项目、data version、run、revision 和验证事件且只能消费一次。
+- 图组训练只复验实际选中 UID 的 source/人工标签及本次共享配置、schema、起始权重；训练成功和权重激活前再次复验这些已绑定输入，持续变化会使 run 失败。
 - 重试创建新 run，并用 `retry_of` 引用原失败 run；历史不覆盖。
 - 不区分“正式/临时训练”，用户通过 run 备注记录目的、重要性、结论和后续用途。
 

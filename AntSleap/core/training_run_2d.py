@@ -11,12 +11,29 @@ from .project_training_inputs import resolve_2d_project_training_dataset
 from .safe_io import atomic_write_json
 from .training_run_recorder import TrainingRunRecorder, capture_environment
 from .training_run_setup import (
-    build_and_attach_verified_training_inputs,
+    build_and_attach_registry_verified_training_inputs,
     resolved_registry_file_specs,
 )
 
 
 DEFAULT_TRAINING_SEED = 20260720
+
+
+def _attach_training_run_id(exc, run):
+    """Keep the failed preflight's run identity with the propagated error.
+
+    The UI receives the preparation exception on a worker signal, while the
+    run object itself stays local to the preparation function.  Carrying only
+    this opaque ID lets a recovery retry reference the failed ledger row
+    without exposing the mutable run object across threads.
+    """
+
+    try:
+        exc.training_run_id = str(run.run_id)
+    except Exception:
+        # A third-party BaseException may disallow custom attributes.  The
+        # original error is still more useful than replacing it here.
+        pass
 
 
 @dataclass
@@ -160,6 +177,8 @@ def prepare_2d_training_run(
     cuda="not_recorded",
     initial_weight_slots=(),
     retry_of=None,
+    detail_progress_callback=None,
+    cancel_check=None,
 ):
     """Create and start a run only after Registry evidence has been rechecked."""
 
@@ -180,6 +199,10 @@ def prepare_2d_training_run(
             data_version_id=data_version_id,
             max_samples=max_samples,
             allowed_image_uids=allowed_image_uids,
+            included_initial_weight_slots=initial_weight_slots,
+            include_parts=include_parts,
+            detail_progress_callback=detail_progress_callback,
+            cancel_check=cancel_check,
         )
         if dataset["project_id"] != project_id:
             raise ValueError("project_registry_identity_mismatch")
@@ -204,11 +227,11 @@ def prepare_2d_training_run(
         config_relative = "inputs/effective_config.json"
         config_path = os.path.join(run.run_dir, *config_relative.split("/"))
         atomic_write_json(config_path, clean_config, indent=2)
-        file_specs = resolved_registry_file_specs(
+        registry_file_specs = resolved_registry_file_specs(
             dataset["resolved_inputs"],
             included_initial_weight_slots=initial_weight_slots,
         )
-        file_specs.append(
+        local_file_specs = [
             {
                 "file_id": "effective_config",
                 "role": "training_config",
@@ -218,7 +241,7 @@ def prepare_2d_training_run(
                     config_path, FULL_FILE_ALGORITHM
                 ),
             }
-        )
+        ]
         run.attach_facts(
             project_ref={
                 "project_kind": "taxamask_2d",
@@ -248,9 +271,12 @@ def prepare_2d_training_run(
             }
         )
         group_count = len({item["group_id"] for item in assignments})
-        build_and_attach_verified_training_inputs(
+        setup = build_and_attach_registry_verified_training_inputs(
             run,
-            file_specs=file_specs,
+            verification_batch=dataset["verification_batch"],
+            resolved_inputs=dataset["resolved_inputs"],
+            registry_file_specs=registry_file_specs,
+            local_file_specs=local_file_specs,
             assignments=assignments,
             dataset_id=project_id,
             data_version_id=data_version_id,
@@ -262,7 +288,12 @@ def prepare_2d_training_run(
             },
             path_bases={"project_root": dataset["project_root"]},
         )
-        run.mark_running()
+        dataset.pop("verification_batch", None)
+        run.mark_running_from_registry_verification(
+            setup["registry_verification_receipt"],
+            detail_progress_callback=detail_progress_callback,
+            cancel_check=cancel_check,
+        )
         return Prepared2DTrainingRun(
             run=run,
             dataset=dataset,
@@ -274,8 +305,11 @@ def prepare_2d_training_run(
             effective_config=clean_config,
         )
     except BaseException as exc:
+        _attach_training_run_id(exc, run)
         if run.status in {"pending", "running"}:
-            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            if getattr(exc, "code", None) == "user_cancelled":
+                run.cancel(stage="integrity_preflight")
+            elif isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 run.interrupt(stage="integrity_preflight")
             else:
                 run.fail(exc, stage="integrity_preflight")
@@ -297,6 +331,8 @@ def prepare_blink_training_run(
     cuda="not_recorded",
     initial_weight_slots=(),
     retry_of=None,
+    detail_progress_callback=None,
+    cancel_check=None,
 ):
     """Prepare a Blink run from registered trajectory snapshots."""
 
@@ -314,6 +350,9 @@ def prepare_blink_training_run(
             project_manager,
             data_version_id=data_version_id,
             allowed_image_uids=allowed_image_uids,
+            included_initial_weight_slots=initial_weight_slots,
+            detail_progress_callback=detail_progress_callback,
+            cancel_check=cancel_check,
         )
         records = []
         for uid in sorted(
@@ -357,11 +396,11 @@ def prepare_blink_training_run(
         config_relative = "inputs/effective_config.json"
         config_path = os.path.join(run.run_dir, *config_relative.split("/"))
         atomic_write_json(config_path, clean_config, indent=2)
-        file_specs = resolved_registry_file_specs(
+        registry_file_specs = resolved_registry_file_specs(
             dataset["resolved_inputs"],
             included_initial_weight_slots=initial_weight_slots,
         )
-        file_specs.append(
+        local_file_specs = [
             {
                 "file_id": "effective_config",
                 "role": "training_config",
@@ -371,7 +410,7 @@ def prepare_blink_training_run(
                     config_path, FULL_FILE_ALGORITHM
                 ),
             }
-        )
+        ]
         run.attach_facts(
             project_ref={
                 "project_kind": "taxamask_2d",
@@ -413,9 +452,12 @@ def prepare_blink_training_run(
                     ],
                 }
             )
-        build_and_attach_verified_training_inputs(
+        setup = build_and_attach_registry_verified_training_inputs(
             run,
-            file_specs=file_specs,
+            verification_batch=dataset["verification_batch"],
+            resolved_inputs=dataset["resolved_inputs"],
+            registry_file_specs=registry_file_specs,
+            local_file_specs=local_file_specs,
             assignments=assignments,
             dataset_id=project_id,
             data_version_id=data_version_id,
@@ -427,7 +469,12 @@ def prepare_blink_training_run(
             },
             path_bases={"project_root": dataset["project_root"]},
         )
-        run.mark_running()
+        dataset.pop("verification_batch", None)
+        run.mark_running_from_registry_verification(
+            setup["registry_verification_receipt"],
+            detail_progress_callback=detail_progress_callback,
+            cancel_check=cancel_check,
+        )
         return PreparedBlinkTrainingRun(
             run=run,
             dataset=dataset,
@@ -437,8 +484,11 @@ def prepare_blink_training_run(
             effective_config=clean_config,
         )
     except BaseException as exc:
+        _attach_training_run_id(exc, run)
         if run.status in {"pending", "running"}:
-            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            if getattr(exc, "code", None) == "user_cancelled":
+                run.cancel(stage="integrity_preflight")
+            elif isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 run.interrupt(stage="integrity_preflight")
             else:
                 run.fail(exc, stage="integrity_preflight")

@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,11 +12,93 @@ from AntSleap.core.tif_sqlite_schema import (
     create_tif_project_database,
     initialize_tif_project_schema,
     json_text,
+    migrate_tif_project_database,
     validate_tif_project_schema,
 )
+from AntSleap.core.sqlite_storage import read_database_schema_version
 
 
 class TifSQLiteSchemaTests(unittest.TestCase):
+    LEGACY_TABLES = {
+        "schema_migrations", "tif_projects", "specimens", "volume_assets",
+        "label_layers", "material_maps", "parts", "part_rois", "part_reslices",
+        "global_axis_proposals", "local_frame_proposals", "tif_models", "tif_runs",
+        "tif_run_artifacts", "tif_events", "sqlite_sequence",
+    }
+
+    def test_v1_database_migrates_explicitly_to_v2_with_backup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "legacy_tif.taxamask.sqlite"
+            connection = create_tif_project_database(db_path)
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO specimens (specimen_id, display_name)
+                    VALUES ('01-legacy', 'Legacy specimen')
+                    """
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            connection = sqlite3.connect(db_path)
+            try:
+                connection.execute("PRAGMA foreign_keys = OFF")
+                for (name,) in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'trigger'"
+                ).fetchall():
+                    connection.execute(f'DROP TRIGGER "{name}"')
+                for (name,) in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall():
+                    if name not in self.LEGACY_TABLES:
+                        connection.execute(f'DROP TABLE "{name}"')
+                connection.execute(
+                    "DELETE FROM schema_migrations WHERE schema_name = ?",
+                    (TIF_SQLITE_SCHEMA_NAME,),
+                )
+                connection.execute(
+                    "INSERT INTO schema_migrations (schema_name, version) VALUES (?, 1)",
+                    (TIF_SQLITE_SCHEMA_NAME,),
+                )
+                connection.execute("UPDATE tif_projects SET schema_version = 1 WHERE id = 1")
+                connection.commit()
+            finally:
+                connection.close()
+
+            result = migrate_tif_project_database(db_path)
+
+            self.assertTrue(result["migrated"])
+            self.assertTrue(Path(result["backup_path"]).is_file())
+            self.assertEqual(
+                read_database_schema_version(db_path, TIF_SQLITE_SCHEMA_NAME),
+                TIF_SQLITE_SCHEMA_VERSION,
+            )
+            connection = sqlite3.connect(db_path)
+            try:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT display_name FROM specimens WHERE specimen_id = '01-legacy'"
+                    ).fetchone()[0],
+                    "Legacy specimen",
+                )
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT schema_version FROM tif_projects WHERE id = 1"
+                    ).fetchone()[0],
+                    2,
+                )
+                self.assertEqual(
+                    [row[0] for row in connection.execute(
+                        "SELECT version FROM schema_migrations WHERE schema_name = ? ORDER BY version",
+                        (TIF_SQLITE_SCHEMA_NAME,),
+                    ).fetchall()],
+                    [1, 2],
+                )
+                validate_tif_project_schema(connection)
+            finally:
+                connection.close()
+
     def test_initialize_schema_is_idempotent(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "tif_project.taxamask.sqlite"
@@ -61,6 +144,29 @@ class TifSQLiteSchemaTests(unittest.TestCase):
                 conn.commit()
                 with self.assertRaisesRegex(ValueError, "missing_tif_sqlite_columns:volume_assets"):
                     initialize_tif_project_schema(conn)
+            finally:
+                conn.close()
+
+    def test_project_row_version_must_match_migration_version(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "inconsistent_tif.taxamask.sqlite"
+            conn = create_tif_project_database(db_path)
+            try:
+                conn.execute(
+                    "UPDATE tif_projects SET schema_version = 1 WHERE id = 1"
+                )
+                conn.commit()
+
+                with self.assertRaisesRegex(
+                    ValueError, "inconsistent_tif_sqlite_schema_version"
+                ):
+                    initialize_tif_project_schema(conn)
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT schema_version FROM tif_projects WHERE id = 1"
+                    ).fetchone()[0],
+                    1,
+                )
             finally:
                 conn.close()
 

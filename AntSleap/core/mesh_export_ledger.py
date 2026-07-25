@@ -9,7 +9,8 @@ from pathlib import PurePosixPath
 from .sqlite_storage import connect_sqlite_database
 
 
-MESH_EXPORT_SCHEMA_VERSION = "taxamask_mesh_export_sqlite_v1"
+LEGACY_MESH_EXPORT_SCHEMA_VERSION = "taxamask_mesh_export_sqlite_v1"
+MESH_EXPORT_SCHEMA_VERSION = "taxamask_mesh_export_sqlite_v2"
 MESH_EXPORT_STATUSES = frozenset(
     {"pending", "running", "complete", "incomplete", "failed"}
 )
@@ -335,6 +336,48 @@ class MeshExportLedger:
         kind = str(source.get("kind") or "")
         if kind not in MESH_ITEM_KINDS:
             raise MeshExportLedgerError("invalid_mesh_item_kind")
+        processing = dict(source.get("processing") or {})
+        bounds_xyz = source.get("bounds_xyz")
+        if bounds_xyz is None:
+            bounds_xyz = source.get("bounds_xyz_mm") or []
+        bounds_unit = str(
+            source.get("bounds_unit")
+            or processing.get("bounds_unit")
+            or ("millimeter" if source.get("bounds_xyz_mm") else "unitless")
+        )
+        scale_verified = str(source.get("scale_status") or "") == "verified"
+        if not scale_verified:
+            bounds_unit = "unitless"
+        if kind == "preview":
+            role = "display_preview"
+            mesh_purpose = "display_preview"
+            measurement_allowed = False
+        elif scale_verified and bounds_unit == "millimeter":
+            role = "measurement_mesh"
+            mesh_purpose = "measurement"
+            measurement_allowed = True
+        else:
+            role = "observation_mesh"
+            mesh_purpose = "observation"
+            measurement_allowed = False
+        processing.update(
+            {
+                "bounds_xyz": bounds_xyz,
+                "bounds_unit": bounds_unit,
+                "mesh_purpose": mesh_purpose,
+                "measurement_allowed": measurement_allowed,
+            }
+        )
+        legacy_bounds_xyz_mm = (
+            bounds_xyz
+            if (
+                kind == "raw"
+                and mesh_purpose == "measurement"
+                and bounds_unit == "millimeter"
+                and measurement_allowed
+            )
+            else []
+        )
         connection = self._connect()
         try:
             with connection:
@@ -348,11 +391,11 @@ class MeshExportLedger:
                     """
                     INSERT INTO mesh_export_items (
                         export_id, artifact_id, label_id, label_name, kind,
-                        relative_path, size_bytes, hash_algorithm, digest,
+                        role, relative_path, size_bytes, hash_algorithm, digest,
                         vertex_count, face_count, bounds_xyz_mm_json,
                         component_count, watertight, scale_status,
                         processing_json, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         clean_export_id,
@@ -360,17 +403,18 @@ class MeshExportLedger:
                         int(source.get("label_id")),
                         str(source.get("label_name") or ""),
                         kind,
+                        role,
                         _relative_path(source.get("relative_path"), "relative_path"),
                         int(source.get("size_bytes") or 0),
                         str(source.get("hash_algorithm") or "sha256"),
                         str(source.get("digest") or ""),
                         int(source.get("vertex_count") or 0),
                         int(source.get("face_count") or 0),
-                        _json_text(source.get("bounds_xyz_mm") or []),
+                        _json_text(legacy_bounds_xyz_mm),
                         int(source.get("component_count") or 0),
                         int(bool(source.get("watertight"))),
                         str(source.get("scale_status") or ""),
-                        _json_text(source.get("processing") or {}),
+                        _json_text(processing),
                         str(source.get("created_at") or _now_iso()),
                     ),
                 )
@@ -496,17 +540,91 @@ class MeshExportLedger:
             record = dict(row)
             for key in ("coordinates_json", "requested_labels_json", "options_json"):
                 record[key.removesuffix("_json")] = json.loads(record.pop(key))
+            coordinates = record["coordinates"]
+            if str(coordinates.get("scale_status") or "") == "verified":
+                coordinates.setdefault("output_unit", "millimeter")
+                coordinates.setdefault("mesh_purpose", "measurement")
+            else:
+                coordinates["output_unit"] = "unitless"
+                coordinates["mesh_purpose"] = "observation"
+                coordinates.pop("spacing_zyx_mm", None)
             record["items"] = []
             for item_row in connection.execute(
                 "SELECT * FROM mesh_export_items WHERE export_id = ? ORDER BY id",
                 (clean_export_id,),
             ).fetchall():
                 item = dict(item_row)
-                item["bounds_xyz_mm"] = json.loads(
+                legacy_bounds_xyz_mm = json.loads(
                     item.pop("bounds_xyz_mm_json")
                 )
                 item["processing"] = json.loads(item.pop("processing_json"))
                 item["watertight"] = bool(item["watertight"])
+                processing = item["processing"]
+                scale_verified = (
+                    str(item.get("scale_status") or "") == "verified"
+                    and str(record.get("coordinates", {}).get("scale_status") or "")
+                    == "verified"
+                )
+                bounds_xyz = processing.get("bounds_xyz")
+                if bounds_xyz is None:
+                    bounds_xyz = legacy_bounds_xyz_mm
+                bounds_unit = str(
+                    processing.get("bounds_unit")
+                    or ("millimeter" if scale_verified else "unitless")
+                )
+                source_mesh_purpose = "measurement" if scale_verified else "observation"
+                mesh_purpose = str(
+                    processing.get("mesh_purpose")
+                    or (
+                        "display_preview"
+                        if item["kind"] == "preview"
+                        else source_mesh_purpose
+                    )
+                )
+                if item["kind"] == "preview":
+                    mesh_purpose = "display_preview"
+                measurement_allowed = bool(
+                    processing.get(
+                        "measurement_allowed",
+                        item["kind"] == "raw"
+                        and mesh_purpose == "measurement"
+                        and bounds_unit == "millimeter"
+                        and scale_verified,
+                    )
+                )
+                if item["kind"] == "preview":
+                    measurement_allowed = False
+                role = str(item.get("role") or "")
+                if role in {"", "mesh"}:
+                    role = (
+                        "display_preview"
+                        if item["kind"] == "preview"
+                        else f"{mesh_purpose}_mesh"
+                    )
+                processing.update(
+                    {
+                        "bounds_xyz": bounds_xyz,
+                        "bounds_unit": bounds_unit,
+                        "mesh_purpose": mesh_purpose,
+                        "measurement_allowed": measurement_allowed,
+                    }
+                )
+                if item["kind"] == "preview":
+                    processing.setdefault(
+                        "source_mesh_purpose",
+                        source_mesh_purpose,
+                    )
+                item.update(
+                    {
+                        "role": role,
+                        "bounds_xyz": bounds_xyz,
+                        "bounds_unit": bounds_unit,
+                        "mesh_purpose": mesh_purpose,
+                        "measurement_allowed": measurement_allowed,
+                    }
+                )
+                if legacy_bounds_xyz_mm and bounds_unit == "millimeter":
+                    item["bounds_xyz_mm"] = legacy_bounds_xyz_mm
                 record["items"].append(item)
             record["reviews"] = []
             for review_row in connection.execute(
@@ -560,6 +678,7 @@ class MeshExportLedger:
 
 
 __all__ = [
+    "LEGACY_MESH_EXPORT_SCHEMA_VERSION",
     "MESH_EXPORT_SCHEMA_VERSION",
     "MESH_EXPORT_STATUSES",
     "MeshExportLedger",

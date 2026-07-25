@@ -228,9 +228,37 @@ def _parse_encoding(header_text):
 
 
 def _parse_spacing_unit(header_text):
-    if re.search(r'Coordinates\s+"?µm"?', header_text) or re.search(r'Coordinates\s+"?Âµm"?', header_text):
-        return "micrometer"
-    return "micrometer"
+    match = re.search(r'Coordinates\s+"?([^"\s,}]+)"?', header_text, re.IGNORECASE)
+    if not match:
+        return "unknown"
+    value = (
+        str(match.group(1) or "")
+        .strip()
+        .lower()
+        .replace("Âµ", "u")
+        .replace("µ", "u")
+        .replace("μ", "u")
+    )
+    aliases = {
+        "m": "meter",
+        "meter": "meter",
+        "meters": "meter",
+        "cm": "centimeter",
+        "centimeter": "centimeter",
+        "centimeters": "centimeter",
+        "mm": "millimeter",
+        "millimeter": "millimeter",
+        "millimeters": "millimeter",
+        "um": "micrometer",
+        "micron": "micrometer",
+        "microns": "micrometer",
+        "micrometer": "micrometer",
+        "micrometers": "micrometer",
+        "nm": "nanometer",
+        "nanometer": "nanometer",
+        "nanometers": "nanometer",
+    }
+    return aliases.get(value, "unknown")
 
 
 def _parse_spacing_zyx(header_text):
@@ -462,6 +490,10 @@ def import_amira_directory(
     raw_tif_shape = _read_raw_tif_shape(files.get("raw_tif", ""))
 
     warnings = []
+    if str(resampled_header.get("spacing_unit") or "unknown") == "unknown":
+        warnings.append("physical_spacing_unit_unknown")
+    if str(labels_header.get("spacing_unit") or "unknown") == "unknown" and "physical_spacing_unit_unknown" not in warnings:
+        warnings.append("physical_spacing_unit_unknown")
     if raw_tif_shape and raw_tif_shape != labels_header["shape_zyx"]:
         warnings.append("raw_tif_shape_differs_from_labels_shape")
     if resampled_header["shape_zyx"] != labels_header["shape_zyx"]:

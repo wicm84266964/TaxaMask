@@ -5,22 +5,145 @@ except ImportError:
 
 
 class MainWindowBlinkWorkflowMixin:
+    @staticmethod
+    def _thread_is_running(thread):
+        if thread is None:
+            return False
+        checker = getattr(thread, "isRunning", None)
+        return bool(checker and checker())
+
+    def _child_training_preflight_worker(self):
+        blink_lab = getattr(self, "blink_lab", None)
+        return (
+            getattr(blink_lab, "training_preflight_thread", None)
+            if blink_lab is not None
+            else None
+        )
+
     def _is_child_training_running(self):
         blink_lab = getattr(self, "blink_lab", None)
         thread = getattr(blink_lab, "training_thread", None) if blink_lab is not None else None
-        return bool(thread and thread.isRunning())
+        return self._thread_is_running(thread) or self._thread_is_running(
+            self._child_training_preflight_worker()
+        )
 
-    def _connect_child_training_progress(self):
+    def _on_child_training_state_changed(self, state):
+        state = str(state or "")
+        if state == "retry_queued":
+            self._child_retry_in_progress = True
+        elif state == "training_idle":
+            self._child_retry_in_progress = False
+            if not self._is_child_training_running():
+                if hasattr(self, "btn_train"):
+                    self.btn_train.setEnabled(True)
+                if hasattr(self, "btn_blink_stop_training"):
+                    self.btn_blink_stop_training.setEnabled(False)
+        if state in {"preflight_started", "retry_queued", "training_started"}:
+            if hasattr(self, "btn_train"):
+                self.btn_train.setEnabled(False)
+            if hasattr(self, "btn_blink_stop_training"):
+                self.btn_blink_stop_training.setEnabled(True)
+            if state == "preflight_started":
+                self._connect_child_training_progress(prefer_preflight=True)
+        elif state == "training_idle":
+            if hasattr(self, "btn_train"):
+                self.btn_train.setEnabled(True)
+            if hasattr(self, "btn_blink_stop_training"):
+                self.btn_blink_stop_training.setEnabled(False)
+        self._refresh_blink_refine_state()
+
+    def _connect_child_training_progress(self, *, prefer_preflight=False):
         blink_lab = getattr(self, "blink_lab", None)
-        thread = getattr(blink_lab, "training_thread", None) if blink_lab is not None else None
-        if thread is None or getattr(thread, "_taxamask_shared_progress_connected", False):
+        state_signal = getattr(blink_lab, "training_state_changed", None)
+        if state_signal is not None and not getattr(
+            blink_lab, "_taxamask_training_state_connected", False
+        ):
+            state_signal.connect(self._on_child_training_state_changed)
+            blink_lab._taxamask_training_state_connected = True
+        thread = (
+            getattr(blink_lab, "training_thread", None)
+            if blink_lab is not None and not prefer_preflight
+            else None
+        )
+        if thread is not None:
+            if getattr(thread, "_taxamask_shared_progress_connected", False):
+                return
+            thread._taxamask_shared_progress_connected = True
+            thread.progress_signal.connect(lambda value: self._set_training_progress("child", None, value))
+            thread.result_signal.connect(self._on_child_training_result)
+            thread.error_signal.connect(self._on_child_training_error)
+            thread.cancelled_signal.connect(self._on_child_training_cancelled)
+            thread.finished.connect(self._on_child_training_finished)
             return
-        thread._taxamask_shared_progress_connected = True
-        thread.progress_signal.connect(lambda value: self._set_training_progress("child", None, value))
-        thread.result_signal.connect(self._on_child_training_result)
-        thread.error_signal.connect(self._on_child_training_error)
-        thread.cancelled_signal.connect(self._on_child_training_cancelled)
-        thread.finished.connect(self._on_child_training_finished)
+
+        preflight = self._child_training_preflight_worker()
+        if preflight is None or getattr(
+            preflight, "_taxamask_shared_lifecycle_connected", False
+        ):
+            return
+        preflight._taxamask_shared_lifecycle_connected = True
+        prepared_signal = getattr(preflight, "prepared_signal", None)
+        if prepared_signal is not None:
+            prepared_signal.connect(
+                lambda prepared, active=preflight: self._on_child_preflight_ready(
+                    prepared, active
+                )
+            )
+        error_signal = getattr(preflight, "error_signal", None)
+        if error_signal is not None:
+            error_signal.connect(
+                lambda error, active=preflight: self._on_child_preflight_error(
+                    error, active
+                )
+            )
+        cancelled_signal = getattr(preflight, "cancelled_signal", None)
+        if cancelled_signal is not None:
+            cancelled_signal.connect(
+                lambda active=preflight: self._on_child_preflight_cancelled(active)
+            )
+
+    def _on_child_preflight_ready(self, _prepared=None, worker=None):
+        # Blink's own callback creates the training thread first; connect to
+        # that thread before the user can receive progress or completion.
+        self._connect_child_training_progress()
+        if self._is_child_training_running() and hasattr(
+            self, "btn_blink_stop_training"
+        ):
+            self.btn_blink_stop_training.setEnabled(True)
+
+    def _finish_child_preflight(self, *, cancelled=False, worker=None):
+        if getattr(self, "_child_retry_in_progress", False):
+            return
+        blink_lab = getattr(self, "blink_lab", None)
+        if worker is not None and blink_lab is not None:
+            matches = getattr(blink_lab, "_training_callback_matches_project", None)
+            if callable(matches):
+                try:
+                    if not matches(worker):
+                        return
+                except Exception:
+                    return
+            if getattr(blink_lab, "pending_blink_retry_request", None):
+                return
+        if cancelled:
+            self.child_training_cancel_requested = True
+            message = tr("Training cancelled.", self.current_lang)
+        else:
+            self.child_training_failed = True
+            message = tr("Child-part expert training failed.", self.current_lang)
+        if hasattr(self, "btn_train"):
+            self.btn_train.setEnabled(True)
+        if hasattr(self, "btn_blink_stop_training"):
+            self.btn_blink_stop_training.setEnabled(False)
+        if hasattr(self, "_set_training_progress"):
+            self._set_training_progress("child", message, self.progress.value())
+        self._refresh_blink_refine_state()
+
+    def _on_child_preflight_error(self, error=None, worker=None):
+        self._finish_child_preflight(cancelled=False, worker=worker)
+
+    def _on_child_preflight_cancelled(self, worker=None):
+        self._finish_child_preflight(cancelled=True, worker=worker)
 
     def _on_child_training_result(self, save_path):
         self.child_training_failed = not bool(save_path)
@@ -30,6 +153,8 @@ class MainWindowBlinkWorkflowMixin:
             self._set_training_progress("child", tr("Child-part expert training failed.", self.current_lang), self.progress.value())
 
     def _on_child_training_error(self, _error_msg):
+        if getattr(self, "_child_retry_in_progress", False):
+            return
         self.child_training_failed = True
         self._set_training_progress("child", tr("Child-part expert training failed.", self.current_lang), self.progress.value())
 
@@ -38,6 +163,8 @@ class MainWindowBlinkWorkflowMixin:
         self._set_training_progress("child", tr("Training cancelled.", self.current_lang), self.progress.value())
 
     def _on_child_training_finished(self):
+        if getattr(self, "_child_retry_in_progress", False):
+            return
         if self.active_training_kind == "child" and not self.child_training_failed and not self.child_training_cancel_requested:
             self._set_training_progress("child", tr("Child-part expert training finished.", self.current_lang), 100)
         if hasattr(self, "btn_train"):
@@ -372,7 +499,7 @@ class MainWindowBlinkWorkflowMixin:
         if self._is_parent_training_running():
             self._warn_blink_context(tr("Parent-part training is running. Wait for it to finish before training a child expert.", self.current_lang))
             return
-        if getattr(self.blink_lab, "training_thread", None) is not None and self.blink_lab.training_thread.isRunning():
+        if self._is_child_training_running():
             self._warn_blink_context(tr("Blink expert training is already running.", self.current_lang))
             return
         child_part = context.get("child_part")
@@ -420,7 +547,7 @@ class MainWindowBlinkWorkflowMixin:
             training_scope=child_training_scope,
         )
         self._connect_child_training_progress()
-        if getattr(self.blink_lab, "training_thread", None) is None:
+        if not self._is_child_training_running():
             self.btn_train.setEnabled(True)
             if hasattr(self, "btn_blink_stop_training"):
                 self.btn_blink_stop_training.setEnabled(False)

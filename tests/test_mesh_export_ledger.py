@@ -1,4 +1,5 @@
 import tempfile
+import sqlite3
 import unittest
 from pathlib import Path
 
@@ -100,6 +101,14 @@ class MeshExportLedgerTests(unittest.TestCase):
             self.assertEqual(complete["completed_item_count"], 1)
             self.assertEqual(complete["items"][0]["label_id"], 1)
             self.assertTrue(complete["items"][0]["watertight"])
+            self.assertEqual(complete["items"][0]["role"], "measurement_mesh")
+            self.assertEqual(complete["items"][0]["mesh_purpose"], "measurement")
+            self.assertEqual(complete["items"][0]["bounds_unit"], "millimeter")
+            self.assertTrue(complete["items"][0]["measurement_allowed"])
+            self.assertEqual(
+                complete["items"][0]["bounds_xyz"],
+                _item()["bounds_xyz_mm"],
+            )
 
             with self.assertRaises(MeshExportLedgerError):
                 ledger.finish(pending["export_id"], "failed")
@@ -213,6 +222,115 @@ class MeshExportLedgerTests(unittest.TestCase):
                 )],
                 ["mesh_scope_reslice"],
             )
+
+    def test_observation_and_preview_use_neutral_processing_without_mm_compat_slot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database_path = Path(tmp) / "project.sqlite"
+            ledger = MeshExportLedger(database_path)
+            pending_record = _pending("mesh_unitless_001")
+            pending_record["coordinates"].update(
+                {
+                    "spacing_unit": "unknown",
+                    "output_unit": "unitless",
+                    "scale_status": "scale_unverified",
+                    "mesh_purpose": "observation",
+                }
+            )
+            pending_record["options"]["preview_smoothing"] = True
+            run = ledger.create_pending(pending_record)
+            ledger.mark_running(run["export_id"])
+
+            observation = _item()
+            observation.pop("bounds_xyz_mm")
+            observation.update(
+                {
+                    "bounds_xyz": [[0, 0, 0], [10, 20, 30]],
+                    "bounds_unit": "unitless",
+                    "mesh_purpose": "observation",
+                    "measurement_allowed": False,
+                    "role": "observation_mesh",
+                    "scale_status": "scale_unverified",
+                }
+            )
+            ledger.add_item(run["export_id"], observation)
+
+            preview = dict(observation)
+            preview.update(
+                {
+                    "artifact_id": "preview_label_1",
+                    "kind": "preview",
+                    "relative_path": "preview/specimen_mesh_test_label_1_brain.stl",
+                    "role": "measurement_mesh",
+                    "mesh_purpose": "measurement",
+                    "measurement_allowed": True,
+                }
+            )
+            loaded = ledger.add_item(run["export_id"], preview)
+            by_kind = {item["kind"]: item for item in loaded["items"]}
+
+            self.assertEqual(by_kind["raw"]["role"], "observation_mesh")
+            self.assertEqual(by_kind["raw"]["bounds_unit"], "unitless")
+            self.assertFalse(by_kind["raw"]["measurement_allowed"])
+            self.assertNotIn("bounds_xyz_mm", by_kind["raw"])
+            self.assertEqual(by_kind["preview"]["role"], "display_preview")
+            self.assertEqual(by_kind["preview"]["mesh_purpose"], "display_preview")
+            self.assertFalse(by_kind["preview"]["measurement_allowed"])
+
+            connection = sqlite3.connect(database_path)
+            try:
+                stored = connection.execute(
+                    "SELECT bounds_xyz_mm_json FROM mesh_export_items ORDER BY id"
+                ).fetchall()
+            finally:
+                connection.close()
+            self.assertEqual(stored, [("[]",), ("[]",)])
+
+    def test_legacy_measurement_item_projects_to_neutral_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database_path = Path(tmp) / "project.sqlite"
+            ledger = MeshExportLedger(database_path)
+            run = ledger.create_pending(_pending("mesh_legacy_item"))
+            ledger.mark_running(run["export_id"])
+            ledger.add_item(run["export_id"], _item())
+            connection = sqlite3.connect(database_path)
+            try:
+                with connection:
+                    connection.execute(
+                        "UPDATE mesh_export_runs SET record_schema_version = ? WHERE export_id = ?",
+                        ("taxamask_mesh_export_sqlite_v1", run["export_id"]),
+                    )
+                    connection.execute(
+                        "UPDATE mesh_export_items SET role = 'mesh', processing_json = ? WHERE export_id = ?",
+                        (
+                            '{"filled_holes":false,"removed_components":false,"smoothed":false}',
+                            run["export_id"],
+                        ),
+                    )
+            finally:
+                connection.close()
+
+            item = ledger.load(run["export_id"])["items"][0]
+            self.assertEqual(item["role"], "measurement_mesh")
+            self.assertEqual(item["mesh_purpose"], "measurement")
+            self.assertEqual(item["bounds_xyz"], _item()["bounds_xyz_mm"])
+            self.assertEqual(item["bounds_xyz_mm"], _item()["bounds_xyz_mm"])
+            self.assertTrue(item["measurement_allowed"])
+
+    def test_legacy_unverified_run_is_projected_as_unitless_observation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = MeshExportLedger(Path(tmp) / "project.sqlite")
+            pending = _pending("mesh_legacy_unknown_scale")
+            pending["coordinates"].update(
+                {
+                    "scale_status": "scale_unverified",
+                    "output_unit": "millimeter",
+                    "spacing_zyx_mm": [2.0, 1.0, 0.5],
+                }
+            )
+            loaded = ledger.create_pending(pending)
+            self.assertEqual(loaded["coordinates"]["output_unit"], "unitless")
+            self.assertEqual(loaded["coordinates"]["mesh_purpose"], "observation")
+            self.assertNotIn("spacing_zyx_mm", loaded["coordinates"])
 
 
 if __name__ == "__main__":

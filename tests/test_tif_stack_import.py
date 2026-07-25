@@ -46,6 +46,7 @@ class TifStackImportTests(unittest.TestCase):
 
             self.assertEqual(specimen["modality"], "micro_ct")
             self.assertEqual(specimen["working_volume"]["shape_zyx"], [3, 4, 5])
+            self.assertEqual(specimen["working_volume"]["spacing_unit"], "unknown")
             self.assertEqual(manual_truth["path"], "")
             self.assertFalse(readiness["train_ready"])
             self.assertIn("specimen_not_marked_train_ready", readiness["reasons"])
@@ -55,8 +56,11 @@ class TifStackImportTests(unittest.TestCase):
             self.assertFalse(report["memory_policy"]["whole_volume_imread"])
             self.assertTrue(report["memory_policy"]["source_tif_copied"])
             self.assertTrue(report["memory_policy"]["working_edit_created_on_import"])
+            self.assertEqual(report["tiff_metadata"]["spacing_unit"], "unknown")
+            self.assertIn("physical_spacing_unit_unknown", report["warnings"])
             self.assertTrue((Path(manager.project_dir) / specimen["source"]["raw_tif"]).exists())
             np.testing.assert_array_equal(load_volume_sidecar(image_abs), source_volume)
+            self.assertEqual(read_volume_metadata(image_abs)["spacing_unit"], "unknown")
             self.assertEqual(read_volume_metadata(edit_abs)["shape_zyx"], [3, 4, 5])
             self.assertTrue(np.all(load_volume_sidecar(edit_abs) == 0))
 
@@ -145,6 +149,8 @@ class TifStackImportTests(unittest.TestCase):
             self.assertEqual(specimen["working_volume"]["path"], "")
             self.assertEqual(specimen["working_volume"]["shape_zyx"], [2, 3, 4])
             self.assertEqual(specimen["working_volume"]["status"], "metadata_only")
+            self.assertEqual(specimen["working_volume"]["spacing_unit"], "unknown")
+            self.assertIn("physical_spacing_unit_unknown", result["report"]["warnings"])
             self.assertEqual(result["report"]["memory_policy"]["import_mode"], "metadata_only")
             self.assertFalse(result["report"]["memory_policy"]["sidecar_created_on_import"])
             self.assertFalse((Path(manager.project_dir) / "specimens" / "01-0101-meta" / "working" / "image.ome.zarr").exists())

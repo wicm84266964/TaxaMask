@@ -1,6 +1,10 @@
 from datetime import datetime
 
 from .tif_local_axis_reslice import compute_local_frame, export_part_reslice
+from .tif_local_axis_validation import (
+    local_frame_proposal_geometry_errors,
+    require_valid_local_frame_proposal_geometry,
+)
 from .tif_project import TifProjectManager
 
 
@@ -17,7 +21,7 @@ LOCAL_AXIS_QUEUE_STATUSES = {
     "failed",
     "hard_cases",
 }
-LOCAL_AXIS_RISK_RANKING_VERSION = "taxamask_local_axis_risk_v2"
+LOCAL_AXIS_RISK_RANKING_VERSION = "taxamask_local_axis_risk_v3"
 
 
 def _now_stamp():
@@ -85,6 +89,11 @@ def list_local_axis_queue(project_manager, filters=None):
                 for proposal in proposals:
                     status = proposal.get("status") or "proposed"
                     hard_flags = proposal.get("hard_case_flags") or []
+                    validation_errors = local_frame_proposal_geometry_errors(
+                        proposal,
+                        shape_zyx=(part.get("image") or {}).get("shape_zyx"),
+                        require_shape=True,
+                    )
                     row = {
                         "specimen_id": specimen_id,
                         "part_id": part_id,
@@ -97,6 +106,8 @@ def list_local_axis_queue(project_manager, filters=None):
                         "missing_landmarks": list(proposal.get("missing_landmarks", []) or []),
                         "model_id": proposal.get("model_id", ""),
                         "model_version": proposal.get("model_version", ""),
+                        "validation_errors": validation_errors,
+                        "accept_allowed": not validation_errors,
                     }
                     if _queue_row_matches(row, status_filter, model_version_filter, hard_case_flag_filter):
                         rows.append(row)
@@ -249,8 +260,23 @@ def _queue_risk(row, active_model=None):
         "hard_case_weight": 0.0,
         "missing_landmark_weight": 0.0,
         "confidence_uncertainty_weight": 0.0,
+        "geometry_validation_weight": 0.0,
+        "model_id_mismatch_weight": 0.0,
         "model_version_mismatch_weight": 0.0,
     }
+    validation_errors = [
+        str(value)
+        for value in row.get("validation_errors", []) or []
+        if str(value)
+    ]
+    if validation_errors and status != "rejected":
+        components["geometry_validation_weight"] = 100.0
+        return (
+            100.0,
+            "high",
+            [f"invalid_geometry:{value}" for value in validation_errors],
+            components,
+        )
     if row.get("kind") == "batch_failure" or status == "failed":
         components["status_weight"] = 100.0
         return 100.0, "high", ["backend_failure"], components
@@ -280,6 +306,13 @@ def _queue_risk(row, active_model=None):
     if confidence < 0.5:
         reasons.append("low_confidence")
     active = active_model if isinstance(active_model, dict) else {}
+    expected_model_id = str(active.get("model_id") or "")
+    proposal_model_id = str(row.get("model_id") or "")
+    if expected_model_id and proposal_model_id != expected_model_id:
+        components["model_id_mismatch_weight"] = 20.0
+        reasons.append(
+            f"model_id_mismatch:{proposal_model_id or 'missing'}!={expected_model_id}"
+        )
     expected_version = str(active.get("model_version") or "")
     proposal_version = str(row.get("model_version") or "")
     if expected_version and proposal_version != expected_version:
@@ -349,6 +382,39 @@ def compare_local_axis_review_orders(
     }
 
 
+def _proposal_review_risk_snapshot(part, proposal, active_model):
+    validation_errors = local_frame_proposal_geometry_errors(
+        proposal,
+        shape_zyx=(part.get("image") or {}).get("shape_zyx"),
+        require_shape=True,
+    )
+    row = {
+        "kind": "local_frame_proposal",
+        "status": str(proposal.get("status") or "proposed"),
+        "confidence": proposal.get("confidence", 0.0),
+        "hard_case_flags": list(proposal.get("hard_case_flags", []) or []),
+        "missing_landmarks": list(proposal.get("missing_landmarks", []) or []),
+        "model_id": str(proposal.get("model_id") or ""),
+        "model_version": str(proposal.get("model_version") or ""),
+        "validation_errors": validation_errors,
+    }
+    score, tier, reasons, components = _queue_risk(
+        row,
+        active_model=active_model,
+    )
+    return {
+        "score": score,
+        "tier": tier,
+        "reasons": list(reasons),
+        "components": dict(components),
+        "ranking_version": LOCAL_AXIS_RISK_RANKING_VERSION,
+        "score_interpretation": "review_priority_not_error_probability",
+        "reference_model_id": str(active_model.get("model_id") or ""),
+        "reference_model_version": str(active_model.get("model_version") or ""),
+        "proposal_validation_errors": validation_errors,
+    }
+
+
 def update_proposal_status(
     project_manager,
     proposal_id,
@@ -370,6 +436,18 @@ def update_proposal_status(
                 continue
             for proposal in (part.get("metadata") or {}).get("local_axis_frame_proposals", []) or []:
                 if proposal.get("frame_proposal_id") == proposal_id:
+                    risk_snapshot = _proposal_review_risk_snapshot(
+                        part,
+                        proposal,
+                        _active_local_axis_model_reference(project_manager),
+                    )
+                    if clean_status in {"accepted", "exported"} and risk_snapshot[
+                        "proposal_validation_errors"
+                    ]:
+                        raise ValueError(
+                            "invalid_local_frame_proposal_geometry:"
+                            + ",".join(risk_snapshot["proposal_validation_errors"])
+                        )
                     reviewed_at = datetime.now().astimezone().isoformat(
                         timespec="seconds"
                     )
@@ -386,6 +464,8 @@ def update_proposal_status(
                         "model_version": str(proposal.get("model_version") or ""),
                         "reviewer_notes": str(reviewer_notes or ""),
                     }
+                    if clean_status in {"accepted", "rejected"}:
+                        audit["risk_snapshot"] = risk_snapshot
                     history = [
                         dict(item)
                         for item in proposal.get("review_history", []) or []
@@ -448,6 +528,7 @@ def proposal_to_reslice_payload(frame_proposal, reslice_id=None, display_name=No
     proposal = frame_proposal if isinstance(frame_proposal, dict) else {}
     if proposal.get("status") != "accepted":
         raise ValueError(f"local_frame_proposal_not_accepted:{proposal.get('frame_proposal_id')}")
+    require_valid_local_frame_proposal_geometry(proposal)
     local_frame = proposal.get("local_frame") if isinstance(proposal.get("local_frame"), dict) else {}
     spacing = _spacing_values(spacing_zyx)
     frame_complete = bool(local_frame.get("origin_zyx") and local_frame.get("x_axis") and local_frame.get("y_axis") and local_frame.get("z_axis"))
@@ -535,6 +616,11 @@ def batch_export_accepted_reslices(project_manager, proposal_ids=None, reslice_p
                     continue
                 try:
                     spacing = ((part.get("image") or {}).get("spacing_zyx") or [1.0, 1.0, 1.0])
+                    require_valid_local_frame_proposal_geometry(
+                        proposal,
+                        shape_zyx=(part.get("image") or {}).get("shape_zyx"),
+                        require_shape=True,
+                    )
                     payload = proposal_to_reslice_payload(proposal, reslice_params=reslice_params, spacing_zyx=spacing)
                     result = export_part_reslice(project_manager, specimen_id, part_id, payload)
                     exported.append(result["record"])

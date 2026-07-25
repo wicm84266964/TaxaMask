@@ -10,6 +10,7 @@ from AntSleap.core.location_registry import (
     LocationRegistryError,
     connect_location_registry,
     default_location_registry_path,
+    read_registered_locations,
     register_location,
     resolve_location,
     resolve_locations,
@@ -153,6 +154,12 @@ class LocationRegistryTests(unittest.TestCase):
         with self.assertRaises(LocationRegistryError) as moved:
             resolve_location(location_ref, database_path=self.db_path)
         self.assertEqual(moved.exception.code, "location_path_missing")
+
+        recorded = read_registered_locations(
+            [location_ref], database_path=self.db_path
+        )
+        self.assertEqual(recorded[location_ref]["entry_kind"], "file")
+        self.assertEqual(recorded[location_ref]["path"], self.file_path)
 
     def test_target_and_parent_symlinks_are_rejected(self):
         file_link = self.root / "file_link.png"

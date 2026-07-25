@@ -122,7 +122,7 @@ def _read_any_volume(path):
             "shape_zyx": [int(value) for value in np.asarray(array).shape],
             "dtype": str(np.asarray(array).dtype),
             "spacing_zyx": [1.0, 1.0, 1.0],
-            "spacing_unit": "micrometer",
+            "spacing_unit": "unknown",
             "orientation": "local_axis_reslice",
             "format": "tiff",
         }
@@ -234,7 +234,16 @@ def write_nifti_volume(path, array, metadata=None):
     struct.pack_into("<4f", header, 280, spacing_x, 0.0, 0.0, 0.0)
     struct.pack_into("<4f", header, 296, 0.0, spacing_y, 0.0, 0.0)
     struct.pack_into("<4f", header, 312, 0.0, 0.0, spacing_z, 0.0)
-    header[123] = 3 if str(metadata.get("spacing_unit", "micrometer")).lower() in {"micrometer", "micron", "um", "µm"} else 2
+    spacing_unit = str(metadata.get("spacing_unit") or "unknown").strip().lower()
+    spacing_unit = spacing_unit.replace("µ", "u").replace("μ", "u")
+    if spacing_unit in {"micrometer", "micrometers", "micron", "microns", "um"}:
+        header[123] = 3
+    elif spacing_unit in {"millimeter", "millimeters", "mm"}:
+        header[123] = 2
+    elif spacing_unit in {"meter", "meters", "m"}:
+        header[123] = 1
+    else:
+        header[123] = 0
     header[344:348] = b"n+1\0"
 
     payload = bytes(header) + b"\0\0\0\0" + volume.tobytes(order="C")
@@ -297,7 +306,15 @@ def read_nifti_volume_with_metadata(path):
     array = np.frombuffer(data, dtype=dtype, count=count, offset=start).reshape((size_z, size_y, size_x))
     spacing_xyz = [float(pixdim[1] or 1.0), float(pixdim[2] or 1.0), float(pixdim[3] or 1.0)]
     unit_code = int(xyzt_units) & 0x07
-    spacing_unit = "micrometer" if unit_code == 3 else "millimeter" if unit_code == 2 else "unknown"
+    spacing_unit = (
+        "micrometer"
+        if unit_code == 3
+        else "millimeter"
+        if unit_code == 2
+        else "meter"
+        if unit_code == 1
+        else "unknown"
+    )
     metadata = {
         "shape_zyx": [int(value) for value in np.asarray(array).shape],
         "dtype": str(np.asarray(array).dtype),

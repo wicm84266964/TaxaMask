@@ -159,7 +159,7 @@ def _stream_tif_stack_to_sidecar(
         dtype,
         role="working_image",
         spacing_zyx=tif_metadata.get("spacing_zyx", [1.0, 1.0, 1.0]),
-        spacing_unit=tif_metadata.get("spacing_unit", "micrometer"),
+        spacing_unit=tif_metadata.get("spacing_unit", "unknown"),
         orientation=tif_metadata.get("orientation", "unknown"),
         source_format="tif_stack",
         extra_metadata={
@@ -192,7 +192,7 @@ def _read_tif_metadata(path):
         "axes": "",
         "dtype": "",
         "spacing_zyx": [1.0, 1.0, 1.0],
-        "spacing_unit": "micrometer",
+        "spacing_unit": "unknown",
         "orientation": "unknown",
         "warnings": [],
     }
@@ -216,13 +216,15 @@ def _read_tif_metadata(path):
                     x_value = _ratio_to_float(x_resolution.value)
                     y_value = _ratio_to_float(y_resolution.value)
                     if x_value > 0 and y_value > 0:
-                        # TIFF resolution is pixels per unit. Without a reliable physical unit
-                        # conversion, keep micrometer as the project default and record raw values.
+                        # TIFF resolution is pixels per unit. Without reliable XYZ physical
+                        # metadata, retain raw values but keep the project unit unknown.
                         metadata["x_resolution_raw"] = x_value
                         metadata["y_resolution_raw"] = y_value
                         metadata["warnings"].append("physical_spacing_not_inferred_from_tiff_resolution")
                 except Exception:
                     metadata["warnings"].append("tiff_resolution_metadata_unreadable")
+    if metadata["spacing_unit"] == "unknown":
+        metadata["warnings"].append("physical_spacing_unit_unknown")
     return metadata
 
 
@@ -451,7 +453,7 @@ def register_tif_stack_metadata(
             "shape_zyx": shape_zyx,
             "dtype": str(tif_metadata.get("dtype") or ""),
             "spacing_zyx": spacing_zyx,
-            "spacing_unit": str(tif_metadata.get("spacing_unit", "micrometer") or "micrometer"),
+            "spacing_unit": str(tif_metadata.get("spacing_unit", "unknown") or "unknown"),
             "orientation": str(tif_metadata.get("orientation", "unknown") or "unknown"),
             "tiff_metadata": dict(tif_metadata),
         }

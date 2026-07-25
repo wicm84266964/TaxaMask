@@ -84,7 +84,7 @@ def _volume_metadata_payload(
         "shape_zyx": shape,
         "dtype": str(np.dtype(dtype)),
         "spacing_zyx": _normalize_spacing(spacing_zyx),
-        "spacing_unit": str(spacing_unit or "micrometer"),
+        "spacing_unit": str(spacing_unit or "unknown"),
         "orientation": str(orientation or "unknown"),
         "source_format": str(source_format or ""),
         "created_at": now,
@@ -132,11 +132,11 @@ def _write_ome_ngff_zarr(sidecar_path, volume, role, spacing_zyx, spacing_unit, 
         },
     )
 
-    axes = [
-        {"name": "z", "type": "space", "unit": str(spacing_unit or "micrometer")},
-        {"name": "y", "type": "space", "unit": str(spacing_unit or "micrometer")},
-        {"name": "x", "type": "space", "unit": str(spacing_unit or "micrometer")},
-    ]
+    unit_text = str(spacing_unit or "").strip()
+    axes = [{"name": axis, "type": "space"} for axis in ("z", "y", "x")]
+    if unit_text and unit_text.lower() not in {"unknown", "unknown_unit", "unitless"}:
+        for axis in axes:
+            axis["unit"] = unit_text
     _write_json(
         os.path.join(path, ".zattrs"),
         {
@@ -305,6 +305,7 @@ def read_volume_metadata(sidecar_path):
         raise ValueError("volume_metadata_not_object")
     if payload.get("schema_version") != VOLUME_SIDECAR_SCHEMA_VERSION:
         raise ValueError(f"unsupported_volume_sidecar_schema:{payload.get('schema_version')}")
+    payload.setdefault("spacing_unit", "unknown")
     return payload
 
 

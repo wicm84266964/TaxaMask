@@ -101,7 +101,10 @@ class MainWindowShellMixin:
         self.project_save_timer.timeout.connect(self._flush_pending_project_save)
         self.last_confirmed_locator_timestamp = None
         self.pending_training_preflight = None
+        self.training_preflight_thread = None
+        self.training_preflight_dialog = None
         self.training_retry_requested = False
+        self.integrity_recovery_retry_used = False
         self.parent_training_failed = False
         self.parent_training_cancel_requested = False
         self.child_training_failed = False
@@ -698,6 +701,11 @@ class MainWindowShellMixin:
             "blink.route_refresh",
             self.blink_lab.route_registry_refresh_requested,
             self.refresh_route_table,
+        )
+        self.shell_signal_router.connect_once(
+            "blink.training_state",
+            self.blink_lab.training_state_changed,
+            self._on_child_training_state_changed,
         )
         self.route_settings_panel = RouteManagementPanel(self, self.current_lang)
         app = QApplication.instance()

@@ -120,6 +120,7 @@ class TifProjectManager:
         self.current_asset_root = ""
         self._legacy_json_write_enabled = False
         self._pending_project_data_version_id = ""
+        self._pending_integrity_dirty_assets = set()
         self._traceability_backfill_needed = False
 
     @property
@@ -200,6 +201,7 @@ class TifProjectManager:
         os.makedirs(project_dir, exist_ok=True)
         self.project_data = _default_project_data(name=name, project_id=project_id)
         self._pending_project_data_version_id = ""
+        self._pending_integrity_dirty_assets = set()
         self._traceability_backfill_needed = False
         if storage_backend == SQLITE_BACKEND:
             return self._create_sqlite_project_storage(name, project_dir)
@@ -214,6 +216,7 @@ class TifProjectManager:
         return self.current_project_path
 
     def load_project(self, path):
+        self._pending_integrity_dirty_assets = set()
         with open(path, "r", encoding="utf-8") as handle:
             payload = json.load(handle)
         if not isinstance(payload, dict):
@@ -305,6 +308,9 @@ class TifProjectManager:
         if not self.current_project_path:
             raise ValueError("tif_project_path_not_set")
         pending_data_version_id = self._pending_project_data_version_id
+        pending_dirty_assets = set(
+            getattr(self, "_pending_integrity_dirty_assets", set())
+        )
         self.project_data["updated_at"] = _now_iso()
         try:
             if self.is_sqlite_project():
@@ -336,12 +342,23 @@ class TifProjectManager:
             self.project_data["project_data_version_id"] = resolved_data_version_id
         if pending_data_version_id:
             self._pending_project_data_version_id = ""
+        self._pending_integrity_dirty_assets.difference_update(
+            pending_dirty_assets
+        )
         return result
 
     def _mark_manual_truth_data_changed(self):
         if not self._pending_project_data_version_id:
             self._pending_project_data_version_id = new_project_data_version_id()
         return self._pending_project_data_version_id
+
+    def _mark_integrity_asset_dirty(self, owner_key, role):
+        clean_key = str(owner_key or "").strip()
+        clean_role = str(role or "").strip()
+        if not clean_key or not clean_role:
+            raise ValueError("integrity_dirty_asset_identity_required")
+        self._pending_integrity_dirty_assets.add((clean_key, clean_role))
+        return self._mark_manual_truth_data_changed()
 
     def integrity_registry_state(self):
         if not self.is_sqlite_project():
@@ -544,6 +561,7 @@ class TifProjectManager:
     def _apply_project_mutation_transaction(self, callback, *, save=True):
         project_snapshot = copy.deepcopy(self.project_data)
         pending_version_snapshot = self._pending_project_data_version_id
+        pending_assets_snapshot = set(self._pending_integrity_dirty_assets)
         try:
             result = callback()
             self._mark_manual_truth_data_changed()
@@ -553,6 +571,7 @@ class TifProjectManager:
         except Exception:
             self.project_data = project_snapshot
             self._pending_project_data_version_id = pending_version_snapshot
+            self._pending_integrity_dirty_assets = pending_assets_snapshot
             raise
 
     def _apply_volume_replacement_transaction(
@@ -562,23 +581,29 @@ class TifProjectManager:
         callback,
         *,
         role,
+        integrity_owner_key="",
         save=True,
         transactions=None,
     ):
         project_snapshot = copy.deepcopy(self.project_data) if transactions is None else None
         pending_version_snapshot = self._pending_project_data_version_id
+        pending_assets_snapshot = set(self._pending_integrity_dirty_assets)
         replacement = begin_volume_sidecar_replacement(source_path, target_path, role=role)
         if transactions is not None:
             transactions.append(replacement)
         try:
             result = callback(replacement.metadata)
-            self._mark_manual_truth_data_changed()
+            if integrity_owner_key:
+                self._mark_integrity_asset_dirty(integrity_owner_key, role)
+            else:
+                self._mark_manual_truth_data_changed()
             if save:
                 self.save_project()
         except Exception as exc:
             if project_snapshot is not None:
                 self.project_data = project_snapshot
             self._pending_project_data_version_id = pending_version_snapshot
+            self._pending_integrity_dirty_assets = pending_assets_snapshot
             if transactions is None:
                 try:
                     replacement.rollback()
@@ -687,7 +712,9 @@ class TifProjectManager:
     def register_working_volume(self, specimen_id, path, shape_zyx, dtype, spacing_zyx=None, spacing_unit="micrometer", orientation="unknown", fmt=VOLUME_SIDECAR_FORMAT, save=True):
         specimen = self._require_specimen(specimen_id)
         specimen["working_volume"] = self._volume_payload(path, shape_zyx, dtype, spacing_zyx, spacing_unit, orientation, fmt)
-        self._mark_manual_truth_data_changed()
+        self._mark_integrity_asset_dirty(
+            f"specimen.{specimen_id}.working", "source_volume"
+        )
         if save:
             self.save_project()
         return specimen["working_volume"]
@@ -733,7 +760,9 @@ class TifProjectManager:
                         part_id="",
                     )
                 )
-            self._mark_manual_truth_data_changed()
+            self._mark_integrity_asset_dirty(
+                f"specimen.{specimen_id}.manual_truth", "manual_truth"
+            )
         if save:
             self.save_project()
         return specimen["labels"][role]
@@ -1058,7 +1087,9 @@ class TifProjectManager:
                     specimen_id=specimen_id,
                     part_id=part_id,
                 )
-            self._mark_manual_truth_data_changed()
+            self._mark_integrity_asset_dirty(
+                f"part.{specimen_id}.{part_id}.manual_truth", "manual_truth"
+            )
             self.set_part_training_metadata(
                 specimen_id,
                 part_id,
@@ -1148,6 +1179,19 @@ class TifProjectManager:
         reslice["updated_at"] = _now_iso()
         part["updated_at"] = _now_iso()
         if role == "manual_truth":
+            if explicit_review:
+                record["review_audit"] = self._manual_truth_review_audit(
+                    record,
+                    review_action=operation,
+                    source_role="registered_manual_truth",
+                    specimen_id=specimen_id,
+                    part_id=part_id,
+                    reslice_id=reslice_id,
+                )
+            self._mark_integrity_asset_dirty(
+                f"reslice.{specimen_id}.{part_id}.{reslice_id}.manual_truth",
+                "manual_truth",
+            )
             self.set_part_training_metadata(
                 specimen_id,
                 part_id,
@@ -1282,7 +1326,7 @@ class TifProjectManager:
                 metadata["shape_zyx"],
                 metadata["dtype"],
                 metadata.get("spacing_zyx"),
-                metadata.get("spacing_unit", "micrometer"),
+                metadata.get("spacing_unit", "unknown"),
                 metadata.get("orientation", "local_axis_reslice"),
                 metadata.get("format", VOLUME_SIDECAR_FORMAT),
             )
@@ -1302,6 +1346,9 @@ class TifProjectManager:
             target_abs,
             apply_replacement,
             role="manual_truth",
+            integrity_owner_key=(
+                f"reslice.{specimen_id}.{part_id}.{reslice_id}.manual_truth"
+            ),
             save=save,
             transactions=_replacement_transactions,
         )
@@ -1385,7 +1432,7 @@ class TifProjectManager:
                 metadata["shape_zyx"],
                 metadata["dtype"],
                 metadata.get("spacing_zyx"),
-                metadata.get("spacing_unit", "micrometer"),
+                metadata.get("spacing_unit", "unknown"),
                 metadata.get("orientation", "unknown"),
                 metadata.get("format", VOLUME_SIDECAR_FORMAT),
             )
@@ -1402,6 +1449,7 @@ class TifProjectManager:
             target_abs,
             apply_replacement,
             role="manual_truth",
+            integrity_owner_key=f"part.{specimen_id}.{part_id}.manual_truth",
             save=save,
             transactions=_replacement_transactions,
         )
@@ -1549,6 +1597,7 @@ class TifProjectManager:
         promoted = []
         project_snapshot = copy.deepcopy(self.project_data)
         pending_version_snapshot = self._pending_project_data_version_id
+        pending_assets_snapshot = set(self._pending_integrity_dirty_assets)
         replacements = []
         try:
             for ref in refs:
@@ -1577,6 +1626,7 @@ class TifProjectManager:
         except Exception as exc:
             self.project_data = project_snapshot
             self._pending_project_data_version_id = pending_version_snapshot
+            self._pending_integrity_dirty_assets = pending_assets_snapshot
             rollback_errors = []
             for replacement in reversed(replacements):
                 try:
@@ -1677,7 +1727,7 @@ class TifProjectManager:
             metadata["shape_zyx"],
             metadata["dtype"],
             metadata.get("spacing_zyx"),
-            metadata.get("spacing_unit", "micrometer"),
+            metadata.get("spacing_unit", "unknown"),
             metadata.get("orientation", "unknown"),
             metadata.get("format", VOLUME_SIDECAR_FORMAT),
         )
@@ -1731,7 +1781,7 @@ class TifProjectManager:
                 metadata["shape_zyx"],
                 metadata["dtype"],
                 metadata.get("spacing_zyx"),
-                metadata.get("spacing_unit", "micrometer"),
+                metadata.get("spacing_unit", "unknown"),
                 metadata.get("orientation", "unknown"),
                 metadata.get("format", VOLUME_SIDECAR_FORMAT),
             )
@@ -1745,6 +1795,7 @@ class TifProjectManager:
             target_abs,
             apply_replacement,
             role="manual_truth",
+            integrity_owner_key=f"specimen.{specimen_id}.manual_truth",
             save=save,
         )
 
@@ -1760,7 +1811,13 @@ class TifProjectManager:
 
         checks["working_volume_exists"] = self._volume_record_exists(working)
         checks["manual_truth_exists"] = self._volume_record_exists(manual)
-        training_guard = can_use_role_for_training("manual_truth", record_exists=checks["manual_truth_exists"], status=manual.get("status", ""))
+        training_guard = can_use_role_for_training(
+            "manual_truth",
+            record_exists=checks["manual_truth_exists"],
+            status=manual.get("status", ""),
+            review_audit=manual.get("review_audit"),
+            training=manual.get("training"),
+        )
         checks["training_role_allowed"] = bool(training_guard)
         checks["material_map_exists"] = bool(material_rel) and os.path.exists(self.to_absolute(material_rel))
 
@@ -1834,7 +1891,13 @@ class TifProjectManager:
         checks["reslice_output_exists"] = bool((reslice or {}).get("image_path") and os.path.exists(self.to_absolute((reslice or {}).get("image_path", ""))))
         checks["label_schema_exists"] = bool(schema and schema.get("labels"))
         checks["manual_truth_exists"] = self._volume_record_exists(manual)
-        training_guard = can_use_role_for_training("manual_truth", record_exists=checks["manual_truth_exists"], status=manual.get("status", ""))
+        training_guard = can_use_role_for_training(
+            "manual_truth",
+            record_exists=checks["manual_truth_exists"],
+            status=manual.get("status", ""),
+            review_audit=manual.get("review_audit"),
+            training=manual.get("training"),
+        )
         checks["training_role_allowed"] = bool(training_guard)
 
         input_shape = self._path_volume_shape((reslice or {}).get("image_path", "")) if reslice else []
@@ -2629,7 +2692,7 @@ class TifProjectManager:
                 "shape_zyx": [],
                 "dtype": "",
                 "spacing_zyx": [],
-                "spacing_unit": "micrometer",
+                "spacing_unit": "unknown",
                 "orientation": "unknown",
             }
         clean = dict(record)
@@ -2638,7 +2701,7 @@ class TifProjectManager:
         clean.setdefault("shape_zyx", [])
         clean.setdefault("dtype", "")
         clean.setdefault("spacing_zyx", [])
-        clean.setdefault("spacing_unit", "micrometer")
+        clean.setdefault("spacing_unit", "unknown")
         clean.setdefault("orientation", "unknown")
         return clean
 
@@ -2857,7 +2920,7 @@ class TifProjectManager:
             "shape_zyx": shape,
             "dtype": str(dtype or ""),
             "spacing_zyx": spacing,
-            "spacing_unit": str(spacing_unit or "micrometer"),
+            "spacing_unit": str(spacing_unit or "unknown"),
             "orientation": str(orientation or "unknown"),
         }
 

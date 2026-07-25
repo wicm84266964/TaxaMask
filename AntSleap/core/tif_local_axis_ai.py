@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import shlex
 import subprocess
@@ -8,6 +9,10 @@ from datetime import datetime
 from .safe_io import atomic_write_json
 from .tif_project import TifProjectManager
 from .tif_local_axis_reslice import source_z_axis_for_part
+from .tif_local_axis_validation import (
+    require_valid_global_roi_proposal_geometry,
+    require_valid_local_frame_proposal_geometry,
+)
 from .tif_backend import (
     _cancel_requested,
     _emit_progress,
@@ -80,7 +85,7 @@ def _normalize_bbox_zyx(bbox):
     if len(bbox) == 6:
         try:
             return [[int(bbox[0]), int(bbox[3])], [int(bbox[1]), int(bbox[4])], [int(bbox[2]), int(bbox[5])]]
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return []
     if len(bbox) != 3:
         return []
@@ -99,9 +104,10 @@ def _normalize_point_zyx(point):
     if not isinstance(point, (list, tuple)) or len(point) != 3:
         return []
     try:
-        return [float(point[0]), float(point[1]), float(point[2])]
-    except (TypeError, ValueError):
+        values = [float(point[0]), float(point[1]), float(point[2])]
+    except (TypeError, ValueError, OverflowError):
         return []
+    return values if all(math.isfinite(value) for value in values) else []
 
 
 def _normalize_status(status):
@@ -180,6 +186,7 @@ def normalize_global_proposal(payload):
 
 def normalize_frame_proposal(payload):
     source = payload if isinstance(payload, dict) else {}
+    require_valid_local_frame_proposal_geometry(source)
     origin = _normalize_point_zyx(source.get("origin_zyx"))
     start = _normalize_point_zyx(source.get("output_axis_start_zyx"))
     end = _normalize_point_zyx(source.get("output_axis_end_zyx"))
@@ -265,9 +272,34 @@ def import_local_axis_proposals(project_manager, global_proposals=None, local_fr
     imported = {"global_roi_proposals": [], "local_frame_proposals": []}
     for proposal in global_proposals or []:
         record = normalize_global_proposal(proposal)
+        specimen = project_manager.get_specimen(
+            record["specimen_id"],
+            default=None,
+        )
+        if specimen is None:
+            raise KeyError(f"unknown_specimen_id:{record['specimen_id']}")
+        require_valid_global_roi_proposal_geometry(
+            record,
+            shape_zyx=(specimen.get("working_volume") or {}).get("shape_zyx"),
+            require_shape=True,
+        )
         imported["global_roi_proposals"].append(project_manager.add_global_axis_proposal(record["specimen_id"], record, save=False))
     for proposal in local_frame_proposals or []:
         record = normalize_frame_proposal(proposal)
+        part = project_manager.get_part(
+            record["specimen_id"],
+            record["part_id"],
+            default=None,
+        )
+        if part is None:
+            raise KeyError(
+                f"unknown_part_id:{record['specimen_id']}:{record['part_id']}"
+            )
+        require_valid_local_frame_proposal_geometry(
+            record,
+            shape_zyx=(part.get("image") or {}).get("shape_zyx"),
+            require_shape=True,
+        )
         imported["local_frame_proposals"].append(project_manager.add_local_frame_proposal(record["specimen_id"], record["part_id"], record, save=False))
     if save:
         project_manager.save_project()

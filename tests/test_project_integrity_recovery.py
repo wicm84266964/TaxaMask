@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -35,6 +36,116 @@ class ProjectIntegrityRecoveryTests(unittest.TestCase):
                     cancel_check=lambda: bool(progress),
                 )
             self.assertTrue(progress)
+
+    def test_inspection_and_registration_reject_linked_parent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project_root = root / "project"
+            manager = ProjectManager()
+            manager.location_registry_database_path = root / "locations.sqlite"
+            manager.create_project("linked_recovery", project_root)
+            source_dir = project_root / "source"
+            source_dir.mkdir()
+            image = source_dir / "ant.png"
+            Image.new("RGB", (8, 8), color=(1, 2, 3)).save(image)
+            manager.add_images([str(image)], save=True)
+            manager.initialize_integrity_baseline()
+
+            relocated = root / "relocated_source"
+            source_dir.rename(relocated)
+            try:
+                source_dir.symlink_to(relocated, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                relocated.rename(source_dir)
+                self.skipTest("This workstation cannot create directory symlinks")
+
+            report = inspect_project_integrity(manager)
+            source = next(
+                item for item in report["items"] if item["role"] == "source_image"
+            )
+
+            self.assertEqual(source["status"], "incomplete")
+            self.assertEqual(source["error_code"], "source_path_unsafe")
+            with self.assertRaisesRegex(ValueError, "source_path_unsafe"):
+                register_current_asset_version(
+                    manager,
+                    source,
+                    note="This linked path must never become a trusted revision.",
+                )
+
+    def test_managed_relative_escape_is_rejected_even_when_content_matches(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project_root = root / "project"
+            manager = ProjectManager()
+            manager.location_registry_database_path = root / "locations.sqlite"
+            manager.create_project("escape_recovery", project_root)
+            source_dir = project_root / "source"
+            source_dir.mkdir()
+            image = source_dir / "ant.png"
+            Image.new("RGB", (8, 8), color=(1, 2, 3)).save(image)
+            manager.add_images([str(image)], save=True)
+            manager.initialize_integrity_baseline()
+
+            outside = root / "outside" / "ant.png"
+            outside.parent.mkdir()
+            outside.write_bytes(image.read_bytes())
+            image_uid = manager.get_image_uid(str(image))
+            connection = sqlite3.connect(manager.current_database_path)
+            try:
+                connection.execute(
+                    """
+                    UPDATE integrity_locations
+                    SET relative_path = ?
+                    WHERE is_active = 1
+                      AND location_kind = 'managed_relative'
+                      AND asset_id = (
+                          SELECT asset_id
+                          FROM integrity_assets
+                          WHERE owner_kind = 'image'
+                            AND owner_key = ?
+                            AND role = 'source_image'
+                      )
+                    """,
+                    ("../outside/ant.png", image_uid),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            report = inspect_project_integrity(manager)
+            source = next(
+                item for item in report["items"] if item["role"] == "source_image"
+            )
+            self.assertEqual(source["status"], "incomplete")
+            self.assertEqual(source["error_code"], "source_path_unsafe")
+            with self.assertRaisesRegex(ValueError, "source_path_unsafe"):
+                register_current_asset_version(
+                    manager,
+                    source,
+                    note="An escaped managed path must not become trusted.",
+                )
+
+    def test_missing_external_file_still_has_a_per_file_recovery_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            external = root / "external" / "ant.png"
+            external.parent.mkdir()
+            Image.new("RGB", (8, 8), color=(4, 5, 6)).save(external)
+            manager = ProjectManager()
+            manager.location_registry_database_path = root / "locations.sqlite"
+            manager.create_project("missing_external", root / "project")
+            manager.add_images([str(external)], save=True)
+            manager.initialize_integrity_baseline()
+            external.unlink()
+
+            report = inspect_project_integrity(manager)
+            source = next(
+                item for item in report["items"] if item["role"] == "source_image"
+            )
+            self.assertEqual(report["status"], "needs_attention")
+            self.assertEqual(source["status"], "missing")
+            self.assertEqual(source["error_code"], "source_missing")
 
     def test_inspection_exposes_mismatch_but_diagnostic_redacts_path(self):
         with tempfile.TemporaryDirectory() as tmp:

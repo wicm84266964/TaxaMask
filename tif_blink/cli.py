@@ -60,6 +60,8 @@ def train_from_project(args) -> dict:
                 str(item.get("specimen_id") or "")
                 for item in manager.list_train_ready_specimens()
             ]
+        if not specimen_ids:
+            raise ValueError("tif_blink_no_train_ready_samples")
         sample_specs = []
         input_resolution = []
         for specimen_id in specimen_ids:
@@ -105,6 +107,8 @@ def train_from_project(args) -> dict:
             trusted_label_policy="manual_truth_only",
         )
         samples = load_train_ready_samples(manager, specimen_ids)
+        if not samples:
+            raise ValueError("tif_blink_no_train_ready_samples")
         shared_mapping = coerce_label_mapping(
             None, [sample.label for sample in samples]
         )
@@ -167,6 +171,13 @@ def train_from_project(args) -> dict:
         if run.status in {"pending", "running"}:
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 run.interrupt(stage="tif_blink_project")
+            elif str(exc) == "tif_blink_no_train_ready_samples":
+                run.fail(
+                    code="tif_blink_no_train_ready_samples",
+                    summary="No verified train-ready TIF samples are available.",
+                    stage="tif_blink_project",
+                    recoverable=True,
+                )
             else:
                 run.fail(exc, stage="tif_blink_project")
         raise

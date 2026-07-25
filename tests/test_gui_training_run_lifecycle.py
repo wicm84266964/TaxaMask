@@ -13,9 +13,10 @@ from AntSleap.ui.main_window_workers import TrainingThread
 
 
 class _Engine:
-    def __init__(self, root, *, fail=False):
+    def __init__(self, root, *, fail=False, fail_report=False):
         self.root = Path(root)
         self.fail = fail
+        self.fail_report = fail_report
         self.device = "cpu"
         self.weights_dir = str(self.root / "models")
         Path(self.weights_dir).mkdir()
@@ -40,6 +41,8 @@ class _Engine:
         return artifact_key
 
     def generate_report(self, *_args, **_kwargs):
+        if self.fail_report:
+            raise RuntimeError("report generation exploded")
         report_dir = self.root / "reports" / "parent"
         report_dir.mkdir(parents=True)
         (report_dir / "report_summary.json").write_text(
@@ -224,6 +227,38 @@ class GuiTrainingRunLifecycleTests(unittest.TestCase):
             retry_record = retry.run.recorder.load(retry.run.run_id)
             self.assertEqual(retry_record["retry_of"], prepared.run.run_id)
             retry.run.cancel(stage="test_cleanup")
+
+    def test_report_failure_cleans_pending_weight_publication(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager, prepared, preflight = self._prepared(root)
+            engine = _Engine(root, fail_report=True)
+            thread = TrainingThread(
+                engine,
+                preflight,
+                ["Head"],
+                ["Head"],
+                epochs=1,
+                batch_size=1,
+                train_segmenter=False,
+                training_run=prepared.run,
+                model_output_root=engine.weights_dir,
+            )
+            errors = []
+            thread.error_signal.connect(errors.append)
+            thread.run()
+
+            record = prepared.run.recorder.load(prepared.run.run_id)
+            self.assertEqual(record["status"], "failed")
+            self.assertTrue(errors)
+            self.assertIn("report generation exploded", errors[0]["message"])
+            self.assertFalse(
+                (
+                    Path(engine.weights_dir)
+                    / "training_runs"
+                    / prepared.run.run_id
+                ).exists()
+            )
 
 
 if __name__ == "__main__":

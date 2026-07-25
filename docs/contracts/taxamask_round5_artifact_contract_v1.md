@@ -51,7 +51,7 @@
 1. `relative_path` 使用 POSIX `/`，不得为空，不得以 `/` 或 `\\` 开头，不得包含反斜杠、Windows 盘符、UNC、NUL、空段、`.` 或 `..` 段。
 2. `path_base` 必须是上表白名单值；未知基准不得猜测。
 3. 解析后必须用规范化绝对路径做 containment 检查，确认目标仍在基准目录内。
-4. 对已有文件使用解析符号链接后的真实路径复核；对待创建文件检查最近的已有父目录，并拒绝任何会借助 junction/symlink 逃出基准目录的路径。
+4. 对根目录到已有目标的每一级执行 `lstat` 等价检查，遇到 junction/symlink/reparse point 立即拒绝，不得先解析链接再把目标当成可信路径；对待创建文件同样逐级检查已有父目录。
 5. 归档记录不得保存绝对路径。运行时确需绝对路径的外部 contract 不直接复制进统一记录；外部产物优先复制/快照到受管根。无法复制的外部产物只能使用 2.4 节定义的 `external_reference`，这是不使用 `path_base/relative_path` 的唯一例外。
 6. 跨目录记录通过稳定 ID 关联，不使用 `../`。引用文件本身仍按其所属基准保存相对路径和哈希。
 
@@ -359,6 +359,11 @@ Schema：`taxamask_training_run_v1`
 - 所有入口使用同一事实字段，不得因“临时训练”“实验 CLI”省略字段。
 - 失败、取消和中断运行也保存当时已知的项目/数据集引用、配置、输入清单引用、拆分进度、终态和脱敏错误。
 - 备注可以后续编辑，但配置、清单、状态时间和 artifact 事实不可被备注写回覆盖。
+- 2D/Blink GUI 在后台执行两轮完整内容复验：第一轮产生绑定项目、data version、revision 和验证事件的单次凭据；第二轮在 `pending -> running` 前重新读取内容。凭据不可伪造、不可重放，也不能跨项目、run 或 revision 使用。
+- 后台复验显示当前文件、完成比例、读取速度和预计剩余时间，并允许安全取消。取消发生在 run 创建后时，run 必须收敛为 `cancelled`，不得继续创建 DataLoader、启动 GPU 训练或发布权重。
+- 在没有不可变快照或等价文件系统保证时，不得用 size、mtime、inode 等元数据缓存替代第二轮内容复验；这些元数据不能证明文件字节未被同长度替换。
+- 图组训练只把实际选中 UID 对应的 source/人工标签、共享 schema、实际配置和选中的起始权重列入验证凭据与运行清单；未参与本次训练的图像变化不得拖慢或阻断该 run。
+- 2D/Blink 在准备激活成功权重前，对本次 run 绑定的输入再做一次收尾内容复验。若训练期间存在持续的外部修改，run 必须失败，待发布权重不得转为 active；这项收尾检查不能替代未来更强的不可变输入快照。
 
 ## 7. 推理运行与分阶段事件
 
@@ -496,7 +501,7 @@ SQLite export run 必须直接保存“导出当时实际读取的 manual truth�
   "meshes": [
     {
       "artifact_id": "raw_structure_a",
-      "role": "mesh",
+      "role": "measurement_mesh",
       "label_id": 1,
       "label_name": "structure_a",
       "kind": "raw",
@@ -508,7 +513,11 @@ SQLite export run 必须直接保存“导出当时实际读取的 manual truth�
       "digest": "7777777777777777777777777777777777777777777777777777777777777777",
       "vertex_count": 1200,
       "face_count": 2396,
-      "bounds_xyz_mm": [[0.0, 0.0, 0.0], [1.2, 0.8, 0.6]],
+      "bounds_xyz": [[0.0, 0.0, 0.0], [1.2, 0.8, 0.6]],
+      "bounds_unit": "millimeter",
+      "mesh_purpose": "measurement",
+      "measurement_allowed": true,
+      "scale_status": "verified",
       "component_count": 1,
       "watertight": false,
       "processing": {"smoothed": false, "filled_holes": false, "removed_components": false}
@@ -519,6 +528,8 @@ SQLite export run 必须直接保存“导出当时实际读取的 manual truth�
 ```
 
 本轮只要求 STL。OBJ/PLY 不属于交付或验收范围。原始网格不得平滑、补洞或删除小结构；展示副本必须使用 `kind: "preview"`，另存为独立 artifact，并在 SQLite 中完整记录平滑、补洞、组件处理及参数。Blender 5.0 验收使用项目界面对 SQLite 记录的只读展示来核对单位、轴顺序和变换。
+
+只有源 spacing 具有可信物理单位且数值有限、为正时，才允许 `output_unit: "millimeter"`、`mesh_purpose: "measurement"` 和 `measurement_allowed: true`。单位未知时不得猜测毫米：保留原数值尺度，写为 `output_unit: "unitless"`、`mesh_purpose: "observation"`、`scale_status: "scale_unverified"`，文件名也带 `unitless`。任何平滑展示副本均为 `display_preview`，无论源尺度是否可信都必须 `measurement_allowed: false`。
 
 ### 8.1 SQLite run/item 字段
 
@@ -537,6 +548,8 @@ recovery_action
 ```
 
 `target_location_ref` 是本机位置注册表中的不透明 ID；项目 SQLite 和诊断产物都不保存目标绝对路径。位置注册丢失时 export 进入 `incomplete`，提示用户重新定位同一目录并复核 SQLite 所列 STL 哈希。
+
+解析 source、project root、export root 和已有目标文件时，必须逐级拒绝 junction、symlink 或其他 reparse point，而不只是检查最终 `realpath`。发现不安全路径时停止导出，提示用户恢复到普通目录、正式重新定位同一文件/目录，或按新版本流程登记；不得静默接受重定向后的内容。
 
 SQLite 是网格导出的唯一状态、对账和恢复来源，默认不生成网格 JSON。若未来另行设计用户显式触发的一次性只读交换报告，它也只能复制已完成 SQLite 记录，不能恢复、覆盖或替代项目状态。
 

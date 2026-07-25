@@ -11,11 +11,15 @@ import os
 import posixpath
 import re
 import stat
+import threading
 import unicodedata
 import uuid
+import weakref
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 
 from .file_integrity import (
+    FingerprintCancelled,
     FingerprintError,
     FULL_FILE_ALGORITHM,
     QUICK_FILE_ALGORITHM,
@@ -164,6 +168,147 @@ class ProjectIntegrityRegistryError(ValueError):
     def __init__(self, code, summary=None):
         self.code = str(code or "project_integrity_registry_error")
         super().__init__(str(summary or self.code))
+
+
+@dataclass(frozen=True)
+class RegistryVerifiedFile:
+    file_id: str
+    role: str
+    asset_id: str
+    revision_id: str
+    data_version_id: str
+    event_id: str
+    verified_at: str
+    observed_entry_kind: str
+    manifest_entry_kind: str
+    observed_size_bytes: int
+    observed_mtime_ns: int
+    observed_hash_algorithm: str
+    observed_digest: str
+    locator_kind: str
+    path_base: str
+    relative_path: str
+    external_location_ref: str
+    runtime_path: str
+    runtime_stat_size_bytes: int
+    runtime_stat_mtime_ns: int
+    runtime_metadata_digest: str
+
+
+@dataclass(frozen=True)
+class RegistryVerificationClaim:
+    batch_id: str
+    project_id: str
+    data_version_id: str
+    files: tuple
+
+
+@dataclass(frozen=True)
+class _RegistryVerificationPayload:
+    batch_id: str
+    database_path: str
+    run_dir: str
+    project_id: str
+    data_version_id: str
+    files: tuple
+
+
+_REGISTRY_CAPABILITY_MUTEX = threading.Lock()
+_ISSUED_REGISTRY_BATCHES = weakref.WeakKeyDictionary()
+_ISSUED_REGISTRY_RECEIPTS = weakref.WeakKeyDictionary()
+
+
+class _OpaqueRegistryCapability:
+    __slots__ = ("__weakref__",)
+
+    def __init__(self, *_args, **_kwargs):
+        raise ProjectIntegrityRegistryError(
+            "registry_verification_capability_not_issued"
+        )
+
+    def __setattr__(self, _name, _value):
+        raise AttributeError("registry_verification_capability_is_immutable")
+
+    @property
+    def consumed(self):
+        store = (
+            _ISSUED_REGISTRY_BATCHES
+            if type(self) is RegistryVerificationBatch
+            else _ISSUED_REGISTRY_RECEIPTS
+        )
+        with _REGISTRY_CAPABILITY_MUTEX:
+            return self not in store
+
+
+class RegistryVerificationBatch(_OpaqueRegistryCapability):
+    """Opaque one-use handle for a successful Registry verification."""
+
+    __slots__ = ()
+
+
+class RegistryVerificationReceipt(_OpaqueRegistryCapability):
+    """Opaque one-use handle accepted by the specialized training gate."""
+
+    __slots__ = ()
+
+
+def _capability_path(path):
+    return os.path.normcase(os.path.abspath(os.fspath(path)))
+
+
+def _new_capability_handle(capability_type, store, payload):
+    handle = object.__new__(capability_type)
+    with _REGISTRY_CAPABILITY_MUTEX:
+        store[handle] = payload
+    return handle
+
+
+def _take_capability(capability, capability_type, store, missing_code):
+    if type(capability) is not capability_type:
+        _raise(missing_code)
+    with _REGISTRY_CAPABILITY_MUTEX:
+        payload = store.pop(capability, None)
+    if payload is None:
+        suffix = (
+            "batch_already_consumed"
+            if capability_type is RegistryVerificationBatch
+            else "receipt_already_consumed"
+        )
+        _raise(f"registry_verification_{suffix}")
+    return payload
+
+
+def _peek_capability(capability, capability_type, store, missing_code):
+    if type(capability) is not capability_type:
+        _raise(missing_code)
+    with _REGISTRY_CAPABILITY_MUTEX:
+        payload = store.get(capability)
+    if payload is None:
+        suffix = (
+            "batch_already_consumed"
+            if capability_type is RegistryVerificationBatch
+            else "receipt_already_consumed"
+        )
+        _raise(f"registry_verification_{suffix}")
+    return payload
+
+
+def _copy_verified_file(item):
+    return RegistryVerifiedFile(
+        **{
+            field_name: getattr(item, field_name)
+            for field_name in RegistryVerifiedFile.__dataclass_fields__
+        }
+    )
+
+
+def _claim_from_payload(payload):
+    return RegistryVerificationClaim(
+        batch_id=payload.batch_id,
+        project_id=payload.project_id,
+        data_version_id=payload.data_version_id,
+        files=tuple(_copy_verified_file(item) for item in payload.files),
+    )
 
 
 def _raise(code, summary=None):
@@ -749,6 +894,178 @@ def _active_location(connection, asset_id):
     }
 
 
+def _revision_location(
+    connection,
+    asset_id,
+    revision_id,
+    *,
+    data_version_id=None,
+    prefer_active=False,
+):
+    """Resolve a revision's location without letting a later relocation rewrite history.
+
+    Locations are intentionally kept outside the immutable revision table so a
+    same-content relocation can update the current project without creating a
+    new data version.  Historical snapshots therefore need an as-of lookup:
+    the location that introduced a revision is used for that revision's own
+    data version, while a later inherited data version may use a relocation
+    that happened before that version was created.  The current snapshot is
+    explicitly allowed to use the active location.
+    """
+    revision = connection.execute(
+        """
+        SELECT created_at FROM integrity_asset_revisions
+        WHERE asset_id = ? AND revision_id = ?
+        """,
+        (asset_id, revision_id),
+    ).fetchone()
+    if not revision:
+        return None
+    next_revision = connection.execute(
+        """
+        SELECT MIN(created_at) FROM integrity_asset_revisions
+        WHERE asset_id = ? AND created_at > ?
+        """,
+        (asset_id, str(revision[0])),
+    ).fetchone()
+    rows = connection.execute(
+        """
+        SELECT location_id, location_kind, path_base, relative_path,
+               opaque_ref, metadata_json, created_at
+        FROM integrity_locations
+        WHERE asset_id = ?
+        ORDER BY created_at DESC, location_id DESC
+        """,
+        (asset_id,),
+    ).fetchall()
+
+    def payload(row):
+        return {
+            "location_id": str(row[0]),
+            "location_kind": str(row[1]),
+            "path_base": row[2],
+            "relative_path": row[3],
+            "opaque_ref": row[4],
+        }
+
+    parsed_rows = []
+    for row in rows:
+        try:
+            metadata = json.loads(str(row[5] or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            metadata = {}
+        parsed_rows.append((row, metadata))
+
+    # The live project must follow the active location, including a
+    # same-content relocation that deliberately did not advance data_version.
+    if prefer_active:
+        active = connection.execute(
+            """
+            SELECT location_id, location_kind, path_base, relative_path,
+                   opaque_ref, metadata_json, created_at
+            FROM integrity_locations
+            WHERE asset_id = ? AND is_active = 1
+            ORDER BY created_at DESC, location_id DESC
+            LIMIT 1
+            """,
+            (asset_id,),
+        ).fetchone()
+        if active:
+            return payload(active)
+
+    matching = [
+        (row, metadata)
+        for row, metadata in parsed_rows
+        if str(metadata.get("revision_id") or "") == str(revision_id)
+    ]
+
+    if data_version_id and matching:
+        target_version = connection.execute(
+            """
+            SELECT created_at, committed_at
+            FROM integrity_data_versions
+            WHERE data_version_id = ?
+            """,
+            (str(data_version_id),),
+        ).fetchone()
+        origin_version = connection.execute(
+            """
+            SELECT data_version_id
+            FROM integrity_version_changes
+            WHERE asset_id = ? AND revision_id = ? AND change_kind = 'set'
+            ORDER BY created_at ASC, data_version_id ASC
+            LIMIT 1
+            """,
+            (asset_id, str(revision_id)),
+        ).fetchone()
+        origin_id = str(origin_version[0]) if origin_version else ""
+
+        # A revision's own data version is its immutable point-in-time
+        # snapshot.  Prefer the non-alias location that was registered with
+        # that revision, even if a later relocation now has the same revision
+        # id in the table.
+        if origin_id and origin_id == str(data_version_id):
+            original = [
+                (row, metadata)
+                for row, metadata in matching
+                if not bool(metadata.get("same_content_alias"))
+            ]
+            if original:
+                row, _metadata = min(
+                    original,
+                    key=lambda item: (str(item[0][6] or ""), str(item[0][0])),
+                )
+                return payload(row)
+
+        # For a later historical version, a relocation is valid when it was
+        # recorded before that version was created.  This preserves a moved
+        # location for an inherited asset without allowing relocations that
+        # happened afterwards to rewrite the old snapshot.
+        as_of = str((target_version or [""])[0] or "")
+        if as_of:
+            eligible = [
+                (row, metadata)
+                for row, metadata in matching
+                if str(row[6] or "") <= as_of
+            ]
+            if eligible:
+                row, _metadata = max(
+                    eligible,
+                    key=lambda item: (str(item[0][6] or ""), str(item[0][0])),
+                )
+                return payload(row)
+
+        # Legacy databases may have location rows without reliable timestamps
+        # or origin metadata.  Keep the first non-alias location as the safest
+        # historical fallback.
+        original = [
+            (row, metadata)
+            for row, metadata in matching
+            if not bool(metadata.get("same_content_alias"))
+        ]
+        if original:
+            row, _metadata = min(
+                original,
+                key=lambda item: (str(item[0][6] or ""), str(item[0][0])),
+            )
+            return payload(row)
+
+    # Preserve the pre-versioned registry fallback for old rows and callers
+    # that do not provide a data-version context.
+    if matching:
+        return payload(matching[0][0])
+
+    revision_created = str(revision[0])
+    next_created = str((next_revision or [""])[0] or "")
+    for row, _metadata in parsed_rows:
+        created = str(row[6] or "")
+        if created >= revision_created and (
+            not next_created or created < next_created
+        ):
+            return payload(row)
+    return None
+
+
 def _same_location(current, prepared):
     if not current or not prepared:
         return current is prepared
@@ -759,13 +1076,33 @@ def _same_location(current, prepared):
             "path_base",
             "relative_path",
             "opaque_ref",
-            "metadata_json",
         )
     )
 
 
-def _insert_location(connection, asset_id, location):
-    prepared = _normalise_location(location)
+def _insert_location(
+    connection,
+    asset_id,
+    location,
+    *,
+    revision_id="",
+    digest="",
+    data_version_id="",
+    same_content_alias=False,
+):
+    prepared_location = dict(location) if isinstance(location, Mapping) else location
+    if isinstance(prepared_location, dict) and revision_id:
+        metadata = dict(prepared_location.get("metadata") or {})
+        metadata.update(
+            {
+                "revision_id": str(revision_id),
+                "digest": str(digest or ""),
+                "data_version_id": str(data_version_id or ""),
+                "same_content_alias": bool(same_content_alias),
+            }
+        )
+        prepared_location["metadata"] = metadata
+    prepared = _normalise_location(prepared_location)
     if prepared is None:
         return None
     connection.execute(
@@ -914,8 +1251,15 @@ def register_project_baseline(
         if asset_id in seen_assets:
             _raise("duplicate_baseline_asset")
         seen_assets.add(asset_id)
-        revision_id, _expected = _insert_revision(connection, asset_id, entry)
-        _insert_location(connection, asset_id, entry.get("location"))
+        revision_id, expected = _insert_revision(connection, asset_id, entry)
+        _insert_location(
+            connection,
+            asset_id,
+            entry.get("location"),
+            revision_id=revision_id,
+            digest=expected["digest"],
+            data_version_id=clean_version_id,
+        )
         connection.execute(
             """
             INSERT INTO integrity_version_changes (
@@ -1075,10 +1419,17 @@ def commit_project_data_version(
             revision_id = None
             tombstoned = 1
         else:
-            revision_id, _actual = _insert_revision(connection, asset_id, change)
+            revision_id, actual = _insert_revision(connection, asset_id, change)
             tombstoned = 0
             if "location" in change:
-                _insert_location(connection, asset_id, change.get("location"))
+                _insert_location(
+                    connection,
+                    asset_id,
+                    change.get("location"),
+                    revision_id=revision_id,
+                    digest=actual["digest"],
+                    data_version_id=new_id,
+                )
         connection.execute(
             """
             INSERT INTO integrity_version_changes (
@@ -1229,6 +1580,19 @@ def get_registry_version_snapshot(connection, data_version_id=None):
             relative_path,
             opaque_ref,
         ) = row
+        bound_location = _revision_location(
+            connection,
+            str(asset_id),
+            str(revision_id),
+            data_version_id=version_id,
+            prefer_active=(version_id == state["current_data_version_id"]),
+        )
+        if bound_location is not None:
+            location_id = bound_location["location_id"]
+            location_kind = bound_location["location_kind"]
+            path_base = bound_location["path_base"]
+            relative_path = bound_location["relative_path"]
+            opaque_ref = bound_location["opaque_ref"]
         item = {
             "file_id": str(asset_id),
             "asset_id": str(asset_id),
@@ -1292,6 +1656,92 @@ def get_training_baseline_snapshot(database_path, data_version_id=None):
         connection.close()
 
 
+def read_materialized_registry_payloads(
+    database_path,
+    snapshot,
+    *,
+    roles=None,
+):
+    """Read immutable JSON snapshots for selection without touching source files.
+
+    Training selection may need to know whether a label contains a usable
+    locator/parts annotation before deciding which source images to hash.  The
+    label snapshots are already immutable Registry revisions, so reading them
+    directly from SQLite avoids a second file-verification pass while keeping
+    selection tied to the requested data version.
+    """
+
+    if not isinstance(snapshot, Mapping):
+        _raise("integrity_baseline_missing")
+    version_id = _safe_id(
+        snapshot.get("data_version_id"), "project_data_version_id"
+    )
+    authoritative = get_training_baseline_snapshot(database_path, version_id)
+    if authoritative != dict(snapshot):
+        _raise("integrity_baseline_snapshot_stale")
+    allowed_roles = (
+        {str(value) for value in roles}
+        if roles is not None
+        else None
+    )
+    entries = [
+        item
+        for item in snapshot.get("files", [])
+        if isinstance(item.get("materializer"), Mapping)
+        and (allowed_roles is None or str(item.get("role") or "") in allowed_roles)
+    ]
+    if not entries:
+        return {}
+
+    revisions = {}
+    connection = connect_sqlite_database_readonly(database_path)
+    try:
+        validate_project_integrity_registry_schema(connection)
+        revision_ids = [str(item.get("revision_id") or "") for item in entries]
+        for start in range(0, len(revision_ids), 400):
+            chunk = revision_ids[start : start + 400]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = connection.execute(
+                f"""
+                SELECT revision_id, asset_id, snapshot_text
+                FROM integrity_asset_revisions
+                WHERE revision_id IN ({placeholders})
+                """,
+                chunk,
+            ).fetchall()
+            for row in rows:
+                revisions[str(row[0])] = (str(row[1]), row[2])
+    finally:
+        connection.close()
+
+    payloads = {}
+    for entry in entries:
+        file_id = str(entry.get("file_id") or "")
+        revision_id = str(entry.get("revision_id") or "")
+        row = revisions.get(revision_id)
+        if row is None or row[0] != str(entry.get("asset_id") or ""):
+            _raise("snapshot_materializer_missing")
+        snapshot_text = row[1]
+        if snapshot_text is None:
+            _raise("snapshot_materializer_missing")
+        expected = _text_fingerprint(snapshot_text)
+        if any(
+            expected.get(key) != entry.get(key)
+            for key in ("entry_kind", "size_bytes", "hash_algorithm", "digest")
+        ):
+            _raise("snapshot_digest_mismatch")
+        try:
+            payload = json.loads(str(snapshot_text))
+        except (TypeError, ValueError) as exc:
+            raise ProjectIntegrityRegistryError(
+                "snapshot_payload_invalid"
+            ) from exc
+        if canonical_snapshot_text(payload) != str(snapshot_text):
+            _raise("snapshot_text_not_canonical")
+        payloads[file_id] = payload
+    return payloads
+
+
 def _is_reparse_point(stat_result):
     attributes = int(getattr(stat_result, "st_file_attributes", 0) or 0)
     flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400) or 0x400)
@@ -1330,6 +1780,166 @@ def _require_safe_existing_path(path, *, expected_kind=None):
             expected_kind=expected_kind if is_last else "directory",
         )
     return os.path.abspath(os.fspath(path))
+
+
+def _runtime_metadata_snapshot(path, *, expected_kind, cancel_check=None):
+    """Capture path identity and tree metadata without rereading file contents."""
+
+    root = _require_safe_existing_path(path, expected_kind=expected_kind)
+    digest = hashlib.sha256()
+    root_result = None
+
+    def visit(current, relative_path):
+        nonlocal root_result
+        if cancel_check is not None and cancel_check():
+            raise FingerprintCancelled()
+        result = _require_safe_entry(current)
+        if stat.S_ISREG(result.st_mode):
+            entry_kind = "file"
+        elif stat.S_ISDIR(result.st_mode):
+            entry_kind = "directory"
+        else:
+            _raise("safe_filesystem_entry_required")
+        if root_result is None:
+            root_result = result
+        mtime_ns = int(
+            getattr(result, "st_mtime_ns", int(result.st_mtime * 1_000_000_000))
+        )
+        record = [
+            str(relative_path).replace("\\", "/"),
+            entry_kind,
+            int(result.st_mode),
+            int(result.st_size),
+            mtime_ns,
+            int(getattr(result, "st_dev", 0) or 0),
+            int(getattr(result, "st_ino", 0) or 0),
+            int(getattr(result, "st_file_attributes", 0) or 0),
+        ]
+        digest.update(
+            json.dumps(record, ensure_ascii=False, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        )
+        digest.update(b"\n")
+        if entry_kind == "directory":
+            try:
+                with os.scandir(current) as iterator:
+                    children = sorted(iterator, key=lambda item: item.name)
+            except OSError as exc:
+                raise ProjectIntegrityRegistryError(
+                    "source_metadata_scan_failed"
+                ) from exc
+            for child in children:
+                child_relative = (
+                    child.name
+                    if not relative_path
+                    else f"{relative_path}/{child.name}"
+                )
+                visit(child.path, child_relative)
+
+    visit(root, "")
+    root_kind = "directory" if stat.S_ISDIR(root_result.st_mode) else "file"
+    root_mtime_ns = int(
+        getattr(
+            root_result,
+            "st_mtime_ns",
+            int(root_result.st_mtime * 1_000_000_000),
+        )
+    )
+    return {
+        "entry_kind": root_kind,
+        "size_bytes": int(root_result.st_size),
+        "mtime_ns": root_mtime_ns,
+        "metadata_digest": digest.hexdigest(),
+    }
+
+
+def _require_verified_file_stable(
+    item,
+    *,
+    progress_callback=None,
+    cancel_check=None,
+):
+    current = _runtime_metadata_snapshot(
+        item.runtime_path,
+        expected_kind=item.observed_entry_kind,
+        cancel_check=cancel_check,
+    )
+    expected = {
+        "entry_kind": item.observed_entry_kind,
+        "size_bytes": item.runtime_stat_size_bytes,
+        "mtime_ns": item.runtime_stat_mtime_ns,
+        "metadata_digest": item.runtime_metadata_digest,
+    }
+    if current != expected:
+        _raise(
+            "registry_verified_source_changed",
+            f"registry_verified_source_changed:{item.file_id}",
+        )
+    observed = compute_fingerprint(
+        item.runtime_path,
+        item.observed_hash_algorithm,
+        progress_callback=progress_callback,
+        cancel_check=cancel_check,
+    )
+    expected_fingerprint = {
+        "entry_kind": item.observed_entry_kind,
+        "size_bytes": item.observed_size_bytes,
+        "hash_algorithm": item.observed_hash_algorithm,
+        "digest": item.observed_digest,
+    }
+    if not _matches_expected(expected_fingerprint, observed):
+        _raise(
+            "registry_verified_source_changed",
+            f"registry_verified_source_changed:{item.file_id}",
+        )
+
+
+def recheck_registry_verified_files(
+    files,
+    *,
+    detail_progress_callback=None,
+    cancel_check=None,
+):
+    """Recheck run-bound Registry inputs before a successful run is published."""
+
+    verified_files = tuple(files or ())
+    if not verified_files or any(
+        type(item) is not RegistryVerifiedFile for item in verified_files
+    ):
+        _raise("registry_verified_files_required")
+    total_bytes = sum(max(0, item.observed_size_bytes) for item in verified_files)
+    completed_bytes = 0
+    for file_index, item in enumerate(verified_files, start=1):
+        callback = None
+        if detail_progress_callback is not None:
+            display_name = os.path.basename(os.path.normpath(item.runtime_path))
+
+            def callback(done, total, *, _item=item, _index=file_index, _name=display_name):
+                detail_progress_callback(
+                    {
+                        "phase": "registry_completion_recheck",
+                        "file_index": _index,
+                        "file_count": len(verified_files),
+                        "file_id": _item.file_id,
+                        "role": _item.role,
+                        "display_name": _name,
+                        "bytes_done": int(done),
+                        "bytes_total": int(total),
+                        "total_bytes_done": completed_bytes + int(done),
+                        "total_bytes": total_bytes,
+                    }
+                )
+
+        _require_verified_file_stable(
+            item,
+            progress_callback=callback,
+            cancel_check=cancel_check,
+        )
+        completed_bytes += max(0, item.observed_size_bytes)
+    if cancel_check is not None and cancel_check():
+        raise FingerprintCancelled()
+    return {"status": "verified", "file_count": len(verified_files)}
 
 
 def _require_safe_existing_components(base, target):
@@ -1449,6 +2059,8 @@ def _matches_expected(expected, observed):
 
 def _record_verification(connection, version_id, entry, status, observed=None, error_code=""):
     observed = dict(observed or {})
+    event_id = _new_id("verify")
+    verified_at = _now_iso()
     connection.execute(
         """
         INSERT INTO integrity_verification_events (
@@ -1458,7 +2070,7 @@ def _record_verification(connection, version_id, entry, status, observed=None, e
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
-            _new_id("verify"),
+            event_id,
             version_id,
             entry["asset_id"],
             entry["revision_id"],
@@ -1468,9 +2080,319 @@ def _record_verification(connection, version_id, entry, status, observed=None, e
             observed.get("hash_algorithm"),
             observed.get("digest"),
             str(error_code or ""),
-            _now_iso(),
+            verified_at,
         ),
     )
+    return {
+        "event_id": event_id,
+        "data_version_id": version_id,
+        "asset_id": entry["asset_id"],
+        "revision_id": entry["revision_id"],
+        "status": str(status),
+        "observed_entry_kind": observed.get("entry_kind"),
+        "observed_size_bytes": observed.get("size_bytes"),
+        "observed_mtime_ns": observed.get("mtime_ns"),
+        "observed_hash_algorithm": observed.get("hash_algorithm"),
+        "observed_digest": observed.get("digest"),
+        "error_code": str(error_code or ""),
+        "verified_at": verified_at,
+    }
+
+
+def _require_capability_binding(
+    payload,
+    *,
+    database_path,
+    run_dir,
+    project_id,
+    data_version_id,
+):
+    if payload.database_path != _capability_path(database_path):
+        _raise("registry_verification_database_mismatch")
+    if payload.run_dir != _capability_path(run_dir):
+        _raise("registry_verification_run_mismatch")
+    if payload.project_id != str(project_id or ""):
+        _raise("registry_verification_project_mismatch")
+    if payload.data_version_id != str(data_version_id or ""):
+        _raise("registry_verification_data_version_mismatch")
+
+
+def _require_registry_evidence_rows(payload, selected):
+    _require_safe_existing_path(payload.database_path, expected_kind="file")
+    _require_safe_existing_path(payload.run_dir, expected_kind="directory")
+    connection = connect_sqlite_database_readonly(payload.database_path)
+    try:
+        validate_project_integrity_registry_schema(connection)
+        state = registry_state(connection)
+        if state["project_id"] != payload.project_id:
+            _raise("registry_verification_project_mismatch")
+        authoritative = get_registry_version_snapshot(
+            connection, payload.data_version_id
+        )
+        entries_by_asset = {
+            str(entry["asset_id"]): entry for entry in authoritative["files"]
+        }
+        for item in selected:
+            entry = entries_by_asset.get(item.asset_id)
+            if entry is None:
+                _raise(f"registry_verification_asset_missing:{item.file_id}")
+            expected = {
+                "file_id": item.file_id,
+                "revision_id": item.revision_id,
+                "role": item.role,
+                "entry_kind": item.observed_entry_kind,
+                "size_bytes": item.observed_size_bytes,
+                "hash_algorithm": item.observed_hash_algorithm,
+                "digest": item.observed_digest,
+            }
+            if any(entry.get(field) != value for field, value in expected.items()):
+                _raise(f"registry_verification_asset_mismatch:{item.file_id}")
+            if item.locator_kind == "materialized_snapshot":
+                materializer = entry.get("materializer") or {}
+                if (
+                    item.path_base != "run_root"
+                    or materializer.get("relative_path") != item.relative_path
+                ):
+                    _raise(f"registry_verification_locator_mismatch:{item.file_id}")
+            else:
+                location = entry.get("location") or {}
+                if location.get("location_kind") != item.locator_kind:
+                    _raise(f"registry_verification_locator_mismatch:{item.file_id}")
+                if item.locator_kind == "managed_relative" and (
+                    location.get("path_base") != item.path_base
+                    or location.get("relative_path") != item.relative_path
+                ):
+                    _raise(f"registry_verification_locator_mismatch:{item.file_id}")
+                if item.locator_kind == "opaque_ref" and (
+                    location.get("opaque_ref") != item.external_location_ref
+                ):
+                    _raise(f"registry_verification_locator_mismatch:{item.file_id}")
+
+        rows_by_id = {}
+        event_ids = [item.event_id for item in selected]
+        for offset in range(0, len(event_ids), 400):
+            chunk = event_ids[offset : offset + 400]
+            placeholders = ",".join("?" for _value in chunk)
+            rows = connection.execute(
+                f"""
+                SELECT event_id, data_version_id, asset_id, revision_id, status,
+                       observed_entry_kind, observed_size_bytes,
+                       observed_hash_algorithm, observed_digest, error_code,
+                       verified_at
+                FROM integrity_verification_events
+                WHERE event_id IN ({placeholders})
+                """,
+                tuple(chunk),
+            ).fetchall()
+            rows_by_id.update({str(row[0]): row for row in rows})
+        for item in selected:
+            row = rows_by_id.get(item.event_id)
+            expected = (
+                item.event_id,
+                item.data_version_id,
+                item.asset_id,
+                item.revision_id,
+                "verified",
+                item.observed_entry_kind,
+                item.observed_size_bytes,
+                item.observed_hash_algorithm,
+                item.observed_digest,
+                "",
+                item.verified_at,
+            )
+            if row is None:
+                _raise(f"registry_verification_event_missing:{item.file_id}")
+            if tuple(row) != expected:
+                _raise(f"registry_verification_event_mismatch:{item.file_id}")
+    finally:
+        connection.close()
+
+
+def consume_registry_verification_batch(
+    batch,
+    *,
+    database_path,
+    run_dir,
+    project_id,
+    data_version_id,
+    selected_file_ids,
+):
+    """Validate Registry events and exchange a one-use batch for a receipt."""
+
+    payload = _take_capability(
+        batch,
+        RegistryVerificationBatch,
+        _ISSUED_REGISTRY_BATCHES,
+        "registry_verification_batch_required",
+    )
+    _require_capability_binding(
+        payload,
+        database_path=database_path,
+        run_dir=run_dir,
+        project_id=project_id,
+        data_version_id=data_version_id,
+    )
+    requested = tuple(str(value or "") for value in selected_file_ids or ())
+    if not requested or any(not value for value in requested):
+        _raise("registry_verification_selected_files_missing")
+    if len(requested) != len(set(requested)):
+        _raise("registry_verification_selected_files_duplicate")
+    if any(type(item) is not RegistryVerifiedFile for item in payload.files):
+        _raise("registry_verification_file_invalid")
+    evidence_by_file = {item.file_id: item for item in payload.files}
+    if len(evidence_by_file) != len(payload.files):
+        _raise("registry_verification_file_duplicate")
+    missing = set(requested) - set(evidence_by_file)
+    if missing:
+        _raise(f"registry_verification_file_missing:{sorted(missing)[0]}")
+    selected = tuple(evidence_by_file[file_id] for file_id in requested)
+    if len({item.event_id for item in selected}) != len(selected):
+        _raise("registry_verification_event_duplicate")
+    receipt_payload = _RegistryVerificationPayload(
+        batch_id=payload.batch_id,
+        database_path=payload.database_path,
+        run_dir=payload.run_dir,
+        project_id=payload.project_id,
+        data_version_id=payload.data_version_id,
+        files=selected,
+    )
+    _require_registry_evidence_rows(receipt_payload, selected)
+    return _new_capability_handle(
+        RegistryVerificationReceipt,
+        _ISSUED_REGISTRY_RECEIPTS,
+        receipt_payload,
+    )
+
+
+def inspect_registry_verification_receipt(
+    receipt,
+    *,
+    database_path,
+    run_dir,
+    project_id,
+    data_version_id,
+):
+    """Return a detached evidence copy without consuming the receipt."""
+
+    payload = _peek_capability(
+        receipt,
+        RegistryVerificationReceipt,
+        _ISSUED_REGISTRY_RECEIPTS,
+        "registry_verification_receipt_required",
+    )
+    _require_capability_binding(
+        payload,
+        database_path=database_path,
+        run_dir=run_dir,
+        project_id=project_id,
+        data_version_id=data_version_id,
+    )
+    return _claim_from_payload(payload)
+
+
+def claim_registry_verification_receipt(
+    receipt,
+    *,
+    database_path,
+    run_dir,
+    project_id,
+    data_version_id,
+    detail_progress_callback=None,
+    cancel_check=None,
+):
+    """Consume and revalidate a receipt at the training transition."""
+
+    payload = _take_capability(
+        receipt,
+        RegistryVerificationReceipt,
+        _ISSUED_REGISTRY_RECEIPTS,
+        "registry_verification_receipt_required",
+    )
+    _require_capability_binding(
+        payload,
+        database_path=database_path,
+        run_dir=run_dir,
+        project_id=project_id,
+        data_version_id=data_version_id,
+    )
+    _require_registry_evidence_rows(payload, payload.files)
+    files = tuple(payload.files)
+    total_bytes = sum(max(0, item.observed_size_bytes) for item in files)
+    completed_bytes = 0
+    for file_index, item in enumerate(files, start=1):
+        callback = None
+        if detail_progress_callback is not None:
+            display_name = os.path.basename(os.path.normpath(item.runtime_path))
+
+            def callback(done, total, *, _item=item, _index=file_index, _name=display_name):
+                detail_progress_callback(
+                    {
+                        "phase": "registry_final_recheck",
+                        "file_index": _index,
+                        "file_count": len(files),
+                        "file_id": _item.file_id,
+                        "role": _item.role,
+                        "display_name": _name,
+                        "bytes_done": int(done),
+                        "bytes_total": int(total),
+                        "total_bytes_done": total_bytes + completed_bytes + int(done),
+                        "total_bytes": total_bytes * 2,
+                    }
+                )
+
+        _require_verified_file_stable(
+            item,
+            progress_callback=callback,
+            cancel_check=cancel_check,
+        )
+        completed_bytes += max(0, item.observed_size_bytes)
+    if cancel_check is not None and cancel_check():
+        raise FingerprintCancelled()
+    return _claim_from_payload(payload)
+
+
+def registry_verification_audit_payload(claim, *, run_id):
+    """Build the path-redacted, persistent audit receipt for one run."""
+
+    if type(claim) is not RegistryVerificationClaim:
+        _raise("registry_verification_claim_required")
+    files = []
+    for item in claim.files:
+        locator = {"locator_kind": item.locator_kind}
+        if item.locator_kind == "opaque_ref":
+            locator["external_location_ref"] = item.external_location_ref
+        else:
+            locator.update(
+                {
+                    "path_base": item.path_base,
+                    "relative_path": item.relative_path,
+                }
+            )
+        files.append(
+            {
+                "file_id": item.file_id,
+                "role": item.role,
+                "asset_id": item.asset_id,
+                "revision_id": item.revision_id,
+                "event_id": item.event_id,
+                "verified_at": item.verified_at,
+                "entry_kind": item.observed_entry_kind,
+                "size_bytes": item.observed_size_bytes,
+                "mtime_ns": item.observed_mtime_ns,
+                "hash_algorithm": item.observed_hash_algorithm,
+                "digest": item.observed_digest,
+                "runtime_metadata_digest": item.runtime_metadata_digest,
+                "locator": locator,
+            }
+        )
+    return {
+        "schema_version": "taxamask_registry_verification_receipt_v1",
+        "batch_id": claim.batch_id,
+        "run_id": str(run_id),
+        "project_id": claim.project_id,
+        "data_version_id": claim.data_version_id,
+        "files": files,
+    }
 
 
 def resolve_training_baseline_inputs(
@@ -1482,7 +2404,10 @@ def resolve_training_baseline_inputs(
     opaque_locations=None,
     managed_roots=None,
     progress_callback=None,
+    detail_progress_callback=None,
     cancel_check=None,
+    issue_verification_batch=False,
+    selected_file_ids=None,
 ):
     """Verify registry expected facts and materialize snapshots under run_root."""
 
@@ -1515,13 +2440,75 @@ def resolve_training_baseline_inputs(
         if authoritative != dict(snapshot):
             _raise("integrity_baseline_snapshot_stale")
         resolved_files = []
+        verified_files = []
         opaque = dict(opaque_locations or {})
-        for entry in authoritative["files"]:
+        all_entries = list(authoritative["files"])
+        if selected_file_ids is None:
+            entries = all_entries
+        else:
+            selected = {
+                _safe_id(value, "file_id") for value in selected_file_ids
+            }
+            available = {
+                str(entry.get("file_id") or "") for entry in all_entries
+            }
+            if not selected:
+                _raise("training_input_selection_empty")
+            if selected - available:
+                _raise("training_input_selection_unknown_file")
+            entries = [
+                entry
+                for entry in all_entries
+                if str(entry.get("file_id") or "") in selected
+            ]
+        total_expected_bytes = sum(
+            max(0, int(entry.get("size_bytes") or 0)) for entry in entries
+        )
+        completed_bytes = 0
+        for file_index, entry in enumerate(entries, start=1):
             expected = {
                 key: entry.get(key)
                 for key in ("entry_kind", "size_bytes", "hash_algorithm", "digest")
             }
             runtime = dict(entry)
+
+            def fingerprint(path):
+                if cancel_check is not None and cancel_check():
+                    raise FingerprintCancelled()
+                callback = None
+                if progress_callback is not None or detail_progress_callback is not None:
+                    display_name = os.path.basename(os.path.normpath(path))
+
+                    def callback(done, total):
+                        if progress_callback is not None:
+                            progress_callback(done, total)
+                        if detail_progress_callback is not None:
+                            detail_progress_callback(
+                                {
+                                    "phase": "registry_verification",
+                                    "file_index": file_index,
+                                    "file_count": len(entries),
+                                    "file_id": str(entry.get("file_id") or ""),
+                                    "role": str(entry.get("role") or "file"),
+                                    "display_name": display_name,
+                                    "bytes_done": int(done),
+                                    "bytes_total": int(total),
+                                    "total_bytes_done": completed_bytes + int(done),
+                                    "total_bytes": (
+                                        total_expected_bytes * 2
+                                        if issue_verification_batch
+                                        else total_expected_bytes
+                                    ),
+                                }
+                            )
+
+                return compute_fingerprint(
+                    path,
+                    entry["hash_algorithm"],
+                    progress_callback=callback,
+                    cancel_check=cancel_check,
+                )
+
             try:
                 if "location" in entry:
                     location = dict(entry["location"])
@@ -1532,6 +2519,10 @@ def resolve_training_baseline_inputs(
                         runtime_path, clean_relative = _safe_runtime_target(
                             roots[path_base], location["relative_path"]
                         )
+                        locator_kind = "managed_relative"
+                        locator_path_base = path_base
+                        locator_relative_path = clean_relative
+                        locator_external_ref = ""
                     else:
                         opaque_ref = location["opaque_ref"]
                         if opaque_ref not in opaque:
@@ -1541,15 +2532,14 @@ def resolve_training_baseline_inputs(
                             _raise("opaque_runtime_path_not_absolute")
                         runtime_path = os.path.abspath(raw_runtime_path)
                         clean_relative = None
+                        locator_kind = "opaque_ref"
+                        locator_path_base = ""
+                        locator_relative_path = ""
+                        locator_external_ref = str(opaque_ref)
                     _require_safe_existing_path(
                         runtime_path, expected_kind=entry["entry_kind"]
                     )
-                    observed = compute_fingerprint(
-                        runtime_path,
-                        entry["hash_algorithm"],
-                        progress_callback=progress_callback,
-                        cancel_check=cancel_check,
-                    )
+                    observed = fingerprint(runtime_path)
                     if not _matches_expected(expected, observed):
                         _record_verification(
                             connection, version_id, entry, "mismatch", observed, "source_digest_mismatch"
@@ -1573,13 +2563,10 @@ def resolve_training_baseline_inputs(
                     ).fetchone()
                     if not row or row[0] is None:
                         _raise("snapshot_materializer_missing")
+                    if cancel_check is not None and cancel_check():
+                        raise FingerprintCancelled()
                     _atomic_write_snapshot(roots["run_root"], target, str(row[0]))
-                    observed = compute_fingerprint(
-                        target,
-                        entry["hash_algorithm"],
-                        progress_callback=progress_callback,
-                        cancel_check=cancel_check,
-                    )
+                    observed = fingerprint(target)
                     if not _matches_expected(expected, observed):
                         _record_verification(
                             connection, version_id, entry, "mismatch", observed, "materialized_digest_mismatch"
@@ -1589,9 +2576,73 @@ def resolve_training_baseline_inputs(
                     materializer["runtime_path"] = target
                     materializer["materialized"] = True
                     runtime["materializer"] = materializer
+                    runtime_path = target
+                    locator_kind = "materialized_snapshot"
+                    locator_path_base = "run_root"
+                    locator_relative_path = clean_relative
+                    locator_external_ref = ""
                 runtime["status"] = "verified"
-                _record_verification(connection, version_id, entry, "verified", observed)
+                manifest_entry_kind = (
+                    "external_reference"
+                    if runtime.get("location", {}).get("location_kind") == "opaque_ref"
+                    else str(observed["entry_kind"])
+                )
+                if issue_verification_batch:
+                    metadata = _runtime_metadata_snapshot(
+                        runtime_path,
+                        expected_kind=str(observed["entry_kind"]),
+                        cancel_check=cancel_check,
+                    )
+                    if (
+                        metadata["entry_kind"] != observed["entry_kind"]
+                        or metadata["mtime_ns"] != observed["mtime_ns"]
+                        or (
+                            observed["entry_kind"] == "file"
+                            and metadata["size_bytes"] != observed["size_bytes"]
+                        )
+                    ):
+                        _record_verification(
+                            connection,
+                            version_id,
+                            entry,
+                            "incomplete",
+                            observed,
+                            "source_changed_after_verification",
+                        )
+                        _raise("source_changed_after_verification")
+                event = _record_verification(
+                    connection, version_id, entry, "verified", observed
+                )
+                if issue_verification_batch:
+                    verified_files.append(
+                        RegistryVerifiedFile(
+                            file_id=str(entry["file_id"]),
+                            role=str(entry["role"]),
+                            asset_id=str(entry["asset_id"]),
+                            revision_id=str(entry["revision_id"]),
+                            data_version_id=version_id,
+                            event_id=str(event["event_id"]),
+                            verified_at=str(event["verified_at"]),
+                            observed_entry_kind=str(observed["entry_kind"]),
+                            manifest_entry_kind=manifest_entry_kind,
+                            observed_size_bytes=int(observed["size_bytes"]),
+                            observed_mtime_ns=int(observed["mtime_ns"]),
+                            observed_hash_algorithm=str(observed["hash_algorithm"]),
+                            observed_digest=str(observed["digest"]),
+                            locator_kind=locator_kind,
+                            path_base=locator_path_base,
+                            relative_path=locator_relative_path,
+                            external_location_ref=locator_external_ref,
+                            runtime_path=_capability_path(runtime_path),
+                            runtime_stat_size_bytes=int(metadata["size_bytes"]),
+                            runtime_stat_mtime_ns=int(metadata["mtime_ns"]),
+                            runtime_metadata_digest=str(
+                                metadata["metadata_digest"]
+                            ),
+                        )
+                    )
                 resolved_files.append(runtime)
+                completed_bytes += int(observed["size_bytes"])
             except ProjectIntegrityRegistryError:
                 raise
             except FingerprintError as exc:
@@ -1610,7 +2661,7 @@ def resolve_training_baseline_inputs(
                 )
                 raise ProjectIntegrityRegistryError("source_missing") from exc
         connection.commit()
-        return {
+        result = {
             "schema_version": BASELINE_SNAPSHOT_SCHEMA_VERSION,
             "project_kind": authoritative["project_kind"],
             "project_id": authoritative["project_id"],
@@ -1618,6 +2669,21 @@ def resolve_training_baseline_inputs(
             "status": "verified",
             "files": resolved_files,
         }
+        if issue_verification_batch:
+            payload = _RegistryVerificationPayload(
+                batch_id=f"registry_verify_{uuid.uuid4().hex}",
+                database_path=_capability_path(database_path),
+                run_dir=_capability_path(roots["run_root"]),
+                project_id=str(authoritative["project_id"]),
+                data_version_id=version_id,
+                files=tuple(verified_files),
+            )
+            result["verification_batch"] = _new_capability_handle(
+                RegistryVerificationBatch,
+                _ISSUED_REGISTRY_BATCHES,
+                payload,
+            )
+        return result
     except Exception:
         connection.commit()
         raise
@@ -1709,7 +2775,15 @@ def _relocate_project_asset(
     }
     if not _matches_expected(expected, observed):
         _raise("relocation_digest_mismatch")
-    new_location_id = _insert_location(connection, clean_asset_id, location)
+    new_location_id = _insert_location(
+        connection,
+        clean_asset_id,
+        location,
+        revision_id=str(current[0]),
+        digest=str(current[2]),
+        data_version_id=state["current_data_version_id"],
+        same_content_alias=True,
+    )
     old_location_id = str((old_location or {}).get("location_id") or "")
     operation_id = _insert_finalized_operation(
         connection,
@@ -1833,19 +2907,29 @@ __all__ = [
     "LABEL_SNAPSHOT_SCHEMA_ID",
     "OPERATION_STATUSES",
     "ProjectIntegrityRegistryError",
+    "RegistryVerificationBatch",
+    "RegistryVerificationClaim",
+    "RegistryVerificationReceipt",
+    "RegistryVerifiedFile",
     "REGISTRY_READY",
     "REGISTRY_RECOVERY_REQUIRED",
     "REGISTRY_SCHEMA_VERSION",
     "REGISTRY_UNINITIALIZED",
     "canonical_snapshot_text",
+    "claim_registry_verification_receipt",
     "commit_project_data_version",
+    "consume_registry_verification_batch",
     "create_operation",
     "get_registry_version_snapshot",
     "get_training_baseline_snapshot",
     "initialize_project_integrity_registry_schema",
+    "inspect_registry_verification_receipt",
     "register_project_baseline",
+    "read_materialized_registry_payloads",
     "relocate_project_asset",
     "registry_state",
+    "registry_verification_audit_payload",
+    "recheck_registry_verified_files",
     "resolve_training_baseline_inputs",
     "sync_registry_identity",
     "update_operation_status",

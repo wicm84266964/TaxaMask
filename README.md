@@ -81,6 +81,8 @@ Maintained 2D, Blink, TIF, nnU-Net, and Local Axis training entries now share a 
 
 Training stops when a required source, reviewed label, configuration snapshot, or weight no longer matches its recorded fingerprint. The recovery view can recheck the files, relocate an unchanged file, register an intentionally changed file as a new data version with a note, or export a redacted diagnostic. Unreviewed AI predictions remain excluded from training throughout recovery.
 
+The 2D and Blink GUI preflight performs both pre-training full-content verification passes in a background worker. It shows the current file, completion percentage, read rate, and estimated time remaining, and can be cancelled without starting training or leaving a run falsely marked as active. A selected image group verifies only its actual source/label inputs plus shared schema, configuration, and selected starting weights. The transition-time pass is intentionally retained because file metadata alone is not proof that the bytes are unchanged. Before a run is marked successful and pending weights become active, those bound inputs are checked once more; a persistent external change fails the run.
+
 The main 2D inference path also emits stage-level diagnostics through the existing runtime log system. Locator, crop, expert routing, SAM, and assembly decisions can be inspected without storing source images, full masks, API credentials, or private absolute paths in the diagnostic events.
 
 ## 2D / STL Morphology Workbench
@@ -170,7 +172,7 @@ Current TIF/CT capabilities include:
 - Explainable high-risk ordering in the existing Local Axis review queue, while preserving the original and confidence-based sort modes.
 - Resliced grayscale TIFF export, with metadata JSON.
 - Optional mask TIFF export when a part mask is available.
-- Raw measurement STL and optional separately marked smoothed preview STL export from reviewed `manual_truth`, with millimeter scale and Blender 5.0-compatible geometry.
+- Blender 5.0-compatible STL export from revision-verified `manual_truth`: trusted physical spacing produces a millimeter measurement mesh; unknown spacing produces an explicitly named `unitless` observation mesh. Optional smoothed copies are display-only and never measurement artifacts.
 - SQLite-backed mesh export history, source/STL hashes, interruption recovery, recheck, retry, and explicit cleanup for incomplete exports; mesh JSON sidecars are not used as project state.
 - Training-material records that capture manual part extraction and local-axis decisions.
 - Label schema import/export/binding so several specimens can share the same numeric labels.

@@ -293,6 +293,7 @@ class TrainingThread(QThread):
         self.has_parts_stage = bool(self.train_segmenter and self.parts_train_data and self.parts_val_data)
         self.saved_weights_timestamp = None
         self.training_run = training_run
+        self._weight_publisher = None
         self.model_output_root = os.path.abspath(
             model_output_root or getattr(engine, "weights_dir", "")
         )
@@ -306,10 +307,36 @@ class TrainingThread(QThread):
     def _cancel_run(self):
         if self._run_active():
             self.training_run.cancel(stage="training")
+            self._cleanup_terminal_publication()
 
     def _fail_run(self, exc):
         if self._run_active():
             self.training_run.fail(exc, stage="training")
+            self._cleanup_terminal_publication()
+
+    def _cleanup_terminal_publication(self):
+        """Best-effort cleanup after the run record is terminally failed."""
+
+        run = self.training_run
+        publisher = self._weight_publisher
+        if run is None or publisher is None:
+            return
+        try:
+            record = run.record
+            if record.get("status") not in {"failed", "cancelled", "interrupted"}:
+                return
+            report = publisher.cleanup_terminal_run(run.run_id, record)
+            if report.get("manual_review"):
+                self.log_signal.emit(
+                    "Training weight cleanup needs manual review: "
+                    + str(report["manual_review"])
+                )
+        except Exception as cleanup_exc:
+            # Never replace the original training failure with a cleanup error.
+            self.log_signal.emit(
+                "Training weight cleanup failed; manual recovery is required: "
+                + str(cleanup_exc)
+            )
 
     def _publish_weights(self):
         run = self.training_run
@@ -319,6 +346,7 @@ class TrainingThread(QThread):
                 save_segmenter=self.has_parts_stage,
             )
         publisher = TrainingWeightPublisher(self.model_output_root)
+        self._weight_publisher = publisher
         specs = []
         if self.has_locator_stage:
             specs.append(

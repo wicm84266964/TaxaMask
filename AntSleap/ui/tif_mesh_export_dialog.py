@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 from AntSleap.core.location_registry import resolve_location
 from AntSleap.core.mesh_export import (
     export_reviewed_label_meshes,
+    recover_interrupted_mesh_exports,
     reviewed_mesh_source_summary,
     safe_cleanup_incomplete_mesh_export,
     verify_mesh_export,
@@ -64,6 +65,24 @@ class MeshExportWorker(QThread):
                     ),
                     **self.kwargs,
                 )
+            elif self.action == "bootstrap":
+                recovery = recover_interrupted_mesh_exports(
+                    self.project,
+                    cancel_check=self._cancel.is_set,
+                    progress_callback=lambda done, total, stage: self.progress_signal.emit(
+                        int(done), int(total), str(stage)
+                    ),
+                    **self.kwargs,
+                )
+                summary = reviewed_mesh_source_summary(
+                    self.project,
+                    cancel_check=self._cancel.is_set,
+                    progress_callback=lambda done, total, stage: self.progress_signal.emit(
+                        int(done), int(total), str(stage)
+                    ),
+                    **self.kwargs,
+                )
+                record = {"recovery": recovery, "summary": summary}
             elif self.action == "summary":
                 record = reviewed_mesh_source_summary(
                     self.project,
@@ -107,6 +126,8 @@ class TifMeshExportDialog(QDialog):
         self.lang = lang
         self.worker = None
         self.source_ready = False
+        self.mesh_purpose = ""
+        self.output_unit = ""
         self.last_record = None
         self.history_records = []
         self.setWindowTitle(
@@ -114,8 +135,8 @@ class TifMeshExportDialog(QDialog):
         )
         self.resize(860, 680)
         self._build_ui()
-        self._load_source_summary()
         self.refresh_history()
+        self._load_source_summary()
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -158,8 +179,8 @@ class TifMeshExportDialog(QDialog):
         self.preview_check = QCheckBox(
             _text(
                 self.lang,
-                "Create smoothed preview copies (not original measurement meshes)",
-                "生成平滑展示副本（不作为原始测量网格）",
+                "Create smoothed display previews (never use for measurement)",
+                "生成平滑展示副本（不可用于测量）",
             ),
             self,
         )
@@ -203,11 +224,13 @@ class TifMeshExportDialog(QDialog):
         layout.addWidget(
             QLabel(_text(self.lang, "Export history", "导出历史"), self)
         )
-        self.history_table = QTableWidget(0, 5, self)
+        self.history_table = QTableWidget(0, 7, self)
         self.history_table.setObjectName("tifMeshExportHistoryTable")
         self.history_table.setHorizontalHeaderLabels(
             [
                 _text(self.lang, "Status", "状态"),
+                _text(self.lang, "Purpose", "用途"),
+                _text(self.lang, "Unit", "单位"),
                 _text(self.lang, "Export ID", "导出 ID"),
                 _text(self.lang, "STL", "STL 数"),
                 _text(self.lang, "Created", "创建时间"),
@@ -258,7 +281,7 @@ class TifMeshExportDialog(QDialog):
         os.makedirs(default, exist_ok=True)
         self.target_edit.setText(default)
         self._start_worker(
-            "summary",
+            "bootstrap",
             {
                 "specimen_id": self.specimen_id,
                 "part_id": self.part_id,
@@ -275,19 +298,38 @@ class TifMeshExportDialog(QDialog):
         self.scope_label.setText(
             _text(self.lang, "Source: {0}", "来源：{0}").format(scope)
         )
-        scale_status = summary["scale_status"]
-        status_text = _text(
-            self.lang,
-            "verified" if scale_status == "verified" else "unverified; observation only",
-            "已验证" if scale_status == "verified" else "未验证，仅供观察",
-        )
+        self.mesh_purpose = str(summary.get("mesh_purpose") or "observation")
+        self.output_unit = str(summary.get("output_unit") or "unitless")
+        if self.mesh_purpose == "measurement" and self.output_unit == "millimeter":
+            purpose_text = _text(
+                self.lang,
+                "Measurement mesh; millimeter scale verified; raw STL may be used for measurement.",
+                "测量网格；毫米尺度已验证；原始 STL 可用于测量。",
+            )
+            export_text = _text(
+                self.lang,
+                "Export selected measurement STL",
+                "导出所选测量 STL",
+            )
+        else:
+            purpose_text = _text(
+                self.lang,
+                "Observation mesh; unitless scale; do not use for physical measurement.",
+                "观察网格；尺度无单位；不可用于物理测量。",
+            )
+            export_text = _text(
+                self.lang,
+                "Export selected observation STL",
+                "导出所选观察 STL",
+            )
         self.scale_label.setText(
             _text(
                 self.lang,
-                "Spacing Z/Y/X: {0} {1}; axes: ZYX to XYZ; STL unit: millimeter; scale: {2}",
-                "体素间距 Z/Y/X：{0} {1}；方向：ZYX 转 XYZ；STL 单位：毫米；尺度：{2}",
-            ).format(summary["spacing_zyx"], summary["spacing_unit"], status_text)
+                "Spacing Z/Y/X: {0} {1}; axes: ZYX to XYZ. {2} Smoothed copies are display previews only.",
+                "体素间距 Z/Y/X：{0} {1}；方向：ZYX 转 XYZ。{2} 平滑副本仅供展示。",
+            ).format(summary["spacing_zyx"], summary["spacing_unit"], purpose_text)
         )
+        self.export_button.setText(export_text)
         labels = summary["labels"]
         self.label_table.setRowCount(len(labels))
         for row, label in enumerate(labels):
@@ -396,15 +438,30 @@ class TifMeshExportDialog(QDialog):
 
     def _on_result(self, record):
         action = str(self.worker.action if self.worker is not None else "")
-        if action == "summary":
-            self._apply_source_summary(record)
-            self.status_label.setText(
-                _text(
+        if action in {"bootstrap", "summary"}:
+            summary = record.get("summary", {}) if action == "bootstrap" else record
+            self._apply_source_summary(summary)
+            recovery = dict(record.get("recovery") or {}) if action == "bootstrap" else {}
+            if action == "bootstrap":
+                self.refresh_history()
+            checked = int(recovery.get("checked_count") or 0)
+            if checked:
+                message = _text(
+                    self.lang,
+                    "Recovered {0} interrupted export(s): {1} complete, {2} incomplete. Reviewed source is ready.",
+                    "已复核 {0} 个中断导出：{1} 个完整，{2} 个未完成。已审核来源可以导出。",
+                ).format(
+                    checked,
+                    int(recovery.get("complete_count") or 0),
+                    int(recovery.get("incomplete_count") or 0),
+                )
+            else:
+                message = _text(
                     self.lang,
                     "Reviewed source is ready for mesh export.",
                     "已审核来源可以导出网格。",
                 )
-            )
+            self.status_label.setText(message)
             return
         self.last_record = dict(record or {})
         self.refresh_history()
@@ -445,6 +502,76 @@ class TifMeshExportDialog(QDialog):
                 "The training truth has not been reviewed yet.",
                 "当前训练真值尚未完成人工审核。",
             ),
+            "mesh_spacing_invalid": _text(
+                self.lang,
+                "Voxel spacing is invalid. Enter three finite positive spacing values in the volume metadata before exporting.",
+                "体素间距无效。请先在体数据元信息中填写 3 个有限且大于 0 的间距值，再导出。",
+            ),
+            "mesh_manual_truth_path_unsafe": _text(
+                self.lang,
+                "The reviewed truth path passes through a symbolic link or junction. Move or restore the file under a normal project directory, then formally relocate or register it before exporting.",
+                "已审核真值路径经过符号链接或 junction。请先把文件移动或恢复到普通项目目录，再正式执行重新定位或登记后导出。",
+            ),
+            "mesh_target_directory_unsafe": _text(
+                self.lang,
+                "The export directory passes through a symbolic link or junction. Choose a normal directory, or formally relocate the registered export location before retrying.",
+                "导出目录经过符号链接或 junction。请选择普通目录，或先正式重新定位已登记的导出位置后再重试。",
+            ),
+            "mesh_registry_data_version_missing": _text(
+                self.lang,
+                "This project has no registered data version. Complete project integrity setup before exporting.",
+                "当前项目尚未建立数据版本。请先完成项目完整性初始化，再导出网格。",
+            ),
+            "mesh_registry_baseline_unavailable": _text(
+                self.lang,
+                "The SQLite integrity baseline is unavailable. Open data integrity recovery to initialize or repair it.",
+                "SQLite 完整性基线不可用。请打开数据完整性恢复，完成初始化或修复后再试。",
+            ),
+            "mesh_registry_data_version_mismatch": _text(
+                self.lang,
+                "The project changed after this view was opened. Reopen the project, then review the current truth before exporting.",
+                "打开此界面后项目数据版本已变化。请重新打开项目，并复核当前真值后再导出。",
+            ),
+            "mesh_registry_project_mismatch": _text(
+                self.lang,
+                "The open project does not match its SQLite integrity record. Stop exporting and repair the project record.",
+                "当前项目与 SQLite 完整性记录不一致。请停止导出并先修复项目记录。",
+            ),
+            "mesh_registry_manual_truth_missing": _text(
+                self.lang,
+                "This reviewed truth is not registered in the current data version. Register or restore it before exporting.",
+                "当前数据版本中没有登记这份已审核真值。请先登记新版本或恢复原文件。",
+            ),
+            "mesh_registry_manual_truth_ambiguous": _text(
+                self.lang,
+                "More than one integrity record matches this truth. Repair the project registry before exporting.",
+                "这份真值对应多条完整性记录。请先修复项目 Registry，再导出。",
+            ),
+            "mesh_registry_manual_truth_revision_missing": _text(
+                self.lang,
+                "The truth record has no immutable revision. Repair the integrity baseline before exporting.",
+                "这份真值缺少不可变 revision。请先修复完整性基线，再导出。",
+            ),
+            "mesh_registry_manual_truth_revision_mismatch": _text(
+                self.lang,
+                "The truth revision is not part of the current data version. Reopen or repair the project before exporting.",
+                "这份真值 revision 不属于当前数据版本。请重新打开或修复项目后再导出。",
+            ),
+            "mesh_registry_manual_truth_location_unavailable": _text(
+                self.lang,
+                "The registered truth location is unavailable. Restore it or use the integrity recovery relocation action before exporting.",
+                "已登记的真值位置当前不可用。请先恢复该位置，或在完整性恢复中执行重新定位，再导出。",
+            ),
+            "mesh_registry_manual_truth_location_mismatch": _text(
+                self.lang,
+                "The project now points to a different truth location than this registered revision. Restore the registered location or formally relocate it before exporting.",
+                "项目当前指向的真值位置与该登记 revision 不一致。请恢复登记位置，或先正式执行重新定位，再导出。",
+            ),
+            "mesh_manual_truth_registry_mismatch": _text(
+                self.lang,
+                "The reviewed truth file changed outside TaxaMask. Restore the registered file or register it as a new version with a reason, then review it again.",
+                "已审核真值文件在 TaxaMask 外发生了变化。请恢复登记文件，或填写原因登记为新版本并重新审核。",
+            ),
             "retry_source_changed_create_new_export": _text(
                 self.lang,
                 "The reviewed labels changed. Start a new export instead of linking this as a retry.",
@@ -483,8 +610,37 @@ class TifMeshExportDialog(QDialog):
         )
         self.history_table.setRowCount(len(self.history_records))
         for row, record in enumerate(self.history_records):
+            coordinates = dict(record.get("coordinates") or {})
+            purpose = str(coordinates.get("mesh_purpose") or "")
+            if not purpose:
+                purpose = (
+                    "measurement"
+                    if coordinates.get("scale_status") == "verified"
+                    else "observation"
+                )
+            purpose_text = {
+                "measurement": _text(self.lang, "Measurement", "测量"),
+                "observation": _text(self.lang, "Observation", "观察"),
+            }.get(purpose, purpose)
+            if bool((record.get("options") or {}).get("preview_smoothing")):
+                purpose_text += _text(
+                    self.lang,
+                    " + display preview",
+                    " + 展示副本",
+                )
+            unit = str(coordinates.get("output_unit") or "")
+            if not unit:
+                unit = (
+                    "millimeter"
+                    if coordinates.get("scale_status") == "verified"
+                    else "unitless"
+                )
             values = (
                 record.get("status"),
+                purpose_text,
+                _text(self.lang, "Millimeter", "毫米")
+                if unit == "millimeter"
+                else _text(self.lang, "Unitless", "无单位"),
                 record.get("export_id"),
                 record.get("stl_item_count"),
                 record.get("created_at"),

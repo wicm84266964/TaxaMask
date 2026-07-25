@@ -688,6 +688,76 @@ class BlinkBridgeTests(unittest.TestCase):
         self.assertIn("Head", widget.canvas.manual_boxes)
         self.assertEqual(tuple(widget.zoomed_img_np.shape[:2]), (800, 800))
 
+    def test_blink_integrity_recovery_allows_only_one_retry(self):
+        widget = BlinkLabWidget(self.engine, self.pm)
+        request = {"project_path": self.pm.current_project_path, "part": "Mandible"}
+        self.assertTrue(widget._queue_blink_integrity_retry(request))
+        self.assertFalse(widget._queue_blink_integrity_retry(request))
+        self.assertTrue(widget.integrity_recovery_retry_used)
+        self.assertEqual(widget.pending_blink_retry_request, request)
+
+    def test_blink_training_integrity_error_queues_recovery_retry(self):
+        widget = BlinkLabWidget(self.engine, self.pm)
+        widget.pending_training_request = {
+            "project_path": self.pm.current_project_path,
+            "part": "Mandible",
+        }
+        worker = types.SimpleNamespace(project_path=self.pm.current_project_path)
+
+        class FakeRecovery:
+            report = {"status": "verified"}
+
+            def __init__(self, *args, **kwargs):
+                self.args = args
+                self.kwargs = kwargs
+
+            def exec(self):
+                return 1
+
+        with patch("ui.blink_lab.TrainingIntegrityRecoveryDialog", FakeRecovery):
+            widget._on_training_error("registry_verified_file_changed", worker=worker)
+
+        self.assertTrue(widget.integrity_recovery_retry_used)
+        self.assertEqual(
+            widget.pending_blink_retry_request,
+            widget.pending_training_request,
+        )
+
+    def test_blink_preflight_recovery_retry_links_failed_run(self):
+        widget = BlinkLabWidget(self.engine, self.pm)
+        request = {
+            "project_path": self.pm.current_project_path,
+            "part": "Mandible",
+        }
+        worker = types.SimpleNamespace(project_path=self.pm.current_project_path)
+        error = RuntimeError("registry_verified_file_changed")
+        error.training_run_id = "failed_blink_preflight_run"
+        widget.training_preflight_thread = worker
+        widget.training_preflight_dialog = None
+
+        class FakeRecovery:
+            report = {"status": "verified"}
+
+            def __init__(self, *args, **kwargs):
+                self.args = args
+                self.kwargs = kwargs
+
+            def exec(self):
+                return 1
+
+        with patch("ui.blink_lab.QMessageBox.critical"), patch(
+            "ui.blink_lab.TrainingIntegrityRecoveryDialog", FakeRecovery
+        ), patch.object(
+            widget, "_start_queued_blink_integrity_retry", return_value=True
+        ) as start_retry:
+            widget._on_blink_preflight_error(error, request, worker)
+
+        self.assertEqual(
+            widget.pending_blink_retry_request["retry_of"],
+            "failed_blink_preflight_run",
+        )
+        start_retry.assert_called_once_with()
+
     def test_blink_session_filters_vlm_drafts_from_internal_auto_boxes(self):
         label_entry = self.pm.project_data["labels"][self.image_path]
         label_entry.setdefault("auto_boxes", {})["Mandible"] = [5.0, 5.0, 15.0, 15.0]

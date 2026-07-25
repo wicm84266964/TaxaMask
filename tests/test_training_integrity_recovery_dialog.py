@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication, QFileDialog
 from AntSleap.core.project import ProjectManager
 from AntSleap.ui.training_integrity_recovery_dialog import (
     TrainingIntegrityRecoveryDialog,
+    is_training_integrity_error,
 )
 
 
@@ -18,6 +19,13 @@ class TrainingIntegrityRecoveryDialogTests(unittest.TestCase):
     def setUpClass(cls):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         cls.app = QApplication.instance() or QApplication([])
+
+    def test_final_registry_recheck_error_opens_recovery_route(self):
+        self.assertTrue(
+            is_training_integrity_error(
+                "registry_verified_source_changed:source_image_ant_001"
+            )
+        )
 
     def test_dialog_lists_mismatch_with_expected_and_observed_values(self):
         with tempfile.TemporaryDirectory() as tmp:

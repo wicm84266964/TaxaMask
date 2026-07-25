@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 import sqlite3
@@ -16,8 +17,12 @@ from AntSleap.core.project_integrity_registry import (
     BASELINE_SNAPSHOT_SCHEMA_VERSION,
     LABEL_SNAPSHOT_SCHEMA_ID,
     ProjectIntegrityRegistryError,
+    RegistryVerificationBatch,
+    RegistryVerificationReceipt,
     canonical_snapshot_text,
+    claim_registry_verification_receipt,
     commit_project_data_version,
+    consume_registry_verification_batch,
     create_operation,
     get_registry_version_snapshot,
     get_training_baseline_snapshot,
@@ -206,6 +211,172 @@ class ProjectIntegrityRegistryTests(unittest.TestCase):
         fingerprint = compute_fingerprint(materialized, FULL_FILE_ALGORITHM)
         self.assertEqual(fingerprint["digest"], label["digest"])
         self.assertEqual(fingerprint["size_bytes"], label["size_bytes"])
+
+    def test_default_resolver_result_remains_serializable_and_copyable(self):
+        self._register()
+        snapshot = get_training_baseline_snapshot(self.db_path)
+        resolved = resolve_training_baseline_inputs(
+            self.db_path,
+            snapshot,
+            project_root=self.project_root,
+            run_root=self.run_root,
+        )
+
+        self.assertNotIn("verification_batch", resolved)
+        self.assertEqual(copy.deepcopy(resolved), resolved)
+        self.assertIsInstance(json.dumps(resolved), str)
+
+    def test_verification_capabilities_cannot_be_forged_or_replayed(self):
+        self._register()
+        snapshot = get_training_baseline_snapshot(self.db_path)
+        resolved = resolve_training_baseline_inputs(
+            self.db_path,
+            snapshot,
+            project_root=self.project_root,
+            run_root=self.run_root,
+            issue_verification_batch=True,
+        )
+        batch = resolved["verification_batch"]
+        file_ids = [item["file_id"] for item in resolved["files"]]
+
+        self.assertFalse(hasattr(batch, "_token"))
+        with self.assertRaises(AttributeError):
+            batch.any_field = "forged"
+        forged_batch = object.__new__(RegistryVerificationBatch)
+        with self.assertRaises(ProjectIntegrityRegistryError):
+            consume_registry_verification_batch(
+                forged_batch,
+                database_path=self.db_path,
+                run_dir=self.run_root,
+                project_id=self.project_id,
+                data_version_id=self.version_id,
+                selected_file_ids=file_ids,
+            )
+
+        receipt = consume_registry_verification_batch(
+            batch,
+            database_path=self.db_path,
+            run_dir=self.run_root,
+            project_id=self.project_id,
+            data_version_id=self.version_id,
+            selected_file_ids=file_ids,
+        )
+        self.assertTrue(batch.consumed)
+        with self.assertRaisesRegex(
+            ProjectIntegrityRegistryError, "batch_already_consumed"
+        ):
+            consume_registry_verification_batch(
+                batch,
+                database_path=self.db_path,
+                run_dir=self.run_root,
+                project_id=self.project_id,
+                data_version_id=self.version_id,
+                selected_file_ids=file_ids,
+            )
+        forged_receipt = object.__new__(RegistryVerificationReceipt)
+        with self.assertRaises(ProjectIntegrityRegistryError):
+            claim_registry_verification_receipt(
+                forged_receipt,
+                database_path=self.db_path,
+                run_dir=self.run_root,
+                project_id=self.project_id,
+                data_version_id=self.version_id,
+            )
+
+        claim = claim_registry_verification_receipt(
+            receipt,
+            database_path=self.db_path,
+            run_dir=self.run_root,
+            project_id=self.project_id,
+            data_version_id=self.version_id,
+        )
+        self.assertEqual({item.file_id for item in claim.files}, set(file_ids))
+        self.assertTrue(receipt.consumed)
+        with self.assertRaisesRegex(
+            ProjectIntegrityRegistryError, "receipt_already_consumed"
+        ):
+            claim_registry_verification_receipt(
+                receipt,
+                database_path=self.db_path,
+                run_dir=self.run_root,
+                project_id=self.project_id,
+                data_version_id=self.version_id,
+            )
+
+    def test_receipt_rejects_source_replaced_after_full_hash(self):
+        self._register()
+        snapshot = get_training_baseline_snapshot(self.db_path)
+        resolved = resolve_training_baseline_inputs(
+            self.db_path,
+            snapshot,
+            project_root=self.project_root,
+            run_root=self.run_root,
+            issue_verification_batch=True,
+        )
+        file_ids = [item["file_id"] for item in resolved["files"]]
+        receipt = consume_registry_verification_batch(
+            resolved["verification_batch"],
+            database_path=self.db_path,
+            run_dir=self.run_root,
+            project_id=self.project_id,
+            data_version_id=self.version_id,
+            selected_file_ids=file_ids,
+        )
+        source = self.project_root / "images" / "a.png"
+        original = source.stat()
+        replacement = source.with_suffix(".replacement")
+        replacement.write_bytes(b"other-v1")
+        os.utime(
+            replacement,
+            ns=(original.st_atime_ns, original.st_mtime_ns),
+        )
+        os.replace(replacement, source)
+
+        with self.assertRaisesRegex(
+            ProjectIntegrityRegistryError, "registry_verified_source_changed"
+        ):
+            claim_registry_verification_receipt(
+                receipt,
+                database_path=self.db_path,
+                run_dir=self.run_root,
+                project_id=self.project_id,
+                data_version_id=self.version_id,
+            )
+
+    def test_receipt_rejects_same_file_changed_with_size_and_mtime_restored(self):
+        self._register()
+        snapshot = get_training_baseline_snapshot(self.db_path)
+        resolved = resolve_training_baseline_inputs(
+            self.db_path,
+            snapshot,
+            project_root=self.project_root,
+            run_root=self.run_root,
+            issue_verification_batch=True,
+        )
+        file_ids = [item["file_id"] for item in resolved["files"]]
+        receipt = consume_registry_verification_batch(
+            resolved["verification_batch"],
+            database_path=self.db_path,
+            run_dir=self.run_root,
+            project_id=self.project_id,
+            data_version_id=self.version_id,
+            selected_file_ids=file_ids,
+        )
+        source = self.project_root / "images" / "a.png"
+        original = source.stat()
+        source.write_bytes(b"image-v2")
+        os.utime(source, ns=(original.st_atime_ns, original.st_mtime_ns))
+
+        with self.assertRaisesRegex(
+            ProjectIntegrityRegistryError, "registry_verified_source_changed"
+        ):
+            claim_registry_verification_receipt(
+                receipt,
+                database_path=self.db_path,
+                run_dir=self.run_root,
+                project_id=self.project_id,
+                data_version_id=self.version_id,
+            )
 
     def test_cancelled_verification_records_incomplete_and_retry_can_verify(self):
         self._register()
@@ -569,6 +740,70 @@ class ProjectIntegrityRegistryTests(unittest.TestCase):
         self.assertEqual(payload["digest"], image["digest"])
         self.assertTrue(payload["same_content_verified"])
         self.assertNotIn(str(self.root), json.dumps(operation, ensure_ascii=False))
+
+    def test_relocation_does_not_rewrite_historical_version_location(self):
+        baseline = self._register()
+        image = next(item for item in baseline["files"] if item["role"] == "source_image")
+        original_location = dict(image["location"])
+        relocated_path = self._write(
+            self.root / "relocated" / "a.png", b"image-v1"
+        )
+
+        # Same-content relocation intentionally keeps the current data
+        # version.  A later content version makes the original version
+        # historical, which is where a stale active-location lookup used to
+        # rewrite its path.
+        with self.connection:
+            relocate_project_asset(
+                self.connection,
+                project_id=self.project_id,
+                asset_id=image["asset_id"],
+                location={
+                    "location_kind": "opaque_ref",
+                    "opaque_ref": "location_relocated_history_a",
+                },
+                runtime_path=relocated_path,
+            )
+            commit_project_data_version(
+                self.connection,
+                project_id=self.project_id,
+                parent_data_version_id=self.version_id,
+                new_data_version_id="project_data_v2",
+                changes=[
+                    {
+                        "owner_kind": "image",
+                        "owner_key": "image_a",
+                        "role": "human_confirmed_label",
+                        "schema_id": LABEL_SNAPSHOT_SCHEMA_ID,
+                        "snapshot_text": canonical_snapshot_text(
+                            {
+                                "schema_version": LABEL_SNAPSHOT_SCHEMA_ID,
+                                "image_uid": "image_a",
+                                "parts": {"Head": [[0, 0], [5, 0], [1, 5]]},
+                            }
+                        ),
+                    }
+                ],
+                reason="trusted_label_changed",
+            )
+
+        historical = get_registry_version_snapshot(self.connection, self.version_id)
+        current = get_registry_version_snapshot(self.connection, "project_data_v2")
+        historical_image = next(
+            item for item in historical["files"] if item["role"] == "source_image"
+        )
+        current_image = next(
+            item for item in current["files"] if item["role"] == "source_image"
+        )
+
+        self.assertEqual(historical_image["location"], original_location)
+        self.assertEqual(
+            current_image["location"]["opaque_ref"],
+            "location_relocated_history_a",
+        )
+        self.assertNotEqual(
+            historical_image["location"], current_image["location"]
+        )
 
     def test_relocation_digest_mismatch_has_no_side_effects(self):
         baseline = self._register()

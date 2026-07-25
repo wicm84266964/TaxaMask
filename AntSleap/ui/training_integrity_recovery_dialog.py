@@ -36,8 +36,12 @@ INTEGRITY_ERROR_MARKERS = (
     "source_missing",
     "source_read_denied",
     "opaque_location",
+    "registry_verified",
     "initial_weight",
     "manual_truth",
+    "source_path_unsafe",
+    "opaque_location_unavailable",
+    "runtime_target_",
 )
 
 

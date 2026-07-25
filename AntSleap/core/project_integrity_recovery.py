@@ -5,9 +5,110 @@ from __future__ import annotations
 import os
 
 from .file_integrity import compute_fingerprint
-from .location_registry import resolve_locations
-from .project_integrity_registry import get_training_baseline_snapshot
+from .location_registry import (
+    LocationRegistryError,
+    read_registered_locations,
+    require_safe_existing_path,
+)
+from .project_integrity_registry import (
+    ProjectIntegrityRegistryError,
+    _safe_runtime_target,
+    get_training_baseline_snapshot,
+)
 from .safe_io import atomic_write_json
+
+
+class ProjectIntegrityRecoveryError(ValueError):
+    def __init__(self, code, summary=None):
+        self.code = str(code or "integrity_recovery_error")
+        super().__init__(str(summary or self.code))
+
+
+def _project_root(project_manager):
+    source = (
+        getattr(project_manager, "current_project_path", "")
+        or getattr(project_manager, "current_database_path", "")
+    )
+    if not source:
+        raise ProjectIntegrityRecoveryError("project_root_unavailable")
+    return os.path.abspath(os.path.dirname(os.path.abspath(source)) or os.curdir)
+
+
+def _managed_recovery_source(project_manager, location):
+    if str(location.get("path_base") or "") != "project_root":
+        raise ProjectIntegrityRecoveryError("source_path_unsafe")
+    try:
+        runtime_path, _clean_relative = _safe_runtime_target(
+            _project_root(project_manager),
+            location.get("relative_path"),
+        )
+    except ProjectIntegrityRegistryError as exc:
+        raise ProjectIntegrityRecoveryError(
+            "source_path_unsafe",
+            f"source_path_unsafe:{exc.code}",
+        ) from exc
+    return runtime_path
+
+
+def _require_safe_recovery_source(path, *, expected_kind=None):
+    raw = os.fspath(path)
+    if not raw:
+        raise FileNotFoundError(raw)
+    absolute = os.path.abspath(raw)
+    try:
+        return require_safe_existing_path(
+            absolute,
+            expected_kind=expected_kind,
+        )
+    except LocationRegistryError as exc:
+        if exc.code == "location_path_missing":
+            raise FileNotFoundError(absolute) from exc
+        if exc.code == "location_path_unreadable":
+            raise PermissionError(absolute) from exc
+        raise ProjectIntegrityRecoveryError(
+            "source_path_unsafe",
+            f"source_path_unsafe:{exc.code}",
+        ) from exc
+
+
+def _issue_runtime_source(project_manager, issue):
+    """Resolve a recovery issue from its recorded locator, not UI path text."""
+
+    location_kind = str(issue.get("location_kind") or "")
+    expected_kind = (issue.get("expected") or {}).get("entry_kind")
+    if location_kind == "managed_relative":
+        return _managed_recovery_source(
+            project_manager,
+            {
+                "path_base": "project_root",
+                "relative_path": issue.get("location_ref"),
+            },
+        )
+    if location_kind == "opaque_ref":
+        location_ref = str(issue.get("location_ref") or "")
+        try:
+            records = read_registered_locations(
+                [location_ref],
+                database_path=getattr(
+                    project_manager, "location_registry_database_path", None
+                ),
+            )
+        except LocationRegistryError as exc:
+            raise ProjectIntegrityRecoveryError(
+                "opaque_location_unavailable"
+            ) from exc
+        record = records.get(location_ref)
+        if not isinstance(record, dict) or not record.get("path"):
+            raise ProjectIntegrityRecoveryError("opaque_location_unavailable")
+        if expected_kind and str(record.get("entry_kind") or "") != str(
+            expected_kind
+        ):
+            raise ProjectIntegrityRecoveryError("source_path_unsafe")
+        return os.fspath(record["path"])
+    raw = issue.get("runtime_path") or ""
+    if not raw:
+        raise ProjectIntegrityRecoveryError("source_path_unsafe")
+    return raw
 
 
 def inspect_project_integrity(
@@ -22,7 +123,7 @@ def inspect_project_integrity(
         for item in snapshot["files"]
         if item.get("location", {}).get("location_kind") == "opaque_ref"
     ]
-    opaque = resolve_locations(
+    opaque = read_registered_locations(
         refs,
         database_path=getattr(
             project_manager, "location_registry_database_path", None
@@ -44,21 +145,30 @@ def inspect_project_integrity(
             continue
         runtime_path = ""
         location_ref = ""
-        if location.get("location_kind") == "managed_relative":
-            runtime_path = os.path.abspath(
-                os.path.join(
-                    project_manager.project_dir,
-                    *str(location.get("relative_path") or "").split("/"),
-                )
-            )
+        managed = location.get("location_kind") == "managed_relative"
+        if managed:
             location_ref = str(location.get("relative_path") or "")
         else:
-            opaque_ref = str(location.get("opaque_ref") or "")
-            runtime_path = os.path.abspath(os.fspath(opaque.get(opaque_ref) or ""))
-            location_ref = opaque_ref
+            location_ref = str(location.get("opaque_ref") or "")
         observed = None
         error_code = ""
         try:
+            if managed:
+                runtime_path = _managed_recovery_source(
+                    project_manager,
+                    location,
+                )
+            else:
+                record = opaque.get(location_ref)
+                if not isinstance(record, dict) or not record.get("path"):
+                    raise ProjectIntegrityRecoveryError(
+                        "opaque_location_unavailable"
+                    )
+                runtime_path = os.path.abspath(os.fspath(record["path"]))
+            runtime_path = _require_safe_recovery_source(
+                runtime_path,
+                expected_kind=entry.get("entry_kind"),
+            )
             observed = compute_fingerprint(
                 runtime_path, entry["hash_algorithm"]
             )
@@ -160,7 +270,10 @@ def register_current_asset_version(project_manager, issue, *, note):
         raise ValueError("integrity_new_version_note_required")
     if issue.get("owner_kind") not in {"image", "tif_asset"}:
         raise ValueError("integrity_asset_new_version_not_supported")
-    runtime_path = os.path.abspath(os.fspath(issue.get("runtime_path") or ""))
+    runtime_path = _require_safe_recovery_source(
+        _issue_runtime_source(project_manager, issue),
+        expected_kind=(issue.get("expected") or {}).get("entry_kind"),
+    )
     observed = compute_fingerprint(runtime_path, issue["expected"]["hash_algorithm"])
     if issue.get("owner_kind") == "tif_asset":
         from .tif_integrity_bridge import _location
@@ -227,6 +340,7 @@ def register_current_asset_version(project_manager, issue, *, note):
 
 
 __all__ = [
+    "ProjectIntegrityRecoveryError",
     "inspect_project_integrity",
     "register_current_asset_version",
     "write_redacted_integrity_diagnostic",

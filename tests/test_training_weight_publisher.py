@@ -215,6 +215,56 @@ class TrainingWeightPublisherTests(unittest.TestCase):
         self.assertFalse((self.model_root / "training_runs" / "train_failed").exists())
         self.assertFalse((self.model_root / "training_runs" / "train_missing").exists())
 
+    def test_cleanup_terminal_run_only_removes_that_failed_run(self):
+        failed = self._publish_one("train_cleanup_failed")
+        other = self._publish_one("train_cleanup_other")
+
+        failed_record = dict(
+            self._successful_record(failed),
+            status="failed",
+        )
+        report = self.publisher.cleanup_terminal_run(
+            "train_cleanup_failed", failed_record
+        )
+
+        self.assertEqual(report["cleaned"], ["train_cleanup_failed"])
+        self.assertEqual(report["manual_review"], [])
+        self.assertFalse(
+            (self.model_root / "training_runs" / "train_cleanup_failed").exists()
+        )
+        self.assertTrue(
+            (self.model_root / "training_runs" / "train_cleanup_other").exists()
+        )
+        self.assertTrue(other["artifacts"])
+
+    def test_cleanup_terminal_run_rejects_live_or_successful_records(self):
+        pending = self._publish_one("train_cleanup_live")
+        live = dict(self._successful_record(pending), status="running")
+
+        with self.assertRaises(PublicationIntegrityError) as raised:
+            self.publisher.cleanup_terminal_run("train_cleanup_live", live)
+
+        self.assertEqual(raised.exception.code, "terminal_failure_run_required")
+        self.assertTrue(
+            (self.model_root / "training_runs" / "train_cleanup_live").exists()
+        )
+
+    def test_cleanup_terminal_run_preserves_tampered_bundle_for_manual_review(self):
+        pending = self._publish_one("train_cleanup_tampered")
+        artifact_path = self.model_root / Path(pending["artifacts"][0]["relative_path"])
+        artifact_path.write_bytes(b"tampered")
+        failed = dict(self._successful_record(pending), status="failed")
+
+        report = self.publisher.cleanup_terminal_run("train_cleanup_tampered", failed)
+
+        self.assertEqual(report["cleaned"], [])
+        self.assertEqual(len(report["manual_review"]), 1)
+        self.assertEqual(
+            report["manual_review"][0]["reason"],
+            "published_weight_fingerprint_mismatch",
+        )
+        self.assertTrue(artifact_path.exists())
+
     def test_live_run_publication_waits_without_being_deleted(self):
         pending = self._publish_one("train_still_running")
 

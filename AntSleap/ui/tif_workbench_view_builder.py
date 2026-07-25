@@ -730,6 +730,13 @@ class TifWorkbenchViewBuilder:
         operation_status_layout.addWidget(self.btn_show_workbench_log)
         right_layout.addWidget(self.operation_status_section)
 
+        self.mesh_export_section, mesh_export_layout = self._make_section(
+            "Mesh export",
+            "tifMeshExportSection",
+        )
+        mesh_export_layout.addWidget(self.btn_export_reviewed_mesh)
+        right_layout.addWidget(self.mesh_export_section)
+
         task_page_parts = build_task_pages(self.lang, tt)
         self.task_tabs = task_page_parts["task_tabs"]
         self.training_mode_tabs = task_page_parts["training_mode_tabs"]
@@ -839,7 +846,6 @@ class TifWorkbenchViewBuilder:
 
         self.part_output_section, part_output_layout = self._make_section("3. Output and manage", "tifPartOutputSection")
         part_output_layout.addWidget(self.btn_export_part_package)
-        part_output_layout.addWidget(self.btn_export_reviewed_mesh)
         part_output_layout.addWidget(self.btn_delete_part_volume)
         self.part_task_layout.addWidget(self.part_output_section)
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import datetime as _datetime
 import os
 from collections.abc import Mapping
 
@@ -12,8 +13,13 @@ from .file_integrity import (
     TREE_ALGORITHM,
     compute_fingerprint,
 )
-from .location_registry import register_location
+from .location_registry import (
+    LocationRegistryError,
+    register_location,
+    require_safe_existing_path,
+)
 from .project_integrity_registry import (
+    ProjectIntegrityRegistryError,
     REGISTRY_READY,
     canonical_snapshot_text,
     commit_project_data_version,
@@ -21,10 +27,20 @@ from .project_integrity_registry import (
     registry_state,
 )
 from .project_traceability import PROJECT_KIND_TIF, new_project_data_version_id
+from .tif_truth_policy import TRAINING_TRUTH_REVIEW_STATUSES
 
 
+# This is the canonical integrity-snapshot payload version.  It is separate
+# from the SQLite database schema version (currently v2 in tif_sqlite_schema).
 TIF_SCHEMA_SNAPSHOT_ID = "taxamask_tif_training_schema_v1"
 LOCAL_AXIS_TRUTH_SNAPSHOT_ID = "taxamask_tif_local_axis_truth_v1"
+_LEGACY_ATTESTABLE_TRUTH_STATUSES = frozenset({"", "available"})
+
+
+def _now_iso():
+    return _datetime.datetime.now(_datetime.timezone.utc).isoformat(
+        timespec="microseconds"
+    ).replace("+00:00", "Z")
 
 
 def _strip_paths(value):
@@ -256,6 +272,7 @@ def _iter_volume_assets(project_manager):
                             if confirmed_mask
                             else "training_context"
                         ),
+                        "requires_explicit_status": False,
                         "path": reslice.get("mask_path"),
                         "record": reslice,
                     }
@@ -277,10 +294,16 @@ def _iter_volume_assets(project_manager):
 
 
 def _runtime_path(project_manager, value):
-    path = project_manager.to_absolute(value)
-    if not os.path.exists(path):
-        raise FileNotFoundError(path)
-    return os.path.abspath(path)
+    path = os.path.abspath(project_manager.to_absolute(value))
+    try:
+        return require_safe_existing_path(path)
+    except LocationRegistryError as exc:
+        if exc.code == "location_path_missing":
+            raise FileNotFoundError(path) from exc
+        raise ProjectIntegrityRegistryError(
+            "unsafe_tif_asset_path",
+            f"unsafe_tif_asset_path:{exc.code}",
+        ) from exc
 
 
 def relocate_tif_project_asset(project_manager, issue, new_path):
@@ -356,6 +379,15 @@ def _location(project_manager, runtime_path, entry_kind):
     root = os.path.abspath(project_manager.project_dir)
     path = os.path.abspath(runtime_path)
     try:
+        path = require_safe_existing_path(path, expected_kind=entry_kind)
+    except LocationRegistryError as exc:
+        if exc.code == "location_path_missing":
+            raise FileNotFoundError(path) from exc
+        raise ProjectIntegrityRegistryError(
+            "unsafe_tif_asset_path",
+            f"unsafe_tif_asset_path:{exc.code}",
+        ) from exc
+    try:
         inside = os.path.normcase(os.path.commonpath([root, path])) == os.path.normcase(
             root
         )
@@ -401,6 +433,44 @@ def _asset_entry(project_manager, item):
     }
 
 
+def _has_explicit_truth_evidence(record):
+    review_audit = record.get("review_audit")
+    training = record.get("training")
+    return bool(
+        isinstance(review_audit, Mapping)
+        and review_audit.get("explicit_review")
+    ) or bool(
+        isinstance(training, Mapping) and training.get("human_confirmed")
+    )
+
+
+def _migrate_explicit_legacy_truth_statuses(project_manager):
+    changed = False
+    for item in _iter_volume_assets(project_manager):
+        if item["role"] != "manual_truth" or not item.get(
+            "requires_explicit_status", True
+        ):
+            continue
+        record = item["record"]
+        status = str(record.get("status") or "").strip()
+        if status in TRAINING_TRUTH_REVIEW_STATUSES or not _has_explicit_truth_evidence(record):
+            continue
+        prior_audit = record.get("review_audit")
+        record["status"] = "reviewed"
+        audit = {
+            "action": "legacy_truth_status_migration",
+            "explicit_review": True,
+            "reviewed_at": _now_iso(),
+            "migration_reason": "explicit_legacy_review_evidence",
+            "prior_status": status,
+        }
+        if isinstance(prior_audit, Mapping):
+            audit["prior_review_audit"] = copy.deepcopy(dict(prior_audit))
+        record["review_audit"] = audit
+        changed = True
+    return changed
+
+
 def build_tif_baseline_entries(
     project_manager, *, progress_callback=None, cancel_check=None
 ):
@@ -410,13 +480,11 @@ def build_tif_baseline_entries(
     for index, item in enumerate(assets, start=1):
         if cancel_check is not None and cancel_check():
             raise RuntimeError("integrity_baseline_cancelled")
-        if item["role"] == "manual_truth":
-            review_audit = item["record"].get("review_audit")
-            training = item["record"].get("training")
-            explicitly_confirmed = isinstance(training, Mapping) and bool(
-                training.get("human_confirmed")
-            )
-            if not isinstance(review_audit, Mapping) and not explicitly_confirmed:
+        if item["role"] == "manual_truth" and item.get(
+            "requires_explicit_status", True
+        ):
+            status = str(item["record"].get("status") or "").strip()
+            if status not in TRAINING_TRUTH_REVIEW_STATUSES:
                 legacy_truth_count += 1
         entry = _asset_entry(project_manager, item)
         entry.pop("runtime_path", None)
@@ -424,6 +492,42 @@ def build_tif_baseline_entries(
         if progress_callback is not None:
             progress_callback(index, len(assets), item["owner_key"])
     return entries, legacy_truth_count
+
+
+def _record_legacy_truth_attestation(project_manager, note):
+    reviewed_at = _now_iso()
+    unresolved = []
+    for item in _iter_volume_assets(project_manager):
+        if item["role"] != "manual_truth" or not item.get(
+            "requires_explicit_status", True
+        ):
+            continue
+        record = item["record"]
+        prior_status = str(record.get("status") or "").strip()
+        if prior_status in TRAINING_TRUTH_REVIEW_STATUSES:
+            continue
+        if prior_status not in _LEGACY_ATTESTABLE_TRUTH_STATUSES:
+            unresolved.append(
+                {
+                    "owner_key": item["owner_key"],
+                    "status": prior_status,
+                }
+            )
+            continue
+        prior_review_audit = record.get("review_audit")
+        record["status"] = "reviewed"
+        record["review_audit"] = {
+            "action": "legacy_truth_attestation",
+            "explicit_review": True,
+            "reviewed_at": reviewed_at,
+            "note": str(note or "").strip(),
+            "prior_status": prior_status,
+        }
+        if isinstance(prior_review_audit, Mapping):
+            record["review_audit"]["prior_review_audit"] = copy.deepcopy(
+                dict(prior_review_audit)
+            )
+    return unresolved
 
 
 def register_tif_project_baseline(
@@ -436,18 +540,45 @@ def register_tif_project_baseline(
 ):
     if not project_manager.is_sqlite_project():
         raise ValueError("sqlite_project_required")
-    entries, legacy_count = build_tif_baseline_entries(
-        project_manager,
-        progress_callback=progress_callback,
-        cancel_check=cancel_check,
-    )
+    project_snapshot = copy.deepcopy(project_manager.project_data)
+    explicit_migration = _migrate_explicit_legacy_truth_statuses(project_manager)
+    try:
+        entries, legacy_count = build_tif_baseline_entries(
+            project_manager,
+            progress_callback=progress_callback,
+            cancel_check=cancel_check,
+        )
+    except Exception:
+        project_manager.project_data = project_snapshot
+        raise
+    attestation_changed = False
+    if legacy_count and legacy_truth_attestation:
+        unresolved = _record_legacy_truth_attestation(project_manager, note)
+        if unresolved:
+            project_manager.project_data = project_snapshot
+            details = ", ".join(
+                f"{item['owner_key']}={item['status'] or '<empty>'}"
+                for item in unresolved
+            )
+            raise ProjectIntegrityRegistryError(
+                "legacy_truth_status_requires_manual_update",
+                f"Manual truth records need an explicit reviewed status: {details}",
+            )
+        attestation_changed = True
     new_version = new_project_data_version_id()
     from .sqlite_storage import connect_sqlite_database
     from .tif_sqlite_migration import _insert_project_row
+    from .tif_sqlite_writer import _rewrite_tif_project_index_tables
 
     connection = connect_sqlite_database(project_manager.current_database_path)
     try:
         with connection:
+            if explicit_migration or attestation_changed:
+                _rewrite_tif_project_index_tables(
+                    connection,
+                    project_manager,
+                    preserve_events=True,
+                )
             snapshot = register_project_baseline(
                 connection,
                 project_kind=PROJECT_KIND_TIF,
@@ -463,6 +594,9 @@ def register_tif_project_baseline(
             payload = copy.deepcopy(project_manager.project_data)
             payload["project_data_version_id"] = new_version
             _insert_project_row(connection, payload)
+    except Exception:
+        project_manager.project_data = project_snapshot
+        raise
     finally:
         connection.close()
     project_manager.project_data["project_data_version_id"] = new_version
@@ -501,6 +635,44 @@ def _same_location(row, location):
     )
 
 
+def _registered_fingerprint(row):
+    return {
+        "entry_kind": str(row[6] or ""),
+        "size_bytes": int(row[4] or 0),
+        "hash_algorithm": str(row[5] or ""),
+        "digest": str(row[3] or ""),
+    }
+
+
+def _fingerprint_matches(expected, observed):
+    return all(
+        expected.get(key) == observed.get(key)
+        for key in ("entry_kind", "size_bytes", "hash_algorithm", "digest")
+    )
+
+
+def _verified_existing_asset_change(project_manager, item, row, runtime_path, location):
+    expected = _registered_fingerprint(row)
+    observed = compute_fingerprint(runtime_path, expected["hash_algorithm"])
+    if not _fingerprint_matches(expected, observed):
+        raise ProjectIntegrityRegistryError(
+            "unregistered_asset_content_change",
+            (
+                "unregistered_asset_content_change:"
+                f"{item['owner_key']}:{item['role']}"
+            ),
+        )
+    return {
+        "owner_kind": "tif_asset",
+        "owner_key": item["owner_key"],
+        "role": item["role"],
+        "media_type": "application/octet-stream",
+        "expected": observed,
+        "location": location,
+        "runtime_path": runtime_path,
+    }
+
+
 def commit_tif_project_integrity_changes(
     connection,
     project_manager,
@@ -523,7 +695,13 @@ def commit_tif_project_integrity_changes(
     current_keys.update(
         (item["owner_key"], item["role"]) for item in truth_entries
     )
-    refresh_training_files = bool(candidate_data_version_id)
+    dirty_assets = {
+        (str(owner_key), str(role))
+        for owner_key, role in getattr(
+            project_manager, "_pending_integrity_dirty_assets", set()
+        )
+    }
+    verify_unchanged_assets = bool(dirty_assets or candidate_data_version_id)
     for item in _iter_volume_assets(project_manager):
         key = (item["owner_key"], item["role"])
         current_keys.add(key)
@@ -531,9 +709,16 @@ def commit_tif_project_integrity_changes(
         runtime_path = _runtime_path(project_manager, item["path"])
         entry_kind = "directory" if os.path.isdir(runtime_path) else "file"
         location = _location(project_manager, runtime_path, entry_kind)
-        if row is None or not _same_location(row, location) or refresh_training_files:
-            change = _asset_entry(project_manager, item)
-            changes.append(change)
+        if row is None or key in dirty_assets:
+            changes.append(_asset_entry(project_manager, item))
+            continue
+        location_changed = not _same_location(row, location)
+        if location_changed or verify_unchanged_assets:
+            verified = _verified_existing_asset_change(
+                project_manager, item, row, runtime_path, location
+            )
+            if location_changed:
+                changes.append(verified)
     for key, row in current_assets.items():
         if key in current_keys:
             continue

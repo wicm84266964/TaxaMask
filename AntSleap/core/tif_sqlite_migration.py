@@ -261,7 +261,7 @@ def _insert_volume_asset(connection, specimen_row_id, record, *, role, asset_key
             json_text(_as_list(record.get("shape_zyx"))),
             str(record.get("dtype") or ""),
             json_text(_as_list(record.get("spacing_zyx"))),
-            str(record.get("spacing_unit") or "micrometer"),
+            str(record.get("spacing_unit") or "unknown"),
             str(record.get("orientation") or "unknown"),
             str(status or record.get("status") or ""),
             str(record.get("source_format") or ""),

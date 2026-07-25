@@ -382,6 +382,7 @@ class TifWorkbenchTests(unittest.TestCase):
             edit_meta = write_volume_sidecar(root / "viewer" / edit_rel, np.zeros_like(labels), role="working_edit")
             manager.register_label_volume("01-0101-08", "manual_truth", label_rel, label_meta["shape_zyx"], label_meta["dtype"], save=False)
             manager.register_label_volume("01-0101-08", "working_edit", edit_rel, edit_meta["shape_zyx"], edit_meta["dtype"], save=False)
+            manager.get_specimen("01-0101-08")["labels"]["manual_truth"]["status"] = "reviewed"
             manager.set_review_status("01-0101-08", "train_ready", train_ready=True)
 
             widget = TifWorkbenchWidget(manager, "en")
@@ -890,7 +891,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 risk_audit = queue.table.item(0, 7).data(Qt.UserRole)
                 self.assertEqual(
                     risk_audit["ranking_version"],
-                    "taxamask_local_axis_risk_v2",
+                    "taxamask_local_axis_risk_v3",
                 )
                 self.assertEqual(risk_audit["reference_model_version"], "v3")
                 queue.table.selectRow(0)

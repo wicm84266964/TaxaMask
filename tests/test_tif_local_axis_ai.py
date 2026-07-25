@@ -113,6 +113,72 @@ class TifLocalAxisAiTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "origin"):
             normalize_frame_proposal({"specimen_id": "s1", "part_id": "head"})
 
+    def test_frame_proposal_normalizer_rejects_non_finite_and_overlapping_axis(self):
+        proposal = {
+            "specimen_id": "s1",
+            "part_id": "head",
+            "origin_zyx": [1.0, 2.0, 3.0],
+            "output_axis_start_zyx": [0.0, 2.0, 3.0],
+            "output_axis_end_zyx": [2.0, 2.0, 3.0],
+        }
+        non_finite = dict(proposal, origin_zyx=[float("nan"), 2.0, 3.0])
+        with self.assertRaisesRegex(ValueError, "origin_zyx_must_be_finite"):
+            normalize_frame_proposal(non_finite)
+
+        overlapping = dict(
+            proposal,
+            output_axis_end_zyx=list(proposal["output_axis_start_zyx"]),
+        )
+        with self.assertRaisesRegex(ValueError, "output_axis_points_must_not_overlap"):
+            normalize_frame_proposal(overlapping)
+
+    def test_import_rejects_local_frame_coordinates_outside_part_volume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = make_local_axis_project(Path(tmp))
+            proposal = {
+                "frame_proposal_id": "frame_outside",
+                "specimen_id": "01-0101-ai",
+                "part_id": "head",
+                "origin_zyx": [99.0, 1.5, 2.0],
+                "output_axis_start_zyx": [0.0, 1.5, 2.0],
+                "output_axis_end_zyx": [3.0, 1.5, 2.0],
+            }
+
+            with self.assertRaisesRegex(ValueError, "origin_zyx_out_of_bounds"):
+                import_local_axis_proposals(
+                    manager,
+                    local_frame_proposals=[proposal],
+                )
+
+            self.assertEqual(
+                manager.list_local_frame_proposals("01-0101-ai", "head"),
+                [],
+            )
+
+    def test_import_rejects_global_roi_coordinates_outside_working_volume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = make_local_axis_project(Path(tmp))
+            proposal = {
+                "global_proposal_id": "roi_outside",
+                "specimen_id": "01-0101-ai",
+                "bbox_zyx": [[1, 6], [1, 5], [1, 6]],
+                "center_zyx": [3.0, 3.0, 3.0],
+            }
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "bbox_zyx_axis_0_out_of_bounds",
+            ):
+                import_local_axis_proposals(
+                    manager,
+                    global_proposals=[proposal],
+                )
+
+            self.assertEqual(
+                manager.list_global_axis_proposals("01-0101-ai"),
+                [],
+            )
+
     def test_import_local_axis_proposals_stores_reviewable_records(self):
         with tempfile.TemporaryDirectory() as tmp:
             manager = make_local_axis_project(Path(tmp))

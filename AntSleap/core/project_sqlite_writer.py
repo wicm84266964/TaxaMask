@@ -1,8 +1,19 @@
 import json
 import os
 
-from .project_sqlite_schema import PROJECT_2D_PROJECT_TYPE, json_text, validate_2d_project_schema
+from .project_sqlite_schema import (
+    PROJECT_2D_PROJECT_TYPE,
+    json_text,
+    new_image_uid,
+    validate_2d_project_schema,
+    validate_image_uid,
+)
 from .sqlite_storage import connect_sqlite_database, ensure_integrity_ok
+from .training_truth import (
+    LABEL_PART_METADATA_FIELD,
+    TRAINING_TRUTH_METADATA_KEY,
+    sanitize_training_truth_record,
+)
 
 
 AUTO_BOX_SOURCE_VLM = "vlm_first_mile"
@@ -91,6 +102,7 @@ def _label_part_names(label_data):
         "auto_box_meta",
         "descriptions",
         "description_sources",
+        LABEL_PART_METADATA_FIELD,
         "shrink_loose_boxes",
         "trajectories",
     ):
@@ -189,9 +201,13 @@ def _connect_project(project_manager):
         raise
 
 
-def write_project_metadata(connection, project_manager):
+def write_project_metadata(connection, project_manager, *, project_data_version_id=None):
     project_data = project_manager.project_data
     settings = {
+        "project_id": str(project_data.get("project_id") or ""),
+        "project_data_version_id": str(
+            project_data_version_id or project_data.get("project_data_version_id") or ""
+        ),
         "vlm_preannotation": _as_dict(project_data.get("vlm_preannotation", {})),
         "blink_context_roi_parents": _as_dict(project_data.get("blink_context_roi_parents", {})),
         "parent_box_aspect_ratios": _as_dict(project_data.get("parent_box_aspect_ratios", {})),
@@ -289,21 +305,39 @@ def _upsert_image(connection, project_manager, image_path):
     stored = _stored_path(project_manager, image_path)
     provenance = _as_dict(project_manager.project_data.get("image_provenance", {}).get(image_path, {}))
     group_id = str(provenance.get("manual_image_group") or "").strip()
+    image_uids = project_manager.project_data.setdefault("image_uids", {})
+    image_uid = str(image_uids.get(image_path) or "").strip()
+    if image_uid:
+        image_uid = validate_image_uid(image_uid)
+    else:
+        existing = connection.execute(
+            "SELECT image_uid FROM images WHERE path = ?", (stored,)
+        ).fetchone()
+        image_uid = str(existing[0] or "").strip() if existing else ""
+        if not image_uid:
+            image_uid = new_image_uid()
     connection.execute(
         """
-        INSERT INTO images (path, filename, group_id, status)
-        VALUES (?, ?, ?, 'active')
+        INSERT INTO images (image_uid, path, filename, group_id, status)
+        VALUES (?, ?, ?, ?, 'active')
         ON CONFLICT(path) DO UPDATE SET
+            image_uid = CASE
+                WHEN images.image_uid = '' THEN excluded.image_uid
+                ELSE images.image_uid
+            END,
             filename = excluded.filename,
             group_id = excluded.group_id,
             status = 'active',
             updated_at = CURRENT_TIMESTAMP
         """,
-        (stored, os.path.basename(str(image_path or stored)), group_id),
+        (image_uid, stored, os.path.basename(str(image_path or stored)), group_id),
     )
-    row = connection.execute("SELECT id FROM images WHERE path = ?", (stored,)).fetchone()
+    row = connection.execute(
+        "SELECT id, image_uid FROM images WHERE path = ?", (stored,)
+    ).fetchone()
     if not row:
         raise ValueError(f"sqlite_image_upsert_failed:{stored}")
+    image_uids[image_path] = validate_image_uid(row[1])
     return int(row[0]), stored
 
 
@@ -371,9 +405,26 @@ def write_image_state(connection, project_manager, image_path):
     label_id = int(cursor.lastrowid)
 
     for part_name in _label_part_names(label_data):
+        part_metadata = _as_dict(
+            _as_dict(label_data.get(LABEL_PART_METADATA_FIELD, {})).get(part_name, {})
+        )
+        clean_metadata = dict(part_metadata)
+        if TRAINING_TRUTH_METADATA_KEY in clean_metadata:
+            clean_truth = sanitize_training_truth_record(
+                clean_metadata.get(TRAINING_TRUTH_METADATA_KEY)
+            )
+            if clean_truth is None:
+                clean_metadata[TRAINING_TRUTH_METADATA_KEY] = clean_metadata.get(
+                    TRAINING_TRUTH_METADATA_KEY
+                )
+            else:
+                clean_metadata[TRAINING_TRUTH_METADATA_KEY] = clean_truth
         connection.execute(
-            "INSERT OR IGNORE INTO label_parts (label_id, part_name) VALUES (?, ?)",
-            (label_id, part_name),
+            """
+            INSERT OR IGNORE INTO label_parts (label_id, part_name, metadata_json)
+            VALUES (?, ?, ?)
+            """,
+            (label_id, part_name, json_text(clean_metadata)),
         )
 
     parts = _as_dict(label_data.get("parts", {}))
@@ -512,16 +563,45 @@ def delete_images(connection, project_manager, image_paths):
         connection.execute("DELETE FROM images WHERE path = ?", (stored,))
 
 
-def flush_project_changes(project_manager, *, image_paths=None, deleted_image_paths=None, integrity_check=False):
+def flush_project_changes(
+    project_manager,
+    *,
+    image_paths=None,
+    deleted_image_paths=None,
+    integrity_check=False,
+    project_data_version_id=None,
+):
+    from .project_integrity_bridge import commit_2d_project_integrity_changes
+
     connection = _connect_project(project_manager)
     try:
         with connection:
-            write_project_metadata(connection, project_manager)
             delete_images(connection, project_manager, deleted_image_paths or [])
             for image_path in image_paths or []:
                 write_image_state(connection, project_manager, image_path)
+            integrity_result = commit_2d_project_integrity_changes(
+                connection,
+                project_manager,
+                image_paths=image_paths or [],
+                deleted_image_paths=deleted_image_paths or [],
+                candidate_data_version_id=project_data_version_id,
+            )
+            resolved_data_version_id = str(
+                integrity_result.get("data_version_id")
+                or project_manager.project_data.get("project_data_version_id")
+                or ""
+            )
+            write_project_metadata(
+                connection,
+                project_manager,
+                project_data_version_id=resolved_data_version_id,
+            )
         if integrity_check:
             ensure_integrity_ok(connection)
+        return {
+            "data_version_id": resolved_data_version_id,
+            "integrity": integrity_result,
+        }
     finally:
         connection.close()
 

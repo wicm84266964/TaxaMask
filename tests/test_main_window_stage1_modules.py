@@ -1,3 +1,4 @@
+import io
 import os
 import subprocess
 import sys
@@ -49,6 +50,35 @@ class MainWindowStage1ModuleTests(unittest.TestCase):
         self.assertEqual(flags.count("--disable-gpu"), 1)
         self.assertIn("--disable-webgl", flags)
         self.assertIn("--log-level=3", flags)
+
+    def test_runtime_log_stops_at_configured_session_capacity(self):
+        from AntSleap import app_runtime
+
+        handle = io.StringIO()
+        with patch.dict(
+            os.environ,
+            {"TAXAMASK_RUNTIME_LOG_MAX_BYTES": "1024"},
+            clear=False,
+        ), patch.multiple(
+            app_runtime,
+            _RUNTIME_LOG_FILE=handle,
+            _RUNTIME_LOG_BYTES_WRITTEN=0,
+            _RUNTIME_LOG_LIMIT_REACHED=False,
+        ):
+            for index in range(100):
+                app_runtime.runtime_log_event(
+                    "capacity_test",
+                    index=index,
+                    payload="x" * 180,
+                )
+            size_at_limit = len(handle.getvalue().encode("utf-8"))
+            app_runtime.runtime_log_event("must_not_grow", payload="y" * 500)
+            final_size = len(handle.getvalue().encode("utf-8"))
+            limit_reached = app_runtime._RUNTIME_LOG_LIMIT_REACHED
+
+        self.assertTrue(limit_reached)
+        self.assertLessEqual(size_at_limit, 1024)
+        self.assertEqual(final_size, size_at_limit)
 
     def test_main_reexports_stage1_classes(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")

@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 class FakeTimer:
@@ -27,6 +28,23 @@ class FakeProject:
 
     def save_project(self, force=False):
         self.save_count += 1
+
+
+class FakeRunningThread:
+    def isRunning(self):
+        return True
+
+
+class FakeCloseEvent:
+    def __init__(self):
+        self.ignored = False
+        self.accepted = False
+
+    def ignore(self):
+        self.ignored = True
+
+    def accept(self):
+        self.accepted = True
 
 
 class MainWindowStage4ProjectLifecycleTests(unittest.TestCase):
@@ -74,6 +92,32 @@ class MainWindowStage4ProjectLifecycleTests(unittest.TestCase):
 
         self.assertNotIn("AntSleap.main", source)
         self.assertNotIn("from main import", source)
+
+    def test_training_preflight_blocks_window_close_before_process_exit(self):
+        import AntSleap.ui.main_window_project_lifecycle as lifecycle_module
+        from AntSleap.ui.main_window_model_management import MainWindowModelManagementMixin
+
+        owner = type(
+            "LifecycleOwner",
+            (
+                lifecycle_module.MainWindowProjectLifecycleMixin,
+                MainWindowModelManagementMixin,
+            ),
+            {},
+        )()
+        owner.current_lang = "en"
+        owner.training_preflight_thread = FakeRunningThread()
+        event = FakeCloseEvent()
+
+        with patch.object(
+            lifecycle_module.QMessageBox, "information"
+        ) as information, patch.object(lifecycle_module.os, "_exit") as hard_exit:
+            owner.closeEvent(event)
+
+        self.assertTrue(event.ignored)
+        self.assertFalse(event.accepted)
+        information.assert_called_once()
+        hard_exit.assert_not_called()
 
 
 if __name__ == "__main__":

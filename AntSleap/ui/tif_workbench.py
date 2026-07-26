@@ -51,7 +51,7 @@ try:
     from AntSleap.core.safe_io import atomic_write_json
     from AntSleap.core.amira_import import import_amira_directory
     from AntSleap.core.tif_backend import DEFAULT_TIF_BACKEND_CONFIG, TifBackendRunner, nnunet_v2_tif_backend_preset, normalize_tif_backend_runtime_config, sanitize_tif_backend_config
-    from AntSleap.core.tif_export import export_tif_part_training_dataset, export_tif_training_dataset
+    from AntSleap.core.tif_export import _reslice_exchange_metadata, export_tif_part_training_dataset, export_tif_training_dataset
     from AntSleap.core.tif_label_guard import can_write_label_role, require_editable_label_role
     from AntSleap.core.tif_materials import next_material_id, read_material_map, remove_material, upsert_material, write_material_map
     from AntSleap.core.tif_part_extraction import (
@@ -71,6 +71,7 @@ try:
     from AntSleap.core.tif_prediction_import import default_prediction_id_for_tif, import_external_prediction_tif
     from AntSleap.core.tif_project import TifProjectManager
     from AntSleap.core.tif_stack_import import import_tif_stack, materialize_registered_tif_stack, register_tif_stack_metadata
+    from AntSleap.core.tif_truth_policy import can_use_role_for_training
     from AntSleap.core.tif_roi_preview import DEFAULT_ROI_TEXTURE_BUDGET_BYTES, HIGH_ROI_TEXTURE_BUDGET_BYTES, build_roi_mask_preview, build_roi_volume_preview, normalize_roi_bbox_zyx, roi_shape_zyx
     from AntSleap.core.tif_volume_io import create_empty_label_sidecar_like, create_volume_sidecar_memmap, flush_volume_array, load_volume_sidecar, volume_sidecar_exists
     from AntSleap.core.tif_volume_preview import (
@@ -98,6 +99,7 @@ try:
     from AntSleap.ui.tif_backend_panel_controller import TifBackendPanelController
     from AntSleap.ui.tif_workbench_control_panels import build_right_control_panel
     from AntSleap.ui.tif_workbench_dialogs import MaterialEditorDialog, TifPartNameDialog, TifTrainingResultDialog, summarize_tif_training_result
+    from AntSleap.ui.tif_mesh_export_dialog import TifMeshExportDialog
     from AntSleap.ui.tif_workbench_helpers import (
         _tif_bbox_shape,
         _tif_clip_bbox_to_shape,
@@ -155,7 +157,7 @@ except ModuleNotFoundError as exc:
     from core.safe_io import atomic_write_json
     from core.amira_import import import_amira_directory
     from core.tif_backend import DEFAULT_TIF_BACKEND_CONFIG, TifBackendRunner, nnunet_v2_tif_backend_preset, normalize_tif_backend_runtime_config, sanitize_tif_backend_config
-    from core.tif_export import export_tif_part_training_dataset, export_tif_training_dataset
+    from core.tif_export import _reslice_exchange_metadata, export_tif_part_training_dataset, export_tif_training_dataset
     from core.tif_label_guard import can_write_label_role, require_editable_label_role
     from core.tif_materials import next_material_id, read_material_map, remove_material, upsert_material, write_material_map
     from core.tif_part_extraction import (
@@ -175,6 +177,7 @@ except ModuleNotFoundError as exc:
     from core.tif_prediction_import import default_prediction_id_for_tif, import_external_prediction_tif
     from core.tif_project import TifProjectManager
     from core.tif_stack_import import import_tif_stack, materialize_registered_tif_stack, register_tif_stack_metadata
+    from core.tif_truth_policy import can_use_role_for_training
     from core.tif_roi_preview import DEFAULT_ROI_TEXTURE_BUDGET_BYTES, HIGH_ROI_TEXTURE_BUDGET_BYTES, build_roi_mask_preview, build_roi_volume_preview, normalize_roi_bbox_zyx, roi_shape_zyx
     from core.tif_volume_io import create_empty_label_sidecar_like, create_volume_sidecar_memmap, flush_volume_array, load_volume_sidecar, volume_sidecar_exists
     from core.tif_volume_preview import (
@@ -202,6 +205,7 @@ except ModuleNotFoundError as exc:
     from ui.tif_backend_panel_controller import TifBackendPanelController
     from ui.tif_workbench_control_panels import build_right_control_panel
     from ui.tif_workbench_dialogs import MaterialEditorDialog, TifPartNameDialog, TifTrainingResultDialog, summarize_tif_training_result
+    from ui.tif_mesh_export_dialog import TifMeshExportDialog
     from ui.tif_workbench_helpers import (
         _tif_bbox_shape,
         _tif_clip_bbox_to_shape,
@@ -511,6 +515,7 @@ class TifWorkbenchWidget(QWidget):
             self.btn_local_axis_reslice,
             self.btn_export_local_axis_training_manifest,
             self.btn_export_part_package,
+            self.btn_export_reviewed_mesh,
         ]
         secondary_buttons = [
             self.btn_start_center,
@@ -944,6 +949,13 @@ class TifWorkbenchWidget(QWidget):
         self.btn_accept_part_mask.setText(tt("Accept part mask", self.lang))
         self.btn_clear_part_preview.setText(tt("Clear preview", self.lang))
         self.btn_export_part_package.setText(tt("Export part package", self.lang))
+        self.btn_export_reviewed_mesh.setText(tt("Export reviewed label STL", self.lang))
+        self.btn_export_reviewed_mesh.setToolTip(
+            tt(
+                "Create Blender-ready STL only from the current reviewed manual truth.",
+                self.lang,
+            )
+        )
         if hasattr(self, "local_axis_volume_help_label"):
             self.local_axis_volume_help_label.setText(
                 tt(
@@ -969,7 +981,7 @@ class TifWorkbenchWidget(QWidget):
         self.btn_align_axis_to_reference_plane.setToolTip(tt("The A/B/C plane is computed from points picked on the observation-side clip plane; use it after A, B, and C are set.", self.lang))
         self.btn_clear_local_axis_draft.setText(tt("Clear axis draft", self.lang))
         self.local_axis_trainable_check.setText(tt("Record this export as trainable local-axis data", self.lang))
-        self.btn_export_local_axis_training_manifest.setText(tt("Export Local Axis training manifest", self.lang))
+        self.btn_export_local_axis_training_manifest.setText(tt("Export confirmed Local Axis training manifest", self.lang))
         self.btn_delete_part_volume.setText(tt("Delete part volume", self.lang))
         self.btn_undo.setText(tt("Undo", self.lang))
         self.btn_redo.setText(tt("Redo", self.lang))
@@ -4082,19 +4094,69 @@ class TifWorkbenchWidget(QWidget):
                 edit_rel = os.path.join(self.project.part_dir(self.current_specimen_id, self.current_part_id), "labels", "editable_ai_result.ome.zarr").replace("\\", "/")
             edit_abs = self.project.to_absolute(edit_rel)
             if volume_sidecar_exists(image_path):
-                metadata = create_empty_label_sidecar_like(image_path, edit_abs, role="editable_ai_result", write_ome_zarr=False)
+                part = self.project.get_part(
+                    self.current_specimen_id,
+                    self.current_part_id,
+                    default=None,
+                ) or {}
+                metadata = create_empty_label_sidecar_like(
+                    image_path,
+                    edit_abs,
+                    role="editable_ai_result",
+                    write_ome_zarr=False,
+                    source_record=part.get("image") or {},
+                )
             else:
                 image_array = tifffile.memmap(image_path) if os.path.exists(image_path) else None
                 if image_array is None:
                     return False
+                spacing_zyx = None
+                spacing_unit = "unknown"
+                scale_verified = False
+                if self.current_reslice_id:
+                    reslice = self.project.get_part_reslice(
+                        self.current_specimen_id,
+                        self.current_part_id,
+                        self.current_reslice_id,
+                        default=None,
+                    ) or {}
+                    source = reslice.get("source") or {}
+                    reslice_audit = {}
+                    metadata_path = self.project.to_absolute(
+                        reslice.get("metadata_path", "")
+                    )
+                    if metadata_path and os.path.isfile(metadata_path):
+                        try:
+                            with open(metadata_path, "r", encoding="utf-8") as handle:
+                                loaded_audit = json.load(handle)
+                            if isinstance(loaded_audit, dict):
+                                reslice_audit = loaded_audit
+                        except (OSError, ValueError, TypeError):
+                            reslice_audit = {}
+                    scale_metadata = _reslice_exchange_metadata(
+                        reslice,
+                        {
+                            "shape_zyx": [int(value) for value in image_array.shape],
+                            "spacing_zyx": (reslice.get("reslice_params") or {}).get("output_spacing_zyx")
+                            or source.get("part_spacing_zyx")
+                            or [1.0, 1.0, 1.0],
+                        },
+                        reslice_audit,
+                    )
+                    spacing_zyx = scale_metadata.get("spacing_zyx")
+                    spacing_unit = scale_metadata.get("spacing_unit", "unknown")
+                    scale_verified = scale_metadata.get("scale_verified") is True
                 metadata, array = create_volume_sidecar_memmap(
                     edit_abs,
                     image_array.shape,
                     "uint16",
                     role="editable_ai_result",
+                    spacing_zyx=spacing_zyx,
+                    spacing_unit=spacing_unit,
                     orientation="local_axis_reslice" if self.current_reslice_id else "part_volume",
                     source_format="empty_label_like",
                     fill_value=0,
+                    scale_verified=scale_verified,
                 )
                 if hasattr(array, "_mmap"):
                     array._mmap.close()
@@ -4109,10 +4171,11 @@ class TifWorkbenchWidget(QWidget):
                     metadata["dtype"],
                     status="empty_edit",
                     spacing_zyx=metadata.get("spacing_zyx"),
-                    spacing_unit=metadata.get("spacing_unit", "micrometer"),
+                    spacing_unit=metadata.get("spacing_unit", "unknown"),
                     orientation=metadata.get("orientation", "local_axis_reslice"),
                     fmt=metadata.get("format", ""),
                     operation="create_empty_edit_layer",
+                    scale_verified=metadata.get("scale_verified") is True,
                     save=False,
                 )
             else:
@@ -4125,10 +4188,11 @@ class TifWorkbenchWidget(QWidget):
                     metadata["dtype"],
                     status="empty_edit",
                     spacing_zyx=metadata.get("spacing_zyx"),
-                    spacing_unit=metadata.get("spacing_unit", "micrometer"),
+                    spacing_unit=metadata.get("spacing_unit", "unknown"),
                     orientation=metadata.get("orientation", "unknown"),
                     fmt=metadata.get("format", ""),
                     operation="create_empty_edit_layer",
+                    scale_verified=metadata.get("scale_verified") is True,
                     save=False,
                 )
             self.project.save_project()
@@ -4152,7 +4216,13 @@ class TifWorkbenchWidget(QWidget):
             return False
         edit_rel = os.path.join(self.project.specimen_dir(self.current_specimen_id), "labels", "working_edit.ome.zarr").replace("\\", "/")
         edit_abs = self.project.to_absolute(edit_rel)
-        metadata = create_empty_label_sidecar_like(image_path, edit_abs, role="working_edit", write_ome_zarr=False)
+        metadata = create_empty_label_sidecar_like(
+            image_path,
+            edit_abs,
+            role="working_edit",
+            write_ome_zarr=False,
+            source_record=specimen.get("working_volume") or {},
+        )
         self.project.register_label_volume(
             self.current_specimen_id,
             "working_edit",
@@ -4161,10 +4231,11 @@ class TifWorkbenchWidget(QWidget):
             metadata["dtype"],
             status="empty_edit",
             spacing_zyx=metadata.get("spacing_zyx"),
-            spacing_unit=metadata.get("spacing_unit", "micrometer"),
+            spacing_unit=metadata.get("spacing_unit", "unknown"),
             orientation=metadata.get("orientation", "unknown"),
             fmt=metadata.get("format", ""),
             operation="create_empty_edit_layer",
+            scale_verified=metadata.get("scale_verified") is True,
             save=False,
         )
         self.project.save_project()
@@ -4285,6 +4356,24 @@ class TifWorkbenchWidget(QWidget):
         self.local_axis_trainable_check.setEnabled(local_axis_editable)
         self.btn_export_local_axis_training_manifest.setEnabled(bool(self.project.project_data.get("specimens", [])))
         self.btn_export_part_package.setEnabled(is_editable_part_volume and has_image)
+        mesh_export_available = bool(
+            has_image and self._current_reviewed_mesh_truth()
+        )
+        self.btn_export_reviewed_mesh.setEnabled(mesh_export_available)
+        if mesh_export_available:
+            self.btn_export_reviewed_mesh.setToolTip(
+                tt(
+                    "Create Blender-ready STL only from the current reviewed manual truth.",
+                    self.lang,
+                )
+            )
+        else:
+            self.btn_export_reviewed_mesh.setToolTip(
+                tt(
+                    "The current object has no reviewed training truth. Use Accept as training truth after review, then export STL.",
+                    self.lang,
+                )
+            )
         self.btn_delete_part_volume.setEnabled(is_editable_part_volume and self.current_part is not None)
         write_locked = self.coordinator.backend_write_lock_active()
         self._set_backend_write_locked_controls(write_locked)
@@ -4640,7 +4729,8 @@ class TifWorkbenchWidget(QWidget):
             labels["working_edit"]["dtype"] = metadata.get("dtype", labels["working_edit"].get("dtype", ""))
             labels["working_edit"]["shape_zyx"] = metadata.get("shape_zyx", labels["working_edit"].get("shape_zyx", []))
             labels["working_edit"]["spacing_zyx"] = metadata.get("spacing_zyx", labels["working_edit"].get("spacing_zyx", [1.0, 1.0, 1.0]))
-            labels["working_edit"]["spacing_unit"] = metadata.get("spacing_unit", labels["working_edit"].get("spacing_unit", "micrometer"))
+            labels["working_edit"]["spacing_unit"] = metadata.get("spacing_unit", labels["working_edit"].get("spacing_unit", "unknown"))
+            labels["working_edit"]["scale_verified"] = metadata.get("scale_verified") is True
             labels["working_edit"]["orientation"] = metadata.get("orientation", labels["working_edit"].get("orientation", "unknown"))
             labels["working_edit"]["format"] = metadata.get("format", labels["working_edit"].get("format", ""))
         labels["working_edit"]["status"] = "in_progress"
@@ -4671,7 +4761,8 @@ class TifWorkbenchWidget(QWidget):
             label_record["dtype"] = metadata.get("dtype", label_record.get("dtype", ""))
             label_record["shape_zyx"] = metadata.get("shape_zyx", label_record.get("shape_zyx", []))
             label_record["spacing_zyx"] = metadata.get("spacing_zyx", label_record.get("spacing_zyx", [1.0, 1.0, 1.0]))
-            label_record["spacing_unit"] = metadata.get("spacing_unit", label_record.get("spacing_unit", "micrometer"))
+            label_record["spacing_unit"] = metadata.get("spacing_unit", label_record.get("spacing_unit", "unknown"))
+            label_record["scale_verified"] = metadata.get("scale_verified") is True
             label_record["orientation"] = metadata.get("orientation", label_record.get("orientation", "unknown"))
             label_record["format"] = metadata.get("format", label_record.get("format", ""))
         label_record["role"] = "editable_ai_result"
@@ -4874,6 +4965,81 @@ class TifWorkbenchWidget(QWidget):
             tt("TIF training handoff", self.lang),
             message,
         )
+
+    def _current_reviewed_mesh_truth(self):
+        if not self.current_specimen_id:
+            return {}
+        try:
+            if self.current_volume_scope == "part":
+                record = self.project.part_label_record(
+                    self.current_specimen_id,
+                    self.current_part_id,
+                    "manual_truth",
+                    reslice_id=self.current_reslice_id,
+                )
+            else:
+                specimen = self.project.get_specimen(
+                    self.current_specimen_id,
+                    default=None,
+                )
+                record = ((specimen or {}).get("labels") or {}).get(
+                    "manual_truth"
+                ) or {}
+            if not record.get("path"):
+                return {}
+            truth_policy = can_use_role_for_training(
+                str(record.get("role") or "manual_truth"),
+                status=record.get("status"),
+                record_exists=True,
+                review_audit=record.get("review_audit"),
+                training=record.get("training"),
+            )
+            if not truth_policy:
+                return {}
+            path = self.project.to_absolute(record["path"])
+            return dict(record) if volume_sidecar_exists(path) else {}
+        except Exception:
+            return {}
+
+    def open_reviewed_mesh_export_dialog(self):
+        if not self.current_specimen_id or self.image_volume is None:
+            QMessageBox.information(
+                self,
+                tt("Mesh export", self.lang),
+                tt(
+                    "Select a TIF volume before exporting reviewed label meshes.",
+                    self.lang,
+                ),
+            )
+            return None
+        if not self._current_reviewed_mesh_truth():
+            QMessageBox.information(
+                self,
+                tt("Mesh export", self.lang),
+                tt(
+                    "The current object has no reviewed training truth. Use Accept as training truth after review, then export STL.",
+                    self.lang,
+                ),
+            )
+            return None
+        try:
+            dialog = TifMeshExportDialog(
+                self.project,
+                self.current_specimen_id,
+                part_id=self.current_part_id if self.current_volume_scope == "part" else "",
+                reslice_id=self.current_reslice_id if self.current_volume_scope == "part" else "",
+                lang=self.lang,
+                parent=self,
+            )
+            dialog.exec()
+            return dialog
+        except Exception as exc:
+            message = tt("Mesh export could not be opened: {0}", self.lang).format(
+                str(exc)
+            )
+            self.log(message)
+            QMessageBox.warning(self, tt("Mesh export", self.lang), message)
+            return None
 
     def export_current_part_package(self):
         if not self.coordinator.guard_backend_write_lock():

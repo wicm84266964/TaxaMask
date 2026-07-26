@@ -1,15 +1,28 @@
 import json
 
+from .project_integrity_registry import (
+    initialize_project_integrity_registry_schema,
+    validate_project_integrity_registry_schema,
+)
+from .training_run_recorder import (
+    initialize_training_run_ledger_schema,
+    validate_training_run_ledger_schema,
+)
+from .mesh_export_ledger import (
+    initialize_mesh_export_schema,
+    validate_mesh_export_schema,
+)
 from .sqlite_storage import (
     connect_sqlite_database,
     get_schema_version,
     initialize_schema_migrations,
+    migrate_sqlite_database_atomically,
     record_schema_version,
 )
 
 
 TIF_SQLITE_SCHEMA_NAME = "taxamask_tif_project"
-TIF_SQLITE_SCHEMA_VERSION = 1
+TIF_SQLITE_SCHEMA_VERSION = 2
 TIF_SQLITE_PROJECT_TYPE = "tif_volume"
 
 REQUIRED_TIF_TABLES = {
@@ -235,7 +248,105 @@ def validate_tif_project_schema(connection):
         missing_columns = sorted(required_columns - existing_columns)
         if missing_columns:
             raise ValueError(f"missing_tif_sqlite_columns:{table_name}:{','.join(missing_columns)}")
+    row = connection.execute(
+        "SELECT schema_version FROM tif_projects WHERE id = 1"
+    ).fetchone()
+    if row is None:
+        raise ValueError("missing_tif_sqlite_project_row")
+    try:
+        project_schema_version = int(row[0])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid_tif_sqlite_project_schema_version") from exc
+    if project_schema_version != TIF_SQLITE_SCHEMA_VERSION:
+        raise ValueError(
+            "inconsistent_tif_sqlite_schema_version:"
+            f"{project_schema_version}!={TIF_SQLITE_SCHEMA_VERSION}"
+        )
+    validate_project_integrity_registry_schema(connection)
+    validate_training_run_ledger_schema(connection)
+    validate_mesh_export_schema(connection)
     return True
+
+
+def _validate_tif_v1_schema(connection, version):
+    if int(version) != 1:
+        raise ValueError(f"unsupported_tif_sqlite_schema_version:{version}")
+    missing = sorted(REQUIRED_TIF_TABLES - _existing_tables(connection))
+    if missing:
+        raise ValueError(f"missing_tif_v1_sqlite_tables:{','.join(missing)}")
+    for table_name, required_columns in sorted(REQUIRED_TIF_COLUMNS.items()):
+        existing_columns = {
+            str(row[1])
+            for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+        }
+        missing_columns = sorted(required_columns - existing_columns)
+        if missing_columns:
+            raise ValueError(
+                f"missing_tif_v1_sqlite_columns:{table_name}:{','.join(missing_columns)}"
+            )
+    row = connection.execute(
+        "SELECT schema_version FROM tif_projects WHERE id = 1"
+    ).fetchone()
+    if row is None or int(row[0]) != 1:
+        raise ValueError("invalid_tif_v1_project_schema_version")
+
+
+def _migrate_v1_volume_scale_trust(connection):
+    rows = connection.execute(
+        "SELECT id, spacing_unit, metadata_json FROM volume_assets ORDER BY id"
+    ).fetchall()
+    for asset_id, spacing_unit, metadata_json in rows:
+        try:
+            metadata = json.loads(metadata_json or "{}")
+        except (TypeError, ValueError):
+            metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+
+        if metadata.get("scale_verified") is True:
+            metadata["scale_verified"] = True
+            normalized_unit = str(spacing_unit or "unknown")
+        else:
+            legacy_unit = str(spacing_unit or "unknown")
+            if legacy_unit.strip().lower() not in {
+                "",
+                "unknown",
+                "unknown_unit",
+                "unitless",
+            }:
+                metadata.setdefault("legacy_unverified_spacing_unit", legacy_unit)
+            metadata["scale_verified"] = False
+            metadata.setdefault(
+                "scale_trust_status",
+                "unverified_legacy_v1_default",
+            )
+            normalized_unit = "unknown"
+
+        connection.execute(
+            """
+            UPDATE volume_assets
+            SET spacing_unit = ?, metadata_json = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                normalized_unit,
+                json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+                int(asset_id),
+            ),
+        )
+
+
+def migrate_tif_project_database(db_path):
+    return migrate_sqlite_database_atomically(
+        db_path,
+        schema_name=TIF_SQLITE_SCHEMA_NAME,
+        target_version=TIF_SQLITE_SCHEMA_VERSION,
+        source_versions=(1,),
+        initialize_schema=initialize_tif_project_schema,
+        validate_schema=validate_tif_project_schema,
+        validate_source_schema=_validate_tif_v1_schema,
+        unsupported_version_error="unsupported_tif_sqlite_schema_version",
+    )
 
 
 def initialize_tif_project_schema(connection):
@@ -244,6 +355,10 @@ def initialize_tif_project_schema(connection):
     if current_version > TIF_SQLITE_SCHEMA_VERSION:
         raise ValueError(f"unsupported_tif_sqlite_schema_version:{current_version}")
     if current_version == TIF_SQLITE_SCHEMA_VERSION:
+        with connection:
+            initialize_project_integrity_registry_schema(connection)
+            initialize_training_run_ledger_schema(connection)
+            initialize_mesh_export_schema(connection)
         validate_tif_project_schema(connection)
         return current_version
 
@@ -255,7 +370,7 @@ def initialize_tif_project_schema(connection):
                 project_id TEXT NOT NULL DEFAULT '',
                 name TEXT NOT NULL DEFAULT 'Untitled TIF Project',
                 project_type TEXT NOT NULL DEFAULT 'tif_volume',
-                schema_version INTEGER NOT NULL DEFAULT 1,
+                schema_version INTEGER NOT NULL DEFAULT 2,
                 legacy_schema_version TEXT NOT NULL DEFAULT '',
                 settings_json TEXT NOT NULL DEFAULT '{}',
                 view_settings_json TEXT NOT NULL DEFAULT '{}',
@@ -292,7 +407,7 @@ def initialize_tif_project_schema(connection):
                 shape_zyx_json TEXT NOT NULL DEFAULT '[]',
                 dtype TEXT NOT NULL DEFAULT '',
                 spacing_zyx_json TEXT NOT NULL DEFAULT '[]',
-                spacing_unit TEXT NOT NULL DEFAULT 'micrometer',
+                spacing_unit TEXT NOT NULL DEFAULT 'unknown',
                 orientation TEXT NOT NULL DEFAULT 'unknown',
                 status TEXT NOT NULL DEFAULT '',
                 source_format TEXT NOT NULL DEFAULT '',
@@ -533,12 +648,21 @@ def initialize_tif_project_schema(connection):
             CREATE INDEX IF NOT EXISTS idx_tif_events_run ON tif_events(run_id);
             """
         )
+        initialize_project_integrity_registry_schema(connection)
+        initialize_training_run_ledger_schema(connection)
+        initialize_mesh_export_schema(connection)
+        if current_version == 1:
+            _migrate_v1_volume_scale_trust(connection)
         connection.execute(
             """
             INSERT OR IGNORE INTO tif_projects (id, name, project_type, schema_version)
             VALUES (1, 'Untitled TIF Project', ?, ?)
             """,
             (TIF_SQLITE_PROJECT_TYPE, TIF_SQLITE_SCHEMA_VERSION),
+        )
+        connection.execute(
+            "UPDATE tif_projects SET schema_version = ? WHERE id = 1",
+            (TIF_SQLITE_SCHEMA_VERSION,),
         )
     record_schema_version(connection, TIF_SQLITE_SCHEMA_NAME, TIF_SQLITE_SCHEMA_VERSION)
     validate_tif_project_schema(connection)

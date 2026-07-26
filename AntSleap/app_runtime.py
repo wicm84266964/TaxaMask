@@ -8,6 +8,8 @@ PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(PACKAGE_DIR)
 _RUNTIME_LOG_FILE = None
 _RUNTIME_LOG_PATH = ""
+_RUNTIME_LOG_BYTES_WRITTEN = 0
+_RUNTIME_LOG_LIMIT_REACHED = False
 
 
 def is_wsl_runtime():
@@ -92,8 +94,46 @@ def runtime_log_prune(log_dir):
         pass
 
 
+def runtime_log_max_bytes():
+    try:
+        value = int(
+            os.environ.get("TAXAMASK_RUNTIME_LOG_MAX_BYTES", str(16 * 1024 * 1024))
+            or 16 * 1024 * 1024
+        )
+    except Exception:
+        value = 16 * 1024 * 1024
+    return max(1024, value)
+
+
+def _write_runtime_log_text(text):
+    global _RUNTIME_LOG_BYTES_WRITTEN, _RUNTIME_LOG_LIMIT_REACHED
+    handle = _RUNTIME_LOG_FILE
+    if handle is None or _RUNTIME_LOG_LIMIT_REACHED:
+        return False
+    payload = str(text)
+    payload_bytes = len(payload.encode("utf-8"))
+    maximum = runtime_log_max_bytes()
+    if _RUNTIME_LOG_BYTES_WRITTEN + payload_bytes > maximum:
+        warning = (
+            f"[{runtime_log_timestamp()}] runtime_log_capacity_reached "
+            f"max_bytes={maximum}\n"
+        )
+        warning_bytes = len(warning.encode("utf-8"))
+        if _RUNTIME_LOG_BYTES_WRITTEN + warning_bytes <= maximum:
+            handle.write(warning)
+            handle.flush()
+            _RUNTIME_LOG_BYTES_WRITTEN += warning_bytes
+        _RUNTIME_LOG_LIMIT_REACHED = True
+        return False
+    handle.write(payload)
+    handle.flush()
+    _RUNTIME_LOG_BYTES_WRITTEN += payload_bytes
+    return True
+
+
 def setup_runtime_logging():
     global _RUNTIME_LOG_FILE, _RUNTIME_LOG_PATH
+    global _RUNTIME_LOG_BYTES_WRITTEN, _RUNTIME_LOG_LIMIT_REACHED
     if _RUNTIME_LOG_FILE is not None or not runtime_log_enabled():
         return _RUNTIME_LOG_PATH
     try:
@@ -103,6 +143,8 @@ def setup_runtime_logging():
         filename = f"taxamask_runtime_{runtime_log_filename_timestamp()}_{os.getpid()}.log"
         _RUNTIME_LOG_PATH = os.path.join(log_dir, filename)
         _RUNTIME_LOG_FILE = open(_RUNTIME_LOG_PATH, "a", encoding="utf-8", buffering=1)
+        _RUNTIME_LOG_BYTES_WRITTEN = 0
+        _RUNTIME_LOG_LIMIT_REACHED = False
         try:
             import faulthandler
 
@@ -134,8 +176,7 @@ def runtime_log_event(event, **fields):
             value = fields.get(key)
             if value is not None:
                 parts.append(f"{key}={runtime_log_value(value)}")
-        handle.write(" ".join(parts) + "\n")
-        handle.flush()
+        _write_runtime_log_text(" ".join(parts) + "\n")
     except Exception:
         pass
 
@@ -148,10 +189,12 @@ def runtime_log_exception(event, exc_type, exc_value, exc_tb):
         import traceback
 
         runtime_log_event(event, error=repr(exc_value))
-        handle.write("".join(traceback.format_exception(exc_type, exc_value, exc_tb)))
+        traceback_text = "".join(
+            traceback.format_exception(exc_type, exc_value, exc_tb)
+        )
         if not str(exc_value).endswith("\n"):
-            handle.write("\n")
-        handle.flush()
+            traceback_text += "\n"
+        _write_runtime_log_text(traceback_text)
     except Exception:
         pass
 
@@ -164,5 +207,6 @@ _runtime_log_enabled = runtime_log_enabled
 _runtime_log_timestamp = runtime_log_timestamp
 _runtime_log_filename_timestamp = runtime_log_filename_timestamp
 _runtime_log_prune = runtime_log_prune
+_runtime_log_max_bytes = runtime_log_max_bytes
 _setup_runtime_logging = setup_runtime_logging
 _runtime_log_value = runtime_log_value

@@ -89,6 +89,67 @@ class TifResultReviewControllerTests(unittest.TestCase):
                 widget.close_project(prompt_unsaved=False)
                 widget.deleteLater()
 
+    def test_accept_selected_results_reports_atomic_batch_failure_ids(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = TifWorkbenchWidget(make_predict_ready_project(Path(tmp)), "en")
+            try:
+                controller = widget.result_review_controller
+                ref = {
+                    "specimen_id": "01-0101-11",
+                    "part_id": "brain",
+                    "reslice_id": "brain_axis_001",
+                }
+                controller.selected_part_refs_for_review_acceptance = Mock(
+                    return_value=[ref]
+                )
+                controller.split_review_acceptance_refs = Mock(
+                    return_value=([ref], [], [])
+                )
+                widget.truth_promotion_service.promote_reviewed_refs = Mock(
+                    side_effect=RuntimeError("synthetic_atomic_rollback")
+                )
+                with patch(
+                    "AntSleap.ui.tif_result_review_controller.QMessageBox.question",
+                    return_value=QMessageBox.Yes,
+                ), patch(
+                    "AntSleap.ui.tif_result_review_controller.QMessageBox.warning"
+                ) as warning:
+                    self.assertFalse(controller.accept_selected_results())
+
+                message = warning.call_args.args[2]
+                self.assertIn("01-0101-11:brain:brain_axis_001", message)
+                self.assertIn("synthetic_atomic_rollback", message)
+                self.assertIn("No selected AI results were accepted", message)
+            finally:
+                widget.close_project(prompt_unsaved=False)
+                widget.deleteLater()
+
+    def test_accept_selected_results_empty_selection_never_calls_promotion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = TifWorkbenchWidget(make_predict_ready_project(Path(tmp)), "en")
+            try:
+                controller = widget.result_review_controller
+                controller.selected_part_refs_for_review_acceptance = Mock(
+                    return_value=[]
+                )
+                promote = Mock(
+                    side_effect=AssertionError("empty selection must not promote")
+                )
+                widget.truth_promotion_service.promote_reviewed_refs = promote
+                with patch(
+                    "AntSleap.ui.tif_result_review_controller.QMessageBox.warning"
+                ) as warning:
+                    self.assertFalse(controller.accept_selected_results())
+
+                promote.assert_not_called()
+                self.assertIn(
+                    "No selected editable AI result",
+                    warning.call_args.args[2],
+                )
+            finally:
+                widget.close_project(prompt_unsaved=False)
+                widget.deleteLater()
+
     def test_external_prediction_import_preserves_manual_truth(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

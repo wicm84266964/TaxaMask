@@ -1,11 +1,33 @@
 import json
+import math
 import os
+import shlex
 import subprocess
+import time
 from datetime import datetime
 
 from .safe_io import atomic_write_json
 from .tif_project import TifProjectManager
 from .tif_local_axis_reslice import source_z_axis_for_part
+from .tif_volume_io import read_volume_metadata, volume_sidecar_exists
+from .tif_local_axis_validation import (
+    require_valid_global_roi_proposal_geometry,
+    require_valid_local_frame_proposal_geometry,
+)
+from .tif_backend import (
+    _cancel_requested,
+    _emit_progress,
+    _kill_process,
+    _tail_lines,
+    _terminate_process_tree,
+    _validate_training_split_receipt,
+)
+from .training_run_recorder import TrainingRunRecorder
+from .training_initial_weights import inspect_initial_weight_registration
+from .training_run_tif import (
+    DEFAULT_TIF_TRAINING_SEED,
+    attach_tif_training_evidence,
+)
 
 
 LOCAL_AXIS_BACKEND_CONTRACT_SCHEMA_VERSION = "taxamask_tif_local_axis_backend_contract_v1"
@@ -16,6 +38,76 @@ GLOBAL_ROI_PROPOSALS_SCHEMA_VERSION = "taxamask_tif_local_axis_global_roi_propos
 LOCAL_FRAME_PROPOSALS_SCHEMA_VERSION = "taxamask_tif_local_axis_frame_proposals_v1"
 
 LOCAL_AXIS_BACKEND_ACTIONS = {"prepare_dataset", "train", "predict_global_roi", "predict_local_frame", "predict"}
+
+
+def _canonical_scale_unit(value):
+    text = str(value or "unknown").strip().lower()
+    text = text.replace("µ", "u").replace("μ", "u")
+    aliases = {
+        "um": "micrometer",
+        "micron": "micrometer",
+        "microns": "micrometer",
+        "micrometer": "micrometer",
+        "micrometers": "micrometer",
+        "mm": "millimeter",
+        "millimeter": "millimeter",
+        "millimeters": "millimeter",
+        "m": "meter",
+        "meter": "meter",
+        "meters": "meter",
+    }
+    return aliases.get(text, "unknown")
+
+
+def _spacing_values_match(left, right):
+    try:
+        left_values = [float(value) for value in (left or [])]
+        right_values = [float(value) for value in (right or [])]
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        len(left_values) == 3
+        and len(right_values) == 3
+        and all(
+            math.isfinite(a)
+            and math.isfinite(b)
+            and a > 0
+            and b > 0
+            and math.isclose(a, b, rel_tol=1e-6, abs_tol=1e-9)
+            for a, b in zip(left_values, right_values)
+        )
+    )
+
+
+def _volume_scale_contract(project_manager, record):
+    record = record if isinstance(record, dict) else {}
+    record_spacing = record.get("spacing_zyx") or [1.0, 1.0, 1.0]
+    result = {
+        "spacing_zyx": [float(value) for value in record_spacing],
+        "spacing_unit": "unknown",
+        "scale_verified": False,
+    }
+    path = project_manager.to_absolute(record.get("path", ""))
+    if not path or not volume_sidecar_exists(path):
+        return result
+    try:
+        metadata = read_volume_metadata(path)
+    except (OSError, TypeError, ValueError):
+        return result
+    metadata_spacing = metadata.get("spacing_zyx") or [1.0, 1.0, 1.0]
+    result["spacing_zyx"] = [float(value) for value in metadata_spacing]
+    metadata_unit = _canonical_scale_unit(metadata.get("spacing_unit"))
+    record_unit = _canonical_scale_unit(record.get("spacing_unit"))
+    verified = (
+        metadata.get("scale_verified") is True
+        and record.get("scale_verified") is True
+        and metadata_unit != "unknown"
+        and metadata_unit == record_unit
+        and _spacing_values_match(metadata_spacing, record.get("spacing_zyx"))
+    )
+    result["spacing_unit"] = metadata_unit if verified else "unknown"
+    result["scale_verified"] = bool(verified)
+    return result
 
 DEFAULT_LOCAL_AXIS_BACKEND_CONFIG = {
     "backend_id": "external_local_axis",
@@ -64,7 +156,7 @@ def _normalize_bbox_zyx(bbox):
     if len(bbox) == 6:
         try:
             return [[int(bbox[0]), int(bbox[3])], [int(bbox[1]), int(bbox[4])], [int(bbox[2]), int(bbox[5])]]
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return []
     if len(bbox) != 3:
         return []
@@ -83,9 +175,10 @@ def _normalize_point_zyx(point):
     if not isinstance(point, (list, tuple)) or len(point) != 3:
         return []
     try:
-        return [float(point[0]), float(point[1]), float(point[2])]
-    except (TypeError, ValueError):
+        values = [float(point[0]), float(point[1]), float(point[2])]
+    except (TypeError, ValueError, OverflowError):
         return []
+    return values if all(math.isfinite(value) for value in values) else []
 
 
 def _normalize_status(status):
@@ -164,6 +257,7 @@ def normalize_global_proposal(payload):
 
 def normalize_frame_proposal(payload):
     source = payload if isinstance(payload, dict) else {}
+    require_valid_local_frame_proposal_geometry(source)
     origin = _normalize_point_zyx(source.get("origin_zyx"))
     start = _normalize_point_zyx(source.get("output_axis_start_zyx"))
     end = _normalize_point_zyx(source.get("output_axis_end_zyx"))
@@ -249,9 +343,34 @@ def import_local_axis_proposals(project_manager, global_proposals=None, local_fr
     imported = {"global_roi_proposals": [], "local_frame_proposals": []}
     for proposal in global_proposals or []:
         record = normalize_global_proposal(proposal)
+        specimen = project_manager.get_specimen(
+            record["specimen_id"],
+            default=None,
+        )
+        if specimen is None:
+            raise KeyError(f"unknown_specimen_id:{record['specimen_id']}")
+        require_valid_global_roi_proposal_geometry(
+            record,
+            shape_zyx=(specimen.get("working_volume") or {}).get("shape_zyx"),
+            require_shape=True,
+        )
         imported["global_roi_proposals"].append(project_manager.add_global_axis_proposal(record["specimen_id"], record, save=False))
     for proposal in local_frame_proposals or []:
         record = normalize_frame_proposal(proposal)
+        part = project_manager.get_part(
+            record["specimen_id"],
+            record["part_id"],
+            default=None,
+        )
+        if part is None:
+            raise KeyError(
+                f"unknown_part_id:{record['specimen_id']}:{record['part_id']}"
+            )
+        require_valid_local_frame_proposal_geometry(
+            record,
+            shape_zyx=(part.get("image") or {}).get("shape_zyx"),
+            require_shape=True,
+        )
         imported["local_frame_proposals"].append(project_manager.add_local_frame_proposal(record["specimen_id"], record["part_id"], record, save=False))
     if save:
         project_manager.save_project()
@@ -299,18 +418,59 @@ def register_local_axis_model_manifest(project_manager, manifest_path, result_co
     return project_manager.register_local_axis_model(model, save=save)
 
 
+def local_axis_initial_weight_entries(manifest_path):
+    path = os.path.abspath(str(manifest_path or ""))
+    manifest = _read_json(path)
+    if manifest.get("schema_version") != LOCAL_AXIS_MODEL_MANIFEST_SCHEMA_VERSION:
+        raise ValueError(
+            f"invalid_local_axis_model_manifest_schema:{manifest.get('schema_version')}"
+        )
+    model_id = _safe_id(manifest.get("model_id") or "local_axis_model")
+    entries = [{"slot": f"local_axis.{model_id}.manifest", "path": path}]
+    weights = manifest.get("weights") if isinstance(manifest.get("weights"), dict) else {}
+    for name, value in sorted(weights.items()):
+        text = str(value or "").strip()
+        if not text:
+            continue
+        weight_path = text if os.path.isabs(text) else os.path.join(os.path.dirname(path), text)
+        entries.append(
+            {
+                "slot": f"local_axis.{model_id}.weight.{_safe_id(name)}",
+                "path": os.path.abspath(weight_path),
+            }
+        )
+    if len(entries) == 1:
+        raise ValueError("local_axis_model_weights_missing")
+    return entries
+
+
 def export_local_axis_training_manifest(project_manager, output_dir, filters=None):
     if not isinstance(project_manager, TifProjectManager):
         raise TypeError("project_manager_must_be_tif_project_manager")
     filters = filters if isinstance(filters, dict) else {}
     include_unconfirmed = bool(filters.get("include_unconfirmed", False))
+    if include_unconfirmed:
+        raise ValueError("include_unconfirmed_not_allowed_for_training_manifest")
     template_filter = filters.get("template_id")
+    specimen_filter = {
+        str(value) for value in filters.get("specimen_ids", []) or []
+    }
+    part_filter = {
+        str(specimen_id): {str(value) for value in part_ids or []}
+        for specimen_id, part_ids in dict(
+            filters.get("part_ids_by_specimen") or {}
+        ).items()
+    }
     samples = []
     for specimen in project_manager.project_data.get("specimens", []) or []:
         specimen_id = specimen.get("specimen_id", "")
+        if specimen_filter and specimen_id not in specimen_filter:
+            continue
         full_volume = specimen.get("working_volume") or {}
         for part in specimen.get("parts", []) or []:
             part_id = part.get("part_id", "")
+            if specimen_id in part_filter and part_id not in part_filter[specimen_id]:
+                continue
             for reslice in (part.get("metadata") or {}).get("local_axis_reslices", []) or []:
                 training = reslice.get("training") or {}
                 training_sample = dict(reslice.get("training_sample") or {})
@@ -318,9 +478,8 @@ def export_local_axis_training_manifest(project_manager, output_dir, filters=Non
                 usable_for_training = bool(training_sample.get("usable_for_training", training.get("usable_for_training", True)))
                 if template_filter and reslice.get("template_id") != template_filter:
                     continue
-                if not include_unconfirmed:
-                    if not human_confirmed or not usable_for_training:
-                        continue
+                if not human_confirmed or not usable_for_training:
+                    continue
                 if training_sample:
                     sample = dict(training_sample)
                     sample.setdefault("sample_id", f"{specimen_id}:{part_id}:{reslice.get('reslice_id', '')}")
@@ -395,7 +554,14 @@ def export_local_axis_training_manifest(project_manager, output_dir, filters=Non
         "schema_version": LOCAL_AXIS_TRAINING_MANIFEST_SCHEMA_VERSION,
         "project_id": project_manager.project_data.get("project_id", ""),
         "created_at": _now_iso(),
-        "filters": dict(filters),
+        "filters": {
+            **filters,
+            "include_unconfirmed": False,
+            "specimen_ids": sorted(specimen_filter),
+            "part_ids_by_specimen": {
+                key: sorted(values) for key, values in sorted(part_filter.items())
+            },
+        },
         "sample_count": len(samples),
         "samples": samples,
     }
@@ -469,7 +635,27 @@ class TifLocalAxisBackendRunner:
         _write_json(path, contract)
         return path
 
-    def run_action(self, action, specimen_ids=None, part_ids_by_specimen=None, template_id="", dataset_dir="", model_manifest=""):
+    def run_action(
+        self,
+        action,
+        specimen_ids=None,
+        part_ids_by_specimen=None,
+        template_id="",
+        dataset_dir="",
+        model_manifest="",
+        progress_callback=None,
+        cancel_check=None,
+    ):
+        if action == "train":
+            return self._run_training_action(
+                specimen_ids=specimen_ids,
+                part_ids_by_specimen=part_ids_by_specimen,
+                template_id=template_id,
+                dataset_dir=dataset_dir,
+                model_manifest=model_manifest,
+                progress_callback=progress_callback,
+                cancel_check=cancel_check,
+            )
         run_id, run_dir = self.create_run_dir(action)
         contract = self.build_contract(action, specimen_ids, part_ids_by_specimen, template_id, run_id, run_dir, dataset_dir, model_manifest)
         if action in {"prepare_dataset", "train"}:
@@ -492,6 +678,255 @@ class TifLocalAxisBackendRunner:
             "result": result,
             "imported": imported,
         }
+
+    def _training_sample_specs(self, manifest):
+        specs = []
+        for sample in manifest.get("samples", []) or []:
+            specimen_id = str(sample.get("specimen_id") or "")
+            part_id = str(sample.get("part_id") or "")
+            reslice_id = str(sample.get("reslice_id") or "")
+            owner_keys = [
+                f"specimen.{specimen_id}.working",
+                f"part.{specimen_id}.{part_id}.image",
+                f"reslice.{specimen_id}.{part_id}.{reslice_id}.image",
+                f"reslice.{specimen_id}.{part_id}.{reslice_id}.local_axis_truth",
+            ]
+            if bool((sample.get("part_mask") or {}).get("available")):
+                owner_keys.append(f"part.{specimen_id}.{part_id}.mask")
+            outputs = sample.get("outputs") if isinstance(sample.get("outputs"), dict) else {}
+            if outputs.get("mask_path"):
+                owner_keys.append(
+                    f"reslice.{specimen_id}.{part_id}.{reslice_id}.mask"
+                )
+            specs.append(
+                {
+                    "sample_id": _safe_id(sample.get("sample_id") or "local_axis_sample"),
+                    "group_id": specimen_id,
+                    "owner_keys": owner_keys,
+                }
+            )
+        return specs
+
+    def _pending_training_config(self, contract, sample_count):
+        return {
+            "resolution_status": "pending_external",
+            "adapter_invocation": {
+                "backend_id": _safe_id(contract.get("backend_id")),
+                "template_id": str(contract.get("template_id") or ""),
+                "sample_count": int(sample_count),
+                "random_seed": DEFAULT_TIF_TRAINING_SEED,
+            },
+            "persist_weights": True,
+        }
+
+    def _index_training_artifacts(self, run, contract_path, contract, result):
+        candidates = [
+            ("backend_contract", "backend_contract", contract_path, "application/json"),
+            ("backend_result", "backend_result", contract["result_json"], "application/json"),
+            (
+                "local_axis_training_manifest",
+                "training_dataset_manifest",
+                contract["training_manifest"],
+                "application/json",
+            ),
+        ]
+        for name in ("train_stdout.log", "train_stderr.log"):
+            path = os.path.join(contract["run_dir"], "logs", name)
+            if os.path.isfile(path):
+                candidates.append(
+                    (f"training_{name.split('.')[0]}", "training_log", path, "text/plain")
+                )
+        persist_weights = bool(
+            (result.get("effective_config") or {}).get("persist_weights", True)
+        )
+        type_counts = {}
+        for artifact in result.get("artifacts", []) or []:
+            if not isinstance(artifact, dict) or not artifact.get("path"):
+                continue
+            artifact_type = _safe_id(artifact.get("type") or "backend_artifact")
+            type_counts[artifact_type] = type_counts.get(artifact_type, 0) + 1
+            artifact_id = f"{artifact_type}_{type_counts[artifact_type]:03d}"
+            role = {
+                "local_axis_model_manifest": "model_manifest",
+                "model_output_dir": "output_weights" if persist_weights else "model_output",
+                "local_axis_training_manifest": "training_dataset_manifest",
+                "dataset_manifest": "training_dataset_manifest",
+                "training_log": "training_log",
+            }.get(artifact_type, "backend_artifact")
+            media_type = {
+                "json": "application/json",
+                "text": "text/plain",
+                "directory": "application/x-directory",
+            }.get(str(artifact.get("format") or ""), "application/octet-stream")
+            candidates.append(
+                (artifact_id, role, self._artifact_abs_path(result, artifact["path"]), media_type)
+            )
+        run_root = os.path.abspath(contract["run_dir"])
+        seen = set()
+        for artifact_id, role, path, media_type in candidates:
+            path = os.path.abspath(path)
+            if path in seen or not os.path.exists(path):
+                continue
+            seen.add(path)
+            try:
+                inside = os.path.normcase(os.path.commonpath([run_root, path])) == os.path.normcase(run_root)
+            except ValueError:
+                inside = False
+            if not inside:
+                raise ValueError(f"local_axis_training_artifact_outside_run:{artifact_id}")
+            run.add_artifact(
+                artifact_id=artifact_id,
+                role=role,
+                path=path,
+                path_base="run_root",
+                media_type=media_type,
+            )
+
+    def _run_training_action(
+        self,
+        *,
+        specimen_ids,
+        part_ids_by_specimen,
+        template_id,
+        dataset_dir,
+        model_manifest,
+        progress_callback,
+        cancel_check,
+    ):
+        recorder = TrainingRunRecorder(
+            self.runs_root,
+            database_path=self.project_manager.current_database_path,
+        )
+        run = recorder.create_pending("local_axis_external")
+        run_id, run_dir = run.run_id, run.run_dir
+        for child in ("dataset", "outputs", "logs"):
+            os.makedirs(os.path.join(run_dir, child), exist_ok=True)
+        try:
+            _emit_progress(progress_callback, 0, 100, "Creating Local Axis training run...")
+            if _cancel_requested(cancel_check):
+                raise RuntimeError("local_axis_backend_train_cancelled")
+            contract = self.build_contract(
+                "train",
+                specimen_ids,
+                part_ids_by_specimen,
+                template_id,
+                run_id,
+                run_dir,
+                dataset_dir,
+                model_manifest,
+            )
+            run_root = os.path.abspath(run_dir)
+            dataset_root = os.path.abspath(contract["dataset_dir"])
+            try:
+                dataset_inside_run = os.path.normcase(
+                    os.path.commonpath([run_root, dataset_root])
+                ) == os.path.normcase(run_root)
+            except ValueError:
+                dataset_inside_run = False
+            if not dataset_inside_run:
+                raise ValueError("local_axis_training_dataset_outside_run")
+            export_filters = {
+                "template_id": template_id,
+                "specimen_ids": list(specimen_ids or []),
+                "part_ids_by_specimen": dict(part_ids_by_specimen or {}),
+            }
+            export = export_local_axis_training_manifest(
+                self.project_manager, contract["dataset_dir"], export_filters
+            )
+            if not export["sample_count"]:
+                raise ValueError("local_axis_training_samples_missing")
+            contract["training_manifest"] = export["manifest_path"]
+            contract["training_sample_count"] = export["sample_count"]
+            pending_config = self._pending_training_config(
+                contract, export["sample_count"]
+            )
+            contract["training_config"] = dict(pending_config)
+            initial_weight_owner_keys = []
+            if contract.get("model_manifest"):
+                initial_entries = local_axis_initial_weight_entries(
+                    contract["model_manifest"]
+                )
+                registration = inspect_initial_weight_registration(
+                    self.project_manager, initial_entries
+                )
+                if not registration["verified"]:
+                    first = next(
+                        (
+                            item
+                            for item in registration["items"]
+                            if item.get("status") != "verified"
+                        ),
+                        {},
+                    )
+                    raise ValueError(
+                        "local_axis_initial_weights_not_registered:"
+                        f"{first.get('slot', 'unknown')}:{first.get('status', 'missing')}"
+                    )
+                initial_weight_owner_keys = [
+                    item["slot"] for item in initial_entries
+                ]
+            attach_tif_training_evidence(
+                run,
+                self.project_manager,
+                sample_specs=self._training_sample_specs(export["manifest"]),
+                effective_config=pending_config,
+                backend={
+                    "backend_id": "local_axis_external",
+                    "backend_version": "1.0",
+                    "adapter_id": _safe_id(contract.get("backend_id")),
+                    "adapter_version": "1.0",
+                },
+                compute_device="external_backend",
+                deferred_effective_config=True,
+                trusted_label_policy="human_confirmed_only",
+                extra_owner_keys=initial_weight_owner_keys,
+            )
+            split_payload = _read_json(os.path.join(run_dir, "split_manifest.json"))
+            contract["training_split"] = {
+                "schema_version": split_payload.get("schema_version"),
+                "strategy": split_payload.get("strategy"),
+                "assignments": split_payload.get("assignments"),
+            }
+            contract_path = self.write_contract(contract)
+            command = self._command_for_action("train")
+            if not command:
+                raise ValueError("local_axis_backend_train_command_missing")
+            self._run_command(
+                command,
+                contract_path,
+                run_dir,
+                "train",
+                progress_callback=progress_callback,
+                cancel_check=cancel_check,
+            )
+            result = self.read_result(contract["result_json"])
+            effective_config = result.get("effective_config")
+            if not isinstance(effective_config, dict):
+                raise ValueError("local_axis_backend_effective_config_missing")
+            _validate_training_split_receipt(contract, result, effective_config)
+            run.resolve_external_effective_config(effective_config)
+            self._index_training_artifacts(run, contract_path, contract, result)
+            imported = self.import_backend_result(result)
+            run.succeed()
+            self._register_run(contract, result)
+            _emit_progress(progress_callback, 100, 100, "Local Axis training finished.")
+            return {
+                "run_id": run_id,
+                "run_dir": run_dir,
+                "contract_json": contract_path,
+                "contract": contract,
+                "result": result,
+                "imported": imported,
+            }
+        except BaseException as exc:
+            if run.status in {"pending", "running"}:
+                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                    run.interrupt(stage="local_axis_external_training")
+                elif "cancelled" in str(exc).lower():
+                    run.cancel(stage="local_axis_external_training")
+                else:
+                    run.fail(exc, stage="local_axis_external_training")
+            raise
 
     def read_result(self, result_json):
         result = _read_json(result_json)
@@ -570,6 +1005,7 @@ class TifLocalAxisBackendRunner:
             if specimen is None:
                 raise KeyError(f"unknown_specimen_id:{specimen_id}")
             working = specimen.get("working_volume") or {}
+            working_scale = _volume_scale_contract(self.project_manager, working)
             part_ids = part_map.get(specimen_id)
             parts = []
             for part in specimen.get("parts", []) or []:
@@ -584,8 +1020,7 @@ class TifLocalAxisBackendRunner:
                         "format": working.get("format", ""),
                         "shape_zyx": working.get("shape_zyx", []),
                         "dtype": working.get("dtype", ""),
-                        "spacing_zyx": working.get("spacing_zyx") or [1.0, 1.0, 1.0],
-                        "spacing_unit": working.get("spacing_unit", "micrometer"),
+                        **working_scale,
                         "orientation": working.get("orientation", "unknown"),
                     },
                     "parts": parts,
@@ -596,6 +1031,7 @@ class TifLocalAxisBackendRunner:
     def _contract_part(self, part):
         image = part.get("image") or {}
         mask = part.get("mask") or {}
+        image_scale = _volume_scale_contract(self.project_manager, image)
         return {
             "part_id": part.get("part_id"),
             "part_name": part.get("display_name") or part.get("part_id"),
@@ -604,7 +1040,7 @@ class TifLocalAxisBackendRunner:
                 "format": image.get("format", ""),
                 "shape_zyx": image.get("shape_zyx", []),
                 "dtype": image.get("dtype", ""),
-                "spacing_zyx": image.get("spacing_zyx") or [1.0, 1.0, 1.0],
+                **image_scale,
             },
             "source_axis": source_z_axis_for_part(image.get("shape_zyx") or [1, 1, 1]),
             "part_mask": {
@@ -640,21 +1076,65 @@ class TifLocalAxisBackendRunner:
             run_dir=run_dir,
         )
 
-    def _run_command(self, command_template, contract_path, run_dir, action):
+    def _run_command(
+        self,
+        command_template,
+        contract_path,
+        run_dir,
+        action,
+        progress_callback=None,
+        cancel_check=None,
+    ):
         command = self._format_template(command_template, run_dir, contract_path)
+        command_parts = shlex.split(command, posix=os.name != "nt")
+        command_parts = [
+            item[1:-1]
+            if len(item) >= 2 and item[0] == item[-1] and item[0] in {"'", '"'}
+            else item
+            for item in command_parts
+        ]
+        if not command_parts:
+            raise ValueError(f"local_axis_backend_{action}_command_missing")
         log_dir = os.path.join(run_dir, "logs")
         os.makedirs(log_dir, exist_ok=True)
         stdout_path = os.path.join(log_dir, f"{action}_stdout.log")
         stderr_path = os.path.join(log_dir, f"{action}_stderr.log")
         with open(stdout_path, "w", encoding="utf-8") as stdout_handle, open(stderr_path, "w", encoding="utf-8") as stderr_handle:
-            result = subprocess.run(
-                command,
+            process = subprocess.Popen(
+                command_parts,
                 cwd=run_dir,
-                shell=True,
+                shell=False,
                 text=True,
                 stdout=stdout_handle,
                 stderr=stderr_handle,
+                start_new_session=os.name != "nt",
             )
-        if result.returncode != 0:
-            raise RuntimeError(f"local_axis_backend_{action}_failed:{result.returncode}:{stderr_path}")
-        return result.returncode
+            started = time.monotonic()
+            last_emit = started
+            while process.poll() is None:
+                if _cancel_requested(cancel_check):
+                    _terminate_process_tree(process)
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        _kill_process(process)
+                        process.wait(timeout=5)
+                    raise RuntimeError(f"local_axis_backend_{action}_cancelled")
+                now = time.monotonic()
+                if now - last_emit >= 0.5:
+                    _emit_progress(
+                        progress_callback,
+                        0,
+                        0,
+                        f"Running Local Axis {action}... {int(now - started)}s",
+                    )
+                    last_emit = now
+                time.sleep(0.1)
+            returncode = process.returncode
+        if returncode != 0:
+            tail = _tail_lines(stderr_path, 10) or _tail_lines(stdout_path, 10)
+            detail = "\n" + "\n".join(tail[-10:]) if tail else ""
+            raise RuntimeError(
+                f"local_axis_backend_{action}_failed:{returncode}{detail}"
+            )
+        return returncode

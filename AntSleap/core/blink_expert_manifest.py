@@ -56,6 +56,8 @@ def build_blink_expert_manifest(
     trajectory_count=0,
     output_schema="vit_b_box_regression_v1",
     train_params=None,
+    initialization=None,
+    seeds=None,
     created_at=None,
 ):
     clean_weights_path = os.path.abspath(str(weights_path or ""))
@@ -76,6 +78,8 @@ def build_blink_expert_manifest(
             "trajectory_count": int(trajectory_count or 0),
         },
         "train_params": dict(train_params or {}),
+        "initialization": dict(initialization or {}),
+        "seeds": dict(seeds or {}),
         "created_at": created_at or datetime.now().isoformat(timespec="seconds"),
     }
 

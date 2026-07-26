@@ -2,7 +2,7 @@ import os
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QCheckBox,
+    QApplication,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -10,10 +10,12 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QProgressDialog,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -21,6 +23,10 @@ from PySide6.QtWidgets import (
 )
 
 try:
+    from AntSleap.ui.training_integrity_recovery_dialog import (
+        TrainingIntegrityRecoveryDialog,
+        is_training_integrity_error,
+    )
     from AntSleap.core.tif_local_axis_baseline import add_baseline_local_frame_proposals
     from AntSleap.core.tif_local_axis_ai import (
         DEFAULT_LOCAL_AXIS_BACKEND_CONFIG,
@@ -30,12 +36,17 @@ try:
         load_global_roi_proposals,
         load_local_frame_proposals,
         register_local_axis_model_manifest,
+        local_axis_initial_weight_entries,
         sanitize_local_axis_backend_config,
         validate_local_axis_backend_command,
     )
 except ModuleNotFoundError as exc:
     if exc.name != "AntSleap":
         raise
+    from ui.training_integrity_recovery_dialog import (
+        TrainingIntegrityRecoveryDialog,
+        is_training_integrity_error,
+    )
     from core.tif_local_axis_baseline import add_baseline_local_frame_proposals
     from core.tif_local_axis_ai import (
         DEFAULT_LOCAL_AXIS_BACKEND_CONFIG,
@@ -45,6 +56,7 @@ except ModuleNotFoundError as exc:
         load_global_roi_proposals,
         load_local_frame_proposals,
         register_local_axis_model_manifest,
+        local_axis_initial_weight_entries,
         sanitize_local_axis_backend_config,
         validate_local_axis_backend_command,
     )
@@ -60,11 +72,13 @@ MODEL_PANEL_TRANSLATIONS = {
         "Active model profile": "当前模型方案",
         "Run history": "运行记录",
         "Template": "模板",
-        "Include unconfirmed": "包含未确认记录",
-        "Export training manifest": "导出训练清单",
+        "Export confirmed training manifest": "导出已确认训练清单",
         "Import global ROI proposals": "导入全局 ROI 建议项",
         "Import local frame proposals": "导入局部坐标系建议项",
         "Register model manifest": "登记模型清单",
+        "Register training start model": "登记训练起始模型",
+        "Initial-weight registration note": "初始权重登记备注",
+        "Registered training start model: {0}": "已登记训练起始模型：{0}",
         "Backend ID": "后端 ID",
         "Display name": "显示名称",
         "Python": "Python",
@@ -103,6 +117,7 @@ MODEL_PANEL_TRANSLATIONS = {
         "Imported proposals: {0} global, {1} local frame.": "已导入建议项：{0} 条全局 ROI，{1} 条局部坐标系。",
         "Registered model: {0}": "已登记模型：{0}",
         "Running {0}...": "正在运行：{0}...",
+        "Cancel": "取消",
         "Action finished: {0}\nRun: {1}": "动作完成：{0}\n运行目录：{1}",
         "Baseline proposals generated: {0} proposals, {1} skipped.": "已生成基线建议项：{0} 条，跳过 {1} 条。",
         "No command configured for this action.": "这个动作还没有配置命令。",
@@ -156,8 +171,7 @@ class TifLocalAxisModelPanel(QWidget):
         group = QGroupBox(tt("Training dataset", self.lang))
         layout = QFormLayout(group)
         self.template_edit = QLineEdit(self.part_id)
-        self.include_unconfirmed_check = QCheckBox(tt("Include unconfirmed", self.lang))
-        self.btn_export_training = QPushButton(tt("Export training manifest", self.lang))
+        self.btn_export_training = QPushButton(tt("Export confirmed training manifest", self.lang))
         self.btn_export_training.clicked.connect(self.export_training_manifest_dialog)
         self.btn_import_global = QPushButton(tt("Import global ROI proposals", self.lang))
         self.btn_import_global.clicked.connect(self.import_global_proposals_dialog)
@@ -165,12 +179,18 @@ class TifLocalAxisModelPanel(QWidget):
         self.btn_import_local.clicked.connect(self.import_local_frame_proposals_dialog)
         self.btn_register_model = QPushButton(tt("Register model manifest", self.lang))
         self.btn_register_model.clicked.connect(self.register_model_manifest_dialog)
+        self.btn_register_training_model = QPushButton(
+            tt("Register training start model", self.lang)
+        )
+        self.btn_register_training_model.clicked.connect(
+            self.register_training_model_manifest_dialog
+        )
         layout.addRow(tt("Template", self.lang), self.template_edit)
-        layout.addRow("", self.include_unconfirmed_check)
         layout.addRow("", self.btn_export_training)
         layout.addRow("", self.btn_import_global)
         layout.addRow("", self.btn_import_local)
         layout.addRow("", self.btn_register_model)
+        layout.addRow("", self.btn_register_training_model)
         return group
 
     def _build_active_model_group(self):
@@ -312,7 +332,7 @@ class TifLocalAxisModelPanel(QWidget):
         return config
 
     def _training_filters(self):
-        filters = {"include_unconfirmed": bool(self.include_unconfirmed_check.isChecked())}
+        filters = {"include_unconfirmed": False}
         template_id = self.template_edit.text().strip()
         if template_id:
             filters["template_id"] = template_id
@@ -411,7 +431,13 @@ class TifLocalAxisModelPanel(QWidget):
         return [item.get("specimen_id", "") for item in self.project.project_data.get("specimens", []) if item.get("specimen_id")]
 
     def _selected_part_map(self, action):
-        if self.specimen_id and self.part_id and action in {"predict_local_frame", "predict", "baseline"}:
+        if self.specimen_id and self.part_id and action in {
+            "prepare_dataset",
+            "train",
+            "predict_local_frame",
+            "predict",
+            "baseline",
+        }:
             return {self.specimen_id: [self.part_id]}
         return None
 
@@ -437,6 +463,7 @@ class TifLocalAxisModelPanel(QWidget):
         return result
 
     def run_backend_action(self, action):
+        progress = None
         try:
             config = self.save_backend_settings()
             command_key = self._command_key_for_action(action)
@@ -450,6 +477,39 @@ class TifLocalAxisModelPanel(QWidget):
                     return None
             action_label = tt(action, self.lang)
             self.status_label.setText(tt("Running {0}...", self.lang).format(action_label))
+            if action == "train":
+                progress = QProgressDialog(
+                    tt("Running {0}...", self.lang).format(action_label),
+                    tt("Cancel", self.lang),
+                    0,
+                    100,
+                    self,
+                )
+                progress.setWindowTitle(tt("Local Axis Models", self.lang))
+                progress.setWindowModality(Qt.WindowModal)
+                progress.setAutoClose(False)
+                progress.setAutoReset(False)
+                progress.setMinimumDuration(0)
+                progress.show()
+
+            def on_progress(current, total, message):
+                if progress is None:
+                    return
+                if int(total or 0) <= 0:
+                    progress.setRange(0, 0)
+                else:
+                    progress.setRange(0, max(1, int(total)))
+                    progress.setValue(max(0, min(int(current or 0), int(total))))
+                if message:
+                    progress.setLabelText(str(message))
+                QApplication.processEvents()
+
+            def cancel_requested():
+                if progress is None:
+                    return False
+                QApplication.processEvents()
+                return progress.wasCanceled()
+
             runner = TifLocalAxisBackendRunner(self.project, config)
             result = runner.run_action(
                 action,
@@ -457,15 +517,61 @@ class TifLocalAxisModelPanel(QWidget):
                 part_ids_by_specimen=self._selected_part_map(action),
                 template_id=self.template_edit.text().strip(),
                 model_manifest=config.get("model_manifest", ""),
+                progress_callback=on_progress if action == "train" else None,
+                cancel_check=cancel_requested if action == "train" else None,
             )
         except Exception as exc:
-            QMessageBox.warning(self, tt("Local Axis Models", self.lang), str(exc))
+            if action == "train" and is_training_integrity_error(exc):
+                self._training_integrity_recovery_dialog = (
+                    TrainingIntegrityRecoveryDialog(self.project, self)
+                )
+                self._training_integrity_recovery_dialog.open()
+            else:
+                QMessageBox.warning(self, tt("Local Axis Models", self.lang), str(exc))
             self.status_label.setText(str(exc))
             return None
+        finally:
+            if progress is not None:
+                progress.close()
+                progress.deleteLater()
         self.last_result = result
         self.refresh_tables()
         self.status_label.setText(tt("Action finished: {0}\nRun: {1}", self.lang).format(tt(action, self.lang), result.get("run_dir", "")))
         return result
+
+    def register_training_model_manifest_dialog(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            tt("Register training start model", self.lang),
+            "",
+            "JSON (*.json)",
+        )
+        if not path:
+            return None
+        note, accepted = QInputDialog.getText(
+            self,
+            tt("Register training start model", self.lang),
+            tt("Initial-weight registration note", self.lang),
+        )
+        if not accepted:
+            return None
+        try:
+            from AntSleap.core.training_initial_weights import (
+                register_initial_weight_version,
+            )
+
+            entries = local_axis_initial_weight_entries(path)
+            register_initial_weight_version(self.project, entries, note=note)
+            record = self.register_model_manifest_file(path)
+        except Exception as exc:
+            QMessageBox.warning(self, tt("Local Axis Models", self.lang), str(exc))
+            return None
+        self.status_label.setText(
+            tt("Registered training start model: {0}", self.lang).format(
+                record.get("model_id", "")
+            )
+        )
+        return record
 
     def refresh_tables(self):
         self._refresh_active_model_combo()
@@ -534,8 +640,47 @@ class TifLocalAxisModelPanel(QWidget):
                 self._set_readonly_item(self.models_table, row, col, value)
 
     def _refresh_runs_table(self):
-        runs = self.project.list_local_axis_runs() if hasattr(self.project, "list_local_axis_runs") else []
-        runs = list(reversed(runs))
+        legacy_runs = self.project.list_local_axis_runs() if hasattr(self.project, "list_local_axis_runs") else []
+        merged = {
+            str(item.get("run_id") or ""): dict(item)
+            for item in legacy_runs
+            if str(item.get("run_id") or "")
+        }
+        try:
+            from AntSleap.core.training_run_recorder import TrainingRunRecorder
+
+            runs_root = os.path.join(self.project.project_dir, "runs", "local_axis")
+            recorder = TrainingRunRecorder(
+                runs_root,
+                database_path=self.project.current_database_path,
+            )
+            for record in recorder.list_records():
+                if record.get("entrypoint") != "local_axis_external":
+                    continue
+                invocation = (record.get("effective_config") or {}).get(
+                    "adapter_invocation"
+                ) or {}
+                backend = record.get("backend") or {}
+                merged[record["run_id"]] = {
+                    "run_id": record["run_id"],
+                    "action": "train",
+                    "result_status": record.get("status", ""),
+                    "backend_id": backend.get("adapter_id") or backend.get("backend_id", ""),
+                    "template_id": invocation.get("template_id", ""),
+                    "specimen_ids": [],
+                    "run_dir": os.path.join(runs_root, record["run_id"]),
+                    "created_at": record.get("created_at", ""),
+                }
+        except Exception:
+            pass
+        runs = sorted(
+            merged.values(),
+            key=lambda item: (
+                str(item.get("created_at") or ""),
+                str(item.get("run_id") or ""),
+            ),
+            reverse=True,
+        )
         self.runs_table.setRowCount(len(runs))
         for row, run in enumerate(runs):
             values = [

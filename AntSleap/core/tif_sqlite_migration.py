@@ -239,9 +239,62 @@ def _volume_has_content(record):
     return False
 
 
-def _insert_volume_asset(connection, specimen_row_id, record, *, role, asset_key="", part_row_id=None, status=""):
+def _legacy_volume_scale_fields(record, *, legacy_source=False):
+    source = record if isinstance(record, dict) else {}
+    original_unit = str(source.get("spacing_unit") or "unknown")
+    unit_text = original_unit.strip().lower().replace("µ", "u").replace("μ", "u")
+    canonical_unit = {
+        "um": "micrometer",
+        "micron": "micrometer",
+        "microns": "micrometer",
+        "micrometer": "micrometer",
+        "micrometers": "micrometer",
+        "mm": "millimeter",
+        "millimeter": "millimeter",
+        "millimeters": "millimeter",
+        "m": "meter",
+        "meter": "meter",
+        "meters": "meter",
+    }.get(unit_text, "unknown")
+    unit_was_declared = unit_text not in {
+        "", "unknown", "unknown_unit", "unitless"
+    }
+    verified = source.get("scale_verified") is True and canonical_unit != "unknown"
+    metadata = {
+        key: value
+        for key, value in source.items()
+        if key
+        not in {
+            "path",
+            "format",
+            "shape_zyx",
+            "dtype",
+            "spacing_zyx",
+            "spacing_unit",
+            "orientation",
+            "status",
+            "source_format",
+            "scale_verified",
+        }
+    }
+    metadata["scale_verified"] = bool(verified)
+    if not verified and unit_was_declared:
+        unit_key = "legacy_unverified_spacing_unit" if legacy_source else "unverified_spacing_unit"
+        metadata.setdefault(unit_key, original_unit)
+        metadata.setdefault(
+            "scale_trust_status",
+            "unverified_legacy_json" if legacy_source else "unverified",
+        )
+    return (canonical_unit if verified else "unknown"), metadata
+
+
+def _insert_volume_asset(connection, specimen_row_id, record, *, role, asset_key="", part_row_id=None, status="", legacy_source=False):
     if not _volume_has_content(record):
         return None
+    spacing_unit, metadata_payload = _legacy_volume_scale_fields(
+        record,
+        legacy_source=legacy_source,
+    )
     cursor = connection.execute(
         """
         INSERT INTO volume_assets (
@@ -261,28 +314,11 @@ def _insert_volume_asset(connection, specimen_row_id, record, *, role, asset_key
             json_text(_as_list(record.get("shape_zyx"))),
             str(record.get("dtype") or ""),
             json_text(_as_list(record.get("spacing_zyx"))),
-            str(record.get("spacing_unit") or "micrometer"),
+            spacing_unit,
             str(record.get("orientation") or "unknown"),
             str(status or record.get("status") or ""),
             str(record.get("source_format") or ""),
-            json_text(
-                {
-                    key: value
-                    for key, value in record.items()
-                    if key
-                    not in {
-                        "path",
-                        "format",
-                        "shape_zyx",
-                        "dtype",
-                        "spacing_zyx",
-                        "spacing_unit",
-                        "orientation",
-                        "status",
-                        "source_format",
-                    }
-                }
-            ),
+            json_text(metadata_payload),
         ),
     )
     return int(cursor.lastrowid)
@@ -709,7 +745,7 @@ def _insert_run_artifacts(connection, run_id, record):
     return count
 
 
-def _insert_specimen_tree(connection, specimen, stats):
+def _insert_specimen_tree(connection, specimen, stats, *, legacy_source=False):
     specimen_row_id = _insert_specimen(connection, specimen)
     stats["specimen_count"] += 1
 
@@ -719,6 +755,7 @@ def _insert_specimen_tree(connection, specimen, stats):
         _as_dict(specimen.get("working_volume")),
         role="working_image",
         asset_key="working_volume",
+        legacy_source=legacy_source,
     )
     if working_asset_id:
         stats["volume_asset_count"] += 1
@@ -726,7 +763,7 @@ def _insert_specimen_tree(connection, specimen, stats):
     labels = _as_dict(specimen.get("labels"))
     for role in ("manual_truth", "working_edit", "raw_ai_prediction_backup"):
         record = _as_dict(labels.get(role))
-        asset_id = _insert_volume_asset(connection, specimen_row_id, record, role=role, asset_key=f"labels.{role}", status=record.get("status", ""))
+        asset_id = _insert_volume_asset(connection, specimen_row_id, record, role=role, asset_key=f"labels.{role}", status=record.get("status", ""), legacy_source=legacy_source)
         if asset_id:
             stats["volume_asset_count"] += 1
             _insert_label_layer(connection, specimen_row_id, asset_id, record, role=role)
@@ -740,6 +777,7 @@ def _insert_specimen_tree(connection, specimen, stats):
             role="model_draft",
             asset_key=f"labels.model_drafts.{draft_index}",
             status=record.get("status", "draft"),
+            legacy_source=legacy_source,
         )
         if asset_id:
             stats["volume_asset_count"] += 1
@@ -759,10 +797,10 @@ def _insert_specimen_tree(connection, specimen, stats):
         part_id = str(part.get("part_id") or "")
         part_row_by_part_id[part_id] = part_row_id
         stats["part_count"] += 1
-        image_asset_id = _insert_volume_asset(connection, specimen_row_id, _as_dict(part.get("image")), role="part_image", asset_key=f"parts.{part_id}.image", part_row_id=part_row_id)
+        image_asset_id = _insert_volume_asset(connection, specimen_row_id, _as_dict(part.get("image")), role="part_image", asset_key=f"parts.{part_id}.image", part_row_id=part_row_id, legacy_source=legacy_source)
         if image_asset_id:
             stats["volume_asset_count"] += 1
-        mask_asset_id = _insert_volume_asset(connection, specimen_row_id, _as_dict(part.get("mask")), role="part_mask", asset_key=f"parts.{part_id}.mask", part_row_id=part_row_id)
+        mask_asset_id = _insert_volume_asset(connection, specimen_row_id, _as_dict(part.get("mask")), role="part_mask", asset_key=f"parts.{part_id}.mask", part_row_id=part_row_id, legacy_source=legacy_source)
         if mask_asset_id:
             stats["volume_asset_count"] += 1
         if image_asset_id or mask_asset_id:
@@ -779,6 +817,7 @@ def _insert_specimen_tree(connection, specimen, stats):
                 asset_key=f"parts.{part_id}.labels.{role}",
                 part_row_id=part_row_id,
                 status=record.get("status", ""),
+                legacy_source=legacy_source,
             )
             if asset_id:
                 stats["volume_asset_count"] += 1
@@ -888,7 +927,7 @@ def migrate_legacy_tif_json_to_sqlite(
         with conn:
             _insert_project_row(conn, project_data)
             for specimen in specimens:
-                _insert_specimen_tree(conn, specimen, stats)
+                _insert_specimen_tree(conn, specimen, stats, legacy_source=True)
                 progress["done"] += 1
                 _emit_progress(progress_callback, progress["done"], total, f"迁移 specimen: {specimen.get('specimen_id', '')}")
             for model in _as_list(project_data.get("models")):

@@ -22,6 +22,13 @@ except Exception:
 
 from .blink_expert_manifest import BLINK_EXPERT_BACKEND_HEATMAP, write_blink_expert_manifest
 from .blink_heatmap_dataset import BlinkHeatmapDataset
+from .blink_reproducibility import (
+    DEFAULT_BLINK_RANDOM_SEED,
+    apply_blink_training_seed,
+    build_blink_seed_record,
+    build_random_blink_initialization,
+    normalize_blink_random_seed,
+)
 from .blink_training_strategy import (
     BLINK_STRATEGY_FULL_INSIDE_RANDOM,
     BLINK_STRATEGY_TRIVIEW_RANDOM,
@@ -32,6 +39,11 @@ from .blink_training_strategy import (
 from .projection import CoordinateMapper
 from .runtime_device import resolve_torch_device
 from .taxonomy_defaults import is_safe_part_name
+from .model_profiles import (
+    DEFAULT_BLINK_OUTER_LOSS_WEIGHTS,
+    DEFAULT_HEATMAP_BLINK_COMPONENT_LOSS_WEIGHTS,
+    sanitize_loss_weights,
+)
 
 
 HEATMAP_BLINK_OUTPUT_SCHEMA = "heatmap_wh_box_v1"
@@ -114,6 +126,10 @@ class BlinkHeatmapTrainer:
         training_strategy=BLINK_STRATEGY_TRIVIEW_RANDOM,
         allowed_image_paths=None,
         training_scope=None,
+        outer_loss_weights=None,
+        random_seed=DEFAULT_BLINK_RANDOM_SEED,
+        training_records=None,
+        validation_records=None,
     ):
         self.device = resolve_torch_device(device)
         self.part_name = str(part_name or "").strip()
@@ -127,9 +143,18 @@ class BlinkHeatmapTrainer:
         self.heatmap_sigma = max(0.1, float(heatmap_sigma or 2.0))
         self.wh_loss_weight = max(0.0, float(wh_loss_weight))
         self.center_loss_weight = max(0.0, float(center_loss_weight))
+        self._outer_loss_weights = sanitize_loss_weights(
+            outer_loss_weights,
+            DEFAULT_BLINK_OUTER_LOSS_WEIGHTS,
+        )
         self.training_strategy = sanitize_blink_training_strategy(training_strategy)
         self.allowed_image_paths = [str(path) for path in (allowed_image_paths or []) if str(path or "").strip()]
         self.training_scope = dict(training_scope or {})
+        self.training_records = list(training_records or [])
+        self.validation_records = list(validation_records or [])
+        self.random_seed = normalize_blink_random_seed(random_seed)
+        self.seeds = apply_blink_training_seed(self.random_seed)
+        self.initialization = build_random_blink_initialization()
         self.history = {
             "loss": [],
             "loss_final": [],
@@ -156,6 +181,60 @@ class BlinkHeatmapTrainer:
         self.optimizer = optim.AdamW(self.model.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode="min", factor=0.5, patience=5)
 
+    @property
+    def loss_config_snapshot(self):
+        outer_weights = sanitize_loss_weights(
+            getattr(self, "_outer_loss_weights", None),
+            DEFAULT_BLINK_OUTER_LOSS_WEIGHTS,
+        )
+        component_weights = sanitize_loss_weights(
+            {
+                "center": getattr(
+                    self,
+                    "center_loss_weight",
+                    DEFAULT_HEATMAP_BLINK_COMPONENT_LOSS_WEIGHTS["center"],
+                ),
+                "wh": getattr(
+                    self,
+                    "wh_loss_weight",
+                    DEFAULT_HEATMAP_BLINK_COMPONENT_LOSS_WEIGHTS["wh"],
+                ),
+            },
+            DEFAULT_HEATMAP_BLINK_COMPONENT_LOSS_WEIGHTS,
+        )
+        return {
+            "outer": outer_weights,
+            "components": component_weights,
+        }
+
+    def get_loss_config_snapshot(self):
+        return self.loss_config_snapshot
+
+    @property
+    def reproducibility_snapshot(self):
+        random_seed = normalize_blink_random_seed(
+            getattr(self, "random_seed", DEFAULT_BLINK_RANDOM_SEED)
+        )
+        seeds = getattr(self, "seeds", None)
+        initialization = getattr(self, "initialization", None)
+        return {
+            "initialization": dict(initialization or build_random_blink_initialization()),
+            "seeds": dict(seeds or build_blink_seed_record(random_seed)),
+        }
+
+    def _combine_component_losses(self, center_loss, wh_loss):
+        weights = self.loss_config_snapshot["components"]
+        return weights["center"] * center_loss + weights["wh"] * wh_loss
+
+    def _combine_outer_losses(self, final_loss, step_loss, view_loss, consistency_loss):
+        weights = self.loss_config_snapshot["outer"]
+        return (
+            weights["final"] * final_loss
+            + weights["step"] * step_loss
+            + weights["view"] * view_loss
+            + weights["consistency"] * consistency_loss
+        )
+
     def _emit_training_log(self, message: str, log_callback: Optional[Callable[[str], None]] = None):
         print(message)
         if callable(log_callback):
@@ -179,6 +258,7 @@ class BlinkHeatmapTrainer:
         progress_callback: Optional[Callable[[int], None]] = None,
         stop_callback: Optional[Callable[[], bool]] = None,
     ):
+        self.seeds = apply_blink_training_seed(self.random_seed)
         target_size = normalize_heatmap_input_size(target_size or self.input_size)
         parent_suffix = f" within {self.parent_part}" if self.parent_part else ""
         self._emit_training_log(
@@ -194,9 +274,14 @@ class BlinkHeatmapTrainer:
             f"Heatmap Blink training strategy: {self.training_strategy} ({blink_training_strategy_label(self.training_strategy)})",
             log_callback=log_callback,
         )
+        self._emit_training_log(
+            f"Heatmap Blink initialization: random, seed={self.random_seed}",
+            log_callback=log_callback,
+        )
 
         dataset = self._make_dataset(target_size)
-        if len(dataset) == 0:
+        validation_dataset = self._make_dataset(target_size, validation=True)
+        if len(dataset) == 0 or len(validation_dataset) == 0:
             self._emit_training_log(
                 "Error: Not enough parent ROI trajectory data for heatmap Blink training.",
                 log_callback=log_callback,
@@ -274,7 +359,7 @@ class BlinkHeatmapTrainer:
             self.model.load_state_dict(saved_state)
 
         manifest_path, manifest = self.write_manifest(save_path, target_size, dataset)
-        self.last_report = self.generate_report(dataset, save_path, target_size=target_size, max_samples=24)
+        self.last_report = self.generate_report(validation_dataset, save_path, target_size=target_size, max_samples=24)
         self.last_report["manifest_path"] = manifest_path
         self.last_report["manifest"] = manifest
         self._emit_training_log(
@@ -283,7 +368,8 @@ class BlinkHeatmapTrainer:
         )
         return save_path
 
-    def _make_dataset(self, target_size, stage_view_mode=None):
+    def _make_dataset(self, target_size, stage_view_mode=None, validation=False):
+        records = self.validation_records if validation else self.training_records
         return BlinkHeatmapDataset(
             self.project_path,
             self.part_name,
@@ -293,6 +379,7 @@ class BlinkHeatmapTrainer:
             training_strategy=self.training_strategy,
             stage_view_mode=stage_view_mode,
             allowed_image_paths=self.allowed_image_paths,
+            training_records=records,
         )
 
     def _training_stages(self, epochs):
@@ -343,14 +430,14 @@ class BlinkHeatmapTrainer:
                 inside_heatmap = torch.sigmoid(inside_logits)
                 inside_center_loss = F.mse_loss(inside_heatmap, heatmap_target)
                 inside_wh_loss = F.smooth_l1_loss(inside_wh, wh_target)
-                inside_loss = self.center_loss_weight * inside_center_loss + self.wh_loss_weight * inside_wh_loss
+                inside_loss = self._combine_component_losses(inside_center_loss, inside_wh_loss)
                 if self.training_strategy == BLINK_STRATEGY_TRIVIEW_RANDOM and "outside_image" in batch_data:
                     outside_imgs = batch_data["outside_image"].to(self.device)
                     outside_logits, outside_wh = self.model(outside_imgs)
                     outside_heatmap = torch.sigmoid(outside_logits)
                     outside_center_loss = F.mse_loss(outside_heatmap, heatmap_target)
                     outside_wh_loss = F.smooth_l1_loss(outside_wh, wh_target)
-                    outside_loss = self.center_loss_weight * outside_center_loss + self.wh_loss_weight * outside_wh_loss
+                    outside_loss = self._combine_component_losses(outside_center_loss, outside_wh_loss)
                     view_loss = 0.5 * (inside_loss + outside_loss)
                     consistency_loss = F.smooth_l1_loss(inside_heatmap, outside_heatmap) + F.smooth_l1_loss(inside_wh, outside_wh)
                 elif self.training_strategy == BLINK_STRATEGY_FULL_INSIDE_RANDOM:
@@ -358,9 +445,9 @@ class BlinkHeatmapTrainer:
                 elif self.training_strategy == BLINK_STRATEGY_TWO_STAGE_FULL_THEN_INSIDE and stage_name == "stage2_inside":
                     view_loss = inside_loss
 
-            final_loss = self.center_loss_weight * final_center_loss + self.wh_loss_weight * final_wh_loss
-            step_loss = self.center_loss_weight * step_center_loss + self.wh_loss_weight * step_wh_loss
-            loss = final_loss + 0.35 * step_loss + 0.20 * view_loss + 0.10 * consistency_loss
+            final_loss = self._combine_component_losses(final_center_loss, final_wh_loss)
+            step_loss = self._combine_component_losses(step_center_loss, step_wh_loss)
+            loss = self._combine_outer_losses(final_loss, step_loss, view_loss, consistency_loss)
             loss.backward()
             self.optimizer.step()
 
@@ -396,6 +483,8 @@ class BlinkHeatmapTrainer:
             "batch_size": int(batch_size),
             "best_loss": float(best_loss),
             "training_strategy": self.training_strategy,
+            "loss_config": self.loss_config_snapshot,
+            **self.reproducibility_snapshot,
             "created_at": datetime.now().isoformat(timespec="seconds"),
         }
 
@@ -407,9 +496,12 @@ class BlinkHeatmapTrainer:
             "wh_loss_weight": float(self.wh_loss_weight),
             "center_loss_weight": float(self.center_loss_weight),
             "training_strategy": self.training_strategy,
+            "loss_config": self.loss_config_snapshot,
+            "random_seed": int(normalize_blink_random_seed(getattr(self, "random_seed", DEFAULT_BLINK_RANDOM_SEED))),
         }
         if self.training_scope:
             train_params["training_scope"] = dict(self.training_scope)
+        reproducibility = self.reproducibility_snapshot
         manifest_path, manifest = write_blink_expert_manifest(
             save_path,
             expert_backend=BLINK_EXPERT_BACKEND_HEATMAP,
@@ -420,6 +512,8 @@ class BlinkHeatmapTrainer:
             trajectory_count=int(getattr(dataset, "sequence_count", len(dataset) if dataset is not None else 0) or 0),
             output_schema=HEATMAP_BLINK_OUTPUT_SCHEMA,
             train_params=train_params,
+            initialization=reproducibility["initialization"],
+            seeds=reproducibility["seeds"],
         )
         return manifest_path, manifest
 
@@ -593,6 +687,8 @@ class BlinkHeatmapTrainer:
             "weight_decay": float(self.weight_decay),
             "training_strategy": self.training_strategy,
             "training_scope": dict(self.training_scope),
+            "loss_config": self.loss_config_snapshot,
+            **self.reproducibility_snapshot,
             "trajectory_sequence_count": int(getattr(dataset, "sequence_count", 0) or 0),
             "expanded_training_sample_count": int(len(dataset) if dataset is not None else 0),
             "validation_count": len(validation_rows),

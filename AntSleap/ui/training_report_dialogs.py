@@ -10,7 +10,9 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
+    QFormLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -537,18 +539,19 @@ class TrainingReportDialog(QDialog):
             open_path(d)
 
 class TrainingResultBrowserDialog(QDialog):
-    def __init__(self, reports, parent=None, lang="en", preview_callback=None, refresh_callback=None):
+    def __init__(self, reports, parent=None, lang="en", preview_callback=None, refresh_callback=None, note_callback=None):
         super().__init__(parent)
         self.lang = lang
         self.reports = list(reports or [])
         self.preview_callback = preview_callback
         self.refresh_callback = refresh_callback
+        self.note_callback = note_callback
         self.setWindowTitle(tr("Training Result Browser", self.lang))
         self.resize(1120, 620)
 
         layout = QVBoxLayout(self)
 
-        self.table = QTableWidget(0, 7)
+        self.table = QTableWidget(0, 9)
         self.table.setObjectName("trainingResultBrowserTable")
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -564,6 +567,8 @@ class TrainingResultBrowserDialog(QDialog):
             tr("Strategy", self.lang),
             tr("Samples", self.lang),
             tr("Time", self.lang),
+            tr("Status", self.lang),
+            tr("Note", self.lang),
             tr("Report Folder", self.lang),
         ])
         self.table.itemSelectionChanged.connect(self._refresh_actions)
@@ -579,6 +584,11 @@ class TrainingResultBrowserDialog(QDialog):
         self.btn_open_folder.clicked.connect(self.open_selected_folder)
         apply_semantic_button_style(self.btn_open_folder, BUTTON_ROLE_NEUTRAL)
         button_row.addWidget(self.btn_open_folder)
+
+        self.btn_note = QPushButton(tr("Edit Run Note", self.lang))
+        self.btn_note.clicked.connect(self.edit_selected_note)
+        apply_semantic_button_style(self.btn_note, BUTTON_ROLE_NEUTRAL)
+        button_row.addWidget(self.btn_note)
 
         self.btn_refresh = QPushButton(tr("Refresh", self.lang))
         self.btn_refresh.clicked.connect(self.refresh_reports)
@@ -607,6 +617,8 @@ class TrainingResultBrowserDialog(QDialog):
                 report.get("strategy_label", ""),
                 report.get("samples_label", ""),
                 report.get("time_label", ""),
+                report.get("status_label", ""),
+                report.get("note_label", ""),
                 report.get("dir", ""),
             ]
             for col_idx, value in enumerate(values):
@@ -633,6 +645,9 @@ class TrainingResultBrowserDialog(QDialog):
         has_selection = self.selected_report() is not None
         self.btn_preview.setEnabled(has_selection)
         self.btn_open_folder.setEnabled(has_selection)
+        self.btn_note.setEnabled(
+            bool(has_selection and self.selected_report().get("run_id"))
+        )
 
     def preview_selected(self):
         report = self.selected_report()
@@ -645,6 +660,51 @@ class TrainingResultBrowserDialog(QDialog):
         if folder:
             open_path(folder)
 
+    def edit_selected_note(self):
+        report = self.selected_report()
+        if report and report.get("run_id") and callable(self.note_callback):
+            self.note_callback(report)
+            self.refresh_reports()
+
     def refresh_reports(self):
         if callable(self.refresh_callback):
             self.populate(self.refresh_callback() or [])
+
+
+class TrainingRunNoteDialog(QDialog):
+    def __init__(self, run_id, note=None, parent=None, lang="en"):
+        super().__init__(parent)
+        self.run_id = str(run_id or "")
+        self.lang = lang
+        current = dict(note or {})
+        self.setWindowTitle(tr("Training Run Note", self.lang))
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(self.run_id))
+        form = QFormLayout()
+        self.purpose = QLineEdit(str(current.get("purpose") or ""))
+        self.importance = QLineEdit(str(current.get("importance") or ""))
+        self.conclusion = QLineEdit(str(current.get("conclusion") or ""))
+        self.follow_up = QLineEdit(str(current.get("follow_up") or ""))
+        self.note = QTextEdit(str(current.get("note") or ""))
+        form.addRow(tr("Purpose", self.lang), self.purpose)
+        form.addRow(tr("Importance", self.lang), self.importance)
+        form.addRow(tr("Conclusion", self.lang), self.conclusion)
+        form.addRow(tr("Follow-up", self.lang), self.follow_up)
+        form.addRow(tr("Note", self.lang), self.note)
+        layout.addLayout(form)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def values(self):
+        return {
+            "purpose": self.purpose.text(),
+            "importance": self.importance.text(),
+            "conclusion": self.conclusion.text(),
+            "follow_up": self.follow_up.text(),
+            "note": self.note.toPlainText(),
+        }

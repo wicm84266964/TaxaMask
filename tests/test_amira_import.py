@@ -69,6 +69,12 @@ Parameters {{
         handle.write(data_bytes)
 
 
+def replace_amira_coordinate_unit(path, unit):
+    payload = path.read_bytes()
+    replacement = b"" if unit is None else f'Coordinates "{unit}"'.encode("latin1")
+    path.write_bytes(payload.replace(b'Coordinates "um"', replacement))
+
+
 def write_material_statistics(path):
     text = """# AmiraMesh 3D ASCII 3.0
 
@@ -193,6 +199,8 @@ Materials {
             self.assertTrue(readiness["train_ready"])
             self.assertEqual(specimen["working_volume"]["shape_zyx"], [2, 3, 4])
             self.assertEqual(specimen["labels"]["manual_truth"]["shape_zyx"], [2, 3, 4])
+            self.assertTrue(specimen["working_volume"]["scale_verified"])
+            self.assertTrue(specimen["labels"]["manual_truth"]["scale_verified"])
             self.assertEqual(result["report"]["alignment"]["labels_aligned_to"], "resampled")
             self.assertIn("raw_tif_shape_differs_from_labels_shape", result["report"]["warnings"])
             np.testing.assert_array_equal(load_volume_sidecar(manager.to_absolute(specimen["working_volume"]["path"])), resampled)
@@ -221,7 +229,27 @@ Materials {
 
             self.assertEqual(header["lattice_xyz"], [4, 3, 2])
             self.assertEqual(header["shape_zyx"], [2, 3, 4])
+            self.assertEqual(header["spacing_unit"], "micrometer")
             np.testing.assert_array_equal(loaded, array)
+
+    def test_amira_spacing_unit_is_explicit_or_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            array = np.zeros((2, 3, 4), dtype=np.uint8)
+            unknown_path = root / "unknown.resampled"
+            millimeter_path = root / "millimeter.resampled"
+            write_amira_file(unknown_path, array)
+            write_amira_file(millimeter_path, array)
+            replace_amira_coordinate_unit(unknown_path, None)
+            replace_amira_coordinate_unit(millimeter_path, "mm")
+
+            _unknown_volume, unknown_header = read_amira_volume(unknown_path)
+            _millimeter_volume, millimeter_header = read_amira_volume(millimeter_path)
+
+            self.assertEqual(unknown_header["spacing_unit"], "unknown")
+            self.assertEqual(millimeter_header["spacing_unit"], "millimeter")
+            self.assertEqual(unknown_header["spacing_source"], "amira_bounding_box")
+            self.assertEqual(millimeter_header["spacing_source"], "amira_bounding_box")
 
     def test_failed_amira_decode_does_not_leave_half_registered_specimen(self):
         with tempfile.TemporaryDirectory() as tmp:

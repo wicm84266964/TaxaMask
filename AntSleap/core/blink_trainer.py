@@ -19,7 +19,15 @@ try:
 except ImportError:
     from models.expert_networks import MicroExpertLocator
 from .blink_dataset import BlinkTrajectoryDataset
+from .blink_reproducibility import (
+    DEFAULT_BLINK_RANDOM_SEED,
+    apply_blink_training_seed,
+    build_blink_seed_record,
+    build_random_blink_initialization,
+    normalize_blink_random_seed,
+)
 from .taxonomy_defaults import is_safe_part_name
+from .model_profiles import DEFAULT_BLINK_OUTER_LOSS_WEIGHTS, sanitize_loss_weights
 from torchvision.ops import generalized_box_iou_loss, box_convert
 try:
     from AntSleap.core.blink_training_strategy import (
@@ -81,6 +89,10 @@ class BlinkExpertTrainer:
         training_strategy=BLINK_STRATEGY_TRIVIEW_RANDOM,
         allowed_image_paths=None,
         training_scope=None,
+        outer_loss_weights=None,
+        random_seed=DEFAULT_BLINK_RANDOM_SEED,
+        training_records=None,
+        validation_records=None,
     ):
         self.device = resolve_torch_device(device)
         self.part_name = str(part_name).strip()
@@ -94,6 +106,15 @@ class BlinkExpertTrainer:
         self.training_strategy = sanitize_blink_training_strategy(training_strategy)
         self.allowed_image_paths = [str(path) for path in (allowed_image_paths or []) if str(path or "").strip()]
         self.training_scope = dict(training_scope or {})
+        self.training_records = list(training_records or [])
+        self.validation_records = list(validation_records or [])
+        self.random_seed = normalize_blink_random_seed(random_seed)
+        self.seeds = apply_blink_training_seed(self.random_seed)
+        self.initialization = build_random_blink_initialization()
+        self._outer_loss_weights = sanitize_loss_weights(
+            outer_loss_weights,
+            DEFAULT_BLINK_OUTER_LOSS_WEIGHTS,
+        )
         self.history = {
             "loss": [],
             "loss_final": [],
@@ -118,7 +139,7 @@ class BlinkExpertTrainer:
         os.makedirs(self.save_dir, exist_ok=True)
         
         # 实例化我们刚才写的轻量级小网络
-        self.model = MicroExpertLocator(pretrained=True, image_size=self.input_size[0]).to(self.device)
+        self.model = MicroExpertLocator(pretrained=False, image_size=self.input_size[0]).to(self.device)
         self.optimizer = optim.AdamW(self.model.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
         
         # 动态学习率调度器
@@ -137,6 +158,38 @@ class BlinkExpertTrainer:
         if side not in allowed:
             side = min(allowed, key=lambda candidate: abs(candidate - side))
         return (side, side)
+
+    @property
+    def loss_config_snapshot(self):
+        weights = sanitize_loss_weights(
+            getattr(self, "_outer_loss_weights", None),
+            DEFAULT_BLINK_OUTER_LOSS_WEIGHTS,
+        )
+        return {"outer": weights}
+
+    def get_loss_config_snapshot(self):
+        return self.loss_config_snapshot
+
+    @property
+    def reproducibility_snapshot(self):
+        random_seed = normalize_blink_random_seed(
+            getattr(self, "random_seed", DEFAULT_BLINK_RANDOM_SEED)
+        )
+        seeds = getattr(self, "seeds", None)
+        initialization = getattr(self, "initialization", None)
+        return {
+            "initialization": dict(initialization or build_random_blink_initialization()),
+            "seeds": dict(seeds or build_blink_seed_record(random_seed)),
+        }
+
+    def _combine_outer_losses(self, loss_final, loss_step, loss_view, loss_consistency):
+        weights = self.loss_config_snapshot["outer"]
+        return (
+            weights["final"] * loss_final
+            + weights["step"] * loss_step
+            + weights["view"] * loss_view
+            + weights["consistency"] * loss_consistency
+        )
 
     def _sanitize_xyxy_rel(self, boxes_rel):
         """将归一化框约束到合法区间，并保证 x2>x1, y2>y1。"""
@@ -187,6 +240,7 @@ class BlinkExpertTrainer:
         progress_callback: Optional[Callable[[int], None]] = None,
         stop_callback: Optional[Callable[[], bool]] = None,
     ):
+        self.seeds = apply_blink_training_seed(self.random_seed)
         target_size = self._normalize_input_size(target_size or self.input_size)
         parent_suffix = f" within {self.parent_part}" if self.parent_part else ""
         self._emit_training_log(
@@ -202,10 +256,15 @@ class BlinkExpertTrainer:
             f"Blink training strategy: {self.training_strategy} ({blink_training_strategy_label(self.training_strategy)})",
             log_callback=log_callback,
         )
+        self._emit_training_log(
+            f"Blink initialization: random, seed={self.random_seed}, torchvision_pretrained=False",
+            log_callback=log_callback,
+        )
 
         dataset = self._make_dataset(target_size)
+        validation_dataset = self._make_dataset(target_size, validation=True)
 
-        if len(dataset) == 0:
+        if len(dataset) == 0 or len(validation_dataset) == 0:
             self._emit_training_log(
                 "Error: Not enough trajectory data. Please go to Blink Lab and run 'Auto-Shrink' on a few images first!",
                 log_callback=log_callback,
@@ -290,7 +349,7 @@ class BlinkExpertTrainer:
             saved_state = saved_payload.get("state_dict", saved_payload) if isinstance(saved_payload, dict) else saved_payload
             self.model.load_state_dict(saved_state)
         manifest_path, manifest = self.write_manifest(save_path, target_size, dataset)
-        self.last_report = self.generate_report(dataset, save_path, target_size=target_size, max_samples=24)
+        self.last_report = self.generate_report(validation_dataset, save_path, target_size=target_size, max_samples=24)
         self.last_report["manifest_path"] = manifest_path
         self.last_report["manifest"] = manifest
         self._emit_training_log(
@@ -299,7 +358,8 @@ class BlinkExpertTrainer:
         )
         return save_path
 
-    def _make_dataset(self, target_size, stage_view_mode=None):
+    def _make_dataset(self, target_size, stage_view_mode=None, validation=False):
+        records = self.validation_records if validation else self.training_records
         return BlinkTrajectoryDataset(
             self.project_path,
             self.part_name,
@@ -308,6 +368,7 @@ class BlinkExpertTrainer:
             training_strategy=self.training_strategy,
             stage_view_mode=stage_view_mode,
             allowed_image_paths=self.allowed_image_paths,
+            training_records=records,
         )
 
     def _training_stages(self, epochs):
@@ -386,11 +447,11 @@ class BlinkExpertTrainer:
                 elif self.training_strategy == BLINK_STRATEGY_TWO_STAGE_FULL_THEN_INSIDE and stage_name == "stage2_inside":
                     loss_view = loss_inside
 
-            loss = (
-                loss_final
-                + 0.35 * loss_step
-                + 0.20 * loss_view
-                + 0.10 * loss_consistency
+            loss = self._combine_outer_losses(
+                loss_final,
+                loss_step,
+                loss_view,
+                loss_consistency,
             )
 
             loss.backward()
@@ -427,6 +488,8 @@ class BlinkExpertTrainer:
             "batch_size": int(batch_size),
             "best_loss": float(best_loss),
             "training_strategy": training_strategy,
+            "loss_config": self.loss_config_snapshot,
+            **self.reproducibility_snapshot,
             "created_at": datetime.now().isoformat(timespec="seconds"),
         }
 
@@ -438,10 +501,13 @@ class BlinkExpertTrainer:
             "learning_rate": float(self.learning_rate),
             "weight_decay": float(self.weight_decay),
             "training_strategy": training_strategy,
+            "loss_config": self.loss_config_snapshot,
+            "random_seed": int(normalize_blink_random_seed(getattr(self, "random_seed", DEFAULT_BLINK_RANDOM_SEED))),
         }
         training_scope = getattr(self, "training_scope", {})
         if training_scope:
             train_params["training_scope"] = dict(training_scope)
+        reproducibility = self.reproducibility_snapshot
         manifest_path, manifest = write_blink_expert_manifest(
             save_path,
             expert_backend=BLINK_EXPERT_BACKEND_VIT_B,
@@ -452,6 +518,8 @@ class BlinkExpertTrainer:
             trajectory_count=len(dataset) if dataset is not None else 0,
             output_schema="vit_b_box_regression_v1",
             train_params=train_params,
+            initialization=reproducibility["initialization"],
+            seeds=reproducibility["seeds"],
         )
         return manifest_path, manifest
 
@@ -643,6 +711,8 @@ class BlinkExpertTrainer:
             "weight_decay": float(self.weight_decay),
             "training_strategy": self.training_strategy,
             "training_scope": dict(self.training_scope),
+            "loss_config": self.loss_config_snapshot,
+            **self.reproducibility_snapshot,
             "trajectory_sequence_count": int(getattr(dataset, "sequence_count", len(getattr(dataset, "samples", []) or [])) or 0),
             "expanded_training_sample_count": int(len(dataset) if dataset is not None else 0),
             "validation_count": len(validation_rows),

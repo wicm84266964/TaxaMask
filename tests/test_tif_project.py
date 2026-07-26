@@ -31,6 +31,23 @@ from AntSleap.core.tif_volume_io import (
 
 
 class TifProjectTests(unittest.TestCase):
+    def test_new_volume_registration_does_not_assume_micrometers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = TifProjectManager()
+            manager.create_project("unknown_scale", Path(tmp) / "unknown_scale")
+            manager.create_specimen_scaffold("specimen")
+
+            record = manager.register_working_volume(
+                "specimen",
+                "specimens/specimen/working/not_written.ome.zarr",
+                [2, 3, 4],
+                "uint8",
+                save=False,
+            )
+
+            self.assertEqual(record["spacing_unit"], "unknown")
+            self.assertFalse(record["scale_verified"])
+
     def test_part_delete_save_failure_restores_record_roi_and_storage(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -374,6 +391,32 @@ class TifProjectTests(unittest.TestCase):
             self.assertEqual(edit_meta["shape_zyx"], image_meta["shape_zyx"])
             self.assertEqual(edit_meta["role"], "working_edit")
 
+    def test_empty_label_sidecar_downgrades_conflicting_source_record_scale(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            image_dir = Path(tmp) / "verified_image.ome.zarr"
+            edit_dir = Path(tmp) / "working_edit.ome.zarr"
+            write_volume_sidecar(
+                image_dir,
+                np.zeros((4, 5, 6), dtype=np.uint8),
+                role="working_image",
+                spacing_zyx=[2.0, 1.0, 0.5],
+                spacing_unit="micrometer",
+                scale_verified=True,
+            )
+
+            edit_meta = create_empty_label_sidecar_like(
+                image_dir,
+                edit_dir,
+                source_record={
+                    "spacing_zyx": [3.0, 1.0, 0.5],
+                    "spacing_unit": "micrometer",
+                    "scale_verified": True,
+                },
+            )
+
+            self.assertEqual(edit_meta["spacing_unit"], "unknown")
+            self.assertFalse(edit_meta["scale_verified"])
+
     def test_material_map_preserves_background_and_trainable_ids(self):
         with tempfile.TemporaryDirectory() as tmp:
             manager = TifProjectManager()
@@ -480,7 +523,15 @@ class TifProjectTests(unittest.TestCase):
             image_meta = write_volume_sidecar(project_root / image_rel, np.zeros((2, 3, 4), dtype=np.uint8), role="working_image")
             manual_meta = write_volume_sidecar(project_root / manual_rel, np.ones((2, 3, 4), dtype=np.uint16), role="manual_truth")
             manager.register_working_volume("01-0101-15", image_rel, image_meta["shape_zyx"], image_meta["dtype"], save=False)
-            manager.register_label_volume("01-0101-15", "manual_truth", manual_rel, manual_meta["shape_zyx"], manual_meta["dtype"], save=False)
+            manager.register_label_volume(
+                "01-0101-15",
+                "manual_truth",
+                manual_rel,
+                manual_meta["shape_zyx"],
+                manual_meta["dtype"],
+                status="reviewed",
+                save=False,
+            )
 
             manager.set_review_status("01-0101-15", "train_ready")
             self.assertTrue(manager.evaluate_train_ready("01-0101-15")["train_ready"])
@@ -711,13 +762,21 @@ class TifProjectTests(unittest.TestCase):
             manager.create_specimen_scaffold("01-0101-crop")
             image = np.arange(4 * 5 * 6, dtype=np.uint8).reshape((4, 5, 6))
             image_rel = "specimens/01-0101-crop/working/image.ome.zarr"
-            image_meta = write_volume_sidecar(project_root / image_rel, image, role="working_image")
+            image_meta = write_volume_sidecar(
+                project_root / image_rel,
+                image,
+                role="working_image",
+                spacing_zyx=[2.0, 1.0, 1.0],
+                spacing_unit="micrometer",
+                scale_verified=True,
+            )
             manager.register_working_volume(
                 "01-0101-crop",
                 image_rel,
                 image_meta["shape_zyx"],
                 image_meta["dtype"],
-                spacing_zyx=[2.0, 1.0, 1.0],
+                spacing_zyx=image_meta["spacing_zyx"],
+                spacing_unit=image_meta["spacing_unit"],
                 save=False,
             )
             manager.save_project()
@@ -732,6 +791,47 @@ class TifProjectTests(unittest.TestCase):
             self.assertTrue((project_root / part["contours_path"]).exists())
             self.assertTrue((project_root / part["extraction_path"]).exists())
             self.assertEqual(part["parent_bbox_zyx"], [[1, 3], [1, 4], [2, 6]])
+            self.assertEqual(part["image"]["spacing_unit"], "micrometer")
+            self.assertTrue(part["image"]["scale_verified"])
+            self.assertTrue(part["mask"]["scale_verified"])
+
+    def test_crop_volume_to_part_requires_sidecar_and_project_scale_trust(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "untrusted_crop"
+            manager = TifProjectManager()
+            manager.create_project("untrusted_crop", project_root)
+            manager.create_specimen_scaffold("01-0101-untrusted")
+            image_rel = "specimens/01-0101-untrusted/working/image.ome.zarr"
+            image_meta = write_volume_sidecar(
+                project_root / image_rel,
+                np.zeros((3, 4, 5), dtype=np.uint8),
+                role="working_image",
+                spacing_zyx=[2.0, 1.0, 0.5],
+                spacing_unit="micrometer",
+                scale_verified=True,
+            )
+            manager.register_working_volume(
+                "01-0101-untrusted",
+                image_rel,
+                image_meta["shape_zyx"],
+                image_meta["dtype"],
+                spacing_zyx=image_meta["spacing_zyx"],
+                spacing_unit=image_meta["spacing_unit"],
+                scale_verified=False,
+                save=True,
+            )
+
+            part = crop_volume_to_part(
+                manager,
+                "01-0101-untrusted",
+                "head",
+                [[0, 2], [0, 3], [0, 4]],
+            )
+
+            self.assertEqual(part["image"]["spacing_unit"], "unknown")
+            self.assertFalse(part["image"]["scale_verified"])
+            self.assertEqual(part["mask"]["spacing_unit"], "unknown")
+            self.assertFalse(part["mask"]["scale_verified"])
 
     def test_rectangular_keyframes_generate_preview_mask_between_slices(self):
         contours = {"axis": "z", "keyframes": []}

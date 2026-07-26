@@ -331,6 +331,22 @@ class LegacyTifJsonToSQLiteMigrationTests(unittest.TestCase):
                 ]
                 self.assertEqual(volume_paths, ["specimens/01-0101-local/working/image.ome.zarr"])
 
+                part_image_scale = conn.execute(
+                    """
+                    SELECT spacing_unit, metadata_json
+                    FROM volume_assets
+                    WHERE specimen_id = ? AND role = ?
+                    """,
+                    (specimen_row[0], "part_image"),
+                ).fetchone()
+                self.assertEqual(part_image_scale[0], "unknown")
+                part_image_metadata = json.loads(part_image_scale[1])
+                self.assertFalse(part_image_metadata["scale_verified"])
+                self.assertEqual(
+                    part_image_metadata["legacy_unverified_spacing_unit"],
+                    "micrometer",
+                )
+
                 material_row = conn.execute(
                     "SELECT path, materials_json FROM material_maps WHERE specimen_id = ?",
                     (specimen_row[0],),
@@ -390,6 +406,77 @@ class LegacyTifJsonToSQLiteMigrationTests(unittest.TestCase):
                 self.assertEqual(run_artifact, ("prediction_label_volume", "model_draft", "01-0101-local", "predict_001"))
             finally:
                 conn.close()
+
+    def test_explicitly_verified_legacy_scale_is_preserved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_json = _build_legacy_tif_project(root / "legacy_tif")
+            project_data = json.loads(source_json.read_text(encoding="utf-8"))
+            working = project_data["specimens"][0]["working_volume"]
+            working["spacing_zyx"] = [2.0, 1.0, 0.5]
+            working["spacing_unit"] = "micrometer"
+            working["scale_verified"] = True
+            source_json.write_text(
+                json.dumps(project_data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            db_path = root / "verified.sqlite"
+
+            migrate_legacy_tif_json_to_sqlite(
+                source_json,
+                database_path=db_path,
+                manifest_path=root / "verified_manifest.json",
+                report_path=root / "verified_report.json",
+            )
+
+            conn = sqlite3.connect(db_path)
+            try:
+                spacing_unit, metadata_json = conn.execute(
+                    """
+                    SELECT spacing_unit, metadata_json
+                    FROM volume_assets
+                    WHERE asset_key = 'working_volume'
+                    """
+                ).fetchone()
+            finally:
+                conn.close()
+            metadata = json.loads(metadata_json)
+            self.assertEqual(spacing_unit, "micrometer")
+            self.assertTrue(metadata["scale_verified"])
+            self.assertNotIn("legacy_unverified_spacing_unit", metadata)
+
+    def test_unknown_verified_legacy_unit_is_still_downgraded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_json = _build_legacy_tif_project(root / "legacy_tif")
+            project_data = json.loads(source_json.read_text(encoding="utf-8"))
+            working = project_data["specimens"][0]["working_volume"]
+            working["spacing_unit"] = "furlong"
+            working["scale_verified"] = True
+            source_json.write_text(
+                json.dumps(project_data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            db_path = root / "unsupported_unit.sqlite"
+
+            migrate_legacy_tif_json_to_sqlite(
+                source_json,
+                database_path=db_path,
+                manifest_path=root / "unsupported_unit_manifest.json",
+                report_path=root / "unsupported_unit_report.json",
+            )
+
+            conn = sqlite3.connect(db_path)
+            try:
+                spacing_unit, metadata_json = conn.execute(
+                    "SELECT spacing_unit, metadata_json FROM volume_assets WHERE asset_key = 'working_volume'"
+                ).fetchone()
+            finally:
+                conn.close()
+            metadata = json.loads(metadata_json)
+            self.assertEqual(spacing_unit, "unknown")
+            self.assertFalse(metadata["scale_verified"])
+            self.assertEqual(metadata["legacy_unverified_spacing_unit"], "furlong")
 
     def test_existing_sqlite_artifact_blocks_migration_and_preserves_source_json(self):
         with tempfile.TemporaryDirectory() as tmp:

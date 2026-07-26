@@ -12,7 +12,7 @@ from AntSleap.core.tif_project import TifProjectManager
 from AntSleap.core.tif_volume_io import load_volume_sidecar, read_volume_metadata, write_volume_sidecar
 
 
-def make_project_with_working_and_truth(root):
+def make_project_with_working_and_truth(root, *, scale_verified=False):
     project_root = root / "prediction_project"
     manager = TifProjectManager()
     manager.create_project("prediction_project", project_root)
@@ -36,6 +36,7 @@ def make_project_with_working_and_truth(root):
         spacing_zyx=[2.0, 0.5, 0.5],
         spacing_unit="micrometer",
         orientation="zyx",
+        scale_verified=scale_verified,
     )
     manual_meta = write_volume_sidecar(project_root / manual_rel, np.ones((3, 4, 5), dtype=np.uint16), role="manual_truth")
     edit_meta = write_volume_sidecar(project_root / edit_rel, np.zeros((3, 4, 5), dtype=np.uint16), role="working_edit")
@@ -47,6 +48,7 @@ def make_project_with_working_and_truth(root):
         spacing_zyx=image_meta["spacing_zyx"],
         spacing_unit=image_meta["spacing_unit"],
         orientation=image_meta["orientation"],
+        scale_verified=scale_verified,
         save=False,
     )
     manager.register_label_volume("01-0101-20", "manual_truth", manual_rel, manual_meta["shape_zyx"], manual_meta["dtype"], save=False)
@@ -103,6 +105,8 @@ class TifPredictionImportTests(unittest.TestCase):
             self.assertEqual(edit_metadata["source_format"], "external_prediction_tif")
             self.assertEqual(edit_metadata["role"], "working_edit")
             self.assertEqual(edit_metadata["spacing_zyx"], [2.0, 0.5, 0.5])
+            self.assertEqual(edit_metadata["spacing_unit"], "unknown")
+            self.assertFalse(edit_metadata["scale_verified"])
             self.assertEqual(backup_metadata["role"], "raw_ai_prediction_backup")
             self.assertEqual(draft_metadata["role"], "model_draft")
             self.assertTrue(Path(result["report_path"]).exists())
@@ -110,6 +114,36 @@ class TifPredictionImportTests(unittest.TestCase):
             self.assertTrue(result["report"]["safety"]["working_edit_overwritten"])
             self.assertFalse(result["report"]["safety"]["manual_truth_overwritten"])
             self.assertTrue(result["report"]["safety"]["train_ready_changed"])
+
+    def test_verified_working_scale_is_propagated_to_prediction_layers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = make_project_with_working_and_truth(root, scale_verified=True)
+            label_tif = root / "verified_prediction.tif"
+            tifffile.imwrite(
+                label_tif,
+                np.full((3, 4, 5), 2, dtype=np.uint16),
+                photometric="minisblack",
+            )
+
+            import_external_prediction_tif(
+                manager,
+                "01-0101-20",
+                label_tif,
+                prediction_id="verified_scale",
+            )
+
+            specimen = manager.get_specimen("01-0101-20")
+            for record in (
+                specimen["labels"]["working_edit"],
+                specimen["labels"]["raw_ai_prediction_backup"],
+                specimen["labels"]["model_drafts"][0],
+            ):
+                metadata = read_volume_metadata(manager.to_absolute(record["path"]))
+                self.assertEqual(record["spacing_unit"], "micrometer")
+                self.assertTrue(record["scale_verified"])
+                self.assertEqual(metadata["spacing_unit"], "micrometer")
+                self.assertTrue(metadata["scale_verified"])
 
     def test_shape_mismatch_is_rejected_without_draft_record(self):
         with tempfile.TemporaryDirectory() as tmp:

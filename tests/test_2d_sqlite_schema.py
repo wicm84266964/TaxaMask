@@ -1,7 +1,9 @@
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from AntSleap.core.project_sqlite_schema import (
     PROJECT_2D_SCHEMA_NAME,
@@ -9,12 +11,167 @@ from AntSleap.core.project_sqlite_schema import (
     create_2d_project_database,
     initialize_2d_project_schema,
     json_text,
+    migrate_2d_project_database,
     validate_2d_project_schema,
 )
-from AntSleap.core.sqlite_storage import get_schema_version, run_integrity_check
+from AntSleap.core.sqlite_storage import (
+    get_schema_version,
+    read_database_schema_version,
+    run_integrity_check,
+)
 
 
 class Project2DSQLiteSchemaTests(unittest.TestCase):
+    LEGACY_TABLES = {
+        "schema_migrations", "projects", "images", "image_groups",
+        "image_group_members", "labels", "label_parts", "label_polygons",
+        "label_boxes", "auto_boxes", "auto_box_reviews", "image_scales",
+        "image_provenance", "taxonomy_parts", "model_profiles", "vlm_runs",
+        "vlm_image_results", "blink_trajectories", "label_events", "sqlite_sequence",
+    }
+
+    def _make_v1_database(self, db_path):
+        connection = create_2d_project_database(db_path)
+        try:
+            connection.execute(
+                "INSERT INTO images (path, filename) VALUES ('images/ant.jpg', 'ant.jpg')"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        connection = sqlite3.connect(db_path)
+        try:
+            connection.execute("PRAGMA foreign_keys = OFF")
+            for (name,) in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger'"
+            ).fetchall():
+                connection.execute(f'DROP TRIGGER "{name}"')
+            for (name,) in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall():
+                if name not in self.LEGACY_TABLES:
+                    connection.execute(f'DROP TABLE "{name}"')
+            connection.execute("DROP INDEX IF EXISTS idx_images_image_uid_unique")
+            connection.execute("ALTER TABLE images DROP COLUMN image_uid")
+            connection.execute(
+                "DELETE FROM schema_migrations WHERE schema_name = ?",
+                (PROJECT_2D_SCHEMA_NAME,),
+            )
+            connection.execute(
+                "INSERT INTO schema_migrations (schema_name, version) VALUES (?, 1)",
+                (PROJECT_2D_SCHEMA_NAME,),
+            )
+            connection.execute("UPDATE projects SET schema_version = 1 WHERE id = 1")
+            connection.commit()
+        finally:
+            connection.close()
+
+    def test_v1_database_migrates_atomically_and_keeps_research_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "legacy.taxamask.sqlite"
+            self._make_v1_database(db_path)
+
+            result = migrate_2d_project_database(db_path)
+
+            self.assertTrue(result["migrated"])
+            self.assertTrue(Path(result["backup_path"]).is_file())
+            self.assertEqual(
+                read_database_schema_version(db_path, PROJECT_2D_SCHEMA_NAME),
+                PROJECT_2D_SCHEMA_VERSION,
+            )
+            connection = sqlite3.connect(db_path)
+            try:
+                row = connection.execute(
+                    "SELECT filename, image_uid FROM images WHERE path = 'images/ant.jpg'"
+                ).fetchone()
+                self.assertEqual(row[0], "ant.jpg")
+                self.assertTrue(row[1])
+                validate_2d_project_schema(connection)
+            finally:
+                connection.close()
+
+    def test_concurrent_save_is_blocked_during_migration_and_succeeds_afterward(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "legacy.taxamask.sqlite"
+            self._make_v1_database(db_path)
+            original_initializer = initialize_2d_project_schema
+            blocked_errors = []
+
+            def initialize_while_another_connection_saves(connection):
+                competing = sqlite3.connect(db_path, timeout=0)
+                try:
+                    competing.execute(
+                        "INSERT INTO images (path, filename) VALUES (?, ?)",
+                        ("images/concurrent.jpg", "concurrent.jpg"),
+                    )
+                    competing.commit()
+                except sqlite3.OperationalError as exc:
+                    blocked_errors.append(str(exc))
+                    competing.rollback()
+                finally:
+                    competing.close()
+                return original_initializer(connection)
+
+            with patch(
+                "AntSleap.core.project_sqlite_schema.initialize_2d_project_schema",
+                side_effect=initialize_while_another_connection_saves,
+            ):
+                result = migrate_2d_project_database(db_path)
+
+            self.assertTrue(result["migrated"])
+            self.assertEqual(len(blocked_errors), 1)
+            self.assertIn("locked", blocked_errors[0].lower())
+
+            competing = sqlite3.connect(db_path)
+            try:
+                competing.execute(
+                    "INSERT INTO images (path, filename) VALUES (?, ?)",
+                    ("images/concurrent.jpg", "concurrent.jpg"),
+                )
+                competing.commit()
+                row = competing.execute(
+                    "SELECT filename FROM images WHERE path = ?",
+                    ("images/concurrent.jpg",),
+                ).fetchone()
+                self.assertEqual(row[0], "concurrent.jpg")
+                validate_2d_project_schema(competing)
+            finally:
+                competing.close()
+
+    def test_failed_v1_migration_leaves_original_database_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "legacy.taxamask.sqlite"
+            self._make_v1_database(db_path)
+
+            def fail_after_write(connection):
+                connection.execute("CREATE TABLE partial_upgrade (id INTEGER)")
+                connection.commit()
+                raise RuntimeError("injected_migration_failure")
+
+            with patch(
+                "AntSleap.core.project_sqlite_schema.initialize_2d_project_schema",
+                side_effect=fail_after_write,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "injected_migration_failure"):
+                    migrate_2d_project_database(db_path)
+
+            self.assertEqual(
+                read_database_schema_version(db_path, PROJECT_2D_SCHEMA_NAME), 1
+            )
+            connection = sqlite3.connect(db_path)
+            try:
+                self.assertIsNone(
+                    connection.execute(
+                        "SELECT 1 FROM sqlite_master WHERE name = 'partial_upgrade'"
+                    ).fetchone()
+                )
+                self.assertEqual(
+                    connection.execute("SELECT COUNT(*) FROM images").fetchone()[0], 1
+                )
+            finally:
+                connection.close()
+            self.assertTrue(list((Path(tmp) / "project.sqlite_backups").glob("*.bak")))
+
     def test_initialize_schema_is_idempotent(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "project.taxamask.sqlite"
@@ -25,6 +182,33 @@ class Project2DSQLiteSchemaTests(unittest.TestCase):
                 self.assertEqual(run_integrity_check(conn), ["ok"])
                 project = conn.execute("SELECT project_type FROM projects WHERE id = 1").fetchone()
                 self.assertEqual(project[0], "2d_image_annotation")
+            finally:
+                conn.close()
+
+    def test_project_row_schema_version_must_match_database_version(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "inconsistent.taxamask.sqlite"
+            conn = create_2d_project_database(db_path)
+            try:
+                for project_version in (1, PROJECT_2D_SCHEMA_VERSION + 1):
+                    with self.subTest(project_version=project_version):
+                        conn.execute(
+                            "UPDATE projects SET schema_version = ? WHERE id = 1",
+                            (project_version,),
+                        )
+                        conn.commit()
+                        with self.assertRaisesRegex(
+                            ValueError, "inconsistent_2d_sqlite_schema_version"
+                        ):
+                            validate_2d_project_schema(conn)
+                        with self.assertRaisesRegex(
+                            ValueError, "inconsistent_2d_sqlite_schema_version"
+                        ):
+                            initialize_2d_project_schema(conn)
+                        stored = conn.execute(
+                            "SELECT schema_version FROM projects WHERE id = 1"
+                        ).fetchone()[0]
+                        self.assertEqual(stored, project_version)
             finally:
                 conn.close()
 

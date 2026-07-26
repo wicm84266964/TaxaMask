@@ -51,6 +51,23 @@ DEFAULT_CHILD_TRAIN_PARAMS = {
     "weight_decay": 1e-4,
 }
 
+DEFAULT_LOCATOR_LOSS_WEIGHTS = {
+    "heatmap": 1.0,
+    "wh": 0.5,
+}
+
+DEFAULT_BLINK_OUTER_LOSS_WEIGHTS = {
+    "final": 1.0,
+    "step": 0.35,
+    "view": 0.20,
+    "consistency": 0.10,
+}
+
+DEFAULT_HEATMAP_BLINK_COMPONENT_LOSS_WEIGHTS = {
+    "center": 1.0,
+    "wh": 1.0,
+}
+
 DEFAULT_CHILD_AUTO_SHRINK_STEPS = 20
 
 DEFAULT_INFERENCE_PARAMS = {
@@ -64,8 +81,8 @@ DEFAULT_INFERENCE_PARAMS = {
 DEFAULT_HEATMAP_BLINK_PARAMS = {
     "input_size": 512,
     "heatmap_sigma": 2.0,
-    "wh_loss_weight": 1.0,
-    "center_loss_weight": 1.0,
+    "wh_loss_weight": DEFAULT_HEATMAP_BLINK_COMPONENT_LOSS_WEIGHTS["wh"],
+    "center_loss_weight": DEFAULT_HEATMAP_BLINK_COMPONENT_LOSS_WEIGHTS["center"],
 }
 
 VLM_PROCESSING_SCOPES = {"current_image", "all_images", "image_group"}
@@ -181,6 +198,14 @@ def _clean_train_params(raw_params, defaults):
     }
 
 
+def sanitize_loss_weights(raw_weights, defaults):
+    raw_weights = raw_weights if isinstance(raw_weights, dict) else {}
+    return {
+        key: _safe_float(raw_weights.get(key), default, minimum=0.0)
+        for key, default in defaults.items()
+    }
+
+
 def _clean_inference_params(raw_params):
     raw_params = raw_params if isinstance(raw_params, dict) else {}
     return {
@@ -241,6 +266,7 @@ def make_default_model_profile(
             "locator_weights": "",
             "segmenter_weights": "BASE_SAM",
             "train_params": _clean_train_params(parent_train_params, DEFAULT_PARENT_TRAIN_PARAMS),
+            "loss_weights": dict(DEFAULT_LOCATOR_LOSS_WEIGHTS),
             "parent_box_aspect_ratios": _clean_parent_ratios(parent_box_aspect_ratios, taxonomy),
             "external_backend": _clean_external_config(external_parent_backend, DEFAULT_EXTERNAL_PARENT_BACKEND),
         },
@@ -250,6 +276,7 @@ def make_default_model_profile(
             "auto_shrink_steps": _safe_int(child_auto_shrink_steps, DEFAULT_CHILD_AUTO_SHRINK_STEPS, minimum=1),
             "training_strategy": DEFAULT_BLINK_TRAINING_STRATEGY,
             "train_params": _clean_train_params(child_train_params, DEFAULT_CHILD_TRAIN_PARAMS),
+            "loss_weights": dict(DEFAULT_BLINK_OUTER_LOSS_WEIGHTS),
             "heatmap_params": dict(DEFAULT_HEATMAP_BLINK_PARAMS),
             "external_blink_backend": dict(DEFAULT_EXTERNAL_BLINK_BACKEND),
         },
@@ -303,6 +330,10 @@ def sanitize_model_profile(raw_profile, *, taxonomy=None, defaults=None):
             "locator_weights": _safe_text(parent_raw.get("locator_weights"), parent_defaults.get("locator_weights", "")),
             "segmenter_weights": _safe_text(parent_raw.get("segmenter_weights"), parent_defaults.get("segmenter_weights", "BASE_SAM")),
             "train_params": _clean_train_params(parent_raw.get("train_params"), parent_defaults.get("train_params", DEFAULT_PARENT_TRAIN_PARAMS)),
+            "loss_weights": sanitize_loss_weights(
+                parent_raw.get("loss_weights", parent_defaults.get("loss_weights", {})),
+                DEFAULT_LOCATOR_LOSS_WEIGHTS,
+            ),
             "parent_box_aspect_ratios": _clean_parent_ratios(
                 parent_raw.get("parent_box_aspect_ratios", parent_defaults.get("parent_box_aspect_ratios", {})),
                 taxonomy,
@@ -325,6 +356,10 @@ def sanitize_model_profile(raw_profile, *, taxonomy=None, defaults=None):
                 child_defaults.get("training_strategy", DEFAULT_BLINK_TRAINING_STRATEGY),
             ),
             "train_params": _clean_train_params(child_raw.get("train_params"), child_defaults.get("train_params", DEFAULT_CHILD_TRAIN_PARAMS)),
+            "loss_weights": sanitize_loss_weights(
+                child_raw.get("loss_weights", child_defaults.get("loss_weights", {})),
+                DEFAULT_BLINK_OUTER_LOSS_WEIGHTS,
+            ),
             "heatmap_params": _clean_heatmap_params(child_raw.get("heatmap_params", child_defaults.get("heatmap_params", {}))),
             "external_blink_backend": _clean_external_config(
                 child_raw.get("external_blink_backend", child_defaults.get("external_blink_backend", {})),

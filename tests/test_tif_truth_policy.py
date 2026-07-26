@@ -45,7 +45,11 @@ class TifTruthPolicyTests(unittest.TestCase):
         self.assertEqual(not_opened.reason, "manual_truth_source_not_opened_for_review")
 
     def test_training_uses_manual_truth_only(self):
-        self.assertTrue(can_use_role_for_training("manual_truth", record_exists=True))
+        self.assertTrue(
+            can_use_role_for_training(
+                "manual_truth", status="reviewed", record_exists=True
+            )
+        )
 
         editable = can_use_role_for_training("editable_ai_result", record_exists=True)
         self.assertFalse(editable.allowed)
@@ -54,6 +58,73 @@ class TifTruthPolicyTests(unittest.TestCase):
         missing = can_use_role_for_training("manual_truth", record_exists=False)
         self.assertFalse(missing.allowed)
         self.assertEqual(missing.reason, "manual_truth_missing")
+
+    def test_training_requires_explicit_review_status(self):
+        for status in ("", "available", "accepted", "high_confidence"):
+            with self.subTest(status=status):
+                decision = can_use_role_for_training(
+                    "manual_truth", status=status, record_exists=True
+                )
+                self.assertFalse(decision.allowed)
+                self.assertEqual(decision.reason, "manual_truth_review_required")
+
+        audited_but_not_reviewed = can_use_role_for_training(
+            "manual_truth",
+            status="available",
+            record_exists=True,
+            review_audit={"explicit_review": True},
+        )
+        self.assertFalse(audited_but_not_reviewed.allowed)
+        audited_legacy = can_use_role_for_training(
+            "manual_truth",
+            status="",
+            record_exists=True,
+            review_audit={"explicit_review": True},
+        )
+        self.assertFalse(audited_legacy.allowed)
+        attested = can_use_role_for_training(
+            "manual_truth",
+            record_exists=True,
+            training={"human_confirmed": True},
+        )
+        self.assertFalse(attested.allowed)
+        for status in ("reviewed", "verified", "train_ready"):
+            with self.subTest(reviewed_status=status):
+                self.assertTrue(
+                    can_use_role_for_training(
+                        "manual_truth",
+                        status=status,
+                        record_exists=True,
+                    )
+                )
+
+    def test_review_or_queue_status_never_substitutes_for_manual_truth_role(self):
+        for role in ("editable_ai_result", "working_edit", "model_draft", "raw_ai_prediction_backup"):
+            for status in ("accepted", "reviewed", "high_confidence", "sorted_first"):
+                with self.subTest(role=role, status=status):
+                    decision = can_use_role_for_training(role, status=status, record_exists=True)
+                    self.assertFalse(decision.allowed)
+                    self.assertEqual(decision.reason, "training_requires_manual_truth")
+
+    def test_manual_truth_policy_reports_audit_metadata_key_names(self):
+        decision = can_promote_to_manual_truth(
+            "editable_ai_result",
+            explicit_review=True,
+            review_ready=True,
+            opened_for_review=True,
+            audit_metadata={
+                "review_action": "accept_selected_ai_results",
+                "specimen_id": "specimen_001",
+                "part_id": "head",
+            },
+        )
+
+        self.assertTrue(decision.allowed)
+        self.assertTrue(decision.details["explicit_review"])
+        self.assertEqual(
+            decision.details["audit_keys"],
+            ["part_id", "review_action", "specimen_id"],
+        )
 
 
 if __name__ == "__main__":

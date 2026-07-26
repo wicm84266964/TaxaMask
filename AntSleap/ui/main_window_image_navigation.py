@@ -236,6 +236,8 @@ class MainWindowImageNavigationMixin:
         if not image_path or not hasattr(self.project, "get_image_provenance"):
             return
         provenance = self.project.get_image_provenance(image_path)
+        if str(status or "") != "retryable_error":
+            provenance.pop("panel_split_rerun_requested", None)
         provenance["panel_split_review"] = {
             "status": str(status or ""),
             "reason": str(reason or ""),
@@ -249,7 +251,8 @@ class MainWindowImageNavigationMixin:
         provenance = self.project.get_image_provenance(image_path)
         if "panel_split_review" in provenance:
             del provenance["panel_split_review"]
-            self.project.set_image_provenance(image_path, provenance, save=False)
+        provenance["panel_split_rerun_requested"] = True
+        self.project.set_image_provenance(image_path, provenance, save=False)
 
     def _builtin_image_group_definitions(self):
         return [
@@ -546,183 +549,11 @@ class MainWindowImageNavigationMixin:
         except Exception:
             pass
 
-    def _candidate_panel_split_sources(self):
-        return [
-            path
-            for path in self.project.project_data.get("images", [])
-            if path and not self._is_split_crop_image(path)
-        ]
-
-    def batch_split_panel_images(self):
-        source_images = self._candidate_panel_split_sources()
-        if not source_images:
-            QMessageBox.information(self, tr("Empty", self.current_lang), tr("No panel crops were detected.", self.current_lang))
-            return
-        reply = themed_yes_no_question(
-            self,
-            tr("Batch Split Plates", self.current_lang),
-            tr(
-                "Run automatic panel splitting on {0} original image(s)?\n\nDetected crops will be added after the original images. Please review the generated crops before training.",
-                self.current_lang,
-            ).format(len(source_images)),
-            confirm_role=BUTTON_ROLE_COMMIT,
-        )
-        if reply != QMessageBox.Yes:
-            return
-
-        crop_records = []
-        skipped = 0
-        manual_required = 0
-        cancelled = False
-        progress = QProgressDialog(
-            tr("Batch Split Plates", self.current_lang),
-            tr("Cancel", self.current_lang),
-            0,
-            len(source_images),
-            self,
-        )
-        progress.setWindowTitle(tr("Batch Split Plates", self.current_lang))
-        progress.setWindowModality(Qt.WindowModal)
-        progress.setMinimumDuration(0)
-        progress.setAutoClose(False)
-        progress.setAutoReset(False)
-        progress.setValue(0)
-        self._prepare_progress_dialog(progress)
-        app = QApplication.instance()
-        if app is not None:
-            app.processEvents()
-
-        for index, source_image in enumerate(source_images, start=1):
-            progress.setLabelText(
-                f"{tr('Batch Split Plates', self.current_lang)}: {index}/{len(source_images)}\n{self._short_progress_path(source_image)}"
-            )
-            progress.setValue(index - 1)
-            if app is not None:
-                app.processEvents()
-            if progress.wasCanceled():
-                cancelled = True
-                break
-            try:
-                detections = detect_panel_crops(source_image)
-            except Exception as exc:
-                skipped += 1
-                self._set_panel_split_review(source_image, "skipped", reason=f"error: {exc}")
-                self.log(f"Panel split skipped {os.path.basename(source_image)}: {exc}")
-                continue
-            hard_joined_detections = [
-                detection
-                for detection in detections
-                if str(detection.get("source") or "") in {"hard_seam_panel_split", "letter_label_panel_split", "label_guided_panel_split"}
-            ]
-            if hard_joined_detections and not any(
-                str(detection.get("source") or "") in {"white_separator_panel_split", "mixed_separator_panel_split"}
-                for detection in detections
-            ):
-                manual_required += 1
-                self._set_panel_split_review(
-                    source_image,
-                    "candidate_split",
-                    reason="hard_seam_panel_split_candidate",
-                    detections=hard_joined_detections,
-                )
-                crop_records.extend(self._save_detected_panel_crops(source_image, hard_joined_detections))
-                progress.setValue(index)
-                if app is not None:
-                    app.processEvents()
-                continue
-            detections = [
-                detection
-                for detection in detections
-                if str(detection.get("source") or "") in {"white_separator_panel_split", "mixed_separator_panel_split"}
-            ]
-            if not detections:
-                skipped += 1
-                self._set_panel_split_review(source_image, "skipped", reason="no_split_detected")
-                continue
-            crop_records.extend(self._save_detected_panel_crops(source_image, detections))
-            self._set_panel_split_review(source_image, "auto_split", reason="white_separator_panel_split", detections=detections)
-            progress.setValue(index)
-            if app is not None:
-                app.processEvents()
-
-        progress.setValue(len(source_images))
-
-        if not crop_records:
-            if hasattr(self.project, "save_project"):
-                self.project.save_project()
-            if cancelled:
-                self.refresh_file_list()
-                message = tr("Panel splitting cancelled.", self.current_lang)
-                QMessageBox.information(self, tr("Batch Split Plates", self.current_lang), message)
-                return
-            if manual_required:
-                self.refresh_file_list()
-                message = tr(
-                    "Panel splitting finished: {0} crop(s) from {1} image(s); hard-joined candidate plates needing review: {2}; no split detected/errors: {3}.",
-                    self.current_lang,
-                ).format(0, 0, manual_required, skipped)
-                QMessageBox.information(self, tr("Batch Split Plates", self.current_lang), message)
-                return
-            QMessageBox.information(self, tr("Empty", self.current_lang), tr("No panel crops were detected.", self.current_lang))
-            return
-
-        message = tr(
-            "Panel splitting finished: {0} crop(s) from {1} image(s); hard-joined candidate plates needing review: {2}; no split detected/errors: {3}.",
-            self.current_lang,
-        ).format(
-            len(crop_records),
-            len({record.get("source_image") for record in crop_records}),
-            manual_required,
-            skipped,
-        )
-        if cancelled:
-            message = f"{message}\n{tr('Panel splitting cancelled.', self.current_lang)}"
-        progress.close()
-        self._start_image_import(
-            [record["path"] for record in crop_records],
-            crop_records=crop_records,
-            completion_message=message,
-            show_success_message=True,
-        )
-
-    def _save_detected_panel_crops(self, source_image, detections):
-        records = []
-        save_dir = os.path.dirname(source_image)
-        base_name = os.path.splitext(os.path.basename(source_image))[0]
-        with PILImage.open(source_image) as img:
-            for index, detection in enumerate(detections, start=1):
-                box = [int(value) for value in detection.get("box", [])]
-                if len(box) != 4 or box[2] <= box[0] or box[3] <= box[1]:
-                    continue
-                new_path = self._next_panel_crop_path(save_dir, base_name, index)
-                img.crop(tuple(box)).save(new_path, quality=95)
-                records.append(
-                    {
-                        "path": os.path.abspath(new_path),
-                        "source_image": os.path.abspath(source_image),
-                        "crop_index": index,
-                        "crop_box": list(box),
-                        "source_size": [int(img.width), int(img.height)],
-                        "crop_source": str(detection.get("source") or "auto_panel_split"),
-                    }
-                )
-        return records
-
-    def _next_panel_crop_path(self, save_dir, base_name, index):
-        candidate = os.path.join(save_dir, f"{base_name}__panel_{index:03d}.jpg")
-        if not os.path.exists(candidate):
-            return candidate
-        suffix = 2
-        while True:
-            candidate = os.path.join(save_dir, f"{base_name}__panel_{index:03d}_{suffix}.jpg")
-            if not os.path.exists(candidate):
-                return candidate
-            suffix += 1
-
-    def _inherit_crop_provenance(self, crop_records):
+    def _inherit_crop_provenance(self, crop_records, save=True):
         if not crop_records or not hasattr(self.project, "get_image_provenance"):
             return
         changed = False
+        parent_provenance_cache = {}
         for record in crop_records:
             if not isinstance(record, dict):
                 continue
@@ -730,7 +561,10 @@ class MainWindowImageNavigationMixin:
             source_image = record.get("source_image")
             if not crop_path or not source_image:
                 continue
-            parent_provenance = self.project.get_image_provenance(source_image)
+            source_identity = path_identity(source_image)
+            if source_identity not in parent_provenance_cache:
+                parent_provenance_cache[source_identity] = self.project.get_image_provenance(source_image)
+            parent_provenance = parent_provenance_cache[source_identity]
             crop_provenance = dict(parent_provenance)
             parent_review = parent_provenance.get("panel_split_review") if isinstance(parent_provenance, dict) else {}
             parent_was_manual_required = isinstance(parent_review, dict) and parent_review.get("status") == "manual_required"
@@ -749,7 +583,7 @@ class MainWindowImageNavigationMixin:
             if crop_source == "manual" or parent_was_manual_required:
                 self._set_panel_split_review(source_image, "manual_done", reason="manual_crop_saved")
             changed = True
-        if changed:
+        if changed and save:
             self.project.save_project()
 
     def _selected_image_paths(self):

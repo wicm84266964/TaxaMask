@@ -25,6 +25,35 @@ It is not a direct port of the 2D/STL Blink workbench. The migrated idea is:
 
 This package is intentionally independent from the main GUI while the algorithm is still experimental.
 
+## Audited Training Runs
+
+`train-project` requires at least two train-ready specimens. It verifies the
+project Registry, keeps specimens together when creating the train/validation
+split, and writes each run under `<project>/runs/tif_blink/<run_id>/`. The
+project SQLite database is the authoritative record; `history.json`,
+checkpoints, and the model manifest are hashed run artifacts.
+
+```powershell
+python -m tif_blink.cli train-project --project <project-manifest> --epochs 5
+```
+
+`train-nnunet-preprocessed` has no TaxaMask project, so its `--output-dir`
+contains the authoritative training SQLite ledger and run directories. The
+external dataset must provide `dataset.json`, `dataset_fingerprint.json`,
+`nnUNetPlans.json`, and `splits_final.json`. A stable source ID and a researcher
+trust note are mandatory. The actual train/validation case lists and all used
+`.b2nd` image/segmentation inputs are hashed before optimization starts.
+
+```powershell
+python -m tif_blink.cli train-nnunet-preprocessed `
+  --preprocessed-root <nnUNet_preprocessed> `
+  --dataset-dir <DatasetXXX_Name> `
+  --plans nnUNetPlans `
+  --output-dir <run-root> `
+  --trusted-source-id <stable-source-id> `
+  --trusted-source-note "Reviewed external labels"
+```
+
 ## Safety Defaults
 
 Boundary bands are generated from human labels. They are used for Blink-style masked views and boundary-weighted loss, but they are not included as model input channels by default because inference will not have human boundary bands available.

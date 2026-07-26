@@ -36,7 +36,13 @@ class TifBackendWorkflowServiceTests(unittest.TestCase):
 
             self.assertTrue(result.ok)
             self.assertEqual(result.payload["input_scope"], "part_reslice")
-            self.assertEqual(result.payload["part_refs"], [{"specimen_id": "01-0101-11", "part_id": "brain", "reslice_id": "brain_axis_001"}])
+            self.assertEqual(
+                result.payload["part_refs"],
+                [
+                    {"specimen_id": "01-0101-11", "part_id": "brain", "reslice_id": "brain_axis_001"},
+                    {"specimen_id": "01-0101-12", "part_id": "brain", "reslice_id": "brain_axis_001"},
+                ],
+            )
 
     def test_predict_can_fall_back_to_top_level_scope(self):
         with tempfile.TemporaryDirectory() as tmp:

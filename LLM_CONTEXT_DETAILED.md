@@ -1,7 +1,7 @@
 # TaxaMask LLM Context
 
 > Target: embedded AntCode agents, advanced LLM assistants, and developers maintaining the current TaxaMask `main` / v2.x line.
-> Last synchronized: 2026-07-11.
+> Last synchronized: 2026-07-26.
 
 This file is the current-state handoff document. It is not a changelog. Do not append dated development logs here. Keep it focused on the program state that an agent needs in order to diagnose, modify, and safely operate TaxaMask.
 
@@ -35,6 +35,8 @@ Do not recreate older duplicate root context/readme files. Keep this file as the
 
 AI outputs are draft material until a researcher confirms them.
 
+Labels restored from the legacy 2D label journal are also drafts. They use the distinct `legacy_journal_recovery` source, are excluded from AI one-click acceptance, and cannot enter training until the researcher explicitly confirms the recovered polygons through the maintenance recovery action.
+
 Do not let automated tools overwrite:
 
 - manual 2D polygons or confirmed masks
@@ -47,6 +49,14 @@ Do not let automated tools overwrite:
 For TIF part labels, model predictions should land in `editable_ai_result` with a `raw_ai_prediction_backup`, not `manual_truth`.
 
 For Local Axis automation, future model outputs should be proposals that require review. They should not directly create final reslice outputs without explicit researcher confirmation.
+
+All maintained training entrypoints use verified researcher truth and a SQLite-backed run ledger. Unreviewed 2D drafts, TIF predictions, or Local Axis proposals cannot enter training. There is no separate formal/temporary training mode; editable run notes express purpose and importance without changing immutable configuration, split, hash, artifact, or status facts.
+
+When a required source, reviewed label, configuration snapshot, or model weight is missing or has a different fingerprint, training stops. Recovery must recheck, relocate identical content, restore a verified copy, or register intentional changed content as a new version with a note. There is no bypass that silently accepts current bytes as the old version.
+
+The maintained 2D and Blink GUI paths perform both Registry verification and the final pre-training content recheck in a background worker. Progress includes current file, percentage, read rate, and ETA. Cancellation must prevent training startup and close any created active run as `cancelled`. Selected image-group runs bind and verify only their selected source/label UIDs plus shared schema, effective config, and selected starting weights. The first-pass capability is single-use and bound to the project, data version, run, revisions, and verification events. Before success and weight activation, the bound Registry inputs receive a completion recheck; persistent changes fail the run and leave pending weights inactive. This reduces but does not eliminate TOCTOU without immutable snapshots. Do not replace byte-level rechecks with size/mtime/inode caching unless a future snapshot mechanism provides equivalent guarantees.
+
+Batch panel splitting prepares its source inventory without repeated per-image project lookups, then performs detection and JPEG encoding in a background worker. The user must confirm the pending source count before work starts. Progress, cancellation, per-image checkpoints, atomic temporary-file promotion, project-task guards, and rollback keep completed crops recoverable without registering partial JPEGs or writing results into a different project.
 
 ## 4. Launch And Runtime
 
@@ -145,6 +155,8 @@ Storage state:
 - Opening an old 2D JSON project prompts for migration to SQLite, creates a migration report and legacy JSON backup, then opens the manifest.
 - Opening the same old JSON again should reuse the existing migrated manifest instead of rerunning migration.
 - If a user accidentally selects the SQLite database file itself, the GUI tries to locate the matching manifest and opens that entry file.
+- Project SQLite is also authoritative for integrity versions, training runs, effective configurations, actual train/validation assignments, artifacts, terminal status, recovery state, and run-note links. JSON reports and manifests remain atomic readable artifacts or projections, not a second project-state backend.
+- Supported 2D and TIF schema upgrades create a verified database backup, hold one writer transaction through migration and validation, and commit only after integrity checks pass. Failed upgrades roll back the complete transaction. TIF v1 upgrades explicitly to v2; code must reject a newer unknown schema instead of rewriting its version.
 
 Important semantics:
 
@@ -164,6 +176,7 @@ Current fourth-round MainWindow architecture state (accepted candidate 2026-07-1
 - Blink child-training callbacks are bound to the concrete worker and its startup project path. A stale worker may leave its model file as an auditable artifact, but it must not register, appoint, or enable a route in the current project.
 - `active_project_kind` is the visible shell mode. `last_workbench_kind` remembers the most recent `image` or `tif` workbench while Start Center/Agent is visible, so recent-project and shutdown routing must not infer project type from the `start` page alone.
 - VLM callbacks also verify worker run ID. Stale run/project results must not write the current SQLite project; they may retain an independent artifacts summary for audit.
+- `predict_full_pipeline` is split into testable input, Locator, crop, expert-route, SAM, and assembly stages without changing its public result contract. Stage decisions and timing are emitted through the existing `TaxaMask_outputs/runtime_logs/` logger; detailed diagnostics remain opt-in and must not include source images, full masks, large arrays, credentials, or private absolute paths.
 - AI drafts, confirmed labels, manual truth, PDF candidates, STL-rendered evidence, Blink trajectories, and TIF label roles remain distinct.
 - Direct private implementation references to methods defined in MainWindow dropped from 146 to zero. GUI contract tests still call inherited workflow methods through a real window and are tracked separately.
 - Researcher acceptance covered the primary interactions and found no current issue, including the representative TIF/3D/label-schema/Local-Axis/large-reslice paths. This was not a complete manual pass over every TaxaMask feature; unchecked 2D/Blink/VLM/PDF/export items remain an explicit residual manual-coverage list rather than claimed passes.
@@ -226,10 +239,14 @@ Core records:
 - extraction metadata
 - Local Axis reslice records
 - TIF segmentation model library records
+- integrity versions and training-run ledgers
+- mesh export runs, items, and later verification reviews
 
 Legacy TIF project JSON is now a migration source rather than the preferred active project store. Large volumes live in project sidecar directories.
 
 Plain TIFF stack import creates an image volume but not trusted training truth. AMIRA-style imports can provide label volumes, but label shape/material consistency must be checked before treating a specimen as train-ready.
+
+Physical scale is trusted only when the actual volume metadata and the project SQLite record both set `scale_verified: true` and their normalized `spacing_unit` and `spacing_zyx` values match. Missing, legacy, or conflicting evidence keeps the numeric voxel spacing for array operations but sets the unit to `unknown` and derived geometry to `unitless`. NIfTI/NRRD/MHA/OME-TIFF exchange, nnU-Net/MONAI, TIF-Blink, Local Axis, prediction import, and STL export must preserve this downgrade and must never infer millimeters from positive spacing or a historical default.
 
 Current TIF volume-segmentation training semantics:
 
@@ -275,6 +292,9 @@ The TIF workbench supports:
 - TIF backend prepare/train/predict controls
 - train-ready sample diagnostics and top-level fallback
 - trained model library selection, notes, model-manifest handoff, and registration-only deletion
+- reviewed-label STL export with separate raw measurement and optional smoothed preview artifacts
+- SQLite-backed mesh export history, verification, retry, interrupted-run recovery, and explicit safe cleanup
+- explainable high-risk ordering in the existing Local Axis proposal queue, with original and confidence ordering retained
 
 Current TIF workbench architecture notes:
 
@@ -406,6 +426,10 @@ Critical semantics:
 - Grayscale image reslicing uses linear interpolation.
 - Mask/label reslicing uses nearest-neighbor interpolation.
 - Export writes a new reslice item. It must not delete or overwrite source TIFF, original part volume, part mask, contours, or extraction metadata.
+- High-risk ordering is a review priority, not a calibrated error probability. It uses status, hard flag, missing landmarks, confidence uncertainty, and active-model-version mismatch, and stores the rule version and component reasons.
+- Sorting never accepts a proposal. Only the explicitly selected Local Axis proposal can be accepted, batch export reads accepted proposals only, and Local Axis acceptance itself does not create segmentation `manual_truth`.
+
+Reviewed TIF labels can be exported as Blender 5.0-compatible STL through `AntSleap/core/mesh_export.py` and `AntSleap/ui/tif_mesh_export_dialog.py`. Export rechecks the current data-version/revision `manual_truth`. Trusted finite positive physical spacing is converted from ZYX to an XYZ millimeter measurement mesh; unknown units retain their numeric scale and become explicitly named `unitless` observation meshes. Smoothed copies are display-only and never measurement artifacts. Raw components are preserved without smoothing/hole filling/removal. Project SQLite is the only authoritative export ledger; default mesh export does not create a JSON sidecar. A run is complete only after source and every published STL hash verify. Interrupted or mismatched runs remain incomplete and expose verify, retry, and explicit record-scoped cleanup paths. Source and export paths are checked component-by-component and reject junctions, symlinks, and other reparse points.
 
 Reslice outputs:
 
@@ -552,15 +576,17 @@ python -m unittest tests.test_agent_context_routes
 python -m unittest tests.test_tif_project tests.test_tif_part_extraction tests.test_tif_local_axis_reslice tests.test_tif_local_axis_batch tests.test_tif_local_axis_ai
 python -m unittest tests.test_tif_workbench tests.test_tif_gpu_volume_canvas
 python -m unittest tests.test_gui_smoke
+python scripts\run_validation_suite.py --suite round5_traceability --timeout 900
+python scripts\run_validation_suite.py --suite round5_inference --suite round5_mesh --suite round5_local_axis_risk --timeout 900
 python scripts\run_validation_suite.py --timeout 300
 git diff --check
 ```
 
-Current fourth-round full validation inventory: 18 suites and 1,149 tests, with one environment-dependent TIF workbench skip and all remaining tests passing. This includes strict stale-result coverage for SAM, image import, parent/child training, recent workbench routing, and Blink route ownership, plus TIF core/storage/services/preview/backends/workbench, GUI smoke, UI polish, layout, PDF safety/literature, validation tooling, TIF round-three architecture, TaxaMask round-four architecture, 2D SQLite, Agent, Blink/locator, and generic VLM/STL/export.
+Current fifth-round maintained validation inventory: 22 default suites and 1,587 tests. The accepted local run has 1,564 passes and 23 platform/environment-dependent skips. The fifth-round groups are traceability (274), inference (9), mesh export (41), and Local Axis risk review (27). The existing core inventory still covers TIF core/storage/services/preview/backends/workbench, GUI smoke, UI polish, layout, PDF safety/literature, validation tooling, TIF round-three architecture, TaxaMask round-four architecture, 2D SQLite, Agent, Blink/locator, and generic VLM/STL/export. A separate 12-test CPU-only `round5_ci_smoke` runs on Windows, macOS, and Linux without real weights, network, Blender, GPU, or private research data. The separate 24-test `round5_path_safety` group exercises junction/symlink/reparse rejection; link-creation cases may skip on restricted Windows accounts, while non-Windows CI first proves link support and then requires the real checks.
 
 Embedded Ant-Code tool results are capped at 256 KiB before they enter model context. A large `list_files` result must be marked `truncated` while preserving its tool success/failure metadata; it must not force a new first-turn TaxaMask context into immediate compaction. A gateway response with no visible text and no tool call is an output-health failure and receives one concise repair retry instead of being accepted as a placeholder-only answer.
 
-Ant-Code 1.3 embedded validation currently covers 118 syntax-checked runtime files, 62 byte-matched Dashboard assets, 11 browser tests, 96 Qt GUI smoke tests, 2 TIF Agent tests, and TaxaMask contract/routing tests. The authenticated bootstrap/status/trust/shutdown sequence is also exercised against a real local 1.3 server. The six expected failures in the imported upstream Dashboard/config/session subset assert standalone user-global configuration behavior that TaxaMask deliberately disables; they are not release blockers unless the configuration policy changes.
+Ant-Code 1.3 embedded validation currently covers 119 syntax-checked runtime files, 62 byte-matched Dashboard assets, 3 embedded Node tests, 11 browser tests, 96 Qt GUI smoke tests, 2 TIF Agent tests, and TaxaMask contract/routing tests. Offline mock gateway verification is isolated from user configuration, endpoints, and credentials. The authenticated bootstrap/status/trust/shutdown sequence is also exercised against a real local 1.3 server. The six expected failures in the imported upstream Dashboard/config/session subset assert standalone user-global configuration behavior that TaxaMask deliberately disables; they are not release blockers unless the configuration policy changes.
 
 Use the TaxaMask environment above for GUI/TIF validation. Do not install PySide6 into the default Python environment to satisfy skipped GUI tests.
 

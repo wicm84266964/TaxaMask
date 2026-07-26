@@ -63,12 +63,13 @@ def _volume_metadata_payload(
     dtype,
     role,
     spacing_zyx=None,
-    spacing_unit="micrometer",
+    spacing_unit="unknown",
     orientation="unknown",
     source_format="",
     extra_metadata=None,
     storage="npy",
     ome_ngff_complete=False,
+    scale_verified=None,
 ):
     shape = [int(value) for value in shape_zyx]
     if len(shape) != 3:
@@ -84,7 +85,13 @@ def _volume_metadata_payload(
         "shape_zyx": shape,
         "dtype": str(np.dtype(dtype)),
         "spacing_zyx": _normalize_spacing(spacing_zyx),
-        "spacing_unit": str(spacing_unit or "micrometer"),
+        "spacing_unit": str(spacing_unit or "unknown"),
+        "scale_verified": (
+            scale_verified is True
+            if scale_verified is not None
+            else isinstance(extra_metadata, dict)
+            and extra_metadata.get("scale_verified") is True
+        ),
         "orientation": str(orientation or "unknown"),
         "source_format": str(source_format or ""),
         "created_at": now,
@@ -92,7 +99,14 @@ def _volume_metadata_payload(
     }
     if isinstance(extra_metadata, dict):
         for key, value in extra_metadata.items():
-            if key not in {"schema_version", "format", "storage", "shape_zyx", "dtype"}:
+            if key not in {
+                "schema_version",
+                "format",
+                "storage",
+                "shape_zyx",
+                "dtype",
+                "scale_verified",
+            }:
                 metadata[key] = value
     return metadata
 
@@ -101,7 +115,15 @@ def _write_volume_metadata(sidecar_path, metadata):
     atomic_write_json(metadata_path(sidecar_path), metadata, indent=2, ensure_ascii=False)
 
 
-def _write_ome_ngff_zarr(sidecar_path, volume, role, spacing_zyx, spacing_unit, chunk_shape_zyx=None):
+def _write_ome_ngff_zarr(
+    sidecar_path,
+    volume,
+    role,
+    spacing_zyx,
+    spacing_unit,
+    chunk_shape_zyx=None,
+    scale_verified=False,
+):
     """Write a minimal OME-NGFF v0.4 Zarr v2 store beside the legacy npy copy."""
     path = os.path.abspath(str(sidecar_path))
     array_dir = os.path.join(path, OME_ZARR_ARRAY_PATH)
@@ -132,11 +154,15 @@ def _write_ome_ngff_zarr(sidecar_path, volume, role, spacing_zyx, spacing_unit, 
         },
     )
 
-    axes = [
-        {"name": "z", "type": "space", "unit": str(spacing_unit or "micrometer")},
-        {"name": "y", "type": "space", "unit": str(spacing_unit or "micrometer")},
-        {"name": "x", "type": "space", "unit": str(spacing_unit or "micrometer")},
-    ]
+    unit_text = str(spacing_unit or "").strip()
+    axes = [{"name": axis, "type": "space"} for axis in ("z", "y", "x")]
+    if (
+        scale_verified is True
+        and unit_text
+        and unit_text.lower() not in {"unknown", "unknown_unit", "unitless"}
+    ):
+        for axis in axes:
+            axis["unit"] = unit_text
     _write_json(
         os.path.join(path, ".zattrs"),
         {
@@ -202,12 +228,13 @@ def write_volume_sidecar(
     array,
     role,
     spacing_zyx=None,
-    spacing_unit="micrometer",
+    spacing_unit="unknown",
     orientation="unknown",
     source_format="",
     extra_metadata=None,
     write_ome_zarr=True,
     chunk_shape_zyx=None,
+    scale_verified=None,
 ):
     volume = np.asarray(array)
     shape = _shape_zyx(volume)
@@ -229,6 +256,12 @@ def write_volume_sidecar(
         raise
 
     spacing = _normalize_spacing(spacing_zyx)
+    verified_scale = (
+        scale_verified is True
+        if scale_verified is not None
+        else isinstance(extra_metadata, dict)
+        and extra_metadata.get("scale_verified") is True
+    )
     ngff_metadata = {}
     ome_ngff_complete = False
     storage = "npy"
@@ -240,6 +273,7 @@ def write_volume_sidecar(
             spacing_zyx=spacing,
             spacing_unit=spacing_unit,
             chunk_shape_zyx=chunk_shape_zyx,
+            scale_verified=verified_scale,
         )
         ome_ngff_complete = True
         storage = "npy+ome_zarr_v2"
@@ -254,6 +288,7 @@ def write_volume_sidecar(
         extra_metadata=extra_metadata,
         storage=storage,
         ome_ngff_complete=ome_ngff_complete,
+        scale_verified=verified_scale,
     )
     metadata.update(ngff_metadata)
     _write_volume_metadata(path, metadata)
@@ -266,11 +301,12 @@ def create_volume_sidecar_memmap(
     dtype,
     role,
     spacing_zyx=None,
-    spacing_unit="micrometer",
+    spacing_unit="unknown",
     orientation="unknown",
     source_format="",
     extra_metadata=None,
     fill_value=None,
+    scale_verified=None,
 ):
     path = os.path.abspath(str(sidecar_path))
     shape = tuple(int(value) for value in shape_zyx)
@@ -293,6 +329,7 @@ def create_volume_sidecar_memmap(
         extra_metadata=extra_metadata,
         storage="npy",
         ome_ngff_complete=False,
+        scale_verified=scale_verified,
     )
     _write_volume_metadata(path, metadata)
     return metadata, array
@@ -305,6 +342,8 @@ def read_volume_metadata(sidecar_path):
         raise ValueError("volume_metadata_not_object")
     if payload.get("schema_version") != VOLUME_SIDECAR_SCHEMA_VERSION:
         raise ValueError(f"unsupported_volume_sidecar_schema:{payload.get('schema_version')}")
+    payload.setdefault("spacing_unit", "unknown")
+    payload["scale_verified"] = payload.get("scale_verified") is True
     return payload
 
 
@@ -351,8 +390,9 @@ def save_volume_array(sidecar_path, array):
             volume,
             role=metadata.get("role", "unknown"),
             spacing_zyx=metadata.get("spacing_zyx", [1.0, 1.0, 1.0]),
-            spacing_unit=metadata.get("spacing_unit", "micrometer"),
+            spacing_unit=metadata.get("spacing_unit", "unknown"),
             chunk_shape_zyx=metadata.get("zarr_chunks_zyx"),
+            scale_verified=metadata.get("scale_verified") is True,
         )
         metadata.update(ngff_metadata)
     _write_volume_metadata(sidecar_path, metadata)
@@ -390,8 +430,9 @@ def flush_volume_array(sidecar_path, array, update_ome_zarr=False):
             volume,
             role=metadata.get("role", "unknown"),
             spacing_zyx=metadata.get("spacing_zyx", [1.0, 1.0, 1.0]),
-            spacing_unit=metadata.get("spacing_unit", "micrometer"),
+            spacing_unit=metadata.get("spacing_unit", "unknown"),
             chunk_shape_zyx=metadata.get("zarr_chunks_zyx"),
+            scale_verified=metadata.get("scale_verified") is True,
         )
         metadata.update(ngff_metadata)
     elif metadata.get("ome_ngff_complete"):
@@ -409,20 +450,51 @@ def create_empty_label_sidecar_like(
     fill_value=0,
     role="working_edit",
     write_ome_zarr=True,
+    source_record=None,
 ):
     image_meta = read_volume_metadata(image_sidecar_path)
     shape = tuple(int(value) for value in image_meta["shape_zyx"])
+    spacing_zyx = image_meta.get("spacing_zyx") or [1.0, 1.0, 1.0]
+    spacing_unit = str(image_meta.get("spacing_unit") or "unknown")
+    scale_verified = image_meta.get("scale_verified") is True
+    if source_record is not None:
+        record = source_record if isinstance(source_record, dict) else {}
+        try:
+            spacing_matches = bool(
+                len(spacing_zyx) == 3
+                and len(record.get("spacing_zyx") or []) == 3
+                and np.allclose(
+                    [float(value) for value in spacing_zyx],
+                    [float(value) for value in record.get("spacing_zyx")],
+                    rtol=1e-6,
+                    atol=1e-9,
+                )
+            )
+        except (TypeError, ValueError):
+            spacing_matches = False
+        scale_verified = (
+            scale_verified
+            and record.get("scale_verified") is True
+            and spacing_unit.strip().lower()
+            == str(record.get("spacing_unit") or "unknown").strip().lower()
+            and spacing_unit.strip().lower()
+            not in {"", "unknown", "unknown_unit", "unitless"}
+            and spacing_matches
+        )
+        if not scale_verified:
+            spacing_unit = "unknown"
     if not write_ome_zarr:
         metadata, array = create_volume_sidecar_memmap(
             label_sidecar_path,
             shape,
             dtype,
             role=role,
-            spacing_zyx=image_meta.get("spacing_zyx"),
-            spacing_unit=image_meta.get("spacing_unit", "micrometer"),
+            spacing_zyx=spacing_zyx,
+            spacing_unit=spacing_unit,
             orientation=image_meta.get("orientation", "unknown"),
             source_format="empty_label_like",
             fill_value=fill_value,
+            scale_verified=scale_verified,
         )
         if hasattr(array, "_mmap"):
             array._mmap.close()
@@ -432,10 +504,11 @@ def create_empty_label_sidecar_like(
         label_sidecar_path,
         array,
         role=role,
-        spacing_zyx=image_meta.get("spacing_zyx"),
-        spacing_unit=image_meta.get("spacing_unit", "micrometer"),
+        spacing_zyx=spacing_zyx,
+        spacing_unit=spacing_unit,
         orientation=image_meta.get("orientation", "unknown"),
         source_format="empty_label_like",
+        scale_verified=scale_verified,
     )
 
 

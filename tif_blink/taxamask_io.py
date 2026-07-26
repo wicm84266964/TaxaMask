@@ -103,6 +103,18 @@ def save_prediction_as_model_draft(
         raise ValueError(f"working_volume_missing:{clean_specimen_id}")
     working_meta = read_volume_metadata(working_path)
     working_shape = [int(value) for value in working_meta.get("shape_zyx", working.get("shape_zyx", []))]
+    sidecar_unit = str(working_meta.get("spacing_unit") or "unknown")
+    record_unit = str(working.get("spacing_unit") or "unknown")
+    sidecar_spacing = [float(value) for value in (working_meta.get("spacing_zyx") or [1.0, 1.0, 1.0])]
+    record_spacing = [float(value) for value in (working.get("spacing_zyx") or [])]
+    scale_verified = (
+        working_meta.get("scale_verified") is True
+        and working.get("scale_verified") is True
+        and sidecar_unit.strip().lower() == record_unit.strip().lower()
+        and sidecar_unit.strip().lower() not in {"", "unknown", "unknown_unit", "unitless"}
+        and sidecar_spacing == record_spacing
+    )
+    spacing_unit = sidecar_unit if scale_verified else "unknown"
     pred = np.asarray(prediction)
     if pred.ndim != 3:
         raise ValueError(f"prediction_must_be_zyx:{pred.shape}")
@@ -137,8 +149,9 @@ def save_prediction_as_model_draft(
             draft_abs,
             pred,
             role="model_draft",
-            spacing_zyx=working_meta.get("spacing_zyx") or working.get("spacing_zyx"),
-            spacing_unit=working_meta.get("spacing_unit", working.get("spacing_unit", "micrometer")),
+            spacing_zyx=sidecar_spacing,
+            spacing_unit=spacing_unit,
+            scale_verified=scale_verified,
             orientation=working_meta.get("orientation", working.get("orientation", "unknown")),
             source_format="tif_blink_prediction",
             extra_metadata={
@@ -156,7 +169,8 @@ def save_prediction_as_model_draft(
             prediction_id=safe_prediction_id,
             source_model=str(source_model or "tif_blink"),
             spacing_zyx=metadata.get("spacing_zyx"),
-            spacing_unit=metadata.get("spacing_unit", "micrometer"),
+            spacing_unit=metadata.get("spacing_unit", "unknown"),
+            scale_verified=metadata.get("scale_verified") is True,
             orientation=metadata.get("orientation", "unknown"),
             fmt=metadata.get("format", ""),
             save=False,
@@ -174,6 +188,9 @@ def save_prediction_as_model_draft(
             },
             "shape_zyx": [int(value) for value in pred.shape],
             "dtype": str(pred.dtype),
+            "spacing_zyx": list(metadata.get("spacing_zyx") or []),
+            "spacing_unit": metadata.get("spacing_unit", "unknown"),
+            "scale_verified": metadata.get("scale_verified") is True,
             "safety": {
                 "imported_role": "model_draft",
                 "manual_truth_overwritten": False,

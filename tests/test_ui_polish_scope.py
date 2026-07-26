@@ -230,7 +230,7 @@ class DummyEngine:
             self.locator = object()
         return self.locator
 
-    def load_locator(self, timestamp):
+    def load_locator(self, timestamp, checkpoint_path=None):
         self.ensure_locator_loaded()
         self.load_locator_calls.append(timestamp)
         return None
@@ -244,7 +244,7 @@ class DummyEngine:
         self.reset_sam_calls += 1
         return None
 
-    def load_sam_decoder(self, timestamp):
+    def load_sam_decoder(self, timestamp, checkpoint_path=None):
         self.load_sam_decoder_calls.append(timestamp)
         return None
 
@@ -283,6 +283,8 @@ class DummyEngine:
 class DummyProjectManager:
     def __init__(self, project_root):
         self.current_project_path = str(Path(project_root) / "dummy_project.json")
+        self.current_database_path = str(Path(project_root) / "dummy_project.sqlite")
+        self._is_sqlite_project = False
         self.save_calls = 0
         self.project_data = {
             "taxonomy": ["Head", "Mesosoma", "Gaster"],
@@ -301,6 +303,12 @@ class DummyProjectManager:
 
     def load_project(self, path):
         self.current_project_path = str(path)
+
+    def is_sqlite_project(self):
+        return bool(self._is_sqlite_project)
+
+    def integrity_registry_state(self):
+        return {"status": "ready"}
 
     def set_known_relocated_roots(self, roots):
         self.known_relocated_roots = list(roots or [])
@@ -540,7 +548,21 @@ class DummyProjectManager:
             self.save_project()
         return None
 
-    def update_label(self, image_path, part_name, points, description_text=None, box=None, auto_box=None, save=True):
+    def update_label(
+        self,
+        image_path,
+        part_name,
+        points,
+        description_text=None,
+        box=None,
+        auto_box=None,
+        save=True,
+        *,
+        training_source=None,
+        training_review_status=None,
+        training_accepted_via=None,
+        preserve_training_truth=False,
+    ):
         entry = self._ensure_label_entry(image_path)
         entry["parts"][part_name] = [[float(pt[0]), float(pt[1])] for pt in points]
         entry["status"] = "labeled"
@@ -2440,7 +2462,7 @@ class UiPolishScopeTests(unittest.TestCase):
                 self.assertEqual(dialog.table.rowCount(), 2)
                 self.assertEqual(
                     [dialog.table.horizontalHeaderItem(i).text() for i in range(dialog.table.columnCount())],
-                    ["Type", "Target", "Backend", "Strategy", "Samples", "Time", "Report Folder"],
+                    ["Type", "Target", "Backend", "Strategy", "Samples", "Time", "Status", "Note", "Report Folder"],
                 )
             finally:
                 dialog.close()
@@ -3878,6 +3900,7 @@ class UiPolishScopeTests(unittest.TestCase):
         window = self.make_main_window()
         try:
             self.project_manager.project_data["taxonomy"] = ["Head", "Mandible"]
+            self.project_manager._is_sqlite_project = True
             self.project_manager.project_data["locator_scope"] = ["Head"]
             self.engine.current_num_classes = 1
             self.project_manager.project_data["images"] = list(image_paths)
@@ -4516,11 +4539,16 @@ class UiPolishScopeTests(unittest.TestCase):
             }
 
             baseline_save_calls = self.project_manager.save_calls
-            with patch.object(window, "refresh_file_list", wraps=window.refresh_file_list) as full_refresh:
+            with patch.object(
+                window, "refresh_file_list", wraps=window.refresh_file_list
+            ) as full_refresh, patch.object(
+                window, "_on_vlm_preannotation_error"
+            ) as vlm_error:
                 window._on_vlm_preannotation_image_result(result)
                 self.app.processEvents()
 
             full_refresh.assert_not_called()
+            vlm_error.assert_not_called()
             self.assertEqual(self.project_manager.save_calls, baseline_save_calls)
             self.assertTrue(window.project_save_pending)
             self.assertEqual(window.vlm_preannotation_saved_total, 1)

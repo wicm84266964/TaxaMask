@@ -44,6 +44,24 @@ predict
 
 `predict` reads selected part, reslice, or top-level volumes and writes prediction label-volume artifacts that TaxaMask imports as reviewable label layers. Part/reslice predictions become `editable_ai_result`; top-level specimen predictions become pending-review `working_edit` and keep a legacy `model_draft` audit record.
 
+## Physical Scale Trust
+
+Every `input_volume` carries `spacing_zyx`, `spacing_unit`, and `scale_verified`.
+
+`scale_verified: true` means TaxaMask found explicit physical-scale evidence in both the authoritative SQLite record and the actual volume metadata, with matching normalized units and spacing values. A backend may use that spacing for physical measurements or preserve it in a derived volume only while that evidence remains valid.
+
+If either source is missing, unverified, or inconsistent, TaxaMask deliberately downgrades the contract to:
+
+```json
+{
+  "spacing_zyx": [2.0, 2.0, 2.0],
+  "spacing_unit": "unknown",
+  "scale_verified": false
+}
+```
+
+TaxaMask normally preserves the observed numeric spacing for voxel processing while removing its physical-unit claim. It falls back to `[1.0, 1.0, 1.0]` only when spacing is missing or invalid. With `scale_verified: false`, any retained spacing is unitless and must not be interpreted as millimeters, micrometers, or another physical unit. Backends must not infer a unit from modality, file extension, positive spacing values, or historical defaults. Predictions derived from an unverified input must remain unverified; a backend must not upgrade scale trust by itself.
+
 ## Command Template
 
 TaxaMask command fields must include one of these placeholders:
@@ -138,6 +156,9 @@ Available placeholders:
         "format": "tiff",
         "shape_zyx": [256, 256, 256],
         "dtype": "uint16",
+        "spacing_zyx": [2.0, 2.0, 2.0],
+        "spacing_unit": "micrometer",
+        "scale_verified": true,
         "orientation_record": {}
       },
       "label_volume": {

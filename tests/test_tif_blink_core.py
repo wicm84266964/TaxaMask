@@ -5,7 +5,7 @@ import tempfile
 import numpy as np
 
 from AntSleap.core.tif_project import TifProjectManager
-from AntSleap.core.tif_volume_io import load_volume_sidecar, write_volume_sidecar
+from AntSleap.core.tif_volume_io import load_volume_sidecar, read_volume_metadata, write_volume_sidecar
 from tif_blink.boundary import BoundaryBandConfig, make_boundary_band
 from tif_blink.labels import build_label_mapping, decode_label, encode_label
 from tif_blink.preprocess import input_channel_count, normalize_stack_percentile, slice_stack
@@ -140,10 +140,36 @@ class TifBlinkCoreTests(unittest.TestCase):
             manual[:, :, 2:] = 5
             image_rel = "specimens/brain-01/working/image.ome.zarr"
             manual_rel = "specimens/brain-01/labels/manual_truth.ome.zarr"
-            image_meta = write_volume_sidecar(root / "project" / image_rel, image, role="working_image")
+            image_meta = write_volume_sidecar(
+                root / "project" / image_rel,
+                image,
+                role="working_image",
+                spacing_zyx=[2.0, 1.0, 0.5],
+                spacing_unit="micrometer",
+                scale_verified=False,
+            )
             manual_meta = write_volume_sidecar(root / "project" / manual_rel, manual, role="manual_truth")
-            manager.register_working_volume("brain-01", image_rel, image_meta["shape_zyx"], image_meta["dtype"], save=False)
-            manager.register_label_volume("brain-01", "manual_truth", manual_rel, manual_meta["shape_zyx"], manual_meta["dtype"], save=False)
+            manager.register_working_volume(
+                "brain-01",
+                image_rel,
+                image_meta["shape_zyx"],
+                image_meta["dtype"],
+                spacing_zyx=image_meta["spacing_zyx"],
+                spacing_unit=image_meta["spacing_unit"],
+                scale_verified=False,
+                save=False,
+            )
+            manager.register_label_volume(
+                "brain-01",
+                "manual_truth",
+                manual_rel,
+                manual_meta["shape_zyx"],
+                manual_meta["dtype"],
+                status="reviewed",
+                explicit_review=True,
+                operation="truth_promotion",
+                save=False,
+            )
             manager.set_review_status("brain-01", "train_ready", train_ready=True)
 
             samples = load_train_ready_samples(manager, ["brain-01"])
@@ -166,9 +192,84 @@ class TifBlinkCoreTests(unittest.TestCase):
 
             self.assertEqual(draft["role"], "model_draft")
             self.assertEqual(draft["prediction_report"], result["report"]["files"]["prediction_report"])
+            self.assertEqual(draft["spacing_unit"], "unknown")
+            self.assertFalse(draft["scale_verified"])
+            draft_metadata = read_volume_metadata(manager.to_absolute(draft["path"]))
+            self.assertEqual(draft_metadata["spacing_unit"], "unknown")
+            self.assertFalse(draft_metadata["scale_verified"])
+            self.assertEqual(result["report"]["spacing_unit"], "unknown")
+            self.assertFalse(result["report"]["scale_verified"])
             self.assertFalse(result["report"]["safety"]["manual_truth_overwritten"])
             np.testing.assert_array_equal(draft_array, prediction)
             np.testing.assert_array_equal(manual_array, manual)
+
+    def test_taxamask_io_preserves_scale_only_when_sidecar_and_record_are_verified(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = TifProjectManager()
+            manager.create_project("tif_blink_verified_scale", root / "project")
+            manager.create_specimen_scaffold("brain-verified")
+            image_rel = "specimens/brain-verified/working/image.ome.zarr"
+            image_meta = write_volume_sidecar(
+                root / "project" / image_rel,
+                np.zeros((2, 3, 4), dtype=np.uint8),
+                role="working_image",
+                spacing_zyx=[2.0, 1.0, 0.5],
+                spacing_unit="micrometer",
+                scale_verified=True,
+            )
+            manager.register_working_volume(
+                "brain-verified",
+                image_rel,
+                image_meta["shape_zyx"],
+                image_meta["dtype"],
+                spacing_zyx=image_meta["spacing_zyx"],
+                spacing_unit=image_meta["spacing_unit"],
+                scale_verified=True,
+                save=True,
+            )
+
+            result = save_prediction_as_model_draft(
+                manager,
+                "brain-verified",
+                np.ones((2, 3, 4), dtype=np.uint16),
+                prediction_id="verified_scale",
+            )
+
+            draft = result["draft"]
+            metadata = read_volume_metadata(manager.to_absolute(draft["path"]))
+            self.assertEqual(draft["spacing_unit"], "micrometer")
+            self.assertTrue(draft["scale_verified"])
+            self.assertEqual(metadata["spacing_unit"], "micrometer")
+            self.assertTrue(metadata["scale_verified"])
+            self.assertEqual(result["report"]["spacing_unit"], "micrometer")
+            self.assertTrue(result["report"]["scale_verified"])
+
+            working_record = manager.get_specimen("brain-verified")["working_volume"]
+            working_record["spacing_zyx"] = [3.0, 1.0, 0.5]
+            spacing_conflict = save_prediction_as_model_draft(
+                manager,
+                "brain-verified",
+                np.ones((2, 3, 4), dtype=np.uint16),
+                prediction_id="spacing_conflict",
+            )
+            self.assertEqual(spacing_conflict["draft"]["spacing_unit"], "unknown")
+            self.assertFalse(spacing_conflict["draft"]["scale_verified"])
+            self.assertEqual(spacing_conflict["report"]["spacing_unit"], "unknown")
+            self.assertFalse(spacing_conflict["report"]["scale_verified"])
+
+            working_record["spacing_zyx"] = [2.0, 1.0, 0.5]
+            working_record["spacing_unit"] = "millimeter"
+            unit_conflict = save_prediction_as_model_draft(
+                manager,
+                "brain-verified",
+                np.ones((2, 3, 4), dtype=np.uint16),
+                prediction_id="unit_conflict",
+            )
+            self.assertEqual(unit_conflict["draft"]["spacing_unit"], "unknown")
+            self.assertFalse(unit_conflict["draft"]["scale_verified"])
+            self.assertEqual(unit_conflict["report"]["spacing_unit"], "unknown")
+            self.assertFalse(unit_conflict["report"]["scale_verified"])
 
     @unittest.skipUnless(HAS_TORCH, "PyTorch is required for TIF-Blink grouped dataset tests")
     def test_grouped_slice_dataset_returns_three_views(self):

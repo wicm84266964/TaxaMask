@@ -2,8 +2,6 @@
 
 [![DOI](https://zenodo.org/badge/1264598942.svg)](https://doi.org/10.5281/zenodo.20619867)
 
-[中文 README](README_zh.md)
-
 **TaxaMask** is an open-source desktop workbench for mask annotation of external and internal biological morphological structures. It brings literature evidence, human review, AI-assisted annotation, model training, and result feedback into a traceable loop, allowing models to keep improving on real research data and gradually take on more repetitive annotation work.
 
 ## A Note From The Author
@@ -62,6 +60,7 @@ TIF / CT internal morphology
   -> 3D preview and local-axis reslice export
   -> label-schema based part/reslice annotation
   -> reviewed manual_truth and train-ready samples
+  -> Blender-ready STL export from reviewed label volumes
   -> TIF backend dataset preparation, training, and prediction
   -> prediction review in draft label layers with raw_ai_prediction_backup
 
@@ -73,6 +72,16 @@ Agent Center
 ```
 
 The program is designed around human-reviewed morphology data. AI outputs, imported predictions, and automated suggestions remain draft material until a researcher accepts them.
+
+## Training Traceability and Recovery
+
+Maintained 2D, Blink, TIF, nnU-Net, and Local Axis training entries now share a SQLite-backed run ledger. Each run records the effective configuration, verified inputs, actual train/validation split, initial and output weights, backend and code versions, status, artifacts, and an editable researcher note. Notes describe purpose or importance; they do not create a separate "formal" versus "temporary" training mode and cannot rewrite recorded facts.
+
+Training stops when a required source, reviewed label, configuration snapshot, or weight no longer matches its recorded fingerprint. The recovery view can recheck the files, relocate an unchanged file, register an intentionally changed file as a new data version with a note, or export a redacted diagnostic. Unreviewed AI predictions remain excluded from training throughout recovery.
+
+The 2D and Blink GUI preflight performs both pre-training full-content verification passes in a background worker. It shows the current file, completion percentage, read rate, and estimated time remaining, and can be cancelled without starting training or leaving a run falsely marked as active. A selected image group verifies only its actual source/label inputs plus shared schema, configuration, and selected starting weights. The transition-time pass is intentionally retained because file metadata alone is not proof that the bytes are unchanged. Before a run is marked successful and pending weights become active, those bound inputs are checked once more; a persistent external change fails the run.
+
+The main 2D inference path also emits stage-level diagnostics through the existing runtime log system. Locator, crop, expert routing, SAM, and assembly decisions can be inspected without storing source images, full masks, API credentials, or private absolute paths in the diagnostic events.
 
 ## 2D / STL Morphology Workbench
 
@@ -158,8 +167,11 @@ Current TIF/CT capabilities include:
 - Source Z-axis display as a locked reference.
 - Editable output Z-axis for the reslice direction.
 - Roll reference point pair for orientation standardization.
+- Explainable high-risk ordering in the existing Local Axis review queue, while preserving the original and confidence-based sort modes.
 - Resliced grayscale TIFF export, with metadata JSON.
 - Optional mask TIFF export when a part mask is available.
+- Blender 5.0-compatible STL export from revision-verified `manual_truth`: trusted physical spacing produces a millimeter measurement mesh; unknown spacing produces an explicitly named `unitless` observation mesh. Optional smoothed copies are display-only and never measurement artifacts.
+- SQLite-backed mesh export history, source/STL hashes, interruption recovery, recheck, retry, and explicit cleanup for incomplete exports; mesh JSON sidecars are not used as project state.
 - Training-material records that capture manual part extraction and local-axis decisions.
 - Label schema import/export/binding so several specimens can share the same numeric labels.
 - Brush, eraser, and auto-fill assisted label editing on part volumes and local-axis reslices.
@@ -394,7 +406,6 @@ The TIF volume-segmentation contract covers label-volume dataset preparation, tr
 
 ## Documentation
 
-- [Chinese README](README_zh.md)
 - [Chinese user manual](TaxaMask使用手册.md)
 - [Platform setup](docs/platform_setup.md)
 - [PDF screening profile guide](docs/PDF筛选profile适配说明.md)

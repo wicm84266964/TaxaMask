@@ -39,6 +39,7 @@ class TifBlinkTrainConfig:
     epochs: int = 5
     batch_size: int = 2
     learning_rate: float = 1e-3
+    weight_decay: float = 1e-2
     boundary_weight: float = 2.0
     dice_weight: float = 1.0
     normal_loss_weight: float = 1.0
@@ -403,13 +404,15 @@ def checkpoint_payload(
     history: list[dict[str, Any]],
     best_metric: float,
 ) -> dict[str, Any]:
+    serialized_config = asdict(config)
+    serialized_config["output_dir"] = "."
     return {
         "schema_version": TIF_BLINK_MODEL_MANIFEST_SCHEMA_VERSION,
         "saved_at": _now_iso(),
         "epoch": int(epoch),
         "best_metric": float(best_metric),
         "model_state": model.state_dict(),
-        "train_config": asdict(config),
+        "train_config": serialized_config,
         "label_id_to_class": {int(k): int(v) for k, v in label_mapping.label_id_to_class.items()},
         "class_to_label_id": {int(k): int(v) for k, v in label_mapping.class_to_label_id.items()},
         "history": history,
@@ -425,18 +428,21 @@ def save_manifest(
     last_checkpoint: str,
     trained_specimens: list[str] | None = None,
 ) -> dict[str, Any]:
+    manifest_dir = os.path.dirname(os.path.abspath(path))
+    serialized_config = asdict(config)
+    serialized_config["output_dir"] = "."
     payload = {
         "schema_version": TIF_BLINK_MODEL_MANIFEST_SCHEMA_VERSION,
         "created_at": _now_iso(),
         "model_name": str(config.model_name),
         "model_family": "tif_blink_unet2d",
-        "train_config": asdict(config),
+        "train_config": serialized_config,
         "label_id_to_class": {str(k): int(v) for k, v in label_mapping.label_id_to_class.items()},
         "class_to_label_id": {str(k): int(v) for k, v in label_mapping.class_to_label_id.items()},
         "num_classes": int(label_mapping.num_classes),
         "checkpoints": {
-            "best": os.path.abspath(best_checkpoint),
-            "last": os.path.abspath(last_checkpoint),
+            "best": os.path.relpath(os.path.abspath(best_checkpoint), manifest_dir).replace("\\", "/"),
+            "last": os.path.relpath(os.path.abspath(last_checkpoint), manifest_dir).replace("\\", "/"),
         },
         "history": history,
         "trained_specimens": list(trained_specimens or []),
@@ -489,7 +495,11 @@ def train_model(
     device = _device(config.device)
     net = model or build_model(config)
     net.to(device)
-    optimizer = torch.optim.AdamW(net.parameters(), lr=float(config.learning_rate))
+    optimizer = torch.optim.AdamW(
+        net.parameters(),
+        lr=float(config.learning_rate),
+        weight_decay=float(config.weight_decay),
+    )
     train_loader = _loader(train_dataset, config, shuffle=True)
     val_loader = _loader(val_dataset, config, shuffle=False) if val_dataset is not None else None
     label_mapping = train_dataset.label_mapping

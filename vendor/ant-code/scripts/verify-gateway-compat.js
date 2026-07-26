@@ -1,42 +1,64 @@
 #!/usr/bin/env node
+import { fileURLToPath } from "node:url";
 import { createMockGatewayServer } from "./mock-gateway.js";
 import { loadConfig } from "../src/config/load-config.js";
 import { createLabModelGateway } from "../src/model-gateway/client.js";
 import { runGatewayHealth } from "../src/model-gateway/health.js";
 import { GATEWAY_PROTOCOL_VERSION } from "../src/model-gateway/protocol.js";
 
-const args = new Set(process.argv.slice(2));
-const live = args.has("--live");
-const json = args.has("--json");
-const result = live ? await verifyLiveGateway() : await verifyMockGateway();
+const MOCK_MODEL_ALIAS = "compatibility-mock";
 
-if (json) {
-  console.log(JSON.stringify(result, null, 2));
-} else {
-  for (const line of formatCompatibilityReport(result)) {
-    console.log(line);
+if (isMainModule()) {
+  const args = new Set(process.argv.slice(2));
+  const live = args.has("--live");
+  const json = args.has("--json");
+  const result = live ? await verifyLiveGateway() : await verifyMockGateway();
+
+  if (json) {
+    console.log(JSON.stringify(result, null, 2));
+  } else {
+    for (const line of formatCompatibilityReport(result)) {
+      console.log(line);
+    }
   }
+
+  process.exitCode = result.ok ? 0 : 1;
 }
 
-process.exitCode = result.ok ? 0 : 1;
-
-async function verifyMockGateway() {
+export async function verifyMockGateway() {
   const server = await listen(createMockGatewayServer(), "127.0.0.1");
   try {
     const baseUrl = serverUrl(server);
     return await verifyGateway({
       mode: "mock",
-      env: {
-        ...process.env,
-        LAB_MODEL_GATEWAY_URL: `${baseUrl}/v1/chat`,
-        LAB_MODEL_GATEWAY_HEALTH_URL: `${baseUrl}/health`,
-        LAB_AGENT_MODEL: "compatibility-mock",
-        LAB_AGENT_NETWORK_MODE: "offline"
+      env: createMockVerificationEnv(baseUrl),
+      mock: {
+        gatewayUrl: `${baseUrl}/v1/chat`,
+        healthUrl: `${baseUrl}/health`,
+        modelAlias: MOCK_MODEL_ALIAS
       }
     });
   } finally {
     await close(server);
   }
+}
+
+/**
+ * Mock verification intentionally inherits nothing from the user's shell.
+ * @param {string} baseUrl
+ */
+export function createMockVerificationEnv(baseUrl) {
+  return {
+    LAB_AGENT_SKIP_PROJECT_CONFIG: "true",
+    LAB_AGENT_MODEL: MOCK_MODEL_ALIAS,
+    LAB_AGENT_NETWORK_MODE: "offline",
+    LAB_MODEL_GATEWAY_URL: `${baseUrl}/v1/chat`,
+    LAB_MODEL_GATEWAY_HEALTH_URL: `${baseUrl}/health`,
+    LAB_MODEL_GATEWAY_PROTOCOL: "lab-agent-gateway",
+    LAB_MODEL_GATEWAY_MAX_RETRIES: "0",
+    LAB_MODEL_GATEWAY_TIMEOUT_MS: "5000",
+    LAB_MODEL_GATEWAY_IDLE_TIMEOUT_MS: "5000"
+  };
 }
 
 async function verifyLiveGateway() {
@@ -47,7 +69,7 @@ async function verifyLiveGateway() {
 }
 
 /**
- * @param {{ mode: string; env: NodeJS.ProcessEnv }} options
+ * @param {{ mode: string; env: NodeJS.ProcessEnv; mock?: { gatewayUrl: string; healthUrl: string; modelAlias: string } }} options
  */
 async function verifyGateway(options) {
   const checks = [];
@@ -69,6 +91,21 @@ async function verifyGateway(options) {
   });
 
   const config = await loadConfig({ cwd, env: options.env });
+  if (options.mode === "mock") {
+    config.modelAlias = options.mock.modelAlias;
+    config.networkMode = "offline";
+    config.allowedHosts = ["127.0.0.1"];
+    config.lab = {
+      ...config.lab,
+      gatewayUrl: options.mock.gatewayUrl,
+      gatewayHealthUrl: options.mock.healthUrl,
+      gatewayProtocol: "lab-agent-gateway",
+      gatewayApiKey: null,
+      gatewayMaxRetries: 0,
+      gatewayTimeoutMs: 5000,
+      gatewayIdleTimeoutMs: 5000
+    };
+  }
   const gateway = createLabModelGateway(config);
   const chat = await gateway.sendChat({
     messages: [{ role: "user", content: "compatibility ping" }],
@@ -192,4 +229,8 @@ function serverUrl(server) {
     throw new Error("server did not expose an address");
   }
   return `http://127.0.0.1:${address.port}`;
+}
+
+function isMainModule() {
+  return process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
 }

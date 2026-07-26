@@ -39,3 +39,5 @@ requests>=2.31.0
 # --- Lightweight web helpers used by optional dashboards/recovery panels ---
 blinker>=1.5.0,<2
 click>=7.0,<9
+scikit-image>=0.25,<1
+trimesh>=4.4,<5

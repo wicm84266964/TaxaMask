@@ -52,6 +52,8 @@ else:
     import AntSleap.ui.main_window_annotation as annotation_module
     import AntSleap.ui.main_window_dialogs as main_window_dialogs_module
     import AntSleap.ui.main_window_image_navigation as image_navigation_module
+    import AntSleap.ui.main_window_panel_split as panel_split_module
+    import AntSleap.ui.main_window_workers as workers_module
     import AntSleap.ui.main_window_prediction as prediction_module
     import AntSleap.ui.main_window_project_lifecycle as project_lifecycle_module
     import AntSleap.ui.main_window_training as training_module
@@ -118,6 +120,50 @@ class SmokeThread:
 
     def wait(self, _timeout=None):
         return True
+
+
+class SmokeBatchPanelSplitThread:
+    instances = []
+
+    def __init__(self, source_images, *, reserved_output_paths=None, wait_for_result_ack=False):
+        self.source_images = list(source_images or [])
+        self.reserved_output_paths = list(reserved_output_paths or [])
+        self.wait_for_result_ack = bool(wait_for_result_ack)
+        self.reserved_output_identities = set()
+        self.progress_signal = SmokeSignal()
+        self.image_result_signal = SmokeSignal()
+        self.error_signal = SmokeSignal()
+        self.finished_signal = SmokeSignal()
+        self.finished = SmokeSignal()
+        self.summary = {}
+        self.started = False
+        self.running = False
+        self.cancel_requested = False
+        self.result_acknowledgements = 0
+        self.deleted = False
+        type(self).instances.append(self)
+
+    def start(self):
+        self.started = True
+        self.running = True
+
+    def isRunning(self):
+        return self.running
+
+    def cancel(self):
+        self.cancel_requested = True
+
+    def acknowledge_result(self):
+        self.result_acknowledgements += 1
+
+    def finish(self, summary=None):
+        self.running = False
+        self.summary = dict(summary or {})
+        self.finished_signal.emit(dict(self.summary))
+        self.finished.emit()
+
+    def deleteLater(self):
+        self.deleted = True
 
 
 class SmokeSamWorker:
@@ -563,8 +609,7 @@ class GuiSmokeTests(unittest.TestCase):
             panel.deleteLater()
 
     def test_agent_panel_defers_embedded_webview_until_dashboard_load(self):
-        with patch.dict(os.environ, {"TAXAMASK_ANTCODE_BROWSER_MODE": "0"}, clear=False), \
-             patch("AntSleap.ui.taxamask_agent_panel.sys.platform", "win32"):
+        with patch.dict(os.environ, {"TAXAMASK_ANTCODE_BROWSER_MODE": "0"}, clear=False):
             panel = main_module.TaxaMaskAgentPanel("en", workspace_dir=str(PROJECT_ROOT))
         try:
             self.assertFalse(panel.browser_mode)
@@ -575,8 +620,7 @@ class GuiSmokeTests(unittest.TestCase):
             panel.deleteLater()
 
     def test_agent_panel_creates_embedded_webview_on_load(self):
-        with patch.dict(os.environ, {"TAXAMASK_ANTCODE_BROWSER_MODE": "0"}, clear=False), \
-             patch("AntSleap.ui.taxamask_agent_panel.sys.platform", "win32"):
+        with patch.dict(os.environ, {"TAXAMASK_ANTCODE_BROWSER_MODE": "0"}, clear=False):
             panel = main_module.TaxaMaskAgentPanel("en", workspace_dir=str(PROJECT_ROOT))
         try:
             created = []
@@ -1306,6 +1350,8 @@ class GuiSmokeTests(unittest.TestCase):
     def test_ask_agent_carries_compact_context_only(self):
         window = self._make_window()
         try:
+            # This test validates context shaping, not the embedded Dashboard lifecycle.
+            window.agent_panel.start_dashboard = lambda: None
             window.project.current_project_path = str(self.project_dir / "image_project.json")
             window.current_image = str(self.project_dir / "head.png")
             window.log("x" * 1200)
@@ -3480,6 +3526,770 @@ class GuiSmokeTests(unittest.TestCase):
         finally:
             window.deleteLater()
 
+    def test_batch_panel_split_starts_worker_without_running_detection_on_ui_thread(self):
+        window = self._make_window()
+        try:
+            source_images = []
+            for index in range(3):
+                source_image = self.project_dir / f"background_plate_{index:03d}.jpg"
+                Image.new("RGB", (80, 60), (100 + index, 120, 140)).save(source_image)
+                source_images.append(str(source_image))
+            window.project.add_images(source_images)
+            SmokeBatchPanelSplitThread.instances.clear()
+            messages = []
+
+            with patch.object(panel_split_module, "BatchPanelSplitThread", SmokeBatchPanelSplitThread), \
+                 patch.object(panel_split_module, "themed_yes_no_question", lambda *args, **kwargs: main_module.QMessageBox.Yes), \
+                 patch.object(workers_module, "detect_panel_crops") as detect_mock, \
+                 patch.object(main_module.QMessageBox, "information", lambda *args: messages.append(args)):
+                window.batch_split_panel_images()
+
+                self.assertEqual(len(SmokeBatchPanelSplitThread.instances), 1)
+                worker = SmokeBatchPanelSplitThread.instances[0]
+                self.assertEqual(len(worker.source_images), len(source_images))
+                self.assertTrue(
+                    all(
+                        _same_path(actual, expected)
+                        for actual, expected in zip(worker.source_images, source_images)
+                    )
+                )
+                self.assertEqual(len(worker.reserved_output_paths), len(source_images))
+                self.assertTrue(
+                    all(
+                        _same_path(actual, expected)
+                        for actual, expected in zip(
+                            worker.reserved_output_paths, source_images
+                        )
+                    )
+                )
+                self.assertTrue(worker.wait_for_result_ack)
+                self.assertTrue(worker.started)
+                self.assertTrue(worker.isRunning())
+                self.assertIs(window.batch_panel_split_thread, worker)
+                self.assertIsNotNone(window.batch_panel_split_progress_dialog)
+                self.assertFalse(window.btn_batch_split_panels.isEnabled())
+                detect_mock.assert_not_called()
+
+                # The native QThread can stop just before its queued finished
+                # callback runs. Do not allow a second batch in that gap.
+                worker.running = False
+                window.batch_split_panel_images()
+                self.assertEqual(len(SmokeBatchPanelSplitThread.instances), 1)
+                self.assertTrue(any("already running" in str(args[2]).lower() for args in messages if len(args) > 2))
+
+                worker.finish({"cancelled": False, "processed": 0, "total": len(source_images)})
+
+            self.assertTrue(worker.deleted)
+            self.assertIsNone(window.batch_panel_split_thread)
+            self.assertIsNone(window.batch_panel_split_progress_dialog)
+            self.assertTrue(window.btn_batch_split_panels.isEnabled())
+        finally:
+            window.deleteLater()
+
+    def test_batch_panel_split_blocks_while_project_task_is_running(self):
+        window = self._make_window()
+        try:
+            source_image = self.project_dir / "busy_plate.jpg"
+            Image.new("RGB", (80, 60), (120, 130, 140)).save(source_image)
+            window.project.add_images([str(source_image)])
+            window.inf_thread = SmokeThread()
+            window.inf_thread.start()
+            messages = []
+
+            with patch.object(
+                panel_split_module,
+                "themed_yes_no_question",
+                side_effect=AssertionError("confirmation must not open while inference is running"),
+            ), patch.object(
+                main_module.QMessageBox,
+                "information",
+                lambda *args: messages.append(args),
+            ):
+                window.batch_split_panel_images()
+
+            self.assertIsNone(window.batch_panel_split_thread)
+            self.assertTrue(any("Batch Inference" in str(args[2]) for args in messages if len(args) > 2))
+        finally:
+            window.inf_thread = None
+            window.deleteLater()
+
+    def test_batch_panel_split_worker_writes_complete_jpegs_and_summary(self):
+        source_image = self.project_dir / "worker_plate.png"
+        image = Image.new("RGB", (120, 80), (30, 40, 50))
+        image.paste((180, 160, 140), (60, 0, 120, 80))
+        image.save(source_image)
+        detections = [
+            {"box": [0, 0, 60, 80], "source": "white_separator_panel_split"},
+            {"box": [60, 0, 120, 80], "source": "white_separator_panel_split"},
+        ]
+        progress_events = []
+        image_results = []
+        errors = []
+        summaries = []
+        worker = workers_module.BatchPanelSplitThread([str(source_image)])
+        worker.progress_signal.connect(lambda done, total, path: progress_events.append((done, total, path)))
+        worker.image_result_signal.connect(image_results.append)
+        worker.error_signal.connect(lambda path, message: errors.append((path, message)))
+        worker.finished_signal.connect(summaries.append)
+
+        with patch.object(workers_module, "detect_panel_crops", return_value=detections):
+            worker.run()
+
+        self.assertEqual(errors, [])
+        self.assertEqual([(done, total) for done, total, _path in progress_events], [(0, 1), (1, 1)])
+        self.assertEqual(len(image_results), 1)
+        result = image_results[0]
+        self.assertEqual(result["review_status"], "auto_split")
+        self.assertEqual(len(result["crop_records"]), 2)
+        staged_paths = []
+        for record in result["crop_records"]:
+            output_path = Path(record["path"])
+            staged_path = Path(record["staged_path"])
+            staged_paths.append(staged_path)
+            self.assertFalse(output_path.exists())
+            self.assertTrue(staged_path.is_file())
+            with Image.open(staged_path) as crop:
+                self.assertEqual(crop.format, "JPEG")
+                self.assertEqual(crop.size, (60, 80))
+
+        promoted_records = workers_module.promote_staged_panel_crops(
+            result["crop_records"],
+            worker.reserved_output_identities,
+        )
+        self.assertEqual(len(promoted_records), 2)
+        self.assertTrue(all(not staged_path.exists() for staged_path in staged_paths))
+        for record in promoted_records:
+            self.assertNotIn("staged_path", record)
+            output_path = Path(record["path"])
+            self.assertTrue(output_path.is_file())
+            with Image.open(output_path) as crop:
+                self.assertEqual(crop.format, "JPEG")
+                self.assertEqual(crop.size, (60, 80))
+        self.assertEqual(list(self.project_dir.glob(".worker_plate__panel_*.tmp")), [])
+        self.assertEqual(len(summaries), 1)
+        self.assertEqual(summaries[0]["processed"], 1)
+        self.assertEqual(summaries[0]["total"], 1)
+        self.assertEqual(summaries[0]["crop_count"], 2)
+        self.assertFalse(summaries[0]["cancelled"])
+
+    def test_batch_panel_split_cancel_without_result_ack_discards_staging(self):
+        source_image = self.project_dir / "cancel_without_ack.png"
+        Image.new("RGB", (100, 60), (90, 110, 130)).save(source_image)
+        detections = [
+            {"box": [0, 0, 50, 60], "source": "white_separator_panel_split"},
+        ]
+        image_results = []
+        worker = workers_module.BatchPanelSplitThread(
+            [str(source_image)],
+            wait_for_result_ack=True,
+        )
+
+        def cancel_without_ack(result):
+            image_results.append(result)
+            worker.cancel()
+
+        worker.image_result_signal.connect(cancel_without_ack)
+        with patch.object(workers_module, "detect_panel_crops", return_value=detections):
+            worker.run()
+
+        self.assertEqual(len(image_results), 1)
+        staged_path = Path(image_results[0]["crop_records"][0]["staged_path"])
+        self.assertFalse(staged_path.exists())
+        self.assertFalse(Path(image_results[0]["crop_records"][0]["path"]).exists())
+        self.assertTrue(worker.summary["cancelled"])
+
+    def test_batch_panel_split_processing_error_remains_retryable(self):
+        window = self._make_window()
+        try:
+            source_image = self.project_dir / "retryable_plate.jpg"
+            Image.new("RGB", (80, 60), (120, 130, 140)).save(source_image)
+            window.project.add_images([str(source_image)])
+            messages = []
+
+            with patch.object(workers_module, "detect_panel_crops", side_effect=OSError("decode failed")), \
+                 patch.object(panel_split_module, "themed_yes_no_question", lambda *args, **kwargs: main_module.QMessageBox.Yes), \
+                 patch.object(main_module.QMessageBox, "information", lambda *args: messages.append(args)):
+                window.batch_split_panel_images()
+                self.assertTrue(self._wait_until(lambda: window.batch_panel_split_thread is None, timeout=10.0))
+
+            review = window.project.get_image_provenance(str(source_image))["panel_split_review"]
+            self.assertEqual(review["status"], "retryable_error")
+            self.assertIn("decode failed", review["reason"])
+            retry_candidates = window._candidate_panel_split_sources()
+            self.assertEqual(len(retry_candidates), 1)
+            self.assertTrue(_same_path(retry_candidates[0], source_image))
+            self.assertTrue(
+                any("retryable failures: 1" in str(args[2]).lower() for args in messages if len(args) > 2),
+                repr(messages),
+            )
+        finally:
+            window.deleteLater()
+
+    def test_batch_panel_split_reserved_missing_output_uses_new_suffix(self):
+        source_image = self.project_dir / "reserved_plate.png"
+        reserved_output = self.project_dir / "reserved_plate__panel_001.jpg"
+        Image.new("RGB", (100, 60), (90, 110, 130)).save(source_image)
+        detections = [
+            {"box": [0, 0, 50, 60], "source": "white_separator_panel_split"},
+        ]
+        image_results = []
+        worker = workers_module.BatchPanelSplitThread(
+            [str(source_image)],
+            reserved_output_paths=[str(reserved_output)],
+        )
+        worker.image_result_signal.connect(image_results.append)
+
+        with patch.object(workers_module, "detect_panel_crops", return_value=detections):
+            worker.run()
+
+        self.assertEqual(len(image_results), 1)
+        staged_record = image_results[0]["crop_records"][0]
+        self.assertEqual(Path(staged_record["path"]).name, "reserved_plate__panel_001_2.jpg")
+        self.assertFalse(reserved_output.exists())
+        promoted = workers_module.promote_staged_panel_crops(
+            [staged_record],
+            worker.reserved_output_identities,
+        )
+        self.assertEqual(Path(promoted[0]["path"]).name, "reserved_plate__panel_001_2.jpg")
+        self.assertTrue(Path(promoted[0]["path"]).is_file())
+        self.assertFalse(reserved_output.exists())
+
+    def test_batch_panel_split_metadata_failure_removes_promoted_file(self):
+        window = self._make_window()
+        try:
+            source_image = self.project_dir / "metadata_failure_plate.jpg"
+            staged_crop = self.project_dir / ".metadata_failure_plate__panel_pending.tmp"
+            final_crop = self.project_dir / "metadata_failure_plate__panel_001.jpg"
+            Image.new("RGB", (100, 60), (90, 110, 130)).save(source_image)
+            Image.new("RGB", (50, 60), (90, 110, 130)).save(staged_crop, format="JPEG")
+            window.project.add_images([str(source_image)])
+            original_provenance = {"source_type": "manual_import", "note": "preserve me"}
+            window.project.set_image_provenance(str(source_image), original_provenance)
+            SmokeBatchPanelSplitThread.instances.clear()
+
+            with patch.object(panel_split_module, "BatchPanelSplitThread", SmokeBatchPanelSplitThread), \
+                 patch.object(panel_split_module, "themed_yes_no_question", lambda *args, **kwargs: main_module.QMessageBox.Yes), \
+                 patch.object(main_module.QMessageBox, "critical", lambda *args, **kwargs: None), \
+                 patch.object(window, "_set_panel_split_review", side_effect=RuntimeError("metadata update failed")):
+                window.batch_split_panel_images()
+                worker = SmokeBatchPanelSplitThread.instances[0]
+                worker.image_result_signal.emit(
+                    {
+                        "source_image": str(source_image),
+                        "detections": [
+                            {"box": [0, 0, 50, 60], "source": "white_separator_panel_split"},
+                        ],
+                        "crop_records": [
+                            {
+                                "path": str(final_crop),
+                                "staged_path": str(staged_crop),
+                                "source_image": str(source_image),
+                                "crop_index": 1,
+                                "crop_box": [0, 0, 50, 60],
+                                "source_size": [100, 60],
+                                "crop_source": "white_separator_panel_split",
+                            }
+                        ],
+                        "review_status": "auto_split",
+                        "review_reason": "white_separator_panel_split",
+                        "error": "",
+                    }
+                )
+                self.assertTrue(worker.cancel_requested)
+                worker.finish({"cancelled": True, "processed": 1, "total": 1})
+
+            self.assertEqual(worker.result_acknowledgements, 1)
+            self.assertFalse(staged_crop.exists())
+            self.assertFalse(final_crop.exists())
+            self.assertEqual(window.project.get_image_provenance(str(source_image)), original_provenance)
+            self.assertFalse(any(_same_path(path, final_crop) for path in window.project.project_data["images"]))
+        finally:
+            window.deleteLater()
+
+    def test_batch_panel_split_save_failure_rolls_back_pending_result(self):
+        window = self._make_window()
+        try:
+            source_image = self.project_dir / "save_failure_plate.jpg"
+            staged_crop = self.project_dir / ".save_failure_plate__panel_pending.tmp"
+            final_crop = self.project_dir / "save_failure_plate__panel_001.jpg"
+            Image.new("RGB", (100, 60), (90, 110, 130)).save(source_image)
+            Image.new("RGB", (50, 60), (90, 110, 130)).save(staged_crop, format="JPEG")
+            window.project.add_images([str(source_image)])
+            original_provenance = window.project.get_image_provenance(str(source_image))
+            SmokeBatchPanelSplitThread.instances.clear()
+
+            with patch.object(panel_split_module, "BatchPanelSplitThread", SmokeBatchPanelSplitThread), \
+                 patch.object(panel_split_module, "themed_yes_no_question", lambda *args, **kwargs: main_module.QMessageBox.Yes), \
+                 patch.object(main_module.QMessageBox, "critical", lambda *args, **kwargs: None):
+                window.batch_split_panel_images()
+                worker = SmokeBatchPanelSplitThread.instances[0]
+                with patch.object(window.project, "save_project", side_effect=OSError("database unavailable")):
+                    worker.image_result_signal.emit(
+                        {
+                            "source_image": str(source_image),
+                            "detections": [
+                                {"box": [0, 0, 50, 60], "source": "white_separator_panel_split"},
+                            ],
+                            "crop_records": [
+                                {
+                                    "path": str(final_crop),
+                                    "staged_path": str(staged_crop),
+                                    "source_image": str(source_image),
+                                    "crop_index": 1,
+                                    "crop_box": [0, 0, 50, 60],
+                                    "source_size": [100, 60],
+                                    "crop_source": "white_separator_panel_split",
+                                }
+                            ],
+                            "review_status": "auto_split",
+                            "review_reason": "white_separator_panel_split",
+                            "error": "",
+                        }
+                    )
+                self.assertTrue(worker.cancel_requested)
+                worker.finish({"cancelled": True, "processed": 1, "total": 1})
+
+            self.assertEqual(worker.result_acknowledgements, 1)
+            self.assertFalse(staged_crop.exists())
+            self.assertFalse(final_crop.exists())
+            self.assertEqual(window.project.get_image_provenance(str(source_image)), original_provenance)
+            self.assertFalse(any(_same_path(path, final_crop) for path in window.project.project_data["images"]))
+        finally:
+            window.deleteLater()
+
+    def test_batch_panel_split_merges_per_image_results_and_reports_progress(self):
+        window = self._make_window()
+        try:
+            split_source = self.project_dir / "progress_split_plate.jpg"
+            skipped_source = self.project_dir / "progress_plain_plate.jpg"
+            generated_crop = self.project_dir / "progress_split_plate__panel_001.jpg"
+            Image.new("RGB", (120, 80), (90, 110, 130)).save(split_source)
+            Image.new("RGB", (120, 80), (140, 150, 160)).save(skipped_source)
+            Image.new("RGB", (50, 60), (90, 110, 130)).save(generated_crop)
+            window.project.add_images([str(split_source), str(skipped_source)])
+            SmokeBatchPanelSplitThread.instances.clear()
+            messages = []
+
+            with patch.object(panel_split_module, "BatchPanelSplitThread", SmokeBatchPanelSplitThread), \
+                 patch.object(panel_split_module, "themed_yes_no_question", lambda *args, **kwargs: main_module.QMessageBox.Yes), \
+                 patch.object(main_module.QMessageBox, "information", lambda *args: messages.append(args)):
+                window.batch_split_panel_images()
+                worker = SmokeBatchPanelSplitThread.instances[0]
+                progress = window.batch_panel_split_progress_dialog
+
+                worker.progress_signal.emit(1, 2, str(split_source))
+                self.assertEqual(progress.value(), 1)
+                self.assertIn("1/2", progress.labelText())
+                self.assertIn(split_source.name, progress.labelText())
+
+                worker.image_result_signal.emit(
+                    {
+                        "source_image": str(split_source),
+                        "detections": [
+                            {
+                                "box": [0, 0, 50, 60],
+                                "source": "white_separator_panel_split",
+                            }
+                        ],
+                        "crop_records": [
+                            {
+                                "path": str(generated_crop),
+                                "source_image": str(split_source),
+                                "crop_index": 1,
+                                "crop_box": [0, 0, 50, 60],
+                                "source_size": [120, 80],
+                                "crop_source": "white_separator_panel_split",
+                            }
+                        ],
+                        "review_status": "auto_split",
+                        "review_reason": "white_separator_panel_split",
+                        "error": "",
+                    }
+                )
+                worker.progress_signal.emit(2, 2, str(skipped_source))
+                worker.image_result_signal.emit(
+                    {
+                        "source_image": str(skipped_source),
+                        "detections": [],
+                        "crop_records": [],
+                        "error": "",
+                    }
+                )
+                worker.finish({"cancelled": False, "processed": 2, "total": 2})
+
+            self.assertEqual(worker.result_acknowledgements, 2)
+            self.assertTrue(any(_same_path(path, generated_crop) for path in window.project.project_data["images"]))
+            split_review = window.project.get_image_provenance(str(split_source))["panel_split_review"]
+            skipped_review = window.project.get_image_provenance(str(skipped_source))["panel_split_review"]
+            self.assertEqual(split_review["status"], "auto_split")
+            self.assertEqual(skipped_review["status"], "skipped")
+            crop_provenance = window.project.get_image_provenance(str(generated_crop))
+            self.assertTrue(_same_path(crop_provenance["derived_from"]["image_path"], split_source))
+            self.assertEqual(crop_provenance["derived_from"]["crop_source"], "white_separator_panel_split")
+            self.assertTrue(any("1 crop(s) from 1 image(s)" in str(args[2]) for args in messages if len(args) > 2))
+            self.assertIsNone(window.batch_panel_split_thread)
+            self.assertIsNone(window.batch_panel_split_progress_dialog)
+        finally:
+            window.deleteLater()
+
+    def test_batch_panel_split_cancel_keeps_only_completed_results(self):
+        window = self._make_window()
+        try:
+            first_source = self.project_dir / "cancel_first_plate.jpg"
+            queued_source = self.project_dir / "cancel_queued_plate.jpg"
+            completed_crop = self.project_dir / "cancel_first_plate__panel_001.jpg"
+            Image.new("RGB", (120, 80), (90, 110, 130)).save(first_source)
+            Image.new("RGB", (120, 80), (140, 150, 160)).save(queued_source)
+            Image.new("RGB", (50, 60), (90, 110, 130)).save(completed_crop)
+            window.project.add_images([str(first_source), str(queued_source)])
+            SmokeBatchPanelSplitThread.instances.clear()
+            messages = []
+
+            with patch.object(panel_split_module, "BatchPanelSplitThread", SmokeBatchPanelSplitThread), \
+                 patch.object(panel_split_module, "themed_yes_no_question", lambda *args, **kwargs: main_module.QMessageBox.Yes), \
+                 patch.object(main_module.QMessageBox, "information", lambda *args: messages.append(args)):
+                window.batch_split_panel_images()
+                worker = SmokeBatchPanelSplitThread.instances[0]
+                worker.image_result_signal.emit(
+                    {
+                        "source_image": str(first_source),
+                        "detections": [
+                            {
+                                "box": [0, 0, 50, 60],
+                                "source": "white_separator_panel_split",
+                            }
+                        ],
+                        "crop_records": [
+                            {
+                                "path": str(completed_crop),
+                                "source_image": str(first_source),
+                                "crop_index": 1,
+                                "crop_box": [0, 0, 50, 60],
+                                "source_size": [120, 80],
+                                "crop_source": "white_separator_panel_split",
+                            }
+                        ],
+                        "review_status": "auto_split",
+                        "review_reason": "white_separator_panel_split",
+                        "error": "",
+                    }
+                )
+
+                window.batch_panel_split_progress_dialog.canceled.emit()
+                self.assertTrue(worker.cancel_requested)
+                worker.finish({"cancelled": True, "processed": 1, "total": 2})
+
+            self.assertEqual(worker.result_acknowledgements, 1)
+            images = list(window.project.project_data["images"])
+            self.assertTrue(any(_same_path(path, completed_crop) for path in images))
+            self.assertEqual(window.project.get_image_provenance(str(first_source))["panel_split_review"]["status"], "auto_split")
+            self.assertNotIn("panel_split_review", window.project.get_image_provenance(str(queued_source)))
+            self.assertTrue(any("stopped after 1/2" in str(args[2]).lower() for args in messages if len(args) > 2))
+            self.assertIsNone(window.batch_panel_split_thread)
+            self.assertIsNone(window.batch_panel_split_progress_dialog)
+            self.assertTrue(window.btn_batch_split_panels.isEnabled())
+        finally:
+            window.deleteLater()
+
+    def test_batch_panel_split_stale_result_discards_staging_and_acknowledges(self):
+        window = self._make_window()
+        try:
+            source_image = self.project_dir / "stale_source.jpg"
+            final_crop = self.project_dir / "stale_source__panel_001.jpg"
+            staged_crop = self.project_dir / ".stale_source__panel_pending.tmp"
+            Image.new("RGB", (80, 60), (120, 130, 140)).save(source_image)
+            Image.new("RGB", (40, 60), (120, 130, 140)).save(staged_crop, format="JPEG")
+            window.project.add_images([str(source_image)])
+            SmokeBatchPanelSplitThread.instances.clear()
+
+            with patch.object(panel_split_module, "BatchPanelSplitThread", SmokeBatchPanelSplitThread), \
+                 patch.object(panel_split_module, "themed_yes_no_question", lambda *args, **kwargs: main_module.QMessageBox.Yes), \
+                 patch.object(main_module.QMessageBox, "information", lambda *args, **kwargs: None):
+                window.batch_split_panel_images()
+                worker = SmokeBatchPanelSplitThread.instances[0]
+                stale_result = {
+                    "source_image": str(source_image),
+                    "detections": [
+                        {"box": [0, 0, 40, 60], "source": "white_separator_panel_split"},
+                    ],
+                    "crop_records": [
+                        {
+                            "path": str(final_crop),
+                            "staged_path": str(staged_crop),
+                            "source_image": str(source_image),
+                            "crop_index": 1,
+                            "crop_box": [0, 0, 40, 60],
+                            "source_size": [80, 60],
+                            "crop_source": "white_separator_panel_split",
+                        }
+                    ],
+                    "review_status": "auto_split",
+                    "review_reason": "white_separator_panel_split",
+                    "error": "",
+                }
+
+                with patch.object(window, "_project_task_context_matches", return_value=False):
+                    worker.image_result_signal.emit(stale_result)
+
+                self.assertFalse(staged_crop.exists())
+                self.assertFalse(final_crop.exists())
+                self.assertTrue(worker.cancel_requested)
+                self.assertEqual(worker.result_acknowledgements, 1)
+                self.assertNotIn("panel_split_review", window.project.get_image_provenance(str(source_image)))
+                worker.finish({"cancelled": True, "processed": 0, "total": 1})
+
+            self.assertIsNone(window.batch_panel_split_thread)
+            self.assertIsNone(window.batch_panel_split_progress_dialog)
+        finally:
+            window.deleteLater()
+
+    def test_batch_panel_split_rollback_preserves_source_dirty_state(self):
+        window = self._make_window()
+        try:
+            source_image = str(self.project_dir / "concurrent_source.jpg")
+            generated_crop = str(self.project_dir / "concurrent_source__panel_001.jpg")
+            Image.new("RGB", (80, 60), (120, 130, 140)).save(source_image)
+            Image.new("RGB", (40, 60), (120, 130, 140)).save(generated_crop)
+            window.project.add_images([source_image, generated_crop], save=False)
+            window.project._sqlite_dirty_images = {source_image, generated_crop}
+            window.project._sqlite_label_dirty_images = {source_image, generated_crop}
+
+            window._rollback_batch_panel_split_checkpoint(
+                {
+                    "pending_generated_crop_paths": [generated_crop],
+                    "pending_source_provenance": {
+                        source_image: {"existed": False, "value": {}},
+                    },
+                    "crop_records": [{"path": generated_crop}],
+                    "pending_crop_records": [{"path": generated_crop}],
+                }
+            )
+
+            self.assertIn(source_image, window.project._sqlite_dirty_images)
+            self.assertIn(source_image, window.project._sqlite_label_dirty_images)
+            self.assertNotIn(generated_crop, window.project._sqlite_dirty_images)
+            self.assertNotIn(generated_crop, window.project._sqlite_label_dirty_images)
+            self.assertFalse(Path(generated_crop).exists())
+        finally:
+            window.deleteLater()
+
+    def test_batch_panel_split_candidates_skip_previously_processed_sources(self):
+        window = self._make_window()
+        try:
+            split_source = self.project_dir / "already_split_plate.jpg"
+            existing_crop = self.project_dir / "already_split_plate__panel_001.jpg"
+            skipped_source = self.project_dir / "already_checked_plain_plate.jpg"
+            untouched_source = self.project_dir / "new_plate.jpg"
+            for path in (split_source, existing_crop, skipped_source, untouched_source):
+                Image.new("RGB", (40, 30), (120, 130, 140)).save(path)
+            window.project.add_images([str(split_source), str(existing_crop), str(skipped_source), str(untouched_source)])
+            window.project.set_image_provenance(
+                str(existing_crop),
+                {
+                    "source_type": "image_crop",
+                    "derived_from": {
+                        "image_path": str(split_source),
+                        "crop_index": 1,
+                        "crop_source": "white_separator_panel_split",
+                    },
+                },
+                save=False,
+            )
+            window._set_panel_split_review(str(skipped_source), "skipped", reason="no_split_detected")
+
+            with patch.object(
+                window.project,
+                "get_image_provenance",
+                side_effect=AssertionError("candidate scan must stay linear and use project_data"),
+            ):
+                candidates = window._candidate_panel_split_sources()
+
+            self.assertEqual(len(candidates), 1)
+            self.assertTrue(_same_path(candidates[0], untouched_source))
+
+            window._clear_panel_split_review(str(split_source))
+            with patch.object(
+                window.project,
+                "get_image_provenance",
+                side_effect=AssertionError("candidate scan must stay linear and use project_data"),
+            ):
+                rerun_candidates = window._candidate_panel_split_sources()
+
+            self.assertEqual(len(rerun_candidates), 2)
+            self.assertTrue(any(_same_path(path, split_source) for path in rerun_candidates))
+            self.assertTrue(any(_same_path(path, untouched_source) for path in rerun_candidates))
+            self.assertFalse(any(_same_path(path, skipped_source) for path in rerun_candidates))
+        finally:
+            window.deleteLater()
+
+    def test_batch_panel_split_rerun_failure_keeps_source_eligible_with_existing_crop(self):
+        window = self._make_window()
+        try:
+            source_image = self.project_dir / "rerun_failure_plate.jpg"
+            existing_crop = self.project_dir / "rerun_failure_plate__panel_001.jpg"
+            Image.new("RGB", (80, 60), (120, 130, 140)).save(source_image)
+            Image.new("RGB", (40, 60), (120, 130, 140)).save(existing_crop)
+            window.project.add_images([str(source_image), str(existing_crop)])
+            window.project.set_image_provenance(
+                str(existing_crop),
+                {
+                    "source_type": "image_crop",
+                    "derived_from": {
+                        "image_path": str(source_image),
+                        "crop_index": 1,
+                        "crop_source": "white_separator_panel_split",
+                    },
+                },
+                save=False,
+            )
+            window._set_panel_split_review(
+                str(source_image),
+                "auto_split",
+                reason="white_separator_panel_split",
+            )
+            self.assertEqual(window._candidate_panel_split_sources(), [])
+
+            window._clear_panel_split_review(str(source_image))
+            rerun_candidates = window._candidate_panel_split_sources()
+            self.assertEqual(len(rerun_candidates), 1)
+            self.assertTrue(_same_path(rerun_candidates[0], source_image))
+            SmokeBatchPanelSplitThread.instances.clear()
+
+            with patch.object(panel_split_module, "BatchPanelSplitThread", SmokeBatchPanelSplitThread), \
+                 patch.object(panel_split_module, "themed_yes_no_question", lambda *args, **kwargs: main_module.QMessageBox.Yes), \
+                 patch.object(main_module.QMessageBox, "information", lambda *args, **kwargs: None):
+                window.batch_split_panel_images()
+                worker = SmokeBatchPanelSplitThread.instances[0]
+                worker.image_result_signal.emit(
+                    {
+                        "source_image": str(source_image),
+                        "detections": [],
+                        "crop_records": [],
+                        "review_status": "retryable_error",
+                        "review_reason": "processing_error: decode failed",
+                        "error": "decode failed",
+                    }
+                )
+                worker.finish(
+                    {
+                        "cancelled": False,
+                        "processed": 1,
+                        "total": 1,
+                        "failed": 1,
+                    }
+                )
+
+            provenance = window.project.get_image_provenance(str(source_image))
+            self.assertEqual(provenance["panel_split_review"]["status"], "retryable_error")
+            self.assertTrue(provenance["panel_split_rerun_requested"])
+            retry_candidates = window._candidate_panel_split_sources()
+            self.assertEqual(len(retry_candidates), 1)
+            self.assertTrue(_same_path(retry_candidates[0], source_image))
+            self.assertEqual(worker.result_acknowledgements, 1)
+        finally:
+            window.deleteLater()
+
+    def test_batch_panel_split_sqlite_roundtrip_preserves_traceability(self):
+        window = self._make_window()
+        try:
+            project_dir = self.project_dir / "panel_split_sqlite_project"
+            project_dir.mkdir(parents=True, exist_ok=True)
+            project_path = window.project.create_project(
+                "panel_split_roundtrip",
+                str(project_dir),
+                template_id=PROJECT_TEMPLATE_GENERIC,
+            )
+            source_image = project_dir / "sqlite_plate.png"
+            Image.new("RGB", (100, 60), (90, 110, 130)).save(source_image)
+            window.project.add_images([str(source_image)])
+            detections = [
+                {"box": [0, 0, 50, 60], "source": "white_separator_panel_split"},
+            ]
+
+            with patch.object(workers_module, "detect_panel_crops", return_value=detections), \
+                 patch.object(panel_split_module, "themed_yes_no_question", lambda *args, **kwargs: main_module.QMessageBox.Yes), \
+                 patch.object(main_module.QMessageBox, "information", lambda *args, **kwargs: None):
+                window.batch_split_panel_images()
+                self.assertTrue(self._wait_until(lambda: window.batch_panel_split_thread is None, timeout=10.0))
+
+            generated = [
+                path
+                for path in window.project.project_data["images"]
+                if not _same_path(path, source_image)
+            ]
+            self.assertEqual(len(generated), 1)
+            generated_crop = generated[0]
+            source_uid = window.project.get_image_uid(str(source_image), create=False)
+            crop_uid = window.project.get_image_uid(generated_crop, create=False)
+            self.assertTrue(source_uid)
+            self.assertTrue(crop_uid)
+            self.assertNotEqual(source_uid, crop_uid)
+
+            reloaded = type(window.project)()
+            reloaded.load_project(project_path)
+            reloaded_source_review = reloaded.get_image_provenance(str(source_image))["panel_split_review"]
+            reloaded_crop_provenance = reloaded.get_image_provenance(generated_crop)
+            self.assertEqual(reloaded_source_review["status"], "auto_split")
+            self.assertTrue(
+                _same_path(reloaded_crop_provenance["derived_from"]["image_path"], source_image)
+            )
+            self.assertEqual(
+                reloaded_crop_provenance["derived_from"]["crop_source"],
+                "white_separator_panel_split",
+            )
+            self.assertEqual(reloaded.get_image_uid(str(source_image), create=False), source_uid)
+            self.assertEqual(reloaded.get_image_uid(generated_crop, create=False), crop_uid)
+
+            active_project = window.project
+            try:
+                window.project = reloaded
+                self.assertEqual(window._candidate_panel_split_sources(), [])
+            finally:
+                window.project = active_project
+        finally:
+            window.deleteLater()
+
+    def test_batch_panel_split_no_results_closes_progress_and_does_not_import(self):
+        window = self._make_window()
+        try:
+            source_image = self.project_dir / "no_separator_plate.jpg"
+            Image.new("RGB", (80, 60), (120, 130, 140)).save(source_image)
+            window.project.add_images([str(source_image)])
+            SmokeBatchPanelSplitThread.instances.clear()
+            messages = []
+
+            with patch.object(panel_split_module, "BatchPanelSplitThread", SmokeBatchPanelSplitThread), \
+                 patch.object(panel_split_module, "themed_yes_no_question", lambda *args, **kwargs: main_module.QMessageBox.Yes), \
+                 patch.object(window, "_start_image_import") as import_mock, \
+                 patch.object(main_module.QMessageBox, "information", lambda *args: messages.append(args)):
+                window.batch_split_panel_images()
+                worker = SmokeBatchPanelSplitThread.instances[0]
+                progress = window.batch_panel_split_progress_dialog
+                worker.image_result_signal.emit(
+                    {
+                        "source_image": str(source_image),
+                        "detections": [],
+                        "crop_records": [],
+                        "error": "",
+                    }
+                )
+                worker.finish({"cancelled": False, "processed": 1, "total": 1})
+
+            self.assertEqual(worker.result_acknowledgements, 1)
+            import_mock.assert_not_called()
+            self.assertEqual(window.project.get_image_provenance(str(source_image))["panel_split_review"]["status"], "skipped")
+            self.assertTrue(
+                any("No panel crops were detected" in str(args[2]) for args in messages if len(args) > 2),
+                repr(messages),
+            )
+            self.assertFalse(progress.isVisible())
+            self.assertTrue(worker.deleted)
+            self.assertIsNone(window.batch_panel_split_thread)
+            self.assertIsNone(window.batch_panel_split_progress_dialog)
+            self.assertTrue(window.btn_batch_split_panels.isEnabled())
+        finally:
+            window.deleteLater()
+
     def test_batch_panel_split_adds_white_and_hard_seam_candidate_crops(self):
         window = self._make_window()
         try:
@@ -3494,9 +4304,7 @@ class GuiSmokeTests(unittest.TestCase):
             hard_image.paste((188, 194, 184), (210, 0, 420, 260))
             hard_image.save(hard_seam_image)
 
-            existing_crop = self.project_dir / "paper__accepted_000008__figure__crop_999.jpg"
-            Image.new("RGB", (64, 64), (120, 120, 120)).save(existing_crop)
-            window.project.add_images([str(parent_image), str(hard_seam_image), str(existing_crop)])
+            window.project.add_images([str(parent_image), str(hard_seam_image)])
             window.project.set_image_provenance(
                 str(parent_image),
                 {
@@ -3506,24 +4314,15 @@ class GuiSmokeTests(unittest.TestCase):
                 },
                 save=False,
             )
-            window.project.set_image_provenance(
-                str(existing_crop),
-                {
-                    "source_type": "pdf_candidate_crop",
-                    "derived_from": {"image_path": str(parent_image), "crop_index": 999},
-                },
-                save=False,
-            )
-
-            with patch.object(image_navigation_module, "themed_yes_no_question", lambda *args, **kwargs: main_module.QMessageBox.Yes):
+            with patch.object(panel_split_module, "themed_yes_no_question", lambda *args, **kwargs: main_module.QMessageBox.Yes):
                 with patch.object(main_module.QMessageBox, "information", lambda *args, **kwargs: None):
                     window.batch_split_panel_images()
+                    self.assertTrue(self._wait_until(lambda: window.batch_panel_split_thread is None, timeout=10.0))
 
             images = list(window.project.project_data["images"])
             self.assertTrue(_same_path(images[0], parent_image))
             self.assertTrue(_same_path(images[1], hard_seam_image))
-            self.assertTrue(_same_path(images[2], existing_crop))
-            generated_paths = images[3:]
+            generated_paths = images[2:]
             self.assertGreaterEqual(len(generated_paths), 3)
             white_generated = [
                 generated
@@ -3600,9 +4399,10 @@ class GuiSmokeTests(unittest.TestCase):
             image.save(source_image)
             window.project.add_images([str(source_image)])
 
-            with patch.object(image_navigation_module, "themed_yes_no_question", lambda *args, **kwargs: main_module.QMessageBox.Yes):
+            with patch.object(panel_split_module, "themed_yes_no_question", lambda *args, **kwargs: main_module.QMessageBox.Yes):
                 with patch.object(main_module.QMessageBox, "information", lambda *args, **kwargs: None):
                     window.batch_split_panel_images()
+                    self.assertTrue(self._wait_until(lambda: window.batch_panel_split_thread is None, timeout=10.0))
 
             generated_paths = list(window.project.project_data["images"])[1:]
             self.assertEqual(generated_paths, [])

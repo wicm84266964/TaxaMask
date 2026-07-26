@@ -3,15 +3,30 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
+import tifffile
 
 from AntSleap.core.tif_backend import TifBackendRunner, nnunet_v2_tif_backend_preset
-from AntSleap.core.tif_export import write_nifti_volume
+from AntSleap.core.tif_export import read_nifti_volume_with_metadata, write_nifti_volume
 from AntSleap.core.tif_project import TifProjectManager
 from AntSleap.core.tif_volume_io import load_volume_sidecar
 from AntSleap.tools import tif_nnunet_v2_backend
 from tests.test_tif_backend import make_predict_ready_project, make_top_level_only_project, make_train_ready_project
+
+
+def _absolute_path_values(value):
+    found = []
+    if isinstance(value, dict):
+        for item in value.values():
+            found.extend(_absolute_path_values(item))
+    elif isinstance(value, list):
+        for item in value:
+            found.extend(_absolute_path_values(item))
+    elif isinstance(value, str) and os.path.isabs(value):
+        found.append(value)
+    return found
 
 
 class TifNnunetV2BackendTests(unittest.TestCase):
@@ -48,7 +63,7 @@ class TifNnunetV2BackendTests(unittest.TestCase):
                     f"sys.path.insert(0, {str(repo_root)!r})",
                     "from pathlib import Path",
                     "from AntSleap.core.tif_export import read_nifti_volume, write_nifti_volume",
-                    "import numpy as np",
+                    "import numpy as np, torch",
                     "args = sys.argv[1:]",
                     "mode = args[0] if args else ''",
                     "Path(os.environ['nnUNet_results']).mkdir(parents=True, exist_ok=True)",
@@ -61,7 +76,7 @@ class TifNnunetV2BackendTests(unittest.TestCase):
                     "    dataset = 'Dataset701_TaxaMaskTifVolumeSegmentation'",
                     "    out = Path(os.environ['nnUNet_results']) / dataset / 'nnUNetTrainer__nnUNetPlans__3d_fullres' / 'fold_0'",
                     "    out.mkdir(parents=True, exist_ok=True)",
-                    "    (out / 'checkpoint_final.pth').write_bytes(b'fake checkpoint')",
+                    "    torch.save({'current_epoch': 3, 'init_args': {'plans': {'configurations': {'3d_fullres': {'batch_size': 2, 'patch_size': [2, 3, 4]}}}}, 'optimizer_state': {'param_groups': [{'lr': 0.001, 'weight_decay': 0.01}]}, 'logging': {'lrs': [0.001]}}, out / 'checkpoint_final.pth')",
                     "elif mode == 'predict':",
                     "    input_dir = Path(args[args.index('-i') + 1])",
                     "    output_dir = Path(args[args.index('-o') + 1])",
@@ -83,6 +98,75 @@ class TifNnunetV2BackendTests(unittest.TestCase):
         self.assertIn("{contract_json}", preset["train_command"])
         self.assertEqual(preset["python_executable"], "C:/Python/python.exe")
 
+    def test_prediction_input_requires_file_metadata_to_match_contract_scale(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "verified.nii.gz"
+            write_nifti_volume(
+                source,
+                np.zeros((2, 3, 4), dtype=np.uint8),
+                {
+                    "spacing_zyx": [2.0, 1.0, 0.5],
+                    "spacing_unit": "micrometer",
+                    "scale_verified": True,
+                },
+            )
+            contract = {
+                "output_dir": str(root / "mismatch"),
+                "input_scope": "top_level_volume",
+                "specimens": [
+                    {
+                        "specimen_id": "s1",
+                        "input_volume": {
+                            "path": str(source),
+                            "spacing_zyx": [3.0, 1.0, 0.5],
+                            "spacing_unit": "micrometer",
+                            "scale_verified": True,
+                        },
+                    }
+                ],
+            }
+
+            _images, cases = tif_nnunet_v2_backend._export_prediction_inputs(
+                contract,
+                SimpleNamespace(file_ending=".nii.gz"),
+            )
+
+            self.assertEqual(cases[0]["exchange_metadata"]["spacing_unit"], "unknown")
+            self.assertFalse(cases[0]["exchange_metadata"]["scale_verified"])
+            _array, output_metadata = read_nifti_volume_with_metadata(cases[0]["image_path"])
+            self.assertEqual(output_metadata["spacing_unit"], "unknown")
+            self.assertFalse(output_metadata["scale_verified"])
+
+    def test_plain_tiff_prediction_input_never_trusts_contract_only_scale(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "plain.tif"
+            tifffile.imwrite(source, np.zeros((2, 3, 4), dtype=np.uint8))
+            contract = {
+                "output_dir": str(root / "plain_output"),
+                "input_scope": "top_level_volume",
+                "specimens": [
+                    {
+                        "specimen_id": "s1",
+                        "input_volume": {
+                            "path": str(source),
+                            "spacing_zyx": [2.0, 1.0, 0.5],
+                            "spacing_unit": "micrometer",
+                            "scale_verified": True,
+                        },
+                    }
+                ],
+            }
+
+            _images, cases = tif_nnunet_v2_backend._export_prediction_inputs(
+                contract,
+                SimpleNamespace(file_ending=".nii.gz"),
+            )
+
+            self.assertEqual(cases[0]["exchange_metadata"]["spacing_unit"], "unknown")
+            self.assertFalse(cases[0]["exchange_metadata"]["scale_verified"])
+
     def test_adapter_prepare_dataset_writes_compact_nnunet_layout(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -102,7 +186,8 @@ class TifNnunetV2BackendTests(unittest.TestCase):
                 part_refs=[{"specimen_id": "01-0101-11", "part_id": "brain", "reslice_id": "brain_axis_001"}],
             )
 
-            dataset_dir = Path(result["result"]["provenance"]["dataset_dir"])
+            dataset_ref = Path(result["result"]["provenance"]["dataset_dir"])
+            dataset_dir = dataset_ref if dataset_ref.is_absolute() else Path(result["run_dir"]) / dataset_ref
             self.assertTrue((dataset_dir / "dataset.json").exists())
             self.assertTrue(any((dataset_dir / "imagesTr").glob("*_0000.nii.gz")))
             with open(dataset_dir / "nnunet_part_manifest.json", "r", encoding="utf-8") as handle:
@@ -114,7 +199,6 @@ class TifNnunetV2BackendTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             manager = make_train_ready_project(root)
-            self._add_second_train_ready_part(manager)
             script = self._script(root)
             fake = self._fake_nnunet_command(root)
             runner = TifBackendRunner(manager, {"backend_id": "taxamask_tif_nnunet_v2_backend"}, runs_root=root / "runs")
@@ -127,6 +211,16 @@ class TifNnunetV2BackendTests(unittest.TestCase):
                     {"specimen_id": "01-0101-12", "part_id": "brain", "reslice_id": "brain_axis_001"},
                 ],
             )
+            contract["training_split"] = {
+                "strategy": {"seed": 17},
+                "assignments": [
+                    {
+                        "sample_id": item["sample_id"],
+                        "partition": "train" if index == 0 else "validation",
+                    }
+                    for index, item in enumerate(contract["part_samples"])
+                ]
+            }
             runner.write_contract(contract)
             args = tif_nnunet_v2_backend.parse_args(
                 [
@@ -149,13 +243,15 @@ class TifNnunetV2BackendTests(unittest.TestCase):
 
             with open(contract["result_json"], "r", encoding="utf-8") as handle:
                 result = json.load(handle)
-            manifest_path = Path(result["provenance"]["model_manifest"])
+            manifest_path = Path(contract["result_json"]).parent / result["provenance"]["model_manifest"]
             self.assertTrue(manifest_path.exists())
             with open(manifest_path, "r", encoding="utf-8") as handle:
                 manifest = json.load(handle)
             self.assertEqual(manifest["training_mode"], "nnunet_v2_real")
             self.assertTrue(manifest["usable_for_research_prediction"])
             self.assertEqual(manifest["nnunet"]["label_id_mode"], "compact")
+            self.assertEqual(_absolute_path_values(result), [])
+            self.assertEqual(_absolute_path_values(manifest), [])
 
     def test_adapter_train_rejects_single_sample_before_nnunet_training(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -232,9 +328,16 @@ class TifNnunetV2BackendTests(unittest.TestCase):
                 "train",
                 run_id="train_top_level_dry",
                 run_dir=root / "runs" / "train" / "train_top_level_dry",
-                specimen_ids=["top-001"],
+                specimen_ids=["top-001", "top-002"],
                 input_scope="top_level_volume",
             )
+            contract["training_split"] = {
+                "strategy": {"seed": 17},
+                "assignments": [
+                    {"sample_id": "top-001", "partition": "train"},
+                    {"sample_id": "top-002", "partition": "validation"},
+                ]
+            }
             runner.write_contract(contract)
             args = tif_nnunet_v2_backend.parse_args(
                 [
@@ -254,13 +357,16 @@ class TifNnunetV2BackendTests(unittest.TestCase):
 
             with open(contract["result_json"], "r", encoding="utf-8") as handle:
                 result = json.load(handle)
-            manifest_path = Path(result["provenance"]["model_manifest"])
+            manifest_path = Path(contract["result_json"]).parent / result["provenance"]["model_manifest"]
             with open(manifest_path, "r", encoding="utf-8") as handle:
                 manifest = json.load(handle)
             self.assertEqual(manifest["model_family"], "nnunet_v2_tif_region")
             self.assertEqual(manifest["input_scope"], "top_level_volume")
             self.assertEqual(manifest["trained_parts"], [])
-            self.assertEqual(manifest["trained_top_level_volumes"], [{"specimen_id": "top-001"}])
+            self.assertEqual(
+                manifest["trained_top_level_volumes"],
+                [{"specimen_id": "top-001"}, {"specimen_id": "top-002"}],
+            )
 
     def test_adapter_predict_restores_taxamask_label_ids_and_imports_editable_result(self):
         with tempfile.TemporaryDirectory() as tmp:

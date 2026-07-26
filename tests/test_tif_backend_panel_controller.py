@@ -72,7 +72,10 @@ class TifBackendPanelControllerTests(unittest.TestCase):
                     controller.selected_backend_samples_for_action("predict"),
                     {
                         "input_scope": "part_reslice",
-                        "part_refs": [{"specimen_id": "01-0101-11", "part_id": "brain", "reslice_id": "brain_axis_001"}],
+                        "part_refs": [
+                            {"specimen_id": "01-0101-11", "part_id": "brain", "reslice_id": "brain_axis_001"},
+                            {"specimen_id": "01-0101-12", "part_id": "brain", "reslice_id": "brain_axis_001"},
+                        ],
                         "specimen_ids": [],
                         "fallback_reason": "",
                     },

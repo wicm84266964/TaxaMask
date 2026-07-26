@@ -172,6 +172,7 @@ class MainWindowStage5NavigationTests(unittest.TestCase):
         for filename in (
             "main_window_part_tree.py",
             "main_window_image_navigation.py",
+            "main_window_panel_split.py",
             "main_window_literature_bridge.py",
         ):
             source = (ROOT / "AntSleap" / "ui" / filename).read_text(encoding="utf-8")

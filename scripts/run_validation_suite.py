@@ -154,9 +154,103 @@ SUITES: dict[str, list[str]] = {
         "tests.test_stl_review_bridge",
         "tests.test_vlm_preannotation",
     ],
+    "round5_traceability": [
+        "tests.test_agentic_train_project",
+        "tests.test_blink_reproducibility",
+        "tests.test_blink_training_backend_guard",
+        "tests.test_blink_training_run_lifecycle",
+        "tests.test_embedded_skill_bundles",
+        "tests.test_embedded_taxonomy_paper_finder",
+        "tests.test_engine_weight_staging",
+        "tests.test_file_integrity",
+        "tests.test_gui_training_run_lifecycle",
+        "tests.test_integrity_manifest_service",
+        "tests.test_location_registry",
+        "tests.test_loss_weight_config",
+        "tests.test_loss_weight_profile_wiring",
+        "tests.test_path_identity",
+        "tests.test_project_integrity_bridge",
+        "tests.test_project_integrity_recovery",
+        "tests.test_project_integrity_registry",
+        "tests.test_tif_blink_training_lifecycle",
+        "tests.test_tif_integrity_bridge",
+        "tests.test_training_initial_weights",
+        "tests.test_training_integrity_recovery_dialog",
+        "tests.test_training_preflight_worker",
+        "tests.test_training_run_2d",
+        "tests.test_training_run_notes",
+        "tests.test_training_run_recorder",
+        "tests.test_training_run_setup",
+        "tests.test_training_run_tif",
+        "tests.test_training_truth",
+        "tests.test_training_weight_publisher",
+    ],
+    "round5_inference": [
+        "tests.test_predict_full_pipeline_baseline",
+        "tests.test_inference_thread_runtime",
+    ],
+    "round5_mesh": [
+        "tests.test_mesh_export",
+        "tests.test_mesh_export_ledger",
+        "tests.test_tif_mesh_export_dialog",
+    ],
+    "round5_local_axis_risk": [
+        "tests.test_tif_local_axis_batch",
+        "tests.test_tif_result_review_controller",
+        "tests.test_tif_truth_policy",
+        "tests.test_tif_truth_promotion_service",
+    ],
+    "round5_ci_smoke": [
+        "tests.test_integrity_manifest_service.IntegrityManifestServiceTests.test_create_and_verify_manifest_atomically",
+        "tests.test_integrity_manifest_service.IntegrityManifestServiceTests.test_pending_started_record_recovers_to_incomplete",
+        "tests.test_project_integrity_bridge.ProjectIntegrityBridgeTests.test_training_snapshot_uses_current_registered_version",
+        "tests.test_predict_full_pipeline_baseline.PredictFullPipelineBaselineTests.test_frozen_scenarios_match_public_result_and_diagnostic_baseline",
+        "tests.test_mesh_export.MeshExportTests.test_non_isotropic_zyx_volume_becomes_physical_xyz_mesh",
+        "tests.test_mesh_export.MeshExportTests.test_export_records_raw_and_preview_stl_in_sqlite",
+        "tests.test_mesh_export.MeshExportTests.test_cancel_after_first_item_leaves_incomplete_recoverable_run",
+        "tests.test_mesh_export.MeshExportTests.test_temporary_stl_validation_failure_leaves_no_partial_file",
+        "tests.test_tif_local_axis_batch.TifLocalAxisBatchTests.test_risk_components_compare_active_model_id_and_version",
+        "tests.test_tif_local_axis_batch.TifLocalAxisBatchTests.test_sorting_and_accepting_selected_axis_do_not_bypass_manual_truth_gate",
+        "tests.test_tif_result_review_controller.TifResultReviewControllerTests.test_accept_selected_results_uses_truth_promotion_service",
+        "tests.test_tif_truth_policy.TifTruthPolicyTests.test_training_uses_manual_truth_only",
+    ],
+    "round5_path_safety": [
+        "tests.test_file_integrity.FileIntegrityTests.test_tree_rejects_symlink_instead_of_following_it",
+        "tests.test_file_integrity.FileIntegrityTests.test_root_symlink_is_rejected",
+        "tests.test_integrity_manifest_service.IntegrityManifestServiceTests.test_managed_root_symlink_is_rejected_even_when_target_is_contained",
+        "tests.test_integrity_manifest_service.IntegrityManifestServiceTests.test_managed_parent_symlink_is_rejected_before_fingerprinting",
+        "tests.test_location_registry.LocationRegistryTests.test_target_and_parent_symlinks_are_rejected",
+        "tests.test_location_registry.LocationRegistryTests.test_windows_reparse_path_is_rejected_without_os_privileges",
+        "tests.test_project_integrity_recovery.ProjectIntegrityRecoveryTests.test_inspection_and_registration_reject_linked_parent",
+        "tests.test_tif_integrity_bridge.TifIntegrityBridgeTests.test_baseline_rejects_asset_below_symlinked_parent",
+        "tests.test_project_integrity_registry.ProjectIntegrityRegistryTests.test_resolver_rejects_symlink_root_and_leaves_no_temp_files",
+        "tests.test_project_integrity_registry.ProjectIntegrityRegistryTests.test_resolver_rejects_windows_reparse_root_without_os_privileges",
+        "tests.test_mesh_export.MeshExportTests.test_manual_truth_path_rejects_symlink_components",
+        "tests.test_mesh_export.MeshExportTests.test_export_target_rejects_symlink_components",
+        "tests.test_mesh_export.MeshExportTests.test_safe_cleanup_rejects_linked_export_root",
+        "tests.test_mesh_export.MeshExportTests.test_safe_cleanup_rejects_linked_descendant",
+        "tests.test_mesh_export.MeshExportTests.test_verify_rejects_linked_export_root",
+        "tests.test_training_run_recorder.TrainingRunRecorderTests.test_external_directory_symlink_root_is_rejected",
+        "tests.test_training_run_recorder.TrainingRunRecorderTests.test_registered_path_base_rejects_symlinked_parent",
+        "tests.test_training_run_recorder.TrainingRunRecorderTests.test_artifact_symlink_is_rejected",
+        "tests.test_training_run_notes.TrainingRunNoteStoreTests.test_note_projection_symlink_is_ignored",
+        "tests.test_training_weight_publisher.TrainingWeightPublisherTests.test_source_file_and_parent_symlinks_are_rejected",
+        "tests.test_training_weight_publisher.TrainingWeightPublisherTests.test_managed_root_and_training_runs_links_are_rejected",
+        "tests.test_training_weight_publisher.TrainingWeightPublisherTests.test_unsafe_hidden_directory_is_preserved_for_manual_review",
+        "tests.test_path_identity.PathIdentityTests.test_realpath_resolves_directory_aliases_when_supported",
+        "tests.test_path_identity.PathIdentityTests.test_project_image_state_uses_one_key_across_directory_aliases",
+    ],
 }
 
-DEFAULT_ORDER = [name for name in SUITES if name != "validation_chunk_sample"]
+DEFAULT_ORDER = [
+    name
+    for name in SUITES
+    if name not in {
+        "validation_chunk_sample",
+        "round5_ci_smoke",
+        "round5_path_safety",
+    }
+]
 SUITE_CHOICES = list(SUITES)
 SUITE_DEFAULT_CHUNK_SIZES = {
     "gui_smoke": 3,
@@ -169,6 +263,8 @@ def _test_count(modules: list[str]) -> int:
     for module in modules:
         path = ROOT / (module.replace(".", os.sep) + ".py")
         if not path.exists():
+            if module.startswith("tests.") and ".test_" in module:
+                total += 1
             continue
         with path.open("r", encoding="utf-8") as handle:
             total += sum(1 for line in handle if line.lstrip().startswith("def test_"))

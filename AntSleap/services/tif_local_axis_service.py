@@ -176,7 +176,7 @@ class TifLocalAxisService:
         if not output_dir:
             return service_blocked("output_dir_required", reasons=["output_dir_required"])
         abs_output = os.path.abspath(str(output_dir))
-        filters = {}
+        filters = {"include_unconfirmed": False}
         if template_id:
             filters["template_id"] = str(template_id)
         return service_ok("local_axis_manifest_export_request_ready", output_dir=abs_output, filters=filters)

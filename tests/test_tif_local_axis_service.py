@@ -13,7 +13,10 @@ class TifLocalAxisServiceTests(unittest.TestCase):
             result = service.build_manifest_export_request(None, Path(tmp) / "exports", template_id="brain")
 
             self.assertTrue(result.ok)
-            self.assertEqual(result.payload["filters"], {"template_id": "brain"})
+            self.assertEqual(
+                result.payload["filters"],
+                {"include_unconfirmed": False, "template_id": "brain"},
+            )
             self.assertTrue(result.payload["output_dir"].endswith("exports"))
 
     def test_initial_draft_frame_and_reslice_payload_are_gui_free(self):

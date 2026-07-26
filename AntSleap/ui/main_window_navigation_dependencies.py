@@ -1,7 +1,6 @@
 import os
 import re
 
-from PIL import Image as PILImage
 from PySide6.QtCore import Qt, QEvent
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
@@ -39,7 +38,6 @@ try:
     )
     from AntSleap.core.model_profiles import DEFAULT_VLM_IMAGE_GROUP
     from AntSleap.core.part_tree import build_part_tree_groups
-    from AntSleap.core.panel_splitter import detect_panel_crops
     from AntSleap.ui.cropper import ImageCropper
     from AntSleap.ui.main_window_dialog_support import (
         BACKGROUND_IMAGE_IMPORT_THRESHOLD,
@@ -67,7 +65,6 @@ except ImportError:
     )
     from core.model_profiles import DEFAULT_VLM_IMAGE_GROUP
     from core.part_tree import build_part_tree_groups
-    from core.panel_splitter import detect_panel_crops
     from ui.cropper import ImageCropper
     from ui.main_window_dialog_support import BACKGROUND_IMAGE_IMPORT_THRESHOLD, LARGE_PROJECT_OPEN_LIGHTWEIGHT_THRESHOLD
     from ui.main_window_dialogs import LiteratureDescriptionDialog

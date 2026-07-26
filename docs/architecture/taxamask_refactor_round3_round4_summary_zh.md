@@ -110,7 +110,7 @@
 ### 信号、状态与 Agent 对齐
 
 - MainWindow 类体不再直接写入工作流状态，也不直接建立 Qt 连接。
-- 架构扫描覆盖 30 个责任模块，真实 `connect/connect_once` 总数仍为 194，说明连接被迁移而不是删除。
+- 架构扫描覆盖 30 个责任模块；第五轮推理失败提示接入后，真实 `connect/connect_once` 总数为 198，连接仍由责任模块管理。
 - PDF、TIF 和 Blink 的跨工作台事件继续由 signal router/coordinator 管理。
 - 动态 worker 回调绑定 worker/run identity，过期任务结果不能刷新新项目或新选择。
 - MainWindow 直接私有实现测试引用从 146 次降到 0；真实窗口上的 workflow contract 测试继续保留。
@@ -127,7 +127,7 @@
 | MainWindow 直接方法 | 390 个待归属方法 | 1 |
 | MainWindow 直接状态写入 | 多处分散写入 | 0 |
 | MainWindow 直接 Qt 连接 | 多处分散连接 | 0 |
-| 全部责任模块真实连接 | 未集中审计 | 194 |
+| 全部责任模块真实连接 | 未集中审计 | 198 |
 
 最大 workflow 模块低于 1,500 行建议审阅线。`main.py` 行数下降 95.2%，其收益主要是降低跨工作流修改风险和提高测试定位能力，不应直接等同于 95.2% 的运行速度提升。
 

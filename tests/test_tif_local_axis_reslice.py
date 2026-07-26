@@ -414,6 +414,61 @@ class TifLocalAxisResliceTests(unittest.TestCase):
 
             self.assertEqual(result["record"]["local_frame"]["spacing_zyx"], [2.0, 1.0, 1.0])
 
+    def test_export_downgrades_conflicting_part_scale_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "conflicting_scale"
+            manager = TifProjectManager()
+            manager.create_project("conflicting_scale", project_root)
+            manager.create_specimen_scaffold("01-0101-conflict")
+            image = np.arange(4 * 5 * 6, dtype=np.uint16).reshape((4, 5, 6))
+            image_rel = "specimens/01-0101-conflict/working/image.ome.zarr"
+            image_meta = write_volume_sidecar(
+                project_root / image_rel,
+                image,
+                role="working_image",
+                spacing_zyx=[2.0, 1.0, 0.5],
+                spacing_unit="micrometer",
+                scale_verified=True,
+            )
+            manager.register_working_volume(
+                "01-0101-conflict",
+                image_rel,
+                image_meta["shape_zyx"],
+                image_meta["dtype"],
+                spacing_zyx=image_meta["spacing_zyx"],
+                spacing_unit=image_meta["spacing_unit"],
+                scale_verified=True,
+                save=True,
+            )
+            part = crop_volume_to_part(
+                manager,
+                "01-0101-conflict",
+                "head",
+                [[0, 4], [0, 5], [0, 6]],
+                display_name="Head",
+            )
+            part["image"]["spacing_zyx"] = [3.0, 1.0, 0.5]
+            frame = compute_local_frame(
+                [1.5, 2.0, 2.5],
+                [0.0, 2.0, 2.5],
+                [3.0, 2.0, 2.5],
+                spacing_zyx=[2.0, 1.0, 0.5],
+                roll_reference={
+                    "point_a": {"role": "left_reference", "zyx": [1.5, 1.0, 2.5]},
+                    "point_b": {"role": "right_reference", "zyx": [1.5, 3.0, 2.5]},
+                },
+            )
+
+            result = export_part_reslice(
+                manager,
+                "01-0101-conflict",
+                "head",
+                {"reslice_id": "axis_001", "template_id": "head", "local_frame": frame},
+            )
+
+            self.assertEqual(result["metadata"]["source"]["part_spacing_unit"], "unknown")
+            self.assertFalse(result["metadata"]["source"]["part_scale_verified"])
+
     def test_export_requires_roll_reference_pair_for_final_reslice(self):
         with tempfile.TemporaryDirectory() as tmp:
             project_root = Path(tmp) / "missing_roll"

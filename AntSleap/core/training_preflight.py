@@ -4,6 +4,8 @@ import os
 
 from PIL import Image
 
+from .training_truth import resolve_part_training_trust
+
 
 def sanitize_polygon(points):
     clean_points = []
@@ -87,10 +89,17 @@ def lower_locator_size_options(current_size_pair, max_options=4):
     return options
 
 
-def stable_train_val_split(samples, val_ratio=0.2):
+def stable_train_val_split(samples, val_ratio=0.2, sample_uid_by_path=None):
+    uid_map = dict(sample_uid_by_path or {})
+
+    def stable_key(item):
+        path = str(item[0])
+        identity = str(uid_map.get(path) or path)
+        return hashlib.sha1(identity.encode("utf-8")).hexdigest()
+
     ordered = sorted(
         list(samples or []),
-        key=lambda item: hashlib.sha1(str(item[0]).encode("utf-8")).hexdigest(),
+        key=stable_key,
     )
     if not ordered:
         return [], []
@@ -125,7 +134,14 @@ def _count_part_coverage(samples, ordered_parts):
     return counts
 
 
-def build_training_preflight(images, labels_by_image, taxonomy, locator_scope):
+def build_training_preflight(
+    images,
+    labels_by_image,
+    taxonomy,
+    locator_scope,
+    *,
+    sample_uid_by_path=None,
+):
     taxonomy_list = [str(part).strip() for part in (taxonomy or []) if str(part).strip()]
     locator_scope_list = [
         str(part).strip() for part in (locator_scope or []) if str(part).strip()
@@ -144,6 +160,8 @@ def build_training_preflight(images, labels_by_image, taxonomy, locator_scope):
     excluded_zero_annotation_images = []
     excluded_invalid_annotation_images = []
     excluded_auto_draft_images = []
+    excluded_untrusted_images = []
+    excluded_untrusted_parts = []
 
     locator_exact_size_counts = {}
 
@@ -166,13 +184,19 @@ def build_training_preflight(images, labels_by_image, taxonomy, locator_scope):
 
         valid_parts = {}
         valid_boxes = {}
-        skipped_auto_draft_parts = []
+        skipped_untrusted_parts = []
         for part_name, points in (raw_parts or {}).items():
             clean_part_name = str(part_name).strip()
             if clean_part_name not in taxonomy_set:
                 continue
-            if isinstance(raw_descriptions, dict) and raw_descriptions.get(clean_part_name) == "Auto-Annotated":
-                skipped_auto_draft_parts.append(clean_part_name)
+            trust = resolve_part_training_trust(label_entry, clean_part_name)
+            if not trust.get("eligible"):
+                detail = {
+                    "image_path": str(image_path),
+                    **trust,
+                }
+                skipped_untrusted_parts.append(detail)
+                excluded_untrusted_parts.append(detail)
                 continue
 
             clean_points = sanitize_polygon(points)
@@ -185,8 +209,17 @@ def build_training_preflight(images, labels_by_image, taxonomy, locator_scope):
                 valid_boxes[clean_part_name] = clean_box
 
         if not valid_parts:
-            if skipped_auto_draft_parts and raw_parts:
-                excluded_auto_draft_images.append(str(image_path))
+            if skipped_untrusted_parts and raw_parts:
+                excluded_untrusted_images.append(str(image_path))
+                if any(
+                    detail.get("reason")
+                    in {
+                        "legacy_auto_annotated_draft",
+                        "legacy_confirmed_ai_has_auto_draft_marker",
+                    }
+                    for detail in skipped_untrusted_parts
+                ):
+                    excluded_auto_draft_images.append(str(image_path))
             elif raw_parts:
                 excluded_invalid_annotation_images.append(str(image_path))
             else:
@@ -269,6 +302,20 @@ def build_training_preflight(images, labels_by_image, taxonomy, locator_scope):
         warnings.append(
             f"Excluded {len(excluded_auto_draft_images)} image(s) with only unreviewed Auto-Annotated drafts from training."
         )
+    conflict_count = sum(
+        1 for detail in excluded_untrusted_parts if detail.get("state") == "conflict"
+    )
+    draft_count = sum(
+        1 for detail in excluded_untrusted_parts if detail.get("state") == "draft"
+    )
+    if draft_count:
+        warnings.append(
+            f"Excluded {draft_count} unconfirmed part annotation(s) from training."
+        )
+    if conflict_count:
+        warnings.append(
+            f"Excluded {conflict_count} part annotation(s) with conflicting trust metadata from training."
+        )
     if excluded_zero_annotation_images:
         warnings.append(
             f"Excluded {len(excluded_zero_annotation_images)} zero-annotation image(s) from training."
@@ -304,8 +351,12 @@ def build_training_preflight(images, labels_by_image, taxonomy, locator_scope):
                 f"SAM/parts coverage is 0 for '{part_name}', so that part will not enter SAM training."
             )
 
-    locator_train_data, locator_val_data = stable_train_val_split(locator_samples)
-    parts_train_data, parts_val_data = stable_train_val_split(parts_samples)
+    locator_train_data, locator_val_data = stable_train_val_split(
+        locator_samples, sample_uid_by_path=sample_uid_by_path
+    )
+    parts_train_data, parts_val_data = stable_train_val_split(
+        parts_samples, sample_uid_by_path=sample_uid_by_path
+    )
     locator_train_part_counts = _count_part_coverage(locator_train_data, locator_scope_list)
     locator_val_part_counts = _count_part_coverage(locator_val_data, locator_scope_list)
     parts_train_part_counts = _count_part_coverage(parts_train_data, taxonomy_list)
@@ -341,6 +392,8 @@ def build_training_preflight(images, labels_by_image, taxonomy, locator_scope):
         "excluded_zero_annotation_images": excluded_zero_annotation_images,
         "excluded_invalid_annotation_images": excluded_invalid_annotation_images,
         "excluded_auto_draft_images": excluded_auto_draft_images,
+        "excluded_untrusted_images": excluded_untrusted_images,
+        "excluded_untrusted_parts": excluded_untrusted_parts,
     }
 
 

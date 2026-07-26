@@ -24,6 +24,8 @@ import AntSleap.ui.main_window_blink_context as blink_context_module
 from main import BlinkEntryDialog, MainWindow
 from ui.blink_lab import BlinkLabWidget, BlinkTrainingThread, BucketDeletePreviewDialog, BucketDeleteTypeConfirmDialog
 from AntSleap.core.blink_training_strategy import DEFAULT_BLINK_TRAINING_STRATEGY
+from AntSleap.core.blink_expert_manifest import BLINK_EXPERT_BACKEND_HEATMAP
+from AntSleap.core.model_profiles import DEFAULT_BLINK_OUTER_LOSS_WEIGHTS
 from AntSleap.core.blink_trainer import BlinkExpertTrainer
 from AntSleap.core.expert_notes import load_expert_notes, set_expert_note
 
@@ -686,6 +688,76 @@ class BlinkBridgeTests(unittest.TestCase):
         self.assertIn("Head", widget.canvas.manual_boxes)
         self.assertEqual(tuple(widget.zoomed_img_np.shape[:2]), (800, 800))
 
+    def test_blink_integrity_recovery_allows_only_one_retry(self):
+        widget = BlinkLabWidget(self.engine, self.pm)
+        request = {"project_path": self.pm.current_project_path, "part": "Mandible"}
+        self.assertTrue(widget._queue_blink_integrity_retry(request))
+        self.assertFalse(widget._queue_blink_integrity_retry(request))
+        self.assertTrue(widget.integrity_recovery_retry_used)
+        self.assertEqual(widget.pending_blink_retry_request, request)
+
+    def test_blink_training_integrity_error_queues_recovery_retry(self):
+        widget = BlinkLabWidget(self.engine, self.pm)
+        widget.pending_training_request = {
+            "project_path": self.pm.current_project_path,
+            "part": "Mandible",
+        }
+        worker = types.SimpleNamespace(project_path=self.pm.current_project_path)
+
+        class FakeRecovery:
+            report = {"status": "verified"}
+
+            def __init__(self, *args, **kwargs):
+                self.args = args
+                self.kwargs = kwargs
+
+            def exec(self):
+                return 1
+
+        with patch("ui.blink_lab.TrainingIntegrityRecoveryDialog", FakeRecovery):
+            widget._on_training_error("registry_verified_file_changed", worker=worker)
+
+        self.assertTrue(widget.integrity_recovery_retry_used)
+        self.assertEqual(
+            widget.pending_blink_retry_request,
+            widget.pending_training_request,
+        )
+
+    def test_blink_preflight_recovery_retry_links_failed_run(self):
+        widget = BlinkLabWidget(self.engine, self.pm)
+        request = {
+            "project_path": self.pm.current_project_path,
+            "part": "Mandible",
+        }
+        worker = types.SimpleNamespace(project_path=self.pm.current_project_path)
+        error = RuntimeError("registry_verified_file_changed")
+        error.training_run_id = "failed_blink_preflight_run"
+        widget.training_preflight_thread = worker
+        widget.training_preflight_dialog = None
+
+        class FakeRecovery:
+            report = {"status": "verified"}
+
+            def __init__(self, *args, **kwargs):
+                self.args = args
+                self.kwargs = kwargs
+
+            def exec(self):
+                return 1
+
+        with patch("ui.blink_lab.QMessageBox.critical"), patch(
+            "ui.blink_lab.TrainingIntegrityRecoveryDialog", FakeRecovery
+        ), patch.object(
+            widget, "_start_queued_blink_integrity_retry", return_value=True
+        ) as start_retry:
+            widget._on_blink_preflight_error(error, request, worker)
+
+        self.assertEqual(
+            widget.pending_blink_retry_request["retry_of"],
+            "failed_blink_preflight_run",
+        )
+        start_retry.assert_called_once_with()
+
     def test_blink_session_filters_vlm_drafts_from_internal_auto_boxes(self):
         label_entry = self.pm.project_data["labels"][self.image_path]
         label_entry.setdefault("auto_boxes", {})["Mandible"] = [5.0, 5.0, 15.0, 15.0]
@@ -1120,6 +1192,7 @@ class BlinkBridgeTests(unittest.TestCase):
             learning_rate=0.002,
             weight_decay=0.0003,
             input_size=384,
+            outer_loss_weights={"final": 1.2, "step": 0.4, "view": 0.3, "consistency": 0.2},
             device="cpu",
         )
         with patch("AntSleap.core.blink_trainer.BlinkExpertTrainer", FakeTrainer):
@@ -1136,19 +1209,66 @@ class BlinkBridgeTests(unittest.TestCase):
                 "learning_rate",
                 "weight_decay",
                 "input_size",
+                "outer_loss_weights",
                 "training_strategy",
                 "device",
                 "allowed_image_paths",
                 "training_scope",
+                "save_dir",
+                "training_records",
+                "validation_records",
             },
         )
         self.assertEqual(trainer_kwargs.get("learning_rate"), 0.002)
         self.assertEqual(trainer_kwargs.get("weight_decay"), 0.0003)
         self.assertEqual(trainer_kwargs.get("input_size"), 384)
+        self.assertEqual(
+            trainer_kwargs.get("outer_loss_weights"),
+            {"final": 1.2, "step": 0.4, "view": 0.3, "consistency": 0.2},
+        )
         self.assertEqual(trainer_kwargs.get("training_strategy"), DEFAULT_BLINK_TRAINING_STRATEGY)
         self.assertEqual(trainer_kwargs.get("device"), "cpu")
         self.assertEqual(trainer_kwargs.get("allowed_image_paths"), [])
         self.assertEqual(trainer_kwargs.get("training_scope"), {})
+
+    def test_heatmap_blink_training_thread_passes_outer_loss_weights_to_trainer(self):
+        trainer_kwargs = {}
+
+        class FakeTrainer:
+            def __init__(self, **kwargs):
+                trainer_kwargs.update(kwargs)
+
+            def train(self, **_kwargs):
+                return "saved_heatmap_expert.pth"
+
+        custom_weights = {"final": 1.3, "step": 0.45, "view": 0.25, "consistency": 0.15}
+        thread = BlinkTrainingThread(
+            project_path=self.pm.current_project_path,
+            part_name="Mandible",
+            parent_part="Head",
+            epochs=2,
+            batch_size=1,
+            trainer_backend=BLINK_EXPERT_BACKEND_HEATMAP,
+            outer_loss_weights=custom_weights,
+            device="cpu",
+        )
+        with patch("AntSleap.core.blink_heatmap_trainer.BlinkHeatmapTrainer", FakeTrainer):
+            thread.start()
+            thread.wait()
+            self.app.processEvents()
+
+        self.assertEqual(trainer_kwargs.get("outer_loss_weights"), custom_weights)
+
+    def test_blink_training_thread_without_profile_weights_uses_legacy_defaults(self):
+        thread = BlinkTrainingThread(
+            project_path=self.pm.current_project_path,
+            part_name="Mandible",
+            parent_part="Head",
+            epochs=1,
+            batch_size=1,
+        )
+
+        self.assertEqual(thread.outer_loss_weights, DEFAULT_BLINK_OUTER_LOSS_WEIGHTS)
 
     def test_blink_training_thread_passes_selected_training_strategy(self):
         trainer_kwargs = {}

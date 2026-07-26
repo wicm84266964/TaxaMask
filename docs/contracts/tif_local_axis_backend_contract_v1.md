@@ -91,7 +91,32 @@ predict
 - full volume proposal 使用 `coordinate_space: "full_volume_voxel_zyx"`。
 - part 内 local frame proposal 使用 `coordinate_space: "part_volume_voxel_zyx"`。
 - `spacing_zyx` 必须随输入一起提供。
+- `spacing_unit` 和 `scale_verified` 必须随 full volume 与 part image 一起提供。
 - 脑部模板的 `left_eye` / `right_eye` 以标本自身解剖左右为准，不以屏幕左右为准。
+
+### 物理尺度可信规则
+
+只有实际体数据 metadata 与项目 SQLite 记录都明确标记尺度可信，且单位和 `spacing_zyx` 一致时，TaxaMask 才会写出：
+
+```json
+{
+  "spacing_zyx": [2.0, 2.0, 2.0],
+  "spacing_unit": "micrometer",
+  "scale_verified": true
+}
+```
+
+任一侧缺失、未核验或互相冲突时，契约会主动降级为：
+
+```json
+{
+  "spacing_zyx": [2.0, 2.0, 2.0],
+  "spacing_unit": "unknown",
+  "scale_verified": false
+}
+```
+
+降级时通常保留实际读取到的数值 spacing，供体素索引或重采样使用；只有 spacing 缺失或无效时才回退为 `[1.0, 1.0, 1.0]`。只要 `scale_verified` 为 `false`，这些数值就不能解释成毫米、微米或其他物理单位。后端不得根据扫描类型、文件扩展名、正数 spacing 或旧版默认值自行猜测单位，也不得把未核验输入升级为可信尺度。Local Axis proposal 的坐标仍是显式声明的体素 `zyx` 坐标；`scale_verified` 不是 proposal 置信度，也不影响“必须人工复核”的规则。
 
 ## Contract 示例
 
@@ -120,6 +145,7 @@ predict
         "dtype": "uint16",
         "spacing_zyx": [2.0, 2.0, 2.0],
         "spacing_unit": "micrometer",
+        "scale_verified": true,
         "orientation": "source_tiff_pages"
       },
       "parts": [
@@ -131,7 +157,9 @@ predict
             "format": "ome.zarr",
             "shape_zyx": [320, 260, 240],
             "dtype": "uint16",
-            "spacing_zyx": [2.0, 2.0, 2.0]
+            "spacing_zyx": [2.0, 2.0, 2.0],
+            "spacing_unit": "micrometer",
+            "scale_verified": true
           },
           "part_mask": {
             "path": "C:/path/specimens/ANTSCAN_0001/parts/head/mask.ome.zarr",

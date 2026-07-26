@@ -50,9 +50,17 @@ QUEUE_TRANSLATIONS = {
         "Failed": "失败",
         "Hard cases": "困难样本",
         "Template": "模板",
+        "Risk": "风险",
+        "Risk reasons": "风险原因",
+        "High": "高",
+        "Medium": "中",
+        "Low": "低",
+        "Reviewed": "已复核",
         "Model version": "模型版本",
         "Hard flag": "困难标记",
         "Sort": "排序",
+        "High-risk sample priority review": "高风险样本优先复核",
+        "Priority score is an explainable review order, not a calibrated error probability.": "该分数只是可解释的复核顺序，不是校准后的错误概率。",
         "Status/specimen": "状态 / 标本",
         "Confidence low first": "置信度低优先",
         "Confidence high first": "置信度高优先",
@@ -64,6 +72,7 @@ QUEUE_TRANSLATIONS = {
         "Reslice": "重切片",
         "Confidence": "置信度",
         "Hard flags": "困难标记",
+        "Missing landmark": "缺失标志点",
         "Accept": "接受",
         "Reject": "拒绝",
         "Open proposal": "打开建议项",
@@ -71,6 +80,11 @@ QUEUE_TRANSLATIONS = {
         "Select a local frame proposal row first.": "请先选择一条局部坐标系建议项。",
         "{0} local axis queue rows": "{0} 条局部轴队列记录",
         "Batch export finished: {0} exported, {1} skipped": "批量导出完成：已导出 {0} 条，跳过 {1} 条",
+        "Skipped: {0}": "跳过：{0}",
+        "status:proposed": "待复核状态",
+        "status:needs_review": "需要复核状态",
+        "low_confidence": "低置信度",
+        "backend_failure": "后端失败",
         "all": "全部",
         "no_part": "未创建部位",
         "part_ready": "部位已准备",
@@ -104,6 +118,7 @@ class TifLocalAxisReviewQueueWidget(QWidget):
         self.lang = lang
         self.rows = []
         self.setObjectName("tifLocalAxisReviewQueue")
+        self.setWindowTitle(tt("High-risk sample priority review", self.lang))
 
         root = QVBoxLayout(self)
         filters = QHBoxLayout()
@@ -121,10 +136,20 @@ class TifLocalAxisReviewQueueWidget(QWidget):
         self.hard_flag_filter_edit.setEditable(True)
         self.hard_flag_filter_edit.addItem("", "")
         self.sort_combo = QComboBox()
+        self.sort_combo.addItem(
+            tt("High-risk sample priority review", self.lang),
+            "risk_priority",
+        )
         self.sort_combo.addItem(tt("Status/specimen", self.lang), "status_specimen")
         self.sort_combo.addItem(tt("Confidence low first", self.lang), "confidence_asc")
         self.sort_combo.addItem(tt("Confidence high first", self.lang), "confidence_desc")
         self.sort_combo.addItem(tt("Model version", self.lang), "model_version")
+        self.sort_combo.setToolTip(
+            tt(
+                "Priority score is an explainable review order, not a calibrated error probability.",
+                self.lang,
+            )
+        )
         filters.addWidget(self.status_combo)
         filters.addWidget(QLabel(tt("Template", self.lang)))
         filters.addWidget(self.template_filter_edit)
@@ -139,9 +164,31 @@ class TifLocalAxisReviewQueueWidget(QWidget):
         filters.addWidget(self.btn_refresh)
         root.addLayout(filters)
 
-        self.table = QTableWidget(0, 9)
+        self.table = QTableWidget(0, 12)
         self.table.setHorizontalHeaderLabels(
-            [tt(text, self.lang) for text in ["Status", "Specimen", "Part", "Kind", "Proposal", "Reslice", "Template", "Confidence", "Hard flags"]]
+            [
+                tt(text, self.lang)
+                for text in [
+                    "Status",
+                    "Specimen",
+                    "Part",
+                    "Kind",
+                    "Proposal",
+                    "Reslice",
+                    "Template",
+                    "Risk",
+                    "Risk reasons",
+                    "Confidence",
+                    "Hard flags",
+                    "Model version",
+                ]
+            ]
+        )
+        self.table.horizontalHeaderItem(7).setToolTip(
+            tt(
+                "Priority score is an explainable review order, not a calibrated error probability.",
+                self.lang,
+            )
         )
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.SingleSelection)
@@ -188,10 +235,11 @@ class TifLocalAxisReviewQueueWidget(QWidget):
         hard_flag = self.hard_flag_filter_edit.currentText().strip()
         if hard_flag:
             filters["hard_case_flag"] = hard_flag
-        filters["sort"] = self.sort_combo.currentData() or "status_specimen"
+        filters["sort"] = self.sort_combo.currentData() or "risk_priority"
         return filters
 
     def refresh(self):
+        selected_key = self._row_key(self.selected_row())
         self.rows = list_local_axis_queue(self.project, self.filters())
         self.table.setRowCount(len(self.rows))
         templates = sorted({str(row.get("template_id", "")) for row in self.rows if row.get("template_id")})
@@ -216,15 +264,71 @@ class TifLocalAxisReviewQueueWidget(QWidget):
                 row.get("proposal_id", ""),
                 row.get("reslice_id", ""),
                 row.get("template_id", ""),
+                f"{tt(str(row.get('risk_tier', '')).title(), self.lang)} ({float(row.get('risk_score', 0.0) or 0.0):.0f})",
+                self._format_risk_reasons(row.get("risk_reasons", [])),
                 f"{float(row.get('confidence', 0.0) or 0.0):.3f}",
                 ", ".join(row.get("hard_case_flags", []) or []),
+                row.get("model_version", "") or "-",
             ]
             for col, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                if col == 7:
+                    item.setData(
+                        Qt.UserRole,
+                        {
+                            "ranking_version": row.get("risk_ranking_version", ""),
+                            "components": dict(row.get("risk_components") or {}),
+                            "reasons": list(row.get("risk_reasons") or []),
+                            "reference_model_id": row.get(
+                                "risk_reference_model_id",
+                                "",
+                            ),
+                            "reference_model_version": row.get(
+                                "risk_reference_model_version",
+                                "",
+                            ),
+                        },
+                    )
                 self.table.setItem(row_index, col, item)
+            if selected_key and self._row_key(row) == selected_key:
+                self.table.selectRow(row_index)
+        self.table.resizeColumnsToContents()
         self.status_label.setText(tt("{0} local axis queue rows", self.lang).format(len(self.rows)))
         return self.rows
+
+    def _row_key(self, row):
+        source = row if isinstance(row, dict) else {}
+        if not source:
+            return ()
+        return (
+            str(source.get("specimen_id") or ""),
+            str(source.get("part_id") or ""),
+            str(source.get("kind") or ""),
+            str(source.get("proposal_id") or ""),
+            str(source.get("reslice_id") or ""),
+            str(source.get("failure_id") or ""),
+        )
+
+    def _format_risk_reasons(self, reasons):
+        formatted = []
+        for reason in reasons or []:
+            value = str(reason or "")
+            if value.startswith("hard_case:"):
+                formatted.append(
+                    f"{tt('Hard flag', self.lang)}: {value.split(':', 1)[1]}"
+                )
+            elif value.startswith("missing_landmark:"):
+                formatted.append(
+                    f"{tt('Missing landmark', self.lang)}: {value.split(':', 1)[1]}"
+                )
+            elif value.startswith("model_version_mismatch:"):
+                formatted.append(
+                    f"{tt('Model version', self.lang)}: {value.split(':', 1)[1]}"
+                )
+            else:
+                formatted.append(tt(value, self.lang))
+        return "; ".join(formatted) or "-"
 
     def _merge_combo_values(self, combo, values):
         current = combo.currentText()
@@ -260,6 +364,7 @@ class TifLocalAxisReviewQueueWidget(QWidget):
             status,
             specimen_id=row.get("specimen_id"),
             part_id=row.get("part_id"),
+            review_action=f"local_axis_review_queue_{status}",
         )
         self.refresh()
         return record
@@ -285,4 +390,17 @@ class TifLocalAxisReviewQueueWidget(QWidget):
                 len(result.get("skipped", [])),
             )
         )
+        skipped = [
+            "{0}:{1}".format(
+                item.get("proposal_id") or "-",
+                item.get("reason") or "unknown",
+            )
+            for item in result.get("skipped", [])
+        ]
+        if skipped:
+            self.status_label.setText(
+                self.status_label.text()
+                + "; "
+                + tt("Skipped: {0}", self.lang).format(", ".join(skipped))
+            )
         return result

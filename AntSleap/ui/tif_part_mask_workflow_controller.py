@@ -853,7 +853,8 @@ class TifPartMaskWorkflowController:
                         "shape_zyx": metadata.get("shape_zyx", []),
                         "dtype": metadata.get("dtype", ""),
                         "spacing_zyx": metadata.get("spacing_zyx", []),
-                        "spacing_unit": metadata.get("spacing_unit", "micrometer"),
+                        "spacing_unit": metadata.get("spacing_unit", "unknown"),
+                        "scale_verified": metadata.get("scale_verified") is True,
                         "orientation": metadata.get("orientation", "unknown"),
                     }
                 )
@@ -1048,7 +1049,8 @@ class TifPartMaskWorkflowController:
                     "shape_zyx": metadata.get("shape_zyx", []),
                     "dtype": metadata.get("dtype", ""),
                     "spacing_zyx": metadata.get("spacing_zyx", []),
-                    "spacing_unit": metadata.get("spacing_unit", "micrometer"),
+                    "spacing_unit": metadata.get("spacing_unit", "unknown"),
+                    "scale_verified": metadata.get("scale_verified") is True,
                     "orientation": metadata.get("orientation", "unknown"),
                 }
             )
@@ -1539,7 +1541,8 @@ class TifPartMaskWorkflowController:
             mask_record["dtype"] = metadata["dtype"]
             mask_record["shape_zyx"] = metadata["shape_zyx"]
             mask_record["spacing_zyx"] = metadata.get("spacing_zyx", mask_record.get("spacing_zyx", [1.0, 1.0, 1.0]))
-            mask_record["spacing_unit"] = metadata.get("spacing_unit", mask_record.get("spacing_unit", "micrometer"))
+            mask_record["spacing_unit"] = metadata.get("spacing_unit", mask_record.get("spacing_unit", "unknown"))
+            mask_record["scale_verified"] = metadata.get("scale_verified") is True
             mask_record["orientation"] = metadata.get("orientation", mask_record.get("orientation", "unknown"))
             mask_record["format"] = metadata.get("format", mask_record.get("format", ""))
             mask_record["status"] = "in_progress"

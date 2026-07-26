@@ -10,6 +10,9 @@ from .tif_label_guard import (
 
 
 PROMOTABLE_TRUTH_SOURCES = {ROLE_WORKING_EDIT, ROLE_EDITABLE_AI_RESULT}
+TRAINING_TRUTH_REVIEW_STATUSES = frozenset(
+    {"reviewed", "verified", "train_ready"}
+)
 
 
 def can_promote_to_manual_truth(
@@ -47,12 +50,31 @@ def can_promote_to_manual_truth(
     return allow("manual_truth_promotion_policy_allowed", details=details)
 
 
-def can_use_role_for_training(role, *, status="", record_exists=True):
+def can_use_role_for_training(
+    role,
+    *,
+    status="",
+    record_exists=True,
+    review_audit=None,
+    training=None,
+):
     clean_role = str(role or "").strip()
     clean_status = str(status or "").strip()
-    details = {"role": clean_role, "status": clean_status, "record_exists": bool(record_exists)}
+    audit = review_audit if isinstance(review_audit, dict) else {}
+    training_evidence = training if isinstance(training, dict) else {}
+    explicit_review = bool(audit.get("explicit_review"))
+    human_confirmed = bool(training_evidence.get("human_confirmed"))
+    details = {
+        "role": clean_role,
+        "status": clean_status,
+        "record_exists": bool(record_exists),
+        "explicit_review": explicit_review,
+        "human_confirmed": human_confirmed,
+    }
     if clean_role != ROLE_MANUAL_TRUTH:
         return deny("training_requires_manual_truth", details=details)
     if not record_exists:
         return deny("manual_truth_missing", details=details)
+    if clean_status not in TRAINING_TRUTH_REVIEW_STATUSES:
+        return deny("manual_truth_review_required", details=details)
     return allow("training_manual_truth_allowed", details=details)

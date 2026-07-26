@@ -1,15 +1,28 @@
 import json
+import re
+import uuid
+
+from .project_integrity_registry import (
+    REQUIRED_REGISTRY_TABLES,
+    initialize_project_integrity_registry_schema,
+    validate_project_integrity_registry_schema,
+)
+from .training_run_recorder import (
+    initialize_training_run_ledger_schema,
+    validate_training_run_ledger_schema,
+)
 
 from .sqlite_storage import (
     connect_sqlite_database,
     get_schema_version,
     initialize_schema_migrations,
+    migrate_sqlite_database_atomically,
     record_schema_version,
 )
 
 
 PROJECT_2D_SCHEMA_NAME = "taxamask_2d_project"
-PROJECT_2D_SCHEMA_VERSION = 1
+PROJECT_2D_SCHEMA_VERSION = 2
 PROJECT_2D_PROJECT_TYPE = "2d_image_annotation"
 REQUIRED_2D_TABLES = {
     "projects",
@@ -31,7 +44,7 @@ REQUIRED_2D_TABLES = {
     "blink_trajectories",
     "label_events",
     "schema_migrations",
-}
+} | set(REQUIRED_REGISTRY_TABLES)
 REQUIRED_2D_COLUMNS = {
     "projects": {
         "id",
@@ -45,7 +58,7 @@ REQUIRED_2D_COLUMNS = {
         "taxon_label",
         "settings_json",
     },
-    "images": {"id", "path", "filename", "group_id", "status", "width", "height"},
+    "images": {"id", "image_uid", "path", "filename", "group_id", "status", "width", "height"},
     "labels": {
         "id",
         "image_id",
@@ -87,13 +100,53 @@ REQUIRED_2D_COLUMNS = {
     "label_events": {"id", "image_id", "label_id", "event_type", "payload_json"},
 }
 
+_IMAGE_UID_RE = re.compile(r"^[A-Za-z0-9._-]{1,240}$")
+
+
+def new_image_uid():
+    return f"image_{uuid.uuid4().hex}"
+
+
+def validate_image_uid(value):
+    image_uid = str(value or "").strip()
+    if not _IMAGE_UID_RE.fullmatch(image_uid):
+        raise ValueError("invalid_image_uid")
+    return image_uid
+
+
+def _backfill_image_uids(connection):
+    columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(images)").fetchall()
+    }
+    if "image_uid" not in columns:
+        connection.execute(
+            "ALTER TABLE images ADD COLUMN image_uid TEXT NOT NULL DEFAULT ''"
+        )
+    seen = set()
+    for row_id, raw_uid in connection.execute(
+        "SELECT id, image_uid FROM images ORDER BY id"
+    ).fetchall():
+        image_uid = str(raw_uid or "").strip()
+        if not _IMAGE_UID_RE.fullmatch(image_uid) or image_uid in seen:
+            image_uid = new_image_uid()
+            connection.execute(
+                "UPDATE images SET image_uid = ? WHERE id = ?", (image_uid, int(row_id))
+            )
+        seen.add(image_uid)
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_images_image_uid_unique
+        ON images(image_uid) WHERE image_uid <> ''
+        """
+    )
+
 
 def _existing_tables(connection):
     cursor = connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
     return {str(row[0]) for row in cursor.fetchall()}
 
 
-def validate_2d_project_schema(connection):
+def _validate_2d_base_schema(connection):
     missing = sorted(REQUIRED_2D_TABLES - _existing_tables(connection))
     if missing:
         raise ValueError(f"missing_2d_sqlite_tables:{','.join(missing)}")
@@ -103,7 +156,65 @@ def validate_2d_project_schema(connection):
         missing_columns = sorted(required_columns - existing_columns)
         if missing_columns:
             raise ValueError(f"missing_2d_sqlite_columns:{table_name}:{','.join(missing_columns)}")
+
+
+def validate_2d_project_schema(connection):
+    _validate_2d_base_schema(connection)
+    row = connection.execute(
+        "SELECT schema_version FROM projects WHERE id = 1"
+    ).fetchone()
+    if row is None:
+        raise ValueError("missing_2d_sqlite_project_row")
+    try:
+        project_schema_version = int(row[0])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid_2d_sqlite_project_schema_version") from exc
+    if project_schema_version != PROJECT_2D_SCHEMA_VERSION:
+        raise ValueError(
+            "inconsistent_2d_sqlite_schema_version:"
+            f"{project_schema_version}!={PROJECT_2D_SCHEMA_VERSION}"
+        )
+    validate_project_integrity_registry_schema(connection)
+    validate_training_run_ledger_schema(connection)
     return True
+
+
+def _validate_2d_v1_schema(connection, version):
+    if int(version) != 1:
+        raise ValueError(f"unsupported_2d_sqlite_schema_version:{version}")
+    legacy_tables = set(REQUIRED_2D_TABLES) - set(REQUIRED_REGISTRY_TABLES)
+    missing = sorted(legacy_tables - _existing_tables(connection))
+    if missing:
+        raise ValueError(f"missing_2d_v1_sqlite_tables:{','.join(missing)}")
+    for table_name, required_columns in sorted(REQUIRED_2D_COLUMNS.items()):
+        expected = set(required_columns)
+        if table_name == "images":
+            expected.discard("image_uid")
+        existing = {
+            str(row[1])
+            for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+        }
+        missing_columns = sorted(expected - existing)
+        if missing_columns:
+            raise ValueError(
+                f"missing_2d_v1_sqlite_columns:{table_name}:{','.join(missing_columns)}"
+            )
+    row = connection.execute("SELECT schema_version FROM projects WHERE id = 1").fetchone()
+    if row is None or int(row[0]) != 1:
+        raise ValueError("invalid_2d_v1_project_schema_version")
+
+
+def migrate_2d_project_database(db_path):
+    return migrate_sqlite_database_atomically(
+        db_path,
+        schema_name=PROJECT_2D_SCHEMA_NAME,
+        target_version=PROJECT_2D_SCHEMA_VERSION,
+        source_versions=(1,),
+        initialize_schema=initialize_2d_project_schema,
+        validate_schema=validate_2d_project_schema,
+        validate_source_schema=_validate_2d_v1_schema,
+        unsupported_version_error="unsupported_2d_sqlite_schema_version",
+    )
 
 
 def initialize_2d_project_schema(connection):
@@ -112,6 +223,11 @@ def initialize_2d_project_schema(connection):
     if current_version > PROJECT_2D_SCHEMA_VERSION:
         raise ValueError(f"unsupported_2d_sqlite_schema_version:{current_version}")
     if current_version == PROJECT_2D_SCHEMA_VERSION:
+        _validate_2d_base_schema(connection)
+        with connection:
+            _backfill_image_uids(connection)
+            initialize_project_integrity_registry_schema(connection)
+            initialize_training_run_ledger_schema(connection)
         validate_2d_project_schema(connection)
         return current_version
 
@@ -122,7 +238,7 @@ def initialize_2d_project_schema(connection):
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 name TEXT NOT NULL DEFAULT 'Untitled',
                 project_type TEXT NOT NULL DEFAULT '2d_image_annotation',
-                schema_version INTEGER NOT NULL DEFAULT 1,
+                schema_version INTEGER NOT NULL DEFAULT 2,
                 taxonomy_json TEXT NOT NULL DEFAULT '[]',
                 locator_scope_json TEXT NOT NULL DEFAULT '[]',
                 project_template TEXT NOT NULL DEFAULT '',
@@ -135,6 +251,7 @@ def initialize_2d_project_schema(connection):
 
             CREATE TABLE IF NOT EXISTS images (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                image_uid TEXT NOT NULL DEFAULT '',
                 path TEXT NOT NULL UNIQUE,
                 filename TEXT NOT NULL DEFAULT '',
                 group_id TEXT NOT NULL DEFAULT '',
@@ -338,12 +455,19 @@ def initialize_2d_project_schema(connection):
             CREATE INDEX IF NOT EXISTS idx_label_events_image ON label_events(image_id);
             """
         )
+        _backfill_image_uids(connection)
+        initialize_project_integrity_registry_schema(connection)
+        initialize_training_run_ledger_schema(connection)
         connection.execute(
             """
             INSERT OR IGNORE INTO projects (id, name, project_type, schema_version)
             VALUES (1, 'Untitled', ?, ?)
             """,
             (PROJECT_2D_PROJECT_TYPE, PROJECT_2D_SCHEMA_VERSION),
+        )
+        connection.execute(
+            "UPDATE projects SET schema_version = ? WHERE id = 1",
+            (PROJECT_2D_SCHEMA_VERSION,),
         )
     record_schema_version(connection, PROJECT_2D_SCHEMA_NAME, PROJECT_2D_SCHEMA_VERSION)
     validate_2d_project_schema(connection)

@@ -11,6 +11,7 @@ from AntSleap.core.training_preflight import (
     describe_training_preflight,
     format_size_pair,
     lower_locator_size_options,
+    stable_train_val_split,
 )
 
 
@@ -83,6 +84,35 @@ class TrainingPreflightTests(unittest.TestCase):
 
     def test_format_size_pair_returns_readable_exact_size(self):
         self.assertEqual(format_size_pair((960, 640)), "960x640")
+
+    def test_stable_split_uses_image_uid_instead_of_movable_path(self):
+        labels = {"parts": {"Head": [[1, 1], [2, 1], [1, 2]]}}
+        original = [("old/a.png", labels), ("old/b.png", labels), ("old/c.png", labels)]
+        relocated = [("new/x.png", labels), ("new/y.png", labels), ("new/z.png", labels)]
+        uid_before = {
+            "old/a.png": "image_a",
+            "old/b.png": "image_b",
+            "old/c.png": "image_c",
+        }
+        uid_after = {
+            "new/x.png": "image_a",
+            "new/y.png": "image_b",
+            "new/z.png": "image_c",
+        }
+        train_before, val_before = stable_train_val_split(
+            original, sample_uid_by_path=uid_before
+        )
+        train_after, val_after = stable_train_val_split(
+            relocated, sample_uid_by_path=uid_after
+        )
+        self.assertEqual(
+            {uid_before[path] for path, _entry in train_before},
+            {uid_after[path] for path, _entry in train_after},
+        )
+        self.assertEqual(
+            {uid_before[path] for path, _entry in val_before},
+            {uid_after[path] for path, _entry in val_after},
+        )
 
     def test_preflight_skips_unreviewed_auto_annotated_drafts(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

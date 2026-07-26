@@ -511,6 +511,7 @@ class MainWindowBlinkContextMixin:
             self.runtime_device,
             trainer_backend=backend_type,
             heatmap_params=heatmap_params,
+            outer_loss_weights=child_defaults.get("loss_weights"),
             auto_shrink_steps=auto_shrink_steps,
             training_strategy=training_strategy,
         )

@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import os
 import re
+import secrets
 import sys
+import tempfile
+import threading
 import time
 
 import torch
+from PIL import Image as PILImage
 from PySide6.QtCore import QThread, Signal
 from torch.utils.data import DataLoader
 
@@ -13,7 +17,10 @@ try:
     from AntSleap.app_runtime import runtime_log_event, runtime_log_exception
     from AntSleap.core.dataset import TwoStageDataset
     from AntSleap.core.external_backend import ExternalBackendRunner, sanitize_external_backend_config
+    from AntSleap.core.panel_splitter import detect_panel_crops
+    from AntSleap.core.path_identity import path_identity
     from AntSleap.core.training_preflight import format_size_pair
+    from AntSleap.core.training_weight_publisher import TrainingWeightPublisher
     from AntSleap.core.vlm_preannotation import (
         VLM_PREANNOTATION_SCHEMA_VERSION,
         run_vlm_preannotation,
@@ -23,7 +30,10 @@ except ImportError:
     from app_runtime import runtime_log_event, runtime_log_exception
     from core.dataset import TwoStageDataset
     from core.external_backend import ExternalBackendRunner, sanitize_external_backend_config
+    from core.panel_splitter import detect_panel_crops
+    from core.path_identity import path_identity
     from core.training_preflight import format_size_pair
+    from core.training_weight_publisher import TrainingWeightPublisher
     from core.vlm_preannotation import VLM_PREANNOTATION_SCHEMA_VERSION, run_vlm_preannotation, sanitize_vlm_prompt_profile
 
 
@@ -31,10 +41,134 @@ def _identity_translate(text, _lang="en"):
     return text
 
 
+_HARD_PANEL_SPLIT_SOURCES = frozenset(
+    {"hard_seam_panel_split", "letter_label_panel_split", "label_guided_panel_split"}
+)
+_AUTOMATIC_PANEL_SPLIT_SOURCES = frozenset(
+    {"white_separator_panel_split", "mixed_separator_panel_split"}
+)
+
+
+def _next_panel_crop_path(save_dir, base_name, index, reserved_identities=None):
+    reserved_identities = reserved_identities if isinstance(reserved_identities, set) else set()
+    suffix = 1
+    while True:
+        suffix_text = "" if suffix == 1 else f"_{suffix}"
+        candidate = os.path.join(save_dir, f"{base_name}__panel_{int(index):03d}{suffix_text}.jpg")
+        identity = path_identity(candidate)
+        if not os.path.exists(candidate) and identity not in reserved_identities:
+            reserved_identities.add(identity)
+            return candidate
+        suffix += 1
+
+
+def _save_detected_panel_crops(source_image, detections, reserved_identities=None):
+    records = []
+    save_dir = os.path.dirname(os.path.abspath(str(source_image)))
+    base_name = os.path.splitext(os.path.basename(str(source_image)))[0]
+    try:
+        with PILImage.open(source_image) as image:
+            source_size = [int(image.width), int(image.height)]
+            for index, detection in enumerate(detections, start=1):
+                box = [int(value) for value in detection.get("box", [])]
+                if len(box) != 4 or box[2] <= box[0] or box[3] <= box[1]:
+                    continue
+                output_path = _next_panel_crop_path(save_dir, base_name, index, reserved_identities)
+                descriptor, temporary_path = tempfile.mkstemp(
+                    prefix=f".{base_name}__panel_",
+                    suffix=".tmp",
+                    dir=save_dir,
+                )
+                os.close(descriptor)
+                try:
+                    crop = image.crop(tuple(box)).convert("RGB")
+                    crop.save(temporary_path, format="JPEG", quality=95)
+                except Exception:
+                    if os.path.exists(temporary_path):
+                        os.unlink(temporary_path)
+                    raise
+                records.append(
+                    {
+                        "path": os.path.abspath(output_path),
+                        "staged_path": os.path.abspath(temporary_path),
+                        "source_image": os.path.abspath(str(source_image)),
+                        "crop_index": int(index),
+                        "crop_box": list(box),
+                        "source_size": source_size,
+                        "crop_source": str(detection.get("source") or "auto_panel_split"),
+                    }
+                )
+    except Exception:
+        for record in records:
+            staged_path = str(record.get("staged_path") or "")
+            try:
+                if staged_path and os.path.isfile(staged_path):
+                    os.unlink(staged_path)
+            except OSError:
+                pass
+        raise
+    return records
+
+
+def discard_staged_panel_crops(crop_records):
+    for record in list(crop_records or []):
+        if not isinstance(record, dict):
+            continue
+        staged_path = str(record.get("staged_path") or "")
+        try:
+            if staged_path and os.path.isfile(staged_path):
+                os.unlink(staged_path)
+        except OSError:
+            pass
+
+
+def promote_staged_panel_crops(crop_records, reserved_identities=None):
+    promoted = []
+    promoted_paths = []
+    reserved_identities = reserved_identities if isinstance(reserved_identities, set) else set()
+    records = [dict(record) for record in list(crop_records or []) if isinstance(record, dict)]
+    try:
+        for record in records:
+            staged_path = str(record.get("staged_path") or "")
+            requested_path = os.path.abspath(str(record.get("path") or ""))
+            if not staged_path:
+                promoted.append(record)
+                continue
+            if not os.path.isfile(staged_path):
+                raise FileNotFoundError(f"missing_panel_split_staging_file:{staged_path}")
+            output_path = requested_path
+            if os.path.exists(output_path):
+                save_dir = os.path.dirname(output_path)
+                base_name = os.path.splitext(os.path.basename(str(record.get("source_image") or "")))[0]
+                output_path = _next_panel_crop_path(
+                    save_dir,
+                    base_name,
+                    record.get("crop_index", 1),
+                    reserved_identities,
+                )
+            os.replace(staged_path, output_path)
+            reserved_identities.add(path_identity(output_path))
+            promoted_paths.append(os.path.abspath(output_path))
+            record["path"] = os.path.abspath(output_path)
+            record.pop("staged_path", None)
+            promoted.append(record)
+    except Exception:
+        for output_path in promoted_paths:
+            try:
+                if output_path and os.path.isfile(output_path):
+                    os.unlink(output_path)
+            except OSError:
+                pass
+        discard_staged_panel_crops(records)
+        raise
+    return promoted
+
+
 class InferenceThread(QThread):
     log_signal = Signal(str)
     progress_signal = Signal(int)
     result_signal = Signal(str, dict)
+    error_signal = Signal(str, str)
     finished_signal = Signal()
 
     def __init__(self, engine, img_paths, taxonomy, locator_scope, inf_params, project_route_manifest=None, model_profile_context=None, lang="en", translate=None):
@@ -46,31 +180,42 @@ class InferenceThread(QThread):
         self.inf_params = inf_params
         self.project_route_manifest = dict(project_route_manifest or {})
         self.model_profile_context = dict(model_profile_context or {})
+        self.prediction_batch_id = f"batch_{secrets.token_hex(6)}"
         self.lang = lang
         self.translate = translate or _identity_translate
 
     def run(self):
         self.log_signal.emit(self.translate("Starting batch inference on {0} images...", self.lang).format(len(self.img_paths)))
         count = 0
-        for img_path in self.img_paths:
-            preds = self.engine.predict_full_pipeline(
-                img_path,
-                current_taxonomy=self.taxonomy,
-                locator_scope=self.locator_scope,
-                conf_thresh=self.inf_params["conf"],
-                adapt_thresh=self.inf_params["adapt"],
-                box_pad=self.inf_params["pad"],
-                noise_floor=self.inf_params["noise_floor"],
-                poly_epsilon=self.inf_params["poly_epsilon"],
-                project_route_manifest=self.project_route_manifest,
-                model_profile_context=self.model_profile_context,
-            )
-            if preds:
-                self.result_signal.emit(img_path, preds)
-                self.log_signal.emit(self.translate("Processed {0}", self.lang).format(os.path.basename(img_path)))
-            count += 1
-            self.progress_signal.emit(int(count / len(self.img_paths) * 100))
-        self.finished_signal.emit()
+        try:
+            for index, img_path in enumerate(self.img_paths, start=1):
+                prediction_context = dict(self.model_profile_context)
+                prediction_context["prediction_run_id"] = (
+                    f"{self.prediction_batch_id}_{index:06d}"
+                )
+                try:
+                    preds = self.engine.predict_full_pipeline(
+                        img_path,
+                        current_taxonomy=self.taxonomy,
+                        locator_scope=self.locator_scope,
+                        conf_thresh=self.inf_params["conf"],
+                        adapt_thresh=self.inf_params["adapt"],
+                        box_pad=self.inf_params["pad"],
+                        noise_floor=self.inf_params["noise_floor"],
+                        poly_epsilon=self.inf_params["poly_epsilon"],
+                        project_route_manifest=self.project_route_manifest,
+                        model_profile_context=prediction_context,
+                    )
+                except Exception as exc:
+                    self.error_signal.emit(str(img_path), str(exc))
+                    break
+                if preds:
+                    self.result_signal.emit(img_path, preds)
+                    self.log_signal.emit(self.translate("Processed {0}", self.lang).format(os.path.basename(img_path)))
+                count += 1
+                self.progress_signal.emit(int(count / len(self.img_paths) * 100))
+        finally:
+            self.finished_signal.emit()
 
 
 class VlmPreannotationThread(QThread):
@@ -193,6 +338,141 @@ class ImageImportThread(QThread):
             self.finished_signal.emit()
 
 
+class BatchPanelSplitThread(QThread):
+    progress_signal = Signal(int, int, str)
+    image_result_signal = Signal(object)
+    error_signal = Signal(str, str)
+    finished_signal = Signal(object)
+
+    def __init__(self, source_images, *, reserved_output_paths=None, wait_for_result_ack=False):
+        super().__init__()
+        self.source_images = [str(path) for path in list(source_images or []) if path]
+        self._cancel_event = threading.Event()
+        self._result_ack_event = threading.Event()
+        self._wait_for_result_ack = bool(wait_for_result_ack)
+        self._reserved_output_paths = [str(path) for path in list(reserved_output_paths or []) if path]
+        self.reserved_output_identities = set()
+        self.summary = {}
+
+    def cancel(self):
+        self._cancel_event.set()
+        self.requestInterruption()
+
+    def acknowledge_result(self):
+        self._result_ack_event.set()
+
+    def _cancel_requested(self):
+        return self._cancel_event.is_set() or self.isInterruptionRequested()
+
+    def run(self):
+        total = len(self.source_images)
+        summary = {
+            "cancelled": False,
+            "processed": 0,
+            "total": total,
+            "crop_count": 0,
+            "manual_required": 0,
+            "skipped": 0,
+            "failed": 0,
+        }
+        runtime_log_event("batch_panel_split_worker_started", total=total)
+        try:
+            reserved_identities = {
+                identity
+                for identity in (path_identity(path) for path in self._reserved_output_paths)
+                if identity
+            }
+            self.reserved_output_identities = reserved_identities
+            for source_image in self.source_images:
+                if self._cancel_requested():
+                    summary["cancelled"] = True
+                    break
+
+                self.progress_signal.emit(summary["processed"], total, source_image)
+                result = {
+                    "source_image": source_image,
+                    "detections": [],
+                    "crop_records": [],
+                    "review_status": "skipped",
+                    "review_reason": "no_split_detected",
+                    "error": "",
+                }
+                try:
+                    detections = list(detect_panel_crops(source_image) or [])
+                    if self._cancel_requested():
+                        summary["cancelled"] = True
+                        break
+
+                    hard_detections = [
+                        detection
+                        for detection in detections
+                        if str(detection.get("source") or "") in _HARD_PANEL_SPLIT_SOURCES
+                    ]
+                    automatic_detections = [
+                        detection
+                        for detection in detections
+                        if str(detection.get("source") or "") in _AUTOMATIC_PANEL_SPLIT_SOURCES
+                    ]
+                    if hard_detections and not automatic_detections:
+                        selected_detections = hard_detections
+                        result["review_status"] = "candidate_split"
+                        result["review_reason"] = "hard_seam_panel_split_candidate"
+                        summary["manual_required"] += 1
+                    else:
+                        selected_detections = automatic_detections
+                        if selected_detections:
+                            result["review_status"] = "auto_split"
+                            result["review_reason"] = "white_separator_panel_split"
+
+                    result["detections"] = selected_detections
+                    if selected_detections:
+                        result["crop_records"] = _save_detected_panel_crops(
+                            source_image,
+                            selected_detections,
+                            reserved_identities,
+                        )
+                        summary["crop_count"] += len(result["crop_records"])
+                    else:
+                        summary["skipped"] += 1
+                except Exception as exc:
+                    result["error"] = str(exc)
+                    result["review_status"] = "retryable_error"
+                    result["review_reason"] = f"processing_error: {exc}"
+                    summary["failed"] += 1
+                    self.error_signal.emit(source_image, str(exc))
+
+                summary["processed"] += 1
+                self._result_ack_event.clear()
+                self.image_result_signal.emit(result)
+                self.progress_signal.emit(summary["processed"], total, source_image)
+                if self._wait_for_result_ack:
+                    while not self._result_ack_event.wait(0.1):
+                        if self._cancel_requested():
+                            break
+                    if self._cancel_requested() and not self._result_ack_event.is_set():
+                        self._result_ack_event.wait(1.0)
+                        if not self._result_ack_event.is_set():
+                            discard_staged_panel_crops(result.get("crop_records"))
+        except Exception as exc:
+            summary["fatal_error"] = str(exc)
+            self.error_signal.emit("", str(exc))
+            runtime_log_exception("batch_panel_split_worker_failed", *sys.exc_info())
+        finally:
+            if self._cancel_requested():
+                summary["cancelled"] = True
+            runtime_log_event(
+                "batch_panel_split_worker_finished",
+                cancelled=summary["cancelled"],
+                crop_count=summary["crop_count"],
+                processed=summary["processed"],
+                skipped=summary["skipped"],
+                failed=summary["failed"],
+                total=summary["total"],
+            )
+            self.summary = dict(summary)
+            self.finished_signal.emit(dict(summary))
+
+
 class ExternalBatchInferenceThread(QThread):
     log_signal = Signal(str)
     progress_signal = Signal(int, int, str)
@@ -256,7 +536,7 @@ class TrainingThread(QThread):
     error_signal = Signal(dict)
     finished_signal = Signal()
 
-    def __init__(self, engine, preflight, taxonomy, locator_scope, epochs=5, batch_size=4, lang="en", train_segmenter=True, training_context=None, translate=None):
+    def __init__(self, engine, preflight, taxonomy, locator_scope, epochs=5, batch_size=4, lang="en", train_segmenter=True, training_context=None, translate=None, training_run=None, model_output_root=None):
         super().__init__()
         self.engine = engine
         self.preflight = dict(preflight or {})
@@ -276,6 +556,108 @@ class TrainingThread(QThread):
         self.has_locator_stage = bool(self.locator_train_data and self.locator_val_data)
         self.has_parts_stage = bool(self.train_segmenter and self.parts_train_data and self.parts_val_data)
         self.saved_weights_timestamp = None
+        self.training_run = training_run
+        self._weight_publisher = None
+        self.model_output_root = os.path.abspath(
+            model_output_root or getattr(engine, "weights_dir", "")
+        )
+
+    def _run_active(self):
+        return self.training_run is not None and self.training_run.status in {
+            "pending",
+            "running",
+        }
+
+    def _cancel_run(self):
+        if self._run_active():
+            self.training_run.cancel(stage="training")
+            self._cleanup_terminal_publication()
+
+    def _fail_run(self, exc):
+        if self._run_active():
+            self.training_run.fail(exc, stage="training")
+            self._cleanup_terminal_publication()
+
+    def _cleanup_terminal_publication(self):
+        """Best-effort cleanup after the run record is terminally failed."""
+
+        run = self.training_run
+        publisher = self._weight_publisher
+        if run is None or publisher is None:
+            return
+        try:
+            record = run.record
+            if record.get("status") not in {"failed", "cancelled", "interrupted"}:
+                return
+            report = publisher.cleanup_terminal_run(run.run_id, record)
+            if report.get("manual_review"):
+                self.log_signal.emit(
+                    "Training weight cleanup needs manual review: "
+                    + str(report["manual_review"])
+                )
+        except Exception as cleanup_exc:
+            # Never replace the original training failure with a cleanup error.
+            self.log_signal.emit(
+                "Training weight cleanup failed; manual recovery is required: "
+                + str(cleanup_exc)
+            )
+
+    def _publish_weights(self):
+        run = self.training_run
+        if run is None:
+            return self.engine.save_weights(
+                save_locator=self.has_locator_stage,
+                save_segmenter=self.has_parts_stage,
+            )
+        publisher = TrainingWeightPublisher(self.model_output_root)
+        self._weight_publisher = publisher
+        specs = []
+        if self.has_locator_stage:
+            specs.append(
+                {
+                    "artifact_id": "locator_checkpoint",
+                    "role": "output_weights",
+                    "relative_path": f"locator_{run.run_id}.pth",
+                    "media_type": "application/octet-stream",
+                }
+            )
+        if self.has_parts_stage:
+            specs.append(
+                {
+                    "artifact_id": "sam_decoder_checkpoint",
+                    "role": "output_weights",
+                    "relative_path": f"sam_decoder_lora_{run.run_id}.pth",
+                    "media_type": "application/octet-stream",
+                }
+            )
+        output_root = os.path.join(run.run_dir, "outputs")
+        os.makedirs(output_root, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix=".weight-staging-", dir=output_root
+        ) as staging_dir:
+            self.engine.save_weights(
+                save_locator=self.has_locator_stage,
+                save_segmenter=self.has_parts_stage,
+                output_dir=staging_dir,
+                artifact_key=run.run_id,
+            )
+            publication = publisher.publish_pending(run.run_id, staging_dir, specs)
+        run.register_path_base("managed_model_root", self.model_output_root)
+        for artifact in publication.get("artifacts", []):
+            path = os.path.join(
+                self.model_output_root,
+                *artifact["relative_path"].split("/"),
+            )
+            observed = run.add_artifact(
+                artifact_id=artifact["artifact_id"],
+                role="output_weights",
+                path=path,
+                path_base="managed_model_root",
+                media_type=artifact["media_type"],
+            )
+            if observed.get("digest") != artifact.get("digest"):
+                raise ValueError("published_weight_artifact_mismatch")
+        return run.run_id, publisher
 
     def _tr(self, text):
         return self.translate(text, self.lang)
@@ -305,14 +687,17 @@ class TrainingThread(QThread):
                     for epoch in range(self.epochs):
                         if self.isInterruptionRequested():
                             self.log_signal.emit(self._tr("Training cancelled."))
+                            self._cancel_run()
                             return
                         loss_t = self.engine.train_epoch(dl_loc_train, locator, opt_loc, None, stop_callback=self.isInterruptionRequested)
                         if loss_t is None or self.isInterruptionRequested():
                             self.log_signal.emit(self._tr("Training cancelled."))
+                            self._cancel_run()
                             return
                         metrics_v = self.engine.validate_epoch(dl_loc_val, locator, stop_callback=self.isInterruptionRequested)
                         if metrics_v is None:
                             self.log_signal.emit(self._tr("Training cancelled."))
+                            self._cancel_run()
                             return
                         self.engine.history["locator_train"].append(loss_t)
                         self.engine.history["locator_val"].append(metrics_v["loss"])
@@ -323,6 +708,7 @@ class TrainingThread(QThread):
                     if "out of memory" in str(exc).lower():
                         if torch.cuda.is_available():
                             torch.cuda.empty_cache()
+                        self._fail_run(exc)
                         self.error_signal.emit({"type": "oom", "stage": "locator", "current_resolution": tuple(self.engine.locator_resolution), "lower_options": list(self.preflight.get("lower_locator_size_options", [])), "message": str(exc)})
                         return
                     raise
@@ -341,14 +727,17 @@ class TrainingThread(QThread):
                 for epoch in range(self.epochs):
                     if self.isInterruptionRequested():
                         self.log_signal.emit(self._tr("Training cancelled."))
+                        self._cancel_run()
                         return
                     loss_t = self.engine.train_epoch(dl_parts_train, parts_model, opt_parts, self.engine.crit_parts, stop_callback=self.isInterruptionRequested)
                     if loss_t is None or self.isInterruptionRequested():
                         self.log_signal.emit(self._tr("Training cancelled."))
+                        self._cancel_run()
                         return
                     metrics_v = self.engine.validate_epoch(dl_parts_val, parts_model, stop_callback=self.isInterruptionRequested)
                     if metrics_v is None:
                         self.log_signal.emit(self._tr("Training cancelled."))
+                        self._cancel_run()
                         return
                     self.engine.history["parts_train"].append(loss_t)
                     self.engine.history["parts_val"].append(metrics_v["loss"])
@@ -362,18 +751,49 @@ class TrainingThread(QThread):
 
             if self.isInterruptionRequested():
                 self.log_signal.emit(self._tr("Training cancelled."))
+                self._cancel_run()
                 return
-            self.saved_weights_timestamp = self.engine.save_weights(save_locator=self.has_locator_stage, save_segmenter=self.has_parts_stage)
+            publication = self._publish_weights()
+            publisher = None
+            if self.training_run is None:
+                self.saved_weights_timestamp = publication
+            else:
+                self.saved_weights_timestamp, publisher = publication
             if self.saved_weights_timestamp:
                 self.training_context["saved_weights_timestamp"] = self.saved_weights_timestamp
-                self.training_context["locator_weights"] = f"locator_{self.saved_weights_timestamp}.pth" if self.has_locator_stage else ""
-                self.training_context["segmenter_weights"] = f"sam_decoder_lora_{self.saved_weights_timestamp}.pth" if self.has_parts_stage else ""
+                if self.training_run is None:
+                    self.training_context["locator_weights"] = f"locator_{self.saved_weights_timestamp}.pth" if self.has_locator_stage else ""
+                    self.training_context["segmenter_weights"] = f"sam_decoder_lora_{self.saved_weights_timestamp}.pth" if self.has_parts_stage else ""
+                else:
+                    bundle = f"training_runs/{self.training_run.run_id}"
+                    self.training_context["locator_weights"] = f"{bundle}/locator_{self.training_run.run_id}.pth" if self.has_locator_stage else ""
+                    self.training_context["segmenter_weights"] = f"{bundle}/sam_decoder_lora_{self.training_run.run_id}.pth" if self.has_parts_stage else ""
             self.log_signal.emit(self._tr("Generating Report..."))
             report = self.engine.generate_report(dl_loc_val, num_samples=6, training_context=self.training_context)
+            if self.training_run is not None:
+                report_dir = str(report.get("dir") or "")
+                if report_dir and os.path.isdir(report_dir):
+                    self.training_run.register_path_base(
+                        "export_root", os.path.dirname(report_dir)
+                    )
+                    self.training_run.add_artifact(
+                        artifact_id="training_report",
+                        role="training_report",
+                        path=report_dir,
+                        path_base="export_root",
+                        media_type="application/x-directory",
+                    )
+                successful = self.training_run.succeed()
+                try:
+                    publisher.activate(self.training_run.run_id, successful)
+                    self.training_context["weight_publication_status"] = "active"
+                except Exception:
+                    self.training_context["weight_publication_status"] = "pending_recovery"
             self.report_signal.emit(report)
             self.log_signal.emit(self._tr("Training Finished! All validation results saved to {0}/val_details").format(report["dir"]))
             self.success_signal.emit()
         except Exception as exc:
+            self._fail_run(exc)
             self.error_signal.emit({"type": "error", "message": str(exc)})
         finally:
             self.finished_signal.emit()

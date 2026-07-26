@@ -23,7 +23,7 @@ from AntSleap.core.training_weight_publisher import (
 class TrainingWeightPublisherTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp_dir.name)
+        self.root = Path(self.temp_dir.name).resolve()
         self.staging = self.root / "staging"
         self.staging.mkdir()
         self.model_root = self.root / "managed_models"

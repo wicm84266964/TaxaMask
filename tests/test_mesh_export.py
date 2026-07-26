@@ -203,7 +203,7 @@ class MeshExportTests(unittest.TestCase):
 
     def test_export_target_rejects_symlink_components(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             manager = _project(root)
             actual_target = root / "actual_exports"
             actual_target.mkdir()
@@ -655,7 +655,7 @@ class MeshExportTests(unittest.TestCase):
 
     def test_safe_cleanup_rejects_linked_export_root(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             manager = _project(root)
             target = root / "exports"
             target.mkdir()
@@ -683,7 +683,7 @@ class MeshExportTests(unittest.TestCase):
 
     def test_safe_cleanup_rejects_linked_descendant(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             manager = _project(root)
             target = root / "exports"
             target.mkdir()
@@ -932,7 +932,7 @@ class MeshExportTests(unittest.TestCase):
 
     def test_verify_rejects_linked_export_root(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             manager = _project(root)
             target = root / "exports"
             target.mkdir()

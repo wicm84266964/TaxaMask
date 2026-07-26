@@ -139,13 +139,14 @@ class TrainingRunNoteStoreTests(unittest.TestCase):
 
     def test_note_projection_symlink_is_ignored(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
-            recorder = TrainingRunRecorder(tmp_dir, recover_on_startup=False)
+            root = Path(tmp_dir).resolve()
+            recorder = TrainingRunRecorder(root, recover_on_startup=False)
             run = recorder.create_pending("notes_test")
             run.cancel()
-            store = TrainingRunNoteStore(tmp_dir)
+            store = TrainingRunNoteStore(root)
             store.save(run.run_id, note="safe")
             note_path = store.path_for_run(run.run_id)
-            outside = Path(tmp_dir) / "outside.json"
+            outside = root / "outside.json"
             outside.write_text("{}", encoding="utf-8")
             note_path.unlink()
             try:

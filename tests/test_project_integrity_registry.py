@@ -50,7 +50,7 @@ from AntSleap.core.sqlite_storage import connect_sqlite_database_readonly
 class ProjectIntegrityRegistryTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.project_root = self.root / "project"
         self.run_root = self.root / "run"
         self.model_root = self.root / "models"

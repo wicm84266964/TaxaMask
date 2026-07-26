@@ -384,7 +384,7 @@ class ProjectIntegrityBridgeTests(unittest.TestCase):
 
     def test_training_snapshot_uses_current_registered_version(self):
         with tempfile.TemporaryDirectory() as tmp:
-            manager, _image_path = self._manager(Path(tmp))
+            manager, _image_path = self._manager(Path(tmp).resolve())
             manager.initialize_integrity_baseline()
             snapshot = get_training_baseline_snapshot(
                 manager.current_database_path

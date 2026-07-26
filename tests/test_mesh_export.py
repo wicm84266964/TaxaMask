@@ -519,7 +519,7 @@ class MeshExportTests(unittest.TestCase):
 
     def test_export_records_raw_and_preview_stl_in_sqlite(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             manager = _project(root)
             target = root / "exports"
             target.mkdir()
@@ -556,7 +556,7 @@ class MeshExportTests(unittest.TestCase):
 
     def test_cancel_after_first_item_leaves_incomplete_recoverable_run(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             manager = _project(root)
             target = root / "exports"
             target.mkdir()
@@ -790,7 +790,7 @@ class MeshExportTests(unittest.TestCase):
                 1,
                 spacing_zyx_mm=[1.0, 1.0, 1.0],
             )
-            final_path = Path(tmp) / "raw" / "label_1.stl"
+            final_path = Path(tmp).resolve() / "raw" / "label_1.stl"
             with patch("trimesh.load_mesh", side_effect=OSError("interrupted reopen")):
                 with self.assertRaises(OSError):
                     _atomic_publish_stl(mesh, final_path)

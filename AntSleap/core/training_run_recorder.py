@@ -1326,7 +1326,10 @@ class TrainingRun:
         base = self._path_bases[clean_base]
         raw_path = Path(path)
         if raw_path.is_absolute():
-            raw_target = _resolve_existing_path_after_safety(raw_path)
+            try:
+                raw_target = _resolve_existing_path_after_safety(raw_path)
+            except UnsafeRunFact as exc:
+                raise UnsafeRunFact(f"artifact_path_unsafe:{clean_id}") from exc
             try:
                 relative = os.path.relpath(raw_target, base).replace("\\", "/")
             except ValueError as exc:

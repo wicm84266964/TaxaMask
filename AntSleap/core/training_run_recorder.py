@@ -442,6 +442,16 @@ def _require_safe_filesystem_entry(path, *, expected_kind=None):
     return target_result
 
 
+def _resolve_existing_path_after_safety(path, *, expected_kind=None):
+    """Canonicalize an existing path only after rejecting redirected components."""
+
+    absolute = os.path.abspath(os.fspath(path))
+    _require_safe_filesystem_entry(absolute, expected_kind=expected_kind)
+    resolved = os.path.abspath(os.path.realpath(absolute))
+    _require_safe_filesystem_entry(resolved, expected_kind=expected_kind)
+    return resolved
+
+
 def _ensure_safe_directory(path):
     absolute = os.path.abspath(os.fspath(path))
     for current in _absolute_path_chain(absolute):
@@ -451,7 +461,7 @@ def _ensure_safe_directory(path):
             except FileExistsError:
                 pass
         _require_safe_filesystem_entry(current, expected_kind="directory")
-    return absolute
+    return _resolve_existing_path_after_safety(absolute, expected_kind="directory")
 
 
 def _canonical_relative_path(value) -> str:
@@ -466,8 +476,9 @@ def _canonical_relative_path(value) -> str:
 
 
 def _managed_lexical_path(base_dir, relative_path):
-    base = os.path.abspath(os.fspath(base_dir))
-    _require_safe_filesystem_entry(base, expected_kind="directory")
+    base = _resolve_existing_path_after_safety(
+        base_dir, expected_kind="directory"
+    )
     clean_relative = _canonical_relative_path(relative_path)
     target = os.path.abspath(os.path.join(base, *clean_relative.split("/")))
     try:
@@ -489,13 +500,13 @@ def _managed_lexical_path(base_dir, relative_path):
             raise UnsafeRunFact("artifact_outside_path_base")
         current = parent
 
-    resolved = str(Path(target).resolve(strict=True))
+    resolved = _resolve_existing_path_after_safety(target)
     try:
         if os.path.normcase(os.path.commonpath([base, resolved])) != os.path.normcase(base):
             raise UnsafeRunFact("artifact_outside_path_base")
     except ValueError as exc:
         raise UnsafeRunFact("artifact_outside_path_base") from exc
-    return target, clean_relative
+    return resolved, clean_relative
 
 
 def _read_json_nofollow(path):
@@ -1265,8 +1276,9 @@ class TrainingRun:
         clean_base = _validate_id(path_base, "path_base")
         if clean_base not in PATH_BASES:
             raise UnsafeRunFact(f"path_base_not_allowed:{clean_base}")
-        requested = os.path.abspath(os.fspath(base_dir))
-        _require_safe_filesystem_entry(requested, expected_kind="directory")
+        requested = _resolve_existing_path_after_safety(
+            base_dir, expected_kind="directory"
+        )
         self._path_bases[clean_base] = requested
         return clean_base
 
@@ -1281,8 +1293,7 @@ class TrainingRun:
             clean_ref = _validate_id(
                 external_location_ref, "external_location_ref"
             )
-            target = os.path.abspath(os.fspath(path))
-            _require_safe_filesystem_entry(target)
+            target = _resolve_existing_path_after_safety(path)
             existing = self._external_locations.get(clean_ref)
             if existing is not None and os.path.normcase(existing) != os.path.normcase(
                 target
@@ -1315,7 +1326,7 @@ class TrainingRun:
         base = self._path_bases[clean_base]
         raw_path = Path(path)
         if raw_path.is_absolute():
-            raw_target = os.path.abspath(os.fspath(raw_path))
+            raw_target = _resolve_existing_path_after_safety(raw_path)
             try:
                 relative = os.path.relpath(raw_target, base).replace("\\", "/")
             except ValueError as exc:

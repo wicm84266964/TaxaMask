@@ -792,10 +792,12 @@ def _resolve_managed_path(
         )
     relative_path = validate_relative_path(relative_path)
     try:
-        base = require_safe_existing_path(
+        lexical_base = require_safe_existing_path(
             os.path.abspath(os.fspath(roots[path_base])),
             expected_kind="directory",
         )
+        base = os.path.abspath(os.path.realpath(lexical_base))
+        require_safe_existing_path(base, expected_kind="directory")
     except (LocationRegistryError, OSError, TypeError) as exc:
         if isinstance(exc, LocationRegistryError) and exc.code in {
             "location_link_not_allowed",

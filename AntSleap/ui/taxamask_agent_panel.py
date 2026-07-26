@@ -2933,17 +2933,20 @@ exec "$@"
         self._cleanup_web_profile_storage()
 
     def _dispose_web_view(self):
-        view = self.web_view
-        profile = self._web_profile
+        view = getattr(self, "web_view", None)
+        profile = getattr(self, "_web_profile", None)
         self.web_view = None
         self._web_page = None
         self._web_profile = None
 
         if view is not None:
             try:
-                if self.stack.currentWidget() is view:
-                    self.stack.setCurrentWidget(self.fallback)
-                self.stack.removeWidget(view)
+                stack = getattr(self, "stack", None)
+                fallback = getattr(self, "fallback", None)
+                if stack is not None:
+                    if fallback is not None and stack.currentWidget() is view:
+                        stack.setCurrentWidget(fallback)
+                    stack.removeWidget(view)
             except Exception:
                 pass
             try:

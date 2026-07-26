@@ -609,8 +609,7 @@ class GuiSmokeTests(unittest.TestCase):
             panel.deleteLater()
 
     def test_agent_panel_defers_embedded_webview_until_dashboard_load(self):
-        with patch.dict(os.environ, {"TAXAMASK_ANTCODE_BROWSER_MODE": "0"}, clear=False), \
-             patch("AntSleap.ui.taxamask_agent_panel.sys.platform", "win32"):
+        with patch.dict(os.environ, {"TAXAMASK_ANTCODE_BROWSER_MODE": "0"}, clear=False):
             panel = main_module.TaxaMaskAgentPanel("en", workspace_dir=str(PROJECT_ROOT))
         try:
             self.assertFalse(panel.browser_mode)
@@ -621,8 +620,7 @@ class GuiSmokeTests(unittest.TestCase):
             panel.deleteLater()
 
     def test_agent_panel_creates_embedded_webview_on_load(self):
-        with patch.dict(os.environ, {"TAXAMASK_ANTCODE_BROWSER_MODE": "0"}, clear=False), \
-             patch("AntSleap.ui.taxamask_agent_panel.sys.platform", "win32"):
+        with patch.dict(os.environ, {"TAXAMASK_ANTCODE_BROWSER_MODE": "0"}, clear=False):
             panel = main_module.TaxaMaskAgentPanel("en", workspace_dir=str(PROJECT_ROOT))
         try:
             created = []
@@ -3548,8 +3546,22 @@ class GuiSmokeTests(unittest.TestCase):
 
                 self.assertEqual(len(SmokeBatchPanelSplitThread.instances), 1)
                 worker = SmokeBatchPanelSplitThread.instances[0]
-                self.assertEqual(worker.source_images, source_images)
-                self.assertEqual(worker.reserved_output_paths, source_images)
+                self.assertEqual(len(worker.source_images), len(source_images))
+                self.assertTrue(
+                    all(
+                        _same_path(actual, expected)
+                        for actual, expected in zip(worker.source_images, source_images)
+                    )
+                )
+                self.assertEqual(len(worker.reserved_output_paths), len(source_images))
+                self.assertTrue(
+                    all(
+                        _same_path(actual, expected)
+                        for actual, expected in zip(
+                            worker.reserved_output_paths, source_images
+                        )
+                    )
+                )
                 self.assertTrue(worker.wait_for_result_ack)
                 self.assertTrue(worker.started)
                 self.assertTrue(worker.isRunning())
@@ -4138,7 +4150,9 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(window._candidate_panel_split_sources(), [])
 
             window._clear_panel_split_review(str(source_image))
-            self.assertEqual(window._candidate_panel_split_sources(), [str(source_image)])
+            rerun_candidates = window._candidate_panel_split_sources()
+            self.assertEqual(len(rerun_candidates), 1)
+            self.assertTrue(_same_path(rerun_candidates[0], source_image))
             SmokeBatchPanelSplitThread.instances.clear()
 
             with patch.object(panel_split_module, "BatchPanelSplitThread", SmokeBatchPanelSplitThread), \
@@ -4169,7 +4183,8 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(provenance["panel_split_review"]["status"], "retryable_error")
             self.assertTrue(provenance["panel_split_rerun_requested"])
             retry_candidates = window._candidate_panel_split_sources()
-            self.assertEqual(retry_candidates, [str(source_image)])
+            self.assertEqual(len(retry_candidates), 1)
+            self.assertTrue(_same_path(retry_candidates[0], source_image))
             self.assertEqual(worker.result_acknowledgements, 1)
         finally:
             window.deleteLater()

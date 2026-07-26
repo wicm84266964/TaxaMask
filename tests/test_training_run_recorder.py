@@ -588,15 +588,16 @@ class TrainingRunRecorderTests(unittest.TestCase):
 
     def test_external_directory_symlink_root_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
-            target = Path(tmp_dir) / "external-target"
+            root = Path(tmp_dir).resolve()
+            target = root / "external-target"
             target.mkdir()
-            link = Path(tmp_dir) / "external-link"
+            link = root / "external-link"
             try:
                 link.symlink_to(target, target_is_directory=True)
             except (OSError, NotImplementedError):
                 self.skipTest("This workstation cannot create directory symlinks")
 
-            _recorder, run = self._make_run(tmp_dir)
+            _recorder, run = self._make_run(root)
             try:
                 with self.assertRaisesRegex(UnsafeRunFact, "filesystem_link_not_allowed"):
                     run.register_external_location("location_ref_link", link)
@@ -605,7 +606,7 @@ class TrainingRunRecorderTests(unittest.TestCase):
 
     def test_registered_path_base_rejects_symlinked_parent(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
-            root = Path(tmp_dir)
+            root = Path(tmp_dir).resolve()
             _recorder, run = self._make_run(root / "runs")
             actual_parent = root / "actual-parent"
             actual_parent.mkdir()
@@ -850,7 +851,9 @@ class TrainingRunRecorderTests(unittest.TestCase):
 
     def test_artifact_symlink_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
-            recorder = TrainingRunRecorder(tmp_dir, recover_on_startup=False)
+            recorder = TrainingRunRecorder(
+                Path(tmp_dir).resolve(), recover_on_startup=False
+            )
             run = recorder.create_pending("path_test")
             try:
                 target = Path(run.run_dir) / "target.bin"

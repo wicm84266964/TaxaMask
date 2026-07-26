@@ -291,6 +291,7 @@ class MainWindowPanelSplitMixin:
         crop_records = []
 
         try:
+            source_image = self.project._image_data_key(source_image)
             crop_records = promote_staged_panel_crops(
                 raw_crop_records,
                 getattr(thread, "reserved_output_identities", None),
@@ -303,6 +304,8 @@ class MainWindowPanelSplitMixin:
             # Record newly promoted files before touching project metadata so any
             # later exception can remove files that were never committed.
             state["pending_generated_crop_paths"].extend(promoted_paths)
+            for record in crop_records:
+                record["source_image"] = source_image
             provenance = self.project.project_data.setdefault("image_provenance", {})
             snapshots = state.setdefault("pending_source_provenance", {})
             if source_image not in snapshots:

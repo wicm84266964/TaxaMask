@@ -181,10 +181,13 @@ class ExternalBackendRunner:
         )
         if observed.get("digest") != self._training_snapshot_expected.get("digest"):
             raise ValueError("external_training_snapshot_modified")
-        with sqlite3.connect(snapshot_path) as connection:
+        connection = sqlite3.connect(snapshot_path)
+        try:
             rows = connection.execute(
                 "SELECT image_uid, partition FROM training_samples"
             ).fetchall()
+        finally:
+            connection.close()
         expected = sorted(prepared.partition_by_uid.items())
         if sorted((str(uid), str(partition)) for uid, partition in rows) != expected:
             raise ValueError("external_training_snapshot_split_mismatch")

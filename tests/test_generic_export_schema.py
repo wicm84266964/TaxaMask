@@ -11,6 +11,16 @@ from AntSleap.core.external_backend import EXTERNAL_PREDICTION_SCHEMA, ExternalB
 from AntSleap.core.project_templates import PROJECT_TEMPLATE_ANT, PROJECT_TEMPLATE_GENERIC
 
 
+def _safe_temp_root(path):
+    root = Path(path)
+    candidates = (root, *root.parents)
+    return (
+        root.resolve()
+        if any(candidate.is_symlink() for candidate in candidates)
+        else root
+    )
+
+
 class GenericExportSchemaTests(unittest.TestCase):
     def _external_training_runner(self, work_dir, script_lines, backend_id):
         script_path = work_dir / f"{backend_id}.py"
@@ -51,11 +61,14 @@ class GenericExportSchemaTests(unittest.TestCase):
         return manager, runner
 
     def _latest_training_record(self, manager):
-        with sqlite3.connect(manager.current_database_path) as connection:
+        connection = sqlite3.connect(manager.current_database_path)
+        try:
             row = connection.execute(
                 "SELECT status, record_json FROM training_runs "
                 "ORDER BY created_at DESC LIMIT 1"
             ).fetchone()
+        finally:
+            connection.close()
         self.assertIsNotNone(row)
         return row[0], json.loads(row[1])
 
@@ -88,7 +101,7 @@ class GenericExportSchemaTests(unittest.TestCase):
 
     def test_coco_uses_generic_supercategory_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
-            work_dir = Path(tmp)
+            work_dir = _safe_temp_root(tmp)
             manager = self._build_project(work_dir)
             out_dir = work_dir / "coco"
 
@@ -100,7 +113,7 @@ class GenericExportSchemaTests(unittest.TestCase):
 
     def test_yolo_dataset_yaml_quotes_custom_taxonomy_names(self):
         with tempfile.TemporaryDirectory() as tmp:
-            work_dir = Path(tmp)
+            work_dir = _safe_temp_root(tmp)
             manager = self._build_project(work_dir)
             out_dir = work_dir / "yolo"
 
@@ -113,7 +126,7 @@ class GenericExportSchemaTests(unittest.TestCase):
 
     def test_project_supercategory_survives_save_and_reload(self):
         with tempfile.TemporaryDirectory() as tmp:
-            work_dir = Path(tmp)
+            work_dir = _safe_temp_root(tmp)
             manager = self._build_project(work_dir)
             manager.project_data["category_supercategory"] = "plant_structure"
             manager.save_project(force=True)
@@ -125,7 +138,7 @@ class GenericExportSchemaTests(unittest.TestCase):
 
     def test_legacy_genus_loads_as_taxon_and_new_taxon_exports_without_overwriting_source(self):
         with tempfile.TemporaryDirectory() as tmp:
-            work_dir = Path(tmp)
+            work_dir = _safe_temp_root(tmp)
             image_path = work_dir / "specimen.png"
             Image.new("RGB", (20, 20), color=(120, 120, 120)).save(image_path)
             project_path = work_dir / "project.json"
@@ -182,7 +195,7 @@ class GenericExportSchemaTests(unittest.TestCase):
 
     def test_relocated_roots_are_configured_not_hardcoded(self):
         with tempfile.TemporaryDirectory() as tmp:
-            work_dir = Path(tmp)
+            work_dir = _safe_temp_root(tmp)
             old_marker = "old_dataset_root"
             relocated_root = work_dir / "new_dataset_root"
             relocated_image = relocated_root / "images" / "specimen.png"
@@ -201,7 +214,7 @@ class GenericExportSchemaTests(unittest.TestCase):
 
     def test_project_image_health_and_remap_preview_are_explicit(self):
         with tempfile.TemporaryDirectory() as tmp:
-            work_dir = Path(tmp)
+            work_dir = _safe_temp_root(tmp)
             old_root = work_dir / "old_root"
             new_root = work_dir / "new_root"
             old_image = old_root / "images" / "specimen.png"
@@ -240,7 +253,7 @@ class GenericExportSchemaTests(unittest.TestCase):
 
     def test_project_image_remap_leaves_duplicate_names_unresolved(self):
         with tempfile.TemporaryDirectory() as tmp:
-            work_dir = Path(tmp)
+            work_dir = _safe_temp_root(tmp)
             new_root = work_dir / "new_root"
             for folder in ("a", "b"):
                 image_path = new_root / folder / "specimen.png"
@@ -257,7 +270,7 @@ class GenericExportSchemaTests(unittest.TestCase):
 
     def test_external_backend_runner_contract_and_prediction_import(self):
         with tempfile.TemporaryDirectory() as tmp:
-            work_dir = Path(tmp)
+            work_dir = _safe_temp_root(tmp)
             image_path = work_dir / "leaf.png"
             Image.new("RGB", (24, 24), color=(80, 120, 80)).save(image_path)
             script_path = work_dir / "external_backend_dummy.py"
@@ -316,7 +329,7 @@ class GenericExportSchemaTests(unittest.TestCase):
 
     def test_external_backend_runner_train_writes_manifest_without_builtin_weights(self):
         with tempfile.TemporaryDirectory() as tmp:
-            work_dir = Path(tmp)
+            work_dir = _safe_temp_root(tmp)
             script_path = work_dir / "external_train_dummy.py"
             script_path.write_text(
                 "\n".join(
@@ -390,7 +403,7 @@ class GenericExportSchemaTests(unittest.TestCase):
 
     def test_external_training_snapshot_modification_is_failed_in_project_sqlite(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = _safe_temp_root(tmp)
             manager, runner = self._external_training_runner(
                 root,
                 [
@@ -419,7 +432,7 @@ class GenericExportSchemaTests(unittest.TestCase):
 
     def test_external_training_command_failure_is_failed_in_project_sqlite(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = _safe_temp_root(tmp)
             manager, runner = self._external_training_runner(
                 root,
                 [
@@ -454,7 +467,7 @@ class GenericExportSchemaTests(unittest.TestCase):
         )
         for backend_id, manifest_expression, expected_error in cases:
             with self.subTest(backend_id=backend_id), tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp)
+                root = _safe_temp_root(tmp)
                 manager, runner = self._external_training_runner(
                     root,
                     [

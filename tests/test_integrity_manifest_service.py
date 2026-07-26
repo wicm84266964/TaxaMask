@@ -16,10 +16,20 @@ from AntSleap.core.integrity_manifest_service import (
 )
 
 
+def _safe_temp_root(path):
+    root = Path(path)
+    candidates = (root, *root.parents)
+    return (
+        root.resolve()
+        if any(candidate.is_symlink() for candidate in candidates)
+        else root
+    )
+
+
 class IntegrityManifestServiceTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name)
+        self.root = _safe_temp_root(self.tmp.name)
         self.project_root = self.root / "project"
         self.run_root = self.root / "run"
         self.project_root.mkdir()

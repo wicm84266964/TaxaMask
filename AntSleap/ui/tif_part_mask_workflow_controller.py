@@ -1669,6 +1669,7 @@ class TifPartMaskWorkflowController:
         self.materialize_progress.setAutoClose(False)
         self.materialize_progress.setAutoReset(False)
         self.materialize_progress.setWindowModality(Qt.WindowModal)
+        self.materialize_progress.setWindowFlag(Qt.WindowCloseButtonHint, False)
         self.materialize_progress.show()
 
         self.materialize_thread = QThread(workbench)

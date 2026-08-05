@@ -39,6 +39,9 @@ TIF_VOLUME_MAX_PREVIEW_VARIANTS_PER_OWNER = 8
 TIF_VOLUME_HIGH_QUALITY_CACHE_OWNER_LIMIT = 2
 TIF_VOLUME_ULTRA_QUALITY_CACHE_OWNER_LIMIT = 1
 TIF_GPU_STREAM_SYNC_MAX_BYTES = 32 * 1024 * 1024
+TIF_RESPONSIVE_FULL_VOLUME_SOURCE_BYTES = 512 * 1024 * 1024
+TIF_RESPONSIVE_GPU_FULL_VOLUME_MAX_DIM = 512
+TIF_RESPONSIVE_CPU_FULL_VOLUME_MAX_DIM = 128
 TIF_MASK_PREVIEW_TRUSTED_STATUSES = {"mask_preview", "mask_in_progress", "reviewed", "ready_for_labeling", "predicted_pending_review", "train_ready"}
 
 def _tif_canvas_background(theme="dark"):
@@ -94,6 +97,7 @@ class TifVolumeRenderController(QObject):
         self.state = TifVolumeRenderState()
         self.preview_build_thread = None
         self.preview_build_worker = None
+        self._queued_preview_build = None
 
     def bind_signals(self):
         workbench = self.workbench
@@ -1306,6 +1310,21 @@ class TifVolumeRenderController(QObject):
         if mode == "drag":
             return self._volume_drag_target_dim()
         requested = self._volume_texture_target_dim()
+        if (
+            workbench.current_volume_scope == "full"
+            and workbench.image_volume is not None
+            and not bool(self.state.volume_clarity_mode)
+            and self._active_part_preview_bbox() is None
+            and not self._volume_roi_inspect_enabled()
+        ):
+            source_bytes = int(getattr(workbench.image_volume, "nbytes", 0) or 0)
+            if source_bytes >= TIF_RESPONSIVE_FULL_VOLUME_SOURCE_BYTES:
+                responsive_limit = (
+                    TIF_RESPONSIVE_GPU_FULL_VOLUME_MAX_DIM
+                    if self.state.volume_canvas_renderer == "gpu"
+                    else TIF_RESPONSIVE_CPU_FULL_VOLUME_MAX_DIM
+                )
+                requested = min(requested, responsive_limit)
         if workbench.current_volume_scope == "part" and workbench.image_volume is not None:
             shape = tuple(int(value) for value in getattr(workbench.image_volume, "shape", ()) or ())
             voxel_count = int(np.prod(shape)) if len(shape) == 3 else 0
@@ -1591,6 +1610,7 @@ class TifVolumeRenderController(QObject):
                 worker.cancel()
             except Exception:
                 pass
+        self._queued_preview_build = None
         self.state.volume_preview_pending_token = 0
         self.state.volume_preview_pending_key = None
         self.state.volume_preview_pending_mask_key = None
@@ -1615,6 +1635,17 @@ class TifVolumeRenderController(QObject):
             return
         self.preview_build_thread = None
         self.preview_build_worker = None
+        queued = self._queued_preview_build
+        self._queued_preview_build = None
+        if queued is not None and self.workbench.display_mode == "volume":
+            volume_request, mask_request = queued
+            QTimer.singleShot(
+                0,
+                lambda volume_request=volume_request, mask_request=mask_request: self._start_volume_preview_build(
+                    volume_request=volume_request,
+                    mask_request=mask_request,
+                ),
+            )
 
     def _volume_preview_build_controls(self):
         workbench = self.workbench
@@ -1677,6 +1708,19 @@ class TifVolumeRenderController(QObject):
         mask_key = mask_request.get("cache_key") if mask_request else None
         if self._is_volume_preview_build_pending(preview_key, mask_key):
             return True
+        thread = self.preview_build_thread
+        if thread is not None:
+            try:
+                running = bool(thread.isRunning())
+            except RuntimeError:
+                running = False
+            if running:
+                self._cancel_volume_preview_build()
+                self._queued_preview_build = (
+                    dict(volume_request or {}) or None,
+                    dict(mask_request or {}) or None,
+                )
+                return True
         self._cancel_volume_preview_build()
         self.state.volume_preview_build_token += 1
         token = int(self.state.volume_preview_build_token)
@@ -2181,13 +2225,6 @@ class TifVolumeRenderController(QObject):
         if str(volume_request.get("mode") or "still") != "still":
             return False
         if self.state.volume_preview_cache.get(volume_request.get("cache_key")) is not None:
-            return False
-        if (
-            workbench.current_volume_scope == "full"
-            and volume_request.get("roi_bbox") is None
-            and self.state.volume_canvas_renderer == "gpu"
-            and hasattr(workbench.volume_canvas, "build_volume_texture_from_source")
-        ):
             return False
         source_bytes = self._volume_request_source_bytes(volume_request)
         if source_bytes <= 0:

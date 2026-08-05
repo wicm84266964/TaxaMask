@@ -2,6 +2,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import json
 import ast
@@ -21,7 +22,7 @@ if str(PROJECT_ROOT) not in sys.path:
 has_pyside6 = False
 
 try:
-    from PySide6.QtCore import QEvent, QPointF, Qt, QThread, Signal
+    from PySide6.QtCore import QEvent, QPointF, Qt, QThread, QTimer, Signal
     from PySide6.QtGui import QColor, QPixmap
     from PySide6.QtOpenGLWidgets import QOpenGLWidget
     from PySide6.QtWidgets import QApplication, QDialog, QLabel, QMessageBox, QSizePolicy, QTextEdit, QTreeWidgetItem, QWidget
@@ -50,6 +51,7 @@ else:
     from AntSleap.ui.tif_local_axis_review_queue import TifLocalAxisReviewQueueWidget
     from AntSleap.ui.tif_workbench import (
         TifBatchImportWorker,
+        TifImportWorker,
         TifLabelAutoSaveWorker,
         TifMaterializeWorker,
         TifTrainingResultDialog,
@@ -692,6 +694,32 @@ class TifWorkbenchTests(unittest.TestCase):
                     widget._tree_item_payload(widget.specimen_list.currentItem()).get("specimen_id"),
                     "existing-b",
                 )
+            finally:
+                widget.close_project(prompt_unsaved=False)
+                widget.deleteLater()
+
+    def test_import_selection_returns_to_z_slice_without_starting_3d_preview(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = TifProjectManager()
+            manager.create_project("import_landing", Path(tmp) / "import_landing")
+            manager.create_specimen_scaffold("newly-imported")
+            widget = TifWorkbenchWidget(manager, "en")
+            try:
+                widget.display_mode = "volume"
+                widget.display_mode_combo.blockSignals(True)
+                widget.display_mode_combo.setCurrentIndex(widget.display_mode_combo.findData("volume"))
+                widget.display_mode_combo.blockSignals(False)
+                widget.slice_axis_combo.setCurrentIndex(widget.slice_axis_combo.findData("x"))
+
+                with patch.object(widget, "_select_volume_tree_item", return_value=True) as select_mock, \
+                     patch.object(widget.volume_render_controller, "render_volume_preview") as volume_render_mock:
+                    widget._select_specimen_after_import("newly-imported")
+
+                self.assertEqual(widget.display_mode, "slice")
+                self.assertEqual(widget.display_mode_combo.currentData(), "slice")
+                self.assertEqual(widget.slice_axis_combo.currentData(), "z")
+                select_mock.assert_called_once_with("newly-imported", "full")
+                volume_render_mock.assert_not_called()
             finally:
                 widget.close_project(prompt_unsaved=False)
                 widget.deleteLater()
@@ -4323,6 +4351,59 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.close_project()
                 widget.deleteLater()
 
+    def test_large_slice_render_keeps_qt_heartbeat_and_coalesces_latest_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=4)
+
+            class LogicalLargeVolume:
+                def __init__(self, array):
+                    self.array = array
+                    self.shape = array.shape
+                    self.dtype = array.dtype
+                    self.nbytes = 64 * 1024 * 1024
+
+                def __getitem__(self, key):
+                    return self.array[key]
+
+            widget.image_volume = LogicalLargeVolume(np.arange(4 * 8 * 8, dtype=np.uint16).reshape(4, 8, 8))
+            widget.label_volume = None
+            widget.edit_volume = None
+            heartbeat = []
+
+            def slow_slice(*_args, **_kwargs):
+                time.sleep(0.15)
+                return np.zeros((8, 8, 3), dtype=np.uint8)
+
+            try:
+                with patch("AntSleap.ui.tif_workbench_workers.build_tif_slice_rgb", side_effect=slow_slice):
+                    QTimer.singleShot(10, lambda: heartbeat.append(True))
+                    widget.render_current_slice()
+                    widget.slice_slider.setValue(1)
+                    widget.slice_slider.setValue(2)
+
+                    deadline = time.monotonic() + 0.12
+                    while time.monotonic() < deadline and not heartbeat:
+                        self.app.processEvents()
+                        time.sleep(0.005)
+
+                    self.assertEqual(heartbeat, [True])
+                    self.assertIsNotNone(widget._slice_render_pending_request)
+                    self.assertEqual(widget._slice_render_pending_request["index"], 2)
+
+                    deadline = time.monotonic() + 2.0
+                    while time.monotonic() < deadline and (
+                        widget._slice_render_thread is not None or widget._slice_render_pending_request is not None
+                    ):
+                        self.app.processEvents()
+                        time.sleep(0.01)
+                    self.assertIsNone(widget._slice_render_thread)
+                    self.assertIsNone(widget._slice_render_pending_request)
+            finally:
+                widget._cancel_slice_render(wait=True)
+                widget.image_volume = None
+                widget.close_project()
+                widget.deleteLater()
+
     def test_side_angle_slices_are_read_only_for_label_safety(self):
         with tempfile.TemporaryDirectory() as tmp:
             widget = self._make_volume_widget(Path(tmp), z_count=3)
@@ -5824,7 +5905,7 @@ class TifWorkbenchTests(unittest.TestCase):
             widget.deleteLater()
             fake_canvas.deleteLater()
 
-    def test_large_full_volume_prefers_gpu_stream_before_background_cpu_preview(self):
+    def test_large_full_volume_starts_background_before_gpu_upload(self):
         manager = TifProjectManager()
         widget = TifWorkbenchWidget(manager, "en")
 
@@ -5872,22 +5953,39 @@ class TifWorkbenchTests(unittest.TestCase):
             widget.image_volume = ShapeOnlyVolume((120, 1600, 1600), np.uint8)
             widget.volume_quality_slider.setValue(1024)
 
-            with patch.object(widget.volume_render_controller, "_start_volume_preview_build") as background_start, \
+            with patch.object(widget.volume_render_controller, "_start_volume_preview_build", return_value=True) as background_start, \
                 patch("AntSleap.ui.tif_volume_render_controller.build_volume_preview") as cpu_builder:
                 widget.volume_render_controller.render_volume_preview()
 
-            background_start.assert_not_called()
+            background_start.assert_called_once()
             cpu_builder.assert_not_called()
-            self.assertEqual(len(fake_canvas.build_calls), 1)
-            self.assertIs(fake_canvas.build_calls[0][0], widget.image_volume)
-            self.assertEqual(fake_canvas.build_calls[0][2]["cache_key"], widget.volume_render_controller._volume_preview_request("still")["cache_key"])
-            self.assertEqual(fake_canvas.mask_uploads[-1], None)
-            self.assertEqual(fake_canvas.render_states[-1]["mask_mode"], "image_only")
-            self.assertEqual(widget._volume_last_stats["preview_provider"]["build_backend"], "gpu_stream")
+            self.assertEqual(fake_canvas.build_calls, [])
         finally:
             widget.close_project()
             widget.deleteLater()
             fake_canvas.deleteLater()
+
+    def test_multi_gib_full_volume_uses_responsive_preview_limits(self):
+        manager = TifProjectManager()
+        widget = TifWorkbenchWidget(manager, "en")
+
+        class ShapeOnlyVolume:
+            shape = (1742, 1876, 1665)
+            dtype = np.dtype(np.uint8)
+            nbytes = int(np.prod(shape, dtype=np.int64))
+
+        try:
+            widget.current_volume_scope = "full"
+            widget.image_volume = ShapeOnlyVolume()
+            widget.volume_quality_slider.setValue(1024)
+            widget._volume_canvas_renderer = "gpu"
+            self.assertEqual(widget.volume_render_controller._active_volume_target_dim("still"), 512)
+            widget._volume_canvas_renderer = "cpu"
+            self.assertEqual(widget.volume_render_controller._active_volume_target_dim("still"), 128)
+        finally:
+            widget.image_volume = None
+            widget.close_project()
+            widget.deleteLater()
 
     def test_gpu_stream_rebuild_keeps_existing_frame_without_pending_flash(self):
         manager = TifProjectManager()
@@ -6748,6 +6846,27 @@ class TifWorkbenchTests(unittest.TestCase):
             self.assertEqual([item["ok"] for item in results], [False, True])
             self.assertIsNone(manager.get_specimen("bad"))
             self.assertIsNotNone(manager.get_specimen("good"))
+
+    def test_single_tif_import_reaches_100_only_after_project_save(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = TifProjectManager()
+            manager.create_project("single_progress", root / "single_progress")
+            tif_path = root / "source.tif"
+            tifffile.imwrite(tif_path, np.ones((3, 8, 8), dtype=np.uint8), photometric="minisblack")
+            worker = TifImportWorker(manager, str(tif_path), "specimen-progress")
+            progress = []
+            finished = []
+            worker.progress.connect(lambda current, total, message: progress.append((current, total, message)))
+            worker.finished.connect(finished.append)
+
+            worker.run()
+
+            self.assertEqual(len(finished), 1)
+            self.assertGreater(len(progress), 1)
+            self.assertTrue(all(int(current) < int(total) for current, total, _message in progress[:-1]))
+            self.assertEqual(progress[-1][:2], (100, 100))
+            self.assertIn("ready", progress[-1][2].lower())
 
     def test_tif_materialize_worker_builds_working_volume_for_metadata_only_specimen(self):
         with tempfile.TemporaryDirectory() as tmp:

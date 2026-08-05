@@ -9,7 +9,12 @@ import numpy as np
 import tifffile
 
 from AntSleap.core.tif_project import TifProjectManager
-from AntSleap.core.tif_stack_import import import_tif_stack, materialize_registered_tif_stack, register_tif_stack_metadata
+from AntSleap.core.tif_stack_import import (
+    _build_tif_working_sidecar,
+    import_tif_stack,
+    materialize_registered_tif_stack,
+    register_tif_stack_metadata,
+)
 from AntSleap.core.tif_volume_io import load_volume_sidecar, read_volume_metadata
 
 
@@ -102,6 +107,54 @@ class TifStackImportTests(unittest.TestCase):
             np.testing.assert_array_equal(load_volume_sidecar(image_abs), source_volume)
             self.assertFalse(result["report"]["memory_policy"]["whole_volume_imread"])
             self.assertTrue(progress)
+
+    def test_working_sidecar_replaces_stale_building_directory_atomically(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tif_path = root / "stack.tif"
+            source_volume = np.arange(2 * 3 * 4, dtype=np.uint8).reshape((2, 3, 4))
+            tifffile.imwrite(tif_path, source_volume, photometric="minisblack")
+            image_path = root / "working" / "image.ome.zarr"
+            building_path = Path(f"{image_path}.building")
+            building_path.mkdir(parents=True)
+            (building_path / "stale.txt").write_text("interrupted import", encoding="utf-8")
+
+            _build_tif_working_sidecar(
+                tif_path,
+                image_path,
+                {
+                    "shape_zyx": list(source_volume.shape),
+                    "dtype": str(source_volume.dtype),
+                    "spacing_zyx": [1.0, 1.0, 1.0],
+                    "spacing_unit": "unknown",
+                    "orientation": "unknown",
+                    "source_path": str(tif_path),
+                },
+            )
+
+            self.assertTrue(image_path.is_dir())
+            self.assertFalse(building_path.exists())
+            np.testing.assert_array_equal(load_volume_sidecar(image_path), source_volume)
+
+    def test_failed_working_sidecar_build_cleans_temporary_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image_path = root / "working" / "image.ome.zarr"
+            building_path = Path(f"{image_path}.building")
+
+            def fail_after_partial_write(_source_path, target_path, _metadata, progress_callback=None):
+                del progress_callback
+                target = Path(target_path)
+                target.mkdir(parents=True)
+                (target / "partial.bin").write_bytes(b"partial")
+                raise RuntimeError("mechanical disk write failed")
+
+            with patch("AntSleap.core.tif_stack_import._stream_tif_stack_to_sidecar", side_effect=fail_after_partial_write):
+                with self.assertRaisesRegex(RuntimeError, "mechanical disk write failed"):
+                    _build_tif_working_sidecar("source.tif", image_path, {})
+
+            self.assertFalse(image_path.exists())
+            self.assertFalse(building_path.exists())
 
     def test_plain_tif_stack_import_can_defer_source_copy_and_working_edit(self):
         with tempfile.TemporaryDirectory() as tmp:

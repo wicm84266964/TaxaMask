@@ -29,7 +29,7 @@ class TifProjectLifecycleController:
             except Exception:
                 pass
 
-    def release_volume_arrays(self, arrays, preview_thread=None, defer=False):
+    def release_volume_arrays(self, arrays, preview_thread=None, wait_threads=None, defer=False):
         unique_arrays = []
         seen = set()
         for array in arrays or ():
@@ -39,10 +39,17 @@ class TifProjectLifecycleController:
             unique_arrays.append(array)
 
         def release():
+            threads = list(wait_threads or ())
             if preview_thread is not None:
+                threads.append(preview_thread)
+            seen_threads = set()
+            for thread in threads:
+                if thread is None or id(thread) in seen_threads:
+                    continue
+                seen_threads.add(id(thread))
                 try:
-                    if preview_thread.isRunning():
-                        preview_thread.wait()
+                    if thread.isRunning():
+                        thread.wait()
                 except RuntimeError:
                     pass
             for array in unique_arrays:
@@ -85,6 +92,15 @@ class TifProjectLifecycleController:
         if self.background_write_running():
             if prompt_unsaved:
                 self._show_background_task_message()
+            return False
+        cancel_slice_render = getattr(workbench, "_cancel_slice_render", None)
+        if callable(cancel_slice_render) and not cancel_slice_render(wait=True):
+            if prompt_unsaved:
+                QMessageBox.information(
+                    workbench,
+                    tt("TIF slice review", workbench.lang),
+                    tt("The current slice is still loading. Wait a moment, then close the project again.", workbench.lang),
+                )
             return False
         if not workbench.volume_render_controller._cancel_and_wait_volume_preview_build():
             if prompt_unsaved:

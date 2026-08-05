@@ -153,12 +153,14 @@ The TIF/CT workflow extends TaxaMask from external morphology images into intern
 Current TIF/CT capabilities include:
 
 - Importing a TIFF stack as a specimen.
+- Building the project working volume in a background task with truthful read, flush, finalize, and project-save progress. The working volume is first written to `image.ome.zarr.building` and is exposed as `image.ome.zarr` only after the disk write completes, so an interrupted import cannot look like a usable specimen volume.
 - Viewing the full volume and extracted part volumes.
 - Drawing full-volume key-slice ROI rectangles as a coarse crop and location tool.
 - Drawing full-volume freehand contour key slices as the precise part-mask tool.
 - Previewing contour auto-fill in the full volume, then confirming the ROI to create both the part image and its part mask.
 - Reviewing or refining masks inside extracted part volumes when needed, without introducing a third part/subpart level.
-- GPU 3D volume preview with streamed texture building, cache reuse, clipping, transfer-function presets, themed clear colors, and section inspection.
+- Background Z/Y/X slice extraction and normalization for large volumes, with rapid navigation coalesced to the latest requested slice instead of blocking the Qt interface on every intermediate position.
+- GPU 3D volume preview with background texture preparation, cache reuse, clipping, transfer-function presets, themed clear colors, and section inspection.
 - ROI high-detail 3D inspection for checking local structures without editing source data.
 - Metadata-only TIF registration followed by explicit working-volume materialization for large stacks.
 - SQLite-backed TIF project indexing with volume, mask, and export data kept as sidecar files.
@@ -336,7 +338,9 @@ On Windows, `启动AntCode修复面板.bat` uses this recovery route.
 
 ### TIF / CT GPU Notes
 
-The TIF/CT volume preview works best when the Python interpreter is assigned to the dedicated NVIDIA GPU. On Windows laptops or desktops with both integrated graphics and an NVIDIA card, set the selected `python.exe` to **High performance** in Windows Graphics settings or NVIDIA Control Panel. The `启动TaxaMask.bat` launcher now searches the `taxamask` Conda environment before the older `antsleap` environment, so update any `TAXAMASK_PYTHON_EXE` override if your environment name changed. After opening a TIF project, check the volume preview status line: it reports the active OpenGL renderer and makes integrated-GPU or CPU fallback problems visible.
+The TIF/CT volume preview works best when the Python interpreter is assigned to a dedicated NVIDIA GPU, but integrated graphics and CPU-only installations remain supported for review. On Windows laptops or desktops with both integrated graphics and an NVIDIA card, set the selected `python.exe` to **High performance** in Windows Graphics settings or NVIDIA Control Panel. The `启动TaxaMask.bat` launcher searches the `taxamask` Conda environment before the older `antsleap` environment, so update any `TAXAMASK_PYTHON_EXE` override if the environment name changed. After opening a TIF project, check the volume preview status line: it reports the active OpenGL renderer and makes integrated-GPU or CPU fallback visible.
+
+For very large full volumes, TaxaMask now opens on a Z slice and prepares the first 3D overview in the background. Full-volume first views are bounded to a 512-voxel maximum dimension on OpenGL renderers and 128 on the CPU fallback; explicit ROI/detail inspection can still request finer local previews. This policy protects interface responsiveness and memory headroom, but it does not make a slow external mechanical disk read like an SSD. Keeping the TaxaMask project on an SSD is recommended because the reusable working volume is stored under `specimens/<specimen_id>/working/image.ome.zarr`; the source TIFF may remain on the external disk.
 
 ## Repository Layout
 

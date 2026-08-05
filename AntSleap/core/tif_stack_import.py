@@ -121,6 +121,19 @@ def _emit_progress(progress_callback, current, total, message):
     progress_callback(int(current), int(total), str(message))
 
 
+def _stage_progress(progress_callback, start, end):
+    start = int(start)
+    end = max(start, int(end))
+
+    def emit(current, total, message):
+        total = max(1, int(total or 1))
+        current = max(0, min(total, int(current or 0)))
+        value = start + int(round((float(current) / float(total)) * float(end - start)))
+        _emit_progress(progress_callback, value, 100, message)
+
+    return emit
+
+
 def _try_write_tif_pages(tif, target, progress_callback=None):
     series = tif.series[0] if tif.series else None
     pages = list(series.pages if series is not None else tif.pages)
@@ -170,19 +183,52 @@ def _stream_tif_stack_to_sidecar(
     )
     try:
         with tifffile.TiffFile(source_path) as tif:
-            _emit_progress(progress_callback, 1, 100, "Inspecting TIF")
-            wrote_pages = _try_write_tif_pages(tif, target, progress_callback=progress_callback)
+            _emit_progress(progress_callback, 6, 100, "Inspecting TIF")
+            wrote_pages = _try_write_tif_pages(
+                tif,
+                target,
+                progress_callback=_stage_progress(progress_callback, 8, 90),
+            )
             if not wrote_pages:
                 _emit_progress(progress_callback, 10, 100, "Reading TIF volume")
                 result = tif.asarray(series=0, out=target, maxworkers=1)
                 if result is not None and result is not target:
                     target[:] = _coerce_tif_array_to_zyx(result)
-                _emit_progress(progress_callback, 95, 100, "Writing TIF sidecar")
+                _emit_progress(progress_callback, 90, 100, "TIF volume decoded")
+        _emit_progress(progress_callback, 92, 100, "Flushing working volume to project storage")
         target.flush()
     finally:
         if hasattr(target, "_mmap"):
             target._mmap.close()
     return image_meta
+
+
+def _build_tif_working_sidecar(
+    source_path,
+    image_abs,
+    tif_metadata,
+    progress_callback=None,
+):
+    image_abs = os.path.abspath(str(image_abs))
+    building_abs = f"{image_abs}.building"
+    if os.path.exists(image_abs):
+        raise FileExistsError(f"working_sidecar_target_already_exists:{image_abs}")
+    if os.path.exists(building_abs):
+        shutil.rmtree(building_abs)
+    try:
+        image_meta = _stream_tif_stack_to_sidecar(
+            source_path,
+            building_abs,
+            tif_metadata,
+            progress_callback=progress_callback,
+        )
+        _emit_progress(progress_callback, 94, 100, "Finalizing working volume")
+        os.replace(building_abs, image_abs)
+        return image_meta
+    except Exception:
+        if os.path.exists(building_abs):
+            shutil.rmtree(building_abs, ignore_errors=True)
+        raise
 
 
 def _read_tif_metadata(path):
@@ -282,7 +328,7 @@ def import_tif_stack(
         image_abs = project_manager.to_absolute(image_rel)
         tif_metadata["source_path"] = source_ref
         _emit_progress(progress_callback, 5, 100, "Preparing sidecar")
-        image_meta = _stream_tif_stack_to_sidecar(
+        image_meta = _build_tif_working_sidecar(
             source_path,
             image_abs,
             tif_metadata,
@@ -394,7 +440,7 @@ def import_tif_stack(
         report_abs = project_manager.to_absolute(report_rel)
         atomic_write_json(report_abs, report, indent=2, ensure_ascii=False)
         specimen["working_volume"]["import_report"] = report_rel
-        _emit_progress(progress_callback, 100, 100, "Saving TIF project")
+        _emit_progress(progress_callback, 98, 100, "Saving TIF project")
         project_manager.save_project()
     except Exception:
         project_manager.discard_specimen_scaffold(specimen_id, save=True)
@@ -532,7 +578,7 @@ def register_tif_stack_metadata(
         report_abs = project_manager.to_absolute(report_rel)
         atomic_write_json(report_abs, report, indent=2, ensure_ascii=False)
         specimen["working_volume"]["import_report"] = report_rel
-        _emit_progress(progress_callback, 100, 100, "Saving TIF metadata")
+        _emit_progress(progress_callback, 98, 100, "Saving TIF metadata")
         project_manager.save_project()
     except Exception:
         project_manager.discard_specimen_scaffold(specimen_id, save=True)
@@ -584,7 +630,7 @@ def materialize_registered_tif_stack(
     tif_metadata["source_path"] = source_ref
     try:
         _emit_progress(progress_callback, 5, 100, "Preparing sidecar")
-        image_meta = _stream_tif_stack_to_sidecar(
+        image_meta = _build_tif_working_sidecar(
             source_path,
             image_abs,
             tif_metadata,
@@ -651,7 +697,7 @@ def materialize_registered_tif_stack(
         }
         atomic_write_json(report_abs, report, indent=2, ensure_ascii=False)
         specimen["working_volume"]["import_report"] = report_rel
-        _emit_progress(progress_callback, 100, 100, "Saving TIF project")
+        _emit_progress(progress_callback, 98, 100, "Saving TIF project")
         project_manager.save_project()
     except Exception as exc:
         rollback_errors = []

@@ -58,6 +58,7 @@ class TifImportWorker(QObject):
         except Exception as exc:
             self.failed.emit(str(exc))
             return
+        self.progress.emit(100, 100, "TIF working volume ready")
         self.finished.emit(result)
 
 
@@ -165,6 +166,127 @@ class TifMaterializeWorker(QObject):
 
 class _TifVolumePreviewCancelled(RuntimeError):
     pass
+
+
+def _extract_tif_axis_slice(volume, axis, index):
+    if volume is None:
+        return None
+    axis = axis if axis in {"z", "y", "x"} else "z"
+    if axis == "y":
+        index = max(0, min(int(index), int(volume.shape[1]) - 1))
+        return np.asarray(volume[:, index, :])
+    if axis == "x":
+        index = max(0, min(int(index), int(volume.shape[2]) - 1))
+        return np.asarray(volume[:, :, index])
+    index = max(0, min(int(index), int(volume.shape[0]) - 1))
+    return np.asarray(volume[index])
+
+
+def _normalize_tif_slice(image_slice, contrast=1.0, brightness=0.0):
+    data = np.asarray(image_slice, dtype=np.float32)
+    finite = data[np.isfinite(data)]
+    if finite.size == 0:
+        return np.zeros(data.shape, dtype=np.uint8)
+    low = float(np.percentile(finite, 1))
+    high = float(np.percentile(finite, 99))
+    if high <= low:
+        low = float(np.min(finite))
+        high = float(np.max(finite))
+    if high <= low:
+        return np.zeros(data.shape, dtype=np.uint8)
+    normalized = (data - low) / (high - low)
+    normalized = (normalized - 0.5) * float(contrast) + 0.5 + float(brightness)
+    return np.clip(normalized * 255.0, 0, 255).astype(np.uint8)
+
+
+def build_tif_slice_rgb(
+    image_volume,
+    *,
+    axis,
+    index,
+    label_volume=None,
+    label_overlay=None,
+    opacity=0.45,
+    contrast=1.0,
+    brightness=0.0,
+    material_colors=None,
+):
+    image_slice = _extract_tif_axis_slice(image_volume, axis, index)
+    if image_slice is None:
+        raise ValueError("tif_slice_image_missing")
+    label_slice = None
+    if label_volume is not None and tuple(label_volume.shape) == tuple(image_volume.shape):
+        label_slice = _extract_tif_axis_slice(label_volume, axis, index)
+    overlay = dict(label_overlay or {})
+    overlay_volume = overlay.get("volume")
+    bbox = overlay.get("bbox") or []
+    if overlay_volume is not None and axis == "z" and len(bbox) == 3:
+        z0, z1 = int(bbox[0][0]), int(bbox[0][1])
+        if z0 <= int(index) < z1:
+            label_slice = np.zeros_like(image_slice, dtype=np.asarray(overlay_volume).dtype)
+            y0, y1 = int(bbox[1][0]), int(bbox[1][1])
+            x0, x1 = int(bbox[2][0]), int(bbox[2][1])
+            label_slice[y0:y1, x0:x1] = np.asarray(overlay_volume[int(index) - z0])
+
+    gray = _normalize_tif_slice(image_slice, contrast=contrast, brightness=brightness)
+    rgb = np.stack([gray, gray, gray], axis=-1)
+    if label_slice is not None and float(opacity) > 0.0:
+        mask = np.asarray(label_slice) > 0
+        if np.any(mask):
+            overlay_rgb = np.zeros_like(rgb)
+            colors = dict(material_colors or {})
+            for material_id in np.unique(np.asarray(label_slice)[mask]):
+                color = colors.get(int(material_id), (255, 75, 75))
+                overlay_rgb[np.asarray(label_slice) == material_id] = tuple(int(value) for value in color[:3])
+            alpha = max(0.0, min(1.0, float(opacity)))
+            rgb[mask] = (
+                (1.0 - alpha) * rgb[mask].astype(np.float32)
+                + alpha * overlay_rgb[mask].astype(np.float32)
+            ).astype(np.uint8)
+    return np.ascontiguousarray(rgb)
+
+
+class TifSliceRenderWorker(QObject):
+    finished = Signal(object)
+    failed = Signal(object)
+
+    def __init__(self, token, request):
+        super().__init__()
+        self.token = int(token)
+        self.request = dict(request or {})
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    def run(self):
+        started = time.perf_counter()
+        try:
+            if self._cancelled:
+                self.finished.emit({"token": self.token, "cancelled": True})
+                return
+            rgb = build_tif_slice_rgb(
+                self.request.get("image_volume"),
+                axis=str(self.request.get("axis") or "z"),
+                index=int(self.request.get("index") or 0),
+                label_volume=self.request.get("label_volume"),
+                label_overlay=self.request.get("label_overlay"),
+                opacity=float(self.request.get("opacity") or 0.0),
+                contrast=float(self.request.get("contrast") or 1.0),
+                brightness=float(self.request.get("brightness") or 0.0),
+                material_colors=self.request.get("material_colors"),
+            )
+            self.finished.emit(
+                {
+                    "token": self.token,
+                    "cancelled": bool(self._cancelled),
+                    "rgb": None if self._cancelled else rgb,
+                    "context": dict(self.request.get("context") or {}),
+                    "build_ms": max(0.0, (time.perf_counter() - started) * 1000.0),
+                }
+            )
+        except Exception as exc:
+            self.failed.emit({"token": self.token, "error": str(exc), "context": dict(self.request.get("context") or {})})
 
 
 class TifVolumePreviewBuildWorker(QObject):

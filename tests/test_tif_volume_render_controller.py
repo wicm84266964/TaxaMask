@@ -212,6 +212,30 @@ class TifVolumeRenderControllerTests(unittest.TestCase):
         thread.wait.assert_called_once_with(250)
         workbench._cancel_tif_task.assert_called_once_with("task-cancel", "volume_preview_cancelled")
 
+    def test_new_preview_waits_for_cancelled_worker_and_keeps_only_latest_request(self):
+        workbench = self.make_workbench()
+        controller = TifVolumeRenderController(workbench)
+        old_worker = Mock()
+        old_thread = Mock()
+        old_thread.isRunning.return_value = True
+        controller.preview_build_worker = old_worker
+        controller.preview_build_thread = old_thread
+        controller.state.volume_preview_build_task_id = "old-task"
+        first = {"cache_key": ("first",), "mode": "still"}
+        latest = {"cache_key": ("latest",), "mode": "still"}
+
+        self.assertTrue(controller._start_volume_preview_build(volume_request=first))
+        self.assertTrue(controller._start_volume_preview_build(volume_request=latest))
+
+        self.assertGreaterEqual(old_worker.cancel.call_count, 2)
+        self.assertEqual(controller._queued_preview_build, (latest, None))
+        callbacks = []
+        with patch("AntSleap.ui.tif_volume_render_controller.QTimer.singleShot", side_effect=lambda _delay, callback: callbacks.append(callback)):
+            controller._cleanup_volume_preview_build_thread(old_thread, old_worker)
+        self.assertEqual(len(callbacks), 1)
+        self.assertIsNone(controller.preview_build_thread)
+        self.assertIsNone(controller.preview_build_worker)
+
     def test_preview_worker_reports_mid_build_cancellation_as_cancelled(self):
         worker = TifVolumePreviewBuildWorker(
             7,

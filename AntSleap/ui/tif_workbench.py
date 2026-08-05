@@ -135,8 +135,10 @@ try:
         TifMaterializeWorker,
         TifPartMaskPreviewWorker,
         TifPromoteWorkingEditWorker,
+        TifSliceRenderWorker,
         TifVolumePreviewBuildWorker,
         _tif_write_label_slice_snapshots,
+        build_tif_slice_rgb,
     )
     from AntSleap.ui.tif_gpu_volume_canvas import (
         GPU_VOLUME_MAX_RAY_STEPS,
@@ -241,8 +243,10 @@ except ModuleNotFoundError as exc:
         TifMaterializeWorker,
         TifPartMaskPreviewWorker,
         TifPromoteWorkingEditWorker,
+        TifSliceRenderWorker,
         TifVolumePreviewBuildWorker,
         _tif_write_label_slice_snapshots,
+        build_tif_slice_rgb,
     )
     from ui.tif_gpu_volume_canvas import (
         GPU_VOLUME_MAX_RAY_STEPS,
@@ -268,6 +272,7 @@ TIF_VOLUME_HIGH_QUALITY_CACHE_OWNER_LIMIT = 2
 TIF_VOLUME_ULTRA_QUALITY_CACHE_OWNER_LIMIT = 1
 TIF_CONFIRM_PART_BACKGROUND_VOXELS = 1_000_000
 TIF_GPU_STREAM_SYNC_MAX_BYTES = 32 * 1024 * 1024
+TIF_ASYNC_SLICE_SOURCE_BYTES = 32 * 1024 * 1024
 TIF_MASK_PREVIEW_TRUSTED_STATUSES = {
     "mask_preview",
     "mask_in_progress",
@@ -2527,6 +2532,11 @@ class TifWorkbenchWidget(QWidget):
         return True
 
     def _select_specimen_after_import(self, specimen_id):
+        if self.display_mode != "slice":
+            self.on_display_mode_changed("slice")
+        z_index = self.slice_axis_combo.findData("z")
+        if z_index >= 0 and self.slice_axis_combo.currentIndex() != z_index:
+            self.slice_axis_combo.setCurrentIndex(z_index)
         self._select_volume_tree_item(specimen_id, "full")
 
     def _default_import_specimen_id(self, tif_path, used_ids=None):
@@ -2979,6 +2989,7 @@ class TifWorkbenchWidget(QWidget):
         self._tif_import_progress.setAutoClose(False)
         self._tif_import_progress.setAutoReset(False)
         self._tif_import_progress.setWindowModality(Qt.WindowModal)
+        self._tif_import_progress.setWindowFlag(Qt.WindowCloseButtonHint, False)
         self._tif_import_progress.show()
 
         self._tif_import_thread = QThread(self)
@@ -3300,6 +3311,11 @@ class TifWorkbenchWidget(QWidget):
         self.delete_part_volume(self.current_specimen_id, self.current_part_id)
 
     def release_loaded_volume_arrays(self, defer=False):
+        slice_thread = self._slice_render_thread if defer else None
+        slice_stopped = self._cancel_slice_render(wait=not defer)
+        if not slice_stopped:
+            defer = True
+            slice_thread = self._slice_render_thread
         arrays = (
             self.image_volume,
             self.label_volume,
@@ -3320,7 +3336,7 @@ class TifWorkbenchWidget(QWidget):
         preview_thread = self.volume_render_controller.preview_build_thread if defer else None
         return self.project_lifecycle_controller.release_volume_arrays(
             unique_arrays,
-            preview_thread=preview_thread,
+            wait_threads=(preview_thread, slice_thread),
             defer=defer,
         )
 
@@ -4511,10 +4527,27 @@ class TifWorkbenchWidget(QWidget):
         axis, slice_index = self._active_slice_position()
         total = self._slice_count_for_axis(axis)
         self.slice_label.setText(f"{slice_index + 1} / {total}")
-        image_slice = self._extract_axis_slice(self.image_volume, axis, slice_index)
-        label_slice = None
-        if self.label_volume is not None and self.label_volume.shape == self.image_volume.shape:
-            label_slice = self._extract_axis_slice(self.label_volume, axis, slice_index)
+        request = self._slice_render_request(axis, slice_index)
+        source_bytes = int(getattr(self.image_volume, "nbytes", 0) or 0)
+        if source_bytes >= TIF_ASYNC_SLICE_SOURCE_BYTES:
+            self._queue_slice_render(request)
+            return
+        self._cancel_slice_render(wait=False)
+        rgb = build_tif_slice_rgb(
+            request["image_volume"],
+            axis=request["axis"],
+            index=request["index"],
+            label_volume=request.get("label_volume"),
+            label_overlay=request.get("label_overlay"),
+            opacity=request["opacity"],
+            contrast=request["contrast"],
+            brightness=request["brightness"],
+            material_colors=request["material_colors"],
+        )
+        self._apply_slice_rgb(rgb)
+
+    def _slice_render_request(self, axis, slice_index):
+        label_volume = self.label_volume if self.label_volume is not None and self.label_volume.shape == self.image_volume.shape else None
         if (
             (
                 (self.current_volume_scope == "part" and self.label_role_combo.currentData() == "editable_ai_result")
@@ -4523,28 +4556,138 @@ class TifWorkbenchWidget(QWidget):
             and self.edit_volume is not None
             and self.edit_volume.shape == self.image_volume.shape
         ):
-            label_slice = self._extract_axis_slice(self.edit_volume, axis, slice_index)
+            label_volume = self.edit_volume
+        label_overlay = None
         if (
             self.current_volume_scope == "full"
             and self.part_preview_mask is not None
             and self.part_mask_preview_bbox
-            and self._current_slice_axis() == "z"
+            and axis == "z"
         ):
-            bbox = self.part_mask_preview_bbox
-            z0, z1 = int(bbox[0][0]), int(bbox[0][1])
-            if z0 <= int(slice_index) < z1:
-                overlay = np.zeros_like(image_slice, dtype=np.asarray(self.part_preview_mask).dtype)
-                local_z = int(slice_index) - z0
-                y0, y1 = int(bbox[1][0]), int(bbox[1][1])
-                x0, x1 = int(bbox[2][0]), int(bbox[2][1])
-                overlay[y0:y1, x0:x1] = np.asarray(self.part_preview_mask[local_z])
-                label_slice = overlay
+            label_overlay = {"volume": self.part_preview_mask, "bbox": self.part_mask_preview_bbox}
         if self.current_volume_scope == "part" and not self.current_reslice_id and self.part_preview_mask is not None and self.part_preview_mask.shape == self.image_volume.shape:
-            label_slice = self._extract_axis_slice(self.part_preview_mask, axis, slice_index)
-        pixmap = self._render_slice_pixmap(image_slice, label_slice)
+            label_volume = self.part_preview_mask
+        return {
+            "image_volume": self.image_volume,
+            "label_volume": label_volume,
+            "label_overlay": label_overlay,
+            "axis": str(axis),
+            "index": int(slice_index),
+            "opacity": float(self.opacity_slider.value()) / 100.0,
+            "contrast": float(self.contrast_slider.value()) / 10.0,
+            "brightness": float(self.brightness_slider.value()) / 100.0,
+            "material_colors": {
+                int(material_id): (color.red(), color.green(), color.blue())
+                for material_id, color in self.material_colors.items()
+            },
+            "context": {
+                "specimen_id": self.current_specimen_id,
+                "scope": self.current_volume_scope,
+                "part_id": self.current_part_id,
+                "reslice_id": self.current_reslice_id,
+                "axis": str(axis),
+                "index": int(slice_index),
+            },
+        }
+
+    def _apply_slice_rgb(self, rgb):
+        rgb = np.ascontiguousarray(rgb)
+        height, width = rgb.shape[:2]
+        image = QImage(rgb.data, width, height, rgb.strides[0], QImage.Format_RGB888).copy()
+        pixmap = QPixmap.fromImage(image)
         reset_view = bool(getattr(self, "_reset_canvas_view_on_next_render", False))
         self._reset_canvas_view_on_next_render = False
         self.canvas.set_slice_pixmap(pixmap, reset_view=reset_view)
+
+    def _queue_slice_render(self, request):
+        self._slice_render_token += 1
+        token = int(self._slice_render_token)
+        request = dict(request or {})
+        request["token"] = token
+        thread = self._slice_render_thread
+        if thread is not None:
+            try:
+                running = bool(thread.isRunning())
+            except RuntimeError:
+                running = False
+            if running:
+                if self._slice_render_worker is not None:
+                    self._slice_render_worker.cancel()
+                self._slice_render_pending_request = request
+                self.status_label.setText(tt("Loading selected TIF slice...", self.lang))
+                return True
+        return self._start_slice_render(request)
+
+    def _start_slice_render(self, request):
+        request = dict(request or {})
+        token = int(request.get("token") or 0)
+        if token <= 0 or token != int(self._slice_render_token):
+            return False
+        thread = QThread(self)
+        worker = TifSliceRenderWorker(token, request)
+        self._slice_render_thread = thread
+        self._slice_render_worker = worker
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_slice_render_finished)
+        worker.failed.connect(self._on_slice_render_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(lambda t=thread, w=worker: self._cleanup_slice_render_thread(t, w))
+        thread.finished.connect(thread.deleteLater)
+        self.status_label.setText(tt("Loading selected TIF slice...", self.lang))
+        thread.start()
+        return True
+
+    def _on_slice_render_finished(self, result):
+        result = dict(result or {})
+        if result.get("cancelled") or int(result.get("token") or 0) != int(self._slice_render_token):
+            return
+        rgb = result.get("rgb")
+        if rgb is None:
+            return
+        self._apply_slice_rgb(rgb)
+        self.status_label.setText(self.canvas_status_text(self.canvas.zoom_factor()))
+
+    def _on_slice_render_failed(self, result):
+        result = dict(result or {})
+        if int(result.get("token") or 0) != int(self._slice_render_token):
+            return
+        message = tt("TIF slice loading failed: {0}", self.lang).format(str(result.get("error") or "unknown_error"))
+        self.status_label.setText(message)
+        self.log(message)
+
+    def _cleanup_slice_render_thread(self, thread=None, worker=None):
+        if thread is not None and self._slice_render_thread is not thread:
+            return
+        if worker is not None and self._slice_render_worker is not worker:
+            return
+        self._slice_render_thread = None
+        self._slice_render_worker = None
+        pending = self._slice_render_pending_request
+        self._slice_render_pending_request = None
+        if pending is not None and int(pending.get("token") or 0) == int(self._slice_render_token) and self.image_volume is not None:
+            QTimer.singleShot(0, lambda pending=pending: self._start_slice_render(pending))
+
+    def _cancel_slice_render(self, wait=False, timeout_ms=2000):
+        self._slice_render_token += 1
+        self._slice_render_pending_request = None
+        worker = self._slice_render_worker
+        thread = self._slice_render_thread
+        if worker is not None:
+            try:
+                worker.cancel()
+            except RuntimeError:
+                pass
+        if wait and thread is not None:
+            try:
+                if thread.isRunning():
+                    thread.quit()
+                    return bool(thread.wait(int(max(0, timeout_ms))))
+            except RuntimeError:
+                return True
+        return True
 
     def _extract_axis_slice(self, volume, axis, index):
         if volume is None:

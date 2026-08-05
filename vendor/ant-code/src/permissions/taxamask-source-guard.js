@@ -8,8 +8,10 @@ export const TAXAMASK_AUTH_SOURCE = "taxamask.source_development";
 const SOURCE_ROOTS = Object.freeze([
   "AntSleap",
   "core",
+  "skills",
   "tools",
   "tests",
+  "vendor/ant-code/config",
   "vendor/ant-code/src",
   "vendor/ant-code/tests",
   "vendor/ant-code/scripts"
@@ -17,6 +19,12 @@ const SOURCE_ROOTS = Object.freeze([
 
 const SOURCE_EXTENSIONS = Object.freeze([
   ".py",
+  ".json",
+  ".yaml",
+  ".yml",
+  ".toml",
+  ".md",
+  ".txt",
   ".js",
   ".jsx",
   ".ts",
@@ -25,8 +33,8 @@ const SOURCE_EXTENSIONS = Object.freeze([
   ".html",
   ".mjs",
   ".cjs",
-  ".sh",
   ".ps1",
+  ".sh",
   ".bat",
   ".cmd"
 ]);
@@ -56,6 +64,7 @@ const DEFAULT_ADAPTER_EXTENSIONS = Object.freeze([
 ]);
 
 const SOURCE_WRITE_TOOLS = new Set(["write_file", "edit_file"]);
+const SHELL_TOOLS = new Set(["powershell", "bash", "background_shell"]);
 
 const SHELL_WRITE_PATTERNS = Object.freeze([
   /\b(Set-Content|Add-Content|Out-File|New-Item|Copy-Item|Move-Item|Remove-Item)\b/i,
@@ -123,7 +132,7 @@ export function taxamaskSourceWriteDecision(payload = {}, options = {}) {
     );
   }
 
-  if ((toolName === "powershell" || toolName === "bash") && sourceTarget) {
+  if (SHELL_TOOLS.has(toolName) && sourceTarget) {
     const command = String(input.command ?? "");
     if (looksLikeSourceMutatingShell(command)) {
       if (sourceAuth === TAXAMASK_AUTH_SOURCE) {
@@ -139,7 +148,7 @@ export function taxamaskSourceWriteDecision(payload = {}, options = {}) {
     }
   }
 
-  if (toolName === "powershell" || toolName === "bash") {
+  if (SHELL_TOOLS.has(toolName)) {
     const command = String(input.command ?? "");
     if (looksLikeBroadSourceMutation(command)) {
       if (adapterTarget && !sourceTarget) {
@@ -193,7 +202,7 @@ export function taxamaskSourceWriteDecision(payload = {}, options = {}) {
     );
   }
 
-  if ((toolName === "powershell" || toolName === "bash") && adapterTarget) {
+  if (SHELL_TOOLS.has(toolName) && adapterTarget) {
     const command = String(input.command ?? "");
     if (looksLikeSourceMutatingShell(command)) {
       if (sourceAuth === TAXAMASK_AUTH_ADAPTER || sourceAuth === TAXAMASK_AUTH_SOURCE) {
@@ -423,8 +432,10 @@ function sourceCandidateFromToken(token) {
   const roots = [
     "AntSleap/",
     "core/",
+    "skills/",
     "tools/",
     "tests/",
+    "vendor/ant-code/config/",
     "vendor/ant-code/src/",
     "vendor/ant-code/tests/",
     "vendor/ant-code/scripts/"

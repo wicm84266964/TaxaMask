@@ -26,6 +26,14 @@ ADAPTER_ID = "taxamask_tif_nnunet_v2_backend"
 MODEL_FAMILY = "nnunet_v2_tif_region"
 LEGACY_MODEL_FAMILIES = {"nnunet_v2_part_reslice"}
 DEFAULT_DATASET_NAME = "TaxaMaskTifVolumeSegmentation"
+DEFAULT_PREDICT_COMMAND = (
+    f'"{sys.executable}" -m AntSleap.tools.nnunet_predict_with_taxamask_trainers'
+)
+SPACING_UNIT_IN_METERS = {
+    "meter": 1.0,
+    "millimeter": 1e-3,
+    "micrometer": 1e-6,
+}
 
 
 def _now_iso():
@@ -187,10 +195,23 @@ def _command_env(args, raw_root, preprocessed_root, results_root):
     env["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
+    repo_root = str(Path(__file__).resolve().parents[2])
+    python_path = [repo_root]
+    if env.get("PYTHONPATH"):
+        python_path.append(env["PYTHONPATH"])
+    env["PYTHONPATH"] = os.pathsep.join(python_path)
     scripts_dir = Path(sys.prefix) / ("Scripts" if os.name == "nt" else "bin")
     if scripts_dir.exists():
         env["PATH"] = str(scripts_dir) + os.pathsep + env.get("PATH", "")
     return env
+
+
+def _prediction_process_args(args, platform_name=None):
+    """Avoid Windows multiprocessing pipes for large prediction exports."""
+    sequential = args.sequential_prediction
+    if sequential is None:
+        sequential = (platform_name or os.name) == "nt"
+    return ["-npp", "0", "-nps", "0"] if sequential else []
 
 
 def _resolve_executable(command, env):
@@ -439,10 +460,7 @@ def _load_checkpoint_payload(checkpoint_path):
         import torch
     except ImportError as exc:
         raise RuntimeError("torch_required_to_resolve_nnunet_effective_config") from exc
-    try:
-        payload = torch.load(str(checkpoint_path), map_location="cpu", weights_only=True)
-    except TypeError:
-        payload = torch.load(str(checkpoint_path), map_location="cpu")
+    payload = torch.load(str(checkpoint_path), map_location="cpu", weights_only=True)
     if not isinstance(payload, dict):
         raise ValueError("nnunet_checkpoint_payload_invalid")
     return payload
@@ -643,10 +661,29 @@ def _label_restore_mapping(manifest):
     return clean
 
 
-def _export_prediction_inputs(contract, args):
+def _convert_prediction_spacing_unit(metadata, target_unit):
+    target = str(target_unit or "").strip().lower()
+    if not target:
+        return dict(metadata or {})
+    clean = _sanitize_exchange_metadata(metadata)
+    source = str(clean.get("spacing_unit") or "unknown")
+    if target not in SPACING_UNIT_IN_METERS:
+        raise ValueError(f"unsupported_model_input_spacing_unit:{target}")
+    if not clean.get("scale_verified") or source not in SPACING_UNIT_IN_METERS:
+        raise ValueError(f"prediction_input_scale_unverified:{source}:{target}")
+    factor = SPACING_UNIT_IN_METERS[source] / SPACING_UNIT_IN_METERS[target]
+    clean["spacing_zyx"] = [float(value) * factor for value in clean["spacing_zyx"]]
+    clean["spacing_unit"] = target
+    clean["scale_verified"] = True
+    return clean
+
+
+def _export_prediction_inputs(contract, args, manifest=None):
     output_dir = Path(contract["output_dir"]).resolve()
     images_ts = output_dir / "imagesTs"
     images_ts.mkdir(parents=True, exist_ok=True)
+    nnunet_meta = (manifest or {}).get("nnunet") if isinstance((manifest or {}).get("nnunet"), dict) else {}
+    model_input_spacing_unit = str(nnunet_meta.get("input_spacing_unit") or "").strip()
     cases = []
     samples = contract.get("part_samples", []) or []
     if str(contract.get("input_scope") or "part_reslice") == "top_level_volume":
@@ -680,7 +717,17 @@ def _export_prediction_inputs(contract, args):
                 "spacing_unit": input_volume.get("spacing_unit", "unknown"),
                 "scale_verified": False,
             })
-        write_nifti_volume(out_path, array, metadata)
+        nnunet_input_metadata = _convert_prediction_spacing_unit(
+            metadata,
+            model_input_spacing_unit,
+        )
+        nnunet_file_metadata = dict(nnunet_input_metadata)
+        if model_input_spacing_unit:
+            # A/B/C training files store model-specific numeric spacing while
+            # leaving xyzt_units unknown, so SimpleITK must not rescale it.
+            nnunet_file_metadata["spacing_unit"] = "unknown"
+            nnunet_file_metadata["scale_verified"] = False
+        write_nifti_volume(out_path, array, nnunet_file_metadata)
         cases.append(
             {
                 "case_id": case_id,
@@ -689,6 +736,8 @@ def _export_prediction_inputs(contract, args):
                 "reslice_id": reslice_id,
                 "input_volume": input_volume,
                 "exchange_metadata": metadata,
+                "nnunet_input_metadata": nnunet_input_metadata,
+                "nnunet_file_metadata": nnunet_file_metadata,
                 "image_path": str(out_path),
                 "shape_zyx": [int(value) for value in np.asarray(array).shape],
             }
@@ -915,7 +964,7 @@ def run_predict(contract, args):
             setattr(args, attr, str(nnunet_meta.get(attr)))
     env = _command_env(args, raw_root, preprocessed_root, results_root)
     predict_prefix = _command_prefix(args.predict_command, env, require_exists=not args.dry_run_commands)
-    images_ts, cases = _export_prediction_inputs(contract, args)
+    images_ts, cases = _export_prediction_inputs(contract, args, manifest)
     predictions_dir = Path(contract["output_dir"]).resolve() / "nnunet_predictions"
     predictions_dir.mkdir(parents=True, exist_ok=True)
     command_log = Path(contract["run_dir"]) / "logs" / "nnunet_v2_predict.log"
@@ -939,6 +988,7 @@ def run_predict(contract, args):
         "-device",
         args.device,
     ]
+    predict_cmd.extend(_prediction_process_args(args))
     if args.disable_tta:
         predict_cmd.append("--disable_tta")
     if args.save_probabilities:
@@ -1004,7 +1054,7 @@ def parse_args(argv=None):
     parser.add_argument("--nnunet-results", default="")
     parser.add_argument("--plan-command", default="nnUNetv2_plan_and_preprocess")
     parser.add_argument("--train-command", default="nnUNetv2_train")
-    parser.add_argument("--predict-command", default="nnUNetv2_predict")
+    parser.add_argument("--predict-command", default=DEFAULT_PREDICT_COMMAND)
     parser.add_argument("--file-ending", default=".nii.gz", choices=(".nii", ".nii.gz"))
     parser.add_argument("--label-id-mode", default="compact", choices=("compact", "preserve"))
     parser.add_argument("--split-mode", default="all_train", choices=("all_train", "leave_one_val"))
@@ -1016,6 +1066,15 @@ def parse_args(argv=None):
     parser.add_argument("--disable-tta", action="store_true")
     parser.add_argument("--save-probabilities", action="store_true")
     parser.add_argument("--not-on-device", action="store_true")
+    parser.add_argument(
+        "--sequential-prediction",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Run nnU-Net preprocessing and segmentation export without multiprocessing. "
+            "Defaults to enabled on Windows to support large prediction arrays."
+        ),
+    )
     parser.add_argument("--dry-run-commands", action="store_true")
     args = parser.parse_args(argv)
     explicit = set()

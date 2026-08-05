@@ -34,7 +34,7 @@ def _label_mapping_from_payload(payload: dict[str, Any]) -> LabelMapping:
 
 def load_checkpoint_model(checkpoint_path: str, device: str = "cpu") -> tuple[TifBlinkUNet2D, TifBlinkTrainConfig, LabelMapping, dict[str, Any]]:
     target_device = _device(device)
-    payload = torch.load(str(checkpoint_path), map_location=target_device)
+    payload = torch.load(str(checkpoint_path), map_location=target_device, weights_only=True)
     config = TifBlinkTrainConfig(**payload["train_config"])
     mapping = _label_mapping_from_payload(payload)
     model = TifBlinkUNet2D(

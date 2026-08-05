@@ -6,6 +6,7 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
+from .external_command import render_external_command
 from .file_integrity import TREE_ALGORITHM, compute_fingerprint
 from .safe_io import atomic_write_json
 from .training_run_2d import DEFAULT_TRAINING_SEED, prepare_2d_training_run
@@ -408,7 +409,15 @@ class ExternalBackendRunner:
         )
 
     def _run_command(self, command_template, contract_path, run_dir, action):
-        command = self._format_template(command_template, run_dir, contract_path)
+        command = render_external_command(
+            command_template,
+            python=self.backend_config.get("python_executable", "python"),
+            contract_json=contract_path,
+            contract=contract_path,
+            run_dir=run_dir,
+        )
+        if not command:
+            raise ValueError(f"external_backend_{action}_command_missing")
         log_dir = os.path.join(run_dir, "logs")
         os.makedirs(log_dir, exist_ok=True)
         stdout_path = os.path.join(log_dir, f"{action}_stdout.log")
@@ -417,7 +426,7 @@ class ExternalBackendRunner:
             result = subprocess.run(
                 command,
                 cwd=run_dir,
-                shell=True,
+                shell=False,
                 text=True,
                 stdout=stdout_handle,
                 stderr=stderr_handle,

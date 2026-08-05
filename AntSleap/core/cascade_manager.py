@@ -279,7 +279,7 @@ class CascadingManager:
             return None
              
         print(f"Loading Micro-Expert for [{part_name}] from {model_path}...")
-        loaded = torch.load(model_path, map_location=self.device)
+        loaded = torch.load(model_path, map_location=self.device, weights_only=True)
         checkpoint_state = loaded
         checkpoint_meta = {}
         if isinstance(loaded, dict) and isinstance(loaded.get("state_dict"), dict):

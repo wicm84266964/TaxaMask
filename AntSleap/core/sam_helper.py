@@ -90,7 +90,7 @@ class SAMWorker(QObject):
             else:
                 pt_model = self.model.model
             
-            state_dict = torch.load(weights_path, map_location=self.device)
+            state_dict = torch.load(weights_path, map_location=self.device, weights_only=True)
             pt_model.mask_decoder.load_state_dict(state_dict)
             print(f"SAMWorker: Loaded fine-tuned weights from {os.path.basename(weights_path)}")
         except Exception as e:

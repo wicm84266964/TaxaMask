@@ -541,7 +541,7 @@ class AntEngine:
         # If specific timestamp not found, try to find latest? No, strict loading for specific selection.
         if os.path.exists(loc_path):
             try:
-                saved_state = torch.load(loc_path, map_location=self.device)
+                saved_state = torch.load(loc_path, map_location=self.device, weights_only=True)
                 checkpoint_state = saved_state
                 checkpoint_meta = {}
 
@@ -606,7 +606,9 @@ class AntEngine:
         if os.path.exists(sam_path):
             try:
                 parts_model = self.ensure_parts_model_loaded()
-                parts_model.sam_model.mask_decoder.load_state_dict(torch.load(sam_path, map_location=self.device))
+                parts_model.sam_model.mask_decoder.load_state_dict(
+                    torch.load(sam_path, map_location=self.device, weights_only=True)
+                )
                 self.loaded_sam_decoder_reference = os.path.relpath(
                     sam_path, weights_root
                 ).replace("\\", "/")

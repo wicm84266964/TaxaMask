@@ -263,7 +263,7 @@ class MainWindowModelManagementMixin:
 
         state_label = ""
         try:
-            saved_state = torch.load(path, map_location="cpu")
+            saved_state = torch.load(path, map_location="cpu", weights_only=True)
         except Exception:
             pass
         else:

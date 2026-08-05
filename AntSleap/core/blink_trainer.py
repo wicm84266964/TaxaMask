@@ -345,7 +345,7 @@ class BlinkExpertTrainer:
                     )
 
         if os.path.exists(save_path):
-            saved_payload = torch.load(save_path, map_location=self.device)
+            saved_payload = torch.load(save_path, map_location=self.device, weights_only=True)
             saved_state = saved_payload.get("state_dict", saved_payload) if isinstance(saved_payload, dict) else saved_payload
             self.model.load_state_dict(saved_state)
         manifest_path, manifest = self.write_manifest(save_path, target_size, dataset)

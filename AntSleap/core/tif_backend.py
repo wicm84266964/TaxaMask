@@ -8,6 +8,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from .external_command import render_external_command
 from .safe_io import atomic_write_json
 from .tif_prediction_policy import can_import_prediction_target, validate_prediction_volume
 from .tif_project import TifProjectManager
@@ -1325,7 +1326,15 @@ class TifBackendRunner:
         return env
 
     def _run_command(self, command_template, contract_path, run_dir, action, progress_callback=None, cancel_check=None):
-        command = self._format_template(command_template, run_dir, contract_path)
+        command = render_external_command(
+            command_template,
+            python=self.backend_config.get("python_executable", "python"),
+            contract=contract_path,
+            contract_json=contract_path,
+            run_dir=run_dir,
+        )
+        if not command:
+            raise ValueError(f"tif_backend_{action}_command_missing")
         log_dir = os.path.join(run_dir, "logs")
         os.makedirs(log_dir, exist_ok=True)
         stdout_path = os.path.join(log_dir, f"{action}_stdout.log")
@@ -1335,7 +1344,7 @@ class TifBackendRunner:
             process = subprocess.Popen(
                 command,
                 cwd=run_dir,
-                shell=True,
+                shell=False,
                 text=True,
                 stdout=stdout_handle,
                 stderr=stderr_handle,

@@ -20,10 +20,26 @@ from core.external_blink_backend import (
     EXTERNAL_BLINK_PREDICTION_SCHEMA,
     ExternalBlinkBackendRunner,
 )
+from core.external_command import render_external_command
 from core.project import ProjectManager
 
 
 class ExternalBlinkBackendTests(unittest.TestCase):
+    def test_command_placeholders_are_single_arguments_without_shell_parsing(self):
+        contract_path = r"C:\research & review\contract.json"
+        command = render_external_command(
+            "{python} worker.py --contract {contract_json}",
+            python=r"C:\Python\python.exe",
+            contract_json=contract_path,
+            contract=contract_path,
+            run_dir=r"C:\research & review",
+        )
+
+        self.assertEqual(command[-1], contract_path)
+        self.assertNotIn("&", command)
+        with self.assertRaisesRegex(ValueError, "shell_operator_not_allowed"):
+            render_external_command("python worker.py && python second.py")
+
     def _script(self, work_dir):
         script_path = Path(work_dir) / "external_blink_dummy.py"
         script_path.write_text(

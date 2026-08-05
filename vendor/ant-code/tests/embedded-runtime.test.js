@@ -10,6 +10,7 @@ import test from "node:test";
 import { loadSkills, readSkill } from "../src/skills/registry.js";
 import { BUILT_IN_TOOLS } from "../src/tools/definitions.js";
 import { createToolRuntime } from "../src/tools/runtime.js";
+import { taxamaskSourceWriteDecision } from "../src/permissions/taxamask-source-guard.js";
 import {
   createMockVerificationEnv,
   verifyMockGateway
@@ -34,6 +35,41 @@ const EXPECTED_SKILLS = [
   "unsloth-studio-finetune",
   "web-research"
 ];
+
+test("TaxaMask source guard covers configuration files and background shells", async () => {
+  const configPath = path.join(TAXAMASK_ROOT, "AntSleap", "config", "taxamask_ant_code.config.json");
+  const config = JSON.parse(await fs.readFile(configPath, "utf8"));
+  const guardedTools = config.hooks.events["tool.before"][0].when.tools;
+  assert.equal(guardedTools.includes("background_shell"), true);
+
+  const configWrite = taxamaskSourceWriteDecision({
+    toolName: "write_file",
+    input: { path: "AntSleap/config/taxamask_ant_code.config.json" }
+  }, { cwd: TAXAMASK_ROOT });
+  assert.equal(configWrite.blocked, true);
+  assert.equal(configWrite.requiresApproval, true);
+  assert.equal(configWrite.scope, "taxamask.source_development");
+
+  for (const skillPath of [
+    "skills/paper_distill_skill_bundle_v6_zh/skills/paper_distill/SKILL.md",
+    "vendor/ant-code/config/skills/taxonomy-paper-finder/SKILL.md"
+  ]) {
+    const skillWrite = taxamaskSourceWriteDecision({
+      toolName: "edit_file",
+      input: { path: skillPath }
+    }, { cwd: TAXAMASK_ROOT });
+    assert.equal(skillWrite.blocked, true, skillPath);
+    assert.equal(skillWrite.scope, "taxamask.source_development", skillPath);
+  }
+
+  const backgroundWrite = taxamaskSourceWriteDecision({
+    toolName: "background_shell",
+    input: { command: "Set-Content -Path AntSleap/main.py -Value unsafe" }
+  }, { cwd: TAXAMASK_ROOT });
+  assert.equal(backgroundWrite.blocked, true);
+  assert.equal(backgroundWrite.requiresApproval, true);
+  assert.equal(backgroundWrite.scope, "taxamask.source_development");
+});
 
 test("TaxaMask loads every bundled skill and exposes only registered tools", async () => {
   const config = {

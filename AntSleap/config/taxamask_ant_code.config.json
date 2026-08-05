@@ -40,6 +40,7 @@
               "edit_file",
               "powershell",
               "bash",
+              "background_shell",
               "mcp_call"
             ]
           }

@@ -57,6 +57,7 @@ SUITES: dict[str, list[str]] = {
         "tests.test_tif_preview_controller",
     ],
     "tif_model_backends": [
+        "tests.test_tif_brain_input_cleaning",
         "tests.test_tif_nnunet_v2_backend",
         "tests.test_tif_blink_core",
         "tests.test_tif_blink_nnunet_core",

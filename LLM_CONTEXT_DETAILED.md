@@ -634,3 +634,21 @@ For example:
 Prefer stable, auditable solutions over clever shortcuts. The user needs to process real research datasets, including large AntScan batches and thousands of 2D/STL candidate images. Data safety and recovery matter more than hidden automation.
 
 Do not assume TIF/CT is fully validated across taxa. The data model is generic, but current validation is mainly AntScan ant CT work.
+
+## 20. Whole-Brain To Brain-Region Input Cleaning
+
+Current reusable implementation:
+
+- `AntSleap/core/tif_brain_input_cleaning.py`
+- `scripts/prepare_brain_region_input.py`
+- `tests/test_tif_brain_input_cleaning.py`
+
+The whole-brain model output is not trusted as an unrestricted crop boundary. The cleaner keeps only the dominant component for the accepted mask value, removes rejected fragments, preserves 20 um of CT context, adds up to 54 um of crop margin, resamples explicitly to the Dataset606 5.4 um grid, and writes a JSON quality audit. Automatic brain-region prediction is allowed only when component dominance, mask fraction, and physical field of view pass the training-profile gate. A failed case receives a `REVIEW_ONLY` locator candidate and must not continue automatically.
+
+The 2026-07-31 regression used physical GPU 1 and preserved all source reslices. `antscan_processed_5x_24-43 / part_1` passed the gate. Compared on the same constrained grid, Dataset606's central-complex candidate changed from 139 voxels in 6 fragments to 158 voxels in 1 component; this improves continuity but is not an accuracy measurement because no manual region truth exists. B original still produced no central-complex label. S-29 failed the physical-FOV gate: its accepted whole-brain extent is about 1118 x 770 x 1705 um, far outside the converted-ant training envelope. Its fixed-size locator candidate visibly removes lateral tissue, so it remains review-only and was not predicted through the new automatic path.
+
+Run-scoped evidence is under:
+
+`TaxaMask_outputs/tif_projects/legacy_AntSleap_project/runs/model_comparison/brain_input_cleaning_v2_20260731`
+
+Do not interpret a quality-gate pass as anatomical validation. It means only that the input construction matches the recorded training conditions closely enough to permit a candidate prediction. Whole-brain and five-region results still require human anatomical review until a labeled ant micro-CT validation set exists.

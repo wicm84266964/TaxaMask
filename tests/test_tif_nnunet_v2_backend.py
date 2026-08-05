@@ -13,6 +13,7 @@ from AntSleap.core.tif_export import read_nifti_volume_with_metadata, write_nift
 from AntSleap.core.tif_project import TifProjectManager
 from AntSleap.core.tif_volume_io import load_volume_sidecar
 from AntSleap.tools import tif_nnunet_v2_backend
+from AntSleap.tools import nnunet_predict_with_taxamask_trainers
 from tests.test_tif_backend import make_predict_ready_project, make_top_level_only_project, make_train_ready_project
 
 
@@ -30,6 +31,37 @@ def _absolute_path_values(value):
 
 
 class TifNnunetV2BackendTests(unittest.TestCase):
+    def test_taxamask_predictor_resolves_blink_and_delegates_standard_trainers(self):
+        class PredictionModule:
+            pass
+
+        calls = []
+
+        def standard_resolver(folder, class_name, current_module):
+            calls.append((folder, class_name, current_module))
+            return "standard-trainer"
+
+        prediction_module = PredictionModule()
+        prediction_module.recursive_find_python_class = standard_resolver
+        resolver = nnunet_predict_with_taxamask_trainers.install_custom_trainer_resolver(
+            prediction_module
+        )
+
+        blink_class = resolver("unused", "nnUNetTrainerTifBlink", "unused")
+        self.assertEqual(blink_class.__name__, "nnUNetTrainerTifBlink")
+        self.assertEqual(calls, [])
+        self.assertEqual(
+            resolver("folder", "nnUNetTrainer", "module"),
+            "standard-trainer",
+        )
+        self.assertEqual(calls, [("folder", "nnUNetTrainer", "module")])
+        self.assertIs(
+            nnunet_predict_with_taxamask_trainers.install_custom_trainer_resolver(
+                prediction_module
+            ),
+            resolver,
+        )
+
     def _add_second_train_ready_part(self, manager):
         source = json.loads(json.dumps(manager.get_specimen("01-0101-11")))
         source["specimen_id"] = "01-0101-12"
@@ -97,6 +129,46 @@ class TifNnunetV2BackendTests(unittest.TestCase):
         self.assertEqual(preset["backend_id"], "taxamask_tif_nnunet_v2_backend")
         self.assertIn("{contract_json}", preset["train_command"])
         self.assertEqual(preset["python_executable"], "C:/Python/python.exe")
+
+    def test_adapter_child_environment_includes_taxamask_source_root(self):
+        args = SimpleNamespace(gpu="0")
+        env = tif_nnunet_v2_backend._command_env(
+            args,
+            Path("raw"),
+            Path("preprocessed"),
+            Path("results"),
+        )
+
+        source_root = str(Path(tif_nnunet_v2_backend.__file__).resolve().parents[2])
+        self.assertEqual(env["PYTHONPATH"].split(os.pathsep)[0], source_root)
+
+    def test_prediction_process_args_use_safe_windows_default(self):
+        args = SimpleNamespace(sequential_prediction=None)
+
+        self.assertEqual(
+            tif_nnunet_v2_backend._prediction_process_args(args, platform_name="nt"),
+            ["-npp", "0", "-nps", "0"],
+        )
+        self.assertEqual(
+            tif_nnunet_v2_backend._prediction_process_args(args, platform_name="posix"),
+            [],
+        )
+
+    def test_prediction_process_args_allow_platform_default_override(self):
+        self.assertEqual(
+            tif_nnunet_v2_backend._prediction_process_args(
+                SimpleNamespace(sequential_prediction=False),
+                platform_name="nt",
+            ),
+            [],
+        )
+        self.assertEqual(
+            tif_nnunet_v2_backend._prediction_process_args(
+                SimpleNamespace(sequential_prediction=True),
+                platform_name="posix",
+            ),
+            ["-npp", "0", "-nps", "0"],
+        )
 
     def test_prediction_input_requires_file_metadata_to_match_contract_scale(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -166,6 +238,125 @@ class TifNnunetV2BackendTests(unittest.TestCase):
 
             self.assertEqual(cases[0]["exchange_metadata"]["spacing_unit"], "unknown")
             self.assertFalse(cases[0]["exchange_metadata"]["scale_verified"])
+
+    def test_prediction_input_converts_verified_spacing_to_model_unit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "verified_um.nii.gz"
+            write_nifti_volume(
+                source,
+                np.zeros((2, 3, 4), dtype=np.uint8),
+                {
+                    "spacing_zyx": [2.0, 1.0, 0.5],
+                    "spacing_unit": "micrometer",
+                    "scale_verified": True,
+                },
+            )
+            contract = {
+                "output_dir": str(root / "converted"),
+                "input_scope": "top_level_volume",
+                "specimens": [
+                    {
+                        "specimen_id": "s1",
+                        "input_volume": {
+                            "path": str(source),
+                            "spacing_zyx": [2.0, 1.0, 0.5],
+                            "spacing_unit": "micrometer",
+                            "scale_verified": True,
+                        },
+                    }
+                ],
+            }
+
+            _images, cases = tif_nnunet_v2_backend._export_prediction_inputs(
+                contract,
+                SimpleNamespace(file_ending=".nii.gz"),
+                {"nnunet": {"input_spacing_unit": "millimeter"}},
+            )
+
+            self.assertEqual(cases[0]["exchange_metadata"]["spacing_unit"], "micrometer")
+            self.assertEqual(cases[0]["nnunet_input_metadata"]["spacing_unit"], "millimeter")
+            np.testing.assert_allclose(
+                cases[0]["nnunet_input_metadata"]["spacing_zyx"],
+                [0.002, 0.001, 0.0005],
+            )
+            _array, output_metadata = read_nifti_volume_with_metadata(cases[0]["image_path"])
+            self.assertEqual(output_metadata["spacing_unit"], "unknown")
+            self.assertFalse(output_metadata["scale_verified"])
+            np.testing.assert_allclose(
+                output_metadata["spacing_zyx"],
+                [0.002, 0.001, 0.0005],
+            )
+
+    def test_prediction_without_model_spacing_contract_preserves_verified_unit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "verified_um.nii.gz"
+            write_nifti_volume(
+                source,
+                np.zeros((2, 3, 4), dtype=np.uint8),
+                {
+                    "spacing_zyx": [2.0, 1.0, 0.5],
+                    "spacing_unit": "micrometer",
+                    "scale_verified": True,
+                },
+            )
+            contract = {
+                "output_dir": str(root / "preserved"),
+                "input_scope": "top_level_volume",
+                "specimens": [
+                    {
+                        "specimen_id": "s1",
+                        "input_volume": {
+                            "path": str(source),
+                            "spacing_zyx": [2.0, 1.0, 0.5],
+                            "spacing_unit": "micrometer",
+                            "scale_verified": True,
+                        },
+                    }
+                ],
+            }
+
+            _images, cases = tif_nnunet_v2_backend._export_prediction_inputs(
+                contract,
+                SimpleNamespace(file_ending=".nii.gz"),
+                {"nnunet": {}},
+            )
+
+            self.assertEqual(cases[0]["nnunet_input_metadata"]["spacing_unit"], "micrometer")
+            self.assertEqual(cases[0]["nnunet_file_metadata"]["spacing_unit"], "micrometer")
+            _array, output_metadata = read_nifti_volume_with_metadata(cases[0]["image_path"])
+            self.assertEqual(output_metadata["spacing_unit"], "micrometer")
+            self.assertTrue(output_metadata["scale_verified"])
+            np.testing.assert_allclose(output_metadata["spacing_zyx"], [2.0, 1.0, 0.5])
+
+    def test_model_spacing_contract_rejects_unverified_plain_tiff(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "plain.tif"
+            tifffile.imwrite(source, np.zeros((2, 3, 4), dtype=np.uint8))
+            contract = {
+                "output_dir": str(root / "rejected"),
+                "input_scope": "top_level_volume",
+                "specimens": [
+                    {
+                        "specimen_id": "s1",
+                        "input_volume": {
+                            "path": str(source),
+                            "spacing_zyx": [1.0, 1.0, 1.0],
+                            "spacing_unit": "micrometer",
+                            "scale_verified": True,
+                        },
+                    }
+                ],
+            }
+
+            with self.assertRaisesRegex(ValueError, "prediction_input_scale_unverified"):
+                tif_nnunet_v2_backend._export_prediction_inputs(
+                    contract,
+                    SimpleNamespace(file_ending=".nii.gz"),
+                    {"nnunet": {"input_spacing_unit": "micrometer"}},
+                )
 
     def test_adapter_prepare_dataset_writes_compact_nnunet_layout(self):
         with tempfile.TemporaryDirectory() as tmp:

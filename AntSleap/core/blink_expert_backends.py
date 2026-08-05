@@ -137,7 +137,7 @@ class HeatmapBlinkBackend:
         if not expert_path or not torch or not cv2:
             return None
         try:
-            loaded = torch.load(expert_path, map_location=manager.device)
+            loaded = torch.load(expert_path, map_location=manager.device, weights_only=True)
         except Exception as exc:
             raise BlinkBackendError(f"heatmap_blink_load_failed:{exc}") from exc
 

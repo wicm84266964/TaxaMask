@@ -7,6 +7,9 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
+import { loadConfig } from "../src/config/load-config.js";
+import { createContextWindow } from "../src/core/context-window.js";
+import { createDashboardRuntime } from "../src/dashboard/sessions.js";
 import { loadSkills, readSkill } from "../src/skills/registry.js";
 import { BUILT_IN_TOOLS } from "../src/tools/definitions.js";
 import { createToolRuntime } from "../src/tools/runtime.js";
@@ -35,6 +38,416 @@ const EXPECTED_SKILLS = [
   "unsloth-studio-finetune",
   "web-research"
 ];
+
+test("embedded config remains unconfigured without models and preserves an explicit empty list", async (t) => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "taxamask-empty-models-"));
+  t.after(() => fs.rm(cwd, { recursive: true, force: true }));
+
+  const config = await loadConfig({ cwd, env: {} });
+
+  assert.equal(config.modelAlias, "");
+  assert.deepEqual(config.models, []);
+
+  await fs.mkdir(path.join(cwd, ".lab-agent"), { recursive: true });
+  await fs.writeFile(path.join(cwd, ".lab-agent", "config.json"), JSON.stringify({
+    modelAlias: "",
+    models: []
+  }), "utf8");
+  const explicitEmpty = await loadConfig({ cwd, env: {} });
+  assert.equal(explicitEmpty.modelAlias, "");
+  assert.deepEqual(explicitEmpty.models, []);
+});
+
+test("embedded config scopes environment keys to the matching gateway endpoint", async (t) => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "taxamask-config-key-scope-"));
+  t.after(() => fs.rm(cwd, { recursive: true, force: true }));
+  await fs.mkdir(path.join(cwd, ".lab-agent"), { recursive: true });
+  const configPath = path.join(cwd, ".lab-agent", "config.json");
+  await fs.writeFile(configPath, JSON.stringify({
+    modelAlias: "project-model",
+    models: [{ id: "project-model" }],
+    lab: {
+      gatewayUrl: "https://project.gateway.example/v1/chat/completions",
+      gatewayProtocol: "openai-chat"
+    }
+  }), "utf8");
+
+  const differentEndpoint = await loadConfig({
+    cwd,
+    env: {
+      LAB_MODEL_GATEWAY_URL: "https://environment.gateway.example/v1/chat/completions",
+      LAB_MODEL_GATEWAY_PROTOCOL: "openai-chat",
+      LAB_MODEL_GATEWAY_API_KEY: "environment-key",
+      LAB_AGENT_MODEL: "environment-model"
+    }
+  });
+  assert.equal(differentEndpoint.lab.gatewayUrl, "https://project.gateway.example/v1/chat/completions");
+  assert.equal(differentEndpoint.lab.gatewayApiKey, null);
+  assert.equal(differentEndpoint.configSources.lab.gatewayApiKey.type, "project");
+
+  const keyWithoutEndpoint = await loadConfig({
+    cwd,
+    env: { LAB_MODEL_GATEWAY_API_KEY: "orphan-environment-key" }
+  });
+  assert.equal(keyWithoutEndpoint.lab.gatewayUrl, "https://project.gateway.example/v1/chat/completions");
+  assert.equal(keyWithoutEndpoint.lab.gatewayApiKey, null);
+  assert.equal(keyWithoutEndpoint.configSources.lab.gatewayApiKey.type, "project");
+
+  await fs.writeFile(configPath, JSON.stringify({
+    modelAlias: "project-model",
+    models: [{ id: "project-model" }],
+    lab: {
+      gatewayUrl: "https://shared.gateway.example/v1/chat/completions",
+      gatewayProtocol: "openai-chat"
+    }
+  }), "utf8");
+  const sameEndpoint = await loadConfig({
+    cwd,
+    env: {
+      LAB_MODEL_GATEWAY_URL: "https://shared.gateway.example/v1/chat/completions",
+      LAB_MODEL_GATEWAY_PROTOCOL: "openai-chat",
+      LAB_MODEL_GATEWAY_API_KEY: "shared-environment-key"
+    }
+  });
+  assert.equal(sameEndpoint.lab.gatewayApiKey, "shared-environment-key");
+  assert.equal(sameEndpoint.configSources.lab.gatewayApiKey.type, "environment");
+});
+
+test("embedded context budget never exceeds the selected model window", () => {
+  const context = createContextWindow({
+    modelAlias: "smaller-model",
+    models: [{ id: "smaller-model", contextTokens: 128000 }],
+    context: { maxTokens: 400000, maxBytes: 1600000 }
+  });
+
+  assert.equal(context.modelMaxTokens, 128000);
+  assert.equal(context.maxTokens, 128000);
+  assert.equal(context.maxBytes, 512000);
+});
+
+test("embedded dashboard keeps no-key profiles isolated from environment credentials", async (t) => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "taxamask-no-key-profile-"));
+  t.after(() => fs.rm(cwd, { recursive: true, force: true }));
+  const runtime = createDashboardRuntime({
+    cwd,
+    env: {
+      LAB_MODEL_GATEWAY_URL: "https://environment.gateway.example/v1/chat/completions",
+      LAB_MODEL_GATEWAY_PROTOCOL: "openai-chat",
+      LAB_MODEL_GATEWAY_API_KEY: "environment-key",
+      LAB_AGENT_MODEL: "environment-model"
+    }
+  });
+
+  await runtime.saveModelConfig({
+    gatewayUrl: "https://no-key.gateway.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    modelId: "no-key-a",
+    modalities: ["text"],
+    switchToModel: true
+  });
+  const saved = await runtime.saveModelConfig({
+    gatewayUrl: "https://no-key.gateway.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    modelId: "no-key-b",
+    modalities: ["text"],
+    switchToModel: true
+  });
+  const environmentProfile = saved.gatewayProfiles.find((profile) => profile.gatewayUrl.includes("environment.gateway"));
+  const noKeyProfile = saved.gatewayProfiles.find((profile) => profile.gatewayUrl.includes("no-key.gateway"));
+
+  const environmentSwitch = await runtime.switchGatewayProfile({ profileId: environmentProfile.id });
+  assert.equal(environmentSwitch.gatewayConfig.apiKeyConfigured, true);
+  const noKeySwitch = await runtime.switchGatewayProfile({ profileId: noKeyProfile.id });
+  assert.equal(noKeySwitch.gatewayConfig.apiKeyConfigured, false);
+  const deleted = await runtime.deleteModelConfig({ modelId: "no-key-a" });
+  assert.equal(deleted.gatewayConfig.apiKeyConfigured, false);
+
+  const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
+  assert.equal(local.lab.gatewayApiKey, null);
+  assert.equal(local.lab.gatewayProfiles.find((profile) => profile.id === noKeyProfile.id).gatewayApiKey, null);
+  assert.equal(local.lab.gatewayProfiles.find((profile) => profile.id === environmentProfile.id).gatewayApiKey, undefined);
+});
+
+test("embedded dashboard clears stale gateway metadata and agent routes", async (t) => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "taxamask-gateway-cleanup-"));
+  t.after(() => fs.rm(cwd, { recursive: true, force: true }));
+  await fs.mkdir(path.join(cwd, ".lab-agent"), { recursive: true });
+  await fs.writeFile(path.join(cwd, ".lab-agent", "config.json"), JSON.stringify({
+    modelAlias: "alpha-main",
+    models: [{ id: "alpha-main" }, { id: "alpha-agent" }],
+    agents: {
+      modelTiers: { cheap: "alpha-agent", default: "alpha-agent", strong: "alpha-agent" },
+      vision: { enabled: false, model: null }
+    },
+    allowedHosts: ["alpha.gateway.example", "beta.gateway.example"],
+    lab: {
+      gatewayUrl: "https://alpha.gateway.example/v1/chat/completions",
+      gatewayHealthUrl: "https://alpha.gateway.example/health",
+      gatewayProtocol: "openai-chat",
+      gatewayApiKey: "alpha-key",
+      activeGatewayProfile: "profile-alpha",
+      gatewayProfiles: [
+        {
+          id: "profile-alpha",
+          gatewayUrl: "https://alpha.gateway.example/v1/chat/completions",
+          gatewayHealthUrl: "https://alpha.gateway.example/health",
+          gatewayProtocol: "openai-chat",
+          gatewayApiKey: "alpha-key",
+          modelAlias: "alpha-main",
+          models: [{ id: "alpha-main" }, { id: "alpha-agent" }]
+        },
+        {
+          id: "profile-beta",
+          gatewayUrl: "https://beta.gateway.example/v1/chat/completions",
+          gatewayProtocol: "openai-chat",
+          gatewayApiKey: null,
+          modelAlias: "beta-main",
+          models: [{ id: "beta-main" }]
+        }
+      ]
+    }
+  }), "utf8");
+  const runtime = createDashboardRuntime({ cwd, env: {} });
+
+  const switched = await runtime.switchGatewayProfile({ profileId: "profile-beta" });
+  assert.deepEqual(switched.agentModelTiers, {});
+  assert.equal(switched.visionAgent.enabled, false);
+
+  const health = await runtime.saveModelConfig({
+    gatewayUrl: "https://beta.gateway.example/v1/chat/completions",
+    gatewayHealthUrl: "",
+    gatewayProtocol: "openai-chat",
+    modelId: "beta-main",
+    switchToModel: true
+  });
+  assert.equal(health.gatewayConfig.gatewayHealthUrl, "");
+
+  const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
+  assert.equal(local.lab.gatewayHealthUrl, null);
+  assert.equal(local.agents.modelTiers, undefined);
+  assert.equal(local.agents.vision.enabled, false);
+});
+
+test("embedded dashboard removes hosts owned only by a deleted gateway", async (t) => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "taxamask-gateway-host-cleanup-"));
+  t.after(() => fs.rm(cwd, { recursive: true, force: true }));
+  const runtime = createDashboardRuntime({ cwd, env: {} });
+
+  await runtime.saveModelConfig({
+    gatewayUrl: "https://old-gateway.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    gatewayApiKey: "old-key",
+    modelId: "old-model",
+    modalities: ["text"],
+    switchToModel: true
+  });
+  const current = await runtime.saveModelConfig({
+    gatewayUrl: "https://new-gateway.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    gatewayApiKey: "new-key",
+    modelId: "new-model",
+    modalities: ["text"],
+    switchToModel: true
+  });
+  await runtime.deleteGatewayProfile({ profileId: current.gatewayConfig.activeProfileId });
+
+  const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
+  assert.equal(local.allowedHosts.includes("new-gateway.example"), false);
+  assert.equal(local.allowedHosts.includes("old-gateway.example"), true);
+});
+
+test("embedded dashboard removes an unused health host when the URL is cleared", async (t) => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "taxamask-health-host-cleanup-"));
+  t.after(() => fs.rm(cwd, { recursive: true, force: true }));
+  const runtime = createDashboardRuntime({ cwd, env: {} });
+
+  await runtime.saveModelConfig({
+    gatewayUrl: "https://chat.gateway.example/v1/chat/completions",
+    gatewayHealthUrl: "https://health-only.example/status",
+    gatewayProtocol: "openai-chat",
+    gatewayApiKey: "gateway-key",
+    modelId: "gateway-model",
+    switchToModel: true
+  });
+  const saved = await runtime.saveModelConfig({
+    gatewayUrl: "https://chat.gateway.example/v1/chat/completions",
+    gatewayHealthUrl: "",
+    gatewayProtocol: "openai-chat",
+    modelId: "gateway-model",
+    switchToModel: true
+  });
+
+  assert.equal(saved.gatewayConfig.gatewayHealthUrl, "");
+  const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
+  assert.equal(local.lab.gatewayHealthUrl, null);
+  assert.equal(local.allowedHosts.includes("health-only.example"), false);
+  assert.equal(local.allowedHosts.includes("chat.gateway.example"), true);
+});
+
+test("embedded dashboard preserves custom gateway ids and collapses endpoint duplicates", async (t) => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "taxamask-custom-gateway-id-"));
+  t.after(() => fs.rm(cwd, { recursive: true, force: true }));
+  await fs.mkdir(path.join(cwd, ".lab-agent"), { recursive: true });
+  await fs.writeFile(path.join(cwd, ".lab-agent", "config.json"), JSON.stringify({
+    modelAlias: "legacy-model",
+    models: [{ id: "legacy-model" }],
+    allowedHosts: ["buddy.example"],
+    lab: {
+      gatewayUrl: "https://buddy.example/v1/chat/completions",
+      gatewayProtocol: "openai-chat",
+      gatewayApiKey: "generated-key",
+      activeGatewayProfile: "gw-stale-generated",
+      gatewayProfiles: [
+        {
+          id: "legacy-custom-id",
+          gatewayUrl: "https://buddy.example/v1/chat/completions",
+          gatewayProtocol: "openai-chat",
+          gatewayApiKey: "legacy-key",
+          modelAlias: "legacy-model",
+          models: [{ id: "legacy-model" }]
+        },
+        {
+          id: "gw-stale-generated",
+          gatewayUrl: "https://buddy.example/v1/chat/completions",
+          gatewayProtocol: "openai-chat",
+          gatewayApiKey: "generated-key",
+          modelAlias: "legacy-model",
+          models: [{ id: "legacy-model" }]
+        }
+      ]
+    }
+  }), "utf8");
+  const runtime = createDashboardRuntime({ cwd, env: {} });
+
+  const saved = await runtime.saveModelConfig({
+    gatewayUrl: "https://buddy.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    gatewayApiKey: "replacement-key",
+    modelId: "edited-model",
+    previousModelId: "legacy-model",
+    switchToModel: true
+  });
+  assert.equal(saved.gatewayConfig.activeProfileId, "legacy-custom-id");
+  assert.deepEqual(saved.gatewayProfiles.map((profile) => profile.id), ["legacy-custom-id"]);
+
+  const localAfterSave = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
+  assert.equal(localAfterSave.lab.gatewayProfiles.length, 1);
+  assert.equal(localAfterSave.lab.gatewayProfiles[0].gatewayApiKey, "replacement-key");
+
+  const deleted = await runtime.deleteGatewayProfile({ profileId: "legacy-custom-id" });
+  assert.equal(deleted.ok, true);
+  assert.deepEqual(deleted.gatewayProfiles, []);
+  const localAfterDelete = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
+  assert.deepEqual(localAfterDelete.lab.gatewayProfiles, []);
+  assert.equal(localAfterDelete.lab.gatewayApiKey, null);
+  assert.equal(localAfterDelete.allowedHosts.includes("buddy.example"), false);
+});
+
+test("embedded dashboard isolates API keys by gateway profile", async (t) => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "taxamask-gateway-key-isolation-"));
+  t.after(() => fs.rm(cwd, { recursive: true, force: true }));
+  const runtime = createDashboardRuntime({ cwd, env: {} });
+
+  const first = await runtime.saveModelConfig({
+    saveTarget: "project",
+    gatewayUrl: "https://old-gateway.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    gatewayApiKey: "old-secret-key",
+    modelId: "old-model",
+    label: "Old Model",
+    modalities: ["text"],
+    switchToModel: true
+  });
+  assert.equal(first.ok, true);
+
+  const sameGateway = await runtime.saveModelConfig({
+    saveTarget: "project",
+    gatewayUrl: "https://old-gateway.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    modelId: "old-model-2",
+    label: "Old Model 2",
+    modalities: ["text"],
+    switchToModel: true
+  });
+  assert.equal(sameGateway.ok, true);
+  assert.equal(sameGateway.gatewayConfig.apiKeyConfigured, true);
+
+  const newGateway = await runtime.saveModelConfig({
+    saveTarget: "project",
+    gatewayUrl: "https://new-gateway.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    modelId: "new-model",
+    label: "New Model",
+    modalities: ["text"],
+    switchToModel: true
+  });
+  assert.equal(newGateway.ok, true);
+  assert.equal(newGateway.gatewayConfig.apiKeyConfigured, false);
+
+  const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
+  assert.equal(local.lab.gatewayApiKey, null);
+  const oldProfile = local.lab.gatewayProfiles.find((profile) => profile.gatewayUrl.includes("old-gateway.example"));
+  assert.equal(oldProfile.gatewayApiKey, "old-secret-key");
+});
+
+test("embedded dashboard does not reactivate an old gateway after clearing the active one", async (t) => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "taxamask-gateway-delete-"));
+  t.after(() => fs.rm(cwd, { recursive: true, force: true }));
+  const runtime = createDashboardRuntime({ cwd, env: {} });
+
+  await runtime.saveModelConfig({
+    saveTarget: "project",
+    gatewayUrl: "https://old-gateway.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    gatewayApiKey: "expired-old-key",
+    modelId: "old-model",
+    modalities: ["text"],
+    switchToModel: true
+  });
+  await runtime.saveModelConfig({
+    saveTarget: "project",
+    gatewayUrl: "https://new-gateway.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    gatewayApiKey: "new-key",
+    modelId: "new-model",
+    modalities: ["text"],
+    switchToModel: true
+  });
+
+  const deletedModel = await runtime.deleteModelConfig({ modelId: "new-model" });
+  assert.equal(deletedModel.ok, true);
+  assert.equal(deletedModel.clearedGateway, true);
+  assert.equal(deletedModel.gatewayConfig.gatewayUrl, "");
+  assert.equal(deletedModel.gatewayConfig.apiKeyConfigured, false);
+  assert.deepEqual(deletedModel.models, []);
+  assert.equal(deletedModel.gatewayProfiles.some((profile) => profile.current), false);
+
+  const restored = await runtime.saveModelConfig({
+    saveTarget: "project",
+    gatewayUrl: "https://new-gateway.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    gatewayApiKey: "new-key",
+    modelId: "new-model",
+    modalities: ["text"],
+    switchToModel: true
+  });
+  const deletedGateway = await runtime.deleteGatewayProfile({
+    profileId: restored.gatewayConfig.activeProfileId
+  });
+  assert.equal(deletedGateway.ok, true);
+  assert.equal(deletedGateway.clearedGateway, true);
+  assert.equal(deletedGateway.gatewayConfig.gatewayUrl, "");
+  assert.equal(deletedGateway.gatewayConfig.apiKeyConfigured, false);
+  assert.deepEqual(deletedGateway.models, []);
+  assert.equal(deletedGateway.gatewayProfiles.some((profile) => profile.current), false);
+
+  const local = JSON.parse(await fs.readFile(path.join(cwd, ".lab-agent", "config.json"), "utf8"));
+  assert.equal(local.modelAlias, "");
+  assert.deepEqual(local.models, []);
+  assert.equal(local.lab.gatewayUrl, null);
+  assert.equal(local.lab.gatewayApiKey, null);
+  assert.equal(local.lab.activeGatewayProfile, "");
+});
 
 test("TaxaMask source guard covers configuration files and background shells", async () => {
   const configPath = path.join(TAXAMASK_ROOT, "AntSleap", "config", "taxamask_ant_code.config.json");

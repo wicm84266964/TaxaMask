@@ -293,7 +293,7 @@ class AgenticContractTests(unittest.TestCase):
             """
         )
 
-    def test_ant_code_project_config_only_overrides_environment_fields_it_defines(self):
+    def test_ant_code_project_gateway_change_does_not_inherit_environment_key(self):
         sessions_module = (PROJECT_ROOT / "vendor" / "ant-code" / "src" / "dashboard" / "sessions.js").resolve().as_uri()
         self._run_node_contract(
             f"""
@@ -343,7 +343,8 @@ class AgenticContractTests(unittest.TestCase):
             assert.equal(project.gatewayConfig.gatewayUrl, "https://project.gateway.example/v1/chat/completions");
             assert.equal(project.sessionStatus.model, "project-model");
             assert.equal(project.gatewayConfig.sources.gatewayUrl.type, "project");
-            assert.equal(project.gatewayConfig.sources.apiKey.type, "environment");
+            assert.equal(project.gatewayConfig.apiKeyConfigured, false);
+            assert.equal(project.gatewayConfig.sources.apiKey.type, "project");
             """
         )
 

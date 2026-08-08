@@ -7,6 +7,11 @@ import sys
 import tempfile
 from pathlib import Path
 
+try:
+    from AntSleap.app_runtime import ensure_qtwebengine_quiet_cpu_flags
+except ImportError:
+    from app_runtime import ensure_qtwebengine_quiet_cpu_flags
+
 
 def _is_wsl_runtime():
     if os.environ.get("WSL_DISTRO_NAME"):
@@ -19,24 +24,7 @@ def _is_wsl_runtime():
 
 
 def _ensure_qtwebengine_cpu_compositing():
-    flags_to_append = [
-        "--disable-gpu",
-        "--disable-gpu-compositing",
-        "--disable-accelerated-2d-canvas",
-        "--disable-es3-gl-context",
-        "--disable-es3-apis",
-        "--disable-webgl",
-        "--disable-3d-apis",
-    ]
-    verbose = os.environ.get("TAXAMASK_QTWEBENGINE_VERBOSE", "").strip().lower()
-    if verbose not in {"1", "true", "yes", "on", "verbose", "debug"}:
-        flags_to_append.extend(["--disable-logging", "--log-level=3"])
-    for flag in flags_to_append:
-        current = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
-        flags = current.split()
-        if flag not in flags:
-            flags.append(flag)
-            os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(flags)
+    return ensure_qtwebengine_quiet_cpu_flags()
 
 
 _ensure_qtwebengine_cpu_compositing()

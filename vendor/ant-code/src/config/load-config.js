@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_MODEL_OPTIONS, parseModelList } from "../model-gateway/models.js";
+import { parseModelList } from "../model-gateway/models.js";
 import { recommendedMcpServers } from "../mcp/recommended.js";
 import { validateHookConfig } from "../hooks/registry.js";
 
@@ -43,8 +43,8 @@ function resolvePackageRoot() {
 
 const DEFAULT_CONFIG = Object.freeze({
   appName: "lab-agent",
-  modelAlias: "default",
-  models: DEFAULT_MODEL_OPTIONS,
+  modelAlias: "",
+  models: [],
   networkMode: "approved-web",
   allowedHosts: [],
   transcript: {
@@ -159,7 +159,7 @@ const DEFAULT_CONFIG = Object.freeze({
  * selected TaxaMask config, and environment overrides.
  *
  * Precedence:
- * defaults < bundled config < environment defaults < explicit config < project config.
+ * defaults < bundled config < explicit config < environment defaults < project config.
  *
  * @param {{ cwd?: string; env?: NodeJS.ProcessEnv }} options
  * @returns {Promise<LabAgentConfig>}
@@ -183,11 +183,11 @@ export async function loadConfig(options = {}) {
   } : null;
 
   const withBundled = mergeConfig(DEFAULT_CONFIG, bundled?.data ?? {});
-  const withEnvDefaults = applyEnvDefaultConfig(withBundled, env, {
-    preserveConfiguredModels: Boolean(bundled)
+  const withGlobalDefaults = mergeConfigWithGatewayCredentialScope(withBundled, lab?.data ?? {});
+  const withEnvDefaults = applyEnvDefaultConfig(withGlobalDefaults, env, {
+    preserveConfiguredModels: Boolean(bundled && !lab)
   });
-  const withLab = mergeConfig(withEnvDefaults, lab?.data ?? {});
-  const withProject = mergeConfig(withLab, project?.data ?? {});
+  const withProject = mergeConfigWithGatewayCredentialScope(withEnvDefaults, project?.data ?? {});
   const withEnv = applyRuntimeEnvConfig(withProject, env);
   const normalized = normalizeContextConfig(withEnv, env);
   const hardened = applySensitivityPolicy(normalized);
@@ -206,6 +206,15 @@ export async function loadConfig(options = {}) {
   };
   validateLabConfig(finalLab);
   const configSources = buildConfigSources({ env, project, lab, bundled });
+  if (finalLab.gatewayApiKey === null
+    && (configSources.lab.gatewayUrl.type === "project" || configSources.lab.gatewayProtocol.type === "project")
+    && configSources.lab.gatewayApiKey.type !== "project") {
+    configSources.lab.gatewayApiKey = {
+      type: "project",
+      label: ".lab-agent/config.json",
+      path: project?.path ?? null
+    };
+  }
 
   return {
     ...hardened,
@@ -305,7 +314,7 @@ function mergeProjectConfigs(configs) {
   if (configs.length === 0) {
     return null;
   }
-  const merged = configs.reduce((current, item) => mergeConfig(current, item.data ?? {}), {});
+  const merged = configs.reduce((current, item) => mergeConfigWithGatewayCredentialScope(current, item.data ?? {}), {});
   return {
     path: configs[configs.length - 1].path,
     paths: configs.map((item) => item.path),
@@ -338,7 +347,7 @@ function sanitizeLoadedConfig(raw, filePath) {
   let ignoredModelGatewayTemplate = templateLike;
   if (templateLike) {
     if (path.resolve(filePath) === path.resolve(BUNDLED_CONFIG_PATH)) {
-      stripBundledTemplateGateway(data);
+      stripBundledTemplateModelGateway(data);
     } else {
       stripModelGatewayConfig(data);
     }
@@ -410,12 +419,13 @@ function stripPlaceholderModelGatewayFields(config) {
     stripped = true;
   }
   if (Array.isArray(config.models)) {
+    const hadModels = config.models.length > 0;
     const nextModels = config.models.filter((model) => !isPlaceholderConfigValue(typeof model === "string" ? model : model?.id));
     if (nextModels.length !== config.models.length) {
       config.models = nextModels;
       stripped = true;
     }
-    if (nextModels.length === 0) {
+    if (hadModels && nextModels.length === 0) {
       delete config.models;
     }
   }
@@ -488,16 +498,8 @@ function stripModelGatewayConfig(config) {
 }
 
 /** @param {Record<string, any>} config */
-function stripBundledTemplateGateway(config) {
-  if (!isPlainObject(config.lab)) {
-    return;
-  }
-  delete config.lab.gatewayUrl;
-  delete config.lab.gatewayHealthUrl;
-  delete config.lab.gatewayProtocol;
-  delete config.lab.gatewayApiKey;
-  delete config.lab.activeGatewayProfile;
-  delete config.lab.gatewayProfiles;
+function stripBundledTemplateModelGateway(config) {
+  stripModelGatewayConfig(config);
 }
 
 function stripPlaceholderAllowedHosts(config) {
@@ -531,6 +533,42 @@ function mergeConfig(base, overlay) {
     }
   }
   return result;
+}
+
+/** @param {Record<string, any>} base @param {Record<string, any>} overlay */
+function mergeConfigWithGatewayCredentialScope(base, overlay) {
+  const next = mergeConfig(base, overlay);
+  const overlayLab = isPlainObject(overlay?.lab) ? overlay.lab : {};
+  const changesEndpoint = Object.prototype.hasOwnProperty.call(overlayLab, "gatewayUrl")
+    || Object.prototype.hasOwnProperty.call(overlayLab, "gatewayProtocol");
+  const declaresCredential = Object.prototype.hasOwnProperty.call(overlayLab, "gatewayApiKey");
+  if (changesEndpoint
+    && hasGatewayCredential(base)
+    && !declaresCredential
+    && (!hasGatewayEndpoint(base) || !sameGatewayEndpoint(base, next))) {
+    next.lab = {
+      ...(isPlainObject(next.lab) ? next.lab : {}),
+      gatewayApiKey: null
+    };
+  }
+  return next;
+}
+
+/** @param {Record<string, any>} config */
+function hasGatewayEndpoint(config) {
+  return Boolean(String(config?.lab?.gatewayUrl ?? "").trim());
+}
+
+/** @param {Record<string, any>} config */
+function hasGatewayCredential(config) {
+  return Boolean(String(config?.lab?.gatewayApiKey ?? "").trim());
+}
+
+/** @param {Record<string, any>} left @param {Record<string, any>} right */
+function sameGatewayEndpoint(left, right) {
+  return String(left?.lab?.gatewayUrl ?? "").trim() === String(right?.lab?.gatewayUrl ?? "").trim()
+    && String(left?.lab?.gatewayProtocol ?? "lab-agent-gateway").trim()
+      === String(right?.lab?.gatewayProtocol ?? "lab-agent-gateway").trim();
 }
 
 function buildConfigSources({ env, project, lab, bundled }) {
@@ -622,6 +660,7 @@ function hasConfigPath(config, keyPath) {
  */
 function applyEnvDefaultConfig(value, env, options = {}) {
   const next = { ...value };
+  const previousGateway = { lab: { ...(isPlainObject(value.lab) ? value.lab : {}) } };
   const envControlsModel = hasNonEmptyEnv(env, "LAB_AGENT_MODEL") || hasNonEmptyEnv(env, "LAB_AGENT_MODELS");
   const envControlsGateway = hasNonEmptyEnv(env, "LAB_MODEL_GATEWAY_URL")
     || hasNonEmptyEnv(env, "LAB_MODEL_GATEWAY_HEALTH_URL")
@@ -653,6 +692,9 @@ function applyEnvDefaultConfig(value, env, options = {}) {
   }
   if (env.LAB_MODEL_GATEWAY_API_KEY) {
     lab.gatewayApiKey = env.LAB_MODEL_GATEWAY_API_KEY;
+  } else if ((env.LAB_MODEL_GATEWAY_URL || env.LAB_MODEL_GATEWAY_PROTOCOL)
+    && !sameGatewayEndpoint(previousGateway, { lab })) {
+    lab.gatewayApiKey = null;
   }
   if (envControlsModel || envControlsGateway) {
     lab.gatewayProfiles = [

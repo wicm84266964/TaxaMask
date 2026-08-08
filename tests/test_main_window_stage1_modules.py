@@ -39,10 +39,17 @@ class MainWindowStage1ModuleTests(unittest.TestCase):
         self.assertLess(source.index("_prepare_qt_runtime_environment()"), source.index("import cv2"))
         self.assertLess(source.index("_prepare_qt_runtime_environment()"), source.index("from PySide6.QtWidgets"))
 
-    def test_runtime_flag_setup_is_idempotent(self):
+    def test_runtime_software_rendering_flags_are_idempotent(self):
         from AntSleap import app_runtime
 
-        with patch.dict(os.environ, {"QTWEBENGINE_CHROMIUM_FLAGS": "--disable-gpu"}, clear=False):
+        with patch.dict(
+            os.environ,
+            {
+                "TAXAMASK_QTWEBENGINE_RENDERING": "software",
+                "QTWEBENGINE_CHROMIUM_FLAGS": "--disable-gpu",
+            },
+            clear=False,
+        ):
             app_runtime.ensure_qtwebengine_quiet_cpu_flags()
             app_runtime.ensure_qtwebengine_quiet_cpu_flags()
             flags = os.environ["QTWEBENGINE_CHROMIUM_FLAGS"].split()
@@ -50,6 +57,34 @@ class MainWindowStage1ModuleTests(unittest.TestCase):
         self.assertEqual(flags.count("--disable-gpu"), 1)
         self.assertIn("--disable-webgl", flags)
         self.assertIn("--log-level=3", flags)
+
+    def test_runtime_auto_rendering_keeps_webengine_gpu_available(self):
+        from AntSleap import app_runtime
+
+        with patch.dict(
+            os.environ,
+            {
+                "TAXAMASK_QTWEBENGINE_RENDERING": "auto",
+                "QTWEBENGINE_CHROMIUM_FLAGS": "",
+            },
+            clear=False,
+        ):
+            mode = app_runtime.ensure_qtwebengine_quiet_cpu_flags()
+            flags = os.environ["QTWEBENGINE_CHROMIUM_FLAGS"].split()
+
+        self.assertEqual(mode, "auto")
+        self.assertNotIn("--disable-gpu", flags)
+        self.assertNotIn("--disable-gpu-compositing", flags)
+        self.assertIn("--disable-logging", flags)
+        self.assertIn("--log-level=3", flags)
+
+    def test_runtime_rendering_aliases_preserve_software_fallback(self):
+        from AntSleap import app_runtime
+
+        with patch.dict(os.environ, {"TAXAMASK_QTWEBENGINE_RENDERING": "cpu"}, clear=False):
+            self.assertEqual(app_runtime.qtwebengine_rendering_mode(), "software")
+        with patch.dict(os.environ, {"TAXAMASK_QTWEBENGINE_RENDERING": "gpu"}, clear=False):
+            self.assertEqual(app_runtime.qtwebengine_rendering_mode(), "hardware")
 
     def test_runtime_log_stops_at_configured_session_capacity(self):
         from AntSleap import app_runtime

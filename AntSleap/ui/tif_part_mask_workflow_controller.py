@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 import numpy as np
-from PySide6.QtCore import Qt, QThread
+from PySide6.QtCore import QObject, Qt, QThread
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QDialog, QMessageBox, QProgressDialog, QTableWidgetItem
 
@@ -63,10 +63,11 @@ class TifPartMaskWorkflowState:
     preview_task_id: str = ""
 
 
-class TifPartMaskWorkflowController:
+class TifPartMaskWorkflowController(QObject):
     VIEW_SCOPE = "part_mask_material"
 
     def __init__(self, workbench):
+        super().__init__(workbench if isinstance(workbench, QObject) else None)
         self.workbench = workbench
         self.state = TifPartMaskWorkflowState()
         self.preview_thread = None
@@ -380,7 +381,7 @@ class TifPartMaskWorkflowController:
         self.preview_progress.setWindowModality(Qt.WindowModal)
         self.preview_progress.show()
 
-        self.preview_thread = QThread(self)
+        self.preview_thread = QThread(workbench)
         self.preview_worker = TifPartMaskPreviewWorker(token, contours, shape, context)
         self.preview_worker.moveToThread(self.preview_thread)
         self.preview_thread.started.connect(self.preview_worker.run)
@@ -395,7 +396,7 @@ class TifPartMaskWorkflowController:
         )
         self.preview_thread.finished.connect(self.preview_thread.deleteLater)
         workbench._set_scope_controls_enabled()
-        self.preview_thread.start()
+        self.preview_thread.start(QThread.LowPriority)
 
     def is_part_contour_draw_mode(self):
         workbench = self.workbench

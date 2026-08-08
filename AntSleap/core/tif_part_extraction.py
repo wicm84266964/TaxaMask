@@ -255,7 +255,7 @@ def rectangle_polygon_for_slice(bbox_yx):
     return [[int(x0), int(y0)], [int(x1), int(y0)], [int(x1), int(y1)], [int(x0), int(y1)]]
 
 
-def polygon_to_mask(points, shape_yx):
+def polygon_to_mask(points, shape_yx, coordinate_grid=None):
     height, width = [int(value) for value in shape_yx]
     if height <= 0 or width <= 0:
         raise ValueError("shape_yx_must_be_positive")
@@ -265,8 +265,10 @@ def polygon_to_mask(points, shape_yx):
     try:
         from matplotlib.path import Path
 
-        yy, xx = np.mgrid[:height, :width]
-        coords = np.stack([xx.reshape(-1), yy.reshape(-1)], axis=1)
+        coords = coordinate_grid
+        if coords is None:
+            yy, xx = np.mgrid[:height, :width]
+            coords = np.stack([xx.reshape(-1), yy.reshape(-1)], axis=1)
         return Path(polygon).contains_points(coords).reshape((height, width))
     except Exception:
         return _scanline_polygon_to_mask(polygon, height, width)
@@ -415,12 +417,18 @@ def validate_contours_for_interpolation(contours_payload, shape_zyx=None, axis="
     }
 
 
-def interpolate_masks_from_keyframes(keyframes, shape_zyx):
+def interpolate_masks_from_keyframes(keyframes, shape_zyx, cancel_callback=None):
     shape = tuple(int(value) for value in shape_zyx)
     if len(shape) != 3 or min(shape) <= 0:
         raise ValueError("shape_zyx_must_have_3_positive_values")
-    normalized = []
+
+    def check_cancelled():
+        if callable(cancel_callback):
+            cancel_callback()
+
+    records = []
     for keyframe in keyframes or []:
+        check_cancelled()
         if not isinstance(keyframe, dict):
             continue
         if str(keyframe.get("axis", "z")) != "z":
@@ -429,24 +437,59 @@ def interpolate_masks_from_keyframes(keyframes, shape_zyx):
         if slice_index is None:
             continue
         if 0 <= slice_index < shape[0]:
-            mask = polygon_to_mask(_clean_polygon_points(keyframe.get("polygon") or []), shape[1:])
-            normalized.append((slice_index, mask))
-    if not normalized:
+            polygon = _clean_polygon_points(keyframe.get("polygon") or [])
+            if len(polygon) >= 3:
+                records.append((slice_index, polygon))
+    if not records:
         return np.zeros(shape, dtype=np.uint16)
+
+    all_points = np.asarray([point for _slice_index, polygon in records for point in polygon], dtype=np.float32)
+    padding = 2
+    x0 = max(0, int(np.floor(float(np.min(all_points[:, 0])))) - padding)
+    x1 = min(shape[2], int(np.ceil(float(np.max(all_points[:, 0])))) + padding + 1)
+    y0 = max(0, int(np.floor(float(np.min(all_points[:, 1])))) - padding)
+    y1 = min(shape[1], int(np.ceil(float(np.max(all_points[:, 1])))) + padding + 1)
+    if x1 <= x0 or y1 <= y0:
+        return np.zeros(shape, dtype=np.uint16)
+
+    normalized = []
+    local_shape = (y1 - y0, x1 - x0)
+    local_yy, local_xx = np.mgrid[:local_shape[0], :local_shape[1]]
+    coordinate_grid = np.stack([local_xx.reshape(-1), local_yy.reshape(-1)], axis=1)
+    for slice_index, polygon in records:
+        check_cancelled()
+        local_polygon = [[float(point[0]) - x0, float(point[1]) - y0] for point in polygon]
+        normalized.append(
+            (
+                slice_index,
+                polygon_to_mask(local_polygon, local_shape, coordinate_grid=coordinate_grid),
+            )
+        )
     normalized.sort(key=lambda item: item[0])
     result = np.zeros(shape, dtype=np.uint16)
     for index, mask in normalized:
-        result[index] = mask.astype(np.uint16)
+        check_cancelled()
+        result[index, y0:y1, x0:x1] = mask.astype(np.uint16)
+    distance_cache = {}
+
+    def cached_signed_distance(index, mask):
+        if index not in distance_cache:
+            check_cancelled()
+            distance_cache[index] = signed_distance(mask)
+        return distance_cache[index]
+
     for (start_idx, start_mask), (end_idx, end_mask) in zip(normalized, normalized[1:]):
+        check_cancelled()
         if end_idx <= start_idx:
             continue
-        start_dist = signed_distance(start_mask)
-        end_dist = signed_distance(end_mask)
+        start_dist = cached_signed_distance(start_idx, start_mask)
+        end_dist = cached_signed_distance(end_idx, end_mask)
         span = float(end_idx - start_idx)
         for z_index in range(start_idx + 1, end_idx):
+            check_cancelled()
             weight = float(z_index - start_idx) / span
             dist = (1.0 - weight) * start_dist + weight * end_dist
-            result[z_index] = (dist <= 0.0).astype(np.uint16)
+            result[z_index, y0:y1, x0:x1] = (dist <= 0.0).astype(np.uint16)
     return result
 
 
@@ -535,12 +578,16 @@ def neighboring_keyframe_indices(contours_payload, current_index, axis="z"):
     }
 
 
-def build_preview_mask_from_contours(contours_payload, shape_zyx):
+def build_preview_mask_from_contours(contours_payload, shape_zyx, cancel_callback=None):
     report = validate_contours_for_interpolation(contours_payload, shape_zyx, axis="z")
     if not report.get("ok"):
         codes = ",".join(item.get("code", "error") for item in report.get("errors", []))
         raise ValueError(f"invalid_part_contours:{codes}")
-    return interpolate_masks_from_keyframes((contours_payload or {}).get("keyframes", []), shape_zyx)
+    return interpolate_masks_from_keyframes(
+        (contours_payload or {}).get("keyframes", []),
+        shape_zyx,
+        cancel_callback=cancel_callback,
+    )
 
 
 def export_part_package(project_manager, specimen_id, part_id, output_dir):

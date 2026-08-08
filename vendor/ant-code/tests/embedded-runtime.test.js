@@ -9,6 +9,8 @@ import test from "node:test";
 
 import { loadConfig } from "../src/config/load-config.js";
 import { createContextWindow } from "../src/core/context-window.js";
+import { classifyToolUse } from "../src/agents/delegation-guard.js";
+import { mapSessionEventToDashboard } from "../src/dashboard/events.js";
 import { createDashboardRuntime } from "../src/dashboard/sessions.js";
 import { loadSkills, readSkill } from "../src/skills/registry.js";
 import { BUILT_IN_TOOLS } from "../src/tools/definitions.js";
@@ -38,6 +40,32 @@ const EXPECTED_SKILLS = [
   "unsloth-studio-finetune",
   "web-research"
 ];
+
+test("embedded dashboard keeps gateway retry state visible through final failure", async () => {
+  const failed = mapSessionEventToDashboard({
+    type: "gateway_error",
+    error: { message: "Gateway returned HTTP 502" }
+  });
+  assert.equal(failed[0].coalesceKey, "gateway");
+
+  const app = await fs.readFile(path.join(PACKAGE_ROOT, "src", "dashboard", "public", "app.js"), "utf8");
+  assert.match(app, /function primaryLiveActivity\(active\)/);
+  assert.match(app, /activity\.rawType === "gateway_retry"/);
+});
+
+test("embedded delegation guard treats ripgrep file listing by its directory scope", () => {
+  const listing = classifyToolUse("rg_files", {
+    path: "src/dashboard",
+    glob: "**/*.js"
+  }, { ok: true }, { complexPrompt: false });
+  const search = classifyToolUse("rg_search", {
+    path: ".",
+    pattern: "gateway"
+  }, { ok: true }, { complexPrompt: false });
+
+  assert.equal(listing.broad, false);
+  assert.equal(search.broad, true);
+});
 
 test("embedded config remains unconfigured without models and preserves an explicit empty list", async (t) => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "taxamask-empty-models-"));

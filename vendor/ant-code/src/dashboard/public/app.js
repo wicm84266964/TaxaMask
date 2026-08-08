@@ -2779,7 +2779,7 @@ function updateLiveStatus() {
     els.liveSubtasks.innerHTML = "";
     return;
   }
-  const primary = active.find((activity) => activity.toolName !== "agent_run") || active[0];
+  const primary = primaryLiveActivity(active);
   const subtasks = active.filter((activity) => activity.toolName === "agent_run");
   els.liveTitle.textContent = liveStatusTitle(primary, subtasks, background);
   els.liveSubtasks.innerHTML = "";
@@ -2826,6 +2826,13 @@ function liveStatusTitle(primary, subtasks, background) {
   return primary?.title === "开始任务" && subtasks.length > 0
     ? "子智能体运行中"
     : primary?.title || state.liveTitle || "正在处理";
+}
+
+/** @param {Array<Record<string, any>>} active */
+function primaryLiveActivity(active) {
+  return active.find((activity) => activity.rawType === "gateway_retry")
+    || active.find((activity) => activity.toolName !== "agent_run")
+    || active[0];
 }
 
 function gatewayRetryChipText(activity) {

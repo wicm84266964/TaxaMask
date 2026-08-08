@@ -9,6 +9,7 @@ from unittest.mock import patch
 import numpy as np
 import tifffile
 
+from AntSleap.core import tif_part_extraction
 from AntSleap.core.tif_materials import read_material_map
 from AntSleap.core.tif_part_extraction import (
     add_polygon_keyframe,
@@ -868,6 +869,69 @@ class TifProjectTests(unittest.TestCase):
         self.assertGreater(int(mask[2].sum()), 0)
         self.assertGreater(int(mask[3].sum()), 0)
         self.assertEqual(int(mask[4].sum()), 0)
+
+    def test_preview_mask_reuses_keyframe_distance_fields(self):
+        contours = {"axis": "z", "keyframes": []}
+        contours = add_rectangular_keyframe(contours, 0, [[2, 10], [2, 10]])
+        contours = add_rectangular_keyframe(contours, 3, [[3, 11], [3, 11]])
+        contours = add_rectangular_keyframe(contours, 6, [[4, 12], [4, 12]])
+
+        with patch.object(
+            tif_part_extraction,
+            "signed_distance",
+            wraps=tif_part_extraction.signed_distance,
+        ) as distance_mock:
+            mask = build_preview_mask_from_contours(contours, (7, 16, 16))
+
+        self.assertGreater(int(mask.sum()), 0)
+        self.assertEqual(distance_mock.call_count, 3)
+
+    def test_local_preview_optimization_preserves_full_frame_mask_pixels(self):
+        keyframes = [
+            {
+                "axis": "z",
+                "slice_index": 1,
+                "polygon": [[1.2, 2.4], [18.8, 3.1], [16.3, 22.7], [3.0, 19.4]],
+            },
+            {
+                "axis": "z",
+                "slice_index": 6,
+                "polygon": [[8.3, 1.1], [29.1, 8.2], [22.4, 29.0], [4.2, 21.5]],
+            },
+        ]
+        shape = (8, 32, 32)
+        start_mask = tif_part_extraction.polygon_to_mask(keyframes[0]["polygon"], shape[1:])
+        end_mask = tif_part_extraction.polygon_to_mask(keyframes[1]["polygon"], shape[1:])
+        start_distance = tif_part_extraction.signed_distance(start_mask)
+        end_distance = tif_part_extraction.signed_distance(end_mask)
+        expected = np.zeros(shape, dtype=np.uint16)
+        expected[1] = start_mask.astype(np.uint16)
+        expected[6] = end_mask.astype(np.uint16)
+        for z_index in range(2, 6):
+            weight = float(z_index - 1) / 5.0
+            expected[z_index] = ((1.0 - weight) * start_distance + weight * end_distance <= 0.0).astype(np.uint16)
+
+        actual = tif_part_extraction.interpolate_masks_from_keyframes(keyframes, shape)
+
+        np.testing.assert_array_equal(actual, expected)
+
+    def test_preview_mask_honors_cancellation_between_slices(self):
+        contours = {"axis": "z", "keyframes": []}
+        contours = add_rectangular_keyframe(contours, 0, [[2, 20], [2, 20]])
+        contours = add_rectangular_keyframe(contours, 15, [[4, 22], [4, 22]])
+        checks = []
+
+        def cancel_after_start():
+            checks.append(True)
+            if len(checks) >= 8:
+                raise RuntimeError("cancelled_for_test")
+
+        with self.assertRaisesRegex(RuntimeError, "cancelled_for_test"):
+            tif_part_extraction.interpolate_masks_from_keyframes(
+                contours["keyframes"],
+                (16, 32, 32),
+                cancel_callback=cancel_after_start,
+            )
 
     def test_contours_json_damage_and_invalid_keyframes_do_not_crash_validation(self):
         with tempfile.TemporaryDirectory() as tmp:

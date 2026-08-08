@@ -184,7 +184,8 @@ def _extract_tif_axis_slice(volume, axis, index):
 
 def _normalize_tif_slice(image_slice, contrast=1.0, brightness=0.0):
     data = np.asarray(image_slice, dtype=np.float32)
-    finite = data[np.isfinite(data)]
+    source_dtype = np.asarray(image_slice).dtype
+    finite = data if np.issubdtype(source_dtype, np.integer) else data[np.isfinite(data)]
     if finite.size == 0:
         return np.zeros(data.shape, dtype=np.uint8)
     low = float(np.percentile(finite, 1))
@@ -406,6 +407,10 @@ class TifPartMaskPreviewWorker(QObject):
     def cancel(self):
         self._cancelled = True
 
+    def _check_cancelled(self):
+        if self._cancelled:
+            raise _TifVolumePreviewCancelled()
+
     def run(self):
         started = time.perf_counter()
         try:
@@ -413,7 +418,11 @@ class TifPartMaskPreviewWorker(QObject):
             if self._cancelled:
                 self.finished.emit({"token": self.token, "cancelled": True, "context": self.context})
                 return
-            mask = build_preview_mask_from_contours(self.contours, self.shape_zyx)
+            mask = build_preview_mask_from_contours(
+                self.contours,
+                self.shape_zyx,
+                cancel_callback=self._check_cancelled,
+            )
             self.progress.emit(100, 100, "Preview auto fill finished")
             self.finished.emit(
                 {
@@ -422,6 +431,15 @@ class TifPartMaskPreviewWorker(QObject):
                     "mask": mask,
                     "contours": self.contours,
                     "shape_zyx": self.shape_zyx,
+                    "context": self.context,
+                    "build_ms": max(0.0, (time.perf_counter() - started) * 1000.0),
+                }
+            )
+        except _TifVolumePreviewCancelled:
+            self.finished.emit(
+                {
+                    "token": self.token,
+                    "cancelled": True,
                     "context": self.context,
                     "build_ms": max(0.0, (time.perf_counter() - started) * 1000.0),
                 }

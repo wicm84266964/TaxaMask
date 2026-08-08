@@ -30,30 +30,51 @@ def append_env_flag(name, flag):
         os.environ[name] = " ".join(flags)
 
 
+def qtwebengine_rendering_mode():
+    value = os.environ.get("TAXAMASK_QTWEBENGINE_RENDERING", "").strip().lower()
+    aliases = {
+        "gpu": "hardware",
+        "accelerated": "hardware",
+        "cpu": "software",
+        "safe": "software",
+        "compatibility": "software",
+    }
+    value = aliases.get(value, value)
+    if value in {"auto", "hardware", "software"}:
+        return value
+    if sys.platform == "linux" or is_wsl_runtime():
+        return "software"
+    return "auto"
+
+
 def ensure_qtwebengine_quiet_cpu_flags():
-    for flag in (
-        "--disable-gpu",
-        "--disable-gpu-compositing",
-        "--disable-accelerated-2d-canvas",
-        "--disable-es3-gl-context",
-        "--disable-es3-apis",
-        "--disable-webgl",
-        "--disable-3d-apis",
-    ):
-        append_env_flag("QTWEBENGINE_CHROMIUM_FLAGS", flag)
+    mode = qtwebengine_rendering_mode()
+    if mode == "software":
+        for flag in (
+            "--disable-gpu",
+            "--disable-gpu-compositing",
+            "--disable-accelerated-2d-canvas",
+            "--disable-es3-gl-context",
+            "--disable-es3-apis",
+            "--disable-webgl",
+            "--disable-3d-apis",
+        ):
+            append_env_flag("QTWEBENGINE_CHROMIUM_FLAGS", flag)
     verbose = os.environ.get("TAXAMASK_QTWEBENGINE_VERBOSE", "").strip().lower()
     if verbose not in {"1", "true", "yes", "on", "verbose", "debug"}:
         append_env_flag("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-logging")
         append_env_flag("QTWEBENGINE_CHROMIUM_FLAGS", "--log-level=3")
+    return mode
 
 
 def prepare_qt_runtime_environment():
-    ensure_qtwebengine_quiet_cpu_flags()
     if sys.platform == "linux" or is_wsl_runtime():
+        os.environ.setdefault("TAXAMASK_QTWEBENGINE_RENDERING", "software")
         os.environ.setdefault("QT_OPENGL", "software")
         os.environ.setdefault("QT_QUICK_BACKEND", "software")
         os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
         os.environ.setdefault("TAXAMASK_ANTCODE_BROWSER_MODE", "1")
+    ensure_qtwebengine_quiet_cpu_flags()
 
 
 def runtime_log_enabled():
@@ -201,6 +222,7 @@ def runtime_log_exception(event, exc_type, exc_value, exc_tb):
 
 _is_wsl_runtime = is_wsl_runtime
 _append_env_flag = append_env_flag
+_qtwebengine_rendering_mode = qtwebengine_rendering_mode
 _ensure_qtwebengine_quiet_cpu_flags = ensure_qtwebengine_quiet_cpu_flags
 _prepare_qt_runtime_environment = prepare_qt_runtime_environment
 _runtime_log_enabled = runtime_log_enabled

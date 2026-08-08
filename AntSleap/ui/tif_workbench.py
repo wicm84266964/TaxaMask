@@ -3569,10 +3569,13 @@ class TifWorkbenchWidget(QWidget):
     def prepare_for_agent_panel(self):
         if hasattr(self, "volume_still_timer"):
             self.volume_still_timer.stop()
+        self.volume_render_controller._cancel_volume_preview_build()
         if self.display_mode != "volume":
+            self._cancel_slice_render(wait=False)
             self._reset_volume_canvas_placeholder_for_agent()
             return
         self.on_display_mode_changed("slice")
+        self._cancel_slice_render(wait=False)
         self._reset_volume_canvas_placeholder_for_agent()
 
     def _current_slice_axis(self):
@@ -4606,16 +4609,11 @@ class TifWorkbenchWidget(QWidget):
         request["token"] = token
         thread = self._slice_render_thread
         if thread is not None:
-            try:
-                running = bool(thread.isRunning())
-            except RuntimeError:
-                running = False
-            if running:
-                if self._slice_render_worker is not None:
-                    self._slice_render_worker.cancel()
-                self._slice_render_pending_request = request
-                self.status_label.setText(tt("Loading selected TIF slice...", self.lang))
-                return True
+            if self._slice_render_worker is not None:
+                self._slice_render_worker.cancel()
+            self._slice_render_pending_request = request
+            self.status_label.setText(tt("Loading selected TIF slice...", self.lang))
+            return True
         return self._start_slice_render(request)
 
     def _start_slice_render(self, request):
@@ -4637,7 +4635,7 @@ class TifWorkbenchWidget(QWidget):
         thread.finished.connect(lambda t=thread, w=worker: self._cleanup_slice_render_thread(t, w))
         thread.finished.connect(thread.deleteLater)
         self.status_label.setText(tt("Loading selected TIF slice...", self.lang))
-        thread.start()
+        thread.start(QThread.LowPriority)
         return True
 
     def _on_slice_render_finished(self, result):

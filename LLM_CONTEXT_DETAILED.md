@@ -76,6 +76,8 @@ For TIF/CT GPU preview, the active Python executable should be assigned to the N
 
 The TIF workbench status text and renderer overlay should be used to confirm whether rendering is using NVIDIA, integrated graphics, or CPU fallback.
 
+On Windows, embedded Qt WebEngine rendering defaults to `auto`, allowing available integrated graphics to handle browser composition instead of forcing all Agent UI work onto the CPU. `TAXAMASK_QTWEBENGINE_RENDERING=software` is the explicit compatibility fallback for broken drivers; Linux/WSL continue to default to software/external-browser-safe behavior. Before the embedded Agent panel opens, the TIF workbench cancels queued slice and 3D preview work so that large-volume CPU tasks do not continue competing with the conversation UI.
+
 ## 5. Agent Center
 
 The embedded Agent Center uses the first-party `vendor/ant-code/` runtime.
@@ -100,6 +102,8 @@ Important files:
 The embedded registry automatically exposes 14 maintained Skills: 10 general Agent Center Skills, `taxamask-pdf-evidence`, `taxonomy-paper-finder`, the Chinese-first `paper-distill` variant, and the Windows-oriented `unsloth-studio-finetune` variant. Paper Distill and Unsloth remain independently adapted TaxaMask variants rather than byte-for-byte mirrors of their standalone repositories. Keep their source commit, local version, license, sync policy, and test command current in `skills/EMBEDDED_SKILLS.json`.
 
 The embedded Node gate must run `npm run verify:release` and `npm test`; a zero-test result is not acceptable. CI also runs the Paper Distill bundle tests separately. Every `allowed-tools` entry declared by a bundled Skill must exist in `BUILT_IN_TOOLS`, and the registry test must fail when a Skill references an unavailable tool.
+
+Gateway credentials are scoped to their endpoint/profile. Changing a gateway URL or protocol without explicitly providing that profile's key must clear the inherited key rather than send it to another service. Custom profile IDs are preserved, duplicate endpoint profiles are folded for persistence, obsolete health-check hosts are removed, deleting the active/final gateway leaves an explicit empty state instead of falling back to an old profile, and configured context limits are capped by the selected model's declared window.
 
 Normal Ask Agent behavior sends compact workbench context, not full private project data. It should include diagnostic route, focused source references, artifact hints, and safety notes.
 
@@ -315,6 +319,9 @@ Current third-round TIF architecture state (accepted 2026-07-10):
 - TIF working volumes are built under `image.ome.zarr.building`, flushed and closed, then atomically promoted to `image.ome.zarr`. A stale `.building` directory is removed before retry and a failed build cleans its partial directory. Import progress must remain below 100 until working-volume finalization and project persistence both succeed; only the worker completion event emits 100.
 - Import/materialization progress dialogs deliberately have no close button. This does not claim mid-write cancellation support: it prevents a hidden dialog from implying that disk work stopped while preserving rollback guarantees.
 - Selection-triggered image/label memmaps are detached immediately but closed in a background release thread. The release waits for any previous preview-build thread before closing mappings, so responsiveness must not introduce use-after-close races. CPU background preview loops may yield to the UI, but their numerical output must remain identical.
+- Part-mask auto-fill controllers are Qt `QObject` instances, while preview `QThread` objects use the workbench as their parent. Do not pass a plain Python controller as a Qt parent. Auto-fill rasterizes only the combined keyframe-polygon bounding region, caches signed-distance fields per keyframe, and checks cancellation throughout; the output must remain pixel-identical to the established Matplotlib polygon-boundary semantics.
+- Slice rendering, part-mask auto-fill, and volume-preview preparation start at low thread priority. Repeated slice/volume requests keep only the latest request even while an old Qt thread is finishing, and entering Agent Center cancels outstanding slice/volume preview computation first.
+- CPU volume projection is bounded to 250,000 sampled points. This is a display-time responsiveness limit only and must not downsample source volumes, label volumes, saved masks, extracted parts, or training data.
 - When entering a part or reslice, label-schema UI restoration must prioritize the persisted `part.training.label_schema_id` over the combo box's previous browsing selection. Binding was already persisted; the accepted follow-up fix corrected only restoration priority.
 - Selection loading completion is explicit. A completed part/specimen selection must not leave the operation status saying that loading is still in progress.
 - The visible acceptance machine currently requires the supported CPU 3D fallback because Qt/OpenGL renderer initialization is unstable. Treat this as renderer/driver compatibility, not TIF corruption. CPU fallback was accepted for this round; embedded/offscreen GPU paths remain covered by contracts and tests.
@@ -591,7 +598,7 @@ Current maintained validation inventory: 22 default suites and 1,629 tests. The 
 
 Embedded Ant-Code tool results are capped at 256 KiB before they enter model context. A large `list_files` result must be marked `truncated` while preserving its tool success/failure metadata; it must not force a new first-turn TaxaMask context into immediate compaction. A gateway response with no visible text and no tool call is an output-health failure and receives one concise repair retry instead of being accepted as a placeholder-only answer.
 
-Ant-Code 1.3 embedded validation currently covers 119 syntax-checked runtime files, 62 byte-matched Dashboard assets, 3 embedded Node tests, 11 browser tests, 96 Qt GUI smoke tests, 2 TIF Agent tests, and TaxaMask contract/routing tests. Offline mock gateway verification is isolated from user configuration, endpoints, and credentials. The authenticated bootstrap/status/trust/shutdown sequence is also exercised against a real local 1.3 server. The six expected failures in the imported upstream Dashboard/config/session subset assert standalone user-global configuration behavior that TaxaMask deliberately disables; they are not release blockers unless the configuration policy changes.
+Ant-Code 1.3 embedded validation currently covers 119 syntax-checked runtime files, 62 byte-matched Dashboard assets, 14 embedded Node tests, 11 browser tests, 96 Qt GUI smoke tests, 2 TIF Agent tests, and TaxaMask contract/routing tests. Offline mock gateway verification is isolated from user configuration, endpoints, and credentials. The authenticated bootstrap/status/trust/shutdown sequence is also exercised against a real local 1.3 server. The separate upstream Ant-Code comparison suite currently has 119 passing tests; TaxaMask's embedded gate remains authoritative for its intentionally different project-scoped configuration policy.
 
 Use the TaxaMask environment above for GUI/TIF validation. Do not install PySide6 into the default Python environment to satisfy skipped GUI tests.
 

@@ -3637,13 +3637,21 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertIs(widget.volume_canvas, fake_canvas)
                 self.assertEqual(widget._volume_canvas_renderer, "gpu")
 
-                widget.prepare_for_agent_panel()
+                with patch.object(widget, "_cancel_slice_render", wraps=widget._cancel_slice_render) as cancel_slice, \
+                     patch.object(
+                         widget.volume_render_controller,
+                         "_cancel_volume_preview_build",
+                         wraps=widget.volume_render_controller._cancel_volume_preview_build,
+                     ) as cancel_volume:
+                    widget.prepare_for_agent_panel()
 
                 self.assertEqual(widget.display_mode, "slice")
                 self.assertFalse(widget._volume_canvas_created)
                 self.assertIsInstance(widget.volume_canvas, TifVolumeCanvas)
                 self.assertIsNot(widget.volume_canvas, fake_canvas)
                 self.assertEqual(fake_canvas.release_calls, 1)
+                cancel_slice.assert_called_once_with(wait=False)
+                cancel_volume.assert_called_once_with()
             finally:
                 widget.close_project()
                 widget.deleteLater()
@@ -4351,6 +4359,49 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.close_project()
                 widget.deleteLater()
 
+    def test_large_part_mask_preview_real_thread_uses_workbench_parent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=5)
+            try:
+                widget.part_bbox_edit.setText("0,5,0,8,0,8")
+                widget.part_mask_workflow_controller.state.keyframes = [
+                    {
+                        "axis": "z",
+                        "slice_index": 1,
+                        "polygon": [[2, 2], [5, 2], [5, 5], [2, 5]],
+                        "source": "manual_freehand",
+                    },
+                    {
+                        "axis": "z",
+                        "slice_index": 3,
+                        "polygon": [[1, 1], [6, 1], [6, 6], [1, 6]],
+                        "source": "manual_freehand",
+                    },
+                ]
+
+                with patch.object(
+                    widget.part_mask_workflow_controller,
+                    "_should_build_part_mask_preview_in_background",
+                    return_value=True,
+                ):
+                    widget.part_mask_workflow_controller.preview_part_mask_from_keyframes()
+
+                thread = widget.part_mask_workflow_controller.preview_thread
+                self.assertIsInstance(thread, QThread)
+                self.assertIs(thread.parent(), widget)
+
+                deadline = time.time() + 5.0
+                while widget.part_mask_workflow_controller.preview_thread is not None and time.time() < deadline:
+                    self.app.processEvents()
+                    time.sleep(0.01)
+
+                self.assertIsNone(widget.part_mask_workflow_controller.preview_thread)
+                self.assertIsNotNone(widget.part_preview_mask)
+            finally:
+                widget.part_mask_workflow_controller.cancel_and_wait_preview()
+                widget.close_project()
+                widget.deleteLater()
+
     def test_large_slice_render_keeps_qt_heartbeat_and_coalesces_latest_request(self):
         with tempfile.TemporaryDirectory() as tmp:
             widget = self._make_volume_widget(Path(tmp), z_count=4)
@@ -4381,14 +4432,18 @@ class TifWorkbenchTests(unittest.TestCase):
                     widget.slice_slider.setValue(1)
                     widget.slice_slider.setValue(2)
 
+                    latest_request_seen = False
                     deadline = time.monotonic() + 0.12
-                    while time.monotonic() < deadline and not heartbeat:
+                    while time.monotonic() < deadline and (not heartbeat or not latest_request_seen):
                         self.app.processEvents()
+                        latest_request = widget._slice_render_pending_request
+                        if latest_request is None and widget._slice_render_worker is not None:
+                            latest_request = widget._slice_render_worker.request
+                        latest_request_seen = bool(latest_request and latest_request.get("index") == 2)
                         time.sleep(0.005)
 
                     self.assertEqual(heartbeat, [True])
-                    self.assertIsNotNone(widget._slice_render_pending_request)
-                    self.assertEqual(widget._slice_render_pending_request["index"], 2)
+                    self.assertTrue(latest_request_seen)
 
                     deadline = time.monotonic() + 2.0
                     while time.monotonic() < deadline and (

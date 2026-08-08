@@ -18,6 +18,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("QT_OPENGL", "software")
+os.environ.setdefault("TAXAMASK_QTWEBENGINE_RENDERING", "software")
 os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu --disable-gpu-compositing")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -731,7 +732,7 @@ class GuiSmokeTests(unittest.TestCase):
             panel._cleanup_web_profile_storage()
             panel.deleteLater()
 
-    def test_qtwebengine_flags_disable_agent_gpu_logging_by_default(self):
+    def test_qtwebengine_software_mode_disables_agent_gpu_logging(self):
         flags = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
         self.assertIn("--disable-gpu", flags)
         self.assertIn("--disable-gpu-compositing", flags)

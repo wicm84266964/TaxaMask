@@ -42,6 +42,7 @@ TIF_GPU_STREAM_SYNC_MAX_BYTES = 32 * 1024 * 1024
 TIF_RESPONSIVE_FULL_VOLUME_SOURCE_BYTES = 512 * 1024 * 1024
 TIF_RESPONSIVE_GPU_FULL_VOLUME_MAX_DIM = 512
 TIF_RESPONSIVE_CPU_FULL_VOLUME_MAX_DIM = 128
+TIF_CPU_VOLUME_MAX_PROJECTED_POINTS = 250_000
 TIF_MASK_PREVIEW_TRUSTED_STATUSES = {"mask_preview", "mask_in_progress", "reviewed", "ready_for_labeling", "predicted_pending_review", "train_ready"}
 
 def _tif_canvas_background(theme="dark"):
@@ -1710,17 +1711,12 @@ class TifVolumeRenderController(QObject):
             return True
         thread = self.preview_build_thread
         if thread is not None:
-            try:
-                running = bool(thread.isRunning())
-            except RuntimeError:
-                running = False
-            if running:
-                self._cancel_volume_preview_build()
-                self._queued_preview_build = (
-                    dict(volume_request or {}) or None,
-                    dict(mask_request or {}) or None,
-                )
-                return True
+            self._cancel_volume_preview_build()
+            self._queued_preview_build = (
+                dict(volume_request or {}) or None,
+                dict(mask_request or {}) or None,
+            )
+            return True
         self._cancel_volume_preview_build()
         self.state.volume_preview_build_token += 1
         token = int(self.state.volume_preview_build_token)
@@ -1762,7 +1758,7 @@ class TifVolumeRenderController(QObject):
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(lambda t=thread, w=worker: self._cleanup_volume_preview_build_thread(t, w))
         thread.finished.connect(thread.deleteLater)
-        thread.start()
+        thread.start(QThread.LowPriority)
         return True
 
     def _on_volume_preview_build_progress(self, message):
@@ -2628,6 +2624,9 @@ class TifVolumeRenderController(QObject):
         if points.size == 0:
             center_slice = np.asarray(render_source[int(render_source.shape[0] // 2)], dtype=np.uint8)
             return workbench._render_slice_pixmap(center_slice)
+        if int(points.shape[0]) > TIF_CPU_VOLUME_MAX_PROJECTED_POINTS:
+            stride = int(math.ceil(float(points.shape[0]) / float(TIF_CPU_VOLUME_MAX_PROJECTED_POINTS)))
+            points = points[::stride]
 
         point_indices = points.copy()
         values = render_source[points[:, 0], points[:, 1], points[:, 2]].astype(np.float32)

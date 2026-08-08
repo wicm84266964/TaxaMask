@@ -61,6 +61,12 @@ jobs:
           VERSION: ${{ inputs.version }}
           PRERELEASE: ${{ inputs.prerelease }}
         run: |
-          args=("$VERSION" --target "$GITHUB_SHA" --title "$VERSION" --generate-notes)
+          shopt -s nullglob
+          release_notes=(docs/releases/"${VERSION#v}"-*.md)
+          if [[ "${#release_notes[@]}" -ne 1 ]]; then
+            echo "Expected exactly one docs/releases/${VERSION#v}-*.md release note, found ${#release_notes[@]}." >&2
+            exit 1
+          fi
+          args=("$VERSION" --target "$GITHUB_SHA" --title "$VERSION" --notes-file "${release_notes[0]}")
           [[ "$PRERELEASE" != "true" ]] || args+=(--prerelease)
           gh release create "${args[@]}"

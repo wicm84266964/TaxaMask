@@ -141,6 +141,56 @@ test("embedded config scopes environment keys to the matching gateway endpoint",
   assert.equal(sameEndpoint.configSources.lab.gatewayApiKey.type, "environment");
 });
 
+test("embedded config keeps global models visible for the same project gateway", async (t) => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "taxamask-model-merge-"));
+  t.after(() => fs.rm(cwd, { recursive: true, force: true }));
+  const globalPath = path.join(cwd, "global-config.json");
+  const gatewayUrl = "https://shared.gateway.example/v1/chat/completions";
+  await fs.writeFile(globalPath, JSON.stringify({
+    modelAlias: "deepseek-v4-pro",
+    models: [
+      { id: "deepseek-v4-flash", label: "Global Flash" },
+      { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro" }
+    ],
+    lab: {
+      gatewayUrl,
+      gatewayProtocol: "openai-chat",
+      gatewayProfiles: [{
+        id: "global-shared",
+        gatewayUrl,
+        gatewayProtocol: "openai-chat",
+        modelAlias: "deepseek-v4-pro",
+        models: [{ id: "deepseek-v4-flash" }, { id: "deepseek-v4-pro" }]
+      }]
+    }
+  }), "utf8");
+  await fs.mkdir(path.join(cwd, ".lab-agent"), { recursive: true });
+  await fs.writeFile(path.join(cwd, ".lab-agent", "config.json"), JSON.stringify({
+    modelAlias: "deepseek-v4-flash",
+    models: [{ id: "deepseek-v4-flash", label: "Project Flash" }],
+    lab: {
+      gatewayUrl,
+      gatewayProtocol: "openai-chat",
+      gatewayProfiles: [{
+        id: "project-shared",
+        gatewayUrl,
+        gatewayProtocol: "openai-chat",
+        modelAlias: "deepseek-v4-flash",
+        models: [{ id: "deepseek-v4-flash" }]
+      }]
+    }
+  }), "utf8");
+
+  const config = await loadConfig({ cwd, env: { LAB_AGENT_CONFIG: globalPath } });
+
+  assert.equal(config.modelAlias, "deepseek-v4-flash");
+  assert.deepEqual(config.models.map((model) => model.id), ["deepseek-v4-flash", "deepseek-v4-pro"]);
+  assert.deepEqual(config.lab.gatewayProfiles[0].models.map((model) => model.id), [
+    "deepseek-v4-flash",
+    "deepseek-v4-pro"
+  ]);
+});
+
 test("embedded context budget never exceeds the selected model window", () => {
   const context = createContextWindow({
     modelAlias: "smaller-model",

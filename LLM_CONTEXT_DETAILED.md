@@ -92,6 +92,8 @@ Ant-Code 1.3 Dashboard APIs are cookie-authenticated. TaxaMask startup health po
 
 The standalone Dashboard keeps its responsive sessions/conversation/files navigation, but `taxamask_embed` must hide that navigation because the embedded workspace intentionally omits the standalone sidebars. Qt theme injection must cover both light and dark states for long-transcript controls, connection status, permission/full-access confirmation, question review, queue/background status, shutdown, and model configuration. Do not rely on standalone dark fixed colors inside the light TaxaMask theme.
 
+The post-load localization adapter must be idempotent. A translation helper may normalize text for matching, but it must not write a value back when the visible text is semantically unchanged. Direct text nodes with layout whitespace must preserve that whitespace without inserting the raw value into itself, and every `textContent` write observed by the body-wide `MutationObserver` must be guarded by an exact value comparison. The five model-configuration toggle labels are the regression fixture: repeated Chinese passes must perform zero writes, while an English translation may write once and must then remain stable.
+
 Important files:
 
 - `AntSleap/ui/taxamask_agent_panel.py`

@@ -4,6 +4,8 @@ import os
 import base64
 import io
 import json
+import shutil
+import subprocess
 import sys
 import tempfile
 import sqlite3
@@ -987,6 +989,120 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertIn('"当前项目配置": "Current project configuration"', script)
             self.assertIn("Active sources: gateway from", script)
             self.assertIn(".model-config-note > div", script)
+        finally:
+            window.deleteLater()
+
+    def test_agent_panel_post_load_script_guards_idempotent_text_writes(self):
+        window = self._make_window()
+        try:
+            script = window.agent_panel._web_post_load_source()
+
+            self.assertIn("if (!taxamaskText.translatePatterns) return trimmed;", script)
+            self.assertIn("if (translated === trimmed) return;", script)
+            self.assertIn("if (node.textContent !== next) node.textContent = next;", script)
+            self.assertNotIn("raw.replace(raw.trim(), translated)", script)
+            defaults_start = script.index("const applyTaxaMaskDefaults")
+            defaults_end = script.index("const trustPending")
+            self.assertNotIn(".textContent =", script[defaults_start:defaults_end])
+        finally:
+            window.deleteLater()
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for the injected JavaScript regression test")
+    def test_agent_panel_post_load_translation_helpers_are_idempotent(self):
+        window = self._make_window()
+        try:
+            script = window.agent_panel._web_post_load_source()
+            helper_start = script.index("const translateTextValue")
+            helper_end = script.index("const applyTaxaMaskDefaults")
+            helper_source = script[helper_start:helper_end]
+            probe = (
+                "const taxamaskText = {textMap: {}, translatePatterns: false};\n"
+                "const Node = {TEXT_NODE: 3};\n"
+                + helper_source
+                + """
+const originalValues = [
+  ' 文本',
+  ' 视觉',
+  ' thinking',
+  ' 保存后切换到这个模型',
+  ' 保存后同步子智能体',
+];
+const values = [...originalValues];
+const writes = originalValues.map(() => 0);
+const labels = originalValues.map((_value, index) => ({
+  childNodes: [{
+    nodeType: Node.TEXT_NODE,
+    get nodeValue() { return values[index]; },
+    set nodeValue(next) { writes[index] += 1; values[index] = next; },
+  }],
+}));
+for (let pass = 0; pass < 4; pass += 1) labels.forEach(translateDirectTextNodes);
+const chinese = {values: [...values], writes: [...writes]};
+
+taxamaskText.textMap = {
+  '文本': 'Text',
+  '视觉': 'Vision',
+  'thinking': 'Thinking',
+  '保存后切换到这个模型': 'Switch after saving',
+  '保存后同步子智能体': 'Sync agents after saving',
+};
+for (let pass = 0; pass < 4; pass += 1) labels.forEach(translateDirectTextNodes);
+const english = {values: [...values], writes: [...writes]};
+
+let text = 'TaxaMask Agent';
+let textWrites = 0;
+const textNode = {
+  get textContent() { return text; },
+  set textContent(next) { textWrites += 1; text = next; },
+};
+setTextIfChanged(textNode, 'TaxaMask Agent');
+setTextIfChanged(textNode, 'Updated');
+setTextIfChanged(textNode, 'Updated');
+console.log(JSON.stringify({chinese, english, text, textWrites}));
+"""
+            )
+            result = subprocess.run(
+                [
+                    shutil.which("node"),
+                    "--max-old-space-size=64",
+                    "--input-type=module",
+                    "--eval",
+                    probe,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=5,
+            )
+
+            self.assertEqual(
+                json.loads(result.stdout),
+                {
+                    "chinese": {
+                        "values": [
+                            " 文本",
+                            " 视觉",
+                            " thinking",
+                            " 保存后切换到这个模型",
+                            " 保存后同步子智能体",
+                        ],
+                        "writes": [0, 0, 0, 0, 0],
+                    },
+                    "english": {
+                        "values": [
+                            " Text",
+                            " Vision",
+                            " Thinking",
+                            " Switch after saving",
+                            " Sync agents after saving",
+                        ],
+                        "writes": [1, 1, 1, 1, 1],
+                    },
+                    "text": "Updated",
+                    "textWrites": 1,
+                },
+            )
         finally:
             window.deleteLater()
 

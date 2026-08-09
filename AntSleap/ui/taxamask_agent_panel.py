@@ -1830,7 +1830,7 @@ exec "$@"
                 if (taxamaskText.textMap && Object.prototype.hasOwnProperty.call(taxamaskText.textMap, trimmed)) {
                   return taxamaskText.textMap[trimmed];
                 }
-                if (!taxamaskText.translatePatterns) return original;
+                if (!taxamaskText.translatePatterns) return trimmed;
                 let translated = trimmed
                   .replaceAll('Key 已配置', 'Key configured')
                   .replaceAll('未配置 Key', 'Key missing')
@@ -1860,18 +1860,28 @@ exec "$@"
                 if (match) return `The current session will use ${match[1]}`;
                 return translated;
               };
+              const setTextIfChanged = (node, value) => {
+                if (!node) return;
+                const next = String(value ?? '');
+                if (node.textContent !== next) node.textContent = next;
+              };
               const setTranslatedText = (node) => {
                 if (!node) return;
-                const translated = translateTextValue(node.textContent);
-                if (translated !== node.textContent.trim()) node.textContent = translated;
+                const raw = node.textContent || '';
+                const translated = translateTextValue(raw);
+                if (translated !== raw.trim()) setTextIfChanged(node, translated);
               };
               const translateDirectTextNodes = (node) => {
                 if (!node) return;
                 node.childNodes.forEach((child) => {
                   if (child.nodeType !== Node.TEXT_NODE) return;
                   const raw = child.nodeValue || '';
+                  const trimmed = raw.trim();
+                  if (!trimmed) return;
                   const translated = translateTextValue(raw);
-                  if (translated !== raw.trim()) child.nodeValue = raw.replace(raw.trim(), translated);
+                  if (translated === trimmed) return;
+                  const next = raw.replace(trimmed, translated);
+                  if (next !== raw) child.nodeValue = next;
                 });
               };
               const translateAttributes = (node) => {
@@ -1890,33 +1900,33 @@ exec "$@"
                   workspaceButton.click();
                 }
                 const localLabel = document.querySelector('.workspace-local span:last-child');
-                if (localLabel) localLabel.textContent = taxamaskText.localLabel;
+                setTextIfChanged(localLabel, taxamaskText.localLabel);
                 const brand = document.querySelector('.brand-name');
-                if (brand) brand.textContent = 'TaxaMask Agent';
+                setTextIfChanged(brand, 'TaxaMask Agent');
                 const subtitle = document.querySelector('.brand-subtitle');
-                if (subtitle) subtitle.textContent = taxamaskText.subtitle;
+                setTextIfChanged(subtitle, taxamaskText.subtitle);
                 const emptyKicker = document.querySelector('.empty-kicker');
-                if (emptyKicker) emptyKicker.textContent = 'TaxaMask Agent';
+                setTextIfChanged(emptyKicker, 'TaxaMask Agent');
                 const emptyTitle = document.querySelector('.empty-title');
-                if (emptyTitle) emptyTitle.textContent = taxamaskText.emptyTitle;
+                setTextIfChanged(emptyTitle, taxamaskText.emptyTitle);
                 const emptyCopy = document.querySelector('.empty-copy');
-                if (emptyCopy) emptyCopy.textContent = taxamaskText.emptyCopy;
+                setTextIfChanged(emptyCopy, taxamaskText.emptyCopy);
                 const prompt = document.querySelector('#prompt-input');
                 if (prompt) prompt.placeholder = taxamaskText.promptPlaceholder;
                 document.querySelectorAll('#permission-mode button[data-mode]').forEach((button) => {
                   const label = taxamaskText.modeLabels && taxamaskText.modeLabels[button.dataset.mode];
-                  if (label) button.textContent = label;
+                  if (label) setTextIfChanged(button, label);
                 });
                 const activeMode = document.querySelector('#permission-mode button.active')?.dataset?.mode || 'workspace';
                 const modeDescription = document.querySelector('#mode-description');
                 if (modeDescription && taxamaskText.modeDescriptions && taxamaskText.modeDescriptions[activeMode]) {
-                  modeDescription.textContent = taxamaskText.modeDescriptions[activeMode];
+                  setTextIfChanged(modeDescription, taxamaskText.modeDescriptions[activeMode]);
                 }
                 const mapText = (node) => {
                   if (!node || !taxamaskText.textMap) return;
                   const current = node.textContent.trim();
                   if (Object.prototype.hasOwnProperty.call(taxamaskText.textMap, current)) {
-                    node.textContent = taxamaskText.textMap[current];
+                    setTextIfChanged(node, taxamaskText.textMap[current]);
                   }
                 };
                 ['#run-status', '#send-button', '#header-shutdown-button', '#context-clear', '#context-compact'].forEach((selector) => {
@@ -1949,15 +1959,15 @@ exec "$@"
                 document.querySelectorAll('.model-config-toggles label').forEach(translateDirectTextNodes);
                 document.querySelectorAll('[title], [aria-label]').forEach(translateAttributes);
                 const trustTitle = document.querySelector('.trust-title');
-                if (trustTitle) trustTitle.textContent = taxamaskText.trustTitle;
+                setTextIfChanged(trustTitle, taxamaskText.trustTitle);
                 const trustButton = document.querySelector('#trust-panel button[data-action="trust"]');
-                if (trustButton && !trustButton.disabled) trustButton.textContent = taxamaskText.trustButton;
+                if (trustButton && !trustButton.disabled) setTextIfChanged(trustButton, taxamaskText.trustButton);
                 const trustCopies = document.querySelectorAll('.trust-copy');
                 if (trustCopies.length > 1) {
                   const raw = trustCopies[1].textContent || '';
-                  trustCopies[1].textContent = raw.includes('高敏') || raw.toLowerCase().includes('high-sensitivity')
+                  setTextIfChanged(trustCopies[1], raw.includes('高敏') || raw.toLowerCase().includes('high-sensitivity')
                     ? taxamaskText.trustProcess
-                    : taxamaskText.trustPersist;
+                    : taxamaskText.trustPersist);
                 }
               };
               const trustPending = () => {

@@ -120,6 +120,12 @@ fi
 
 export LAB_AGENT_PACKAGE_ROOT="$ANT_CODE_ROOT"
 export LAB_AGENT_CONFIG="${TAXAMASK_ANT_CODE_CONFIG:-$PROJECT_ROOT/AntSleap/config/taxamask_ant_code.config.json}"
+export LAB_AGENT_SKIP_PROJECT_CONFIG=1
+if [[ -n "${XDG_CONFIG_HOME:-}" ]]; then
+  export LAB_AGENT_RECOVERY_CONFIG="${TAXAMASK_ANTCODE_RECOVERY_CONFIG:-$XDG_CONFIG_HOME/taxamask/ant-code-recovery.config.json}"
+else
+  export LAB_AGENT_RECOVERY_CONFIG="${TAXAMASK_ANTCODE_RECOVERY_CONFIG:-$HOME/.config/taxamask/ant-code-recovery.config.json}"
+fi
 
 echo "Starting Ant-Code recovery dashboard for TaxaMask..."
 echo "Project: $PROJECT_ROOT"

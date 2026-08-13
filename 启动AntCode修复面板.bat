@@ -67,7 +67,13 @@ if errorlevel 1 (
 )
 
 set "LAB_AGENT_PACKAGE_ROOT=%ANT_CODE_ROOT%"
+set "LAB_AGENT_CONFIG=%PROJECT_ROOT%\AntSleap\config\taxamask_ant_code.config.json"
 set "LAB_AGENT_SKIP_PROJECT_CONFIG=1"
+if defined APPDATA (
+    set "LAB_AGENT_RECOVERY_CONFIG=%APPDATA%\TaxaMask\ant-code-recovery.config.json"
+) else (
+    set "LAB_AGENT_RECOVERY_CONFIG=%USERPROFILE%\.config\TaxaMask\ant-code-recovery.config.json"
+)
 
 echo Starting Ant-Code recovery dashboard for TaxaMask...
 echo Project: %PROJECT_ROOT%

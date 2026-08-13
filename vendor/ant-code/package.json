@@ -1,6 +1,6 @@
 {
   "name": "@ant-code/cli",
-  "version": "1.3.0-taxamask.1",
+  "version": "1.3.0-taxamask.2",
   "description": "First-party Ant-Code Agent Center runtime embedded by TaxaMask.",
   "type": "module",
   "private": true,

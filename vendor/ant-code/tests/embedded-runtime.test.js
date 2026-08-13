@@ -191,6 +191,87 @@ test("embedded config keeps global models visible for the same project gateway",
   ]);
 });
 
+test("TaxaMask recovery mode persists model credentials outside a skipped project config", async (t) => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "taxamask-recovery-config-"));
+  t.after(() => fs.rm(cwd, { recursive: true, force: true }));
+  const recoveryPath = path.join(cwd, "user", "ant-code-recovery.config.json");
+  const policyPath = path.join(TAXAMASK_ROOT, "AntSleap", "config", "taxamask_ant_code.config.json");
+  await fs.mkdir(path.join(cwd, ".lab-agent"), { recursive: true });
+  await fs.writeFile(path.join(cwd, ".lab-agent", "config.json"), "{ broken project config", "utf8");
+  const env = {
+    LAB_AGENT_CONFIG: policyPath,
+    LAB_AGENT_SKIP_PROJECT_CONFIG: "1",
+    LAB_AGENT_RECOVERY_CONFIG: recoveryPath
+  };
+  const runtime = createDashboardRuntime({ cwd, env });
+
+  const initial = await runtime.status();
+  assert.equal(initial.gatewayConfig.apiKeyConfigured, false);
+  const saved = await runtime.saveModelConfig({
+    gatewayUrl: "https://recovery.gateway.example/v1/chat/completions",
+    gatewayProtocol: "openai-chat",
+    gatewayApiKey: "recovery-key",
+    modelId: "recovery-model",
+    switchToModel: true
+  });
+
+  assert.equal(saved.ok, true);
+  assert.equal(saved.configPath, recoveryPath);
+  assert.equal(saved.gatewayConfig.apiKeyConfigured, true);
+  const restarted = createDashboardRuntime({ cwd, env });
+  const status = await restarted.status();
+  assert.equal(status.gatewayConfig.apiKeyConfigured, true);
+  assert.equal(status.gatewayConfig.gatewayUrl, "https://recovery.gateway.example/v1/chat/completions");
+  const persisted = JSON.parse(await fs.readFile(recoveryPath, "utf8"));
+  assert.equal(persisted.lab.gatewayApiKey, "recovery-key");
+  await runtime.shutdown({ force: true });
+  await restarted.shutdown({ force: true });
+});
+
+test("TaxaMask recovery config cannot override the fixed source protection policy", async (t) => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "taxamask-recovery-policy-"));
+  t.after(() => fs.rm(cwd, { recursive: true, force: true }));
+  const recoveryPath = path.join(cwd, "ant-code-recovery.config.json");
+  const policyPath = path.join(TAXAMASK_ROOT, "AntSleap", "config", "taxamask_ant_code.config.json");
+  await fs.writeFile(recoveryPath, JSON.stringify({
+    hooks: { enabled: false, events: {} },
+    taxamaskPermissions: { adapterRoots: [] },
+    modelAlias: "recovery-model",
+    models: [{ id: "recovery-model" }],
+    lab: {
+      gatewayUrl: "https://recovery.gateway.example/v1/chat/completions",
+      gatewayProtocol: "openai-chat",
+      gatewayApiKey: "recovery-key"
+    }
+  }), "utf8");
+
+  const config = await loadConfig({
+    cwd,
+    env: {
+      LAB_AGENT_CONFIG: policyPath,
+      LAB_AGENT_SKIP_PROJECT_CONFIG: "true",
+      LAB_AGENT_RECOVERY_CONFIG: recoveryPath
+    }
+  });
+
+  assert.equal(config.hooks.enabled, true);
+  assert.ok(config.hooks.events["tool.before"].some((hook) => hook.builtin === "denyTaxaMaskSourceWrites"));
+  assert.ok(config.taxamaskPermissions.adapterRoots.includes("external_backends"));
+  assert.equal(config.lab.gatewayApiKey, "recovery-key");
+});
+
+test("TaxaMask recovery launchers keep policy and credential storage separate", async () => {
+  const windowsLauncher = await fs.readFile(path.join(TAXAMASK_ROOT, "启动AntCode修复面板.bat"), "utf8");
+  const shellLauncher = await fs.readFile(path.join(TAXAMASK_ROOT, "启动AntCode修复面板.sh"), "utf8");
+
+  for (const launcher of [windowsLauncher, shellLauncher]) {
+    assert.match(launcher, /LAB_AGENT_CONFIG/);
+    assert.match(launcher, /LAB_AGENT_SKIP_PROJECT_CONFIG/);
+    assert.match(launcher, /LAB_AGENT_RECOVERY_CONFIG/);
+    assert.match(launcher, /ant-code-recovery\.config\.json/);
+  }
+});
+
 test("embedded context budget never exceeds the selected model window", () => {
   const context = createContextWindow({
     modelAlias: "smaller-model",

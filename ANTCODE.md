@@ -50,7 +50,7 @@ Treat this TaxaMask protocol as always active, not as an optional skill:
 - Current maintained line: **TaxaMask `main` / v2.x**, integrating Agent Center, PDF evidence, 2D/STL morphology, and the newer TIF/CT workbench in one branch.
 - Startup defaults to TaxaMask Agent Center.
 - The start center main area embeds Ant-Code Dashboard through `AntSleap/ui/taxamask_agent_panel.py`.
-- The embedded Agent Center runtime is `1.3.0-taxamask.1`. TaxaMask keeps its embedded workspace/config boundary, read-only Git review tools, source guard, and selectively adapted Skill set rather than mirroring standalone Ant-Code wholesale.
+- The embedded Agent Center runtime is `1.3.0-taxamask.2`. TaxaMask keeps its embedded workspace/config boundary, read-only Git review tools, source guard, and selectively adapted Skill set rather than mirroring standalone Ant-Code wholesale.
 - The default registry exposes 14 maintained Skills, including `paper-distill` and `unsloth-studio-finetune`. Their source commit, local variant, license, sync policy, and test command are recorded in `skills/EMBEDDED_SKILLS.json`.
 - Long-running terminal work should use registered background terminal tasks: prefer `background_shell`, check existing tasks with `background_terminal_list` before restarting servers/viewers/downloads/renders/training jobs, and cancel stale tasks with `background_terminal_cancel` when appropriate. Dashboard recycle actions can also cancel registered terminal tasks.
 - The start center right rail contains recent/open/general settings controls followed by `PDF evidence workflow`, `2D/STL Morphology`, and `TIF Volume` cards. PDF evidence should remain visible near the top because it is often the first screening/review step before candidate import.

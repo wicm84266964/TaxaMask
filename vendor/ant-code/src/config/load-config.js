@@ -169,8 +169,19 @@ export async function loadConfig(options = {}) {
   const env = options.env ?? process.env;
 
   const skipProjectConfig = parseBoolean(env.LAB_AGENT_SKIP_PROJECT_CONFIG ?? "false");
+  const recoveryConfigPath = skipProjectConfig
+    ? String(env.LAB_AGENT_RECOVERY_CONFIG ?? "").trim()
+    : "";
+  const recoveryConfig = recoveryConfigPath
+    ? await readJsonIfExists(path.resolve(recoveryConfigPath))
+    : null;
   const projectConfigs = skipProjectConfig ? [] : await loadProjectConfigs(cwd);
-  const project = mergeProjectConfigs(projectConfigs);
+  const project = recoveryConfig ? {
+    path: path.resolve(recoveryConfigPath),
+    paths: [path.resolve(recoveryConfigPath)],
+    data: recoveryModelConfig(recoveryConfig.data),
+    label: "TaxaMask recovery config"
+  } : mergeProjectConfigs(projectConfigs);
   const explicitLabConfigPath = hasNonEmptyEnv(env, "LAB_AGENT_CONFIG");
   const labConfigPath = globalConfigPath(env);
   const labConfigReadPath = explicitLabConfigPath ? labConfigPath : null;
@@ -211,7 +222,7 @@ export async function loadConfig(options = {}) {
     && configSources.lab.gatewayApiKey.type !== "project") {
     configSources.lab.gatewayApiKey = {
       type: "project",
-      label: ".lab-agent/config.json",
+      label: project?.label ?? ".lab-agent/config.json",
       path: project?.path ?? null
     };
   }
@@ -290,6 +301,38 @@ export function globalConfigPath(env = process.env) {
   }
   const home = env.USERPROFILE || env.HOME || os.homedir();
   return path.join(home, ".ant-code", "lab-agent.config.json");
+}
+
+function recoveryModelConfig(value) {
+  if (!isPlainObject(value)) {
+    return {};
+  }
+  const lab = isPlainObject(value.lab) ? value.lab : {};
+  return {
+    ...(Object.prototype.hasOwnProperty.call(value, "modelAlias") ? { modelAlias: value.modelAlias } : {}),
+    ...(Array.isArray(value.models) ? { models: value.models } : {}),
+    ...(Array.isArray(value.allowedHosts) ? { allowedHosts: value.allowedHosts } : {}),
+    ...(isPlainObject(value.context) ? { context: value.context } : {}),
+    ...(isPlainObject(value.agents) ? { agents: recoveryAgentModelConfig(value.agents) } : {}),
+    lab: Object.fromEntries(Object.entries(lab).filter(([key]) => [
+      "gatewayUrl",
+      "gatewayHealthUrl",
+      "gatewayProtocol",
+      "gatewayApiKey",
+      "gatewayMaxRetries",
+      "gatewayTimeoutMs",
+      "gatewayIdleTimeoutMs",
+      "activeGatewayProfile",
+      "gatewayProfiles"
+    ].includes(key)))
+  };
+}
+
+function recoveryAgentModelConfig(value) {
+  return {
+    ...(isPlainObject(value.modelTiers) ? { modelTiers: value.modelTiers } : {}),
+    ...(isPlainObject(value.vision) ? { vision: value.vision } : {})
+  };
 }
 
 /**
@@ -661,7 +704,7 @@ function configSourceFor(keyPath, { env, project, lab, bundled }) {
   if (hasConfigPath(project?.data, keyPath)) {
     return {
       type: "project",
-      label: ".lab-agent/config.json",
+      label: project?.label ?? ".lab-agent/config.json",
       path: project?.path ?? null
     };
   }

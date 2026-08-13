@@ -158,7 +158,7 @@ export function createDashboardRuntime(options) {
       }
       let refreshed = config;
       if (input.applyAgentDefaults === true && Object.keys(selection.model.agentModelTiers ?? {}).length > 0) {
-        const localPath = localProjectConfigPath(options.cwd);
+        const localPath = dashboardWritableConfigPath(options.cwd, runtimeEnv);
         const mutation = await mutateDashboardConfig(localPath, (local) => (
           buildLocalAgentModelTiersConfig(local, config, selection.model.agentModelTiers)
         ));
@@ -215,7 +215,7 @@ export function createDashboardRuntime(options) {
       if (!normalized.ok) {
         return normalized;
       }
-      const configPath = localProjectConfigPath(options.cwd);
+      const configPath = dashboardWritableConfigPath(options.cwd, runtimeEnv);
       const mutation = await mutateDashboardConfig(configPath, async (targetConfig) => {
         config = await loadConfig({ cwd: options.cwd, env: await resolveConfigEnv() });
         normalized = normalizeModelConfigInput(input, config);
@@ -281,7 +281,7 @@ export function createDashboardRuntime(options) {
           gatewayProfiles: publicGatewayProfiles(state.session.config)
         };
       }
-      const localPath = localProjectConfigPath(options.cwd);
+      const localPath = dashboardWritableConfigPath(options.cwd, runtimeEnv);
       let nextLocal = buildLocalDeleteModelConfig(await readJsonConfig(localPath), config, modelId);
       if (!nextLocal.ok) {
         return {
@@ -358,7 +358,7 @@ export function createDashboardRuntime(options) {
         };
       }
       let config = await loadConfig({ cwd: options.cwd, env: configEnv });
-      const localPath = localProjectConfigPath(options.cwd);
+      const localPath = dashboardWritableConfigPath(options.cwd, runtimeEnv);
       let deletion = buildGatewayProfileDeleteConfig(await readJsonConfig(localPath), config, profileId);
       if (!deletion.ok) {
         return { ok: false, status: 404, error: deletion.error };
@@ -415,7 +415,7 @@ export function createDashboardRuntime(options) {
         };
       }
       const config = await loadConfig({ cwd: options.cwd, env: configEnv });
-      const localPath = localProjectConfigPath(options.cwd);
+      const localPath = dashboardWritableConfigPath(options.cwd, runtimeEnv);
       let nextLocal = buildGatewayProfileSwitchConfig(await readJsonConfig(localPath), config, profileId);
       if (!nextLocal.ok) {
         return {
@@ -2469,6 +2469,16 @@ function dashboardConfigResultError(result) {
 
 async function dashboardConfigEnv(cwd, env) {
   return env;
+}
+
+function dashboardWritableConfigPath(cwd, env = {}) {
+  if (String(env.LAB_AGENT_SKIP_PROJECT_CONFIG ?? "").trim().toLowerCase().match(/^(1|true|yes|on)$/)) {
+    const recoveryPath = String(env.LAB_AGENT_RECOVERY_CONFIG ?? "").trim();
+    if (recoveryPath) {
+      return path.resolve(recoveryPath);
+    }
+  }
+  return localProjectConfigPath(cwd);
 }
 
 function buildLocalModelConfig(local, config, normalized) {

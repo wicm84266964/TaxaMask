@@ -52,6 +52,7 @@ else:
     from AntSleap.ui.tif_workbench import (
         TifBatchImportWorker,
         TifImportWorker,
+        TifSliceSeriesImportWorker,
         TifLabelAutoSaveWorker,
         TifMaterializeWorker,
         TifTrainingResultDialog,
@@ -3453,7 +3454,11 @@ class TifWorkbenchTests(unittest.TestCase):
         manager = TifProjectManager()
         widget = TifWorkbenchWidget(manager, "en")
         try:
-            self.assertEqual(widget.btn_import_tif.text(), "Import TIF stack")
+            self.assertEqual(widget.btn_import_tif.text(), "Import TIF volume")
+            self.assertIn("separate specimen", widget.btn_import_tif.toolTip())
+            self.assertEqual(widget.btn_import_tif_slices.text(), "Combine TIF slices")
+            self.assertIn("combined into one specimen", widget.btn_import_tif_slices.toolTip())
+            self.assertIn("physical Z spacing is not inferred", widget.btn_import_tif_slices.toolTip())
             self.assertEqual(widget.btn_import_amira.text(), "Import AMIRA directory")
             self.assertEqual(widget.btn_export_training.text(), "Export train-ready volumes")
             self.assertEqual(widget.btn_prepare_dataset.text(), "Prepare dataset")
@@ -3478,6 +3483,7 @@ class TifWorkbenchTests(unittest.TestCase):
             self.assertIsNotNone(widget.findChild(type(widget.btn_start_center), "tifStartCenterButton"))
             self.assertIsNotNone(widget.findChild(type(widget.btn_ask_agent), "tifAskAgentButton"))
             self.assertIsNotNone(widget.findChild(type(widget.btn_import_tif), "tifImportStackButton"))
+            self.assertIsNotNone(widget.findChild(type(widget.btn_import_tif_slices), "tifImportSliceSeriesButton"))
             self.assertIsNotNone(widget.findChild(type(widget.btn_import_amira), "tifImportAmiraButton"))
             self.assertIsNotNone(widget.findChild(type(widget.btn_prepare_dataset), "tifPrepareDatasetButton"))
             self.assertIsNotNone(widget.findChild(type(widget.btn_train_backend), "tifTrainBackendButton"))
@@ -3577,10 +3583,12 @@ class TifWorkbenchTests(unittest.TestCase):
             self.assertIsNotNone(widget.findChild(type(widget.btn_open_result_comparison_target), "tifOpenResultComparisonTargetButton"))
             self.assertIsNotNone(widget.findChild(type(widget.btn_show_result_region_in_3d), "tifShowResultRegionIn3DButton"))
             self.assertEqual(widget.btn_import_tif.property("tifRole"), "primary")
+            self.assertEqual(widget.btn_import_tif_slices.property("tifRole"), "primary")
             self.assertEqual(widget.btn_train_backend.property("tifRole"), "primary")
             self.assertEqual(widget.btn_save_backend.property("tifRole"), "secondary")
             self.assertEqual(widget.btn_delete_material.property("tifRole"), "danger")
             self.assertGreaterEqual(widget.btn_import_tif.minimumHeight(), 34)
+            self.assertGreaterEqual(widget.btn_import_tif_slices.minimumHeight(), 34)
             self.assertEqual(widget.specimen_list.objectName(), "tifSpecimenList")
             self.assertEqual(widget.material_table.objectName(), "tifMaterialTable")
             self.assertEqual(widget.btn_tool_brush.objectName(), "tifToolBrushButton")
@@ -6875,6 +6883,67 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertEqual((specimen.get("working_volume") or {}).get("status"), "metadata_only")
                 self.assertFalse((specimen.get("labels") or {}).get("working_edit", {}).get("path"))
 
+    def test_tif_slice_series_worker_builds_one_volume_from_selected_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = TifProjectManager()
+            manager.create_project("slice_worker", root / "slice_worker")
+            slice_10 = root / "slice_10.tif"
+            slice_2 = root / "slice_2.tif"
+            tifffile.imwrite(slice_10, np.full((4, 5), 10, dtype=np.uint8), photometric="minisblack")
+            tifffile.imwrite(slice_2, np.full((4, 5), 2, dtype=np.uint8), photometric="minisblack")
+            worker = TifSliceSeriesImportWorker(
+                manager,
+                [str(slice_10), str(slice_2)],
+                "slice-series",
+            )
+            finished = []
+            failed = []
+            progress = []
+            worker.finished.connect(finished.append)
+            worker.failed.connect(failed.append)
+            worker.progress.connect(lambda current, total, message: progress.append((current, total, message)))
+
+            worker.run()
+
+            self.assertEqual(failed, [])
+            self.assertEqual(len(finished), 1)
+            self.assertEqual(finished[0]["import_kind"], "tif_slice_series")
+            specimen = manager.get_specimen("slice-series")
+            volume = load_volume_sidecar(manager.to_absolute(specimen["working_volume"]["path"]))
+            self.assertEqual(volume[:, 0, 0].tolist(), [2, 10])
+            self.assertEqual(progress[-1][:2], (100, 100))
+
+    def test_tif_slice_series_dialog_launches_one_series_worker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = TifProjectManager()
+            manager.create_project("slice_dialog", root / "slice_dialog_project")
+            slice_1 = root / "slice_1.tif"
+            slice_2 = root / "slice_2.tif"
+            tifffile.imwrite(slice_1, np.ones((3, 4), dtype=np.uint8), photometric="minisblack")
+            tifffile.imwrite(slice_2, np.ones((3, 4), dtype=np.uint8), photometric="minisblack")
+            widget = TifWorkbenchWidget(manager, "en")
+            try:
+                with patch(
+                    "AntSleap.ui.tif_workbench.QFileDialog.getOpenFileNames",
+                    return_value=([str(slice_2), str(slice_1)], "TIF/TIFF"),
+                ), patch(
+                    "AntSleap.ui.tif_workbench.QInputDialog.getText",
+                    return_value=("selected-series", True),
+                ), patch.object(widget, "_launch_tif_import_worker") as launch:
+                    widget.import_tif_slice_series_dialog()
+
+                worker = launch.call_args.args[0]
+                self.assertIsInstance(worker, TifSliceSeriesImportWorker)
+                self.assertEqual(worker.tif_paths, [str(slice_2), str(slice_1)])
+                self.assertEqual(worker.specimen_id, "selected-series")
+                self.assertEqual(launch.call_args.kwargs["import_kind"], "tif_slice_series")
+                self.assertEqual(launch.call_args.kwargs["payload"]["slice_count"], 2)
+            finally:
+                widget.close_project(prompt_unsaved=False)
+                widget.deleteLater()
+
     def test_tif_batch_import_worker_keeps_successes_when_one_stack_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -6998,7 +7067,11 @@ class TifWorkbenchTests(unittest.TestCase):
         try:
             widget.change_language("zh")
             self.assertEqual(widget.task_tabs.tabText(2), "标注与训练")
-            self.assertEqual(widget.btn_import_tif.text(), "导入 TIF stack")
+            self.assertEqual(widget.btn_import_tif.text(), "导入完整 TIF 体数据")
+            self.assertIn("分别导入为一个样本", widget.btn_import_tif.toolTip())
+            self.assertEqual(widget.btn_import_tif_slices.text(), "合并多个 TIF 切片")
+            self.assertIn("合并为一个样本", widget.btn_import_tif_slices.toolTip())
+            self.assertIn("不会自动推断 Z 向物理间距", widget.btn_import_tif_slices.toolTip())
             self.assertEqual(widget.btn_import_amira.text(), "导入 AMIRA 目录")
             self.assertEqual(widget.btn_export_training.text(), "导出可训练体数据")
             self.assertEqual(widget.btn_prepare_dataset.text(), "准备训练数据")
@@ -9149,6 +9222,7 @@ class TifWorkbenchTests(unittest.TestCase):
                     self.assertIsNone(widget.local_axis_controller.copy_source_z_axis_to_draft())
                     with patch("AntSleap.ui.tif_workbench.QFileDialog.getOpenFileNames") as open_files:
                         widget.import_tif_stack_dialog()
+                        widget.import_tif_slice_series_dialog()
                         open_files.assert_not_called()
                     with patch("AntSleap.ui.tif_workbench.QFileDialog.getExistingDirectory") as open_dir:
                         widget.import_amira_directory_dialog()
@@ -9170,6 +9244,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertIn("Volume preview", widget.coordinator.backend_write_lock_message())
                 with patch_message_boxes(), patch("AntSleap.ui.tif_workbench.QFileDialog.getOpenFileNames") as open_files:
                     widget.import_tif_stack_dialog()
+                    widget.import_tif_slice_series_dialog()
                     open_files.assert_not_called()
                 widget._finish_tif_task(task.task_id, message="done")
                 self.assertFalse(widget.coordinator.backend_write_lock_active())

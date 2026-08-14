@@ -132,6 +132,7 @@ class TifWorkbenchShell:
             "_tif_import_specimen_id": "",
             "_tif_import_jobs": [],
             "_tif_import_task_id": "",
+            "_tif_import_kind": "stack",
             "_slice_render_thread": None,
             "_slice_render_worker": None,
             "_slice_render_token": 0,

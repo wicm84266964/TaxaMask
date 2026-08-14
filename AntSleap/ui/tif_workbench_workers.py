@@ -8,7 +8,7 @@ try:
     from AntSleap.core.tif_backend import TifBackendRunner
     from AntSleap.core.tif_part_extraction import build_preview_mask_from_contours, crop_volume_to_part
     from AntSleap.core.tif_roi_preview import DEFAULT_ROI_TEXTURE_BUDGET_BYTES, build_roi_mask_preview, build_roi_volume_preview
-    from AntSleap.core.tif_stack_import import import_tif_stack, materialize_registered_tif_stack, register_tif_stack_metadata
+    from AntSleap.core.tif_stack_import import import_tif_slice_series, import_tif_stack, materialize_registered_tif_stack, register_tif_stack_metadata
     from AntSleap.core.tif_volume_io import flush_volume_array, load_volume_sidecar
     from AntSleap.core.tif_volume_preview import build_mask_preview, build_volume_preview
     from AntSleap.core.tif_local_axis_reslice import export_part_reslice
@@ -23,7 +23,7 @@ except ModuleNotFoundError as exc:
     from core.tif_backend import TifBackendRunner
     from core.tif_part_extraction import build_preview_mask_from_contours, crop_volume_to_part
     from core.tif_roi_preview import DEFAULT_ROI_TEXTURE_BUDGET_BYTES, build_roi_mask_preview, build_roi_volume_preview
-    from core.tif_stack_import import import_tif_stack, materialize_registered_tif_stack, register_tif_stack_metadata
+    from core.tif_stack_import import import_tif_slice_series, import_tif_stack, materialize_registered_tif_stack, register_tif_stack_metadata
     from core.tif_volume_io import flush_volume_array, load_volume_sidecar
     from core.tif_volume_preview import build_mask_preview, build_volume_preview
     from core.tif_local_axis_reslice import export_part_reslice
@@ -59,6 +59,34 @@ class TifImportWorker(QObject):
             self.failed.emit(str(exc))
             return
         self.progress.emit(100, 100, "TIF working volume ready")
+        self.finished.emit(result)
+
+
+class TifSliceSeriesImportWorker(QObject):
+    progress = Signal(int, int, str)
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, project_manager, tif_paths, specimen_id):
+        super().__init__()
+        self.project_manager = project_manager
+        self.tif_paths = [str(path) for path in tif_paths or ()]
+        self.specimen_id = str(specimen_id or "")
+
+    def run(self):
+        try:
+            result = import_tif_slice_series(
+                self.project_manager,
+                self.tif_paths,
+                self.specimen_id,
+                copy_source=False,
+                create_working_edit=False,
+                progress_callback=self.progress.emit,
+            )
+        except Exception as exc:
+            self.failed.emit(str(exc))
+            return
+        self.progress.emit(100, 100, "TIF slice series working volume ready")
         self.finished.emit(result)
 
 

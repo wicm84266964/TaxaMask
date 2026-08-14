@@ -129,6 +129,7 @@ try:
         TifBackendActionWorker,
         TifBatchImportWorker,
         TifImportWorker,
+        TifSliceSeriesImportWorker,
         TifLabelAutoSaveWorker,
         TifLabelManualSaveWorker,
         TifLocalAxisResliceExportWorker,
@@ -237,6 +238,7 @@ except ModuleNotFoundError as exc:
         TifBackendActionWorker,
         TifBatchImportWorker,
         TifImportWorker,
+        TifSliceSeriesImportWorker,
         TifLabelAutoSaveWorker,
         TifLabelManualSaveWorker,
         TifLocalAxisResliceExportWorker,
@@ -500,6 +502,7 @@ class TifWorkbenchWidget(QWidget):
     def _apply_button_roles(self):
         primary_buttons = [
             self.btn_import_tif,
+            self.btn_import_tif_slices,
             self.btn_import_amira,
             self.btn_export_training,
             self.btn_prepare_dataset,
@@ -936,7 +939,20 @@ class TifWorkbenchWidget(QWidget):
         self._sync_undo_redo_buttons()
         self.current_material_title_label.setText(tt("Current label", self.lang))
         self.part_mask_workflow_controller._update_current_material_summary()
-        self.btn_import_tif.setText(tt("Import TIF stack", self.lang))
+        self.btn_import_tif.setText(tt("Import TIF volume", self.lang))
+        self.btn_import_tif.setToolTip(
+            tt(
+                "Each selected TIF file is imported as a separate specimen. Use this when one file already contains the complete volume.",
+                self.lang,
+            )
+        )
+        self.btn_import_tif_slices.setText(tt("Combine TIF slices", self.lang))
+        self.btn_import_tif_slices.setToolTip(
+            tt(
+                "Selected single-plane grayscale TIF files are sorted and combined into one specimen. You can select only the slices you need. Size, data type, and photometric meaning must match; physical Z spacing is not inferred.",
+                self.lang,
+            )
+        )
         self.btn_import_amira.setText(tt("Import AMIRA directory", self.lang))
         self.part_bbox_edit.setPlaceholderText(tt("z0,z1,y0,y1,x0,x1", self.lang))
         self.btn_part_draw_roi.setText(tt("Draw ROI", self.lang))
@@ -2558,7 +2574,7 @@ class TifWorkbenchWidget(QWidget):
         return candidate
 
     def _set_tif_import_controls_enabled(self, enabled):
-        for button in (self.btn_import_tif, self.btn_import_amira):
+        for button in (self.btn_import_tif, self.btn_import_tif_slices, self.btn_import_amira):
             button.setEnabled(bool(enabled))
 
     def _task_request_key(self, value):
@@ -2739,6 +2755,7 @@ class TifWorkbenchWidget(QWidget):
             self.btn_export_part_package,
             self.btn_delete_part_volume,
             self.btn_import_tif,
+            self.btn_import_tif_slices,
             self.btn_import_amira,
         )
         for widget in write_controls:
@@ -2760,6 +2777,7 @@ class TifWorkbenchWidget(QWidget):
         self._tif_import_specimen_id = ""
         self._tif_import_jobs = []
         self._tif_import_task_id = ""
+        self._tif_import_kind = "stack"
 
 
 
@@ -2787,7 +2805,7 @@ class TifWorkbenchWidget(QWidget):
             self.refresh_project(reload_current=False)
             if first_id and task_current:
                 self._select_specimen_after_import(first_id)
-            message = tt("Imported {0}/{1} TIF stack(s).", self.lang).format(len(successes), len(batch_results))
+            message = tt("Imported {0}/{1} complete TIF volume(s).", self.lang).format(len(successes), len(batch_results))
             if failures:
                 message = f"{message} {tt('Failed', self.lang)}: {len(failures)}"
             if not task_current:
@@ -2804,15 +2822,25 @@ class TifWorkbenchWidget(QWidget):
                 thread.quit()
             if failures:
                 details = "\n".join(f"{item.get('specimen_id', '')}: {item.get('error', '')}" for item in failures[:8])
-                QMessageBox.warning(self, tt("Import TIF Stack", self.lang), f"{message}\n{details}")
+                QMessageBox.warning(self, tt("Import Complete TIF Volume", self.lang), f"{message}\n{details}")
             return
 
         specimen_id = self._tif_import_specimen_id
+        import_kind = str((result or {}).get("import_kind") or self._tif_import_kind or "stack") if isinstance(result, dict) else str(self._tif_import_kind or "stack")
         self.refresh_project(reload_current=False)
         if task_current:
             self._select_specimen_after_import(specimen_id)
         report_path = result.get("report_path", "") if isinstance(result, dict) else ""
-        message = tt("Imported TIF stack for specimen {0}. Report: {1}", self.lang).format(specimen_id, report_path)
+        if import_kind == "tif_slice_series":
+            source_series = (result.get("report") or {}).get("source_series") or {}
+            slice_count = int(source_series.get("selected_file_count") or 0)
+            message = tt("Imported {0} selected TIF slice(s) as specimen {1}. Report: {2}", self.lang).format(
+                slice_count,
+                specimen_id,
+                report_path,
+            )
+        else:
+            message = tt("Imported complete TIF volume for specimen {0}. Report: {1}", self.lang).format(specimen_id, report_path)
         if not task_current:
             message = f"{message} {tt('Current view was left unchanged because you switched context while it was running.', self.lang)}"
         else:
@@ -2826,11 +2854,13 @@ class TifWorkbenchWidget(QWidget):
 
     def _on_tif_import_failed(self, message):
         thread = self._tif_import_thread
+        import_kind = str(self._tif_import_kind or "stack")
         self._fail_tif_task(self._tif_import_task_id, str(message or ""), message=str(message or ""))
         self._cleanup_tif_import_thread()
         if thread is not None:
             thread.quit()
-        QMessageBox.critical(self, tt("Import TIF Stack", self.lang), message)
+        title = "Combine Multiple TIF Slices" if import_kind == "tif_slice_series" else "Import Complete TIF Volume"
+        QMessageBox.critical(self, tt(title, self.lang), message)
 
     def _is_metadata_only_specimen(self, specimen=None):
         specimen = specimen if specimen is not None else self.project.get_specimen(self.current_specimen_id, default=None)
@@ -2924,6 +2954,108 @@ class TifWorkbenchWidget(QWidget):
             message_key = "Loaded selected TIF volume and labels."
         self._set_operation_feedback(tt(message_key, self.lang), log=False)
 
+    def _launch_tif_import_worker(
+        self,
+        worker,
+        *,
+        specimen_id,
+        import_kind,
+        action,
+        payload,
+        progress_message,
+        window_title,
+        progress_max=100,
+        jobs=None,
+    ):
+        self._set_tif_import_controls_enabled(False)
+        self._tif_import_jobs = [dict(job) for job in (jobs or [])]
+        self._tif_import_specimen_id = str(specimen_id or "")
+        self._tif_import_kind = str(import_kind or "stack")
+        task = self._start_tif_task(
+            "tif_import",
+            action=str(action or "import_tif_stack"),
+            payload=dict(payload or {}),
+            request_key=self._tif_import_specimen_id,
+            message=str(progress_message or ""),
+        )
+        self._tif_import_task_id = task.task_id
+        self._tif_import_progress = QProgressDialog(
+            str(progress_message or ""),
+            "",
+            0,
+            max(100, int(progress_max or 100)),
+            self,
+        )
+        self._tif_import_progress.setWindowTitle(str(window_title or ""))
+        self._tif_import_progress.setCancelButton(None)
+        self._tif_import_progress.setAutoClose(False)
+        self._tif_import_progress.setAutoReset(False)
+        self._tif_import_progress.setWindowModality(Qt.WindowModal)
+        self._tif_import_progress.setWindowFlag(Qt.WindowCloseButtonHint, False)
+        self._tif_import_progress.show()
+
+        self._tif_import_thread = QThread(self)
+        self._tif_import_worker = worker
+        self._tif_import_worker.moveToThread(self._tif_import_thread)
+        self._tif_import_thread.started.connect(self._tif_import_worker.run)
+        self._tif_import_worker.progress.connect(self._on_tif_import_progress)
+        self._tif_import_worker.finished.connect(self._on_tif_import_finished)
+        if hasattr(self._tif_import_worker, "failed"):
+            self._tif_import_worker.failed.connect(self._on_tif_import_failed)
+        self._tif_import_worker.finished.connect(self._tif_import_thread.quit)
+        if hasattr(self._tif_import_worker, "failed"):
+            self._tif_import_worker.failed.connect(self._tif_import_thread.quit)
+        self._tif_import_thread.finished.connect(self._tif_import_worker.deleteLater)
+        self._tif_import_thread.finished.connect(self._tif_import_thread.deleteLater)
+        self._tif_import_thread.start()
+
+    def import_tif_slice_series_dialog(self):
+        if not self.coordinator.guard_backend_write_lock():
+            return
+        if not self._ensure_tif_project_open():
+            return
+        if self._tif_import_thread is not None:
+            QMessageBox.information(
+                self,
+                tt("Combine Multiple TIF Slices", self.lang),
+                tt("TIF import is already running.", self.lang),
+            )
+            return
+        tif_paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            tt("Combine Multiple TIF Slices", self.lang),
+            "",
+            "TIF/TIFF (*.tif *.tiff)",
+        )
+        tif_paths = [str(path) for path in (tif_paths or []) if str(path or "").strip()]
+        if not tif_paths:
+            return
+        source_parent = os.path.dirname(tif_paths[0]) or tif_paths[0]
+        default_id = self._default_import_specimen_id(source_parent)
+        specimen_id, ok = QInputDialog.getText(
+            self,
+            tt("Combine Multiple TIF Slices", self.lang),
+            tt("Specimen ID:", self.lang),
+            text=default_id,
+        )
+        if not ok or not specimen_id:
+            return
+        worker = TifSliceSeriesImportWorker(self.project, tif_paths, str(specimen_id))
+        self._launch_tif_import_worker(
+            worker,
+            specimen_id=str(specimen_id),
+            import_kind="tif_slice_series",
+            action="import_tif_slice_series",
+            payload={
+                "slice_count": len(tif_paths),
+                "source_directory": os.path.dirname(tif_paths[0]),
+                "first_selected_file": os.path.basename(tif_paths[0]),
+                "last_selected_file": os.path.basename(tif_paths[-1]),
+            },
+            progress_message=tt("Importing selected TIF slices...", self.lang),
+            window_title=tt("Combine Multiple TIF Slices", self.lang),
+        )
+
     def import_tif_stack_dialog(self):
         if not self.coordinator.guard_backend_write_lock():
             return
@@ -2932,13 +3064,13 @@ class TifWorkbenchWidget(QWidget):
         if self._tif_import_thread is not None:
             QMessageBox.information(
                 self,
-                tt("Import TIF Stack", self.lang),
+                tt("Import Complete TIF Volume", self.lang),
                 tt("TIF import is already running.", self.lang),
             )
             return
         tif_paths, _ = QFileDialog.getOpenFileNames(
             self,
-            tt("Import TIF Stack", self.lang),
+            tt("Import Complete TIF Volume", self.lang),
             "",
             "TIF/TIFF (*.tif *.tiff)",
         )
@@ -2954,7 +3086,7 @@ class TifWorkbenchWidget(QWidget):
             default_id = self._default_import_specimen_id(tif_path, used_ids)
             specimen_id, ok = QInputDialog.getText(
                 self,
-                tt("Import TIF Stack", self.lang),
+                tt("Import Complete TIF Volume", self.lang),
                 tt("Specimen ID:", self.lang),
                 text=default_id,
             )
@@ -2966,49 +3098,26 @@ class TifWorkbenchWidget(QWidget):
                 specimen_id = self._default_import_specimen_id(tif_path, used_ids)
                 used_ids.add(specimen_id)
                 jobs.append({"tif_path": tif_path, "specimen_id": specimen_id})
-        self._set_tif_import_controls_enabled(False)
-        self._tif_import_jobs = jobs
-        self._tif_import_specimen_id = jobs[0]["specimen_id"] if jobs else ""
-        task = self._start_tif_task(
-            "tif_import",
+        if len(jobs) == 1:
+            worker = TifImportWorker(self.project, jobs[0]["tif_path"], jobs[0]["specimen_id"])
+        else:
+            worker = TifBatchImportWorker(self.project, jobs)
+        progress_message = (
+            tt("Importing complete TIF volume...", self.lang)
+            if len(jobs) == 1
+            else tt("Importing complete TIF volume batch...", self.lang)
+        )
+        self._launch_tif_import_worker(
+            worker,
+            specimen_id=jobs[0]["specimen_id"] if jobs else "",
+            import_kind="stack",
             action="import_tif_stack",
             payload={"jobs": [dict(job) for job in jobs]},
-            request_key=self._tif_import_specimen_id,
-            message=tt("Importing TIF stack...", self.lang),
+            progress_message=progress_message,
+            window_title=tt("Import Complete TIF Volume", self.lang),
+            progress_max=max(100, len(jobs) * 100),
+            jobs=jobs,
         )
-        self._tif_import_task_id = task.task_id
-        self._tif_import_progress = QProgressDialog(
-            tt("Importing TIF stack...", self.lang) if len(jobs) == 1 else tt("Importing TIF stack batch...", self.lang),
-            "",
-            0,
-            max(100, len(jobs) * 100),
-            self,
-        )
-        self._tif_import_progress.setWindowTitle(tt("Import TIF Stack", self.lang))
-        self._tif_import_progress.setCancelButton(None)
-        self._tif_import_progress.setAutoClose(False)
-        self._tif_import_progress.setAutoReset(False)
-        self._tif_import_progress.setWindowModality(Qt.WindowModal)
-        self._tif_import_progress.setWindowFlag(Qt.WindowCloseButtonHint, False)
-        self._tif_import_progress.show()
-
-        self._tif_import_thread = QThread(self)
-        if len(jobs) == 1:
-            self._tif_import_worker = TifImportWorker(self.project, jobs[0]["tif_path"], jobs[0]["specimen_id"])
-        else:
-            self._tif_import_worker = TifBatchImportWorker(self.project, jobs)
-        self._tif_import_worker.moveToThread(self._tif_import_thread)
-        self._tif_import_thread.started.connect(self._tif_import_worker.run)
-        self._tif_import_worker.progress.connect(self._on_tif_import_progress)
-        self._tif_import_worker.finished.connect(self._on_tif_import_finished)
-        if hasattr(self._tif_import_worker, "failed"):
-            self._tif_import_worker.failed.connect(self._on_tif_import_failed)
-        self._tif_import_worker.finished.connect(self._tif_import_thread.quit)
-        if hasattr(self._tif_import_worker, "failed"):
-            self._tif_import_worker.failed.connect(self._tif_import_thread.quit)
-        self._tif_import_thread.finished.connect(self._tif_import_worker.deleteLater)
-        self._tif_import_thread.finished.connect(self._tif_import_thread.deleteLater)
-        self._tif_import_thread.start()
 
     def import_amira_directory_dialog(self):
         if not self.coordinator.guard_backend_write_lock():
@@ -4443,8 +4552,12 @@ class TifWorkbenchWidget(QWidget):
         model_drafts = labels.get("model_drafts") or []
         latest_draft = model_drafts[-1] if model_drafts else {}
         source = specimen.get("source") or {}
+        source_series_manifest = source.get("tif_slice_series_manifest", "")
         path_lines = [
-            self._format_tif_path_line("Source TIF", source.get("raw_tif") or (specimen.get("provenance") or {}).get("source_file", "")),
+            self._format_tif_path_line(
+                "Source TIF series" if source_series_manifest else "Source TIF",
+                source_series_manifest or source.get("raw_tif") or (specimen.get("provenance") or {}).get("source_file", ""),
+            ),
             self._format_tif_path_line("Working volume", working.get("path", "")),
             self._format_tif_path_line("Working edit", (labels.get("working_edit") or {}).get("path", "")),
             self._format_tif_path_line("Training truth", (labels.get("manual_truth") or {}).get("path", "")),

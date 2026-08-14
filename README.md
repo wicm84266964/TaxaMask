@@ -152,7 +152,7 @@ The TIF/CT workflow extends TaxaMask from external morphology images into intern
 
 Current TIF/CT capabilities include:
 
-- Importing a TIFF stack as a specimen.
+- Importing either one multipage TIFF stack or a researcher-selected subset of single-plane `.tif`/`.tiff` files as one specimen. Selected slice files are naturally ordered by filename and recorded in a project manifest before they enter the working volume.
 - Building the project working volume in a background task with truthful read, flush, finalize, and project-save progress. The working volume is first written to `image.ome.zarr.building` and is exposed as `image.ome.zarr` only after the disk write completes, so an interrupted import cannot look like a usable specimen volume.
 - Viewing the full volume and extracted part volumes.
 - Drawing full-volume key-slice ROI rectangles as a coarse crop and location tool.
@@ -384,7 +384,7 @@ PDF evidence route:
 
 TIF / CT route:
 
-1. Open an AntScan or other TIFF stack.
+1. Open an AntScan or other multipage TIFF stack, or select the required single-plane TIFF files from a slice directory.
 2. Create a specimen part with ROI and key-slice masks.
 3. Extract a part volume.
 4. Review the part in 3D and multi-direction slices.

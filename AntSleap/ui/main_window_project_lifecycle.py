@@ -716,7 +716,7 @@ class MainWindowProjectLifecycleMixin:
         self._ensure_tif_workbench()
         tif_path, _ = QFileDialog.getOpenFileName(
             self,
-            tr("Import TIF Stack", self.current_lang),
+            tr("Import Complete TIF Volume", self.current_lang),
             "",
             "TIF/TIFF (*.tif *.tiff)",
         )
@@ -725,7 +725,7 @@ class MainWindowProjectLifecycleMixin:
         default_id = os.path.splitext(os.path.basename(tif_path))[0]
         specimen_id, ok = QInputDialog.getText(
             self,
-            tr("Import TIF Stack", self.current_lang),
+            tr("Import Complete TIF Volume", self.current_lang),
             tr("Specimen ID:", self.current_lang),
             text=default_id,
         )
@@ -734,12 +734,12 @@ class MainWindowProjectLifecycleMixin:
         try:
             result = import_tif_stack(self.tif_project, tif_path, specimen_id)
         except Exception as exc:
-            QMessageBox.critical(self, tr("Import TIF Stack", self.current_lang), str(exc))
+            QMessageBox.critical(self, tr("Import Complete TIF Volume", self.current_lang), str(exc))
             return
         self.tif_workbench.refresh_project()
         self.tabs.setCurrentWidget(self.tif_workbench)
         report_path = result.get("report_path", "")
-        self.log(tr("Imported TIF stack for specimen {0}. Report: {1}", self.current_lang).format(specimen_id, report_path))
+        self.log(tr("Imported complete TIF volume for specimen {0}. Report: {1}", self.current_lang).format(specimen_id, report_path))
 
     def import_amira_directory_action(self):
         if not self._ensure_tif_project_open():

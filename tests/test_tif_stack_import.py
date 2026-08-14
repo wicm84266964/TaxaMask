@@ -1,4 +1,5 @@
 import copy
+import json
 import os
 import tempfile
 import unittest
@@ -11,6 +12,7 @@ import tifffile
 from AntSleap.core.tif_project import TifProjectManager
 from AntSleap.core.tif_stack_import import (
     _build_tif_working_sidecar,
+    import_tif_slice_series,
     import_tif_stack,
     materialize_registered_tif_stack,
     register_tif_stack_metadata,
@@ -19,6 +21,158 @@ from AntSleap.core.tif_volume_io import load_volume_sidecar, read_volume_metadat
 
 
 class TifStackImportTests(unittest.TestCase):
+    def test_tif_slice_series_imports_only_selected_files_in_natural_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            slices_dir = root / "selected_slices"
+            slices_dir.mkdir()
+            paths = {}
+            for number in (1, 2, 3, 10):
+                path = slices_dir / f"slice_{number}.tif"
+                tifffile.imwrite(path, np.full((4, 5), number, dtype=np.uint16), photometric="minisblack")
+                paths[number] = path
+
+            manager = TifProjectManager()
+            manager.create_project("slice_subset", root / "slice_subset_project")
+            progress = []
+            result = import_tif_slice_series(
+                manager,
+                [paths[10], paths[2]],
+                "selected-brain-region",
+                progress_callback=lambda current, total, message: progress.append((current, total, message)),
+            )
+
+            specimen = manager.get_specimen("selected-brain-region")
+            image_abs = manager.to_absolute(specimen["working_volume"]["path"])
+            volume = load_volume_sidecar(image_abs)
+            self.assertEqual(list(volume.shape), [2, 4, 5])
+            np.testing.assert_array_equal(volume[0], np.full((4, 5), 2, dtype=np.uint16))
+            np.testing.assert_array_equal(volume[1], np.full((4, 5), 10, dtype=np.uint16))
+            self.assertEqual(specimen["source"]["raw_tif"], "")
+            manifest_rel = specimen["source"]["tif_slice_series_manifest"]
+            manifest = json.loads(Path(manager.to_absolute(manifest_rel)).read_text(encoding="utf-8"))
+            self.assertEqual([item["filename"] for item in manifest["slices"]], ["slice_2.tif", "slice_10.tif"])
+            self.assertEqual([item["z_index"] for item in manifest["slices"]], [0, 1])
+            self.assertEqual(manifest["selected_file_count"], 2)
+            self.assertEqual(manifest["photometric"], "MINISBLACK")
+            self.assertEqual(manifest["samples_per_pixel"], 1)
+            self.assertEqual(result["report"]["source_series"]["selected_file_count"], 2)
+            self.assertEqual(result["report"]["source_series"]["ordering"], "natural_filename_v1")
+            self.assertEqual(result["report"]["tiff_metadata"]["photometric"], "MINISBLACK")
+            self.assertTrue(result["report"]["memory_policy"]["one_source_slice_loaded_at_a_time"])
+            self.assertFalse(result["report"]["memory_policy"]["whole_volume_imread"])
+            self.assertTrue(progress)
+            normalized_progress = [current / float(max(1, total)) for current, total, _message in progress]
+            self.assertEqual(normalized_progress, sorted(normalized_progress))
+            self.assertIn((94, 100, "Finalizing working volume"), progress)
+
+    def test_tif_slice_series_shape_mismatch_leaves_no_specimen(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = root / "slice_1.tif"
+            second = root / "slice_2.tif"
+            tifffile.imwrite(first, np.ones((4, 5), dtype=np.uint8), photometric="minisblack")
+            tifffile.imwrite(second, np.ones((5, 5), dtype=np.uint8), photometric="minisblack")
+
+            manager = TifProjectManager()
+            manager.create_project("shape_mismatch", root / "shape_mismatch_project")
+            with self.assertRaisesRegex(ValueError, "tif_slice_series_shape_mismatch"):
+                import_tif_slice_series(manager, [second, first], "invalid-series")
+
+            self.assertIsNone(manager.get_specimen("invalid-series", default=None))
+            self.assertEqual(manager.project_data["specimens"], [])
+
+    def test_tif_slice_series_dtype_mismatch_leaves_no_specimen(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = root / "slice_1.tif"
+            second = root / "slice_2.tif"
+            tifffile.imwrite(first, np.ones((4, 5), dtype=np.uint8), photometric="minisblack")
+            tifffile.imwrite(second, np.ones((4, 5), dtype=np.uint16), photometric="minisblack")
+
+            manager = TifProjectManager()
+            manager.create_project("dtype_mismatch", root / "dtype_mismatch_project")
+            specimen_root = Path(manager.to_absolute(manager.specimen_dir("invalid-dtype-series")))
+            with self.assertRaisesRegex(ValueError, "tif_slice_series_dtype_mismatch"):
+                import_tif_slice_series(manager, [second, first], "invalid-dtype-series")
+
+            self.assertIsNone(manager.get_specimen("invalid-dtype-series", default=None))
+            self.assertFalse(specimen_root.exists())
+
+    def test_tif_slice_series_midstream_failure_removes_partial_specimen(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = root / "slice_1.tif"
+            second = root / "slice_2.tif"
+            tifffile.imwrite(first, np.ones((4, 5), dtype=np.uint8), photometric="minisblack")
+            tifffile.imwrite(second, np.ones((4, 5), dtype=np.uint8), photometric="minisblack")
+
+            manager = TifProjectManager()
+            manager.create_project("stream_failure", root / "stream_failure_project")
+            specimen_root = Path(manager.to_absolute(manager.specimen_dir("partial-series")))
+            with patch(
+                "AntSleap.core.tif_stack_import._read_tif_slice_yx",
+                side_effect=[np.ones((4, 5), dtype=np.uint8), OSError("simulated_read_failure")],
+            ):
+                with self.assertRaisesRegex(OSError, "simulated_read_failure"):
+                    import_tif_slice_series(manager, [second, first], "partial-series")
+
+            self.assertIsNone(manager.get_specimen("partial-series", default=None))
+            self.assertFalse(specimen_root.exists())
+            self.assertFalse((specimen_root / "working" / "image.ome.zarr.building").exists())
+
+    def test_tif_slice_series_rejects_palette_tif(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            palette_slice = root / "palette_slice.tif"
+            colormap = np.zeros((3, 256), dtype=np.uint16)
+            colormap[0] = np.arange(256, dtype=np.uint16) * 257
+            tifffile.imwrite(
+                palette_slice,
+                np.arange(20, dtype=np.uint8).reshape((4, 5)),
+                photometric="palette",
+                colormap=colormap,
+            )
+
+            manager = TifProjectManager()
+            manager.create_project("palette_reject", root / "palette_reject_project")
+            with self.assertRaisesRegex(ValueError, "tif_slice_file_must_be_grayscale"):
+                import_tif_slice_series(manager, [palette_slice], "invalid-palette")
+
+            self.assertIsNone(manager.get_specimen("invalid-palette", default=None))
+
+    def test_tif_slice_series_rejects_mixed_photometric_meanings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            black_zero = root / "slice_1.tif"
+            white_zero = root / "slice_2.tif"
+            tifffile.imwrite(black_zero, np.ones((4, 5), dtype=np.uint8), photometric="minisblack")
+            tifffile.imwrite(white_zero, np.ones((4, 5), dtype=np.uint8), photometric="miniswhite")
+
+            manager = TifProjectManager()
+            manager.create_project("photometric_mismatch", root / "photometric_mismatch_project")
+            with self.assertRaisesRegex(ValueError, "tif_slice_series_photometric_mismatch"):
+                import_tif_slice_series(manager, [white_zero, black_zero], "invalid-photometric")
+
+            self.assertIsNone(manager.get_specimen("invalid-photometric", default=None))
+
+    def test_tif_slice_series_rejects_multipage_stack_as_one_slice(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stack = root / "not_a_single_slice.tif"
+            tifffile.imwrite(
+                stack,
+                np.ones((2, 4, 5), dtype=np.uint8),
+                photometric="minisblack",
+            )
+
+            manager = TifProjectManager()
+            manager.create_project("multipage_reject", root / "multipage_reject_project")
+            with self.assertRaisesRegex(ValueError, "tif_slice_file_must_contain_one_page"):
+                import_tif_slice_series(manager, [stack], "invalid-multipage")
+
+            self.assertIsNone(manager.get_specimen("invalid-multipage", default=None))
+
     def test_plain_tif_stack_import_creates_working_volume_but_not_manual_truth(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

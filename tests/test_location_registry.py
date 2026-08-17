@@ -35,7 +35,7 @@ class LocationRegistryTests(unittest.TestCase):
 
     def test_default_path_uses_user_config_directory(self):
         with patch(
-            "AntSleap.core.location_registry.user_config_dir",
+            "AntSleap.core.location_registry.writable_user_config_dir",
             return_value=self.config_dir,
         ):
             self.assertEqual(default_location_registry_path(), self.db_path)

@@ -61,8 +61,10 @@ class MainWindowStartCenterMixin:
         agent_layout.setContentsMargins(0, 0, 0, 0)
         agent_layout.setSpacing(14)
 
+        self._agent_running_state = "stopped"
         self.agent_panel = TaxaMaskAgentPanel(self.current_lang)
         self.agent_panel.status_changed.connect(self._handle_agent_dashboard_status_changed)
+        self.agent_panel.running_state_changed.connect(self._handle_agent_running_state_changed)
 
         header = QWidget()
         apply_surface_role(header, SURFACE_ROLE_PANEL, "startCenterHeader")
@@ -102,6 +104,7 @@ class MainWindowStartCenterMixin:
         self.btn_stop_ant_code = QPushButton()
         self.btn_stop_ant_code.setObjectName("startCenterStopAntCodeButton")
         self.btn_stop_ant_code.clicked.connect(self.agent_panel.stop_dashboard)
+        self.btn_stop_ant_code.setEnabled(False)
         button_extras = "padding: 5px 10px;"
         apply_semantic_button_style(self.btn_start_ant_code, BUTTON_ROLE_RUN, button_extras)
         apply_semantic_button_style(self.btn_stop_ant_code, BUTTON_ROLE_STOP, button_extras)
@@ -372,8 +375,7 @@ class MainWindowStartCenterMixin:
         self.btn_open_any.setText(tr("Open any project", self.current_lang))
         self.btn_general_settings.setText(tr("General Settings", self.current_lang))
         if hasattr(self, "btn_start_ant_code"):
-            self.btn_start_ant_code.setText(tr("Start Ant-Code", self.current_lang))
-            self.btn_stop_ant_code.setText(tr("Stop Ant-Code", self.current_lang))
+            self._apply_agent_running_state_buttons()
         self._refresh_project_console()
         if hasattr(self, "create_menus"):
             self.create_menus()
@@ -399,6 +401,41 @@ class MainWindowStartCenterMixin:
     def _handle_agent_dashboard_status_changed(self, status):
         self._update_start_agent_status(status)
         self._refresh_project_console()
+
+    def _handle_agent_running_state_changed(self, state):
+        self._agent_running_state = str(state or "stopped")
+        self._apply_agent_running_state_buttons()
+
+    def _apply_agent_running_state_buttons(self):
+        if not hasattr(self, "btn_start_ant_code"):
+            return
+        state = getattr(self, "_agent_running_state", "stopped")
+        lang = self.current_lang
+        if state == "starting":
+            self.btn_start_ant_code.setEnabled(False)
+            self.btn_start_ant_code.setText(tr("Starting Ant-Code...", lang))
+            self.btn_stop_ant_code.setEnabled(True)
+            self.btn_stop_ant_code.setText(tr("Stop Ant-Code", lang))
+        elif state == "running":
+            self.btn_start_ant_code.setEnabled(True)
+            self.btn_start_ant_code.setText(tr("Reload Ant-Code", lang))
+            self.btn_stop_ant_code.setEnabled(True)
+            self.btn_stop_ant_code.setText(tr("Stop Ant-Code", lang))
+        elif state == "stopping":
+            self.btn_start_ant_code.setEnabled(False)
+            self.btn_start_ant_code.setText(tr("Stopping Ant-Code...", lang))
+            self.btn_stop_ant_code.setEnabled(False)
+            self.btn_stop_ant_code.setText(tr("Stop Ant-Code", lang))
+        elif state == "error":
+            self.btn_start_ant_code.setEnabled(True)
+            self.btn_start_ant_code.setText(tr("Start Ant-Code", lang))
+            self.btn_stop_ant_code.setEnabled(False)
+            self.btn_stop_ant_code.setText(tr("Stop Ant-Code", lang))
+        else:
+            self.btn_start_ant_code.setEnabled(True)
+            self.btn_start_ant_code.setText(tr("Start Ant-Code", lang))
+            self.btn_stop_ant_code.setEnabled(False)
+            self.btn_stop_ant_code.setText(tr("Stop Ant-Code", lang))
 
     def _update_start_agent_status(self, status=None):
         if not hasattr(self, "start_agent_status_label"):

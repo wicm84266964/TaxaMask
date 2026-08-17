@@ -7,7 +7,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from AntSleap.core.config import ConfigManager, DEFAULT_CONFIG
-from AntSleap.core.platform_paths import user_config_path
+from AntSleap.core import platform_paths
+from AntSleap.core.platform_paths import user_config_path, writable_user_config_dir
 
 
 class ConfigCleanupTests(unittest.TestCase):
@@ -158,6 +159,17 @@ class ConfigCleanupTests(unittest.TestCase):
             str(mac_path).replace("\\", "/"),
             "/Users/alice/Library/Application Support/TaxaMask/user_config.json",
         )
+
+
+    def test_writable_user_config_dir_falls_back_to_repo_outputs(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            default_dir = root / "readonly" / "taxamask"
+            fallback_dir = root / "repo" / "TaxaMask_outputs" / "config"
+            with patch.object(platform_paths, "user_config_dir", return_value=default_dir), \
+                 patch.object(platform_paths, "repo_root", return_value=root / "repo"), \
+                 patch.object(platform_paths, "_directory_is_writable", side_effect=[False, True]):
+                self.assertEqual(writable_user_config_dir(), fallback_dir)
 
 
 if __name__ == "__main__":

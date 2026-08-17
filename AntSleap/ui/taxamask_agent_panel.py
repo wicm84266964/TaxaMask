@@ -1590,7 +1590,15 @@ exec "$@"
 
     def start_dashboard(self):
         if self.is_running():
-            self._set_running_state("running")
+            if self._running_state == "error":
+                self._preflight_error = ""
+                self._embedded_page_error = ""
+                self._health_checks_remaining = 80
+                self._set_running_state("starting")
+                self._update_status_label(at("Starting Ant-Code Dashboard...", self.lang))
+                self._update_fallback()
+                self.health_timer.start()
+                return
             if self.browser_mode:
                 self._browser_opened_for_url = ""
                 self.open_dashboard_in_browser(start_if_needed=False)

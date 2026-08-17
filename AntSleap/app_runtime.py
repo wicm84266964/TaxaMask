@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sys
+from pathlib import Path
 
 
 PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -67,6 +69,89 @@ def ensure_qtwebengine_quiet_cpu_flags():
     return mode
 
 
+def _directory_is_writable(path: Path) -> bool:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return False
+    probe = path / f".taxamask_write_probe_{os.getpid()}"
+    try:
+        descriptor = os.open(probe, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.close(descriptor)
+        probe.unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
+
+
+def _ensure_writable_application_config(env_name, relative_dir):
+    if os.environ.get(env_name):
+        return
+    if not (sys.platform == "linux" or is_wsl_runtime()):
+        return
+    xdg_root = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    if xdg_root:
+        candidate = Path(xdg_root) / relative_dir
+    else:
+        candidate = Path.home() / ".config" / relative_dir
+    if _directory_is_writable(candidate):
+        return
+    fallback_root = Path(REPO_ROOT) / "TaxaMask_outputs"
+    # YOLO_CONFIG_DIR points to the parent directory; Ultralytics appends
+    # its own "Ultralytics" subdirectory.  Other variables, such as
+    # MPLCONFIGDIR, point directly at the application directory.
+    fallback = fallback_root if env_name == "YOLO_CONFIG_DIR" else fallback_root / relative_dir
+    if _directory_is_writable(fallback):
+        os.environ[env_name] = str(fallback)
+
+
+def _ensure_cjk_fontconfig_for_wsl():
+    """Make CJK fonts visible to Qt when WSL has no writable user font dirs.
+
+    WSLg often exposes Microsoft YaHei / SimSun from the Windows side even
+    when the Linux side has no CJK fonts installed.  Fontconfig cannot write
+    its cache below the read-only ``~/.config`` in this sandbox, so we point
+    it at a repo-local cache and font directory.
+    """
+    if os.environ.get("FONTCONFIG_FILE"):
+        return
+    if not (sys.platform == "linux" and is_wsl_runtime()):
+        return
+    windows_font_dir = Path("/mnt/c/Windows/Fonts")
+    font_names = ("msyh.ttc", "msyhbd.ttc", "simsun.ttc")
+    available_sources = [windows_font_dir / name for name in font_names if (windows_font_dir / name).exists()]
+    if not available_sources:
+        return
+    fonts_dir = Path(REPO_ROOT) / "TaxaMask_outputs" / "fonts"
+    cache_dir = Path(REPO_ROOT) / "TaxaMask_outputs" / "fontconfig-cache"
+    config_path = fonts_dir / "fonts.conf"
+    try:
+        fonts_dir.mkdir(parents=True, exist_ok=True)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        for source in available_sources:
+            target = fonts_dir / source.name
+            if target.exists() or target.is_symlink():
+                continue
+            try:
+                target.symlink_to(source)
+            except OSError:
+                shutil.copyfile(source, target)
+        if not config_path.exists():
+            config_path.write_text(
+                '<?xml version="1.0"?>\n'
+                '<!DOCTYPE fontconfig SYSTEM "fonts.dtd">\n'
+                '<fontconfig>\n'
+                '  <include ignore_missing="yes">/etc/fonts/fonts.conf</include>\n'
+                f'  <dir>{fonts_dir}</dir>\n'
+                f'  <cachedir>{cache_dir}</cachedir>\n'
+                '</fontconfig>\n',
+                encoding="utf-8",
+            )
+        os.environ.setdefault("FONTCONFIG_FILE", str(config_path))
+    except OSError:
+        return
+
+
 def prepare_qt_runtime_environment():
     if sys.platform == "linux" or is_wsl_runtime():
         os.environ.setdefault("TAXAMASK_QTWEBENGINE_RENDERING", "software")
@@ -74,6 +159,9 @@ def prepare_qt_runtime_environment():
         os.environ.setdefault("QT_QUICK_BACKEND", "software")
         os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
         os.environ.setdefault("TAXAMASK_ANTCODE_BROWSER_MODE", "1")
+        _ensure_writable_application_config("YOLO_CONFIG_DIR", "Ultralytics")
+        _ensure_writable_application_config("MPLCONFIGDIR", "matplotlib")
+        _ensure_cjk_fontconfig_for_wsl()
     ensure_qtwebengine_quiet_cpu_flags()
 
 

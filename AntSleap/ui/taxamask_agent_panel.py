@@ -30,17 +30,26 @@ def _ensure_qtwebengine_cpu_compositing():
 _ensure_qtwebengine_cpu_compositing()
 
 from PySide6.QtCore import Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QHBoxLayout,
     QLabel,
+    QPushButton,
+    QScrollArea,
     QSizePolicy,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
-from .style import get_theme_config, normalize_theme
+from .style import (
+    BUTTON_ROLE_COMMIT,
+    BUTTON_ROLE_NEUTRAL,
+    apply_semantic_button_style,
+    get_theme_config,
+    normalize_theme,
+)
 
 
 def _env_requests_browser_mode():
@@ -106,6 +115,9 @@ AGENT_TRANSLATIONS = {
         "Ant-Code embedded": "Ant-Code 内嵌",
         "Start Ant-Code": "启动 Ant-Code",
         "Open in browser": "浏览器打开",
+        "Reload": "重新加载",
+        "Copy Agent context again": "再次复制 Agent 上下文",
+        "Browser mode is active for this Linux/macOS/WSL session. If the dashboard did not open automatically, open the URL below.": "当前为浏览器模式。如果浏览器没有自动打开，请打开下面的网址。",
         "Stop": "停止",
         "Starting Ant-Code Dashboard...": "正在启动 Ant-Code Dashboard...",
         "Ant-Code Dashboard is ready.": "Ant-Code Dashboard 已就绪。",
@@ -170,6 +182,7 @@ class TaxaMaskAgentPanel(QWidget):
     """Embed the real Ant-Code Dashboard inside TaxaMask."""
 
     status_changed = Signal(str)
+    running_state_changed = Signal(str)
 
     def __init__(self, lang="en", parent=None, workspace_dir=None, ant_code_executable=None, ant_code_root=None):
         super().__init__(parent)
@@ -212,6 +225,9 @@ class TaxaMaskAgentPanel(QWidget):
         self._dashboard_http_opener = None
         self._dashboard_csrf_token = ""
         self._browser_context_copied = False
+        self._last_context_prompt = ""
+        self._running_state = "stopped"
+        self._dashboard_page_shown = False
         self.current_theme = normalize_theme(getattr(parent, "current_theme", "dark"))
         self.browser_mode = self._resolve_browser_mode()
         self._browser_opened_for_url = ""
@@ -578,11 +594,51 @@ exec "$@"
         self.fallback_logo.setObjectName("taxamaskAgentFallbackLogo")
         self.fallback_logo.setAlignment(Qt.AlignCenter)
         fallback_layout.addWidget(self.fallback_logo)
+
+        self.fallback_url_label = QLabel("")
+        self.fallback_url_label.setObjectName("taxamaskAgentFallbackUrl")
+        self.fallback_url_label.setAlignment(Qt.AlignCenter)
+        self.fallback_url_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.fallback_url_label.setVisible(False)
+        fallback_layout.addWidget(self.fallback_url_label)
+
         self.fallback_detail = QLabel("")
         self.fallback_detail.setObjectName("taxamaskAgentFallbackDetail")
         self.fallback_detail.setAlignment(Qt.AlignCenter)
         self.fallback_detail.setWordWrap(True)
-        fallback_layout.addWidget(self.fallback_detail)
+        self.fallback_detail.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.fallback_detail_scroll = QScrollArea()
+        self.fallback_detail_scroll.setObjectName("taxamaskAgentFallbackDetailScroll")
+        self.fallback_detail_scroll.setWidgetResizable(True)
+        self.fallback_detail_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.fallback_detail_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.fallback_detail_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.fallback_detail_scroll.setMaximumHeight(240)
+        self.fallback_detail_scroll.setWidget(self.fallback_detail)
+        fallback_layout.addWidget(self.fallback_detail_scroll)
+
+        self.btn_open_dashboard_in_browser = QPushButton()
+        self.btn_open_dashboard_in_browser.setObjectName("taxamaskAgentOpenBrowserButton")
+        self.btn_open_dashboard_in_browser.clicked.connect(lambda: self.open_dashboard_in_browser(start_if_needed=True))
+        apply_semantic_button_style(self.btn_open_dashboard_in_browser, BUTTON_ROLE_COMMIT, "padding: 6px 12px;")
+        self.btn_copy_agent_context_again = QPushButton()
+        self.btn_copy_agent_context_again.setObjectName("taxamaskAgentCopyContextButton")
+        self.btn_copy_agent_context_again.clicked.connect(lambda: self.copy_agent_context_again())
+        apply_semantic_button_style(self.btn_copy_agent_context_again, BUTTON_ROLE_NEUTRAL, "padding: 6px 12px;")
+        self.btn_reload_dashboard = QPushButton()
+        self.btn_reload_dashboard.setObjectName("taxamaskAgentReloadButton")
+        self.btn_reload_dashboard.clicked.connect(lambda: self.reload_dashboard())
+        apply_semantic_button_style(self.btn_reload_dashboard, BUTTON_ROLE_NEUTRAL, "padding: 6px 12px;")
+        fallback_button_row = QHBoxLayout()
+        fallback_button_row.setContentsMargins(0, 0, 0, 0)
+        fallback_button_row.setSpacing(10)
+        fallback_button_row.addStretch(1)
+        fallback_button_row.addWidget(self.btn_open_dashboard_in_browser)
+        fallback_button_row.addWidget(self.btn_copy_agent_context_again)
+        fallback_button_row.addWidget(self.btn_reload_dashboard)
+        fallback_button_row.addStretch(1)
+        fallback_layout.addLayout(fallback_button_row)
+
         fallback_layout.addStretch(1)
         self.stack.addWidget(self.fallback)
         self.web_view = None
@@ -610,8 +666,18 @@ exec "$@"
             self.web_view.setPage(self._web_page)
         self._install_web_bootstrap_script()
         self.web_view.loadFinished.connect(self._on_web_load_finished)
+        self._apply_web_view_background_color()
         self.stack.addWidget(self.web_view)
         return True
+
+    def _apply_web_view_background_color(self):
+        if self.web_view is None or self.web_view.page() is None:
+            return
+        try:
+            theme = get_theme_config(self.current_theme)
+            self.web_view.page().setBackgroundColor(QColor(theme["bg_main"]))
+        except Exception:
+            return
 
     def _load_fallback_mark(self):
         mark_path = Path(__file__).resolve().parents[1] / "assets" / "brand" / "taxamask_mark.png"
@@ -1431,6 +1497,7 @@ exec "$@"
     def _sync_web_embed_theme(self):
         if self.web_view is None:
             return
+        self._apply_web_view_background_color()
         css = json.dumps(self._web_embed_style_source())
         self.web_view.page().runJavaScript(
             f"""
@@ -1523,14 +1590,21 @@ exec "$@"
 
     def start_dashboard(self):
         if self.is_running():
+            self._set_running_state("running")
+            if self.browser_mode:
+                self._browser_opened_for_url = ""
+                self.open_dashboard_in_browser(start_if_needed=False)
             self._prepare_dashboard_load(reset=True)
             return
+        self._set_running_state("starting")
         if not self.browser_mode and not self._ensure_web_view():
             self.browser_mode = True
             self._update_fallback()
         try:
             self.port = find_free_port(7410)
             self.dashboard_url = f"http://127.0.0.1:{self.port}"
+            self._browser_opened_for_url = ""
+            self._dashboard_page_shown = False
             self._reset_dashboard_http_session()
             self._load_retries = 0
             self._pending_prompt_attempts = 0
@@ -1557,6 +1631,7 @@ exec "$@"
             self.process = None
             self.dashboard_url = ""
             self._preflight_error = str(exc)
+            self._set_running_state("error")
             self._update_status_label(at("Unable to start Ant-Code: {0}", self.lang).format(self._preflight_error))
             self._update_fallback()
             return
@@ -1632,12 +1707,15 @@ exec "$@"
         if not self.is_running():
             self.health_timer.stop()
             self._preflight_error = self._dashboard_exit_error()
+            self._set_running_state("error")
             self._update_status_label(at("Unable to start Ant-Code: {0}", self.lang).format(self._preflight_error))
             self._close_dashboard_log()
             self._update_fallback()
             return
         if self._health_checks_remaining <= 0:
             self.health_timer.stop()
+            self._preflight_error = "timeout"
+            self._set_running_state("error")
             self._update_status_label(at("Unable to start Ant-Code: {0}", self.lang).format("timeout"))
             self._update_fallback()
             return
@@ -1652,6 +1730,7 @@ exec "$@"
 
     def _on_dashboard_ready(self):
         self._close_dashboard_log()
+        self._set_running_state("running")
         self._update_status_label(at("Ant-Code Dashboard is ready.", self.lang))
         if self.browser_mode:
             self.open_dashboard_in_browser(start_if_needed=False)
@@ -1665,6 +1744,7 @@ exec "$@"
         if not self.dashboard_url:
             return
         if not self.is_running():
+            self._set_running_state("error")
             self._update_status_label(at("Ant-Code process exited.", self.lang))
             self._update_fallback()
             return
@@ -1696,7 +1776,10 @@ exec "$@"
             self.stack.setCurrentWidget(self.fallback)
             self._update_fallback()
             return
-        self.stack.setCurrentWidget(self.web_view)
+        if not self._dashboard_page_shown:
+            self.stack.setCurrentWidget(self.fallback)
+            self._update_fallback()
+        self._apply_web_view_background_color()
         cache_key = f"taxamask_embed=1&taxamask_lang={self.lang}&reload={self._load_retries}"
         self.web_view.load(QUrl(f"{self.dashboard_url}/?{cache_key}"))
 
@@ -2060,9 +2143,13 @@ exec "$@"
         if not ok:
             self._embedded_page_error = "embedded page load failed"
             self._update_status_label(at("Unable to start Ant-Code: {0}", self.lang).format(self._embedded_page_error))
+            self._dashboard_page_shown = False
             self.stack.setCurrentWidget(self.fallback)
             self._update_fallback()
             return
+        self._dashboard_page_shown = True
+        if not self.browser_mode:
+            self.stack.setCurrentWidget(self.web_view)
         self._sync_web_embed_theme()
         self.web_view.page().runJavaScript(self._web_post_load_source())
         self._ensure_trusted()
@@ -2370,6 +2457,7 @@ exec "$@"
             self._browser_context_copied = False
             return
         self._pending_context_prompt = prompt
+        self._last_context_prompt = prompt
         if self.browser_mode:
             self._browser_context_copied = self._copy_context_prompt_to_clipboard(prompt)
             if self._browser_context_copied:
@@ -2792,6 +2880,7 @@ exec "$@"
         return False
 
     def stop_dashboard(self):
+        self._set_running_state("stopping")
         self.health_timer.stop()
         self.prompt_retry_timer.stop()
         self._request_dashboard_shutdown()
@@ -2812,7 +2901,10 @@ exec "$@"
         self._close_dashboard_log(remove=True)
         self._cleanup_owned_dashboard_processes()
         self.dashboard_url = ""
+        self._browser_opened_for_url = ""
+        self._dashboard_page_shown = False
         self._reset_dashboard_http_session()
+        self._set_running_state("stopped")
         self._update_status_label(at("Ant-Code Dashboard is not running.", self.lang))
         self.stack.setCurrentWidget(self.fallback)
         self._update_fallback()
@@ -2975,6 +3067,42 @@ exec "$@"
         except Exception:
             return
 
+    def _set_running_state(self, state):
+        state = str(state or "stopped")
+        if state not in {"stopped", "starting", "running", "stopping", "error"}:
+            state = "stopped"
+        if self._running_state == state:
+            return
+        self._running_state = state
+        self.running_state_changed.emit(state)
+
+    def running_state(self):
+        return self._running_state
+
+    def copy_agent_context_again(self):
+        prompt = str(self._last_context_prompt or "")
+        if not prompt:
+            return False
+        copied = self._copy_context_prompt_to_clipboard(prompt)
+        if copied:
+            self._browser_context_copied = True
+            self._update_status_label(at("Agent context copied to clipboard. Paste it into the browser prompt.", self.lang))
+            self._update_fallback()
+        return copied
+
+    def reload_dashboard(self):
+        if not self.is_running():
+            self.start_dashboard()
+            return
+        self._preflight_error = ""
+        self._embedded_page_error = ""
+        self._update_fallback()
+        if self.browser_mode:
+            self._browser_opened_for_url = ""
+            self.open_dashboard_in_browser(start_if_needed=False)
+            return
+        self._prepare_dashboard_load(reset=True)
+
     def _update_status_label(self, status):
         self._status_text = str(status or "")
         self.status_changed.emit(self._status_text)
@@ -2985,15 +3113,14 @@ exec "$@"
     def _update_fallback(self):
         lines = []
         if self.browser_mode:
-            lines.append("Browser mode is active for this Linux/macOS/WSL session. If the dashboard did not open automatically, open the URL below.")
+            lines.append(at("Browser mode is active for this Linux/macOS/WSL session. If the dashboard did not open automatically, open the URL below.", self.lang))
             if self._browser_context_copied:
                 lines.append(at("Agent context copied to clipboard. Paste it into the browser prompt.", self.lang))
         elif _QTWEBENGINE_IMPORT_ATTEMPTED and QWebEngineView is None:
             lines.append(at("Qt WebEngine is unavailable in this environment. Start Ant-Code and open it in a browser.", self.lang))
-        if self.dashboard_url:
-            lines.append(self.dashboard_url)
         if self._preflight_error:
-            lines.append(f"Preflight error: {self._preflight_error}")
+            label = "启动前检查错误" if self.lang == "zh" else "Preflight error"
+            lines.append(f"{label}: {self._preflight_error}")
         if self._embedded_page_error:
             label = "内嵌页面错误" if self.lang == "zh" else "Embedded page error"
             lines.append(f"{label}: {self._embedded_page_error}")
@@ -3003,3 +3130,15 @@ exec "$@"
         detail = "\n".join(line for line in lines if str(line or "").strip())
         self.fallback_detail.setText(detail)
         self.fallback_detail.setVisible(bool(detail))
+        self.fallback_detail_scroll.setVisible(bool(detail))
+
+        url = str(self.dashboard_url or "").strip()
+        self.fallback_url_label.setText(url)
+        self.fallback_url_label.setVisible(bool(url))
+
+        self.btn_open_dashboard_in_browser.setText(at("Open in browser", self.lang))
+        self.btn_open_dashboard_in_browser.setVisible(bool(url) and (self.browser_mode or self.web_view is None))
+        self.btn_copy_agent_context_again.setText(at("Copy Agent context again", self.lang))
+        self.btn_copy_agent_context_again.setVisible(bool(self.browser_mode and self._last_context_prompt))
+        self.btn_reload_dashboard.setText(at("Reload", self.lang))
+        self.btn_reload_dashboard.setVisible(bool(url) and (self.browser_mode or bool(self._preflight_error) or bool(self._embedded_page_error)))

@@ -25,6 +25,9 @@ class MainWindowPresentationMixin:
         workflow_menu = menubar.addMenu(tr("Workflow", self.current_lang))
         workflow_menu.addAction(tr("2D/STL Morphology Workflow", self.current_lang), self.enter_image_workflow)
         workflow_menu.addAction(tr("Create 2D/STL project", self.current_lang), self.new_project)
+        verify_current_action = workflow_menu.addAction(tr("Verify Current Image", self.current_lang))
+        verify_current_action.setShortcut(QKeySequence("Ctrl+Enter"))
+        verify_current_action.triggered.connect(lambda checked=False: self.verify_current_image())
         if self._is_tif_workflow_enabled():
             workflow_menu.addAction(tr("TIF Volume Workflow", self.current_lang), self.enter_tif_workflow)
             workflow_menu.addAction(tr("Create TIF project", self.current_lang), self.new_tif_project)
@@ -144,8 +147,6 @@ class MainWindowPresentationMixin:
             self.btn_training_results.setText(tr("Training Results", self.current_lang))
         if hasattr(self, "label_training_progress_status") and not self.active_training_label:
             self.label_training_progress_status.setText(tr("No training running.", self.current_lang))
-        self.btn_blink_entry.setText(tr("Open Child Expert Session", self.current_lang))
-        self.btn_blink_entry.setVisible(False)
         if hasattr(self, "btn_literature_descriptions"):
             self.btn_literature_descriptions.setText(tr("Literature Traits", self.current_lang))
             self.btn_literature_descriptions.setToolTip(
@@ -156,6 +157,12 @@ class MainWindowPresentationMixin:
             )
         self.btn_start_center_from_workbench.setText(tr("Start Center", self.current_lang))
         self.btn_agent_from_workbench.setText(tr("Ask Agent", self.current_lang))
+        if hasattr(self, "btn_more_actions"):
+            self.btn_more_actions.setText(tr("More Actions", self.current_lang))
+        if hasattr(self, "workbench_inspector_tabs"):
+            self.workbench_inspector_tabs.setTabText(0, tr("Current Image", self.current_lang))
+            self.workbench_inspector_tabs.setTabText(1, tr("Auto Annotation", self.current_lang))
+            self.workbench_inspector_tabs.setTabText(2, tr("Run & Logs", self.current_lang))
         self.label_blink_refine.setText(tr("Child-part annotation", self.current_lang))
         self.btn_configure_route_expert.setText(tr("Configure Route Expert", self.current_lang))
         self.btn_blink_auto_annotate.setText(tr("Annotate child from existing parent box", self.current_lang))
@@ -169,7 +176,9 @@ class MainWindowPresentationMixin:
             self.label_blink_parent_context.setText(tr("Parent context:", self.current_lang))
         self.label_logs.setText(tr("LOGS", self.current_lang))
         self.radio_draw.setText(tr("Manual Draw", self.current_lang))
+        self.radio_draw.setToolTip(tr("Tool: Manual Draw - Click points to outline.", self.current_lang))
         self.radio_magic.setText(tr("Magic Wand (SAM)", self.current_lang))
+        self.radio_magic.setToolTip(tr("Tool: Magic Wand (SAM) - Click to auto-segment.", self.current_lang))
         self.radio_box.setText(tr("SAM Box Segmentation", self.current_lang))
         self.radio_box.setToolTip(
             tr(
@@ -502,12 +511,12 @@ class MainWindowPresentationMixin:
             apply_theme_button_style(self.btn_crop, BUTTON_ROLE_NEUTRAL, "", self.current_theme)
         if hasattr(self, "btn_batch_split_panels"):
             apply_theme_button_style(self.btn_batch_split_panels, BUTTON_ROLE_NEUTRAL, "", self.current_theme)
-        if hasattr(self, "btn_blink_entry"):
-            apply_theme_button_style(self.btn_blink_entry, BUTTON_ROLE_NEUTRAL, "", self.current_theme)
         if hasattr(self, "btn_start_center_from_workbench"):
             apply_theme_button_style(self.btn_start_center_from_workbench, BUTTON_ROLE_NEUTRAL, "", self.current_theme)
         if hasattr(self, "btn_agent_from_workbench"):
             apply_theme_button_style(self.btn_agent_from_workbench, BUTTON_ROLE_NEUTRAL, "", self.current_theme)
+        if hasattr(self, "btn_more_actions"):
+            apply_theme_button_style(self.btn_more_actions, BUTTON_ROLE_NEUTRAL, "padding: 5px 10px;", self.current_theme)
         if hasattr(self, "btn_literature_descriptions"):
             apply_theme_button_style(self.btn_literature_descriptions, BUTTON_ROLE_NEUTRAL, "padding: 4px 8px;", self.current_theme)
         if hasattr(self, "btn_start_ant_code"):

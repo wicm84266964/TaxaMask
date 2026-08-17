@@ -678,7 +678,13 @@ class TifWorkbenchViewBuilder:
         top_layout.setSpacing(8)
         self.tif_top_context_label = QLabel("TIF Volume Workbench")
         self.tif_top_context_label.setObjectName("tifTopContextLabel")
-        top_layout.addWidget(self.tif_top_context_label, 1)
+        self.tif_top_runtime_status_label = QLabel("")
+        self.tif_top_runtime_status_label.setObjectName("tifTopRuntimeStatusText")
+        self.tif_top_runtime_status_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.tif_top_runtime_status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.tif_top_runtime_status_label.setToolTip("")
+        top_layout.addWidget(self.tif_top_context_label)
+        top_layout.addWidget(self.tif_top_runtime_status_label, 1)
         top_layout.addWidget(self.btn_start_center)
         top_layout.addWidget(self.btn_ask_agent)
         root.addWidget(top_bar)
@@ -738,7 +744,6 @@ class TifWorkbenchViewBuilder:
             "tifMeshExportSection",
         )
         mesh_export_layout.addWidget(self.btn_export_reviewed_mesh)
-        right_layout.addWidget(self.mesh_export_section)
 
         task_page_parts = build_task_pages(self.lang, tt)
         self.task_tabs = task_page_parts["task_tabs"]
@@ -763,7 +768,8 @@ class TifWorkbenchViewBuilder:
         import_button_grid.addWidget(self.btn_import_tif_slices, 1, 0)
         import_button_grid.addWidget(self.btn_import_amira, 2, 0)
         import_layout.addLayout(import_button_grid)
-        self.part_task_layout.addWidget(import_section)
+        self.import_section = import_section
+        self.display_task_layout.addWidget(import_section)
 
         status_section, status_layout = self._make_section("Current object", "tifStatusSection")
         status_layout.addWidget(self.status_label)
@@ -1198,6 +1204,7 @@ class TifWorkbenchViewBuilder:
         log_layout.addWidget(self.log_console)
         self.training_task_layout.addWidget(log_section)
 
+        self.result_compare_layout.addWidget(self.mesh_export_section)
         result_section, result_layout = self._make_section("Result comparison", "tifResultComparisonSection")
         result_source_row = QHBoxLayout()
         self.result_source_label = QLabel("Review source")

@@ -1099,7 +1099,11 @@ class UiPolishScopeTests(unittest.TestCase):
                 ):
                     self.assertGreaterEqual(control.height(), 24)
                     self.assertTrue(control.isVisible())
-            self.assertLessEqual(widget.minimumHeight(), 120)
+            # CJK font fallback (D18) can add a few pixels to line metrics on
+            # WSL once Microsoft YaHei is visible to Qt.  Keep the original
+            # "does not balloon when resized" contract without depending on
+            # Latin-only font metrics.
+            self.assertLessEqual(widget.minimumHeight(), 128)
         finally:
             widget.close()
             widget.deleteLater()
@@ -1285,16 +1289,22 @@ class UiPolishScopeTests(unittest.TestCase):
             self.assertIsNotNone(window.findChild(QWidget, "workbenchParentAnnotationPanel"))
             self.assertIsNotNone(window.findChild(QWidget, "workbenchAIActionPanel"))
             self.assertIsNotNone(window.findChild(QWidget, "workbenchLogsPanel"))
+            self.assertIsNotNone(window.findChild(QWidget, "workbenchInspectorTabs"))
+            self.assertEqual(window.workbench_inspector_tabs.count(), 3)
             self.assertEqual(window.btn_export.parentWidget().objectName(), "workbenchToolbarProjectPanel")
-            self.assertEqual(window.btn_blink_entry.parentWidget().objectName(), "workbenchToolbarFlowPanel")
-            self.assertFalse(window.btn_blink_entry.isVisible())
+            self.assertFalse(hasattr(window, "btn_blink_entry"))
+            self.assertEqual(window.btn_more_actions.parentWidget().objectName(), "workbenchToolbarFlowPanel")
+            self.assertFalse(window.btn_more_actions.isHidden())
+            self.assertTrue(window.btn_crop.isHidden())
+            self.assertTrue(window.btn_batch_split_panels.isHidden())
+            self.assertTrue(window.btn_vlm_preannotate_batch.isHidden())
             self.assertEqual(window.btn_agent_from_workbench.parentWidget().objectName(), "workbenchToolbarFlowPanel")
             self.assertEqual(window.btn_literature_descriptions.parentWidget().objectName(), "workbenchDescriptionHeader")
             self.assertEqual(window.label_taxonomy.parentWidget().objectName(), "workbenchImageTaxonPanel")
             self.assertEqual(window.genus_combo.parentWidget().objectName(), "workbenchImageTaxonPanel")
             self.assertLess(
-                window.metadata_panel.layout().indexOf(window.part_list),
                 window.metadata_panel.layout().indexOf(window.image_taxon_panel),
+                window.metadata_panel.layout().indexOf(window.part_list),
             )
             self.assertLess(
                 window.description_header_panel.layout().indexOf(window.btn_literature_descriptions),
@@ -1329,7 +1339,7 @@ class UiPolishScopeTests(unittest.TestCase):
             self.assertEqual(window.label_blink_refine.text(), "子部位标注")
             self.assertEqual(window.label_taxonomy.text(), "当前图片物种")
             self.assertEqual(window.btn_blink_auto_annotate.text(), "用已有父框标注子部位")
-            self.assertEqual(window.radio_box.text(), "SAM框选分割")
+            self.assertEqual(window.radio_box.text(), "SAM 框选分割")
             self.assertIn("立即调用 SAM", window.radio_box.toolTip())
             self.assertEqual(window.radio_annotation_box.text(), "人工ROI框")
             self.assertIn("只保存框", window.radio_annotation_box.toolTip())

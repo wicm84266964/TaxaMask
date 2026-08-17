@@ -10,7 +10,7 @@ import unicodedata
 import uuid
 from pathlib import Path
 
-from .platform_paths import user_config_dir
+from .platform_paths import writable_user_config_dir
 from .project_traceability import validate_traceability_id
 
 
@@ -159,7 +159,7 @@ def _path_key(path):
 
 
 def default_location_registry_path(config_dir=None):
-    root = Path(config_dir) if config_dir is not None else user_config_dir()
+    root = Path(config_dir) if config_dir is not None else writable_user_config_dir()
     return root / LOCATION_REGISTRY_FILENAME
 
 

@@ -3,9 +3,9 @@ import os
 import shutil
 from copy import deepcopy
 
-from .platform_paths import legacy_repo_config_path, user_config_path
+from .platform_paths import legacy_repo_config_path, writable_user_config_path
 
-CONFIG_FILE = str(user_config_path())
+CONFIG_FILE = str(writable_user_config_path())
 LEGACY_CONFIG_FILE = str(legacy_repo_config_path())
 
 OBSOLETE_CONFIG_KEYS = (

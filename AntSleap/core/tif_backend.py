@@ -90,6 +90,20 @@ def _validate_training_split_receipt(contract, result, effective_config):
         raise ValueError("tif_backend_training_split_not_applied")
 
 
+def _path_exists(path):
+    try:
+        return Path(path).exists()
+    except OSError:
+        return False
+
+
+def _path_is_dir(path):
+    try:
+        return Path(path).is_dir()
+    except OSError:
+        return False
+
+
 def _is_generic_python_command(value):
     text = _strip_shell_quotes(value).lower()
     return text in {"python", "python.exe", "py", "py.exe", "python3", "python3.exe"}
@@ -100,13 +114,13 @@ def _resolve_python_path(value, env=None):
     if not text:
         return ""
     path = Path(text)
-    if path.is_dir():
+    if _path_is_dir(path):
         candidates = [path / "python.exe", path / "Scripts" / "python.exe"] if os.name == "nt" else [path / "bin" / "python", path / "python"]
         for candidate in candidates:
-            if candidate.exists():
+            if _path_exists(candidate):
                 return str(candidate)
         return ""
-    if path.exists():
+    if _path_exists(path):
         return str(path.resolve())
     if _is_generic_python_command(text) or (not path.is_absolute() and os.path.basename(text) == text):
         active_env = env if isinstance(env, dict) else os.environ
@@ -147,7 +161,7 @@ def _python_has_nnunet_v2_commands(python_executable, env=None):
         found = False
         for scripts_dir in _script_dirs_for_python(resolved):
             for suffix in suffixes:
-                if (scripts_dir / f"{command}{suffix}").exists():
+                if _path_exists(scripts_dir / f"{command}{suffix}"):
                     found = True
                     break
             if found:
@@ -206,7 +220,7 @@ def _candidate_python_in_prefix(prefix):
     prefix = Path(prefix)
     candidates = [prefix / "python.exe", prefix / "Scripts" / "python.exe"] if os.name == "nt" else [prefix / "bin" / "python", prefix / "python"]
     for candidate in candidates:
-        if candidate.exists():
+        if _path_exists(candidate):
             return str(candidate.resolve())
     return ""
 
@@ -228,7 +242,7 @@ def _iter_nnunet_python_candidates(preferred_python="", env=None, extra_roots=No
     for path in (preferred_python, active_env.get("TAXAMASK_TIF_NNUNET_PYTHON"), active_env.get("TAXAMASK_TIF_BACKEND_PYTHON"), sys.executable):
         yield from emit(path)
     for root in _iter_conda_env_roots(env=active_env, extra_roots=extra_roots):
-        if not root.exists():
+        if not _path_exists(root):
             continue
         direct = _candidate_python_in_prefix(root)
         if direct:
@@ -239,7 +253,7 @@ def _iter_nnunet_python_candidates(preferred_python="", env=None, extra_roots=No
             except OSError:
                 children = []
             for child in children:
-                if child.is_dir():
+                if _path_is_dir(child):
                     candidate = _candidate_python_in_prefix(child)
                     if candidate:
                         yield from emit(candidate)

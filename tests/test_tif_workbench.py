@@ -3542,7 +3542,7 @@ class TifWorkbenchTests(unittest.TestCase):
             task_tabs = widget.findChild(QWidget, "tifTaskTabs")
             self.assertIsNotNone(task_tabs)
             self.assertEqual(widget.task_tabs.count(), 3)
-            self.assertEqual(widget.task_tabs.tabText(0), "Review")
+            self.assertEqual(widget.task_tabs.tabText(0), "Import & Preview")
             self.assertEqual(widget.task_tabs.tabText(1), "Part Extraction")
             self.assertEqual(widget.task_tabs.tabText(2), "Annotation / training")
             self.assertEqual(widget.training_mode_tabs.count(), 3)

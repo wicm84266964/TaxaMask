@@ -351,8 +351,9 @@ class MainWindowLiteratureBridgeMixin:
         self.log(tr("Applied literature description for {0}.", self.current_lang).format(clean_part))
 
     def _ensure_workbench_description_visible(self):
-        if hasattr(self, "workbench_inspector_scroll"):
-            self.workbench_inspector_scroll.setMinimumWidth(260)
+        if hasattr(self, "workbench_inspector_tabs"):
+            self.workbench_inspector_tabs.setMinimumWidth(260)
+            self.workbench_inspector_tabs.setCurrentWidget(self.workbench_inspector_current_image_page)
         if hasattr(self, "workbench_splitter"):
             sizes = self.workbench_splitter.sizes()
             if len(sizes) >= 3 and sizes[2] < 180:
@@ -362,6 +363,6 @@ class MainWindowLiteratureBridgeMixin:
                 center = max(360, total - left - right)
                 self.workbench_splitter.setSizes([left, center, right])
         if hasattr(self, "desc_box"):
-            if hasattr(self, "workbench_inspector_scroll"):
-                self.workbench_inspector_scroll.ensureWidgetVisible(self.desc_box)
+            if hasattr(self, "workbench_inspector_current_image_page"):
+                self.workbench_inspector_current_image_page.ensureWidgetVisible(self.desc_box)
             self.desc_box.setFocus(Qt.OtherFocusReason)

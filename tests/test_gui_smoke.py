@@ -639,6 +639,9 @@ class GuiSmokeTests(unittest.TestCase):
                 def runJavaScript(self, *_args, **_kwargs):
                     return None
 
+                def setBackgroundColor(self, _color):
+                    return None
+
             class FakeLoadFinished:
                 def connect(self, _callback):
                     return None
@@ -668,8 +671,10 @@ class GuiSmokeTests(unittest.TestCase):
 
             self.assertEqual(created, ["webview"])
             self.assertIsNotNone(panel.web_view)
-            self.assertEqual(panel.stack.currentWidget(), panel.web_view)
             self.assertIn("127.0.0.1:7410", panel.web_view.loaded_url.toString())
+            self.assertEqual(panel.stack.currentWidget(), panel.fallback)
+            panel._on_web_load_finished(True)
+            self.assertEqual(panel.stack.currentWidget(), panel.web_view)
         finally:
             panel.deleteLater()
 
@@ -853,6 +858,79 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(panel._pending_context_prompt, "")
             self.assertIn("clipboard", panel.status_text())
             self.assertIn("clipboard", panel.fallback_detail.text())
+        finally:
+            panel.deleteLater()
+
+    def test_agent_panel_resets_browser_open_marker_on_stop(self):
+        panel = main_module.TaxaMaskAgentPanel("en", workspace_dir=str(PROJECT_ROOT))
+        try:
+            panel.browser_mode = True
+            panel.dashboard_url = "http://127.0.0.1:7410"
+            panel._browser_opened_for_url = panel.dashboard_url
+            with patch.object(panel, "_request_dashboard_shutdown", lambda: None), \
+                 patch.object(panel, "_cleanup_owned_dashboard_processes", lambda: None):
+                panel.stop_dashboard()
+            self.assertEqual(panel._browser_opened_for_url, "")
+            self.assertEqual(panel.running_state(), "stopped")
+        finally:
+            panel.deleteLater()
+
+    def test_agent_panel_reports_running_state_transitions(self):
+        panel = main_module.TaxaMaskAgentPanel("en", workspace_dir=str(PROJECT_ROOT))
+        try:
+            states = []
+            panel.running_state_changed.connect(states.append)
+            panel._set_running_state("starting")
+            panel._set_running_state("running")
+            panel._set_running_state("stopping")
+            panel._set_running_state("error")
+            self.assertEqual(states, ["starting", "running", "stopping", "error"])
+            self.assertEqual(panel.running_state(), "error")
+        finally:
+            panel.deleteLater()
+
+    def test_start_center_agent_buttons_follow_running_state(self):
+        window = self._make_window()
+        try:
+            self.assertTrue(window.btn_start_ant_code.isEnabled())
+            self.assertFalse(window.btn_stop_ant_code.isEnabled())
+            window._handle_agent_running_state_changed("starting")
+            self.assertFalse(window.btn_start_ant_code.isEnabled())
+            self.assertTrue(window.btn_stop_ant_code.isEnabled())
+            self.assertIn("Starting", window.btn_start_ant_code.text())
+            window._handle_agent_running_state_changed("running")
+            self.assertTrue(window.btn_start_ant_code.isEnabled())
+            self.assertTrue(window.btn_stop_ant_code.isEnabled())
+            self.assertEqual(window.btn_start_ant_code.text(), "Reload Ant-Code")
+            window._handle_agent_running_state_changed("stopping")
+            self.assertFalse(window.btn_start_ant_code.isEnabled())
+            self.assertFalse(window.btn_stop_ant_code.isEnabled())
+            window._handle_agent_running_state_changed("error")
+            self.assertTrue(window.btn_start_ant_code.isEnabled())
+            self.assertFalse(window.btn_stop_ant_code.isEnabled())
+            window._handle_agent_running_state_changed("running")
+            window.change_language("zh")
+            self.assertEqual(window.btn_start_ant_code.text(), "重新加载 Ant-Code")
+            self.assertEqual(window.btn_stop_ant_code.text(), "停止 Ant-Code")
+        finally:
+            window.deleteLater()
+
+    def test_agent_panel_fallback_buttons_use_chinese_labels(self):
+        panel = main_module.TaxaMaskAgentPanel("zh", workspace_dir=str(PROJECT_ROOT))
+        try:
+            panel.browser_mode = True
+            panel.dashboard_url = "http://127.0.0.1:7410"
+            panel._last_context_prompt = "taxamask-context"
+            panel._preflight_error = "bootstrap-error"
+            panel._update_fallback()
+            self.assertEqual(panel.btn_open_dashboard_in_browser.text(), "浏览器打开")
+            self.assertEqual(panel.btn_copy_agent_context_again.text(), "再次复制 Agent 上下文")
+            self.assertEqual(panel.btn_reload_dashboard.text(), "重新加载")
+            self.assertEqual(panel.fallback_url_label.text(), "http://127.0.0.1:7410")
+            self.assertFalse(panel.btn_open_dashboard_in_browser.isHidden())
+            self.assertFalse(panel.btn_copy_agent_context_again.isHidden())
+            self.assertFalse(panel.btn_reload_dashboard.isHidden())
+            self.assertIn("当前为浏览器模式", panel.fallback_detail.text())
         finally:
             panel.deleteLater()
 
@@ -1708,8 +1786,8 @@ console.log(JSON.stringify({chinese, english, text, textWrites}));
         window = self._make_window()
         try:
             window.change_language("zh")
-            self.assertEqual(window.btn_vlm_preannotate_current.text(), "VLM预标注")
-            self.assertEqual(window.btn_vlm_preannotate_batch.text(), "VLM批量预标")
+            self.assertEqual(window.btn_vlm_preannotate_current.text(), "VLM 预标注")
+            self.assertEqual(window.btn_vlm_preannotate_batch.text(), "VLM 批量预标注")
             window.change_language("en")
             self.assertEqual(window.btn_vlm_preannotate_current.text(), "VLM Pre-Label")
             self.assertEqual(window.btn_vlm_preannotate_batch.text(), "VLM Batch Pre-Label")

@@ -854,7 +854,7 @@ class TifWorkbenchWidget(QWidget):
         self._apply_volume_transfer_opacity_setting()
         self._populate_volume_mask_combo()
         if hasattr(self, "task_tabs"):
-            for index, label in enumerate(("Review", "Part Extraction", "Annotation / training")):
+            for index, label in enumerate(("Import & Preview", "Part Extraction", "Annotation / training")):
                 self.task_tabs.setTabText(index, tt(label, self.lang))
         if hasattr(self, "training_mode_tabs"):
             for index, label in enumerate(("Label review", "Train / predict", "Result comparison")):
@@ -1091,8 +1091,10 @@ class TifWorkbenchWidget(QWidget):
         self.backend_panel_controller.refresh_training_result_controls()
         self.backend_panel_controller.refresh_predict_targets()
         if not self.backend_panel_controller.action_running():
-            self.backend_run_status_label.setText(tt("Idle", self.lang))
+            self._set_backend_run_status(tt("Idle", self.lang))
             self.backend_elapsed_label.setText(tt("Elapsed: 00:00", self.lang))
+        else:
+            self._set_backend_run_status(self.backend_run_status_label.text())
         self.btn_import_external_prediction_tif.setText(tt("Import external label TIF as review result", self.lang))
         self.btn_refresh_result_comparison.setText(tt("Refresh comparison", self.lang))
         self.btn_open_result_comparison_target.setText(tt("Open selected in 3D", self.lang))
@@ -1104,6 +1106,15 @@ class TifWorkbenchWidget(QWidget):
             ["", tt("ID", self.lang), tt("Name", self.lang), tt("Train", self.lang)]
         )
         self.local_axis_controller.update_summary()
+
+    def _set_backend_run_status(self, text):
+        clean_text = str(text or "")
+        self.backend_run_status_label.setText(clean_text)
+        top_label = getattr(self, "tif_top_runtime_status_label", None)
+        if top_label is not None:
+            top_label.setText(clean_text)
+            top_label.setToolTip(clean_text)
+            top_label.setVisible(bool(clean_text))
 
     def _update_volume_control_tooltips(self):
         pairs = (

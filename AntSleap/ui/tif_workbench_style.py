@@ -42,6 +42,7 @@ def tif_workbench_theme(theme="dark"):
         "text": c["text_main"],
         "text_soft": c["text_soft"],
         "text_dim": c["text_dim"],
+        "muted": c["text_soft"],
         "canvas_text": "#C8D7EA",
         "border": c["border"],
         "border_strong": c["border_strong"],
@@ -73,6 +74,10 @@ TIF_WORKBENCH_STYLESHEET_TEMPLATE = """
             QLabel#tifTopContextLabel {
                 color: {t['text']};
                 font-weight: 700;
+                border: none;
+            }
+            QLabel#tifTopRuntimeStatusText {
+                color: {t['muted']};
                 border: none;
             }
             QFrame#tifImportSection,

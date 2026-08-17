@@ -611,7 +611,7 @@ class TifBackendPanelController(QObject):
                     if path:
                         self.state.result_json = path
             first_line = text.splitlines()[0]
-            wb.backend_run_status_label.setText(first_line)
+            wb._set_backend_run_status(first_line)
             if wb._task_context_matches_current(
                 self.state.task_id,
                 fields=("specimen_id", "volume_scope", "part_id", "reslice_id"),
@@ -838,7 +838,7 @@ class TifBackendPanelController(QObject):
             detail = tt("{0} {1} top-level volume(s).", wb.lang).format(status, len(specimen_ids or []))
         else:
             detail = tt("{0} {1} part sample(s).", wb.lang).format(status, len(part_refs or []))
-        wb.backend_run_status_label.setText(detail)
+        wb._set_backend_run_status(detail)
         wb.training_status_label.setText(detail)
         wb.backend_elapsed_label.setText(tt("Elapsed: {0}", wb.lang).format("00:00"))
         wb.backend_elapsed_timer.start()
@@ -902,7 +902,7 @@ class TifBackendPanelController(QObject):
         wb.backend_progress_bar.setFormat("%p%")
         action = str(result.get("contract", {}).get("action") or wb._tif_backend_action or "")
         message = tt("Run finished: {0}\nRun: {1}", wb.lang).format(action, wb._tif_backend_run_dir)
-        wb.backend_run_status_label.setText(message)
+        wb._set_backend_run_status(message)
         if task_current:
             wb.training_status_label.setText(message)
         wb.log(message)
@@ -968,7 +968,7 @@ class TifBackendPanelController(QObject):
         wb.backend_progress_bar.setRange(0, 100)
         wb.backend_progress_bar.setValue(0)
         wb.backend_progress_bar.setFormat("%p%")
-        wb.backend_run_status_label.setText(status)
+        wb._set_backend_run_status(status)
         if task_current:
             wb.training_status_label.setText(status)
         detail_lines = text.splitlines()
@@ -1000,7 +1000,7 @@ class TifBackendPanelController(QObject):
         action = wb._tif_backend_action
         wb._tif_backend_worker.cancel()
         message = tt("Cancelling {0}...", wb.lang).format(action)
-        wb.backend_run_status_label.setText(message)
+        wb._set_backend_run_status(message)
         wb.training_status_label.setText(message)
         wb.log(message)
         wb._cancel_tif_task(wb._tif_backend_task_id, message)

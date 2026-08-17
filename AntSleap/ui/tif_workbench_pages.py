@@ -19,7 +19,7 @@ def build_task_pages(lang, translate):
     training_mode_tabs.addTab(training_task_page, translate("Train / predict", lang))
     training_mode_tabs.addTab(result_compare_page, translate("Result comparison", lang))
 
-    task_tabs.addTab(display_task_page, translate("Review", lang))
+    task_tabs.addTab(display_task_page, translate("Import & Preview", lang))
     task_tabs.addTab(part_task_page, translate("Part Extraction", lang))
     task_tabs.addTab(training_mode_tabs, translate("Annotation / training", lang))
 

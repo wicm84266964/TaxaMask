@@ -427,9 +427,10 @@ class MainWindowStartCenterMixin:
             self.btn_stop_ant_code.setEnabled(False)
             self.btn_stop_ant_code.setText(tr("Stop Ant-Code", lang))
         elif state == "error":
+            process_alive = bool(getattr(self, "agent_panel", None) and self.agent_panel.is_running())
             self.btn_start_ant_code.setEnabled(True)
             self.btn_start_ant_code.setText(tr("Start Ant-Code", lang))
-            self.btn_stop_ant_code.setEnabled(False)
+            self.btn_stop_ant_code.setEnabled(process_alive)
             self.btn_stop_ant_code.setText(tr("Stop Ant-Code", lang))
         else:
             self.btn_start_ant_code.setEnabled(True)

@@ -915,6 +915,32 @@ class GuiSmokeTests(unittest.TestCase):
         finally:
             window.deleteLater()
 
+    def test_start_center_error_keeps_stop_available_for_live_agent(self):
+        window = self._make_window()
+        try:
+            window.agent_panel.process = type("Process", (), {"poll": lambda self: None})()
+            window._handle_agent_running_state_changed("error")
+            self.assertTrue(window.btn_start_ant_code.isEnabled())
+            self.assertTrue(window.btn_stop_ant_code.isEnabled())
+        finally:
+            window.agent_panel.process = None
+            window.deleteLater()
+
+    def test_agent_panel_rechecks_health_before_marking_live_process_running(self):
+        panel = main_module.TaxaMaskAgentPanel("en", workspace_dir=str(PROJECT_ROOT))
+        try:
+            panel.process = type("Process", (), {"poll": lambda self: None})()
+            panel.dashboard_url = "http://127.0.0.1:7410"
+            panel._set_running_state("error")
+            panel.start_dashboard()
+            self.assertEqual(panel.running_state(), "starting")
+            self.assertEqual(panel._health_checks_remaining, 80)
+            self.assertTrue(panel.health_timer.isActive())
+        finally:
+            panel.health_timer.stop()
+            panel.process = None
+            panel.deleteLater()
+
     def test_agent_panel_fallback_buttons_use_chinese_labels(self):
         panel = main_module.TaxaMaskAgentPanel("zh", workspace_dir=str(PROJECT_ROOT))
         try:

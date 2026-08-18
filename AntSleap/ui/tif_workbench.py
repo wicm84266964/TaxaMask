@@ -275,6 +275,7 @@ TIF_VOLUME_ULTRA_QUALITY_CACHE_OWNER_LIMIT = 1
 TIF_CONFIRM_PART_BACKGROUND_VOXELS = 1_000_000
 TIF_GPU_STREAM_SYNC_MAX_BYTES = 32 * 1024 * 1024
 TIF_ASYNC_SLICE_SOURCE_BYTES = 32 * 1024 * 1024
+TIF_SLICE_DRAG_DEBOUNCE_MS = 90
 TIF_MASK_PREVIEW_TRUSTED_STATUSES = {
     "mask_preview",
     "mask_in_progress",
@@ -2010,9 +2011,39 @@ class TifWorkbenchWidget(QWidget):
             return
         self.slice_slider.setValue(target)
 
+    def on_slice_slider_pressed(self):
+        self._slice_drag_active = True
+        self._slice_drag_rendered_position = None
+        self._slice_drag_render_timer.stop()
+        self._cancel_slice_render(wait=False)
+
+    def on_slice_slider_released(self):
+        position = self._active_slice_position() if self.image_volume is not None else None
+        self._slice_drag_active = False
+        self._slice_drag_render_timer.stop()
+        if position == self._slice_drag_rendered_position:
+            return
+        self.render_current_slice()
+
     def on_slice_slider_changed(self):
         self._slice_positions[self._current_slice_axis()] = int(self.slice_slider.value())
+        self._update_slice_position_label()
+        if self._slice_drag_active or self.slice_slider.isSliderDown():
+            self._slice_drag_render_timer.start(TIF_SLICE_DRAG_DEBOUNCE_MS)
+            return
         self.render_current_slice()
+
+    def _render_debounced_drag_slice(self):
+        if not (self._slice_drag_active or self.slice_slider.isSliderDown()):
+            return
+        self._slice_drag_rendered_position = self._active_slice_position()
+        self.render_current_slice()
+
+    def _update_slice_position_label(self):
+        if self.image_volume is None:
+            return
+        axis, slice_index = self._active_slice_position()
+        self.slice_label.setText(f"{slice_index + 1} / {self._slice_count_for_axis(axis)}")
 
     def on_slice_axis_changed(self):
         axis = self.slice_axis_combo.currentData() or "z"
@@ -4652,8 +4683,7 @@ class TifWorkbenchWidget(QWidget):
             self._set_slice_review_unavailable(self._slice_unavailable_message(specimen))
             return
         axis, slice_index = self._active_slice_position()
-        total = self._slice_count_for_axis(axis)
-        self.slice_label.setText(f"{slice_index + 1} / {total}")
+        self._update_slice_position_label()
         request = self._slice_render_request(axis, slice_index)
         source_bytes = int(getattr(self.image_volume, "nbytes", 0) or 0)
         if source_bytes >= TIF_ASYNC_SLICE_SOURCE_BYTES:

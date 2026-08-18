@@ -2,3 +2,7 @@
 # kept for runtime/package layout compatibility, but GitHub Linguist should not
 # treat it as third-party vendored code in repository language statistics.
 vendor/ant-code/** -linguist-vendored
+
+# Windows command interpreters require CRLF in batch entrypoints.
+*.bat text eol=crlf
+*.cmd text eol=crlf

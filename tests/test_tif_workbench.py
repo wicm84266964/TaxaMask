@@ -4467,6 +4467,60 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.close_project()
                 widget.deleteLater()
 
+    def test_large_slice_slider_drag_defers_io_and_renders_final_page_on_release(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=6)
+
+            class LogicalLargeVolume:
+                def __init__(self, array):
+                    self.array = array
+                    self.shape = array.shape
+                    self.dtype = array.dtype
+                    self.nbytes = 64 * 1024 * 1024
+
+                def __getitem__(self, key):
+                    return self.array[key]
+
+            widget.image_volume = LogicalLargeVolume(np.arange(6 * 8 * 8, dtype=np.uint16).reshape(6, 8, 8))
+            widget.label_volume = None
+            widget.edit_volume = None
+            queued_indices = []
+            original_queue = widget._queue_slice_render
+
+            def record_queue(request):
+                queued_indices.append(int(request["index"]))
+                return True
+
+            try:
+                widget._queue_slice_render = record_queue
+                widget.slice_slider.setSliderDown(True)
+                widget.slice_slider.setValue(1)
+                widget.slice_slider.setValue(3)
+                widget.slice_slider.setValue(5)
+
+                self.assertEqual(queued_indices, [])
+                self.assertEqual(widget.slice_slider.value(), 5)
+                self.assertEqual(widget.slice_label.text(), "6 / 6")
+
+                widget.slice_slider.setSliderDown(False)
+
+                self.assertEqual(queued_indices, [5])
+                self.assertEqual(widget.slice_slider.value(), 5)
+
+                widget.slice_slider.setSliderDown(True)
+                widget.slice_slider.setValue(4)
+                widget._render_debounced_drag_slice()
+                self.assertEqual(queued_indices, [5, 4])
+
+                widget.slice_slider.setSliderDown(False)
+                self.assertEqual(queued_indices, [5, 4])
+            finally:
+                widget._queue_slice_render = original_queue
+                widget._cancel_slice_render(wait=True)
+                widget.image_volume = None
+                widget.close_project()
+                widget.deleteLater()
+
     def test_side_angle_slices_are_read_only_for_label_safety(self):
         with tempfile.TemporaryDirectory() as tmp:
             widget = self._make_volume_widget(Path(tmp), z_count=3)

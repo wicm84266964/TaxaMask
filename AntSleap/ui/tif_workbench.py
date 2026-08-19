@@ -275,7 +275,6 @@ TIF_VOLUME_ULTRA_QUALITY_CACHE_OWNER_LIMIT = 1
 TIF_CONFIRM_PART_BACKGROUND_VOXELS = 1_000_000
 TIF_GPU_STREAM_SYNC_MAX_BYTES = 32 * 1024 * 1024
 TIF_ASYNC_SLICE_SOURCE_BYTES = 32 * 1024 * 1024
-TIF_SLICE_DRAG_DEBOUNCE_MS = 90
 TIF_MASK_PREVIEW_TRUSTED_STATUSES = {
     "mask_preview",
     "mask_in_progress",
@@ -2014,29 +2013,32 @@ class TifWorkbenchWidget(QWidget):
     def on_slice_slider_pressed(self):
         self._slice_drag_active = True
         self._slice_drag_rendered_position = None
-        self._slice_drag_render_timer.stop()
+        self._slice_drag_completed_position = None
         self._cancel_slice_render(wait=False)
+        if self.image_volume is not None:
+            self.status_label.setText(tt("Loading selected TIF slice...", self.lang))
 
     def on_slice_slider_released(self):
         position = self._active_slice_position() if self.image_volume is not None else None
         self._slice_drag_active = False
-        self._slice_drag_render_timer.stop()
+        if position == self._slice_drag_completed_position:
+            self.status_label.setText(self.canvas_status_text(self.canvas.zoom_factor()))
+            return
         if position == self._slice_drag_rendered_position:
             return
         self.render_current_slice()
+        if self._slice_render_thread is None and self._slice_render_pending_request is None:
+            self.status_label.setText(self.canvas_status_text(self.canvas.zoom_factor()))
 
     def on_slice_slider_changed(self):
         self._slice_positions[self._current_slice_axis()] = int(self.slice_slider.value())
         self._update_slice_position_label()
         if self._slice_drag_active or self.slice_slider.isSliderDown():
-            self._slice_drag_render_timer.start(TIF_SLICE_DRAG_DEBOUNCE_MS)
+            self._slice_drag_rendered_position = self._active_slice_position()
+            self.render_current_slice()
+            if self._slice_render_thread is None and self._slice_render_pending_request is None:
+                self._slice_drag_completed_position = self._slice_drag_rendered_position
             return
-        self.render_current_slice()
-
-    def _render_debounced_drag_slice(self):
-        if not (self._slice_drag_active or self.slice_slider.isSliderDown()):
-            return
-        self._slice_drag_rendered_position = self._active_slice_position()
         self.render_current_slice()
 
     def _update_slice_position_label(self):
@@ -4763,7 +4765,7 @@ class TifWorkbenchWidget(QWidget):
         request["token"] = token
         thread = self._slice_render_thread
         if thread is not None:
-            if self._slice_render_worker is not None:
+            if self._slice_render_worker is not None and not (self._slice_drag_active or self.slice_slider.isSliderDown()):
                 self._slice_render_worker.cancel()
             self._slice_render_pending_request = request
             self.status_label.setText(tt("Loading selected TIF slice...", self.lang))
@@ -4794,19 +4796,56 @@ class TifWorkbenchWidget(QWidget):
 
     def _on_slice_render_finished(self, result):
         result = dict(result or {})
-        if result.get("cancelled") or int(result.get("token") or 0) != int(self._slice_render_token):
+        result_token = int(result.get("token") or 0)
+        current_token = int(self._slice_render_token)
+        dragging = bool(self._slice_drag_active or self.slice_slider.isSliderDown())
+        context = dict(result.get("context") or {})
+        if result.get("cancelled"):
+            return
+        if result_token != current_token and (not dragging or not self._slice_render_context_matches_current(context)):
             return
         rgb = result.get("rgb")
         if rgb is None:
             return
         self._apply_slice_rgb(rgb)
+        if result_token != current_token:
+            self.status_label.setText(tt("Loading selected TIF slice...", self.lang))
+            return
+        self._slice_drag_completed_position = (
+            str(context.get("axis") or self._current_slice_axis()),
+            int(context.get("index") or 0),
+        )
+        if dragging:
+            self.status_label.setText(tt("Loading selected TIF slice...", self.lang))
+            return
         self.status_label.setText(self.canvas_status_text(self.canvas.zoom_factor()))
+
+    def _slice_render_context_matches_current(self, context):
+        context = dict(context or {})
+        return (
+            str(context.get("specimen_id") or "") == str(self.current_specimen_id or "")
+            and str(context.get("scope") or "") == str(self.current_volume_scope or "")
+            and str(context.get("part_id") or "") == str(self.current_part_id or "")
+            and str(context.get("reslice_id") or "") == str(self.current_reslice_id or "")
+            and str(context.get("axis") or "") == str(self._current_slice_axis() or "")
+        )
 
     def _on_slice_render_failed(self, result):
         result = dict(result or {})
         if int(result.get("token") or 0) != int(self._slice_render_token):
             return
         message = tt("TIF slice loading failed: {0}", self.lang).format(str(result.get("error") or "unknown_error"))
+        context = dict(result.get("context") or {})
+        failed_position = (
+            str(context.get("axis") or self._current_slice_axis()),
+            int(context.get("index") or 0),
+        )
+        if failed_position == self._slice_drag_rendered_position:
+            self._slice_drag_rendered_position = None
+        if self._slice_drag_active or self.slice_slider.isSliderDown():
+            self.status_label.setText(tt("Loading selected TIF slice...", self.lang))
+            self.log(message)
+            return
         self.status_label.setText(message)
         self.log(message)
 

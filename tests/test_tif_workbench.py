@@ -4467,7 +4467,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.close_project()
                 widget.deleteLater()
 
-    def test_large_slice_slider_drag_defers_io_and_renders_final_page_on_release(self):
+    def test_large_slice_slider_drag_requests_continuous_previews_and_keeps_final_page(self):
         with tempfile.TemporaryDirectory() as tmp:
             widget = self._make_volume_widget(Path(tmp), z_count=6)
 
@@ -4498,24 +4498,114 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.slice_slider.setValue(3)
                 widget.slice_slider.setValue(5)
 
-                self.assertEqual(queued_indices, [])
+                self.assertEqual(queued_indices, [1, 3, 5])
                 self.assertEqual(widget.slice_slider.value(), 5)
                 self.assertEqual(widget.slice_label.text(), "6 / 6")
 
                 widget.slice_slider.setSliderDown(False)
 
-                self.assertEqual(queued_indices, [5])
+                self.assertEqual(queued_indices, [1, 3, 5])
                 self.assertEqual(widget.slice_slider.value(), 5)
 
                 widget.slice_slider.setSliderDown(True)
                 widget.slice_slider.setValue(4)
-                widget._render_debounced_drag_slice()
-                self.assertEqual(queued_indices, [5, 4])
+                self.assertEqual(queued_indices, [1, 3, 5, 4])
 
                 widget.slice_slider.setSliderDown(False)
-                self.assertEqual(queued_indices, [5, 4])
+                self.assertEqual(queued_indices, [1, 3, 5, 4])
             finally:
                 widget._queue_slice_render = original_queue
+                widget._cancel_slice_render(wait=True)
+                widget.image_volume = None
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_large_slice_slider_keeps_loading_status_until_drag_release(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=4)
+
+            class LogicalLargeVolume:
+                def __init__(self, array):
+                    self.array = array
+                    self.shape = array.shape
+                    self.dtype = array.dtype
+                    self.nbytes = 64 * 1024 * 1024
+
+                def __getitem__(self, key):
+                    return self.array[key]
+
+            widget.image_volume = LogicalLargeVolume(np.arange(4 * 8 * 8, dtype=np.uint16).reshape(4, 8, 8))
+            widget.label_volume = None
+            widget.edit_volume = None
+            loading_text = "Loading selected TIF slice..."
+
+            try:
+                widget.slice_slider.setSliderDown(True)
+                widget.slice_slider.setValue(3)
+
+                deadline = time.monotonic() + 2.0
+                while time.monotonic() < deadline and widget._slice_render_thread is not None:
+                    self.app.processEvents()
+                    time.sleep(0.01)
+
+                self.assertIsNone(widget._slice_render_thread)
+                self.assertEqual(widget.status_label.text(), loading_text)
+                self.assertEqual(widget._slice_drag_completed_position, ("z", 3))
+
+                widget.slice_slider.setSliderDown(False)
+
+                self.assertEqual(widget.status_label.text(), widget.canvas_status_text(widget.canvas.zoom_factor()))
+                self.assertIn("Z 4/4", widget.status_label.text())
+            finally:
+                widget._cancel_slice_render(wait=True)
+                widget.image_volume = None
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_large_slice_slider_applies_inflight_preview_while_dragging(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=4)
+
+            class LogicalLargeVolume:
+                def __init__(self, array):
+                    self.array = array
+                    self.shape = array.shape
+                    self.dtype = array.dtype
+                    self.nbytes = 64 * 1024 * 1024
+
+                def __getitem__(self, key):
+                    return self.array[key]
+
+            widget.image_volume = LogicalLargeVolume(np.arange(4 * 8 * 8, dtype=np.uint16).reshape(4, 8, 8))
+            widget.label_volume = None
+            widget.edit_volume = None
+            applied_indices = []
+
+            def build_indexed_slice(*_args, index=0, **_kwargs):
+                time.sleep(0.05)
+                return np.full((8, 8, 3), int(index), dtype=np.uint8)
+
+            def record_applied_slice(rgb):
+                applied_indices.append(int(np.asarray(rgb)[0, 0, 0]))
+
+            try:
+                with patch("AntSleap.ui.tif_workbench_workers.build_tif_slice_rgb", side_effect=build_indexed_slice):
+                    with patch.object(widget, "_apply_slice_rgb", side_effect=record_applied_slice):
+                        widget.slice_slider.setSliderDown(True)
+                        widget.slice_slider.setValue(1)
+                        widget.slice_slider.setValue(3)
+
+                        deadline = time.monotonic() + 2.0
+                        while time.monotonic() < deadline and len(applied_indices) < 2:
+                            self.app.processEvents()
+                            time.sleep(0.01)
+
+                        self.assertEqual(applied_indices, [1, 3])
+                        self.assertEqual(widget.status_label.text(), "Loading selected TIF slice...")
+
+                        widget.slice_slider.setSliderDown(False)
+                        self.assertIn("Z 4/4", widget.status_label.text())
+            finally:
                 widget._cancel_slice_render(wait=True)
                 widget.image_volume = None
                 widget.close_project()

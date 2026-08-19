@@ -139,6 +139,7 @@ class TifWorkbenchShell:
             "_slice_render_pending_request": None,
             "_slice_drag_active": False,
             "_slice_drag_rendered_position": None,
+            "_slice_drag_completed_position": None,
             "slice_axis": "z",
             "_slice_positions": {"z": 0, "y": 0, "x": 0},
             "display_mode": "slice",

@@ -4,6 +4,11 @@ This directory contains the first-party Ant-Code Agent Center runtime embedded b
 
 Ant-Code is part of the TaxaMask source release, not a third-party dependency. The `vendor/ant-code` directory name is retained for runtime layout compatibility and to keep the Node dashboard package isolated from the Python workbench.
 
+## Versioning
+
+The embedded runtime version label follows the Ant-Code formal release line. An unmodified synchronization uses the upstream version directly, such as `1.3.5`. If TaxaMask carries embedded-only adaptations on top of that release line, it uses `<upstream version>-taxamask.<N>`, such as `1.3.5-taxamask.1`. The suffix counts only TaxaMask-specific changes and resets to `.1` when the upstream release label changes. Version-label updates and source synchronization are separate reviewed operations; the label alone must not be treated as proof that every upstream bug fix is present. The embedded version is independent of the TaxaMask application version.
+
+
 ## What Is Included
 
 - `src/`: local agent runtime, dashboard server, permission checks, session store, and tool adapters.

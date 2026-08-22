@@ -1281,7 +1281,7 @@ function boundedContextRatio(value, fallback) {
 }
 
 function sessionGatewayProtocol(session) {
-  return session?.config?.lab?.gatewayProtocol ?? "lab-agent-gateway";
+  return session?.config?.lab?.gatewayProtocol ?? "openai-chat";
 }
 
 /**

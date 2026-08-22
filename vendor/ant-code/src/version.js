@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const FALLBACK_VERSION = "1.3.5-taxamask.1";
+const FALLBACK_VERSION = "1.3.6-taxamask.1";
 
 /**
  * @param {NodeJS.ProcessEnv} [env]

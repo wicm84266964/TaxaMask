@@ -5,6 +5,11 @@ import {
   normalizeOpenAIChatCompletionResponse,
   parseOpenAIChatCompletionStream
 } from "./openai-chat.js";
+import {
+  createAnthropicMessagesRequest,
+  normalizeAnthropicMessagesResponse,
+  parseAnthropicMessagesStream
+} from "./anthropic-messages.js";
 import { listConfiguredModels } from "./models.js";
 import { createGatewayRequest, normalizeGatewayResponse } from "./protocol.js";
 import { parseGatewayStream } from "./streaming.js";
@@ -54,7 +59,7 @@ export function createLabModelGateway(config) {
         };
       }
 
-      const protocol = config.lab.gatewayProtocol ?? "lab-agent-gateway";
+      const protocol = config.lab.gatewayProtocol ?? "openai-chat";
       const requestInput = {
         model: config.modelAlias,
         messages: request.messages,
@@ -66,7 +71,9 @@ export function createLabModelGateway(config) {
       };
       const gatewayRequest = protocol === "openai-chat"
         ? createOpenAIChatCompletionRequest(requestInput)
-        : createGatewayRequest(requestInput);
+        : protocol === "anthropic-messages"
+          ? createAnthropicMessagesRequest(requestInput)
+          : createGatewayRequest(requestInput);
 
       const maxRetries = resolveGatewayMaxRetries(config);
       const maxAttempts = maxRetries + 1;
@@ -80,7 +87,7 @@ export function createLabModelGateway(config) {
         try {
           response = await fetch(config.lab.gatewayUrl, {
             method: "POST",
-            headers: createHeaders(config, request.sessionId),
+            headers: createHeaders(config, request.sessionId, protocol),
             body: JSON.stringify(gatewayRequest),
             signal: attemptAbort.signal
           });
@@ -639,9 +646,13 @@ function cancelReader(reader, reason) {
  * @param {{ signal?: AbortSignal; idleTimeoutMs?: number }} [options]
  */
 function parseStreamForProtocol(protocol, body, contentType, onEvent, config, options = {}) {
-  return protocol === "openai-chat"
-    ? parseOpenAIChatCompletionStream(body, { onEvent, reasoningContentMode: resolveReasoningContentMode(config), ...options })
-    : parseGatewayStream(body, contentType, { onEvent, ...options });
+  if (protocol === "openai-chat") {
+    return parseOpenAIChatCompletionStream(body, { onEvent, reasoningContentMode: resolveReasoningContentMode(config), ...options });
+  }
+  if (protocol === "anthropic-messages") {
+    return parseAnthropicMessagesStream(body, { onEvent, ...options });
+  }
+  return parseGatewayStream(body, contentType, { onEvent, ...options });
 }
 
 /**
@@ -710,11 +721,18 @@ function attachGatewayBodyPreview(error, text) {
 /**
  * @param {import("../config/load-config.js").LabAgentConfig} config
  */
-function createHeaders(config, sessionId = null) {
-  const headers = { "content-type": "application/json" };
+function createHeaders(config, sessionId = null, protocol = config.lab.gatewayProtocol ?? "openai-chat") {
+  const headers = /** @type {Record<string, string>} */ ({ "content-type": "application/json" });
+  if (protocol === "anthropic-messages") {
+    headers["anthropic-version"] = "2023-06-01";
+  }
   const apiKey = config.lab.gatewayApiKey;
   if (typeof apiKey === "string" && apiKey.length > 0) {
-    headers.authorization = `Bearer ${apiKey}`;
+    if (protocol === "anthropic-messages") {
+      headers["x-api-key"] = apiKey;
+    } else {
+      headers.authorization = `Bearer ${apiKey}`;
+    }
   }
   const affinity = sanitizeHeaderValue(sessionId);
   if (affinity) {
@@ -741,9 +759,13 @@ function isPlainObject(value) {
  * @param {import("../config/load-config.js").LabAgentConfig} [config]
  */
 function normalizeResponseForProtocol(protocol, raw, config) {
-  return protocol === "openai-chat"
-    ? normalizeOpenAIChatCompletionResponse(raw, { reasoningContentMode: resolveReasoningContentMode(config) })
-    : normalizeGatewayResponse(raw);
+  if (protocol === "openai-chat") {
+    return normalizeOpenAIChatCompletionResponse(raw, { reasoningContentMode: resolveReasoningContentMode(config) });
+  }
+  if (protocol === "anthropic-messages") {
+    return normalizeAnthropicMessagesResponse(raw);
+  }
+  return normalizeGatewayResponse(raw);
 }
 
 /**

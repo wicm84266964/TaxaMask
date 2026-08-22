@@ -12,6 +12,11 @@ import { createContextWindow } from "../src/core/context-window.js";
 import { classifyToolUse } from "../src/agents/delegation-guard.js";
 import { mapSessionEventToDashboard } from "../src/dashboard/events.js";
 import { createDashboardRuntime } from "../src/dashboard/sessions.js";
+import {
+  createAnthropicMessagesRequest,
+  normalizeAnthropicMessagesResponse,
+  parseAnthropicMessagesStream
+} from "../src/model-gateway/anthropic-messages.js";
 import { loadSkills, readSkill } from "../src/skills/registry.js";
 import { BUILT_IN_TOOLS } from "../src/tools/definitions.js";
 import { createToolRuntime } from "../src/tools/runtime.js";
@@ -75,6 +80,7 @@ test("embedded config remains unconfigured without models and preserves an expli
 
   assert.equal(config.modelAlias, "");
   assert.deepEqual(config.models, []);
+  assert.equal(config.lab.gatewayProtocol, "openai-chat");
 
   await fs.mkdir(path.join(cwd, ".lab-agent"), { recursive: true });
   await fs.writeFile(path.join(cwd, ".lab-agent", "config.json"), JSON.stringify({
@@ -84,6 +90,56 @@ test("embedded config remains unconfigured without models and preserves an expli
   const explicitEmpty = await loadConfig({ cwd, env: {} });
   assert.equal(explicitEmpty.modelAlias, "");
   assert.deepEqual(explicitEmpty.models, []);
+});
+
+test("embedded dashboard offers the two public gateway protocols", async () => {
+  const app = await fs.readFile(path.join(PACKAGE_ROOT, "src", "dashboard", "public", "app.js"), "utf8");
+  assert.match(app, /const gatewayProtocol = gateway\.gatewayUrl \? gateway\.gatewayProtocol : "openai-chat"/);
+  assert.match(app, /<option value="openai-chat"/);
+  assert.match(app, /<option value="anthropic-messages"/);
+  assert.doesNotMatch(app, /<option value="lab-agent-gateway"/);
+});
+
+test("embedded Anthropic Messages adapter preserves tools and parses SSE", async () => {
+  const request = createAnthropicMessagesRequest({
+    model: "claude-sonnet-4-5",
+    messages: [
+      { role: "system", content: "Use TaxaMask local tools only" },
+      { role: "user", content: "Read the project context" },
+      { role: "assistant", content: [], toolCalls: [{ id: "call-1", name: "read_file", input: { path: "ANTCODE.md" } }] },
+      { role: "tool", toolCallId: "call-1", content: "{\"ok\":true}" }
+    ],
+    tools: [{ name: "read_file", description: "Read", inputSchema: { type: "object", required: ["path"] } }],
+    stream: true
+  });
+  assert.equal(request.system, "Use TaxaMask local tools only");
+  assert.equal(request.messages[1].content[0].type, "tool_use");
+  assert.equal(request.messages[2].content[0].type, "tool_result");
+
+  const normalized = normalizeAnthropicMessagesResponse({
+    id: "msg-1",
+    model: "claude-sonnet-4-5",
+    content: [{ type: "text", text: "ready" }],
+    stop_reason: "end_turn"
+  });
+  assert.equal(normalized.text, "ready");
+  assert.equal(normalized.stopReason, "end_turn");
+
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode([
+        'event: message_start\ndata: {"type":"message_start","message":{"id":"msg-1","model":"claude-sonnet-4-5"}}\n\n',
+        'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}\n\n',
+        'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}\n\n',
+        'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+      ].join("")));
+      controller.close();
+    }
+  });
+  const streamed = await parseAnthropicMessagesStream(stream);
+  assert.equal(streamed.text, "hello");
+  assert.equal(streamed.stopReason, "end_turn");
 });
 
 test("embedded config scopes environment keys to the matching gateway endpoint", async (t) => {

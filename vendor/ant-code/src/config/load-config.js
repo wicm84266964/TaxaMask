@@ -16,7 +16,8 @@ export const NETWORK_MODES = Object.freeze([
 
 export const GATEWAY_PROTOCOLS = Object.freeze([
   "lab-agent-gateway",
-  "openai-chat"
+  "openai-chat",
+  "anthropic-messages"
 ]);
 
 const PROJECT_CONFIG_FILES = Object.freeze([
@@ -137,7 +138,7 @@ const DEFAULT_CONFIG = Object.freeze({
   lab: {
     gatewayUrl: null,
     gatewayHealthUrl: null,
-    gatewayProtocol: "lab-agent-gateway",
+    gatewayProtocol: "openai-chat",
     gatewayApiKey: null,
     gatewayMaxRetries: DEFAULT_GATEWAY_MAX_RETRIES,
     gatewayTimeoutMs: DEFAULT_GATEWAY_TIMEOUT_MS,
@@ -206,7 +207,7 @@ export async function loadConfig(options = {}) {
   const finalLab = {
     gatewayUrl: hardened.lab?.gatewayUrl ?? null,
     gatewayHealthUrl: hardened.lab?.gatewayHealthUrl ?? null,
-    gatewayProtocol: hardened.lab?.gatewayProtocol ?? "lab-agent-gateway",
+    gatewayProtocol: hardened.lab?.gatewayProtocol ?? "openai-chat",
     gatewayApiKey: hardened.lab?.gatewayApiKey ?? null,
     gatewayMaxRetries: parseOptionalInteger(env.LAB_MODEL_GATEWAY_MAX_RETRIES, hardened.lab?.gatewayMaxRetries ?? DEFAULT_GATEWAY_MAX_RETRIES),
     gatewayTimeoutMs: parseOptionalInteger(env.LAB_MODEL_GATEWAY_TIMEOUT_MS, hardened.lab?.gatewayTimeoutMs ?? DEFAULT_GATEWAY_TIMEOUT_MS),
@@ -681,8 +682,8 @@ function hasGatewayCredential(config) {
 /** @param {Record<string, any>} left @param {Record<string, any>} right */
 function sameGatewayEndpoint(left, right) {
   return String(left?.lab?.gatewayUrl ?? "").trim() === String(right?.lab?.gatewayUrl ?? "").trim()
-    && String(left?.lab?.gatewayProtocol ?? "lab-agent-gateway").trim()
-      === String(right?.lab?.gatewayProtocol ?? "lab-agent-gateway").trim();
+    && String(left?.lab?.gatewayProtocol ?? "openai-chat").trim()
+      === String(right?.lab?.gatewayProtocol ?? "openai-chat").trim();
 }
 
 function buildConfigSources({ env, project, lab, bundled }) {
@@ -839,7 +840,7 @@ function envGatewayProfile(config) {
   if (!gatewayUrl) {
     return null;
   }
-  const gatewayProtocol = String(config.lab?.gatewayProtocol ?? "lab-agent-gateway").trim();
+  const gatewayProtocol = String(config.lab?.gatewayProtocol ?? "openai-chat").trim();
   return {
     id: gatewayProfileIdFromParts(gatewayProtocol, gatewayUrl),
     label: parseHost(gatewayUrl) || gatewayUrl,
@@ -868,7 +869,7 @@ function envModelList(models, modelAlias, preserveConfiguredModels = false) {
 }
 
 function gatewayProfileIdFromParts(protocol, gatewayUrl) {
-  const raw = `${String(protocol ?? "lab-agent-gateway").trim()}|${String(gatewayUrl ?? "").trim()}`;
+  const raw = `${String(protocol ?? "openai-chat").trim()}|${String(gatewayUrl ?? "").trim()}`;
   if (!String(gatewayUrl ?? "").trim()) {
     return "";
   }
@@ -1359,7 +1360,7 @@ function validateVisionAgentConfig(value) {
  * @param {{ gatewayProtocol?: string; gatewayApiKey?: string | null; gatewayMaxRetries?: number; gatewayTimeoutMs?: number; gatewayIdleTimeoutMs?: number }} lab
  */
 function validateLabConfig(lab) {
-  const protocol = lab.gatewayProtocol ?? "lab-agent-gateway";
+  const protocol = lab.gatewayProtocol ?? "openai-chat";
   if (!GATEWAY_PROTOCOLS.includes(protocol)) {
     throw new Error(`Unsupported LAB_MODEL_GATEWAY_PROTOCOL: ${protocol}`);
   }

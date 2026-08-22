@@ -1,12 +1,12 @@
 {
   "name": "@ant-code/cli",
-  "version": "1.3.5-taxamask.1",
+  "version": "1.3.6-taxamask.1",
   "lockfileVersion": 3,
   "requires": true,
   "packages": {
     "": {
       "name": "@ant-code/cli",
-      "version": "1.3.5-taxamask.1",
+      "version": "1.3.6-taxamask.1",
       "dependencies": {
         "@vscode/ripgrep": "1.18.0",
         "ink": "^6.8.0",

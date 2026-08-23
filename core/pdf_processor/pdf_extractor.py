@@ -2153,7 +2153,8 @@ class EnhancedPDFExtractionSystem:
         pdf_prefix = re.sub(r"[^A-Za-z0-9_\-]+", "_", Path(pdf_filename).stem)[:40].strip("_") or "pdf"
         if caption_block:
             caption = str(caption_block.get("text_content", "") or "")
-            caption = re.sub(r"[^A-Za-z0-9_\-\s]+", "", caption).strip().replace(" ", "_")[:48]
+            caption = re.sub(r"[^A-Za-z0-9_\-\s]+", "", caption).strip()
+            caption = re.sub(r"\s+", "_", caption)[:48]
         else:
             caption = "figure"
         return f"{pdf_prefix}_p{page_number:03d}_f{figure_index:03d}_{caption}_{figure_hash[:8]}.png"

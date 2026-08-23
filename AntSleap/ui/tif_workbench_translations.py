@@ -924,6 +924,7 @@ TIF_TRANSLATIONS = {
         "No part is available for prediction.": "当前没有可用于预测的部位。",
         "Copied latest model draft into working_edit.": "已将最新只读预测副本复制到当前标注。",
         "No model draft is available for this specimen.": "当前 specimen 还没有只读预测副本。",
+        "Previous volume data is still being released. Wait a moment, then try again.": "先前的体数据仍在释放。请稍等片刻后重试。",
         "Imported {0}/{1} complete TIF volume(s).": "已导入 {0}/{1} 个完整 TIF 体数据。",
         "Importing complete TIF volume batch...": "正在批量导入完整 TIF 体数据...",
         "Importing AMIRA directory...": "正在导入 AMIRA 目录...",
@@ -943,4 +944,3 @@ TIF_TRANSLATIONS = {
 
 def tt(text, lang):
     return TIF_TRANSLATIONS.get(lang, {}).get(text, text)
-

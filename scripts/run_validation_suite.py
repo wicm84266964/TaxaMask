@@ -254,6 +254,7 @@ SUITES: dict[str, list[str]] = {
         "tests.test_tif_workbench.TifWorkbenchTests.test_copy_model_draft_copy_and_reload_failure_keeps_pending_recovery",
         "tests.test_tif_workbench.TifWorkbenchTests.test_copy_model_draft_second_attempt_reuses_pending_recovery_after_double_failure",
         "tests.test_tif_workbench.TifWorkbenchTests.test_sync_save_metadata_failure_preserves_dirty_slice_snapshot",
+        "tests.test_tif_volume_render_controller.TifVolumeRenderControllerTests.test_gpu_failure_repaint_runs_after_failure_guard_is_released",
         "tests.test_tif_project_lifecycle_controller.TifProjectLifecycleControllerTests.test_close_project_stops_when_auto_save_wait_times_out",
         "tests.test_main_window_stage4_project_lifecycle.MainWindowStage4ProjectLifecycleTests.test_window_close_honors_active_tif_unsaved_cancel",
         "tests.test_main_window_stage4_project_lifecycle.MainWindowStage4ProjectLifecycleTests.test_open_project_does_not_replace_active_tif_when_close_is_cancelled",

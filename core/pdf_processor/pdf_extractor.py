@@ -712,8 +712,10 @@ class EnhancedPDFExtractionSystem:
             database_committed = True
 
             result_status = "success"
+            projection_synchronized = False
             try:
                 stats.update(self._sync_import_ready_figure_exports(pdf_file_id))
+                projection_synchronized = True
             except Exception as exc:
                 result_status = "partial_success"
                 export_error = f"{type(exc).__name__}: {exc}"
@@ -728,19 +730,20 @@ class EnhancedPDFExtractionSystem:
                     pdf_path_obj.name,
                     export_error,
                 )
-            try:
-                self._cleanup_stale_scoped_audit_artifacts(
-                    scope=pdf_artifact_scope,
-                    figure_names=self._touched_figure_artifacts,
-                    batch_manifest_names=self._touched_batch_manifests,
-                    raw_response_names=self._touched_batch_raw_responses,
-                )
-            except Exception as exc:
-                self.logger.warning(
-                    "Could not finish stale PDF audit artifact cleanup for scope %s: %s",
-                    pdf_artifact_scope,
-                    exc,
-                )
+            if projection_synchronized:
+                try:
+                    self._cleanup_stale_scoped_audit_artifacts(
+                        scope=pdf_artifact_scope,
+                        figure_names=self._touched_figure_artifacts,
+                        batch_manifest_names=self._touched_batch_manifests,
+                        raw_response_names=self._touched_batch_raw_responses,
+                    )
+                except Exception as exc:
+                    self.logger.warning(
+                        "Could not finish stale PDF audit artifact cleanup for scope %s: %s",
+                        pdf_artifact_scope,
+                        exc,
+                    )
 
             self.logger.info(
                 f"Figure V2.0 提取完成: {pdf_path_obj.name} | 候选={stats['total_figures']} | 通过={stats['accepted_figures']} | 拒绝={stats['rejected_figures']} | 复核={stats['review_queue_figures']} | 部位描述={stats.get('part_description_records', 0)} | 可导入通过图={stats.get('accepted_exported_figures', 0)}"

@@ -451,6 +451,112 @@ class FigureFilenameTests(unittest.TestCase):
             finally:
                 extractor.close()
 
+    def test_projection_failure_preserves_source_used_by_restored_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pdf_path = root / "paper.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\nfixture\n%%EOF\n")
+            extractor = EnhancedPDFExtractionSystem(
+                output_db_path=str(root / "literature.db"),
+                save_images_to_files=True,
+                enable_multimodal_validation=False,
+                resume_completed_pdfs=False,
+            )
+            try:
+                old_pdf_id, scope, old_source = self._insert_accepted_figure(
+                    extractor, root, payload=b"old-source"
+                )
+                old_stats = extractor._sync_import_ready_figure_exports(old_pdf_id)
+                manifest_path = Path(str(old_stats["import_ready_manifest"]))
+                with open(
+                    manifest_path, "r", encoding="utf-8-sig", newline=""
+                ) as handle:
+                    old_row = next(csv.DictReader(handle))
+                old_export = Path(old_row["exported_image_path"])
+
+                new_run_scope = f"{scope}_run_new000000000"
+                new_source = (
+                    extractor.figures_dir
+                    / f"{new_run_scope}_p001_f001_new_22222222.png"
+                )
+
+                def build_candidate(**_kwargs):
+                    new_source.write_bytes(b"new-source")
+                    extractor._touched_figure_artifacts.add(new_source.name)
+                    return {
+                        "candidate_id": "new",
+                        "page_number": 1,
+                        "figure_index": 1,
+                        "figure_hash": "newhash",
+                        "image_path": str(new_source),
+                        "image_file_name": new_source.name,
+                        "accepted": True,
+                        "review_status": "accepted",
+                    }
+
+                document = MagicMock()
+                document.__len__.return_value = 1
+                real_replace = os.replace
+
+                def fail_staged_manifest(source, target):
+                    if Path(source).name == "manifest.csv":
+                        raise OSError("injected manifest publish failure")
+                    return real_replace(source, target)
+
+                with patch(
+                    "core.pdf_processor.pdf_extractor.fitz.open",
+                    return_value=document,
+                ), patch.object(
+                    extractor,
+                    "_pdf_artifact_run_scope",
+                    return_value=new_run_scope,
+                ), patch.object(
+                    extractor,
+                    "_extract_document_text_blocks",
+                    return_value=[],
+                ), patch.object(
+                    extractor,
+                    "_extract_text_part_descriptions",
+                    return_value=PartExtractionResult(
+                        status="skipped", reason="fixture"
+                    ),
+                ), patch.object(
+                    extractor,
+                    "_collect_page_visual_rects",
+                    return_value=[{}],
+                ), patch.object(
+                    extractor,
+                    "_cluster_image_rects",
+                    return_value=[[{}]],
+                ), patch.object(
+                    extractor,
+                    "_build_figure_candidate",
+                    side_effect=build_candidate,
+                ), patch.object(
+                    extractor,
+                    "_review_all_candidates",
+                    side_effect=lambda candidates, _scope: candidates,
+                ), patch(
+                    "core.pdf_processor.pdf_extractor.os.replace",
+                    side_effect=fail_staged_manifest,
+                ):
+                    result = extractor.extract_from_pdf(str(pdf_path))
+
+                with open(
+                    manifest_path, "r", encoding="utf-8-sig", newline=""
+                ) as handle:
+                    restored_row = next(csv.DictReader(handle))
+
+                self.assertEqual(result["status"], "partial_success")
+                self.assertEqual(restored_row, old_row)
+                self.assertTrue(old_export.is_file())
+                self.assertTrue(old_source.is_file())
+                self.assertTrue(Path(restored_row["source_image_path"]).is_file())
+                self.assertTrue(new_source.is_file())
+                document.close.assert_called_once_with()
+            finally:
+                extractor.close()
+
     def test_import_ready_incomplete_rollback_preserves_manual_recovery_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -53,6 +53,18 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn('[[ "$state" != "completed:success" ]]', gate)
         self.assertIn('[[ "$failed" -eq 0 ]] || exit 1', gate)
 
+    def test_release_check_gate_reads_every_check_run_page(self):
+        workflow = _load_workflow(WORKFLOW)
+        gate = _step_run(
+            workflow,
+            "release",
+            "Require successful checks on this commit",
+        )
+
+        self.assertIn("gh api --paginate --slurp", gate)
+        self.assertIn("check-runs?per_page=100", gate)
+        self.assertIn("[.[] | .check_runs[]", gate)
+
     def test_release_validates_version_metadata_and_uses_descriptive_title(self):
         workflow = _load_workflow(WORKFLOW)
         citation = yaml.safe_load(CITATION.read_text(encoding="utf-8"))

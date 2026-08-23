@@ -796,13 +796,16 @@ class TifProjectManager:
 
         text = quoted_path.sub(replace_quoted, text)
 
+        # Unknown unquoted paths can legally contain spaces. Redact the whole
+        # span up to an unambiguous record delimiter. If no delimiter exists,
+        # the ambiguous trailing text is intentionally redacted with the path.
         windows_token = re.compile(
-            r"(?<![A-Za-z0-9_])(?:[A-Za-z]:[\\/]|\\{1,2})[^\s,;'\"]+"
+            r"(?<![A-Za-z0-9_])(?:[A-Za-z]:[\\/]|\\{1,2})[^\r\n,;'\"<>]+"
         )
-        posix_token = re.compile(r"(?<![:A-Za-z0-9_.~])/(?:[^\s,;'\"<>]+)")
+        posix_token = re.compile(r"(?<![:A-Za-z0-9_.~])/(?:[^\r\n,;'\"<>]+)")
         relative_external_token = re.compile(
             r"(?<![A-Za-z0-9_])(?:\.\.[\\/]|~[\\/]|[A-Za-z]:(?![\\/]))"
-            r"[^\s,;'\"<>]+"
+            r"[^\r\n,;'\"<>]+"
         )
         text = windows_token.sub(
             lambda match: self._cleanup_warning_path_reference(match.group(0)),

@@ -1853,6 +1853,52 @@ class TifProjectTests(unittest.TestCase):
                 ).startswith("external_path_")
             )
 
+    def test_cleanup_warning_error_redacts_unquoted_paths_with_spaces(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = TifProjectManager()
+            manager.create_project(
+                "cleanup-spaced-path-redaction",
+                Path(tmp) / "cleanup-spaced-path-redaction",
+            )
+            cases = (
+                (
+                    r"failed at C:\Secret Folder\private name.txt, retry pending",
+                    ("Secret Folder", "private name.txt"),
+                    "retry pending",
+                ),
+                (
+                    "failed at /Users/Private Folder/private name.tif; retry pending",
+                    ("Private Folder", "private name.tif"),
+                    "retry pending",
+                ),
+                (
+                    "failed at ../Private Folder/private name.tif, retry pending",
+                    ("Private Folder", "private name.tif"),
+                    "retry pending",
+                ),
+            )
+
+            for error, private_fragments, preserved_suffix in cases:
+                with self.subTest(error=error):
+                    normalized = manager._normalize_volume_cleanup_warning(
+                        {"operation": "spaced-path-redaction", "error": error}
+                    )["error"]
+                    self.assertIn("external_path_", normalized)
+                    self.assertIn(preserved_suffix, normalized)
+                    for fragment in private_fragments:
+                        self.assertNotIn(fragment, normalized)
+
+            ambiguous = manager._normalize_volume_cleanup_warning(
+                {
+                    "operation": "spaced-path-redaction",
+                    "error": r"failed at C:\Secret Folder\private name.txt because cleanup failed",
+                }
+            )["error"]
+            self.assertIn("external_path_", ambiguous)
+            self.assertNotIn("Secret Folder", ambiguous)
+            self.assertNotIn("private name.txt", ambiguous)
+            self.assertNotIn("because cleanup failed", ambiguous)
+
     def test_invalid_cleanup_sidecar_is_preserved_when_isolation_slot_is_unsafe(self):
         class CleanupReplacement:
             metadata = {"role": "manual_truth"}

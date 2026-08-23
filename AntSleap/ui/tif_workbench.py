@@ -5233,15 +5233,26 @@ class TifWorkbenchWidget(QWidget):
                 tt("No model draft is available for this specimen.", self.lang),
             )
             return
+        specimen_id = self.current_specimen_id
+        self.release_loaded_volume_arrays()
+        if not self.project_lifecycle_controller.wait_for_volume_array_releases():
+            self.load_specimen(specimen_id)
+            QMessageBox.warning(
+                self,
+                tt("TIF backend", self.lang),
+                tt("Previous volume data is still being released. Wait a moment, then try again.", self.lang),
+            )
+            return
         try:
-            self.project.copy_label_layer_to_working_edit(self.current_specimen_id, source_role="model_draft")
+            self.project.copy_label_layer_to_working_edit(specimen_id, source_role="model_draft")
         except Exception as exc:
+            self.load_specimen(specimen_id)
             QMessageBox.warning(self, tt("TIF backend", self.lang), str(exc))
             return
         index = self.label_role_combo.findData("working_edit")
         if index >= 0:
             self.label_role_combo.setCurrentIndex(index)
-        self.load_specimen(self.current_specimen_id)
+        self.load_specimen(specimen_id)
         message = tt("Copied latest model draft into working_edit.", self.lang)
         self.training_status_label.setText(message)
         self.log(message)

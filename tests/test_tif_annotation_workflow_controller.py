@@ -11,7 +11,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 try:
     from PySide6.QtWidgets import QApplication, QCheckBox, QPushButton, QSlider
     from PySide6.QtGui import QShortcut
-    from PySide6.QtCore import Qt
+    from PySide6.QtCore import QEventLoop, QObject, QThread, QTimer, Qt, Signal
 except ModuleNotFoundError as exc:
     if exc.name and exc.name.startswith("PySide6"):
         QApplication = None
@@ -83,6 +83,40 @@ class TifAnnotationWorkflowControllerTests(unittest.TestCase):
         self.assertTrue(controller.state.dirty)
         self.assertIn(4, controller.state.dirty_slices)
         self.assertTrue(controller.state.dirty)
+
+    def test_worker_signal_is_delivered_on_controller_gui_thread(self):
+        workbench = self.make_workbench()
+
+        class ProbeController(TifAnnotationWorkflowController):
+            def capture_thread(self):
+                self.observed_thread = QThread.currentThread()
+                loop.quit()
+
+        class Emitter(QObject):
+            fired = Signal()
+
+            def run(self):
+                self.fired.emit()
+
+        controller = ProbeController(workbench)
+        emitter = Emitter()
+        thread = QThread()
+        emitter.moveToThread(thread)
+        loop = QEventLoop()
+        thread.started.connect(emitter.run)
+        emitter.fired.connect(controller.capture_thread)
+        emitter.fired.connect(thread.quit)
+        QTimer.singleShot(3000, loop.quit)
+        try:
+            thread.start()
+            loop.exec()
+            thread.wait(3000)
+            self.assertIs(controller.thread(), self.app.thread())
+            self.assertIs(controller.observed_thread, self.app.thread())
+        finally:
+            if thread.isRunning():
+                thread.quit()
+                thread.wait(3000)
 
     def test_bind_signals_is_idempotent_and_tool_button_targets_controller(self):
         workbench = self.make_workbench()

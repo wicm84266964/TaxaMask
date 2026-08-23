@@ -516,6 +516,62 @@ class TifWorkbenchTests(unittest.TestCase):
             widget.close_project()
             widget.deleteLater()
 
+    def test_copy_model_draft_releases_open_working_edit_before_replacement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = TifProjectManager()
+            manager.create_project("draft_handoff", root / "draft_handoff")
+            manager.create_specimen_scaffold(
+                "draft-specimen",
+                material_map={
+                    "materials": [
+                        {"id": 0, "name": "background", "trainable": False},
+                        {"id": 1, "name": "brain", "trainable": True},
+                    ]
+                },
+            )
+            image = np.arange(3 * 8 * 8, dtype=np.uint8).reshape((3, 8, 8))
+            working = np.ones((3, 8, 8), dtype=np.uint16)
+            truth = np.full((3, 8, 8), 2, dtype=np.uint16)
+            draft = np.full((3, 8, 8), 3, dtype=np.uint16)
+            image_rel = "specimens/draft-specimen/working/image.ome.zarr"
+            working_rel = "specimens/draft-specimen/labels/working_edit.ome.zarr"
+            truth_rel = "specimens/draft-specimen/labels/manual_truth.ome.zarr"
+            draft_rel = "specimens/draft-specimen/labels/model_draft/prediction.ome.zarr"
+            image_meta = write_volume_sidecar(root / "draft_handoff" / image_rel, image, role="working_image")
+            working_meta = write_volume_sidecar(root / "draft_handoff" / working_rel, working, role="working_edit")
+            truth_meta = write_volume_sidecar(root / "draft_handoff" / truth_rel, truth, role="manual_truth")
+            draft_meta = write_volume_sidecar(root / "draft_handoff" / draft_rel, draft, role="model_draft")
+            manager.register_working_volume("draft-specimen", image_rel, image_meta["shape_zyx"], image_meta["dtype"], save=False)
+            manager.register_label_volume("draft-specimen", "working_edit", working_rel, working_meta["shape_zyx"], working_meta["dtype"], save=False)
+            manager.register_label_volume("draft-specimen", "manual_truth", truth_rel, truth_meta["shape_zyx"], truth_meta["dtype"], save=False)
+            manager.add_model_draft("draft-specimen", draft_rel, draft_meta["shape_zyx"], draft_meta["dtype"], "prediction", save=True)
+
+            widget = TifWorkbenchWidget(manager, "en")
+            try:
+                self.assertIsInstance(widget.edit_volume, np.memmap)
+                original_copy = manager.copy_label_layer_to_working_edit
+                observed = {}
+
+                def copy_after_release(*args, **kwargs):
+                    observed["edit_volume"] = widget.edit_volume
+                    observed["label_volume"] = widget.label_volume
+                    return original_copy(*args, **kwargs)
+
+                with patch.object(manager, "copy_label_layer_to_working_edit", side_effect=copy_after_release), \
+                     patch("AntSleap.ui.tif_workbench.QMessageBox.warning") as warning:
+                    widget.copy_latest_model_draft_to_working_edit()
+
+                self.assertIsNone(observed["edit_volume"])
+                self.assertIsNone(observed["label_volume"])
+                warning.assert_not_called()
+                np.testing.assert_array_equal(load_volume_sidecar(root / "draft_handoff" / working_rel), draft)
+                np.testing.assert_array_equal(load_volume_sidecar(root / "draft_handoff" / truth_rel), truth)
+                self.assertIsInstance(widget.edit_volume, np.memmap)
+            finally:
+                widget.close_project(prompt_unsaved=False)
+                widget.deleteLater()
+
     def test_specimen_tree_groups_part_reslices_under_part(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

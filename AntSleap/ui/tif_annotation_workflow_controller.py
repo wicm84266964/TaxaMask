@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from PySide6.QtCore import QThread
+from PySide6.QtCore import QObject, QThread
 from PySide6.QtWidgets import QMessageBox
 
 try:
@@ -37,11 +37,12 @@ class TifAnnotationWorkflowState:
     stroke_changed: bool = False
 
 
-class TifAnnotationWorkflowController:
+class TifAnnotationWorkflowController(QObject):
     TOOL_MODES = frozenset({"brush", "eraser", "lasso", "rectangle", "ellipse", "picker", "pan"})
     VIEW_SCOPE = "annotation"
 
     def __init__(self, workbench):
+        super().__init__(workbench if isinstance(workbench, QObject) else None)
         self.workbench = workbench
         self.state = TifAnnotationWorkflowState()
         self.auto_save_thread = None

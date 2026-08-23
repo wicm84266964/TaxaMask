@@ -143,6 +143,7 @@ SUITES: dict[str, list[str]] = {
         "tests.test_literature_description_bridge",
         "tests.test_part_description_profile",
         "tests.test_pdf_classifier_llm_review",
+        "tests.test_pdf_figure_filename",
         "tests.test_pdf_part_description_extraction",
         "tests.test_specimen_linkage_pdf_evidence",
     ],
